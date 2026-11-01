@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use super::group_review_types::*;
 use super::plan_defect_routing::AuthoritativeGroupReviewerBinding;
-use crate::cross_cutting::worktree::scope_allows_path;
+use crate::cross_cutting::worktree::scope_allows_member_path;
 use crate::product::coding_evaluation_context::redact_sensitive_patterns;
 use crate::product::coding_models::{ReviewRequest, UnitReviewConclusionSnapshot};
 use crate::product::models::PlanDefectRoute;
@@ -101,9 +101,11 @@ pub(crate) fn compile_group_review_material(
         quality_target_bytes,
     );
     draft.partition_result = partition_result;
-    draft.diff_index.shard_selections = shard_selections(&draft, &bindings, SHARD_DIFF_BUDGET);
+    let member_prefix = git_facts.scope_member_prefix.as_deref();
+    draft.diff_index.shard_selections =
+        shard_selections(&draft, &bindings, SHARD_DIFF_BUDGET, member_prefix);
     draft.diff_index.reduction_selection =
-        reduction_selection(&draft, &bindings, REDUCTION_DIFF_BUDGET);
+        reduction_selection(&draft, &bindings, REDUCTION_DIFF_BUDGET, member_prefix);
     findings.sort_by(finding_order);
     draft.deterministic_findings = findings;
     finalize(draft)
@@ -392,7 +394,14 @@ fn deterministic_checks(
                         .scope_policy
                         .forbidden_scopes
                         .iter()
-                        .any(|scope| scope_allows_path(scope, path, true))
+                        .any(|scope| {
+                            scope_allows_member_path(
+                                scope,
+                                path,
+                                git_facts.scope_member_prefix.as_deref(),
+                                true,
+                            )
+                        })
             })
         });
         if forbidden {
@@ -790,7 +799,14 @@ fn build_diff_index(
                             .scope_policy
                             .forbidden_scopes
                             .iter()
-                            .any(|scope| scope_allows_path(scope, &path, true))
+                            .any(|scope| {
+                                scope_allows_member_path(
+                                    scope,
+                                    &path,
+                                    facts.scope_member_prefix.as_deref(),
+                                    true,
+                                )
+                            })
                 })
             });
             DiffFileEntry {
@@ -898,7 +914,11 @@ fn stats_from_patch(patch: &str) -> Vec<DiffFileStat> {
         .collect()
 }
 
-fn diff_level(file: &DiffFileEntry, bindings: &[&AuthoritativeGroupReviewerBinding]) -> char {
+fn diff_level(
+    file: &DiffFileEntry,
+    bindings: &[&AuthoritativeGroupReviewerBinding],
+    member_prefix: Option<&str>,
+) -> char {
     if file.forbidden_scope_hit {
         'A'
     } else if file.ambiguous {
@@ -924,7 +944,7 @@ fn diff_level(file: &DiffFileEntry, bindings: &[&AuthoritativeGroupReviewerBindi
                     .scope_policy
                     .exclusive_scopes
                     .iter()
-                    .any(|scope| scope_allows_path(scope, &file.path, true))
+                    .any(|scope| scope_allows_member_path(scope, &file.path, member_prefix, true))
         })
     }) {
         'D'
@@ -937,6 +957,7 @@ fn shard_selections(
     draft: &GroupReviewMaterialSnapshotDraft,
     bindings: &[&AuthoritativeGroupReviewerBinding],
     budget: usize,
+    member_prefix: Option<&str>,
 ) -> Vec<ShardDiffSelection> {
     draft
         .partition_result
@@ -963,6 +984,7 @@ fn shard_selections(
                     bindings,
                     budget,
                     true,
+                    member_prefix,
                 ),
                 total_hunks_in_shard: draft
                     .diff_index
@@ -982,6 +1004,7 @@ fn reduction_selection(
     draft: &GroupReviewMaterialSnapshotDraft,
     bindings: &[&AuthoritativeGroupReviewerBinding],
     budget: usize,
+    member_prefix: Option<&str>,
 ) -> ReductionDiffSelection {
     let locations = draft
         .partition_result
@@ -999,7 +1022,7 @@ fn reduction_selection(
         .files
         .iter()
         .filter(|file| {
-            let level = diff_level(file, bindings);
+            let level = diff_level(file, bindings, member_prefix);
             matches!(level, 'A' | 'B')
                 || matches!(level, 'C' | 'D')
                     && file
@@ -1011,7 +1034,14 @@ fn reduction_selection(
                         > 1
         })
         .collect::<Vec<_>>();
-    let fragments = select_fragments(&files, &draft.diff_index.hunks, bindings, budget, false);
+    let fragments = select_fragments(
+        &files,
+        &draft.diff_index.hunks,
+        bindings,
+        budget,
+        false,
+        member_prefix,
+    );
     ReductionDiffSelection {
         total_cross_shard_hunks: fragments.len(),
         fragments,
@@ -1030,17 +1060,18 @@ fn select_fragments(
     bindings: &[&AuthoritativeGroupReviewerBinding],
     budget: usize,
     include_e_headers: bool,
+    member_prefix: Option<&str>,
 ) -> Vec<SelectedDiffFragment> {
     let mut files = files.to_vec();
     files.sort_by(|left, right| {
-        diff_level(left, bindings)
-            .cmp(&diff_level(right, bindings))
+        diff_level(left, bindings, member_prefix)
+            .cmp(&diff_level(right, bindings, member_prefix))
             .then(left.path.cmp(&right.path))
     });
     let mut remaining = budget;
     let mut result = Vec::new();
     for file in files {
-        let level = diff_level(file, bindings);
+        let level = diff_level(file, bindings, member_prefix);
         if level == 'E' && !include_e_headers {
             continue;
         }

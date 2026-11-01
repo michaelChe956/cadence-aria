@@ -387,7 +387,7 @@ async fn preparing_complete_group_creates_human_final_confirm_without_group_prov
 
     let prepared = fixture
         .engine
-        .prepare_group_final_confirm_from_readiness(&running)
+        .prepare_group_final_confirm_from_readiness(&running, &no_cross_repo_review_provider())
         .await
         .expect("prepare human final confirmation");
 
@@ -451,12 +451,12 @@ async fn preparing_group_final_confirm_twice_reuses_pending_timeline_node() {
 
     let first = fixture
         .engine
-        .prepare_group_final_confirm_from_readiness(&running)
+        .prepare_group_final_confirm_from_readiness(&running, &no_cross_repo_review_provider())
         .await
         .expect("prepare initial human final confirmation");
     let second = fixture
         .engine
-        .prepare_group_final_confirm_from_readiness(&first)
+        .prepare_group_final_confirm_from_readiness(&first, &no_cross_repo_review_provider())
         .await
         .expect("repeat preparation reuses pending final confirmation");
 
@@ -486,7 +486,7 @@ async fn final_confirm_rejects_complete_snapshot_with_contradictory_diagnostics(
     let running = seed_complete_group_readiness(&fixture);
     let prepared = fixture
         .engine
-        .prepare_group_final_confirm_from_readiness(&running)
+        .prepare_group_final_confirm_from_readiness(&running, &no_cross_repo_review_provider())
         .await
         .expect("prepare final confirmation");
     let mut snapshot = fixture
@@ -543,16 +543,15 @@ async fn incomplete_readiness_cannot_be_final_confirmed() {
     }
     let running = fixture
         .store
-        .update_attempt_status(
+        .seed_running_attempt_for_test(
             &fixture.attempt.project_id,
             &fixture.attempt.issue_id,
             &fixture.attempt.id,
-            CodingAttemptStatus::Running,
         )
         .expect("running attempt");
     let prepared = fixture
         .engine
-        .prepare_group_final_confirm_from_readiness(&running)
+        .prepare_group_final_confirm_from_readiness(&running, &no_cross_repo_review_provider())
         .await
         .expect("prepare incomplete readiness for human diagnosis");
     let snapshot = fixture
@@ -588,7 +587,7 @@ async fn final_confirm_keeps_range_scope_and_dirty_worktree_gate() {
     let running = seed_complete_group_readiness(&fixture);
     let prepared = fixture
         .engine
-        .prepare_group_final_confirm_from_readiness(&running)
+        .prepare_group_final_confirm_from_readiness(&running, &no_cross_repo_review_provider())
         .await
         .expect("prepare final confirmation");
     let lifecycle = LifecycleStore::new(fixture.store.paths());

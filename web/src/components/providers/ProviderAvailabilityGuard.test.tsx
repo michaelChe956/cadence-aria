@@ -356,7 +356,7 @@ describe("ProviderAvailabilityGuard", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("does not let an enabled Fake provider unblock or appear in the install list", () => {
+  it("lets an enabled Fake provider render children without entering the real install list", () => {
     setSnapshot(
       snapshot({
         real_workflow_blocked: true,
@@ -367,8 +367,8 @@ describe("ProviderAvailabilityGuard", () => {
 
     renderGuard();
 
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "业务操作" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "业务操作" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.queryByText("Fake")).not.toBeInTheDocument();
   });
 });

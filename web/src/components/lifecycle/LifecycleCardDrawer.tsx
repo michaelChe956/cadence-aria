@@ -13,13 +13,16 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   ArtifactVersion,
   CodingAttempt,
+  IssueDeliverySummaryDto,
   IssueWorkItemPlanDependencyEdgeDto,
   ProductIssueArtifact,
   WorkItemContextBudget,
   WorkItemExecutionPlanStatus,
   WorkItemKind,
+  WorkspaceReviewStatus,
   LifecycleWorkItem,
   WorkItemSplitFinding,
+  PlanGroupProjectionDto,
 } from "../../api/types";
 import {
   workItemKindLabel,
@@ -27,6 +30,14 @@ import {
 } from "../../state/lifecycle-workbench-store";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
+import { PlanGroupProjectionPanel } from "./PlanGroupProjectionPanel";
+import {
+  LIFECYCLE_META_CHIP_CLASS,
+  LIFECYCLE_STATUS_LABELS,
+  lifecycleStatusChipClass,
+  lifecycleStatusTone,
+} from "./LifecycleCard";
+import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
 
 export type DrawerEntityKind =
   | "issue"
@@ -45,6 +56,8 @@ export interface DrawerEntity {
   description?: string;
   artifacts?: ProductIssueArtifact[];
   phase?: string;
+  /// REQ-PIB-01：issue 基准分支（创建后锁定呈现；null=存量按默认链解析）。
+  baseBranch?: string | null;
   createdAt?: string;
   latestAttempt?: CodingAttempt | null;
   // Work item split metadata
@@ -64,15 +77,24 @@ export interface DrawerEntity {
   workItemPlanSourceDesignSpecIds?: string[];
   workItemPlanValidatorFindings?: WorkItemSplitFinding[];
   workItemPlanDependencyGraph?: IssueWorkItemPlanDependencyEdgeDto[];
+  // F-26b：workspace timeline reviewer 节点证据投影（spec/plan 实体）。
+  reviewStatus?: WorkspaceReviewStatus | null;
+  // REQ-MTG-04（WP3）：plan 级 group 聚合只读投影（additive，缺省 undefined）。
+  groupProjection?: PlanGroupProjectionDto | null;
 }
 
 interface LifecycleCardDrawerProps {
   entity: DrawerEntity;
   onClose: () => void;
-  onOpenWorkspace: () => void;
+  onOpenWorkspace?: () => void;
   onOpenCodingWorkspace?: () => void;
   onGenerateNext?: () => void;
   onDelete?: () => void;
+  /** H5（设计 C）：plan 抽屉 Coding 区的整组删除辅入口（仅 work_item_group）。 */
+  onDeleteAllCodingWorkspaces?: () => void;
+  /** 整组删除请求进行中：禁重复点击。 */
+  groupCodingDeleteBusy?: boolean;
+  deliverySummary?: IssueDeliverySummaryDto;
 }
 
 const KIND_LABELS: Record<DrawerEntityKind, string> = {
@@ -82,16 +104,12 @@ const KIND_LABELS: Record<DrawerEntityKind, string> = {
   work_item: "Work Item",
   work_item_group: "Work Item Group",
 };
-
-const STATUS_LABELS: Record<string, string> = {
-  confirmed: "已确认",
-  draft: "草稿",
-  in_review: "审核中",
-  change_requested: "要求修改",
-  blocked: "阻塞",
-  pending: "待处理",
-  planning: "规划中",
-  completed: "已完成",
+const KIND_ICON_CLASS: Record<DrawerEntityKind, string> = {
+  issue: "text-sky-700",
+  story_spec: "text-emerald-700",
+  design_spec: "text-violet-700",
+  work_item: "text-amber-700",
+  work_item_group: "text-amber-700",
 };
 
 const NEXT_ACTION_LABELS: Partial<Record<DrawerEntityKind, string>> = {
@@ -106,6 +124,9 @@ export function LifecycleCardDrawer({
   onOpenCodingWorkspace,
   onGenerateNext,
   onDelete,
+  onDeleteAllCodingWorkspaces,
+  groupCodingDeleteBusy = false,
+  deliverySummary,
 }: LifecycleCardDrawerProps) {
   const [showAllVersions, setShowAllVersions] = useState(false);
   const [selectedVersionIndex, setSelectedVersionIndex] = useState(0);
@@ -122,9 +143,12 @@ export function LifecycleCardDrawer({
   const canShowDiff = selectedVersionIndex > 0 && selectedArtifact !== null && latestVersion !== null;
   const nextActionLabel = entity.status === "confirmed" ? NEXT_ACTION_LABELS[entity.kind] : null;
   const codingActionLabel = entity.latestAttempt ? "进入 Coding Workspace" : "开始 Coding";
+  // H5（设计 C）：Plan 本体删除改明确「删除计划及工作项」——它删的是计划与
+  // 工作项（保留 Coding 删除保护），不再误称负责批量删 Coding；整组删 Coding
+  // 由 Coding 区辅入口独立承载。
   const deleteActionLabel =
     entity.kind === "work_item_group"
-      ? "删除 Work Item Group"
+      ? "删除计划及工作项"
       : "删除 Work Item";
   const deleteActionTestId =
     entity.kind === "work_item_group"
@@ -149,22 +173,54 @@ export function LifecycleCardDrawer({
       <header className="flex min-w-0 items-start justify-between gap-3 border-b border-[var(--aria-line)] px-4 py-3">
         <div className="min-w-0">
           <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
-            <Icon className="h-3.5 w-3.5 text-[var(--aria-primary)]" />
+            <Icon className={`h-3.5 w-3.5 ${KIND_ICON_CLASS[entity.kind]}`} />
             {KIND_LABELS[entity.kind]}
           </div>
           <h2 className="truncate text-base font-semibold text-[var(--aria-ink)]">
             {entity.title}
           </h2>
           <div className="mt-2 flex flex-wrap gap-1.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-            <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
+            <span
+              data-testid="drawer-id-chip"
+              className={LIFECYCLE_META_CHIP_CLASS}
+            >
               {entity.id}
             </span>
-            <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
-              {STATUS_LABELS[entity.status] ?? entity.status}
+            <span
+              data-testid="drawer-status-chip"
+              data-tone={lifecycleStatusTone(entity.status)}
+              className={lifecycleStatusChipClass(entity.status)}
+            >
+              {LIFECYCLE_STATUS_LABELS[entity.status] ?? entity.status}
             </span>
+            {entity.kind === "issue" && entity.baseBranch ? (
+              <span
+                data-testid="drawer-base-branch-chip"
+                className={LIFECYCLE_META_CHIP_CLASS}
+                title="基准分支已锁定（修改基线需新建 Issue）"
+              >
+                基准 {entity.baseBranch} · 锁定
+              </span>
+            ) : null}
             {entity.version ? (
-              <span className="rounded border border-[var(--aria-line)] px-1.5 py-0.5">
+              <span
+                data-testid="drawer-version-chip"
+                className={LIFECYCLE_META_CHIP_CLASS}
+              >
                 v{entity.version}
+              </span>
+            ) : null}
+            {entity.reviewStatus ? (
+              <span
+                data-testid="drawer-review-status"
+                className={[
+                  "rounded border px-1.5 py-0.5",
+                  entity.reviewStatus === "running"
+                    ? "border-sky-300 bg-sky-50 text-sky-800"
+                    : "border-[var(--aria-primary)] bg-white/70 text-[var(--aria-primary)]",
+                ].join(" ")}
+              >
+                {entity.reviewStatus === "running" ? "Review 进行中" : "Review 已完成"}
               </span>
             ) : null}
           </div>
@@ -184,6 +240,7 @@ export function LifecycleCardDrawer({
           <IssueDetail
             entity={entity}
             onOpenPreview={() => setIssuePreviewOpen(true)}
+            deliverySummary={deliverySummary}
           />
         ) : versions.length > 0 ? (
           <section className="border-b border-[var(--aria-line)] px-4 py-3">
@@ -254,6 +311,9 @@ export function LifecycleCardDrawer({
           </section>
         ) : null}
 
+        {entity.kind === "work_item_group" && entity.groupProjection ? (
+          <PlanGroupProjectionPanel projection={entity.groupProjection} />
+        ) : null}
         {entity.kind === "work_item_group" ? (
           <WorkItemGroupDetail entity={entity} />
         ) : null}
@@ -346,15 +406,17 @@ export function LifecycleCardDrawer({
       ) : null}
 
       <footer className="space-y-2 border-t border-[var(--aria-line)] px-4 py-3">
-        <button
-          data-testid="drawer-open-workspace"
-          type="button"
-          onClick={onOpenWorkspace}
-          className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-[var(--aria-ink)] px-3 text-sm font-semibold text-white hover:opacity-90"
-        >
-          <ExternalLink className="h-4 w-4" />
-          打开 Workspace
-        </button>
+        {onOpenWorkspace ? (
+          <button
+            data-testid="drawer-open-workspace"
+            type="button"
+            onClick={onOpenWorkspace}
+            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-[var(--aria-ink)] px-3 text-sm font-semibold text-white hover:opacity-90"
+          >
+            <ExternalLink className="h-4 w-4" />
+            打开 Workspace
+          </button>
+        ) : null}
         {nextActionLabel && onGenerateNext ? (
           <button
             data-testid="drawer-generate-next"
@@ -378,17 +440,46 @@ export function LifecycleCardDrawer({
             {codingActionLabel}
           </button>
         ) : null}
-        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
-        onDelete ? (
+        {entity.kind === "work_item_group" && onDeleteAllCodingWorkspaces ? (
           <button
-            data-testid={deleteActionTestId}
+            data-testid="drawer-delete-plan-coding-workspaces"
             type="button"
-            onClick={onDelete}
-            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
+            disabled={groupCodingDeleteBusy}
+            onClick={onDeleteAllCodingWorkspaces}
+            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
           >
             <Trash2 className="h-4 w-4" />
-            {deleteActionLabel}
+            删除本计划全部 Coding 工作区
           </button>
+        ) : null}
+        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
+        onDelete ? (
+          entity.kind === "work_item_group" ? (
+            <div
+              data-testid="drawer-danger-zone"
+              className="mt-2 space-y-2 border-t border-dashed border-[var(--aria-danger)] pt-2"
+            >
+              <button
+                data-testid={deleteActionTestId}
+                type="button"
+                onClick={onDelete}
+                className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
+              >
+                <Trash2 className="h-4 w-4" />
+                {deleteActionLabel}
+              </button>
+            </div>
+          ) : (
+            <button
+              data-testid={deleteActionTestId}
+              type="button"
+              onClick={onDelete}
+              className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              {deleteActionLabel}
+            </button>
+          )
         ) : null}
       </footer>
     </aside>
@@ -398,9 +489,11 @@ export function LifecycleCardDrawer({
 function IssueDetail({
   entity,
   onOpenPreview,
+  deliverySummary,
 }: {
   entity: DrawerEntity;
   onOpenPreview: () => void;
+  deliverySummary?: IssueDeliverySummaryDto;
 }) {
   const artifacts = entity.artifacts ?? [];
   return (
@@ -428,6 +521,9 @@ function IssueDetail({
             </div>
           </div>
         </section>
+      ) : null}
+      {deliverySummary ? (
+        <DeliveryStatusPanel summary={deliverySummary} />
       ) : null}
       {artifacts.length > 0 ? (
         <section className="border-b border-[var(--aria-line)] px-4 py-3">

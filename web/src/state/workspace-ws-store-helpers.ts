@@ -1,4 +1,6 @@
 import type {
+  ChoiceOption,
+  ChoiceQuestion,
   PlanProjectionBundle,
   ProjectionValidationReport,
   WorkItemProjectionBundle,
@@ -13,6 +15,7 @@ import type {
   ArtifactVersion,
   ArtifactVersionSummary,
   ExecutionEvent,
+  PendingChoiceRequestProjection,
   TimelineNode,
   TimelineNodeDetail,
   WorkspaceArtifact,
@@ -78,6 +81,9 @@ export function emptyNodeDetail(
     base_artifact_ref: null,
     started_at: node?.started_at ?? "",
     ended_at: node?.completed_at ?? null,
+    // F-47 REQ-NDR-01/03：占位壳标记——durable detail 尚未水合/内联，内容与
+    // token 位均按「未读取」处理（详见 TimelineNodeDetail 的类型注释）。
+    hydration_pending: true,
   };
 }
 
@@ -418,7 +424,7 @@ export function workItemPlanProjectionArtifactFromRecord(
 
 export function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, nodeId: string) {
   const existing = details[nodeId];
-  details[nodeId] = existing
+  const next: TimelineNodeDetail = existing
     ? {
         ...existing,
         messages: [...existing.messages],
@@ -426,6 +432,11 @@ export function ensureNodeDetail(details: Record<string, TimelineNodeDetail>, no
         permission_events: [...existing.permission_events],
       }
     : emptyNodeDetail(nodeId);
+  // F-47 REQ-NDR-01/03：ensureNodeDetail 的语义是「取可变 detail 准备写入本地内容」
+  // （流式分片 / 执行事件 / 消息 / 结论）——内容一到场就不再是水合占位壳：清掉标记，
+  // 使其在快照 merge 中按已物化条目保留，token 位也从 pending 转终态。
+  delete next.hydration_pending;
+  details[nodeId] = next;
   return details[nodeId];
 }
 
@@ -476,6 +487,37 @@ export function normalizeTimelineNodeDetails(details: Record<string, TimelineNod
   );
 }
 
+/**
+ * F-47 REQ-NDR-01/Review Focus 1：快照内联 detail 覆盖「已物化」detail 时的 merge。
+ *
+ * 内联优先（spec 场景二）：状态/正文等一律以快照内联为准。但快照投影会**裁剪**
+ * 执行事件——`build_session_state_node_detail` 把每个事件的 `output` 置 null 并截断
+ * 正文，纯粹为了压缩帧体积；`output: null` 是「裁剪」而不是「无输出」。若原样覆盖，
+ * work_item_plan 的 outline/draft/batch run 节点（内联白名单，durable 里有 usage）
+ * 会在下一个门/choice/重连快照帧上丢掉 token 载荷，而水合去重 ref 阻止二次拉取 →
+ * token 行静默消失且不自愈，与 F-47 主诉同形。
+ *
+ * 因此：同 event_id 的事件保留已水合的非空 `output`，其余字段仍取内联（较新的投影）。
+ */
+export function mergeSnapshotNodeDetail(
+  hydrated: TimelineNodeDetail,
+  inline: TimelineNodeDetail,
+): TimelineNodeDetail {
+  return {
+    ...hydrated,
+    ...inline,
+    execution_events: inline.execution_events.map((event) => {
+      if (typeof event.output === "string" && event.output.length > 0) {
+        return event;
+      }
+      const hydratedEvent = hydrated.execution_events.find(
+        (candidate) => candidate.event_id === event.event_id,
+      );
+      return hydratedEvent?.output ? { ...event, output: hydratedEvent.output } : event;
+    }),
+  };
+}
+
 function deduplicateExecutionEvents(events: ExecutionEvent[]) {
   return events.reduce<ExecutionEvent[]>((deduped, event) => {
     const index = deduped.findIndex((existing) => existing.event_id === event.event_id);
@@ -486,4 +528,128 @@ function deduplicateExecutionEvents(events: ExecutionEvent[]) {
     }
     return deduped;
   }, []);
+}
+
+/**
+ * F-59：session_state `pending_choice_requests` 载荷归一——畸形条目（无 id）
+ * 跳过；`created_at_ms` 缺省（旧载荷/TextFallback）回退 null，由调用方按
+ * 首见时刻补齐。同会话同 id 的首见时刻跨帧保留（first_seen_at_ms 稳定）。
+ * P0 1.3（REQ-WIGA-05）Task 11：保完整 options/questions/source/allow_*——
+ * questions 逐题严格校验（id 非空+选项数组同规），任何一题畸形即整组置空
+ *（旧帧有有效 questions 则沿用）；不得把多题扁平化，也不给 REST 提交面
+ * 喂不完整结构。
+ */
+export function pendingChoiceRequestsFromSession(
+  raw: unknown,
+  previous: readonly PendingChoiceRequestProjection[],
+  sameSession: boolean,
+): PendingChoiceRequestProjection[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const previousById = new Map(previous.map((item) => [item.id, item]));
+  const now = Date.now();
+  const projected: PendingChoiceRequestProjection[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id.length === 0) {
+      continue;
+    }
+    const seen = sameSession ? previousById.get(record.id) : undefined;
+    const options = choiceOptionsFromPayload(record.options) ?? seen?.options ?? [];
+    const allowMultiple = record.allow_multiple === true || seen?.allow_multiple === true;
+    const allowFreeText = record.allow_free_text === true || seen?.allow_free_text === true;
+    const questions =
+      choiceQuestionsFromPayload(record.questions) ??
+      seen?.questions ??
+      [];
+    projected.push({
+      id: record.id,
+      prompt:
+        typeof record.prompt === "string"
+          ? record.prompt
+          : seen?.prompt ?? "",
+      role:
+        typeof record.role === "string" && record.role.length > 0
+          ? record.role
+          : seen?.role ?? "author",
+      created_at_ms:
+        typeof record.created_at_ms === "number" && Number.isFinite(record.created_at_ms)
+          ? record.created_at_ms
+          : seen?.created_at_ms ?? null,
+      first_seen_at_ms: seen?.first_seen_at_ms ?? now,
+      expected_run_id:
+        typeof record.expected_run_id === "string" && record.expected_run_id.length > 0
+          ? record.expected_run_id
+          : seen?.expected_run_id ?? null,
+      options,
+      allow_multiple: allowMultiple,
+      allow_free_text: allowFreeText,
+      questions,
+      source:
+        typeof record.source === "string" && record.source.length > 0
+          ? record.source
+          : seen?.source ?? "",
+    });
+  }
+  return projected;
+}
+
+function choiceOptionsFromPayload(raw: unknown): ChoiceOption[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const options: ChoiceOption[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      return null;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id.length === 0) {
+      return null;
+    }
+    if (typeof record.label !== "string") {
+      return null;
+    }
+    options.push({
+      id: record.id,
+      label: record.label,
+      description: typeof record.description === "string" ? record.description : null,
+    });
+  }
+  return options;
+}
+
+function choiceQuestionsFromPayload(raw: unknown): ChoiceQuestion[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const questions: ChoiceQuestion[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      return null;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id.length === 0) {
+      return null;
+    }
+    if (typeof record.prompt !== "string") {
+      return null;
+    }
+    const options = choiceOptionsFromPayload(record.options);
+    if (options === null) {
+      return null;
+    }
+    questions.push({
+      id: record.id,
+      prompt: record.prompt,
+      options,
+      allow_multiple: record.allow_multiple === true,
+      allow_free_text: record.allow_free_text === true,
+    });
+  }
+  return questions;
 }

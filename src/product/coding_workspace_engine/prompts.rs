@@ -1,7 +1,18 @@
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
+use crate::product::cadence_skills::routing_reference::{
+    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+};
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_work_item_context::{
+    WRITE_SCOPE_FORBIDDEN_LIST_HEADING, WRITE_SCOPE_SECTION_HEADING,
+};
+
+// `routing_reference_context_from_policy` 已迁至 `cadence_skills/routing_reference.rs`
+// 作为单一归属（WorkItemPlan T3 与 coding T2 共用）。此处 re-export 保持既有
+// `use super::*` 调用点（coding/rework/internal_pr_review/provider_retry）不变。
+use super::cross_attempt_handoff::ResolvedUpstreamDelivery;
+pub(crate) use crate::product::cadence_skills::routing_reference::routing_reference_context_from_policy;
 
 pub(crate) fn code_review_output_contract(nonce: &str) -> String {
     format!(
@@ -10,8 +21,8 @@ pub(crate) fn code_review_output_contract(nonce: &str) -> String {
          - 你可以先输出简短工作流路由回执或可读进度，但这些文本不得包含 {{ 或 }}。\n\
          - 最终审查结论必须且只能放在以下带 nonce 的终端块内；不要在 JSON 外使用 Markdown fence：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
-         {{\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[{{\"severity\":\"error|warning|info\",\"file_path\":\"...\",\"line\":1,\"message\":\"...\",\"required_action\":\"...\",\"source_stage\":\"code_review\"}}]}}\n\
-         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
+         {{\"nonce\":\"{nonce}\",\"verdict\":\"approve|request_changes|blocked\",\"summary\":\"...\",\"findings\":[{{\"severity\":\"error|warning|info\",\"file_path\":\"...\",\"line\":1,\"message\":\"...\",\"required_action\":\"...\",\"source_stage\":\"code_review\"}}]}}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n\
          - 不得输出 Markdown fence 包裹 JSON；最终结论的 JSON 必须是合法对象。\n"
     )
 }
@@ -29,6 +40,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         worktree_path: &Path,
         retry_diagnostic: Option<&str>,
+        routing_context: &RoutingReferenceContext,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let diff_base = code_review_diff_base(attempt)?;
         let diff = self._git_service.git_diff(worktree_path, diff_base).await?;
@@ -71,7 +83,7 @@ impl CodingWorkspaceEngine {
             attempt.id,
             attempt.branch_name,
             attempt.base_branch,
-            code_review_material_protocol(),
+            code_review_material_protocol(routing_context),
             crate::product::plan_repair::plan_defect_structured_output_contract(),
             reviewer_test_scope_contract(),
             reviewer_process_evidence_boundary_contract(),
@@ -85,12 +97,53 @@ impl CodingWorkspaceEngine {
         ))
     }
 
+    /// Reviewer 的实际 prompt 组装（group 渲染路径 + legacy 回落路径合一）。
+    ///
+    /// group（schema v2 投影渲染）路径的材料只有投影 section（Scope Policy
+    /// JSON），没有「判定基准／匹配语义非 glob／空列表语义／默认拒绝」的规范
+    /// 语义——追加一份与 legacy **逐字同源**的写入范围规范段：数据取 reviewer
+    /// projection 的 `scope_policy`（即 `canonical_contract.write_policy`，与机器门
+    /// `gates/schema_v2.rs` 同一份取值），文案由
+    /// `coding_work_item_context::write_scope_section_text` 渲染（legacy markdown
+    /// 与 group prompt 共用同一渲染器）。追加发生在 render→bind 哈希计算之后，
+    /// 执行上下文哈希不受影响；legacy 路径的范围段已随 Work Item markdown 进入
+    /// prompt，不重复渲染（同一 prompt 内两份范围会让 agent 读到两套口径）。
+    pub(crate) async fn build_reviewer_prompt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        reviewer: &ProviderName,
+        worktree_path: &Path,
+        retry_diagnostic: Option<&str>,
+        routing_context: &RoutingReferenceContext,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let mut prompt = match self.render_reviewer_unit_run_context(attempt, reviewer)? {
+            Some(rendered) => rendered.text,
+            None => {
+                self.build_code_review_prompt(
+                    attempt,
+                    worktree_path,
+                    retry_diagnostic,
+                    routing_context,
+                )
+                .await?
+            }
+        };
+        if let Some(scope_section) =
+            self.unit_run_write_scope_section(attempt, CodingProviderRole::CodeReviewer)?
+        {
+            prompt.push_str(&scope_section);
+        }
+        Ok(prompt)
+    }
+
+    // 多仓形态不再生成 group prompt；重复保留待清理（REQ-GFR-CR-01，Task 12）。
     pub(crate) async fn build_internal_pr_review_prompt(
         &self,
         attempt: &CodingExecutionAttempt,
         review_request: &ReviewRequest,
         worktree_path: &Path,
         retry_diagnostic: Option<&str>,
+        routing_context: &RoutingReferenceContext,
     ) -> Result<String, CodingWorkspaceEngineError> {
         let diff = self
             ._git_service
@@ -143,7 +196,7 @@ impl CodingWorkspaceEngine {
             ),
             evaluation_context_json,
             truncate_prompt_section(&diff, 30_000),
-            group_final_review_material_protocol(),
+            group_final_review_material_protocol(routing_context),
             crate::product::plan_repair::plan_defect_structured_output_contract(),
             reviewer_test_scope_contract(),
             reviewer_process_evidence_boundary_contract(),
@@ -158,6 +211,7 @@ pub(crate) fn build_coding_prompt(
     context: &CodingExecutionContext,
     rework_instruction: Option<&CodingReworkInstruction>,
     context_notes: Option<&ReworkContextNoteInput>,
+    routing_context: &RoutingReferenceContext,
 ) -> String {
     let mut prompt = format!(
         "Coding Workspace\n\
@@ -176,6 +230,10 @@ pub(crate) fn build_coding_prompt(
     if let Some(worktree_path) = attempt.worktree_path.as_ref() {
         prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
     }
+    // ①（WI 越界根修）：写入范围段——markdown 已带规范范围段时此处不再追加，
+    // 只在 markdown 缺段时补 fail-closed 兜底。位置紧随文件定位信息、先于
+    // 任务正文，避免 agent 读完材料后仍不知道边界。
+    prompt.push_str(write_scope_section(context));
     if !context.verification_commands.is_empty() {
         prompt.push_str("\n验证命令:\n");
         for command in &context.verification_commands {
@@ -213,9 +271,53 @@ pub(crate) fn build_coding_prompt(
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(&coding_execution_protocol());
+    prompt.push_str(&coding_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
-    prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(&coding_completion_report_contract());
+    prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
+    prompt
+}
+
+/// （WI 越界根修）：Coder prompt 的写入范围段。
+///
+/// 范围事实只由 `coding_work_item_context::write_scope_section_text` 渲染**一份**
+/// （legacy 记录渲染进已确认 Work Item markdown；group 投影渲染进最终 prompt，
+/// 追加在 render→bind 哈希计算之后），prompt 侧不再渲染第二份列表——同一
+/// prompt 内两份范围会让 agent 读到两套口径。
+///
+/// markdown 缺该段（未读到已确认记录、旧快照）时 fail-closed：不得把「文档未
+/// 提及范围」当成「不限制」。
+fn write_scope_section(context: &CodingExecutionContext) -> &'static str {
+    let has_scope = context
+        .work_item_markdown
+        .as_deref()
+        .is_some_and(|markdown| markdown.contains(WRITE_SCOPE_SECTION_HEADING));
+    if has_scope {
+        ""
+    } else {
+        FAIL_CLOSED_WRITE_SCOPE_SECTION
+    }
+}
+
+/// markdown 缺写入范围段时的 fail-closed 兜底句（逐字，勿改写）。
+const FAIL_CLOSED_WRITE_SCOPE_SECTION: &str = "\n修改范围（硬边界）：\n范围未知（未能读取已确认 Work Item 记录）：除 Work Item / Verification Plan 材料明确给出的文件与验证命令外，不得改动任何仓库文件（含 .gitignore、构建配置等全局文件）；若确有必要，请不要自行改动，在交付说明里标注，由平台裁决。\n";
+
+/// B-③（3.6 矩阵族③）：coder 完成报告 plan_defect_findings 解析失败后的
+/// 「恰一次教学重驱」prompt。仿 workspace_engine 的
+/// `build_work_item_plan_compile_reredrive_prompt` 模板（「上一轮已结束，但
+/// 没有…不要继续调研，不要只解释…立即重新输出完整…」）+ 解析错误原文
+/// 逐字回灌 + 共享单源契约（A 件后含 defect_class 8 取值逐字枚举，教学不
+/// 另设副本，与 schema 单源对齐）。经 resume session 续跑时作为 delta prompt
+/// 注入；无 session 时作为 fresh prompt 的尾段注入（见 coding.rs 重驱接线）。
+pub(crate) fn build_coding_output_teaching_reredrive_prompt(parse_error: &str) -> String {
+    let mut prompt = format!(
+        "上一轮已结束，但你没有输出合法的 plan_defect_findings 完成报告，结论已被结构化解析拒绝。\n\
+         不要继续调研，不要修改代码，不要只解释，不要输出任何前言或路由回执。\n\
+         具体解析错误（原文回灌）:\n- {parse_error}\n\
+         请基于已有上下文，立即重新输出完整完成报告；结论必须是一个顶层 JSON 对象，\n\
+         包含 plan_defect_findings 数组（普通成功输出使用 plan_defect_findings: []），\n\
+         defect_class 必须逐字使用 8 个合法取值之一，禁止发明、合并或概括取值。\n"
+    );
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
@@ -225,6 +327,7 @@ pub(crate) fn build_coding_delta_prompt(
     context: &CodingExecutionContext,
     rework_instruction: Option<&CodingReworkInstruction>,
     context_notes: Option<&ReworkContextNoteInput>,
+    routing_context: &RoutingReferenceContext,
 ) -> String {
     let mut prompt = format!(
         "Coding Workspace\n\
@@ -282,9 +385,9 @@ pub(crate) fn build_coding_delta_prompt(
         );
     }
     append_coding_context_notes(&mut prompt, context_notes);
-    prompt.push_str(&coding_delta_execution_protocol());
+    prompt.push_str(&coding_delta_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
-    prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(&coding_completion_report_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
@@ -302,20 +405,23 @@ pub(crate) fn reviewer_test_scope_contract() -> &'static str {
      - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境，也不得将其转换成 finding、verdict/summary 否决理由、Coder required_action 或任何返修要求。\n"
 }
 
-pub(crate) fn reviewer_process_evidence_boundary_contract() -> &'static str {
-    "\nReviewer 过程证据边界:\n\
+pub(crate) fn reviewer_process_evidence_boundary_contract() -> String {
+    format!(
+        "\nReviewer 过程证据边界:\n\
      - 过程事实同时满足两条：无法从当前 diff、验证命令输出、handoff 字段或人工检查结果观测；实现完成后即使 Coder 返修也无法产出该证据。\n\
      - 典型过程事实包括 red commit 的存在、失败到通过的提交序列、开发时序、提交拆分粒度、分支创建与 rebase 历史以及 Coder 会话内操作顺序。\n\
      - 不得创建以过程事实为目的的 finding。过程事实的缺失、不符合预期或缺少证据均不得成为 finding，不得导致 request_changes 或 blocked，不得作为 verdict 或 summary 中的否决理由，不得成为 Coder required_action 或任何返修要求。\n\
      - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述过程事实，也不得转换为 finding、verdict 或 summary 中的否决理由、Coder required_action 或任何返修要求。\n\
      - EvidenceKind 仅表示当前可观测证据：source_diff 表示最终代码状态；non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。manual_check 仅表示人工检查结果；handoff_field 仅表示交接字段的存在与内容。\n\
-     - 本边界不削弱可观测结果的审查：仍必须审查测试文件是否存在、测试是否覆盖需求场景、验证命令是否真实执行且非零、测试输出是否与实现自相矛盾，以及 Forbidden Write Scopes 是否被越过。\n"
+     - 本边界不削弱可观测结果的审查：仍必须审查测试文件是否存在、测试是否覆盖需求场景、验证命令是否真实执行且非零、测试输出是否与实现自相矛盾，以及 Forbidden Write Scopes 是否被越过（材料内的段标题为「{WRITE_SCOPE_FORBIDDEN_LIST_HEADING}」）。\n"
+    )
 }
 
-pub(crate) fn coding_execution_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：已确认 OpenSpec 与 Plan/Work Item 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
-        "Coder 执行协议:\n\
+pub(crate) fn coding_execution_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        concat!(
+            "当前阶段：已确认 OpenSpec 与 Plan/Work Item 范围内实施。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+            "Coder 执行协议:\n\
      - 在修改代码前，必须先阅读“已确认 Work Item”，并从其中提取本次任务的执行清单。\n\
      - 执行清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、依赖初始化或环境诊断要求、验证命令与执行顺序、完成前自检要求、handoff 中要求交付给下游的契约。\n\
      - 如果 Work Item、Source Draft Supplement、Verification Plan 已明确给出某项要求，必须按其内容执行。\n\
@@ -325,48 +431,79 @@ pub(crate) fn coding_execution_protocol() -> String {
      - 人工事项不属于你的执行范围：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，都由人工在流程末端确认。必须在最终报告中单列“待人工处理”清单（逐项写明事项与人工执行方式），但不得因无法执行它们而报阻塞、拒绝完成或降低完成度。\n\
      - 缺少浏览器、设备、外部账号等人工环境不是运维阻塞：只有当你自己该执行的命令或代码修改无法进行时，才输出 operational_gate。\n\
      - 不得用平台默认技术栈假设替代 Work Item 内容。\n"
-    ))
+        ),
+        context,
+    )
 }
 
-pub(crate) fn coding_delta_execution_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：已确认 Plan/Work Item 范围内的 bounded rework。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
-        "Coder 增量执行协议:\n\
+pub(crate) fn coding_delta_execution_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        concat!(
+            "当前阶段：已确认 Plan/Work Item 范围内的 bounded rework。必调 Skill：using-superpowers → executing-plans；写代码前调用 test-driven-development。若范围、架构或验收变化，停止并交给 Aria 既有审批 gate。\n",
+            "Coder 增量执行协议:\n\
      - 继续以本会话中的“已确认 Work Item”和 Verification Plan 作为任务来源。\n\
      - 在继续修改前，必须重新核对本轮修复要求、补充上下文和原 Work Item 中的执行要求。\n\
      - 若存在人工修复意见，人工修复意见优先级最高；当人工修复意见与 reviewer findings、原 Work Item 或既有上下文冲突时，优先遵循人工修复意见，并在最终报告说明冲突和取舍。\n\
      - 若没有人工修复意见，但本轮 reviewer findings 与原 Work Item 冲突，优先遵循更具体、更新的本轮 reviewer findings；同时在最终报告说明冲突和取舍。\n\
      - 不得引入平台默认技术栈假设；语言、构建系统、包管理器、测试框架相关动作必须来自 Work Item、Verification Plan、仓库文件或项目规则。\n\
      - 如果判断依据不足，必须在最终报告中说明“不足以确定”，并列出需要人工确认的问题。\n"
-    ))
+        ),
+        context,
+    )
 }
 
-pub(crate) fn coding_completion_report_contract() -> &'static str {
-    "\n完成报告要求:\n\
+pub(crate) fn coding_completion_report_contract() -> String {
+    format!(
+        "\n完成报告要求:\n\
      - 先列出你从 Work Item / Final Compile / Verification Plan 提取出的执行清单。\n\
      - 列出实际修改文件。\n\
      - 列出实际执行的验证命令。\n\
      - 粘贴每条验证命令的完整输出。\n\
      - 报告 git status --short（含未跟踪文件）与 git diff --stat。\n\
-     - 基于两者明确说明是否触碰 Forbidden Write Scopes；若出现允许范围外的已修改或未跟踪文件，必须报告，不得声称未触碰。\n\
+     - 基于两者明确说明是否触碰 Forbidden Write Scopes（材料内的段标题为「{WRITE_SCOPE_FORBIDDEN_LIST_HEADING}」）所列路径；若出现允许范围外的已修改或未跟踪文件，必须报告，不得声称未触碰。\n\
      - 如果测试命令显示没有测试被执行或没有实际测试被执行，包括 \"0 tests\" 或 \"running 0 tests\"，不能直接视为已覆盖；必须说明处理方式或风险。\n\
      - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n\
      - 必须单列“待人工处理”小节：逐项写明需要人工核对、人工测试或人工操作的事项及其执行方式；无此类事项时明确写“无”。该清单是交接内容，不是未完成项。\n"
+    )
 }
 
-pub(crate) fn code_review_material_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：只读代码审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
-        "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
+/// 批2 Task 15（C5.1／D §7，REQ-ENV-CHECK-01）：HostCoding CHECK 自跑
+/// 合同。主路径＝Coder 自己执行计划原命令（构建／测试／依赖／容器）；
+/// 环境能力标注只是声明，不是授权也不路由——executor=container/JVM 不
+/// 改变受信 profile／岗位／工具策略；A′（verification-triage）只补外部
+/// 硬件／人工／临时缺项；失败四分类如实呈现，不归「沙箱失败」不假绿。
+/// 接线（审查修复轮1 F3）：单源在 coding.rs／rework.rs 的 render/fallback
+/// 合并后无条件追加（先例＝platform_directives_section，追加发生在
+/// render→bind 哈希计算之后）；builder 不内嵌，防合并路径重复注入；
+/// 平台交付门与人工批准保持不动。
+pub(crate) fn host_coding_check_contract() -> &'static str {
+    "\n[host_coding_check]\n\
+     HostCoding CHECK 自跑合同:\n\
+     - 计划合同列出的验证命令（构建、测试、依赖、容器等 CHECK）由你自己在指定 worktree 内亲自执行并如实记录：计划命令原文、实际执行命令、工作目录（cwd）、退出码、测试数量与原始输出都会进入验证证据，供平台与人工对账。\n\
+     - 任务材料中的环境能力标注（例如 executor=container、executor=JVM，或 JVM、Node、网络、容器可用性说明）只是环境能力声明：不是授权，不是路由指令，不改变你的执行 profile、岗位或工具策略，也不改变交付必须经过的平台门与人工批准。\n\
+     - 平台不会代你执行计划命令；验证补充（verification-triage）只覆盖外部硬件、人工检查与临时缺项，不能替代你自己可执行的 CHECK。\n\
+     - CHECK 失败时按事实分类报告并保留原始输出：缺依赖、认证失败、权限失败、断言失败分别说明；不得笼统归为“沙箱失败”或“环境不可用”，不得省略失败输出，不得把失败伪装成通过。\n"
+}
+pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        &format!(
+            "{}{}{}",
+            concat!(
+                "当前阶段：代码审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码。\n",
+                "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
      CodeReviewer 审查协议:\n\
-     - 只分析当前变更 diff，不修改代码、不执行写操作。\n\
+     - 只分析当前变更 diff，不得修改交付源码；验证所需的临时文件、脚本与构建产物允许创建，轮次结束由平台按审查窗口基线恢复与对账。\n\
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
      - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、交接契约与能力、需求/设计追踪关系。\n\
      - EvaluationContextPack.CoderEvidencePack 是 coder 已执行工作的证据包；必须优先审查其中的 role run、raw/artifact refs、completion report 和 evidence_warnings。\n\
      - WorkItemGroup 当前 Unit 的 completion commit 与 HandoffRevision 在 Code Review approve 后才生成；Code Review 前为空是正常状态，不得据此创建 finding、request_changes 或 blocked。\n\
      - Code Review 阶段应以 Coder completion report、raw/artifact refs、实际测试输出和当前 Unit diff 判断验证证据；真正缺失或自相矛盾的 required verification evidence 仍必须记录。\n\
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
-     - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和交接契约。\n\
+     - 复跑验证命令时在隔离 worktree 内执行（以 reviewer_verify_discipline 纪律段钉定的绝对路径为准）；禁止在任何成员主 checkout 执行验证、构建或测试命令（cargo 等）或任何写操作/git mutation。\n\
+     - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围（材料内的段标题为「"
+            ),
+            WRITE_SCOPE_FORBIDDEN_LIST_HEADING,
+            "」，旧称 Forbidden Write Scopes）、验证计划、自检要求和交接契约。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
      - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在流程末端确认。coder 如实登记这些事项即为正确交付，不得因其“尚未验证”创建 finding、给出 request_changes 或 blocked；缺少浏览器等人工环境同理。\n\
      - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
@@ -377,19 +514,27 @@ pub(crate) fn code_review_material_protocol() -> String {
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
      - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n\
-     - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
-    ))
+     - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n",
+        ),
+        context,
+    )
 }
 
-pub(crate) fn group_final_review_material_protocol() -> String {
-    with_cadence_routing_reference(concat!(
-        "当前阶段：组级 PR 最终只读审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
-        "WorkItemGroup GroupFinalReview 审查协议:\n\
+pub(crate) fn group_final_review_material_protocol(context: &RoutingReferenceContext) -> String {
+    with_cadence_routing_reference(
+        &format!(
+            "{}{}{}",
+            concat!(
+                "当前阶段：组级 PR 最终审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码；验证临时产物允许，轮次结束由平台按审查窗口基线恢复与对账。\n",
+                "WorkItemGroup GroupFinalReview 审查协议:\n\
      - 你必须从 Completed Units、HandoffRevision、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
      - 跨 unit 交接的审查对象是 HandoffRevision 的契约与能力语义：Completed Units 段落中每个 unit 的 Provided Contracts 与 Provided Capabilities。不存在自然语言交接摘要，不得要求或期待它。\n\
      - 必须确认每个 completed unit 的 HandoffRevision 所声明的契约与能力是否体现在最终 diff 中。\n\
-     - 必须检查依赖交接是否断裂：上游 unit 声明的契约与能力（API、状态、文件）是否被下游正确消费。\n\
-     - 必须检查整组 diff 是否越过任何 unit 的 Forbidden Write Scopes。\n\
+     - 必须检查依赖交接是否断裂：上游 unit 声明的契约与能力是否被下游正确消费。\n\
+     - 必须检查整组 diff 是否越过任何 unit 的 Forbidden Write Scopes（材料内的段标题为「"
+            ),
+            WRITE_SCOPE_FORBIDDEN_LIST_HEADING,
+            "」）所列路径。\n\
      - 如果某个 unit 的验证证据缺失、声明的契约与能力未在 diff 中落地、或最终 PR 描述遗漏关键影响，必须 request_changes 或 blocked。\n\
      - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在本流程之后确认。这些事项尚未验证不得成为 finding、request_changes 或 blocked 的理由；必须在 summary 中汇总整组的待人工处理清单，供人工接手。\n\
      - 如果 ReviewRequest 已 push 的 commit 与 completed units、diff 或验证证据不一致，必须 request_changes 或 blocked。\n\
@@ -401,15 +546,165 @@ pub(crate) fn group_final_review_material_protocol() -> String {
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 source_stage=group_final_review。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
-     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n"
-    ))
+     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n",
+        ),
+        context,
+    )
 }
 
-fn with_cadence_routing_reference(protocol: &'static str) -> String {
+fn with_cadence_routing_reference(protocol: &str, context: &RoutingReferenceContext) -> String {
     let mut rendered = String::from("\n");
-    rendered.push_str(direct_cadence_routing_rules_reference());
+    rendered.push_str(&direct_cadence_routing_rules_reference(context));
+    if matches!(context, RoutingReferenceContext::Logical(_)) {
+        rendered.push_str(&cross_repo_evidence_section());
+    }
     rendered.push_str(protocol);
     rendered
+}
+
+/// C-4 跨仓只读证据中介的 Logical 分支 prompt 段：告知 Coder/Reviewer 可用的
+/// 证据查询辅助工具及其边界。Legacy 分支不注入本段（既有 legacy 字节基线不变）。
+///
+/// 仅 Logical（逻辑代码库多仓流程）注入：证据中介链路（令牌/端口/查询脚本）只
+/// 在逻辑代码库 attempt 的 worktree 内注入，传统单仓流程不存在该工具。
+pub(crate) fn cross_repo_evidence_section() -> String {
+    "\n[cross_repo_evidence]\n\
+     - 本 worktree 已注入跨仓只读证据查询工具：`.aria/bin/aria-evidence-query`。\n\
+     - 用法: .aria/bin/aria-evidence-query --role <coder|reviewer> --query <symbol>\n\
+     - 预算规则: 收到 429 即停止查询（attempt 累计配额已耗尽）。\n\
+     - 只允许通过上述脚本读取 `.aria/evidence-token` 令牌并查询证据；不得触碰 `.aria/evidence-token` 以外的机制（不得改写令牌文件、端口文件或 Aria 内部分区）。\n"
+        .to_string()
+}
+
+/// r54 越界根修(Ruling 11 A 面 prompt 纪律,oracle 定性 2026-10-08):
+/// LC attempt 的 coder/reviewer 会话 spawn cwd=authority root(聚合根,
+/// REQ-ENV-10 冻结合同,claude_code_provider/mod.rs:1300-1312),隔离 worktree
+/// 只经 launch target/writable_roots 表达;组路径渲染 envelope 又不携带
+/// 「Worktree Path」行(build_coding_prompt 被绕过)——r54 现场 coder 依计划
+/// 验证命令「cd alpha」落入成员主 checkout 提交+构建,触发
+/// cross_target_violation(r53 同环境 AI 自行导航正确=方差,Ruling 11 系统性
+/// 消除)。本段以绝对路径硬钉唯一工作区+成员主 checkout 负边界禁线+交付门
+/// 整轮作废后果,注入 coder fresh/delta/rework 与 reviewer 全族实际 prompt
+/// (装配点:coding.rs/rework.rs/provider_retry.rs,LC attempt 才注入,与
+/// cross_target_check.rs 检测口径一致;legacy 单仓 cwd 本就在 worktree,零变化)。
+pub(crate) fn worktree_discipline_section(worktree_path: &std::path::Path) -> String {
+    format!(
+        "\n[worktree_discipline]\n\
+         - 你的工作区是且只是隔离 worktree：{path}。所有文件修改、git add/commit 等版本操作、构建与测试命令（cargo 等）都必须在 {path} 内执行；任务材料或验证命令中的成员相对路径（例如 cd alpha）一律解析为 {path} 内的对应目录。\n\
+         - 禁止在任何成员主 checkout（聚合根下各成员仓的主工作区）执行写操作、git mutation 或构建/测试命令；只读审查角色需要复跑验证命令时，同样只允许在隔离 worktree 内执行。\n\
+         - 存在 cross_target 交付门：违反以上纪律会使本轮交付整轮作废（cross_target_violation）。发现成员主 checkout 存在本任务无法解释的改动时，保留原样并在报告中报告，不得清理或提交。\n\
+         - git push 由平台执行，禁止手动执行 git push（任何形式，含 --force 变体）；未执行 push 或 push 失败不算任务失败，交付分支的远端推送与对账由平台统一完成，不要为此重试或报告失败。\n",
+        path = worktree_path.display()
+    )
+}
+
+/// S6（DesignPushLocal2 Q6/Q4②）：平台提交责任声明与汇报契约段。
+///
+/// Q6 规则冲突裁定：目标仓库文件（AGENTS.md / CLAUDE.md）的「不自动提交」
+/// 类规则会压过投影的 commit_responsibility，coder 借此漏交——投影契约
+/// 优先必须显式说出来。不动 render.rs 的 commit_responsibility 本体（它是
+/// 投影的一部分，改动会牵动 renderer_version 与执行上下文哈希，在途 run
+/// 校验失败），改为在最终 prompt 组装后统一追加本段；同一函数承载 Q4② 的
+/// 汇报契约：交付摘要只含四类事实，环境异常只许末尾「环境备注」一行，
+/// 防止总结被环境差异叙事污染、交付事实被省略。
+/// 装配点：coding.rs/rework.rs/provider_retry.rs（渲染与回落两路径合并后、
+/// 哈希计算之后追加，执行上下文哈希不受影响）；所有 attempt 无条件注入，
+/// 与 worktree_discipline_section 的 LC-only 口径不同。
+pub(crate) fn platform_directives_section() -> String {
+    // 目录清单取自单一事实源（`product::local_artifacts`），不写死字面量：
+    // 清单变更时告知句自动跟随，避免两处漂移。
+    let local_artifact_dirs = crate::product::local_artifacts::PLATFORM_LOCAL_ARTIFACT_DIRS
+        .iter()
+        .map(|dir| dir.trim_end_matches('/'))
+        .collect::<Vec<_>>()
+        .join("`、`");
+    format!(
+        "\n[platform_directives]\n\
+     - 提交责任：平台编排下，本 Work Item 的提交责任归你；该责任优先于仓库文件（AGENTS.md / CLAUDE.md 等）中任何「不自动提交」类规则。禁止执行 git push（任何形式，含 --force 变体），交付分支的推送由平台执行；未执行 push 或 push 失败不算任务失败，不要为此重试或报告失败。\n\
+     - 汇报契约：交付摘要只包含四类事实——实际改动的文件、提交 SHA、验证命令及其完整输出、git status。环境异常（路径或挂载命名空间差异等）只允许写入摘要末尾固定小节「环境备注」，一行带过，不得占据摘要主体，也不得借此省略任何交付事实。文件工具与 shell 的路径命名空间可能不同，一律以本 prompt 给定的 Worktree Path 为准。\n\
+     - 本地产物屏蔽：平台在 worktree 准备阶段已把 `{local_artifact_dirs}` 写入仓库本地 `info/exclude`，这些目录不会出现在 `git status`；因此不需要也不得为它们修改 `.gitignore`。若你仍看到该类别目录的未跟踪噪音（例如目标仓 `.gitignore` 反选了它们），请在交付说明中标注，由平台处理。其他未跟踪文件属于仓库工作内容，同样不得擅自加入 `.gitignore`；确有必要请在交付说明中标注，由平台裁决。\n"
+    )
+}
+
+/// 批2 Task 20(删旧注入的对位面):Reviewer 会话的纪律段——删除「提交
+/// 责任归你/自行 Git 提交/必须在 worktree 内复跑」旧注入,保留禁止
+/// Git mutation/平台交付与资源登记/清理纪律;复跑验证命令的落点由
+/// durable 审查窗口对账承担(违规=整轮作废,恢复成功不洗白)。
+pub(crate) fn reviewer_verify_discipline_section(worktree_path: &std::path::Path) -> String {
+    format!(
+        "\n[reviewer_verify_discipline]\n\
+         - 你在 ReviewerVerify 岗位执行验证:构建、测试、脚本、容器均可运行;写入与临时文件允许发生在 {path} 内,轮次结束由平台按审查窗口基线恢复与对账。\n\
+         - 禁止任何 Git mutation(git add/commit/push/reset 等,含 --force 变体);交付分支的提交与推送由平台执行,你不得代行。\n\
+         - 你启动的进程、容器与临时目录按资源登记纪律使用,轮次结束前清理自己创建的临时产物;无法清理的在报告中列明。\n\
+         - 违反以上纪律会使本轮审查整轮作废(窗口对账失败→人工门),恢复成功也不改变作废结论。\n",
+        path = worktree_path.display()
+    )
+}
+
+/// P3-a（REQ-COD-07）：跨仓上游交付清单段。事实来自
+/// `resolved_upstream_deliveries_for_attempt`（cross_attempt_handoff.rs 的
+/// 权威 resolver），渲染为运行期注入段：上游逻辑 WI/revision、owner
+/// attempt/unit run、handoff revision 与 commit SHA、owner worktree 绝对
+/// 路径、provided_contracts/capabilities，以及上游只读／测试在本仓
+/// target／不可读报 operational_blocker（reason_code=
+/// upstream_source_unavailable，REQ-COD-08）的行为边界。
+///
+/// 装配点：coding.rs/rework.rs 的 fresh/delta/rework 实际 prompt（渲染与
+/// 回落两路径合并后、哈希计算之后、prompt 记录/claim 之前追加）与
+/// coding.rs 的 teaching 重驱轮——注入只进实际 prompt，不动 renderer
+/// 哈希链与执行上下文哈希。`deliveries` 为空（单仓、无依赖或全部依赖
+/// 同桶承载）时返回空串，prompt 不出现本段。
+pub(crate) fn resolved_upstream_deliveries_section(
+    deliveries: &[ResolvedUpstreamDelivery],
+) -> String {
+    if deliveries.is_empty() {
+        return String::new();
+    }
+    let mut section = String::from(
+        "\n[resolved_upstream_deliveries]\n\
+         以下跨仓上游交付已由平台权威解析（不等上游 attempt 人工确认），为本轮运行期注入事实：\n",
+    );
+    for delivery in deliveries {
+        let contracts = if delivery.provided_contracts.is_empty() {
+            "（无）".to_string()
+        } else {
+            delivery.provided_contracts.join("、")
+        };
+        let capabilities = if delivery.provided_capabilities.is_empty() {
+            "（无）".to_string()
+        } else {
+            delivery
+                .provided_capabilities
+                .iter()
+                .map(|(contract, capabilities)| {
+                    format!("{contract} -> {}", capabilities.join("、"))
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        section.push_str(&format!(
+            "- 上游 WI {}（owner attempt {}，unit run {}，work item revision {}）：handoff {}，commit {}；提供契约 {}；提供能力 {}\n",
+            delivery.logical_work_item_id,
+            delivery.owner_attempt_id,
+            delivery.owner_unit_run_id,
+            delivery.owner_work_item_revision_id,
+            delivery.handoff_revision_id,
+            delivery.commit_sha,
+            contracts,
+            capabilities,
+        ));
+        match delivery.owner_worktree_path.as_ref() {
+            Some(path) => section.push_str(&format!("  - 上游只读 worktree：{}\n", path.display())),
+            None => section.push_str(
+                "  - 上游 worktree 路径缺失（owner attempt 未携带 worktree）：按上游不可读处理\n",
+            ),
+        }
+    }
+    section.push_str(
+        "- 上游 worktree 对你只读：仅允许读取与引用，禁止在其中执行任何写操作、git mutation、构建或测试；你的修改、构建与测试必须在本仓 target worktree 内执行。\n\
+         - 上游路径不存在或不可读时：不要自行修复环境或绕过，报告 defect_class=operational_blocker、recommended_route=operational_gate、reason_code=upstream_source_unavailable 的 finding（保留读取命令与路径 evidence），平台将落环境阻塞门处理。\n",
+    );
+    section
 }
 
 pub(crate) fn append_coding_context_notes(
@@ -468,12 +763,58 @@ pub(crate) fn provider_prompt_event(
     }
 }
 
+/// 批2 Task 11（B6 公共角色矩阵）在 coding 的注入点：deny 按 AdapterRole
+/// 一概套用的旧矩阵退役——Coder（Executor）全工具；Reviewer 只携
+/// ReviewerVerify+窗口合同（真窗归 T20 接线，wire 面不回退旧 deny
+/// fallback）；Orchestrator/Splitter/Handoff 不一概套 deny。Author 岗位
+/// 纪律的唯一 wire 物理投影（DenyFileWriteBuiltins）由受信装配铸造
+/// （workspace_engine author 面/`prepare_trusted_*`），不经本工厂。
+/// 所有 coding streaming 入口（provider_retry.rs / internal_pr_review.rs /
+/// group_review_orchestrator.rs）都经 `streaming_input_from_adapter` 构造，
+/// role 的唯一设置点即此处，新角色入口自动继承矩阵，禁止绕过本工厂裸构造
+/// 直启。
+fn coding_tool_policy_for_role(_role: &AdapterRole) -> Option<ProviderToolPolicy> {
+    None
+}
+
+#[cfg(test)]
+mod coding_tool_policy_matrix_tests {
+    use super::{AdapterRole, ProviderToolPolicy, coding_tool_policy_for_role};
+
+    /// 批2 Task 11 表驱动：五角色 wire 面一律 None（Coder 不带 deny；
+    /// Reviewer 不回退旧 deny；Author 岗位投影不经本工厂）。
+    #[test]
+    fn coding_streaming_roles_derive_no_deny() {
+        for role in [
+            AdapterRole::Orchestrator,
+            AdapterRole::WorkItemSplitter,
+            AdapterRole::Reviewer,
+            AdapterRole::Executor,
+            AdapterRole::Handoff,
+        ] {
+            assert_eq!(
+                coding_tool_policy_for_role(&role),
+                None,
+                "coding streaming role {role:?} must not derive deny (T11 matrix)"
+            );
+            assert_ne!(
+                coding_tool_policy_for_role(&role),
+                Some(ProviderToolPolicy::deny_file_write_builtins())
+            );
+        }
+    }
+}
+
 pub(crate) fn streaming_input_from_adapter(
     input: &AdapterInput,
     working_dir: PathBuf,
     permission_mode: ProviderPermissionMode,
 ) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
+        baseline_tree: None,
+        tool_policy: coding_tool_policy_for_role(&input.role),
+        audit_sink: None,
         provider_type: input.provider_type.clone(),
         role: input.role.clone(),
         prompt: input.prompt.clone(),
@@ -573,4 +914,208 @@ pub(crate) fn take_last_chars(value: &str, limit: usize) -> String {
     let chars = value.chars().collect::<Vec<_>>();
     let start = chars.len().saturating_sub(limit);
     chars[start..].iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::cadence_skills::routing_reference::{
+        LogicalPolicyReference, RoutingReferenceContext,
+    };
+
+    fn logical_context() -> RoutingReferenceContext {
+        RoutingReferenceContext::Logical(LogicalPolicyReference {
+            policy_id: "pol_1".to_string(),
+            policy_revision: 3,
+            policy_digest: "abc123".to_string(),
+            authority_root: "/data/aria/aggregate/policy".to_string(),
+        })
+    }
+
+    const LEGACY_RULE_SEGMENT: &str = "[cadence_project_rules]\n当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md 是本任务的流程规则依据";
+
+    fn assert_legacy_baseline(prompt: &str) {
+        assert!(
+            prompt.starts_with('\n'),
+            "legacy prompt must keep leading \\n"
+        );
+        assert!(
+            prompt.contains(LEGACY_RULE_SEGMENT),
+            "legacy prompt must keep the previous routing reference bytes:\n{prompt}"
+        );
+        for logical_only in [
+            "authority_root:",
+            "policy_id:",
+            "policy_digest:",
+            "不作为政策正文",
+        ] {
+            assert!(
+                !prompt.contains(logical_only),
+                "legacy prompt must not leak logical-only marker `{logical_only}`:\n{prompt}"
+            );
+        }
+    }
+
+    fn assert_logical_policy_ref(prompt: &str) {
+        assert!(prompt.contains("authority_root:"));
+        assert!(prompt.contains("/data/aria/aggregate/policy"));
+        assert!(prompt.contains("policy_id:"));
+        assert!(prompt.contains("pol_1"));
+        assert!(prompt.contains("policy_revision: 3"));
+        assert!(prompt.contains("policy_digest:"));
+        assert!(prompt.contains("abc123"));
+        assert!(prompt.contains("不作为政策正文"));
+        assert!(prompt.contains("只报告阻塞"));
+        assert!(
+            !prompt.contains(LEGACY_RULE_SEGMENT),
+            "logical prompt must not carry the legacy routing reference bytes:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn coding_execution_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&coding_execution_protocol(&RoutingReferenceContext::Legacy));
+    }
+
+    #[test]
+    fn coding_execution_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&coding_execution_protocol(&logical_context()));
+    }
+
+    #[test]
+    fn coding_execution_protocol_logical_carries_cross_repo_evidence_section() {
+        let prompt = coding_execution_protocol(&logical_context());
+        assert!(
+            prompt.contains("[cross_repo_evidence]"),
+            "logical prompt must carry the cross-repo evidence section:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(".aria/bin/aria-evidence-query"),
+            "logical prompt must carry the evidence tool path:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("429"),
+            "logical prompt must carry the 429 budget rule:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(".aria/evidence-token"),
+            "logical prompt must carry the token-file constraint:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn coding_execution_protocol_legacy_omits_cross_repo_evidence_section() {
+        let prompt = coding_execution_protocol(&RoutingReferenceContext::Legacy);
+        assert!(
+            !prompt.contains("[cross_repo_evidence]"),
+            "legacy prompt must not carry the cross-repo evidence section:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains(".aria/bin/aria-evidence-query"),
+            "legacy prompt must not carry the evidence tool path:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn coding_delta_execution_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&coding_delta_execution_protocol(
+            &RoutingReferenceContext::Legacy,
+        ));
+    }
+
+    #[test]
+    fn coding_delta_execution_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&coding_delta_execution_protocol(&logical_context()));
+    }
+
+    #[test]
+    fn code_review_material_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&code_review_material_protocol(
+            &RoutingReferenceContext::Legacy,
+        ));
+    }
+
+    #[test]
+    fn code_review_material_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&code_review_material_protocol(&logical_context()));
+    }
+
+    #[test]
+    fn group_final_review_material_protocol_legacy_matches_previous_bytes() {
+        assert_legacy_baseline(&group_final_review_material_protocol(
+            &RoutingReferenceContext::Legacy,
+        ));
+    }
+
+    #[test]
+    fn group_final_review_material_protocol_logical_carries_policy_ref() {
+        assert_logical_policy_ref(&group_final_review_material_protocol(&logical_context()));
+    }
+
+    /// r54 越界根修(Ruling 11 A 面)单测:纪律段文本契约——绝对路径唯一
+    /// 工作区+成员主 checkout 负边界禁线+交付门整轮作废后果三句齐全。
+    #[test]
+    fn worktree_discipline_section_pins_absolute_path_and_negative_boundaries() {
+        let worktree =
+            std::path::Path::new("/run/aggregate-root/alpha/.worktrees/aria-issues/issue_0001");
+        let section = worktree_discipline_section(worktree);
+        assert!(
+            section.starts_with("\n[worktree_discipline]\n"),
+            "纪律段必须以固定锚点开头:\n{section}"
+        );
+        assert!(
+            section.contains("/run/aggregate-root/alpha/.worktrees/aria-issues/issue_0001"),
+            "纪律段必须携带隔离 worktree 绝对路径(r54 现场唯一缺失锚):\n{section}"
+        );
+        assert!(
+            section.contains("是且只是隔离 worktree"),
+            "纪律段第一句必须显式钉唯一工作区:\n{section}"
+        );
+        assert!(
+            section.contains("禁止在任何成员主 checkout"),
+            "纪律段第二句必须携带成员主 checkout 负边界禁线:\n{section}"
+        );
+        assert!(
+            section.contains("git mutation"),
+            "禁线必须覆盖 git mutation(git commit 不走 Write 工具):\n{section}"
+        );
+        assert!(
+            section.contains("cross_target_violation"),
+            "纪律段第三句必须声明交付门整轮作废后果:\n{section}"
+        );
+        // F3(r58 深掏审计):push 纪律句——交付链的权威 push 在产品进程
+        //(codex/kimi 沙箱内 bare origin 不可达,coder 自 push 失败会自判
+        // 任务失败/重试空转烧格);纪律段必须显式声明 push 由平台执行,
+        // 消除沙箱内 AI 自 push 的失败方差。
+        assert!(
+            section.contains("git push 由平台执行"),
+            "纪律段必须声明 git push 由平台执行:\n{section}"
+        );
+        assert!(
+            section.contains("禁止手动执行 git push"),
+            "纪律段必须携带手动 git push 禁令:\n{section}"
+        );
+    }
+
+    /// r54 越界根修 reviewer 侧对偶断言:复跑口(prompts.rs 原「证据缺失可
+    /// 复跑」行)收口为「只在隔离 worktree 内复跑+成员主 checkout 禁令」,
+    /// legacy 与 logical 两分支同文。
+    #[test]
+    fn code_review_material_protocol_reviewer_rerun_scoped_to_worktree() {
+        for context in [RoutingReferenceContext::Legacy, logical_context()] {
+            let protocol = code_review_material_protocol(&context);
+            assert!(
+                protocol.contains("复跑验证命令时在隔离 worktree 内执行"),
+                "reviewer 复跑口必须收口到 worktree:\n{protocol}"
+            );
+            assert!(
+                protocol.contains("reviewer_verify_discipline"),
+                "复跑口必须锚定 ReviewerVerify 纪律段:\n{protocol}"
+            );
+            assert!(
+                protocol.contains("禁止在任何成员主 checkout 执行验证、构建或测试命令"),
+                "reviewer 复跑口必须携带成员主 checkout 禁令:\n{protocol}"
+            );
+        }
+    }
 }

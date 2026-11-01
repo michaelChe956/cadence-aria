@@ -1,8 +1,16 @@
 use super::support::{product_execution_workspace_id, product_store_api_error};
 use super::*;
+use crate::product::coding_attempt_store::{
+    DeliveryEntry, IssueDeliveryOverall, IssueDeliverySummary, PlanGroupOverall,
+    PlanGroupProjection, PlanTargetEntry,
+};
 use crate::product::models::WorkspaceSessionSummaryRecord;
+use crate::product::workspace_engine::WorkItemRepositoryGroup;
+use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 pub(crate) fn issue_work_item_plan_detail_dto(
     plan: &IssueWorkItemPlanRecord,
+    group_projection: Option<PlanGroupProjectionDto>,
+    review_status: Option<String>,
 ) -> IssueWorkItemPlanDetailDto {
     IssueWorkItemPlanDetailDto {
         id: plan.id.clone(),
@@ -35,6 +43,8 @@ pub(crate) fn issue_work_item_plan_detail_dto(
             .collect(),
         created_at: plan.created_at.clone(),
         updated_at: plan.updated_at.clone(),
+        group_projection,
+        review_status,
     }
 }
 
@@ -101,6 +111,9 @@ pub(crate) fn repository_dto(record: RepositoryRecord) -> RepositoryDto {
 mod repository_initialization;
 pub(crate) use repository_initialization::repository_initialization_operation_dto;
 
+mod aggregate_initialization;
+pub(crate) use aggregate_initialization::aggregate_initialization_dto;
+
 pub(crate) fn repository_initialization_result_dto(
     success: &crate::product::repository_store::RepositoryRegistrationSuccess,
 ) -> RepositoryInitializationResultDto {
@@ -136,6 +149,7 @@ pub(crate) fn product_issue_dto(
         issue_id: record.id,
         project_id: record.project_id,
         repo_id: record.repo_id,
+        base_branch: record.base_branch,
         workspace_id,
         task_id,
         session_id,
@@ -188,6 +202,12 @@ pub(crate) fn story_spec_dto(
             &record.issue_id,
             session_id,
         )?,
+        review_status: session_review_status(
+            lifecycle,
+            &record.project_id,
+            &record.issue_id,
+            session_id,
+        ),
     })
 }
 
@@ -211,7 +231,51 @@ pub(crate) fn design_spec_dto(
             &record.issue_id,
             session_id,
         )?,
+        review_status: session_review_status(
+            lifecycle,
+            &record.project_id,
+            &record.issue_id,
+            session_id,
+        ),
     })
+}
+
+/// F-26b：workspace timeline 的 reviewer 节点证据（reviewer_run / plan 系 review
+/// 节点，与 engine reviewer 角色分类同集合）映射为生命周期投影——活跃节点在
+/// 则 review 进行中，否则任一已完成节点即 review 已做；零证据/读失败返回 None
+/// （只读投影降级，不阻断生命周期响应）。
+pub(crate) fn session_review_status(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    session_id: Option<&str>,
+) -> Option<String> {
+    let session_id = session_id?;
+    let nodes = lifecycle
+        .load_timeline_nodes_for_issue_session(project_id, issue_id, session_id)
+        .ok()?;
+    let is_reviewer_node = |node: &&crate::web::workspace_ws_types::TimelineNode| {
+        matches!(
+            node.node_type,
+            TimelineNodeType::ReviewerRun
+                | TimelineNodeType::WorkItemPlanOutlineReview
+                | TimelineNodeType::WorkItemDraftReview
+                | TimelineNodeType::WorkItemBatchReview
+        )
+    };
+    if nodes.iter().any(|node| {
+        is_reviewer_node(&node)
+            && matches!(
+                node.status,
+                TimelineNodeStatus::Active | TimelineNodeStatus::Paused
+            )
+    }) {
+        return Some("running".to_string());
+    }
+    nodes
+        .iter()
+        .any(|node| is_reviewer_node(&node) && matches!(node.status, TimelineNodeStatus::Completed))
+        .then(|| "completed".to_string())
 }
 
 pub(crate) fn workspace_session_for_entity<'a>(
@@ -384,8 +448,46 @@ pub(crate) use work_item_runtime::{
     LifecycleWorkItemRuntimeDtoInput, lifecycle_work_item_runtime_dto,
 };
 
-pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAttemptDto {
-    CodingAttemptDto {
+/// REQ-TGT-05：将 `WorkItemRepositoryGroup`（核心分组视图）转换为 Web DTO。
+/// `convert_item` 负责把组内 `LifecycleWorkItemRecord` 转为 `LifecycleWorkItemDto`
+///（复用既有单 item 字段，不改动单 item 结构）。
+pub(crate) fn work_item_repository_group_dto(
+    group: WorkItemRepositoryGroup,
+    convert_item: impl Fn(LifecycleWorkItemRecord) -> ApiResult<LifecycleWorkItemDto>,
+) -> ApiResult<WorkItemRepositoryGroupDto> {
+    let items = group
+        .items
+        .into_iter()
+        .map(convert_item)
+        .collect::<ApiResult<Vec<_>>>()?;
+    Ok(WorkItemRepositoryGroupDto {
+        target_repository_id: group.target_repository_id,
+        alias: group.alias,
+        status: group.status,
+        compatibility_projection: group.compatibility_projection,
+        items,
+    })
+}
+
+pub(crate) fn coding_attempt_dto(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> ApiResult<CodingAttemptDto> {
+    // 权威投影：push_status 取 list_review_requests 末元素的 ReviewRequest.push_status；
+    // 无 ReviewRequest 时保留既有 pushed_remote 推导（单仓红线：无 review request 路径行为不变）。
+    let push_status = match store
+        .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .last()
+    {
+        Some(review) => Some(push_status_text(&review.push_status).to_string()),
+        None => attempt
+            .pushed_remote
+            .as_ref()
+            .map(|_| push_status_text(&PushStatus::Pushed).to_string()),
+    };
+    Ok(CodingAttemptDto {
         attempt_id: attempt.id.clone(),
         project_id: attempt.project_id.clone(),
         issue_id: attempt.issue_id.clone(),
@@ -397,6 +499,7 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
         attempt_no: attempt.attempt_no,
         status: coding_attempt_status_text(&attempt.status).to_string(),
         stage: coding_execution_stage_text(&attempt.stage).to_string(),
+        manual_recovery_reason: attempt.manual_recovery_reason.clone(),
         branch_name: attempt.branch_name.clone(),
         base_branch: attempt.base_branch.clone(),
         worktree_path: attempt
@@ -405,13 +508,85 @@ pub(crate) fn coding_attempt_dto(attempt: &CodingExecutionAttempt) -> CodingAtte
             .map(|path| path.to_string_lossy().to_string()),
         rework_count: attempt.rework_count,
         head_commit: attempt.head_commit.clone(),
-        push_status: attempt
-            .pushed_remote
-            .as_ref()
-            .map(|_| push_status_text(&PushStatus::Pushed).to_string()),
+        push_status,
         review_request_url: None,
         created_at: attempt.created_at.clone(),
         updated_at: attempt.updated_at.clone(),
+        completed_at: attempt.completed_at.clone(),
+    })
+}
+
+pub(crate) fn issue_delivery_summary_dto(summary: IssueDeliverySummary) -> IssueDeliverySummaryDto {
+    IssueDeliverySummaryDto {
+        project_id: summary.project_id,
+        issue_id: summary.issue_id,
+        entries: summary
+            .entries
+            .into_iter()
+            .map(delivery_entry_dto)
+            .collect(),
+        overall: match summary.overall {
+            IssueDeliveryOverall::AllPushed => "all_pushed".to_string(),
+            IssueDeliveryOverall::Partial => "partial".to_string(),
+            IssueDeliveryOverall::None => "none".to_string(),
+        },
+    }
+}
+
+/// REQ-MTG-04（WP3）：plan 级三值聚合终态投影 DTO 映射。`overall` 不复用
+/// issue 级 `"none"`（plan 级未启≠无条目，见 k3 §2.3 口径差异说明）。
+pub(crate) fn plan_group_projection_dto(
+    projection: PlanGroupProjection,
+) -> crate::web::types::PlanGroupProjectionDto {
+    crate::web::types::PlanGroupProjectionDto {
+        plan_id: projection.plan_id,
+        entries: projection
+            .entries
+            .into_iter()
+            .map(plan_target_entry_dto)
+            .collect(),
+        overall: match projection.overall {
+            PlanGroupOverall::AllDelivered => "all_delivered".to_string(),
+            PlanGroupOverall::Partial => "partial".to_string(),
+            PlanGroupOverall::NotStarted => "not_started".to_string(),
+        },
+    }
+}
+
+fn plan_target_entry_dto(entry: PlanTargetEntry) -> crate::web::types::PlanTargetEntryDto {
+    crate::web::types::PlanTargetEntryDto {
+        target_repository_id: entry.target_repository_id.0.to_string(),
+        repository_name: entry.repository_name,
+        attempt_id: entry.attempt_id,
+        attempt_status: entry
+            .attempt_status
+            .map(|status| coding_attempt_status_text(&status).to_string()),
+        stage: entry
+            .stage
+            .map(|stage| coding_execution_stage_text(&stage).to_string()),
+        branch_name: entry.branch_name,
+        head_commit: entry.head_commit,
+        push_status: entry
+            .push_status
+            .map(|status| push_status_text(&status).to_string()),
+        review_request_id: entry.review_request_id,
+        blocked_reason: entry.blocked_reason,
+    }
+}
+
+fn delivery_entry_dto(entry: DeliveryEntry) -> DeliveryEntryDto {
+    DeliveryEntryDto {
+        repository_name: entry.repository_name,
+        work_item_id: entry.work_item_id,
+        attempt_status: entry
+            .attempt_status
+            .map(|status| coding_attempt_status_text(&status).to_string()),
+        branch_name: entry.branch_name,
+        commit_sha: entry.commit_sha,
+        push_status: entry
+            .push_status
+            .map(|status| push_status_text(&status).to_string()),
+        push_error: entry.push_error,
     }
 }
 pub(crate) fn coding_execution_unit_dto(
@@ -467,9 +642,12 @@ pub(crate) fn active_coding_timeline_node_id(nodes: &[CodingTimelineNode]) -> Op
         .map(|node| node.id.clone())
 }
 
-pub(crate) fn workspace_session_dto(record: WorkspaceSessionRecord) -> WorkspaceSessionDto {
+pub(crate) fn workspace_session_dto(
+    record: WorkspaceSessionRecord,
+    automation: crate::product::models::automation::AutomationOwnership,
+) -> WorkspaceSessionDto {
     let summary_record = workspace_session_summary_record_from_record(&record);
-    let summary = workspace_session_summary_dto(&summary_record);
+    let summary = workspace_session_summary_dto(&summary_record, automation);
     WorkspaceSessionDto {
         workspace_session_id: summary.workspace_session_id,
         issue_id: summary.issue_id,
@@ -481,6 +659,7 @@ pub(crate) fn workspace_session_dto(record: WorkspaceSessionRecord) -> Workspace
         review_rounds: summary.review_rounds,
         superpowers_enabled: summary.superpowers_enabled,
         openspec_enabled: summary.openspec_enabled,
+        automation: summary.automation,
         messages: record
             .messages
             .into_iter()
@@ -509,6 +688,7 @@ fn workspace_session_summary_record_from_record(
 
 pub(crate) fn workspace_session_summary_dto(
     record: &WorkspaceSessionSummaryRecord,
+    automation: crate::product::models::automation::AutomationOwnership,
 ) -> WorkspaceSessionSummaryDto {
     WorkspaceSessionSummaryDto {
         workspace_session_id: record.id.clone(),
@@ -517,10 +697,16 @@ pub(crate) fn workspace_session_summary_dto(
         workspace_type: workspace_type_text(&record.workspace_type).to_string(),
         status: workspace_session_status_text(&record.status).to_string(),
         author_provider: provider_name_text(&record.author_provider).to_string(),
-        reviewer_provider: provider_name_text(&record.reviewer_provider).to_string(),
+        reviewer_provider: record
+            .reviewer_provider
+            .as_ref()
+            .map(provider_name_text)
+            .unwrap_or("reviewer_unconfigured")
+            .to_string(),
         review_rounds: record.review_rounds,
         superpowers_enabled: record.superpowers_enabled,
         openspec_enabled: record.openspec_enabled,
+        automation,
     }
 }
 
@@ -693,6 +879,7 @@ pub(crate) fn coding_attempt_status_text(status: &CodingAttemptStatus) -> &'stat
         CodingAttemptStatus::Running => "running",
         CodingAttemptStatus::WaitingForHuman => "waiting_for_human",
         CodingAttemptStatus::Blocked => "blocked",
+        CodingAttemptStatus::AwaitingManualRecovery => "awaiting_manual_recovery",
         CodingAttemptStatus::AwaitingPlanAmendment => "awaiting_plan_amendment",
         CodingAttemptStatus::ApplyingPlanAmendment => "applying_plan_amendment",
         CodingAttemptStatus::AmendmentApplyFailed => "amendment_apply_failed",
@@ -710,6 +897,8 @@ pub(crate) fn coding_execution_stage_text(stage: &CodingExecutionStage) -> &'sta
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",
         CodingExecutionStage::FinalConfirm => "final_confirm",
+        // attempt.stage 永不为该值，UI 不出现。
+        CodingExecutionStage::IssueCrossRepoReview => "issue_cross_repo_review",
     }
 }
 pub(crate) fn push_status_text(status: &PushStatus) -> &'static str {
@@ -717,6 +906,7 @@ pub(crate) fn push_status_text(status: &PushStatus) -> &'static str {
         PushStatus::NotPushed => "not_pushed",
         PushStatus::Pushed => "pushed",
         PushStatus::Failed => "failed",
+        PushStatus::SkippedNotConfigured => "skipped_not_configured",
     }
 }
 
@@ -738,6 +928,8 @@ pub(crate) fn workspace_session_status_text(status: &WorkspaceSessionStatus) -> 
         WorkspaceSessionStatus::ChangeRequested => "change_requested",
         WorkspaceSessionStatus::BlockedProviderUnavailable => "blocked_provider_unavailable",
         WorkspaceSessionStatus::Terminated => "terminated",
+        WorkspaceSessionStatus::StoppedNeedsHuman => "stopped_needs_human",
+        WorkspaceSessionStatus::Failed => "failed",
     }
 }
 
@@ -771,3 +963,6 @@ pub(crate) fn issue_status_text(status: &IssueStatus) -> &'static str {
 
 #[cfg(test)]
 include!("dto/repository_initialization_tests.rs");
+
+#[cfg(test)]
+include!("dto/coding_attempt_dto_tests.rs");

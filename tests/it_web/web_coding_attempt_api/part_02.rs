@@ -205,17 +205,14 @@ async fn bootstrap_confirmed_work_item_with_providers(
     let author_provider = provider_name_from_str(work_item_author_provider);
     let reviewer_provider = provider_name_from_str(work_item_reviewer_provider);
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider,
-            reviewer_provider,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        author_provider,
+        reviewer_provider: Some(reviewer_provider),
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create work item session");
     lifecycle
         .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Confirmed)
@@ -624,27 +621,23 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
             ]),
         })
         .expect("compile group plan projection");
-    let revision = WorkItemPlanRevision {
-        id: "plan_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        revision_no: 1,
-        supersedes: None,
-        reason: PlanRevisionReason::InitialCompile,
-        work_item_bindings: BTreeMap::from([
-            (
-                "work_item_0001".to_string(),
-                "work_item_revision_0001".to_string(),
-            ),
-            (
-                "work_item_0002".to_string(),
-                "work_item_revision_0002".to_string(),
-            ),
-        ]),
-        dependency_graph_revision_id: dependency.id,
-        validation_report_ref: "plan-validation-report.json".to_string(),
-        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-        created_at: "2026-07-18T00:00:00Z".to_string(),
-    };
+    let revision = WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+    plan_id: lineage.id.clone(),
+    revision_no: 1,
+    supersedes: None,
+    reason: PlanRevisionReason::InitialCompile,
+    work_item_bindings: BTreeMap::from([
+        (
+            "work_item_0001".to_string(),
+            "work_item_revision_0001".to_string(),
+        ),
+        (
+            "work_item_0002".to_string(),
+            "work_item_revision_0002".to_string(),
+        ),
+    ]),
+    dependency_graph_revision_id: dependency.id,
+    validation_report_ref: "plan-validation-report.json".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:00Z".to_string(),  };
     let plan_projection = PlanProjectionBundle {
         id: revision.plan_projection_bundle_id.clone(),
         plan_revision_id: revision.id.clone(),
@@ -669,4 +662,64 @@ fn seed_group_plan_revision(app_paths: &ProductAppPaths) {
     store
         .set_active_plan_revision(&lineage, &revision.id)
         .expect("active plan revision");
+    seed_legacy_group_draft_records(app_paths);
+}
+
+/// 补 Legacy 单仓 group 的 source draft records（target 全 None）。
+/// validate_group_single_target 拒绝任何 source_draft_error，单仓 Legacy 校验全 None。
+/// Logical 多仓测试会在之后用 rewrite_group_draft_targets 覆盖为 Some(target)。
+fn seed_legacy_group_draft_records(app_paths: &ProductAppPaths) {
+    let draft_store = WorkItemPlanStore::new(app_paths.clone());
+    for (draft_id, outline_id, logical_work_item_id, title) in [
+        (
+            "draft_work_item_revision_0001",
+            "outline_0001",
+            "work_item_0001",
+            "实现爬楼梯",
+        ),
+        (
+            "draft_work_item_revision_0002",
+            "outline_0002",
+            "work_item_0002",
+            "实现爬楼梯 part 2",
+        ),
+    ] {
+        draft_store
+            .put_draft_record(&WorkItemDraftRecord {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                draft_id: draft_id.to_string(),
+                outline_id: outline_id.to_string(),
+                generation_round_id: "round_0001".to_string(),
+                batch_id: None,
+                attempt_index: 1,
+                outline_version_ref: "outline_version_0001".to_string(),
+                generation_mode: WorkItemGenerationMode::Serial,
+                generation_diagnostics: None,
+                candidate: WorkItemDraftCandidate {
+                    target_repository_id: None,
+                    outline_id: outline_id.to_string(),
+                    logical_work_item_id: logical_work_item_id.to_string(),
+                    canonical_contract_candidate: group_canonical_contract(
+                        logical_work_item_id,
+                        title,
+                    ),
+                    verification_plan: WorkItemDraftVerificationPlan { checks: Vec::new() },
+                },
+                status: WorkItemDraftStatus::Accepted,
+                active: true,
+                superseded_by_draft_id: None,
+                supersede_reason: None,
+                copied_from_draft_id: None,
+                review_node_id: None,
+                review_verdict_ref: None,
+                generated_from_node_id: "timeline_node_0001".to_string(),
+                accepted_at: Some("2026-07-18T00:00:00Z".to_string()),
+                superseded_at: None,
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            })
+            .expect("legacy group source draft");
+    }
 }

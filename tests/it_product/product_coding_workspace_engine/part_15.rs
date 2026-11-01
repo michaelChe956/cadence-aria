@@ -1,3 +1,4 @@
+use cadence_aria::product::work_item_projection::renderer_version_for_optional_provider;
 fn seed_authoritative_group_final_review_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
@@ -13,8 +14,7 @@ fn seed_authoritative_group_final_review_fixture(
     let coder_renderer_version = renderer_for(&providers.coder)
         .renderer_version()
         .to_string();
-    let reviewer_renderer_version = renderer_for(&providers.code_reviewer)
-        .renderer_version()
+    let reviewer_renderer_version = renderer_version_for_optional_provider(providers.code_reviewer.as_ref())
         .to_string();
     for (index, logical_id) in ["work_item_0001", "work_item_0002"]
         .into_iter()

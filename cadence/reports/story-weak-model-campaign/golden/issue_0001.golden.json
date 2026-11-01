@@ -1,0 +1,136 @@
+{
+  "ac_ids": [
+    "AC-001",
+    "AC-002",
+    "AC-003",
+    "AC-004",
+    "AC-005",
+    "AC-006"
+  ],
+  "ac_req_links": {
+    "AC-001": [
+      "REQ-001",
+      "REQ-002",
+      "REQ-003",
+      "REQ-004"
+    ],
+    "AC-002": [
+      "REQ-007"
+    ],
+    "AC-003": [
+      "REQ-008",
+      "REQ-009"
+    ],
+    "AC-004": [
+      "REQ-006",
+      "REQ-010"
+    ],
+    "AC-005": [
+      "REQ-001",
+      "REQ-009"
+    ],
+    "AC-006": [
+      "REQ-011"
+    ]
+  },
+  "heading_set": [
+    "功能需求",
+    "待确认项",
+    "成功标准",
+    "用户故事",
+    "用户确认决策",
+    "范围",
+    "非功能需求"
+  ],
+  "nfr_ids": [
+    "NFR-001",
+    "NFR-002",
+    "NFR-003",
+    "NFR-004",
+    "NFR-005"
+  ],
+  "req_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004",
+    "REQ-005",
+    "REQ-006",
+    "REQ-007",
+    "REQ-008",
+    "REQ-009",
+    "REQ-010",
+    "REQ-011"
+  ],
+  "schema_version": 1,
+  "source_id_coverage": {
+    "NFR-001": [
+      "author-decision-001",
+      "issue_0001#范围限制"
+    ],
+    "NFR-002": [
+      "issue_0001#范围限制"
+    ],
+    "NFR-003": [
+      "issue_0001#背景"
+    ],
+    "NFR-004": [
+      "issue_0001#前端演示页面"
+    ],
+    "NFR-005": [
+      "repository_0001 规则 .claude/rules/code-usage.md"
+    ],
+    "REQ-001": [
+      "issue_0001#库函数",
+      "issue_0001#范围限制"
+    ],
+    "REQ-002": [
+      "issue_0001#格式规则"
+    ],
+    "REQ-003": [
+      "issue_0001#格式规则"
+    ],
+    "REQ-004": [
+      "issue_0001#格式规则"
+    ],
+    "REQ-005": [
+      "issue_0001#背景"
+    ],
+    "REQ-006": [
+      "issue_0001#前端演示页面",
+      "issue_0001#范围限制"
+    ],
+    "REQ-007": [
+      "issue_0001#前端演示页面",
+      "issue_0001#页面验收标准"
+    ],
+    "REQ-008": [
+      "issue_0001#前端演示页面",
+      "issue_0001#页面验收标准"
+    ],
+    "REQ-009": [
+      "issue_0001#前端演示页面"
+    ],
+    "REQ-010": [
+      "issue_0001#前端演示页面",
+      "issue_0001#页面验收标准"
+    ],
+    "REQ-011": [
+      "issue_0001#范围限制",
+      "用户确认决策 author-decision-001"
+    ]
+  },
+  "user_decisions": {
+    "author-decision-001": {
+      "answer": "零依赖口径——使用 Node.js 内置 test runner（node:test / node:assert），不引入第三方测试框架或 devDependency。",
+      "bindings": {
+        "ac_ids": [
+          "AC-006"
+        ],
+        "req_ids": [
+          "REQ-011"
+        ]
+      }
+    }
+  }
+}

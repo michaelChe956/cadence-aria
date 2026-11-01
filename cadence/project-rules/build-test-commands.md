@@ -64,3 +64,27 @@ cargo test-approval-bridge
 
 - 工具链以 `rust-toolchain.toml` 为唯一来源；缺组件时按其修复宿主机环境，不改用 Docker 绕过。
 - 新增或升级依赖时必须同步更新 `Cargo.lock`，并确保第 1 节四条命令全部通过。
+
+## 6. 部署与迭代构建模式（2026-09-22 起，默认执行）
+
+服务器静态资源由 `static_assets.rs` 双形态服务：设置环境变量 `ARIA_WEB_DIST=<仓库根>/web/dist` 时从磁盘实时读取；未设置时用编译期 rust-embed 嵌入产物。
+
+### 6.1 迭代模式（复验/日常开发，默认）
+
+- 服务器以 **debug 二进制 + `ARIA_WEB_DIST=<仓库根>/web/dist`** 启动（hub 进程名 `aria-dev-*`）。
+- **前端改动**：`cd web && pnpm build`（约 3 秒）→ 刷新浏览器即生效。**不需要** cargo 重建、不需要重启服务。
+- **后端改动**：`cargo build --locked`（debug 增量，实测约 20 秒）→ hub 重启同名进程。
+- 每次迭代后核对：`curl /api/health` ok + `curl / | grep -o 'index-[^"]*\.js'` 与 `web/dist/index.html` 引用一致（证明 pnpm build 真的跑了——磁盘模式会如实服务旧 dist，忘 build 就是旧 UI）。
+- debug 二进制性能损耗对本服务（IO 型，provider 在外部进程）无感；用户感知卡顿则临时切里程碑模式。
+
+### 6.2 里程碑模式（用户验收点 / vXX 谱系 / 收口 push）
+
+1. `cd web && pnpm build` **先行**，记录 dist 引用的 `index-*.js` 指纹
+2. `cargo build --release --locked`，记录二进制 md5
+3. hub 停旧起新（`aria-NN-vXX`，persist），启动环境变量加 `ARIA_WEB_DIST` 同 6.1
+4. 三对账：health ok / `md5sum /proc/<pid>/exe` = 磁盘二进制 / 服务端首页指纹 = dist 指纹
+
+### 6.3 历史教训（仍然有效）
+
+- v33 事故（前端未重建，嵌入产物停留在旧版）：磁盘模式下等价陷阱=忘跑 `pnpm build`。6.1/6.2 的指纹核对就是防它。
+- 交接文档中的「先 pnpm build 再 cargo release」铁律仅适用于 6.2；迭代模式不触发 cargo。

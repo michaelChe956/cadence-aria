@@ -2,7 +2,6 @@ import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent 
 import type {
   HumanPresentationRevision,
   HumanPresentationScope,
-  SaveHumanPresentationRevisionMessage,
 } from "../../api/types";
 
 export type HumanPresentationEditorBase = {
@@ -18,12 +17,10 @@ export type HumanPresentationEditorBase = {
 
 export function HumanPresentationEditor({
   base,
-  onSave,
   saving = false,
   error = null,
 }: {
   base: HumanPresentationEditorBase;
-  onSave: (message: SaveHumanPresentationRevisionMessage) => void;
   saving?: boolean;
   error?: string | null;
 }) {
@@ -59,17 +56,7 @@ export function HumanPresentationEditor({
     if (saving || humanSummary.trim().length === 0) {
       return;
     }
-    onSave({
-      type: "save_human_presentation_revision",
-      source_projection_bundle_id: base.source_projection_bundle_id,
-      scope: base.scope,
-      supersedes: base.presentation?.id ?? null,
-      human_summary: humanSummary.trim(),
-      why_split: nullableText(whySplit),
-      dependency_explanation: lines(dependencyExplanation),
-      risk_explanation: lines(riskExplanation),
-      source_refs: lines(sourceRefs),
-    });
+    // 退役留档（T5/REQ-RET-02）：保存发送面已删（wire 消息族删除），编辑器仅只读呈现。
   }
 
   function handleKeyboardSave(event: KeyboardEvent<HTMLFormElement>) {

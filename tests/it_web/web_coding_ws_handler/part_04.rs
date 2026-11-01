@@ -378,6 +378,7 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part04-attempt-repository".to_string(),
         })
         .expect("create repository");
     LifecycleStore::new(app_paths.clone())
@@ -407,6 +408,7 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -475,6 +477,7 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part04-confirmed-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -490,17 +493,15 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
         })
         .expect("create work item");
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: Some(ProviderName::Fake),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("create workspace session");
     lifecycle
         .append_artifact_version(
@@ -540,6 +541,7 @@ fn app_with_confirmed_work_item_context(root_path: &std::path::Path) -> axum::Ro
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -567,6 +569,18 @@ fn app_with_full_chain_attempt_and_provider(
     );
 
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    // complete 路径新增的落盘判定会读 issue 聚合（T3），fixture 补齐 issue 记录。
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
+            title: "coding ws full chain issue".to_string(),
+            description: None,
+            change_id: None,
+                   base_branch: None,
+ })
+        .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -574,6 +588,7 @@ fn app_with_full_chain_attempt_and_provider(
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part04-internal-review-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -612,6 +627,7 @@ fn app_with_full_chain_attempt_and_provider(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );

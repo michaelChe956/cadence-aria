@@ -43,7 +43,9 @@ fn group_engine_with_two_units() -> (
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     store
@@ -104,7 +106,9 @@ fn group_engine_with_last_running_unit() -> (
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     store
@@ -291,6 +295,7 @@ fn seed_authoritative_group_terminal_fixture(
                 summary: logical.title.clone(),
             },
             non_goals: Vec::new(),
+            depends_on: Vec::new(),
             input_contracts: Vec::new(),
             output_contracts: Vec::new(),
             tasks: Vec::new(),
@@ -307,6 +312,7 @@ fn seed_authoritative_group_terminal_fixture(
             },
             blocker_rules: Vec::new(),
             design_traceability: Vec::new(),
+            intent_contract: None,
         };
         let revision = WorkItemRevision {
             id: revision_id.to_string(),
@@ -436,18 +442,14 @@ fn seed_authoritative_group_terminal_fixture(
             },
         )
         .expect("put plan projection bundle");
-    let plan_revision = WorkItemPlanRevision {
-        id: "plan_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        revision_no: 1,
-        supersedes: None,
-        reason: PlanRevisionReason::InitialCompile,
-        work_item_bindings: bindings,
-        dependency_graph_revision_id: graph.id,
-        validation_report_ref: "validation_report_0001".to_string(),
-        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-        created_at: "2026-06-27T00:00:00Z".to_string(),
-    };
+    let plan_revision = WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+    plan_id: lineage.id.clone(),
+    revision_no: 1,
+    supersedes: None,
+    reason: PlanRevisionReason::InitialCompile,
+    work_item_bindings: bindings,
+    dependency_graph_revision_id: graph.id,
+    validation_report_ref: "validation_report_0001".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-06-27T00:00:00Z".to_string(),  };
     revision_store
         .put_plan_revision(&lineage, &plan_revision)
         .expect("put plan revision");
@@ -587,7 +589,9 @@ fn completed_group_attempt_with_handoff_revisions() -> (
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
@@ -635,14 +639,7 @@ fn group_attempt_waiting_for_final_confirm() -> (
             Some("frontend done".to_string()),
         )
         .expect("refresh terminal attempt pointers");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_stage(
             &attempt.project_id,

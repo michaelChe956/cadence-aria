@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::product::coding_attempt_store::admission::{MIXED_TARGET_GROUP_REJECTED, StableCode};
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnit,
-    CodingExecutionUnitStatus,
+    AttemptTargetSnapshot, CodingAttemptScope, CodingExecutionAttempt, CodingExecutionStage,
+    CodingExecutionUnit, CodingExecutionUnitStatus,
 };
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryRouting};
+use crate::product::work_item_plan_store::WorkItemPlanStore;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +16,10 @@ pub struct AuthoritativeCodingUnitBinding {
     pub work_item_revision_id: String,
     pub verification_plan_revision_id: String,
     pub projection_bundle_id: String,
+    /// `None` 仅表示 source draft 已校验存在且 target 未指定；回溯断链另存错误，
+    /// 防止被 group B2 误判为可 focus 兜底的零 target。
+    pub target_repository_id: Option<LogicalRepositoryId>,
+    pub source_draft_error: Option<String>,
     pub dependency_logical_work_item_ids: Vec<String>,
 }
 
@@ -132,6 +139,17 @@ impl super::CodingAttemptStore {
             values.sort();
         }
 
+        let mut draft_targets = BTreeMap::new();
+        let mut ambiguous_draft_ids = BTreeSet::new();
+        for draft in WorkItemPlanStore::new(self.paths())
+            .list_draft_records(project_id, issue_id, plan_id)?
+        {
+            if draft_targets.contains_key(&draft.draft_id) {
+                ambiguous_draft_ids.insert(draft.draft_id);
+            } else {
+                draft_targets.insert(draft.draft_id.clone(), draft);
+            }
+        }
         let mut units = Vec::with_capacity(ordered_ids.len());
         let mut projection_bundle_ids = BTreeSet::new();
         for logical_id in ordered_ids {
@@ -174,12 +192,37 @@ impl super::CodingAttemptStore {
                     "work item revision dependencies do not match the bound logical work item",
                 ));
             }
+            let (target_repository_id, source_draft_error) =
+                if ambiguous_draft_ids.contains(&work_item_revision.source_draft_revision_id) {
+                    (
+                        None,
+                        Some("work item revision source draft is ambiguous".to_string()),
+                    )
+                } else {
+                    match draft_targets.get(&work_item_revision.source_draft_revision_id) {
+                        None => (
+                            None,
+                            Some("work item revision source draft is missing".to_string()),
+                        ),
+                        Some(source_draft)
+                            if source_draft.candidate.logical_work_item_id != logical_id => (
+                            None,
+                            Some(
+                                "work item revision source draft logical work item does not match"
+                                    .to_string(),
+                            ),
+                        ),
+                        Some(source_draft) => (source_draft.candidate.target_repository_id, None),
+                    }
+                };
             projection_bundle_ids.insert(projection.id.clone());
             units.push(AuthoritativeCodingUnitBinding {
                 logical_work_item_id: logical_id.clone(),
                 work_item_revision_id: revision_id,
                 verification_plan_revision_id: verification.id,
                 projection_bundle_id: projection.id,
+                target_repository_id,
+                source_draft_error,
                 dependency_logical_work_item_ids: dependencies
                     .remove(&logical_id)
                     .expect("known logical work item"),
@@ -211,8 +254,78 @@ impl super::CodingAttemptStore {
         attempt: &CodingExecutionAttempt,
     ) -> Result<AuthoritativeGroupPlanBinding, ProductStoreError> {
         let (stored, authoritative, units) = self.validate_group_attempt_structure(attempt)?;
-        validate_group_attempt_pointers(&stored, &units)?;
+        let routing =
+            // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（conflict
+            // fail-closed）；旧数据无归属/无别名 record 时回退 Legacy。
+            match crate::product::logical_codebase::RepositoryAuthorityResolver::new(
+                self.paths.clone(),
+            )
+            .resolve_for_issue(&stored.project_id, &stored.issue_id)?
+            {
+                None => RepositoryRouting::Legacy {
+                    repository_id: String::new(),
+                },
+                Some(resolution) => RepositoryRouting::classify(
+                    resolution.manifest,
+                    resolution.selection,
+                ),
+            };
+        validate_group_single_target(
+            &routing,
+            &authoritative.units,
+            stored.target_snapshot.as_ref(),
+        )
+        .map_err(|_| mixed_target_group_rejected())?;
+        // N2（REQ-CS-05）：first_ready_unit 选中首项完成后的安全暂停是唯一新
+        // 合法“无 active 指针”形态——严格匹配 durable plan-run 冻结 selection
+        // 的完成身份；无匹配 run / 身份不符仍走原失败关闭。
+        let plan_coding_pause =
+            self.plan_coding_pause_matches_completed_selection(&stored, &units)?;
+        validate_group_attempt_pointers(&stored, &units, plan_coding_pause)?;
         Ok(authoritative)
+    }
+
+    /// N2（REQ-CS-05）合法暂停形状判定：Blocked+CodeReview+空指针+恰一个
+    /// Completed unit，且存在本 plan 的 first_ready run 冻结 selection 恰指向
+    /// 该完成 unit（attempt/unit 双身份）。Invalidated run 不构成暂停例外。
+    fn plan_coding_pause_matches_completed_selection(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        units: &[CodingExecutionUnit],
+    ) -> Result<bool, ProductStoreError> {
+        if attempt.status != crate::product::coding_models::CodingAttemptStatus::Blocked
+            || attempt.stage != CodingExecutionStage::CodeReview
+            || attempt.active_unit_id.is_some()
+            || attempt.current_work_item_id.is_some()
+        {
+            return Ok(false);
+        }
+        let mut completed_units = units
+            .iter()
+            .filter(|unit| unit.status == CodingExecutionUnitStatus::Completed);
+        let Some(unit) = completed_units.next() else {
+            return Ok(false);
+        };
+        if completed_units.next().is_some() {
+            return Ok(false);
+        }
+        let run = crate::product::coding_plan_run::CodingPlanRunStore::new(self.paths())
+            .matching_first_ready_run(attempt)?;
+        let Some(run) = run else {
+            return Ok(false);
+        };
+        if matches!(
+            run.phase,
+            crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated
+        ) {
+            return Ok(false);
+        }
+        let Some(selection) = run.selection else {
+            return Ok(false);
+        };
+        Ok(selection.attempt_id == attempt.id
+            && selection.unit_id == unit.id
+            && selection.logical_work_item_id == unit.logical_work_item_id)
     }
 
     pub(super) fn validate_group_attempt_structure(
@@ -245,7 +358,7 @@ impl super::CodingAttemptStore {
                 "attempt plan binding targets another coding group",
             ));
         }
-        let authoritative = self
+        let mut authoritative = self
             .resolve_authoritative_group_plan_binding_for_revision(
                 &stored.project_id,
                 &stored.issue_id,
@@ -253,6 +366,40 @@ impl super::CodingAttemptStore {
                 &binding.bound_plan_revision_id,
             )
             .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?;
+        // REQ-MTG-02（WP2 分流消费面，D2.1）：带冻结快照的 group attempt 以其
+        // target 桶为权威 unit 集与根 unit。**桶收窄仅作用于权威 plan 自身 ≥2
+        // 桶（镜像 advance 分流门 `units_by_target` ≥2）**——单 target plan（含
+        // 权威 units 漂移成 Some+None 混合的退化态）保持 whole-plan 语义，让
+        // `validate_group_attempt_integrity` 的 `validate_group_single_target`
+        // 继续以 `mixed_target_group_rejected` 稳定码拒绝（k3 fix round 1，
+        // it_web mixed_target_group_recovery_rejects_drifted_some_none 契约）。
+        // 无快照保持 whole-plan 投影序零变化（A3：不猜测归属）；多 target 拆分
+        // attempt 各自对桶内集校验。ScAdvance 建组按桶内拓扑序物化（与
+        // prepare_group_initialization_with_admission_for_target 一致），
+        // LegacyGroup 保持投影序。空桶（快照 target 不覆盖任何 unit）fail-closed。
+        if units_by_target(&authoritative).by_target.len() >= 2
+            && let Some(snapshot) = stored.target_snapshot.as_ref()
+        {
+            let bucket = authoritative
+                .units
+                .iter()
+                .filter(|unit| unit.target_repository_id == Some(snapshot.logical_repository_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if bucket.is_empty() {
+                return Err(incomplete_group_attempt(
+                    &stored.id,
+                    "attempt target snapshot does not cover any authoritative unit",
+                ));
+            }
+            authoritative.units = match stored.admission_kind {
+                crate::product::coding_models::CodingAdmissionKind::ScAdvance => {
+                    super::group_initialization::topologically_order_unit_bindings(&bucket)
+                        .map_err(|error| map_group_integrity_dependency_error(&stored.id, error))?
+                }
+                _ => bucket,
+            };
+        }
         if stored.work_item_id
             != authoritative
                 .units
@@ -312,6 +459,7 @@ fn map_group_integrity_dependency_error(
 fn validate_group_attempt_pointers(
     attempt: &CodingExecutionAttempt,
     units: &[CodingExecutionUnit],
+    plan_coding_pause_allowed: bool,
 ) -> Result<(), ProductStoreError> {
     let active_units = units
         .iter()
@@ -348,8 +496,15 @@ fn validate_group_attempt_pointers(
                 && attempt.status != crate::product::coding_models::CodingAttemptStatus::Created
                 && attempt.stage.order() >= CodingExecutionStage::ReviewRequest.order()
                 && final_review_units;
-            let no_target_is_allowed =
-                terminal_no_target_is_allowed || final_review_no_target_is_allowed;
+            // N2（REQ-CS-05）：first_ready_unit 安全暂停——Blocked+CodeReview+
+            // 清指针，其余 units 保持事实状态（Pending 等）。完成身份已由
+            // plan_coding_pause_allowed（严格匹配冻结 selection）背书。
+            let plan_pause_no_target_is_allowed = plan_coding_pause_allowed
+                && attempt.status == crate::product::coding_models::CodingAttemptStatus::Blocked
+                && attempt.stage == CodingExecutionStage::CodeReview;
+            let no_target_is_allowed = terminal_no_target_is_allowed
+                || final_review_no_target_is_allowed
+                || plan_pause_no_target_is_allowed;
             if !pointers_are_empty || !no_target_is_allowed {
                 return Err(incomplete_group_attempt(
                     &attempt.id,
@@ -395,4 +550,352 @@ pub(super) fn incomplete_group_attempt(attempt_id: &str, reason: &str) -> Produc
     ProductStoreError::Io(format!(
         "coding_group_attempt_incomplete: {attempt_id}: {reason}"
     ))
+}
+
+/// REQ-COD-04：routing-aware 的 group 单目标校验（创建/恢复/replay 三处调同一函数）。
+///
+/// 堵 v1.0 的 `Some(A)+None` 绕过（`filter_map` 让 None 消失）与 snapshot 漂移：
+/// - Legacy：所有 unit target 必须全 `None`，出现任何 `Some` → 拒。
+/// - Logical：所有 unit target 必须全 `Some` 且互相同，且与 attempt snapshot 的
+///   `logical_repository_id` 一致 → 通过；任何 `None` / ≥2 不同 `Some` / 与 snapshot
+///   不一致 → 拒。
+/// - 拒绝任何 `source_draft_error`（draft 溯源已出错，不应进 group）。
+///
+/// `RepositoryRouting::FailClosed` 是路由失败态（非 mixed-target），由调用方在进入本
+/// 函数前处理，此处不重复判定。
+pub fn validate_group_single_target(
+    routing: &RepositoryRouting,
+    unit_bindings: &[AuthoritativeCodingUnitBinding],
+    attempt_snapshot: Option<&AttemptTargetSnapshot>,
+) -> Result<(), StableCode> {
+    if unit_bindings
+        .iter()
+        .any(|unit| unit.source_draft_error.is_some())
+    {
+        return Err(StableCode::MixedTargetGroupRejected);
+    }
+    match routing {
+        RepositoryRouting::Legacy { .. } => {
+            if unit_bindings
+                .iter()
+                .any(|unit| unit.target_repository_id.is_some())
+            {
+                return Err(StableCode::MixedTargetGroupRejected);
+            }
+            Ok(())
+        }
+        RepositoryRouting::Logical { .. } => {
+            let Some(first) = unit_bindings
+                .first()
+                .and_then(|unit| unit.target_repository_id)
+            else {
+                return Err(StableCode::MixedTargetGroupRejected);
+            };
+            if unit_bindings
+                .iter()
+                .any(|unit| unit.target_repository_id != Some(first))
+            {
+                return Err(StableCode::MixedTargetGroupRejected);
+            }
+            match attempt_snapshot {
+                Some(snapshot) if snapshot.logical_repository_id == first => Ok(()),
+                _ => Err(StableCode::MixedTargetGroupRejected),
+            }
+        }
+        RepositoryRouting::FailClosed { .. } => Ok(()),
+    }
+}
+
+pub(crate) fn mixed_target_group_rejected() -> ProductStoreError {
+    ProductStoreError::Io(MIXED_TARGET_GROUP_REJECTED.to_string())
+}
+
+/// REQ-MTG-01（WP1 分流化）：authoritative units 按 target 分组的结果。
+/// 无归属（`target_repository_id == None`）的 unit 不入任何 target 桶，交由
+/// 调用方按 0-target/selection focus 规则处置（与创建面 focus 回落语义对齐）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UnitsByTarget {
+    pub by_target: BTreeMap<LogicalRepositoryId, Vec<AuthoritativeCodingUnitBinding>>,
+    pub unattributed: Vec<AuthoritativeCodingUnitBinding>,
+}
+
+/// REQ-MTG-01（WP1 分流化）：units 按 target 分组的分流解析辅助（T2 分流创建
+/// 消费）。纯分组不判定：`source_draft_error` fail-closed 前置校验仍由调用方在
+/// 进入本函数前完成（语义不变），focus 回落与 selection 有效性亦由调用面处置。
+pub fn units_by_target(authoritative: &AuthoritativeGroupPlanBinding) -> UnitsByTarget {
+    let mut grouped = UnitsByTarget::default();
+    for unit in &authoritative.units {
+        match unit.target_repository_id {
+            Some(target_repository_id) => grouped
+                .by_target
+                .entry(target_repository_id)
+                .or_default()
+                .push(unit.clone()),
+            None => grouped.unattributed.push(unit.clone()),
+        }
+    }
+    grouped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::coding_models::AttemptTargetSnapshot;
+    use crate::product::logical_codebase::RepositoryRouting;
+    use crate::product::logical_codebase::issue_selection::IssueCodebaseSelection;
+    use crate::product::logical_codebase::store::LogicalCodebaseManifest;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn logical_id(u: u128) -> LogicalRepositoryId {
+        LogicalRepositoryId(Uuid::from_u128(u))
+    }
+
+    fn unit(
+        logical_work_item_id: &str,
+        target: Option<LogicalRepositoryId>,
+    ) -> AuthoritativeCodingUnitBinding {
+        unit_with_draft_error(logical_work_item_id, target, None)
+    }
+
+    fn unit_with_draft_error(
+        logical_work_item_id: &str,
+        target: Option<LogicalRepositoryId>,
+        source_draft_error: Option<&str>,
+    ) -> AuthoritativeCodingUnitBinding {
+        AuthoritativeCodingUnitBinding {
+            logical_work_item_id: logical_work_item_id.to_string(),
+            work_item_revision_id: format!("{logical_work_item_id}_rev"),
+            verification_plan_revision_id: format!("{logical_work_item_id}_verification"),
+            projection_bundle_id: format!("{logical_work_item_id}_projection"),
+            target_repository_id: target,
+            source_draft_error: source_draft_error.map(str::to_string),
+            dependency_logical_work_item_ids: Vec::new(),
+        }
+    }
+
+    fn snapshot(logical_repository_id: LogicalRepositoryId) -> AttemptTargetSnapshot {
+        AttemptTargetSnapshot {
+            logical_repository_id,
+            checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(Uuid::from_u128(
+                0xaaaa,
+            )),
+            physical_repository_id: "physical_0001".to_string(),
+            canonical_path: PathBuf::from("/tmp/repo"),
+            git_dir_identity: "sha256:git".to_string(),
+            revision: Some("deadbeef".to_string()),
+            policy_digest: "policy_digest".to_string(),
+            membership_revision: 1,
+            captured_at: "2026-08-11T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        }
+    }
+
+    fn legacy_routing() -> RepositoryRouting {
+        RepositoryRouting::Legacy {
+            repository_id: "repository_0001".to_string(),
+        }
+    }
+
+    fn logical_routing(member_ids: Vec<LogicalRepositoryId>) -> RepositoryRouting {
+        RepositoryRouting::Logical {
+            manifest: LogicalCodebaseManifest::new(
+                "project_0001",
+                PathBuf::from("/tmp/logical"),
+                member_ids,
+            ),
+            selection: Box::new(IssueCodebaseSelection::all_members(
+                "project_0001",
+                "issue_0001",
+                None,
+            )),
+        }
+    }
+
+    #[test]
+    fn legacy_all_none_is_accepted() {
+        let units = vec![unit("work_item_0001", None), unit("work_item_0002", None)];
+        assert_eq!(
+            validate_group_single_target(&legacy_routing(), &units, None),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn legacy_any_some_is_rejected() {
+        let units = vec![
+            unit("work_item_0001", None),
+            unit("work_item_0002", Some(logical_id(0x0001))),
+        ];
+        assert_eq!(
+            validate_group_single_target(&legacy_routing(), &units, None),
+            Err(StableCode::MixedTargetGroupRejected)
+        );
+    }
+
+    #[test]
+    fn logical_all_same_some_matching_snapshot_is_accepted() {
+        let target = logical_id(0x0001);
+        let units = vec![
+            unit("work_item_0001", Some(target)),
+            unit("work_item_0002", Some(target)),
+        ];
+        assert_eq!(
+            validate_group_single_target(
+                &logical_routing(vec![target]),
+                &units,
+                Some(&snapshot(target)),
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn logical_any_none_is_rejected() {
+        let target = logical_id(0x0001);
+        let units = vec![
+            unit("work_item_0001", Some(target)),
+            unit("work_item_0002", None),
+        ];
+        assert_eq!(
+            validate_group_single_target(
+                &logical_routing(vec![target]),
+                &units,
+                Some(&snapshot(target)),
+            ),
+            Err(StableCode::MixedTargetGroupRejected)
+        );
+    }
+
+    #[test]
+    fn logical_distinct_some_targets_are_rejected() {
+        let target_one = logical_id(0x0001);
+        let target_two = logical_id(0x0002);
+        let units = vec![
+            unit("work_item_0001", Some(target_one)),
+            unit("work_item_0002", Some(target_two)),
+        ];
+        assert_eq!(
+            validate_group_single_target(
+                &logical_routing(vec![target_one, target_two]),
+                &units,
+                Some(&snapshot(target_one)),
+            ),
+            Err(StableCode::MixedTargetGroupRejected)
+        );
+    }
+
+    #[test]
+    fn logical_snapshot_mismatch_is_rejected() {
+        let target = logical_id(0x0001);
+        let other = logical_id(0x0002);
+        let units = vec![
+            unit("work_item_0001", Some(target)),
+            unit("work_item_0002", Some(target)),
+        ];
+        assert_eq!(
+            validate_group_single_target(
+                &logical_routing(vec![target, other]),
+                &units,
+                Some(&snapshot(other)),
+            ),
+            Err(StableCode::MixedTargetGroupRejected)
+        );
+    }
+
+    #[test]
+    fn logical_missing_snapshot_is_rejected() {
+        let target = logical_id(0x0001);
+        let units = vec![
+            unit("work_item_0001", Some(target)),
+            unit("work_item_0002", Some(target)),
+        ];
+        assert_eq!(
+            validate_group_single_target(&logical_routing(vec![target]), &units, None),
+            Err(StableCode::MixedTargetGroupRejected)
+        );
+    }
+
+    #[test]
+    fn any_source_draft_error_is_rejected() {
+        let target = logical_id(0x0001);
+        let units = vec![
+            unit("work_item_0001", Some(target)),
+            unit_with_draft_error(
+                "work_item_0002",
+                Some(target),
+                Some("work item revision source draft is missing"),
+            ),
+        ];
+        assert_eq!(
+            validate_group_single_target(
+                &logical_routing(vec![target]),
+                &units,
+                Some(&snapshot(target)),
+            ),
+            Err(StableCode::MixedTargetGroupRejected)
+        );
+    }
+
+    #[test]
+    fn units_by_target_groups_units_per_target_and_tracks_unattributed() {
+        // REQ-MTG-01（WP1 分流化）：units 按 target 分组——每个有归属 unit 恰入
+        // 一桶；无归属 unit 不入任何桶、交由调用方按 0-target/focus 规则处置。
+        let api = logical_id(0x0001);
+        let web = logical_id(0x0002);
+        let binding = AuthoritativeGroupPlanBinding {
+            plan_revision_id: "plan_revision_0001".to_string(),
+            dependency_graph_revision_id: "dependency_graph_0001".to_string(),
+            plan_projection_bundle_id: "plan_projection_0001".to_string(),
+            units: vec![
+                unit("work_item_0001", Some(api)),
+                unit("work_item_0002", Some(web)),
+                unit("work_item_0003", None),
+                unit("work_item_0004", Some(api)),
+            ],
+        };
+
+        let grouped = units_by_target(&binding);
+
+        assert_eq!(grouped.by_target.len(), 2);
+        assert_eq!(
+            grouped.by_target.get(&api).map(|units| units
+                .iter()
+                .map(|unit| unit.logical_work_item_id.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["work_item_0001", "work_item_0004"])
+        );
+        assert_eq!(
+            grouped.by_target.get(&web).map(|units| units
+                .iter()
+                .map(|unit| unit.logical_work_item_id.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["work_item_0002"])
+        );
+        assert_eq!(
+            grouped
+                .unattributed
+                .iter()
+                .map(|unit| unit.logical_work_item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work_item_0003"]
+        );
+    }
+
+    #[test]
+    fn units_by_target_all_unattributed_yields_empty_map() {
+        // 0-target 形态：全部无归属 → 空桶+全集 unattributed（focus 回落判定
+        // 交由调用方，与创建面 0-target focus 语义对齐）。
+        let binding = AuthoritativeGroupPlanBinding {
+            plan_revision_id: "plan_revision_0001".to_string(),
+            dependency_graph_revision_id: "dependency_graph_0001".to_string(),
+            plan_projection_bundle_id: "plan_projection_0001".to_string(),
+            units: vec![unit("work_item_0001", None), unit("work_item_0002", None)],
+        };
+
+        let grouped = units_by_target(&binding);
+
+        assert!(grouped.by_target.is_empty());
+        assert_eq!(grouped.unattributed.len(), 2);
+    }
 }

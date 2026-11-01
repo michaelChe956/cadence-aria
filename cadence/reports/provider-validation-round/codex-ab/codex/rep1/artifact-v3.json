@@ -1,0 +1,223 @@
+{
+  "event_seq": 3059,
+  "type": "artifact_update",
+  "version": 3,
+  "work_item_projection": {
+    "canonical_contract_hash": "9600902003c35a82b1c638ad231b33a7832467a9769281b59b241d710790a79a",
+    "coder_projection": {
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN node --test tests/backend/backend.test.js 执行 THE SYSTEM SHALL 覆盖并通过生命周期、成功契约、数据校验错误、API 404、API 405 和静态托管测试。"
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "provided_contract_refs": [
+          "CT-001",
+          "CT-002"
+        ],
+        "required_fields": [
+          "contract_id",
+          "capabilities"
+        ],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      },
+      "objective": "WHEN 服务收到关卡数据或页面资源请求 THE SYSTEM SHALL 使用 Node 内置模块提供可注入的关卡 API、错误语义和静态托管能力。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002",
+        "TASK-003"
+      ],
+      "tasks": [
+        {
+          "done_when_refs": [
+            "AC-001"
+          ],
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "statement": "WHEN 编写 backend 契约测试 THE SYSTEM SHALL 先在 tests/backend/backend.test.js 建立失败测试，覆盖生命周期、成功 API、数据错误、API 404、API 405 和注入 staticRoot 的静态托管。",
+          "task_id": "TASK-001"
+        },
+        {
+          "done_when_refs": [
+            "AC-001"
+          ],
+          "requirement_refs": [
+            "REQ-003"
+          ],
+          "statement": "WHEN 实现 data/levels.json THE SYSTEM SHALL 提供恰好五项满足字段约束且 id 唯一的关卡数据。",
+          "task_id": "TASK-002"
+        },
+        {
+          "done_when_refs": [
+            "AC-001"
+          ],
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "statement": "WHEN 实现服务入口与数据读取器 THE SYSTEM SHALL 使用 tests/backend/fixtures/** 触发错误分支，提供成功响应、统一错误响应、路径安全静态托管和可停止的服务生命周期。",
+          "task_id": "TASK-003"
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/backend/backend.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_4d4bfb69187295206ee3ab48",
+      "write_policy": {
+        "exclusive_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ],
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**"
+        ]
+      }
+    },
+    "coder_projection_hash": "d258ebdc0b54345213da95d3b213c1c8eda047822b52f969d3ead2a2752c6c3f",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-20T01:18:32.916471550+00:00",
+    "human_projection": {
+      "completion_summary": [
+        "WHEN node --test tests/backend/backend.test.js 执行 THE SYSTEM SHALL 覆盖并通过生命周期、成功契约、数据校验错误、API 404、API 405 和静态托管测试。"
+      ],
+      "dependencies": [],
+      "goal": "WHEN 服务收到关卡数据或页面资源请求 THE SYSTEM SHALL 使用 Node 内置模块提供可注入的关卡 API、错误语义和静态托管能力。",
+      "inputs": [],
+      "logical_work_item_id": "WI-001",
+      "non_goals": [
+        "不实现关卡玩法、认证、数据库、外部服务或 npm 依赖。",
+        "不实现前端页面逻辑或集成测试。"
+      ],
+      "normative": false,
+      "outputs": [
+        {
+          "capabilities": [
+            "服务仅使用 node:http、node:fs、node:path",
+            "GET / 返回注入 staticRoot 下的 index.html"
+          ],
+          "contract_id": "CT-001",
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "contract_id": "CT-002",
+          "source_refs": [
+            "CT-002"
+          ]
+        }
+      ],
+      "scope_summary": {
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**"
+        ],
+        "owned_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ]
+      },
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "CT-002",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "TASK-001",
+        "TASK-002",
+        "TASK-003"
+      ],
+      "title": "Backend Levels API",
+      "used_by_provider": false
+    },
+    "human_projection_hash": "acab92a26d32d45fbe050bf142e74b13e2c800c24d6693f3002ce02c12cef972",
+    "id": "work_item_projection_bundle_4d4bfb69187295206ee3ab48",
+    "projection_schema_version": 1,
+    "reviewer_projection": {
+      "blocker_routing": [],
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "capabilities": [
+            "服务仅使用 node:http、node:fs、node:path",
+            "GET / 返回注入 staticRoot 下的 index.html"
+          ],
+          "contract_id": "CT-001"
+        },
+        {
+          "capabilities": [
+            "API 错误响应体结构为 { error: { code",
+            "message } } 且 message 不含堆栈、绝对路径或内部实现细节"
+          ],
+          "contract_id": "CT-002"
+        }
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "REQ-002",
+            "REQ-003",
+            "REQ-004"
+          ]
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**"
+        ],
+        "forbidden_scopes": [
+          "web/**",
+          "tests/frontend/**",
+          "tests/integration/**"
+        ]
+      },
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/backend/backend.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_4d4bfb69187295206ee3ab48"
+    },
+    "reviewer_projection_hash": "26a6cab08ad040858e9115eca0c5055e02d133121ec2a9f0ca20c6162378eb6b",
+    "work_item_revision_id": "work_item_revision_4d4bfb69187295206ee3ab48"
+  }
+}

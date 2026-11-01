@@ -184,6 +184,9 @@ pub(crate) struct GroupGitFacts {
     pub final_diff: String,
     pub final_commit: String,
     pub completion_commit_in_final: BTreeSet<String>,
+    /// 多仓 attempt 的 scope 路径域前缀（成员 checkout 相对聚合根）；单仓为 `None`。
+    /// diff 路径是仓内相对，而 Work Item scope 以聚合根为基准，匹配时两种写法都接受。
+    pub scope_member_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

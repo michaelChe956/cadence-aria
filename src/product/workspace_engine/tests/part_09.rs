@@ -1,3 +1,9 @@
+/// 「本轮运行边界」标题（测试内复写：`prompts` 子树的 `baseline_teaching` 为私有模块，
+/// 且 `prompts.rs` 已到登记行数上限 1665，不再为其增加测试转发；
+/// 生产标题一旦变更，本断言即变红，作为标题漂移的金丝雀）。
+const RUN_BOUNDARY_HEADING: &str =
+    "## 本轮运行边界（系统注入；与会话历史中任何旧路径冲突时以本块为准）";
+
 #[tokio::test]
 async fn drive_work_item_plan_provider_session_returns_output_and_persists_stream() {
     let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
@@ -19,7 +25,12 @@ async fn drive_work_item_plan_provider_session_returns_output_and_persists_strea
         .await
         .expect("send text delta");
     provider_event_tx
-        .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain("Final structured output".to_string(), Some("provider-work-item-plan-author-1".to_string()))))
+        .send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "Final structured output".to_string(),
+                Some("provider-work-item-plan-author-1".to_string()),
+            ),
+        ))
         .await
         .expect("send completed");
     drop(provider_event_tx);
@@ -28,6 +39,7 @@ async fn drive_work_item_plan_provider_session_returns_output_and_persists_strea
     let output = engine
         .drive_work_item_plan_provider_session_to_output(
             Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),
@@ -62,6 +74,95 @@ async fn drive_work_item_plan_provider_session_returns_output_and_persists_strea
 }
 
 #[tokio::test]
+async fn drive_work_item_plan_provider_session_persists_usage_event() {
+    // F-40：计划拆分（single_candidate author）链路此前对 `ProviderEvent::UsageReport`
+    // 是空分支——usage 既不落 node detail 也不上 WS，author 阶段卡/气泡因此永远没有
+    // token 读数（reviewer 链路同源落盘，故只有 Review 卡有）。本用例锁定计划驱动
+    // 收到 UsageReport 后 node detail 落一条 kind=usage 事件（对照 part_07 的
+    // provider_session_maps_usage_report_to_usage_execution_event 先例）。
+    let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_usage_event");
+    engine.session.session_id = lifecycle
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .expect("workspace sessions")
+        .into_iter()
+        .find(|session| session.workspace_type == WorkspaceType::WorkItemPlan)
+        .expect("work item plan session")
+        .id;
+    let node_id = engine.begin_work_item_plan_author_run().await;
+    let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+    let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
+    // 先落一段流式内容（与既有用例同款），使 node detail 的存在不依赖本修复——
+    // 本用例的红色判据是「usage 事件缺失」，不是「detail 不存在」。
+    provider_event_tx
+        .send(ProviderEvent::TextDelta {
+            content: "Plan draft\n".to_string(),
+        })
+        .await
+        .expect("send text delta");
+    provider_event_tx
+        .send(ProviderEvent::UsageReport(
+            crate::cross_cutting::streaming_provider::UsageReportData {
+                role: "author".to_string(),
+                input_tokens: Some(339),
+                output_tokens: Some(9_774),
+                cache_read_tokens: Some(58_368),
+                cache_creation_tokens: None,
+            },
+        ))
+        .await
+        .expect("send usage report");
+    provider_event_tx
+        .send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "Final structured output".to_string(),
+                None,
+            ),
+        ))
+        .await
+        .expect("send completed");
+    drop(provider_event_tx);
+    let mut command_rx = empty_provider_commands();
+
+    engine
+        .drive_work_item_plan_provider_session_to_output(
+            Ok(ProviderSession {
+                native_session_id: None,
+                events: provider_event_rx,
+                commands: provider_command_tx,
+            }),
+            &mut command_rx,
+            node_id.clone(),
+            ProviderName::ClaudeCode,
+        )
+        .await
+        .expect("collector output");
+
+    let detail = lifecycle
+        .load_node_detail(engine.session().session_id.as_str(), &node_id)
+        .expect("node detail");
+    let persisted = detail
+        .execution_events
+        .iter()
+        .filter(|event| event["event_id"] == "usage_author")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted.len(),
+        1,
+        "UsageReport should persist exactly one usage event on the plan author node"
+    );
+    assert_eq!(persisted[0]["kind"], "usage");
+    assert_eq!(persisted[0]["title"], "author token usage");
+    let output: serde_json::Value =
+        serde_json::from_str(persisted[0]["output"].as_str().expect("usage output json"))
+            .expect("usage output parses");
+    assert_eq!(output["role"], "author");
+    assert_eq!(output["input_tokens"], 339);
+    assert_eq!(output["output_tokens"], 9_774);
+    assert_eq!(output["cache_read_tokens"], 58_368);
+}
+
+#[tokio::test]
 async fn drive_work_item_plan_provider_session_hides_structured_output_from_stream() {
     let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_stream_filter");
@@ -89,7 +190,12 @@ async fn drive_work_item_plan_provider_session_hides_structured_output_from_stre
         .await
         .expect("send structured delta");
     provider_event_tx
-        .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.clone(), None)))
+        .send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                full_output.clone(),
+                None,
+            ),
+        ))
         .await
         .expect("send completed");
     drop(provider_event_tx);
@@ -98,6 +204,7 @@ async fn drive_work_item_plan_provider_session_hides_structured_output_from_stre
     let output = engine
         .drive_work_item_plan_provider_session_to_output(
             Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),
@@ -126,16 +233,28 @@ fn build_work_item_plan_streaming_input_uses_splitter_role() {
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_splitter_input");
 
-    let input = engine.build_work_item_plan_streaming_input(
-        ProviderType::Fake,
-        "split prompt".to_string(),
-        "/tmp/worktree".to_string(),
-        ProviderName::Fake,
-    );
+    let input = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::Fake,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::Fake,
+            PlanAuthorOutputContract::Structured,
+        )
+        .expect("plan input");
 
     assert_eq!(input.provider_type, ProviderType::Fake);
     assert_eq!(input.role, AdapterRole::WorkItemSplitter);
-    assert_eq!(input.prompt, "split prompt");
+    // REQ-PRB-01/03：作者侧漏斗（含 work_item_plan 计划 provider 路径）无条件注入
+    // 「本轮运行边界」块，故原「逐字等值」断言改为前缀式（保留「该路径照用传入
+    // stub prompt」的原意）并追加块恰好一次。
+    assert!(input.prompt.starts_with("split prompt"), "{}", input.prompt);
+    assert_eq!(
+        input.prompt.matches(RUN_BOUNDARY_HEADING).count(),
+        1,
+        "{}",
+        input.prompt
+    );
     assert_eq!(input.working_dir, PathBuf::from("/tmp/worktree"));
     assert_eq!(
         input.workspace_session_id.as_deref(),
@@ -158,17 +277,65 @@ fn build_work_item_plan_streaming_input_reuses_author_provider_session() {
         last_node_id: Some("node-1".to_string()),
     }];
 
-    let input = engine.build_work_item_plan_streaming_input(
-        ProviderType::ClaudeCode,
-        "split prompt".to_string(),
-        "/tmp/worktree".to_string(),
-        ProviderName::ClaudeCode,
-    );
+    let input = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::ClaudeCode,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::Structured,
+        )
+        .expect("plan input");
 
     assert_eq!(
         input.resume_provider_session_id,
         Some("author-session-1".to_string()),
         "should reuse persisted author provider session id"
+    );
+}
+
+#[test]
+fn build_work_item_plan_streaming_input_fresh_never_resumes_old_author_session() {
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_fresh_author");
+    // 模拟旧 Author provider 会话（SameContext 正常 resume 会复用，rebuild 必须忽略）。
+    engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "author-session-1".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        last_node_id: Some("node-1".to_string()),
+    }];
+
+    // legacy 正常 resume：仍携带旧会话 id（行为不变）。
+    let resumed = engine
+        .build_work_item_plan_streaming_input(
+            ProviderType::ClaudeCode,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::Structured,
+        )
+        .expect("plan input");
+    assert_eq!(
+        resumed.resume_provider_session_id,
+        Some("author-session-1".to_string()),
+        "legacy resume must keep carrying the author provider session id"
+    );
+
+    // StaleContext rebuild：provider 全新启动，不携带任何 resume id（不 --resume 旧会话）。
+    let fresh = engine
+        .build_work_item_plan_streaming_input_fresh(
+            ProviderType::ClaudeCode,
+            "split prompt".to_string(),
+            "/tmp/worktree".to_string(),
+            ProviderName::ClaudeCode,
+            PlanAuthorOutputContract::Structured,
+        )
+        .expect("plan input");
+    assert_eq!(
+        fresh.resume_provider_session_id, None,
+        "rebuild run must not resume the old author provider session"
     );
 }
 
@@ -182,11 +349,17 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
         summary: "需要细化 outline".to_string(),
         findings: vec![ReviewFinding {
             severity: ReviewFindingSeverity::MustFix,
-            message: "backend outline 缺少 exclusive_write_scope".to_string(),
+            message: "backend outline 缺少 exclusive_write_scope\n影响：会导致 draft 阶段写入冲突"
+                .to_string(),
             evidence: "outline 中 backend 项 exclusive_write_scopes 为空".to_string(),
-            impact: "会导致 draft 阶段写入冲突".to_string(),
             required_action: "为 backend outline 补充 exclusive_write_scope".to_string(),
-        }],
+            category: None,
+            class_hint: None,
+            contract_field: None,
+            machine_repair: None,
+            owner_question: None,
+            owner_options: None,
+        disposition: None, target_work_item_id: None, finding_key: None, }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
         structured_output_diagnostic: None,
@@ -226,12 +399,17 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
         comments: "仅建议补充说明".to_string(),
         summary: "optional-only".to_string(),
         findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Optional,
-            message: "可补充 handoff 说明".to_string(),
+            severity: ReviewFindingSeverity::Suggestion,
+            message: "可补充 handoff 说明\n影响：不影响执行".to_string(),
             evidence: "现有说明较短".to_string(),
-            impact: "不影响执行".to_string(),
             required_action: "可后续补充".to_string(),
-        }],
+            category: None,
+            class_hint: None,
+            contract_field: None,
+            machine_repair: None,
+            owner_question: None,
+            owner_options: None,
+        disposition: None, target_work_item_id: None, finding_key: None, }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
         structured_output_diagnostic: None,
@@ -242,6 +420,74 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
         .expect("optional feedback");
 
     assert!(!feedback.contains("[impact_closure_contract]"));
+}
+
+/// REQ-WSC-14（作者返修输入面）：owner 已处置、被平台强制降级为 advisory 的
+/// finding MUST NOT 以「必须处理」的形态进入 outline 返修反馈；impact closure
+/// 契约也不得由它触发。
+#[test]
+fn work_item_plan_outline_revision_feedback_omits_owner_downgraded_findings() {
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_feedback_excluded");
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "本轮只修可收敛项".to_string(),
+        summary: "范围外事实已被 owner 排除".to_string(),
+        findings: vec![
+            ReviewFinding {
+                severity: ReviewFindingSeverity::MustFix,
+                message: "本 Work Item 验收标准缺口".to_string(),
+                evidence: "CT-001 acceptance".to_string(),
+                required_action: "补齐验收标准".to_string(),
+                category: None,
+                class_hint: None,
+                contract_field: None,
+                machine_repair: None,
+                owner_question: None,
+                owner_options: None,
+                disposition: None,
+                target_work_item_id: None,
+                finding_key: None,
+            },
+            ReviewFinding {
+                severity: ReviewFindingSeverity::MustFix,
+                message: "中文 locale 尚未配置".to_string(),
+                evidence: "docs/frontend-spec.md".to_string(),
+                required_action: "回写产品侧文档".to_string(),
+                category: None,
+                class_hint: None,
+                contract_field: None,
+                machine_repair: None,
+                owner_question: None,
+                owner_options: None,
+                disposition: Some(
+                    crate::web::workspace_ws_types::review::ReviewFindingDisposition::Advisory,
+                ),
+                target_work_item_id: None,
+                finding_key: None,
+            },
+        ],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    });
+
+    let feedback = engine
+        .work_item_plan_outline_revision_feedback(None)
+        .expect("revision feedback");
+
+    assert!(
+        feedback.contains("本 Work Item 验收标准缺口"),
+        "actionable finding 必须保留: {feedback}"
+    );
+    assert!(
+        !feedback.contains("中文 locale 尚未配置"),
+        "降级后的 finding message 不得进入 outline 返修反馈: {feedback}"
+    );
+    assert!(
+        !feedback.contains("回写产品侧文档"),
+        "降级后的 finding required_action 不得进入 outline 返修反馈: {feedback}"
+    );
 }
 
 #[test]
@@ -256,7 +502,7 @@ fn work_item_plan_outline_revision_feedback_uses_failed_diagnostic_without_raw_p
         review_gate: ReviewGate::UserTriageRequired,
         work_item_plan_review: None,
         structured_output_diagnostic: Some(StructuredOutputDiagnostic {
-            code: "missing_end_nonce".to_string(),
+            code: "missing_json_nonce".to_string(),
             message: "missing structured output end nonce".to_string(),
             repair_attempted: true,
             repair_succeeded: false,
@@ -324,6 +570,25 @@ fn work_item_plan_outline_revision_feedback_returns_none_when_empty() {
     );
 }
 
+#[test]
+fn work_item_plan_fixture_session_ids_are_process_unique() {
+    // failpoint 家族键隔离前提（3.6 F7-D 项 2）：所有复用本 fixture 的测试
+    // 共享固定 project/issue/plan id，session id 必须进程内唯一，否则
+    // 单候选 compile failpoint 的 durable scope 键
+    // (session, project, issue, plan, checkpoint) 会跨测试撞车——持
+    // 全局锁的 failpoint 测试与不持锁的 compile 测试并发时互相误伤
+    // （3.5 台账 compile-failpoint 并行负载偶发根因）。锁死该前提：
+    // 同一进程内两次构建 fixture，session id 必不相同。
+    let (_tmp_a, _checkpoint_a, _lifecycle_a, _plan_a, engine_a) =
+        make_work_item_plan_engine_with_draft_candidate("sess_a");
+    let (_tmp_b, _checkpoint_b, _lifecycle_b, _plan_b, engine_b) =
+        make_work_item_plan_engine_with_draft_candidate("sess_b");
+    assert_ne!(
+        engine_a.session.session_id, engine_b.session.session_id,
+        "fixture session ids must be process-unique (failpoint key isolation)"
+    );
+}
+
 fn make_work_item_plan_engine_with_draft_candidate(
     _session_id: &str,
 ) -> (
@@ -336,12 +601,22 @@ fn make_work_item_plan_engine_with_draft_candidate(
     let tmp = TempDir::new().unwrap();
     let checkpoint_store = Arc::new(CheckpointStore::new(tmp.path().to_path_buf()));
     let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "workspace engine fixture project".to_string(),
+            description: None,
+        })
+        .unwrap();
     let lifecycle = LifecycleStore::new(app_paths);
 
     let project_id = "project_0001";
     let issue_id = "issue_0001";
     let repository_path = tmp.path().join("repository");
     std::fs::create_dir(&repository_path).unwrap();
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git 仓库
+    // 会令基线解析 fail-closed——author 上下文/门内修订/运行期预校验三面共用）。
+    init_fixture_git_repo(&repository_path);
+
     let repository = crate::product::repository_store::RepositoryStore::new(lifecycle.app_paths())
         .create(crate::product::repository_store::CreateRepositoryInput {
             project_id: project_id.to_string(),
@@ -349,6 +624,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             path: repository_path,
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-engine-fixture-repository".to_string(),
         })
         .unwrap();
     let repository_id = repository.id.clone();
@@ -362,6 +638,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             id: issue_id.to_string(),
             project_id: project_id.to_string(),
             repo_id: Some(repository.id),
+            logical_codebase_id: None,
             title: "Workspace Engine Fixture Issue".to_string(),
             description: Some("RuntimeBinding Final Compile fixture".to_string()),
             change_id: "workspace_engine_fixture".to_string(),
@@ -370,6 +647,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             active_binding_id: None,
             created_at: now.clone(),
             updated_at: now,
+            base_branch: None,
         },
     )
     .unwrap();
@@ -380,6 +658,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
             title: "Story".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle
@@ -388,6 +667,7 @@ fn make_work_item_plan_engine_with_draft_candidate(
             issue_id: issue_id.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
 
@@ -564,23 +844,50 @@ fn make_work_item_plan_engine_with_draft_candidate(
                     code: "W001".to_string(),
                     message: "scope overlap risk".to_string(),
                     work_item_ids: vec![work_item_1.id.clone()],
+                    // F1.2：fixture 沿旧 record 形态（kind=None）。
+                    kind: None,
                 }],
             },
         )
         .unwrap();
 
+    // failpoint 键隔离纪律（3.6 F7-D 项 2，与 campaign_stage3_amendment 的
+    // 「session id 进程内唯一化」同源）：本 fixture 的 project/issue/plan id
+    // 全部固定，session id 若也相同（旧实现基于各测试独立 TempDir 计数，
+    // 每个都是 workspace_session_0001），单候选 compile failpoint 的
+    // durable scope 键会跨测试撞车。进程级原子计数保证唯一，且
+    // `workspace_session_{seq:06}` 形态与 next_workspace_session_id 的
+    // 序号扫描兼容（同 store 后续自动分配从 max+1 继续，不冲突）。
+    static FIXTURE_SESSION_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    let session_sequence =
+        FIXTURE_SESSION_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let session_record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: project_id.to_string(),
-            issue_id: issue_id.to_string(),
-            entity_id: plan.id.clone(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session_with_id(
+            CreateWorkspaceSessionInput {
+                project_id: project_id.to_string(),
+                issue_id: issue_id.to_string(),
+                entity_id: plan.id.clone(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
+
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                // L2 退役（T5）：staged 夹具显式钉 Legacy flow（历史在途会话形态——
+                // options 缺省值已随单路径收敛翻为 SingleCandidate）。
+                work_item_plan_options: Some(
+                    crate::product::lifecycle_store::WorkItemPlanSessionOptions {
+                        flow_kind:
+                            crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+                        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+                        rollout_snapshot: false,
+                    },
+                ),
+            },
+            format!("workspace_session_{session_sequence:06}"),
+        )
         .unwrap();
 
     let session = WorkspaceSession::from_record(session_record);
@@ -595,4 +902,232 @@ fn make_work_item_plan_engine_with_draft_candidate(
     engine.session.reviewer_provider = Some(ProviderName::Codex);
 
     (tmp, checkpoint_store, lifecycle, plan.id, engine)
+}
+
+/// REQ-PIB-02 测试夹具 git 仓库：`main` 分支+初始空提交（与 it_core/it_web
+/// 夹具同构）。裸 init 无分支或无提交会令 `resolve_effective_base_branch`
+/// 走默认链 `git show-ref refs/heads/main` 得 128 → fail-closed。
+pub(crate) fn init_fixture_git_repo(repo: &std::path::Path) {
+    for args in [
+        vec!["init", "--initial-branch", "main"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(repo)
+            .status()
+            .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+}
+
+#[tokio::test]
+async fn drive_work_item_plan_provider_session_idle_watchdog_aborts_silent_provider() {
+    // r29 问题2 根修锚点(r28 现场):SC 门修订 turn 的 provider 流式 1min 后
+    // 静默挂死——本驱动循环此前缺 F-19 零活动看门狗(主驱动
+    // drive_provider_session 有 600s),挂死 provider 永不收口,harness 侧
+    // 90min 空等。修:同构补看门狗(test cfg 150ms)——静默超限即 Abort+
+    // cancel+失败节点+Error 事件+finish_failed_run,有界返回 Err。
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_idle_watchdog");
+    engine.session.session_id = _lifecycle
+        .list_workspace_sessions("project_0001", "issue_0001")
+        .expect("workspace sessions")
+        .into_iter()
+        .find(|session| session.workspace_type == WorkspaceType::WorkItemPlan)
+        .expect("work item plan session")
+        .id;
+    let node_id = engine.begin_work_item_plan_author_run().await;
+    let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
+    let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
+    // 一段真实流式后永久静默(事件通道保持打开=provider 未退出也未产出)。
+    provider_event_tx
+        .send(ProviderEvent::TextDelta {
+            content: "partial draft then silence\n".to_string(),
+        })
+        .await
+        .expect("send text delta");
+    let mut command_rx = empty_provider_commands();
+
+    let drive = engine.drive_work_item_plan_provider_session_to_output(
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: provider_event_rx,
+            commands: provider_command_tx,
+        }),
+        &mut command_rx,
+        node_id.clone(),
+        ProviderName::ClaudeCode,
+    );
+    // 有界观测:修前裸 await 永挂(此处 5s 上界即 RED);修后看门狗
+    // (test 150ms)触发,秒级返回带稳定原因码的 Err。
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), drive).await;
+    let result = outcome.expect("看门狗必须在有界时间内收口(修前=永挂 90min)");
+    assert!(result.is_err(), "静默 provider 必须按失败收口,不得返回输出");
+    let message = result.expect_err("watchdog failure");
+    assert!(
+        message.contains("provider_idle_watchdog"),
+        "失败原因必须携带稳定原因码 provider_idle_watchdog,got: {message}"
+    );
+}
+
+/// B2b1(Task 5.2,anchor_t14,设计 §4.2.4/§5.4):old map missing → waiting——
+/// fullmap 纪元激活(同 provider/role 存在 map 记录)后,conversation-only
+/// native(不在任何 Active map 绑定)不得 resume 也不得出生 fresh,typed
+/// FrozenBindingUnavailable 上浮、零 provider start;绑定一致 native 正常
+/// 续接(纪元不误伤);无 gateway 的 direct 形态(纪元之前)维持既有恢复
+/// 行为(plan None 分支原样)。
+#[test]
+fn anchor_t14_plan_resume_without_trusted_map_waits_not_fresh() {
+    use crate::product::models::{
+        LogicalLaunchBasis, LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState,
+        ProviderConversationRef, ProviderConversationRole,
+    };
+
+    let (_tmp, _checkpoint, lifecycle, _plan_id, engine_plain) =
+        make_work_item_plan_engine_with_draft_candidate("sess_t14_epoch");
+    let worktree = _tmp.path().join("repository").to_string_lossy().to_string();
+
+    // direct 对照(纪元之前):无 gateway,conversation-only native 原样续接。
+    let plain_engine = engine_plain;
+    let session_id = plain_engine.session.session_id.clone();
+    seed_t14_epoch_record(
+        &lifecycle,
+        &session_id,
+        "native-conv-only",
+        Some("native-map-bound"),
+    );
+    let resumed = plain_engine
+        .build_work_item_plan_streaming_input(
+            crate::protocol::contracts::ProviderType::ClaudeCode,
+            "anchor t14 prompt".to_string(),
+            worktree.clone(),
+            ProviderName::ClaudeCode,
+            crate::product::workspace_engine::PlanAuthorOutputContract::Structured,
+        )
+        .expect("纪元之前(direct)conversation-only resume 维持既有行为");
+    assert_eq!(
+        resumed.resume_provider_session_id.as_deref(),
+        Some("native-conv-only")
+    );
+
+    // 纪元激活:gateway 在场 + 同 (role,provider) 存在 map 记录,conversation
+    // native 未命中 Active 绑定 → typed 等待,零 fresh 出生。
+    let engine = plain_engine.with_logical_provider_gateway(t14_epoch_gateway(
+        &lifecycle,
+        _tmp.path().join("t14-authority-root"),
+    ));
+    let error = engine
+        .build_work_item_plan_streaming_input(
+            crate::protocol::contracts::ProviderType::ClaudeCode,
+            "anchor t14 prompt".to_string(),
+            worktree.clone(),
+            ProviderName::ClaudeCode,
+            crate::product::workspace_engine::PlanAuthorOutputContract::Structured,
+        )
+        .expect_err("unbound conversation native must wait, not resume or rebirth");
+    assert!(
+        error.contains("native_resume_candidate_frozen_binding_unavailable"),
+        "typed FrozenBindingUnavailable 必须上浮,got: {error}"
+    );
+
+    // 绑定一致对照:conversation native == Active map 绑定 → 正常续接。
+    seed_t14_epoch_record(
+        &lifecycle,
+        &session_id,
+        "native-map-bound",
+        Some("native-map-bound"),
+    );
+    let resumed = engine
+        .build_work_item_plan_streaming_input(
+            crate::protocol::contracts::ProviderType::ClaudeCode,
+            "anchor t14 prompt".to_string(),
+            worktree,
+            ProviderName::ClaudeCode,
+            crate::product::workspace_engine::PlanAuthorOutputContract::Structured,
+        )
+        .expect("map-bound native resumes");
+    assert_eq!(
+        resumed.resume_provider_session_id.as_deref(),
+        Some("native-map-bound")
+    );
+
+    fn seed_t14_epoch_record(
+        lifecycle: &LifecycleStore,
+        session_id: &str,
+        conversation_native: &str,
+        map_native: Option<&str>,
+    ) {
+        let mut record = lifecycle
+            .get_workspace_session(session_id)
+            .expect("session record");
+        record.provider_conversations = vec![ProviderConversationRef {
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            provider_session_id: conversation_native.to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_node_id: Some("timeline_node_prev".to_string()),
+        }];
+        record.logical_launch_fingerprints = vec![LogicalLaunchFingerprintRecord {
+            schema_version: 1,
+            basis: LogicalLaunchBasis::FullLcProjectionV2,
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            role_run_seq: 7,
+            node_id: "timeline_node_007".to_string(),
+            native_session_id: map_native.map(str::to_string),
+            fingerprint_digest: "sha256:t14-epoch".to_string(),
+            planning_access_fingerprint: "sha256:t14-epoch".to_string(),
+            state: LogicalLaunchFingerprintState::Active,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }];
+        crate::product::json_store::write_json(
+            &lifecycle
+                .workspace_sessions_root("project_0001", "issue_0001")
+                .join(format!("{session_id}.json")),
+            &record,
+        )
+        .expect("seed epoch record");
+    }
+
+    fn t14_epoch_gateway(
+        lifecycle: &LifecycleStore,
+        worktree: std::path::PathBuf,
+    ) -> std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway> {
+        std::fs::create_dir_all(&worktree).expect("authority root dir");
+        let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+            "project_0001",
+            worktree.clone(),
+            Vec::new(),
+        );
+        let policy_store = crate::product::logical_codebase::AggregatePolicyArtifactStore::new(
+            lifecycle.app_paths(),
+        );
+        policy_store
+            .ensure_bootstrap(&manifest)
+            .expect("bootstrap aggregate policy");
+        let mut registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
+        registry.register(
+            ProviderName::ClaudeCode,
+            std::sync::Arc::new(ReviewVerdictStreamingProvider {
+                output: "t14",
+                provider_type: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                prompt: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            }),
+        );
+        std::sync::Arc::new(
+            crate::product::logical_codebase::LogicalCodebaseProviderGateway::new(
+                policy_store,
+                std::sync::Arc::new(ReviewStaticCapabilitySource::default()),
+                std::sync::Arc::new(ReviewPassThroughTargetResolver),
+                std::sync::Arc::new(registry),
+                std::sync::Arc::new(ReviewStubSyncAdapter),
+                review_always_available_gate(),
+                worktree,
+            ),
+        )
+    }
 }

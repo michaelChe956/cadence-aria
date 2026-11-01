@@ -1,7 +1,7 @@
 use super::*;
 use crate::product::coding_models::CodingUnitRun;
 use crate::product::coding_workspace_engine::group_review_types::RoutingAuthorityEntry;
-use crate::product::models::{PlanDefectRoute, RepairTargetKind};
+use crate::product::models::{PlanDefectClass, PlanDefectRoute, RepairTargetKind};
 use crate::product::plan_repair::{
     PlanDefectConfidence, PlanDefectFinding, PlanDefectSeverity, PlanRepairError,
     normalize_blocker_route,
@@ -380,7 +380,86 @@ pub(crate) fn execution_plan_defect_flow_decision(
         .iter()
         .map(|finding| execution_finding_adapter(&report.source, finding))
         .collect::<Vec<_>>();
-    review_findings_flow_decision(&findings, &ReviewVerdict::Blocked, reviewer_projection)
+    // P2-b（REQ-COD-08）coder 路径校验放宽：operational_blocker+operational_gate
+    // 的 finding 不要求 reviewer projection blocker rule——plan 生成时未声明
+    // blocker_rules 的运行环境类阻塞仍可判 OpenOperationalGate 落
+    // coding_operational_blocker 门，而非全部落人工分诊（单仓投影恒空，
+    // 同受益）。
+    review_findings_flow_decision_with_validator(&findings, &ReviewVerdict::Blocked, |finding| {
+        validate_coder_finding_for_routing(finding, reviewer_projection)
+    })
+}
+
+/// coder 路由校验分流：`operational_blocker`+`operational_gate` 走 canonical
+/// 级别放宽校验；其余 defect_class 保持原严格校验（plan repair/amendment 类
+/// 会触发改写计划的重动作，必须有 plan 契约背书）。
+fn validate_coder_finding_for_routing(
+    finding: &ReviewFinding,
+    reviewer_projection: &ReviewerWorkItemProjection,
+) -> Result<(), PlanRepairError> {
+    if finding.defect_class == PlanDefectClass::OperationalBlocker
+        && finding.recommended_route == PlanDefectRoute::OperationalGate
+    {
+        return validate_operational_gate_finding_canonical(finding);
+    }
+    validate_plan_defect_finding(finding, reviewer_projection)
+}
+
+/// canonical 级别校验：与 `validate_plan_defect_finding` 的结构校验同构
+/// （reason_code／confidence／refs／evidence／severity＋
+/// `PlanDefectFinding::validate` 的合法矩阵），但不做 projection blocker
+/// rule 匹配。
+fn validate_operational_gate_finding_canonical(
+    finding: &ReviewFinding,
+) -> Result<(), PlanRepairError> {
+    let reason_code = finding
+        .reason_code
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            PlanRepairError::InvalidFinding("plan defect reason code is missing".to_string())
+        })?;
+    if !matches!(
+        finding.confidence,
+        Some(PlanDefectConfidence::Medium | PlanDefectConfidence::High)
+    ) || finding
+        .contract_refs
+        .iter()
+        .chain(finding.capability_refs.iter())
+        .chain(finding.evidence.iter())
+        .any(|value| value.trim().is_empty())
+        || finding.plan_defect_evidence.iter().any(|evidence| {
+            evidence.kind.trim().is_empty()
+                || evidence.source_ref.trim().is_empty()
+                || evidence.message.trim().is_empty()
+        })
+    {
+        return Err(PlanRepairError::InvalidFinding(
+            "plan defect confidence or references are invalid".to_string(),
+        ));
+    }
+    let canonical = PlanDefectFinding {
+        finding_id: "coder_operational_gate_validation".to_string(),
+        severity: match finding.severity {
+            FindingSeverity::Error => PlanDefectSeverity::Error,
+            FindingSeverity::Warning => PlanDefectSeverity::Warning,
+            FindingSeverity::Info => {
+                return Err(PlanRepairError::InvalidFinding(
+                    "plan defect severity cannot be info".to_string(),
+                ));
+            }
+        },
+        defect_class: finding.defect_class.clone(),
+        reason_code: reason_code.to_string(),
+        message: finding.message.clone(),
+        evidence: finding.plan_defect_evidence.clone(),
+        contract_refs: finding.contract_refs.clone(),
+        capability_refs: finding.capability_refs.clone(),
+        repair_target: finding.repair_target.clone(),
+        recommended_route: finding.recommended_route.clone(),
+        confidence: finding.confidence.clone().expect("validated confidence"),
+    };
+    canonical.validate()
 }
 
 impl CodeReviewFlowDecision {

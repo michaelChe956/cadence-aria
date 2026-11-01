@@ -151,8 +151,8 @@ if [ "${2:-}" != "" ]; then
   exit 7
 fi
 cat >/dev/null
-echo "<ARIA_STRUCTURED_OUTPUT>"
-echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
 echo "</ARIA_STRUCTURED_OUTPUT>"
 "#,
     );
@@ -199,8 +199,8 @@ case "${1:-run}" in
       echo "provider log line $i with enough bytes to fill stdout pipe before process exit"
       i=$((i + 1))
     done
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -245,8 +245,8 @@ case "${1:-run}" in
     ;;
   run)
     cat >/dev/null
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     sleep 30
     exit 0
@@ -300,8 +300,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout before structured output"
     echo "stderr before structured output" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -357,8 +357,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout without log dir"
     echo "stderr without log dir" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -407,8 +407,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout marker line"
     echo "stderr marker line" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -485,8 +485,8 @@ case "${1:-run}" in
     cat >/dev/null
     echo "stdout chunk for browser"
     echo "stderr chunk for browser" >&2
-    echo "<ARIA_STRUCTURED_OUTPUT>"
-    echo '{"artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
+    echo "<ARIA_STRUCTURED_OUTPUT nonce=\"fix00001\">"
+    echo '{"nonce":"fix00001","artifact_kind":"clarification_record","goal_summary":"fixture goal","constraints":[],"open_questions":[],"assumptions":[],"suggested_scope":"fixture scope"}'
     echo "</ARIA_STRUCTURED_OUTPUT>"
     exit 0
     ;;
@@ -543,6 +543,78 @@ fn missing_provider_command_is_diagnostic_not_a_panic() {
     assert!(error.details.contains("missing-provider-command"));
 }
 
+/// 批2 T3→T11 集成轮(b45 现场):裸名 CLI 命令在显式空环境
+/// (env_clear + 空 env map)下必须保持 ProviderCommandMissing 失败形态
+/// ——不静默回退宿主 PATH(T10 删隐式继承回退)。
+#[test]
+fn cli_adapter_bare_name_command_without_env_is_command_missing() {
+    let _guard = cli_adapter_test_guard();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let command = support::write_executable_script(
+        tempdir.path(),
+        "fixture-provider",
+        support::successful_provider_script(),
+    );
+    let mut compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
+    compatibility.run_command =
+        cadence_aria::cross_cutting::adapter_compatibility::CommandSpec::new(
+            "fixture-provider".to_string(),
+            vec!["run".to_string()],
+        );
+    let worktree = tempfile::tempdir().expect("worktree");
+    let adapter = CliProviderAdapter::new(CliAdapterConfig {
+        compatibility,
+        expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
+    });
+
+    let error = adapter
+        .run(&adapter_input(worktree.path()))
+        .expect_err("bare-name command without env PATH must fail");
+
+    assert_eq!(error.code.as_str(), "provider_command_missing");
+}
+
+/// 批2 T3→T11 集成轮:裸名 CLI 靠 `AdapterInput::env_vars` 传输的冻结
+/// 白名单 PATH 解析(env_clear + 仅注入该表)——b45 现场恢复形态。
+#[test]
+fn cli_adapter_bare_name_command_resolves_via_frozen_env_path() {
+    let _guard = cli_adapter_test_guard();
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let command = support::write_executable_script(
+        tempdir.path(),
+        "fixture-provider",
+        support::successful_provider_script(),
+    );
+    let mut compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
+    compatibility.run_command =
+        cadence_aria::cross_cutting::adapter_compatibility::CommandSpec::new(
+            "fixture-provider".to_string(),
+            vec!["run".to_string()],
+        );
+    let worktree = tempfile::tempdir().expect("worktree");
+    let adapter = CliProviderAdapter::new(CliAdapterConfig {
+        compatibility,
+        expected_artifact_kind: Some("clarification_record".to_string()),
+        output_sink: None,
+    });
+    let mut input = adapter_input(worktree.path());
+    input.env_vars.insert(
+        "PATH".to_string(),
+        format!(
+            "{}:{}",
+            tempdir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+
+    let output = adapter
+        .run(&input)
+        .expect("bare-name command must resolve via the frozen env PATH");
+
+    assert_eq!(output.exit_code, Some(0));
+}
+
 /// 无 coding attempt 上下文的执行路径不得提供流日志目录，从而按 adapter 的缺省
 /// 行为不写流日志。`build_provider_context` 服务全部 runtime unit，取其作为代表：
 /// 它是这些路径构造 `AdapterInput` 的唯一入口。
@@ -573,6 +645,7 @@ fn runtime_unit_adapter_input_carries_no_provider_stream_log_dir() {
         constraint_summary: "constraint summary for test".to_string(),
         context_files: vec!["tests/fixtures/artifacts/spec.md".to_string()],
         worktree_path: Some(worktree.path().to_string_lossy().to_string()),
+        routing_reference_context: Default::default(),
     })
     .expect("context package");
 
@@ -588,6 +661,8 @@ fn runtime_unit_adapter_input_carries_no_provider_stream_log_dir() {
 
 fn adapter_input(worktree_path: &std::path::Path) -> AdapterInput {
     AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         worktree_path: Some(worktree_path.to_string_lossy().to_string()),
@@ -605,6 +680,8 @@ fn adapter_input_with_stream_log_dir(
     stream_log_dir: &std::path::Path,
 ) -> AdapterInput {
     AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
         provider_stream_log_dir: Some(stream_log_dir.to_string_lossy().to_string()),
         ..adapter_input(worktree_path)
     }

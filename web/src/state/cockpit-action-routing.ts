@@ -1,0 +1,593 @@
+import { newCommandId } from "../hooks/useWorkspaceWs";
+import type {
+  WorkItemPlanCompileRecoveryAction,
+  WorkspaceHumanAction,
+  WorkspaceProviderName,
+} from "../api/types";
+import type {
+  RevokeFindingExclusionsAction,
+  RevokeFindingExclusionsOutcome,
+} from "./workspace-finding-exclusions";
+import {
+  gateActionBlockReason,
+  gateKindOf,
+  gateTerminateBlockReason,
+} from "./workspace-cockpit-projection";
+import type { WorkspaceWsState } from "./workspace-ws-store-types";
+
+/**
+ * C1 Task 9（enrollment-recovery-surface）＋C2 Task 12（REQ-CRO-06）：
+ * 驾驶舱等待项恢复动作——只按 durable 等待项投影的 actions 名触发对应
+ * REST（页面接线发送器），前端不判定业务成功；失败/needs_human 由服务端
+ * state 承载后刷新投影。C2 新增 restart_coding（Task 3 restart REST）与
+ * gate_response（Task 12 gate-responses REST，与 WS 同一应用服务）。
+ */
+export type C1RecoveryActionPayload =
+  | { kind: "recover_candidate"; projectId: string; issueId: string; sessionId: string; gateId: string; commandId: string }
+  | {
+      kind: "retry_initialization";
+      projectId: string;
+      issueId: string;
+      planId: string;
+      commandId: string;
+      attemptId: string;
+      checkpoint: string;
+      confirmUnknownSideEffect: boolean;
+    }
+  | {
+      kind: "restart_coding";
+      projectId: string;
+      issueId: string;
+      attemptId: string;
+      commandId: string;
+      expectedVersion: number;
+    }
+  | {
+      kind: "gate_response";
+      projectId: string;
+      issueId: string;
+      attemptId: string;
+      gateId: string;
+      actionId: string;
+      commandId: string;
+      expectedVersion: number;
+    }
+  | {
+      kind: "confirm_takeover";
+      projectId: string;
+      issueId: string;
+      commandId: string;
+      leaseId: string;
+      attemptId: string;
+    }
+  | { kind: "rebind"; projectId: string; issueId: string }
+  | {
+      // C5 Task 6：project 级 repository 初始化失败“网关恢复后继续”——
+      // 不要求 issueId（project 等待项无 issue 归属），按 operation_id 出站。
+      kind: "resume_repository_initialization";
+      projectId: string;
+      operationId: string;
+      commandId: string;
+    };
+
+/**
+ * C4 Task 9（LC 冷启动加固）：驾驶舱 bootstrap 动作——准备/继续/重试/核验
+ * 统一走 Task 6 的 bootstrap action REST（稳定 command_id 由卡片按 notice
+ * key 派生并复用；expected revision/object 来自 durable 投影）。repair 的
+ * mapping 裁决表单在生命周期工作台，驾驶舱只触发 bootstrap 面。
+ */
+export type LcBootstrapActionPayload = {
+  kind: "lc_bootstrap";
+  projectId: string;
+  logicalCodebaseId: string;
+  step: string;
+  action: string;
+  commandId: string;
+  expectedRevision: number | null;
+  expectedObjectId: string;
+};
+
+export type C1RecoveryActionKind = C1RecoveryActionPayload["kind"];
+
+export type CockpitActionFacade = {
+  confirm(): boolean | void;
+  /**
+   * F-31（v37 复验 #2）：story/design author 门「确认并评审」——复用 confirm
+   * 通道携带 with_review=true（HTTP confirm 端点），与主区门卡语义一致。
+   */
+  confirmReview(): boolean | void;
+  /**
+   * REQ-WSC-13（owner 2026-10-30 裁定，取舍 2=A）：`excludedFindingIds` 非空
+   * 时把「排除此项」一并提交（反馈与排除可同时发生；仅排除时 feedback 为空
+   * 串）。空串且无排除项＝拒发（旧行为不变）。
+   */
+  feedback(
+    feedback: string,
+    options?: { excludedFindingIds?: string[] },
+  ): boolean | void;
+  terminate(): boolean | void;
+  advance(): boolean | void;
+  /**
+   * v40 复验 #3：author 门「采纳 Review 意见」——把最新 review 报告预填为修订
+   * 反馈并切回对话视图（纯客户端动作，无 WS/HTTP 帧），与主区/产物审核面板
+   * 按钮同款行为；待处理抽屉由此补齐第四动作。
+   */
+  adoptReview(): void;
+  /**
+   * REQ-PCG-01（plan-compile-gate-visibility）：整组 Work Item Draft 确认——HTTP
+   * confirm 端点（与 story/design author 门同通路，SC AuthorConfirm 阶段矩阵不放行
+   * WS confirm 帧）。仅对 kind=batch_confirm 且未阻断的门生效；不得映射为
+   * Confirm/HumanGateFeedback/AbandonHumanGate 三命令（REQ-RET-02/REQ-CG-02）。
+   */
+  confirmBatch(): Promise<void>;
+  /**
+   * REQ-PCG-02：Final Compile recovery——经既有 WS
+   * `work_item_plan_compile_recovery_action` 发送既有 action 枚举。仅对
+   * kind=compile_recovery 且未阻断的门生效；不复制 compile 状态机、不改 action 语义。
+   */
+  recoverCompile(
+    action: WorkItemPlanCompileRecoveryAction,
+    reason?: string,
+  ): Promise<void>;
+  /** C1 Task 9：候选门恢复（Task 4 CandidateRecovery REST 通道）。 */
+  recoverCandidate(payload: C1RecoveryActionPayload & { kind: "recover_candidate" }): void;
+  /** C1 Task 9：Failed advance 显式 retry（Task 7 retry REST）。 */
+  retryInitialization(
+    payload: C1RecoveryActionPayload & { kind: "retry_initialization" },
+  ): Promise<void>;
+  /** C1 Task 9：死亡租约确认接管（Task 6 takeover REST）。 */
+  confirmTakeover(
+    payload: C1RecoveryActionPayload & { kind: "confirm_takeover" },
+  ): Promise<void>;
+  rebind(payload: C1RecoveryActionPayload & { kind: "rebind" }): void;
+  /** C2 Task 12：终态 coding attempt 显式 restart（Task 3 restart REST；
+   * 可选面——旧接线不提供时卡片按钮只读 fail-closed）。 */
+  restartCoding?(
+    payload: C1RecoveryActionPayload & { kind: "restart_coding" },
+  ): Promise<void>;
+  /** C2 Task 12：gate response（gate-responses REST，与 WS 同一应用服务；
+   * 可选面——旧接线不提供时卡片按钮只读 fail-closed）。 */
+  respondGate?(
+    payload: C1RecoveryActionPayload & { kind: "gate_response" },
+  ): Promise<void>;
+  /** C5 Task 6：project 级 repository 初始化 resume（Task 6 resume REST；
+   * 可选面——旧接线不提供时卡片按钮只读 fail-closed）。 */
+  resumeRepositoryInitialization?(
+    payload: C1RecoveryActionPayload & {
+      kind: "resume_repository_initialization";
+    },
+  ): Promise<void>;
+  /** C4 Task 9：LC 冷启动统一动作（Task 6 bootstrap action REST 透传，
+   * 页面接线发送器；未接线零出站 fail-closed）。 */
+  sendBootstrapAction(payload: LcBootstrapActionPayload): Promise<void>;
+  /** 「登记并重试」按钮（owner 2026-10-12 直批）：WS register_trust_entry
+   * 显式授权登记（root 服务端解析）；可选面——未接线零出站 fail-closed。 */
+  registerTrustEntry?(provider: WorkspaceProviderName): boolean;
+  /**
+   * REQ-WSC-13/14（k3 P0-2C）：撤销 owner 的「排除此项」——REST human-actions
+   * 的 `revoke_finding_exclusions`（会话级 durable 事实，**不带**
+   * expected_gate_id，与门身份无关；门可能已换/已关）。可选面——未接线
+   * （legacy/只读页面）时门卡不渲染撤销按钮（fail-closed 零出站）。
+   * `findingKeys` 传空数组 = 零写只读列表（回执 remaining 即 durable 清单
+   * 全量，刷新后恢复「已排除」呈现用）。
+   */
+  revokeFindingExclusions?(findingKeys: string[]): Promise<RevokeFindingExclusionsOutcome>;
+};
+
+
+export function actionFacadeForFlowKind(
+  flowKind: WorkspaceWsState["flowKind"],
+): "typed" | "legacy" {
+  return flowKind === "single_candidate" ? "typed" : "legacy";
+}
+
+/**
+ * 蒸发链修法①（诊断 local://diag-manual-revision-evaporate.md）：门命令
+ * command_id 的复用策略——仅非终态活 turn（"open"/"busy" ↔ 服务端
+ * Reserved/Running）才复用其 command_id（重试/重连重放同 id，幂等）。
+ * 终态 turn（"failed" / "awaiting_confirm" ↔ Failed/Completed）的
+ * command_id 已被 durable 查重消费，复用会被服务端 Replayed/Rejected 吞掉
+ * （现场 workspace_session_0003：第二次提交复用死 turn 的 command_id，
+ * 零 spawn、零回显）；必须返回 null 交由调用方 newCommandId() 开新回合。
+ */
+export function replayableGateCommandId(
+  state: Pick<WorkspaceWsState, "humanGateTurn">,
+): string | null {
+  const turn = state.humanGateTurn;
+  if (turn && (turn.status === "open" || turn.status === "busy")) {
+    return turn.command_id;
+  }
+  return null;
+}
+
+export function createCockpitActionFacade(input: {
+  flowKind: WorkspaceWsState["flowKind"];
+  getState: () => WorkspaceWsState;
+  sendConfirm: (withReview?: boolean) => boolean;
+  sendAbandonGate: (commandId: string) => boolean;
+  sendHumanGateFeedback: (
+    feedback: string,
+    commandId?: string,
+    excludedFindingIds?: string[],
+  ) => boolean;
+  sendAdvance: (commandId?: string) => boolean;
+  /** v40 复验 #3：客户端采纳通道（预填修订反馈+切视图），由页面接线。 */
+  adoptReview: () => void;
+  /** REQ-PCG-01：整组 Draft 确认的 HTTP confirm 发送器（页面接线，含审计与错误面）。 */
+  sendBatchConfirm: () => Promise<void>;
+  /** REQ-PCG-02：既有 compile recovery WS 发送器（`useWorkspaceWs`）。 */
+  sendCompileRecovery: (
+    action: WorkItemPlanCompileRecoveryAction,
+    reason?: string,
+  ) => void;
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 10：durable owner=server 会话的人工门 REST 发送器
+   * （页面接线 `postWorkspaceHumanAction`，含审计与错误面）。owner=server 时
+   * feedback/terminate/recoverCompile 一律走本通道——无 driver WS 也能作答；
+   * 未接线时对应动作零出站（fail-closed），不退回 WS 手动语义；owner=client
+   * 或未知（null，等重启暂停）保留既有手动 WS 语义，observer 不借 REST 扩权。
+   */
+  sendHumanAction?: (action: WorkspaceHumanAction) => boolean;
+  /**
+   * C1 Task 9：驾驶舱 C1 恢复动作发送器（页面接线对应 REST：recover_
+   * candidate→human-actions CandidateRecovery、retry_initialization→Task 7
+   * retry 路由、confirm_takeover→Task 6 takeover 路由、rebind→issue 生命
+   * 周期页显式 rebind 表单）。未接线时对应动作零出站（fail-closed）。
+   */
+  sendC1Action?: (payload: C1RecoveryActionPayload) => void;
+  /**
+   * C4 Task 9：LC 冷启动统一动作发送器（页面接线 bootstrap action REST）。
+   * 未接线时对应动作零出站（fail-closed）；前端不判定业务成功。
+   */
+  sendLcBootstrapAction?: (payload: LcBootstrapActionPayload) => Promise<void>;
+  /** 「登记并重试」发送器（useWorkspaceWs.sendRegisterTrustEntry 页面接线；
+   * 未接线零出站 fail-closed）。 */
+  sendRegisterTrustEntry?: (provider: WorkspaceProviderName) => boolean;
+  /** REQ-WSC-13/14（k3 P0-2C）：撤销排除的 REST 发送器（页面接线，含
+   * sessionId 现读）；未接线时门面不暴露撤销面（fail-closed 零出站）。 */
+  sendRevokeFindingExclusions?: (
+    action: RevokeFindingExclusionsAction,
+  ) => Promise<RevokeFindingExclusionsOutcome>;
+}): CockpitActionFacade {
+  // REQ-WSC-13/14（k3 P0-2C）：撤销排除发送器的 const 捕获（闭包内保持
+  // 「已接线」收窄；未接线时下方条件展开直接省略整个方法）。
+  const sendRevokeFindingExclusions = input.sendRevokeFindingExclusions;
+  return {
+    confirm() {
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return false;
+      }
+      return input.sendConfirm();
+    },
+    confirmReview() {
+      // F-31：与 confirm 同源阻断判据（收口/相位/终态），仅多带 with_review。
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return false;
+      }
+      return input.sendConfirm(true);
+    },
+    feedback(feedback, options) {
+      const state = input.getState();
+      const excludedFindingIds = (options?.excludedFindingIds ?? []).filter(
+        (key) => typeof key === "string" && key.trim().length > 0,
+      );
+      // REQ-WSC-13：空反馈只在「同时排除某些 finding」时放行——纯排除动作
+      // 也是 owner 的处置表达；两者皆空＝旧拒发行为。
+      if (!feedback.trim() && excludedFindingIds.length === 0) {
+        return false;
+      }
+      if (gateActionBlockReason(state) !== null) {
+        return false;
+      }
+      if (actionFacadeForFlowKind(input.flowKind) !== "typed") {
+        return false;
+      }
+      const restRoute = humanActionRestRoute(state);
+      if (restRoute === "none") {
+        return false;
+      }
+      if (restRoute !== "ws") {
+        return (
+          input.sendHumanAction?.({
+            type: "feedback",
+            command_id: newCommandId(),
+            expected_gate_id: restRoute.gateId,
+            feedback,
+            ...(excludedFindingIds.length > 0
+              ? { excluded_finding_ids: excludedFindingIds }
+              : {}),
+          }) ?? false
+        );
+      }
+      // 协议依据（cadence/reports/workitem-conversational-gate-advance/evidence/
+      // amendment-wire-notes.md §40-42）：human_gate_feedback 的 command_id 完全由
+      // driver/client 生成；服务端按 (session_id, command_id) durable 查重并开新
+      // turn（Reserved+扣预算）。重连/刷新后 typed 门只剩 session_state 快照、无活
+      // turn 提供既有 command_id 时，凭新生成的 command_id 提交反馈而非拒发。
+      // 蒸发链修法①（诊断 local://diag-manual-revision-evaporate.md）：复用仅限
+      // 非终态活 turn（open/busy ↔ 服务端 Reserved/Running，重连重放幂等）；
+      // 终态（failed/awaiting_confirm）turn 的 command_id 已被 durable 消费，复用
+      // 会被服务端查重吞掉——必须 newCommandId() 开新回合。点击时现读 store，
+      // 不吃 memo 闭包过期。
+      // 无排除项时保持旧 2 参调用形态（既有 mock/断言零改）。
+      return excludedFindingIds.length > 0
+        ? input.sendHumanGateFeedback(
+            feedback,
+            replayableGateCommandId(state) ?? newCommandId(),
+            excludedFindingIds,
+          )
+        : input.sendHumanGateFeedback(
+            feedback,
+            replayableGateCommandId(state) ?? newCommandId(),
+          );
+    },
+    terminate() {
+      const state = input.getState();
+      // L1 typed 重承载（REQ-RET-02）：终止=显式 abandon_human_gate 命令；
+      // 重连/刷新后无活 turn command_id 时凭新 id 提交（与 feedback 同款纪律）。
+      // F-21：用终止专属判据——plan 会话停在 human_confirm 的 context blocker/
+      // author 失败/缺相位门此前被 phase_mismatch 静默拦截（点击零 WS 出站），
+      // 而矩阵与引擎对这些形态均接受 abandon（confirm/feedback 纪律不变）。
+      if (gateTerminateBlockReason(state) !== null) {
+        return false;
+      }
+      const restRoute = humanActionRestRoute(state);
+      if (restRoute === "none") {
+        return false;
+      }
+      if (restRoute !== "ws") {
+        return (
+          input.sendHumanAction?.({
+            type: "abandon",
+            command_id: newCommandId(),
+            expected_gate_id: restRoute.gateId,
+          }) ?? false
+        );
+      }
+      // 与 feedback 同款复用纪律：仅非终态活 turn 复用其 command_id。
+      return input.sendAbandonGate(replayableGateCommandId(state) ?? newCommandId());
+    },
+    advance() {
+      const state = input.getState();
+      // k3 P2-2：AuthorConfirm 矩阵只放行 Abort/AbandonHumanGate——HTTP confirm 的
+      // 乐观 confirmed 态也不发 advance（否则必回 ADVANCE_STAGE_INVALID 红条）。
+      if (state.stage === "author_confirm") {
+        return false;
+      }
+      // k3 P2（F-42 fix1）：manual advance 的有效通路只有一条——SC 计划已确认、引擎
+      // 仍需一次推进。矩阵唯一的 Advance 放行格是「stage=completed ∧
+      // single_candidate」（protocol.rs），且客户端 stage 可能落后于持久层（已 Confirm
+      // 但页面仍显示 human_confirm），故判据取流+关门裁决、不读客户端 stage——与
+      // autopilot（useCockpitAutopilot：flowKind=single_candidate 且 closure
+      // confirm/sessionStatus confirmed 才推进）同源。该判据取代旧的 "closed" 裸豁免：
+      // story/design 终态与 terminated 会话不再借 closed 发帧（前者必回
+      // ADVANCE_STAGE_INVALID，后者会误推进已终止会话）；修复前这两种形态由
+      // terminal_stage 静默拦截，零出站。
+      const advanceableSingleCandidateGate =
+        state.flowKind === "single_candidate" &&
+        (state.humanGateClosure?.decision === "confirm" ||
+          state.sessionStatus === "confirmed");
+      if (!advanceableSingleCandidateGate) {
+        return false;
+      }
+      const reason = gateActionBlockReason(state);
+      if (reason !== null && reason !== "closed") {
+        return false;
+      }
+      return input.sendAdvance(newCommandId());
+    },
+    adoptReview() {
+      // v40 复验 #3：与 confirm 同源阻断判据——门已收口/相位漂移时不再把修订
+      // 反馈预填进不可回传的输入框；纯客户端动作，无 WS/HTTP 帧。
+      if (gateActionBlockReason(input.getState()) !== null) {
+        return;
+      }
+      input.adoptReview();
+    },
+    // REQ-PCG-01：整组 Draft 确认（HTTP）。门种类与阻断判据都在发送前现读——
+    // 批次门已收口/终态或当前不是批次门时零出站（REQ-PCG-03 fail-closed）。
+    async confirmBatch() {
+      const state = input.getState();
+      if (gateKindOf(state) !== "batch_confirm" || gateActionBlockReason(state) !== null) {
+        return;
+      }
+      await input.sendBatchConfirm();
+    },
+    // REQ-PCG-02：compile recovery（既有 WS action 通路，action 枚举原样透传）。
+    // P0 1.3：owner=server 时同款动作改走 REST 人工命令（无 driver WS 也能恢复）。
+    async recoverCompile(action, reason) {
+      const state = input.getState();
+      if (
+        gateKindOf(state) !== "compile_recovery" ||
+        gateActionBlockReason(state) !== null
+      ) {
+        return;
+      }
+      const restRoute = humanActionRestRoute(state);
+      if (restRoute === "none") {
+        return;
+      }
+      if (restRoute !== "ws") {
+        input.sendHumanAction?.({
+          type: "compile_recovery",
+          command_id: newCommandId(),
+          expected_gate_id: restRoute.gateId,
+          action,
+          reason: reason ?? null,
+        });
+        return;
+      }
+      input.sendCompileRecovery(action, reason);
+    },
+    // C1 Task 9：C1 恢复动作只透传页面接线的 REST 发送器（fail-closed：
+    // 未接线零出站）；稳定 command_id 由调用方（C1 卡片）生成并复用。
+    recoverCandidate(payload) {
+      input.sendC1Action?.(payload);
+    },
+    async retryInitialization(payload) {
+      input.sendC1Action?.(payload);
+    },
+    async confirmTakeover(payload) {
+      input.sendC1Action?.(payload);
+    },
+    rebind(payload) {
+      input.sendC1Action?.(payload);
+    },
+    // C2 Task 12：restart／gate response 同款透传（fail-closed：未接线零出站）。
+    async restartCoding(payload) {
+      input.sendC1Action?.(payload);
+    },
+    async respondGate(payload) {
+      input.sendC1Action?.(payload);
+    },
+    // C5 Task 6：repository 初始化 resume 同款透传（fail-closed：
+    // 未接线零出站）；成功后的 project 刷新由页面发送器接线。
+    async resumeRepositoryInitialization(payload) {
+      input.sendC1Action?.(payload);
+    },
+    // C4 Task 9：bootstrap 动作只透传页面接线发送器（fail-closed：未接线
+    // 零出站）；稳定 command_id 由卡片按 notice key 派生并复用。
+    async sendBootstrapAction(payload) {
+      await input.sendLcBootstrapAction?.(payload);
+    },
+    // 「登记并重试」：显式授权登记只透传发送器（fail-closed：未接线零出站）。
+    registerTrustEntry(provider) {
+      return input.sendRegisterTrustEntry?.(provider) ?? false;
+    },
+    // REQ-WSC-13/14（k3 P0-2C）：撤销排除透传页面发送器（可选面——未接线
+    // 不暴露 revokeFindingExclusions，门卡不渲染撤销按钮）；command_id 每次
+    // 现生成（服务端幂等按 key 清单承担，无按 command_id 查重的重放语义）。
+    ...(sendRevokeFindingExclusions && {
+      revokeFindingExclusions: (findingKeys: string[]) =>
+        sendRevokeFindingExclusions({
+          type: "revoke_finding_exclusions",
+          command_id: newCommandId(),
+          finding_keys: findingKeys,
+        }),
+    }),
+  };
+}
+
+
+export type ProtocolErrorDisposition =
+  | { kind: "gate"; turnId: string }
+  | { kind: "advance"; commandId: string }
+  | { kind: "hard_error" };
+
+type ProtocolRoutingState = Pick<WorkspaceWsState, "humanGateTurn" | "advanceCommands">;
+
+const GATE_REJECTION_CODES: Record<string, true> = {
+  INVALID_HUMAN_CONFIRM_ACTION: true,
+  HUMAN_GATE_NOT_READY: true,
+  HUMAN_GATE_FEEDBACK_REJECTED: true,
+};
+
+const ADVANCE_REPLAY_CODES: Record<string, true> = {
+  ADVANCE_REPLAY_NOT_READY: true,
+  ADVANCE_REPLAY_INCOMPLETE: true,
+};
+
+export function classifyProtocolError(
+  code: string,
+  context: unknown,
+  state: ProtocolRoutingState,
+): ProtocolErrorDisposition {
+  const turnId = contextString(context, "turn_id");
+  if (
+    turnId !== null &&
+    GATE_REJECTION_CODES[code] === true &&
+    state.humanGateTurn?.turn_id === turnId
+  ) {
+    return { kind: "gate", turnId };
+  }
+
+  const commandId = contextString(context, "command_id");
+  if (
+    commandId !== null &&
+    ADVANCE_REPLAY_CODES[code] === true &&
+    state.advanceCommands[commandId] !== undefined
+  ) {
+    return { kind: "advance", commandId };
+  }
+
+  return { kind: "hard_error" };
+}
+
+/**
+ * P2（REQ-WSC-15 归因扩展）：排除-only 帧落盘失败时服务端回 `WsOutMessage::Error`
+ * （`{"type":"error","message":"排除项没有落盘，请重试：…"}`，无 turn/command 关联
+ * 字段，非 protocol_error）——归因唯一线索是「最近本地门动作是排除」。窗口外的
+ * 陈旧动作不归因（防无关错误误撤销已成功的排除）；归因成立的落库由
+ * `applyGateExclusionFailure` 消费动作记录（同一错误只归因一次）。
+ */
+export const GATE_EXCLUSION_ATTRIBUTION_WINDOW_MS = 15_000;
+
+/** 归因成立时写入失败事实的前端稳定码（服务端 error 帧无 code 字段）。 */
+export const GATE_EXCLUSION_ERROR_CODE = "EXCLUSION_NOT_RECORDED";
+
+export function classifyGateExclusionError(
+  state: Pick<WorkspaceWsState, "lastGateLocalAction">,
+  now: number = Date.now(),
+): { gateKey: string } | null {
+  const action = state.lastGateLocalAction;
+  if (action === null || action.kind !== "exclusion") {
+    return null;
+  }
+  if (now - action.at > GATE_EXCLUSION_ATTRIBUTION_WINDOW_MS) {
+    return null;
+  }
+  return { gateKey: action.gateKey };
+}
+
+export function gateIdentityFromState(
+  state: Pick<WorkspaceWsState, "humanGateTurn" | "humanGateSnapshot" | "stage">,
+): string | null {
+  if (state.humanGateTurn) {
+    return state.humanGateTurn.turn_id;
+  }
+  if (state.humanGateSnapshot?.opened_at) {
+    return `snapshot:${state.humanGateSnapshot.opened_at}:${snapshotGateFingerprint(state.humanGateSnapshot)}`;
+  }
+  if (state.humanGateSnapshot) {
+    return `snapshot:${state.stage}`;
+  }
+  // L1 重承载（REQ-RET-02）：gateId 派生收敛为 humanGateTurn/humanGateSnapshot 两路；
+  // stage-only legacy 门不再派生 `legacy:` 前缀 id（投影 key 由 selectGateProjection
+  // 以 `stage:` 前缀兜底）。
+  return null;
+}
+
+export function snapshotGateFingerprint(
+  snapshot: Pick<
+    NonNullable<WorkspaceWsState["humanGateSnapshot"]>,
+    "trigger" | "manual_repairs_remaining" | "resumable" | "repeated_fingerprints" | "findings"
+  >,
+): string {
+  return `${snapshot.trigger}|${snapshot.manual_repairs_remaining}|${snapshot.resumable}|${snapshot.repeated_fingerprints.join(",")}|${snapshot.findings.map((finding) => finding.fingerprint).join(",")}`;
+}
+
+function contextString(context: unknown, key: string): string | null {
+  if (typeof context !== "object" || context === null) {
+    return null;
+  }
+  const value = (context as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * P0 1.3（REQ-WIGA-05）Task 10：人工门命令的出站路由——durable
+ * `automation.owner==="server"` 的会话一律走 REST 人工命令端点（驾驶舱没有
+ * driver WS 也能作答）；owner=client 或未知（null，等重启暂停）保留既有手动
+ * WS 语义。`expected_gate_id` 与服务端当前 active gate/timeline node 比对：
+ * activeNodeId 优先，缺省回退最后一个节点；两者皆无时零出站（fail-closed，
+ * 不猜门身份、不退回 WS）。
+ */
+function humanActionRestRoute(
+  state: Pick<WorkspaceWsState, "automation" | "activeNodeId" | "timelineNodes">,
+): { gateId: string } | "ws" | "none" {
+  if (state.automation?.owner !== "server") {
+    return "ws";
+  }
+  const gateId = state.activeNodeId ?? state.timelineNodes.at(-1)?.node_id;
+  return typeof gateId === "string" ? { gateId } : "none";
+}

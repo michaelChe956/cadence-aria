@@ -36,6 +36,11 @@ async fn claude_provider_cancel_kills_and_reaps_hanging_process() {
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }

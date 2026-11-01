@@ -24,7 +24,7 @@ use cadence_aria::product::coding_models::{
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
     CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind, ReviewVerdict,
+    ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use cadence_aria::product::coding_workspace_engine::{
     CodingExecutionContext, CodingWorkspaceEngine,
@@ -109,6 +109,7 @@ fn role_permission_modes_are_persisted_with_role_provider_config() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -328,7 +329,9 @@ fn running_group_engine_with_two_units_for_terminal_lock_tests() -> (
                 permission_modes:
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_terminal_fixture(&store, &attempt);
@@ -358,14 +361,7 @@ fn running_group_engine_with_two_units_for_terminal_lock_tests() -> (
             })
             .expect("create group coding unit");
     }
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("start group attempt");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     (root, paths, store, engine, attempt)
@@ -549,14 +545,7 @@ async fn single_work_item_abort_rejects_same_owner_lock_for_another_work_item() 
 async fn single_work_item_failure_rejects_same_owner_lock_for_another_work_item() {
     let (_root, store, engine, attempt, lifecycle) =
         single_work_item_engine_with_same_owner_lock_on_another_work_item();
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("start attempt");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
 
     engine
         .handle_attempt_failed(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -720,14 +709,7 @@ async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() 
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = FileWritingStreamingProvider;
@@ -820,14 +802,7 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
@@ -880,14 +855,7 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let context = CodingExecutionContext {
         work_item_markdown: Some(
             "# 爬楼梯问题 Work Item\n\n\
@@ -960,14 +928,7 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
 async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() {
     let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
     seed_authoritative_group_coder_fixture(&store, &attempt);
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running attempt");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .replace_attempt_provider_conversations(
             &attempt,

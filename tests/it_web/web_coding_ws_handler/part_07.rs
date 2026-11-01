@@ -53,6 +53,7 @@ fn app_with_coding_attempt(
             path: repo.clone(),
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part07-hanging-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -91,6 +92,7 @@ fn app_with_coding_attempt(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -117,14 +119,7 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
         }),
     );
 
-    let attempt = store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    let attempt = crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", "coding_attempt_0001");
     store
         .update_attempt_stage(
             "project_0001",
@@ -157,6 +152,9 @@ async fn coding_ws_retry_internal_review_resumes_internal_reviewer_run() {
             created_at: "2026-06-13T00:00:00Z".to_string(),
             updated_at: "2026-06-13T00:00:00Z".to_string(),
             push_error: None,
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
+            revoked: false,
         })
         .expect("save review request");
     let first_run = store

@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
+import { LifecycleCard } from "./LifecycleCard";
 
 vi.mock("../shared/MonacoViewer", () => ({
   MonacoViewer: ({ value, height }: { value: string; height?: string }) => (
@@ -28,6 +29,43 @@ vi.mock("../shared/MonacoDiffViewer", () => ({
 }));
 
 describe("LifecycleCardDrawer", () => {
+
+  it("REQ-PIB-01：issue 抽屉呈现锁定的基准分支，非 issue 实体不呈现", () => {
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_0001",
+          kind: "issue",
+          title: "分支锚定",
+          status: "draft",
+          version: null,
+          baseBranch: "feature/x",
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("drawer-base-branch-chip")).toHaveTextContent(
+      "基准 feature/x · 锁定",
+    );
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_0002",
+          kind: "issue",
+          title: "存量 issue",
+          status: "draft",
+          version: null,
+          baseBranch: null,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("drawer-base-branch-chip")).toBeNull();
+  });
+
   it("renders entity info, version history, artifact preview, and next action", () => {
     const onOpenWorkspace = vi.fn();
     const onGenerateNext = vi.fn();
@@ -98,6 +136,44 @@ describe("LifecycleCardDrawer", () => {
     fireEvent.click(screen.getByLabelText("关闭"));
 
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("renders delivery status panel inside issue detail", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue-id",
+          kind: "issue",
+          title: "登录会话过期",
+          status: "draft",
+          version: null,
+        }}
+        deliverySummary={{
+          project_id: "project_0001",
+          issue_id: "issue-id",
+          overall: "partial",
+          entries: [
+            {
+              repository_name: "cadence-aria",
+              work_item_id: "work_item_0001",
+              attempt_status: "completed",
+              branch_name: "feat/delivery",
+              commit_sha: "abc123def",
+              push_status: "failed",
+              push_error: "remote rejected: non-fast-forward",
+            },
+          ],
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("delivery-status-panel")).toBeInTheDocument();
+    expect(screen.getByText("部分交付")).toBeInTheDocument();
+    expect(
+      screen.getByText("remote rejected: non-fast-forward"),
+    ).toBeInTheDocument();
   });
 
   it("renders issue description, artifacts, and metadata", () => {
@@ -234,4 +310,335 @@ describe("LifecycleCardDrawer", () => {
     expect(screen.getByTestId("version-diff-original")).toHaveTextContent("# v1");
     expect(screen.getByTestId("version-diff-modified")).toHaveTextContent("# v2");
   });
+
+  it("renders plan group projection panel for work_item_group and hides it when absent", () => {
+    // REQ-MTG-04（WP3）：plan 卡片区（work_item_group 抽屉）呈现聚合只读投影；
+    // 旧响应无 group_projection（缺省）时不渲染——additive 兼容。
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "plan-1",
+          kind: "work_item_group",
+          title: "Work Item Group",
+          status: "confirmed",
+          version: null,
+          groupProjection: {
+            plan_id: "plan-1",
+            overall: "partial",
+            entries: [
+              {
+                target_repository_id: "11111111-1111-1111-1111-111111111111",
+                repository_name: "checkout-alpha",
+                attempt_id: "coding_attempt_0001",
+                attempt_status: "completed",
+                stage: "final_confirm",
+                branch_name: "aria/issues/issue_0001/checkout-alpha",
+                head_commit: "sha1111",
+                push_status: "pushed",
+                review_request_id: "review_request_0001",
+                blocked_reason: null,
+              },
+              {
+                target_repository_id: "22222222-2222-2222-2222-222222222222",
+                repository_name: "checkout-beta",
+                attempt_id: "coding_attempt_0002",
+                attempt_status: "failed",
+                stage: "coding",
+                branch_name: "aria/issues/issue_0001/checkout-beta",
+                head_commit: null,
+                push_status: null,
+                review_request_id: null,
+                blocked_reason: "coder crashed",
+              },
+            ],
+          },
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("plan-group-projection-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("plan-group-overall-badge")).toHaveAttribute(
+      "data-status",
+      "partial",
+    );
+    expect(screen.getByText("checkout-alpha")).toBeInTheDocument();
+    expect(screen.getByText(/coder crashed/)).toBeInTheDocument();
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "plan-1",
+          kind: "work_item_group",
+          title: "Work Item Group",
+          status: "confirmed",
+          version: null,
+          groupProjection: null,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("plan-group-projection-panel"),
+    ).not.toBeInTheDocument();
+  });
+  // F-26b：spec/plan 详情 overview 头部展示 workspace review 证据——用户在
+  // issue 面打开抽屉即可确认「review 已做/进行中」。
+  it("projects workspace review evidence in the drawer header", () => {
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "用户认证模块",
+          status: "confirmed",
+          version: 2,
+          reviewStatus: "running",
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("drawer-review-status").textContent).toBe(
+      "Review 进行中",
+    );
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "用户认证模块",
+          status: "confirmed",
+          version: 2,
+          reviewStatus: "completed",
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("drawer-review-status").textContent).toBe(
+      "Review 已完成",
+    );
+
+    // 无 review 证据不渲染指示。
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "用户认证模块",
+          status: "confirmed",
+          version: 2,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("drawer-review-status")).not.toBeInTheDocument();
+  });
+  // 统一视觉语言：抽屉 header chips 与卡片 chips 同构——同一状态在两个
+  // 表面使用相同文案、tone 与样式类；chips 顺序与卡片一致（id→status→
+  // version→review），kind 图标色跟随实体 kind（与卡片图标同色系）。
+  it("unifies drawer header chips with card chips: same tone, classes, and order", () => {
+    render(
+      <div>
+        <LifecycleCard
+          card={{
+            kind: "design_spec",
+            id: "design_spec_0001",
+            issueId: "issue_0001",
+            title: "设计卡片",
+            status: "confirmed",
+            version: 2,
+            preview: null,
+            sourceIds: [],
+            artifactVersions: [],
+            raw: {
+              design_spec_id: "design_spec_0001",
+              issue_id: "issue_0001",
+              story_spec_ids: [],
+              title: "设计卡片",
+              current_version: 2,
+              current_markdown_preview: null,
+              confirmation_status: "confirmed",
+              artifact_versions: [],
+            },
+          }}
+          selected={false}
+          onSelect={vi.fn()}
+        />
+        <LifecycleCardDrawer
+          entity={{
+            id: "design_spec_0001",
+            kind: "design_spec",
+            title: "设计抽屉",
+            status: "confirmed",
+            version: 2,
+            reviewStatus: "completed",
+          }}
+          onClose={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+        />
+      </div>,
+    );
+
+    const cardStatus = screen.getByTestId("lifecycle-card-status-chip");
+    const drawerStatus = screen.getByTestId("drawer-status-chip");
+    expect(drawerStatus).toHaveTextContent("已确认");
+    expect(drawerStatus).toHaveAttribute("data-tone", "confirmed");
+    expect(drawerStatus.className).toBe(cardStatus.className);
+
+    const cardVersion = screen.getByTestId("lifecycle-card-version-chip");
+    const drawerVersion = screen.getByTestId("drawer-version-chip");
+    expect(drawerVersion).toHaveTextContent("v2");
+    expect(drawerVersion.className).toBe(cardVersion.className);
+
+    // chips 顺序与卡片一致：id → status → version → review
+    const chipsRow = drawerStatus.parentElement as HTMLElement;
+    const order = [...chipsRow.children].map(
+      (chip) => chip.getAttribute("data-testid") ?? chip.textContent,
+    );
+    expect(order).toEqual([
+      "drawer-id-chip",
+      "drawer-status-chip",
+      "drawer-version-chip",
+      "drawer-review-status",
+    ]);
+  });
+
+  it("colors the drawer kind icon with the entity kind palette like the card", () => {
+    const { rerender } = render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "story-1",
+          kind: "story_spec",
+          title: "故事",
+          status: "confirmed",
+          version: 1,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    const storyIcon = screen
+      .getByTestId("lifecycle-card-drawer")
+      .querySelector("header svg");
+    expect(storyIcon?.getAttribute("class")).toContain("text-emerald-700");
+
+    rerender(
+      <LifecycleCardDrawer
+        entity={{
+          id: "design-1",
+          kind: "design_spec",
+          title: "设计",
+          status: "confirmed",
+          version: 1,
+        }}
+        onClose={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+      />,
+    );
+    const designIcon = screen
+      .getByTestId("lifecycle-card-drawer")
+      .querySelector("header svg");
+    expect(designIcon?.getAttribute("class")).toContain("text-violet-700");
+  });
+
+  it("h5: group 抽屉分离「删除计划及工作项」危险区与 Coding 区整组删除辅入口", () => {
+    const onDelete = vi.fn();
+    const onDeleteAllCodingWorkspaces = vi.fn();
+
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_plan_0001",
+          kind: "work_item_group",
+          title: "分组计划",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDelete={onDelete}
+        onDeleteAllCodingWorkspaces={onDeleteAllCodingWorkspaces}
+      />,
+    );
+
+    const dangerZone = screen.getByTestId("drawer-danger-zone");
+    expect(
+      within(dangerZone).getByRole("button", { name: "删除计划及工作项" }),
+    ).toBeInTheDocument();
+    const codingDelete = screen.getByTestId("drawer-delete-plan-coding-workspaces");
+    expect(codingDelete).toHaveTextContent("删除本计划全部 Coding 工作区");
+    expect(dangerZone.contains(codingDelete)).toBe(false);
+    fireEvent.click(codingDelete);
+    expect(onDeleteAllCodingWorkspaces).toHaveBeenCalledTimes(1);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("h5: work_item 抽屉不提供整组 Coding 删除辅入口", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "work_item_0001",
+          kind: "work_item",
+          title: "单项",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDelete={vi.fn()}
+        onDeleteAllCodingWorkspaces={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("drawer-delete-plan-coding-workspaces")).toBeNull();
+    expect(screen.getByRole("button", { name: "删除 Work Item" })).toBeInTheDocument();
+    expect(screen.queryByTestId("drawer-danger-zone")).toBeNull();
+  });
+
+  it("h5: 未接线时辅入口缺席且计划删除仍可达", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_plan_0001",
+          kind: "work_item_group",
+          title: "分组计划",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("drawer-delete-plan-coding-workspaces")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "删除计划及工作项" }),
+    ).toBeInTheDocument();
+  });
+
+  it("h5: 整组删除请求进行中禁用辅入口", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_plan_0001",
+          kind: "work_item_group",
+          title: "分组计划",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDeleteAllCodingWorkspaces={vi.fn()}
+        groupCodingDeleteBusy
+      />,
+    );
+
+    expect(screen.getByTestId("drawer-delete-plan-coding-workspaces")).toBeDisabled();
+  });
+
+
 });

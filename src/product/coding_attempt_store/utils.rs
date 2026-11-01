@@ -176,10 +176,6 @@ pub(crate) fn push_unique_artifact_ref(artifact_refs: &mut Vec<String>, artifact
     }
 }
 
-pub(crate) fn count_json_files(path: &Path) -> Result<usize, ProductStoreError> {
-    Ok(json_file_paths(path)?.len())
-}
-
 pub(crate) fn next_text_file_sequence(
     path: &Path,
     purpose: &str,
@@ -188,7 +184,7 @@ pub(crate) fn next_text_file_sequence(
         return Ok(1);
     }
     let prefix = format!("{purpose}_");
-    let mut count = 0;
+    let mut max = 0;
     for entry in fs::read_dir(path)
         .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
     {
@@ -204,14 +200,18 @@ pub(crate) fn next_text_file_sequence(
         if !file_type.is_file() {
             continue;
         }
-        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        if file_name.starts_with(&prefix) && file_name.ends_with(".txt") {
-            count += 1;
+        if let Some(sequence) = name
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(".txt"))
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+        {
+            max = max.max(sequence);
         }
     }
-    Ok(count + 1)
+    Ok(max + 1)
 }
 
 pub(crate) fn coding_stage_dir_name(stage: &CodingExecutionStage) -> &'static str {
@@ -223,6 +223,8 @@ pub(crate) fn coding_stage_dir_name(stage: &CodingExecutionStage) -> &'static st
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",
         CodingExecutionStage::FinalConfirm => "final_confirm",
+        // 该 stage 目录永不产生（仅作 findings 的 source_stage 取值）。
+        CodingExecutionStage::IssueCrossRepoReview => "issue_cross_repo_review",
     }
 }
 

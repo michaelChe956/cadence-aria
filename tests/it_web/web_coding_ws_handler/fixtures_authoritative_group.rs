@@ -47,6 +47,7 @@ fn seed_authoritative_group_plan_fixture(
                 summary: logical.title.clone(),
             },
             non_goals: Vec::new(),
+            depends_on: Vec::new(),
             input_contracts: Vec::new(),
             output_contracts: Vec::new(),
             tasks: Vec::new(),
@@ -67,6 +68,7 @@ fn seed_authoritative_group_plan_fixture(
                 reviewer_triggered_rework_blocker_rules_fixture()
             },
             design_traceability: Vec::new(),
+            intent_contract: None,
         };
         let revision = WorkItemRevision {
             id: revision_id.to_string(),
@@ -93,6 +95,44 @@ fn seed_authoritative_group_plan_fixture(
         revision_store
             .put_work_item_revision(&lineage, &revision)
             .expect("work item revision");
+        // 补 source draft record：validate_group_single_target 拒绝任何
+        // source_draft_error，Legacy 单仓 unit 的 target 为 None。
+        WorkItemPlanStore::new(store.paths())
+            .put_draft_record(&WorkItemDraftRecord {
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: lineage.id.clone(),
+                draft_id: revision.source_draft_revision_id.clone(),
+                outline_id: format!("outline_{revision_id}"),
+                generation_round_id: "round_0001".to_string(),
+                batch_id: None,
+                attempt_index: 1,
+                outline_version_ref: "outline_version_0001".to_string(),
+                generation_mode: WorkItemGenerationMode::Serial,
+                generation_diagnostics: None,
+                candidate: WorkItemDraftCandidate {
+                    target_repository_id: None,
+                    outline_id: format!("outline_{revision_id}"),
+                    logical_work_item_id: logical.id.clone(),
+                    canonical_contract_candidate: revision.canonical_contract.clone(),
+                    verification_plan: WorkItemDraftVerificationPlan {
+                        checks: revision.canonical_contract.verification_checks.clone(),
+                    },
+                },
+                status: WorkItemDraftStatus::Accepted,
+                active: true,
+                superseded_by_draft_id: None,
+                supersede_reason: None,
+                copied_from_draft_id: None,
+                review_node_id: None,
+                review_verdict_ref: None,
+                generated_from_node_id: "timeline_node_0001".to_string(),
+                accepted_at: Some("2026-07-18T00:00:00Z".to_string()),
+                superseded_at: None,
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            })
+            .expect("authoritative group source draft");
         let projections = WorkItemProjectionCompiler
             .compile(&revision.canonical_contract, &revision.id)
             .expect("compile work item projections");
@@ -137,18 +177,14 @@ fn seed_authoritative_group_plan_fixture(
         .put_dependency_graph_revision(&lineage, &graph)
         .expect("dependency graph");
     let ordered_logical_work_item_ids = bindings.keys().cloned().collect::<Vec<_>>();
-    let plan_revision = WorkItemPlanRevision {
-        id: "plan_revision_0001".to_string(),
-        plan_id: lineage.id.clone(),
-        revision_no: 1,
-        supersedes: None,
-        reason: PlanRevisionReason::InitialCompile,
-        work_item_bindings: bindings,
-        dependency_graph_revision_id: graph.id,
-        validation_report_ref: "validation_report_0001".to_string(),
-        plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-        created_at: "2026-07-18T00:00:00Z".to_string(),
-    };
+    let plan_revision = WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+    plan_id: lineage.id.clone(),
+    revision_no: 1,
+    supersedes: None,
+    reason: PlanRevisionReason::InitialCompile,
+    work_item_bindings: bindings,
+    dependency_graph_revision_id: graph.id,
+    validation_report_ref: "validation_report_0001".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:00Z".to_string(),  };
     let compiled_plan = CompiledPlanProjections {
         human: HumanGroupProjection {
             plan_id: lineage.id.clone(),

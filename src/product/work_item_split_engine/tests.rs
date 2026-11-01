@@ -1,9 +1,44 @@
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
+
 include!("tests/part_01.rs");
-include!("tests/prompt_contract.rs");
+mod prompt_contract {
+    use super::*;
+
+    include!("tests/prompt_contract.rs");
+}
+mod prompt_contract_weak_model {
+    use super::*;
+
+    include!("tests/prompt_contract_weak_model.rs");
+}
+mod prompt_contract_sc_revision {
+    use super::*;
+
+    include!("tests/prompt_contract_sc_revision.rs");
+}
+mod prompt_contract_sc_anti_preamble {
+    use super::*;
+
+    include!("tests/prompt_contract_sc_anti_preamble.rs");
+}
+mod prompt_contract_plan_options {
+    use super::*;
+
+    include!("tests/prompt_contract_plan_options.rs");
+}
+mod prompt_contract_plan_intent_target {
+    use super::*;
+
+    include!("tests/prompt_contract_plan_intent_target.rs");
+}
 include!("tests/part_02.rs");
+include!("tests/routing_reference_contract.rs");
 include!("tests/part_03.rs");
 include!("tests/author_canonical.rs");
 include!("tests/draft_scalar_evidence.rs");
 include!("tests/outline_option_semantics.rs");
+include!("tests/engine_gateway_guard.rs");
+include!("tests/provider_ref_mapping.rs");
 include!("tests/outline_traceability_example.rs");
+include!("tests/f60_plan_json_contract_equivalence.rs");
 include!("tests/design_context_canonical.rs");

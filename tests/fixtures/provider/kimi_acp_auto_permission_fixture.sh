@@ -23,6 +23,7 @@ while IFS= read -r line; do
     else
       exit 1
     fi
+    echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"kimi_auto_permission_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"auto permission done"}}}}'
     echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-3},\"result\":{\"stopReason\":\"end_turn\"}}"
     exit 0
   fi

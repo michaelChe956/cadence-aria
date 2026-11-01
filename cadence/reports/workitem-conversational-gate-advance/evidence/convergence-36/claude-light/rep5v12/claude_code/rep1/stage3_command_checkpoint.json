@@ -1,0 +1,7 @@
+{
+  "campaign_run_id": "workitem:claude_code:rep1:issue_0191",
+  "command_ids": {
+    "human_gate_feedback#0": "cmd-human_gate_feedback-0-74cd646b37",
+    "advance#2": "cmd-advance-2-70136e9d97"
+  }
+}

@@ -1,12 +1,13 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
   fetchWorkspaceNodeDetail,
 } from "../api/workspace-content";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import {
   emptyWorkspaceContentCache,
@@ -31,7 +32,8 @@ import {
   workItemPlanOutlinePayload,
 } from "./ChatWorkspacePage.test-utils";
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
@@ -71,6 +73,17 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("ChatWorkspacePage chat actions", () => {
   installChatWorkspacePageTestHooks();
+  beforeEach(() => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+  });
+
+  it("keeps the real command id generator through the module mock", async () => {
+    // 验证 Vitest mock 的运行时导出，静态导入无法覆盖该模块边界。
+    const { newCommandId } = await import("../hooks/useWorkspaceWs");
+
+    expect(typeof newCommandId).toBe("function");
+    expect(newCommandId()).not.toBe(newCommandId());
+  });
 
   it("starts generation with provider config from the chat input", async () => {
     const api = mockWorkspaceWs();
@@ -83,7 +96,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     useWorkspaceStore.setState({
       providers: { author: "fake", reviewer: "codex" },
@@ -130,7 +143,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.queryByRole("button", { name: "开始生成" })).not.toBeInTheDocument();
@@ -195,7 +208,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     const grid = screen.getByTestId("review-split-grid");
@@ -221,8 +234,9 @@ describe("ChatWorkspacePage chat actions", () => {
   });
 
   // spec-workbench-canvas-experience T5：work_item_plan 在 author_confirm 不走
-  // Canvas 审核面板，WorkItemPlanCandidatePanel 自有终局按钮兜底，无死路。
-  it("keeps final actions reachable for work_item_plan author_confirm", async () => {
+  // L1/OQ2：Legacy 页 candidate panel 只读——终局按钮（accept-plan/request-revision）
+  // 不再渲染（原「keeps final actions reachable for work_item_plan author_confirm」重钉）。
+  it("renders the work_item_plan candidate panel read-only on the legacy page", async () => {
     mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
@@ -233,7 +247,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -243,8 +257,10 @@ describe("ChatWorkspacePage chat actions", () => {
     expect(
       screen.getByTestId("work-item-plan-candidate-panel"),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("accept-plan-button")).toBeEnabled();
-    expect(screen.getByTestId("request-revision-button")).toBeInTheDocument();
+    expect(screen.queryByTestId("accept-plan-button")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("request-revision-button"),
+    ).not.toBeInTheDocument();
   });
 
   // spec-workbench-canvas-experience T5：空 workspaceType（store 默认）在
@@ -258,7 +274,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -269,8 +285,10 @@ describe("ChatWorkspacePage chat actions", () => {
     ).toBeEnabled();
   });
 
-  it("sends author confirmation decisions from the review panel", async () => {
-    const api = mockWorkspaceWs();
+  // L1/OQ2：Legacy 页 author 决策面（发送反馈/确认并送审/确认定稿）剥离——
+  // 原「sends author confirmation decisions from the review panel」重钉为只读。
+  it("renders the author confirm review panel read-only on the legacy page", async () => {
+    mockWorkspaceWs();
     useWorkspaceStore.setState({
       sessionId: "workspace_session_0001",
       workspaceType: "story",
@@ -281,41 +299,19 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
+    expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "重新编写" }),
+      screen.queryByRole("button", { name: "发送反馈" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
-
-    await userEvent.type(
-      screen.getByPlaceholderText(/输入修改意见/),
-      "补充回滚策略",
-    );
-    await userEvent.click(screen.getByRole("button", { name: "发送反馈" }));
-
-    // 输入聚焦会收起面板，重新展开后再点终局确认对。
-    await userEvent.click(
-      screen.getByRole("button", { name: "展开 Artifact 审核" }),
-    );
-    expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "确认并送审" }));
-    await userEvent.click(screen.getByRole("button", { name: "确认定稿" }));
-
-    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
-      1,
-      "revise",
-      "补充回滚策略",
-    );
-    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
-      2,
-      "accept_with_review",
-    );
-    expect(api.sendAuthorDecision).toHaveBeenNthCalledWith(
-      3,
-      "accept_finalize",
-    );
+    expect(
+      screen.queryByRole("button", { name: "确认并送审" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "确认定稿" }),
+    ).not.toBeInTheDocument();
   });
 
   describe("author_confirm 产物审核面板开合状态机（spec-workbench-canvas-experience T4）", () => {
@@ -332,10 +328,8 @@ describe("ChatWorkspacePage chat actions", () => {
         });
 
         render(
-          <ChatWorkspacePage
-            sessionId="workspace_session_0001"
-            onBack={vi.fn()}
-          />,
+          <ChatWorkspacePage sessionId="workspace_session_0001"
+          onBack={vi.fn()} onOpenSession={vi.fn()} />,
         );
 
         expect(
@@ -358,7 +352,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       expect(
@@ -380,7 +374,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       // 输入聚焦（<1440px，jsdom 默认 innerWidth=1024）→ overlay 遮挡输入框，收起。
@@ -421,7 +415,7 @@ describe("ChatWorkspacePage chat actions", () => {
       });
       try {
         render(
-          <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+          <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
         );
         expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
         act(() => {
@@ -438,7 +432,9 @@ describe("ChatWorkspacePage chat actions", () => {
       }
     });
 
-    it("点击采纳 Review 意见预填输入并收起面板", async () => {
+    // L1/OQ2：面板 actions 插槽（采纳 Review 意见/确认并送审/确认定稿）随 Legacy
+    // 页决策面剥离删除——原两测退役，面板开合状态机断言保留于本 describe 其余各测。
+    it("renders the review panel without decision actions on the legacy page", async () => {
       mockWorkspaceWs();
       useWorkspaceStore.setState({
         sessionId: "workspace_session_0001",
@@ -457,61 +453,28 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
-      const adoptButton = screen.getByRole("button", { name: "采纳 Review 意见" });
-      expect(adoptButton).toBeInTheDocument();
-      await userEvent.click(adoptButton);
-
-      const feedbackInput = screen.getByPlaceholderText(
-        /输入修改意见/,
-      ) as HTMLTextAreaElement;
-      expect(feedbackInput.value).toBe(
-        "按以下 review 意见修订：\n\n发现 3 个问题：第二节缺少回滚策略。",
-      );
-      expect(
-        screen.queryByTestId("artifact-review-panel"),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "展开 Artifact 审核" }),
-      ).toBeInTheDocument();
-    });
-
-    it("无 review 报告时不渲染采纳按钮，主次样式随 reviewerEnabled", async () => {
-      const api = mockWorkspaceWs();
-      useWorkspaceStore.setState({
-        sessionId: "workspace_session_0001",
-        workspaceType: "design",
-        stage: "author_confirm",
-        reviewerEnabled: false,
-        providers: { author: "claude_code", reviewer: "codex" },
-        artifact: "# Design",
-      });
-
-      render(
-        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
-      );
-
+      expect(screen.getByTestId("artifact-review-panel")).toBeInTheDocument();
       expect(
         screen.queryByRole("button", { name: "采纳 Review 意见" }),
       ).not.toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "确认并送审" }).className,
-      ).not.toContain("btn-primary");
+        screen.queryByRole("button", { name: "确认并送审" }),
+      ).not.toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "确认定稿" }).className,
-      ).toContain("btn-primary");
-
-      await userEvent.click(screen.getByRole("button", { name: "确认并送审" }));
-      expect(api.sendAuthorDecision).toHaveBeenCalledWith("accept_with_review");
+        screen.queryByRole("button", { name: "确认定稿" }),
+      ).not.toBeInTheDocument();
     });
   });
 
+  // L1/OQ2：Legacy 页 review_decision 动作面（接受修订建议/补充上下文后修订/
+  // 跳过，人工处理）剥离——原 it.each 三型重钉为只读呈现。
   it.each(["story", "design", "work_item"])(
-    "shows review decision actions when restored %s chat lacks a review verdict entry",
+    "renders the restored %s review decision stage read-only on the legacy page",
     async (workspaceType) => {
-      const api = mockWorkspaceWs();
+      mockWorkspaceWs();
       useWorkspaceStore.setState({
         sessionId: "workspace_session_0001",
         workspaceType,
@@ -529,49 +492,22 @@ describe("ChatWorkspacePage chat actions", () => {
         ],
         activeNodeId: "timeline_node_017",
         selectedNodeId: "timeline_node_017",
-        chatEntries: [
-          chatEntry({
-            id: "timeline_node_017:timeline-anchor",
-            type: "stage_change",
-            role: "system",
-            content: "Review Decision Round 4 · 需要继续返修",
-            node_id: "timeline_node_017",
-          }),
-        ],
+        chatEntries: [],
       });
 
       render(
-        <ChatWorkspacePage
-          sessionId="workspace_session_0001"
-          onBack={vi.fn()}
-        />,
+        <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
 
       expect(
-        screen.getByRole("button", { name: "接受修订建议" }),
-      ).toBeInTheDocument();
+        screen.queryByRole("button", { name: "接受修订建议" }),
+      ).not.toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "补充上下文后修订" }),
-      ).toBeInTheDocument();
+        screen.queryByRole("button", { name: "补充上下文后修订" }),
+      ).not.toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "跳过，人工处理" }),
-      ).toBeInTheDocument();
-
-      await userEvent.click(
-        screen.getByRole("button", { name: "补充上下文后修订" }),
-      );
-      await userEvent.type(
-        screen.getByLabelText("补充返修上下文"),
-        "补充 provider gate 细节",
-      );
-      await userEvent.click(
-        screen.getByRole("button", { name: "提交补充并修订" }),
-      );
-
-      expect(api.sendSelectRevisionPath).toHaveBeenCalledWith(
-        "revise-with-context",
-        "补充 provider gate 细节",
-      );
+        screen.queryByRole("button", { name: "跳过，人工处理" }),
+      ).not.toBeInTheDocument();
     },
   );
 
@@ -598,7 +534,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await userEvent.click(screen.getByRole("button", { name: "允许" }));
@@ -640,7 +576,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await userEvent.click(screen.getByTestId("timeline-node-author_run"));
@@ -702,10 +638,8 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage
-          sessionId="workspace_session_0001"
-          onBack={vi.fn()}
-        />,
+        <ChatWorkspacePage sessionId="workspace_session_0001"
+        onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
       scrolledEntryIds.length = 0;
 
@@ -763,10 +697,8 @@ describe("ChatWorkspacePage chat actions", () => {
       });
 
       render(
-        <ChatWorkspacePage
-          sessionId="workspace_session_0001"
-          onBack={vi.fn()}
-        />,
+        <ChatWorkspacePage sessionId="workspace_session_0001"
+        onBack={vi.fn()} onOpenSession={vi.fn()} />,
       );
       scrolledEntryIds.length = 0;
 
@@ -788,7 +720,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByTestId("protocol-error-alert")).toHaveTextContent(
@@ -820,7 +752,7 @@ describe("ChatWorkspacePage chat actions", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(screen.getByTestId("review-verdict-entry")).toBeInTheDocument();

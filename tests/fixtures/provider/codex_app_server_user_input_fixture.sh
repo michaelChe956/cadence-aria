@@ -8,14 +8,14 @@ fi
 
 while IFS= read -r line; do
   if [[ "$line" == *'"initialize"'* ]]; then
-    id="$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-1},\"result\":{\"userAgent\":\"cadence-aria-test\"}}"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-1}\",\"result\":{\"userAgent\":\"cadence-aria-test\"}}"
   elif [[ "$line" == *'"thread/start"'* ]]; then
-    id="$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{\"thread\":{\"id\":\"codex_user_input_thread\"},\"approvalPolicy\":\"never\"}}"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-2}\",\"result\":{\"thread\":{\"id\":\"codex_user_input_thread\"},\"approvalPolicy\":\"never\"}}"
   elif [[ "$line" == *'"turn/start"'* ]]; then
-    id="$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-3},\"result\":{\"turn\":{\"id\":\"codex_user_input_turn\",\"status\":\"inProgress\"}}}"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-3}\",\"result\":{\"turn\":{\"id\":\"codex_user_input_turn\",\"status\":\"inProgress\"}}}"
     echo '{"jsonrpc":"2.0","id":77,"method":"item/tool/requestUserInput","params":{"threadId":"codex_user_input_thread","turnId":"codex_user_input_turn","itemId":"ask_1","questions":[{"id":"complexity","header":"需求确认","question":"请选择复杂度","options":[{"label":"O(n)","description":"线性复杂度"},{"label":"O(1)","description":"常数复杂度"}]}]}}'
   elif [[ "$line" == *'"answers"'* ]]; then
     if [[ "$line" != *'"complexity"'* || "$line" != *'"O(n)"'* ]]; then

@@ -174,6 +174,18 @@ impl StreamingProviderAdapter for TestControlledFakeStreamingProvider {
         ))
     }
 
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(review/permission fixture 与 fake fallback
+    /// 语义保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
+
     async fn run_streaming(
         &self,
         input: &AdapterInput,
@@ -233,6 +245,7 @@ fn start_review_fixture_session(
     });
 
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }
@@ -251,9 +264,14 @@ fn review_fixture_completion(
         return ProviderCompletion::plain(output, provider_session_id);
     };
     let (comments, json) = review_fixture_output_parts(&output);
+    let mut json: serde_json::Value =
+        serde_json::from_str(json).expect("review fixture JSON must be an object");
+    json.as_object_mut()
+        .expect("review fixture JSON must be an object")
+        .insert("nonce".to_string(), serde_json::json!(contract.nonce));
     let full_output = format!(
-        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-        contract.nonce, contract.nonce
+        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT>",
+        contract.nonce
     );
     ProviderCompletion::from_output(full_output, Some(contract), provider_session_id)
 }
@@ -367,6 +385,7 @@ fn start_permission_fixture_session(
     });
 
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }

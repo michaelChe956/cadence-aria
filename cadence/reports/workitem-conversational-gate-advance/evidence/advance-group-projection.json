@@ -1,0 +1,51 @@
+{
+  "schema": "advance-campaign-evidence/v1",
+  "sanitized": "only digests/lengths/ids/counts; no candidate text, no feedback content, no provider payload",
+  "scenario": "step4_8_3_b_group_projection_and_step6_snapshot_readback",
+  "proven_by": [
+    "rust:campaign_stage3_group_projection_reads_every_work_item_result",
+    "node:campaign_stage3_group_snapshot_readback_after_advance_completed",
+    "node:campaign_stage3_group_snapshot_evidence_fails_closed_on_mismatched_attempt"
+  ],
+  "generated_from": "pure fake campaign fixtures + durable readback assertions of the listed tests; no real provider run",
+  "evidence": {
+    "source": "group_attempt_snapshot_readback",
+    "attempt_id": "attempt_fixture_0001",
+    "attempt_status": "created",
+    "units": [
+      {
+        "logical_work_item_id": "wi_a",
+        "status": "running"
+      },
+      {
+        "logical_work_item_id": "wi_b",
+        "status": "pending"
+      }
+    ],
+    "binding_revision_digest": "fa66bc1e5b5f809c0669040f5dff53ac83a30c05726a96654b8d9526c0b43445",
+    "binding_revision_sources": 2,
+    "lock_id": "attempt_fixture_0001",
+    "advance_record": {
+      "command_id": "cmd-campaign-adv-projection",
+      "record_id": "advance_fixture_0001",
+      "status": "ready",
+      "attempt_id": "attempt_fixture_0001"
+    },
+    "provider_start_counts": {
+      "before": 0,
+      "after": 0
+    },
+    "provider_start_violation": false
+  },
+  "states_covered": [
+    "pending",
+    "running",
+    "completed",
+    "blocked"
+  ],
+  "tamper_proof": {
+    "workspace_session_reads": 0,
+    "output": "byte_identical_after_child_session_tamper"
+  },
+  "http_ws_parity": "per-logical-WI identical (group_coding_progress + group_progress)"
+}

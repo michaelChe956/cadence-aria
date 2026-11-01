@@ -8,13 +8,17 @@ use crate::product::models::{
 use crate::product::plan_repair::{
     candidate_request_matches_review_status, load_plan_repair_candidate_package,
 };
-use crate::product::work_item_contract::{CanonicalWorkItemContract, canonical_contract_hash};
+use crate::product::work_item_contract::{
+    CanonicalWorkItemContract, ContractReviewerCoverageProjection, build_dependency_contract_graph,
+    canonical_contract_hash, project_contract_reviewer_coverage,
+};
 use crate::product::work_item_projection::{
     CompiledPlanProjections, CompiledWorkItemProjections, ProjectionValidationReport,
     plan_projection_hashes, projection_hashes,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::workspace_engine::WorkspaceEngine;
+use serde_json::json;
 
 pub(super) struct PlanReviewContext {
     pub(super) story_design_traceability: Vec<String>,
@@ -42,6 +46,115 @@ pub(super) fn append_review_context_section(
     );
     prompt.push('\n');
     Ok(())
+}
+
+pub(super) fn single_candidate_reviewer_coverage(
+    items: &[crate::product::work_item_plan_compiler::PlanCandidateItemIr],
+) -> Result<ContractReviewerCoverageProjection, String> {
+    let contracts = items
+        .iter()
+        .map(|item| item.contract.clone())
+        .collect::<Vec<_>>();
+    let graph = build_dependency_contract_graph(&contracts).map_err(|report| {
+        format!("single-candidate review dependency contract graph failed: {report:?}")
+    })?;
+    Ok(project_contract_reviewer_coverage(&graph))
+}
+
+/// F5-C：SC reviewer 防打转教学段。修订循环不收敛的第一根因已由 findings 回灌
+/// （F5-A）修复，本段数导 reviewer 不对同一批未解决 findings 无限 revise：
+/// 与上一轮实质相同且 author 已声明处理时改判 needs_human 并说明卡点。
+pub(super) const SINGLE_CANDIDATE_REVIEW_REPETITION_TEACHING: &str = "\
+[review_repetition_discipline]\
+若本轮 findings 与你上一轮实质相同（同一批未解决问题，且 author 已在修订中声明处理或本轮输出仍未解决），不得再次返回 revise：改判 needs_human，并在 summary 中说明卡点（哪条 finding 为何无法通过自动修订收敛）。不要对同一批未解决 findings 无限第 N 次 revise。\
+\n";
+
+pub(super) fn append_single_candidate_contract_gap_teaching(
+    prompt: &mut String,
+    coverage: &ContractReviewerCoverageProjection,
+) {
+    for handoff in coverage
+        .handoff_consumption
+        .iter()
+        .filter(|handoff| !handoff.consumed)
+    {
+        prompt.push_str(&format!(
+            "- handoff gap evidence required: severity=must_fix category=contract_gap class_hint=repairable evidence: provider `{}`, contract_ref `{}`, consumers: [], consumed: false\n",
+            handoff.provider, handoff.contract_ref,
+        ));
+    }
+}
+
+pub(super) fn single_candidate_dependency_graph(
+    items: &[crate::product::work_item_plan_compiler::PlanCandidateItemIr],
+) -> Result<serde_json::Value, String> {
+    let mut item_ids = BTreeSet::new();
+    for item in items {
+        let item_id = item.contract.identity.logical_work_item_id.as_str();
+        if item_id.trim().is_empty() {
+            return Err(
+                "single-candidate review IR contains an empty work item identity".to_string(),
+            );
+        }
+        if !item_ids.insert(item_id.to_string()) {
+            return Err(format!(
+                "single-candidate review IR contains duplicate work item identity `{item_id}`"
+            ));
+        }
+    }
+    let mut remaining_dependencies = BTreeMap::new();
+    let mut dependents = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut edges = Vec::new();
+    for item in items {
+        let item_id = item.contract.identity.logical_work_item_id.clone();
+        let mut dependencies = BTreeSet::new();
+        for dependency in &item.contract.depends_on {
+            if !item_ids.contains(dependency) {
+                return Err(format!(
+                    "single-candidate review IR dependency `{dependency}` for `{item_id}` is missing"
+                ));
+            }
+            if dependency == &item_id {
+                return Err(format!(
+                    "single-candidate review IR work item `{item_id}` depends on itself"
+                ));
+            }
+            if dependencies.insert(dependency.clone()) {
+                dependents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .insert(item_id.clone());
+                edges.push(format!("{dependency} -> {item_id}"));
+            }
+        }
+        remaining_dependencies.insert(item_id, dependencies);
+    }
+    edges.sort();
+    let mut ready = remaining_dependencies
+        .iter()
+        .filter_map(|(item_id, dependencies)| dependencies.is_empty().then_some(item_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut topological_order = Vec::with_capacity(items.len());
+    while let Some(item_id) = ready.iter().next().cloned() {
+        ready.remove(&item_id);
+        topological_order.push(item_id.clone());
+        for dependent in dependents.get(&item_id).into_iter().flatten() {
+            let dependencies = remaining_dependencies
+                .get_mut(dependent)
+                .expect("dependent must be present in remaining dependency map");
+            dependencies.remove(&item_id);
+            if dependencies.is_empty() {
+                ready.insert(dependent.clone());
+            }
+        }
+    }
+    if topological_order.len() != items.len() {
+        return Err("single-candidate review IR dependency graph contains a cycle".to_string());
+    }
+    Ok(json!({
+        "topological_order": topological_order,
+        "edges": edges,
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -394,4 +507,216 @@ fn validate_plan_projection_hashes(projection: &PlanProjectionBundle) -> Result<
         return Err("Plan Review plan projection payload hash mismatch".to_string());
     }
     Ok(())
+}
+
+/// REQ-TOP-04 场景 6（F-52 L2 前轮注入）：加载上一 ReviewerRun 持久化
+/// verdict（与 F5-B 闸门同源的单候选加载形态），其非 advisory findings
+/// 逐条经 classify_finding 得到结构化身份（fingerprint/category/
+/// contract_field/required_action）注入复评轮 prompt——reviewer 可比对
+/// fingerprint 显式标注 repeated，不再依赖措辞巧合判重。首轮（无前轮
+/// verdict 或前轮无非 advisory finding）返回 None；prompt 字节预算由
+/// `ensure_single_candidate_review_prompt_budget`（96KiB）兜底。
+pub(crate) fn single_candidate_previous_round_findings_section(
+    engine: &WorkspaceEngine,
+    current_ir_ref: &str,
+) -> Option<String> {
+    let active_node_id = engine.active_node_id.as_ref()?;
+    let lifecycle = engine.lifecycle_store.as_ref()?;
+    let previous = engine
+        .timeline_nodes
+        .iter()
+        .rev()
+        .filter(|node| {
+            matches!(
+                node.node_type,
+                crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun
+            )
+        })
+        .filter(|node| &node.node_id != active_node_id)
+        .find_map(|node| {
+            let detail = lifecycle
+                .load_node_detail_for_issue_session(
+                    &engine.session.project_id,
+                    &engine.session.issue_id,
+                    &engine.session.session_id,
+                    &node.node_id,
+                )
+                .ok()?;
+            let persisted = detail.verdict?;
+            crate::product::workspace_engine::deserialize_historical_review_verdict(persisted).ok()
+        })?;
+    // REQ-WSC-14（作者/评审输入面一致性）：`previous` 是 durable 原始 verdict（未按
+    // 已处置清单归一），此处 MUST 再按 owner 已处置清单过滤——否则同一 prompt 既说
+    // 「这是上一轮未收敛 finding」又说「该事实已被 owner 排除」，自相矛盾。
+    let excluded_keys = engine.session_human_disposition_keys();
+    let previous_findings: Vec<_> = previous
+        .findings
+        .iter()
+        .filter(|finding| !excluded_keys.contains(&finding.computed_finding_key()))
+        .map(|finding| {
+            crate::product::work_item_plan_policy::classify::classify_finding(
+                previous.verdict.clone(),
+                finding,
+            )
+        })
+        .filter(|classified| {
+            classified.class != crate::product::work_item_plan_policy::FindingClass::Advisory
+        })
+        .map(|classified| {
+            json!({
+                "fingerprint": classified.fingerprint.0,
+                "category": classified.category.map(|category| category.as_str()),
+                "contract_field": classified.contract_field,
+                "required_action": classified.required_action,
+            })
+        })
+        .collect();
+    if previous_findings.is_empty() {
+        return None;
+    }
+    let payload = json!({
+        "note": "上一轮评审已登记的 finding 身份；fingerprint 是其稳定身份指纹",
+        "previous_findings": previous_findings,
+        "current_plan_candidate_ir_ref": current_ir_ref,
+    });
+    let serialized = serde_json::to_string_pretty(&payload).ok()?;
+    Some(format!(
+        "\n### Previous Review Round Findings\n{serialized}\n\
+         [previous_round_repetition_discipline]\n\
+         若上列某条 fingerprint 在本轮再次出现（同一问题未收敛），必须在该 finding 的 evidence 中显式标注 repeated 并说明为何自动修订未能关闭它；不得以改写措辞的方式隐式重复同一问题。\n"
+    ))
+}
+
+// 余量按完整多 WI plan 的增长预留；接近上限时先实测，再放宽至整百级。
+// 实测记录：2026-09-07 pi×重 levels 单轮 66018B（64KiB 触顶→72KiB）；2026-09-08 pi×重 v4 多轮修订 81923B（72KiB 触顶→96KiB）。若第三次触顶应转 history 压缩调优而非继续放宽。
+// 2026-09-07 3.6 矩阵 pi×重 levels 语料多轮修订真跑实测 66018B 触顶旧 64KiB，
+// 按上述方针提额至 72KiB（留 ~11% 余量）。
+pub(crate) const SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES: usize = 96 * 1024;
+
+pub(crate) fn ensure_single_candidate_review_prompt_budget(prompt: &str) -> Result<(), String> {
+    if prompt.len() <= SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES {
+        Ok(())
+    } else {
+        Err(format!(
+            "single-candidate reviewer prompt exceeds byte budget: actual={} max={}",
+            prompt.len(),
+            SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES
+        ))
+    }
+}
+
+impl WorkspaceEngine {
+    /// Task 2.4（REQ-ENV-10、REQ-PLN-01/PLN-07）：review builder 的
+    /// cwd/target 分离合同（返回 `(target_worktree, session_cwd)`）。
+    ///
+    /// LC 分支（注入 logical gateway）：Task 2（REQ-PLN-11，设计 A 条目 2）
+    /// lc 评审目标降级为 LC 根——target 与 cwd 均为 gateway 冻结的
+    /// canonical authority root（经 `working_directory` 字段合同下发；不从
+    /// target/worktree/进程 cwd 推导）；不再要求 `session.repository_path`
+    /// 是成员 worktree（多仓评审范围以材料集合解析为准，见
+    /// `assert_plan_review_material`）。legacy 直连面继续以 `working_dir`
+    /// 表达 target——gateway 启动侧以它锚 `PolicyTarget`，spawn 前
+    /// effective cwd 复验以 envelope 冻结值为准。
+    ///
+    /// 单仓分支（无 gateway）：原值不变——cwd 语义仍由 `working_dir` 承载
+    ///（`repository_path`，缺省回退进程 cwd），`working_directory` 保持
+    /// `None`（存量构造零行为变化）。
+    pub(crate) fn review_launch_target_and_cwd(
+        &self,
+    ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), String> {
+        if let Some(gateway) = self.logical_provider_gateway() {
+            let authority_root = gateway.authority_root().to_path_buf();
+            return Ok((authority_root.clone(), Some(authority_root)));
+        }
+        // 单仓分支逐字不动。注意：lc 会话上 `session.repository_path` 是
+        // 兼容字段，非 lc 范围权威（lc 评审范围 = 材料集合解析结果）。
+        let working_dir = match &self.session.repository_path {
+            Some(path) => path.clone(),
+            None => std::env::current_dir()
+                .map_err(|error| format!("working directory error: {error}"))?,
+        };
+        Ok((working_dir, None))
+    }
+}
+
+/// REQ-WSC-13/14：把该会话 durable 的「owner 已处置事实清单」注入 reviewer
+/// prompt。清单为空（owner 从未排除）→ None，输入面零变化。
+///
+/// 只喂**能拿到上轮上下文**的审查路径（单候选 Plan 复评、带
+/// `latest_review_verdict` 的通用评审）；全新候选的 Outline/Draft/Batch/
+/// Projection 路径不注入——那些轮次没有「上一轮处置」事实可对账。
+pub(crate) fn human_dispositions_section(engine: &WorkspaceEngine) -> Option<String> {
+    let lifecycle = engine.lifecycle_store.as_ref()?;
+    let records = lifecycle
+        .list_human_dispositions(&engine.session.session_id)
+        .ok()?;
+    render_human_dispositions_section(&records)
+}
+
+/// 纯渲染（单测入口）：把 durable 清单投影为 reviewer prompt 段落；空清单
+/// → None（输入面零变化）。
+pub(super) fn render_human_dispositions_section(
+    records: &[crate::product::models::HumanDispositionRecord],
+) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut rendered =
+        String::from("\n[human_dispositions]\nowner 已处置、不得重复报为 actionable 的事实：\n");
+    for record in records {
+        let summary = record.message_summary.trim();
+        let summary = if summary.is_empty() {
+            "<无摘要>"
+        } else {
+            summary
+        };
+        rendered.push_str(&format!(
+            "- {}：{}（owner 排除/已处置）\n",
+            record.finding_key, summary
+        ));
+    }
+    rendered.push_str(
+        "上述事实 MUST NOT 再报为 actionable；如仍要提及，只能 disposition=advisory 且 required_action 不得要求作者执行。\n",
+    );
+    Some(rendered)
+}
+
+#[cfg(test)]
+mod disposition_section_tests {
+    use super::*;
+    use crate::product::models::{HumanDispositionRecord, HumanFindingDispositionKind};
+
+    fn record(key: &str, summary: &str) -> HumanDispositionRecord {
+        HumanDispositionRecord {
+            finding_key: key.to_string(),
+            message_summary: summary.to_string(),
+            disposition: HumanFindingDispositionKind::Excluded,
+            recorded_at: "2026-10-30T00:00:00Z".to_string(),
+        }
+    }
+
+    /// REQ-WSC-13：清单渲染逐条列 key + 摘要，并声明不得再报为 actionable。
+    #[test]
+    fn renders_dispositions_with_key_and_summary() {
+        let rendered = render_human_dispositions_section(&[
+            record("0123456789abcdef", "中文 locale 尚未配置"),
+            record("fedcba9876543210", ""),
+        ])
+        .expect("non-empty ledger renders");
+
+        assert!(rendered.contains("[human_dispositions]"), "{rendered}");
+        assert!(rendered.contains("0123456789abcdef"), "{rendered}");
+        assert!(rendered.contains("中文 locale 尚未配置"), "{rendered}");
+        assert!(rendered.contains("<无摘要>"), "{rendered}");
+        assert!(
+            rendered.contains("MUST NOT 再报为 actionable"),
+            "{rendered}"
+        );
+    }
+
+    /// REQ-WSC-13：owner 从未排除 → 零注入（输入面逐字不变）。
+    #[test]
+    fn empty_ledger_injects_nothing() {
+        assert!(render_human_dispositions_section(&[]).is_none());
+    }
 }

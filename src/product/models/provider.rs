@@ -43,6 +43,21 @@ pub enum ProviderConversationRole {
     InternalReviewer,
 }
 
+impl ProviderConversationRole {
+    /// F-59：会话 wire 角色标签（与 serde snake_case 序列化同名）——
+    /// pending choice 投影/等待提示条的发问角色标注。
+    pub fn wire_label(&self) -> &'static str {
+        match self {
+            Self::Author => "author",
+            Self::Reviewer => "reviewer",
+            Self::Coder => "coder",
+            Self::Analyst => "analyst",
+            Self::CodeReviewer => "code_reviewer",
+            Self::InternalReviewer => "internal_reviewer",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderConversationRef {

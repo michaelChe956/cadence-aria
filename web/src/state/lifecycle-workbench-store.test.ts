@@ -81,6 +81,7 @@ const lifecycle: IssueLifecycleResponse = {
     issue_id: "issue_0001",
     project_id: "project_0001",
     repo_id: "repository_0001",
+    base_branch: null,
     workspace_id: null,
     task_id: null,
     session_id: null,
@@ -142,6 +143,7 @@ const lifecycle: IssueLifecycleResponse = {
   ],
   work_item_plans: [],
   work_items: [],
+  work_item_repository_groups: [],
   workspace_sessions: [],
   coding_attempts: [],
 };

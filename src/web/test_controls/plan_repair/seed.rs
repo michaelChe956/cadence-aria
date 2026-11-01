@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
+use chrono::Utc;
 use tokio::sync::mpsc;
 
 use super::{PlanRepairFixtureError, PlanRepairFixtureWaiting};
@@ -58,7 +59,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
 
     let store = CodingAttemptStore::new(paths.clone());
     if store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .is_some()
     {
@@ -94,6 +95,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
                 path: worktree.clone(),
                 default_policy_preset: Some("manual-write".to_string()),
                 default_provider_mode: Some("fake".to_string()),
+                idempotency_key: "plan-repair-seed-repository".to_string(),
             })
             .map_err(fixture_error)?;
         if repository.id != "repository_0001" {
@@ -106,6 +108,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             id: ISSUE_ID.to_string(),
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
             title: "Plan Repair fixture issue".to_string(),
             description: None,
             change_id: "plan-repair-fixture".to_string(),
@@ -114,6 +117,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             active_binding_id: None,
             created_at: CREATED_AT.to_string(),
             updated_at: CREATED_AT.to_string(),
+            base_branch: None,
         },
     )
     .map_err(fixture_error)?;
@@ -125,6 +129,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             issue_id: ISSUE_ID.to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Plan Repair fixture story".to_string(),
+            aggregate_codebase: None,
         })
         .map_err(fixture_error)?;
     let design = lifecycle
@@ -133,6 +138,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             issue_id: ISSUE_ID.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Plan Repair fixture design".to_string(),
+            aggregate_codebase: None,
         })
         .map_err(fixture_error)?;
     if story.id != "story_spec_0001" || design.id != "design_spec_0001" {
@@ -178,7 +184,9 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .map_err(fixture_error)?;
 
@@ -291,6 +299,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         dependency_graph_revision_id: dependency_graph.id.clone(),
         validation_report_ref: "plan_validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: CREATED_AT.to_string(),
     };
     let plan_projection = super::seed_projection::compile_plan_projection_bundle(
@@ -429,8 +438,15 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         .map_err(fixture_error)?;
 
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则过不了
+    // ensure_provider_run_allowed 的第二道防线。
+    attempt.admission_ticket_consumed_at = Some(Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::CodeReview;
-    store.save_coding_attempt(&attempt).map_err(fixture_error)?;
+    write_json(
+        &store.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+        &attempt,
+    )
+    .map_err(fixture_error)?;
     let lifecycle = LifecycleStore::new(paths);
     let base_plan_session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
@@ -439,10 +455,11 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             entity_id: PLAN_ID.to_string(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .map_err(fixture_error)?;
     lifecycle
@@ -473,7 +490,7 @@ pub(super) async fn route_upstream_contract_invalid(
 ) -> Result<PlanRepairFixtureWaiting, PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .ok_or_else(|| PlanRepairFixtureError::not_implemented("attempt_missing"))?;
     if attempt.status != CodingAttemptStatus::AwaitingPlanAmendment {
@@ -508,7 +525,7 @@ pub(super) async fn start_plan_repair_finding(
 ) -> Result<(), PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .ok_or_else(|| PlanRepairFixtureError::not_implemented("attempt_missing"))?;
     let revision_store = WorkItemRevisionStore::new(store.paths());
@@ -706,6 +723,7 @@ fn contract(
     blocker_rules: Vec<BlockerRule>,
 ) -> CanonicalWorkItemContract {
     CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_id.to_string(),
@@ -716,6 +734,7 @@ fn contract(
             summary: logical_id.to_string(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts,
         output_contracts: vec![PromisedOutputContract {
             contract_id: output_contract_id.to_string(),
@@ -747,6 +766,7 @@ pub(super) fn status_name(status: &CodingAttemptStatus) -> &'static str {
         CodingAttemptStatus::Running => "running",
         CodingAttemptStatus::WaitingForHuman => "waiting_for_human",
         CodingAttemptStatus::Blocked => "blocked",
+        CodingAttemptStatus::AwaitingManualRecovery => "awaiting_manual_recovery",
         CodingAttemptStatus::AwaitingPlanAmendment => "awaiting_plan_amendment",
         CodingAttemptStatus::ApplyingPlanAmendment => "applying_plan_amendment",
         CodingAttemptStatus::AmendmentApplyFailed => "amendment_apply_failed",

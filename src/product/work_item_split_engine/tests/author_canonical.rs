@@ -6,6 +6,7 @@ fn canonical_author_output(outline_id: &str, logical_work_item_id: &str) -> serd
         "draft": {
             "outline_id": outline_id,
             "logical_work_item_id": logical_work_item_id,
+            "target_repository_id": null,
             "canonical_contract": contract,
             "verification_plan": {
                 "checks": verification_checks
@@ -393,6 +394,7 @@ fn work_item_plan_author_canonical_prompt_requests_contract_candidate_only() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -447,6 +449,7 @@ fn work_item_plan_author_canonical_prompt_is_provider_neutral_about_verification
             WorkItemGenerationMode::Serial,
             &[],
             None,
+            &RoutingReferenceContext::Legacy,
         )
         .expect("draft invocation");
 

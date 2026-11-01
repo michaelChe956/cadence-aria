@@ -1,5 +1,7 @@
 use super::*;
-use crate::product::workspace_engine::review::{format_review_feedback, trusted_review_comments};
+use crate::product::workspace_engine::review::{
+    format_actionable_review_feedback, format_review_feedback, trusted_review_comments,
+};
 
 mod transaction;
 
@@ -124,61 +126,6 @@ pub(crate) fn build_work_item_plan_revision_input(
 }
 
 impl WorkspaceEngine {
-    pub(crate) fn review_decision_restarts_work_item_plan_outline(&self) -> bool {
-        self.session.workspace_type == WorkspaceType::WorkItemPlan
-            && self
-                .latest_review_verdict
-                .as_ref()
-                .and_then(|verdict| verdict.work_item_plan_review.as_ref())
-                .is_some_and(|review| {
-                    review.review_action == WorkItemPlanReviewAction::ReviseOutline
-                        || review.verdict == WorkItemPlanReviewVerdict::PlanReopenRequired
-                        || review
-                            .gates
-                            .contains(&WorkItemPlanReviewGate::RequiresPlanReopen)
-                })
-    }
-
-    pub(crate) fn human_confirm_should_revise_work_item_plan_outline(&self) -> bool {
-        if self.session.workspace_type != WorkspaceType::WorkItemPlan
-            || !self.current_artifact_is_work_item_plan_outline_candidate()
-        {
-            return false;
-        }
-
-        self.timeline_nodes
-            .iter()
-            .rev()
-            .find(|node| {
-                node.status == TimelineNodeStatus::Completed
-                    && matches!(
-                        &node.node_type,
-                        TimelineNodeType::WorkItemPlanOutlineReview
-                            | TimelineNodeType::WorkItemDraftReview
-                            | TimelineNodeType::WorkItemBatchReview
-                    )
-            })
-            .is_some_and(|node| node.node_type == TimelineNodeType::WorkItemPlanOutlineReview)
-    }
-
-    pub(crate) fn review_decision_outline_revision_persistence_policy(
-        &self,
-    ) -> OutlineRevisionPersistencePolicy {
-        match self
-            .latest_review_verdict
-            .as_ref()
-            .and_then(|verdict| verdict.work_item_plan_review.as_ref())
-            .map(|review| &review.review_scope)
-        {
-            Some(WorkItemPlanReviewScope::Item | WorkItemPlanReviewScope::Batch) => {
-                OutlineRevisionPersistencePolicy::RequireActiveRound
-            }
-            Some(WorkItemPlanReviewScope::Outline) | None => {
-                OutlineRevisionPersistencePolicy::AllowMissingInitialRound
-            }
-        }
-    }
-
     fn outline_revision_persistence_snapshot(
         &self,
         lifecycle: &LifecycleStore,
@@ -207,9 +154,6 @@ impl WorkspaceEngine {
             }
             WorkItemPlanOutlineRevisionSource::ReviewDecision => {
                 "Review Decision 已请求返修 WorkItemPlan Outline"
-            }
-            WorkItemPlanOutlineRevisionSource::HumanConfirm => {
-                "Human Confirm 已请求返修 WorkItemPlan Outline"
             }
         }
         .to_string();
@@ -659,29 +603,34 @@ impl WorkspaceEngine {
             if let Some(comments) = trusted_review_comments(verdict) {
                 parts.push(format!("Reviewer 审核意见:\n{comments}"));
             }
-            for finding in &verdict.findings {
+            // REQ-WSC-14（作者返修输入面）：owner 已处置 / 范围外 finding 已被平台
+            // 降级为 advisory——作者输入面只列 actionable。
+            for finding in verdict
+                .findings
+                .iter()
+                .filter(|finding| finding.is_actionable())
+            {
                 parts.push(format!(
                     "[{}] {}",
                     serialized_string(&finding.severity),
                     finding.message
                 ));
             }
-            let detailed_feedback = format_review_feedback(verdict);
+            let detailed_feedback = format_actionable_review_feedback(verdict);
             if !verdict.findings.is_empty() && !detailed_feedback.is_empty() {
                 parts.push(detailed_feedback);
             }
         }
         if let Some(context) = context.map(str::trim).filter(|c| !c.is_empty()) {
-            parts.push(format!("用户补充信息:\n{}", context));
+            parts.push(format!("用户补充信息:\n{context}"));
         }
         let requires_impact_closure = self.latest_review_verdict.as_ref().is_some_and(|verdict| {
             verdict.findings.iter().any(|finding| {
-                matches!(
-                    &finding.severity,
-                    ReviewFindingSeverity::Blocking
-                        | ReviewFindingSeverity::MustFix
-                        | ReviewFindingSeverity::StrongRecommendFix
-                )
+                finding.is_actionable()
+                    && matches!(
+                        &finding.severity,
+                        ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
+                    )
             }) || verdict
                 .structured_output_diagnostic
                 .as_ref()

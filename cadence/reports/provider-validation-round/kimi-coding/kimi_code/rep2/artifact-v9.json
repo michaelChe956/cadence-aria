@@ -1,0 +1,391 @@
+{
+  "event_seq": 16504,
+  "plan_projection": {
+    "coder_group_context": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**",
+            "package.json"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**",
+            "package.json"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "web/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/frontend/**",
+            "package.json"
+          ]
+        }
+      },
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "plan_id": "issue_work_item_plan_0001"
+    },
+    "coder_group_context_hash": "b2e1aef93b8c604e79c23787b567349126894331c9b9e495f53da9e080d720d7",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-18T16:59:18.616582849+00:00",
+    "dependency_graph_revision_id": "dependency_graph_revision_df3c368566e7510049ddd504",
+    "human_group_projection": {
+      "contract_flow": [
+        {
+          "contract_id": "CT-001",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+          ],
+          "required_capabilities": [
+            "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+          ],
+          "to": "WI-002"
+        },
+        {
+          "contract_id": "CT-001",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+          ],
+          "required_capabilities": [
+            "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-002",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听"
+          ],
+          "required_capabilities": [
+            "以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-003",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html"
+          ],
+          "required_capabilities": [
+            "GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-004",
+          "from": "WI-002",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels"
+          ],
+          "required_capabilities": [
+            "web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels"
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "normative": false,
+      "plan_id": "issue_work_item_plan_0001",
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "split_reason": "由 canonical handoff schema 投影",
+      "used_by_provider": false,
+      "work_items": [
+        {
+          "depends_on": [],
+          "goal": "WHEN 服务以默认或注入配置启动并接收 HTTP 请求 THE SYSTEM SHALL 仅使用 Node 内置模块提供 GET /api/levels 关卡数据 API、静态页面托管与契约定义的成功及错误响应。",
+          "logical_work_item_id": "WI-001",
+          "provides": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**",
+              "package.json"
+            ],
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ]
+          },
+          "title": "后端关卡列表 API 与静态托管服务"
+        },
+        {
+          "depends_on": [
+            "WI-001"
+          ],
+          "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 通过相对路径 GET /api/levels 加载并渲染五个关卡的名称、难度与锁定态且在请求或响应异常时保留页面框架并展示可读错误提示而不白屏。",
+          "logical_work_item_id": "WI-002",
+          "provides": [
+            "CT-004"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**",
+              "package.json"
+            ],
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ]
+          },
+          "title": "前端关卡选择页与异常展示"
+        },
+        {
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "goal": "WHEN 集成测试以默认配置启动真实服务并经 HTTP 访问页面与 API THE SYSTEM SHALL 产出同源可达、页面容器结构与脚本加载及 API 成功与错误响应契约的可观测证据。",
+          "logical_work_item_id": "WI-003",
+          "provides": [
+            "CT-005"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "web/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/frontend/**",
+              "package.json"
+            ],
+            "owned_scopes": [
+              "tests/integration/**"
+            ]
+          },
+          "title": "前后端集成联调验证"
+        }
+      ]
+    },
+    "human_group_projection_hash": "d91eec1e474c7065661ae9fbd96eac28aa8049b023ab2d0e73d6ff8f2ca842c6",
+    "id": "plan_projection_bundle_df3c368566e7510049ddd504",
+    "plan_revision_id": "plan_revision_df3c368566e7510049ddd504",
+    "reviewer_group_matrix": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 数据无效时返回 500 且错误体 code 为 LEVEL_DATA_UNAVAILABLE 且 message 为不含堆栈与绝对路径的可读消息"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "以 port 为 0 启动可获得临时端口且 stop() 返回 Promise 并释放监听"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "GET / 返回 staticRoot 下入口页 HTML 且 Content-Type 为 text/html"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js 经静态路径可获取且其源码以相对路径引用 /api/levels"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "requirement_id": "NFR-001",
+          "source_id": "design_spec_0001",
+          "source_type": "design_spec"
+        }
+      ],
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "criterion_refs": [
+            "AC-001",
+            "AC-002",
+            "AC-003",
+            "AC-004",
+            "AC-005",
+            "AC-006"
+          ],
+          "input_contract_refs": [],
+          "logical_work_item_id": "WI-001",
+          "output_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-007",
+            "AC-008",
+            "AC-009",
+            "AC-010"
+          ],
+          "input_contract_refs": [
+            "CT-001"
+          ],
+          "logical_work_item_id": "WI-002",
+          "output_contract_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-011",
+            "AC-012",
+            "AC-013",
+            "AC-014",
+            "AC-015"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003",
+            "CT-004"
+          ],
+          "logical_work_item_id": "WI-003",
+          "output_contract_refs": [
+            "CT-005"
+          ]
+        }
+      ]
+    },
+    "reviewer_group_matrix_hash": "37186d1759db6c7c5b213417d18a5c52e5918c2de24ba3ff5ff1bf2723dbfd70",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_a3d7535e82d5bd90c25c5da2",
+      "work_item_projection_bundle_80db1514eaa6c351056ef0b1",
+      "work_item_projection_bundle_fd288adbbbba61ed70c6fb10"
+    ]
+  },
+  "type": "artifact_update",
+  "version": 9
+}

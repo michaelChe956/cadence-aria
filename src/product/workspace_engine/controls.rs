@@ -31,29 +31,39 @@ impl WorkspaceEngine {
     pub async fn handle_confirm(&mut self) -> Result<WorkspaceConfirmOutcome, String> {
         match self.session.stage {
             WorkspaceStage::HumanConfirm => {
+                self.validate_confirm_aggregate_spec_gate()?;
+                // T4.1（REQ-REG-15 方案 A/D1）：合法 HumanConfirm 门在
+                // aggregate spec 校验后、定稿/创建子会话/直入 compile 之前
+                // 做确认 trust 按需准备（mutex 内锁定的 session 事实取有效
+                // provider；SC Approval 直入 compile 臂同样先准备）。Running
+                // 臂不登记。未 Ready 返回 typed TrustWaiting，零定稿副作用。
+                if let Err(waiting) = self
+                    .ensure_confirmation_trust_ready(
+                        self.session.author_provider.clone(),
+                        self.session.reviewer_provider.clone(),
+                    )
+                    .await
+                {
+                    return Ok(WorkspaceConfirmOutcome::TrustWaiting { waiting });
+                }
                 match self.session.workspace_type {
+                    WorkspaceType::WorkItemPlan
+                        if self.session.flow_kind
+                            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+                            && self.session.single_candidate_phase
+                                == Some(crate::product::models::SingleCandidatePhase::Approval) =>
+                    {
+                        // REQ-WSC-19：确认＝必然重跑 Final Compile。当前候选已
+                        // 确定编译不过时 fail-closed（与 close_human_gate 的
+                        // Approve 臂同一判据、同一文案），零 compile 副作用。
+                        self.ensure_current_candidate_compile_not_failed()?;
+                        self.enter_policy_valid_work_item_plan_compile_trust_ready()
+                            .await;
+                        return Ok(WorkspaceConfirmOutcome::None);
+                    }
                     WorkspaceType::WorkItemPlan => {
-                        self.complete_active_node(Some("已确认通过".to_string()))
-                            .await;
-                        self.mark_latest_artifact_confirmed(Some("human".to_string()));
-                        let (plan, new_sessions) = self.confirm_work_item_plan().await?;
-                        self.transition_stage(WorkspaceStage::Completed).await;
-                        let _ = self
-                            .create_timeline_node(TimelineNodeDraft {
-                                node_type: TimelineNodeType::Completed,
-                                agent: None,
-                                stage: WorkspaceStage::Completed,
-                                round: None,
-                                title: "WorkItemPlan 已确认".to_string(),
-                                summary: Some(format!(
-                                    "plan {} confirmed，已建立 {} 个子 WorkItem session",
-                                    plan.id,
-                                    new_sessions.len()
-                                )),
-                                status: TimelineNodeStatus::Completed,
-                            })
-                            .await;
-
+                        let (_plan, new_sessions) =
+                            self.confirm_work_item_plan_and_complete().await?;
                         return Ok(WorkspaceConfirmOutcome::WorkItemPlan {
                             child_sessions: new_sessions,
                         });
@@ -71,6 +81,76 @@ impl WorkspaceEngine {
             _ => {}
         }
         Ok(WorkspaceConfirmOutcome::None)
+    }
+
+    /// WorkItemPlan 确认的引擎推进段（**纯移动**自 `handle_confirm` 的 WorkItemPlan 臂，
+    /// 行为不变）：收口当前门节点 → 定稿产物 → `confirm_work_item_plan`（plan Draft→
+    /// Confirmed + 建子 WorkItem 会话，SC 流走 CAS 保留门快照）→ stage→Completed → SC
+    /// 终态相位 → Completed 节点。
+    ///
+    /// 两处共用：`handle_confirm`（HumanConfirm 门的 legacy/对话流）与 HTTP confirm 端点
+    /// 的 `WorkItemBatchConfirm` 分支（change plan-compile-gate-visibility Task 3——
+    /// 端点此前对 WorkItemPlan 走 store-only 兜底，只写 status=Confirmed，stage 停在
+    /// AuthorConfirm 且不建子会话，形成「既不能 advance 也无子会话」的半落状态）。
+    pub(crate) async fn confirm_work_item_plan_and_complete(
+        &mut self,
+    ) -> Result<(IssueWorkItemPlan, Vec<WorkspaceSessionRecord>), String> {
+        self.complete_active_node(Some("已确认通过".to_string()))
+            .await;
+        self.mark_latest_artifact_confirmed(Some("human".to_string()));
+        let (plan, new_sessions) = self.confirm_work_item_plan().await?;
+        self.transition_stage(WorkspaceStage::Completed).await;
+        self.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Completed,
+        );
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::Completed,
+                agent: None,
+                stage: WorkspaceStage::Completed,
+                round: None,
+                title: "WorkItemPlan 已确认".to_string(),
+                summary: Some(format!(
+                    "plan {} confirmed，已建立 {} 个子 WorkItem session",
+                    plan.id,
+                    new_sessions.len()
+                )),
+                status: TimelineNodeStatus::Completed,
+            })
+            .await;
+
+        Ok((plan, new_sessions))
+    }
+
+    /// Confirmed 写入前的聚合 Spec 门禁。Story/Design 的旧 HumanConfirm 路径与
+    /// main 引入的 `finalize_current_artifact` 路径均复用它，避免主干的对话式确认
+    /// 绕过多仓 involved/change_order 校验。
+    pub(crate) fn validate_confirm_aggregate_spec_gate(&self) -> Result<(), String> {
+        // Blocker 2 修复：confirm gate 下沉到 product 层（LifecycleStore 的
+        // validate_confirm_aggregate_spec），在置 Confirmed **前**拦截多仓 Story/Design
+        // 校验失败（involved 空 / 多仓 Design 缺 change_order），杜绝 WebSocket 绕过
+        // REQ-PLN-04/05 进入 prepare。失败返回 Err，不置 Confirmed（单仓不校验，红线）。
+        if matches!(
+            self.session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design
+        ) && let Some(store) = &self.lifecycle_store
+        {
+            store
+                .validate_confirm_aggregate_spec(
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                    &self.session.entity_id,
+                    &self.session.workspace_type,
+                )
+                .map_err(|error| {
+                    format!(
+                        "confirm gate 校验失败：{}: {}",
+                        error.stable_code(),
+                        error.message()
+                    )
+                })?;
+        }
+        Ok(())
     }
 
     /// WorkItemPlan 确认：plan/work_items Draft -> Confirmed，并幂等创建子 WorkItem session。
@@ -130,17 +210,42 @@ impl WorkspaceEngine {
             })
             .collect::<Vec<_>>();
 
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
+        if let Some(store) = &self.lifecycle_store
+            && self.session.flow_kind
+                == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+        {
+            // SC 计划批准链：Confirmed 落库必须保留 human_gate_snapshot（D11 预算
+            // 接续原 session 快照的单一预算源；D16 原 plan session 是唯一门宿主）。
+            // REQ-GCE-03 修订链重开同一门依赖该快照在场，因此这里用只改 status 的
+            // CAS 写入，绕开通用终态清理（update_workspace_session_status 会清快照）。
+            // 非_SC/legacy 路径继续走通用清理，语义不变。
+            if let Ok(expected) = store.get_workspace_session(&self.session.session_id)
+                && let Ok(record) = store.compare_and_update_workspace_session_status(
+                    &expected,
+                    WorkspaceSessionStatus::Confirmed,
+                )
+            {
+                self.session.session_status = record.status;
+            }
+        } else if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.update_workspace_session_status(
                 &self.session.session_id,
                 WorkspaceSessionStatus::Confirmed,
-            );
+            )
+        {
+            self.session.session_status = record.status;
         }
 
         Ok((plan, child_sessions))
     }
 
     pub fn handle_abort(&mut self) {
+        // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：engine 级 abort API
+        // （当前 workspace web 流未接入，保留位点以防未来接入时不可见）。
+        eprintln!(
+            "[aria-cancellation] workspace engine_handle_abort trigger=engine_handle_abort session_id={} role=none",
+            self.session.session_id
+        );
         self.cancel.cancel();
     }
 
@@ -170,16 +275,12 @@ impl WorkspaceEngine {
         }?;
 
         if let Some(store) = &self.lifecycle_store {
-            let reviewer_provider = self
-                .session
-                .reviewer_provider
-                .clone()
-                .unwrap_or(ProviderName::Codex);
+            // C2 Task 5（REQ-CRO-05）：三值透传——缺 reviewer 持久化空 effective。
             store
                 .update_workspace_session_providers(
                     &self.session.session_id,
                     self.session.author_provider.clone(),
-                    reviewer_provider,
+                    self.session.reviewer_provider.clone(),
                 )
                 .map_err(|error| format!("persist provider selection failed: {error}"))?;
             store
@@ -235,32 +336,5 @@ impl WorkspaceEngine {
             })
             .await;
         artifact_ref
-    }
-
-    pub(crate) async fn replace_current_artifact_payload(
-        &mut self,
-        payload: ArtifactPayload,
-    ) -> Result<u32, String> {
-        self.session.artifact = Some(payload.clone());
-        let Some(version) = self
-            .artifact_versions
-            .iter_mut()
-            .rev()
-            .find(|version| version.is_current)
-        else {
-            let artifact_ref = self.update_artifact(payload).await;
-            return Ok(artifact_ref.version);
-        };
-        version.payload = payload.clone();
-        let version_number = version.version;
-        self.persist_artifact_versions();
-        let _ = self
-            .event_tx
-            .send(EngineEvent::ArtifactUpdate {
-                version: version_number,
-                payload,
-            })
-            .await;
-        Ok(version_number)
     }
 }

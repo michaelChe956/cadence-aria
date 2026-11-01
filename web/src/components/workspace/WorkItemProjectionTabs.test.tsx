@@ -73,38 +73,8 @@ describe("WorkItemProjectionTabs", () => {
     expect(screen.getByText("contract-delta-001")).toBeInTheDocument();
   });
 
-  it("shows current plan and work item editors but hides them for historical projections", () => {
-    const onSavePresentation = vi.fn();
-    const { rerender } = render(
-      <WorkItemProjectionTabs
-        planProjection={planProjectionFixture()}
-        workItemProjections={[workItemProjectionFixture()]}
-        history={historyFixture()}
-        validation={{ findings: [] }}
-        presentations={{}}
-        presentationSaveStates={{}}
-        editable
-        onSavePresentation={onSavePresentation}
-      />,
-    );
-
-    expect(screen.getAllByRole("form", { name: "编辑人工说明" })).toHaveLength(2);
-
-    rerender(
-      <WorkItemProjectionTabs
-        planProjection={planProjectionFixture()}
-        workItemProjections={[workItemProjectionFixture()]}
-        history={historyFixture()}
-        validation={{ findings: [] }}
-        presentations={{}}
-        presentationSaveStates={{}}
-        editable={false}
-        onSavePresentation={onSavePresentation}
-      />,
-    );
-
-    expect(screen.queryByRole("form", { name: "编辑人工说明" })).not.toBeInTheDocument();
-  });
+  // 退役留档（T5/REQ-RET-02）：`shows current plan and work item editors but hides them for historical projections` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 });
 
 function renderProjectionTabs() {

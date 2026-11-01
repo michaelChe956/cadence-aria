@@ -1,6 +1,7 @@
 use crate::product::coding_models::{
     CodingUnitRun, CodingUnitRunStatus, CompactFindingDigest, PushStatus, RemoteKind,
-    ReviewRequest, ReviewRequestKind, ReviewVerdict, UnitReviewConclusionSnapshot,
+    ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
+    UnitReviewConclusionSnapshot,
 };
 use crate::product::coding_workspace_engine::group_review_material::{
     GroupReviewMaterialSnapshotDraft, ShardPromptMeasurer, compile_group_review_material,
@@ -125,6 +126,9 @@ fn request() -> ReviewRequest {
         external_url: None,
         manual_instructions: Vec::new(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
         created_at: "ignored".to_string(),
         updated_at: "ignored".to_string(),
     }
@@ -157,6 +161,7 @@ fn facts(bindings: &[AuthoritativeGroupReviewerBinding]) -> GroupGitFacts {
             .iter()
             .filter_map(|binding| binding.run.completion_commit.clone())
             .collect(),
+        scope_member_prefix: None,
     }
 }
 
@@ -358,6 +363,60 @@ fn material_marks_paths_forbidden_by_their_owning_unit() {
             && finding.detail == "package.json"
             && finding.related_unit_run_ids == ["run_owner"]
     }));
+}
+
+/// 多仓：forbidden scope 以聚合根为基准（`busi/package.json`），diff 路径是仓内相对
+/// （`package.json`）。带成员前缀时必须命中；不带前缀（修复前形态）静默不命中。
+#[test]
+fn material_marks_root_relative_forbidden_scope_with_member_prefix() {
+    let mut owner = binding(1, "owner", Vec::new(), Vec::new());
+    owner
+        .projection_binding
+        .projection
+        .scope_policy
+        .forbidden_scopes = vec!["busi/package.json".to_string()];
+    let bindings = vec![owner];
+    let snapshots = bindings.iter().map(snapshot).collect::<Vec<_>>();
+    let build_facts = |prefix: Option<&str>| {
+        let mut git_facts = facts(&bindings);
+        git_facts.completion_diffs[0].patch =
+            "diff --git a/package.json b/package.json\n@@ -0,0 +1 @@\n+{}\n".to_string();
+        git_facts.completion_diffs[0].file_stats = vec![DiffFileStat {
+            path: "package.json".to_string(),
+            insertions: 1,
+            deletions: 0,
+        }];
+        git_facts.scope_member_prefix = prefix.map(str::to_string);
+        git_facts
+    };
+
+    let with_prefix = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &build_facts(Some("busi")),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile with prefix");
+    assert!(with_prefix.diff_index.files[0].forbidden_scope_hit);
+    assert!(with_prefix.deterministic_findings.iter().any(|finding| {
+        finding.kind == "forbidden_scope_hit" && finding.detail == "package.json"
+    }));
+
+    let without_prefix = compile_group_review_material(
+        &bindings,
+        &snapshots,
+        &request(),
+        &build_facts(None),
+        &FixedMeasurer,
+        1_000,
+    )
+    .expect("compile without prefix");
+    assert!(
+        !without_prefix.diff_index.files[0].forbidden_scope_hit,
+        "单仓语义不变：无前缀时根相对 scope 不命中仓内相对路径"
+    );
 }
 
 #[test]

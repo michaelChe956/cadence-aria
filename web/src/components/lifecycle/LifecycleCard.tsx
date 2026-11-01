@@ -13,6 +13,46 @@ import {
   workItemWaitingReason,
 } from "../../state/lifecycle-workbench-store";
 
+// —— 实体视觉语言共享层（卡片与抽屉同构）——
+// 状态 chips 只跟「状态」走：同一状态在卡片与抽屉两个表面使用相同文案、
+// 语义色调与样式类；kind 色仅属于边框/图标/标签等结构元素。
+export const LIFECYCLE_STATUS_LABELS: Record<string, string> = {
+  confirmed: "已确认",
+  draft: "草稿",
+  in_review: "审核中",
+  change_requested: "要求修改",
+  blocked: "阻塞",
+  pending: "待处理",
+  planning: "规划中",
+  completed: "已完成",
+};
+
+export type LifecycleStatusTone = "confirmed" | "draft" | "neutral";
+
+export function lifecycleStatusTone(status: string): LifecycleStatusTone {
+  if (status === "confirmed" || status === "completed") {
+    return "confirmed";
+  }
+  if (status === "draft") {
+    return "draft";
+  }
+  return "neutral";
+}
+
+export function lifecycleStatusChipClass(status: string): string {
+  const tone = lifecycleStatusTone(status);
+  if (tone === "confirmed") {
+    return "rounded border px-1.5 py-0.5 border-emerald-300 bg-white/70 text-emerald-800";
+  }
+  if (tone === "draft") {
+    return "rounded border px-1.5 py-0.5 border-amber-300 bg-white/70 text-amber-800";
+  }
+  return "rounded border px-1.5 py-0.5 border-[var(--aria-line)] bg-white/70 text-[var(--aria-ink-muted)]";
+}
+
+export const LIFECYCLE_META_CHIP_CLASS =
+  "rounded border px-1.5 py-0.5 border-[var(--aria-line)] bg-white/70 text-[var(--aria-ink-muted)]";
+
 export function LifecycleCard({
   card,
   selected,
@@ -46,7 +86,8 @@ export function LifecycleCard({
       data-testid={`lifecycle-card-${card.kind}`}
       data-color-token={visual.token}
       data-delete-state={deleting ? "deleting" : "idle"}
-      aria-busy={deleting}
+      aria-current={selected ? "true" : undefined}
+      aria-busy={deleting || undefined}
       className={[
         "flex w-full items-start gap-2 rounded-md border border-l-4 p-3 text-left transition-colors focus-within:ring-2 focus-within:ring-[var(--aria-primary)]",
         visual.cardClassName,
@@ -85,22 +126,43 @@ export function LifecycleCard({
               </span>
             ) : null}
             <span className="mt-1 flex flex-wrap gap-1.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-              <span>{card.id}</span>
               <span
-                className={`rounded border px-1.5 py-0.5 ${visual.metaClassName}`}
+                data-testid="lifecycle-card-id-chip"
+                className={LIFECYCLE_META_CHIP_CLASS}
               >
-                {card.status}
+                {card.id}
+              </span>
+              <span
+                data-testid="lifecycle-card-status-chip"
+                data-tone={lifecycleStatusTone(card.status)}
+                className={lifecycleStatusChipClass(card.status)}
+              >
+                {LIFECYCLE_STATUS_LABELS[card.status] ?? card.status}
               </span>
               {card.version ? (
                 <span
-                  className={`rounded border px-1.5 py-0.5 ${visual.metaClassName}`}
+                  data-testid="lifecycle-card-version-chip"
+                  className={LIFECYCLE_META_CHIP_CLASS}
                 >
                   v{card.version}
                 </span>
               ) : null}
               {card.kind === "work_item" ? (
-                <span className="rounded border border-[var(--aria-line)] bg-white/70 px-1.5 py-0.5">
+                <span className={LIFECYCLE_META_CHIP_CLASS}>
                   {workItemKindLabel(card.raw.kind)}
+                </span>
+              ) : null}
+              {workItemReviewStatusLabel(card) ? (
+                <span
+                  data-testid="lifecycle-card-review-status"
+                  className={[
+                    "rounded border px-1.5 py-0.5",
+                    workItemReviewStatusLabel(card) === "Review 进行中"
+                      ? "border-sky-300 bg-sky-50 text-sky-800"
+                      : "border-[var(--aria-primary)] bg-white/70 text-[var(--aria-primary)]",
+                  ].join(" ")}
+                >
+                  {workItemReviewStatusLabel(card)}
                 </span>
               ) : null}
               {workItemStatusLabel ? (
@@ -181,7 +243,6 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
       hoverClassName: "hover:border-sky-300 hover:bg-sky-50",
       iconClassName: "text-sky-700",
       labelClassName: "border-sky-200 bg-sky-100 text-sky-800",
-      metaClassName: "border-sky-200 bg-white/70 text-sky-900",
     },
     story_spec: {
       label: "Story",
@@ -190,7 +251,6 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
       hoverClassName: "hover:border-emerald-300 hover:bg-emerald-50",
       iconClassName: "text-emerald-700",
       labelClassName: "border-emerald-200 bg-emerald-100 text-emerald-800",
-      metaClassName: "border-emerald-200 bg-white/70 text-emerald-900",
     },
     design_spec: {
       label: "Design",
@@ -199,7 +259,6 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
       hoverClassName: "hover:border-violet-300 hover:bg-violet-50",
       iconClassName: "text-violet-700",
       labelClassName: "border-violet-200 bg-violet-100 text-violet-800",
-      metaClassName: "border-violet-200 bg-white/70 text-violet-900",
     },
     work_item: {
       label: "Work Item",
@@ -208,7 +267,6 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
       hoverClassName: "hover:border-amber-300 hover:bg-amber-50",
       iconClassName: "text-amber-700",
       labelClassName: "border-amber-200 bg-amber-100 text-amber-900",
-      metaClassName: "border-amber-200 bg-white/70 text-amber-900",
     },
     work_item_group: {
       label: "Work Item Group",
@@ -217,7 +275,6 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
       hoverClassName: "hover:border-amber-300 hover:bg-amber-50",
       iconClassName: "text-amber-700",
       labelClassName: "border-amber-200 bg-amber-100 text-amber-900",
-      metaClassName: "border-amber-200 bg-white/70 text-amber-900",
     },
   } satisfies Record<
     LifecycleCardData["kind"],
@@ -228,7 +285,6 @@ function lifecycleCardVisual(kind: LifecycleCardData["kind"]) {
       hoverClassName: string;
       iconClassName: string;
       labelClassName: string;
-      metaClassName: string;
     }
   >;
 
@@ -254,6 +310,26 @@ function workItemStatusBadge(
   }
   if (card.raw.plan_status === "confirmed") {
     return { text: "可编码", waiting: false };
+  }
+  return null;
+}
+
+// F-26b：spec/plan 卡片的 workspace review 证据投影——timeline reviewer 节点
+// 状态经后端 review_status 传入（running/completed），issue 工作台不进会话页
+// 即可看到「review 已做/进行中」。issue/work_item 卡无此投影（零证据零展示）。
+function workItemReviewStatusLabel(card: LifecycleCardData): string | null {
+  if (
+    card.kind !== "story_spec" &&
+    card.kind !== "design_spec" &&
+    card.kind !== "work_item_group"
+  ) {
+    return null;
+  }
+  if (card.raw.review_status === "running") {
+    return "Review 进行中";
+  }
+  if (card.raw.review_status === "completed") {
+    return "Review 已完成";
   }
   return null;
 }

@@ -1,2 +1,7 @@
 include!("web_lifecycle_api/part_01.rs");
 include!("web_lifecycle_api/part_02.rs");
+include!("web_lifecycle_api/part_03.rs");
+include!("web_lifecycle_api/part_04.rs");
+include!("web_lifecycle_api/part_05.rs");
+include!("web_lifecycle_api/part_06.rs");
+include!("web_lifecycle_api/part_07.rs");

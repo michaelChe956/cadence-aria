@@ -1,0 +1,356 @@
+{
+  "type": "artifact_update",
+  "version": 11,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_ac4ae280917c28025ea25629",
+    "work_item_revision_id": "work_item_revision_ac4ae280917c28025ea25629",
+    "canonical_contract_hash": "3b606584d54009b6e01ff0004c7016c6de0579060c69e961c99dcb248f753086",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-003",
+      "title": "前后端集成联调验证",
+      "goal": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 经同一 Node 服务以真实 HTTP 同源请求验证页面入口结构、API 契约形状与错误语义。",
+      "non_goals": [
+        "不修改 server/、web/、data/levels.json 的产品实现。",
+        "不修改 tests/backend/ 与 tests/frontend/ 的上游测试。",
+        "不做浏览器自动化与运行时 DOM 渲染断言、该断言归属前端测试。"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "port 0 binds an ephemeral port for parallel test isolation"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "static file not found returns HTTP 404 with plain text response"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js references relative path /api/levels"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-006",
+          "capabilities": [
+            "example input for missing static resource is GET {origin}/missing.html and example output is HTTP 404 with plain text body 404 Not Found"
+          ],
+          "source_refs": [
+            "CT-006"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 以 start({ port: 0 }) 启动真实服务并请求 GET /api/levels THE SYSTEM SHALL 收到 200 与恰好 5 项且字段满足约束的顶层数组。",
+        "WHEN 请求 GET / 与页面脚本资源 THE SYSTEM SHALL 收到含 id=loading、id=level-list、id=error-message 并加载 web/level-select.js 的 HTML 响应以及含相对路径 /api/levels 引用的脚本响应。",
+        "WHEN 请求未知 API 路径、对 API 使用不支持方法与请求缺失静态资源 THE SYSTEM SHALL 分别收到 JSON 404、Content-Type 为 application/json; charset=utf-8 的 JSON 405 与 404 文本响应。",
+        "WHEN 运行 node --test tests/integration/ THE SYSTEM SHALL 全部用例通过、在零测试时判定失败且未修改 server/、web/ 与 data/levels.json。"
+      ],
+      "source_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013",
+        "AC-014",
+        "CHECK-005",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "CT-006",
+        "NFR-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "TASK-009",
+        "TASK-010"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_ac4ae280917c28025ea25629",
+      "objective": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 经同一 Node 服务以真实 HTTP 同源请求验证页面入口结构、API 契约形状与错误语义。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "port 0 binds an ephemeral port for parallel test isolation"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "static file not found returns HTTP 404 with plain text response"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js references relative path /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-009",
+        "TASK-010"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-009",
+          "statement": "WHEN 编写 tests/integration 集成测试 THE SYSTEM SHALL 先写失败测试并以 start({ port: 0 }) 启动真实服务后请求 GET / 与 GET /api/levels 断言同源可达、容器标记、脚本加载与 5 项契约形状。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-011"
+          ]
+        },
+        {
+          "task_id": "TASK-010",
+          "statement": "WHEN 断言错误语义 THE SYSTEM SHALL 请求未知 API 路径与不支持方法验证 404 与 405 的 JSON 错误体并以缺失静态资源验证 404 文本响应且不修改任何实现文件。",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "done_when_refs": [
+            "AC-013"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-011",
+          "statement": "WHEN 以 start({ port: 0 }) 启动真实服务并请求 GET /api/levels THE SYSTEM SHALL 收到 200 与恰好 5 项且字段满足约束的顶层数组。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-012",
+          "statement": "WHEN 请求 GET / 与页面脚本资源 THE SYSTEM SHALL 收到含 id=loading、id=level-list、id=error-message 并加载 web/level-select.js 的 HTML 响应以及含相对路径 /api/levels 引用的脚本响应。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-013",
+          "statement": "WHEN 请求未知 API 路径、对 API 使用不支持方法与请求缺失静态资源 THE SYSTEM SHALL 分别收到 JSON 404、Content-Type 为 application/json; charset=utf-8 的 JSON 405 与 404 文本响应。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-014",
+          "statement": "WHEN 运行 node --test tests/integration/ THE SYSTEM SHALL 全部用例通过、在零测试时判定失败且未修改 server/、web/ 与 data/levels.json。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-005",
+          "command": "node --test tests/integration/",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "集成证据覆盖 api_path=/api/levels、页面入口 GET /、脚本相对路径 /api/levels 引用与 404、405 错误形状; 浏览器级 e2e 由真实 HTTP 同源集成测试策略有意替代; 执行命令为 node --test tests/integration/"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-011",
+          "AC-012",
+          "AC-013",
+          "AC-014"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_ac4ae280917c28025ea25629",
+      "criterion_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013",
+        "AC-014"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-011",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-012",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-013",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-014",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "port 0 binds an ephemeral port for parallel test isolation"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "static file not found returns HTTP 404 with plain text response"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js references relative path /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-006",
+          "capabilities": [
+            "example input for missing static resource is GET {origin}/missing.html and example output is HTTP 404 with plain text body 404 Not Found"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-005",
+          "command": "node --test tests/integration/",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "6ceb201f6317e5648e33503efda1e9e501acd6baa19f89d7c44e075c161483d3",
+    "coder_projection_hash": "1e554fcef8e0f4c1d3c91753fdbad5a28df56f35298e38f309347d80e77bd401",
+    "reviewer_projection_hash": "9c2d960d059a6c28249bcc93aa3f820e374baa17beea97aa1795d5f1476d46f7",
+    "created_at": "2026-09-08T09:58:34.037662715+00:00"
+  }
+}

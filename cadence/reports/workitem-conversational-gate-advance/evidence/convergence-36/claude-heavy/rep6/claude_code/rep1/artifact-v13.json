@@ -1,0 +1,56 @@
+{
+  "type": "artifact_update",
+  "version": 13,
+  "work_item_revision_history": {
+    "entries": [
+      {
+        "kind": "draft_revision",
+        "id": "draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_1",
+        "logical_work_item_id": "WI-001",
+        "related_revision_id": "work_item_revision_12eb6cb0c1602ca7cb4c873e",
+        "summary": "Draft revision 1",
+        "created_at": "2026-09-10T21:57:19.620143980+00:00"
+      },
+      {
+        "kind": "draft_revision",
+        "id": "draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_2",
+        "logical_work_item_id": "WI-002",
+        "related_revision_id": "work_item_revision_8eeba39bd0b576720f32c559",
+        "summary": "Draft revision 1",
+        "created_at": "2026-09-10T21:57:19.620143980+00:00"
+      },
+      {
+        "kind": "draft_revision",
+        "id": "draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_3",
+        "logical_work_item_id": "WI-003",
+        "related_revision_id": "work_item_revision_a7c27502fd860899ab4e2a8b",
+        "summary": "Draft revision 1",
+        "created_at": "2026-09-10T21:57:19.620143980+00:00"
+      },
+      {
+        "kind": "work_item_revision",
+        "id": "work_item_revision_12eb6cb0c1602ca7cb4c873e",
+        "logical_work_item_id": "WI-001",
+        "related_revision_id": "draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_1",
+        "summary": "Compiled WorkItem revision from draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_1",
+        "created_at": "2026-09-10T21:57:19.620143980+00:00"
+      },
+      {
+        "kind": "work_item_revision",
+        "id": "work_item_revision_8eeba39bd0b576720f32c559",
+        "logical_work_item_id": "WI-002",
+        "related_revision_id": "draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_2",
+        "summary": "Compiled WorkItem revision from draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_2",
+        "created_at": "2026-09-10T21:57:19.620143980+00:00"
+      },
+      {
+        "kind": "work_item_revision",
+        "id": "work_item_revision_a7c27502fd860899ab4e2a8b",
+        "logical_work_item_id": "WI-003",
+        "related_revision_id": "draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_3",
+        "summary": "Compiled WorkItem revision from draft_c7ea446f99925efe4dee19522616abd1f4ef629e8bbf23f68934fffccef102c8_3",
+        "created_at": "2026-09-10T21:57:19.620143980+00:00"
+      }
+    ]
+  }
+}

@@ -1,0 +1,278 @@
+{
+  "provider": "pi",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/wic-phase1/pi/rep1",
+  "startedAt": "2026-08-27T01:30:07.998Z",
+  "finishedAt": "2026-08-27T01:44:02.035Z",
+  "elapsedSec": 834.037,
+  "issue_id": "issue_0016",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0019",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "pi",
+    "reviewer_provider": "pi",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "92cd2ef9d70bf14b3a46dff9ec34406e91fef4237d49a954ea49afd199d47655"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.152,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.215,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 215.349,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 215.43,
+      "source": "stage_change"
+    },
+    {
+      "stage": "review_decision",
+      "elapsedSec": 324.57,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 324.646,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 324.726,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 705.035,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 705.122,
+      "source": "stage_change"
+    },
+    {
+      "stage": "review_decision",
+      "elapsedSec": 832.838,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 833.73,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 833.732,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 833.91,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [
+    {
+      "node_id": "timeline_node_005",
+      "round": 1,
+      "elapsedSec": 324.571,
+      "verdict": "pass",
+      "options": [
+        "apply_optional_findings",
+        "skip_optional_findings"
+      ],
+      "selected_option": "skip_optional_findings",
+      "strategy": "skip_optional_findings_keyword"
+    },
+    {
+      "node_id": "timeline_node_010",
+      "round": 2,
+      "elapsedSec": 832.839,
+      "verdict": "pass",
+      "options": [
+        "apply_optional_findings",
+        "skip_optional_findings"
+      ],
+      "selected_option": "skip_optional_findings",
+      "strategy": "skip_optional_findings_keyword"
+    }
+  ],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 324.57,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "DEC-001 的默认端口 3000 与 PORT 环境变量覆盖行为未出现在 goal/scope（goal 仅写 start({ port }) 的 EXE-001 契约），只在 handoff_notes 中以交接常量形式提及；draft 阶段可能对 start() 未传 port 时是否读取 PORT env 产生歧义，进而影响交接常量的实现完整性。",
+          "evidence": "outline_backend.goal 仅含 \"start({ port }）（Promise resolve 为 { origin, port, stop }）\"（EXE-001）；handoff_notes 列 \"default_port=3000、port_env=PORT\"；Design DEC-001 要求 \"默认端口为 3000，允许通过环境变量 PORT 覆盖\"。",
+          "required_action": "在 outline_backend 的 goal 或 scope[0] 中显式纳入 DEC-001 的端口默认/覆盖语义（start() 未显式传 port 时默认 3000 且可被 PORT 环境变量覆盖），与 handoff 常量保持一致；Outline 结构无需返修。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "三项验证命令均要求目录零测试文件时判定失败，但 node --test 对空目录默认可能通过，当前仅由 risks 提示交由 draft 落地；若 draft 未固化显式守卫，AC-004 的失败语义可能落空。",
+          "evidence": "risks[1]：\"node --test 对空目录默认可能通过，draft 需以目录内测试存在性或计数作为失败保证\"；三个 outline 的 verification_intent 均含 \"目录零测试文件时判定失败（NFR-001/AC-004）\"。",
+          "required_action": "draft 阶段为每个测试目录固化零测试守卫机制（如目录内测试文件计数守卫或等价检查），确保 node --test <dir> 在零测试时以非零退出；Outline 层无需改动。"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 2,
+      "elapsedSec": 832.838,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "后端交接字段 default_port=3000 与 port_env=PORT 在草案内缺少需求/任务/验收支撑：capabilities 与 ac_backend_006 仅定义 start({ port })（含 port: 0）语义，五项任务与 design_traceability 均无端口默认值或 PORT 环境变量的溯源条目，t5 的核对动作缺少组内可对照的来源，存在交接值无法在本草案范围内核对的风险；因无下游 Work Item 消费该字段且不破坏组内一致性，不构成返修理由。",
+          "evidence": "draft_001（outline_backend）handoff_contract.required_fields 含 default_port=3000、port_env=PORT；ac_backend_006 仅断言 start({ port: 0 }) resolve 为 { origin, port, stop } 与 createServer 的 dataPath/staticRoot 默认值；design_traceability 的全部条目（REQ-002/003/004、AC-001/004、NFR-001、DEC-001/002、API-001/002/003、CMP-001/002/003、EXE-001~006、RISK-003、所有权边界）无一覆盖端口默认值或 PORT 环境变量语义。",
+          "required_action": "无需本组返修：后续编码轮执行 t5 核对交接字段时从设计规范原文（如 DEC-001/EXE-001 出处）确认 default_port 与 port_env 取值；若设计规范未定义 PORT 环境变量语义，在下一轮交接中去掉该字段或补充对应需求/契约溯源。"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "suggestion",
+      "message": "DEC-001 的默认端口 3000 与 PORT 环境变量覆盖行为未出现在 goal/scope（goal 仅写 start({ port }) 的 EXE-001 契约），只在 handoff_notes 中以交接常量形式提及；draft 阶段可能对 start() 未传 port 时是否读取 PORT env 产生歧义，进而影响交接常量的实现完整性。",
+      "evidence": "outline_backend.goal 仅含 \"start({ port }）（Promise resolve 为 { origin, port, stop }）\"（EXE-001）；handoff_notes 列 \"default_port=3000、port_env=PORT\"；Design DEC-001 要求 \"默认端口为 3000，允许通过环境变量 PORT 覆盖\"。",
+      "required_action": "在 outline_backend 的 goal 或 scope[0] 中显式纳入 DEC-001 的端口默认/覆盖语义（start() 未显式传 port 时默认 3000 且可被 PORT 环境变量覆盖），与 handoff 常量保持一致；Outline 结构无需返修。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "三项验证命令均要求目录零测试文件时判定失败，但 node --test 对空目录默认可能通过，当前仅由 risks 提示交由 draft 落地；若 draft 未固化显式守卫，AC-004 的失败语义可能落空。",
+      "evidence": "risks[1]：\"node --test 对空目录默认可能通过，draft 需以目录内测试存在性或计数作为失败保证\"；三个 outline 的 verification_intent 均含 \"目录零测试文件时判定失败（NFR-001/AC-004）\"。",
+      "required_action": "draft 阶段为每个测试目录固化零测试守卫机制（如目录内测试文件计数守卫或等价检查），确保 node --test <dir> 在零测试时以非零退出；Outline 层无需改动。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "后端交接字段 default_port=3000 与 port_env=PORT 在草案内缺少需求/任务/验收支撑：capabilities 与 ac_backend_006 仅定义 start({ port })（含 port: 0）语义，五项任务与 design_traceability 均无端口默认值或 PORT 环境变量的溯源条目，t5 的核对动作缺少组内可对照的来源，存在交接值无法在本草案范围内核对的风险；因无下游 Work Item 消费该字段且不破坏组内一致性，不构成返修理由。",
+      "evidence": "draft_001（outline_backend）handoff_contract.required_fields 含 default_port=3000、port_env=PORT；ac_backend_006 仅断言 start({ port: 0 }) resolve 为 { origin, port, stop } 与 createServer 的 dataPath/staticRoot 默认值；design_traceability 的全部条目（REQ-002/003/004、AC-001/004、NFR-001、DEC-001/002、API-001/002/003、CMP-001/002/003、EXE-001~006、RISK-003、所有权边界）无一覆盖端口默认值或 PORT 环境变量语义。",
+      "required_action": "无需本组返修：后续编码轮执行 t5 核对交接字段时从设计规范原文（如 DEC-001/EXE-001 出处）确认 default_port 与 port_env 取值；若设计规范未定义 PORT 环境变量语义，在下一轮交接中去掉该字段或补充对应需求/契约溯源。"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "wi_backend_levels_service",
+    "wi_frontend_level_select",
+    "wi_integration_levels_sameorigin"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 996,
+      "output_tokens": 1619,
+      "cache_read_tokens": 37760,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json",
+    "artifact-v10.json",
+    "artifact-v11.json",
+    "artifact-v12.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "legacy",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 2,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "batch:round_001": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "outline:outline_artifact_1": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "provider_start_count": 0,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.063,
+    "1:running": 215.134,
+    "2:author_confirm": 0.081,
+    "3:cross_review": 109.14,
+    "4:review_decision": 0.076,
+    "5:author_confirm": 0.08,
+    "6:running": 380.309,
+    "7:author_confirm": 0.087,
+    "8:cross_review": 127.716,
+    "9:review_decision": 0.892,
+    "10:running": 0.002,
+    "11:human_confirm": 0.178,
+    "12:completed": 0.127
+  }
+}

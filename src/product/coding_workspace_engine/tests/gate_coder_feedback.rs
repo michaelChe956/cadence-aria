@@ -18,16 +18,12 @@ async fn code_review_blocked_gate_accepts_manual_feedback_without_findings() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
     attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running");
     attempt = store
         .update_attempt_stage(
@@ -64,6 +60,8 @@ async fn code_review_blocked_gate_accepts_manual_feedback_without_findings() {
                 role_run_id: None,
                 run_no: Some(1),
                 unit_run_id: None,
+                acceptance: None,
+                review_window_id: None,
             },
         )
         .expect("code review report");

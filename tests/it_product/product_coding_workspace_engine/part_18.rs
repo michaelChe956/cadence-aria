@@ -5,14 +5,7 @@ async fn handle_abort_marks_attempt_aborted_and_closes_active_timeline_node() {
     let attempt = store
         .create_attempt(create_input())
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",

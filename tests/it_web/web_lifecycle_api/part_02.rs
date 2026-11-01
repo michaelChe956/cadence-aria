@@ -476,10 +476,11 @@ async fn bootstrap_confirmed_work_item_session(
             entity_id: "work_item_0001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider,
-            reviewer_provider,
+            reviewer_provider: Some(reviewer_provider),
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .expect("create work item session");
     lifecycle
@@ -508,13 +509,224 @@ async fn request_json(
     (status, value)
 }
 
+async fn delete_repository_with_idempotency_key(
+    app: axum::Router,
+    project_id: &str,
+    repository_id: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(Method::DELETE)
+        .uri(format!(
+            "/api/projects/{project_id}/repositories/{repository_id}"
+        ))
+        .header("content-type", "application/json")
+        .header("Idempotency-Key", "test-delete-repo-lifecycle-0001")
+        .body(Body::from("{}".to_string()))
+        .expect("delete repository request");
+    let response = app
+        .oneshot(request)
+        .await
+        .expect("delete repository response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("delete repository body");
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
 fn git_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("repo");
+    // REQ-PIB-02：issue 基线解析要求 refs/heads 可解析（裸 init 无分支会
+    // fail-closed），夹具对齐生产不变量（main 分支+初始提交）。
     let status = Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(dir.path())
         .status()
         .expect("git init");
     assert!(status.success());
+    for args in [
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(dir.path())
+            .status()
+            .expect("git fixture");
+        assert!(status.success());
+    }
     dir
+}
+
+// ---- 方案 X 阶段1：聚合代码库（Logical）Web 接入回归测试（Task 5）----
+// 多仓 issue 无 repo_id（manifest + selection 同时存在 → RepositoryRouting::Logical）：
+// 1. issue_lifecycle 不要求 repo_id（Logical 分支不报 repository_required）；
+// 2. generate_story_specs Logical 分支经 PlanningContextResolver + 草稿态 create + 注入
+//    aggregate prompt（session context message 含 inventory + 聚合视野指令）。
+use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
+use cadence_aria::product::lifecycle_store::CreateStorySpecInput;
+use cadence_aria::product::logical_codebase::{
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositorySourceIdentity, RepositoryType,
+    aggregate_index::{
+        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
+        AggregateIndexStore,
+    },
+    policy::AggregatePolicyArtifactStore,
+};
+use cadence_aria::product::models::LifecycleConfirmationStatus;
+
+/// 多仓场景 fixture：写 manifest + active member + checkout + 显式 selection + active
+/// aggregate index + policy bootstrap，使 `RepositoryRouting::load_for_issue` 判为 Logical。
+///
+/// PlanningContextResolver 会在读取 active index 前采集成员 Git evidence，因此这里的
+/// main checkout 必须是带提交的真实 Git 仓，且已发布快照必须匹配该提交。
+fn seed_logical_codebase(app_paths: &ProductAppPaths, member_id: LogicalRepositoryId) {
+    let aggregate_root = app_paths.root().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).expect("create aggregate-root fixture dir");
+    let checkout_path = aggregate_root.join("api");
+    std::fs::create_dir_all(&checkout_path).expect("create api checkout fixture dir");
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("initialize api checkout git repository");
+    assert!(
+        init.status.success(),
+        "git init fixture failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    std::fs::write(checkout_path.join("lib.rs"), "pub fn fixture() {}\n")
+        .expect("write api checkout fixture source");
+    let commit = Command::new("git")
+        .args(["add", "lib.rs"])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("stage api checkout fixture source");
+    assert!(
+        commit.status.success(),
+        "git add fixture failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "initial fixture",
+        ])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("commit api checkout fixture source");
+    assert!(
+        commit.status.success(),
+        "git commit fixture failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let revision_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&checkout_path)
+        .output()
+        .expect("read api checkout fixture revision");
+    assert!(
+        revision_output.status.success(),
+        "git rev-parse fixture failed: {}",
+        String::from_utf8_lossy(&revision_output.stderr)
+    );
+    let revision = String::from_utf8(revision_output.stdout)
+        .expect("git revision is UTF-8")
+        .trim()
+        .to_string();
+    let manifest =
+        LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), vec![member_id]);
+    LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest("project_0001", &manifest)
+        .unwrap();
+    let now = "2026-08-10T00:00:00Z".to_string();
+    LogicalCodebaseStore::new(app_paths.clone())
+        .save_member(
+            "project_0001",
+            &CodebaseMemberRecord {
+                logical_repository_id: member_id,
+                physical_repository_id: "repository_api".to_string(),
+                alias: "api".to_string(),
+                role: "service".to_string(),
+                ordinal: 1,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &checkout_path,
+                    checkout_path.join(".git"),
+                    Some("ssh://git@example.test/acme/api.git".to_string()),
+                ),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".to_string()],
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![RepositoryCheckoutId(uuid::Uuid::nil())],
+                status: MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .unwrap();
+    LogicalCodebaseStore::new(app_paths.clone())
+        .save_checkout(
+            "project_0001",
+            &RepositoryCheckoutRecord {
+                checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+                logical_repository_id: member_id,
+                physical_repository_id: "repository_api".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: checkout_path,
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: "sha256:git-dir".to_string(),
+                revision: Some(revision.clone()),
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .unwrap();
+    IssueCodebaseSelectionStore::new(app_paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![member_id],
+            Vec::new(),
+            Vec::new(),
+            None,
+        ))
+        .unwrap();
+    let index = AggregateIndexRecord::building(
+        "aggregate_index_0001".to_string(),
+        "project_0001".to_string(),
+        manifest.membership_revision,
+        vec![AggregateIndexMemberSnapshot::indexed(
+            member_id,
+            RepositoryCheckoutId(uuid::Uuid::nil()),
+            revision,
+            false,
+            now.clone(),
+        )],
+        now.clone(),
+    );
+    AggregateIndexStore::new(app_paths.clone())
+        .create("project_0001", index.clone())
+        .unwrap();
+    let mut activated = index;
+    activated.status = AggregateIndexStatus::Active;
+    AggregateIndexStore::new(app_paths.clone())
+        .replace_active("project_0001", activated)
+        .unwrap();
+    AggregatePolicyArtifactStore::new(app_paths.clone())
+        .ensure_bootstrap(&manifest)
+        .unwrap();
 }

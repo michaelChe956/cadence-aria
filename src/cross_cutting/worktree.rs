@@ -332,6 +332,17 @@ fn scope_pair_may_overlap(left: &str, right: &str, case_sensitive: bool) -> bool
 }
 
 pub(crate) fn scope_allows_path(scope: &str, relative_path: &str, case_sensitive: bool) -> bool {
+    // F-25（kimi author 方言，现场 attempt 9298fe0b）：author 可能把
+    // exclusive/forbidden scopes 产成顿号单串（"server/**、data/levels.json"）
+    // 而非数组；整体当 glob 解析会把 base 钉在首段上，错拒/错放后续段
+    // （final_confirm diff 门错拒 data/levels.json）。确定性机械修：顿号按
+    // 分隔符切分、逐段独立匹配，空段永不放行；glob/大小写/路径归一语义
+    // 零变化（对照弯引号归一化 c60dbae9 的同族保守边界）。
+    if scope.contains('、') {
+        return scope
+            .split('、')
+            .any(|part| scope_allows_path(part, relative_path, case_sensitive));
+    }
     let pattern = ScopePattern::parse(scope, case_sensitive);
     let path = normalize_scope_text(relative_path, case_sensitive);
     if pattern.all {
@@ -343,6 +354,58 @@ pub(crate) fn scope_allows_path(scope: &str, relative_path: &str, case_sensitive
     path == pattern.base
 }
 
+/// 多仓（LC）scope 的路径域兼容匹配。
+///
+/// 多仓 Work Item 的 scope 以聚合根为基准书写（`busi/src/a.ts`），而 git 事实
+/// 给出的是仓内相对路径（`src/a.ts`）。`member_prefix` 为成员 checkout 相对聚合根
+/// 的目录（如 `busi`）：仓内相对与「根相对带前缀」两种写法任一命中即视为命中；
+/// 无前缀（单仓）时与 `scope_allows_path` 完全等价。
+pub(crate) fn scope_allows_member_path(
+    scope: &str,
+    repo_relative_path: &str,
+    member_prefix: Option<&str>,
+    case_sensitive: bool,
+) -> bool {
+    scope_allows_path(scope, repo_relative_path, case_sensitive)
+        || member_prefix.is_some_and(|prefix| {
+            scope_allows_path(
+                scope,
+                &format!("{prefix}/{repo_relative_path}"),
+                case_sensitive,
+            )
+        })
+}
+
+/// scope 的固定路径锚点提取（REQ-WSC-10 归属判定辅助）：给出该 scope
+/// 钉死的根相对路径域——首个 `*` 之前的固定段（顿号方言按 F-25 分隔符
+/// 逐段展开、逐段归一），`busi/src/**` → `busi/src`、`scripts/dev.sh` →
+/// `scripts/dev.sh`、`web/src/` → `web/src`。无固定锚点的 scope（`*`、
+/// `**/x` 等无确定路径域）不产出锚点——「锚不住」不是错误，由调用方按
+/// 各自规则处置，不得据此判违规。归一与 [`ScopePattern::parse`] 同源
+///（反斜杠/`./` 前缀/重复斜杠/大小写），不另立第二套语义。
+pub(crate) fn scope_fixed_path_anchors(scope: &str, case_sensitive: bool) -> Vec<String> {
+    if scope.contains('、') {
+        return scope
+            .split('、')
+            .flat_map(|part| scope_fixed_path_anchors(part, case_sensitive))
+            .collect();
+    }
+    let normalized = normalize_scope_text(scope, case_sensitive);
+    if normalized == "*" {
+        return Vec::new();
+    }
+    let base = if normalized.contains('*') {
+        normalized.split('*').next().unwrap_or_default()
+    } else {
+        normalized.as_str()
+    };
+    let anchor = base.trim_end_matches('/');
+    if anchor.is_empty() {
+        Vec::new()
+    } else {
+        vec![anchor.to_string()]
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopePattern {
     base: String,
@@ -427,4 +490,139 @@ fn platform_case_sensitive() -> bool {
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scope_allows_member_path, scope_allows_path, scope_fixed_path_anchors};
+
+    /// F-25（kimi author 方言，现场 attempt 9298fe0b）：author 把
+    /// exclusive_scopes 产成顿号单串（"server/**、data/levels.json、
+    /// tests/backend/**"）而非数组；整体当 glob 解析时 base 钉在首段
+    /// "server/" 上，final_confirm diff 门错拒合法改动 data/levels.json。
+    /// 确定性机械修：顿号是分隔符，逐段独立匹配，不扩大也不缩小授权面。
+    #[test]
+    fn dun_separated_scope_string_matches_each_alternative_independently() {
+        let scope = "server/**、data/levels.json、tests/backend/**";
+        // 现场：单串第二段（精确路径）必须放行——修复前 base=server/ 错拒。
+        assert!(scope_allows_path(scope, "data/levels.json", true));
+        // 各段按独立 glob 生效：wildcard 段、目录前缀段照常匹配。
+        assert!(scope_allows_path(scope, "server/api/mod.rs", true));
+        assert!(scope_allows_path(scope, "tests/backend/init.rs", true));
+        // 顿号外路径仍拒绝——分隔不扩大授权面。
+        assert!(!scope_allows_path(scope, "web/index.html", true));
+        assert!(!scope_allows_path(scope, "server", true));
+    }
+
+    /// forbidden 方向同方言：顿号单串 forbidden scope 逐段生效，任一段
+    /// 命中即违规（gates final_confirm 的 forbidden 检查消费同一函数）。
+    #[test]
+    fn dun_separated_forbidden_scope_flags_each_alternative() {
+        let scope = "docs/**、secrets.json";
+        assert!(scope_allows_path(scope, "docs/api.md", true));
+        assert!(scope_allows_path(scope, "secrets.json", true));
+        assert!(!scope_allows_path(scope, "src/main.rs", true));
+    }
+
+    /// 空段永不放行：连续顿号/首尾顿号产生的空串不是通配授权。
+    #[test]
+    fn dun_split_empty_segments_never_allow() {
+        assert!(!scope_allows_path("、", "anything.rs", true));
+        assert!(!scope_allows_path(
+            "server/**、、web/**",
+            "anything.rs",
+            true
+        ));
+        assert!(!scope_allows_path("、server/**", "web/x.rs", true));
+    }
+
+    /// 多仓现场形态：scope 以聚合根为基准（`busi/src/notifications.ts`），
+    /// git 事实是仓内相对（`src/notifications.ts`）。带成员前缀时两种写法任一命中即放行。
+    #[test]
+    fn member_prefixed_scope_matches_repo_relative_path() {
+        assert!(!scope_allows_path(
+            "busi/src/notifications.ts",
+            "src/notifications.ts",
+            true
+        ));
+        assert!(scope_allows_member_path(
+            "busi/src/notifications.ts",
+            "src/notifications.ts",
+            Some("busi"),
+            true
+        ));
+        assert!(scope_allows_member_path(
+            "busi/test/**",
+            "test/notifications.test.ts",
+            Some("busi"),
+            true
+        ));
+        // 仓内相对写法的 scope 仍然命中。
+        assert!(scope_allows_member_path(
+            "src/**",
+            "src/a.ts",
+            Some("busi"),
+            true
+        ));
+        // 他仓前缀的 scope 不会命中本仓路径。
+        assert!(!scope_allows_member_path(
+            "api/src/**",
+            "src/a.ts",
+            Some("busi"),
+            true
+        ));
+        // 顿号单串在前缀域同样逐段生效。
+        assert!(scope_allows_member_path(
+            "api/src/**、busi/src/**",
+            "src/a.ts",
+            Some("busi"),
+            true
+        ));
+    }
+
+    /// 单仓（无前缀）与 `scope_allows_path` 等价，不放宽也不收紧。
+    #[test]
+    fn member_matcher_without_prefix_is_identical_to_plain_matcher() {
+        for (scope, path) in [
+            ("src/**", "src/a.ts"),
+            ("busi/src/**", "src/a.ts"),
+            ("src/a.ts", "src/b.ts"),
+        ] {
+            assert_eq!(
+                scope_allows_member_path(scope, path, None, true),
+                scope_allows_path(scope, path, true)
+            );
+        }
+    }
+
+    /// REQ-WSC-10 归属判定的锚点提取：固定段、顿号方言、归一与「锚不住
+    /// 不判」三类边界。
+    #[test]
+    fn scope_fixed_path_anchors_extract_normalized_fixed_prefixes() {
+        assert_eq!(
+            scope_fixed_path_anchors("busi/src/**", true),
+            vec!["busi/src".to_string()]
+        );
+        assert_eq!(
+            scope_fixed_path_anchors("scripts/dev.sh", true),
+            vec!["scripts/dev.sh".to_string()]
+        );
+        // 目录形 scope 去尾部斜杠；`./` 前缀与反斜杠归一。
+        assert_eq!(
+            scope_fixed_path_anchors("web/src/", true),
+            vec!["web/src".to_string()]
+        );
+        assert_eq!(
+            scope_fixed_path_anchors(r".\busi\src\x", true),
+            vec!["busi/src/x".to_string()]
+        );
+        // 顿号方言逐段展开。
+        assert_eq!(
+            scope_fixed_path_anchors("busi/a.ts、web/b.ts", true),
+            vec!["busi/a.ts".to_string(), "web/b.ts".to_string()]
+        );
+        // 无固定锚点（`*`、`**/x`）不产出锚点。
+        assert!(scope_fixed_path_anchors("*", true).is_empty());
+        assert!(scope_fixed_path_anchors("**/x.ts", true).is_empty());
+    }
 }

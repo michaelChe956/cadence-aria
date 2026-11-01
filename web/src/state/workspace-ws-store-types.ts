@@ -1,4 +1,13 @@
 import type {
+  WorkItemPlanCandidateCompileFailure,
+  AutomationOwnership,
+  ChoiceOption,
+  ChoiceQuestion,
+  HumanGateTurnRejectionProjection,
+  LcResumeRecoveryDto,
+  UsageReportPayload,
+} from "../api/types/workspace";
+import type {
   ProviderPermissionMode,
   WorkspaceProviderName,
   HumanPresentationRevision,
@@ -64,7 +73,7 @@ export type ProviderStatus =
   | "completed"
   | "failed"
   | "aborted";
-export type ExecutionEventKind = "provider" | "turn" | "command" | "output" | "artifact";
+export type ExecutionEventKind = "provider" | "turn" | "command" | "output" | "artifact" | "usage";
 export type ExecutionEventStatus =
   | "started"
   | "running"
@@ -179,6 +188,10 @@ export interface TimelineNode {
   title: string;
   summary?: string | null;
   started_at: string;
+  // 最近一次引擎事件时间（客户端维护，见 store 的 addTimelineNode / updateTimelineNode /
+  // appendStreamChunk 刷新点）；REQ-UI37-18 的「长时间无事件」静默判据取本字段，
+  // 老数据或重建快照缺省时回退 `started_at`。
+  last_event_at?: string | null;
   completed_at?: string | null;
   duration_ms?: number | null;
   artifact_ref?: string | null;
@@ -195,25 +208,28 @@ export interface ReviewVerdict {
   structured_output_diagnostic?: StructuredOutputDiagnostic | null;
 }
 
-export type ReviewFindingSeverity =
-  | "blocking"
-  | "must_fix"
-  | "strong_recommend_fix"
-  | "suggestion"
-  | "minor"
-  | "optional";
+export type ReviewFindingSeverity = "blocking" | "must_fix" | "suggestion";
 
 export type ReviewGate =
   | "requires_revision"
   | "user_confirm_allowed"
   | "user_triage_required";
 
+/** REQ-WSC-11：`needs_human` 结论面向 owner 的单条互斥选项。 */
+export interface ReviewOwnerOption {
+  label: string;
+  consequence: string;
+}
+
 export interface ReviewFinding {
   severity: ReviewFindingSeverity;
   message: string;
   evidence: string;
-  impact: string;
   required_action: string;
+  /** REQ-WSC-11：面向 owner 的一句话人话提问（仅 needs_human 携带）。 */
+  owner_question?: string | null;
+  /** REQ-WSC-11：owner 可选的互斥处置项（2–3 项）。 */
+  owner_options?: ReviewOwnerOption[] | null;
 }
 
 export interface ArtifactVersionSummary {
@@ -236,7 +252,15 @@ export interface ArtifactVersion extends ArtifactVersionSummary {
   projection_validation?: ProjectionValidationReport;
 }
 
-export type TimelineNodeDetail = NodeDetail;
+/**
+ * F-47 REQ-NDR-01/03：`hydration_pending` 是前端本地水合态标记（非 WS/REST 载荷
+ * 字段）。`emptyNodeDetail` 造的占位壳带 `hydration_pending: true`，表示该节点的
+ * durable detail 尚未经 REST 水合或快照内联填充；一旦有本地内容写入（流式分片 /
+ * 执行事件 / 消息 / 结论，见 `ensureNodeDetail`）或 REST/内联 detail 落库，标记即消失。
+ * 用途：①快照 merge 只保留「已物化」条目，纯占位壳按当前节点重建（避免沿用陈旧
+ * status/ended_at）；②token 位据此区分「尚未读取」与「确认无 usage」。
+ */
+export type TimelineNodeDetail = NodeDetail & { hydration_pending?: boolean };
 
 export interface NodeDetailSummary {
   node_id: string;
@@ -272,16 +296,250 @@ export interface RecoverableInterruptedRun {
   label: string;
 }
 
+export type WorkspaceSessionStatus =
+  | "open"
+  | "running"
+  | "waiting_for_human"
+  | "confirmed"
+  | "change_requested"
+  | "blocked_provider_unavailable"
+  | "terminated"
+  | "stopped_needs_human"
+  | "failed";
+export type WorkItemPlanFlowKind = "legacy" | "single_candidate";
+export type WorkItemPlanRunPolicy = "interactive" | "auto_if_valid";
+export type WorkItemPlanSingleCandidatePhase =
+  | "prepare"
+  | "generate"
+  | "evaluate"
+  | "approval"
+  | "completed"
+  | "failed";
+export interface WorkItemPlanRunHistory {
+  seen_fingerprints: string[];
+  repairs_used: number;
+  manual_repairs_used: number;
+  transitions_used: number;
+  initial_review_count: number;
+  verification_review_count: number;
+  review_cycles?: Record<
+    string,
+    { repairs_used: number; initial_count: number; verification_count: number }
+  >;
+}
+
+export interface WorkItemPlanHumanGateSnapshot {
+  findings: Array<{
+    class: "mechanical_error" | "repairable" | "human_required" | "advisory";
+    fingerprint: string;
+    category: string | null;
+    severity: string;
+    message: string;
+    evidence: string | null;
+    required_action: string | null;
+    contract_field: string | null;
+    /** C1（REQ-TOP-04 场景 4）：无稳定 ID 措辞域身份——true 时跨轮对比禁推断。 */
+    identity_unstable?: boolean;
+  }>;
+  repeated_fingerprints: string[];
+  attempts_used: number;
+  manual_repairs_remaining: number;
+  /** C2（REQ-HGC-01）：gate-local 已接受反馈轮次；旧会话缺席=预算历史不可用。 */
+  accepted_feedback_turns?: number | null;
+  trigger:
+    | "native_human_required"
+    | "repeated_fingerprint"
+    | "verification_new_findings"
+    | "repair_budget_exhausted";
+  resumable: boolean;
+  opened_at?: string;
+}
+
+export type HumanGateTurnStatus = "open" | "awaiting_confirm" | "failed" | "busy";
+export type GateClosureDecision = "confirm" | "terminate";
+export type AdvanceCommandStatus = "pending" | "completed" | "rejected";
+
+/**
+ * REQ-WSC-14（owner 2026-10-30 反馈「用户不知道如何往下继续了」）：门 turn
+ * 以 validation_reject 失败时的可操作事实——被拒反馈原文、可读原因、下一步
+ * 动作与逐字诊断（后端 durable 落盘后投影的同一份内容）。
+ */
+export interface HumanGateTurnRejectionState {
+  rejected_feedback: string;
+  rejection_reason: string;
+  rejection_next_actions: string[];
+  rejection_diagnostics: string[];
+}
+
+export interface HumanGateTurnState {
+  turn_id: string;
+  command_id: string | null;
+  remaining_budget: number;
+  status: HumanGateTurnStatus;
+  artifact_ref: string | null;
+  failure_class: string | null;
+  failure_message: string | null;
+  /** REQ-WSC-14：终态 validation_reject 的可操作事实；其它失败/未失败为 null。 */
+  rejection?: HumanGateTurnRejectionState | null;
+  opened_at: string;
+  inlineError: InlineProtocolError | null;
+  /**
+   * F-49 A8：本 turn 开出时的门快照身份（`snapshotGateIdentity`）。门以新快照重建后
+   * （修订成功经 Evaluate 重建、预算重置为默认值）残留 turn 的预算即过期——投影以
+   * 本字段与当前快照身份的差异判定「快照已接管预算」。缺省（undefined）表示开出时
+   * 无快照凭据，此时维持 turn 值（fail-closed）。
+   */
+  opened_snapshot_identity?: string | null;
+}
+
+/**
+ * P2（REQ-WSC-15 归因扩展，change: bound-review-findings-to-work-item-scope）：
+ * 排除-only 帧落盘失败时服务端回的是 `WsOutMessage::Error`——无 turn/command
+ * 关联字段（非 protocol_error），前端只能按「最近本地门动作」归因。
+ */
+export type GateLocalActionKind = "exclusion" | "feedback";
+
+/** 最近一次本地门动作（点击排除/提交反馈时记录，error 帧归因线索）。 */
+export interface GateLocalActionState {
+  kind: GateLocalActionKind;
+  /** 动作发生的门卡身份（门卡 metadata.gate_identity，缺省卡 id）。 */
+  gateKey: string;
+  /** epoch ms——归因仅认短窗口内的动作，陈旧动作不归因。 */
+  at: number;
+}
+
+/** 归因成立的排除失败事实：门卡据此撤销乐观「已排除」并就地呈现原因。 */
+export interface GateExclusionFailureState {
+  code: string;
+  /** 服务端 error 帧原文（可读原因，如「排除项没有落盘，请重试：…」）。 */
+  message: string;
+  /** 归因到的门卡身份（与 GateLocalActionState.gateKey 同源）。 */
+  gateKey: string;
+  at: number;
+}
+
+export interface InlineProtocolError {
+  code: string;
+  message: string;
+}
+
+export interface HumanGateClosure {
+  decision: GateClosureDecision;
+  stage: string;
+}
+
+
+export interface AdvanceCommandState {
+  command_id: string;
+  status: AdvanceCommandStatus;
+  code: string | null;
+  reason: string | null;
+  attempt_id: string | null;
+  workspace_entry: string | null;
+  inlineError: InlineProtocolError | null;
+}
+
+
+export interface ProtocolDiagnostic {
+  code: string;
+  message: string;
+  at: string;
+  type: string;
+}
+export interface ConnectionCloseDiagnostic {
+  connectionId: string | null;
+  closeCode: number;
+  closeReason: string;
+  wasClean: boolean;
+  visibilityState: DocumentVisibilityState;
+  lastPongOrServerMessageAt: string | null;
+  lastPingAt: string | null;
+  at: string;
+}
+
+
+export interface WorkItemPlanRepairReservation {
+  token: string;
+  owner_session_id: string;
+  owner_run_id: string;
+  provider_start_idempotency_key: string;
+  state: "reserved" | "provider_started" | "committed" | "released";
+  commit_id: string | null;
+}
+
+export interface WorkItemPlanPolicyDiagnostic {
+  code: string;
+  message: string;
+  field: string | null;
+}
+
+export interface WorkItemPlanProviderStartLedgerEntry {
+  provider_start_idempotency_key: string;
+  started: boolean;
+}
+
+/**
+ * F-59：session_state `pending_choice_requests` 投影条目——等待提示条的
+ * 数据源。`created_at_ms` 是 provider pending 登记时刻（epoch ms，跨刷新
+ * 不失真的等待锚点；TextFallback/旧载荷缺省 null，回退 first_seen_at_ms）；
+ * `role` 标注发问方（author/reviewer）。
+ * P0 1.3（REQ-WIGA-05）Task 11：同时是驾驶舱就地作答的数据源——完整
+ * options/questions/source/allow_* 与服务端 `WsPendingChoiceRequest` 同形
+ *（questions 严格校验：question id/选项数组畸形即置空，禁止喂 REST 提交面）。
+ */
+export interface PendingChoiceRequestProjection {
+  id: string;
+  prompt: string;
+  role: string;
+  created_at_ms: number | null;
+  first_seen_at_ms: number | null;
+  /** P0 1.3：应答须绑定的 run 化身；null=旧载荷/无活跃 run（不猜 run）。 */
+  expected_run_id: string | null;
+  options: ChoiceOption[];
+  allow_multiple: boolean;
+  allow_free_text: boolean;
+  questions: ChoiceQuestion[];
+  source: string;
+}
+
 export interface WorkspaceWsState {
   sessionId: string | null;
   workspaceType: string | null;
   stage: string;
   superpowersEnabled: boolean;
   openSpecEnabled: boolean;
+  sessionStatus: WorkspaceSessionStatus | null;
+  flowKind: WorkItemPlanFlowKind | null;
+  runPolicy: WorkItemPlanRunPolicy | null;
+  runHistory: WorkItemPlanRunHistory | null;
+  reviewInvocationScope: unknown | null;
+  humanGateSnapshot: WorkItemPlanHumanGateSnapshot | null;
+  /**
+   * C2（REQ-HGC-02 场景 3）：同一 logical gate 内上一轮 durable 快照的
+   * findings（复评重建时由 setSessionState 保留）——跨轮 delta 的前轮事实；
+   * 刷新/跨会话/关门后为 null（历史不全显式 unknown，不猜）。
+   */
+  previousGateFindings: WorkItemPlanHumanGateSnapshot["findings"] | null;
+  repairReservation: WorkItemPlanRepairReservation | null;
+  policyDiagnostics: WorkItemPlanPolicyDiagnostic[];
+  providerStartLedger: WorkItemPlanProviderStartLedgerEntry[];
+  singleCandidatePhase: WorkItemPlanSingleCandidatePhase | null;
+  /**
+   * REQ-WSC-18：当前候选 Final Compile 失败事实（`session_state` 顶层
+   * `candidate_compile_failure` 归一；帧缺席即置回 null——失败属于旧候选
+   * 时后端整体省略该字段）。null=候选可编译，门卡不进「候选编译不过」态。
+   */
+  candidateCompileFailure: WorkItemPlanCandidateCompileFailure | null;
+  workItemPlanSourceRevisionRef: string | null;
+  planCandidateIrRef: string | null;
+  mechanicalReportRef: string | null;
+  publicationProvenanceRef: string | null;
   visitedStages: string[];
   messages: WsMessage[];
-  checkpoints: WsCheckpoint[];
   chatEntries: ChatEntry[];
+  checkpoints: WsCheckpoint[];
+  /** F-59：session_state pending_choice_requests 归一投影（等待提示条数据源）。 */
+  pendingChoiceRequests: PendingChoiceRequestProjection[];
   artifact: string | null;
   workItemPlanCandidate: WorkItemPlanCandidateDto | null;
   workItemPlanArtifact: WorkItemPlanArtifactPayload | null;
@@ -309,6 +567,25 @@ export interface WorkspaceWsState {
   error: string | null;
   activeRunId: string | null;
   recoverableInterruptedRun: RecoverableInterruptedRun | null;
+  /**
+   * C1（Task 6.1）：durable LC 恢复权威投影（session_state 全量替换；
+   * reset/切会话清空）。resolved 证据保留（供 Replay 对账）但收件箱不投
+   * 卡、不阻塞 generic 后续动作；null=当前无恢复事实。
+   */
+  lcResumeRecovery: LcResumeRecoveryDto | null;
+  /**
+   * 「登记并重试」按钮的最近一次 typed 回执（owner 2026-10-12 直批）：
+   * provider 匹配的 trust 缺失错误卡据此切「已登记，请显式重新生成」态；
+   * reset/切会话清空。null=尚未显式登记成功。
+   */
+  trustRegistration: TrustRegistrationReceipt | null;
+  /**
+   * trust 指引卡结构化指导（wire trust_missing_guidance 的镜像，owner
+   * 2026-10-12 直批简化）：紧随 trust 缺失 error 帧到达并与之配对；新
+   * error 帧/reset/切会话清空（不跨错误存活）。null=最近错误无结构化
+   * 指导（旧服务端/非 trust 错误，投影回落稳定码文本识别）。
+   */
+  trustMissingGuidance: TrustMissingGuidanceState | null;
   protocolError: ProtocolErrorState | null;
   providerLocked: boolean;
   providerSnapshot: ProviderConfigSnapshot | null;
@@ -322,31 +599,81 @@ export interface WorkspaceWsState {
   };
   pendingReviewDecision: { verdict: string; summary: string } | null;
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
+  humanGateTurn: HumanGateTurnState | null;
+  /**
+   * P2（REQ-WSC-15 归因扩展）：最近一次本地门动作（排除/反馈提交）——
+   * WsOutMessage::Error 无关联字段，error 帧归因只能按它；归因成立或排除
+   * 受理回执即消费（null=无在窗动作）。
+   */
+  lastGateLocalAction: GateLocalActionState | null;
+  /** P2：归因成立的排除失败事实；重试新动作/受理回执/关门清空（null=无）。 */
+  gateExclusionFailure: GateExclusionFailureState | null;
+  planRepair: PlanRepairSessionSnapshot | null;
+  /**
+   * P0 1.2（REQ-WIGA-08）：durable automation 归属（与 REST summary 同形）。
+   * null=未知（首帧未到/服务端读取失败省略），不与 client 混淆——D6 以
+   * owner!=="client" 退位发令。
+   */
+  automation: AutomationOwnership | null;
+
+  snapshotGateIdentity: string | null;
+  snapshotGateOpenedAt: string | null;
+  humanGateClosure: HumanGateClosure | null;
+  advanceCommands: Record<string, AdvanceCommandState>;
+  protocolDiagnostics: ProtocolDiagnostic[];
+  connectionCloseDiagnostics: ConnectionCloseDiagnostic[];
+}
+
+export interface WorkspaceSessionStatePayload {
+  session_id: string;
+  connection_id?: string;
+  workspace_type: string;
+  stage: string;
+  superpowers_enabled?: boolean;
+  openspec_enabled?: boolean;
+  session_status: WorkspaceSessionStatus;
+  flow_kind: WorkItemPlanFlowKind;
+  run_policy: WorkItemPlanRunPolicy;
+  run_history: WorkItemPlanRunHistory;
+  review_invocation_scope?: unknown | null;
+  human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
+  /** REQ-WSC-14：该会话最近一次门 turn 拒收（四要素）；刷新后重建门卡用。 */
+  human_gate_turn_rejection?: HumanGateTurnRejectionProjection | null;
+  /** REQ-WSC-18：当前候选 Final Compile 失败事实；缺席=无失败/旧候选。 */
+  candidate_compile_failure?: WorkItemPlanCandidateCompileFailure | null;
+  repair_reservation?: WorkItemPlanRepairReservation | null;
+  policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
+  provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
+  single_candidate_phase?: WorkItemPlanSingleCandidatePhase | null;
+  work_item_plan_source_revision_ref?: string | null;
+  plan_candidate_ir_ref?: string | null;
+  mechanical_report_ref?: string | null;
+  publication_provenance_ref?: string | null;
+  messages: WsMessage[];
+  checkpoints: WsCheckpoint[];
+  artifact: WorkspaceArtifact;
+  providers: WsProviderConfig;
+  timeline_nodes?: TimelineNode[];
+  active_node_id?: string | null;
+  artifact_versions?: ArtifactVersion[];
+  artifact_version_summaries?: ArtifactVersionSummary[];
+  timeline_node_details?: Record<string, TimelineNodeDetail>;
+  timeline_node_summaries?: Record<string, NodeDetailSummary>;
+  active_run_id?: string | null;
+  human_presentation_revisions?: HumanPresentationRevision[];
+  reviewer_enabled_at_start?: boolean | null;
+  recoverable_interrupted_run?: RecoverableInterruptedRun | null;
+  /** C1（Task 6.1）：durable LC 恢复纯投影；空/旧 wire 缺省省略（→ null）。 */
+  lc_resume_recovery?: LcResumeRecoveryDto | null;
+  plan_repair?: PlanRepairSessionSnapshot | null;
+  /** F-59：挂起 choice 全量投影（含 role/created_at_ms）。 */
+  pending_choice_requests?: unknown;
+  /** P0 1.2：durable automation 归属；缺省=未知（store 保持 null）。 */
+  automation?: AutomationOwnership | null;
 }
 
 export interface WorkspaceWsActions {
-  setSessionState: (state: {
-    session_id: string;
-    workspace_type: string;
-    stage: string;
-    superpowers_enabled?: boolean;
-    openspec_enabled?: boolean;
-    messages: WsMessage[];
-    checkpoints: WsCheckpoint[];
-    artifact: WorkspaceArtifact;
-    providers: WsProviderConfig;
-    timeline_nodes?: TimelineNode[];
-    active_node_id?: string | null;
-    artifact_versions?: ArtifactVersion[];
-    artifact_version_summaries?: ArtifactVersionSummary[];
-    timeline_node_details?: Record<string, TimelineNodeDetail>;
-    timeline_node_summaries?: Record<string, NodeDetailSummary>;
-    active_run_id?: string | null;
-    human_presentation_revisions?: HumanPresentationRevision[];
-    reviewer_enabled_at_start?: boolean | null;
-    recoverable_interrupted_run?: RecoverableInterruptedRun | null;
-    plan_repair?: PlanRepairSessionSnapshot | null;
-  }) => void;
+  setSessionState: (state: WorkspaceSessionStatePayload) => void;
   appendStreamChunk: (content: string, nodeId?: string | null) => void;
   appendBufferedStreamChunk: (content: string, nodeId: string, role: ChatEntryRole) => void;
   flushBufferedStream: (nodeId: string) => void;
@@ -355,8 +682,13 @@ export interface WorkspaceWsActions {
   clearAllStreamBuffers: () => void;
   completeMessage: (messageId: string, checkpointId: string, nodeId?: string | null) => void;
   appendChatEntry: (entry: ChatEntry) => void;
+  /** F-49 A1：门卡 upsert——门内轮次切换时把上一轮未决门卡留档（只读）。 */
+  upsertGatePromptEntry: (entry: ChatEntry) => void;
+  /** F-49 A4/B5：记录某张门卡本轮的反馈提交文本。 */
+  recordGateFeedbackSubmission: (entryId: string, feedback: string) => void;
   resolveGateEntry: (resolution: ChatEntryResolution) => void;
   updateStreamingEntry: (entryId: string, content: string) => void;
+  setEntryUsage: (entryId: string, usage: UsageReportPayload) => void;
   finalizeStreamingEntry: (entryId: string) => void;
   rebuildChatEntries: () => void;
   setStage: (stage: string) => void;
@@ -408,5 +740,75 @@ export interface WorkspaceWsActions {
     mode: ProviderPermissionMode,
   ) => void;
   setAcknowledgedAbortedNodes: (nodeIds: string[]) => void;
+  applyHumanGateTurnOpen: (
+    turnId: string,
+    commandId: string,
+    remainingBudget: number,
+  ) => void;
+  applyHumanGateTurnCompleted: (turnId: string, artifactRef: string) => void;
+  applyHumanGateTurnFailed: (
+    turnId: string,
+    failureClass: string,
+    message: string,
+  ) => void;
+  /** REQ-WSC-14：记录终态拒收的可操作事实（同一 turn 幂等覆盖）。 */
+  applyHumanGateTurnRejected: (
+    turnId: string,
+    rejection: HumanGateTurnRejectionState,
+  ) => void;
+  applyHumanGateBusy: (turnId: string) => void;
+  applyHumanGateClosed: (decision: GateClosureDecision, stage: string) => void;
+  applyAdvanceCompleted: (
+    commandId: string,
+    attemptId: string,
+    workspaceEntry: string,
+  ) => void;
+  applyAdvanceRejected: (commandId: string, code: string, reason: string) => void;
+  recordProtocolDiagnostic: (diagnostic: ProtocolDiagnostic) => void;
+  recordConnectionCloseDiagnostic: (diagnostic: ConnectionCloseDiagnostic) => void;
+
+  applyGateProtocolError: (turnId: string, error: InlineProtocolError) => void;
+  applyAdvanceProtocolError: (commandId: string, error: InlineProtocolError) => void;
+
+  /** P2（REQ-WSC-15 归因扩展）：记录最近本地门动作（同时清旧失败事实）。 */
+  recordGateLocalAction: (gateKey: string, kind: GateLocalActionKind) => void;
+  /** P2：归因成立的排除失败落库（消费动作记录，防同一错误重复归因）。 */
+  applyGateExclusionFailure: (failure: {
+    code: string;
+    message: string;
+    gateKey: string;
+  }) => void;
+  /** P2：排除受理回执对账——清失败事实与动作记录（durable 已确认）。 */
+  resolveGateExclusion: () => void;
+
+  /** 「登记并重试」回执对账：幂等覆盖最近回执（不自动重新生成）。 */
+  applyTrustEntryRegistered: (receipt: TrustRegistrationReceipt) => void;
+  /** 结构化 trust 指导对账：null=清空（新 error 帧/reset/切会话）。 */
+  applyTrustMissingGuidance: (guidance: TrustMissingGuidanceState | null) => void;
+  setTimelineNodesForTest: (nodes: TimelineNode[]) => void;
+  setActiveNodeId: (nodeId: string | null) => void;
+  setSessionStatus: (status: WorkspaceSessionStatus) => void;
+  setHumanGateSnapshot: (snapshot: WorkItemPlanHumanGateSnapshot | null) => void;
+  setSessionIdForTest: (sessionId: string) => void;
   reset: () => void;
+}
+
+/** 「登记并重试」按钮的 typed 回执（wire trust_entry_registered 的镜像）。 */
+export interface TrustRegistrationReceipt {
+  provider: WorkspaceProviderName;
+  action: "registered" | "replay" | "reuse_user_entry";
+  trust_key: string;
+  canonical_root: string;
+  registered_at: string;
+}
+
+/** trust 指引卡结构化指导（wire trust_missing_guidance 的 camelCase 镜像，
+ * owner 2026-10-12 直批卡简化：providers/canonicalRoot 供两行说明，
+ * commandMarkdown 供可复制命令窗——前端不解析平铺 error 文本）。 */
+export interface TrustMissingGuidanceState {
+  providers: readonly string[];
+  canonicalRoot: string;
+  reasonCode: string;
+  retryAction: string;
+  commandMarkdown: string | null;
 }

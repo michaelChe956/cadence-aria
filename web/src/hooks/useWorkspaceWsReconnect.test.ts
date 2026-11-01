@@ -53,7 +53,30 @@ describe("useWorkspaceWsReconnect", () => {
     expect(onReconnect).not.toHaveBeenCalled();
   });
 
-  it("pauses while document is hidden", () => {
+  it("reconnects at the hidden base delay after an abnormal close while hidden", () => {
+    const onReconnect = vi.fn();
+
+    setDocumentHidden(true);
+    renderHook(() =>
+      useWorkspaceWsReconnect({
+        enabled: true,
+        onReconnect,
+        closeCode: 1006,
+      }),
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(59999);
+    });
+    expect(onReconnect).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a pending reconnect when backgrounded and slows to the hidden base delay", () => {
     const onReconnect = vi.fn();
 
     renderHook(() =>
@@ -67,10 +90,58 @@ describe("useWorkspaceWsReconnect", () => {
     act(() => {
       setDocumentHidden(true);
       document.dispatchEvent(new Event("visibilitychange"));
-      vi.advanceTimersByTime(5000);
     });
 
-    expect(onReconnect).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(59999);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the visible backoff delay across enabled toggles", () => {
+    const onReconnect = vi.fn();
+    const { rerender } = renderHook(
+      ({ enabled }) =>
+        useWorkspaceWsReconnect({
+          enabled,
+          onReconnect,
+          closeCode: 1006,
+        }),
+      { initialProps: { enabled: true } },
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    // 模拟真实接线:重连尝试令 status 翻转,enabled false→true 各自独立提交,
+    // 使 close effect 重跑
+    act(() => {
+      rerender({ enabled: false });
+    });
+    act(() => {
+      rerender({ enabled: true });
+    });
+    act(() => {
+      vi.advanceTimersByTime(1001);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      vi.advanceTimersByTime(1599);
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(2);
   });
 
   it("retries immediately when requested manually", () => {

@@ -22,10 +22,12 @@ async fn coding_plan_repair_orphan_child_without_link_reuses_canonical_parent() 
                 entity_id: fixture.plan.id.clone(),
                 workspace_type: WorkspaceType::WorkItemPlan,
                 author_provider: ProviderName::Codex,
-                reviewer_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
+
                 review_rounds: 1,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             },
             format!("workspace_session_{amendment_id}"),
         )
@@ -190,10 +192,12 @@ fn corrupt_reconnect_identity(fixture: &PlanRepairFixture, corruption: Reconnect
                         entity_id: fixture.plan.id.clone(),
                         workspace_type: WorkspaceType::WorkItemPlan,
                         author_provider: ProviderName::Codex,
-                        reviewer_provider: ProviderName::ClaudeCode,
+                        reviewer_provider: Some(ProviderName::ClaudeCode),
+
                         review_rounds: 1,
                         superpowers_enabled: true,
                         openspec_enabled: true,
+                        work_item_plan_options: None,
                     },
                     "workspace_session_forged".to_string(),
                 )

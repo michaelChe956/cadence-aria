@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::PlanAuthorOutputContract;
 
 impl WorkspaceEngine {
     pub(crate) fn current_work_item_draft_candidate_payload(
@@ -12,60 +13,18 @@ impl WorkspaceEngine {
         }
     }
 
-    pub async fn select_work_item_generation_mode(
-        &mut self,
-        mode: WorkItemGenerationModeDto,
-    ) -> Result<(), String> {
-        if self.session.stage != WorkspaceStage::AuthorConfirm
-            || self.active_node_type() != Some(TimelineNodeType::WorkItemGenerationMode)
-        {
-            return Err(
-                "select_work_item_generation_mode requires active work_item_generation_mode node"
-                    .to_string(),
-            );
-        }
-
-        self.update_work_item_plan_outline_generation_metadata(None, Some(mode.clone()))
-            .await?;
-        self.pending_revision_context = None;
-        match mode {
-            WorkItemGenerationModeDto::Serial => {
-                self.complete_active_node(Some("已选择逐项生成 Work Item".to_string()))
-                    .await;
-                self.start_serial_work_item_draft_run().await;
-            }
-            WorkItemGenerationModeDto::Batch => {
-                self.create_current_work_item_batch_record()?;
-                self.complete_active_node(Some("已选择自动生成全部 Work Item".to_string()))
-                    .await;
-                self.transition_stage(WorkspaceStage::Running).await;
-                let _ = self
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::WorkItemBatchRun,
-                        agent: Some(self.session.author_provider.clone()),
-                        stage: WorkspaceStage::Running,
-                        round: None,
-                        title: "Work Item Batch 生成".to_string(),
-                        summary: Some("WP5 占位节点，Batch 实际生成由后续 WP 接入".to_string()),
-                        status: TimelineNodeStatus::Active,
-                    })
-                    .await;
-            }
-        }
-        Ok(())
-    }
+    // 退役留档（T5/REQ-RET-02）：生成模式选择消息的引擎入口随消息族删除
+    // （wp5-attribution-table.md §1）；mode 值类型迁至 artifact.rs（历史
+    // artifact 载荷字段+SC 内部诊断）。
 
     pub(crate) async fn begin_work_item_draft_review_run(&mut self, outline_id: &str) -> String {
         self.transition_stage(WorkspaceStage::CrossReview).await;
         let round = self.next_review_round();
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
+        // C2 Task 5（REQ-CRO-05）：三值透传——节点 agent 为 Option，缺失记 None。
+        let reviewer = self.session.reviewer_provider.clone();
         self.create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemDraftReview,
-            agent: Some(reviewer),
+            agent: reviewer,
             stage: WorkspaceStage::CrossReview,
             round: Some(round),
             title: format!("Work Item Draft Review Round {round}"),
@@ -73,96 +32,6 @@ impl WorkspaceEngine {
             status: TimelineNodeStatus::Active,
         })
         .await
-    }
-
-    pub(crate) async fn begin_work_item_batch_review_run(&mut self) -> String {
-        self.transition_stage(WorkspaceStage::CrossReview).await;
-        let round = self.next_review_round();
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
-        self.create_timeline_node(TimelineNodeDraft {
-            node_type: TimelineNodeType::WorkItemBatchReview,
-            agent: Some(reviewer),
-            stage: WorkspaceStage::CrossReview,
-            round: Some(round),
-            title: format!("Work Item Batch Review Round {round}"),
-            summary: Some("审核整组 Work Item Draft".to_string()),
-            status: TimelineNodeStatus::Active,
-        })
-        .await
-    }
-
-    pub(crate) fn create_current_work_item_batch_record(
-        &self,
-    ) -> Result<WorkItemBatchRecord, String> {
-        let store = self.work_item_plan_store()?;
-        let project_id = self.session.project_id.clone();
-        let issue_id = self.session.issue_id.clone();
-        let plan_id = self.session.entity_id.clone();
-        let mut index = store
-            .load_active_index(&project_id, &issue_id, &plan_id)
-            .map_err(|error| format!("load work item plan active index failed: {error}"))?
-            .ok_or_else(|| "work item plan active index is missing".to_string())?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let batch = WorkItemBatchRecord {
-            batch_id: next_batch_id(&index, &now),
-            generation_round_id: index.current_generation_round_id.clone(),
-            mode: WorkItemGenerationMode::Batch,
-            item_draft_ids: Vec::new(),
-            status: WorkItemBatchStatus::Generating,
-            validation_failed_ids: Vec::new(),
-            created_at: now.clone(),
-        };
-        let outline_candidate = self.current_work_item_plan_outline_candidate()?;
-        let first_outline_id =
-            work_item_plan_outline_topological_order(&outline_candidate.outline)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| "WorkItemPlan Outline has no work item outlines".to_string())?;
-        index.active_outline_id = Some(first_outline_id);
-        index.batches.push(batch.clone());
-        index.updated_at = now;
-        store
-            .save_active_index(&index)
-            .map_err(|error| format!("save work item plan active index failed: {error}"))?;
-        Ok(batch)
-    }
-
-    pub(crate) async fn start_serial_work_item_draft_run(&mut self) {
-        let first_outline_id =
-            match self
-                .current_work_item_plan_outline_candidate()
-                .and_then(|outline_candidate| {
-                    work_item_plan_outline_topological_order(&outline_candidate.outline).and_then(
-                        |order| {
-                            order.into_iter().next().ok_or_else(|| {
-                                "WorkItemPlan Outline has no work item outlines".to_string()
-                            })
-                        },
-                    )
-                }) {
-                Ok(outline_id) => outline_id,
-                Err(message) => {
-                    self.enter_human_confirm(Some(format!(
-                        "无法开始逐项生成 Work Item：{message}"
-                    )))
-                    .await;
-                    return;
-                }
-            };
-
-        if let Err(message) = self.set_active_work_item_plan_outline(&first_outline_id) {
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-            self.enter_human_confirm(Some("保存当前 Work Item 游标失败".to_string()))
-                .await;
-            return;
-        }
-
-        self.create_serial_work_item_draft_run_node(&first_outline_id)
-            .await;
     }
 
     pub(crate) async fn start_serial_work_item_draft_run_for(
@@ -206,9 +75,10 @@ impl WorkspaceEngine {
             .unwrap_or_else(|| outline_id.to_string())
     }
 
-    pub fn build_current_work_item_draft_streaming_input(
+    pub(crate) fn build_current_work_item_draft_streaming_input(
         &mut self,
         feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
     ) -> Result<StreamingProviderInput, String> {
         let effective_feedback = match feedback {
             Some(value) => {
@@ -219,12 +89,36 @@ impl WorkspaceEngine {
         };
         self.build_current_work_item_draft_streaming_input_with_feedback(
             effective_feedback.as_deref(),
+            context,
         )
     }
 
     pub(crate) fn build_current_work_item_draft_streaming_input_with_feedback(
         &self,
         feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+    ) -> Result<StreamingProviderInput, String> {
+        self.build_work_item_draft_streaming_input_variant(feedback, context, false)
+    }
+
+    /// B2b3（Task 5.4，设计 §5.3 legacy_draft 行）：LC 显式 fresh 构建——
+    /// feedback 为 durable 冻结值原样透传（不读/不清/不 take 内存
+    /// `pending_revision_context`），provider **全新启动**（resume=None，
+    /// 不回捞旧 native 会话）；其余材料同正常构建（当前 outline 全文 +
+    /// accepted drafts）。
+    pub(crate) fn build_current_work_item_draft_streaming_input_explicit_fresh(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+    ) -> Result<StreamingProviderInput, String> {
+        self.build_work_item_draft_streaming_input_variant(feedback, context, true)
+    }
+
+    fn build_work_item_draft_streaming_input_variant(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+        explicit_fresh: bool,
     ) -> Result<StreamingProviderInput, String> {
         let store = self.work_item_plan_store()?;
         let index = store
@@ -247,6 +141,7 @@ impl WorkspaceEngine {
             WorkItemGenerationMode::Serial,
             &accepted_drafts,
             feedback,
+            context,
         )
         .map_err(|error| error.message)?;
         let working_dir = self
@@ -255,17 +150,29 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
-        Ok(self.build_work_item_plan_streaming_input(
-            provider_type_for_name(&self.session.author_provider),
-            invocation.prompt,
-            working_dir.to_string_lossy().to_string(),
-            self.session.author_provider.clone(),
-        ))
+        if explicit_fresh {
+            self.build_work_item_plan_streaming_input_fresh(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        } else {
+            self.build_work_item_plan_streaming_input(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        }
     }
 
-    pub fn build_current_work_item_batch_draft_streaming_input(
+    pub(crate) fn build_current_work_item_batch_draft_streaming_input(
         &mut self,
         feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
     ) -> Result<StreamingProviderInput, String> {
         if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
             return Err("batch draft input requires active work_item_batch_run node".to_string());
@@ -277,6 +184,34 @@ impl WorkspaceEngine {
             }
             None => self.pending_revision_context.take(),
         };
+        self.build_work_item_batch_streaming_input_variant(
+            effective_feedback.as_deref(),
+            context,
+            false,
+        )
+    }
+
+    /// B2b3（Task 5.4，设计 §5.3 legacy_batch 行）：LC 显式 fresh 构建——
+    /// feedback 为 durable 冻结值原样透传（不读/不清/不 take 内存
+    /// `pending_revision_context`），provider **全新启动**（resume=None）；
+    /// 材料同正常构建（当前 batch 上下文全文）。
+    pub(crate) fn build_current_work_item_batch_draft_streaming_input_explicit_fresh(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+    ) -> Result<StreamingProviderInput, String> {
+        if self.active_node_type() != Some(TimelineNodeType::WorkItemBatchRun) {
+            return Err("batch draft input requires active work_item_batch_run node".to_string());
+        }
+        self.build_work_item_batch_streaming_input_variant(feedback, context, true)
+    }
+
+    fn build_work_item_batch_streaming_input_variant(
+        &self,
+        feedback: Option<&str>,
+        context: &crate::product::cadence_skills::routing_reference::RoutingReferenceContext,
+        explicit_fresh: bool,
+    ) -> Result<StreamingProviderInput, String> {
         let store = self.work_item_plan_store()?;
         let index = store
             .load_active_index(
@@ -299,7 +234,8 @@ impl WorkspaceEngine {
             &active_outline_id,
             WorkItemGenerationMode::Batch,
             &batch_drafts,
-            effective_feedback.as_deref(),
+            feedback,
+            context,
         )
         .map_err(|error| error.message)?;
         let working_dir = self
@@ -308,12 +244,23 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| "working directory unavailable".to_string())?;
-        Ok(self.build_work_item_plan_streaming_input(
-            provider_type_for_name(&self.session.author_provider),
-            invocation.prompt,
-            working_dir.to_string_lossy().to_string(),
-            self.session.author_provider.clone(),
-        ))
+        if explicit_fresh {
+            self.build_work_item_plan_streaming_input_fresh(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        } else {
+            self.build_work_item_plan_streaming_input(
+                provider_type_for_name(&self.session.author_provider),
+                invocation.prompt,
+                working_dir.to_string_lossy().to_string(),
+                self.session.author_provider.clone(),
+                PlanAuthorOutputContract::Structured,
+            )
+        }
     }
 
     pub(crate) fn accepted_work_item_plan_draft_records(
@@ -416,5 +363,44 @@ impl WorkspaceEngine {
             batch_status: batch.status.clone(),
             failure_summary,
         })
+    }
+
+    // L2 退役（T5/REQ-RET-02）：wire 入口已删；保留供 policy routing 测试构造
+    // batch review 场景（cfg(test)）。
+    #[cfg(test)]
+    pub(crate) async fn begin_work_item_batch_review_run(&mut self) -> String {
+        self.transition_stage(WorkspaceStage::CrossReview).await;
+        let round = self.next_review_round();
+        // C2 Task 5（REQ-CRO-05）：三值透传——节点 agent 为 Option，缺失记 None。
+        let reviewer = self.session.reviewer_provider.clone();
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::WorkItemBatchReview,
+            agent: reviewer,
+            stage: WorkspaceStage::CrossReview,
+            round: Some(round),
+            title: format!("Work Item Batch Review Round {round}"),
+            summary: Some("审核整组 Work Item Draft".to_string()),
+            status: TimelineNodeStatus::Active,
+        })
+        .await
+    }
+
+    /// B2b3（Task 5.4，设计 §5.3 legacy_batch 行）：LC 显式 fresh 的 batch
+    /// provider 运行节点重建——仅新建 `WorkItemBatchRun` 节点（stale 收口后
+    /// 活动节点已清空）；**不另建 batch、不重置 repair 预算**，完成仍走同
+    /// batch 完成器（`complete_work_item_batch_draft_author`）。
+    pub(crate) async fn begin_work_item_batch_fresh_recovery_run(&mut self) {
+        self.transition_stage(WorkspaceStage::Running).await;
+        let _ = self
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::WorkItemBatchRun,
+                agent: Some(self.session.author_provider.clone()),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "Work Item Batch 生成".to_string(),
+                summary: Some("LC 显式 fresh 恢复：续跑当前 batch（不另建 batch）".to_string()),
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
     }
 }

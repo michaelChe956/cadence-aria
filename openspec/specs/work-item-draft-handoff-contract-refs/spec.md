@@ -1,7 +1,7 @@
 # work-item-draft-handoff-contract-refs Specification
 
 ## Purpose
-TBD - created by archiving change relax-terminal-handoff-contract-refs. Update Purpose after archive.
+放宽 Work Item Draft 交接契约引用的链路末端约束：仅当本 WorkItem 产出被某个后续 WorkItem 的 `input_contracts` 消费时才在 `handoff_contract.provided_contract_refs` 中列出对应契约 ref，无下游消费者的末端 WorkItem 允许为空数组；Prompt 约束与 Final Compile 的 `unconsumed_required_handoff` 依赖图校验不变量保持一致，后端校验器语义不放宽，`required_fields` 与 `reviewer_check_refs` 的既有约束不变。
 ## Requirements
 ### Requirement: 末端 WorkItem 的 provided_contract_refs 允许为空
 

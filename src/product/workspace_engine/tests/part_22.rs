@@ -185,6 +185,7 @@ async fn plan_repair_awaiting_rejects_invalid_validation_before_timeline_persist
                 contract_ref: None,
                 capability_ref: None,
                 message: "contract invalid".to_string(),
+                kind: None,
             },
         );
     })
@@ -204,6 +205,7 @@ async fn plan_repair_awaiting_rejects_invalid_projection_before_timeline_persist
                 code: "missing_projection".to_string(),
                 projection: "coder".to_string(),
                 contract_ref: None,
+                kind: None,
                 message: "projection missing".to_string(),
             },
         );
@@ -376,18 +378,14 @@ async fn plan_repair_awaiting_rejects_stale_base_revision_before_timeline_persis
     revision_store
         .put_plan_revision(
             &plan,
-            &crate::product::models::WorkItemPlanRevision {
-                id: "plan_revision_external".to_string(),
-                plan_id: plan.id.clone(),
-                revision_no: 2,
-                supersedes: Some("plan_revision_0001".to_string()),
-                reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
-                work_item_bindings: std::collections::BTreeMap::new(),
-                dependency_graph_revision_id: "dependency_graph_external".to_string(),
-                validation_report_ref: "validation_external".to_string(),
-                plan_projection_bundle_id: "projection_external".to_string(),
-                created_at: "2026-07-18T00:00:03Z".to_string(),
-            },
+            &crate::product::models::WorkItemPlanRevision { id: "plan_revision_external".to_string(),
+            plan_id: plan.id.clone(),
+            revision_no: 2,
+            supersedes: Some("plan_revision_0001".to_string()),
+            reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
+            work_item_bindings: std::collections::BTreeMap::new(),
+            dependency_graph_revision_id: "dependency_graph_external".to_string(),
+            validation_report_ref: "validation_external".to_string(), plan_projection_bundle_id: "projection_external".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:03Z".to_string(),  },
         )
         .unwrap();
     revision_store
@@ -589,17 +587,15 @@ fn plan_repair_child_record(
 ) -> crate::product::models::WorkspaceSessionRecord {
     lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: "work_item_plan_0001".to_string(),
-                workspace_type: WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 2,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            },
+            CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+
+            review_rounds: 2,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             session_id.to_string(),
         )
         .unwrap()

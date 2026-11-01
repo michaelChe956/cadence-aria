@@ -9,6 +9,18 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
     );
 
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    // complete 路径新增的落盘判定会读 issue 聚合（T3），fixture 补齐 issue 记录。
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
+            title: "coding ws internal review issue".to_string(),
+            description: None,
+            change_id: None,
+                   base_branch: None,
+ })
+        .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -16,6 +28,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-internal-review-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -54,6 +67,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -84,6 +98,18 @@ fn app_with_code_review_rework_attempt(
     );
 
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    // complete 路径新增的落盘判定会读 issue 聚合（T3），fixture 补齐 issue 记录。
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
+            title: "coding ws code review rework issue".to_string(),
+            description: None,
+            change_id: None,
+                   base_branch: None,
+ })
+        .expect("create issue");
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -91,6 +117,7 @@ fn app_with_code_review_rework_attempt(
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-code-review-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -129,6 +156,7 @@ fn app_with_code_review_rework_attempt(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -154,6 +182,7 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
             path: repo,
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-attempt-repository".to_string(),
         })
         .expect("create repository");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -192,6 +221,7 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
@@ -228,17 +258,11 @@ fn app_with_running_code_review_attempt_and_state(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -306,17 +330,11 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         },
     );
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -412,6 +430,64 @@ async fn wait_for_timeline_node(
         }
     }
     panic!("expected timeline node for {stage:?}");
+}
+
+// —— stage_gate 「确认 vs 过期自动继续」观测口径（3.6 F7-B 项 2） ——
+// 过期自动继续补发独立观测标记（coding_execution_event，title=stage_gate_auto_continue，
+// 含 gate id/阶段/倒计时耗尽原因）；确认路径不得发。载体不新增顶层消息类型：
+// driver（abdddb41 起豁免 stage_gate）对 coding_execution_event payload 不解析，
+// 不会触发 unknown_ws_message 停机。
+async fn wait_for_stage_gate_auto_continue(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    gate_id: &str,
+) -> cadence_aria::web::workspace_ws_types::WsExecutionEvent {
+    for _ in 0..50 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingExecutionEvent { event }
+                if event.title == "stage_gate_auto_continue" =>
+            {
+                assert_eq!(
+                    event.event_id, format!("stage_gate_auto_continue_{gate_id}"),
+                    "auto-continue marker must carry the gate id"
+                );
+                return event;
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected stage_gate_auto_continue marker for gate {gate_id}");
+}
+
+async fn wait_for_stage_start_without_auto_continue(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    stage: CodingExecutionStage,
+) -> CodingTimelineNode {
+    for _ in 0..50 {
+        match recv_json(ws).await {
+            CodingWsOutMessage::CodingTimelineNodeCreated { node } if node.stage == stage => {
+                return node;
+            }
+            CodingWsOutMessage::CodingExecutionEvent { event }
+                if event.title == "stage_gate_auto_continue" =>
+            {
+                panic!(
+                    "confirmed stage gate must not emit auto-continue marker: {event:?}"
+                );
+            }
+            CodingWsOutMessage::CodingProtocolError { code, message } => {
+                panic!("unexpected coding protocol error {code}: {message}");
+            }
+            _ => {}
+        }
+    }
+    panic!("expected timeline node for {stage:?} without auto-continue marker");
 }
 
 async fn wait_for_provider_config_update(

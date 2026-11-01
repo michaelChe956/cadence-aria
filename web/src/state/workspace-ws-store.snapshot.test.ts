@@ -14,6 +14,17 @@ import {
   makeOutlineArtifactPayload,
   makeWorkItemPlanCandidate,
 } from "./workspace-ws-store.test-utils";
+import { observerStateFromSessionState } from "./workspace-observer-store";
+import type {
+  ExecutionEvent,
+  TimelineNode,
+  WorkspaceSessionStatePayload,
+} from "./workspace-ws-store-types";
+import { planRepairSnapshotFixture } from "./workspace-plan-repair-test-fixtures";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "./workspace-cockpit-projection.test-fixtures";
 
 describe("workspace ws store snapshots", () => {
   installWorkspaceStoreTestHooks();
@@ -43,6 +54,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_002",
       workspace_type: "documentation",
       stage: "human_confirm",
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -70,6 +92,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_reviewer_off",
       workspace_type: "story",
       stage: "author_confirm",
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -82,6 +115,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_reviewer_off",
       workspace_type: "story",
       stage: "author_confirm",
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -95,6 +139,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_reviewer_off",
       workspace_type: "story",
       stage: "author_confirm",
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -110,6 +165,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_003",
       workspace_type: "story",
       stage: "cross_review",
+      session_status: "running",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: "# Story",
@@ -151,6 +217,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_artifact_summaries",
       workspace_type: "story",
       stage: "completed",
+      session_status: "confirmed",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -223,6 +300,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_keep_selection",
       workspace_type: "story",
       stage: "prepare_context",
+      session_status: "open",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -244,6 +332,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_keep_selection",
       workspace_type: "story",
       stage: "prepare_context",
+      session_status: "open",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -274,6 +373,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_004",
       workspace_type: "story",
       stage: "running",
+      session_status: "running",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -318,6 +428,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_005",
       workspace_type: "story",
       stage: "running",
+      session_status: "running",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -335,6 +456,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_005",
       workspace_type: "story",
       stage: "prepare_context",
+      session_status: "open",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -351,6 +483,137 @@ describe("workspace ws store snapshots", () => {
     expect(state.activeRunId).toBeNull();
   });
 
+  // F-47 REQ-NDR-01：快照应用是 merge 而非重建——已水合 detail 不得被空壳清空。
+  // 三步断言结构与 F47Diag 实测探针一致（快照→水合→再快照），现状第三步回 0（红）。
+  it("keeps a hydrated node detail when a later snapshot arrives without that detail", () => {
+    const store = useWorkspaceStore.getState();
+    const snapshot = f47DesignSnapshot({ timeline_node_details: {} });
+
+    store.setSessionState(snapshot);
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002?.execution_events ?? [],
+    ).toHaveLength(0);
+    expect(usageEntryCount()).toBe(0);
+
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        status: "failed",
+        streaming_content: "author 正文",
+        execution_events: [usageEvent({ input_tokens: 14_512, output_tokens: 19_493 })],
+      }),
+    );
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002.execution_events,
+    ).toHaveLength(1);
+    expect(usageEntryCount()).toBe(1);
+
+    store.setSessionState(snapshot);
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002.execution_events,
+    ).toHaveLength(1);
+    expect(usageEntryCount()).toBe(1);
+  });
+
+  // REQ-NDR-01 场景二：快照内联 detail 覆盖对应节点（merge 契约边界，防版本倒挂）。
+  it("lets a snapshot inline detail override the hydrated detail of the same node", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(f47DesignSnapshot({ timeline_node_details: {} }));
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        streaming_content: "REST 水合输出",
+      }),
+    );
+
+    store.setSessionState(
+      f47DesignSnapshot({
+        timeline_node_details: {
+          timeline_node_002: makeNodeDetail({
+            node_id: "timeline_node_002",
+            session_id: "session_f47",
+            streaming_content: "快照内联输出",
+          }),
+        },
+      }),
+    );
+
+    expect(useWorkspaceStore.getState().nodeDetails.timeline_node_002.streaming_content).toBe(
+      "快照内联输出",
+    );
+  });
+
+  // REQ-NDR-01 + Review Focus 1：快照内联投影会把执行事件 output 置 null 瘦身
+  // （build_session_state_node_detail）——内联优先不得把已水合的 usage 载荷抹掉，
+  // 否则 work_item_plan 的 outline/draft/batch run 节点（内联白名单）会在下一个
+  // 门/choice/重连帧上丢 token 行，且水合去重 ref 阻止二次拉取 → 不自愈。
+  it("keeps hydrated event payloads when an inline snapshot detail overrides the node", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(f47DesignSnapshot({ timeline_node_details: {} }));
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        streaming_content: "完整正文（水合）",
+        execution_events: [usageEvent({ input_tokens: 464, output_tokens: 21_136 })],
+      }),
+    );
+    expect(usageEntryCount()).toBe(1);
+
+    // 第二帧：该节点被内联（投影裁剪：正文只剩 preview、output 置 null）。
+    store.setSessionState(
+      f47DesignSnapshot({
+        timeline_node_details: {
+          timeline_node_002: makeNodeDetail({
+            node_id: "timeline_node_002",
+            session_id: "session_f47",
+            streaming_content: "内联摘要",
+            execution_events: [
+              {
+                ...usageEvent({ input_tokens: 464, output_tokens: 21_136 }),
+                output: null,
+              },
+            ],
+          }),
+        },
+      }),
+    );
+
+    const detail = useWorkspaceStore.getState().nodeDetails.timeline_node_002;
+    // 内联优先：正文取内联（较新的投影）。
+    expect(detail.streaming_content).toBe("内联摘要");
+    // 但裁剪掉的 output 不覆盖已水合载荷 → token 行数据仍在。
+    expect(detail.execution_events[0]?.output).toContain('"output_tokens":21136');
+    expect(usageEntryCount()).toBe(1);
+  });
+
+  // merge 只在同会话内保留：跨会话节点 id 同构（timeline_node_00N），不得串场。
+  it("does not carry hydrated details across a session switch", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(f47DesignSnapshot({ timeline_node_details: {} }));
+    store.setNodeDetail(
+      makeNodeDetail({
+        node_id: "timeline_node_002",
+        session_id: "session_f47",
+        streaming_content: "上一会话输出",
+      }),
+    );
+
+    store.setSessionState(
+      f47DesignSnapshot({
+        session_id: "session_f48",
+        timeline_node_details: {},
+        timeline_nodes: [f47TimelineNode({ node_id: "timeline_node_002" })],
+      }),
+    );
+
+    expect(
+      useWorkspaceStore.getState().nodeDetails.timeline_node_002.streaming_content,
+    ).toBe("");
+  });
+
   it("selectNodeDetail returns the requested snapshot detail", () => {
     const store = useWorkspaceStore.getState();
     const detail = makeNodeDetail({
@@ -362,6 +625,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_006",
       workspace_type: "story",
       stage: "running",
+      session_status: "running",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -386,6 +660,17 @@ describe("workspace ws store snapshots", () => {
       session_id: "session_context_notes",
       workspace_type: "story",
       stage: "prepare_context",
+      session_status: "open",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
       messages: [],
       checkpoints: [],
       artifact: null,
@@ -452,5 +737,266 @@ describe("workspace ws store snapshots", () => {
 
   it("does not show a context note before backend acknowledgement", () => {
     expect(selectPrepareContextNotes(useWorkspaceStore.getState())).toEqual([]);
+  });
+});
+
+// F-47 快照 merge 用例的共用夹具：design 会话（author/reviewer 节点一律走 summary
+// 分支、快照不内联 detail），与诊断报告实测的会话形态一致。
+function f47TimelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {
+  return {
+    node_id: "timeline_node_002",
+    node_type: "author_run",
+    agent: "pi",
+    stage: "running",
+    round: null,
+    status: "failed",
+    title: "Author Run",
+    summary: null,
+    started_at: "2026-09-23T16:15:05.965Z",
+    completed_at: "2026-09-23T16:16:44.926Z",
+    duration_ms: 98_961,
+    artifact_ref: null,
+    provider_config_snapshot: {
+      author: "pi",
+      reviewer: "kimi_code",
+      review_rounds: 1,
+    },
+    ...overrides,
+  };
+}
+
+function f47DesignSnapshot(
+  overrides: Partial<WorkspaceSessionStatePayload> = {},
+): WorkspaceSessionStatePayload {
+  return {
+    session_id: "session_f47",
+    workspace_type: "design",
+    stage: "running",
+    session_status: "running",
+    flow_kind: "legacy",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
+    messages: [],
+    checkpoints: [],
+    artifact: null,
+    providers: { author: "pi", reviewer: "kimi_code" },
+    timeline_nodes: [f47TimelineNode()],
+    active_node_id: null,
+    artifact_versions: [],
+    timeline_node_details: {},
+    active_run_id: null,
+    ...overrides,
+  };
+}
+
+function usageEvent(payload: Record<string, number>): ExecutionEvent {
+  return {
+    event_id: "usage_author",
+    kind: "usage",
+    status: "completed",
+    title: "author token usage",
+    output: JSON.stringify({ role: "author", ...payload }),
+  };
+}
+
+/** 对话流里带 token 读数的条目数——「token 行可见」的数据面等价断言。 */
+function usageEntryCount(): number {
+  return useWorkspaceStore
+    .getState()
+    .chatEntries.filter((entry) => (entry as ChatEntry).metadata?.usage !== undefined).length;
+}
+
+describe("plan repair snapshot mirroring", () => {
+  installWorkspaceStoreTestHooks();
+
+  function sessionStateBase(
+    overrides: Partial<WorkspaceSessionStatePayload> = {},
+  ): WorkspaceSessionStatePayload {
+    return {
+      session_id: "session_child",
+      workspace_type: "work_item_plan",
+      stage: "running",
+      session_status: "running",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: null },
+      ...overrides,
+    };
+  }
+
+  it("mirrors the plan_repair snapshot from session_state", () => {
+    const snapshot = planRepairSnapshotFixture("session_child");
+    useWorkspaceStore.getState().setSessionState(
+      sessionStateBase({ plan_repair: snapshot }),
+    );
+    expect(useWorkspaceStore.getState().planRepair).toEqual(snapshot);
+  });
+
+  it("clears the mirror when a later snapshot has no plan repair", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(
+      sessionStateBase({ plan_repair: planRepairSnapshotFixture("session_child") }),
+    );
+    expect(useWorkspaceStore.getState().planRepair).not.toBeNull();
+
+    store.setSessionState(sessionStateBase({ plan_repair: null }));
+    expect(useWorkspaceStore.getState().planRepair).toBeNull();
+  });
+
+  it("defaults the mirror to null when the field is absent", () => {
+    useWorkspaceStore.getState().setSessionState(sessionStateBase());
+    expect(useWorkspaceStore.getState().planRepair).toBeNull();
+  });
+
+  it("mirrors plan repair into observer states for takeover sessions", () => {
+    const snapshot = planRepairSnapshotFixture("session_child");
+    const observerState = observerStateFromSessionState(
+      sessionStateBase({ plan_repair: snapshot }) as never,
+    );
+    expect(observerState.planRepair).toEqual(snapshot);
+  });
+});
+
+describe("anchor_t19 driver/observer authoritative lc resume recovery", () => {
+  installWorkspaceStoreTestHooks();
+
+  function recoverySessionState(
+    sessionId: string,
+    extras: Partial<WorkspaceSessionStatePayload> = {},
+  ): WorkspaceSessionStatePayload {
+    return {
+      session_id: sessionId,
+      workspace_type: "work_item_plan",
+      stage: "running",
+      session_status: "waiting_for_human",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "codex", reviewer: null },
+      ...extras,
+    };
+  }
+
+  it("anchor_t19_driver_observer_recovery_projection_and_resolved_clear", () => {
+    const store = useWorkspaceStore.getState();
+    const waiting = lcResumeRecoveryFixture({
+      state: "waiting",
+      last_operation: lcFreshOperationFixture({ state: "failed", reason: "prepare_failed" }),
+    });
+
+    // 全量：首帧带恢复事实 → driver store 落库（typed 字段，不从错误文本解析）。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    const driver = useWorkspaceStore.getState();
+    expect(driver.lcResumeRecovery?.recovery_id).toBe("rec-1");
+    expect(driver.lcResumeRecovery?.state).toBe("waiting");
+    expect(driver.lcResumeRecovery?.allowed_actions).toEqual([]);
+    expect(driver.lcResumeRecovery?.last_operation).toMatchObject({
+      operation_id: "op-1",
+      state: "failed",
+      reason: "prepare_failed",
+    });
+
+    // 增量序列：权威 SessionState 逐帧推进，最新帧事实胜出。
+    store.setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: lcResumeRecoveryFixture({
+          state: "fresh_reserved",
+          last_operation: lcFreshOperationFixture({ state: "reserved" }),
+        }),
+      }),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.state).toBe("fresh_reserved");
+    store.setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: lcResumeRecoveryFixture({
+          state: "fresh_running",
+          last_operation: lcFreshOperationFixture({ state: "running" }),
+        }),
+      }),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.state).toBe("fresh_running");
+    store.setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: lcResumeRecoveryFixture({
+          state: "resolved",
+          last_operation: lcFreshOperationFixture({ state: "completed", fresh_node: "node-2" }),
+        }),
+      }),
+    );
+    // resolved：卡消失方向由投影决定，store 证据保留。
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "resolved",
+      last_operation: { operation_id: "op-1", state: "completed", fresh_node: "node-2" },
+    });
+
+    // null：字段缺席的权威帧 → 清空（不复活旧恢复事实）。
+    store.setSessionState(recoverySessionState("session_rec"));
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toBeNull();
+
+    // reset：显式清空。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.recovery_id).toBe("rec-1");
+    useWorkspaceStore.getState().reset();
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toBeNull();
+
+    // 切会话：旧会话恢复事实不串入新会话。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    store.setSessionState(recoverySessionState("session_other"));
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toBeNull();
+
+    // 重连：同会话新全量帧同源重建；observer 同帧同 ID/action。
+    store.setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: waiting }));
+    const observer = observerStateFromSessionState(
+      recoverySessionState("session_rec", { lc_resume_recovery: waiting }) as never,
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.recovery_id).toBe("rec-1");
+    expect(observer.lcResumeRecovery?.recovery_id).toBe("rec-1");
+    expect(observer.lcResumeRecovery).toEqual(useWorkspaceStore.getState().lcResumeRecovery);
+  });
+
+  it("anchor_t19 driver keeps the previous authoritative recovery when a wire payload is malformed", () => {
+    const valid = lcResumeRecoveryFixture();
+    useWorkspaceStore
+      .getState()
+      .setSessionState(recoverySessionState("session_rec", { lc_resume_recovery: valid }));
+    // 畸形载荷（非法 state 字面量）不构成清卡权威事实：fail-closed 保留旧投影。
+    useWorkspaceStore.getState().setSessionState(
+      recoverySessionState("session_rec", {
+        lc_resume_recovery: { ...valid, state: "bogus" } as never,
+      }),
+    );
+    expect(useWorkspaceStore.getState().lcResumeRecovery).toMatchObject({
+      recovery_id: "rec-1",
+      state: "waiting",
+    });
   });
 });

@@ -188,9 +188,14 @@ where
             if options.check {
                 return run_cli(args);
             }
-            crate::web::app::serve_web(options.workspace, options.host, options.port)
-                .await
-                .map_err(internal_error)?;
+            crate::web::app::serve_web(
+                options.workspace,
+                options.host,
+                options.port,
+                options.work_item_plan_single_candidate,
+            )
+            .await
+            .map_err(internal_error)?;
             Ok(CliOutput::Text(String::new()))
         }
         _ => run_cli(args),
@@ -203,6 +208,7 @@ struct WebOptions {
     host: String,
     port: Option<u16>,
     check: bool,
+    work_item_plan_single_candidate: bool,
 }
 
 fn parse_web_options(args: &[String]) -> Result<WebOptions, CliError> {
@@ -220,6 +226,9 @@ fn parse_web_options(args: &[String]) -> Result<WebOptions, CliError> {
         host,
         port,
         check: args.iter().any(|item| item == "--check"),
+        work_item_plan_single_candidate: args
+            .iter()
+            .any(|item| item == "--work-item-plan-single-candidate"),
     })
 }
 
@@ -286,8 +295,36 @@ fn task_status_text(status: &TaskRunStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_workspace;
+    use super::{WebOptions, parse_web_options, parse_workspace, run_cli};
     use std::path::PathBuf;
+
+    #[test]
+    fn parse_web_options_enables_single_candidate_rollout_flag() {
+        let options = parse_web_options(&[
+            "--workspace".to_string(),
+            ".".to_string(),
+            "--work-item-plan-single-candidate".to_string(),
+        ])
+        .expect("parse web options");
+
+        assert_eq!(
+            options,
+            WebOptions {
+                workspace: std::env::current_dir().expect("current directory"),
+                host: "127.0.0.1".to_string(),
+                port: None,
+                check: false,
+                work_item_plan_single_candidate: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_web_options_defaults_single_candidate_rollout_flag_to_disabled() {
+        let options = parse_web_options(&[]).expect("parse web options");
+
+        assert!(!options.work_item_plan_single_candidate);
+    }
 
     #[test]
     fn parse_workspace_makes_relative_workspace_absolute() {
@@ -313,5 +350,23 @@ mod tests {
         let workspace = parse_workspace(&[]).unwrap();
 
         assert_eq!(workspace, std::env::current_dir().unwrap());
+    }
+
+    /// 悬空引用巡检的人工 CLI 入口已删除（owner 拍板：服务启动时自动跑一次，
+    /// 「我重启下服务不就行了」）——`inspect dangling-references` 必须被拒。
+    #[test]
+    fn inspect_dangling_references_subcommand_is_removed() {
+        let error = run_cli(vec![
+            "inspect".to_string(),
+            "dangling-references".to_string(),
+            "--workspace".to_string(),
+            ".".to_string(),
+        ])
+        .expect_err("悬空引用巡检的人工入口必须已删除");
+        assert_eq!(error.code, "invalid_cli_args");
+        assert!(
+            !error.message.contains("dangling"),
+            "错误文案不得再提悬空引用子命令：{error:?}"
+        );
     }
 }

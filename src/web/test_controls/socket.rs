@@ -151,6 +151,33 @@ impl TestControls {
         }
     }
 
+    pub async fn record_connection_diagnostic(
+        &self,
+        session_id: &str,
+        diagnostic: serde_json::Value,
+    ) {
+        if !super::test_controls_enabled() {
+            return;
+        }
+        self.inner
+            .connection_diagnostics
+            .lock()
+            .expect("test controls connection diagnostics lock")
+            .entry(session_id.to_string())
+            .or_default()
+            .push(diagnostic);
+    }
+
+    pub fn connection_diagnostics(&self, session_id: &str) -> Vec<serde_json::Value> {
+        self.inner
+            .connection_diagnostics
+            .lock()
+            .expect("test controls connection diagnostics lock")
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn server_idle_timeout(&self) -> Duration {
         self.inner
             .server_idle_timeout

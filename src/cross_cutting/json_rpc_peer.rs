@@ -39,12 +39,37 @@ impl Drop for PendingRequestGuard {
     }
 }
 
-#[derive(Clone)]
 pub struct JsonRpcPeer<W> {
     writer: Arc<Mutex<W>>,
     pending: PendingResponses,
     incoming_rx: Arc<Mutex<mpsc::Receiver<Value>>>,
     next_id: Arc<AtomicU64>,
+    outbound_id_namespace: OutboundIdNamespace,
+}
+
+/// Outbound JSON-RPC request-id namespace (GC7)：server→client 入站 id 保持原生
+/// （数字）；Aria 出站 request id 使用 typed namespace 字符串 `aria-<seq>`，
+/// 两类 id 在 pending/应答匹配中值域隔离、互不误配。仅 codex peer 配 `Aria`；
+/// pi/kimi 默认 `Numeric` 保持数字 id 零变化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboundIdNamespace {
+    Numeric,
+    Aria,
+}
+
+/// Manual Clone: the writer/pending/incoming handles are all `Arc`-shared, so
+/// cloning must not require `W: Clone`. This lets concurrent client-service
+/// dispatcher tasks share one peer.
+impl<W> Clone for JsonRpcPeer<W> {
+    fn clone(&self) -> Self {
+        Self {
+            writer: Arc::clone(&self.writer),
+            pending: Arc::clone(&self.pending),
+            incoming_rx: Arc::clone(&self.incoming_rx),
+            next_id: Arc::clone(&self.next_id),
+            outbound_id_namespace: self.outbound_id_namespace,
+        }
+    }
 }
 
 impl<W> JsonRpcPeer<W>
@@ -69,7 +94,16 @@ where
             pending,
             incoming_rx: Arc::new(Mutex::new(incoming_rx)),
             next_id: Arc::new(AtomicU64::new(1)),
+            outbound_id_namespace: OutboundIdNamespace::Numeric,
         }
+    }
+
+    /// Sets the outbound request-id namespace for this peer (GC7). Codex
+    /// app-server peers use `Aria` (typed `aria-<seq>` string ids); pi/kimi keep
+    /// the default `Numeric` so outbound ids remain numeric with zero change.
+    pub(crate) fn with_outbound_id_namespace(mut self, namespace: OutboundIdNamespace) -> Self {
+        self.outbound_id_namespace = namespace;
+        self
     }
 }
 
@@ -113,7 +147,7 @@ where
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
-        let id = ensure_request_id(&mut payload, &self.next_id)?;
+        let id = ensure_request_id(&mut payload, &self.next_id, self.outbound_id_namespace)?;
         let (response_tx, mut response_rx) = oneshot::channel();
         let _pending_request =
             PendingRequestGuard::register(Arc::clone(&self.pending), id.clone(), response_tx);
@@ -179,6 +213,16 @@ where
     }
 
     pub async fn send(&self, payload: Value) -> Result<(), ProviderAdapterError> {
+        // T22 r3 调试基建:ACP 发帧级 trace(截断;仅 RUST_LOG 开启时产出)。
+        tracing::debug!(
+            target: "aria_acp_frames",
+            frame = %serde_json::to_string(&payload)
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect::<String>(),
+            "ACP ->"
+        );
         let mut writer = self.writer.lock().await;
         let line = serde_json::to_string(&payload).map_err(|error| {
             ProviderAdapterError::parse_error(
@@ -216,6 +260,12 @@ async fn read_json_rpc_lines<R>(
             Ok(Some(line)) => line,
             Ok(None) | Err(_) => break,
         };
+        // T22 r3 调试基建:ACP 收帧级 trace(截断;仅 RUST_LOG 开启时产出)。
+        tracing::debug!(
+            target: "aria_acp_frames",
+            frame = %line.chars().take(300).collect::<String>(),
+            "ACP <-"
+        );
         if line.trim().is_empty() {
             continue;
         }
@@ -247,15 +297,24 @@ async fn read_json_rpc_lines<R>(
     pending.lock().expect("pending response lock").clear();
 }
 
-fn ensure_request_id(
+pub(crate) fn ensure_request_id(
     payload: &mut Value,
     next_id: &AtomicU64,
+    namespace: OutboundIdNamespace,
 ) -> Result<String, ProviderAdapterError> {
     if let Some(id) = payload.get("id").and_then(id_key) {
         return Ok(id);
     }
 
-    let id = next_id.fetch_add(1, Ordering::Relaxed);
+    let seq = next_id.fetch_add(1, Ordering::Relaxed);
+    let id_value = match namespace {
+        // Numeric：计数器 1 起（pi/kimi 现状），出站数字 id 零变化（1, 2, 3…）。
+        OutboundIdNamespace::Numeric => Value::from(seq),
+        // Aria：seq 0 起（GC7 契约字面要求：codex 首出站=aria-0）。peer 计数器
+        // 仍 1 起，故 fetch_add 后减一；对以 0 起传入的计数器 saturating 保持 0。
+        OutboundIdNamespace::Aria => Value::from(format!("aria-{}", seq.saturating_sub(1))),
+    };
+    let id = id_key(&id_value).expect("namespace-assigned ids are numeric or string");
     let Some(object) = payload.as_object_mut() else {
         return Err(ProviderAdapterError::parse_error(
             "JSON-RPC request payload must be an object",
@@ -263,8 +322,8 @@ fn ensure_request_id(
             String::new(),
         ));
     };
-    object.insert("id".to_string(), Value::from(id));
-    Ok(id.to_string())
+    object.insert("id".to_string(), id_value);
+    Ok(id)
 }
 
 fn is_response(value: &Value) -> bool {
@@ -465,5 +524,70 @@ mod tests {
         .unwrap();
 
         assert_eq!(value["ok"], true);
+    }
+
+    /// F3 Task 4.1（restrict-role-write-tools GC7 回归锁）：默认 peer（pi/kimi
+    /// 构造路径，`JsonRpcPeer::new`）出站 request id 保持 Numeric 命名空间、
+    /// 1 起（1、2、3…），永不出现 `aria-<seq>` typed namespace（仅 codex peer
+    /// 经 `with_outbound_id_namespace(Aria)` 升级——Task 2.2 作用域约束）。
+    #[tokio::test]
+    async fn default_peer_outbound_request_ids_stay_numeric_and_one_based() {
+        // 命名空间锁定：默认 peer 出站 id 必须是 1 起的 JSON 数字（wire 级断言；
+        // 若默认翻成 Aria 档，id 会变成 "aria-0"/"aria-1" 字符串，下列断言即红）。
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(client_io);
+        let peer = JsonRpcPeer::new(reader, writer);
+
+        let server_task = tokio::spawn(async move {
+            let (server_reader, mut server_writer) = tokio::io::split(server_io);
+            let mut reader = tokio::io::BufReader::new(server_reader);
+            let mut seen_ids = Vec::new();
+            for expected in [1_u64, 2_u64] {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("read outbound");
+                let request: serde_json::Value =
+                    serde_json::from_str(line.trim()).expect("outbound json");
+                // wire 断言：id 是 JSON 数字（非字符串、非 aria- 前缀）。
+                assert_eq!(
+                    request["id"],
+                    serde_json::json!(expected),
+                    "default peer outbound id must be the {expected}-based numeric id"
+                );
+                seen_ids.push(request["id"].clone());
+                let reply = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"].clone(),
+                    "result": {"ok": true},
+                });
+                server_writer
+                    .write_all(reply.to_string().as_bytes())
+                    .await
+                    .expect("write reply");
+                server_writer.write_all(b"\n").await.expect("write newline");
+            }
+            seen_ids
+        });
+
+        for _ in 0..2 {
+            let value = tokio::time::timeout(
+                Duration::from_secs(1),
+                peer.request(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "params": {},
+                })),
+            )
+            .await
+            .expect("default peer request should complete")
+            .expect("default peer request should succeed");
+            assert_eq!(value["ok"], true);
+        }
+
+        let seen_ids = server_task.await.expect("server task");
+        assert_eq!(seen_ids.len(), 2);
+        assert!(
+            seen_ids.iter().all(|id| id.is_u64() && !id.is_string()),
+            "pi/kimi outbound ids must stay numeric, never aria-<seq> strings"
+        );
     }
 }

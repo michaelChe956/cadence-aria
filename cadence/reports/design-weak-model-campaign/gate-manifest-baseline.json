@@ -1,0 +1,4279 @@
+{
+  "schema": "gate-campaign/1",
+  "run_kind": "baseline",
+  "samples": [
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "01",
+      "shape_file": "01-api-design.md",
+      "story_fixture_file": "01-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "01",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:30:39.643Z",
+      "finishedAt": "2026-08-23T15:34:16.066Z",
+      "issueId": "issue_0057",
+      "sessionId": "workspace_session_0057",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 216.177
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 216.423,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 147.345,
+      "authorConfirmSec": 147.345,
+      "reviewCompleteSec": 216.177,
+      "finalizeSec": 216.177,
+      "choices": [
+        {
+          "elapsedSec": 77.585,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:30:39.896907392+00:00",
+          "completed_at": "2026-08-23T15:30:39.896907392+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:30:39.913270841+00:00",
+          "completed_at": "2026-08-23T15:33:06.943237096+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:33:06.971036017+00:00",
+          "completed_at": "2026-08-23T15:33:06.988632594+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:33:07.004367487+00:00",
+          "completed_at": "2026-08-23T15:34:15.757498493+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:34:15.798855505+00:00",
+          "completed_at": "2026-08-23T15:34:15.820700370+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:34:15.861751934+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "01",
+      "shape_file": "01-api-design.md",
+      "story_fixture_file": "01-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "01",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:34:21.827Z",
+      "finishedAt": "2026-08-23T15:39:25.451Z",
+      "issueId": "issue_0061",
+      "sessionId": "workspace_session_0061",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 303.371
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 303.623,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 225.492,
+      "authorConfirmSec": 225.493,
+      "reviewCompleteSec": 303.371,
+      "finalizeSec": 303.371,
+      "choices": [
+        {
+          "elapsedSec": 131.57,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:34:22.115529891+00:00",
+          "completed_at": "2026-08-23T15:34:22.115529891+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:34:22.132721683+00:00",
+          "completed_at": "2026-08-23T15:38:07.267579670+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:38:07.295190520+00:00",
+          "completed_at": "2026-08-23T15:38:07.321367721+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:38:07.340102537+00:00",
+          "completed_at": "2026-08-23T15:39:25.144194982+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:39:25.177203894+00:00",
+          "completed_at": "2026-08-23T15:39:25.200013155+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:39:25.244537772+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "02",
+      "shape_file": "02-data-model.md",
+      "story_fixture_file": "02-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "02",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:39:31.406Z",
+      "finishedAt": "2026-08-23T15:44:28.266Z",
+      "issueId": "issue_0063",
+      "sessionId": "workspace_session_0063",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 296.617
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 296.86,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 209.918,
+      "authorConfirmSec": 209.918,
+      "reviewCompleteSec": 296.617,
+      "finalizeSec": 296.618,
+      "choices": [
+        {
+          "elapsedSec": 115.365,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:39:31.691813770+00:00",
+          "completed_at": "2026-08-23T15:39:31.691813770+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:39:31.715929994+00:00",
+          "completed_at": "2026-08-23T15:43:01.282417470+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:43:01.307089283+00:00",
+          "completed_at": "2026-08-23T15:43:01.324819340+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:43:01.340287349+00:00",
+          "completed_at": "2026-08-23T15:44:27.970324452+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:44:28.002266402+00:00",
+          "completed_at": "2026-08-23T15:44:28.024460633+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:44:28.065412519+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "02",
+      "shape_file": "02-data-model.md",
+      "story_fixture_file": "02-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "02",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:45:11.654Z",
+      "finishedAt": "2026-08-23T15:57:31.791Z",
+      "issueId": "issue_0067",
+      "sessionId": "workspace_session_0067",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "revise",
+          "el": 576.936
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 740.136,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 421.075,
+      "authorConfirmSec": 421.075,
+      "reviewCompleteSec": 576.936,
+      "finalizeSec": 739.866,
+      "choices": [
+        {
+          "elapsedSec": 337.169,
+          "picked": [
+            "opt_0"
+          ]
+        },
+        {
+          "elapsedSec": 660.297,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:45:11.973428993+00:00",
+          "completed_at": "2026-08-23T15:45:11.973428993+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:45:11.990762832+00:00",
+          "completed_at": "2026-08-23T15:52:12.686920824+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:52:12.712510487+00:00",
+          "completed_at": "2026-08-23T15:52:12.731201719+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:52:12.753748837+00:00",
+          "completed_at": "2026-08-23T15:54:48.537557901+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "用户提交反馈，进入修订",
+          "started_at": "2026-08-23T15:54:48.569984666+00:00",
+          "completed_at": "2026-08-23T15:54:48.591873963+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "revision",
+          "status": "completed",
+          "title": "反馈修订",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:54:48.612375097+00:00",
+          "completed_at": "2026-08-23T15:57:31.447026618+00:00"
+        },
+        {
+          "node_id": "timeline_node_007",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:57:31.487943840+00:00",
+          "completed_at": "2026-08-23T15:57:31.521623387+00:00"
+        },
+        {
+          "node_id": "timeline_node_008",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:57:31.586811850+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 2,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "03",
+      "shape_file": "03-choice-to-dec.md",
+      "story_fixture_file": "03-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "03",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:02:29.459Z",
+      "finishedAt": "2026-08-23T16:06:57.066Z",
+      "issueId": "issue_0077",
+      "sessionId": "workspace_session_0077",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 267.371
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 267.607,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 194.824,
+      "authorConfirmSec": 194.824,
+      "reviewCompleteSec": 267.371,
+      "finalizeSec": 267.371,
+      "choices": [
+        {
+          "elapsedSec": 69.755,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:02:29.822301187+00:00",
+          "completed_at": "2026-08-23T16:02:29.822301187+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:02:29.842643547+00:00",
+          "completed_at": "2026-08-23T16:05:44.244541737+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:05:44.266702521+00:00",
+          "completed_at": "2026-08-23T16:05:44.283514251+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:05:44.297472820+00:00",
+          "completed_at": "2026-08-23T16:06:56.785045714+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:06:56.811707754+00:00",
+          "completed_at": "2026-08-23T16:06:56.831104767+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:06:56.867982602+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "03",
+      "shape_file": "03-choice-to-dec.md",
+      "story_fixture_file": "03-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "03",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:06:53.077Z",
+      "finishedAt": "2026-08-23T16:14:19.635Z",
+      "issueId": "issue_0081",
+      "sessionId": "workspace_session_0081",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 446.318
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 446.556,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 359.657,
+      "authorConfirmSec": 359.657,
+      "reviewCompleteSec": 446.318,
+      "finalizeSec": 446.318,
+      "choices": [
+        {
+          "elapsedSec": 93.639,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:06:53.475799587+00:00",
+          "completed_at": "2026-08-23T16:06:53.475799587+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:06:53.492633968+00:00",
+          "completed_at": "2026-08-23T16:12:52.698105165+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:12:52.720751946+00:00",
+          "completed_at": "2026-08-23T16:12:52.736697867+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:12:52.751969482+00:00",
+          "completed_at": "2026-08-23T16:14:19.348180990+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:14:19.377277873+00:00",
+          "completed_at": "2026-08-23T16:14:19.397872845+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:14:19.435988338+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "04",
+      "shape_file": "04-abstract-traceability.md",
+      "story_fixture_file": "04-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "04",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:14:33.435Z",
+      "finishedAt": "2026-08-23T16:18:36.207Z",
+      "issueId": "issue_0083",
+      "sessionId": "workspace_session_0083",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 242.522
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 242.771,
+      "boundary_kind": "abstract-positive",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 174.398,
+      "authorConfirmSec": 174.398,
+      "reviewCompleteSec": 242.522,
+      "finalizeSec": 242.522,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:14:33.831587231+00:00",
+          "completed_at": "2026-08-23T16:14:33.831587231+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:14:33.848271099+00:00",
+          "completed_at": "2026-08-23T16:17:27.788995640+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:17:27.815137785+00:00",
+          "completed_at": "2026-08-23T16:17:27.834827483+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:17:27.852777114+00:00",
+          "completed_at": "2026-08-23T16:18:35.901922695+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:18:35.935283631+00:00",
+          "completed_at": "2026-08-23T16:18:35.958821578+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:18:36.002918860+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "04",
+      "shape_file": "04-abstract-traceability.md",
+      "story_fixture_file": "04-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "04",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:18:47.067Z",
+      "finishedAt": "2026-08-23T16:24:35.607Z",
+      "issueId": "issue_0085",
+      "sessionId": "workspace_session_0085",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 348.297
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 348.539,
+      "boundary_kind": "abstract-positive",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 268.226,
+      "authorConfirmSec": 268.226,
+      "reviewCompleteSec": 348.297,
+      "finalizeSec": 348.297,
+      "choices": [
+        {
+          "elapsedSec": 222.205,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:18:47.481831073+00:00",
+          "completed_at": "2026-08-23T16:18:47.481831073+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:18:47.498565213+00:00",
+          "completed_at": "2026-08-23T16:23:15.251644052+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:23:15.276656290+00:00",
+          "completed_at": "2026-08-23T16:23:15.294681270+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:23:15.315204157+00:00",
+          "completed_at": "2026-08-23T16:24:35.311258688+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:24:35.342472998+00:00",
+          "completed_at": "2026-08-23T16:24:35.365594677+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:24:35.407945390+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "05",
+      "shape_file": "05-test-boundary-violation.md",
+      "story_fixture_file": "05-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "05",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:24:46.788Z",
+      "finishedAt": "2026-08-23T16:29:51.851Z",
+      "issueId": "issue_0086",
+      "sessionId": "workspace_session_0086",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 304.824
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 305.062,
+      "boundary_kind": "violation-negative",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 212.532,
+      "authorConfirmSec": 212.532,
+      "reviewCompleteSec": 304.824,
+      "finalizeSec": 304.824,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:24:47.213597941+00:00",
+          "completed_at": "2026-08-23T16:24:47.213597941+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:24:47.230112333+00:00",
+          "completed_at": "2026-08-23T16:28:19.284430863+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:28:19.306335004+00:00",
+          "completed_at": "2026-08-23T16:28:19.321628384+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:28:19.335475577+00:00",
+          "completed_at": "2026-08-23T16:29:51.568091249+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:29:51.594402033+00:00",
+          "completed_at": "2026-08-23T16:29:51.614048233+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:29:51.651036979+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "first_review_verdict": "pass",
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "05",
+      "shape_file": "05-test-boundary-violation.md",
+      "story_fixture_file": "05-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "05",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:33:17.600Z",
+      "finishedAt": "2026-08-23T16:38:45.543Z",
+      "issueId": "issue_0089",
+      "sessionId": "workspace_session_0089",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 327.705
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 327.942,
+      "boundary_kind": "violation-negative",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 243.643,
+      "authorConfirmSec": 243.643,
+      "reviewCompleteSec": 327.705,
+      "finalizeSec": 327.705,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:33:18.047279232+00:00",
+          "completed_at": "2026-08-23T16:33:18.047279232+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:33:18.065098600+00:00",
+          "completed_at": "2026-08-23T16:37:21.207969509+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:37:21.229273605+00:00",
+          "completed_at": "2026-08-23T16:37:21.244796470+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:37:21.258427736+00:00",
+          "completed_at": "2026-08-23T16:38:45.262717774+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:38:45.288395387+00:00",
+          "completed_at": "2026-08-23T16:38:45.307265714+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:38:45.342108113+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "first_review_verdict": "pass",
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "06",
+      "shape_file": "06-multi-constraint.md",
+      "story_fixture_file": "06-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "06",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:37:56.101Z",
+      "finishedAt": "2026-08-23T16:43:48.695Z",
+      "issueId": "issue_0092",
+      "sessionId": "workspace_session_0092",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 352.32
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 352.593,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 245.385,
+      "authorConfirmSec": 245.385,
+      "reviewCompleteSec": 352.32,
+      "finalizeSec": 352.321,
+      "choices": [
+        {
+          "elapsedSec": 129.733,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:37:56.555877472+00:00",
+          "completed_at": "2026-08-23T16:37:56.555877472+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:37:56.573923319+00:00",
+          "completed_at": "2026-08-23T16:42:01.436326515+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:42:01.466604692+00:00",
+          "completed_at": "2026-08-23T16:42:01.487877410+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:42:01.506267281+00:00",
+          "completed_at": "2026-08-23T16:43:48.362140521+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:43:48.398370816+00:00",
+          "completed_at": "2026-08-23T16:43:48.423551606+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:43:48.488675326+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "claude_code",
+      "model": "claude_code-cli",
+      "model_version": "claude_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "claude_code",
+          "model": "claude_code-cli",
+          "model_version": "claude_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "06",
+      "shape_file": "06-multi-constraint.md",
+      "story_fixture_file": "06-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "06",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:44:03.634Z",
+      "finishedAt": "2026-08-23T16:48:19.814Z",
+      "issueId": "issue_0093",
+      "sessionId": "workspace_session_0093",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 255.938
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 256.179,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 180.591,
+      "authorConfirmSec": 180.592,
+      "reviewCompleteSec": 255.938,
+      "finalizeSec": 255.939,
+      "choices": [
+        {
+          "elapsedSec": 105.443,
+          "picked": [
+            "opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:44:04.095681354+00:00",
+          "completed_at": "2026-08-23T16:44:04.095681354+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:44:04.112523012+00:00",
+          "completed_at": "2026-08-23T16:47:04.182145412+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:47:04.206896613+00:00",
+          "completed_at": "2026-08-23T16:47:04.227263953+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:47:04.242878640+00:00",
+          "completed_at": "2026-08-23T16:48:19.523778589+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:48:19.553514568+00:00",
+          "completed_at": "2026-08-23T16:48:19.574481566+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:48:19.614802936+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "01",
+      "shape_file": "01-api-design.md",
+      "story_fixture_file": "01-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "01",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:30:41.423Z",
+      "finishedAt": "2026-08-23T15:33:53.279Z",
+      "issueId": "issue_0058",
+      "sessionId": "workspace_session_0058",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 191.616
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 191.856,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 160.061,
+      "authorConfirmSec": 160.061,
+      "reviewCompleteSec": 191.616,
+      "finalizeSec": 191.616,
+      "choices": [
+        {
+          "elapsedSec": 85.644,
+          "picked": [
+            "q0_opt_0"
+          ]
+        },
+        {
+          "elapsedSec": 88.59,
+          "picked": [
+            "q0_opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:30:41.699440137+00:00",
+          "completed_at": "2026-08-23T15:30:41.699440137+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:30:41.722342613+00:00",
+          "completed_at": "2026-08-23T15:33:21.428782742+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:33:21.467375731+00:00",
+          "completed_at": "2026-08-23T15:33:21.484847527+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:33:21.500409619+00:00",
+          "completed_at": "2026-08-23T15:33:52.988000662+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:33:53.019614598+00:00",
+          "completed_at": "2026-08-23T15:33:53.040087877+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:33:53.078272796+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "01",
+      "shape_file": "01-api-design.md",
+      "story_fixture_file": "01-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "01",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:33:58.909Z",
+      "finishedAt": "2026-08-23T15:37:05.419Z",
+      "issueId": "issue_0060",
+      "sessionId": "workspace_session_0060",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 186.272
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 186.509,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 137.795,
+      "authorConfirmSec": 137.795,
+      "reviewCompleteSec": 186.272,
+      "finalizeSec": 186.272,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:33:59.181955066+00:00",
+          "completed_at": "2026-08-23T15:33:59.181955066+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:33:59.199830541+00:00",
+          "completed_at": "2026-08-23T15:36:16.660541788+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:36:16.689444852+00:00",
+          "completed_at": "2026-08-23T15:36:16.706093908+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:36:16.720544856+00:00",
+          "completed_at": "2026-08-23T15:37:05.136018857+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:37:05.163234259+00:00",
+          "completed_at": "2026-08-23T15:37:05.183030072+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:37:05.220271126+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "02",
+      "shape_file": "02-data-model.md",
+      "story_fixture_file": "02-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "02",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:37:17.008Z",
+      "finishedAt": "2026-08-23T15:40:48.347Z",
+      "issueId": "issue_0062",
+      "sessionId": "workspace_session_0062",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 211.093
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 211.338,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 157.587,
+      "authorConfirmSec": 157.587,
+      "reviewCompleteSec": 211.093,
+      "finalizeSec": 211.094,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:37:17.290634483+00:00",
+          "completed_at": "2026-08-23T15:37:17.290634483+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:37:17.307431442+00:00",
+          "completed_at": "2026-08-23T15:39:54.543736426+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:39:54.578453698+00:00",
+          "completed_at": "2026-08-23T15:39:54.596616532+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:39:54.612603449+00:00",
+          "completed_at": "2026-08-23T15:40:48.052548440+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:40:48.082361350+00:00",
+          "completed_at": "2026-08-23T15:40:48.103618032+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:40:48.147118915+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "02",
+      "shape_file": "02-data-model.md",
+      "story_fixture_file": "02-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "02",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:40:54.196Z",
+      "finishedAt": "2026-08-23T15:44:47.695Z",
+      "issueId": "issue_0064",
+      "sessionId": "workspace_session_0064",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 233.259
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 233.498,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 193.136,
+      "authorConfirmSec": 193.136,
+      "reviewCompleteSec": 233.259,
+      "finalizeSec": 233.259,
+      "choices": [
+        {
+          "elapsedSec": 92.418,
+          "picked": [
+            "q0_opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:40:54.488459443+00:00",
+          "completed_at": "2026-08-23T15:40:54.488459443+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:40:54.505716058+00:00",
+          "completed_at": "2026-08-23T15:44:07.284098659+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:44:07.315507356+00:00",
+          "completed_at": "2026-08-23T15:44:07.333878021+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:44:07.350546123+00:00",
+          "completed_at": "2026-08-23T15:44:47.407249379+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:44:47.435975850+00:00",
+          "completed_at": "2026-08-23T15:44:47.456835219+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:44:47.496439293+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "03",
+      "shape_file": "03-choice-to-dec.md",
+      "story_fixture_file": "03-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "03",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:44:52.340Z",
+      "finishedAt": "2026-08-23T15:46:17.659Z",
+      "issueId": "issue_0066",
+      "sessionId": "workspace_session_0066",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 85.085
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 85.318,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 56.856,
+      "authorConfirmSec": 56.856,
+      "reviewCompleteSec": 85.085,
+      "finalizeSec": 85.085,
+      "choices": [
+        {
+          "elapsedSec": 33.048,
+          "picked": [
+            "q0_opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:44:52.655568664+00:00",
+          "completed_at": "2026-08-23T15:44:52.655568664+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:44:52.672328955+00:00",
+          "completed_at": "2026-08-23T15:45:49.158814962+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:45:49.183952255+00:00",
+          "completed_at": "2026-08-23T15:45:49.197802015+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:45:49.209990516+00:00",
+          "completed_at": "2026-08-23T15:46:17.387286937+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:46:17.409970333+00:00",
+          "completed_at": "2026-08-23T15:46:17.427031285+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:46:17.459203024+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "03",
+      "shape_file": "03-choice-to-dec.md",
+      "story_fixture_file": "03-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "03",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:46:22.899Z",
+      "finishedAt": "2026-08-23T15:47:43.319Z",
+      "issueId": "issue_0068",
+      "sessionId": "workspace_session_0068",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 80.187
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 80.42,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 64.396,
+      "authorConfirmSec": 64.396,
+      "reviewCompleteSec": 80.187,
+      "finalizeSec": 80.188,
+      "choices": [
+        {
+          "elapsedSec": 43.407,
+          "picked": [
+            "q0_opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:46:23.215085912+00:00",
+          "completed_at": "2026-08-23T15:46:23.215085912+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:46:23.232155491+00:00",
+          "completed_at": "2026-08-23T15:47:27.245434920+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:47:27.278743601+00:00",
+          "completed_at": "2026-08-23T15:47:27.295943689+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:47:27.315275629+00:00",
+          "completed_at": "2026-08-23T15:47:43.047981222+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:47:43.070285006+00:00",
+          "completed_at": "2026-08-23T15:47:43.087416321+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:47:43.118551961+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "04",
+      "shape_file": "04-abstract-traceability.md",
+      "story_fixture_file": "04-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "04",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:47:48.240Z",
+      "finishedAt": "2026-08-23T15:49:54.658Z",
+      "issueId": "issue_0069",
+      "sessionId": "workspace_session_0069",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 126.181
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 126.418,
+      "boundary_kind": "abstract-positive",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 97.342,
+      "authorConfirmSec": 97.342,
+      "reviewCompleteSec": 126.181,
+      "finalizeSec": 126.181,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:47:48.564777939+00:00",
+          "completed_at": "2026-08-23T15:47:48.564777939+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:47:48.582168949+00:00",
+          "completed_at": "2026-08-23T15:49:25.536140803+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:49:25.567361645+00:00",
+          "completed_at": "2026-08-23T15:49:25.582985459+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:49:25.596725131+00:00",
+          "completed_at": "2026-08-23T15:49:54.378652730+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:49:54.403613907+00:00",
+          "completed_at": "2026-08-23T15:49:54.422196152+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:49:54.455916233+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "04",
+      "shape_file": "04-abstract-traceability.md",
+      "story_fixture_file": "04-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "04",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:50:00.422Z",
+      "finishedAt": "2026-08-23T15:52:14.335Z",
+      "issueId": "issue_0070",
+      "sessionId": "workspace_session_0070",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 133.677
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 133.912,
+      "boundary_kind": "abstract-positive",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 108.611,
+      "authorConfirmSec": 108.611,
+      "reviewCompleteSec": 133.677,
+      "finalizeSec": 133.677,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:50:00.750915386+00:00",
+          "completed_at": "2026-08-23T15:50:00.750915386+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:50:00.768259173+00:00",
+          "completed_at": "2026-08-23T15:51:48.984887346+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:51:49.018768562+00:00",
+          "completed_at": "2026-08-23T15:51:49.034791092+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:51:49.048843995+00:00",
+          "completed_at": "2026-08-23T15:52:14.057488426+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:52:14.082473499+00:00",
+          "completed_at": "2026-08-23T15:52:14.100767764+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:52:14.135713475+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "05",
+      "shape_file": "05-test-boundary-violation.md",
+      "story_fixture_file": "05-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "05",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:52:19.813Z",
+      "finishedAt": "2026-08-23T15:55:56.367Z",
+      "issueId": "issue_0071",
+      "sessionId": "workspace_session_0071",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 216.313
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 216.553,
+      "boundary_kind": "violation-negative",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 164.667,
+      "authorConfirmSec": 164.667,
+      "reviewCompleteSec": 216.313,
+      "finalizeSec": 216.313,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:52:20.148394594+00:00",
+          "completed_at": "2026-08-23T15:52:20.148394594+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:52:20.168689498+00:00",
+          "completed_at": "2026-08-23T15:55:04.432986966+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:55:04.465174029+00:00",
+          "completed_at": "2026-08-23T15:55:04.481886215+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:55:04.497641982+00:00",
+          "completed_at": "2026-08-23T15:55:56.079708040+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:55:56.106705986+00:00",
+          "completed_at": "2026-08-23T15:55:56.127540530+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:55:56.162671428+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "first_review_verdict": "pass",
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "05",
+      "shape_file": "05-test-boundary-violation.md",
+      "story_fixture_file": "05-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "05",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:55:58.353Z",
+      "finishedAt": "2026-08-23T15:59:29.607Z",
+      "issueId": "issue_0073",
+      "sessionId": "workspace_session_0073",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 211.014
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 211.253,
+      "boundary_kind": "violation-negative",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 174.579,
+      "authorConfirmSec": 174.579,
+      "reviewCompleteSec": 211.014,
+      "finalizeSec": 211.014,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:55:58.698532378+00:00",
+          "completed_at": "2026-08-23T15:55:58.698532378+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:55:58.716862681+00:00",
+          "completed_at": "2026-08-23T15:58:52.880896041+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:58:52.915651130+00:00",
+          "completed_at": "2026-08-23T15:58:52.933495713+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:58:52.962070109+00:00",
+          "completed_at": "2026-08-23T15:59:29.320553889+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:59:29.348542896+00:00",
+          "completed_at": "2026-08-23T15:59:29.368996174+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T15:59:29.406976011+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "first_review_verdict": "pass",
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "06",
+      "shape_file": "06-multi-constraint.md",
+      "story_fixture_file": "06-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "06",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:02:29.900Z",
+      "finishedAt": "2026-08-23T16:05:22.675Z",
+      "issueId": "issue_0078",
+      "sessionId": "workspace_session_0078",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 172.523
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 172.774,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 147.67,
+      "authorConfirmSec": 147.67,
+      "reviewCompleteSec": 172.523,
+      "finalizeSec": 172.523,
+      "choices": [
+        {
+          "elapsedSec": 58.832,
+          "picked": [
+            "q0_opt_0"
+          ]
+        },
+        {
+          "elapsedSec": 66.897,
+          "picked": [
+            "q0_opt_0"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:02:30.308782858+00:00",
+          "completed_at": "2026-08-23T16:02:30.308782858+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:02:30.335699073+00:00",
+          "completed_at": "2026-08-23T16:04:57.519349129+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:04:57.552641371+00:00",
+          "completed_at": "2026-08-23T16:04:57.572288095+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:04:57.589953537+00:00",
+          "completed_at": "2026-08-23T16:05:22.367988707+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:05:22.402557247+00:00",
+          "completed_at": "2026-08-23T16:05:22.425299959+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:05:22.472758616+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "kimi_code",
+      "model": "kimi_code-cli",
+      "model_version": "kimi_code-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "kimi_code",
+          "model": "kimi_code-cli",
+          "model_version": "kimi_code-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "06",
+      "shape_file": "06-multi-constraint.md",
+      "story_fixture_file": "06-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "06",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:02:41.290Z",
+      "finishedAt": "2026-08-23T16:07:12.150Z",
+      "issueId": "issue_0079",
+      "sessionId": "workspace_session_0079",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 270.616
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 270.86,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 235.396,
+      "authorConfirmSec": 235.396,
+      "reviewCompleteSec": 270.616,
+      "finalizeSec": 270.616,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:02:41.658660019+00:00",
+          "completed_at": "2026-08-23T16:02:41.658660019+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:02:41.676698961+00:00",
+          "completed_at": "2026-08-23T16:06:36.629307257+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:06:36.667990270+00:00",
+          "completed_at": "2026-08-23T16:06:36.687274294+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:06:36.704269374+00:00",
+          "completed_at": "2026-08-23T16:07:11.856181226+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:07:11.885766669+00:00",
+          "completed_at": "2026-08-23T16:07:11.906883750+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:07:11.946808720+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "01",
+      "shape_file": "01-api-design.md",
+      "story_fixture_file": "01-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "01",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T13:49:40.376Z",
+      "finishedAt": "2026-08-23T13:55:05.721Z",
+      "issueId": "issue_0056",
+      "sessionId": "workspace_session_0056",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": false,
+      "reviewVerdicts": [],
+      "failureClass": "provider_error",
+      "elapsedSec": 325.344,
+      "boundary_kind": null,
+      "error": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+      "errorCode": "workspace_error",
+      "aborted": false,
+      "firstArtifactSec": null,
+      "authorConfirmSec": null,
+      "reviewCompleteSec": null,
+      "finalizeSec": null,
+      "choices": [],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T13:49:40.636740679+00:00",
+          "completed_at": "2026-08-23T13:49:40.636740679+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "failed",
+          "title": "Design Spec 生成",
+          "summary": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+          "started_at": "2026-08-23T13:49:40.653164485+00:00",
+          "completed_at": "2026-08-23T13:55:01.300642665+00:00"
+        }
+      ],
+      "timeouts": [],
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "01",
+      "shape_file": "01-api-design.md",
+      "story_fixture_file": "01-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "01",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T15:30:50.371Z",
+      "finishedAt": "2026-08-23T15:42:15.716Z",
+      "issueId": "issue_0059",
+      "sessionId": "workspace_session_0059",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": false,
+      "reviewVerdicts": [
+        {
+          "verdict": "needs_human",
+          "el": 538.017
+        }
+      ],
+      "failureClass": "provider_error",
+      "elapsedSec": 685.345,
+      "boundary_kind": null,
+      "error": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+      "errorCode": "workspace_error",
+      "aborted": false,
+      "firstArtifactSec": 401.712,
+      "authorConfirmSec": 401.712,
+      "reviewCompleteSec": 538.017,
+      "finalizeSec": null,
+      "choices": [
+        {
+          "elapsedSec": 179.303,
+          "picked": [
+            "B. 五态含取消：CREATED 已创建 / PAID 已支付 / SHIPPED 已发货 / COMPLETED 已完成 / CANCELLED 已取消（推荐：覆盖运营最常用的取消场景）"
+          ]
+        },
+        {
+          "elapsedSec": 191.204,
+          "picked": [
+            "A. RESTful 查询参数式：GET /api/v1/orders?status={status}&page={page}&pageSize={pageSize}（推荐：查询语义自然、天然无副作用、利于缓存与网关治理）"
+          ]
+        },
+        {
+          "elapsedSec": 201.707,
+          "picked": [
+            "A. 参数非法才报错；合法页码超总页数返回空列表 + 完整分页元数据（推荐：客户端翻页竞态友好，符合常见列表 API 习惯）"
+          ]
+        },
+        {
+          "elapsedSec": 591.497,
+          "picked": [
+            "A. 我在下一条消息中粘贴具体评审意见（推荐：逐条列出，便于精确增量修订）"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:30:50.632250618+00:00",
+          "completed_at": "2026-08-23T15:30:50.632250618+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:30:50.648610095+00:00",
+          "completed_at": "2026-08-23T15:37:32.020511229+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:37:32.062797959+00:00",
+          "completed_at": "2026-08-23T15:37:32.083946332+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:37:32.106536450+00:00",
+          "completed_at": "2026-08-23T15:39:48.329897704+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "用户提交反馈，进入修订",
+          "started_at": "2026-08-23T15:39:48.365801342+00:00",
+          "completed_at": "2026-08-23T15:39:48.388458761+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "revision",
+          "status": "failed",
+          "title": "反馈修订",
+          "summary": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+          "started_at": "2026-08-23T15:39:48.409479054+00:00",
+          "completed_at": "2026-08-23T15:40:55.007536762+00:00"
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "02",
+      "shape_file": "02-data-model.md",
+      "story_fixture_file": "02-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "02",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T15:42:21.884Z",
+      "finishedAt": "2026-08-23T15:54:27.263Z",
+      "issueId": "issue_0065",
+      "sessionId": "workspace_session_0065",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": false,
+      "reviewVerdicts": [
+        {
+          "verdict": "needs_human",
+          "el": 605.347
+        }
+      ],
+      "failureClass": "provider_error",
+      "elapsedSec": 725.378,
+      "boundary_kind": null,
+      "error": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]",
+      "errorCode": "workspace_error",
+      "aborted": false,
+      "firstArtifactSec": 452.416,
+      "authorConfirmSec": 452.416,
+      "reviewCompleteSec": 605.347,
+      "finalizeSec": null,
+      "choices": [
+        {
+          "elapsedSec": 270.722,
+          "picked": [
+            "通用关系型数据库（产品无关表述，索引策略用各主流库通用能力，JSON 字段标注 PG/MySQL 差异）【推荐】"
+          ]
+        },
+        {
+          "elapsedSec": 632.933,
+          "picked": [
+            "由我在下一条回复中粘贴具体评审意见，author 逐条做增量修订【推荐】"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T15:42:22.180106941+00:00",
+          "completed_at": "2026-08-23T15:42:22.180106941+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T15:42:22.196068244+00:00",
+          "completed_at": "2026-08-23T15:49:54.235644609+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T15:49:54.280180064+00:00",
+          "completed_at": "2026-08-23T15:49:54.301556018+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T15:49:54.319945934+00:00",
+          "completed_at": "2026-08-23T15:52:27.174641190+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "用户提交反馈，进入修订",
+          "started_at": "2026-08-23T15:52:27.210942935+00:00",
+          "completed_at": "2026-08-23T15:52:27.233292328+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "revision",
+          "status": "failed",
+          "title": "反馈修订",
+          "summary": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]",
+          "started_at": "2026-08-23T15:52:27.254853518+00:00",
+          "completed_at": "2026-08-23T15:53:08.342848524+00:00"
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "02",
+      "shape_file": "02-data-model.md",
+      "story_fixture_file": "02-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "02",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:02:28.574Z",
+      "finishedAt": "2026-08-23T16:14:47.159Z",
+      "issueId": "issue_0076",
+      "sessionId": "workspace_session_0076",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 738.333
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 738.584,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 562.508,
+      "authorConfirmSec": 562.508,
+      "reviewCompleteSec": 738.332,
+      "finalizeSec": 738.333,
+      "choices": [
+        {
+          "elapsedSec": 279.11,
+          "picked": [
+            "① PostgreSQL"
+          ]
+        },
+        {
+          "elapsedSec": 286.555,
+          "picked": [
+            "① 仅触发来源字段"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:02:28.942789368+00:00",
+          "completed_at": "2026-08-23T16:02:28.942789368+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:02:28.958877042+00:00",
+          "completed_at": "2026-08-23T16:11:51.017791559+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:11:51.062282130+00:00",
+          "completed_at": "2026-08-23T16:11:51.084161962+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:11:51.103435813+00:00",
+          "completed_at": "2026-08-23T16:14:46.844617923+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:14:46.882084917+00:00",
+          "completed_at": "2026-08-23T16:14:46.908442861+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:14:46.956989850+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "03",
+      "shape_file": "03-choice-to-dec.md",
+      "story_fixture_file": "03-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "03",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:04:40.670Z",
+      "finishedAt": "2026-08-23T16:11:02.578Z",
+      "issueId": "issue_0080",
+      "sessionId": "workspace_session_0080",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 381.669
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 381.907,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 280.562,
+      "authorConfirmSec": 280.562,
+      "reviewCompleteSec": 381.669,
+      "finalizeSec": 381.669,
+      "choices": [
+        {
+          "elapsedSec": 165.014,
+          "picked": [
+            "JSON"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:04:41.062088293+00:00",
+          "completed_at": "2026-08-23T16:04:41.062088293+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:04:41.078610843+00:00",
+          "completed_at": "2026-08-23T16:09:21.185551202+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:09:21.217863227+00:00",
+          "completed_at": "2026-08-23T16:09:21.233830605+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:09:21.248166709+00:00",
+          "completed_at": "2026-08-23T16:11:02.292719431+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:11:02.321012432+00:00",
+          "completed_at": "2026-08-23T16:11:02.340967647+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:11:02.379334040+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "03",
+      "shape_file": "03-choice-to-dec.md",
+      "story_fixture_file": "03-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "03",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:11:30.662Z",
+      "finishedAt": "2026-08-23T16:17:29.879Z",
+      "issueId": "issue_0082",
+      "sessionId": "workspace_session_0082",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 358.973
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 359.216,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 245.559,
+      "authorConfirmSec": 245.56,
+      "reviewCompleteSec": 358.973,
+      "finalizeSec": 358.973,
+      "choices": [
+        {
+          "elapsedSec": 139.385,
+          "picked": [
+            "JSON"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:11:31.088552743+00:00",
+          "completed_at": "2026-08-23T16:11:31.088552743+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:11:31.105350911+00:00",
+          "completed_at": "2026-08-23T16:15:36.177134091+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:15:36.208022891+00:00",
+          "completed_at": "2026-08-23T16:15:36.223349242+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:15:36.237180298+00:00",
+          "completed_at": "2026-08-23T16:17:29.589066757+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:17:29.616790140+00:00",
+          "completed_at": "2026-08-23T16:17:29.637011949+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:17:29.679824397+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "04",
+      "shape_file": "04-abstract-traceability.md",
+      "story_fixture_file": "04-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "04",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:17:41.267Z",
+      "finishedAt": "2026-08-23T16:26:43.063Z",
+      "issueId": "issue_0084",
+      "sessionId": "workspace_session_0084",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 541.545
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 541.795,
+      "boundary_kind": "abstract-positive",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 423.098,
+      "authorConfirmSec": 423.098,
+      "reviewCompleteSec": 541.545,
+      "finalizeSec": 541.545,
+      "choices": [
+        {
+          "elapsedSec": 251.779,
+          "picked": [
+            "A｜单次口径：每次结算针对一笔确定的退款请求计算金额，不在抽象中跟踪多次退款的累计状态"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:17:41.694127216+00:00",
+          "completed_at": "2026-08-23T16:17:41.694127216+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:17:41.710883389+00:00",
+          "completed_at": "2026-08-23T16:24:44.308123731+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:24:44.347253354+00:00",
+          "completed_at": "2026-08-23T16:24:44.366568888+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:24:44.383744985+00:00",
+          "completed_at": "2026-08-23T16:26:42.757928861+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:26:42.790979585+00:00",
+          "completed_at": "2026-08-23T16:26:42.813964098+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:26:42.858144267+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "04",
+      "shape_file": "04-abstract-traceability.md",
+      "story_fixture_file": "04-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "04",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:33:19.720Z",
+      "finishedAt": "2026-08-23T16:44:55.252Z",
+      "issueId": "issue_0090",
+      "sessionId": "workspace_session_0090",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": false,
+      "reviewVerdicts": [
+        {
+          "verdict": "revise",
+          "el": 569.628
+        }
+      ],
+      "failureClass": "provider_error",
+      "elapsedSec": 695.531,
+      "boundary_kind": "abstract-positive",
+      "error": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+      "errorCode": "workspace_error",
+      "aborted": false,
+      "firstArtifactSec": 351.793,
+      "authorConfirmSec": 351.793,
+      "reviewCompleteSec": 569.628,
+      "finalizeSec": null,
+      "choices": [
+        {
+          "elapsedSec": 154.604,
+          "picked": [
+            "A. 函数式策略契约（推荐）"
+          ]
+        },
+        {
+          "elapsedSec": 188.342,
+          "picked": [
+            "A. 统一输入契约（推荐）"
+          ]
+        },
+        {
+          "elapsedSec": 600.679,
+          "picked": [
+            "A. 我来粘贴评审意见"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:33:20.172635664+00:00",
+          "completed_at": "2026-08-23T16:33:20.172635664+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:33:20.191686058+00:00",
+          "completed_at": "2026-08-23T16:39:11.459463850+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:39:11.495792205+00:00",
+          "completed_at": "2026-08-23T16:39:11.515229374+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:39:11.533317105+00:00",
+          "completed_at": "2026-08-23T16:42:49.293185160+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "用户提交反馈，进入修订",
+          "started_at": "2026-08-23T16:42:49.326696959+00:00",
+          "completed_at": "2026-08-23T16:42:49.350268091+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "revision",
+          "status": "failed",
+          "title": "反馈修订",
+          "summary": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+          "started_at": "2026-08-23T16:42:49.371648456+00:00",
+          "completed_at": "2026-08-23T16:43:32.492442786+00:00"
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "05",
+      "shape_file": "05-test-boundary-violation.md",
+      "story_fixture_file": "05-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "05",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T16:37:39.033Z",
+      "finishedAt": "2026-08-23T16:48:16.391Z",
+      "issueId": "issue_0091",
+      "sessionId": "workspace_session_0091",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 637.114
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 637.358,
+      "boundary_kind": "violation-negative",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 404.243,
+      "authorConfirmSec": 404.243,
+      "reviewCompleteSec": 637.114,
+      "finalizeSec": 637.114,
+      "choices": [
+        {
+          "elapsedSec": 239.262,
+          "picked": [
+            "异步任务编排为主（推荐）：提交即受理并返回任务标识，后台生成文件，完成后授权下载；适合大体量订单、可重试、可追踪、利于归档审计"
+          ]
+        },
+        {
+          "elapsedSec": 246.865,
+          "picked": [
+            "单一缺省格式起步（推荐）：首版仅 CSV，文件生成器保持窄接口（输入数据流、输出产物），后续加格式不破坏既有契约；符合 YAGNI"
+          ]
+        },
+        {
+          "elapsedSec": 257.782,
+          "picked": [
+            "时效性下载凭证 + 归属绑定（推荐）：任务完成后签发短期、与申请者身份绑定的下载凭证；核验凭证有效性与归属后放行，过期或非本人即拒绝"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:37:39.488138792+00:00",
+          "completed_at": "2026-08-23T16:37:39.488138792+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:37:39.504535848+00:00",
+          "completed_at": "2026-08-23T16:44:23.222049895+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:44:23.257818934+00:00",
+          "completed_at": "2026-08-23T16:44:23.276755108+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:44:23.293508205+00:00",
+          "completed_at": "2026-08-23T16:48:16.087200460+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:48:16.124841107+00:00",
+          "completed_at": "2026-08-23T16:48:16.147843641+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:48:16.191246952+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "first_review_verdict": "pass",
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "05",
+      "shape_file": "05-test-boundary-violation.md",
+      "story_fixture_file": "05-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "05",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T16:48:25.132Z",
+      "finishedAt": "2026-08-23T16:58:31.847Z",
+      "issueId": "issue_0094",
+      "sessionId": "workspace_session_0094",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "pass",
+          "el": 606.471
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 606.714,
+      "boundary_kind": "violation-negative",
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 447.873,
+      "authorConfirmSec": 447.873,
+      "reviewCompleteSec": 606.471,
+      "finalizeSec": 606.471,
+      "choices": [
+        {
+          "elapsedSec": 297.889,
+          "picked": [
+            "A. 保持技术中立（推荐）：只定义组件职责边界、接口契约与数据模型，用「模块/层」描述文件职责，不绑定语言框架与具体目录路径"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T16:48:25.625868639+00:00",
+          "completed_at": "2026-08-23T16:48:25.625868639+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T16:48:25.649358493+00:00",
+          "completed_at": "2026-08-23T16:55:52.954208211+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T16:55:52.990068721+00:00",
+          "completed_at": "2026-08-23T16:55:53.007022766+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T16:55:53.022403704+00:00",
+          "completed_at": "2026-08-23T16:58:31.554244138+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:58:31.583902611+00:00",
+          "completed_at": "2026-08-23T16:58:31.604741152+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T16:58:31.646464884+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "first_review_verdict": "pass",
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "06",
+      "shape_file": "06-multi-constraint.md",
+      "story_fixture_file": "06-story-fixture.md",
+      "repetition": "1",
+      "case_id": {
+        "shape_id": "06",
+        "repetition_id": 1
+      },
+      "startedAt": "2026-08-23T17:04:08.921Z",
+      "finishedAt": "2026-08-23T17:16:03.715Z",
+      "issueId": "issue_0096",
+      "sessionId": "workspace_session_0096",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": true,
+      "reviewVerdicts": [
+        {
+          "verdict": "needs_human",
+          "el": 523.905
+        }
+      ],
+      "failureClass": "completed",
+      "elapsedSec": 714.793,
+      "boundary_kind": null,
+      "error": null,
+      "errorCode": null,
+      "aborted": false,
+      "firstArtifactSec": 379.326,
+      "authorConfirmSec": 379.326,
+      "reviewCompleteSec": 523.905,
+      "finalizeSec": 714.514,
+      "choices": [
+        {
+          "elapsedSec": 177.5,
+          "picked": [
+            "A. 继续派发全部剩余子任务（完全隔离：每个租户预热互不影响，父任务在所有子任务终态后统一汇总成功/失败，预热覆盖最大化）"
+          ]
+        },
+        {
+          "elapsedSec": 206.791,
+          "picked": [
+            "A. 仅子任务级自动重试：失败的租户子任务按 scheduler 既有重试策略自动重试；父任务等所有子任务到达终态后汇总，不做整批自动重跑"
+          ]
+        },
+        {
+          "elapsedSec": 566.198,
+          "picked": [
+            "A. 我将粘贴具体评审意见（选择此项后请在回答中附上 must_fix/should_fix 原文）"
+          ]
+        },
+        {
+          "elapsedSec": 587.926,
+          "picked": [
+            "（兜底）无具体清单，改按自查缺口增强修订（①终态通知契约 ②同租户多报表执行策略 ③租户清单来源口径 ④同步更新追踪关系）"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T17:04:09.406160285+00:00",
+          "completed_at": "2026-08-23T17:04:09.406160285+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T17:04:09.422983686+00:00",
+          "completed_at": "2026-08-23T17:10:28.186570490+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T17:10:28.228334620+00:00",
+          "completed_at": "2026-08-23T17:10:28.248453166+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T17:10:28.266586180+00:00",
+          "completed_at": "2026-08-23T17:12:52.771184276+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "用户提交反馈，进入修订",
+          "started_at": "2026-08-23T17:12:52.805498436+00:00",
+          "completed_at": "2026-08-23T17:12:52.828074319+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "revision",
+          "status": "completed",
+          "title": "反馈修订",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T17:12:52.848521559+00:00",
+          "completed_at": "2026-08-23T17:16:03.347335243+00:00"
+        },
+        {
+          "node_id": "timeline_node_007",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T17:16:03.391051216+00:00",
+          "completed_at": "2026-08-23T17:16:03.436745947+00:00"
+        },
+        {
+          "node_id": "timeline_node_008",
+          "node_type": "completed",
+          "status": "completed",
+          "title": "流程完成",
+          "summary": "人工确认定稿",
+          "started_at": "2026-08-23T17:16:03.508925356+00:00",
+          "completed_at": null
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 2,
+      "usage_unavailable": true
+    },
+    {
+      "provider": "pi",
+      "model": "pi-cli",
+      "model_version": "pi-cli-version-placeholder",
+      "role_provider": {
+        "author": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        },
+        "reviewer": {
+          "provider": "pi",
+          "model": "pi-cli",
+          "model_version": "pi-cli-version-placeholder"
+        }
+      },
+      "strategy": "fresh",
+      "resume_available": false,
+      "shape_id": "06",
+      "shape_file": "06-multi-constraint.md",
+      "story_fixture_file": "06-story-fixture.md",
+      "repetition": "2",
+      "case_id": {
+        "shape_id": "06",
+        "repetition_id": 2
+      },
+      "startedAt": "2026-08-23T17:04:21.979Z",
+      "finishedAt": "2026-08-23T17:16:47.544Z",
+      "issueId": "issue_0097",
+      "sessionId": "workspace_session_0097",
+      "storySpecId": "story_spec_0001",
+      "designSpecId": "design_spec_0001",
+      "finished": false,
+      "reviewVerdicts": [
+        {
+          "verdict": "needs_human",
+          "el": 623.931
+        }
+      ],
+      "failureClass": "provider_error",
+      "elapsedSec": 745.564,
+      "boundary_kind": null,
+      "error": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+      "errorCode": "workspace_error",
+      "aborted": false,
+      "firstArtifactSec": 500.381,
+      "authorConfirmSec": 500.381,
+      "reviewCompleteSec": 623.931,
+      "finalizeSec": null,
+      "choices": [
+        {
+          "elapsedSec": 329.178,
+          "picked": [
+            "A｜完全隔离：继续启动全部未开始子任务，失败仅影响最终汇总状态，不影响任何其他租户执行（推荐：最贴合 REQ-004 字面与 NFR-001 隔离意图）"
+          ]
+        },
+        {
+          "elapsedSec": 340.098,
+          "picked": [
+            "A｜子任务级：每个租户子任务独立走现有重试接口；父任务不做整体自动重跑（推荐：与失败隔离一致，避免全量重放放大缓存集群负载）"
+          ]
+        },
+        {
+          "elapsedSec": 652.415,
+          "picked": [
+            "A｜我在回复中直接粘贴具体评审意见（逐条 must_fix/should_fix）"
+          ]
+        }
+      ],
+      "permissionApprovals": 0,
+      "nodes": [
+        {
+          "node_id": "timeline_node_001",
+          "node_type": "start_generation",
+          "status": "completed",
+          "title": "开始生成",
+          "summary": null,
+          "started_at": "2026-08-23T17:04:22.464677317+00:00",
+          "completed_at": "2026-08-23T17:04:22.464677317+00:00"
+        },
+        {
+          "node_id": "timeline_node_002",
+          "node_type": "author_run",
+          "status": "completed",
+          "title": "Design Spec 生成",
+          "summary": "生成完成",
+          "started_at": "2026-08-23T17:04:22.481556842+00:00",
+          "completed_at": "2026-08-23T17:12:42.302965808+00:00"
+        },
+        {
+          "node_id": "timeline_node_003",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "已确认，进入 Review",
+          "started_at": "2026-08-23T17:12:42.343194687+00:00",
+          "completed_at": "2026-08-23T17:12:42.362062249+00:00"
+        },
+        {
+          "node_id": "timeline_node_004",
+          "node_type": "reviewer_run",
+          "status": "completed",
+          "title": "Review Round 1",
+          "summary": "Review 完成，报告已进入对话流",
+          "started_at": "2026-08-23T17:12:42.379424495+00:00",
+          "completed_at": "2026-08-23T17:14:45.855511644+00:00"
+        },
+        {
+          "node_id": "timeline_node_005",
+          "node_type": "author_confirm",
+          "status": "completed",
+          "title": "Author 结果确认",
+          "summary": "用户提交反馈，进入修订",
+          "started_at": "2026-08-23T17:14:45.888382438+00:00",
+          "completed_at": "2026-08-23T17:14:45.911718412+00:00"
+        },
+        {
+          "node_id": "timeline_node_006",
+          "node_type": "revision",
+          "status": "failed",
+          "title": "反馈修订",
+          "summary": "Provider 未返回有效的 Design Spec artifact：缺少 heading: 设计范围；缺少 heading: 设计决策；缺少 heading: 公共组件；缺少 heading: API 契约；缺少 heading: 数据模型；缺少 heading: 风险；缺少 heading: 追踪关系；缺少 [DEC-*]；缺少 [CMP-*]；缺少 [API-*]；缺少 source id",
+          "started_at": "2026-08-23T17:14:45.936207993+00:00",
+          "completed_at": "2026-08-23T17:15:30.458159959+00:00"
+        }
+      ],
+      "timeouts": [],
+      "artifactVersion": 1,
+      "usage_unavailable": true
+    }
+  ]
+}

@@ -3,7 +3,8 @@ use super::group_review_orchestrator::GroupReviewOrchestrator;
 use super::*;
 
 // Legacy group review executor retained for regression coverage
-// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+//  Task 12 删除)
 // and legacy artifact reader support. No production callers remain after the
 // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
 // no longer need regression coverage.
@@ -91,12 +92,22 @@ pub(crate) fn map_group_review_orchestration_error(
         GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::Internal(message)) => {
             CodingWorkspaceEngineError::GroupReviewExecutorInternal(message)
         }
+        // P4-b（REQ-PTR-IDLE）：internal reviewer 零活动挂起耗尽映射为可人工
+        // 恢复的 Blocked 语义（stalled 门已由 create_failure_gate 落
+        // code_review_provider_stalled），不进 Failed 收口。
+        GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::IdleStall {
+            ..
+        }) => CodingWorkspaceEngineError::GroupReviewBlocked {
+            reason_code: CODE_REVIEW_PROVIDER_STALLED_REASON_CODE.to_string(),
+            gate_id,
+        },
         GroupReviewOrchestrationError::Store(error) => CodingWorkspaceEngineError::Store(error),
     }
 }
 
 // Legacy group review executor retained for regression coverage
-// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+//  Task 12 删除)
 // and legacy artifact reader support. No production callers remain after the
 // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
 // no longer need regression coverage.
@@ -110,7 +121,8 @@ enum GroupReviewFailureDisposition {
 }
 
 // Legacy group review executor retained for regression coverage
-// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+//  Task 12 删除)
 // and legacy artifact reader support. No production callers remain after the
 // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
 // no longer need regression coverage.
@@ -134,7 +146,8 @@ fn group_review_failure_disposition(
 
 impl CodingWorkspaceEngine {
     // Legacy group review executor retained for regression coverage
-    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+    //  Task 12 删除)
     // and legacy artifact reader support. No production callers remain after the
     // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
     // no longer need regression coverage.
@@ -145,7 +158,14 @@ impl CodingWorkspaceEngine {
         node_id: &str,
         role_run_id: &str,
         error: CodingWorkspaceEngineError,
+        review_window: Option<&crate::product::reviewer_window::ReviewerWindowHandle>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        // 批2 Task 20b(决策项⑧):group 审查窗在失败收尾前技术收口
+        // (锁保持到恢复完成;收口错误只 warn 不掩盖原始错误)。
+        if let Some(window) = review_window {
+            self.close_reviewer_window_after_failure(window, "group_review_failed")
+                .await;
+        }
         let message = error.to_string();
         match group_review_failure_disposition(&error) {
             GroupReviewFailureDisposition::Blocked => {
@@ -225,7 +245,8 @@ impl CodingWorkspaceEngine {
     }
 
     // Legacy group review executor retained for regression coverage
-    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+    //  Task 12 删除)
     // and legacy artifact reader support. No production callers remain after the
     // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
     // no longer need regression coverage.
@@ -237,6 +258,7 @@ impl CodingWorkspaceEngine {
         node_id: &str,
         role_run_id: &str,
         error: GroupReviewOrchestrationError,
+        review_window: Option<&crate::product::reviewer_window::ReviewerWindowHandle>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
         let gate_id = match &error {
             GroupReviewOrchestrationError::CapacityExceeded
@@ -245,21 +267,23 @@ impl CodingWorkspaceEngine {
             | GroupReviewOrchestrationError::ShardOutputInvalid { .. }
             | GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
             | GroupReviewOrchestrationError::ShardTransportExhausted { .. }
-            | GroupReviewOrchestrationError::ReductionTransportExhausted => {
-                match orchestrator.create_failure_gate(attempt, node_id, &error) {
-                    Ok(gate) => Some(gate.gate_id),
-                    Err(store_error) => {
-                        return self
-                            .finalize_group_review_failure(
-                                attempt,
-                                node_id,
-                                role_run_id,
-                                CodingWorkspaceEngineError::Store(store_error),
-                            )
-                            .await;
-                    }
+            | GroupReviewOrchestrationError::ReductionTransportExhausted
+            | GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::IdleStall {
+                ..
+            }) => match orchestrator.create_failure_gate(attempt, node_id, &error) {
+                Ok(gate) => Some(gate.gate_id),
+                Err(store_error) => {
+                    return self
+                        .finalize_group_review_failure(
+                            attempt,
+                            node_id,
+                            role_run_id,
+                            CodingWorkspaceEngineError::Store(store_error),
+                            review_window,
+                        )
+                        .await;
                 }
-            }
+            },
             GroupReviewOrchestrationError::ShardInProgress { .. }
             | GroupReviewOrchestrationError::ReductionInProgress
             | GroupReviewOrchestrationError::ReductionNotReady
@@ -269,7 +293,7 @@ impl CodingWorkspaceEngine {
             | GroupReviewOrchestrationError::Executor(_) => None,
         };
         let mapped = map_group_review_orchestration_error(error, gate_id);
-        self.finalize_group_review_failure(attempt, node_id, role_run_id, mapped)
+        self.finalize_group_review_failure(attempt, node_id, role_run_id, mapped, review_window)
             .await
     }
 }

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
@@ -17,9 +19,92 @@ const MAX_CONTEXT_RESOLUTIONS: usize = 20;
 const MAX_CONTEXT_ESTIMATED_TOKENS: u32 = 8_000;
 const SUMMARY_ESTIMATED_TOKENS: u32 = 512;
 
+#[cfg(test)]
+thread_local! {
+    static COMPILE_TRANSACTION_WRITE_JOURNAL: RefCell<Option<Vec<WorkItemPlanCompileTransaction>>> =
+        const { RefCell::new(None) };
+}
+
+/// 在测试中收集当前线程内每次 compile transaction 覆盖写的完整快照。
+///
+/// guard 离开作用域时恢复嵌套观察者并清理当前 case 的记录，避免并行测试串扰。
+#[cfg(test)]
+pub(crate) struct WorkItemPlanCompileTransactionJournalGuard {
+    previous: Option<Vec<WorkItemPlanCompileTransaction>>,
+}
+
+#[cfg(test)]
+impl WorkItemPlanCompileTransactionJournalGuard {
+    pub(crate) fn snapshots(&self) -> Vec<WorkItemPlanCompileTransaction> {
+        COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| {
+            journal
+                .borrow()
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| panic!("compile transaction journal guard is no longer active"))
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for WorkItemPlanCompileTransactionJournalGuard {
+    fn drop(&mut self) {
+        COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| {
+            *journal.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn observe_compile_transaction_writes() -> WorkItemPlanCompileTransactionJournalGuard {
+    let previous =
+        COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| journal.borrow_mut().replace(Vec::new()));
+    WorkItemPlanCompileTransactionJournalGuard { previous }
+}
+
+#[cfg(test)]
+fn record_compile_transaction_write(tx: &WorkItemPlanCompileTransaction) {
+    COMPILE_TRANSACTION_WRITE_JOURNAL.with(|journal| {
+        if let Some(snapshots) = journal.borrow_mut().as_mut() {
+            snapshots.push(tx.clone());
+        }
+    });
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkItemPlanStore {
     app_paths: ProductAppPaths,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PANIC_ON_LEGACY_COMPILE_READ: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyCompileReadSpy;
+
+#[cfg(test)]
+impl Drop for LegacyCompileReadSpy {
+    fn drop(&mut self) {
+        PANIC_ON_LEGACY_COMPILE_READ.with(|flag| flag.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn panic_on_legacy_compile_reads() -> LegacyCompileReadSpy {
+    PANIC_ON_LEGACY_COMPILE_READ.with(|flag| flag.set(true));
+    LegacyCompileReadSpy
+}
+
+#[cfg(test)]
+fn assert_legacy_compile_read_allowed(operation: &str) {
+    PANIC_ON_LEGACY_COMPILE_READ.with(|flag| {
+        assert!(
+            !flag.get(),
+            "SingleCandidate accessed legacy compile store: {operation}"
+        );
+    });
 }
 
 impl WorkItemPlanStore {
@@ -40,6 +125,8 @@ impl WorkItemPlanStore {
         generation_round_id: &str,
         draft_id: &str,
     ) -> Result<WorkItemDraftRecord, ProductStoreError> {
+        #[cfg(test)]
+        assert_legacy_compile_read_allowed("get_draft_record");
         validate_work_item_plan_path_ids(project_id, issue_id, plan_id)?;
         validate_relative_id(generation_round_id)?;
         validate_relative_id(draft_id)?;
@@ -62,6 +149,8 @@ impl WorkItemPlanStore {
         issue_id: &str,
         plan_id: &str,
     ) -> Result<Vec<WorkItemDraftRecord>, ProductStoreError> {
+        #[cfg(test)]
+        assert_legacy_compile_read_allowed("list_draft_records");
         validate_work_item_plan_path_ids(project_id, issue_id, plan_id)?;
         let root = self.draft_plan_root(project_id, issue_id, plan_id);
         let mut records = Vec::new();
@@ -81,6 +170,8 @@ impl WorkItemPlanStore {
         issue_id: &str,
         plan_id: &str,
     ) -> Result<Option<WorkItemPlanDraftActiveIndex>, ProductStoreError> {
+        #[cfg(test)]
+        assert_legacy_compile_read_allowed("load_active_index");
         validate_work_item_plan_path_ids(project_id, issue_id, plan_id)?;
         read_optional_json(&self.active_index_path_for(project_id, issue_id, plan_id))
     }
@@ -115,6 +206,8 @@ impl WorkItemPlanStore {
         tx: &WorkItemPlanCompileTransaction,
     ) -> Result<(), ProductStoreError> {
         validate_compile_transaction(tx)?;
+        #[cfg(test)]
+        record_compile_transaction_write(tx);
         write_json(&self.compile_transaction_path(tx), tx)
     }
 

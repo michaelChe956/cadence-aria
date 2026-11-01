@@ -11,6 +11,8 @@ export type MockLifecycleData = {
   design_specs: Array<Record<string, unknown>>;
   work_item_plans: unknown[];
   work_items: Array<Record<string, unknown>>;
+  // REQ-TGT-05：后端按 target_repository_id 分组的聚合视图（空数组 = 单仓/扁平兼容）。
+  work_item_repository_groups: Array<Record<string, unknown>>;
   workspace_sessions: WorkspaceSession[];
   coding_attempts: CodingAttempt[];
 };
@@ -105,12 +107,26 @@ export function workspaceSessionRecordShape(
     entity_id: entityId,
     workspace_type: workspaceType,
     status: "waiting_for_human",
+    automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false },
     author_provider: "codex",
     reviewer_provider: "claude_code",
     review_rounds: 2,
     superpowers_enabled: true,
     openspec_enabled: true,
     messages: [],
+  };
+}
+
+export function workItemRepositoryGroupRecord(
+  overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    target_repository_id: "repo_target_0001",
+    alias: "api",
+    status: "pending",
+    compatibility_projection: false,
+    items: [],
+    ...overrides,
   };
 }
 
@@ -130,6 +146,7 @@ export function initialLifecycleData(
       design_specs: [],
       work_item_plans: [],
       work_items: [],
+      work_item_repository_groups: [],
       workspace_sessions: [],
       coding_attempts: [],
     };
@@ -225,6 +242,7 @@ export function initialLifecycleData(
     ],
     work_item_plans: workItemPlans ?? defaultWorkItemPlans,
     work_items: workItems,
+    work_item_repository_groups: [],
     workspace_sessions: [
       workspaceSessionRecord("story", storyId, "workspace_session_story_0001"),
       workspaceSessionRecord(
@@ -463,4 +481,154 @@ export function deferred<T>() {
     reject = promiseReject;
   });
   return { promise, resolve, reject };
+}
+
+// 从 IssueLifecycleWorkbench.test-utils.ts 拆出（large_file_guard 1200 行上限，纯移动零行为变化）：
+// sharedLifecycleIdsAcrossIssues 选项共用的跨 issue 同 id lifecycle 数据工厂。
+export function sharedIdLifecycleData(issueId: string): MockLifecycleData {
+    const planId = "issue_work_item_plan_0001";
+    const data = initialLifecycleData(
+      issueId,
+      false,
+      false,
+      true,
+      false,
+      [
+        issueWorkItemPlanRecord({
+          id: planId,
+          issue_id: issueId,
+          status: "confirmed",
+          work_item_ids: ["work_item_0001"],
+        }),
+      ],
+      false,
+    );
+    data.story_specs[0] = {
+      ...data.story_specs[0],
+      issue_id: issueId,
+      title: `${issueId} Story`,
+    };
+    data.design_specs[0] = {
+      ...data.design_specs[0],
+      issue_id: issueId,
+      title: `${issueId} Design`,
+    };
+    data.work_items[0] = {
+      ...data.work_items[0],
+      issue_id: issueId,
+      title: `${issueId} Child`,
+    };
+    data.work_item_repository_groups = [];
+    data.workspace_sessions = [
+      workspaceSessionRecord(
+        "story",
+        "story_spec_0001",
+        `workspace_session_${issueId}_story`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "design",
+        "design_spec_0001",
+        `workspace_session_${issueId}_design`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "work_item",
+        "work_item_0001",
+        `workspace_session_${issueId}_work_item`,
+        { issue_id: issueId },
+      ),
+      workspaceSessionRecord(
+        "work_item_plan",
+        planId,
+        `workspace_session_${issueId}_work_item_plan`,
+        { issue_id: issueId },
+      ),
+    ];
+    return data;
+}
+
+// 级联删除 D2.3（fix-cascade-deletion REQ-DEL-04/05）：在基础 lifecycle 夹具
+// 之上模拟服务端三类 DELETE 确认契约——首次删除（无 query）按配置返回 409
+// 稳定码或交由基础夹具 200；`?confirmed=true` 恒放行至基础夹具（Draft 语义
+// = 未配置 required 的资源直接 200）。
+export type CascadeDeleteConfirmationReason =
+  | "previously_confirmed"
+  | "legacy_history_unknown";
+
+export type CascadeDeleteContractSpec = {
+  /** 首次 DELETE 需要一次确认的资源 id → 服务端三分类 reason。 */
+  requiredReasonByEntityId?: Record<string, CascadeDeleteConfirmationReason>;
+  /** 首次 DELETE 直接拒绝的资源 id → 稳定错误码（coding/reference/busy）。 */
+  rejectedCodeByEntityId?: Record<string, string>;
+};
+
+const CASCADE_DELETE_ENTITY_PATTERN =
+  /^\/api\/projects\/[^/]+\/issues\/[^/]+\/(?:story-specs|design-specs|work-item-plans)\/([^/?]+)(?:\?.*)?$/;
+
+export function cascadeDeleteConfirmationFetch(
+  baseFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+  spec: CascadeDeleteContractSpec = {},
+): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (init?.method !== "DELETE") {
+      return baseFetch(input, init);
+    }
+    const match = url.match(CASCADE_DELETE_ENTITY_PATTERN);
+    if (!match) {
+      return baseFetch(input, init);
+    }
+    const entityId = decodeURIComponent(match[1] ?? "");
+    const confirmed = url.includes("confirmed=true");
+    if (confirmed) {
+      // 服务端只在分类 Required 且 query 显式 true 时放行重删；query 由本
+      // 契约包装器消费，路径部分委托基础夹具（其路由 regex 不含 query）。
+      return baseFetch(url.slice(0, url.indexOf("?")), init);
+    }
+    const requiredReason = spec.requiredReasonByEntityId?.[entityId];
+    if (requiredReason) {
+      return new Response(
+        JSON.stringify({
+          code: "deletion_confirmation_required",
+          message: "该实体曾确认或确认历史未知，删除前需要一次确认",
+          details: { reason: requiredReason, entity_id: entityId },
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+    const rejectedCode = spec.rejectedCodeByEntityId?.[entityId];
+    if (rejectedCode) {
+      const bodyByCode: Record<string, { message: string; details: unknown }> = {
+        coding_workspace_exists: {
+          message: "存在 coding workspace，请先删除 coding workspace 再删除 work item group",
+          details: { plan_id: entityId, attempt_id: "coding_attempt_0001" },
+        },
+        entity_referenced: {
+          message: "实体仍被存活后置对象引用，请先删除引用它的对象",
+          details: {
+            entity_id: entityId,
+            references: [{ kind: "design_spec", id: "design_spec_0001" }],
+          },
+        },
+        entity_busy: {
+          message: "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+          details: { entity_id: entityId },
+        },
+      };
+      const body = bodyByCode[rejectedCode];
+      if (!body) {
+        throw new Error(`unexpected cascade reject code: ${rejectedCode}`);
+      }
+      return new Response(
+        JSON.stringify({
+          code: rejectedCode,
+          message: body.message,
+          details: body.details,
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+    return baseFetch(input, init);
+  };
 }

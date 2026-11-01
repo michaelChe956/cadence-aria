@@ -1,0 +1,754 @@
+{
+  "type": "artifact_update",
+  "version": 6,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_1d41f286d4e936903ec60e34",
+    "work_item_revision_id": "work_item_revision_1d41f286d4e936903ec60e34",
+    "canonical_contract_hash": "bc87bbceed3b5bb3e3d8c3cdfe82ce9efc9f6ebf72dddca1e4b5aad2a52f1fcd",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-003",
+      "title": "前后端同源联调集成验证",
+      "goal": "WHEN 后端服务与前端页面产物就绪并以默认 dataPath 与 staticRoot 启动 THE SYSTEM SHALL 在 tests/integration/ 以同源 HTTP 可观测证据验证页面入口与 GET /api/levels 联调及错误响应形状",
+      "non_goals": [
+        "不修改 server/** 与 web/** 与 data/levels.json 及 tests/backend/** 与 tests/frontend/**",
+        "不引入浏览器自动化与 npm 依赖及数据库与认证或外部服务",
+        "不重复前端已覆盖的运行时渲染与失败降级断言"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/levels"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且恰为 5 项"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "GET /api/levels 成功响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "关卡字段约束为 id 非空字符串且文件内唯一 且 name 非空字符串 且 difficulty 属于枚举{简单 普通 困难} 且 unlocked 为布尔值"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "contract_id": "CT-006",
+          "capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象"
+          ],
+          "source_refs": [
+            "CT-006"
+          ]
+        },
+        {
+          "contract_id": "CT-007",
+          "capabilities": [
+            "未知 API 路径返回 404"
+          ],
+          "source_refs": [
+            "CT-007"
+          ]
+        },
+        {
+          "contract_id": "CT-009",
+          "capabilities": [
+            "server/server.js 导出 createServer(options) 且 options 含 dataPath 默认 data/levels.json 与 staticRoot 默认 web/"
+          ],
+          "source_refs": [
+            "CT-009"
+          ]
+        },
+        {
+          "contract_id": "CT-010",
+          "capabilities": [
+            "start({ port }) 返回 Promise 且 resolve 为含 origin 与 port 与 stop 的对象且 origin 形如 http://127.0.0.1:<实际端口>"
+          ],
+          "source_refs": [
+            "CT-010"
+          ]
+        },
+        {
+          "contract_id": "CT-011",
+          "capabilities": [
+            "测试可用 port: 0 获取临时端口避免并行争用"
+          ],
+          "source_refs": [
+            "CT-011"
+          ]
+        },
+        {
+          "contract_id": "CT-013",
+          "capabilities": [
+            "GET / 返回静态根目录下的页面入口 HTML"
+          ],
+          "source_refs": [
+            "CT-013"
+          ]
+        },
+        {
+          "contract_id": "CT-014",
+          "capabilities": [
+            "静态资源按 staticRoot 提供文件与 Content-Type"
+          ],
+          "source_refs": [
+            "CT-014"
+          ]
+        },
+        {
+          "contract_id": "CT-017",
+          "capabilities": [
+            "web/index.html 为关卡选择页入口"
+          ],
+          "source_refs": [
+            "CT-017"
+          ]
+        },
+        {
+          "contract_id": "CT-018",
+          "capabilities": [
+            "web/index.html 含 id=loading 容器标记"
+          ],
+          "source_refs": [
+            "CT-018"
+          ]
+        },
+        {
+          "contract_id": "CT-019",
+          "capabilities": [
+            "web/index.html 含 id=level-list 容器标记"
+          ],
+          "source_refs": [
+            "CT-019"
+          ]
+        },
+        {
+          "contract_id": "CT-020",
+          "capabilities": [
+            "web/index.html 含 id=error-message 容器标记"
+          ],
+          "source_refs": [
+            "CT-020"
+          ]
+        },
+        {
+          "contract_id": "CT-021",
+          "capabilities": [
+            "web/index.html 引入 web/level-select.js 脚本"
+          ],
+          "source_refs": [
+            "CT-021"
+          ]
+        },
+        {
+          "contract_id": "CT-022",
+          "capabilities": [
+            "web/level-select.js 引用相对路径 /api/levels"
+          ],
+          "source_refs": [
+            "CT-022"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-024",
+          "capabilities": [
+            "tests/integration/** 提供同源页面入口与 GET /api/levels 与错误响应形状的联调测试证据"
+          ],
+          "source_refs": [
+            "CT-024"
+          ]
+        },
+        {
+          "contract_id": "CT-025",
+          "capabilities": [
+            "集成测试不修改实现与上游测试且仅以 Node 内置测试运行器执行"
+          ],
+          "source_refs": [
+            "CT-025"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 以默认 dataPath 与 staticRoot 启动服务并请求 start 返回的 origin THE SYSTEM SHALL 同源返回 GET / 的 200 页面 HTML 与 GET /api/levels 的 200 顶层数组恰为 5 项且元素满足关卡字段约束且 Content-Type 为 application/json; charset=utf-8",
+        "WHEN GET / 与 /level-select.js 被 HTTP 请求 THE SYSTEM SHALL 分别返回含 id=loading 与 id=level-list 与 id=error-message 及脚本引用的 HTML 与含 /api/levels 相对路径引用的脚本内容",
+        "WHEN 未知 API 路径被请求 THE SYSTEM SHALL 返回 404 且错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象",
+        "WHEN 集成测试套件以 node --test 执行 THE SYSTEM SHALL 全部通过且集成测试未修改实现与上游测试"
+      ],
+      "source_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013",
+        "AC-014",
+        "CHECK-003",
+        "CHECK-004",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "CT-006",
+        "CT-007",
+        "CT-009",
+        "CT-010",
+        "CT-011",
+        "CT-013",
+        "CT-014",
+        "CT-017",
+        "CT-018",
+        "CT-019",
+        "CT-020",
+        "CT-021",
+        "CT-022",
+        "CT-024",
+        "CT-025",
+        "NFR-001",
+        "REQ-002",
+        "REQ-004",
+        "REQ-005",
+        "TASK-017",
+        "TASK-018",
+        "TASK-019",
+        "TASK-020"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_1d41f286d4e936903ec60e34",
+      "objective": "WHEN 后端服务与前端页面产物就绪并以默认 dataPath 与 staticRoot 启动 THE SYSTEM SHALL 在 tests/integration/ 以同源 HTTP 可观测证据验证页面入口与 GET /api/levels 联调及错误响应形状",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且恰为 5 项"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 成功响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "关卡字段约束为 id 非空字符串且文件内唯一 且 name 非空字符串 且 difficulty 属于枚举{简单 普通 困难} 且 unlocked 为布尔值"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-006",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-007",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "未知 API 路径返回 404"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-009",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "server/server.js 导出 createServer(options) 且 options 含 dataPath 默认 data/levels.json 与 staticRoot 默认 web/"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-010",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "start({ port }) 返回 Promise 且 resolve 为含 origin 与 port 与 stop 的对象且 origin 形如 http://127.0.0.1:<实际端口>"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-011",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "测试可用 port: 0 获取临时端口避免并行争用"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-013",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回静态根目录下的页面入口 HTML"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-014",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "静态资源按 staticRoot 提供文件与 Content-Type"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-017",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 为关卡选择页入口"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-018",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 含 id=loading 容器标记"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-019",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 含 id=level-list 容器标记"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-020",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 含 id=error-message 容器标记"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-021",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 引入 web/level-select.js 脚本"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-022",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 引用相对路径 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-017",
+        "TASK-018",
+        "TASK-019",
+        "TASK-020"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-017",
+          "statement": "WHEN 集成测试启动被测服务 THE SYSTEM SHALL 先在 tests/integration/ 编写失败测试并以 port 0 启动服务后对返回 origin 断言 GET / 返回 200 页面 HTML 与 GET /api/levels 返回 200 顶层数组恰为 5 项且元素满足关卡字段约束",
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "done_when_refs": [
+            "AC-011"
+          ]
+        },
+        {
+          "task_id": "TASK-018",
+          "statement": "WHEN 集成测试检查页面可观测结构 THE SYSTEM SHALL 先编写失败测试断言 GET / 响应体含 id=loading 与 id=level-list 与 id=error-message 及 web/level-select.js 引用且 /level-select.js 响应体包含 /api/levels 相对路径引用",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-012"
+          ]
+        },
+        {
+          "task_id": "TASK-019",
+          "statement": "WHEN 集成测试检查 API 错误形状 THE SYSTEM SHALL 先编写失败测试断言未知 API 路径返回 404 且错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "done_when_refs": [
+            "AC-013"
+          ]
+        },
+        {
+          "task_id": "TASK-020",
+          "statement": "WHEN 集成验证完成 THE SYSTEM SHALL 以限定 tests/integration 的 node --test 套件运行至全部通过且未修改 server/** 与 web/** 与 data/levels.json 及上游测试目录",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-014"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-011",
+          "statement": "WHEN 以默认 dataPath 与 staticRoot 启动服务并请求 start 返回的 origin THE SYSTEM SHALL 同源返回 GET / 的 200 页面 HTML 与 GET /api/levels 的 200 顶层数组恰为 5 项且元素满足关卡字段约束且 Content-Type 为 application/json; charset=utf-8",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-012",
+          "statement": "WHEN GET / 与 /level-select.js 被 HTTP 请求 THE SYSTEM SHALL 分别返回含 id=loading 与 id=level-list 与 id=error-message 及脚本引用的 HTML 与含 /api/levels 相对路径引用的脚本内容",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-013",
+          "statement": "WHEN 未知 API 路径被请求 THE SYSTEM SHALL 返回 404 且错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-014",
+          "statement": "WHEN 集成测试套件以 node --test 执行 THE SYSTEM SHALL 全部通过且集成测试未修改实现与上游测试",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "find tests/integration -name '*.test.js' -print -quit | grep -q . && node --test \"tests/integration/**/*.test.js\"",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "null",
+          "manual_instruction": "本项目不引入浏览器 e2e 且 node --test 同源集成套件已通过 start 返回的 origin 覆盖真实 HTTP 联调证据",
+          "required": false,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "integration_test_dir=tests/integration/",
+          "evidence_contract=CT-024",
+          "rendering_ownership=集成仅验证 HTTP 可观测证据且运行时渲染断言归属前端测试"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-011",
+          "AC-012",
+          "AC-013",
+          "AC-014"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_1d41f286d4e936903ec60e34",
+      "criterion_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013",
+        "AC-014"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-011",
+          "requirement_refs": [
+            "REQ-004"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-012",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-013",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-014",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 返回 200 与顶层数组且恰为 5 项"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET /api/levels 成功响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "关卡字段约束为 id 非空字符串且文件内唯一 且 name 非空字符串 且 difficulty 属于枚举{简单 普通 困难} 且 unlocked 为布尔值"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-006",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-007",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "未知 API 路径返回 404"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-009",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "server/server.js 导出 createServer(options) 且 options 含 dataPath 默认 data/levels.json 与 staticRoot 默认 web/"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-010",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "start({ port }) 返回 Promise 且 resolve 为含 origin 与 port 与 stop 的对象且 origin 形如 http://127.0.0.1:<实际端口>"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-011",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "测试可用 port: 0 获取临时端口避免并行争用"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-013",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回静态根目录下的页面入口 HTML"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-014",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "静态资源按 staticRoot 提供文件与 Content-Type"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-017",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 为关卡选择页入口"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-018",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 含 id=loading 容器标记"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-019",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 含 id=level-list 容器标记"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-020",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 含 id=error-message 容器标记"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-021",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/index.html 引入 web/level-select.js 脚本"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-022",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 引用相对路径 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-024",
+          "capabilities": [
+            "tests/integration/** 提供同源页面入口与 GET /api/levels 与错误响应形状的联调测试证据"
+          ]
+        },
+        {
+          "contract_id": "CT-025",
+          "capabilities": [
+            "集成测试不修改实现与上游测试且仅以 Node 内置测试运行器执行"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "find tests/integration -name '*.test.js' -print -quit | grep -q . && node --test \"tests/integration/**/*.test.js\"",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "null",
+          "manual_instruction": "本项目不引入浏览器 e2e 且 node --test 同源集成套件已通过 start 返回的 origin 覆盖真实 HTTP 联调证据",
+          "required": false,
+          "non_zero_test_execution_required": false
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "c535eb6dc0cc0c650ed24e877ce74878920313719c9cd55c2acacd14947a343d",
+    "coder_projection_hash": "5fea262b7d9cb19a1f1e68c21a455961d484b6b03f38fa07fc67b4e886a94375",
+    "reviewer_projection_hash": "292c028b875a77cf7ded5940c99cd2adfc2b1cac4aaa6179c3f03eacb33b5dbd",
+    "created_at": "2026-09-07T09:02:37.450643954+00:00"
+  }
+}

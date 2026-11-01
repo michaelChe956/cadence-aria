@@ -1,0 +1,476 @@
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
+import {
+  aggregateInitializationOperation,
+  installIssueLifecycleWorkbenchTestHooks,
+  lifecycleFetch,
+  projectRecord,
+  repositoryRecord,
+} from "./IssueLifecycleWorkbench.test-utils";
+
+vi.mock("../shared/MonacoViewer", () => ({
+  MonacoViewer: ({ value }: { value: string }) => (
+    <div data-testid="monaco-viewer">{value}</div>
+  ),
+}));
+
+function member(
+  logical_repository_id: string,
+  alias: string,
+  physical_repository_id: string | null,
+) {
+  return {
+    logical_repository_id,
+    alias,
+    status: "active" as const,
+    physical_repository_id,
+  };
+}
+
+describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
+  installIssueLifecycleWorkbenchTestHooks();
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("多 LC 并存：面板数据随选中 LC 切换（members/初始化卡片按选中 LC 分区）", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [
+        { id: "lc_0001", name: "platform", member_count: 1 },
+        { id: "lc_0002", name: "web", member_count: 0 },
+      ],
+      logicalCodebaseMembersByLc: {
+        lc_0001: [member("lr-1", "api", "repository_1001")],
+        lc_0002: [],
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：运维面板默认折叠为摘要条，先展开再断言面板内容。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
+    // 默认选中首个 LC：其成员驱动的初始化卡片可见
+    expect(
+      await screen.findByTestId("aggregate-initialization-card"),
+    ).toBeInTheDocument();
+    expect(
+      calls.filter((call) =>
+        call.includes("/logical-codebases/lc_0001/members"),
+      ).length,
+    ).toBeGreaterThan(0);
+
+    // 切换到第二个 LC：members 请求走该 LC 路径，且无成员 → 初始化卡片消失
+    await user.click(screen.getByTestId("lc-selector-web"));
+    await waitFor(() =>
+      expect(
+        calls.filter((call) =>
+          call.includes("/logical-codebases/lc_0002/members"),
+        ).length,
+      ).toBeGreaterThan(0),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("aggregate-initialization-card"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("LC 切换重置 aggregateInitialization：A 启动初始化后切 B 不显示 A 的 operation", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [
+        { id: "lc_0001", name: "platform", member_count: 1 },
+        { id: "lc_0002", name: "web", member_count: 1 },
+      ],
+      logicalCodebaseMembersByLc: {
+        lc_0001: [member("lr-1", "api", "repository_1001")],
+        lc_0002: [member("lr-2", "web", "repository_1002")],
+      },
+      aggregateInitializationStart: aggregateInitializationOperation("created"),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板（默认为摘要条）。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
+    // LC A：启动初始化，卡片显示 A 的 operation
+    await screen.findByTestId("aggregate-initialization-card");
+    await user.click(
+      screen.getByRole("button", { name: "启动聚合初始化" }),
+    );
+    expect(
+      await screen.findByTestId("aggregate-initialization-status"),
+    ).toHaveAttribute("data-status", "created");
+
+    // 切到 LC B：卡片仍可见（B 有成员），但不应显示 A 的 operation
+    await user.click(screen.getByTestId("lc-selector-web"));
+    await waitFor(() =>
+      expect(screen.getByTestId("lc-selector-web")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("aggregate-initialization-status"),
+      ).not.toBeInTheDocument(),
+    );
+    // 也不应对 B 轮询 A 的 operation_id(B 拉取自己的 active 投影属预期,
+    // 但不得携带 A 的 operation_id 发起按 id GET)。
+    expect(
+      calls.some((call) =>
+        /\/logical-codebases\/lc_0002\/initializations\/aggregate_initialization/.test(
+          call,
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("LC 作用域加载恢复最新初始化 operation:完成态显示而非「尚未初始化」", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [{ id: "lc_0001", name: "platform", member_count: 1 }],
+      logicalCodebaseMembersByLc: {
+        lc_0001: [member("lr-1", "api", "repository_1001")],
+      },
+      aggregateInitializationActive: aggregateInitializationOperation("completed"),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
+    // 完成态从 active 投影恢复:徽标 completed、文案「初始化完成」、
+    // 无「启动聚合初始化」按钮(Completed 没有启动按钮)。
+    expect(
+      await screen.findByTestId("aggregate-initialization-status"),
+    ).toHaveAttribute("data-status", "completed");
+    expect(screen.getByText("初始化完成")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "启动聚合初始化" }),
+    ).not.toBeInTheDocument();
+    expect(
+      calls.some((call) =>
+        call.includes("/logical-codebases/lc_0001/initializations/active"),
+      ),
+    ).toBe(true);
+  });
+
+  it("登记成员对选中 LC 打开向导（不再固定取首个）", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [
+        { id: "lc_0001", name: "platform", member_count: 0 },
+        { id: "lc_0002", name: "web", member_count: 0 },
+      ],
+      registrationPreflight: {
+        preflight_id: "preflight_0001",
+        created_at: "2026-08-19T00:00:00Z",
+        items: [{ path: "/root/web", class: "eligible", reason: null }],
+      },
+      registrationSubmit: {
+        batch_id: "batch_0001",
+        status: "completed",
+        items: [
+          { path: "/root/web", status: "completed", failure_reason: null },
+        ],
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板才能触及 LC 切换 tab 与「登记成员」。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
+    await screen.findByTestId("lc-selector-web");
+    await user.click(screen.getByTestId("lc-selector-web"));
+    await user.click(screen.getByRole("button", { name: "登记成员" }));
+    await user.type(
+      await screen.findByLabelText("聚合根目录"),
+      "/root/web",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "确认聚合根并自动发现" }),
+    );
+    expect(
+      await screen.findByLabelText("选择 /root/web（eligible）"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "提交登记" }));
+
+    await waitFor(() =>
+      expect(
+        calls.filter((call) =>
+          call.startsWith(
+            "POST /api/projects/project_0001/logical-codebases/lc_0002/registrations",
+          ),
+        ).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(
+      calls.filter((call) =>
+        call.includes("/logical-codebases/lc_0001/registrations"),
+      ).length,
+    ).toBe(0);
+  });
+
+  it("逻辑条目删除：二次确认后走 DELETE /logical-codebases/{lc_id} 并刷新列表", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [
+        { id: "lc_0001", name: "platform", member_count: 0 },
+        { id: "lc_0002", name: "web", member_count: 0 },
+      ],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        return fetchMock(input, init);
+      }),
+    );
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("codebase-kind-platform");
+    confirmSpy.mockReturnValue(false);
+    await user.click(
+      screen.getByRole("button", { name: "删除逻辑代码库 platform" }),
+    );
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    // Bug3 ③：删除确认文案必须注明「软删除、可恢复」——旧文案声称
+    // 「无法在界面内撤销」与恢复端点语义相悖。
+    const confirmText = String(confirmSpy.mock.calls[0]?.[0] ?? "");
+    expect(confirmText).toMatch(/软删除/);
+    expect(confirmText).toMatch(/恢复/);
+    expect(
+      calls.some((call) => call.startsWith("DELETE /api/projects/project_0001/logical-codebases/lc_0001")),
+    ).toBe(false);
+    expect(await screen.findByTestId("codebase-kind-platform")).toBeInTheDocument();
+
+    confirmSpy.mockReturnValue(true);
+    await user.click(
+      screen.getByRole("button", { name: "删除逻辑代码库 platform" }),
+    );
+    await waitFor(() =>
+      expect(
+        calls.some((call) =>
+          call.startsWith(
+            "DELETE /api/projects/project_0001/logical-codebases/lc_0001",
+          ),
+        ),
+      ).toBe(true),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("codebase-kind-platform"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("单仓 project（仅 kind=single_repo）：不渲染「逻辑代码库」管理面板", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+        lifecycleFetch({
+          projects: [projectRecord("project_0001", "Aria")],
+          logicalCodebases: [],
+        })(input, init),
+      ),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    // 等待工作台主内容加载完成后，面板标题（h2「逻辑代码库」）不应出现
+    expect(
+      await screen.findByRole("button", { name: "新建 Issue" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "逻辑代码库" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("issue 创建：选逻辑代码库时提交 logical_codebase_id + primary repository_id", async () => {
+    const issueBodies: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [
+        { id: "lc_0001", name: "platform", member_count: 1 },
+      ],
+      logicalCodebaseMembersByLc: {
+        lc_0001: [member("lr-1", "api", "repository_1001")],
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (
+          url === "/api/projects/project_0001/issues" &&
+          init?.method === "POST"
+        ) {
+          issueBodies.push(String(init.body));
+        }
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByRole("button", { name: "新建 Issue" }));
+    const dialog = await screen.findByRole("dialog", { name: "新建 Issue" });
+    await user.type(within(dialog).getByLabelText("Issue 标题"), "跨仓需求");
+    await user.selectOptions(
+      within(dialog).getByLabelText("代码库"),
+      "lc:lc_0001",
+    );
+    const memberGroup = await within(dialog).findByRole("group", { name: "成员" });
+    await user.click(
+      within(memberGroup).getByRole("checkbox", { name: /api · repository_1001/ }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建 Issue" }),
+    );
+
+    await waitFor(() => expect(issueBodies).toHaveLength(1));
+    expect(JSON.parse(issueBodies[0])).toMatchObject({
+      title: "跨仓需求",
+      repository_id: "repository_1001",
+      logical_codebase_id: "lc_0001",
+      focus_repository_ids: ["lr-1"],
+    });
+  });
+
+  it("REQ-MRE-01：LC-only 项目（无单仓，LC 有 active 成员）新建 Issue 入口可用且对话框提供成员多选", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        projects: [projectRecord("project_0001", "Aria")],
+        // e2e 冒烟 S3 现场：LC-only 项目项目级 /repositories 为空（成员物理仓
+        // 经 members 端点投影），门不得因此禁用「新建 Issue」。
+        repositoriesByProject: { project_0001: [] },
+        logicalCodebases: [
+          { id: "lc_0001", name: "platform", member_count: 4 },
+        ],
+        logicalCodebaseMembersByLc: {
+          lc_0001: [
+            member("lr-1", "contracts", "repository_1001"),
+            member("lr-2", "api", "repository_1002"),
+            member("lr-3", "ui", "repository_1003"),
+            member("lr-4", "infra", "repository_1004"),
+          ],
+        },
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("codebase-kind-platform");
+    expect(
+      screen.getByRole("button", { name: "新建 Issue" }),
+    ).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "新建 Issue" }));
+    const dialog = await screen.findByRole("dialog", { name: "新建 Issue" });
+    await user.selectOptions(
+      within(dialog).getByLabelText("代码库"),
+      "lc:lc_0001",
+    );
+    const memberGroup = await within(dialog).findByRole("group", {
+      name: "成员",
+    });
+    for (const alias of ["contracts", "api", "ui", "infra"]) {
+      expect(
+        within(memberGroup).getByRole("checkbox", { name: new RegExp(alias) }),
+      ).toBeInTheDocument();
+    }
+  });
+
+  it("无单仓且 LC 无 active 成员（member_count=0）：新建 Issue 仍禁用（不放宽空项目）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        projects: [projectRecord("project_0001", "Aria")],
+        repositoriesByProject: { project_0001: [] },
+        logicalCodebases: [
+          { id: "lc_0001", name: "platform", member_count: 0 },
+        ],
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("codebase-kind-platform");
+    expect(
+      screen.getByRole("button", { name: "新建 Issue" }),
+    ).toBeDisabled();
+  });
+
+  it("有单仓项目：新建 Issue 可用（仓库路径零变化钉）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        projects: [projectRecord("project_0001", "Aria")],
+        repositoriesByProject: { project_0001: [repositoryRecord()] },
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("codebase-kind-Aria Repo");
+    expect(
+      screen.getByRole("button", { name: "新建 Issue" }),
+    ).toBeEnabled();
+  });
+});

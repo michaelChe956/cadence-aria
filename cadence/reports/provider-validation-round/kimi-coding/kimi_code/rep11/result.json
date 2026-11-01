@@ -1,0 +1,371 @@
+{
+  "provider": "kimi_code",
+  "repetition": 11,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep11",
+  "startedAt": "2026-09-20T12:35:53.304Z",
+  "finishedAt": "2026-09-20T12:51:45.119Z",
+  "elapsedSec": 951.814,
+  "issue_id": "issue_0300",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0494",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 2.868,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 2.945,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 423.081,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 951.813,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 560.804,
+      "findings": [
+        {
+          "category": "other",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities",
+          "evidence": "CT-005 见 WI-001 output_contracts 与 WI-003 input_contracts，含独立条目 \"port\"；CT-007 见 WI-002 output_contracts，含 \"web/level-select.js 导出 initLevelSelect({ document\" 与 \"fetchImpl }) 渲染接口\" 碎片；coverage projection 中 from=WI-002 -> to=WI-003 contract_id=CT-007 的 provided_capabilities 同样碎片化但与 required 匹配、missing_capabilities 为空；CHECK-001/002/003 的 manual_instruction 均为字符串 \"null\"。",
+          "message": "CT-005 与 CT-007 的 capabilities 数组存在按对象字面量逗号切分的碎片条目（如独立条目 \"port\"、\"fetchImpl }) 渲染接口\"），供需两侧文本一致故 coverage 匹配与 missing_capabilities 判定不受影响，但碎片化条目削弱契约语义可读性与后续精确字符串匹配的稳健性；另有 verification_checks 的 manual_instruction 被序列化为字符串 \"null\" 的次要瑕疵。建议后续修订轮将碎片合并为完整原子 capability 语句（双侧同步）。",
+          "required_action": "下一轮 IR 修订时合并逗号切分碎片并规范 manual_instruction 空值序列化，双侧同步修改，不阻断本轮发布。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "WI-001 TASK-002 done_when_refs=[\"AC-003\"] 而 statement 覆盖 CT-001 成功契约与数据错误分支（对应 AC-001/AC-002）；TASK-003 done_when_refs=[\"AC-005\"] 未含静态托管 AC-004；WI-002 TASK-004/TASK-005 均仅引用 AC-008，AC-006/AC-007 无引用；WI-003 TASK-006 done_when_refs=[\"AC-011\"]，其 statement 覆盖页面入口、脚本引用与 API 成功契约（AC-009/AC-010）但未引用。",
+          "message": "部分验收标准未被任何 task 的 done_when_refs 引用：WI-001 的 AC-001/AC-002/AC-004、WI-002 的 AC-006/AC-007、WI-003 的 AC-009/AC-010；且 WI-001 TASK-002 的语句语义覆盖 AC-001/AC-002 却仅引用 AC-003。验收内容仍可由各 task statement 与 non_zero_test_execution 的 verification_checks 佐证，不影响发布，属完备度建议。",
+          "required_action": "修订时将各 task 实际覆盖的验收标准补入 done_when_refs，增强验证可归因性。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "Projection Validation Report：error_count=0、warning_count=1，finding 为 integration_or_e2e_skipped_risk（建议 acceptance 前补充 manual verification）；CHECK-003 仅执行 node --test tests/integration/，AC-009/AC-010 均只要求 non_zero_test_execution。",
+          "message": "机械校验报告含 integration_or_e2e_skipped_risk 警告：候选以 WI-003 的 node --test tests/integration/ 提供同源集成证据，但无浏览器级 e2e 覆盖，建议验收前补充一次人工页面走查作为补充证据，不阻断发布。",
+          "required_action": "验收前对 GET / 页面加载与 /api/levels 渲染做一次人工浏览器走查，或记录跳过理由。",
+          "severity": "suggestion"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 2,
+      "elapsedSec": 771.061,
+      "findings": [
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "WI-001: TASK-001→AC-005、TASK-002→AC-003、TASK-003→AC-005，AC-001/AC-002/AC-004 未出现于任何 done_when_refs；WI-002: TASK-004→AC-008、TASK-005→AC-008；WI-003: TASK-006→AC-011。",
+          "message": "任务级验收追溯不完整：WI-001 三个任务的 done_when_refs 并集仅含 AC-003 与 AC-005，AC-001、AC-002、AC-004 未被任何任务引用；WI-002 仅覆盖 AC-008（缺 AC-006、AC-007）；WI-003 仅覆盖 AC-011（缺 AC-009、AC-010）。且 TASK-002 引用 AC-003（404/405 路由错误）但其陈述只覆盖成功契约与 LEVEL_DATA_UNAVAILABLE 数据错误（对应 AC-001/AC-002 语义），指向错位。任务陈述文本大体覆盖相应验收内容，属完备度缺陷，不阻断发布。",
+          "required_action": "后续修订时补齐各任务 done_when_refs 至其陈述实际覆盖的 AC 集合，并纠正 TASK-002 的指向。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "other",
+          "class_hint": "repairable",
+          "contract_field": "capabilities",
+          "evidence": "WI-001 output_contracts CT-005 capabilities 为三元素碎片数组，WI-003 input_contracts CT-005 required_capabilities 同构；WI-002 output_contracts CT-007 capabilities 为三元素碎片数组；各 verification_checks 的 manual_instruction 值为字符串 null。",
+          "message": "契约能力文本存在按内部逗号切分的序列化伪影：CT-005 的能力被拆为三段碎片（含单独的 port 与 stop } 且 origin 为 http://127.0.0.1:<实际端口>），CT-007 的 WI-002 输出侧同样被拆为 initLevelSelect({ document 与 fetchImpl }) 渲染接口 等碎片。供需两侧碎片完全一致，本轮 coverage 无缺口、匹配成立，但碎片化降低契约语义完整性与后续修订轮次的匹配稳健性；另 verification_checks 中 manual_instruction 为字符串 null 而非空值，属同类序列化缺陷。",
+          "required_action": "重新序列化时保留 { origin, port, stop } 与 { document, fetchImpl } 内部逗号不被切分，将每条能力合并为单条完整描述。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "Projection Validation Report finding integration_or_e2e_skipped_risk（severity=warning，work_item_ids 为空）；WI-003 CHECK-003 命令 node --test tests/integration/ 为 required 且 non_zero_test_execution_required=true。",
+          "message": "机械校验提示 e2e 跳过风险。候选已以 WI-003 同源集成测试（页面入口可达、脚本对 /api/levels 的引用、API 成功契约、404/405 错误响应）作为 required 且非零执行的测试证据，浏览器级 e2e 未纳入本候选；建议在验收阶段辅以人工核验或后续补充 e2e，不阻断本轮发布。",
+          "required_action": "",
+          "severity": "suggestion"
+        },
+        {
+          "category": "other",
+          "class_hint": "advisory",
+          "evidence": "AC-004：越出静态根目录的路径被拒绝（无状态码约定）；WI-002 goal：经相对路径 /api/levels；AC-010：脚本内容以相对路径引用 /api/levels。",
+          "message": "两处规格措辞精度问题：AC-004 对越出静态根目录的路径仅表述为被拒绝，未指定状态码（403 或 404），验收测试断言口径可能分歧；AC-010 与 WI-002 goal 将根相对路径 /api/levels 表述为相对路径，可能引导实现写成相对拼接 api/levels。二者均为同一 WorkItem 内可自决的措辞问题，不构成跨项供需缺口。",
+          "required_action": "",
+          "severity": "suggestion"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 3,
+      "elapsedSec": 951.813,
+      "findings": [
+        {
+          "category": "other",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities",
+          "evidence": "WI-001 CT-005 capabilities 含被切断的 'resolve 为 { origin'、'port'、'stop } 且 origin 为 http://127.0.0.1:实际端口' 三段；WI-002 CT-007 同样在 'initLevelSelect({ document' 处断开为三段。",
+          "message": "CT-005 与 CT-007 的能力文本在逗号处被机械切分为碎片条目（如独立条目 'port'、'fetchImpl }) 渲染接口'），因供需两侧切分完全一致未形成 coverage 缺口，但碎片化能力项在后续契约比对或单侧重生成时易被误判为不一致。",
+          "required_action": "建议将被误切的能力描述合并回完整单句条目。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "repairable",
+          "evidence": "未被任何 done_when_refs 覆盖的 AC：AC-001、AC-002、AC-004（WI-001），AC-006、AC-007（WI-002），AC-009、AC-010（WI-003）。",
+          "message": "多条验收标准未被任何 task 的 done_when_refs 引用，且个别引用与任务 SHALL 内容错位：WI-001 TASK-002 的 SHALL 覆盖 CT-001 成功契约与 500/LEVEL_DATA_UNAVAILABLE 数据错误（对应 AC-001/AC-002），done_when_refs 却仅指 AC-003 的 404/405 路由错误。验证仍可经 CHECK-001..003 归因，属完备度问题而非验证不可归因。",
+          "required_action": "建议补齐 done_when_refs 与 AC 的映射并修正 TASK-002 的错位引用。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "Projection Validation Report warning_count=1；三个 verification_checks 的 manual_instruction 字段均为字符串 'null'。",
+          "message": "机械报告存在唯一 warning（integration_or_e2e_skipped_risk，提示 e2e 跳过需考虑人工验证），且 CHECK-001/002/003 的 manual_instruction 均为字符串值 'null' 而非空值，当前验收仅依赖 node:test 替身测试与同源集成测试，浏览器侧无可用人工验证路径。",
+          "required_action": "可为浏览器侧交互补充 manual_instruction 说明，或确认接受现有替身加集成的测试覆盖。",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "WI-001 CT-006 capabilities 引用 web/index.html 与 web/level-select.js；WI-002 write_policy.exclusive_scopes 为 web/**、tests/frontend/** 且 depends_on 含 WI-001；AC-004 静态托管以 fixtures 目录验证。",
+          "message": "WI-001 输出契约 CT-006 声明 GET / 返回 web/index.html，但 web/** 属于 WI-002 的排他写域且 WI-002 依赖 WI-001，WI-001 自身完成时该文件尚不存在（其后端静态托管验证改用 tests/backend/fixtures/** 夹具），该契约字面上要到 WI-002 完成才可满足；因唯一消费者 WI-003 在两者之后运行，供需与拓扑不受影响。",
+          "required_action": "建议将 CT-006 措辞改为按 staticRoot 入口文件的相对表述，或显式标注其对 WI-002 产物的时序依赖。",
+          "severity": "suggestion"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "category": "other",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities",
+      "evidence": "CT-005 见 WI-001 output_contracts 与 WI-003 input_contracts，含独立条目 \"port\"；CT-007 见 WI-002 output_contracts，含 \"web/level-select.js 导出 initLevelSelect({ document\" 与 \"fetchImpl }) 渲染接口\" 碎片；coverage projection 中 from=WI-002 -> to=WI-003 contract_id=CT-007 的 provided_capabilities 同样碎片化但与 required 匹配、missing_capabilities 为空；CHECK-001/002/003 的 manual_instruction 均为字符串 \"null\"。",
+      "message": "CT-005 与 CT-007 的 capabilities 数组存在按对象字面量逗号切分的碎片条目（如独立条目 \"port\"、\"fetchImpl }) 渲染接口\"），供需两侧文本一致故 coverage 匹配与 missing_capabilities 判定不受影响，但碎片化条目削弱契约语义可读性与后续精确字符串匹配的稳健性；另有 verification_checks 的 manual_instruction 被序列化为字符串 \"null\" 的次要瑕疵。建议后续修订轮将碎片合并为完整原子 capability 语句（双侧同步）。",
+      "required_action": "下一轮 IR 修订时合并逗号切分碎片并规范 manual_instruction 空值序列化，双侧同步修改，不阻断本轮发布。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "WI-001 TASK-002 done_when_refs=[\"AC-003\"] 而 statement 覆盖 CT-001 成功契约与数据错误分支（对应 AC-001/AC-002）；TASK-003 done_when_refs=[\"AC-005\"] 未含静态托管 AC-004；WI-002 TASK-004/TASK-005 均仅引用 AC-008，AC-006/AC-007 无引用；WI-003 TASK-006 done_when_refs=[\"AC-011\"]，其 statement 覆盖页面入口、脚本引用与 API 成功契约（AC-009/AC-010）但未引用。",
+      "message": "部分验收标准未被任何 task 的 done_when_refs 引用：WI-001 的 AC-001/AC-002/AC-004、WI-002 的 AC-006/AC-007、WI-003 的 AC-009/AC-010；且 WI-001 TASK-002 的语句语义覆盖 AC-001/AC-002 却仅引用 AC-003。验收内容仍可由各 task statement 与 non_zero_test_execution 的 verification_checks 佐证，不影响发布，属完备度建议。",
+      "required_action": "修订时将各 task 实际覆盖的验收标准补入 done_when_refs，增强验证可归因性。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "Projection Validation Report：error_count=0、warning_count=1，finding 为 integration_or_e2e_skipped_risk（建议 acceptance 前补充 manual verification）；CHECK-003 仅执行 node --test tests/integration/，AC-009/AC-010 均只要求 non_zero_test_execution。",
+      "message": "机械校验报告含 integration_or_e2e_skipped_risk 警告：候选以 WI-003 的 node --test tests/integration/ 提供同源集成证据，但无浏览器级 e2e 覆盖，建议验收前补充一次人工页面走查作为补充证据，不阻断发布。",
+      "required_action": "验收前对 GET / 页面加载与 /api/levels 渲染做一次人工浏览器走查，或记录跳过理由。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "WI-001: TASK-001→AC-005、TASK-002→AC-003、TASK-003→AC-005，AC-001/AC-002/AC-004 未出现于任何 done_when_refs；WI-002: TASK-004→AC-008、TASK-005→AC-008；WI-003: TASK-006→AC-011。",
+      "message": "任务级验收追溯不完整：WI-001 三个任务的 done_when_refs 并集仅含 AC-003 与 AC-005，AC-001、AC-002、AC-004 未被任何任务引用；WI-002 仅覆盖 AC-008（缺 AC-006、AC-007）；WI-003 仅覆盖 AC-011（缺 AC-009、AC-010）。且 TASK-002 引用 AC-003（404/405 路由错误）但其陈述只覆盖成功契约与 LEVEL_DATA_UNAVAILABLE 数据错误（对应 AC-001/AC-002 语义），指向错位。任务陈述文本大体覆盖相应验收内容，属完备度缺陷，不阻断发布。",
+      "required_action": "后续修订时补齐各任务 done_when_refs 至其陈述实际覆盖的 AC 集合，并纠正 TASK-002 的指向。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "other",
+      "class_hint": "repairable",
+      "contract_field": "capabilities",
+      "evidence": "WI-001 output_contracts CT-005 capabilities 为三元素碎片数组，WI-003 input_contracts CT-005 required_capabilities 同构；WI-002 output_contracts CT-007 capabilities 为三元素碎片数组；各 verification_checks 的 manual_instruction 值为字符串 null。",
+      "message": "契约能力文本存在按内部逗号切分的序列化伪影：CT-005 的能力被拆为三段碎片（含单独的 port 与 stop } 且 origin 为 http://127.0.0.1:<实际端口>），CT-007 的 WI-002 输出侧同样被拆为 initLevelSelect({ document 与 fetchImpl }) 渲染接口 等碎片。供需两侧碎片完全一致，本轮 coverage 无缺口、匹配成立，但碎片化降低契约语义完整性与后续修订轮次的匹配稳健性；另 verification_checks 中 manual_instruction 为字符串 null 而非空值，属同类序列化缺陷。",
+      "required_action": "重新序列化时保留 { origin, port, stop } 与 { document, fetchImpl } 内部逗号不被切分，将每条能力合并为单条完整描述。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "Projection Validation Report finding integration_or_e2e_skipped_risk（severity=warning，work_item_ids 为空）；WI-003 CHECK-003 命令 node --test tests/integration/ 为 required 且 non_zero_test_execution_required=true。",
+      "message": "机械校验提示 e2e 跳过风险。候选已以 WI-003 同源集成测试（页面入口可达、脚本对 /api/levels 的引用、API 成功契约、404/405 错误响应）作为 required 且非零执行的测试证据，浏览器级 e2e 未纳入本候选；建议在验收阶段辅以人工核验或后续补充 e2e，不阻断本轮发布。",
+      "required_action": "",
+      "severity": "suggestion"
+    },
+    {
+      "category": "other",
+      "class_hint": "advisory",
+      "evidence": "AC-004：越出静态根目录的路径被拒绝（无状态码约定）；WI-002 goal：经相对路径 /api/levels；AC-010：脚本内容以相对路径引用 /api/levels。",
+      "message": "两处规格措辞精度问题：AC-004 对越出静态根目录的路径仅表述为被拒绝，未指定状态码（403 或 404），验收测试断言口径可能分歧；AC-010 与 WI-002 goal 将根相对路径 /api/levels 表述为相对路径，可能引导实现写成相对拼接 api/levels。二者均为同一 WorkItem 内可自决的措辞问题，不构成跨项供需缺口。",
+      "required_action": "",
+      "severity": "suggestion"
+    },
+    {
+      "category": "other",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities",
+      "evidence": "WI-001 CT-005 capabilities 含被切断的 'resolve 为 { origin'、'port'、'stop } 且 origin 为 http://127.0.0.1:实际端口' 三段；WI-002 CT-007 同样在 'initLevelSelect({ document' 处断开为三段。",
+      "message": "CT-005 与 CT-007 的能力文本在逗号处被机械切分为碎片条目（如独立条目 'port'、'fetchImpl }) 渲染接口'），因供需两侧切分完全一致未形成 coverage 缺口，但碎片化能力项在后续契约比对或单侧重生成时易被误判为不一致。",
+      "required_action": "建议将被误切的能力描述合并回完整单句条目。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "repairable",
+      "evidence": "未被任何 done_when_refs 覆盖的 AC：AC-001、AC-002、AC-004（WI-001），AC-006、AC-007（WI-002），AC-009、AC-010（WI-003）。",
+      "message": "多条验收标准未被任何 task 的 done_when_refs 引用，且个别引用与任务 SHALL 内容错位：WI-001 TASK-002 的 SHALL 覆盖 CT-001 成功契约与 500/LEVEL_DATA_UNAVAILABLE 数据错误（对应 AC-001/AC-002），done_when_refs 却仅指 AC-003 的 404/405 路由错误。验证仍可经 CHECK-001..003 归因，属完备度问题而非验证不可归因。",
+      "required_action": "建议补齐 done_when_refs 与 AC 的映射并修正 TASK-002 的错位引用。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "Projection Validation Report warning_count=1；三个 verification_checks 的 manual_instruction 字段均为字符串 'null'。",
+      "message": "机械报告存在唯一 warning（integration_or_e2e_skipped_risk，提示 e2e 跳过需考虑人工验证），且 CHECK-001/002/003 的 manual_instruction 均为字符串值 'null' 而非空值，当前验收仅依赖 node:test 替身测试与同源集成测试，浏览器侧无可用人工验证路径。",
+      "required_action": "可为浏览器侧交互补充 manual_instruction 说明，或确认接受现有替身加集成的测试覆盖。",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "WI-001 CT-006 capabilities 引用 web/index.html 与 web/level-select.js；WI-002 write_policy.exclusive_scopes 为 web/**、tests/frontend/** 且 depends_on 含 WI-001；AC-004 静态托管以 fixtures 目录验证。",
+      "message": "WI-001 输出契约 CT-006 声明 GET / 返回 web/index.html，但 web/** 属于 WI-002 的排他写域且 WI-002 依赖 WI-001，WI-001 自身完成时该文件尚不存在（其后端静态托管验证改用 tests/backend/fixtures/** 夹具），该契约字面上要到 WI-002 完成才可满足；因唯一消费者 WI-003 在两者之后运行，供需与拓扑不受影响。",
+      "required_action": "建议将 CT-006 措辞改为按 staticRoot 入口文件的相对表述，或显式标注其对 WI-002 产物的时序依赖。",
+      "severity": "suggestion"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 9051,
+      "output_tokens": 1007,
+      "cache_read_tokens": 40256,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "stopped_needs_human",
+  "error": null,
+  "completed": false,
+  "session_status": "stopped_needs_human",
+  "flow_kind": "single_candidate",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 2,
+    "manual_repairs_used": 0,
+    "transitions_used": 1,
+    "initial_review_count": 3,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_007": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [
+      {
+        "class": "repairable",
+        "fingerprint": "41448efadb356cc01e026b685fefbaea4299a6f1cdad0aa2bf2d9e57c1bb20ae",
+        "category": "other",
+        "severity": "suggestion",
+        "message": "CT-005 与 CT-007 的能力文本在逗号处被机械切分为碎片条目（如独立条目 'port'、'fetchImpl }) 渲染接口'），因供需两侧切分完全一致未形成 coverage 缺口，但碎片化能力项在后续契约比对或单侧重生成时易被误判为不一致。",
+        "evidence": "WI-001 CT-005 capabilities 含被切断的 'resolve 为 { origin'、'port'、'stop } 且 origin 为 http://127.0.0.1:实际端口' 三段；WI-002 CT-007 同样在 'initLevelSelect({ document' 处断开为三段。",
+        "required_action": "建议将被误切的能力描述合并回完整单句条目。",
+        "contract_field": "output_contracts.capabilities"
+      },
+      {
+        "class": "repairable",
+        "fingerprint": "da37c8f50c4acec21409255721954cdad9da7bbb1f352e9c19d3bca0340cdb04",
+        "category": "completeness",
+        "severity": "suggestion",
+        "message": "多条验收标准未被任何 task 的 done_when_refs 引用，且个别引用与任务 SHALL 内容错位：WI-001 TASK-002 的 SHALL 覆盖 CT-001 成功契约与 500/LEVEL_DATA_UNAVAILABLE 数据错误（对应 AC-001/AC-002），done_when_refs 却仅指 AC-003 的 404/405 路由错误。验证仍可经 CHECK-001..003 归因，属完备度问题而非验证不可归因。",
+        "evidence": "未被任何 done_when_refs 覆盖的 AC：AC-001、AC-002、AC-004（WI-001），AC-006、AC-007（WI-002），AC-009、AC-010（WI-003）。",
+        "required_action": "建议补齐 done_when_refs 与 AC 的映射并修正 TASK-002 的错位引用。",
+        "contract_field": null
+      }
+    ],
+    "repeated_fingerprints": [
+      "41448efadb356cc01e026b685fefbaea4299a6f1cdad0aa2bf2d9e57c1bb20ae"
+    ],
+    "attempts_used": 2,
+    "manual_repairs_remaining": 3,
+    "trigger": "repeated_fingerprint",
+    "resumable": true
+  },
+  "provider_start_count": 3,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0494:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0494:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0494:2",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 951814,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.077,
+    "1:running": 420.136,
+    "2:cross_review": 528.732,
+    "3:completed": 0.001
+  }
+}

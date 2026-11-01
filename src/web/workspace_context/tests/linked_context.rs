@@ -1,10 +1,11 @@
 use super::*;
 
-#[test]
-fn story_workspace_context_codex_author_requires_request_user_input() {
+#[tokio::test]
+async fn story_workspace_context_codex_author_requires_request_user_input() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -12,15 +13,18 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "codex-author-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .expect("issue");
 
@@ -31,6 +35,7 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "爬楼梯问题 Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     let session = lifecycle
@@ -40,14 +45,17 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 
@@ -57,11 +65,12 @@ fn story_workspace_context_codex_author_requires_request_user_input() {
     assert!(context.contains("text_fallback 异常兜底"));
 }
 
-#[test]
-fn design_workspace_context_includes_linked_story_markdown() {
+#[tokio::test]
+async fn design_workspace_context_includes_linked_story_markdown() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -69,15 +78,18 @@ fn design_workspace_context_includes_linked_story_markdown() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "linked-story-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .expect("issue");
 
@@ -88,6 +100,7 @@ fn design_workspace_context_includes_linked_story_markdown() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "爬楼梯问题 Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     lifecycle
@@ -115,6 +128,7 @@ fn design_workspace_context_includes_linked_story_markdown() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "爬楼梯问题 Design Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("design");
     let session = lifecycle
@@ -124,14 +138,17 @@ fn design_workspace_context_includes_linked_story_markdown() {
             entity_id: design.id,
             workspace_type: WorkspaceType::Design,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 
@@ -142,10 +159,11 @@ fn design_workspace_context_includes_linked_story_markdown() {
     assert!(context.contains("[REQ-001] 返回爬楼梯方法数。"));
 }
 
-#[test]
-fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
+#[tokio::test]
+async fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
@@ -154,14 +172,18 @@ fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
             entity_id: "wi_library_export".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
-    let error = ensure_workspace_context_message(&app_paths, &lifecycle, session).unwrap_err();
+    let error = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
+        .unwrap_err();
 
     assert!(matches!(
         error,
@@ -172,10 +194,11 @@ fn work_item_workspace_context_rejects_a_missing_runtime_binding() {
     ));
 }
 
-#[test]
-fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failure() {
+#[tokio::test]
+async fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failure() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
@@ -184,15 +207,18 @@ fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failu
             entity_id: "wi_library_export".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
-    let error =
-        ensure_workspace_context_message(&app_paths, &lifecycle, session.clone()).unwrap_err();
+    let error = ensure_workspace_context_message(&app_paths, &lifecycle, session.clone())
+        .await
+        .unwrap_err();
 
     assert!(matches!(
         error,
@@ -211,11 +237,12 @@ fn work_item_workspace_context_does_not_create_a_legacy_context_on_binding_failu
     );
 }
 
-#[test]
-fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
+#[tokio::test]
+async fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -223,15 +250,18 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "linked-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .expect("issue");
 
@@ -242,6 +272,7 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "爬楼梯问题 Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     lifecycle
@@ -269,6 +300,7 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id],
             title: "爬楼梯问题 Design Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("design");
     let session = lifecycle
@@ -278,10 +310,12 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
             entity_id: design.id,
             workspace_type: WorkspaceType::Design,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
     let stale_messages = vec![
@@ -301,6 +335,7 @@ fn existing_generation_brief_is_refreshed_when_linked_context_changes() {
         .expect("replace stale messages");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
 
     assert_eq!(session.messages.len(), 2);

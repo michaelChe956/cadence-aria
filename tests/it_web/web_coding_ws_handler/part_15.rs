@@ -400,14 +400,44 @@ async fn run_reviewer_triggered_rework_case(
                 gates[0].reason_code.as_deref(),
                 Some("coding_output_human_triage")
             );
-        } else {
-            assert!(
-                store
-                    .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
-                    .expect("blocked gates")
-                    .is_empty(),
-                "{} must not create a generic blocked gate",
+        } else if matches!(case, ReviewerTriggeredReworkCase::Operational) {
+            // P2-b（A-9）：coder 路径（含 reviewer 触发的 rework）的
+            // OpenOperationalGate 必须落 coding_operational_blocker 门，不得
+            // 静默停在 Running/Coding（无门无入口）。动作集合恰为
+            // retry_coding / retry_coding_with_context / abort。
+            let gates = store
+                .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("blocked gates");
+            assert_eq!(
+                gates.len(),
+                1,
+                "{} must open exactly one operational blocker gate",
                 case.label()
+            );
+            assert_eq!(
+                gates[0].reason_code.as_deref(),
+                Some("coding_operational_blocker")
+            );
+            assert_eq!(
+                gates[0]
+                    .available_actions
+                    .iter()
+                    .map(|action| action.action_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["retry_coding", "retry_coding_with_context", "abort"]
+            );
+        } else {
+            let gates = store
+                .list_open_blocked_gates("project_0001", "issue_0001", "coding_attempt_0001")
+                .expect("blocked gates");
+            assert!(
+                gates.is_empty(),
+                "{} must not create a generic blocked gate; gates={:?}",
+                case.label(),
+                gates
+                    .iter()
+                    .map(|gate| (gate.reason_code.clone(), gate.title.clone()))
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -441,7 +471,10 @@ async fn coding_plan_repair_reviewer_triggered_rework_routes_plan_and_safe_stops
             attempt.status,
             if matches!(case, ReviewerTriggeredReworkCase::Plan) {
                 CodingAttemptStatus::AwaitingPlanAmendment
-            } else if matches!(case, ReviewerTriggeredReworkCase::Invalid) {
+            } else if matches!(
+                case,
+                ReviewerTriggeredReworkCase::Invalid | ReviewerTriggeredReworkCase::Operational
+            ) {
                 CodingAttemptStatus::Blocked
             } else {
                 CodingAttemptStatus::Running

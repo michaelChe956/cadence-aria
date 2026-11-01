@@ -1,4 +1,4 @@
-import type { RevisionPath } from "../../api/types";
+import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
 import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../../state/chat-entries";
 import { ChatEntryContainer } from "./ChatEntryContainer";
 import { ChatEntryRenderer } from "./ChatEntryRenderer";
@@ -8,6 +8,7 @@ import { PermissionRequestEntry } from "./entries/PermissionRequestEntry";
 import {
   MarkdownContent,
   normalizeProviderStreamEntryContent,
+  entryUsage,
 } from "./entries/ProviderStreamEntry";
 import type { MessageGroup } from "./message-grouping";
 import { elapsedDurationText } from "../shared/duration";
@@ -16,11 +17,7 @@ interface MessageGroupViewProps {
   group: MessageGroup;
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
-  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) => void;
+  actions?: CockpitActionFacade;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
   loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;
@@ -31,8 +28,7 @@ export function MessageGroupView({
   group,
   onPermissionResponse,
   onChoiceResponse,
-  onSelectRevisionPath,
-  onHumanConfirm,
+  actions,
   sessionId,
   contentCache,
   loadContent,
@@ -43,6 +39,14 @@ export function MessageGroupView({
     <ChatEntryContainer
       role={group.role}
       title={groupTitle(group)}
+      titleSuffix={group.primaryEntry && entryUsage(group.primaryEntry) ? (
+        <span
+          data-testid="provider-stream-usage"
+          className="ml-2 border-l border-gray-300 pl-2 text-[11px] font-normal text-amber-600"
+        >
+          {entryUsage(group.primaryEntry)}
+        </span>
+      ) : null}
       testId="message-group"
     >
       <div className="space-y-3">
@@ -87,8 +91,7 @@ export function MessageGroupView({
                   entry={entry}
                   onPermissionResponse={onPermissionResponse}
                   onChoiceResponse={onChoiceResponse}
-                  onSelectRevisionPath={onSelectRevisionPath}
-                  onHumanConfirm={onHumanConfirm}
+                  actions={actions}
                 />
               ),
             )}

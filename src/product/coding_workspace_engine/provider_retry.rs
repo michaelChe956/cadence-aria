@@ -1,7 +1,15 @@
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputContract;
+use crate::product::coding_models::{CodingAdmissionKind, CodingAttemptScope};
+use crate::product::coding_workspace_engine::group::GroupUnitFailureOutcome;
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+use crate::product::logical_codebase::provider_gateway::{
+    ProviderGatewayError, SessionLaunchRequest, ValidatedSessionLaunchPolicy,
+};
+use crate::product::work_item_split_engine::engine::provider_ref_for_name;
 use crate::protocol::provider_errors::ProviderErrorCode;
 
-const MAX_PROVIDER_INVOCATIONS_PER_CYCLE: u32 = 3;
+pub(crate) const MAX_PROVIDER_INVOCATIONS_PER_CYCLE: u32 = 3;
 
 pub(crate) struct ProviderRetryCycleSuccess {
     pub(crate) outcome: ProviderStreamOutcome,
@@ -32,6 +40,9 @@ pub(crate) struct CodeReviewerRetryCycleInput<'a> {
     pub(crate) worktree_path: &'a Path,
     pub(crate) initial_resume_provider_session_id: Option<String>,
     pub(crate) command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
+    /// T19:当前 reviewer 窗口句柄(调用方在材料采集前已开窗;技术失败
+    /// 重试在原「首次+最多两次自动重试」预算内旋转新窗)。
+    pub(crate) review_window: &'a mut crate::product::reviewer_window::ReviewerWindowHandle,
 }
 
 /// Provider 调用中允许交给外层协调器自动恢复的技术失败。
@@ -116,6 +127,16 @@ pub(crate) enum ProviderInvocationOutcome {
         message: String,
         partial_output: String,
     },
+    /// P4-a（REQ-PTR-IDLE）：共享 stream 的零活动看门狗触发（C3/C4：env
+    /// 覆写短阈值红测、范式复用 workspace_engine watchdog）。首次挂起由
+    /// `resolve_provider_retry_cycle_outcome` 同 provider fresh 重试恰一次；
+    /// 再次挂起转 attempt Blocked＋stalled 门，不占 transport 预算分类。
+    IdleStall {
+        role: CodingProviderRole,
+        phase: String,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    },
 }
 
 impl ProviderInvocationOutcome {
@@ -127,6 +148,19 @@ impl ProviderInvocationOutcome {
         match result {
             Ok(outcome) => Self::Completed(outcome),
             Err(CodingWorkspaceEngineError::Aborted) => Self::Cancelled,
+            // P4-a：idle 挂起前置——不进 transport 分类（纯 idle 最多 2 次，
+            // 不改 transport 3 次预算）。
+            Err(CodingWorkspaceEngineError::ProviderIdleStall {
+                role,
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            }) => Self::IdleStall {
+                role,
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            },
             Err(error) => match classify_provider_failure(&error) {
                 ProviderFailureClassification::Retryable {
                     failure,
@@ -151,10 +185,127 @@ impl ProviderInvocationOutcome {
     }
 }
 
+/// Coder（Executor）retry-cycle streaming 启动的生产构造函数（批2 Task 11
+/// 矩阵锚点）。内部构造 legacy `AdapterInput{role: Executor}` 并经共享工厂
+/// `streaming_input_from_adapter` 派生 `tool_policy`（Coder 全工具 `None`，
+/// 不带 deny），再绑定 attempt 的 workspace/resume 会话上下文。Coder streaming
+/// 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即绕过
+/// 角色矩阵，矩阵测试将失败。
+pub(crate) fn coder_retry_cycle_streaming_input(
+    provider_name: &ProviderName,
+    prompt: String,
+    worktree_path: &Path,
+    provider_stream_log_dir: String,
+    attempt_id: &str,
+    resume_provider_session_id: Option<String>,
+    permission_mode: ProviderPermissionMode,
+) -> (AdapterInput, StreamingProviderInput) {
+    let legacy_input = AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
+        provider_type: provider_type_for_name(provider_name),
+        role: AdapterRole::Executor,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: Some(provider_stream_log_dir),
+        prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_markdown".to_string(),
+        timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        max_retries: 0,
+    };
+    let mut provider_input =
+        streaming_input_from_adapter(&legacy_input, worktree_path.to_path_buf(), permission_mode);
+    provider_input.workspace_session_id = Some(attempt_id.to_string());
+    provider_input.resume_provider_session_id = resume_provider_session_id;
+    (legacy_input, provider_input)
+}
+
+/// CodeReviewer（Reviewer）retry-cycle streaming 启动的生产构造函数（批2
+/// Task 11 矩阵锚点）。内部构造 legacy `AdapterInput{role: Reviewer}` 并经
+/// 共享工厂 `streaming_input_from_adapter` 派生 `tool_policy`（T11：Reviewer
+/// wire 面全开 `None`，只携 ReviewerVerify+窗口合同，真窗归 T20，执行审计
+/// 按角色保留），再绑定 attempt 会话上下文与结构化输出契约。CodeReviewer
+/// streaming 入口禁止绕过本函数裸构造 `StreamingProviderInput`。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn code_reviewer_retry_cycle_streaming_input(
+    reviewer: &ProviderName,
+    prompt: String,
+    worktree_path: &Path,
+    provider_stream_log_dir: String,
+    attempt_id: &str,
+    resume_provider_session_id: Option<String>,
+    structured_output_contract: StructuredOutputContract,
+    permission_mode: ProviderPermissionMode,
+) -> (AdapterInput, StreamingProviderInput) {
+    let legacy_input = AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
+        provider_type: provider_type_for_name(reviewer),
+        role: AdapterRole::Reviewer,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: Some(provider_stream_log_dir),
+        prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_code_review_json".to_string(),
+        timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        max_retries: 0,
+    };
+    let mut provider_input =
+        streaming_input_from_adapter(&legacy_input, worktree_path.to_path_buf(), permission_mode);
+    provider_input.workspace_session_id = Some(attempt_id.to_string());
+    provider_input.resume_provider_session_id = resume_provider_session_id;
+    provider_input.structured_output_contract = Some(structured_output_contract);
+    (legacy_input, provider_input)
+}
+
 impl CodingWorkspaceEngine {
     pub(crate) async fn run_coder_with_retry_cycle(
         &self,
         input: CoderRetryCycleInput<'_>,
+    ) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
+        // T14:Coder code_delivery 资源窗——cycle 级持有,绑定首个真实
+        // role_run/run_id(技术重试旋转到新 run)。普通 CLI/MCP/ACP 三
+        // 入口在 engine 收敛于同一 retry cycle,同归属。
+        let attempt_id = input.attempt.id.clone();
+        let mut delivery = Some(std::sync::Arc::new(
+            self.begin_coder_delivery_scope(
+                input.attempt,
+                &input.initial_role_run,
+                input.worktree_path,
+            )
+            .await?,
+        ));
+        let result = self
+            .coder_retry_cycle_with_delivery(input, &mut delivery)
+            .await;
+        // T14:全部退出路径单点收口——先 quiesce 再清;恢复停等在成功
+        // 路径显式 Err,失败/取消路径 warn 不掩盖原始错误(durable 停等
+        // 事实留给恢复驱动;下一轮开窗 sweep 亦会重试收口)。
+        if let Some(scope) = delivery.take()
+            && let Err(recovery) = self
+                .recycle_coder_delivery_scope(&scope, "coder_cycle_exit")
+                .await
+        {
+            if result.is_ok() {
+                return Err(recovery);
+            }
+            tracing::warn!(
+                attempt_id = %attempt_id,
+                error = %recovery,
+                "coder_delivery_scope_close_deferred_to_recovery"
+            );
+        }
+        result
+    }
+
+    /// 原 coder retry cycle 主体(`run_coder_with_retry_cycle` 委托;
+    /// `delivery` 持有当前 run 的 code_delivery 资源窗,技术重试时旋转)。
+    async fn coder_retry_cycle_with_delivery(
+        &self,
+        input: CoderRetryCycleInput<'_>,
+        delivery: &mut Option<
+            std::sync::Arc<crate::cross_cutting::provider_resources::ProviderRunResourceScope>,
+        >,
     ) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
         let CoderRetryCycleInput {
             attempt,
@@ -173,7 +324,8 @@ impl CodingWorkspaceEngine {
             role_permission_mode_for_attempt(&self.store, attempt, CodingProviderRole::Coder)?;
         let mut node = initial_node;
         let mut role_run = self.ensure_retry_cycle_metadata(attempt, initial_role_run)?;
-
+        // P4-a：本 cycle 内 idle 挂起计数（纯 idle 最多 2 次调用后收口）。
+        let mut idle_stalls = 0u32;
         for attempt_no in 1..=MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
             if attempt_no > 1 {
                 (node, role_run) = self
@@ -185,6 +337,18 @@ impl CodingWorkspaceEngine {
                     )
                     .await?;
             }
+            // T14:技术重试资源窗旋转——前 run scope 先收口(quiesce+
+            // cleanup;恢复停等=Err,不重试不加次数),新 run 开新
+            // scope。重试预算(MAX_PROVIDER_INVOCATIONS_PER_CYCLE)
+            // 不因窗口旋转增加(invocation 计数与资源窗解耦)。
+            if let Some(prior) = delivery.take() {
+                self.recycle_coder_delivery_scope(&prior, "coder_technical_retry_rotation")
+                    .await?;
+            }
+            *delivery = Some(std::sync::Arc::new(
+                self.begin_coder_delivery_scope(attempt, &role_run, worktree_path)
+                    .await?,
+            ));
 
             let (prompt, prompt_mode, resume_provider_session_id) = if attempt_no == 1 {
                 (
@@ -210,24 +374,17 @@ impl CodingWorkspaceEngine {
                     ),
                 })
                 .await;
-            let legacy_input = AdapterInput {
-                provider_type: provider_type_for_name(provider_name),
-                role: AdapterRole::Executor,
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
-                prompt: prompt.clone(),
-                context_files: Vec::new(),
-                output_schema: "coding_workspace_markdown".to_string(),
-                timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-                max_retries: 0,
-            };
-            let mut provider_input = streaming_input_from_adapter(
-                &legacy_input,
-                worktree_path.to_path_buf(),
+            // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+            // tool_policy：Executor → None）。
+            let (legacy_input, provider_input) = coder_retry_cycle_streaming_input(
+                provider_name,
+                prompt.clone(),
+                worktree_path,
+                self.attempt_provider_stream_log_dir(attempt),
+                &attempt.id,
+                resume_provider_session_id,
                 permission_mode.clone(),
             );
-            provider_input.workspace_session_id = Some(attempt.id.clone());
-            provider_input.resume_provider_session_id = resume_provider_session_id;
             let invocation_attempt = match self.ensure_provider_retry_cycle_active(attempt) {
                 Ok(current) => current,
                 Err(error) => {
@@ -236,22 +393,80 @@ impl CodingWorkspaceEngine {
                     return Err(error);
                 }
             };
+            // 裁决 A 两阶段:validate 前移,在 coding.rs/rework.rs 已完成 prompt 构建
+            // (并注入 routing reference);此处仅 resolve policy 再捆绑 validated input,
+            // provider_input 仍 clone-then-move(validated 包裹 clone,原值 move 进 run 结构)。
+            // Task 2.6（REQ-ENV-10/11）：LC attempt 走 root launch（cwd=canonical
+            // root、target/writable root=attempt worktree）；单仓/legacy 保持既有
+            // `resolve_launch_policy_for_role` 分流（None → 直连，零行为变化）。
+            let policy = if invocation_attempt.target_snapshot.is_some() {
+                self.resolve_coder_root_launch_policy(&invocation_attempt, worktree_path)
+            } else {
+                self.resolve_launch_policy_for_role(
+                    &invocation_attempt,
+                    CodingProviderRole::Coder,
+                    worktree_path,
+                )
+            }
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            // 设计决策 1「launch 层按 validated envelope 重绑 cwd」：policy 存在时
+            // input 显式携带 envelope 冻结的 canonical cwd（LC Coder=root；Task 2.5
+            // 复验在 spawn 前消费该字段）。单仓/无政策路径保持 None（回填
+            // working_dir，零行为变化）。
+            let mut provider_input = provider_input;
+            if let Some(policy) = policy.as_ref() {
+                provider_input.working_directory =
+                    Some(policy.envelope().working_directory.clone());
+            }
+            // Task 1b 段③:validated input 一律经 gateway prepare 组装(prepare
+            // 前绑定 run-bound sink——Coder/Kimi 无通用 tool_policy 也绑定;
+            // 外来非法 Some(policy) 由 gateway 拒绝)。
+            let validated_input = if invocation_attempt.target_snapshot.is_some() {
+                self.prepare_coder_root_launch_streaming(
+                    &invocation_attempt,
+                    worktree_path,
+                    provider_input.clone(),
+                )
+            } else {
+                self.prepare_streaming_launch_for_role(
+                    &invocation_attempt,
+                    CodingProviderRole::Coder,
+                    worktree_path,
+                    provider_input.clone(),
+                )
+            }
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            // B1-1:本次 launch 的受信归属从本轮 code_delivery 资源窗真实
+            // scope 铸造(同 key/run/boot/worktree 标签;每次 invocation
+            // 唯一资源 ID),经 launch 分流透传到 adapter spawn 点登记。
+            let launch_ownership = delivery.as_ref().map(|scope| {
+                crate::cross_cutting::provider_resources::TrustedLaunchOwnership::mint(
+                    std::sync::Arc::clone(scope),
+                    &format!("code_delivery provider process: {provider_name:?}"),
+                )
+            });
             let outcome = self
-                .run_provider_stream_invocation(CodingProviderStreamRun {
-                    attempt: &invocation_attempt,
-                    node_id: &node.id,
-                    role_run: Some(&role_run),
-                    provider,
-                    legacy_input: &legacy_input,
-                    input: provider_input,
-                    provider_name,
-                    provider_role: CodingProviderRole::Coder,
-                    command_rx: &mut *command_rx,
-                    allow_legacy_stream_fallback: true,
-                    timeout: None,
-                    timeout_reason_code: None,
-                    suppress_failure_side_effects: true,
-                })
+                .run_provider_stream_invocation_with_ownership(
+                    CodingProviderStreamRun {
+                        attempt: &invocation_attempt,
+                        node_id: &node.id,
+                        role_run: Some(&role_run),
+                        provider,
+                        legacy_input: &legacy_input,
+                        input: provider_input,
+                        provider_name,
+                        provider_role: CodingProviderRole::Coder,
+                        command_rx: &mut *command_rx,
+                        // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
+                        // 传统/非逻辑路径保留 `true` 以兼容未实现 `start` 的历史 adapter。
+                        allow_legacy_stream_fallback: invocation_attempt.target_snapshot.is_none(),
+                        timeout: None,
+                        timeout_reason_code: None,
+                        suppress_failure_side_effects: true,
+                        validated_input,
+                    },
+                    launch_ownership,
+                )
                 .await;
             if let Some(outcome) = self
                 .resolve_provider_retry_cycle_outcome(
@@ -259,6 +474,7 @@ impl CodingWorkspaceEngine {
                     &node,
                     &role_run,
                     attempt_no,
+                    &mut idle_stalls,
                     outcome,
                 )
                 .await?
@@ -287,6 +503,7 @@ impl CodingWorkspaceEngine {
             worktree_path,
             initial_resume_provider_session_id,
             command_rx,
+            review_window,
         } = input;
         let permission_mode = role_permission_mode_for_attempt(
             &self.store,
@@ -295,6 +512,8 @@ impl CodingWorkspaceEngine {
         )?;
         let mut node = initial_node;
         let mut role_run = self.ensure_retry_cycle_metadata(attempt, initial_role_run)?;
+        // P4-a：本 cycle 内 idle 挂起计数（纯 idle 最多 2 次调用后收口）。
+        let mut idle_stalls = 0u32;
 
         for attempt_no in 1..=MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
             if attempt_no > 1 {
@@ -306,23 +525,70 @@ impl CodingWorkspaceEngine {
                         &role_run,
                     )
                     .await?;
+                // T19:技术失败重试——前窗必须无违规且恢复完整才以原
+                // 「首次+最多两次自动重试」预算建新窗;违规→人工门,
+                // 新窗口不加次数;provider 特有恢复/换新会话仍占本预算
+                // (invocation 计数不因窗口旋转增加)。
+                let rotated = self
+                    .rotate_reviewer_window_for_retry(
+                        review_window,
+                        attempt,
+                        &role_run,
+                        reviewer,
+                        worktree_path,
+                    )
+                    .await;
+                if let Err(error) = rotated {
+                    let _ = self
+                        .finalize_retry_cycle_state_change(attempt, &node, &role_run)
+                        .await;
+                    return Err(error);
+                }
+                *review_window = rotated.expect("checked Err above");
             }
+            // T19:材料采集(reviewer_context 渲染/prompt 构建/Git diff)
+            // 之前同源复验——窗口 Running 且材料与 baseline 同指纹。
+            self.assert_reviewer_window_running(
+                review_window,
+                attempt,
+                &role_run.id,
+                reviewer,
+                worktree_path,
+            )?;
 
             let retry_diagnostic = self.retry_diagnostic_for_previous_run(attempt, &role_run)?;
             let nonce = crate::product::workspace_engine::structured_output_nonce();
             let structured_output_contract = code_review_structured_output_contract(nonce.clone());
             let terminal_contract = code_review_output_contract(&nonce);
-            let mut prompt = match self.render_reviewer_unit_run_context(attempt, reviewer)? {
-                Some(rendered) => rendered.text,
-                None => {
-                    self.build_code_review_prompt(
-                        attempt,
-                        worktree_path,
-                        retry_diagnostic.as_deref(),
-                    )
-                    .await?
-                }
-            };
+            // 裁决 A 两阶段:validate 前移,在 prompt 构建前 resolve policy 并计算
+            // routing reference context。attempt 的 project_id/target_snapshot 稳定,
+            // 与下方 ensure 后取得的 invocation_attempt 一致。
+            let policy = self
+                .resolve_launch_policy_for_role(
+                    attempt,
+                    CodingProviderRole::CodeReviewer,
+                    worktree_path,
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            let routing_context = policy
+                .as_ref()
+                .map(routing_reference_context_from_policy)
+                .unwrap_or_default();
+            let mut prompt = self
+                .build_reviewer_prompt(
+                    attempt,
+                    reviewer,
+                    worktree_path,
+                    retry_diagnostic.as_deref(),
+                    &routing_context,
+                )
+                .await?;
+            // r54 越界根修残留→批2 Task 20a-fix(F5):Reviewer prompt 不再
+            // 注入「必须worktree内复跑」与平台提交责任段(旧注入删除);
+            // ReviewerVerify 纪律段(禁 Git mutation/平台交付/资源登记
+            // 清理三禁条)对 LC 与单仓(非 LC)reviewer 一致注入——T19
+            // 开窗不按 target_snapshot 分叉,纪律段同不分叉。
+            prompt.push_str(&reviewer_verify_discipline_section(worktree_path));
             if !prompt.ends_with(&terminal_contract) {
                 prompt.push_str(&terminal_contract);
             }
@@ -337,29 +603,22 @@ impl CodingWorkspaceEngine {
                     ),
                 })
                 .await;
-            let legacy_input = AdapterInput {
-                provider_type: provider_type_for_name(reviewer),
-                role: AdapterRole::Reviewer,
-                worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-                provider_stream_log_dir: Some(self.attempt_provider_stream_log_dir(attempt)),
+            // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+            // tool_policy：Reviewer → ReviewerVerify 窗口合同；Author 才 deny）。
+            let (legacy_input, provider_input) = code_reviewer_retry_cycle_streaming_input(
+                reviewer,
                 prompt,
-                context_files: Vec::new(),
-                output_schema: "coding_workspace_code_review_json".to_string(),
-                timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-                max_retries: 0,
-            };
-            let mut provider_input = streaming_input_from_adapter(
-                &legacy_input,
-                worktree_path.to_path_buf(),
+                worktree_path,
+                self.attempt_provider_stream_log_dir(attempt),
+                &attempt.id,
+                if attempt_no == 1 {
+                    initial_resume_provider_session_id.clone()
+                } else {
+                    None
+                },
+                structured_output_contract,
                 permission_mode.clone(),
             );
-            provider_input.workspace_session_id = Some(attempt.id.clone());
-            provider_input.resume_provider_session_id = if attempt_no == 1 {
-                initial_resume_provider_session_id.clone()
-            } else {
-                None
-            };
-            provider_input.structured_output_contract = Some(structured_output_contract);
             let invocation_attempt = match self.ensure_provider_retry_cycle_active(attempt) {
                 Ok(current) => current,
                 Err(error) => {
@@ -368,22 +627,67 @@ impl CodingWorkspaceEngine {
                     return Err(error);
                 }
             };
+            // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
+            // 此处仅把 policy 与 provider_input 捆绑(同源 clone-then-move)。
+            // Task 2.6：launch 层 envelope 重绑（设计决策 1）——reviewer 现状
+            // envelope cwd==target worktree（effective 零变化）；reviewer 角色
+            // 的 root envelope 接线（Task 2.7）后本重绑自动跟随，spawn 前复验
+            // 不因字段分离而漂移。无政策路径保持 None（回填，零行为变化）。
+            let mut provider_input = provider_input;
+            // 批2 Task 20:Reviewer launch 携 ReviewerVerify 窗口合同——
+            // T19 已在材料采集前开窗(本 cycle 持 `review_window`),此处
+            // 经窗口 id 铸造;无有效窗=0 会话(fail-closed,不 fallback)。
+            provider_input.tool_policy = Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                    review_window.window_id.clone(),
+                ),
+            );
+            if let Some(policy) = policy.as_ref() {
+                provider_input.working_directory =
+                    Some(policy.envelope().working_directory.clone());
+            }
+            // Task 1b 段③:validated input 一律经 gateway prepare 组装(prepare
+            // 前绑定 run-bound sink;外来非法 Some(policy) 拒绝)。
+            let validated_input = self
+                .prepare_streaming_launch_for_role(
+                    &invocation_attempt,
+                    CodingProviderRole::CodeReviewer,
+                    worktree_path,
+                    provider_input.clone(),
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            // B1-1:编码 reviewer 本次 launch 的受信归属从开窗主 scope
+            // (reviewer-window-{attempt},同 run/boot,挂 worktree 标签)
+            // 铸造——与窗口开窗 quiesce 目标同源,兄弟 scope 枚举路径
+            // (aria.worktree)同样可发现。
+            let launch_ownership = self.reviewer_launch_ownership(
+                &review_window.window_id,
+                &invocation_attempt,
+                &role_run.id,
+                worktree_path,
+            )?;
             let outcome = self
-                .run_provider_stream_invocation(CodingProviderStreamRun {
-                    attempt: &invocation_attempt,
-                    node_id: &node.id,
-                    role_run: Some(&role_run),
-                    provider,
-                    legacy_input: &legacy_input,
-                    input: provider_input,
-                    provider_name: reviewer,
-                    provider_role: CodingProviderRole::CodeReviewer,
-                    command_rx: &mut *command_rx,
-                    allow_legacy_stream_fallback: true,
-                    timeout: None,
-                    timeout_reason_code: None,
-                    suppress_failure_side_effects: true,
-                })
+                .run_provider_stream_invocation_with_ownership(
+                    CodingProviderStreamRun {
+                        attempt: &invocation_attempt,
+                        node_id: &node.id,
+                        role_run: Some(&role_run),
+                        provider,
+                        legacy_input: &legacy_input,
+                        input: provider_input,
+                        provider_name: reviewer,
+                        provider_role: CodingProviderRole::CodeReviewer,
+                        command_rx: &mut *command_rx,
+                        // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
+                        // 传统/非逻辑路径保留 `true`。
+                        allow_legacy_stream_fallback: invocation_attempt.target_snapshot.is_none(),
+                        timeout: None,
+                        timeout_reason_code: None,
+                        suppress_failure_side_effects: true,
+                        validated_input,
+                    },
+                    Some(launch_ownership),
+                )
                 .await;
             if let Some(outcome) = self
                 .resolve_provider_retry_cycle_outcome(
@@ -391,6 +695,7 @@ impl CodingWorkspaceEngine {
                     &node,
                     &role_run,
                     attempt_no,
+                    &mut idle_stalls,
                     outcome,
                 )
                 .await?
@@ -572,7 +877,7 @@ impl CodingWorkspaceEngine {
                 expected.id
             )));
         }
-        let current = self.store.ensure_provider_run_allowed(&current)?;
+        let current = self.admit_provider_run(&current, &expected.stage, "provider_retry")?;
         if current.status != CodingAttemptStatus::Running || current.stage != expected.stage {
             return Err(CodingWorkspaceEngineError::ProviderStream(format!(
                 "provider_retry_attempt_state_changed: {}",
@@ -589,6 +894,7 @@ impl CodingWorkspaceEngine {
         node: &CodingTimelineNode,
         role_run: &CodingRoleRun,
         attempt_no: u32,
+        idle_stall_count: &mut u32,
         outcome: ProviderInvocationOutcome,
     ) -> Result<Option<ProviderStreamOutcome>, CodingWorkspaceEngineError> {
         match outcome {
@@ -598,8 +904,63 @@ impl CodingWorkspaceEngine {
                     .await?;
                 Err(CodingWorkspaceEngineError::Aborted)
             }
+            // P4-a（REQ-PTR-IDLE）：idle 挂起前置收口——首次挂起同 provider
+            // fresh 重试恰一次（cycle 既有重试路径即 fresh：prompt 重建、
+            // resume_provider_session_id=None）；再次挂起转 attempt Blocked＋
+            // stalled 门。不占 transport 预算分类（纯 transport 仍 3 次）。
+            ProviderInvocationOutcome::IdleStall {
+                role,
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            } => {
+                if let Err(error) = self.ensure_provider_retry_cycle_active(attempt) {
+                    self.finalize_retry_cycle_state_change(attempt, node, role_run)
+                        .await?;
+                    return Err(error);
+                }
+                self.store.update_role_run_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &role_run.id,
+                    CodingRoleRunStatus::Failed,
+                    Some(PROVIDER_IDLE_STALL_REASON_CODE.to_string()),
+                )?;
+                self.complete_timeline_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &node.id,
+                    CodingTimelineNodeStatus::Failed,
+                    Some(format!(
+                        "provider 零活动挂起：{idle_secs} 秒无事件超过 {idle_limit_secs} 秒界（阶段 {phase}）"
+                    )),
+                )
+                .await?;
+                *idle_stall_count += 1;
+                if *idle_stall_count < 2 && attempt_no < MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
+                    return Ok(None);
+                }
+                let error = CodingWorkspaceEngineError::ProviderIdleStall {
+                    role: role.clone(),
+                    phase: phase.clone(),
+                    idle_secs,
+                    idle_limit_secs,
+                };
+                self.open_provider_stalled_gate(
+                    attempt,
+                    &node.id,
+                    role,
+                    &phase,
+                    idle_secs,
+                    idle_limit_secs,
+                )
+                .await?;
+                Err(error)
+            }
             ProviderInvocationOutcome::RetryableTransport {
-                failure: _,
+                failure,
                 reason_code,
                 message,
                 partial_output: _,
@@ -608,6 +969,61 @@ impl CodingWorkspaceEngine {
                     self.finalize_retry_cycle_state_change(attempt, node, role_run)
                         .await?;
                     return Err(error);
+                }
+                let group_unit_failure = if attempt.scope == CodingAttemptScope::WorkItemGroup
+                    && attempt.admission_kind == CodingAdmissionKind::ScAdvance
+                    && attempt.stage == CodingExecutionStage::Coding
+                {
+                    match attempt.active_unit_id.as_deref() {
+                        Some(unit_id) => {
+                            let active = self.store.get_active_unit_run(attempt)?;
+                            if active.unit_id != unit_id {
+                                return Err(CodingWorkspaceEngineError::Store(
+                                    ProductStoreError::IdentityMismatch {
+                                        kind: "coding_active_unit_run",
+                                        id: unit_id.to_string(),
+                                    },
+                                ));
+                            }
+                            Some(unit_id.to_string())
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(unit_id) = group_unit_failure {
+                    let group_outcome = self
+                        .handle_group_unit_failure(
+                            attempt,
+                            &unit_id,
+                            ProviderFailureClassification::Retryable {
+                                failure,
+                                reason_code: reason_code.clone(),
+                                message: message.clone(),
+                            },
+                        )
+                        .await?;
+                    if !matches!(group_outcome, GroupUnitFailureOutcome::RetrySameUnit { .. }) {
+                        self.store.update_role_run_status(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &role_run.id,
+                            CodingRoleRunStatus::Failed,
+                            Some(reason_code),
+                        )?;
+                        self.complete_timeline_node(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &node.id,
+                            CodingTimelineNodeStatus::Failed,
+                            Some(message.clone()),
+                        )
+                        .await?;
+                        return Err(CodingWorkspaceEngineError::ProviderStream(message));
+                    }
                 }
                 self.store.update_role_run_status(
                     &attempt.project_id,
@@ -640,6 +1056,60 @@ impl CodingWorkspaceEngine {
                 error,
                 interaction_wait,
             } => {
+                if attempt.scope == CodingAttemptScope::WorkItemGroup
+                    && attempt.admission_kind == CodingAdmissionKind::ScAdvance
+                    && attempt.stage == CodingExecutionStage::Coding
+                    && attempt.active_unit_id.is_some()
+                {
+                    let unit_id = attempt.active_unit_id.as_deref().expect("checked above");
+                    let active = self.store.get_active_unit_run(attempt)?;
+                    if active.unit_id != unit_id {
+                        return Err(CodingWorkspaceEngineError::Store(
+                            ProductStoreError::IdentityMismatch {
+                                kind: "coding_active_unit_run",
+                                id: unit_id.to_string(),
+                            },
+                        ));
+                    }
+                    let group_outcome = self
+                        .handle_group_unit_failure(
+                            attempt,
+                            unit_id,
+                            ProviderFailureClassification::NonRetryable {
+                                reason_code: reason_code.clone(),
+                                interaction_wait,
+                            },
+                        )
+                        .await?;
+                    if matches!(
+                        group_outcome,
+                        GroupUnitFailureOutcome::AwaitingManualRecovery { .. }
+                            | GroupUnitFailureOutcome::Aborted { .. }
+                    ) {
+                        self.store.update_role_run_status(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &role_run.id,
+                            if matches!(group_outcome, GroupUnitFailureOutcome::Aborted { .. }) {
+                                CodingRoleRunStatus::Aborted
+                            } else {
+                                CodingRoleRunStatus::Failed
+                            },
+                            Some(reason_code),
+                        )?;
+                        self.complete_timeline_node(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                            &node.id,
+                            CodingTimelineNodeStatus::Failed,
+                            Some(error.to_string()),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                }
                 if interaction_wait && reason_code != "permission_timeout" {
                     self.store.update_role_run_status(
                         &attempt.project_id,
@@ -742,6 +1212,30 @@ impl CodingWorkspaceEngine {
         .await?;
         Ok(())
     }
+    /// T19:窗口旋转——回收前窗(必须无违规且恢复完整)后以 retry run
+    /// 建新窗。回收失败(违规人工门/恢复停等)即 Err:不重试、不加次数。
+    async fn rotate_reviewer_window_for_retry(
+        &self,
+        window: &mut crate::product::reviewer_window::ReviewerWindowHandle,
+        attempt: &CodingExecutionAttempt,
+        retry_run: &CodingRoleRun,
+        reviewer: &ProviderName,
+        worktree_path: &Path,
+    ) -> Result<crate::product::reviewer_window::ReviewerWindowHandle, CodingWorkspaceEngineError>
+    {
+        self.recycle_reviewer_window(window, "technical_retry_window_recycle")
+            .await?;
+        let window_id =
+            crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &retry_run.id);
+        self.begin_reviewer_window_for_run(
+            &window_id,
+            attempt,
+            &retry_run.id,
+            reviewer,
+            worktree_path,
+        )
+        .await
+    }
 }
 
 pub(crate) fn classify_provider_failure(
@@ -777,6 +1271,7 @@ fn classify_adapter_error(error: &ProviderAdapterError) -> ProviderFailureClassi
             non_retryable("provider_execution_failed", false)
         }
         ProviderErrorCode::ProviderParseError => non_retryable("provider_parse_error", false),
+        ProviderErrorCode::ProviderEmptyOutput => non_retryable("provider_empty_output", false),
         ProviderErrorCode::ProviderCommandMissing => {
             non_retryable("provider_command_missing", false)
         }
@@ -878,7 +1373,9 @@ fn upstream_status(message: &str) -> Option<u16> {
 
     tokens.iter().enumerate().find_map(|(index, token)| {
         let status = token.parse::<u16>().ok()?;
-        if !matches!(status, 503 | 504) {
+        // 429 为瞬态限流，与 503/504 一并归入可重试 upstream 类（F1 Ruling：
+        // reason_code 沿用 provider_upstream_5xx 属兼容命名，不改名）。
+        if !matches!(status, 429 | 503 | 504) {
             return None;
         }
         let context = &tokens[index.saturating_sub(5)..index];
@@ -938,3 +1435,7 @@ fn non_retryable(reason_code: &str, interaction_wait: bool) -> ProviderFailureCl
         interaction_wait,
     }
 }
+
+// Task 2.6：LC Coder root launch 解析（物理拆分满足 large_file_guard 1200 行
+// 上限；include! 后与本文件同模块域）。
+include!("provider_retry_parts/coder_root_launch.inc.rs");

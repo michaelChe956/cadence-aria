@@ -1,7 +1,7 @@
 # process-evidence-acceptance-boundary Specification
 
 ## Purpose
-TBD - created by archiving change fix-process-evidence-as-acceptance. Update Purpose after archive.
+划定验收标准与评审否决的可观测证据边界：acceptance criterion 必须描述可从最终代码状态、验证命令输出、人工检查结果或 handoff 字段观测的结果状态，不得以提交历史、开发时序等事后无法追补的过程事实为验收内容；reviewer 不得以过程证据缺失否决实现，同时对可观测测试证据的审查要求与 Coder 侧 TDD 要求保持不变，且不为存量过程性契约提供豁免。
 ## Requirements
 ### Requirement: 验收标准必须是可观测的结果状态
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::run_boundary;
 
 impl WorkspaceEngine {
     pub async fn drive_work_item_plan_provider_session_to_output(
@@ -14,7 +15,15 @@ impl WorkspaceEngine {
         let mut session = match session {
             Ok(session) => session,
             Err(error) => {
-                let message = error.details.clone();
+                // 诊断直通（claude×轻 握手谜团第 2 轮）：workitem author 启动失败的
+                // stderr 尾部（有界）并入消息——随 EngineEvent::Error → WS error
+                // 消息上浮，并在驱动 result（Err 返回值）中同源携带。
+                let mut message = error.details.clone();
+                crate::cross_cutting::provider_adapter::ProviderAdapterError::append_bounded_stderr_tail(
+                    &mut message,
+                    &error.stderr,
+                    crate::cross_cutting::provider_adapter::PROVIDER_ERROR_STDERR_TAIL_BYTES,
+                );
                 let _ = self
                     .event_tx
                     .send(EngineEvent::Error {
@@ -39,10 +48,102 @@ impl WorkspaceEngine {
         let mut tool_call_titles = BTreeMap::new();
         let mut tool_call_commands = BTreeMap::new();
         let mut display_filter = StructuredOutputDisplayFilter::new();
-
+        // F-27R3：挂起集经 PendingChoiceRequests 镜像到进程级登记簿（对照主驱动
+        // provider_drive 先例）——session_state 全量投影据此补挂本子驱动挂起的
+        // choice 卡；guard Drop（本函数任意出口）只摘本 run 登记的 id，防泄漏。
+        let mut pending_choice_requests = PendingChoiceRequests::new(&self.session.session_id);
+        // r29 问题2 根修(r28 现场):本循环此前缺 F-19 零活动看门狗(主驱动
+        // drive_provider_session 有)——SC 门修订 turn 的 provider 流式 1min 后
+        // 静默挂死,驱动永不收口,harness 侧 90min 空等零信号。同构补齐:
+        // 事件/命令任一活动重置;等待人工权限/选择应答期间挂起(与主驱动
+        // 同语义——人工等待由 ApprovalBridge PERMISSION_TIMEOUT 与
+        // choice_wait 界收口,不是 provider 楔死)。
+        // r32 校准:plan 文档生成的合法静默可超 10min(r28 实测 648s),本循环
+        // 用 1800s 专用界(主驱动保持 600s——story/design 逐 token 流式形态
+        // 不同);r32 现场 600s 界曾误杀合法慢生成。
+        let idle_watchdog_timeout = PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT;
+        let idle_watchdog =
+            tokio::time::sleep_until(tokio::time::Instant::now() + idle_watchdog_timeout);
+        tokio::pin!(idle_watchdog);
+        let choice_wait_timeout = PROVIDER_CHOICE_WAIT_TIMEOUT;
+        let choice_wait_timer =
+            tokio::time::sleep_until(tokio::time::Instant::now() + choice_wait_timeout);
+        tokio::pin!(choice_wait_timer);
+        let mut waiting_for_permission = false;
         while events_open {
             tokio::select! {
+                _ = &mut idle_watchdog,
+                if !waiting_for_permission && pending_choice_requests.is_empty() =>
+                {
+                    // F-19 同构:provider 会话零活动楔死——Abort kill 链 + cancel +
+                    // 失败节点带稳定原因码 + Error 事件 + finish_failed_run
+                    //(workspace 会话回 prepare_context 可重跑)。
+                    eprintln!(
+                        "[aria-cancellation] workspace work_item_plan_drive idle_watchdog trigger=provider_idle_watchdog session_id={} role=author timeout_secs={}",
+                        self.session.session_id,
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_idle_watchdog: provider 会话 {} 秒零活动（无事件/命令），疑似楔死，运行已由看门狗中止；可重新开始生成",
+                        idle_watchdog_timeout.as_secs()
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    let display_content = display_filter.finish();
+                    self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error { message })
+                        .await;
+                    self.finish_failed_run().await;
+                    return Err("provider_idle_watchdog: work item plan provider 会话零活动楔死，运行已中止".to_string());
+                }
+                _ = &mut choice_wait_timer,
+                if !pending_choice_requests.is_empty() =>
+                {
+                    // F-22/F-19b 同构:choice 卡丢失/无人应答超界。
+                    let pending_ids: Vec<&str> = pending_choice_requests.ids();
+                    eprintln!(
+                        "[aria-cancellation] workspace work_item_plan_drive choice_wait_timeout trigger=provider_choice_wait_timeout session_id={} role=author pending={:?} timeout_secs={}",
+                        self.session.session_id,
+                        pending_ids,
+                        choice_wait_timeout.as_secs()
+                    );
+                    let message = format!(
+                        "provider_choice_wait_timeout: 等待回答超时——{} 秒内未收到选择应答，运行已中止；choice 卡可能未送达或已送达但无人应答（pending={:?}）。请重新提交反馈重新发起本轮",
+                        choice_wait_timeout.as_secs(),
+                        pending_ids
+                    );
+                    let _ = session.commands.send(ProviderCommand::Abort).await;
+                    cancel.cancel();
+                    let display_content = display_filter.finish();
+                    self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
+                    self.update_timeline_node(
+                        &node_id,
+                        TimelineNodeStatus::Failed,
+                        Some(message.clone()),
+                    )
+                    .await;
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error { message })
+                        .await;
+                    self.finish_failed_run().await;
+                    return Err("provider_choice_wait_timeout: work item plan provider 等待选择应答超时，运行已中止".to_string());
+                }
                 _ = cancel.cancelled() => {
+                    // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：workitem author
+                    // 驱动循环观察到 engine/run token 被外部取消。
+                    eprintln!(
+                        "[aria-cancellation] workspace work_item_plan_drive select_cancelled trigger=engine_cancelled_observed session_id={} role=author agent={agent:?}",
+                        self.session.session_id
+                    );
                     let display_content = display_filter.finish();
                     self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
                     let _ = self.flush_stream_buffer(&node_id).await;
@@ -50,8 +151,17 @@ impl WorkspaceEngine {
                     return Err("provider run aborted".to_string());
                 }
                 command = command_rx.recv(), if commands_open => {
+                    // F-19 同构:任何命令活动(含人工权限/选择应答)重置看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     match command {
                         Some(ProviderCommand::Abort) => {
+                            // 诊断打点：Abort 命令到达 workitem author 驱动循环。
+                            eprintln!(
+                                "[aria-cancellation] workspace work_item_plan_drive abort_command trigger=abort_command session_id={} role=author agent={agent:?}",
+                                self.session.session_id
+                            );
                             let _ = session.commands.send(ProviderCommand::Abort).await;
                             cancel.cancel();
                             let display_content = display_filter.finish();
@@ -65,6 +175,8 @@ impl WorkspaceEngine {
                             approved,
                             reason,
                         }) => {
+                            // 人工权限应答到达:解除看门狗挂起(与主驱动同语义)。
+                            waiting_for_permission = false;
                             let _ = self
                                 .persist_permission_response(
                                     &node_id,
@@ -88,12 +200,23 @@ impl WorkspaceEngine {
                             selected_option_ids,
                             free_text,
                             answers,
+                            receipt,
                         }) => {
+                            // F-27R3：应答命中挂起 choice（登记簿同步摘除）——
+                            // 通知 Web runtime 广播全量 session_state 收敛已答卡
+                            //（对照主驱动先例）。
+                            if pending_choice_requests.remove(&id).is_some() {
+                                let _ = self
+                                    .event_tx
+                                    .send(EngineEvent::ChoicePendingChanged)
+                                    .await;
+                            }
                             if session.commands.send(ProviderCommand::ChoiceResponse {
                                 id,
                                 selected_option_ids,
                                 free_text,
                                 answers,
+                            receipt,
                             }).await.is_err() {
                                 commands_open = false;
                             }
@@ -103,6 +226,10 @@ impl WorkspaceEngine {
                     }
                 }
                 event = session.events.recv() => {
+                    // F-19 同构:事件活动重置看门狗。
+                    idle_watchdog
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
                     let Some(event) = event else {
                         events_open = false;
                         continue;
@@ -115,6 +242,8 @@ impl WorkspaceEngine {
                             self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
                         }
                         ProviderEvent::PermissionRequest(request) => {
+                            // F-19 同构:等待人工权限应答期间看门狗不计时。
+                            waiting_for_permission = true;
                             let _ = self
                                 .persist_permission_request(
                                     &node_id,
@@ -160,6 +289,9 @@ impl WorkspaceEngine {
                         }
                         ProviderEvent::ChoiceRequest(request) => {
                             let questions = request.effective_questions();
+                            // F-27R3：登记进程级挂起集（三驱动统一登记簿）——
+                            // session_state 投影经登记簿携带本卡。
+                            pending_choice_requests.insert(request.clone(), "author");
                             let _ = self
                                 .event_tx
                                 .send(EngineEvent::ChoiceRequest {
@@ -273,6 +405,27 @@ impl WorkspaceEngine {
                                 .await;
                             return Err(format!("permission timeout: {permission_id}"));
                         }
+                        // token 用量（F-40）：与主循环 / reviewer 驱动 / coding 引擎同构，
+                        // 映射为 kind=usage 的 execution event——同时落 node detail 与 WS
+                        // 事件流（此前本链路是空分支：计划拆分 author 的 token 在数据面
+                        // 整体缺失，author 阶段卡/气泡因此无读数，仅 Review 卡有）。
+                        ProviderEvent::UsageReport(report) => {
+                            self.emit_execution_event(
+                                execution_event_from_usage_report(report),
+                                Some(node_id.clone()),
+                                Some(agent.clone()),
+                            )
+                            .await;
+                        }
+                        // 策略审计出口（approval_decision/protocol_warning/
+                        // session_terminated）：观测性事件，engine 主循环不消费；
+                        // durable 落盘在 Task 3.2 的 LifecycleStore sink 注入。
+                        ProviderEvent::ToolPolicyDecision(_)
+                        | ProviderEvent::ToolPolicyWarning(_)
+                        | ProviderEvent::ToolPolicyTerminated(_)
+                        // 批2 Task 7：终端活动快照——观测性事件，计划驱动不消费
+                        // （快照消费在 provider_drive/coding 两层看门狗）。
+                        | ProviderEvent::TerminalActivity(_) => {}
                     }
                 }
             }
@@ -317,20 +470,163 @@ impl WorkspaceEngine {
     ) {
         if let Some(node_id) = node_id.as_deref() {
             let event_json = execution_event_json(&event);
-            let _ = self
+            let persisted = self
                 .update_node_detail(node_id, |detail| {
                     upsert_execution_event_json(&mut detail.execution_events, event_json);
                 })
                 .await;
+            // REQ-NDR-05：usage 事件的 durable 落盘失败此前被 `let _ =` 静默吞掉，导致
+            // 「节点无 usage」无法区分「本来没有」与「落盘失败」。这里按档位留痕
+            // （节点 detail 诊断事件 → 会话级 usage-diagnostics.jsonl → 结构化 warn），
+            // 不改变事件广播与 gate/provider 行为。
+            if let Err(error) = persisted
+                && event.kind == ProviderExecutionEventKind::Usage
+            {
+                self.record_usage_persist_diagnostic(node_id, &event.event_id, &error)
+                    .await;
+            }
         }
+        // REQ-PRB-10/11：原事件已照原样持久化 → 此处扫描（只扫作者侧 `Command` 事件）
+        // → 广播原事件 → 最后追加告警事件（只告警，不阻断 run）。
+        let source_event_id = event.event_id.clone();
+        let scan = self.run_boundary_scan_request(&event, node_id.as_deref());
         let _ = self
             .event_tx
             .send(EngineEvent::ExecutionEvent {
                 event,
-                node_id,
-                agent,
+                node_id: node_id.clone(),
+                agent: agent.clone(),
             })
             .await;
+        if let Some((node_id, findings)) = scan {
+            self.append_run_boundary_alerts(&node_id, &source_event_id, &findings, agent)
+                .await;
+        }
+    }
+
+    /// REQ-PRB-10：扫描请求 = 作者侧节点 + `Command` 类事件；其余整段跳过。
+    ///
+    /// 作者侧判定按 `TimelineNodeType` 白名单（不按 provider 名或 role）：
+    /// 先取事件所属节点的类型，内存时间线查不到时回落 `active_node_type()`。
+    fn run_boundary_scan_request(
+        &self,
+        event: &ProviderExecutionEvent,
+        node_id: Option<&str>,
+    ) -> Option<(String, Vec<run_boundary::BoundaryFinding>)> {
+        let node_id = node_id?;
+        if event.kind != ProviderExecutionEventKind::Command {
+            return None;
+        }
+        let node_type = self
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .map(|node| node.node_type.clone())
+            .or_else(|| self.active_node_type())?;
+        if !run_boundary::is_author_side_node(&node_type) {
+            return None;
+        }
+        let context = self.run_boundary_context()?;
+        let findings = run_boundary::scan_event(&context, event);
+        if findings.is_empty() {
+            return None;
+        }
+        Some((node_id.to_string(), findings))
+    }
+
+    /// REQ-PRB-10：扫描上下文（scratch / 状态根 / provider 历史目录表）。
+    ///
+    /// 无持久化 store（内存态 engine）时整段跳过——检测路径不参与成败判定。
+    fn run_boundary_context(&self) -> Option<run_boundary::RunBoundary> {
+        let store = self.lifecycle_store.as_ref()?;
+        let dir = store.run_scratch_dir(&self.session.session_id);
+        let scratch = std::fs::symlink_metadata(&dir)
+            .ok()
+            .filter(|metadata| metadata.file_type().is_dir())
+            .map(|_| dir);
+        Some(run_boundary::RunBoundary {
+            state_root: store.app_paths().root().to_path_buf(),
+            scratch,
+            tmp_roots: vec![
+                std::path::PathBuf::from("/tmp"),
+                std::path::PathBuf::from("/var/tmp"),
+            ],
+            history_dirs: run_boundary::default_history_dirs(),
+        })
+    }
+
+    /// REQ-PRB-10/11：把每个 finding 作为独立告警事件写进 node detail 并广播。
+    ///
+    /// 去重：`upsert_execution_event_json` 按 `event_id` 覆盖同 id 事件；
+    /// 上界：每 node 至多 `MAX_RUN_BOUNDARY_ALERTS_PER_NODE` 条告警；
+    /// 只告警：落盘/广播失败只留 `tracing::warn` 痕迹（与 usage 落盘失败同口径，
+    /// 「没有告警」与「告警没落地」必须可区分），不向上传播。
+    async fn append_run_boundary_alerts(
+        &mut self,
+        node_id: &str,
+        source_event_id: &str,
+        findings: &[run_boundary::BoundaryFinding],
+        agent: Option<ProviderName>,
+    ) {
+        let mut inserted: Vec<ProviderExecutionEvent> = Vec::new();
+        let persisted = self
+            .update_node_detail(node_id, |detail| {
+                let mut existing = detail
+                    .execution_events
+                    .iter()
+                    .filter(|event| {
+                        event
+                            .get("event_id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|id| id.starts_with("run_boundary_"))
+                    })
+                    .count();
+                for finding in findings {
+                    if existing >= run_boundary::MAX_RUN_BOUNDARY_ALERTS_PER_NODE {
+                        break;
+                    }
+                    let alert = run_boundary::run_boundary_alert_event(finding, source_event_id);
+                    let json = execution_event_json(&alert);
+                    let duplicated = detail
+                        .execution_events
+                        .iter()
+                        .any(|event| event.get("event_id") == json.get("event_id"));
+                    upsert_execution_event_json(&mut detail.execution_events, json);
+                    if !duplicated {
+                        existing += 1;
+                        inserted.push(alert);
+                    }
+                }
+            })
+            .await;
+        if let Err(error) = persisted {
+            tracing::warn!(
+                target: "workspace_engine",
+                node_id,
+                error = %error,
+                "run boundary alert persist failed"
+            );
+        }
+        for alert in inserted {
+            let event_id = alert.event_id.clone();
+            if let Err(error) = self
+                .event_tx
+                .send(EngineEvent::ExecutionEvent {
+                    event: alert,
+                    node_id: Some(node_id.to_string()),
+                    agent: agent.clone(),
+                })
+                .await
+            {
+                tracing::warn!(
+                    target: "workspace_engine",
+                    node_id,
+                    event_id,
+                    error = %error,
+                    "run boundary alert broadcast failed"
+                );
+            }
+        }
     }
 
     pub async fn emit_provider_prompt_event(

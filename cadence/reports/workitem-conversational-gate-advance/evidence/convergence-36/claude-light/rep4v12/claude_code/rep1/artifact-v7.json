@@ -1,0 +1,91 @@
+{
+  "type": "artifact_update",
+  "version": 7,
+  "plan_projection": {
+    "id": "plan_projection_bundle_4bce2307f625b41e486344b1",
+    "plan_revision_id": "plan_revision_4bce2307f625b41e486344b1",
+    "dependency_graph_revision_id": "dependency_graph_revision_4bce2307f625b41e486344b1",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_397270a4c5a86187cfcffc6f"
+    ],
+    "human_group_projection": {
+      "plan_id": "issue_work_item_plan_0001",
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "split_reason": "由 canonical handoff schema 投影",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "title": "Hello API",
+          "goal": "WHEN 客户端请求 GET /api/hello THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+          "depends_on": [],
+          "provides": [
+            "CT-001"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "server.js",
+              "test/hello.test.js"
+            ],
+            "forbidden_scopes": [
+              "package.json"
+            ]
+          }
+        }
+      ],
+      "contract_flow": [],
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_group_context": {
+      "plan_id": "issue_work_item_plan_0001",
+      "ordered_logical_work_item_ids": [
+        "WI-001"
+      ],
+      "dependency_edges": [],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server.js",
+            "test/hello.test.js"
+          ],
+          "forbidden_scopes": [
+            "package.json"
+          ]
+        }
+      }
+    },
+    "reviewer_group_matrix": {
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "criterion_refs": [
+            "AC-001"
+          ],
+          "input_contract_refs": [],
+          "output_contract_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependency_edges": [],
+      "design_traceability_refs": [
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0001#api",
+          "requirement_id": "design_requirement_placeholder"
+        }
+      ]
+    },
+    "human_group_projection_hash": "238cc1fe07f9d3f5ae9c532e736fdef0e8a0bd6a7acb5bf74602949b03f5c7c3",
+    "coder_group_context_hash": "c72fbdac467fa860f50d698ff69894fa46dabfd6d34b3b39d880ab14833d1b63",
+    "reviewer_group_matrix_hash": "c96baac4c081526fc25219e815c5c904a3110f1a5d88b8443b6cf7e2d9e99223",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-09T04:32:16.983699936+00:00"
+  }
+}

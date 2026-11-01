@@ -61,12 +61,20 @@ pub fn pause_next_git_command_after_exit(cwd: &Path, command_prefix: &str) -> Gi
 }
 
 pub(super) async fn pause_git_command_after_exit_if_configured(cwd: &Path, args: &str) {
+    // Bug45/T4:args 审计串现在以禁桥参数开头(见 git_command 的注入);
+    // 暂停匹配按剥离禁桥前缀后的「逻辑子命令」进行,调用方仍按
+    // `git <子命令...>` 语义注册 command_prefix。
+    let bridge_prefix = format!(
+        "{} ",
+        crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS.join(" ")
+    );
+    let logical_args = args.strip_prefix(&bridge_prefix).unwrap_or(args);
     let state = {
         let mut registered = registered_pauses()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let matched_id = registered.iter().find_map(|(id, state)| {
-            (cwd == state.cwd && args.starts_with(&state.command_prefix)).then_some(*id)
+            (cwd == state.cwd && logical_args.starts_with(&state.command_prefix)).then_some(*id)
         });
         matched_id.and_then(|id| registered.remove(&id))
     };

@@ -4,8 +4,10 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::logical_codebase::LogicalCodebaseStore;
+use crate::product::logical_codebase::aggregate_artifact_cleanup::cleanup_project_artifacts;
 use crate::product::models::ProjectRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +48,9 @@ impl ProjectStore {
 
         let mut projects = Vec::with_capacity(project_files.len());
         for project_file in project_files {
-            projects.push(read_json(&project_file)?);
+            let project: ProjectRecord = read_json(&project_file)?;
+            LogicalCodebaseStore::new(self.paths.clone()).migrate_legacy(&project.id)?;
+            projects.push(project);
         }
         Ok(projects)
     }
@@ -61,12 +65,16 @@ impl ProjectStore {
             });
         }
 
-        read_json(&project_path)
+        let project: ProjectRecord = read_json(&project_path)?;
+        LogicalCodebaseStore::new(self.paths.clone()).migrate_legacy(project_id)?;
+        Ok(project)
     }
 
     pub fn create(&self, input: CreateProjectInput) -> Result<ProjectRecord, ProductStoreError> {
-        let existing_len = count_entries(&self.paths.projects_root())?;
-        let id = next_sequential_id("project", existing_len);
+        let projects_root = self.paths.projects_root();
+        let id = next_sequential_id_in_directory("project", &projects_root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", projects_root.display()))
+        })?;
         let now = Utc::now().to_rfc3339();
         let project = ProjectRecord {
             id: id.clone(),
@@ -101,6 +109,9 @@ impl ProjectStore {
                 id: project_id.to_string(),
             });
         }
+        // 硬删项目：先清掉 aria 放在用户工作区里的产物（本项目所有 LC 的政策
+        // 正文目录 + 成员仓指针文件）。清理幂等、失败只 warn，绝不阻断删除。
+        cleanup_project_artifacts(&self.paths, project_id);
         fs::remove_dir_all(&project_root).map_err(|error| {
             ProductStoreError::Io(format!("remove {}: {error}", project_root.display()))
         })?;
@@ -121,21 +132,84 @@ impl ProjectStore {
     }
 }
 
-fn count_entries(path: &Path) -> Result<usize, ProductStoreError> {
-    if !path_exists(path)? {
-        return Ok(0);
-    }
-
-    fs::read_dir(path)
-        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
-        .try_fold(0usize, |count, entry| {
-            entry.map(|_| count + 1).map_err(|error| {
-                ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
-            })
-        })
-}
-
 fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
     path.try_exists()
         .map_err(|error| ProductStoreError::Io(format!("try_exists {}: {error}", path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateProjectInput, ProjectStore};
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::logical_codebase::LogicalCodebaseStore;
+
+    #[test]
+    fn project_store_ignores_legacy_multi_repo_json_field() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = ProjectStore::new(paths.clone());
+        let created = store
+            .create(CreateProjectInput {
+                name: "Aggregate".into(),
+                description: None,
+            })
+            .unwrap();
+        let stored =
+            std::fs::read_to_string(paths.project_root(&created.id).join("project.json")).unwrap();
+        assert!(!stored.contains("multi_repo"));
+
+        let legacy_root = paths.logical_codebase_root("project_legacy");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(
+            paths.project_root("project_legacy").join("project.json"),
+            r#"{"id":"project_legacy","name":"Legacy","description":null,"created_at":"2026-08-18T00:00:00Z","updated_at":"2026-08-18T00:00:00Z","last_opened_at":null,"multi_repo":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            legacy_root.join("manifest.json"),
+            r#"{"schema_version":1,"project_id":"project_legacy","logical_codebase_id":"018f0f8e-2c2d-7a10-8a11-111111111111","provider_context_root":"/workspace/legacy","layout":"common_non_git_parent","membership_revision":1,"member_ids":[],"created_at":"2026-08-18T00:00:00Z","updated_at":"2026-08-18T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(store.get("project_legacy").unwrap().name, "Legacy");
+        let records = LogicalCodebaseStore::new(paths)
+            .list("project_legacy")
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "legacy");
+    }
+
+    #[test]
+    fn create_after_deleting_middle_project_uses_id_above_existing_maximum() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(ProductAppPaths::new(root.path().join(".aria")));
+        let _first = store
+            .create(CreateProjectInput {
+                name: "First".into(),
+                description: None,
+            })
+            .unwrap();
+        let middle = store
+            .create(CreateProjectInput {
+                name: "Middle".into(),
+                description: None,
+            })
+            .unwrap();
+        let _last = store
+            .create(CreateProjectInput {
+                name: "Last".into(),
+                description: None,
+            })
+            .unwrap();
+        store.delete(&middle.id).unwrap();
+
+        let replacement = store
+            .create(CreateProjectInput {
+                name: "Replacement".into(),
+                description: None,
+            })
+            .unwrap();
+
+        assert_eq!(replacement.id, "project_0004");
+    }
 }

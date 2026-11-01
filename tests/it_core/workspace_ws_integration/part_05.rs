@@ -28,6 +28,69 @@ impl StreamingProviderAdapter for HangingStreamingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<
+        mpsc::Receiver<cadence_aria::cross_cutting::streaming_provider::StreamChunk>,
+        ProviderAdapterError,
+    > {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
+}
+
+/// 断连不取消修复的测试 provider：先发首个 chunk（驱动测试可确认 run 已启动），
+/// 随后挂起直到外部 `Notify` 触发才发出 Completed——用于验证「断连期间 run
+/// 不被取消、触发完成后仍能驱动至完成并落盘」。
+struct SignalledCompletionStreamingProvider {
+    complete: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for SignalledCompletionStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        let complete = self.complete.clone();
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: "# Draft".to_string(),
+                })
+                .await;
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = complete.notified() => {}
+            }
+            // 用合法 story artifact 作为完成输出：避免触发引擎的「artifact 缺失
+            // 自动续写」二回合（那会掩盖本测试要观察的断连存活语义）。
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        VALID_STORY_SPEC.to_string(),
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -96,71 +159,7 @@ impl StreamingProviderAdapter for PiHangingStreamingProvider {
             abort_observed.notify_one();
         });
         Ok(ProviderSession {
-            events: event_rx,
-            commands: command_tx,
-        })
-    }
-
-    async fn run_streaming(
-        &self,
-        _input: &AdapterInput,
-        _cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "run_streaming is not used by workspace websocket",
-            0,
-        ))
-    }
-}
-
-struct ChoiceThenHangingStreamingProvider;
-
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
-    async fn start(
-        &self,
-        _input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        let (event_tx, event_rx) = mpsc::channel(8);
-        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
-        tokio::spawn(async move {
-            let _ = event_tx
-                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
-                    id: "choice_hanging_001".to_string(),
-                    prompt: "继续方式？".to_string(),
-                    options: vec![ChoiceOptionData {
-                        id: "opt_0".to_string(),
-                        label: "继续 author".to_string(),
-                        description: None,
-                    }],
-                    allow_multiple: false,
-                    allow_free_text: false,
-                    questions: vec![],
-                    source: ChoiceRequestSource::ProviderChoice,
-                }))
-                .await;
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    command = command_rx.recv() => {
-                        match command {
-                            Some(ProviderCommand::Abort) | None => return,
-                            Some(ProviderCommand::ChoiceResponse { .. }) => {
-                                let _ = event_tx
-                                    .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
-                                    .await;
-                            }
-                            Some(ProviderCommand::PermissionResponse { .. })
-                            | Some(ProviderCommand::ToolResult(_)) => {}
-                        }
-                    }
-                }
-            }
-        });
-        Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -234,6 +233,7 @@ impl StreamingProviderAdapter for ChoiceThenCompletingStreamingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -315,6 +315,7 @@ impl StreamingProviderAdapter for SequencedChoiceCompletingProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -364,6 +365,7 @@ impl StreamingProviderAdapter for ScriptedStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -398,9 +400,13 @@ fn scripted_provider_completion(
         );
     };
     let (comments, json) = review_output_parts(&output);
+    let mut json: serde_json::Value = serde_json::from_str(json).expect("review fixture JSON");
+    json.as_object_mut()
+        .expect("review fixture JSON object")
+        .insert("nonce".to_string(), serde_json::json!(contract.nonce));
     let full_output = format!(
-        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-        contract.nonce, contract.nonce
+        "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT>",
+        contract.nonce
     );
     cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::from_output(
         full_output,
@@ -425,14 +431,14 @@ fn review_output_parts(output: &str) -> (&str, &str) {
     (output[..start].trim_end(), json)
 }
 
-async fn create_workspace_session_fixture(root: &TempDir) -> TempDir {
+async fn create_workspace_session_fixture(root: &TempDir) -> PathBuf {
     create_workspace_session_fixture_with_author(root, "fake").await
 }
 
 async fn create_workspace_session_fixture_with_author(
     root: &TempDir,
     author_provider: &str,
-) -> TempDir {
+) -> PathBuf {
     create_workspace_session_fixture_with_providers(root, author_provider, "fake", 1).await
 }
 
@@ -457,8 +463,8 @@ async fn create_workspace_session_fixture_with_providers(
     author_provider: &str,
     reviewer_provider: &str,
     review_rounds: u32,
-) -> TempDir {
-    let repo = git_repo();
+) -> PathBuf {
+    let repo = git_repo(root.path());
     let app = build_web_router(WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
@@ -475,7 +481,7 @@ async fn create_workspace_session_fixture_with_providers(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/repositories",
-        json!({"name":"Repo","path":repo.path()}),
+        json!({"name":"Repo","path":repo}),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
@@ -546,10 +552,6 @@ async fn create_workspace_session_fixture_with_providers(
     repo
 }
 
-fn clear_workspace_session_messages(root: &std::path::Path) {
-    replace_workspace_session_messages(root, json!([]));
-}
-
 fn replace_workspace_session_messages(root: &std::path::Path, messages: Value) {
     let session_path = root.join(
         ".aria/projects/project_0001/issues/issue_0001/workspace-sessions/workspace_session_0001.json",
@@ -586,22 +588,6 @@ async fn request_json(
     (status, value)
 }
 
-async fn lifecycle_json(root: &std::path::Path) -> Value {
-    let app = build_web_router(WebAppState::new(
-        root.to_path_buf(),
-        WebRuntime::new_fake(root.to_path_buf()),
-    ));
-    let (status, lifecycle) = request_json(
-        app,
-        Method::GET,
-        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    lifecycle
-}
-
 fn persisted_workspace_messages(
     root: &std::path::Path,
 ) -> Vec<cadence_aria::product::models::WorkspaceMessageRecord> {
@@ -624,23 +610,9 @@ async fn send_json(
     .expect("send ws message");
 }
 
-async fn accept_author_output(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) {
-    assert_eq!(
-        recv_until_stage(ws, "author_confirm").await,
-        "author_confirm"
-    );
-    send_json(
-        ws,
-        &WsInMessage::AuthorDecision {
-            decision: AuthorDecision::Accept,
-        },
-    )
-    .await;
-}
+// 退役留档（T5/REQ-RET-02）：accept_author_output 夹具（author_decision 发送）随消息族退役，
+// 调用方测试（part_01 choice/review/reconnect 五测）同批退役——choice/reconnect 面
+// 由 campaign_stage3 恢复矩阵与 disconnect e2e 承接。
 
 async fn recv_json(
     ws: &mut tokio_tungstenite::WebSocketStream<
@@ -753,6 +725,9 @@ async fn recv_until_permission_request(
 }
 
 #[derive(Debug)]
+// L2 退役（T5/REQ-RET-02）：choice 接收 helper 的 prompt/options/source 字段
+// 原服务已退役的 choice 断言族，现仅 id 被消费。
+#[allow(dead_code)]
 struct ChoiceRequestSeen {
     id: String,
     prompt: String,
@@ -831,13 +806,95 @@ fn executable_fixture(relative_path: &str) -> PathBuf {
     path
 }
 
-fn git_repo() -> TempDir {
-    let dir = tempdir().expect("repo");
+fn git_repo(root: &std::path::Path) -> PathBuf {
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
+    // 会令基线解析 fail-closed）；仓库置于 root 下由调用方持有生命周期，
+    // 避免 TempDir 早删令 run 期基准分支解析失效。
+    let dir = root.join("repo");
+    std::fs::create_dir_all(&dir).expect("create repo dir");
     let status = Command::new("git")
         .args(["init", "--initial-branch", "main"])
-        .current_dir(dir.path())
+        .current_dir(&dir)
         .status()
         .expect("git init");
     assert!(status.success());
+    for args in [
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(&dir)
+            .status()
+            .expect("git fixture");
+        assert!(status.success());
+    }
     dir
+}
+
+struct ChoiceThenHangingStreamingProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenHangingStreamingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::ChoiceRequest(ChoiceRequestData {
+                    id: "choice_hanging_001".to_string(),
+                    prompt: "继续方式？".to_string(),
+                    options: vec![ChoiceOptionData {
+                        id: "opt_0".to_string(),
+                        label: "继续 author".to_string(),
+                        description: None,
+                    }],
+                    allow_multiple: false,
+                    allow_free_text: false,
+                    questions: vec![],
+                    source: ChoiceRequestSource::ProviderChoice,
+                }))
+                .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    command = command_rx.recv() => {
+                        match command {
+                            Some(ProviderCommand::Abort) | None => return,
+                            Some(ProviderCommand::ChoiceResponse { .. }) => {
+                                let _ = event_tx
+                                    .send(ProviderEvent::StatusChanged(ProviderStatus::Running))
+                                    .await;
+                            }
+                            Some(ProviderCommand::PermissionResponse { .. })
+                            | Some(ProviderCommand::ToolResult(_)) => {}
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by workspace websocket",
+            0,
+        ))
+    }
 }

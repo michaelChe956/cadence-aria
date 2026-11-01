@@ -28,3 +28,29 @@ frontend.log
 .pi-subagents/
 .pi/subagents/
 .superpowers/
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
+cadence/reports/provider-validation-round/kimi-coding/coding-kimi_code-coding_attempt_*/
+cadence/reports/provider-validation-round/kimi-coding/*console*.txt
+cadence/reports/provider-validation-round/kimi-coding/coding-drive*.cjs
+cadence/reports/provider-validation-round/kimi-coding/gate-release*.cjs
+codex-ab/codex/rep*/ws.jsonl
+cadence/reports/provider-validation-round/codex-ab/codex/rep*/ws.jsonl
+cadence/reports/provider-validation-round/f24-choice/*.mjs
+cadence/reports/provider-validation-round/f24-choice/run*/ws.jsonl
+cadence/reports/provider-validation-round/f24-choice/*console*.txt
+cadence/reports/provider-validation-round/wave4-ppstress/*.jsonl
+cadence/reports/provider-validation-round/wave4-ppstress/*.cjs
+cadence/reports/legacy-protocol-retirement/wp1-gate-retest/campaign/*/rep*/ws.jsonl
+cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep*/ws.jsonl
+cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep*/*.jsonl
+cadence/reports/provider-validation-round/kimi-coding/*.cjs
+cadence/reports/provider-validation-round/wave2-2c/*.jsonl
+cadence/reports/provider-validation-round/wave2-f18/*.cjs
+cadence/reports/legacy-protocol-retirement/smoke/*.jsonl
+cadence/reports/lc-gateway-multi-provider/
+
+# 发版打包产物（make-release-assets.mjs 输出；不进仓库，由 CI 生成后上传 Release）
+/dist-release/

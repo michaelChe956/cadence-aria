@@ -81,6 +81,15 @@ impl CodingWorkspaceEngine {
                     .into());
                 }
             },
+            // PointerPublish journal 不落 attempt_dir，attempt 终止路径不可达；
+            // 若出现即编程错误，fail-closed。
+            CodingGitOperationKind::PointerPublish => {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_git_operation",
+                    id: journal.attempt_id,
+                }
+                .into());
+            }
         }
         self.store
             .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -112,6 +121,34 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         journal: &CodingGitOperationJournal,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        // T19:补偿 mutation(git reset)走 Compensation 通道——窗口冻结
+        // 期间拒绝,补偿由终止重试/T21 恢复驱动续接(补偿面与 runner 共用
+        // 同一守卫,不在 REST/WS 按钮层各自拦)。
+        self.guard_platform_write_channel(
+            &journal.worktree_path,
+            crate::product::reviewer_window_store::WriteChannelKind::Compensation,
+            &attempt.id,
+        )?;
+        let outcome = self
+            .compensate_cancelled_review_commit_inner(attempt, journal)
+            .await;
+        if outcome.is_err() {
+            // 失败回退:释放通道登记(成功路径由 advance(Compensated) 的
+            // 全通道退出收口)。
+            self.release_platform_write_channel(
+                &journal.worktree_path,
+                crate::product::reviewer_window_store::WriteChannelKind::Compensation,
+                &attempt.id,
+            );
+        }
+        outcome
+    }
+
+    pub(super) async fn compensate_cancelled_review_commit_inner(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        journal: &CodingGitOperationJournal,
+    ) -> Result<(), CodingWorkspaceEngineError> {
         let git = GitWorkspaceService::new();
         let current_head = git.git_current_head(&journal.worktree_path).await?;
         let mut journal = journal.clone();
@@ -123,6 +160,15 @@ impl CodingWorkspaceEngine {
                 &journal,
                 CodingGitOperationPhase::CommitCreated,
                 Some(current_head),
+            )?;
+            // F1(修复轮 1):上方 advance 的自愈式 exit-all 已清除外层
+            // enter 的 Compensation 登记,而 CommitCreated 相位不再登记
+            // 任何通道——reset 前必须重新登记:冻结窗口恰好在外层 enter
+            // 之后出现时,此处拒绝,reset 不在冻结窗口内裸跑。
+            self.guard_platform_write_channel(
+                &journal.worktree_path,
+                crate::product::reviewer_window_store::WriteChannelKind::Compensation,
+                &attempt.id,
             )?;
         }
         git.git_reset_mixed(&journal.worktree_path, &journal.before_head)
@@ -149,10 +195,12 @@ impl CodingWorkspaceEngine {
         let existing_requests =
             self.store
                 .list_review_requests(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let review_request_id = attempt
-            .review_request_id
-            .clone()
-            .unwrap_or_else(|| next_sequential_id("review_request", existing_requests.len()));
+        let review_request_id = attempt.review_request_id.clone().unwrap_or_else(|| {
+            crate::product::id::next_sequential_id_from_existing(
+                "review_request",
+                existing_requests.iter().map(|request| request.id.as_str()),
+            )
+        });
         self.store
             .complete_review_coding_git_operation(
                 attempt,
@@ -241,6 +289,25 @@ impl CodingWorkspaceEngine {
                     id: journal.attempt_id.clone(),
                 })?;
         let git = GitWorkspaceService::new();
+        // S2a 同模式（本地交付判定，internal_pr_review）：远端「未配置」
+        //（git remote 列表无该名）意味着 push 确定未发生——不跑 ls-remote
+        //（无远端仓必 fatal → CommandFailed），终止 reconcile 以
+        // SkippedNotConfigured 确定性收完 journal；已配置但不可达/结果不
+        // 可判定仍走下方原 fail-closed 路径（PushIndeterminate 语义不变）。
+        if !git
+            .git_remote_configured(&journal.worktree_path, remote)
+            .await?
+        {
+            return self
+                .finish_review_git_operation(
+                    attempt,
+                    journal,
+                    PushStatus::SkippedNotConfigured,
+                    None,
+                )
+                .await
+                .map(Some);
+        }
         if git
             .git_remote_branch_head(&journal.worktree_path, remote, &journal.branch_name)
             .await?
@@ -298,11 +365,24 @@ impl CodingWorkspaceEngine {
             })?,
             external_url: None,
             push_error: journal.push_error.clone(),
-            manual_instructions: vec![format!(
-                "基于远端 {}/{} 发起代码审查",
-                journal.remote.as_deref().unwrap_or_default(),
-                journal.branch_name
-            )],
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
+            revoked: false,
+            manual_instructions: vec![if journal.push_status
+                == Some(PushStatus::SkippedNotConfigured)
+            {
+                format!(
+                    "本地交付：分支 {} / commit {}，未配置远端，未推送",
+                    journal.branch_name,
+                    journal.commit_sha.as_deref().unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "基于远端 {}/{} 发起代码审查",
+                    journal.remote.as_deref().unwrap_or_default(),
+                    journal.branch_name
+                )
+            }],
             created_at: journal.updated_at.clone(),
             updated_at: journal.updated_at.clone(),
         };

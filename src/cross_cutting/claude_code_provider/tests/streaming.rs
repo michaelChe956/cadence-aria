@@ -27,6 +27,11 @@ async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> Provider
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -35,7 +40,7 @@ async fn recv_completion(events: &mut mpsc::Receiver<ProviderEvent>) -> Provider
 }
 
 #[tokio::test]
-async fn claude_provider_classifies_missing_end_nonce() {
+async fn claude_provider_classifies_missing_json_nonce() {
     let fixture = write_fixture(
         "claude_structured_output_fixture.sh",
         r##"#!/usr/bin/env bash
@@ -70,7 +75,7 @@ done
     let StructuredOutputState::Failed(error) = completion.structured_output else {
         panic!("expected structured output failure");
     };
-    assert_eq!(error.code, StructuredOutputErrorCode::MissingEndNonce);
+    assert_eq!(error.code, StructuredOutputErrorCode::MissingJsonNonce);
     assert_eq!(completion.readable_output, "审核说明");
 }
 
@@ -128,6 +133,11 @@ done
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -252,6 +262,11 @@ async fn claude_provider_truncates_multibyte_tool_result_preview_without_panicki
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
             }
+            ProviderEvent::UsageReport(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -301,4 +316,161 @@ async fn claude_provider_run_streaming_cancel_closes_backpressured_bridge() {
     tokio::time::timeout(TEST_TIMEOUT, wait_for_receiver_closed(&rx))
         .await
         .expect("stream receiver should close after cancellation");
+}
+
+#[test]
+fn parse_claude_result_usage_extracts_usage_fields() {
+    let result = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "# Draft",
+        "session_id": "sess_usage",
+        "usage": {
+            "input_tokens": 1000,
+            "output_tokens": 250,
+            "cache_read_input_tokens": 300,
+            "cache_creation_input_tokens": 40
+        }
+    });
+    let report = crate::cross_cutting::claude_code_provider::stream::parse_claude_result_usage(
+        &result, "author",
+    )
+    .expect("usage should parse");
+    assert_eq!(report.role, "author");
+    assert_eq!(report.input_tokens, Some(1000));
+    assert_eq!(report.output_tokens, Some(250));
+    assert_eq!(report.cache_read_tokens, Some(300));
+    assert_eq!(report.cache_creation_tokens, Some(40));
+}
+
+#[test]
+fn parse_claude_result_usage_returns_none_without_usage_object() {
+    let result = serde_json::json!({ "type": "result", "is_error": false, "result": "# Draft" });
+    assert!(
+        crate::cross_cutting::claude_code_provider::stream::parse_claude_result_usage(
+            &result, "author"
+        )
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn claude_provider_emits_usage_report_before_completion() {
+    let fixture = write_fixture(
+        "claude_usage_fixture.sh",
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude 2.1.160"
+  exit 0
+fi
+
+while IFS= read -r line; do
+  if [[ "$line" == *'"user"'* ]]; then
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"# Draft","session_id":"claude_usage_session","usage":{"input_tokens":1000,"output_tokens":250,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}'
+    exit 0
+  fi
+done
+"##,
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let input = streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Supervised);
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("start provider");
+
+    let mut usage = None;
+    loop {
+        let event = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event channel open");
+        match event {
+            ProviderEvent::UsageReport(report) => usage = Some(report),
+            ProviderEvent::Completed(_) => break,
+            _ => {}
+        }
+    }
+
+    let report = usage.expect("provider should emit UsageReport before Completed");
+    assert_eq!(report.role, "author");
+    assert_eq!(report.input_tokens, Some(1000));
+    assert_eq!(report.output_tokens, Some(250));
+    assert_eq!(report.cache_read_tokens, Some(300));
+    assert_eq!(report.cache_creation_tokens, Some(40));
+}
+
+/// r19 根修回归:CLI 直接子进程死亡(kill -9)而同进程组的后台进程仍持有
+/// stdout 写端时,EOF 被无限推迟——会话事件流仍必须在秒级以 Failed 终结,
+/// 不得依赖外层 stage 超时兜底(r19 现场:sync 桥 epoll 空等 57min+ 直至
+/// 5400s 外层 kill)。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_child_death_terminates_stream_when_pipe_held_by_group_member() {
+    let fixture = write_fixture(
+        "claude_child_exit_pipe_held_fixture.sh",
+        "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-exit-1\"}'\n    sleep 300 &\n    kill -9 $$\n  fi\ndone\n",
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let mut session = provider
+        .start(
+            streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("claude session starts");
+
+    let failure = tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if let ProviderEvent::Failed { message } = session
+                .events
+                .recv()
+                .await
+                .expect("event channel stays open until terminal event")
+            {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("child exit must terminate the session stream within seconds");
+    assert!(
+        failure.contains("exited without result") || failure.contains("child exited"),
+        "unexpected failure message: {failure}"
+    );
+}
+
+/// r19 结构性根修回归:事件流必须能随会话机构(收尾任务+审批桥)终结而
+/// 关闭——即使消费者仍持有 `ProviderSession.commands`(同步桥 drive 循环
+/// 形态),审批桥监听任务不得无限期持有 event 通道发送端使 recv 永不返回
+/// None(否则收尾任务无终态事件的任何路径都会空等到 stage 超时)。
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_event_stream_closes_after_session_ends_even_while_commands_held() {
+    let fixture = write_fixture(
+        "claude_init_result_close_fixture.sh",
+        "#!/usr/bin/env bash\nwhile IFS= read -r line; do\n  if [[ \"$line\" == *'\"type\":\"user\"'* ]]; then\n    echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-close-1\"}'\n    echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"close done\",\"session_id\":\"sess-close-1\"}'\n    exit 0\n  fi\ndone\n",
+    );
+    let provider = ClaudeCodeProvider::new(fixture);
+    let mut session = provider
+        .start(
+            streaming_input(ProviderType::ClaudeCode, ProviderPermissionMode::Auto),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("claude session starts");
+
+    let _ = recv_completion(&mut session.events).await;
+
+    // 消费者镜像 sync bridge drive 循环:持有 commands 不放,等事件流终结。
+    let closed = tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+        .await
+        .expect("event stream must close after session machinery ends");
+    assert!(
+        closed.is_none(),
+        "event channel must terminate once the session tail ends"
+    );
 }

@@ -22,7 +22,10 @@ async fn coding_plan_repair_global_failed_review_recovery_ignores_unrelated_gate
     unrelated.completed_at = None;
     unrelated.worktree_path = Some(fixture._tmp.path().join("unrelated-worktree"));
     std::fs::create_dir_all(unrelated.worktree_path.as_ref().unwrap()).unwrap();
-    fixture.store.save_coding_attempt(&unrelated).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&unrelated)
+        .unwrap();
     fixture
         .store
         .save_timeline_node(
@@ -71,7 +74,10 @@ async fn coding_plan_repair_global_failed_review_recovery_ignores_unrelated_gate
         "gate IDs must collide across attempts for this regression"
     );
     unrelated.status = CodingAttemptStatus::AwaitingPlanAmendment;
-    fixture.store.save_coding_attempt(&unrelated).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&unrelated)
+        .unwrap();
 
     let recovered = engine
         .recover_failed_code_review(&gate_id)

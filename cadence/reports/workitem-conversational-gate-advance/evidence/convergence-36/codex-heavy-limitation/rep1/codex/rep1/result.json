@@ -1,0 +1,159 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1/codex/rep1",
+  "startedAt": "2026-09-08T04:12:21.632Z",
+  "finishedAt": "2026-09-08T04:20:15.928Z",
+  "elapsedSec": 474.295,
+  "issue_id": "issue_0158",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0207",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.889,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.951,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 363.266,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 363.601,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 413.877,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-003 对 CT-004 require_all 能力校验失败，当前覆盖投影存在非空 missing_capabilities。",
+          "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-004, missing_capabilities [script relative reference to /api/levels]",
+          "required_action": "将 WI-002 的 CT-004 输出能力补齐为 script relative reference to /api/levels，或将 WI-003 的输入契约能力同步修正，使 coverage missing_capabilities 为空。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 的验收标准与输出契约能力声明不一致，契约层无法支撑消费者所要求的页面脚本相对引用能力。",
+          "evidence": "AC-006 already requires a relative /api/levels reference, but CT-004 advertises only [readable API failure without blank page]; demand WI-002 -> WI-003 requires [script relative reference to /api/levels].",
+          "required_action": "以已验收的 AC-006 能力为准修正 CT-004 capabilities，保持验收、供给与需求三方一致。",
+          "category": "self_contradiction",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "WI-003 对 CT-004 require_all 能力校验失败，当前覆盖投影存在非空 missing_capabilities。",
+      "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-004, missing_capabilities [script relative reference to /api/levels]",
+      "required_action": "将 WI-002 的 CT-004 输出能力补齐为 script relative reference to /api/levels，或将 WI-003 的输入契约能力同步修正，使 coverage missing_capabilities 为空。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 的验收标准与输出契约能力声明不一致，契约层无法支撑消费者所要求的页面脚本相对引用能力。",
+      "evidence": "AC-006 already requires a relative /api/levels reference, but CT-004 advertises only [readable API failure without blank page]; demand WI-002 -> WI-003 requires [script relative reference to /api/levels].",
+      "required_action": "以已验收的 AC-006 能力为准修正 CT-004 capabilities，保持验收、供给与需求三方一致。",
+      "category": "self_contradiction",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 21676,
+      "output_tokens": 405,
+      "cache_read_tokens": 20800,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "Codex resume stalled before provider progress for thread 01a07f37-8f84-7113-a0a2-d7d5dbd43328 (exit status: signal: 9 (SIGKILL)); stderr: \u001b[2m2026-09-08T04:19:15.969795Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:15.970863Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:16.002681Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:16.349726Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:16.376949Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:16.377078Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:17.476675Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:17.521099Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification\n\u001b[2m2026-09-08T04:19:17.524264Z\u001b[0m \u001b[31mERROR\u001b[0m \u001b[2mrmcp::transport::worker\u001b[0m\u001b[2m:\u001b[0m worker quit with fatal: Unexpected content type: Some(\"missing-content-type; body: \"), when send initialized notification",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [],
+  "human_gate_turns": [],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 474295,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.062,
+    "1:running": 362.315,
+    "2:cross_review": 0.335,
+    "3:prepare_context": 110.694
+  }
+}

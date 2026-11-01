@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::work_item_contract::{CanonicalWorkItemContract, VerificationCheck};
 
 use super::lifecycle::{IssueWorkItemPlan, WorkItemKind, WorkItemSplitFinding};
@@ -75,6 +76,8 @@ impl WorkItemPlanOutline {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkItemOutline {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repository_id: Option<LogicalRepositoryId>,
     pub outline_id: String,
     pub logical_work_item_id: String,
     pub title: String,
@@ -129,6 +132,8 @@ pub struct WorkItemDraftVerificationPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct WorkItemDraftCandidate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repository_id: Option<LogicalRepositoryId>,
     pub outline_id: String,
     pub logical_work_item_id: String,
     pub canonical_contract_candidate: CanonicalWorkItemContract,
@@ -269,6 +274,20 @@ pub struct WorkItemPlanCompileTransaction {
     pub project_id: String,
     pub issue_id: String,
     pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_kind: Option<crate::product::work_item_plan_policy::WorkItemPlanFlowKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_candidate_ir_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanical_report_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_provenance_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_provenance_content_hash: Option<String>,
     pub generation_round_id: String,
     pub outline_version_ref: String,
     pub active_draft_ids: Vec<String>,
@@ -290,6 +309,15 @@ pub struct WorkItemPlanCompileTransaction {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_at: Option<String>,
+}
+
+impl WorkItemPlanCompileTransaction {
+    pub fn effective_flow_kind(
+        &self,
+    ) -> crate::product::work_item_plan_policy::WorkItemPlanFlowKind {
+        self.flow_kind
+            .unwrap_or(crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

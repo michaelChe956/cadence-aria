@@ -1,6 +1,7 @@
 provider log line
-<ARIA_STRUCTURED_OUTPUT>
+<ARIA_STRUCTURED_OUTPUT nonce="fix00001">
 {
+  "nonce": "fix00001",
   "artifact_kind": "clarification_record",
   "goal_summary": "fixture goal",
   "constraints": ["fixture constraint"],

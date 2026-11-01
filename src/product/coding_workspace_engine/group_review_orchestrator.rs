@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -10,8 +11,9 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Semaphore, mpsc};
 
 use super::{
-    CodingProviderStreamRun, CodingWorkspaceEngine, CodingWorkspaceEngineError,
-    provider_type_for_name, role_permission_mode_for_attempt, streaming_input_from_adapter,
+    CODE_REVIEW_PROVIDER_STALLED_REASON_CODE, CodingProviderStreamRun, CodingWorkspaceEngine,
+    CodingWorkspaceEngineError, coding_gate_action_for_id, provider_type_for_name,
+    role_permission_mode_for_attempt, streaming_input_from_adapter,
 };
 
 use super::group_review_budget::{
@@ -35,7 +37,9 @@ use super::plan_defect_routing::{
 };
 use super::review_parser::{CodeReviewProviderPayload, parse_group_review_payload};
 use crate::cross_cutting::provider_adapter::{DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderAdapterError};
-use crate::cross_cutting::streaming_provider::StreamingProviderAdapter;
+use crate::cross_cutting::streaming_provider::{
+    ProviderPermissionMode, StreamingProviderAdapter, StreamingProviderInput,
+};
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateBlockedGateInput};
 use crate::product::coding_models::{
     CasOutcome, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
@@ -44,7 +48,6 @@ use crate::product::coding_models::{
     ReviewVerdict,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::{AdapterInput, AdapterRole};
@@ -55,6 +58,47 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 const GROUP_REVIEW_MAX_ATTEMPTS: usize = 3;
+
+/// P4-b（REQ-PTR-IDLE）：internal reviewer 零活动挂起的独立预算——首次挂起
+/// 同 provider fresh 重试恰一次，两次挂起即耗尽（不占 transport 3 次预算）。
+const GROUP_REVIEW_MAX_IDLE_STALLS: u32 = 2;
+
+/// group review shard/reduction（Reviewer）streaming 启动的生产构造函数
+/// （批2 Task 11 矩阵锚点）。内部构造 legacy `AdapterInput{role: Reviewer}`
+/// 并经共享工厂 `streaming_input_from_adapter` 派生 `tool_policy`（T11：
+/// Reviewer wire 面全开 `None`，只携 ReviewerVerify+窗口合同，真窗归 T20，
+/// 不回退旧 deny fallback），再绑定 attempt 的 workspace 会话上下文
+/// （group review 每次 execute 均新起会话，resume 恒 `None`）。group review
+/// streaming 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即
+/// 绕过角色矩阵，矩阵测试将失败。LC root cwd 由 execute 侧 envelope
+/// 重绑注入（Task 2.7），工厂本身保持 D2 锚点。
+pub(crate) fn group_review_streaming_input(
+    reviewer: &ProviderName,
+    prompt: String,
+    worktree_path: &Path,
+    provider_stream_log_dir: String,
+    attempt_id: &str,
+    permission_mode: ProviderPermissionMode,
+) -> (AdapterInput, StreamingProviderInput) {
+    let legacy_input = AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
+        provider_type: provider_type_for_name(reviewer),
+        role: AdapterRole::Reviewer,
+        worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+        provider_stream_log_dir: Some(provider_stream_log_dir),
+        prompt,
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_internal_pr_review_json".to_string(),
+        timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+        max_retries: 0,
+    };
+    let mut provider_input =
+        streaming_input_from_adapter(&legacy_input, worktree_path.to_path_buf(), permission_mode);
+    provider_input.workspace_session_id = Some(attempt_id.to_string());
+    provider_input.resume_provider_session_id = None;
+    (legacy_input, provider_input)
+}
 
 pub(crate) struct GroupReviewOrchestrator<'a> {
     executor: &'a dyn GroupReviewExecutor,
@@ -136,6 +180,22 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 None,
                 None,
             ),
+            // P4-b（REQ-PTR-IDLE）：idle 挂起耗尽不走组审查失败门（那会按
+            // reason_code 改写动作为重试分片/归约），改走 P4-a 备好的
+            // stalled 门（按 stage 恢复 retry_internal_review）。
+            GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::IdleStall {
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            }) => {
+                return self.create_provider_stalled_gate(
+                    attempt,
+                    node_id,
+                    phase,
+                    *idle_secs,
+                    *idle_limit_secs,
+                );
+            }
             _ => {
                 return Err(ProductStoreError::Io(
                     "group_review_failure_gate_unsupported_error".to_string(),
@@ -172,6 +232,60 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 phase: phase.to_string(),
                 run_failure_code: reason_code.to_string(),
             },
+        )
+    }
+
+    /// P4-b（REQ-PTR-IDLE）：internal reviewer 零活动挂起耗尽门——同 P4-a
+    /// `open_provider_stalled_gate` 的 InternalReviewer 面（reason_code
+    /// `code_review_provider_stalled`，动作按 stage 恢复：retry_internal_review
+    /// 与 abort，文案同源），attempt 转 Blocked。走通用 `create_blocked_gate`
+    /// 而非组审查失败门（后者按 reason_code 改写动作，见
+    /// `create_failure_gate` 的组审查失败臂）；编排器无 event_tx，
+    /// durable-first 落盘由 P4-c 投影按 reason_code 消费。
+    fn create_provider_stalled_gate(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        node_id: &str,
+        phase: &str,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    ) -> Result<crate::product::coding_models::CodingGateRequired, ProductStoreError> {
+        let attempt = if attempt.status == CodingAttemptStatus::Blocked {
+            attempt.clone()
+        } else {
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?
+        };
+        self.store.create_blocked_gate_with_diagnostic(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::InternalPrReview,
+                node_id: Some(node_id.to_string()),
+                role: Some(CodingProviderRole::InternalReviewer),
+                title: "AI 挂起了".to_string(),
+                description: format!(
+                    "Internal Reviewer 已 {idle_secs} 秒没有任何输出（界 {idle_limit_secs} 秒，阶段 {phase}），自动重试一次后仍无进展，流程已暂停。可重试对应阶段审查，或终止。"
+                ),
+                reason_code: Some(CODE_REVIEW_PROVIDER_STALLED_REASON_CODE.to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_internal_review")
+                        .expect("retry internal review action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+            Some(CodingGateDiagnostic {
+                actual_value: Some(idle_secs.to_string()),
+                limit: Some(idle_limit_secs.to_string()),
+                phase: phase.to_string(),
+                run_failure_code: CODE_REVIEW_PROVIDER_STALLED_REASON_CODE.to_string(),
+            }),
         )
     }
 
@@ -337,19 +451,33 @@ impl<'a> GroupReviewOrchestrator<'a> {
         max_attempts: usize,
     ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
         let attempts = max_attempts.max(1);
-        let mut last_transport_error = None;
-        for _ in 0..attempts {
+        let mut transport_attempts_left = attempts;
+        // P4-b（REQ-PTR-IDLE）：idle 挂起与 transport 预算分离（同 P4-a
+        // retry-cycle 语义）——首次挂起同 provider fresh 重试恰一次（execute
+        // 每次新起会话、resume 恒 None 即 fresh）；两次挂起即耗尽返回
+        // `IdleStall`，由调用方经 `create_failure_gate` 落
+        // `code_review_provider_stalled` 门，不占 transport 重试次数。
+        let mut idle_stall_count = 0u32;
+        loop {
             match self.executor.execute(prompt).await {
                 Ok(result) => return Ok(result),
                 Err(error @ GroupReviewExecutionError::Transport(_)) => {
-                    last_transport_error = Some(error);
+                    transport_attempts_left -= 1;
+                    if transport_attempts_left == 0 {
+                        return Err(error);
+                    }
+                }
+                Err(error @ GroupReviewExecutionError::IdleStall { .. }) => {
+                    idle_stall_count += 1;
+                    if idle_stall_count >= GROUP_REVIEW_MAX_IDLE_STALLS {
+                        return Err(error);
+                    }
                 }
                 Err(error @ GroupReviewExecutionError::UserCancelled)
                 | Err(error @ GroupReviewExecutionError::ProviderProtocol(_))
                 | Err(error @ GroupReviewExecutionError::Internal(_)) => return Err(error),
             }
         }
-        Err(last_transport_error.expect("at least one transport error after exhausted retries"))
     }
 
     pub(crate) async fn execute_repair(
@@ -713,7 +841,10 @@ impl<'a> GroupReviewOrchestrator<'a> {
                     ))
                 })?;
         let review = InternalPrReview {
-            id: next_sequential_id("internal_review", existing.len()),
+            id: crate::product::id::next_sequential_id_from_existing(
+                "internal_review",
+                existing.iter().map(|review| review.id.as_str()),
+            ),
             attempt_id: snapshot.attempt_id.clone(),
             review_request_id: snapshot.review_request_id.clone(),
             verdict: reduction.verdict.clone(),
@@ -728,6 +859,8 @@ impl<'a> GroupReviewOrchestrator<'a> {
             raw_provider_output_ref: Some(raw_ref.clone()),
             role_run_id: None,
             run_no: None,
+            acceptance: None,
+            review_window_id: None,
         };
         match self.store.save_internal_pr_review_if_active(
             &snapshot.attempt_id,
@@ -891,6 +1024,8 @@ pub(crate) struct RealGroupReviewExecutor<'a> {
     node_id: String,
     role_run: CodingRoleRun,
     provider_name: ProviderName,
+    /// 批2 Task 20:durable 审查窗口引用(开窗后经 builder 注入)。
+    review_window_id: Option<String>,
 }
 
 impl<'a> RealGroupReviewExecutor<'a> {
@@ -909,7 +1044,18 @@ impl<'a> RealGroupReviewExecutor<'a> {
             node_id,
             role_run,
             provider_name,
+            review_window_id: None,
         }
+    }
+
+    /// 批2 Task 20:绑定 durable 审查窗口(开窗后传入;shard/reduction/
+    /// repair 共享同窗,材料与 baseline 同指纹;无窗 fail-closed 由
+    /// adapter 启动检查承担,不在测试专用 executor 路径伪铸)。
+    /// T20a-fix(F4)→T20b(决策项⑧):已接生产构造点
+    /// (legacy_group_final_review 开窗后绑定)——豁免移除。
+    pub(crate) fn with_review_window_id(mut self, window_id: &str) -> Self {
+        self.review_window_id = Some(window_id.to_string());
+        self
     }
 }
 
@@ -925,29 +1071,63 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
                 self.attempt.id
             ))
         })?;
-        let input = AdapterInput {
-            provider_type: provider_type_for_name(&self.provider_name),
-            role: AdapterRole::Reviewer,
-            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            provider_stream_log_dir: Some(
-                self.engine.attempt_provider_stream_log_dir(&self.attempt),
-            ),
-            prompt: prompt.to_string(),
-            context_files: Vec::new(),
-            output_schema: "coding_workspace_internal_pr_review_json".to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
-            max_retries: 0,
-        };
-        let permission_mode = role_permission_mode_for_attempt(
-            &self.engine.store,
-            &self.attempt,
-            CodingProviderRole::InternalReviewer,
-        )
-        .map_err(map_group_review_engine_error)?;
-        let mut provider_input =
-            streaming_input_from_adapter(&input, worktree_path, permission_mode);
-        provider_input.workspace_session_id = Some(self.attempt.id.clone());
-        provider_input.resume_provider_session_id = None;
+        // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+        // tool_policy：Reviewer → ReviewerVerify 窗口合同；Author 才 deny）。
+        let (input, provider_input) = group_review_streaming_input(
+            &self.provider_name,
+            prompt.to_string(),
+            &worktree_path,
+            self.engine.attempt_provider_stream_log_dir(&self.attempt),
+            &self.attempt.id,
+            role_permission_mode_for_attempt(
+                &self.engine.store,
+                &self.attempt,
+                CodingProviderRole::InternalReviewer,
+            )
+            .map_err(map_group_review_engine_error)?,
+        );
+        // 裁决 A 两阶段:policy 在 prompt 构建前 resolve(shard/reduction prompt 不含
+        // 4 协议 routing reference,故此处仅 resolve 并捆绑 validated input)。
+        let policy = self
+            .engine
+            .resolve_launch_policy_for_role(
+                &self.attempt,
+                CodingProviderRole::InternalReviewer,
+                &worktree_path,
+            )
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))
+            .map_err(map_group_review_engine_error)?;
+        // Task 2.7（REQ-ENV-10）：launch 层 envelope 重绑（设计决策 1，与 2.6 的
+        // coder/reviewer cycle 同款）——policy 在场时 input 显式携带 envelope 冻结
+        // 的 canonical cwd（LC=root），spawn 前复验消费；无政策路径保持 None
+        // （回填 working_dir，单仓零变化）。
+        let mut provider_input = provider_input;
+        // 批2 Task 20:绑定窗口时铸 ReviewerVerify 合同(shard/reduction/
+        // repair 同窗共享;无窗 legacy 测试路径保持 None,由四家启动检查
+        // 拒绝真实 provider——不伪铸)。
+        if let Some(window_id) = self.review_window_id.as_deref() {
+            provider_input.tool_policy = Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                    window_id,
+                ),
+            );
+        }
+        if let Some(policy) = policy.as_ref() {
+            provider_input.working_directory = Some(policy.envelope().working_directory.clone());
+        }
+        // Task 1b 段③:validated input 一律经 gateway `prepare_streaming_launch`
+        // 组装(prepare 前绑定 run-bound sink;无通用 tool_policy 的角色同样
+        // 绑定;外来非法 Some(policy) 由 gateway 拒绝)。
+        let validated_input = self
+            .engine
+            .prepare_streaming_launch_for_role(
+                &self.attempt,
+                CodingProviderRole::InternalReviewer,
+                &worktree_path,
+                provider_input.clone(),
+            )
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))
+            .map_err(map_group_review_engine_error)?;
         let (command_tx, mut command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
         drop(command_tx);
         let full_output = self
@@ -962,10 +1142,12 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
                 provider_name: &self.provider_name,
                 provider_role: CodingProviderRole::InternalReviewer,
                 command_rx: &mut command_rx,
-                allow_legacy_stream_fallback: true,
+                // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge。
+                allow_legacy_stream_fallback: self.attempt.target_snapshot.is_none(),
                 timeout: None,
                 timeout_reason_code: None,
                 suppress_failure_side_effects: true,
+                validated_input,
             })
             .await
             .map_err(map_group_review_engine_error)?;
@@ -987,6 +1169,19 @@ fn map_group_review_engine_error(error: CodingWorkspaceEngineError) -> GroupRevi
         {
             GroupReviewExecutionError::ProviderProtocol(message)
         }
+        // P4-b（REQ-PTR-IDLE）：共享 idle 看门狗的挂起保留 idle 类别进
+        // 重试编排（首次 fresh 重试一次），不折损成 Transport 吃 3 次预算。
+        // group review executor 恒 InternalReviewer，role 不再携带。
+        CodingWorkspaceEngineError::ProviderIdleStall {
+            phase,
+            idle_secs,
+            idle_limit_secs,
+            ..
+        } => GroupReviewExecutionError::IdleStall {
+            phase,
+            idle_secs,
+            idle_limit_secs,
+        },
         CodingWorkspaceEngineError::ProviderStream(message)
         | CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError {
             details: message,
@@ -1010,63 +1205,7 @@ pub(crate) struct GroupReviewExecutionResult {
     pub role_run_id: Option<String>,
 }
 
-#[cfg(test)]
-pub(crate) struct FakeGroupReviewExecutor {
-    results: Mutex<VecDeque<Result<GroupReviewExecutionResult, GroupReviewExecutionError>>>,
-    prompts: Mutex<Vec<String>>,
-}
-
-#[cfg(test)]
-impl FakeGroupReviewExecutor {
-    pub(crate) fn new(
-        results: Vec<Result<GroupReviewExecutionResult, GroupReviewExecutionError>>,
-    ) -> Self {
-        Self {
-            results: Mutex::new(results.into()),
-            prompts: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn push_result(
-        &self,
-        result: Result<GroupReviewExecutionResult, GroupReviewExecutionError>,
-    ) {
-        self.results
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back(result);
-    }
-
-    pub(crate) fn prompts(&self) -> Vec<String> {
-        self.prompts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-}
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl GroupReviewExecutor for FakeGroupReviewExecutor {
-    async fn execute(
-        &self,
-        prompt: &str,
-    ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
-        self.prompts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(prompt.to_string());
-        self.results
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pop_front()
-            .unwrap_or_else(|| {
-                Err(GroupReviewExecutionError::Internal(
-                    "fake_group_review_executor_exhausted".to_string(),
-                ))
-            })
-    }
-}
+include!("group_review_orchestrator_fake_executor.inc.rs");
 
 fn has_all_shard_reports(
     snapshot: &GroupReviewMaterialSnapshot,
@@ -1189,5 +1328,28 @@ fn severity_rank(severity: &crate::product::coding_models::FindingSeverity) -> u
         crate::product::coding_models::FindingSeverity::Info => 0,
         crate::product::coding_models::FindingSeverity::Warning => 1,
         crate::product::coding_models::FindingSeverity::Error => 2,
+    }
+}
+
+#[cfg(test)]
+mod provider_idle_stall_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn maps_provider_idle_stall_to_idle_category_not_transport() {
+        let mapped = map_group_review_engine_error(CodingWorkspaceEngineError::ProviderIdleStall {
+            role: CodingProviderRole::InternalReviewer,
+            phase: "shard".to_string(),
+            idle_secs: 5,
+            idle_limit_secs: 1,
+        });
+        assert!(matches!(
+            &mapped,
+            GroupReviewExecutionError::IdleStall {
+                phase,
+                idle_secs: 5,
+                idle_limit_secs: 1,
+            } if phase == "shard"
+        ));
     }
 }

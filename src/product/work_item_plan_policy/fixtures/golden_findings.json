@@ -1,0 +1,248 @@
+[
+  {
+    "id": "rep1-f1",
+    "source_run": "rep1",
+    "source_kind": "provider_raw",
+    "verdict": "pass",
+    "finding": {
+      "severity": "suggestion",
+      "message": "后端验证意图已覆盖数量和字段类型，但未明确提及 Design 中要求的 id 非空及文件内唯一性校验。",
+      "evidence": "Design API-001 与数据模型要求 id 非空且唯一；backend 的 TDD-1/TDD-3 仅描述字段类型和数据损坏场景。",
+      "required_action": "在后端验证意图中补充 id 非空、唯一性断言，或明确将其归入数据结构校验。"
+    },
+    "expected_class": "advisory",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep1-f2",
+    "source_run": "rep1",
+    "source_kind": "provider_raw",
+    "verdict": "pass",
+    "finding": {
+      "severity": "suggestion",
+      "message": "集成项通过 HTTP 获取页面源代码，无法单独证明动态 JavaScript 渲染后的可见名称与难度。",
+      "evidence": "AC-002 要求页面可见关卡名称与难度；integration 仅断言页面源/可观测结构，动态渲染由 frontend 测试覆盖。",
+      "required_action": "在交接说明中明确动态渲染由 frontend 测试负责，integration 仅验证同源入口与 API 契约，避免对页面源代码作过强验收表述。"
+    },
+    "expected_class": "advisory",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep2-f1",
+    "source_run": "rep2",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "后端声明要用自有 fixture 覆盖数据不可读、JSON 解析失败、结构校验失败和静态路径安全，但没有任何可注入的数据路径/加载器或静态根目录接口；backend input_contracts 为空，且 write_policy 禁止依赖 web/**。现有测试无法确定性地触发这些分支而不改动真实数据或依赖内部 monkey patch。",
+      "evidence": "wi_backend_levels_api 的 task_backend_contract_tests 要求使用 tests/backend/fixtures/**；criterion_backend_errors 要求覆盖数据错误；criterion_backend_static 又要求验证 page_entry_path=web/index.html 且不读取 web/**，但 canonical contract 没有 dataPath、loader、staticRoot 或等价配置能力。",
+      "required_action": "在后端输出契约中定义可注入的数据加载与静态根目录/入口参数及默认值，并把其加入 handoff；同步改写 backend 测试和 integration 的错误触发方式，确保测试可独立、可重复执行。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep2-f2",
+    "source_run": "rep2",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "前端 handoff 要求 dom_render_interface，但 oc_frontend_page_entry 只声明容器 id 和 API 路径，没有定义脚本模块路径、初始化/渲染函数签名或 document/fetch 注入方式；因此最小 DOM 替身测试无法依据稳定公共接口编写。",
+      "evidence": "wi_frontend_level_select.handoff_contract.required_fields 包含 dom_render_interface；其 output_contract.oc_frontend_page_entry.capabilities 没有任何函数、模块或依赖注入能力，而 task_frontend_page 仅笼统写“可注入 document”。",
+      "required_action": "补充前端公共交接契约，明确可导入模块、初始化函数参数/返回值以及 document 和 fetch 的注入边界，并使 frontend 测试与 handoff 使用同一接口。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep2-f3",
+    "source_run": "rep2",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "后端实现任务同时要求静态根目录路径安全约束，却限制只能使用 node:http 与 node:fs；该依赖限制没有提供可靠的路径规范化/边界校验方案，容易导致实现无法满足安全验收或被迫使用脆弱字符串处理。",
+      "evidence": "wi_backend_levels_api.task_backend_implementation 明确写“仅使用 node:http 与 node:fs”，而 oc_static_hosting_boundary 和 criterion_backend_static 要求静态根目录路径安全解析。",
+      "required_action": "允许使用 node:path（必要时 node:url）等 Node 内置模块，或在契约中给出等价且可测试的安全解析算法；同步更新任务和验证范围。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep2-f4",
+    "source_run": "rep2",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "integration 明确要求错误响应的 Content-Type 为 application/json; charset=utf-8，但 backend 的 oc_levels_api_contract 和 criterion_backend_errors 只保证 error.code/message，没有向消费者承诺错误响应内容类型，形成提供方与消费者契约不一致。",
+      "evidence": "outline_integration_levels_http 的 criterion_integration_api_shape 要求错误响应包含 application/json; charset=utf-8；outline_backend_levels_api 的 oc_levels_api_contract.capabilities 及 criterion_backend_errors 均未包含该错误响应头能力。",
+      "required_action": "将错误响应 Content-Type 纳入后端提供契约和验收标准，或删除 integration 对该未提供能力的强制断言，并保持三项 Draft 的引用一致。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep2-f5",
+    "source_run": "rep2",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "服务生命周期交接只描述“返回实际监听地址”，没有定义返回值的具体结构、地址格式或测试端口策略；integration 需要从该交接构造同一实际来源，当前实现可在不同作者选择下产生不可兼容结果，且并行测试可能争用默认 3000。",
+      "evidence": "oc_backend_service_lifecycle 仅列出“启动后返回实际监听地址”；handoff_contract.required_fields 仅列 actual_listen_address；integration task 直接要求使用该地址访问 GET / 与 GET /api/levels，未定义例如 origin/port 的字段结构或 PORT=0 的隔离规则。",
+      "required_action": "定义 start/stop API 的精确返回结构与 origin 生成规则，并明确测试可使用的临时端口（如 PORT=0）及清理约束；同步更新 backend handoff、frontend/integration input contract 和测试任务。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep2-f6",
+    "source_run": "rep2",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "三项 Draft 都依赖“合法/有效字段”判断，但没有定义 id、name、difficulty、unlocked 的类型、空值规则或 difficulty 取值集合；后端校验、前端无效响应处理和 integration 的“完整字段”可能接受不同数据，导致验收不可判定。",
+      "evidence": "backend criterion_backend_api 使用“合法的 id、name、difficulty、unlocked 字段”；frontend criterion_frontend_error_handling 要求校验字段无效响应；integration criterion_integration_api_shape 要求完整字段，但 oc_levels_api_contract 只列字段名称，没有字段级约束。",
+      "required_action": "在共享 API 契约中补齐四个字段的类型、必填/非空规则及 difficulty 允许值，并让 backend、frontend、integration 的测试和验收引用同一约束。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep3-f1",
+    "source_run": "rep3",
+    "source_kind": "provider_raw",
+    "verdict": "revise",
+    "finding": {
+      "severity": "must_fix",
+      "message": "后端 Outline 将未知路径概括为 404 JSON/API-002 错误，但 Design API-003 明确规定静态资源不存在时返回 404 文本响应；当前范围和验证意图会使静态资源 404 与 API 404 的契约发生冲突，coding session 无法据此稳定实现和验收。",
+      "evidence": "scope 写明“未知路径和方法的 404/405 JSON 错误语义”；verification_intent 又要求“错误状态 500/404/405 均断言 Content-Type 和 API-002 结构”；而 Design API-002 仅约束未知 API 路径，API-003 规定静态资源不存在返回 404 文本响应。",
+      "required_action": "明确拆分 404 语义：未知 API 路径使用 API-002 的 JSON 404，静态资源缺失保留 API-003 的文本 404；同步修订 scope、verification_intent 和 handoff_notes 中的表述，避免将两者合并验收。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep4-f1",
+    "source_run": "rep4",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "集成 Work Item 的 non_goals 禁止“实现测试”，但任务和写入范围要求编写 tests/integration/** 测试，执行者无法同时满足该项边界与验收。",
+      "evidence": "draft_003 的 non_goals 写有“不修改 server/**、web/**、data/levels.json 或实现测试”，而 task_integration_tests 明确要求“先在 tests/integration/** 编写失败测试”，write_policy 也将 tests/integration/** 设为 exclusive_scopes。",
+      "required_action": "在整组返修中将 draft_003 的 non_goals 改为仅禁止修改产品实现与上游测试，明确允许新增和维护 tests/integration/**。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep4-f2",
+    "source_run": "rep4",
+    "source_kind": "provider_raw",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "集成 HTML 验收将 /api/levels 引用要求在 GET / 的 HTML 本体中，但前端契约将 API 调用放在独立的 web/level-select.js；这会迫使无意义地重复或内联 API 路径，不能验证实际脚本行为。",
+      "evidence": "draft_002 的 oc_level_page_v1 规定页面入口为 web/index.html、脚本为 web/level-select.js，且“页面通过 /api/levels 获取数据”；draft_003 的 ac_integration_html_contract 却要求“GET / 返回的 HTML ... 并包含对 /api/levels 的引用”。",
+      "required_action": "在整组返修中调整 draft_003：GET / 只验证三个容器与 level-select.js 加载；另通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用。"
+    },
+    "expected_class": "human_required",
+    "expected_category": null,
+    "contract_field": null
+  },
+  {
+    "id": "rep2-f1-annotated",
+    "source_run": "rep2",
+    "source_kind": "annotated_variant",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "后端声明要用自有 fixture 覆盖数据不可读、JSON 解析失败、结构校验失败和静态路径安全，但没有任何可注入的数据路径/加载器或静态根目录接口；backend input_contracts 为空，且 write_policy 禁止依赖 web/**。现有测试无法确定性地触发这些分支而不改动真实数据或依赖内部 monkey patch。",
+      "evidence": "wi_backend_levels_api 的 task_backend_contract_tests 要求使用 tests/backend/fixtures/**；criterion_backend_errors 要求覆盖数据错误；criterion_backend_static 又要求验证 page_entry_path=web/index.html 且不读取 web/**，但 canonical contract 没有 dataPath、loader、staticRoot 或等价配置能力。",
+      "required_action": "在后端输出契约中定义可注入的数据加载与静态根目录/入口参数及默认值，并把其加入 handoff；同步改写 backend 测试和 integration 的错误触发方式，确保测试可独立、可重复执行。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "backend.input_contracts"
+    },
+    "expected_class": "repairable",
+    "expected_category": "contract_gap",
+    "contract_field": "backend.input_contracts",
+    "annotation": {
+      "provenance": "human_annotation",
+      "annotated_fields": [
+        "category",
+        "class_hint",
+        "contract_field"
+      ],
+      "note": "category、class_hint、contract_field 为人工标注，不来自 provider 原始输出。"
+    }
+  },
+  {
+    "id": "rep3-f1-annotated",
+    "source_run": "rep3",
+    "source_kind": "annotated_variant",
+    "verdict": "revise",
+    "finding": {
+      "severity": "must_fix",
+      "message": "后端 Outline 将未知路径概括为 404 JSON/API-002 错误，但 Design API-003 明确规定静态资源不存在时返回 404 文本响应；当前范围和验证意图会使静态资源 404 与 API 404 的契约发生冲突，coding session 无法据此稳定实现和验收。",
+      "evidence": "scope 写明“未知路径和方法的 404/405 JSON 错误语义”；verification_intent 又要求“错误状态 500/404/405 均断言 Content-Type 和 API-002 结构”；而 Design API-002 仅约束未知 API 路径，API-003 规定静态资源不存在返回 404 文本响应。",
+      "required_action": "明确拆分 404 语义：未知 API 路径使用 API-002 的 JSON 404，静态资源缺失保留 API-003 的文本 404；同步修订 scope、verification_intent 和 handoff_notes 中的表述，避免将两者合并验收。",
+      "category": "self_contradiction",
+      "class_hint": "repairable",
+      "contract_field": "api_404_response_semantics"
+    },
+    "expected_class": "repairable",
+    "expected_category": "self_contradiction",
+    "contract_field": "api_404_response_semantics",
+    "annotation": {
+      "provenance": "human_annotation",
+      "annotated_fields": [
+        "category",
+        "class_hint",
+        "contract_field"
+      ],
+      "note": "category、class_hint、contract_field 为人工标注，不来自 provider 原始输出。"
+    }
+  },
+  {
+    "id": "rep4-f1-annotated",
+    "source_run": "rep4",
+    "source_kind": "annotated_variant",
+    "verdict": "needs_human",
+    "finding": {
+      "severity": "must_fix",
+      "message": "集成 Work Item 的 non_goals 禁止“实现测试”，但任务和写入范围要求编写 tests/integration/** 测试，执行者无法同时满足该项边界与验收。",
+      "evidence": "draft_003 的 non_goals 写有“不修改 server/**、web/**、data/levels.json 或实现测试”，而 task_integration_tests 明确要求“先在 tests/integration/** 编写失败测试”，write_policy 也将 tests/integration/** 设为 exclusive_scopes。",
+      "required_action": "在整组返修中将 draft_003 的 non_goals 改为仅禁止修改产品实现与上游测试，明确允许新增和维护 tests/integration/**。",
+      "category": "self_contradiction",
+      "class_hint": "repairable",
+      "contract_field": "draft_003.non_goals"
+    },
+    "expected_class": "repairable",
+    "expected_category": "self_contradiction",
+    "contract_field": "draft_003.non_goals",
+    "annotation": {
+      "provenance": "human_annotation",
+      "annotated_fields": [
+        "category",
+        "class_hint",
+        "contract_field"
+      ],
+      "note": "category、class_hint、contract_field 为人工标注，不来自 provider 原始输出。"
+    }
+  }
+]

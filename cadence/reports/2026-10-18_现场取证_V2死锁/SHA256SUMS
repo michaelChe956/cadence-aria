@@ -1,0 +1,15 @@
+621795576289531374b812aa6d69835df5efaca720ce938b4ce41c2b88b965b3  ./.aria/projects/project_0002/issues/issue_0001/automation-enrollment.json
+0f57906d4728e0aa1eec90f02b580bc440d9387a8aed9436369b6b39f370ef25  ./.aria/projects/project_0002/issues/issue_0001/automation-generation-intent.json
+ce119fe4d4448683bce911cd756ff6e544b95f177d45b9c6a30f684621119339  ./.aria/projects/project_0002/issues/issue_0001/automation-plan-intent.json
+893738d06ddc68999ef73b67f565839111b6200615a12e10007d1da7967e6c8f  ./.aria/projects/project_0002/issues/issue_0001/planning-context-snapshot.json
+b70795574c81a60df2aeb5c0f414ed7122514370410ee1e7c21606bff55bb75f  ./.aria/projects/project_0002/issues/issue_0001/workspace-sessions/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406.json
+485d6c3a9a6f500693282353fafd5108cabc1f6537a3654d32afaf046f667106  ./.aria/state/entity-identity/sessions/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406.json
+705e0d39773f2d9ead80ac14b250ece53054d108af75d6541c2d6074441d9418  ./.aria/tool-policy-run-audit/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/1.jsonl
+705e0d39773f2d9ead80ac14b250ece53054d108af75d6541c2d6074441d9418  ./.aria/tool-policy-run-audit/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/2.jsonl
+705e0d39773f2d9ead80ac14b250ece53054d108af75d6541c2d6074441d9418  ./.aria/tool-policy-run-audit/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/5.jsonl
+749651fdd77568dfa72a0eadbc156449e4c9601d1acc9626b36e41e6e9857f9c  ./.aria/tool-policy-run-audit/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/role-run-seq.jsonl
+e8af285f3895b459a2efba23dd66ed5c5233191a25f2aafa2b4f45216b97b610  ./.aria/work-item-split-runs/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/1/run.json
+b6a1508d3d214337584e4da6a33289f3c4492a4d4ef0b7e8adffa3aa3fe68dc2  ./.aria/work-item-split-runs/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/1/structured_output.json
+41bb9df21bde17d87ecca3e6977ef72e4ec56d29aa548ce118a5efb0c68a94bf  ./.aria/work-item-split-runs/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/2/run.json
+2573ef0a32ab111614e5e137b1c8655d81437abb859bfd71352c3ce806c6894d  ./.aria/work-item-split-runs/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/2/structured_output.json
+d93bc85a097510260c1ab56557eaeb9b40b0ae397033906022ed46ffdee7632f  ./.aria/work-item-split-runs/workspace_session_auto_5033602b-621f-4591-a671-0442024c4406/5/run.json

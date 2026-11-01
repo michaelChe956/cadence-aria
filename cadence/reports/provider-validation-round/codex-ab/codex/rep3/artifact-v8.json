@@ -1,0 +1,418 @@
+{
+  "event_seq": 4711,
+  "plan_projection": {
+    "coder_group_context": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "stop() 返回 Promise 并停止服务"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "GET / 返回注入 staticRoot 的页面入口文件"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js 引用 /api/levels"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**",
+            "package.json 依赖字段"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**",
+            "package.json 依赖字段"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "web/**",
+            "tests/backend/**",
+            "tests/frontend/**",
+            "package.json 依赖字段"
+          ]
+        }
+      },
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "plan_id": "issue_work_item_plan_0001"
+    },
+    "coder_group_context_hash": "3365255d1a9298faf71ccb09f416130347a208f20ca382bb93a098463e82d00f",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-20T01:30:12.153371149+00:00",
+    "dependency_graph_revision_id": "dependency_graph_revision_df082871e14533637e547626",
+    "human_group_projection": {
+      "contract_flow": [
+        {
+          "contract_id": "CT-002",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "不支持的 HTTP 方法返回 405 且返回 error.code/message 结构",
+            "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+          ],
+          "required_capabilities": [
+            "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+          ],
+          "to": "WI-002"
+        },
+        {
+          "contract_id": "CT-001",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "stop() 返回 Promise 并停止服务"
+          ],
+          "required_capabilities": [
+            "stop() 返回 Promise 并停止服务"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-002",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "不支持的 HTTP 方法返回 405 且返回 error.code/message 结构",
+            "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+          ],
+          "required_capabilities": [
+            "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-003",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET / 返回注入 staticRoot 的页面入口文件",
+            "静态路径使用 node:path normalize/resolve 并限制在 staticRoot 内"
+          ],
+          "required_capabilities": [
+            "GET / 返回注入 staticRoot 的页面入口文件"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-004",
+          "from": "WI-002",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "initLevelSelect 错误分支保留页面框架",
+            "web/level-select.js 引用 /api/levels"
+          ],
+          "required_capabilities": [
+            "web/level-select.js 引用 /api/levels"
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "normative": false,
+      "plan_id": "issue_work_item_plan_0001",
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "split_reason": "由 canonical handoff schema 投影",
+      "used_by_provider": false,
+      "work_items": [
+        {
+          "depends_on": [],
+          "goal": "WHEN 服务以可注入配置启动 THE SYSTEM SHALL 提供关卡 API 和可测试的静态托管能力。",
+          "logical_work_item_id": "WI-001",
+          "provides": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**",
+              "package.json 依赖字段"
+            ],
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ]
+          },
+          "title": "Backend Levels Service"
+        },
+        {
+          "depends_on": [
+            "WI-001"
+          ],
+          "goal": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 通过可测试的原生脚本渲染关卡列表或在失败时显示可读错误。",
+          "logical_work_item_id": "WI-002",
+          "provides": [
+            "CT-004"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**",
+              "package.json 依赖字段"
+            ],
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ]
+          },
+          "title": "Frontend Level Select"
+        },
+        {
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "goal": "WHEN 集成测试使用同一服务运行 THE SYSTEM SHALL 验证同源页面入口、静态脚本引用、API 成功形状和错误响应契约。",
+          "logical_work_item_id": "WI-003",
+          "provides": [
+            "CT-005"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "web/**",
+              "tests/backend/**",
+              "tests/frontend/**",
+              "package.json 依赖字段"
+            ],
+            "owned_scopes": [
+              "tests/integration/**"
+            ]
+          },
+          "title": "Fullstack Integration Verification"
+        }
+      ]
+    },
+    "human_group_projection_hash": "db4edd3a7af0b393cd8ecf53190a91f6719045c132439ca7a2d981af740bc389",
+    "id": "plan_projection_bundle_df082871e14533637e547626",
+    "plan_revision_id": "plan_revision_df082871e14533637e547626",
+    "reviewer_group_matrix": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "stop() 返回 Promise 并停止服务"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "GET / 返回注入 staticRoot 的页面入口文件"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "web/level-select.js 引用 /api/levels"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "requirement_id": "REQ-002",
+          "source_id": "issue_workitem_0007#api",
+          "source_type": "issue"
+        },
+        {
+          "requirement_id": "REQ-004",
+          "source_id": "issue_workitem_0007#api",
+          "source_type": "issue"
+        },
+        {
+          "requirement_id": "REQ-003",
+          "source_id": "issue_workitem_0007#data",
+          "source_type": "issue"
+        },
+        {
+          "requirement_id": "REQ-005",
+          "source_id": "issue_workitem_0007#frontend",
+          "source_type": "issue"
+        },
+        {
+          "requirement_id": "REQ-006",
+          "source_id": "issue_workitem_0007#frontend",
+          "source_type": "issue"
+        },
+        {
+          "requirement_id": "NFR-001",
+          "source_id": "issue_workitem_0007#verify",
+          "source_type": "issue"
+        }
+      ],
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "criterion_refs": [
+            "AC-001",
+            "AC-002",
+            "AC-003",
+            "AC-004",
+            "AC-005"
+          ],
+          "input_contract_refs": [],
+          "logical_work_item_id": "WI-001",
+          "output_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-006",
+            "AC-007",
+            "AC-008",
+            "AC-009",
+            "AC-010"
+          ],
+          "input_contract_refs": [
+            "CT-002"
+          ],
+          "logical_work_item_id": "WI-002",
+          "output_contract_refs": [
+            "CT-004"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-011",
+            "AC-012",
+            "AC-013"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003",
+            "CT-004"
+          ],
+          "logical_work_item_id": "WI-003",
+          "output_contract_refs": [
+            "CT-005"
+          ]
+        }
+      ]
+    },
+    "reviewer_group_matrix_hash": "61cee22d2de60c563a929c908bec95aabb03c8e9ddf17aec6e8a9a1a92b30ae7",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_745567fb96a43eb357afae48",
+      "work_item_projection_bundle_cdaa867b25947238e7edb4dd",
+      "work_item_projection_bundle_57120772b585dd8f4a07eb48"
+    ]
+  },
+  "type": "artifact_update",
+  "version": 8
+}

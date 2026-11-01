@@ -1,11 +1,11 @@
 use cadence_aria::product::coding_models::{
-    CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChatEntry, CodingContextNote,
-    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingGateAction,
-    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
+    CodeReviewReport, CodingAdmissionKind, CodingAgentRole, CodingAttemptStatus, CodingChatEntry,
+    CodingContextNote, CodingEntryType, CodingExecutionAttempt, CodingExecutionStage,
+    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole,
     CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingStageGateState,
     CodingStageGateStatus, CodingTimelineNode, CodingTimelineNodeStatus, FindingSeverity,
     InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
-    ReviewVerdict,
+    ReviewRequestOwnerKind, ReviewVerdict,
 };
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -48,8 +48,8 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
     });
 
     assert_eq!(snapshot.coder, ProviderName::Codex);
-    assert_eq!(snapshot.code_reviewer, ProviderName::Fake);
-    assert_eq!(snapshot.internal_reviewer, ProviderName::Fake);
+    assert_eq!(snapshot.code_reviewer, Some(ProviderName::Fake));
+    assert_eq!(snapshot.internal_reviewer, Some(ProviderName::Fake));
     assert_eq!(snapshot.review_rounds, 2);
 
     let value = serde_json::to_value(snapshot).expect("serialize role provider snapshot");
@@ -69,8 +69,10 @@ fn coding_role_provider_config_snapshot_derives_from_legacy_provider_snapshot() 
     );
 }
 
+// C2 Task 5（REQ-CRO-05）：reviewer 三值——原 author 回填 pin 毒测试已删，
+// 换为空 effective 语义断言。
 #[test]
-fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_missing() {
+fn coding_role_provider_config_snapshot_without_reviewer_stays_empty_effective() {
     let snapshot = CodingRoleProviderConfigSnapshot::from(ProviderConfigSnapshot {
         author: ProviderName::ClaudeCode,
         reviewer: None,
@@ -79,8 +81,20 @@ fn coding_role_provider_config_snapshot_falls_back_to_author_when_reviewer_is_mi
     });
 
     assert_eq!(snapshot.coder, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.code_reviewer, ProviderName::ClaudeCode);
-    assert_eq!(snapshot.internal_reviewer, ProviderName::ClaudeCode);
+    assert_eq!(snapshot.code_reviewer, None);
+    assert_eq!(snapshot.internal_reviewer, None);
+
+    let value = serde_json::to_value(&snapshot).expect("serialize role provider snapshot");
+    assert_eq!(value["code_reviewer"], serde_json::Value::Null);
+    assert_eq!(value["internal_reviewer"], serde_json::Value::Null);
+
+    // 旧 role-provider-config.json 缺三值字段：按空 effective 解释。
+    let legacy: CodingRoleProviderConfigSnapshot = serde_json::from_value(serde_json::json!({
+        "coder": "claude_code", "review_rounds": 1
+    }))
+    .expect("deserialize legacy snapshot");
+    assert_eq!(legacy.code_reviewer, None);
+    assert_eq!(legacy.internal_reviewer, None);
 }
 
 #[test]
@@ -141,8 +155,10 @@ fn coding_stage_gate_state_serializes_open_gate_contract() {
         expires_at: "2026-05-28T00:00:05Z".to_string(),
         provider_snapshot: CodingRoleProviderConfigSnapshot {
             coder: ProviderName::Codex,
-            code_reviewer: ProviderName::Fake,
-            internal_reviewer: ProviderName::Fake,
+            code_reviewer: Some(ProviderName::Fake),
+
+            internal_reviewer: Some(ProviderName::Fake),
+
             review_rounds: 1,
             permission_modes: CodingRolePermissionModes::default(),
         },
@@ -172,6 +188,10 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
         attempt_no: 1,
         scope: cadence_aria::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Created,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::PrepareContext,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -194,18 +214,25 @@ fn coding_attempt_serializes_stage_status_and_provider_snapshot() {
         provider_conversations: Vec::new(),
         created_at: "2026-05-23T00:00:00Z".to_string(),
         updated_at: "2026-05-23T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_claim: None,
+        start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
     };
 
     let value = serde_json::to_value(&attempt).expect("serialize attempt");
 
     assert_eq!(value["status"], "created");
+    assert_eq!(value["version"], 0);
+    assert!(value.get("manual_recovery_reason").is_none());
     assert_eq!(value["stage"], "prepare_context");
     assert_eq!(value["provider_config_snapshot"]["author"], "fake");
 
     let decoded: CodingExecutionAttempt =
         serde_json::from_value(value).expect("deserialize attempt");
     assert_eq!(decoded.status, CodingAttemptStatus::Created);
+    assert_eq!(decoded.version, 0);
+    assert!(decoded.manual_recovery_reason.is_none());
     assert_eq!(decoded.stage, CodingExecutionStage::PrepareContext);
 }
 
@@ -245,6 +272,8 @@ fn review_reports_preserve_backend_evidence() {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     };
     let internal = InternalPrReview {
         id: "internal_review_0001".to_string(),
@@ -262,6 +291,8 @@ fn review_reports_preserve_backend_evidence() {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     };
 
     assert_eq!(
@@ -300,6 +331,9 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         created_at: "2026-05-23T00:05:00Z".to_string(),
         updated_at: "2026-05-23T00:05:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
     };
     let node = CodingTimelineNode {
         id: "coding_node_0001".to_string(),
@@ -331,6 +365,8 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
         diagnostic: None,
+        triage_summary: None,
+        latest_review_verdict: None,
     };
 
     assert_eq!(
@@ -374,6 +410,8 @@ fn review_reports_round_trip_role_run_metadata() {
         role_run_id: Some("coding_role_run_0001".to_string()),
         run_no: Some(1),
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     };
     let value = serde_json::to_value(&code_review).expect("serialize code review");
     assert_eq!(value["role_run_id"], "coding_role_run_0001");
@@ -399,6 +437,8 @@ fn review_reports_round_trip_role_run_metadata() {
         ),
         role_run_id: Some("coding_role_run_0002".to_string()),
         run_no: Some(1),
+        acceptance: None,
+        review_window_id: None,
     };
     let value = serde_json::to_value(&internal_review).expect("serialize internal review");
     assert_eq!(value["role_run_id"], "coding_role_run_0002");

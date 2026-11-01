@@ -464,6 +464,8 @@ fn new_split_output_with_ids(
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
+            logical_repository_id: None,
+            membership_revision: 0,
             provider_run_ref: None,
             languages: vec!["rust".to_string()],
             frameworks: Vec::new(),
@@ -504,6 +506,7 @@ fn new_split_output_with_ids(
             created_from_provider_run: Some("provider_run_split_0001".to_string()),
             validator_findings: Vec::new(),
             review_summary: None,
+            ever_confirmed: None,
             created_at: "2026-06-17T00:00:00Z".to_string(),
             updated_at: "2026-06-17T00:00:00Z".to_string(),
         },
@@ -516,6 +519,7 @@ fn new_split_output_with_ids(
                     project_id: "project_0001".to_string(),
                     issue_id: "issue_0001".to_string(),
                     repository_id: "repository_0001".to_string(),
+                    target_repository_id: None,
                     story_spec_ids: vec!["story_spec_0001".to_string()],
                     design_spec_ids: vec!["design_spec_0001".to_string()],
                     title: format!("new work item {}", index + 1),
@@ -699,6 +703,8 @@ fn replace_issue_work_item_plan_candidate_swaps_draft_work_items_and_updates_pla
         code: "scope_overlap".to_string(),
         message: "watch overlaps".to_string(),
         work_item_ids: vec!["work_item_0003".to_string()],
+        // F1.2：fixture 沿旧 record 形态（kind=None）。
+        kind: None,
     };
     let snapshot: WorkItemPlanCandidateSnapshot = store
         .replace_issue_work_item_plan_candidate(

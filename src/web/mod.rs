@@ -1,11 +1,26 @@
+pub mod advance_plan;
+pub mod api_auth;
 pub mod app;
+pub mod automation_attention_info;
+pub mod autopilot_orchestrator;
+pub mod choice_reply;
+pub mod coding_attention_info;
+pub mod coding_final_confirm_info;
+pub mod coding_start;
 pub mod coding_ws_handler;
 pub mod error;
 pub mod events;
+pub mod gateway_factory;
 pub mod handlers;
 pub mod issue_registry;
+pub mod plan_confirmed_info;
+#[cfg(test)]
+#[path = "plan_confirmed_info_c1_tests.rs"]
+mod plan_confirmed_info_c1_tests;
+pub mod plan_generation;
 pub mod provider_availability;
 pub mod provider_probe;
+pub mod recent_completion_info;
 pub mod redaction;
 pub mod runtime;
 pub mod runtime_store;
@@ -13,7 +28,10 @@ pub mod state;
 pub mod static_assets;
 pub mod test_controls;
 pub mod types;
+#[cfg(test)]
+pub(crate) mod wiga_gate_fixture;
 pub mod workspace_context;
 pub mod workspace_registry;
+pub mod workspace_session;
 pub mod workspace_ws_handler;
 pub mod workspace_ws_types;

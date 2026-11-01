@@ -1,0 +1,12 @@
+{
+  "id": "version_0001",
+  "project_id": "project_0001",
+  "issue_id": "issue_0002",
+  "entity_id": "story_spec_0001",
+  "version": 1,
+  "markdown": "# 关卡列表与关卡选择页需求（上游 Story Spec fixture）\n\nsource id: issue_workitem_0007#api\nsource id: issue_workitem_0007#frontend\nsource id: issue_workitem_0007#data\nsource id: issue_workitem_0007#verify\n\n## 用户故事\n\n- [REQ-001] 作为玩家，我希望打开游戏后看到关卡选择页，列出所有可选关卡及难度，以便选择要玩的关卡。\n  - source id: issue_workitem_0007#frontend\n\n## 功能需求\n\n- [REQ-002] 系统 SHALL 提供 GET /api/levels 接口，返回关卡列表，每项含 id、name、difficulty、unlocked 字段。\n  - source id: issue_workitem_0007#api\n- [REQ-003] 关卡数据 SHALL 来自静态 JSON 数据文件，包含恰好 5 个关卡。\n  - source id: issue_workitem_0007#data\n- [REQ-004] 后端 SHALL 仅使用 Node 内置模块实现（如 node:http、node:fs、node:path），不引入任何 npm 依赖，并托管前端静态页面。\n  - source id: issue_workitem_0007#api\n- [REQ-005] 关卡选择页 SHALL 调用 GET /api/levels 渲染关卡列表，展示名称与难度。\n  - source id: issue_workitem_0007#frontend\n- [REQ-006] API 请求失败时，页面 SHALL 展示可读错误提示，不得白屏。\n  - source id: issue_workitem_0007#frontend\n\n## 非功能需求\n\n- [NFR-001] 测试 SHALL 只使用 Node 内置测试运行器（node --test），不引入测试框架。\n  - source id: issue_workitem_0007#verify\n\n## 成功标准\n\n- [AC-001] 启动服务后，GET /api/levels 返回 5 个关卡且字段完整。覆盖 REQ-002、REQ-003。\n  - source id: issue_workitem_0007#api\n- [AC-002] 页面 HTML 包含加载、列表、错误三个容器标记并引用 /api/levels；运行时渲染行为（名称、难度、锁定态）由前端自身测试以 DOM 替身方式验证，不依赖浏览器。覆盖 REQ-005。\n  - source id: issue_workitem_0007#frontend\n- [AC-003] 前端测试以 DOM 替身模拟 API 失败时，页面逻辑进入错误提示分支且不白屏（不依赖浏览器）。覆盖 REQ-006。\n  - source id: issue_workitem_0007#frontend\n- [AC-004] node --test 全部通过。覆盖 NFR-001。\n  - source id: issue_workitem_0007#verify\n\n## 范围\n\n- 本 Story 只约定功能行为需求；API 契约、服务结构与验证方案的详细设计由下游 Design 产物（形态 07-fullstack-levels）完成。\n- 后端工作项的验收 SHALL 能在其自身写入范围内独立完成：静态托管相关测试使用自有的测试夹具文件，不读取、不依赖前端页面目录。\n- 运行时渲染行为的验证 SHALL 使用 DOM 替身方案，不引入浏览器自动化。\n- 不实现关卡实际玩法逻辑，选中关卡后的行为不在本期范围。\n  - source id: issue_workitem_0007#frontend\n",
+  "provider_run_refs": [],
+  "review_refs": [],
+  "confirmed_by": "campaign_fixture",
+  "created_at": "2026-08-25T15:27:35.699Z"
+}

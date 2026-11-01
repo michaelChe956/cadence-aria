@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "design gate-campaign/1 manifest",
+  "description": "Strict, machine-readable acceptance manifest for the Design weak-model campaign.",
+  "type": "object",
+  "required": ["schema", "run_kind", "samples"],
+  "properties": {
+    "schema": { "const": "gate-campaign/1" },
+    "run_kind": { "enum": ["baseline", "revised"] },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/sample" }
+    }
+  },
+  "definitions": {
+    "model_identity": {
+      "type": "object",
+      "required": ["provider", "model", "model_version"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "model_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "role_provider": {
+      "type": "object",
+      "required": ["author", "reviewer"],
+      "properties": {
+        "author": { "$ref": "#/definitions/model_identity" },
+        "reviewer": { "$ref": "#/definitions/model_identity" }
+      }
+    },
+    "case_id": {
+      "type": "object",
+      "required": ["shape_id", "repetition_id"],
+      "properties": {
+        "shape_id": { "type": "string", "pattern": "^[0-9]{2}$" },
+        "repetition_id": { "type": "integer", "minimum": 1 },
+        "round": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "review_verdict": {
+      "type": "object",
+      "required": ["verdict", "el"],
+      "properties": {
+        "verdict": { "enum": ["pass", "revise", "needs_human"] },
+        "el": { "type": "number", "minimum": 0 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "required": ["input_tokens", "cache_read_tokens"],
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "cache_read_tokens": { "type": "integer", "minimum": 0 },
+        "fresh_or_resume": { "enum": ["fresh", "resume"] }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "required": [
+        "provider",
+        "model",
+        "model_version",
+        "role_provider",
+        "strategy",
+        "resume_available",
+        "shape_id",
+        "shape_file",
+        "repetition",
+        "case_id",
+        "startedAt",
+        "finishedAt",
+        "issueId",
+        "sessionId",
+        "storySpecId",
+        "designSpecId",
+        "finished",
+        "reviewVerdicts",
+        "failureClass",
+        "elapsedSec",
+        "boundary_kind"
+      ],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "model_version": { "type": "string", "minLength": 1 },
+        "role_provider": { "$ref": "#/definitions/role_provider" },
+        "strategy": { "enum": ["fresh", "resume"] },
+        "resume_available": { "type": "boolean" },
+        "shape_id": { "type": "string", "pattern": "^[0-9]{2}$" },
+        "shape_file": { "type": "string", "minLength": 1 },
+        "repetition": { "type": "string", "pattern": "^[0-9]+$" },
+        "case_id": { "$ref": "#/definitions/case_id" },
+        "startedAt": { "type": "string", "minLength": 1 },
+        "finishedAt": { "type": ["string", "null"] },
+        "issueId": { "type": ["string", "null"] },
+        "sessionId": { "type": ["string", "null"] },
+        "storySpecId": { "type": ["string", "null"] },
+        "designSpecId": { "type": ["string", "null"] },
+        "finished": { "type": "boolean" },
+        "reviewVerdicts": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/review_verdict" }
+        },
+        "failureClass": { "type": ["string", "null"] },
+        "elapsedSec": { "type": "number", "minimum": 0 },
+        "boundary_kind": {
+          "enum": ["abstract-positive", "violation-negative", null]
+        },
+        "error": { "type": ["string", "null"] },
+        "aborted": { "type": "boolean" },
+        "usage": { "$ref": "#/definitions/usage" },
+        "usage_unavailable": { "const": true }
+      },
+      "oneOf": [
+        {
+          "required": ["usage"],
+          "not": { "required": ["usage_unavailable"] }
+        },
+        {
+          "required": ["usage_unavailable"],
+          "not": { "required": ["usage"] }
+        }
+      ]
+    }
+  }
+}

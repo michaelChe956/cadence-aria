@@ -18,6 +18,10 @@ fn revise_review_verdict(summary: &str, comments: &str) -> ReviewVerdict {
     }
 }
 
+// 退役留档（T5/REQ-RET-02）：`single_repo_design_review_pass_waits_for_author_finalize_and_keeps_inputs_unstructured` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
+
 #[tokio::test]
 async fn review_completion_routes_back_to_author_confirm_for_story() {
     let (_tmp, _lifecycle, mut engine) = persistent_test_engine();
@@ -93,35 +97,9 @@ async fn review_completion_records_formatted_report_in_conversation() {
 
 // I-1：review 完成后（latest_review_verdict 存在）用户提交反馈，Revise 臂必须清空 verdict，
 // 使 T4 分流谓词（pending.is_some() && verdict.is_none()）成立 → 走 build_author_revision_prompt。
-#[tokio::test]
-async fn revise_after_review_clears_verdict_and_uses_author_prompt() {
-    let mut engine = prompt_engine_with_artifact("# Story Spec\n\n旧内容");
-    engine.latest_review_verdict = Some(revise_review_verdict("review 结论", "review 结论。"));
-
-    engine
-        .handle_author_decision(AuthorDecision::Revise {
-            feedback: "补充异常场景与回滚策略".into(),
-        })
-        .await
-        .expect("post-review feedback revision");
-
-    assert!(
-        engine.latest_review_verdict.is_none(),
-        "post-review 新反馈必须清空 latest_review_verdict（I-1）"
-    );
-    assert_eq!(
-        engine.pending_revision_context.as_deref(),
-        Some("补充异常场景与回滚策略")
-    );
-
-    let input = engine.build_revision_input().expect("revision input");
-    assert!(
-        input.prompt.contains("## 用户反馈"),
-        "review 后反馈必须走 author 增量修订 prompt（含产物全文与用户反馈）: {}",
-        input.prompt
-    );
-    assert!(input.prompt.contains("补充异常场景与回滚策略"));
-}
+// 退役留档（T5/REQ-RET-02）：`revise_after_review_clears_verdict_and_uses_author_prompt` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 // M-1：author 反馈修订分流谓词提取为共享 helper，两处（prompts/revision.rs / provider_drive.rs）同语义。
 #[test]

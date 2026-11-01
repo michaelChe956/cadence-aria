@@ -93,8 +93,9 @@ test.describe("E. 断开策略", () => {
 
     await page.getByRole("button", { name: "中止" }).click();
 
+    // 自动执行流方块把失败态本地化为「失败」；保留原始英文状态词，仅增补中文文案。
     await expect(page.getByTestId("timeline-node-author_run").first()).toContainText(
-      /failed|中止/i,
+      /failed|失败|中止/i,
     );
     await expect(page.getByTestId("timeline-node-aborted_by_disconnect")).toHaveCount(0);
   });

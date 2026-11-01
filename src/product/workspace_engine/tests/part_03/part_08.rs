@@ -1,58 +1,4 @@
-async fn prepare_outline_review_decision_without_index(
-    scope: WorkItemPlanReviewScope,
-) -> (TempDir, LifecycleStore, String, WorkspaceEngine) {
-    let (tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate(&format!(
-            "sess_outline_policy_{scope:?}"
-        ));
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    engine.session.stage = WorkspaceStage::ReviewDecision;
-    let source_node_id = engine
-        .create_timeline_node(TimelineNodeDraft {
-            node_type: TimelineNodeType::ReviewDecision,
-            agent: None,
-            stage: WorkspaceStage::ReviewDecision,
-            round: Some(1),
-            title: "Review 决策".to_string(),
-            summary: None,
-            status: TimelineNodeStatus::Active,
-        })
-        .await;
-    lifecycle
-        .update_workspace_session_status(
-            &engine.session.session_id,
-            WorkspaceSessionStatus::WaitingForHuman,
-        )
-        .expect("set review decision session status");
-    engine.latest_review_verdict = Some(ReviewVerdict {
-        verdict: ReviewVerdictType::NeedsHuman,
-        comments: "需要重开 Outline".to_string(),
-        summary: "需要重开 Outline".to_string(),
-        findings: Vec::new(),
-        review_gate: ReviewGate::UserTriageRequired,
-        work_item_plan_review: Some(WorkItemPlanReviewComplete {
-            verdict: WorkItemPlanReviewVerdict::PlanReopenRequired,
-            review_scope: scope.clone(),
-            target_outline_id: (scope == WorkItemPlanReviewScope::Item)
-                .then(|| "outline_a".to_string()),
-            generation_round_id: if scope == WorkItemPlanReviewScope::Outline {
-                "legacy_work_item_plan_candidate".to_string()
-            } else {
-                "round_0001".to_string()
-            },
-            draft_id: (scope == WorkItemPlanReviewScope::Item).then(|| "draft_a".to_string()),
-            batch_id: (scope == WorkItemPlanReviewScope::Batch).then(|| "batch_a".to_string()),
-            review_action: WorkItemPlanReviewAction::ReviseOutline,
-            gates: vec![WorkItemPlanReviewGate::RequiresPlanReopen],
-            affects_items: Vec::new(),
-            warnings: Vec::new(),
-        }),
-        structured_output_diagnostic: None,
-    });
-    (tmp, lifecycle, source_node_id, engine)
-}
-
-fn make_work_item_plan_engine_with_accepted_contract_drafts()
+pub(crate) fn make_work_item_plan_engine_with_accepted_contract_drafts()
 -> (TempDir, LifecycleStore, String, WorkspaceEngine) {
     let (tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_initial_plan_revision_compile");
@@ -213,13 +159,24 @@ async fn work_item_plan_initial_compile_publishes_revision_and_projection_bundle
             )
             .unwrap();
     }
+    // park-1（8-19 验收欠账收敛）：initial revision compile 现在必须为每个
+    // logical work item 落一条 per-target LifecycleWorkItemRecord（id=entity
+    // 语义），供 coding 会话创建的 WorkItem 臂 find(entity_id) 解析仓归属。
     assert_eq!(
         lifecycle
             .count_work_items("project_0001", "issue_0001")
             .unwrap(),
-        lifecycle_work_item_count,
-        "initial revision compile must not create legacy LifecycleWorkItemRecord facts"
+        lifecycle_work_item_count + 2,
+        "initial revision compile must persist per-target LifecycleWorkItemRecord facts (wi_a/wi_b)"
     );
+    let persisted_ids = lifecycle
+        .list_work_items("project_0001", "issue_0001")
+        .unwrap()
+        .into_iter()
+        .map(|record| record.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(persisted_ids.contains("wi_a"));
+    assert!(persisted_ids.contains("wi_b"));
 }
 
 #[tokio::test]
@@ -271,40 +228,9 @@ async fn work_item_plan_compile_canonical_validation_failure_writes_no_revision_
     );
 }
 
-#[tokio::test]
-async fn item_and_batch_review_decision_require_active_round() {
-    for scope in [WorkItemPlanReviewScope::Item, WorkItemPlanReviewScope::Batch] {
-        let (_tmp, lifecycle, source_node_id, mut engine) =
-            prepare_outline_review_decision_without_index(scope.clone()).await;
-        let original_artifact_versions = engine.artifact_versions.clone();
-        let original_timeline_nodes = engine.timeline_nodes.clone();
-
-        let error = engine
-            .handle_review_decision("continue".to_string(), None)
-            .await
-            .expect_err("item/batch plan reopen must require an active round");
-
-        assert!(error.contains("work item plan active index missing"));
-        assert_eq!(engine.session().stage, WorkspaceStage::ReviewDecision);
-        assert_eq!(engine.active_node_id.as_deref(), Some(source_node_id.as_str()));
-        assert_eq!(
-            serde_json::to_value(&engine.artifact_versions).expect("artifact versions json"),
-            serde_json::to_value(original_artifact_versions).expect("original artifacts json")
-        );
-        assert_eq!(
-            serde_json::to_value(&engine.timeline_nodes).expect("timeline json"),
-            serde_json::to_value(original_timeline_nodes).expect("original timeline json")
-        );
-        assert_eq!(
-            lifecycle
-                .get_workspace_session(&engine.session.session_id)
-                .expect("workspace session")
-                .status,
-            WorkspaceSessionStatus::WaitingForHuman,
-            "{scope:?} failure must not leave lifecycle status Open"
-        );
-    }
-}
+// 退役留档（T5/REQ-RET-02）：`item_and_batch_review_decision_require_active_round` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn generation_mode_generic_request_revision_requires_active_round() {
@@ -365,22 +291,9 @@ async fn generation_mode_generic_request_revision_requires_active_round() {
     );
 }
 
-#[tokio::test]
-async fn legacy_outline_scope_review_decision_allows_missing_initial_round() {
-    let (_tmp, _lifecycle, _source_node_id, mut engine) =
-        prepare_outline_review_decision_without_index(WorkItemPlanReviewScope::Outline).await;
-
-    let outcome = engine
-        .handle_review_decision("continue".to_string(), None)
-        .await
-        .expect("legacy outline review keeps initial-round compatibility");
-
-    assert!(matches!(
-        outcome,
-        ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
-    ));
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-}
+// 退役留档（T5/REQ-RET-02）：`legacy_outline_scope_review_decision_allows_missing_initial_round` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 fn outline_revision_engine_snapshot(engine: &WorkspaceEngine) -> serde_json::Value {
     serde_json::json!({
@@ -578,43 +491,9 @@ async fn outline_revision_timeline_save_failure_rolls_back_everything() {
     );
 }
 
-#[tokio::test]
-async fn outline_revision_node_detail_save_failure_rolls_back_without_success_events() {
-    let (_tmp, lifecycle, plan_id, source_node_id, mut engine) =
-        make_atomic_outline_revision_engine("sess_outline_atomic_node_detail_save", false).await;
-    let engine_before = outline_revision_engine_snapshot(&engine);
-    let persisted_before =
-        outline_revision_persisted_snapshot(&lifecycle, &engine, &plan_id, &source_node_id);
-    let run_node_id = format!("timeline_node_{:03}", engine.timeline_nodes.len() + 1);
-    let details_root = workspace_timeline_root(&lifecycle, &engine).join("timeline_node_details");
-    std::fs::create_dir_all(&details_root).expect("create node details root");
-    let run_detail_blocker = details_root.join(format!("{run_node_id}.json"));
-    std::fs::create_dir(&run_detail_blocker).expect("block only the new run detail target");
-    let (event_tx, mut event_rx) = mpsc::channel(16);
-    engine.event_tx = event_tx;
-
-    let result = engine
-        .prepare_work_item_plan_outline_revision(
-            Some("node detail save failure".to_string()),
-            WorkItemPlanOutlineRevisionSource::HumanConfirm,
-            OutlineRevisionPersistencePolicy::AllowMissingInitialRound,
-        )
-        .await;
-
-    std::fs::remove_dir(&run_detail_blocker).expect("remove run detail blocker");
-    let error = result.expect_err("node detail save failure must fail the transaction");
-    assert!(error.contains("save outline revision run node detail failed"));
-    assert_eq!(outline_revision_engine_snapshot(&engine), engine_before);
-    assert_eq!(
-        outline_revision_persisted_snapshot(&lifecycle, &engine, &plan_id, &source_node_id),
-        persisted_before
-    );
-    assert!(matches!(
-        lifecycle.load_node_detail(&engine.session.session_id, &run_node_id),
-        Err(ProductStoreError::NotFound { .. })
-    ));
-    assert_no_outline_revision_success_events(&mut event_rx);
-}
+// 退役留档（T5/REQ-RET-02）：`outline_revision_node_detail_save_failure_rolls_back_without_success_events` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn outline_revision_prepared_journal_recovers_each_persistence_crash_point() {

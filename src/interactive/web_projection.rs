@@ -252,7 +252,12 @@ fn git_summary(workspace_root: &Path) -> GitSummary {
 }
 
 fn git_stdout(workspace_root: &Path, args: &[&str]) -> Option<String> {
+    // Bug45/T4 修复轮:web 投影面对 coder/reviewer 可写的 workspace 仓,
+    // 属平台受信启动面;子命令之前注入禁桥参数(与
+    // cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS 同源),status
+    // 不得询问仓库 core.fsmonitor 探针。
     let output = Command::new("git")
+        .args(crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS)
         .args(args)
         .current_dir(workspace_root)
         .output()
@@ -261,4 +266,63 @@ fn git_stdout(workspace_root: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    /// Bug45/T4 修复轮:web 投影 git_stdout 是平台受信启动面,不得执行
+    /// coder 可写仓的 core.fsmonitor 探针。
+    #[test]
+    fn web_projection_git_stdout_does_not_spawn_repo_fsmonitor_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = Path::new("/tmp/aria-bug45/t4");
+        std::fs::create_dir_all(base).expect("create /tmp/aria-bug45/t4 fixture base");
+        let temp = tempfile::tempdir_in(base).expect("fixture dir under /tmp/aria-bug45/t4");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let raw = |argv: &[&str]| {
+            let output = Command::new("git")
+                .args(argv)
+                .current_dir(&repo)
+                .output()
+                .expect("raw fixture git");
+            assert!(output.status.success());
+        };
+        raw(&["init", "--quiet", "-b", "main"]);
+        raw(&["config", "user.email", "aria-t4@example.invalid"]);
+        raw(&["config", "user.name", "Aria T4"]);
+        std::fs::write(repo.join("README.md"), "x\n").unwrap();
+        raw(&["add", "."]);
+        raw(&["commit", "--quiet", "-m", "init"]);
+
+        let fsmonitor_probe = repo.join(".git/aria-fsmonitor-fired");
+        let fsmonitor_hook = repo.join(".git/aria-fsmonitor-hook.sh");
+        std::fs::write(
+            &fsmonitor_hook,
+            format!("#!/bin/sh\n: > {}\nexit 1\n", fsmonitor_probe.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fsmonitor_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        raw(&[
+            "config",
+            "core.fsmonitor",
+            fsmonitor_hook.to_str().expect("utf8 hook path"),
+        ]);
+
+        let summary_dirty = git_stdout(&repo, &["status", "--porcelain"]);
+        assert!(summary_dirty.is_some(), "bridged status must succeed");
+        assert!(
+            !fsmonitor_probe.exists(),
+            "Bug45: web 投影 git_stdout 不得执行仓库 core.fsmonitor 探针"
+        );
+
+        raw(&["status", "--porcelain"]);
+        assert!(
+            fsmonitor_probe.exists(),
+            "对照失败:coder 域 status 应触发其自身 fsmonitor 探针,夹具失效"
+        );
+    }
 }

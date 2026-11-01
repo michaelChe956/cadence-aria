@@ -1,0 +1,1157 @@
+use chrono::Utc;
+
+use crate::product::coding_attempt_store::CodingAttemptStore;
+use crate::product::coding_models::PlanAmendmentContext;
+use crate::product::json_store::ProductStoreError;
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::models::{
+    HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, SingleCandidatePhase,
+    WorkItemPlanCompileStatus, WorkItemPlanCompileTransaction, WorkItemSplitFinding,
+    WorkspaceSessionStatus, WorkspaceType,
+};
+use crate::product::work_item_plan_compiler::grammar;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+
+// T4.1：确认 trust 按需登记的共用类型定义在 types.rs；本文件再导出供
+// web/manager 与同引擎测试以 `workspace_engine::conversational_gate::…`
+// 路径消费（mod.rs 的 types 重导出清单不在本 change 写面内）。
+pub(crate) use super::types::{ConfirmationTrustContext, ConfirmationTrustWaiting};
+
+mod story_terminate;
+
+#[derive(Debug)]
+pub(crate) enum ScManualRevisionResult {
+    Accepted {
+        artifact_ref: String,
+    },
+    ValidationRejected {
+        diagnostics: Vec<String>,
+        /// SG6a.2（Main 裁定(a)）：`Some` = 本次拒收已同 turn claim
+        /// attempt2（冻结机器指令 prompt 身份/全文与 provider start key
+        /// 随案），handler 消费唯一 claim/冻结 prompt 驱动 attempt2；
+        /// `None` = 无结构授权窗口（原门/operational 等待/耗尽），turn
+        /// 不因拒收终态化。
+        claim: Option<ScRevisionClaimCarry>,
+    },
+}
+pub(crate) const HUMAN_GATE_COMMAND_ID_MAX_BYTES: usize = 256;
+pub(crate) const HUMAN_GATE_BUDGET_EXHAUSTED_CODE: &str = "HUMAN_GATE_BUDGET_EXHAUSTED";
+/// 蒸发链修法②（诊断 local://diag-manual-revision-evaporate.md）：command_id
+/// 命中**终态**（Failed/Completed）turn 时的稳定拒收码。重连重放的幂等语义
+/// 只需覆盖 Reserved/Running——终态 turn 的 command_id 复用必须以可见错误
+/// 回显，否则提交被 Replayed 效果吞掉（零 durable 写 + 客户端对同 turn_id
+/// 幂等吞帧 = 无声蒸发，现场 workspace_session_0003 / turn 71b47478）。
+pub(crate) const HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN_CODE: &str =
+    "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN";
+/// Fixed upper bound for real provider starts belonging to one logical turn.
+/// A turn is reserved as attempt 1 and may be resumed once as attempt 2.
+pub(crate) const HUMAN_GATE_PROVIDER_MAX_ATTEMPTS: u32 = 2;
+/// 顺手项（attempt_no 单源）：turn 预约恒为 attempt 1（恢复链
+/// conversational_gate_recovery 可同 turn 续跑一次为 attempt 2）——预约侧
+/// 的 turn 字段与 provider_start 幂等键共用同一常量，不再散落字面量。
+const HUMAN_GATE_TURN_RESERVATION_ATTEMPT_NO: u32 = 1;
+
+#[derive(Debug, Clone)]
+pub(crate) struct HumanGateFeedbackInput {
+    pub command_id: String,
+    pub feedback: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HumanGateCommandOutcome {
+    TurnOpened {
+        turn: HumanGateTurn,
+        remaining_budget: u32,
+        prompt: String,
+    },
+    Busy {
+        turn_id: String,
+    },
+    Replayed {
+        turn: HumanGateTurn,
+    },
+    Rejected {
+        code: String,
+        reason: String,
+    },
+}
+
+// 关门裁决的 typed 结果,按值返回给 WS/REST 投影;Box 会波及两处投影。
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HumanGateCloseOutcome {
+    Confirmed,
+    Abandoned,
+    Busy {
+        turn_id: String,
+    },
+    /// 地雷 2（F3 run1d 实证）：另一 worker 已先行关门（durable Running/Confirmed），
+    /// 迟到 confirm 的幂等 no-op 结果——不 abort 会话，可见提示事件由 engine 发出。
+    AlreadyClosed {
+        status: WorkspaceSessionStatus,
+    },
+    /// T4.1（REQ-REG-15/D4）：确认 trust 未 Ready 的 typed 停等——SC 在
+    /// 静态资格预检后、原带写 close CAS 之前返回；零 durable 副作用、门
+    /// 保持开态（close CAS 未被推进，`close_cas_attempts` 可断言）。web
+    /// 层（change 5.1）以稳定 code `workspace_confirmation_trust_waiting`
+    /// 投影为 WS ProtocolError / REST 非成功 ApiError。
+    TrustWaiting {
+        waiting: ConfirmationTrustWaiting,
+    },
+}
+
+/// SC 门关门决策（L0 typed 重承载，REQ-RET-02/REQ-CG-04）：approve=既有
+/// `Confirm` 入站变体；abandon=显式 `AbandonHumanGate` 入站命令。与 legacy
+/// human-confirm 决策枚举零共用（该旧枚举随 L2 退役删除）；legacy
+/// RequestChange 在此类型面上不可表达（SC 门结构性拒绝，wire 面由 stage
+/// 白名单直接拒绝）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HumanGateCloseDecision {
+    Approve,
+    Abandon,
+}
+
+/// confirm 后 compile 失败的 typed 详情（SG3b）：`failure` 为本次 close 内
+/// Final Compile 捕获的 PlanningCompileFailure（failure_id/approval/source
+/// context 已 seal）；`validator_findings` 仅当本 close 运行
+/// （compile_run_id 匹配）的 Failed compile transaction 携带 strict
+/// validator findings 时非空——不同 failure 的旧 Failed tx 不捞。web 层
+/// （WS ProtocolError.context 与 REST 422 details）经 out.rs 纯投影共用。
+#[derive(Debug, Clone)]
+pub(crate) struct HumanGateCloseCompileFailure {
+    pub(crate) failure: super::types::PlanningCompileFailure,
+    pub(crate) validator_findings: Vec<WorkItemSplitFinding>,
+}
+
+impl HumanGateCloseCompileFailure {
+    /// SG3b：本次 close typed 失败 → out.rs wire DTO 的单源纯投影
+    ///（WS ProtocolError.context 与 REST 422 details 共用）。
+    pub(crate) fn wire_presentation(
+        &self,
+    ) -> crate::web::workspace_ws_types::out::PlanningCompileFailureDto {
+        use crate::web::workspace_ws_types::out::{
+            PlanningCompileFailureDto, PlanningCompileStructureFindingDto,
+        };
+        let failure = &self.failure;
+        let (kind, stable_code, cause, structure_findings) = match &failure.kind {
+            super::types::PlanningCompileFailureKind::Operational { stable_code, cause } => (
+                "operational".to_string(),
+                stable_code.clone(),
+                Some(cause.clone()),
+                Vec::new(),
+            ),
+            super::types::PlanningCompileFailureKind::Structure(set) => (
+                "structure".to_string(),
+                super::types::PlanningCompileFailure::STRUCTURE_STABLE_CODE.to_string(),
+                None,
+                set.failures
+                    .iter()
+                    .map(|item| PlanningCompileStructureFindingDto {
+                        code: item.kind.stable_code().to_string(),
+                        category: item.kind.category().as_str().to_string(),
+                        affected_ids: item.evidence.affected_ids.clone(),
+                    })
+                    .collect(),
+            ),
+        };
+        PlanningCompileFailureDto {
+            failure_id: failure.failure_id.clone(),
+            kind,
+            stable_code,
+            approval_attempt_id: failure.approval_attempt_id.clone(),
+            source_revision_ref: failure.source_revision_ref.clone(),
+            plan_candidate_ir_ref: failure.plan_candidate_ir_ref.clone(),
+            mechanical_report_ref: failure.mechanical_report_ref.clone(),
+            context_digest: failure.context_digest.clone(),
+            compile_run_id: failure.compile_run_id.clone(),
+            cause,
+            structure_findings,
+            validator_findings: self.validator_findings.clone(),
+        }
+    }
+}
+
+fn rejected(code: &str, reason: impl Into<String>) -> HumanGateCommandOutcome {
+    HumanGateCommandOutcome::Rejected {
+        code: code.to_string(),
+        reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) use story_terminate::register_story_terminate_drift_hook;
+
+/// Task 1.1 测试观察锚：SC 门 close 带写 CAS 的按会话尝试计数（仅测试构建
+/// 存在）。静态资格预检的拒收必须发生在任何带写 CAS 调用之前；计数不增即
+/// 证明拒收先于 CAS（生产构建 `note_close_cas_attempt` 为 no-op，不影响
+/// 锁/写路径）。与 story_terminate drift hook 同款测试注入纪律。
+#[cfg(test)]
+static CLOSE_CAS_ATTEMPT_COUNTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn note_close_cas_attempt(session_id: &str) {
+    let mut counts = CLOSE_CAS_ATTEMPT_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counts.entry(session_id.to_string()).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+pub(crate) fn close_cas_attempts(session_id: &str) -> u64 {
+    CLOSE_CAS_ATTEMPT_COUNTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(not(test))]
+#[inline]
+fn note_close_cas_attempt(_session_id: &str) {}
+
+fn non_terminal(turn: &HumanGateTurn) -> bool {
+    matches!(
+        turn.status,
+        HumanGateTurnStatus::Reserved | HumanGateTurnStatus::Running
+    )
+}
+
+/// 蒸发链修法②：按 (session_id, command_id) 查重命中的 turn 分派重放效果——
+/// 非终态（Reserved/Running）保持 `Replayed`（重连重放幂等，回显 TurnOpen）；
+/// 终态（Failed/Completed）返回 typed `Rejected` 回显——该 command_id 已被
+/// durable 终态消费，任何客户端都能把 ProtocolError/422 显示出来，蒸发变
+/// 回显。
+fn replay_outcome_for_command_turn(turn: HumanGateTurn) -> HumanGateCommandOutcome {
+    if non_terminal(&turn) {
+        HumanGateCommandOutcome::Replayed { turn }
+    } else {
+        rejected(
+            HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN_CODE,
+            format!(
+                "command_id was already consumed by terminal turn {} ({:?}); \
+                 resubmit feedback with a fresh command_id",
+                turn.turn_id, turn.status
+            ),
+        )
+    }
+}
+
+pub(crate) fn validate_command_id(command_id: &str) -> Result<(), String> {
+    if command_id.trim().is_empty() {
+        return Err("INVALID_COMMAND_ID: command_id must not be blank".to_string());
+    }
+    if command_id.len() > HUMAN_GATE_COMMAND_ID_MAX_BYTES {
+        return Err(format!(
+            "HUMAN_GATE_COMMAND_ID_TOO_LARGE: command_id exceeds {} bytes",
+            HUMAN_GATE_COMMAND_ID_MAX_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn validate_feedback(feedback: &str) -> Result<(), String> {
+    super::prompts::validate_sc_manual_revision_feedback(feedback)
+}
+
+/// Task 1.1（REQ-REG-15 方案 A/D1）：SC Approve 静态资格预检——在**已加载的
+/// expected** 上纯判 `single_candidate_phase ∈ {Approval, Evaluate}` 且
+/// `human_gate_snapshot` 非空；不满足时返回与 store 原关门 CAS 同类的
+/// Conflict，交既有 `translate_human_gate_close_cas_error` 翻译拒收。
+/// 零副作用：不读不写 store、不取锁，零 ensure/home/ownership/audit，也
+/// 不调用带写入的 CAS 充当预检；store 层判据
+/// （`compare_and_save_human_gate_close`）一字不动。供 close Approve 臂
+/// （登记/带写 CAS 之前）拒收，及 Task 4 确认准备接线复用。
+fn human_gate_approve_static_eligibility(
+    expected: &crate::product::models::WorkspaceSessionRecord,
+) -> Result<(), ProductStoreError> {
+    if matches!(
+        expected.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval) | Some(SingleCandidatePhase::Evaluate)
+    ) && expected.human_gate_snapshot.is_some()
+    {
+        Ok(())
+    } else {
+        Err(ProductStoreError::Conflict {
+            kind: "human_gate_close",
+            id: expected.id.clone(),
+        })
+    }
+}
+/// C2 Task 11：SC 修订组装记录文件（session 分区；"组装 digest 记录"）。
+pub(crate) const SC_REVISION_ASSEMBLY_FILE: &str = "sc-revision-assembly.json";
+/// C2 Task 11：大候选停等等待事实文件（session 分区；Task 12 投影
+/// kind `large_candidate_blocked`）。
+pub(crate) const SC_REVISION_BLOCKED_FILE: &str = "sc-revision-blocked.json";
+
+// C2 Task 11：分块交付与静态预算表供 WS/REST 层与测试消费（同模块再导出）。
+// 分块交付渲染/重组仅由 cfg(test) 消费（生产交付走 artifact 引用路径）。
+#[cfg(test)]
+pub(crate) use super::prompts::{render_sc_revision_delivery, sc_provider_input_budget};
+
+/// C2 Task 11：SC 修订组装记录（inline 交付不落账——零新增持久化）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScRevisionAssemblyRecord {
+    pub session_id: String,
+    pub command_id: String,
+    pub total_bytes: usize,
+    pub transport: super::prompts::ScCandidateTransport,
+    pub created_at: String,
+}
+
+/// C2 Task 11：大候选停等等待事实（CAS 前拒绝时落账；操作面
+/// segmented_revision／retry 由用户点击后才开新回合）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScRevisionBlockedRecord {
+    pub session_id: String,
+    pub command_id: String,
+    pub reason_code: String,
+    pub detail: String,
+    pub total_bytes: usize,
+    pub hard_limit_bytes: usize,
+    pub actions: Vec<String>,
+    pub created_at: String,
+}
+
+/// "CODE: reason" 稳定码拆分（无前缀时整串作 code）。
+fn split_stable_error(error: &str) -> (String, &str) {
+    match error.split_once(':') {
+        Some((code, reason)) => (code.to_string(), reason.trim()),
+        None => (error.to_string(), ""),
+    }
+}
+include!("conversational_gate_parts/sc_revision_delivery.inc.rs");
+
+impl super::WorkspaceEngine {
+    /// F-49/A6：门内人工修订轮必须与普通 SC 修订同构地落在一个 author 节点上。
+    ///
+    /// 修订轮此前沿用 `active_timeline_node_id()`——门内活动节点就是 HumanConfirm
+    /// 门节点，于是 revision prompt / streaming_content / output 事件 / artifact_ref
+    /// 与「产物版本 source_node_id」全部写进门节点 detail。门节点
+    /// `node_type=human_confirm` 在前端对话流 rebuild 的 `chatRoleForTimelineNode`
+    /// 判为 `null`，整节点零条目（实测 issue_0002/workspace_session_0009：artifact v3
+    /// 挂 timeline_node_006，74 条 rebuild 条目里既无 node_006 也无 v3），用户侧
+    /// 「author 修订步不可见」。
+    ///
+    /// 本入口给出与普通 SC 修订（`single_candidate.rs` 的 SC author Run）同构的载体：
+    /// 活动节点已是 AuthorRun 时复用——provider 在修订 run 内中断、恢复以同一 turn
+    /// 重跑时不得重复建节点（与 SC author 的选节点约定一致）；否则新建 AuthorRun
+    /// 节点（agent=author provider；stage 取会话阶段 human_confirm，理由见方法内注释）。
+    /// 修订事实随之落在该节点 detail 上，前端既有 rebuild 分支（`author_run` →
+    /// author 气泡）与 live `TimelineNodeCreated` 帧即可渲染「author 正在修订 /
+    /// 修订完成」；本入口不新造事件类型，`human_gate_turn_open`/
+    /// `human_gate_turn_completed` 契约（REQ-CG-01/03）零变化。
+    pub(crate) async fn begin_work_item_plan_human_gate_revision_run(&mut self) -> String {
+        use crate::product::workspace_engine::TimelineNodeDraft;
+        use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+
+        if self.active_node_type() == Some(TimelineNodeType::AuthorRun)
+            && let Some(node_id) = self.active_node_id.clone()
+        {
+            return node_id;
+        }
+        // stage 必须与会话阶段一致（human_confirm）：`WorkspaceEngine::new_persistent`
+        // 对非空 durable 时间线以「活动节点的 stage」重建 `session.stage`
+        // （lifecycle.rs 的 `workspace_stage_from_ws_stage`），而门内修订期间会话阶段
+        // 恒为 human_confirm——门命令语义（REQ-CG-02 单飞：在飞 turn 期间 feedback/
+        // approve/abandon 返回 gate_busy）以该阶段为前提。若本节点写成 running，
+        // 重连/第二 worker 重建后会把阶段推导为 running，门命令被拒为
+        // STAGE_INVALID（campaign 单飞用例实测回归），用户重连即失去门内反馈能力。
+        self.create_timeline_node(TimelineNodeDraft {
+            node_type: TimelineNodeType::AuthorRun,
+            agent: Some(self.session.author_provider.clone()),
+            stage: super::WorkspaceStage::HumanConfirm,
+            round: None,
+            title: "Work Item Plan 生成".to_string(),
+            summary: None,
+            status: TimelineNodeStatus::Active,
+        })
+        .await
+    }
+
+    pub(crate) fn mark_human_gate_turn_running(&mut self, turn_id: &str) -> Result<(), String> {
+        use crate::product::models::HumanGateTurnStatus;
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let mut turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if turn.status == HumanGateTurnStatus::Running {
+            return Ok(());
+        }
+        if turn.status != HumanGateTurnStatus::Reserved {
+            return Err(format!("human gate turn {turn_id} is not reservable"));
+        }
+        turn.status = HumanGateTurnStatus::Running;
+        turn.updated_at = Utc::now().to_rfc3339();
+        let saved = store
+            .update_human_gate_turn(&expected, turn)
+            .map_err(|error| error.to_string())?;
+        self.session.provider_start_ledger = saved.provider_start_ledger;
+        Ok(())
+    }
+
+    /// 终态化一个 human-gate turn（durable Failed + failure_class）。返回
+    /// `true` 表示发生了真实迁移；已终态（Completed/Failed）的 turn 幂等
+    /// 返回 `Ok(false)`——调用方（取消臂回显）据此不重复回显误导帧。
+    ///
+    /// 蒸发链顺手项：迁移成功时同步收口修订 author 载体节点（与成功路径
+    /// revision_turn.inc.rs 的 complete_active_node 同构）——否则节点永停
+    /// Active（时间线幻影，现场 workspace_session_0003 node_005）。
+    pub(crate) async fn fail_human_gate_turn(
+        &mut self,
+        turn_id: &str,
+        failure_class: crate::product::models::HumanGateTurnFailureClass,
+    ) -> Result<bool, String> {
+        use crate::product::models::HumanGateTurnStatus;
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let mut turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if matches!(
+            turn.status,
+            HumanGateTurnStatus::Completed | HumanGateTurnStatus::Failed
+        ) {
+            return Ok(false);
+        }
+        turn.status = HumanGateTurnStatus::Failed;
+        turn.failure_class = Some(failure_class);
+        turn.updated_at = Utc::now().to_rfc3339();
+        let saved = store
+            .update_human_gate_turn(&expected, turn)
+            .map_err(|error| error.to_string())?;
+        self.session.provider_start_ledger = saved.provider_start_ledger;
+        self.close_revision_author_node_after_turn_failure().await;
+        Ok(true)
+    }
+
+    /// 失败收口：活动节点是修订 author 载体（AuthorRun）时置 Failed。门节点
+    /// 载体（历史直驱形态）保持 Active——门仍开着，收口归 enter_human_confirm
+    /// 与终态 compile。
+    async fn close_revision_author_node_after_turn_failure(&mut self) {
+        use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+        if self.active_node_type() == Some(TimelineNodeType::AuthorRun)
+            && let Some(node_id) = self.active_node_id.clone()
+        {
+            self.update_timeline_node(
+                &node_id,
+                TimelineNodeStatus::Failed,
+                Some("人工修订失败，本轮反馈未采纳".to_string()),
+            )
+            .await;
+        }
+    }
+}
+
+include!("conversational_gate_parts/revision_turn.inc.rs");
+include!("conversational_gate_parts/dispositions.inc.rs");
+
+impl super::WorkspaceEngine {
+    pub(crate) async fn handle_human_gate_feedback(
+        &mut self,
+        input: HumanGateFeedbackInput,
+    ) -> Result<HumanGateCommandOutcome, String> {
+        // A replay is intentionally checked before stage and budget checks so
+        // reconnects can safely resend a command after the session advanced.
+        if let Err(error) = validate_command_id(&input.command_id) {
+            let (code, reason) = error
+                .split_once(':')
+                .map_or(("INVALID_COMMAND_ID", error.as_str()), |(code, reason)| {
+                    (code, reason.trim())
+                });
+            return Ok(rejected(code, reason));
+        }
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        if let Some(turn) = store
+            .get_human_gate_turn_by_command_id(&self.session.session_id, &input.command_id)
+            .map_err(|error| error.to_string())?
+        {
+            // 蒸发链修法②：终态 turn 的 command_id 复用必须 typed 拒收回显，
+            // 仅 Reserved/Running 保持重连重放幂等。
+            return Ok(replay_outcome_for_command_turn(turn));
+        }
+
+        // REQ-GCE-03 场景二：attempt 处于 AwaitingPlanAmendment 期间，原 SC plan
+        // session 以 amendment 上下文重开同一人工门接受 typed feedback。stage 不在
+        // HumanConfirm 时先探测并校验 session/plan lineage 与 PlanAmendmentContext，
+        // 命中才放行；否则保持既有 stage 拒绝语义（零副作用）。
+        let amendment_gate = self.probe_amendment_gate_context()?;
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || (self.session.stage != super::WorkspaceStage::HumanConfirm
+                && amendment_gate.is_none())
+        {
+            return Ok(rejected(
+                "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
+                "human gate feedback is only available for a single-candidate work-item plan in human_confirm",
+            ));
+        }
+        if let Err(error) = validate_feedback(&input.feedback) {
+            let (code, reason) = error.split_once(':').map_or(
+                ("INVALID_HUMAN_GATE_FEEDBACK", error.as_str()),
+                |(code, reason)| (code, reason.trim()),
+            );
+            return Ok(rejected(code, reason));
+        }
+
+        let turns = store
+            .list_human_gate_turns(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        if let Some(turn) = turns.iter().find(|turn| non_terminal(turn)) {
+            return Ok(HumanGateCommandOutcome::Busy {
+                turn_id: turn.turn_id.clone(),
+            });
+        }
+
+        let remaining_budget = self
+            .session
+            .human_gate_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.manual_repairs_remaining)
+            .ok_or_else(|| "human gate snapshot is missing".to_string())?;
+        if remaining_budget == 0 {
+            return Ok(rejected(
+                HUMAN_GATE_BUDGET_EXHAUSTED_CODE,
+                "manual repair budget is exhausted",
+            ));
+        }
+
+        // 构造完整 SC revision prompt 必须发生在 HumanGateTurn CAS 之前。这样候选或
+        // 固定契约超出预算时，反馈请求只返回 bounded error，不消耗预算/ledger。
+        let prompt = match self.build_sc_manual_revision_prompt_for_turn(&input.feedback) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                let (code, reason) = error.split_once(':').map_or(
+                    ("HUMAN_GATE_REVISION_CANDIDATE_MISSING", error.as_str()),
+                    |(code, reason)| (code, reason.trim()),
+                );
+                return Ok(rejected(code, reason));
+            }
+        };
+
+        // C2 Task 11（REQ-CG-03，#15）：完整预算口径——扣回合前以 UTF-8 字节
+        // 计算完整组装输入并与所选 provider 静态预算比较：≤inline 整体内联
+        // （零新增持久化，现行为）；超 inline 但硬限内先持久化组装 artifact
+        // （readback digest 校验）经 ArtifactRef 传输完整原文并记录组装 digest；
+        // artifact 不可读或完整输入超硬限在 turn CAS 之前拒绝停等（门状态、
+        // manual_repairs_remaining 与 provider 启动计数不变），落大候选停等
+        // 等待事实（Task 12 投影 large_candidate_blocked）。
+        let prompt = match self.assemble_sc_revision_delivery(&input.command_id, prompt) {
+            Ok(prompt) => prompt,
+            Err((code, reason)) => return Ok(rejected(&code, reason)),
+        };
+
+        let now = Utc::now().to_rfc3339();
+        let source_hash = self
+            .session
+            .artifact
+            .as_ref()
+            .map(|artifact| {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(artifact.markdown_or_empty().as_bytes()))
+            })
+            .unwrap_or_default();
+        let turn = HumanGateTurn {
+            turn_id: format!("human_gate_turn_{}", uuid::Uuid::new_v4()),
+            session_id: self.session.session_id.clone(),
+            command_id: input.command_id.clone(),
+            feedback_text: input.feedback,
+            status: HumanGateTurnStatus::Reserved,
+            attempt_no: HUMAN_GATE_TURN_RESERVATION_ATTEMPT_NO,
+            budget_reserved: 1,
+            source_hash,
+            result_artifact_ref: None,
+            failure_class: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let reservation = HumanGateReservation {
+            command_id: turn.command_id.clone(),
+            turn_id: turn.turn_id.clone(),
+            provider_start_idempotency_key: format!(
+                "human_gate:{}:attempt:{}",
+                turn.turn_id, HUMAN_GATE_TURN_RESERVATION_ATTEMPT_NO
+            ),
+            reserved_at: now,
+        };
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        // Re-check the durable status immediately before the CAS.  A websocket
+        // may have retained a fresh-looking in-memory stage while another
+        // worker already advanced the session; reserving a turn in that stale
+        // window would reopen a closed gate.
+        let expected =
+            if expected.status == WorkspaceSessionStatus::Confirmed && amendment_gate.is_some() {
+                // amendment 上下文重开：CAS Confirmed→WaitingForHuman，门快照与预算
+                // 原样保留（D11 单一预算源），不新建第二个门实例。
+                match store.compare_and_reopen_amendment_gate(&expected) {
+                    Ok(saved) => {
+                        self.session.session_status = saved.status.clone();
+                        self.session.human_gate_snapshot = saved.human_gate_snapshot.clone();
+                        saved
+                    }
+                    Err(_) => {
+                        return Ok(rejected(
+                            "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
+                            "amendment gate reopen lost the durable race",
+                        ));
+                    }
+                }
+            } else {
+                expected
+            };
+        if expected.status != WorkspaceSessionStatus::WaitingForHuman {
+            return Ok(rejected(
+                "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID",
+                "human gate feedback requires a waiting_for_human session",
+            ));
+        }
+        let (saved, saved_turn) =
+            match store.compare_and_reserve_human_gate_turn(&expected, turn, reservation) {
+                Ok(result) => result,
+                Err(error) => {
+                    // Another websocket worker may have won the CAS. Reconcile
+                    // from disk and report the durable single-flight owner.
+                    if let Some(existing) = store
+                        .get_human_gate_turn_by_command_id(
+                            &self.session.session_id,
+                            &input.command_id,
+                        )
+                        .map_err(|read_error| read_error.to_string())?
+                    {
+                        // 蒸发链修法②：和解路径同款分派——竞态窗口内同
+                        // command_id 的 turn 已终态时同样 typed 拒收。
+                        return Ok(replay_outcome_for_command_turn(existing));
+                    }
+                    if let Some(existing) = store
+                        .list_human_gate_turns(&self.session.session_id)
+                        .map_err(|read_error| read_error.to_string())?
+                        .into_iter()
+                        .find(non_terminal)
+                    {
+                        return Ok(HumanGateCommandOutcome::Busy {
+                            turn_id: existing.turn_id,
+                        });
+                    }
+                    return Err(error.to_string());
+                }
+            };
+        self.session.human_gate_snapshot = saved.human_gate_snapshot;
+        self.session.provider_start_ledger = saved.provider_start_ledger;
+        // C2 Task 11：成功开回合闭合大候选停等等待事实（如有）。
+        self.clear_sc_revision_blocked();
+        Ok(HumanGateCommandOutcome::TurnOpened {
+            turn: saved_turn,
+            remaining_budget: remaining_budget - 1,
+            prompt,
+        })
+    }
+
+    pub(crate) async fn handle_human_gate_termination(
+        &mut self,
+        decision: HumanGateCloseDecision,
+    ) -> Result<HumanGateCloseOutcome, String> {
+        // SG3b：入口先清 typed close 失败 stash（close_human_gate 内再清一次，
+        // 覆盖绕过本入口的直调路径）。
+        self.last_gate_close_compile_failure = None;
+        // F-18（w2c 实测矩阵）：story/design 会话（legacy 流）恒停
+        // author_confirm 门——approve 有 HTTP confirm 端点，terminate 此前
+        // 零通路。typed abandon 对 story/design 门分流到本门关门语义
+        //（门开态/幂等判据在 terminate_story_author_gate 内读 durable）；
+        // WorkItemPlan 会话仍走 SC close。
+        if matches!(decision, HumanGateCloseDecision::Abandon)
+            && matches!(
+                self.session.workspace_type,
+                WorkspaceType::Story | WorkspaceType::Design
+            )
+        {
+            return self.terminate_story_author_gate().await;
+        }
+        self.close_human_gate(decision).await
+    }
+
+    /// Atomically closes the single-candidate human gate. Approval enters the
+    /// existing deterministic compile path and only becomes Confirmed after
+    /// that path durably publishes the plan; termination is terminal without
+    /// creating a compile transaction.
+    pub(crate) async fn close_human_gate(
+        &mut self,
+        decision: HumanGateCloseDecision,
+    ) -> Result<HumanGateCloseOutcome, String> {
+        // SG3b：typed close 失败 stash 在任何早退（含 stage 拒绝）前清空——
+        // 非 close 运行（如 routing 直入 compile）留下的 stash 不得泄漏为
+        // 本次 close 的失败上下文。
+        self.last_gate_close_compile_failure = None;
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan
+            || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || self.session.stage != super::WorkspaceStage::HumanConfirm
+        {
+            return Err("human gate close is only available for a single-candidate work-item plan in human_confirm".to_string());
+        }
+
+        let expected = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        if expected.status != WorkspaceSessionStatus::WaitingForHuman {
+            // 地雷 2（先到者赢）：durable 已非 WaitingForHuman 说明另一 worker 已
+            // 关门/推进；迟到 approve/abandon 重读 durable 翻译（幂等
+            // AlreadyClosed/明确已终止错误），不再把迟到者当噪音 Err 上抛
+            //（曾致 session aborted）。
+            return self
+                .translate_lost_human_gate_close_race(
+                    &lifecycle,
+                    decision,
+                    "human gate close requires a waiting_for_human session".to_string(),
+                )
+                .await;
+        }
+        if let Some(turn) = lifecycle
+            .list_human_gate_turns(&self.session.session_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(non_terminal)
+        {
+            return Ok(HumanGateCloseOutcome::Busy {
+                turn_id: turn.turn_id,
+            });
+        }
+
+        // C1（REQ-C1-GATE-01）：门快照携带候选恢复评估 label 时（C1 后开启
+        // 的候选审批门），approve 前按 durable 事实重估完整性；不完整则
+        // fail-closed——不扣预算、不启动 compile/provider、不伪造已批准。
+        // label 缺席（旧会话/legacy 门）保持既有 approve 语义零回归。
+        if matches!(decision, HumanGateCloseDecision::Approve)
+            && expected
+                .human_gate_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.candidate_recovery.as_ref())
+                .is_some()
+        {
+            let facts = self.assess_candidate_snapshot()?;
+            if !facts.complete {
+                return Err(format!(
+                    "CANDIDATE_SNAPSHOT_INCOMPLETE: missing {:?}; approve is fail-closed until the candidate gate is recovered or rebuilt",
+                    facts.missing
+                ));
+            }
+        }
+
+        match decision {
+            HumanGateCloseDecision::Approve => {
+                // REQ-WSC-19（owner 2026-10-31）：「确认当前版本」不是「跳过
+                // 编译」——approve 之后必然重跑同一次 Final Compile。当前候选
+                // 已确定编译不过时，放行只会原样再失败一次（owner 点多少次都
+                // 一样），因此平台侧 fail-closed：零 durable 写、门保持打开，
+                // 并给出原因与出路。判据是 durable 候选编译事实 × 当前候选
+                // 绑定，前端禁用按钮只是同一判据的呈现面。
+                self.ensure_current_candidate_compile_not_failed()?;
+                // Task 1.1：静态资格预检（零副作用）——无效资格在任何带写
+                // close CAS 与（Task 4 接线的）trust 登记之前拒收，沿原
+                // Conflict 既有翻译；不调用 CAS 充当预检。
+                if let Err(error) = human_gate_approve_static_eligibility(&expected) {
+                    return self
+                        .translate_human_gate_close_cas_error(&lifecycle, decision, error)
+                        .await;
+                }
+                // T4.1（REQ-REG-15 方案 A/D1）：静态资格预检通过后、原带写
+                // close CAS 之前，按 durable expected 的 author/effective
+                // reviewer 做确认 trust 按需准备；未 Ready 返回 typed
+                // TrustWaiting（门不变，close CAS 不推进——计数锚不变）。
+                if let Err(waiting) = self
+                    .ensure_confirmation_trust_ready(
+                        expected.author_provider.clone(),
+                        expected.reviewer_provider.clone(),
+                    )
+                    .await
+                {
+                    return Ok(HumanGateCloseOutcome::TrustWaiting { waiting });
+                }
+                note_close_cas_attempt(&self.session.session_id);
+                let saved = match lifecycle
+                    .compare_and_save_human_gate_close(&expected, WorkspaceSessionStatus::Running)
+                {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        return self
+                            .translate_human_gate_close_cas_error(&lifecycle, decision, error)
+                            .await;
+                    }
+                };
+                self.session.session_status = saved.status;
+                // 人工权威升级后的内存同步：close CAS 已把 durable phase 原子提升
+                // 为 Approval，内存相位必须同步，否则 compile 链以内存 phase 判
+                // auto_confirm 时 compile 会成功但不落 Confirmed 而回
+                // enter_human_confirm。
+                self.session.single_candidate_phase = saved.single_candidate_phase.clone();
+                self.session.human_gate_snapshot = saved.human_gate_snapshot;
+                self.enter_policy_valid_work_item_plan_compile_trust_ready()
+                    .await;
+
+                let durable = lifecycle
+                    .get_workspace_session(&self.session.session_id)
+                    .map_err(|error| error.to_string())?;
+                self.session.session_status = durable.status.clone();
+                self.session.single_candidate_phase = durable.single_candidate_phase.clone();
+                self.session.human_gate_snapshot = durable.human_gate_snapshot.clone();
+                if durable.status != WorkspaceSessionStatus::Confirmed
+                    || durable.single_candidate_phase
+                        != Some(crate::product::models::SingleCandidatePhase::Completed)
+                {
+                    return Err(self.single_candidate_gate_close_failure_error());
+                }
+                let _ = self
+                    .event_tx
+                    .send(super::EngineEvent::HumanGateClosed {
+                        decision: "confirm".to_string(),
+                        stage: self.session.stage.as_str().to_string(),
+                    })
+                    .await;
+                Ok(HumanGateCloseOutcome::Confirmed)
+            }
+            HumanGateCloseDecision::Abandon => {
+                note_close_cas_attempt(&self.session.session_id);
+                let saved = match lifecycle.compare_and_save_human_gate_close(
+                    &expected,
+                    WorkspaceSessionStatus::Terminated,
+                ) {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        return self
+                            .translate_human_gate_close_cas_error(&lifecycle, decision, error)
+                            .await;
+                    }
+                };
+                self.session.session_status = saved.status;
+                self.session.human_gate_snapshot = saved.human_gate_snapshot;
+                let terminal_stage = super::WorkspaceStage::Completed;
+                self.session.stage = terminal_stage.clone();
+                let _ = self
+                    .event_tx
+                    .send(super::EngineEvent::HumanGateClosed {
+                        decision: "terminate".to_string(),
+                        stage: terminal_stage.as_str().to_string(),
+                    })
+                    .await;
+                self.complete_active_node(Some("已终止".to_string())).await;
+                self.transition_stage(terminal_stage).await;
+                let _ = self
+                    .create_timeline_node(super::TimelineNodeDraft {
+                        node_type: super::TimelineNodeType::Completed,
+                        agent: None,
+                        stage: super::WorkspaceStage::Completed,
+                        round: None,
+                        title: "流程终止".to_string(),
+                        summary: Some("已终止".to_string()),
+                        status: super::TimelineNodeStatus::Completed,
+                    })
+                    .await;
+                Ok(HumanGateCloseOutcome::Abandoned)
+            }
+        }
+    }
+
+    /// close CAS 错误的 engine 层翻译（地雷 2）：store 的 expected 快照单飞
+    /// 原子性一字不动；仅在 Conflict 时重读 durable 把迟到者翻译成幂等结果/明确
+    /// 错误，其余错误与非幂等真冲突维持既有上抛。
+    async fn translate_human_gate_close_cas_error(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        decision: HumanGateCloseDecision,
+        error: ProductStoreError,
+    ) -> Result<HumanGateCloseOutcome, String> {
+        let fallback = error.to_string();
+        if !matches!(error, ProductStoreError::Conflict { .. }) {
+            return Err(fallback);
+        }
+        self.translate_lost_human_gate_close_race(lifecycle, decision, fallback)
+            .await
+    }
+
+    /// 迟到 close 命令的 durable 重读翻译：先到者赢、后到者幂等友好。
+    /// - durable 已 Terminated → 明确「gate 已终止」错误（非 conflict 噪音）
+    /// - durable 已 Running/Confirmed 且本命令为 confirm 方向 → 幂等
+    async fn translate_lost_human_gate_close_race(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        decision: HumanGateCloseDecision,
+        fallback: String,
+    ) -> Result<HumanGateCloseOutcome, String> {
+        let durable = match lifecycle.get_workspace_session(&self.session.session_id) {
+            Ok(durable) => durable,
+            Err(_) => return Err(fallback),
+        };
+        let direction = match decision {
+            HumanGateCloseDecision::Approve => "confirm",
+            HumanGateCloseDecision::Abandon => "terminate",
+        };
+        match (&durable.status, decision) {
+            (WorkspaceSessionStatus::Terminated, _) => Err(format!(
+                "single-candidate human gate already terminated; late {direction} is rejected (session {})",
+                self.session.session_id
+            )),
+            (
+                status @ (WorkspaceSessionStatus::Running | WorkspaceSessionStatus::Confirmed),
+                HumanGateCloseDecision::Approve,
+            ) => {
+                // 先到者已赢：迟到 confirm 是幂等 no-op。同步 in-memory 会话状态并
+                // 发一条可见提示事件；不产生第二个 HumanGateClosed，也不 abort。
+                self.session.session_status = status.clone();
+                self.session.single_candidate_phase = durable.single_candidate_phase.clone();
+                self.session.human_gate_snapshot = durable.human_gate_snapshot.clone();
+                let _ = self
+                    .event_tx
+                    .send(super::EngineEvent::ProtocolError {
+                        code: "HUMAN_GATE_ALREADY_CLOSED".to_string(),
+                        message: "single-candidate human gate already closed by an earlier confirm; this late confirm is an idempotent no-op"
+                            .to_string(),
+                        context: Some(serde_json::json!({
+                            "session_id": self.session.session_id,
+                            "decision": "confirm",
+                            "durable_status": serde_json::to_value(status).unwrap_or_default(),
+                        })),
+                    })
+                    .await;
+                Ok(HumanGateCloseOutcome::AlreadyClosed {
+                    status: status.clone(),
+                })
+            }
+            _ => Err(fallback),
+        }
+    }
+
+    /// confirm 后 compile 未达 Confirmed/Completed 的失败错误（SG3b typed
+    /// 化）：消息与结构化副本都来自本次 close 内 Final Compile 捕获的
+    /// PlanningCompileFailure——typed failure_id/approval/source context 直
+    /// 达 web 层；validator findings 仅按本 close 运行（compile_run_id 匹配
+    /// 的 Failed compile transaction）附带，不同 failure 的旧 Failed tx
+    /// 不得被 latest-scan 捞为本次失败事实。stash 缺席（本次 close 未运行
+    /// compile，如 durable 竞态翻译路径）保持基础消息，不伪结构化上下文。
+    fn single_candidate_gate_close_failure_error(&mut self) -> String {
+        let mut message =
+            "single-candidate approval compile failed; human gate remains open".to_string();
+        let Some(mut captured) = self.last_gate_close_compile_failure.take() else {
+            return message;
+        };
+        message.push_str("\nfailure_id: ");
+        message.push_str(&captured.failure.failure_id);
+        message.push('\n');
+        message.push_str(&captured.failure.render());
+        if let Some(run_id) = captured.failure.compile_run_id.as_deref()
+            && let Some(tx) = self.latest_failed_compile_tx_for_run(run_id)
+        {
+            if let Some(reason) = tx.failure_reason.as_deref() {
+                message.push_str("\nfailure_reason: ");
+                message.push_str(reason);
+            }
+            if !tx.validator_findings.is_empty() {
+                message.push_str("\nvalidator findings:");
+                for finding in &tx.validator_findings {
+                    message.push_str(&format!(
+                        "\n[{}] {}: {} (work_items: {})",
+                        finding.severity.as_str(),
+                        finding.code,
+                        finding.message,
+                        finding.work_item_ids.join(", ")
+                    ));
+                }
+            }
+            captured.validator_findings = tx.validator_findings.clone();
+        }
+        self.last_gate_close_compile_failure = Some(captured);
+        message
+    }
+
+    /// 本 close 运行身份（compile_id）匹配的最近 Failed compile transaction。
+    fn latest_failed_compile_tx_for_run(
+        &self,
+        compile_run_id: &str,
+    ) -> Option<WorkItemPlanCompileTransaction> {
+        if self.session.workspace_type != WorkspaceType::WorkItemPlan {
+            return None;
+        }
+        self.work_item_plan_store()
+            .ok()?
+            .list_compile_transactions(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .ok()?
+            .into_iter()
+            .filter(|tx| {
+                tx.status == WorkItemPlanCompileStatus::Failed && tx.compile_id == compile_run_id
+            })
+            .max_by(|left, right| left.created_at.cmp(&right.created_at))
+    }
+
+    /// web 层读取本次 close 内 Final Compile typed 失败的结构化载体（仅在
+    /// 同一 close 调用内失败时非空，避免陈旧失败误挂）；WS ProtocolError
+    /// .context 与 REST 422 details 经 out.rs
+    /// `planning_compile_failure_presentation` 同源投影。
+    pub(crate) fn last_human_gate_close_compile_failure(
+        &self,
+    ) -> Option<&HumanGateCloseCompileFailure> {
+        self.last_gate_close_compile_failure.as_ref()
+    }
+}
+
+impl super::WorkspaceEngine {
+    /// REQ-WSC-13（owner 2026-10-30 裁定，取舍 2=A）：把 owner 的逐条
+    /// 「排除此项」落成 durable 已处置事实清单。`finding_keys` 是平台算的
+    /// finding 身份；非空才写。摘要取本轮（最近一次）评审 verdict 的同一
+    /// 内容身份 finding，供下一轮 reviewer 复述。
+    pub(crate) async fn record_owner_finding_exclusions(
+        &mut self,
+        finding_keys: &[String],
+    ) -> Result<usize, String> {
+        let Some(store) = self.lifecycle_store.clone() else {
+            return Ok(0);
+        };
+        let keys = finding_keys
+            .iter()
+            .map(|key| key.trim().to_string())
+            .filter(|key| crate::product::models::HumanDispositionRecord::is_valid_finding_key(key))
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let summaries: std::collections::BTreeMap<String, String> = self
+            .latest_review_verdict
+            .as_ref()
+            .map(|verdict| {
+                verdict
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        (
+                            finding.computed_finding_key(),
+                            finding_summary(&finding.message),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let now = Utc::now().to_rfc3339();
+        let records = keys
+            .into_iter()
+            .map(|key| crate::product::models::HumanDispositionRecord {
+                message_summary: summaries.get(&key).cloned().unwrap_or_default(),
+                finding_key: key,
+                disposition: crate::product::models::HumanFindingDispositionKind::Excluded,
+                recorded_at: now.clone(),
+            })
+            .collect::<Vec<_>>();
+        let merged = store
+            .record_human_dispositions(&self.session.session_id, &records)
+            .map_err(|error| error.to_string())?;
+        Ok(merged.len())
+    }
+
+    /// REQ-WSC-14（根因 E）：门 turn 已终态 Failed(validation_reject) 时，
+    /// 把可读原因、下一步动作与逐字诊断落 durable 并回传，供界面告诉
+    /// owner「发生了什么、下一步怎么做」。非终态（in-band 等待/授权面）
+    /// 返回 None——不冒充终态事实。
+    pub(crate) async fn record_terminal_rejection(
+        &mut self,
+        turn_id: &str,
+        diagnostics: &[String],
+    ) -> Result<Option<crate::product::models::HumanGateTurnRejection>, String> {
+        use crate::product::models::{HumanGateTurnFailureClass, HumanGateTurnStatus};
+
+        let Some(store) = self.lifecycle_store.clone() else {
+            return Ok(None);
+        };
+        let turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if turn.status != HumanGateTurnStatus::Failed
+            || turn.failure_class != Some(HumanGateTurnFailureClass::ValidationReject)
+        {
+            return Ok(None);
+        }
+        let rejection =
+            crate::product::lifecycle_store::human_dispositions::build_human_gate_turn_rejection(
+                turn_id,
+                &turn.feedback_text,
+                diagnostics,
+            );
+        if let Err(error) =
+            store.save_human_gate_turn_rejection(&self.session.session_id, &rejection)
+        {
+            // durable 审计失败不吞掉回执：owner 仍要看到发生了什么，日志留证。
+            eprintln!(
+                "[aria-gate-rejection] save rejection failed session_id={} turn_id={turn_id} error={error}",
+                self.session.session_id
+            );
+        }
+        Ok(Some(rejection))
+    }
+
+    /// REQ-WSC-14（根因 E）：SC 修订被拒时的出站帧单一构造点。
+    ///
+    /// **严格加法**：既有稳定码 `ProtocolError` 照旧先发（不替换、不改序——
+    /// 既有客户端与测试的等待面零变化）；turn 已终态
+    /// `Failed(validation_reject)` 时再**追加**一条可操作回执帧（原因/下一步/
+    /// 逐字诊断，且已落 durable）。非终态（in-band 等待/授权面）只有原帧。
+    pub(crate) async fn rejection_frames_for_terminal(
+        &mut self,
+        turn_id: &str,
+        stable_code: &str,
+        diagnostics: &[String],
+    ) -> Vec<crate::web::workspace_ws_types::WsOutMessage> {
+        use crate::web::workspace_ws_types::WsOutMessage;
+
+        let mut frames = vec![WsOutMessage::ProtocolError {
+            code: stable_code.to_string(),
+            message: diagnostics.join("; "),
+            context: None,
+        }];
+        if let Ok(Some(rejection)) = self.record_terminal_rejection(turn_id, diagnostics).await {
+            frames.push(human_gate_turn_rejected_frame(&rejection));
+        }
+        frames
+    }
+}
+/// finding message 的单行人话摘要（已处置清单复述用；不是身份）。
+fn finding_summary(message: &str) -> String {
+    let first_line = message.lines().next().unwrap_or_default().trim();
+    let mut summary = first_line.chars().take(120).collect::<String>();
+    if first_line.chars().count() > 120 {
+        summary.push('…');
+    }
+    summary
+}
+
+/// REQ-WSC-14：把 durable 拒收记录投影为出站回执帧（逐字，不加工）。
+pub(crate) fn human_gate_turn_rejected_frame(
+    rejection: &crate::product::models::HumanGateTurnRejection,
+) -> crate::web::workspace_ws_types::WsOutMessage {
+    crate::web::workspace_ws_types::WsOutMessage::HumanGateTurnRejected {
+        turn_id: rejection.turn_id.clone(),
+        rejected_feedback: rejection.rejected_feedback.clone(),
+        rejection_reason: rejection.reason.clone(),
+        rejection_next_actions: rejection.next_actions.clone(),
+        rejection_diagnostics: rejection.diagnostics.clone(),
+    }
+}

@@ -1,0 +1,341 @@
+// F-49 门卡引导与留档文案的单一事实源（controller 草案，常量集中便于按复验调整）。
+// 门卡此前只有 4 字 trigger chip：无「为什么需要你」、无「建议确认还是反馈」，
+// findings 只在「requiresTriage 且 0 条」时被用于一句提示——实测门卡 metadata 带
+// 3 条 advisory 却完全不渲染（诊断 f49-gate-ui-diagnosis.md §2.2）。
+
+/**
+ * F-50 裁决 2：门卡唯一原因行（advisory-only，N = 本轮建议级 findings 数）。
+ * 「机械校验 0 error」并入前半句作证据，下一步建议（可直接确认，或反馈后
+ * 再修订）收在同一行——不再渲染独立的绿色建议行。
+ */
+export function gateWhyAdvisoryCopy(findingCount: number): string {
+  return `原因：机械校验 0 error，复评有 ${findingCount} 条建议（不阻断发布）；可直接确认，或提交反馈后再修订。`;
+}
+
+/** F-50 裁决 2：存在必须处理项时的原因行（N = must_fix/blocking 条数）。 */
+export function gateWhyRequiredCopy(requiredCount: number): string {
+  return `原因：有 ${requiredCount} 条必须处理项；建议先提交反馈。`;
+}
+
+/**
+ * REQ-WSC-18（owner 2026-10-31 意见 1）：候选 Final Compile 未通过时唯一
+ * 原因行——与顶部指引/距通过清单/确认按钮判据同源（store
+ * `candidateCompileFailure` 同一份事实），此态下绝不说「可直接确认」。
+ */
+export function gateWhyCompileFailureCopy(): string {
+  return "原因：当前候选 Final Compile 未通过，此候选无效，不能确认放行；需按下方要点让 author 重新生成。";
+}
+
+/**
+ * REQ-WSC-18 两阶段（owner 2026-10-31 答复问题 1）：首次失败、平台正在
+ * 自动重写——原因行明示「后台自动重写中，无需手动推进」，与顶部指引同源。
+ */
+export function gateWhyCompileFailureRewriteRunningCopy(): string {
+  return "原因：当前候选 Final Compile 未通过，此候选无效，不能确认放行；平台正在后台自动重写，无需你手动推进。";
+}
+
+/**
+ * REQ-WSC-18 两阶段（owner 2026-10-31 答复问题 2）：同一依赖环重复、自动
+ * 重写提前停——原因行升级为「自动重写无法解决，需修改 design」。
+ */
+export function gateWhyCompileFailureRewriteStoppedCopy(): string {
+  return "原因：当前候选 Final Compile 未通过，此候选无效；自动重写无法解决同一依赖环，需修改 design 后重新生成。";
+}
+
+/**
+ * REQ-WSC-12 平台硬规则（前端侧同口径）：只有 `disposition=actionable` 的
+ * finding 计入阻断/必处理计数；`advisory` 只呈现不阻断。缺失＝actionable
+ * （与后端 fail-safe 一致，历史记录不受影响）。
+ */
+export function isActionableFinding(finding: {
+  disposition?: string | null;
+  class_hint?: string | null;
+  severity?: string;
+}): boolean {
+  return finding.disposition !== "advisory";
+}
+
+/** REQ-WSC-12：advisory 过滤后的有效 findings。 */
+export function actionableFindings<T extends { disposition?: string | null }>(
+  findings: ReadonlyArray<T>,
+): T[] {
+  return findings.filter((finding) => isActionableFinding(finding));
+}
+
+/**
+ * C2（REQ-HGC-02 场景 1/F-54）：批次确认门（compile 成功后等待发布确认）
+ * 专属标题——与候选修订确认门「需要人工确认」在标题层级可区分。
+ */
+export function gateBatchConfirmTitle(): string {
+  return "确认发布整组 Work Items";
+}
+
+/** C2（REQ-HGC-02）：批次门 why——发布含义一句（确认即发布进入执行）。 */
+export function gateBatchConfirmWhyCopy(): string {
+  return "原因：Final Compile 已通过；确认后整组 Work Item Draft 将发布进入执行阶段，此门将关闭。";
+}
+
+export type GateDistanceStatus = "ok" | "pending" | "unknown";
+
+export interface GateDistanceItem {
+  key: "blockers" | "preflight" | "verification" | "approve";
+  label: string;
+  status: GateDistanceStatus;
+}
+
+/**
+ * C2（REQ-HGC-02 场景 2/F-52 §三）：「距通过」清单——当前 must_fix/error 项、
+ * C1 options 预检结果（mechanical_error 类 findings）、Verification 状态与
+ * approve 可用性，全部从 durable findings/trigger/阻断判据派生（零新状态机）。
+ * findings 不带 class（review 元数据形态）或 trigger 缺席时显式 unknown，不猜。
+ */
+export function gateDistanceToPass(input: {
+  findings: ReadonlyArray<{
+    severity: string;
+    class?: string;
+    disposition?: string | null;
+  }>;
+  trigger: string | null;
+  approveAvailable: boolean;
+  /**
+   * REQ-WSC-18：候选编译失败态在场时，approve 行不得再说「可直接确认」
+   * （owner 2026-10-31 截图三处指引互相矛盾的其一）——同一份事实驱动。
+   */
+  candidateCompileFailure?: boolean;
+}): GateDistanceItem[] {
+  // REQ-WSC-12：advisory 不算「必须处理项」（只作提示）。
+  const blockers = input.findings.filter(
+    (finding) =>
+      isActionableFinding(finding) &&
+      ["blocking", "must_fix", "error"].includes(finding.severity),
+  );
+  const preflightGaps = input.findings.filter(
+    (finding) => isActionableFinding(finding) && finding.class === "mechanical_error",
+  );
+  const hasClassFact = input.findings.some((finding) => typeof finding.class === "string");
+  return [
+    {
+      key: "blockers",
+      label:
+        blockers.length > 0
+          ? `必须处理项 ${blockers.length} 条（must_fix/error）`
+          : "无必须处理项",
+      status: blockers.length > 0 ? "pending" : "ok",
+    },
+    {
+      key: "preflight",
+      label:
+        preflightGaps.length > 0
+          ? `编译前预检缺口 ${preflightGaps.length} 条`
+          : hasClassFact
+            ? "编译前预检无缺口"
+            : "预检结果未同步",
+      status: preflightGaps.length > 0 ? "pending" : hasClassFact ? "ok" : "unknown",
+    },
+    {
+      key: "verification",
+      label:
+        input.trigger === "verification_new_findings"
+          ? "复评（Verification）发现新问题，需再修订"
+          : input.trigger
+            ? "评审已完成，等待人工"
+            : "复评状态未同步",
+      status: input.trigger === "verification_new_findings" ? "pending" : input.trigger ? "ok" : "unknown",
+    },
+    {
+      key: "approve",
+      label: input.candidateCompileFailure
+        ? "候选编译未通过，不能确认放行"
+        : input.approveAvailable
+          ? "可直接确认（或先反馈修订）"
+          : "门动作当前被阻断",
+      status: input.approveAvailable && !input.candidateCompileFailure ? "ok" : "pending",
+    },
+  ];
+}
+
+/** 跨轮 delta 的单侧 findings：带 C1 结构化 identity（fingerprint/unstable）。 */
+export type GateFindingsDeltaSide = ReadonlyArray<{
+  fingerprint: string;
+  identity_unstable?: boolean;
+}> | null;
+
+export type GateFindingsDelta =
+  | { kind: "counts"; added: number; resolved: number; recurring: number }
+  | { kind: "unknown"; reason: "no_previous" | "empty_current" | "empty_previous" | "unstable" };
+
+/**
+ * C2（REQ-HGC-02 场景 3/F-52 §三）：本轮 × 前轮 findings 的跨轮 delta——
+ * 按 C1 结构化 fingerprint 集合差：新增=current−prev、已解决=prev−current、
+ * 复现=prev∩current。保守纪律：前轮缺席（刷新/历史不全）、任一侧 findings
+ * 为空（findings 空 ≠ 历史问题已解决）、任一侧含 unstable 措辞域身份 →
+ * 整体 unknown，不推断。
+ */
+export function gateFindingsCrossRoundDelta(
+  current: GateFindingsDeltaSide,
+  previous: GateFindingsDeltaSide,
+): GateFindingsDelta {
+  if (!Array.isArray(current) || !Array.isArray(previous)) {
+    return { kind: "unknown", reason: "no_previous" };
+  }
+  if (current.length === 0) {
+    return { kind: "unknown", reason: "empty_current" };
+  }
+  if (previous.length === 0) {
+    return { kind: "unknown", reason: "empty_previous" };
+  }
+  if (
+    current.some((finding) => finding.identity_unstable === true) ||
+    previous.some((finding) => finding.identity_unstable === true)
+  ) {
+    return { kind: "unknown", reason: "unstable" };
+  }
+  const previousFingerprints = new Set(previous.map((finding) => finding.fingerprint));
+  let added = 0;
+  let recurring = 0;
+  for (const fingerprint of current.map((finding) => finding.fingerprint)) {
+    if (previousFingerprints.has(fingerprint)) {
+      recurring += 1;
+    } else {
+      added += 1;
+    }
+  }
+  return {
+    kind: "counts",
+    added,
+    resolved: previousFingerprints.size - recurring,
+    recurring,
+  };
+}
+
+/** C2（REQ-HGC-02 场景 3）：delta 计数行文案；unknown 一律如实，不猜。 */
+export function gateFindingsDeltaCopy(delta: GateFindingsDelta): string {
+  if (delta.kind === "unknown") {
+    return "较上一轮：未能判断（历史不可比）";
+  }
+  return `较上一轮：新增 ${delta.added} · 已解决 ${delta.resolved} · 复现 ${delta.recurring}`;
+}
+
+/**
+ * F-50 裁决 1：triage intent 门的原因行——标题保留「需要判断 reviewer 意图」
+ * 时，原因行解释为什么无法自动取舍并给出两条出路。
+ */
+export const GATE_TRIAGE_WHY_COPY =
+  "原因：评审结果无法自动取舍；请选择确认当前版本或反馈修改。";
+
+/**
+ * F-50 裁决 3：反馈与确认并行——可直接确认，反馈是可选修订路径。帮助文案
+ * 明示「反馈可选、确认无需填写」，消除「必须先反馈」的误读。
+ */
+export const GATE_FEEDBACK_OPTIONAL_HINT =
+  "如需调整，请在反馈框填写修改意见；确认当前版本无需填写。";
+
+/**
+ * F-50 裁决 4：终止按钮按实际作用域命名——actions.terminate 发送
+ * abandon_human_gate（门级 abandon，见 cockpit-action-routing.ts），故所有
+ * 终止入口统一「终止此门」，与错误条/会话级动作不再同名歧义。
+ */
+export const GATE_TERMINATE_BUTTON_LABEL = "终止此门";
+export const GATE_TERMINATE_CONFIRM_LABEL = "确认终止此门";
+
+/** 与门卡标题同义的内容/摘要短语（归一化比较，去空白与标点）。 */
+const GATE_TITLE_SYNONYMS: Record<string, true> = {
+  需要人工确认: true,
+  需要判断reviewer意图: true,
+  人工确认: true,
+  等待人工确认: true,
+  需人工确认: true,
+  等待确认: true,
+  可确认当前版本: true,
+};
+
+/**
+ * F-50 裁决 1：entry.content / summary 与标题同义（「等待人工确认」等人工
+ * 介入同义句）时不渲染——单标题制下不让正文重复标题。独立事实不受影响。
+ */
+export function isGateTitleSynonymousCopy(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/[\s，。；、·（）()：:—\-]/gu, "");
+  return GATE_TITLE_SYNONYMS[normalized] === true;
+}
+
+/** B3：门卡内 findings 折叠列表的开关文案（N = 本轮 findings 条数）。 */
+export function gateFindingsToggleLabel(findingCount: number): string {
+  return `本轮 findings ${findingCount} 条`;
+}
+
+/** A4：反馈提交被门面接受后的成功反馈。 */
+export const GATE_FEEDBACK_SUBMITTED_NOTE = "反馈已提交";
+
+/**
+ * B4：反馈已提交、引擎正在跑门内修订 provider。
+ * 草案原为「（第 N/3 轮）」，但前端无单调轮次事实源——门每次重开预算按默认值重置
+ * （REQ-CG-02 重建公式 ⇒ `remaining_budget` 非单调），turn 计数不在 session_state 内，
+ * 补序号属新增可见事实面（契约增量），故先不绑序号。
+ */
+export const GATE_REVISION_RUNNING_NOTE = "已提交，正在按反馈修订";
+
+/** B4：门内修订已完成，引擎正在复评（复评结论随后以 review 结论卡呈现）。 */
+export const GATE_REVISION_REVIEWING_NOTE = "修订完成，正在复评";
+
+/** B5：留档卡徽章。 */
+export const GATE_ARCHIVE_BADGE_LABEL = "已留档";
+
+/** B5：留档摘要截断长度（草案「摘要前 50 字」）。 */
+export const GATE_ARCHIVE_FEEDBACK_SNIPPET_MAX = 50;
+
+/** B5：旧轮留档文案（提交过反馈的轮次）。 */
+export function gateArchiveFeedbackCopy(round: number, feedback: string): string {
+  return `第 ${round} 轮已提交反馈：${feedback.trim().slice(0, GATE_ARCHIVE_FEEDBACK_SNIPPET_MAX)}`;
+}
+
+/**
+ * B5：旧轮留档文案（未记录到反馈文本的轮次，如另一连接提交——本连接没有本地
+ * 提交记录）。不谎报「已提交反馈」。
+ */
+export function gateArchiveClosedCopy(round: number): string {
+  return `第 ${round} 轮已收口`;
+}
+
+/** B6：「采纳建议为反馈」按钮文案。 */
+export const GATE_ADOPT_FINDINGS_BUTTON_LABEL = "采纳建议为反馈";
+
+/** B6：采纳文本开头一句（模板见 gateAdoptFindingsFeedback）。 */
+export const GATE_ADOPT_FINDINGS_LEAD = "按复评建议修订以下内容：";
+
+/** B6：采纳文本收尾一句（模板见 gateAdoptFindingsFeedback）。 */
+export const GATE_ADOPT_FINDINGS_TRAIL = "其余内容保持不变。";
+
+/**
+ * B6：单条 advisory finding 的采纳句。对象=message、建议动作=required_action
+ * （门卡 metadata findings 的结构化文本位就这两个，与 B3 渲染同源）；建议缺失即
+ * 字段不足，整条原文降级拼入。
+ */
+export function gateAdoptFindingLine(finding: {
+  message: string;
+  required_action?: string;
+}): string {
+  const subject = finding.message.trim();
+  const action = finding.required_action?.trim() ?? "";
+  if (subject && action) {
+    return `${subject}：${action}；`;
+  }
+  return `${subject || action}；`;
+}
+
+/**
+ * B6：advisory findings → 反馈输入框的修订指令文本（只填入不提交，用户可继续
+ * 编辑）。must_fix 不在拼接范围（处理路径不同），由调用方过滤后传入。
+ *
+ * 单行串接：门卡反馈框是单行 <input>（HTML value 净化会剥掉换行），开头/收尾
+ * 两句按前后缀直接串接，保证所见即所交。
+ */
+export function gateAdoptFindingsFeedback(
+  findings: ReadonlyArray<{ message: string; required_action?: string }>,
+): string {
+  const items = findings
+    .map(gateAdoptFindingLine)
+    .filter((line) => line !== "；");
+  return `${GATE_ADOPT_FINDINGS_LEAD}${items.join("")}${GATE_ADOPT_FINDINGS_TRAIL}`;
+}

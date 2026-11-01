@@ -1,0 +1,1043 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0163",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "pi",
+  "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+  "outDir": "/tmp/aria-36-matrix/pi-heavy-v5/rep1c/coding/coding-pi-coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+  "startedAt": "2026-09-08T09:59:04.135Z",
+  "finishedAt": "2026-09-08T10:43:03.711Z",
+  "elapsedSec": 2639.577,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.21,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.393,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 966.946,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1088.258,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 1088.258,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1695.595,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 1695.595,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "code_review",
+      "elapsedSec": 2592.935,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "review_request",
+      "elapsedSec": 2634.685,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "final_confirm",
+      "elapsedSec": 2639.445,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.488,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 966.946,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 1088.258,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0003",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 1628.025,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0004",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 1695.595,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0005",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 2203.686,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0006",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 2592.933,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0007",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [
+    {
+      "id": "746ab705-c246-4c08-ab7a-ea7bf3003cea",
+      "elapsedSec": 588.452,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    },
+    {
+      "id": "007aa359-8f1e-42f9-bc82-638ba35f235c",
+      "elapsedSec": 1504.524,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    },
+    {
+      "id": "f7e5fbfe-b459-4b8b-8055-fbc776c52c94",
+      "elapsedSec": 1845.612,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    },
+    {
+      "id": "5cf4691b-6eaf-4dee-a5b2-64cb3ab87332",
+      "elapsedSec": 2107.186,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    },
+    {
+      "id": "430d1df4-471f-49d3-bce7-c37a665b8c3f",
+      "elapsedSec": 2147.575,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    },
+    {
+      "id": "8ca1b39a-2677-4676-a08a-14a137c3e352",
+      "elapsedSec": 2161.207,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    },
+    {
+      "id": "55e27410-f37a-44a8-a116-e7e80210a9f1",
+      "elapsedSec": 2550.484,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    }
+  ],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0003",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 3,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "tests/integration/http.test.js",
+          "line": 115,
+          "message": "输出契约 CT-006 的规范示例未被执行：套件中不存在 GET {origin}/missing.html 请求，缺失静态资源用例仅以等价路径 /no-such-static-resource.txt 覆盖同类行为，且仅断言 404 与 text/plain 及响应体非空，未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，与 CT-006 示例输出语义一致，规范示例用例可在当前独占范围内补充。",
+          "required_action": "在 tests/integration/http.test.js 中新增规范示例用例：对同一 origin 发起 GET /missing.html，断言状态码为 404、Content-Type 以 text/plain 开头、响应体为纯文本 Not Found（与 CT-006 示例输出一致）；保留现有等价路径用例；完成后重新运行 node --test tests/integration/ 确认全部测试通过。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查发现一个阻塞问题：输出契约 CT-006 规定的规范示例未被执行。CT-006 要求示例输入为 GET {origin}/missing.html、示例输出为 HTTP 404 纯文本响应，但 tests/integration/http.test.js 中不存在对该示例路径的请求，缺失静态资源用例仅使用等价路径 no-such-static-resource.txt，且只断言响应非空、未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，行为与 CT-006 示例输出语义一致，说明缺口仅为规范示例用例缺失，可在 tests/integration 独占范围内修复。其余方面均通过：CHECK-005 实测 node --test tests/integration/ 共 5 个测试全部通过（非零测试执行）；AC-011 以 port 0 启动真实服务断言临时端口并以同源请求验证关卡数组契约形状，AC-012 同源验证页面容器、脚本可达及脚本内 /api/levels 相对路径引用（消费 CT-004），AC-013 验证未知 API 路径 404 JSON、不支持方法 405 JSON 含 Allow 头与缺失静态资源 404 文本；输入契约 CT-001 至 CT-004 的上游能力均已在其提供单元验证成立且与本套件无矛盾；diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope。",
+      "created_at": "2026-09-08T10:40:07.599466128+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0003.txt",
+      "role_run_id": "coding_role_run_0006",
+      "run_no": 3,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0003",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 3,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "tests/integration/http.test.js",
+          "line": 115,
+          "message": "输出契约 CT-006 的规范示例未被执行：套件中不存在 GET {origin}/missing.html 请求，缺失静态资源用例仅以等价路径 /no-such-static-resource.txt 覆盖同类行为，且仅断言 404 与 text/plain 及响应体非空，未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，与 CT-006 示例输出语义一致，规范示例用例可在当前独占范围内补充。",
+          "required_action": "在 tests/integration/http.test.js 中新增规范示例用例：对同一 origin 发起 GET /missing.html，断言状态码为 404、Content-Type 以 text/plain 开头、响应体为纯文本 Not Found（与 CT-006 示例输出一致）；保留现有等价路径用例；完成后重新运行 node --test tests/integration/ 确认全部测试通过。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查发现一个阻塞问题：输出契约 CT-006 规定的规范示例未被执行。CT-006 要求示例输入为 GET {origin}/missing.html、示例输出为 HTTP 404 纯文本响应，但 tests/integration/http.test.js 中不存在对该示例路径的请求，缺失静态资源用例仅使用等价路径 no-such-static-resource.txt，且只断言响应非空、未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，行为与 CT-006 示例输出语义一致，说明缺口仅为规范示例用例缺失，可在 tests/integration 独占范围内修复。其余方面均通过：CHECK-005 实测 node --test tests/integration/ 共 5 个测试全部通过（非零测试执行）；AC-011 以 port 0 启动真实服务断言临时端口并以同源请求验证关卡数组契约形状，AC-012 同源验证页面容器、脚本可达及脚本内 /api/levels 相对路径引用（消费 CT-004），AC-013 验证未知 API 路径 404 JSON、不支持方法 405 JSON 含 Allow 头与缺失静态资源 404 文本；输入契约 CT-001 至 CT-004 的上游能力均已在其提供单元验证成立且与本套件无矛盾；diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope。",
+      "created_at": "2026-09-08T10:40:07.599466128+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0003.txt",
+      "role_run_id": "coding_role_run_0006",
+      "run_no": 3,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0003",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 3,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "tests/integration/http.test.js",
+          "line": 115,
+          "message": "输出契约 CT-006 的规范示例未被执行：套件中不存在 GET {origin}/missing.html 请求，缺失静态资源用例仅以等价路径 /no-such-static-resource.txt 覆盖同类行为，且仅断言 404 与 text/plain 及响应体非空，未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，与 CT-006 示例输出语义一致，规范示例用例可在当前独占范围内补充。",
+          "required_action": "在 tests/integration/http.test.js 中新增规范示例用例：对同一 origin 发起 GET /missing.html，断言状态码为 404、Content-Type 以 text/plain 开头、响应体为纯文本 Not Found（与 CT-006 示例输出一致）；保留现有等价路径用例；完成后重新运行 node --test tests/integration/ 确认全部测试通过。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查发现一个阻塞问题：输出契约 CT-006 规定的规范示例未被执行。CT-006 要求示例输入为 GET {origin}/missing.html、示例输出为 HTTP 404 纯文本响应，但 tests/integration/http.test.js 中不存在对该示例路径的请求，缺失静态资源用例仅使用等价路径 no-such-static-resource.txt，且只断言响应非空、未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，行为与 CT-006 示例输出语义一致，说明缺口仅为规范示例用例缺失，可在 tests/integration 独占范围内修复。其余方面均通过：CHECK-005 实测 node --test tests/integration/ 共 5 个测试全部通过（非零测试执行）；AC-011 以 port 0 启动真实服务断言临时端口并以同源请求验证关卡数组契约形状，AC-012 同源验证页面容器、脚本可达及脚本内 /api/levels 相对路径引用（消费 CT-004），AC-013 验证未知 API 路径 404 JSON、不支持方法 405 JSON 含 Allow 头与缺失静态资源 404 文本；输入契约 CT-001 至 CT-004 的上游能力均已在其提供单元验证成立且与本套件无矛盾；diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope。",
+      "created_at": "2026-09-08T10:40:07.599466128+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0003.txt",
+      "role_run_id": "coding_role_run_0006",
+      "run_no": 3,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0004",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 4,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "复审通过，上轮唯一阻塞问题已按要求修复。新增 CT-006 规范示例用例：对真实服务发起 GET {origin}/missing.html，断言状态码 404、Content-Type 以 text/plain 开头、响应体严格等于纯文本 Not Found，与输出契约 CT-006 的示例输入输出完全对应。CHECK-005 复测 node --test tests/integration/ 共 6 个测试全部通过（非零测试执行），原有 AC-011 端口 0 临时端口与关卡数组契约形状同源验证、AC-012 页面容器与脚本及 /api/levels 相对路径引用验证、AC-013 未知路径 404 JSON、405 JSON 含 Allow 头与缺失静态资源 404 文本共 5 个用例完整保留。diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope；输入契约 CT-001 至 CT-004 的上游能力维持有效。后端回归 17 个测试、前端回归 12 个测试全部通过，单元间无相互影响。",
+      "created_at": "2026-09-08T10:42:58.589735407+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0004.txt",
+      "role_run_id": "coding_role_run_0008",
+      "run_no": 4,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0003",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 3,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "tests/integration/http.test.js",
+          "line": 115,
+          "message": "输出契约 CT-006 的规范示例未被执行：套件中不存在 GET {origin}/missing.html 请求，缺失静态资源用例仅以等价路径 /no-such-static-resource.txt 覆盖同类行为，且仅断言 404 与 text/plain 及响应体非空，未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，与 CT-006 示例输出语义一致，规范示例用例可在当前独占范围内补充。",
+          "required_action": "在 tests/integration/http.test.js 中新增规范示例用例：对同一 origin 发起 GET /missing.html，断言状态码为 404、Content-Type 以 text/plain 开头、响应体为纯文本 Not Found（与 CT-006 示例输出一致）；保留现有等价路径用例；完成后重新运行 node --test tests/integration/ 确认全部测试通过。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查发现一个阻塞问题：输出契约 CT-006 规定的规范示例未被执行。CT-006 要求示例输入为 GET {origin}/missing.html、示例输出为 HTTP 404 纯文本响应，但 tests/integration/http.test.js 中不存在对该示例路径的请求，缺失静态资源用例仅使用等价路径 no-such-static-resource.txt，且只断言响应非空、未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，行为与 CT-006 示例输出语义一致，说明缺口仅为规范示例用例缺失，可在 tests/integration 独占范围内修复。其余方面均通过：CHECK-005 实测 node --test tests/integration/ 共 5 个测试全部通过（非零测试执行）；AC-011 以 port 0 启动真实服务断言临时端口并以同源请求验证关卡数组契约形状，AC-012 同源验证页面容器、脚本可达及脚本内 /api/levels 相对路径引用（消费 CT-004），AC-013 验证未知 API 路径 404 JSON、不支持方法 405 JSON 含 Allow 头与缺失静态资源 404 文本；输入契约 CT-001 至 CT-004 的上游能力均已在其提供单元验证成立且与本套件无矛盾；diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope。",
+      "created_at": "2026-09-08T10:40:07.599466128+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0003.txt",
+      "role_run_id": "coding_role_run_0006",
+      "run_no": 3,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0004",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 4,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "复审通过，上轮唯一阻塞问题已按要求修复。新增 CT-006 规范示例用例：对真实服务发起 GET {origin}/missing.html，断言状态码 404、Content-Type 以 text/plain 开头、响应体严格等于纯文本 Not Found，与输出契约 CT-006 的示例输入输出完全对应。CHECK-005 复测 node --test tests/integration/ 共 6 个测试全部通过（非零测试执行），原有 AC-011 端口 0 临时端口与关卡数组契约形状同源验证、AC-012 页面容器与脚本及 /api/levels 相对路径引用验证、AC-013 未知路径 404 JSON、405 JSON 含 Allow 头与缺失静态资源 404 文本共 5 个用例完整保留。diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope；输入契约 CT-001 至 CT-004 的上游能力维持有效。后端回归 17 个测试、前端回归 12 个测试全部通过，单元间无相互影响。",
+      "created_at": "2026-09-08T10:42:58.589735407+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0004.txt",
+      "role_run_id": "coding_role_run_0008",
+      "run_no": 4,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "review_request_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "kind": "git_branch_only",
+      "remote_kind": "github",
+      "remote": "origin",
+      "base_branch": "main",
+      "branch_name": "aria/issues/issue_0163",
+      "commit_sha": "23a3ea1ffe70203c073ddc89fac2d45a9632962f",
+      "push_status": "pushed",
+      "external_url": null,
+      "manual_instructions": [
+        "基于远端 origin/aria/issues/issue_0163 发起代码审查"
+      ],
+      "push_error": null,
+      "owner_kind": "attempt",
+      "pointer_publication_id": null,
+      "revoked": false,
+      "created_at": "2026-09-08T10:43:03.500403515+00:00",
+      "updated_at": "2026-09-08T10:43:03.500403515+00:00"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0003",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 3,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "tests/integration/http.test.js",
+          "line": 115,
+          "message": "输出契约 CT-006 的规范示例未被执行：套件中不存在 GET {origin}/missing.html 请求，缺失静态资源用例仅以等价路径 /no-such-static-resource.txt 覆盖同类行为，且仅断言 404 与 text/plain 及响应体非空，未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，与 CT-006 示例输出语义一致，规范示例用例可在当前独占范围内补充。",
+          "required_action": "在 tests/integration/http.test.js 中新增规范示例用例：对同一 origin 发起 GET /missing.html，断言状态码为 404、Content-Type 以 text/plain 开头、响应体为纯文本 Not Found（与 CT-006 示例输出一致）；保留现有等价路径用例；完成后重新运行 node --test tests/integration/ 确认全部测试通过。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查发现一个阻塞问题：输出契约 CT-006 规定的规范示例未被执行。CT-006 要求示例输入为 GET {origin}/missing.html、示例输出为 HTTP 404 纯文本响应，但 tests/integration/http.test.js 中不存在对该示例路径的请求，缺失静态资源用例仅使用等价路径 no-such-static-resource.txt，且只断言响应非空、未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，行为与 CT-006 示例输出语义一致，说明缺口仅为规范示例用例缺失，可在 tests/integration 独占范围内修复。其余方面均通过：CHECK-005 实测 node --test tests/integration/ 共 5 个测试全部通过（非零测试执行）；AC-011 以 port 0 启动真实服务断言临时端口并以同源请求验证关卡数组契约形状，AC-012 同源验证页面容器、脚本可达及脚本内 /api/levels 相对路径引用（消费 CT-004），AC-013 验证未知 API 路径 404 JSON、不支持方法 405 JSON 含 Allow 头与缺失静态资源 404 文本；输入契约 CT-001 至 CT-004 的上游能力均已在其提供单元验证成立且与本套件无矛盾；diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope。",
+      "created_at": "2026-09-08T10:40:07.599466128+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0003.txt",
+      "role_run_id": "coding_role_run_0006",
+      "run_no": 3,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0004",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 4,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "复审通过，上轮唯一阻塞问题已按要求修复。新增 CT-006 规范示例用例：对真实服务发起 GET {origin}/missing.html，断言状态码 404、Content-Type 以 text/plain 开头、响应体严格等于纯文本 Not Found，与输出契约 CT-006 的示例输入输出完全对应。CHECK-005 复测 node --test tests/integration/ 共 6 个测试全部通过（非零测试执行），原有 AC-011 端口 0 临时端口与关卡数组契约形状同源验证、AC-012 页面容器与脚本及 /api/levels 相对路径引用验证、AC-013 未知路径 404 JSON、405 JSON 含 Allow 头与缺失静态资源 404 文本共 5 个用例完整保留。diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope；输入契约 CT-001 至 CT-004 的上游能力维持有效。后端回归 17 个测试、前端回归 12 个测试全部通过，单元间无相互影响。",
+      "created_at": "2026-09-08T10:42:58.589735407+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0004.txt",
+      "role_run_id": "coding_role_run_0008",
+      "run_no": 4,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/backend/ 共 17 个测试全部通过（非零测试执行），覆盖 AC-001 至 AC-006 全部验收标准与 CT-001/CT-002/CT-003 三项输出契约。人工检查确认 server/server.js 仅导入 node:http、node:fs、node:path 三个 Node 内置模块，测试夹具位于 tests/backend/fixtures 目录，server 与 tests/backend 均不读取 web/ 目录。diff 仅触及 server/**、data/levels.json、tests/backend/**，符合 Scope Policy，未触及任何禁止范围。数据不可用场景统一返回 HTTP 500 与 LEVEL_DATA_UNAVAILABLE 可读中文错误且不泄露堆栈与内部路径；静态服务以路径规范化加前缀比对拒绝越界访问，缺失资源返回 404 纯文本；port 0 启动返回实际临时端口支持并行测试隔离。",
+      "created_at": "2026-09-08T10:17:11.942790823+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 2,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查通过。实测运行 node --test tests/frontend/ 共 12 个测试全部通过（非零测试执行），覆盖 AC-007 至 AC-010 全部验收标准。web/level-select.js 以相对路径 /api/levels 发起请求满足 CT-004；测试以 DOM 替身与 fetch 替身驱动 initLevelSelect、不启动浏览器、不引入 npm 依赖，满足 CT-005。输入契约 CT-001 的消费已验证：非 200 响应测试使用 HTTP 500 加 LEVEL_DATA_UNAVAILABLE 与可读 message 的错误结构，页面正确展示服务端可读信息并在网络失败、错误体非 JSON、载荷形状非法等场景降级为可读提示且不泄漏内部细节。CHECK-004 人工检查确认 web/ 目录仅含 index.html 与 level-select.js，无任何 npm 依赖与外部资源引用。diff 仅触及 web/** 与 tests/frontend/**，符合 Scope Policy，未触及任何禁止范围；后端回归 17 个测试全部通过，两个单元互不干扰。",
+      "created_at": "2026-09-08T10:27:19.267408967+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0002.txt",
+      "role_run_id": "coding_role_run_0004",
+      "run_no": 2,
+      "unit_run_id": "coding_unit_run_0002"
+    },
+    {
+      "id": "code_review_0003",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 3,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "tests/integration/http.test.js",
+          "line": 115,
+          "message": "输出契约 CT-006 的规范示例未被执行：套件中不存在 GET {origin}/missing.html 请求，缺失静态资源用例仅以等价路径 /no-such-static-resource.txt 覆盖同类行为，且仅断言 404 与 text/plain 及响应体非空，未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，与 CT-006 示例输出语义一致，规范示例用例可在当前独占范围内补充。",
+          "required_action": "在 tests/integration/http.test.js 中新增规范示例用例：对同一 origin 发起 GET /missing.html，断言状态码为 404、Content-Type 以 text/plain 开头、响应体为纯文本 Not Found（与 CT-006 示例输出一致）；保留现有等价路径用例；完成后重新运行 node --test tests/integration/ 确认全部测试通过。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查发现一个阻塞问题：输出契约 CT-006 规定的规范示例未被执行。CT-006 要求示例输入为 GET {origin}/missing.html、示例输出为 HTTP 404 纯文本响应，但 tests/integration/http.test.js 中不存在对该示例路径的请求，缺失静态资源用例仅使用等价路径 no-such-static-resource.txt，且只断言响应非空、未断言响应体内容。实测真实服务对 GET {origin}/missing.html 返回 404、Content-Type 为 text/plain; charset=utf-8、响应体为 Not Found，行为与 CT-006 示例输出语义一致，说明缺口仅为规范示例用例缺失，可在 tests/integration 独占范围内修复。其余方面均通过：CHECK-005 实测 node --test tests/integration/ 共 5 个测试全部通过（非零测试执行）；AC-011 以 port 0 启动真实服务断言临时端口并以同源请求验证关卡数组契约形状，AC-012 同源验证页面容器、脚本可达及脚本内 /api/levels 相对路径引用（消费 CT-004），AC-013 验证未知 API 路径 404 JSON、不支持方法 405 JSON 含 Allow 头与缺失静态资源 404 文本；输入契约 CT-001 至 CT-004 的上游能力均已在其提供单元验证成立且与本套件无矛盾；diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope。",
+      "created_at": "2026-09-08T10:40:07.599466128+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0003.txt",
+      "role_run_id": "coding_role_run_0006",
+      "run_no": 3,
+      "unit_run_id": "coding_unit_run_0003"
+    },
+    {
+      "id": "code_review_0004",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "round": 4,
+      "verdict": "approve",
+      "findings": [],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "复审通过，上轮唯一阻塞问题已按要求修复。新增 CT-006 规范示例用例：对真实服务发起 GET {origin}/missing.html，断言状态码 404、Content-Type 以 text/plain 开头、响应体严格等于纯文本 Not Found，与输出契约 CT-006 的示例输入输出完全对应。CHECK-005 复测 node --test tests/integration/ 共 6 个测试全部通过（非零测试执行），原有 AC-011 端口 0 临时端口与关卡数组契约形状同源验证、AC-012 页面容器与脚本及 /api/levels 相对路径引用验证、AC-013 未知路径 404 JSON、405 JSON 含 Allow 头与缺失静态资源 404 文本共 5 个用例完整保留。diff 仅触及 tests/integration/**，未越过任何 Forbidden Scope；输入契约 CT-001 至 CT-004 的上游能力维持有效。后端回归 17 个测试、前端回归 12 个测试全部通过，单元间无相互影响。",
+      "created_at": "2026-09-08T10:42:58.589735407+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0004.txt",
+      "role_run_id": "coding_role_run_0008",
+      "run_no": 4,
+      "unit_run_id": "coding_unit_run_0003"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0163",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0163",
+    "head_commit": "23a3ea1ffe70203c073ddc89fac2d45a9632962f",
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 2080,
+    "output_tokens": 2975,
+    "cache_read_tokens": 115968
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 706,
+      "output_tokens": 1279,
+      "cache_read_tokens": 65536,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 1374,
+      "output_tokens": 1696,
+      "cache_read_tokens": 50432,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-08T09:59:04.524795791+00:00",
+      "completed_at": "2026-09-08T09:59:04.547925724+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-08T09:59:09.634335486+00:00",
+      "completed_at": "2026-09-08T10:15:10.900411795+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-08T10:15:16.093066879+00:00",
+      "completed_at": "2026-09-08T10:17:11.952138049+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-08T10:17:17.394222759+00:00",
+      "completed_at": "2026-09-08T10:26:11.962331696+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0005",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-08T10:26:17.162079367+00:00",
+      "completed_at": "2026-09-08T10:27:19.276949529+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0006",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-08T10:27:24.731259479+00:00",
+      "completed_at": "2026-09-08T10:35:47.630523717+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0007",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "failed",
+      "agent_role": "reviewer",
+      "summary": "code review 要求修改",
+      "started_at": "2026-09-08T10:35:52.824162808+00:00",
+      "completed_at": "2026-09-08T10:40:07.609290108+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0008",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "reviewer 修复 round 1",
+      "started_at": "2026-09-08T10:40:07.619879031+00:00",
+      "completed_at": "2026-09-08T10:42:16.703449654+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0009",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "completed",
+      "agent_role": "reviewer",
+      "summary": "code review 通过",
+      "started_at": "2026-09-08T10:42:22.073097056+00:00",
+      "completed_at": "2026-09-08T10:42:58.602365681+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0010",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "review_request",
+      "title": "发起 review request",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "review request 已创建",
+      "started_at": "2026-09-08T10:42:58.814101563+00:00",
+      "completed_at": "2026-09-08T10:43:03.503401934+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0011",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "stage": "final_confirm",
+      "title": "等待人工最终确认",
+      "status": "completed",
+      "agent_role": "system",
+      "summary": "用户已确认完成",
+      "started_at": "2026-09-08T10:43:03.537341375+00:00",
+      "completed_at": "2026-09-08T10:43:03.669740382+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": null,
+  "error": null,
+  "completed": true
+}

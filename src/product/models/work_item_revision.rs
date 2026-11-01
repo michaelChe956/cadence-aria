@@ -45,6 +45,8 @@ pub struct WorkItemPlanRevision {
     pub dependency_graph_revision_id: String,
     pub validation_report_ref: String,
     pub plan_projection_bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_provenance_ref: Option<String>,
     pub created_at: String,
 }
 
@@ -113,6 +115,21 @@ pub struct WorkItemRuntimeBinding {
     pub human_projection_hash: String,
     pub coder_projection_hash: String,
     pub reviewer_projection_hash: String,
+}
+
+/// C1 Task 8（REQ-C1-CHILD-01）：compile child 的 durable 绑定身份——
+/// plan/plan revision/logical work item/work item revision 四元身份加上
+/// 当前 enrollment binding version/enrollment id/target。同代 replay 全等
+/// 复用；任一字段不同即跨代/漂移，绝不静默复用、不迁移、不覆盖旧 child。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildBindingIdentity {
+    pub plan_id: String,
+    pub plan_revision_id: String,
+    pub logical_work_item_id: String,
+    pub work_item_revision_id: String,
+    pub binding_version: u64,
+    pub enrollment_id: String,
+    pub target: crate::product::logical_codebase::EnrollmentTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

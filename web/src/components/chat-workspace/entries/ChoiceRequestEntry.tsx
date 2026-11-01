@@ -11,12 +11,19 @@ interface ChoiceRequestEntryProps {
   entry: ChatEntry;
   onRespond?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
   embedded?: boolean;
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 11：外部受控提交态（REST 202 保卡复查/错误重试
+   * 由父级命令状态裁决）——提供时完全取代内部一次性 submitting；缺省内用
+   * 既有行为（legacy WS 卡）。
+   */
+  submittingOverride?: boolean;
 }
 
 export function ChoiceRequestEntry({
   entry,
   onRespond,
   embedded = false,
+  submittingOverride,
 }: ChoiceRequestEntryProps) {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   const allowMultiple = metadata?.allow_multiple === true;
@@ -38,9 +45,18 @@ export function ChoiceRequestEntry({
   const isResolved = entry.resolved === true;
   const isRejected = metadata?.rejected === true;
   const rejectionReason = stringField(metadata, "rejection_reason");
+  // P2-e：REST 命令谱系经 metadata 回写卡片状态——expired（F-9 文案）与
+  // 提交错误（F-10 保留可重试）。
+  const isChoiceExpired = metadata?.choice_expired === true;
+  const submitError = stringField(metadata, "choice_submit_error");
   const [selectedByQuestion, setSelectedByQuestion] = useState<Record<string, string[]>>({});
   const [freeTextByQuestion, setFreeTextByQuestion] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  // Task 11：外部受控优先（202 复查期间禁改答案；错误回落后允许同命令重试）；
+  // P2-e：错误/提示回落（choice_submit_error）同样解除内部一次性 submitting，
+  // 保卡片可改答案重试。
+  const effectiveSubmitting = submittingOverride ?? (submitting && !submitError);
+  const [promptExpanded, setPromptExpanded] = useState(false);
 
   function selectedIdsFor(questionId: string) {
     return selectedByQuestion[questionId] ?? [];
@@ -96,10 +112,12 @@ export function ChoiceRequestEntry({
     const freeTexts = answers
       .map((answer) => answer.free_text)
       .filter((text): text is string => Boolean(text));
+    // P2-e（REQ-CRO-11）：REST 提交恒按题号逐题组装 answers——无 questions
+    // 的旧单题卡经 choiceQuestions 回落单一 default 题，answers 恒非空。
     const payload: ChoiceResponsePayload = {
       selected_option_ids: selectedOptionIds,
       free_text: freeTexts.length > 0 ? freeTexts.join("\n\n") : null,
-      ...(usesStructuredQuestions ? { answers } : {}),
+      answers,
     };
     setSubmitting(true);
     onRespond?.(entry, payload);
@@ -129,7 +147,7 @@ export function ChoiceRequestEntry({
                   name={`choice-${entry.id}-${question.id}`}
                   checked={selectedIds.includes(option.id)}
                   onChange={() => toggleOption(question, option.id)}
-                  disabled={submitting}
+                  disabled={effectiveSubmitting}
                 />
                 <span className="min-w-0">
                   <span className="font-medium">{option.label}</span>
@@ -151,7 +169,7 @@ export function ChoiceRequestEntry({
               aria-label={textareaLabel}
               value={freeText}
               onChange={(event) => updateFreeText(question.id, event.target.value)}
-              disabled={submitting}
+              disabled={effectiveSubmitting}
               className="mt-1 min-h-20 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-2 py-1 text-sm font-normal text-[var(--aria-ink)]"
             />
           </label>
@@ -162,6 +180,10 @@ export function ChoiceRequestEntry({
 
   const canSubmit = questions.length > 0 && questions.every(isQuestionAnswered);
   const showQuestionPrompts = usesStructuredQuestions || questions.length > 1;
+  const segments = promptSegments(prompt);
+  const clampable = segments.some(
+    (segment) => segment.kind === "text" && needsPromptClamp(segment.text),
+  );
 
   const resolvedSummary = choiceSummary(response, questions, options);
   const content = (
@@ -175,12 +197,53 @@ export function ChoiceRequestEntry({
               {sourceLabel}
             </span>
           ) : null}
-          <div className="mt-1 text-[var(--aria-ink-muted)]">{prompt}</div>
+          <div className="mt-1 space-y-1">
+            {segments.map((segment, index) =>
+              segment.kind === "command" ? (
+                <pre
+                  key={`command-${index}`}
+                  data-testid="choice-command-block"
+                  className="max-h-40 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-subtle)] p-2 font-mono text-[11px] leading-4 text-[var(--aria-ink)]"
+                >
+                  {segment.text}
+                </pre>
+              ) : (
+                <p
+                  key={`text-${index}`}
+                  data-testid="choice-prompt-text"
+                  className={[
+                    "whitespace-pre-wrap break-words text-[var(--aria-ink-muted)]",
+                    clampable && !promptExpanded ? "line-clamp-6" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {segment.text}
+                </p>
+              ),
+            )}
+            {clampable ? (
+              <button
+                type="button"
+                aria-expanded={promptExpanded}
+                onClick={() => setPromptExpanded((expanded) => !expanded)}
+                className="inline-flex h-7 items-center rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold text-[var(--aria-ink-muted)] hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+              >
+                {promptExpanded ? "收起全文" : "展开全文"}
+              </button>
+            ) : null}
+          </div>
         </div>
       </div>
 
       {isResolved ? (
-        isRejected ? (
+        isChoiceExpired ? (
+          // P2-e 红测⑤（F-9）：REST 410 expired → 失效提示，无作答控件。
+          <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0">这个问题已失效（AI 已重新开始）</span>
+          </span>
+        ) : isRejected ? (
           <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
             <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span className="min-w-0">
@@ -203,12 +266,24 @@ export function ChoiceRequestEntry({
             {questions.map((question) => renderQuestion(question, showQuestionPrompts))}
           </div>
 
+          {submitError ? (
+            // P2-e 红测④（X1/D-3 提示语）：无 runner 等提交受阻的人话提示；
+            // 不提供「恢复运行」按钮，卡片保持可作答。
+            <div
+              data-testid="choice-submit-error"
+              className="flex items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700"
+            >
+              <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 break-words">{submitError}</span>
+            </div>
+          ) : null}
+
           {onRespond ? (
             <div className="flex justify-end">
               <button
                 type="button"
                 onClick={submitChoice}
-                disabled={submitting || !canSubmit}
+                disabled={effectiveSubmitting || !canSubmit}
                 className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-primary-soft)] bg-white px-3 text-xs font-semibold text-[var(--aria-primary)] hover:bg-[var(--aria-primary-soft)] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Check className="h-3.5 w-3.5" />
@@ -407,4 +482,53 @@ function stringField(value: unknown, key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+interface ChoicePromptSegment {
+  kind: "text" | "command";
+  text: string;
+}
+
+const DANGEROUS_COMMAND_HEADER = /^\s*(?:⚠️|⚠)?\s*Dangerous command\s*[:：]\s*$/i;
+const DANGEROUS_COMMAND_TRAILER = /^\s*Allow\s*[?？]\s*$/i;
+const PROMPT_CLAMP_LINES = 6;
+// clamp 判定不能等布局（jsdom/首帧无量测），按行数 + 每行约 40 字符折算。
+const PROMPT_CLAMP_CHARS_PER_LINE = 40;
+
+/**
+ * F-43 ①：provider（已实测 pi）的危险命令询问形如
+ *   "⚠️ Dangerous command:\n\n<命令正文>\n\nAllow?"
+ * 正文可达数千字符，此前与提示文字混作一段普通文本，把选项按钮推出可点区域。
+ * 这里按「标记行 / 命令正文 / 尾行」切段：正文单独走等宽内滚块，其余文本可
+ * clamp。非危险命令形态（无标记行）整段作为文本，行为与此前一致。
+ */
+function promptSegments(prompt: string): ChoicePromptSegment[] {
+  const lines = prompt.split("\n");
+  const headerIndex = lines.findIndex((line) => DANGEROUS_COMMAND_HEADER.test(line));
+  if (headerIndex === -1) {
+    return [{ kind: "text", text: prompt }];
+  }
+  const trailerOffset = lines
+    .slice(headerIndex + 1)
+    .findIndex((line) => DANGEROUS_COMMAND_TRAILER.test(line));
+  const trailerIndex = trailerOffset === -1 ? lines.length : headerIndex + 1 + trailerOffset;
+  const commandText = lines.slice(headerIndex + 1, trailerIndex).join("\n").trim();
+  if (commandText.length === 0) {
+    return [{ kind: "text", text: prompt }];
+  }
+  const segments: ChoicePromptSegment[] = [
+    { kind: "text", text: lines.slice(0, headerIndex + 1).join("\n") },
+    { kind: "command", text: commandText },
+  ];
+  if (trailerIndex < lines.length) {
+    segments.push({ kind: "text", text: lines.slice(trailerIndex).join("\n") });
+  }
+  return segments;
+}
+
+function needsPromptClamp(text: string) {
+  return (
+    text.split("\n").length > PROMPT_CLAMP_LINES ||
+    text.length > PROMPT_CLAMP_LINES * PROMPT_CLAMP_CHARS_PER_LINE
+  );
 }

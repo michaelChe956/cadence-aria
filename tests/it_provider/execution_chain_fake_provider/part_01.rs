@@ -1,7 +1,7 @@
 use cadence_aria::cross_cutting::integration_queue::IntegrationQueue;
 use cadence_aria::cross_cutting::provider_adapter::{
-    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
-    parse_last_structured_output,
+    parse_last_structured_output, structured_output_sentinel, ProviderAdapter,
+    ProviderAdapterError,
 };
 use cadence_aria::cross_cutting::worktree::{WorktreeLeaseManager, WorktreeLeaseStatus};
 use cadence_aria::protocol::contracts::{
@@ -176,6 +176,31 @@ fn fake_provider_runs_n16_to_n18_happy_path_with_normalized_traceability() {
     }
     assert_eq!(result.next_node, "M20");
     assert_eq!(result.rework_counter, 0);
+}
+
+/// A1-b1(Bug45 批2 环境回退):runtime unit freeze 点停止注入环境——
+/// 每个 provider.run 收到的 `AdapterInput::env_vars` 不再携带平台注入的
+/// PATH(空 map);宿主 PATH 由底座(cli_adapter)继承到达子进程。
+#[test]
+fn execution_chain_provider_inputs_carry_no_injected_path() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = ScriptedExecutionProvider::happy();
+
+    run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
+        .expect("execution chain");
+
+    let seen_env_paths = provider.seen_env_paths();
+    assert_eq!(
+        seen_env_paths.len(),
+        2,
+        "coding + review nodes must both reach the provider"
+    );
+    for path in &seen_env_paths {
+        assert!(
+            path.is_none(),
+            "runtime unit provider input 不得再携带平台注入的 PATH(宿主值由底座继承)"
+        );
+    }
 }
 
 #[test]

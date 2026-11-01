@@ -47,6 +47,50 @@ impl super::CodingAttemptStore {
             .join(attempt_id)
     }
 
+    /// post-hoc 越界检测基线目录：`coding-attempts/{attempt_id}/cross-target-baselines`。
+    pub(crate) fn attempt_cross_target_baselines_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("cross-target-baselines")
+    }
+
+    /// 单个 role run 的越界检测基线文件：
+    /// `coding-attempts/{attempt_id}/cross-target-baselines/{run_id}.json`。
+    pub(crate) fn attempt_cross_target_baselines_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        run_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(run_id)?;
+        Ok(self
+            .attempt_cross_target_baselines_root(project_id, issue_id, attempt_id)
+            .join(format!("{run_id}.json")))
+    }
+
+    pub(crate) fn admission_ticket_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("admission-ticket.json")
+    }
+
+    pub(crate) fn group_dependency_gate_snapshot_path(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    ) -> PathBuf {
+        self.attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("group-dependency-gate.json")
+    }
+
     pub(crate) fn group_final_readiness_snapshot_path(
         &self,
         attempt: &crate::product::coding_models::CodingExecutionAttempt,
@@ -73,6 +117,46 @@ impl super::CodingAttemptStore {
     ) -> PathBuf {
         self.attempt_dir(project_id, issue_id, attempt_id)
             .join("git-operation.json")
+    }
+
+    /// PointerPublish journal 落盘分区：
+    /// `logical-codebase/pointer-publications/{publication_id}/git-operations/{journal_id}.json`。
+    pub(crate) fn pointer_publication_git_operation_path(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        journal_id: &str,
+    ) -> PathBuf {
+        self.paths
+            .logical_codebase_root(project_id)
+            .join("pointer-publications")
+            .join(publication_id)
+            .join("git-operations")
+            .join(format!("{journal_id}.json"))
+    }
+
+    /// PointerPublication 来源 ReviewRequest 分区：
+    /// `pointer-publications/{publication_id}/review-requests`。
+    pub(crate) fn pointer_review_requests_root(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+    ) -> PathBuf {
+        self.paths
+            .logical_codebase_root(project_id)
+            .join("pointer-publications")
+            .join(publication_id)
+            .join("review-requests")
+    }
+
+    pub(crate) fn pointer_review_request_path(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        request_id: &str,
+    ) -> PathBuf {
+        self.pointer_review_requests_root(project_id, publication_id)
+            .join(format!("{request_id}.json"))
     }
 
     pub(crate) fn role_provider_config_path(
@@ -157,6 +241,22 @@ impl super::CodingAttemptStore {
             .join(format!("{plan_id}.json"))
     }
 
+    /// REQ-MTG-02（OQ2，WP2 分流创建）：多 target per-target journal 子路径
+    /// `group-initializations/{plan_id}/{logical_repository_id}.json`（单 target
+    /// journal 保持原路径 `{plan_id}.json` 零迁移——见上）。
+    pub(crate) fn group_initialization_journal_path_for_target(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        target: &crate::product::logical_codebase::LogicalRepositoryId,
+    ) -> PathBuf {
+        self.coding_attempts_root(project_id, issue_id)
+            .join("group-initializations")
+            .join(plan_id)
+            .join(format!("{}.json", target.0))
+    }
+
     pub(crate) fn amendment_applications_root(
         &self,
         project_id: &str,
@@ -165,6 +265,16 @@ impl super::CodingAttemptStore {
     ) -> PathBuf {
         self.attempt_dir(project_id, issue_id, attempt_id)
             .join("amendment-applications")
+    }
+
+    pub(crate) fn plan_amendment_contexts_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> PathBuf {
+        self.attempt_dir(project_id, issue_id, attempt_id)
+            .join("plan-amendment-contexts")
     }
 
     pub(crate) fn amendment_application_path(

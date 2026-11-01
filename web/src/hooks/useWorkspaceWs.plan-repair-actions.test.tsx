@@ -1,8 +1,9 @@
 import { act } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { linkedWorkspaceAmendmentSnapshotFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import {
   installWorkspaceWsTestHooks,
   renderWorkspaceHook,
@@ -10,6 +11,9 @@ import {
 
 describe("useWorkspaceWs plan repair actions", () => {
   installWorkspaceWsTestHooks();
+  beforeEach(() => {
+    useOperationAuditStore.getState().reset();
+  });
 
   it("sends the authoritative plan amendment confirmation once", () => {
     const harness = renderWorkspaceHook("workspace_session_repair_0001");
@@ -30,7 +34,60 @@ describe("useWorkspaceWs plan repair actions", () => {
     ]);
   });
 
-  it("sends cancellation and revision requests through existing workspace messages", () => {
+  it("records a sent plan amendment confirmation against the current gate", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      useWorkspaceStore.getState().setStage("human_confirm");
+      harness.api.confirmPlanAmendment("plan_amendment_0001");
+    });
+
+    expect(useOperationAuditStore.getState().records).toEqual([
+      expect.objectContaining({
+        sessionId: "workspace_session_repair_0001",
+        gateId: "stage:human_confirm",
+        operation: "confirm_plan_amendment",
+        outcome: "sent",
+        detail: "plan_amendment_0001",
+      }),
+    ]);
+  });
+
+  it("does not record an amendment confirmation when the socket cannot send", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    let sent = true;
+    act(() => {
+      sent = harness.api.confirmPlanAmendment("plan_amendment_0001");
+    });
+
+    expect(sent).toBe(false);
+    expect(useOperationAuditStore.getState().records).toEqual([]);
+  });
+
+  it("records a typed gate approve with its projected gate id", () => {
+    const harness = renderWorkspaceHook("workspace_session_repair_0001");
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(sessionState("workspace_session_repair_0001"));
+      useWorkspaceStore.getState().setStage("human_confirm");
+      harness.api.sendConfirmGate();
+    });
+
+    // L1 重承载：stage-only 门的审计 gateId=投影 key（`stage:` 前缀派生，
+    // 不再是 legacy:human_confirm）。
+    expect(useOperationAuditStore.getState().records).toEqual([
+      expect.objectContaining({
+        sessionId: "workspace_session_repair_0001",
+        gateId: "stage:human_confirm",
+        operation: "confirm",
+        outcome: "sent",
+        detail: "confirm",
+      }),
+    ]);
+  });
+
+  it("sends cancellation and typed revision requests through existing workspace messages", () => {
     const harness = renderWorkspaceHook("workspace_session_repair_0001");
     let cancelled = false;
     let requested = false;
@@ -42,9 +99,7 @@ describe("useWorkspaceWs plan repair actions", () => {
         "plan_amendment_0001",
         " 用户取消修订 ",
       );
-      requested = harness.api.sendHumanConfirm("request-change", {
-        description: "调整 Plan Repair 修订范围",
-      });
+      requested = harness.api.sendRequestRevision("调整 Plan Repair 修订范围");
     });
 
     expect(cancelled).toBe(true);
@@ -56,9 +111,11 @@ describe("useWorkspaceWs plan repair actions", () => {
         reason: "用户取消修订",
       }),
       JSON.stringify({
-        type: "human_confirm",
-        decision: "request-change",
-        payload: { description: "调整 Plan Repair 修订范围" },
+        type: "request_revision",
+        feedback: {
+          feedback_types: ["revision"],
+          description: "调整 Plan Repair 修订范围",
+        },
       }),
     ]);
   });

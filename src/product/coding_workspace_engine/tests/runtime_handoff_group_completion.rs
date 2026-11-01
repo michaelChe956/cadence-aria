@@ -164,9 +164,10 @@ async fn coding_runtime_handoff_group_completion_resumes_and_starts_waiting_cons
                 coder_provider_renderer_version: renderer_for(&providers.coder)
                     .renderer_version()
                     .to_string(),
-                reviewer_provider_renderer_version: renderer_for(&providers.code_reviewer)
-                    .renderer_version()
-                    .to_string(),
+                reviewer_provider_renderer_version: renderer_version_for_optional_provider(
+                    providers.code_reviewer.as_ref(),
+                )
+                .to_string(),
                 internal_reviewer_provider_renderer_version: None,
                 coder_projection_hash: bundle.coder_projection_hash.clone(),
                 reviewer_projection_hash: bundle.reviewer_projection_hash.clone(),
@@ -360,9 +361,10 @@ fn create_group_authority_run_for_logical_unit(
         coder_provider_renderer_version: renderer_for(&providers.coder)
             .renderer_version()
             .to_string(),
-        reviewer_provider_renderer_version: renderer_for(&providers.code_reviewer)
-            .renderer_version()
-            .to_string(),
+        reviewer_provider_renderer_version: renderer_version_for_optional_provider(
+            providers.code_reviewer.as_ref(),
+        )
+        .to_string(),
         internal_reviewer_provider_renderer_version: None,
         coder_projection_hash: bundle.coder_projection_hash,
         reviewer_projection_hash: bundle.reviewer_projection_hash,
@@ -401,7 +403,9 @@ fn create_group_authority_other_attempt_run(
             branch_name: "aria/issues/issue_other".to_string(),
             worktree_path: None,
             provider_config_snapshot: fixture.attempt.provider_config_snapshot.clone(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     let unit = fixture

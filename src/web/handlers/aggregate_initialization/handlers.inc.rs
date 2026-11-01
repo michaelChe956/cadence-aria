@@ -1,0 +1,623 @@
+/// Legacy `/logical-codebase/initializations` compatibility alias for the
+/// default first logical codebase (v1.2 migration artifact).
+pub async fn create_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<CreateAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    // owner 2026-10-29：用户显式点「启动聚合初始化」= 明确表达「我要跑完整
+    // 五步」——无视聚合根是否已做过 Cadence-skills 初始化（否则 skills 更新
+    // 后没有任何重装途径）。跳过式检测只保留给冷启动自动推进路径。
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request, true)
+        .await
+}
+
+/// v1.3 canonical endpoint: aggregate initialization is resolved per logical
+/// codebase (D3 spawn execute / token cancel / recovery semantics unchanged).
+pub async fn create_lc_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+    Json(request): Json<CreateAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    // owner 2026-10-29：手动「启动聚合初始化」始终跑完整五步（含四条
+    // Cadence-skills 命令），不走「聚合根已初始化」的跳过检测——跳过式
+    // 检测只属于冷启动自动推进（bootstrap/advance，full_recipe_requested
+    // 仍为 false）。
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request, true)
+        .await
+}
+
+/// owner 2026-10-29：「重新初始化（聚合）」入口。
+///
+/// 与初始化入口同一操作模型、同一条信道路径，唯一差别是创建期冻结
+/// 「强制跑完整五步」事实：执行期无视聚合根是否已做过 Cadence-skills
+/// 初始化，四条命令照跑（Cadence-skills 更新后重装用）。
+pub async fn create_lc_aggregate_reinitialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+    Json(request): Json<CreateAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request, true)
+        .await
+}
+
+async fn create_aggregate_initialization_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+    request: CreateAggregateInitializationRequest,
+    full_recipe_requested: bool,
+) -> ApiResult<Response> {
+    // A（REQ-REG-10 自动推进）：创建链抽成可复用入口——bootstrap advance 的
+    // 准备派发复用同一条链，不复制 trust 门/幂等/lease/spawn 语义。
+    let operation = start_lc_aggregate_initialization(
+        &state,
+        &project_id,
+        &logical_codebase_id,
+        &request.idempotency_key,
+        full_recipe_requested,
+    )?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(aggregate_initialization_dto(operation)),
+    )
+        .into_response())
+}
+
+/// A（REQ-REG-10 自动推进）：「跑起聚合初始化」的唯一实现——trust 硬前置门
+/// → 幂等 begin → run lease → spawn 执行 + detached index build。
+///
+/// 同步（只做 durable 写 + spawn，不 await 长任务），供 HTTP create 面与
+/// bootstrap advance 的准备派发共用。
+pub(crate) fn start_lc_aggregate_initialization(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+    idempotency_key: &str,
+    full_recipe_requested: bool,
+) -> ApiResult<crate::product::logical_codebase::AggregateInitializationOperation> {
+    let project_paths = product_app_paths(state);
+    validate_project_id(project_id)?;
+    validate_idempotency_key(idempotency_key)?;
+    let dependencies =
+        aggregate_initialization_dependencies(state).for_lc(logical_codebase_id.to_string());
+    let operation_id = deterministic_operation_id(project_id, idempotency_key);
+    let manifest = load_manifest_for_profile(&project_paths, project_id, logical_codebase_id)?;
+    let input = crate::product::logical_codebase::AggregateInitializationOperationInput {
+        idempotency_key: idempotency_key.to_string(),
+        manifest_revision: manifest.membership_revision,
+        policy_digest: "sha256:aggregate-policy".to_string(),
+        profile_evidence_digest: Some("sha256:profile".to_string()),
+        provider_context_root: manifest.provider_context_root.clone(),
+        provider: "claude_code".to_string(),
+    };
+    // Task 1.8（REQ-REG-14）：trust 硬前置门——生产依赖图（`production`/
+    // `for_lc` 透传）注入 gate 时在 begin 之前评估；未 Ready 只保留 gate
+    // 自行落盘的 waiting/审计事实，五步 operation 不创建、worker 不启动。
+    ensure_recipe_trust_ready(
+        &dependencies,
+        project_id,
+        &operation_id,
+        logical_codebase_id,
+        &manifest.provider_context_root,
+    )?;
+    let operation = if full_recipe_requested {
+        dependencies
+            .coordinator
+            .begin_reinitialization(operation_id, project_id, input)
+    } else {
+        dependencies
+            .coordinator
+            .begin(operation_id, project_id, input)
+    }
+    .map_err(aggregate_initialization_api_error)?;
+    // `begin` returns only a newly-created operation: an existing terminal
+    // operation with the same key is reported as an idempotency conflict.
+    let key =
+        InitializationRunKey::aggregate(project_id, logical_codebase_id, &operation.operation_id);
+    let lease = dependencies.runs.register(key).ok_or_else(|| {
+        ApiError::runtime(
+            "aggregate_initialization_in_progress",
+            "aggregate initialization is already in progress",
+            json!({}),
+        )
+    })?;
+    let token = lease.cancellation_token();
+    let coordinator = dependencies.coordinator.clone();
+    let index = dependencies.index.clone();
+    let manifest_revision = operation.input.manifest_revision;
+    let project_id_for_worker = project_id.to_string();
+    let operation_id_for_worker = operation.operation_id.clone();
+    tokio::spawn(async move {
+        // Keep the lease alive for the entire coordinator execution. Dropping
+        // it before spawning would make cancellation and recovery observability
+        // racy with the first provider turn.
+        let _lease = lease;
+        match coordinator
+            .execute(&project_id_for_worker, &operation_id_for_worker, token)
+            .await
+        {
+            Ok(_completed) => {
+                // Task 4（REQ-BOOT-05）：最终政策发布与 receipt 签发已由
+                // 生产 driver 在末命令收口唯一完成（发布失败强制传播为
+                // ProviderTurn 失败，operation 不 Completed）——此处不再
+                // warn-only 补发。Index creation is deliberately detached
+                // from initialization durability. A failed index build is
+                // observable in its own operation and must not roll back a
+                // completed initialization.
+                let project_id = project_id_for_worker.clone();
+                let operation_id = operation_id_for_worker.clone();
+                // Do not extend the initialization lease over the follow-up
+                // index build: this is an independent, best-effort task.
+                tokio::spawn(async move {
+                    let build_project_id = project_id.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        index.build(&build_project_id, manifest_revision)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                project_id = %project_id,
+                                operation_id = %operation_id,
+                                error = %error,
+                                "aggregate initialization index build stopped"
+                            );
+                            // `AggregateIndexOperation::build` persists a Failed
+                            // generation before returning. Keep this detached
+                            // failure independent from the already-Completed
+                            // initialization operation, while making the
+                            // missing projection actionable through GET active.
+                        }
+                        Err(error) => tracing::warn!(
+                            project_id = %project_id,
+                            operation_id = %operation_id,
+                            error = %error,
+                            "aggregate initialization index worker panicked"
+                        ),
+                    }
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    project_id = %project_id_for_worker,
+                    operation_id = %operation_id_for_worker,
+                    error = %error,
+                    "aggregate initialization worker stopped"
+                );
+            }
+        }
+    });
+    Ok(operation)
+}
+
+/// A（REQ-REG-10 自动推进）：把「根配方 operation 跑起来」暴露为可复用入口。
+///
+/// 幂等且不重推：同 `idempotency_key` 派生同 operation id。已在跑 →
+/// `AlreadyRunning`（不再启动第二个 provider turn）；已存在但没有任何活跃
+/// run（Running/Failed/Cancelled/Completed）→ 一律等人工，**绝不自动重试**
+/// 失败配方；不存在 → 走既有创建链（trust 门 + 幂等 begin + lease + spawn）。
+pub(crate) fn ensure_lc_initialization_started(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+    idempotency_key: &str,
+) -> crate::product::logical_codebase::BootstrapPrepareOutcome {
+    use crate::product::logical_codebase::BootstrapPrepareOutcome;
+    use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationStatus;
+
+    let operation_id = deterministic_operation_id(project_id, idempotency_key);
+    let dependencies =
+        aggregate_initialization_dependencies(state).for_lc(logical_codebase_id.to_string());
+    let key = InitializationRunKey::aggregate(project_id, logical_codebase_id, &operation_id);
+    if dependencies.runs.is_active(&key) {
+        // 幂等：同一根配方长任务已在跑，绝不启动第二个 provider turn。
+        return BootstrapPrepareOutcome::AlreadyRunning;
+    }
+    let store = AggregateInitializationOperationStore::for_lc(
+        product_app_paths(state),
+        logical_codebase_id.to_string(),
+    );
+    // 同一 LC 上已有任意**其它**根配方在跑（例如用户刚手动点了「启动聚合
+    // 初始化」，其 operation id 与自动推进派生的 id 不同）→ 绝不并行启动
+    // 第二份；自身 operation 的中断判定留给下方状态分支。
+    let other_recipe_running = match store.list(project_id) {
+        Ok(operations) => operations.iter().any(|operation| {
+            operation.operation_id != operation_id
+                && operation.status == AggregateInitializationOperationStatus::Running
+        }),
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                logical_codebase_id = %logical_codebase_id,
+                error = %error,
+                "bootstrap advance could not list root recipe operations"
+            );
+            return BootstrapPrepareOutcome::WaitingForHuman {
+                reason_code: "aggregate_initialization_state_unreadable".to_string(),
+            };
+        }
+    };
+    if other_recipe_running {
+        return BootstrapPrepareOutcome::AlreadyRunning;
+    }
+    match store.get(project_id, &operation_id) {
+        Ok(operation) => {
+            return match operation.status {
+                // Created 但没有活跃 run：走既有幂等 begin（复用同一记录）
+                // + 新 lease，让 execute 从 checkpoint 续跑。
+                AggregateInitializationOperationStatus::Created => start_lc_initialization_outcome(
+                    state,
+                    project_id,
+                    logical_codebase_id,
+                    idempotency_key,
+                ),
+                AggregateInitializationOperationStatus::Running => {
+                    BootstrapPrepareOutcome::WaitingForHuman {
+                        reason_code: "root_recipe_interrupted".to_string(),
+                    }
+                }
+                AggregateInitializationOperationStatus::Completed => {
+                    BootstrapPrepareOutcome::WaitingForHuman {
+                        reason_code: "root_recipe_already_completed".to_string(),
+                    }
+                }
+                AggregateInitializationOperationStatus::Failed => {
+                    BootstrapPrepareOutcome::WaitingForHuman {
+                        reason_code: "root_recipe_failed".to_string(),
+                    }
+                }
+                AggregateInitializationOperationStatus::Cancelled => {
+                    BootstrapPrepareOutcome::WaitingForHuman {
+                        reason_code: "root_recipe_cancelled".to_string(),
+                    }
+                }
+            };
+        }
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {}
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                logical_codebase_id = %logical_codebase_id,
+                error = %error,
+                "bootstrap advance could not read the root recipe operation"
+            );
+            return BootstrapPrepareOutcome::WaitingForHuman {
+                reason_code: "aggregate_initialization_state_unreadable".to_string(),
+            };
+        }
+    }
+    start_lc_initialization_outcome(state, project_id, logical_codebase_id, idempotency_key)
+}
+
+fn start_lc_initialization_outcome(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+    idempotency_key: &str,
+) -> crate::product::logical_codebase::BootstrapPrepareOutcome {
+    match start_lc_aggregate_initialization(
+        state,
+        project_id,
+        logical_codebase_id,
+        idempotency_key,
+        false,
+    ) {
+        Ok(_) => crate::product::logical_codebase::BootstrapPrepareOutcome::Started,
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                logical_codebase_id = %logical_codebase_id,
+                code = %error.code,
+                message = %error.message,
+                "bootstrap advance root recipe prepare was rejected"
+            );
+            crate::product::logical_codebase::BootstrapPrepareOutcome::WaitingForHuman {
+                reason_code: error.code,
+            }
+        }
+    }
+}
+
+/// Legacy `/logical-codebase/initializations/{operation_id}` compatibility
+/// alias for the default first logical codebase.
+pub async fn get_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, operation_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    get_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id)
+}
+
+/// v1.3 canonical endpoint: operation recovery is resolved per logical
+/// codebase.
+pub async fn get_lc_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id, operation_id)): Path<(String, String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    get_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, operation_id)
+}
+
+/// Legacy `/logical-codebase/initializations/active` compatibility alias for
+/// the default first logical codebase.
+pub async fn get_aggregate_initialization_active(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    get_aggregate_initialization_active_for_lc(state, project_id, logical_codebase_id)
+}
+
+/// v1.3 canonical endpoint: returns the LC's latest aggregate initialization
+/// operation regardless of terminal state (completed/failed/cancelled), so
+/// the management panel can restore the real status after a page reload
+/// instead of showing「尚未初始化」.
+pub async fn get_lc_aggregate_initialization_active(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    get_aggregate_initialization_active_for_lc(state, project_id, logical_codebase_id)
+}
+
+fn get_aggregate_initialization_active_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+) -> ApiResult<Response> {
+    validate_project_id(&project_id)?;
+    let dependencies =
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
+    // 纯投影:任意状态(含 completed/failed/cancelled)的最新 operation;
+    // 无 operation 时按未初始化语义返回稳定 not_found code(404)。
+    let operation = dependencies
+        .coordinator
+        .latest(&project_id)
+        .map_err(aggregate_initialization_api_error)?
+        .ok_or_else(|| {
+            aggregate_initialization_api_error(AggregateInitializationError::NotFound {
+                id: "active".to_string(),
+            })
+        })?;
+    Ok(Json(aggregate_initialization_dto(operation)).into_response())
+}
+
+fn get_aggregate_initialization_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+    operation_id: String,
+) -> ApiResult<Response> {
+    validate_project_id(&project_id)?;
+    validate_operation_id(&operation_id)?;
+    let dependencies =
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
+    // C4 Task 6：GET 纯投影——Running 但内存 run 不活跃时不再隐式
+    // `recover_interrupted`；中断事实由显式 bootstrap action（Continue/
+    // Retry）落盘，GET 只读 durable 记录与 DTO。
+    let operation = dependencies
+        .coordinator
+        .get(&project_id, &operation_id)
+        .map_err(aggregate_initialization_api_error)?;
+    Ok(Json(aggregate_initialization_dto(operation)).into_response())
+}
+
+/// Legacy `/logical-codebase/initializations/{operation_id}/cancel`
+/// compatibility alias for the default first logical codebase.
+pub async fn cancel_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, operation_id)): Path<(String, String)>,
+    Json(request): Json<CancelAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
+    cancel_aggregate_initialization_for_lc(
+        state,
+        project_id,
+        logical_codebase_id,
+        operation_id,
+        request,
+    )
+}
+
+/// v1.3 canonical endpoint: cancellation is resolved per logical codebase.
+pub async fn cancel_lc_aggregate_initialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id, operation_id)): Path<(String, String, String)>,
+    Json(request): Json<CancelAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    cancel_aggregate_initialization_for_lc(
+        state,
+        project_id,
+        logical_codebase_id,
+        operation_id,
+        request,
+    )
+}
+
+fn cancel_aggregate_initialization_for_lc(
+    state: WebAppState,
+    project_id: String,
+    logical_codebase_id: String,
+    operation_id: String,
+    request: CancelAggregateInitializationRequest,
+) -> ApiResult<Response> {
+    validate_project_id(&project_id)?;
+    validate_operation_id(&operation_id)?;
+    let dependencies =
+        aggregate_initialization_dependencies(&state).for_lc(logical_codebase_id.clone());
+    let operation = dependencies
+        .coordinator
+        .cancel(
+            &project_id,
+            &operation_id,
+            &request.reason,
+            request.detail.clone(),
+        )
+        .map_err(aggregate_initialization_api_error)?;
+    // Persist the cancellation first, then signal the in-memory worker. The
+    // worker checks this token at every step boundary and will not advance
+    // after the provider turn currently in flight completes.
+    dependencies.runs.cancel(&InitializationRunKey::aggregate(
+        &project_id,
+        &logical_codebase_id,
+        &operation_id,
+    ));
+    Ok((
+        StatusCode::OK,
+        Json(aggregate_initialization_dto(operation)),
+    )
+        .into_response())
+}
+
+fn aggregate_initialization_dependencies(
+    state: &WebAppState,
+) -> AggregateInitializationDependencies {
+    state.aggregate_initialization_dependencies()
+}
+
+fn load_manifest_for_profile(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<crate::product::logical_codebase::store::LogicalCodebaseManifest> {
+    let store = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+        paths.clone(),
+        logical_codebase_id,
+    );
+    store
+        .load_manifest(project_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(|| {
+            ApiError::runtime(
+                "logical_codebase_manifest_missing",
+                "logical codebase manifest is missing; register members first",
+                json!({}),
+            )
+        })
+}
+
+fn validate_project_id(project_id: &str) -> ApiResult<()> {
+    validate_relative_id(project_id).map_err(|error| {
+        ApiError::validation("invalid_project_id", format!("invalid project id: {error}"))
+    })?;
+    Ok(())
+}
+
+fn validate_operation_id(operation_id: &str) -> ApiResult<()> {
+    validate_relative_id(operation_id).map_err(|error| {
+        ApiError::validation(
+            "invalid_operation_id",
+            format!("invalid operation id: {error}"),
+        )
+    })?;
+    Ok(())
+}
+
+fn validate_idempotency_key(key: &str) -> ApiResult<()> {
+    if key.is_empty() {
+        return Err(ApiError::validation(
+            "invalid_idempotency_key",
+            "idempotency_key must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn deterministic_operation_id(project_id: &str, idempotency_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.as_bytes());
+    hasher.update(idempotency_key.as_bytes());
+    format!("aggregate_initialization_{:x}", hasher.finalize())[..40].to_string()
+}
+
+fn aggregate_initialization_api_error(error: AggregateInitializationError) -> ApiError {
+    match error {
+        AggregateInitializationError::NotFound { .. } => ApiError::runtime(
+            "aggregate_initialization_operation_not_found",
+            "aggregate initialization operation not found",
+            json!({}),
+        ),
+        AggregateInitializationError::TrustWaiting { waiting } => ApiError::runtime(
+            "aggregate_initialization_trust_waiting",
+            waiting.message.clone(),
+            json!({
+                "provider": crate::product::logical_codebase::provider_trust::provider_wire_label(
+                    &waiting.provider,
+                ),
+                "reason_code": waiting.reason_code,
+                "retry_action": waiting.retry_action,
+                "manual_guidance": waiting.manual_guidance,
+                // 指引卡简化（owner 2026-10-12 直批）：结构化命令段
+                //（entry 缺失才有值），消费方直渲命令窗。
+                "command_markdown": waiting.command_markdown,
+                "trust_key": waiting.trust_key,
+                "canonical_root": waiting.canonical_root.to_string_lossy(),
+                "retryable": true,
+            }),
+        ),
+        AggregateInitializationError::StateRejected { detail, .. } => {
+            ApiError::runtime("aggregate_initialization_state_rejected", detail, json!({}))
+        }
+        AggregateInitializationError::Store(error) => product_store_api_error(error),
+        other => ApiError::runtime(
+            "aggregate_initialization_failed",
+            other.to_string(),
+            json!({}),
+        ),
+    }
+}
+
+/// Task 1.8（REQ-REG-14）：route 面 trust 硬前置门——与 coordinator 的
+/// `execute_with_trust` 同一语义（registry durable facts 按
+/// (project_id, lc_id) 调用点 scope，根暂不可得时保持原样、由后续
+/// aggregate_preflight fail-closed 拦截）。未装配 gate 的依赖图（测试
+/// 默认）保持旧行为；Waiting 以稳定 code 的可重试等待面拒绝，绝不
+/// begin/execute。
+fn ensure_recipe_trust_ready(
+    dependencies: &AggregateInitializationDependencies,
+    project_id: &str,
+    operation_id: &str,
+    logical_codebase_id: &str,
+    provider_context_root: &std::path::Path,
+) -> ApiResult<()> {
+    use crate::product::logical_codebase::provider_trust::ProviderTrustPreparationResult;
+
+    let Some(trust) = dependencies.trust() else {
+        return Ok(());
+    };
+    let canonical_root = std::fs::canonicalize(provider_context_root)
+        .unwrap_or_else(|_| provider_context_root.to_path_buf());
+    match trust.ensure_ready(
+        project_id,
+        operation_id,
+        logical_codebase_id,
+        &canonical_root,
+        // 五步 recipe 固定 Claude Code；`requires_workspace_trust` 过滤后
+        // 仅 Codex/Kimi 进入登记（多 provider 入口由 Phase 2/3 扩展）。
+        &[crate::product::models::ProviderName::ClaudeCode],
+        // route 面是五步 recipe 入口：以 Recipe 场景驱动中立 trust 门。
+        crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Recipe,
+    ) {
+        ProviderTrustPreparationResult::Ready { .. } => Ok(()),
+        ProviderTrustPreparationResult::Waiting { waiting } => Err(
+            aggregate_initialization_api_error(AggregateInitializationError::TrustWaiting {
+                waiting: Box::new(waiting),
+            }),
+        ),
+    }
+}

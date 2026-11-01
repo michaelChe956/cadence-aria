@@ -23,17 +23,14 @@ fn running_group_attempt() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running group attempt");
     (root, store, attempt)
 }
@@ -101,6 +98,39 @@ async fn coding_plan_repair_group_terminal_abort_converges_units_and_clears_resu
         rx.try_recv().is_err(),
         "terminal group emitted a coding event"
     );
+}
+
+#[tokio::test]
+async fn group_terminal_transition_leaving_running_clears_admission_marker() {
+    // 会话语义守卫：group attempt 经 update_group_terminal_status_locked 离开 Running
+    // 进入终态时，必须在同一次锁内清空 admission 会话标记。
+    for target in [CodingAttemptStatus::Failed, CodingAttemptStatus::Aborted] {
+        let (_root, store, attempt) = running_group_attempt();
+        assert!(
+            attempt.admission_ticket_consumed_at.is_some(),
+            "{target:?}: fixture must enter Running through a seeded admission session"
+        );
+        let terminal = store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                target.clone(),
+            )
+            .unwrap_or_else(|error| panic!("{target:?}: group terminal transition: {error}"));
+        assert_eq!(terminal.status, target);
+        assert!(
+            terminal.admission_ticket_consumed_at.is_none(),
+            "{target:?}: group terminal transition must clear the admission session marker"
+        );
+        let persisted = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap_or_else(|error| panic!("{target:?}: reload attempt: {error}"));
+        assert!(
+            persisted.admission_ticket_consumed_at.is_none(),
+            "{target:?}: persisted group attempt must have no admission session marker"
+        );
+    }
 }
 
 #[tokio::test]
@@ -216,6 +246,7 @@ async fn group_review_material_failure_keeps_business_error_when_terminal_lock_w
             CodingWorkspaceEngineError::GroupReviewMaterial(
                 "unit_cross_review_record_exceeds_size_limit".into(),
             ),
+            None,
         )
         .await
         .expect_err("group review material failure remains surfaced");
@@ -427,9 +458,8 @@ fn seed_completed_group_final_review_runtime(
     let coder_renderer_version = renderer_for(&providers.coder)
         .renderer_version()
         .to_string();
-    let reviewer_renderer_version = renderer_for(&providers.code_reviewer)
-        .renderer_version()
-        .to_string();
+    let reviewer_renderer_version =
+        renderer_version_for_optional_provider(providers.code_reviewer.as_ref()).to_string();
     for (index, unit) in store
         .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("coding units")
@@ -740,7 +770,7 @@ fn coding_plan_repair_group_terminal_validator_rejects_created_attempt_disguised
         .expect("review request stage");
     corrupted.status = CodingAttemptStatus::Created;
     store
-        .save_coding_attempt(&corrupted)
+        .write_coding_attempt_for_test(&corrupted)
         .expect("corrupt attempt status");
 
     let error = store
@@ -772,16 +802,12 @@ fn coding_plan_repair_single_work_item_terminal_status_update_is_unchanged() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("single attempt");
     let running = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running single attempt");
 
     let aborted = store

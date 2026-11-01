@@ -138,14 +138,7 @@ fn group_attempt_with_committed_unit_changes(
         &unit2_commit_for_head,
     );
 
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_stage(
             &attempt.project_id,

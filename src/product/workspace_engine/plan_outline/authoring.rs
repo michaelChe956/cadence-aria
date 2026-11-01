@@ -30,14 +30,11 @@ impl WorkspaceEngine {
     pub async fn begin_work_item_plan_outline_review_run(&mut self) -> String {
         self.transition_stage(WorkspaceStage::CrossReview).await;
         let round = self.next_review_round();
-        let reviewer = self
-            .session
-            .reviewer_provider
-            .clone()
-            .unwrap_or(ProviderName::Codex);
+        // C2 Task 5（REQ-CRO-05）：三值透传——节点 agent 为 Option，缺失记 None。
+        let reviewer = self.session.reviewer_provider.clone();
         self.create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemPlanOutlineReview,
-            agent: Some(reviewer),
+            agent: reviewer,
             stage: WorkspaceStage::CrossReview,
             round: Some(round),
             title: format!("WorkItemPlan Outline Review Round {round}"),
@@ -47,36 +44,9 @@ impl WorkspaceEngine {
         .await
     }
 
-    pub async fn request_work_item_plan_outline_revision(
-        &mut self,
-        feedback: Option<String>,
-    ) -> Result<Option<String>, String> {
-        let active_node_type = self.active_node_type();
-        let is_allowed_node = matches!(
-            active_node_type,
-            Some(
-                TimelineNodeType::WorkItemPlanOutlineConfirm
-                    | TimelineNodeType::WorkItemGenerationMode
-            )
-        );
-        if self.session.stage != WorkspaceStage::AuthorConfirm || !is_allowed_node {
-            return Err(
-                "request_outline_revision requires active work_item_plan_outline_confirm or work_item_generation_mode node"
-                    .to_string(),
-            );
-        }
-        let policy = if active_node_type == Some(TimelineNodeType::WorkItemPlanOutlineConfirm) {
-            OutlineRevisionPersistencePolicy::AllowMissingInitialRound
-        } else {
-            OutlineRevisionPersistencePolicy::RequireActiveRound
-        };
-        self.prepare_work_item_plan_outline_revision(
-            feedback,
-            WorkItemPlanOutlineRevisionSource::AuthorConfirm,
-            policy,
-        )
-        .await
-    }
+    // 退役留档（T5/REQ-RET-02）：request_work_item_plan_outline_revision
+    //（RequestOutlineRevision 消息族唯一引擎入口）随消息族删除——SC outline
+    // 修订走 human_gate_feedback（wp5-attribution-table.md §2）。
 
     pub async fn begin_work_item_plan_auto_revision_run(&mut self, round: u32) -> String {
         self.transition_stage(WorkspaceStage::Revision).await;
@@ -292,6 +262,9 @@ impl WorkspaceEngine {
                 "Provider did not return a valid WorkItemPlan Outline structured output: {message}"
             ),
             work_item_ids: Vec::new(),
+            // F1.2：outline 解析失败 finding 恒 kind=None（旧 wire 兼容；
+            // 显式 typed 工厂归 F2b）。
+            kind: None,
         }];
         let design_context_gaps = self.current_work_item_plan_design_context_gaps();
 

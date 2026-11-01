@@ -30,6 +30,8 @@ pub(crate) async fn forward_runner_command_to_provider(
             id,
             selected_option_ids,
             free_text,
+            answers,
+            receipt,
         } => {
             send_provider_command_with_cancellation(
                 provider_commands,
@@ -37,7 +39,8 @@ pub(crate) async fn forward_runner_command_to_provider(
                     id,
                     selected_option_ids,
                     free_text,
-                    answers: vec![],
+                    answers,
+                    receipt,
                 },
                 cancellation,
             )
@@ -47,7 +50,8 @@ pub(crate) async fn forward_runner_command_to_provider(
             provider_commands.try_send(ProviderCommand::Abort).is_ok()
         }
         CodingRunnerCommand::ProviderSelect { .. }
-        | CodingRunnerCommand::StageGateConfirm { .. } => true,
+        | CodingRunnerCommand::StageGateConfirm { .. }
+        | CodingRunnerCommand::RetryPush => true,
     }
 }
 

@@ -12,9 +12,10 @@ use crate::product::coding_models::{
     CodingExecutionStage as FixtureStage, CodingGateAction, CodingGateActionType,
     CodingProviderRole, CodingRoleRunEventType, CodingRoleRunStatus, CodingRoleRunTrigger,
     CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest,
-    ReviewRequestKind,
+    ReviewRequestKind, ReviewRequestOwnerKind,
 };
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+use crate::product::json_store::write_json;
 use crate::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
@@ -54,13 +55,16 @@ pub(super) fn create_large_workspace_fixture(
         path: app_paths.root().to_path_buf(),
         default_policy_preset: Some("manual-write".to_string()),
         default_provider_mode: Some("fake".to_string()),
+        idempotency_key: "large-workspace-fixture-repository".to_string(),
     })?;
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),
         repo_id: Some(repository.id.clone()),
+        logical_codebase_id: None,
         title: "Large Workspace Memory Issue".to_string(),
         description: Some("验证大型 workspace 的按需内容加载".to_string()),
         change_id: None,
+        base_branch: None,
     })?;
     let lifecycle = LifecycleStore::new(app_paths);
     let story = lifecycle.create_story_spec(CreateStorySpecInput {
@@ -68,6 +72,7 @@ pub(super) fn create_large_workspace_fixture(
         issue_id: issue.id.clone(),
         repository_id: repository.id,
         title: "Large Workspace Memory Story".to_string(),
+        aggregate_codebase: None,
     })?;
     let session = lifecycle.create_workspace_session(CreateWorkspaceSessionInput {
         project_id: project.id,
@@ -75,10 +80,11 @@ pub(super) fn create_large_workspace_fixture(
         entity_id: story.id,
         workspace_type: WorkspaceType::Story,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
         review_rounds: 5,
         superpowers_enabled: false,
         openspec_enabled: true,
+        work_item_plan_options: None,
     })?;
 
     let session_id = session.id;
@@ -292,13 +298,16 @@ fn create_coding_role_run_fixture(
         path: repo_path.clone(),
         default_policy_preset: Some("manual-write".to_string()),
         default_provider_mode: Some("fake".to_string()),
+        idempotency_key: "coding-role-run-fixture-repository".to_string(),
     })?;
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),
         repo_id: Some(repository.id.clone()),
+        logical_codebase_id: None,
         title: "Coding Role Run Issue".to_string(),
         description: Some("Issue for role run history E2E".to_string()),
         change_id: None,
+        base_branch: None,
     })?;
 
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -307,6 +316,7 @@ fn create_coding_role_run_fixture(
         issue_id: issue.id.clone(),
         repository_id: repository.id.clone(),
         title: "Fixture Story".to_string(),
+        aggregate_codebase: None,
     })?;
     let work_item =
         lifecycle.create_work_item(crate::product::lifecycle_store::CreateWorkItemInput {
@@ -354,6 +364,10 @@ fn create_coding_role_run_fixture(
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Blocked,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: if blocked_stage_internal {
             FixtureStage::InternalPrReview
         } else {
@@ -374,9 +388,15 @@ fn create_coding_role_run_fixture(
         provider_conversations: Vec::new(),
         created_at: now.clone(),
         updated_at: now.clone(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
-    store.save_coding_attempt(&attempt)?;
+    write_json(
+        &store.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id),
+        &attempt,
+    )?;
 
     let now = chrono::Utc::now().to_rfc3339();
     if blocked_stage_internal {
@@ -395,6 +415,9 @@ fn create_coding_role_run_fixture(
             created_at: now.clone(),
             updated_at: now.clone(),
             push_error: None,
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
+            revoked: false,
         };
         store.save_review_request(&attempt, &review_request)?;
 

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::product::coding_models::{
-    CodingChoiceOption, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
-    CodingProviderRole,
+    AttemptTargetSnapshot, CodingChoiceOption, CodingChoiceQuestion, CodingExecutionStage,
+    CodingExecutionUnitStatus, CodingGateAction, CodingProviderRole, CodingStartRunPolicy,
 };
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -16,6 +16,7 @@ pub struct CreateCodingAttemptInput {
     pub branch_name: String,
     pub worktree_path: Option<PathBuf>,
     pub provider_config_snapshot: ProviderConfigSnapshot,
+    pub target_snapshot: Option<AttemptTargetSnapshot>,
     pub max_auto_rework: u32,
 }
 
@@ -29,7 +30,11 @@ pub struct CreateGroupCodingAttemptInput {
     pub branch_name: String,
     pub worktree_path: Option<PathBuf>,
     pub provider_config_snapshot: ProviderConfigSnapshot,
+    pub target_snapshot: Option<AttemptTargetSnapshot>,
     pub max_auto_rework: u32,
+    /// P2 Task 2：group attempt 首建时冻结的首启策略；普通/手工/legacy/
+    /// 多 target 调用方显式 Manual，Task 1 自动服务核验后才传 AutoStartOnce。
+    pub start_run_policy: CodingStartRunPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +77,16 @@ pub struct CreateChoiceGateInput {
     pub options: Vec<CodingChoiceOption>,
     pub allow_multiple: bool,
     pub allow_free_text: bool,
+    pub questions: Vec<CodingChoiceQuestion>,
+}
+
+/// `resolve_choice_gate` 的应答载荷：原样落入 `CodingChoiceGateResponse`
+///（responded_at 由 store 落盘时补齐）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveChoiceGateInput {
+    pub selected_option_ids: Vec<String>,
+    pub free_text: Option<String>,
+    pub answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

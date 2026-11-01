@@ -8,16 +8,18 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS;
 use crate::cross_cutting::process_manager::ManagedProcessChild;
 use crate::product::coding_models::{PushStatus, RemoteKind};
+use crate::product::local_artifacts::is_platform_local_artifact_path;
 
 mod reconcile;
 mod test_pause;
 
 pub use test_pause::{GitCommandPause, pause_next_git_command_after_exit};
 
-const SAFE_WORKTREE_PREFIXES: &[&str] = &["aria-work-items", "aria-issues"];
-const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/"];
+const SAFE_WORKTREE_PREFIXES: &[&str] = &["aria-work-items", "aria-issues", "aria-pointer"];
+const SAFE_BRANCH_PREFIXES: &[&str] = &["aria/work-items/", "aria/issues/", "aria-pointer/"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitWorkspaceError {
@@ -35,6 +37,14 @@ pub enum GitWorkspaceError {
     Cancelled { args: String, cwd: String },
     #[error("git_workspace_unsafe_path: {0}")]
     UnsafePath(String),
+    /// F-15：staging 前发现无任何读位的产物文件（如 agent 造的 chmod 000
+    /// fixture）。`git add -A` 对这类文件报 `unable to index file` 失败，且文件
+    /// 留在 worktree 会让同 worktree 后续所有 run 的 staging 永久失败；必须在
+    /// staging 前 fail-closed，错误指名文件与修法让 agent 自修重写。
+    #[error(
+        "git_workspace_unreadable_artifact: {path} 权限 {mode:o} 无任何读位，git add 无法索引；请修正权限（如 chmod 644 {path}）或重写该产物后重试"
+    )]
+    UnreadableArtifact { path: String, mode: u32 },
     #[error("git_workspace_parse: {0}")]
     Parse(String),
     #[error("git_push_indeterminate: {remote}/{branch} at {commit_sha}")]
@@ -139,10 +149,25 @@ impl GitWorkspaceService {
                 branch_name
             )));
         }
-
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 GitWorkspaceError::Io(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        // Bug1(2026-10-16):未注册但目录在场 = 删除残留(注册已删、目录留下)。
+        // 路径已过 `ensure_safe_worktree_path`(aria worktree 命名空间内),
+        // 直接补删后再建,使新建与删除残留兼容——否则 `git worktree add`
+        // 以 `already exists` 失败,现场表现为「已存在部分内容」。
+        if worktree_path.exists() {
+            tracing::info!(
+                worktree = %worktree_path.display(),
+                "replacing unregistered worktree residue directory on create"
+            );
+            std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                GitWorkspaceError::Io(format!(
+                    "remove residue {}: {error}",
+                    worktree_path.display()
+                ))
             })?;
         }
         let worktree = worktree_path.to_string_lossy().to_string();
@@ -162,9 +187,39 @@ impl GitWorkspaceService {
             return Ok(());
         }
         let worktree = worktree_path.to_string_lossy().to_string();
-        self.run_git(repo_path, &["worktree", "remove", "--force", &worktree])
-            .await
-            .map(|_| ())
+        // Bug1(2026-10-16):保证「目录与注册要么都在要么都不在」。
+        // - 已注册:`git worktree remove --force` 原子清两者;报成功但目录
+        //   仍在(超时竞态/部分删除)时补删目录,失败显式上抛。
+        // - 未注册但目录在场 = 删除残留:aria worktree 命名空间内的孤儿
+        //   目录,直接补删,使删除动作对既有残留幂等(重放即清干净)。
+        if self
+            .find_worktree_branch(repo_path, worktree_path)
+            .await?
+            .is_some()
+        {
+            self.run_git(repo_path, &["worktree", "remove", "--force", &worktree])
+                .await?;
+        } else {
+            tracing::info!(
+                worktree = %worktree,
+                "removing unregistered worktree residue directory"
+            );
+            std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                GitWorkspaceError::Io(format!(
+                    "remove residue {}: {error}",
+                    worktree_path.display()
+                ))
+            })?;
+        }
+        if worktree_path.exists() {
+            std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                GitWorkspaceError::Io(format!(
+                    "remove residue {}: {error}",
+                    worktree_path.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     pub async fn prune_worktrees(&self, repo_path: &Path) -> Result<(), GitWorkspaceError> {
@@ -172,6 +227,25 @@ impl GitWorkspaceService {
         self.run_git(repo_path, &["worktree", "prune"])
             .await
             .map(|_| ())
+    }
+
+    /// 枚举仓内全部已注册 worktree 的绝对路径(porcelain `worktree ` 行)。
+    /// Bug1 清扫用:issue 级残留目录内仍有注册 worktree(其他 plan/轮次
+    /// 存活)时不得整目录删除。
+    pub(crate) async fn list_worktree_paths(
+        &self,
+        repo_path: &Path,
+    ) -> Result<Vec<PathBuf>, GitWorkspaceError> {
+        self.ensure_git_repo(repo_path).await?;
+        let output = self
+            .run_git(repo_path, &["worktree", "list", "--porcelain"])
+            .await?;
+        Ok(output
+            .stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .collect())
     }
 
     pub async fn delete_local_branch(
@@ -193,20 +267,41 @@ impl GitWorkspaceService {
             .map(|_| ())
     }
 
+    pub async fn delete_remote_branch(
+        &self,
+        repo_path: &Path,
+        remote: &str,
+        branch_name: &str,
+    ) -> Result<(), GitWorkspaceError> {
+        self.ensure_git_repo(repo_path).await?;
+        ensure_safe_aria_branch_name(branch_name)?;
+        let output = self
+            .run_git_allow_failure(repo_path, &["push", remote, "--delete", branch_name])
+            .await?;
+        if output.status_success {
+            return Ok(());
+        }
+        // 远端分支本就不存在：git 输出含 "remote ref does not exist" 且 exit != 0，
+        // 与 delete_local_branch 的 show-ref 幂等语义对齐，视为成功。
+        if remote_delete_output_is_missing_ref(&output.stderr) {
+            return Ok(());
+        }
+        Err(GitWorkspaceError::CommandFailed {
+            args: format!("push {remote} --delete {branch_name}"),
+            cwd: repo_path.display().to_string(),
+            stderr: output.stderr,
+        })
+    }
+
     pub async fn git_status(
         &self,
         worktree_path: &Path,
     ) -> Result<Vec<FileStatus>, GitWorkspaceError> {
         self.ensure_git_repo(worktree_path).await?;
         let output = self
-            .run_git(worktree_path, &["status", "--porcelain"])
+            .run_git(worktree_path, &["status", "--porcelain", "-z"])
             .await?;
-        Ok(output
-            .stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(parse_status_line)
-            .collect())
+        parse_porcelain_z_status(&output.stdout_bytes)
     }
 
     pub async fn git_add_all(&self, worktree_path: &Path) -> Result<(), GitWorkspaceError> {
@@ -221,6 +316,7 @@ impl GitWorkspaceService {
         worktree_path: &Path,
     ) -> Result<(), GitWorkspaceError> {
         self.ensure_git_repo(worktree_path).await?;
+        self.ensure_staged_files_readable(worktree_path).await?;
         self.run_git(worktree_path, &["add", "-A"]).await?;
         let output = self
             .run_git(worktree_path, &["diff", "--cached", "--name-only", "-z"])
@@ -229,6 +325,34 @@ impl GitWorkspaceService {
             if should_exclude_from_work_item_commit(path) {
                 self.run_git(worktree_path, &["restore", "--staged", "--", path])
                     .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// F-15 预检：枚举 `git add -A` 将索引的文件（索引内已修改 + 未忽略的
+    /// untracked，与 add -A 的触达面一致），任一无读位即 fail-closed——
+    /// 否则 add -A 以不可归因的 `unable to index file` 失败，且残留文件会
+    /// 卡死同 worktree 后续所有 run 的 staging。
+    async fn ensure_staged_files_readable(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<(), GitWorkspaceError> {
+        let output = self
+            .run_git(
+                worktree_path,
+                &[
+                    "ls-files",
+                    "-z",
+                    "--modified",
+                    "--others",
+                    "--exclude-standard",
+                ],
+            )
+            .await?;
+        for relative in output.stdout.split('\0').filter(|path| !path.is_empty()) {
+            if let Some(error) = unreadable_artifact_error(worktree_path, relative) {
+                return Err(error);
             }
         }
         Ok(())
@@ -320,6 +444,20 @@ impl GitWorkspaceService {
         }
     }
 
+    /// 仓库是否配置了名为 `remote` 的远端。
+    ///
+    /// 以 `git remote` 列表判定，不依赖 `remote get-url`/`ls-remote` 的退出码：
+    /// 后者无法区分「未配置」与「已配置但不可达」。只有「未配置」才允许本地交付跳过推送。
+    pub async fn git_remote_configured(
+        &self,
+        worktree_path: &Path,
+        remote: &str,
+    ) -> Result<bool, GitWorkspaceError> {
+        self.ensure_git_repo(worktree_path).await?;
+        let output = self.run_git(worktree_path, &["remote"]).await?;
+        Ok(output.stdout.lines().any(|line| line.trim() == remote))
+    }
+
     pub async fn git_diff_stat(
         &self,
         worktree_path: &Path,
@@ -349,6 +487,8 @@ impl GitWorkspaceService {
     ///
     /// 当两个提交相同时，没有观察到该 unit 的新提交，因此返回空集合，且不会
     /// 回退为读取单提交或其父提交的 diff。
+    ///
+    /// 清单以 `-z` NUL 协议采集，返回逐项严格 UTF-8 解码的真实路径。
     pub async fn git_commit_range_changed_files(
         &self,
         worktree_path: &Path,
@@ -363,15 +503,12 @@ impl GitWorkspaceService {
         let output = self
             .run_git(
                 worktree_path,
-                &["diff", "--name-only", "--no-renames", &commit_range],
+                &["diff", "--name-only", "--no-renames", "-z", &commit_range],
             )
             .await?;
-        Ok(output
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
+        let paths = decode_nul_separated_paths(&output.stdout_bytes, "diff --name-only -z")?;
+        Ok(paths
+            .into_iter()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect())
@@ -411,6 +548,8 @@ impl GitWorkspaceService {
     /// 用于组完成写入范围门禁：每个已完成 unit 的 `completion_commit` 决定该 unit
     /// 实际改了哪些文件，从而保住 per-unit 的归属判定。根提交（无父）返回该提交
     /// 引入的全部文件。
+    ///
+    /// 清单以 `-z` NUL 协议采集，返回逐项严格 UTF-8 解码的真实路径。
     pub async fn git_commit_changed_files(
         &self,
         worktree_path: &Path,
@@ -425,17 +564,12 @@ impl GitWorkspaceService {
                     "--name-only",
                     "--pretty=format:",
                     "--no-renames",
+                    "-z",
                     commit_sha,
                 ],
             )
             .await?;
-        Ok(output
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect())
+        decode_nul_separated_paths(&output.stdout_bytes, "show --name-only -z")
     }
 
     pub async fn git_diff(
@@ -530,15 +664,12 @@ impl GitWorkspaceService {
         cwd: &Path,
         args: &[&str],
     ) -> Result<GitCommandOutput, GitWorkspaceError> {
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(cwd)
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let args_display = args.join(" ");
+        let mut command = git_command(cwd, args);
+        // 审计串必须反映实际执行 argv:禁桥参数固定在最前(与 git_command
+        // 的注入顺序一致),其后才是调用方子命令。
+        let mut argv_display: Vec<&str> = TRUSTED_GIT_BRIDGE_ARGS.to_vec();
+        argv_display.extend_from_slice(args);
+        let args_display = argv_display.join(" ");
         let cwd_display = cwd.display().to_string();
         let mut child = ManagedProcessChild::spawn(&mut command).map_err(|error| {
             GitWorkspaceError::Io(format!("git {args_display} in {cwd_display}: {error}"))
@@ -604,6 +735,7 @@ impl GitWorkspaceService {
             status_success: status.success(),
             stdout: String::from_utf8_lossy(&stdout).to_string(),
             stderr: String::from_utf8_lossy(&stderr).to_string(),
+            stdout_bytes: stdout,
         })
     }
 
@@ -620,10 +752,60 @@ impl Default for GitWorkspaceService {
     }
 }
 
+/// 构造 git 子进程命令。固定 `LC_ALL=C`（评审 I1）：git 的诊断短语
+/// （如 `push --delete` 的 `remote ref does not exist`）会随 locale 本地化，
+/// 而 `remote_delete_output_is_missing_ref` 仅匹配英文短语，因此必须强制英文输出，
+/// 否则非 C locale 下 `delete_remote_branch` 的幂等判定会误报真实失败。
+///
+/// 同时在子命令之前注入平台受信禁桥参数（Bug45/T4，与
+/// [`crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS`] 同源）：
+/// coder 可写的 `.git/hooks`（经 `core.hooksPath` 定位）与
+/// `core.fsmonitor` 探针命令不得借平台 Git 在 owner 上下文自动执行。
+/// `-c` 命令级覆盖不落盘：不改仓库 config，也不影响 coder 自己域内
+/// git 的 hooks 语义（两个信任域不得混用）。
+fn git_command(cwd: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args(TRUSTED_GIT_BRIDGE_ARGS)
+        .args(args)
+        .current_dir(cwd)
+        .kill_on_drop(true)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
 struct GitCommandOutput {
     status_success: bool,
     stdout: String,
     stderr: String,
+    /// stdout 的原始字节。`-z` NUL 协议文件清单必须从这里解析路径，严禁
+    /// 经过 `stdout`（lossy 解码）：无效 UTF-8 要 fail-closed 返回 Parse
+    /// 错误，而不是替换成 U+FFFD 后继续参与 scope 鉴权（Bug1-A）。
+    stdout_bytes: Vec<u8>,
+}
+
+/// NUL 协议（`-z`）文件清单解码：原始字节按 0x00 分割，逐项严格 UTF-8。
+///
+/// 文件名中的引号/空格/换行原样保留（不 trim、不剥引号、不启发式反转义）；
+/// 任何一段不是有效 UTF-8 即整体 fail-closed 返回 Parse 错误。
+fn decode_nul_separated_paths(
+    bytes: &[u8],
+    command_display: &str,
+) -> Result<Vec<String>, GitWorkspaceError> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            str::from_utf8(path).map(str::to_string).map_err(|error| {
+                GitWorkspaceError::Parse(format!(
+                    "git {command_display}: file path is not valid UTF-8: {error}"
+                ))
+            })
+        })
+        .collect()
 }
 
 async fn read_pipe<R>(mut pipe: R) -> std::io::Result<Vec<u8>>
@@ -700,6 +882,61 @@ fn reject_parent_dir_components(path: &Path) -> Result<(), GitWorkspaceError> {
     Ok(())
 }
 
+/// 无法反解主仓时的 worktree 目录**兜底删除**守卫（不需要 `repo_path`）。
+///
+/// 与 [`ensure_safe_worktree_path`] 语义同源（拒绝父级 `..`、`.worktrees` 下
+/// 首层白名单、实体名非空），但主仓路径不可知——反解失败的现场正是
+/// 「gitfile 缺失/损坏」——故只凭路径形状确认目标是 aria worktree 实体：
+/// `<repo>/.worktrees/<aria-work-items|aria-issues|aria-pointer>/<name>`。
+///
+/// 不满足即 [`GitWorkspaceError::UnsafePath`]（调用方 MUST fail-closed：
+/// 保留记录待人工，绝不 `remove_dir_all`）。典型危险现场：`worktree_path`
+/// 被记录为主仓根（`.git` 是目录，反解失败）——旧实现会整仓删除。
+///
+/// 取**最后一个** `.worktrees` 段：嵌套 worktree（worktree 内的 `.worktrees`）
+/// 时以最具体的一层判定，仍是同一语义。
+pub(crate) fn ensure_worktree_namespace_path(
+    worktree_path: &Path,
+) -> Result<(), GitWorkspaceError> {
+    reject_parent_dir_components(worktree_path)?;
+    // 路径存在（调用方只在 exists 时兜底）；canonicalize 解析符号链接——
+    // 指向命名空间之外的链接按目标判定（fail-closed）。
+    let normalized = worktree_path.canonicalize().map_err(|error| {
+        GitWorkspaceError::Io(format!("canonicalize {}: {error}", worktree_path.display()))
+    })?;
+    let components: Vec<&std::ffi::OsStr> = normalized.iter().collect();
+    let Some(index) = components
+        .iter()
+        .rposition(|component| *component == std::ffi::OsStr::new(".worktrees"))
+    else {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} is not inside a `.worktrees` namespace",
+            worktree_path.display()
+        )));
+    };
+    let Some(prefix) = components.get(index + 1).and_then(|value| value.to_str()) else {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} has no worktree prefix below `.worktrees`",
+            worktree_path.display()
+        )));
+    };
+    if !SAFE_WORKTREE_PREFIXES.contains(&prefix) {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} is outside allowed aria worktree prefixes {:?}",
+            worktree_path.display(),
+            SAFE_WORKTREE_PREFIXES
+        )));
+    }
+    // 白名单层之下必须还有实体名（不得删整个前缀命名空间）。
+    if components.len() <= index + 2 {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} is a worktree namespace root, not a worktree entity",
+            worktree_path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_safe_aria_branch_name(branch_name: &str) -> Result<(), GitWorkspaceError> {
     if branch_name.starts_with('/')
         || branch_name.contains("..")
@@ -747,19 +984,85 @@ fn normalize_existing_prefix(path: &Path) -> Result<PathBuf, GitWorkspaceError> 
     }
 }
 
-fn parse_status_line(line: &str) -> FileStatus {
-    let code = line.get(0..2).unwrap_or("").trim().to_string();
-    let path = line.get(3..).unwrap_or("").to_string();
-    FileStatus { code, path }
+/// porcelain `-z` 状态清单解析：原始字节按 0x00 分割，逐条严格 UTF-8。
+///
+/// 与文件清单同一 NUL 协议（Bug1-A）：路径原样保留（不 trim、不剥引号、
+/// 不启发式反转义）；rename/copy 条目在目标路径后紧跟一段无 `XY ` 前缀的
+/// 源路径——源路径按协议作为独立状态条目上报（与清单命令 `--no-renames`
+/// 的「两路径都报」同约定），否则越界删除可借目标命中绕过 single-scope
+/// 完成门禁（F1/P2）；任一条目非有效 UTF-8 整体 fail-closed 返回 Parse
+/// 错误，绝不替换后继续。
+fn parse_porcelain_z_status(bytes: &[u8]) -> Result<Vec<FileStatus>, GitWorkspaceError> {
+    let mut statuses = Vec::new();
+    let mut rename_code: Option<String> = None;
+    for record in bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let record = str::from_utf8(record).map_err(|error| {
+            GitWorkspaceError::Parse(format!(
+                "git status --porcelain -z: file path is not valid UTF-8: {error}"
+            ))
+        })?;
+        if let Some(code) = rename_code.take() {
+            statuses.push(FileStatus {
+                code,
+                path: record.to_string(),
+            });
+            continue;
+        }
+        let code = record.get(0..2).unwrap_or("").trim().to_string();
+        if code.starts_with('R') || code.starts_with('C') {
+            rename_code = Some(code.clone());
+        }
+        statuses.push(FileStatus {
+            code,
+            path: record.get(3..).unwrap_or("").to_string(),
+        });
+    }
+    Ok(statuses)
 }
 
+/// Work Item commit 前从暂存区剔除的路径：平台本地产物走
+/// [`is_platform_local_artifact_path`]（目录列表单一事实源
+/// [`crate::product::local_artifacts::PLATFORM_LOCAL_ARTIFACT_DIRS`]，与
+/// exclude 写入同源——exclude 未就位/产物已被跟踪时的第二道防线，旧过滤只认
+/// `.aria` 与 `.aria/coding-artifacts/`，`.aria/evidence-token`、
+/// `.codegraph/…`、`.verify/…` 全部漏网）；Python 工具链噪音维持原剔除。
 fn should_exclude_from_work_item_commit(path: &str) -> bool {
-    path == ".aria"
-        || path.starts_with(".aria/coding-artifacts/")
+    is_platform_local_artifact_path(path)
         || path == "__pycache__"
         || path.starts_with("__pycache__/")
         || path.contains("/__pycache__/")
         || path.ends_with(".pyc")
+}
+
+/// F-15：判定单个产物文件属主读位是否为零（unix mode & 0o400 == 0）。
+///
+/// git 以文件属主身份运行且 Linux 不向 group/other 类回退——属主读位为零
+/// （chmod 000 / 0o044 / 0o040 / 0o004 等）即 `git add` 必然失败的自我死锁
+/// 产物，且 commit 进仓也会毒化队友与 CI；组/其他读位不影响属主判定。
+/// 属主可读但组只读等形态（0o400+）由 git 语义自行处理，不在预检范围。
+/// symlink 与已删除文件不读内容、不受影响，直接放行。
+fn unreadable_artifact_error(worktree_path: &Path, relative: &str) -> Option<GitWorkspaceError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::symlink_metadata(worktree_path.join(relative)).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let permissions = metadata.permissions().mode();
+        if permissions & 0o400 == 0 {
+            return Some(GitWorkspaceError::UnreadableArtifact {
+                path: relative.to_string(),
+                mode: permissions & 0o777,
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (worktree_path, relative);
+    None
 }
 
 fn push_output_is_explicit_remote_rejection(stderr: &str) -> bool {
@@ -767,6 +1070,12 @@ fn push_output_is_explicit_remote_rejection(stderr: &str) -> bool {
     stderr.contains("[remote rejected]")
         || stderr.contains("[rejected]")
         || stderr.contains("remote: error:")
+}
+
+fn remote_delete_output_is_missing_ref(stderr: &str) -> bool {
+    stderr
+        .to_ascii_lowercase()
+        .contains("remote ref does not exist")
 }
 
 fn parse_numstat_line(line: &str) -> Result<DiffFileStat, GitWorkspaceError> {

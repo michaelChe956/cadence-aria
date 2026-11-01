@@ -31,8 +31,12 @@ fn failed_review_comments_never_enter_story_design_or_work_item_revision_prompts
         };
 
         for prompt in [
-            engine.build_revision_full_prompt("# Existing Artifact", &verdict),
-            engine.build_revision_delta_prompt(&verdict),
+            engine.build_revision_full_prompt(
+                "# Existing Artifact",
+                &verdict,
+                &RoutingReferenceContext::Legacy,
+            ),
+            engine.build_revision_delta_prompt(&verdict, &RoutingReferenceContext::Legacy),
         ] {
             assert!(!prompt.contains(raw_injection), "{workspace_type:?}");
             assert!(

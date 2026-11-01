@@ -1,0 +1,65 @@
+{
+  "provider": "kimi_code",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep1",
+  "startedAt": "2026-09-18T16:26:25.241Z",
+  "finishedAt": "2026-09-18T16:26:26.902Z",
+  "elapsedSec": 1.66,
+  "issue_id": "issue_0277",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0443",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [],
+  "validator_findings": [],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [],
+  "permission_approvals": 0,
+  "failureClass": "driver_error",
+  "error": "$.flow_kind 必须为 legacy，实际为 single_candidate",
+  "completed": false,
+  "session_status": null,
+  "flow_kind": null,
+  "run_policy": null,
+  "run_history": null,
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 1660,
+  "stage_durations_sec": {}
+}

@@ -211,11 +211,14 @@ fn builder_input_without_risk_registry_ref() -> ProviderContextBuilderInput {
         constraint_summary: "constraint summary".to_string(),
         context_files: vec![],
         worktree_path: None,
+        routing_reference_context: Default::default(),
     }
 }
 
 fn adapter_input(canonical_inputs: Value) -> AdapterInput {
     AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Reviewer,
         worktree_path: None,

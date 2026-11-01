@@ -1,0 +1,3 @@
+# lib :: command recorded in commands.manifest.json :: run 2026-09-03 (task 8.5 worker re-run, fresh worktree session)
+running 3074 tests
+test result: ok. 3072 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 24.39s

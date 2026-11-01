@@ -28,6 +28,7 @@ fn persistent_engine_accepts_complete_revision_artifact_misclassified_as_text_fa
                 issue_id: "issue_0001".to_string(),
                 repository_id: "repository_0001".to_string(),
                 title: "Story".to_string(),
+            aggregate_codebase: None,
             })
             .expect("story spec");
         let entity_id = match &workspace_type {
@@ -38,23 +39,22 @@ fn persistent_engine_accepts_complete_revision_artifact_misclassified_as_text_fa
                     issue_id: "issue_0001".to_string(),
                     story_spec_ids: vec![story.id.clone()],
                     title: "Design".to_string(),
+                aggregate_codebase: None,
                 })
                 .expect("design spec")
                 .id,
             _ => unreachable!("text fallback recovery only applies to story and design"),
         };
         let session_record = lifecycle_store
-            .create_workspace_session(CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: entity_id.clone(),
-                workspace_type: workspace_type.clone(),
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 1,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            })
+            .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: entity_id.clone(),
+            workspace_type: workspace_type.clone(),
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+
+            review_rounds: 1,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .expect("workspace session");
         lifecycle_store
             .append_version(AppendSpecVersionInput {
@@ -269,8 +269,8 @@ async fn persistent_engine_recovers_outline_review_with_valid_string_references(
     let review_output = r#"审核结论：Outline 可以继续，以下均为非阻塞建议。
 
 <ARIA_STRUCTURED_OUTPUT nonce="abc12345">
-{"verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有非阻塞建议","affects_items":["outline_a","outline_b"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","impact":"不影响 Draft 生成","required_action":"补充 handoff 说明"}]}
-</ARIA_STRUCTURED_OUTPUT nonce="abc12345">"#;
+{"nonce":"abc12345","verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有非阻塞建议","affects_items":["outline_a","outline_b"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","required_action":"补充 handoff 说明"}]}
+</ARIA_STRUCTURED_OUTPUT>"#;
     let fallback = ReviewVerdict {
         verdict: ReviewVerdictType::NeedsHuman,
         comments: "审核结论：Outline 可以继续，以下均为非阻塞建议。".to_string(),
@@ -441,8 +441,8 @@ async fn outline_review_schema_recovery_rolls_back_verdict_when_timeline_commit_
                 messages: Vec::new(),
                 streaming_content: r#"Outline 可以继续，但有可选建议。
 <ARIA_STRUCTURED_OUTPUT nonce="abc12345">
-{"verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有可选建议","affects_items":["outline_a"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","impact":"不影响 Draft 生成","required_action":"补充说明"}]}
-</ARIA_STRUCTURED_OUTPUT nonce="abc12345">"#
+{"nonce":"abc12345","verdict":"pass","review_scope":"outline","generation_round_id":"round_0001","summary":"Outline 可以继续，但有可选建议","affects_items":["outline_a"],"findings":[{"severity":"suggestion","message":"handoff 可以更明确","evidence":"handoff_notes 较简短","required_action":"补充说明"}]}
+</ARIA_STRUCTURED_OUTPUT>"#
                     .to_string(),
                 execution_events: Vec::new(),
                 permission_events: Vec::new(),

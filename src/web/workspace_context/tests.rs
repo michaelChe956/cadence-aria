@@ -3,6 +3,7 @@ use super::prompts::{
     constraint_summary_for, output_schema_for, runtime_contract_for, workflow_discipline_for,
 };
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::{
     AppendSpecVersionInput, CreateDesignSpecInput, CreateIssueWorkItemPlanInput,
@@ -12,11 +13,22 @@ use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LifecycleConfirmationStatus, ProviderName,
     WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::product::workspace_engine::AUTHOR_ARTIFACT_NEGATIVE_LIST;
 use tempfile::tempdir;
 
 mod linked_context;
 mod work_item_plan_context;
+
+fn seed_legacy_project(app_paths: &ProductAppPaths) {
+    ProjectStore::new(app_paths.clone())
+        .create(CreateProjectInput {
+            name: "workspace context fixture".to_string(),
+            description: None,
+        })
+        .expect("create project");
+}
 
 #[test]
 fn all_workspace_artifact_outputs_require_artifact_fence() {
@@ -31,6 +43,43 @@ fn all_workspace_artifact_outputs_require_artifact_fence() {
             schema.contains("```artifact fenced block"),
             "{workspace_type:?} output schema must require artifact fenced block"
         );
+    }
+}
+
+/// REQ-ACS-03：「初次 output schema」注入点（Web workspace 上下文 `[output_schema]`）
+/// 对四类 workspace 都注入同一份 artifact 输出负面清单教学。
+#[test]
+fn all_workspace_output_schemas_teach_the_shared_negative_list() {
+    const NEGATIVE_LIST_KEYWORDS: [&str; 5] = [
+        "一个",
+        "artifact fence 之外",
+        "<thinking>",
+        "四反引号",
+        "不得作为最终候选回显",
+    ];
+
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        let schema = output_schema_for(&workspace_type);
+        assert!(
+            schema.contains(AUTHOR_ARTIFACT_NEGATIVE_LIST),
+            "{workspace_type:?} output schema must inject the shared negative list constant"
+        );
+        assert_eq!(
+            schema.matches(AUTHOR_ARTIFACT_NEGATIVE_LIST).count(),
+            1,
+            "{workspace_type:?} output schema must not carry a second copy of the negative list"
+        );
+        for keyword in NEGATIVE_LIST_KEYWORDS {
+            assert!(
+                schema.contains(keyword),
+                "{workspace_type:?} output schema must teach negative-list keyword `{keyword}`: {schema}"
+            );
+        }
     }
 }
 #[test]
@@ -161,10 +210,10 @@ fn workspace_author_workflows_directly_reference_cadence_routing_rules() {
         WorkspaceType::WorkItem,
         WorkspaceType::WorkItemPlan,
     ] {
-        let workflow = workflow_discipline_for(&workspace_session_record(
-            workspace_type.clone(),
-            ProviderName::Codex,
-        ));
+        let workflow = workflow_discipline_for(
+            &workspace_session_record(workspace_type.clone(), ProviderName::Codex),
+            &RoutingReferenceContext::Legacy,
+        );
 
         assert!(
             workflow.contains("[cadence_project_rules]"),
@@ -195,7 +244,7 @@ fn workspace_author_stops_when_required_superpowers_are_unavailable() {
     let mut session = workspace_session_record(WorkspaceType::Story, ProviderName::Codex);
     session.superpowers_enabled = false;
 
-    let workflow = workflow_discipline_for(&session);
+    let workflow = workflow_discipline_for(&session, &RoutingReferenceContext::Legacy);
 
     assert!(workflow.contains("当前 provider 环境未启用必调 Superpowers Skill；必须停止并报告"));
     assert!(!workflow.contains("Superpowers 未启用；仍需显式说明假设"));
@@ -330,10 +379,10 @@ fn output_schemas_require_structured_interaction_decisions_in_artifacts() {
 
 #[test]
 fn work_item_workflow_discipline_describes_single_task_not_task_split() {
-    let guidance = workflow_discipline_for(&workspace_session_record(
-        WorkspaceType::WorkItem,
-        ProviderName::Codex,
-    ));
+    let guidance = workflow_discipline_for(
+        &workspace_session_record(WorkspaceType::WorkItem, ProviderName::Codex),
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(guidance.contains("单个可执行任务"));
     assert!(!guidance.contains("任务拆分"));
@@ -341,10 +390,10 @@ fn work_item_workflow_discipline_describes_single_task_not_task_split() {
 
 #[test]
 fn fake_story_provider_uses_daemon_pause_guidance_not_fake_tool_call() {
-    let guidance = workflow_discipline_for(&workspace_session_record(
-        WorkspaceType::Story,
-        ProviderName::Fake,
-    ));
+    let guidance = workflow_discipline_for(
+        &workspace_session_record(WorkspaceType::Story, ProviderName::Fake),
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(guidance.contains("daemon"));
     assert!(guidance.contains("text_fallback"));
@@ -354,10 +403,10 @@ fn fake_story_provider_uses_daemon_pause_guidance_not_fake_tool_call() {
 
 #[test]
 fn pi_story_context_requires_ask_user_tool() {
-    let guidance = workflow_discipline_for(&workspace_session_record(
-        WorkspaceType::Story,
-        ProviderName::Pi,
-    ));
+    let guidance = workflow_discipline_for(
+        &workspace_session_record(WorkspaceType::Story, ProviderName::Pi),
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(guidance.contains("当前 author provider 是 Pi"));
     assert!(guidance.contains("使用 `ask_user` 工具提问并等待回答"));
@@ -367,10 +416,10 @@ fn pi_story_context_requires_ask_user_tool() {
 
 #[test]
 fn kimi_story_context_declares_structured_permission_and_choice_interactions() {
-    let guidance = workflow_discipline_for(&workspace_session_record(
-        WorkspaceType::Story,
-        ProviderName::KimiCode,
-    ));
+    let guidance = workflow_discipline_for(
+        &workspace_session_record(WorkspaceType::Story, ProviderName::KimiCode),
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(guidance.contains("当前 author provider 是 Kimi Code"));
     assert!(
@@ -381,11 +430,12 @@ fn kimi_story_context_declares_structured_permission_and_choice_interactions() {
     assert!(guidance.contains("等待用户审批或回答"));
 }
 
-#[test]
-fn claude_code_story_context_requires_structured_ask_user_question() {
+#[tokio::test]
+async fn claude_code_story_context_requires_structured_ask_user_question() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -393,15 +443,18 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "claude-code-story-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .expect("issue");
 
@@ -412,6 +465,7 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "爬楼梯问题 Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     let session = lifecycle
@@ -421,14 +475,17 @@ fn claude_code_story_context_requires_structured_ask_user_question() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 
@@ -451,7 +508,8 @@ fn workspace_session_record(
         workspace_type,
         status: WorkspaceSessionStatus::Open,
         author_provider,
-        reviewer_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::Codex),
+
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,
@@ -459,9 +517,202 @@ fn workspace_session_record(
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding: None,
+        work_item_child_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        human_gate_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
         created_at: "2026-06-30T00:00:00Z".to_string(),
         updated_at: "2026-06-30T00:00:00Z".to_string(),
+        sc_recovery_claim: None,
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
+        structural_governance_state: None,
+        review_identity_id: String::new(),
     }
+}
+
+#[test]
+fn workflow_discipline_logical_declares_policy_envelope() {
+    let context =
+        crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Logical(
+            crate::product::cadence_skills::routing_reference::LogicalPolicyReference {
+                policy_id: "policy/project_0001/logical_0001/3".into(),
+                policy_revision: 3,
+                policy_digest: "sha256:abc123".into(),
+                authority_root: "/data/aria/aggregate/policy".into(),
+            },
+        );
+    let workflow = workflow_discipline_for(
+        &workspace_session_record(WorkspaceType::Story, ProviderName::Codex),
+        &context,
+    );
+
+    assert!(
+        workflow.contains("authority_root: /data/aria/aggregate/policy"),
+        "{workflow}"
+    );
+    assert!(
+        workflow.contains("policy_id: policy/project_0001/logical_0001/3"),
+        "{workflow}"
+    );
+    assert!(workflow.contains("policy_revision: 3"), "{workflow}");
+    assert!(workflow.contains("sha256:abc123"), "{workflow}");
+    assert!(workflow.contains("不作为政策正文"), "{workflow}");
+    assert!(workflow.contains("只报告阻塞"), "{workflow}");
+}
+
+#[test]
+fn workflow_discipline_legacy_matches_legacy_reference() {
+    let workflow = workflow_discipline_for(
+        &workspace_session_record(WorkspaceType::Story, ProviderName::Codex),
+        &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy,
+    );
+    let legacy =
+        crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference(
+            &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy,
+        );
+    assert!(workflow.contains(&legacy), "{workflow}");
+    assert_eq!(workflow.matches("[cadence_project_rules]").count(), 1);
+}
+
+#[test]
+fn routing_reference_context_for_project_derives_logical_from_stores() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let aggregate_root = root.path().join("aggregate-root");
+    // 裁决①：provider_context_root 必须可达（fs::canonicalize 探测），测试需真实建目录。
+    std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+    let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+        "project_0001",
+        aggregate_root.clone(),
+        Vec::new(),
+    );
+    crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest("project_0001", &manifest)
+        .expect("save manifest");
+    let artifact =
+        crate::product::logical_codebase::AggregatePolicyArtifactStore::new(app_paths.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("ensure bootstrap");
+
+    let context = super::builder::routing_reference_context_for_project(&app_paths, "project_0001")
+        .expect("routing reference context");
+
+    match context {
+        crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Logical(p) => {
+            assert_eq!(p.policy_id, artifact.policy_id);
+            assert_eq!(p.policy_revision, artifact.revision);
+            assert_eq!(p.policy_digest, artifact.digest);
+            // M1：authority_root 与 gateway_factory/envelope 表示一致（canonicalize 后形态）。
+            assert_eq!(
+                p.authority_root,
+                std::fs::canonicalize(&aggregate_root)
+                    .expect("canonicalize aggregate root")
+                    .to_string_lossy()
+            );
+        }
+        crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy => {
+            panic!("expected logical routing reference context with manifest + artifact");
+        }
+    }
+}
+
+#[test]
+fn routing_reference_context_for_project_defaults_to_legacy_without_manifest() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+
+    let context = super::builder::routing_reference_context_for_project(&app_paths, "project_0001")
+        .expect("routing reference context");
+
+    assert!(matches!(
+        context,
+        crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy
+    ));
+}
+
+#[test]
+fn routing_reference_context_for_project_propagates_corrupted_manifest_error() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let logical_root = app_paths.logical_codebase_root("project_0001");
+    std::fs::create_dir_all(&logical_root).expect("create logical root");
+    std::fs::write(logical_root.join("manifest.json"), "{ not valid json")
+        .expect("corrupt manifest");
+
+    let result = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+
+    assert!(
+        result.is_err(),
+        "corrupted manifest must fail-closed instead of silently falling back to Legacy: {result:?}"
+    );
+}
+
+#[test]
+fn routing_reference_context_for_project_propagates_corrupted_artifact_error() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let aggregate_root = root.path().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+    let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+        "project_0001",
+        aggregate_root,
+        Vec::new(),
+    );
+    crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest("project_0001", &manifest)
+        .expect("save manifest");
+    crate::product::logical_codebase::AggregatePolicyArtifactStore::new(app_paths.clone())
+        .ensure_bootstrap(&manifest)
+        .expect("ensure bootstrap");
+    std::fs::write(
+        app_paths.aggregate_policy_artifact_path("project_0001"),
+        "{ not valid json",
+    )
+    .expect("corrupt artifact");
+
+    let result = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+
+    assert!(
+        result.is_err(),
+        "corrupted aggregate policy artifact must fail-closed instead of silently falling back to Legacy: {result:?}"
+    );
+}
+
+#[test]
+fn routing_reference_context_for_project_fails_closed_when_provider_context_root_unreachable() {
+    let root = tempdir().expect("root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+        "project_0001",
+        root.path().join("does-not-exist"),
+        Vec::new(),
+    );
+    crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
+        .save_manifest("project_0001", &manifest)
+        .expect("save manifest");
+
+    let result = super::builder::routing_reference_context_for_project(&app_paths, "project_0001");
+
+    assert!(
+        result.is_err(),
+        "unreachable provider_context_root must fail-closed instead of silently falling back to Legacy: {result:?}"
+    );
 }

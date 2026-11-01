@@ -1,14 +1,20 @@
 use serde_json::Value;
 
 use crate::cross_cutting::streaming_provider::{
-    ChoiceOptionData, ChoiceQuestionData, ProviderExecutionEvent, ProviderExecutionEventKind,
-    ProviderExecutionEventStatus,
+    ChoiceOptionData, ChoiceQuestionData, CodexApprovalCategory, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, UsageReportData,
 };
 
+/// 分类后的 codex 审批请求（GC6）：rpc_id 原样保留用于应答回带；category 按
+/// method + `_meta.codex_approval_kind` 精确分类；fileChange 的 diff 关联信息
+/// 通过 request_id（item id）在 session 层关联缓存 item，不使用自然语言 reason。
 #[derive(Debug, Clone)]
 pub(crate) struct CodexApprovalRequest {
     pub(crate) rpc_id: Value,
-    pub(crate) tool_name: String,
+    pub(crate) category: CodexApprovalCategory,
+    pub(crate) server_name: Option<String>,
+    pub(crate) tool_name: Option<String>,
+    pub(crate) request_id: String,
     pub(crate) description: String,
 }
 
@@ -193,33 +199,158 @@ pub(crate) fn command_output(item: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-pub(crate) fn parse_approval_request(value: &Value) -> Option<CodexApprovalRequest> {
+/// 缓存 fileChange item 摘要（item id → "path (changeType)" + 来源 method），
+/// 供 `item/fileChange/requestApproval` 经 item id 关联 diff 信息；T13 起
+/// 岗位纪律（Author）会话以本解析为检测型触发信号（来源 method 进检测审计）。
+/// 不使用自然语言 `reason`；仅接受 `item/started` / `item/completed` 通知中
+/// 的 fileChange item。
+pub(crate) fn parse_file_change_summary(value: &Value) -> Option<(String, String, String)> {
     let method = value.get("method")?.as_str()?;
+    if method != "item/started" && method != "item/completed" {
+        return None;
+    }
+    let item = value.pointer("/params/item")?;
+    if item.get("type").and_then(Value::as_str)? != "fileChange" {
+        return None;
+    }
+    let id = item.get("id").and_then(Value::as_str)?.to_string();
+    let path = item
+        .get("path")
+        .or_else(|| item.get("filePath"))
+        .and_then(Value::as_str)
+        .unwrap_or("file");
+    let change_type = item
+        .get("changeType")
+        .or_else(|| item.get("change_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("change");
+    Some((id, format!("{path} ({change_type})"), method.to_string()))
+}
+
+/// 按 GC6 冻结规则分类审批请求：method 名 + `_meta.codex_approval_kind` 精确判别，
+/// 自然语言 `reason` 不作为分类依据；未知 elicitation / 未知 item 形态返回
+/// `Unknown { method }`（保留原 method，不得静默不应答）。
+pub(crate) fn parse_approval_request(value: &Value) -> Option<CodexApprovalRequest> {
+    let method = value.get("method")?.as_str()?.to_string();
+    let params = value.get("params").unwrap_or(value);
+    let rpc_id = value.get("id").cloned().unwrap_or(Value::Null);
+
+    let approval_request_id = || {
+        params
+            .get("requestId")
+            .or_else(|| params.get("itemId"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| rpc_id_string(&rpc_id))
+            .unwrap_or_else(|| "codex_approval".to_string())
+    };
+
     if method == "codex/server_request" {
-        let params = value.get("params")?;
-        if params.get("type")?.as_str()? != "command_execution_request_approval" {
+        let server_request = value.get("params")?;
+        if server_request.get("type")?.as_str()? != "command_execution_request_approval" {
             return None;
         }
-        let request_params = params.get("params").unwrap_or(params);
+        let request_params = server_request.get("params").unwrap_or(server_request);
         return Some(CodexApprovalRequest {
             rpc_id: value
                 .get("id")
                 .cloned()
-                .or_else(|| params.get("request_id").cloned())
+                .or_else(|| server_request.get("request_id").cloned())
                 .unwrap_or(Value::Null),
-            tool_name: "command".to_string(),
+            category: CodexApprovalCategory::CommandExecution,
+            server_name: None,
+            tool_name: Some("command".to_string()),
+            request_id: server_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| rpc_id_string(value.get("id").unwrap_or(&Value::Null)))
+                .unwrap_or_else(|| "codex_command".to_string()),
             description: command_description(request_params)
                 .unwrap_or_else(|| "Codex command approval request".to_string()),
         });
     }
 
     if method == "item/commandExecution/requestApproval" {
-        let params = value.get("params").unwrap_or(value);
         return Some(CodexApprovalRequest {
-            rpc_id: value.get("id").cloned().unwrap_or(Value::Null),
-            tool_name: "command".to_string(),
+            rpc_id,
+            category: CodexApprovalCategory::CommandExecution,
+            server_name: None,
+            tool_name: Some("command".to_string()),
+            request_id: params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| rpc_id_string(value.get("id").unwrap_or(&Value::Null)))
+                .unwrap_or_else(|| "codex_command".to_string()),
             description: command_description(params)
                 .unwrap_or_else(|| "Codex command approval request".to_string()),
+        });
+    }
+
+    if method == "item/fileChange/requestApproval" {
+        return Some(CodexApprovalRequest {
+            rpc_id,
+            category: CodexApprovalCategory::FileChange,
+            server_name: None,
+            tool_name: Some("file_change".to_string()),
+            // diff 关联键：item id（session 层用缓存 item 补全描述，不读 reason）
+            request_id: params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| rpc_id_string(value.get("id").unwrap_or(&Value::Null)))
+                .unwrap_or_else(|| "codex_file_change".to_string()),
+            description: "Codex file change approval request".to_string(),
+        });
+    }
+
+    if method == "mcpServer/elicitation/request" {
+        // 仅 `_meta.codex_approval_kind="mcp_tool_call"` 是 MCP（Task 0 实测契约），
+        // 其余（含无 marker）均为未知 elicitation，保留原 method。
+        let kind = value
+            .pointer("/params/_meta/codex_approval_kind")
+            .and_then(Value::as_str);
+        let server_name = params
+            .get("serverName")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let category = if kind == Some("mcp_tool_call") {
+            CodexApprovalCategory::McpToolCall
+        } else {
+            CodexApprovalCategory::Unknown {
+                method: method.clone(),
+            }
+        };
+        let request_id = approval_request_id();
+        let description = format!(
+            "MCP tool call approval via {}",
+            server_name.as_deref().unwrap_or("unknown server")
+        );
+        return Some(CodexApprovalRequest {
+            rpc_id,
+            category,
+            server_name,
+            tool_name: params
+                .get("toolName")
+                .or_else(|| value.pointer("/params/_meta/tool_name"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            request_id,
+            description,
+        });
+    }
+
+    // 未知 `item/*/requestApproval` 形态：返回 decline，保留原 method。
+    if method.starts_with("item/") && method.ends_with("/requestApproval") {
+        let request_id = approval_request_id();
+        return Some(CodexApprovalRequest {
+            rpc_id,
+            category: CodexApprovalCategory::Unknown { method },
+            server_name: None,
+            tool_name: None,
+            request_id,
+            description: "Codex approval request".to_string(),
         });
     }
 
@@ -322,15 +453,77 @@ pub(crate) fn rpc_id_string(value: &Value) -> Option<String> {
         .or_else(|| value.as_str().map(ToString::to_string))
 }
 
+/// 解析 codex `turn/completed`（或 legacy `codex/event` 的 `turn_completed`）附带的 usage。
+///
+/// app-server 新协议字段为 camelCase（`inputTokens` / `outputTokens` /
+/// `cachedInputTokens`），legacy codex/event 为 snake_case（`input_tokens` / ...）。
+/// 两种形状都尝试；任一字段缺失记 `None`，整个 usage 缺失返回 `None`（best-effort）。
+pub(crate) fn parse_codex_usage(value: &Value, role: &'static str) -> Option<UsageReportData> {
+    let usage = value
+        .pointer("/params/usage")
+        .or_else(|| value.pointer("/params/msg/usage"))?;
+    let field = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| usage.get(*name).and_then(Value::as_u64))
+    };
+    // 嵌套兑底：部分版本把用量包在 total_token_usage 对象里（JSON pointer 访问，非扁平 key）
+    let nested = |pointer: &str| usage.pointer(pointer).and_then(Value::as_u64);
+    let report = UsageReportData {
+        role: role.to_string(),
+        input_tokens: field(&["inputTokens", "input_tokens"])
+            .or_else(|| nested("/total_token_usage/input_tokens"))
+            .or_else(|| nested("/total_token_usage/prompt_tokens")),
+        output_tokens: field(&["outputTokens", "output_tokens"])
+            .or_else(|| nested("/total_token_usage/output_tokens")),
+        cache_read_tokens: field(&["cachedInputTokens", "cached_input_tokens"])
+            .or_else(|| nested("/total_token_usage/cached_input_tokens")),
+        cache_creation_tokens: field(&["cacheWriteTokens", "cache_write_tokens"]),
+    };
+    report.has_any_tokens().then_some(report)
+}
+
+/// codex `turn/completed` 的轮次状态。新协议实测在 `params.turn.status`
+/// （spike T2-resume-writes.jsonl），兼容读取顶层 `params.status`；缺省视为完成
+/// （旧版 wire 与 legacy 形态不携带 status）。
+fn turn_status(value: &Value) -> Option<&str> {
+    value
+        .pointer("/params/turn/status")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/params/status").and_then(Value::as_str))
+}
+
 pub(crate) fn is_turn_completed(value: &Value) -> bool {
-    value.get("method").and_then(Value::as_str) == Some("turn/completed")
+    let turn_completed = value.get("method").and_then(Value::as_str) == Some("turn/completed")
         || value
             .pointer("/params/msg/type")
             .and_then(Value::as_str)
-            .is_some_and(|event_type| event_type == "turn_completed")
+            .is_some_and(|event_type| event_type == "turn_completed");
+    // status:"failed" 的 turn/completed 是失败轮（如上游 429 限流），不是完成轮；
+    // 仅 status 为 completed/缺省才命中完成分支。
+    turn_completed && turn_status(value).is_none_or(|status| status == "completed")
 }
 
 pub(crate) fn parse_failure(value: &Value) -> Option<String> {
+    // 新协议失败轮：turn/completed{turn.status:"failed"}（上游 429/5xx 等）。
+    // error.message 原样透传，不得改写（下游引擎靠文案分类 attempt 级重试）。
+    if value.get("method").and_then(Value::as_str) == Some("turn/completed")
+        && turn_status(value) == Some("failed")
+    {
+        let message = value
+            .pointer("/params/turn/error/message")
+            .or_else(|| value.pointer("/params/error/message"))
+            .and_then(Value::as_str);
+        let code = value
+            .pointer("/params/turn/error/code")
+            .or_else(|| value.pointer("/params/error/code"))
+            .map(|code| code.to_string());
+        return match (message, code) {
+            (Some(message), _) => Some(message.to_string()),
+            (None, Some(code)) => Some(code),
+            (None, None) => Some("Codex turn failed".to_string()),
+        };
+    }
     let event_type = value.pointer("/params/msg/type").and_then(Value::as_str)?;
     if event_type == "turn_failed" || event_type == "error" {
         return value

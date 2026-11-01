@@ -3,7 +3,7 @@ import type {
   WorkItemContextBudget,
   WorkItemKind,
 } from "./common";
-import type { LifecycleWorkItem } from "./lifecycle";
+import type { LifecycleWorkItem, WorkspaceReviewStatus } from "./lifecycle";
 import type {
   ArtifactVersionSummary,
   WorkspaceSession,
@@ -599,21 +599,39 @@ export type HumanPresentationRevision = {
 
 export type HumanPresentationScope = "plan" | "work_item";
 
-export type SaveHumanPresentationRevisionMessage = {
-  type: "save_human_presentation_revision";
-  source_projection_bundle_id: string;
-  scope: HumanPresentationScope;
-  supersedes: string | null;
-  human_summary: string;
-  why_split: string | null;
-  dependency_explanation: string[];
-  risk_explanation: string[];
-  source_refs: string[];
-};
+// 退役留档（T5/REQ-RET-02）：SaveHumanPresentationRevisionMessage
+// 随保存命令族删除（wp5-attribution-table.md §2）。
 
 export type IssueWorkItemPlanDependencyEdgeDto = {
   from_work_item_id: string;
   to_work_item_id: string;
+};
+
+// REQ-MTG-04（WP3）：plan 级 group 聚合只读投影——后端从 target-attempt
+// durable 事实确定性派生（无第二状态机）。null 字段表示该 target 无对应事实。
+export type PlanTargetEntryDto = {
+  target_repository_id: string;
+  repository_name: string;
+  attempt_id: string | null;
+  attempt_status: string | null;
+  stage: string | null;
+  branch_name: string | null;
+  head_commit: string | null;
+  push_status: string | null;
+  review_request_id: string | null;
+  // 失败/阻塞原因（只呈现不判定）：manual_recovery_reason → push_error →
+  // 失败态 status 文本。
+  blocked_reason: string | null;
+};
+
+// plan 级三值聚合终态——"not_started" 不复用 issue 级 "none"（plan 级未启=
+// 无 target-attempt 或全部未达 provider 启动，未启优先于「部分」）。
+export type PlanGroupOverallDto = "all_delivered" | "partial" | "not_started";
+
+export type PlanGroupProjectionDto = {
+  plan_id: string;
+  entries: PlanTargetEntryDto[];
+  overall: PlanGroupOverallDto;
 };
 
 export type IssueWorkItemPlanDetailDto = {
@@ -631,6 +649,11 @@ export type IssueWorkItemPlanDetailDto = {
   validator_findings: WorkItemSplitFinding[];
   created_at: string;
   updated_at: string;
+  // REQ-MTG-04（WP3，additive）：plan 级 group 聚合只读投影——旧响应缺省
+  //（undefined/null）兼容。
+  group_projection?: PlanGroupProjectionDto | null;
+  // F-26b（additive）：plan 会话 reviewer 节点证据投影；旧响应缺省。
+  review_status?: WorkspaceReviewStatus | null;
 };
 
 export type PrepareWorkItemPlanRequest = ProviderWorkspaceConfigInput & {
@@ -646,4 +669,32 @@ export type PrepareWorkItemPlanRequest = ProviderWorkspaceConfigInput & {
 export type PrepareWorkItemPlanResponse = {
   work_item_plan: IssueWorkItemPlanDetailDto;
   workspace_session: WorkspaceSession;
+};
+
+// C1 Task 5（REQ-C1-PLAN-01）：existing/create 计划意图合同（additive，
+// 旧 plan 响应缺省 undefined——不自动补声明）。
+export type WorkItemIntent = 'existing' | 'create';
+
+export type EnrollmentTargetDto =
+  | { kind: 'single_repository'; repository_id: string }
+  | {
+      kind: 'logical_codebase';
+      logical_codebase_id: string;
+      logical_repository_id: string;
+    }
+  // 多成员逻辑代码库：与后端 EnrollmentTarget 第三变体对齐（wire kind =
+  // logical_codebase_members）。
+  | {
+      kind: 'logical_codebase_members';
+      logical_codebase_id: string;
+      logical_repository_ids: string[];
+    };
+
+export type WorkItemIntentContractDto = {
+  intent: WorkItemIntent;
+  provider_work_item_id: string;
+  depends_on: string[];
+  exclusive_scopes: string[];
+  forbidden_scopes: string[];
+  target: EnrollmentTargetDto;
 };

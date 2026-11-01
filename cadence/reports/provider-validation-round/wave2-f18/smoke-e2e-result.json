@@ -1,0 +1,17 @@
+{
+  "started_at": "2026-09-20T02:33:55.854Z",
+  "http_confirm": {
+    "status": 200,
+    "session_status_after": "confirmed",
+    "dto_status": "confirmed"
+  },
+  "ws_abandon": {
+    "gate_stage_before": "author_confirm",
+    "close_event": {
+      "decision": "terminate",
+      "stage": "completed"
+    },
+    "session_status_after": "terminated"
+  },
+  "completed_at": "2026-09-20T02:33:56.547Z"
+}

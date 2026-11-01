@@ -23,6 +23,7 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
             }],
             allow_multiple: false,
             allow_free_text: true,
+            questions: Vec::new(),
         })
         .expect("create choice gate");
 
@@ -46,8 +47,11 @@ fn store_persists_and_resolves_choice_gates_in_attempt_scope() {
             "issue_0001",
             &attempt.id,
             "choice_0001",
-            vec!["backend_first".to_string()],
-            Some("先控制范围".to_string()),
+            ResolveChoiceGateInput {
+                selected_option_ids: vec!["backend_first".to_string()],
+                free_text: Some("先控制范围".to_string()),
+                answers: Vec::new(),
+            },
         )
         .expect("resolve choice gate");
 
@@ -131,6 +135,7 @@ fn create_input_for(
             review_rounds: 1,
             permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
+        target_snapshot: None,
         max_auto_rework: 2,
     }
 }
@@ -158,7 +163,9 @@ fn group_create_input(current_work_item_id: &str) -> CreateGroupCodingAttemptInp
             review_rounds: 1,
             permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
+        target_snapshot: None,
         max_auto_rework: 2,
+        start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
     }
 }
 
@@ -177,6 +184,8 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 
@@ -196,6 +205,9 @@ fn sample_review_request(attempt_id: &str) -> ReviewRequest {
         created_at: "2026-05-23T00:02:00Z".to_string(),
         updated_at: "2026-05-23T00:02:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
     }
 }
 
@@ -216,6 +228,8 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 

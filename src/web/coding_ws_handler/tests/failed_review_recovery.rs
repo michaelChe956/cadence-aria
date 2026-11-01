@@ -386,10 +386,11 @@ async fn failed_code_review_recovery_reloads_attempt_and_rejects_status_change()
     let dirty_gate = fixture.dirty_gate.clone().expect("dirty gate");
     let mut changed = fixture.attempt.clone();
     changed.status = CodingAttemptStatus::Running;
+    changed.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     changed.completed_at = None;
     fixture
         .store
-        .save_coding_attempt(&changed)
+        .write_coding_attempt_for_test(&changed)
         .expect("persist changed attempt status");
     let runs_before = fixture
         .store
@@ -502,11 +503,10 @@ async fn failed_code_review_recovery_journal_prefixes_converge_idempotently() {
         ) {
             fixture
                 .store
-                .update_attempt_status(
+                .admit_and_transition_attempt_to_executable(
                     &fixture.attempt.project_id,
                     &fixture.attempt.issue_id,
                     &fixture.attempt.id,
-                    CodingAttemptStatus::Running,
                 )
                 .expect("persist running attempt prefix");
             journal = fixture

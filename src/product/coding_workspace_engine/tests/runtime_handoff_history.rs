@@ -7,17 +7,15 @@ async fn coding_runtime_handoff_revision_history_refresh_uses_real_run_and_hando
     let lifecycle = LifecycleStore::new(fixture.store.paths());
     let session = lifecycle
         .create_workspace_session(
-            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
-                project_id: fixture.attempt.project_id.clone(),
-                issue_id: fixture.attempt.issue_id.clone(),
-                entity_id: "work_item_plan_0001".to_string(),
-                workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::Codex,
-                reviewer_provider: ProviderName::ClaudeCode,
-                review_rounds: 1,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            },
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput { project_id: fixture.attempt.project_id.clone(),
+            issue_id: fixture.attempt.issue_id.clone(),
+            entity_id: "work_item_plan_0001".to_string(),
+            workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
+            review_rounds: 1,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
         )
         .expect("plan workspace session");
     lifecycle
@@ -310,17 +308,15 @@ async fn plan_repair_history_bootstrap_fixture(
     let lifecycle = LifecycleStore::new(fixture.store.paths());
     let parent = lifecycle
         .create_workspace_session(
-            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
-                project_id: fixture.attempt.project_id.clone(),
-                issue_id: fixture.attempt.issue_id.clone(),
-                entity_id: "work_item_plan_0001".to_string(),
-                workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::Codex,
-                reviewer_provider: ProviderName::ClaudeCode,
-                review_rounds: 1,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            },
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput { project_id: fixture.attempt.project_id.clone(),
+            issue_id: fixture.attempt.issue_id.clone(),
+            entity_id: "work_item_plan_0001".to_string(),
+            workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
+            review_rounds: 1,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
         )
         .expect("plan parent session");
     if with_base_history {
@@ -337,11 +333,10 @@ async fn plan_repair_history_bootstrap_fixture(
     let runtime_history = if refresh_before_child {
         fixture.attempt = fixture
             .store
-            .update_attempt_status(
+            .seed_running_attempt_for_test(
                 &fixture.attempt.project_id,
                 &fixture.attempt.issue_id,
                 &fixture.attempt.id,
-                crate::product::coding_models::CodingAttemptStatus::Running,
             )
             .expect("running attempt");
         Some(
@@ -419,17 +414,15 @@ async fn plan_repair_history_bootstrap_fixture(
     if with_older_base_history {
         let mut older = lifecycle
             .create_workspace_session(
-                crate::product::lifecycle_store::CreateWorkspaceSessionInput {
-                    project_id: fixture.attempt.project_id.clone(),
-                    issue_id: fixture.attempt.issue_id.clone(),
-                    entity_id: "work_item_plan_0001".to_string(),
-                    workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
-                    author_provider: ProviderName::Codex,
-                    reviewer_provider: ProviderName::ClaudeCode,
-                    review_rounds: 1,
-                    superpowers_enabled: true,
-                    openspec_enabled: true,
-                },
+                crate::product::lifecycle_store::CreateWorkspaceSessionInput { project_id: fixture.attempt.project_id.clone(),
+                issue_id: fixture.attempt.issue_id.clone(),
+                entity_id: "work_item_plan_0001".to_string(),
+                workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Codex,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
+
+                review_rounds: 1,
+                superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             )
             .expect("older plan session");
         older.created_at = "2026-07-19T00:00:00Z".to_string();
@@ -479,17 +472,15 @@ fn create_prior_repair_child(
 ) -> crate::product::models::WorkspaceSessionRecord {
     let child = lifecycle
         .create_workspace_session(
-            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
-                project_id: fixture.attempt.project_id.clone(),
-                issue_id: fixture.attempt.issue_id.clone(),
-                entity_id: "work_item_plan_0001".to_string(),
-                workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::Codex,
-                reviewer_provider: ProviderName::ClaudeCode,
-                review_rounds: 1,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            },
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput { project_id: fixture.attempt.project_id.clone(),
+            issue_id: fixture.attempt.issue_id.clone(),
+            entity_id: "work_item_plan_0001".to_string(),
+            workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
+            review_rounds: 1,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
         )
         .expect("prior repair child");
     lifecycle

@@ -19,6 +19,7 @@ fn outline_prompt_example_injects_real_source_spec_ids() {
         "",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     // outline 级 + work_item_outlines 两项 = 3 处，全部非空且复用真实 ID。
@@ -57,6 +58,7 @@ fn outline_prompt_example_injects_multiple_real_source_spec_ids() {
         "",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert_eq!(
@@ -88,6 +90,7 @@ fn outline_prompt_example_uses_placeholder_source_ids_when_request_empty() {
         "",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert_eq!(
@@ -123,6 +126,7 @@ fn outline_prompt_contract_forbids_empty_source_spec_id_arrays() {
         "",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(

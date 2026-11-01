@@ -21,9 +21,9 @@ use crate::product::models::{
 };
 use crate::protocol::contracts::{AdapterInput, ProviderType};
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, AuthorDecision, ProviderConfigSnapshot, ReviewFinding, ReviewFindingSeverity,
-    ReviewGate, ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType,
-    WorkItemCandidateDto, WorkItemCandidateMetaDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
+    ArtifactPayload, ProviderConfigSnapshot, ReviewFinding, ReviewFindingSeverity, ReviewGate,
+    ReviewVerdictType, TimelineNode, TimelineNodeStatus, TimelineNodeType, WorkItemCandidateDto,
+    WorkItemCandidateMetaDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
     WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewComplete,
     WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
     WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
@@ -96,6 +96,7 @@ fn test_work_item_plan_outline(
         strategy_summary: "test strategy".to_string(),
         work_item_outlines: vec![
             WorkItemOutline {
+                target_repository_id: None,
                 outline_id: "outline_a".to_string(),
                 logical_work_item_id: "wi_a".to_string(),
                 title: "A".to_string(),
@@ -115,6 +116,7 @@ fn test_work_item_plan_outline(
                 handoff_notes: "handoff A".to_string(),
             },
             WorkItemOutline {
+                target_repository_id: None,
                 outline_id: "outline_b".to_string(),
                 logical_work_item_id: "wi_b".to_string(),
                 title: "B".to_string(),
@@ -134,6 +136,7 @@ fn test_work_item_plan_outline(
                 handoff_notes: "handoff B".to_string(),
             },
             WorkItemOutline {
+                target_repository_id: None,
                 outline_id: "outline_c".to_string(),
                 logical_work_item_id: "wi_c".to_string(),
                 title: "C".to_string(),
@@ -319,7 +322,29 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         reviewer_enabled_at_start: None,
         superpowers_enabled: true,
         openspec_enabled: true,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
         provider_conversations: Vec::new(),
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
+        structural_governance_state: None,
+        review_identity_id: String::new(),
         repository_path: None,
     }
 }
@@ -327,6 +352,139 @@ fn make_session(session_id: &str) -> WorkspaceSession {
 fn empty_provider_commands() -> mpsc::Receiver<ProviderCommand> {
     let (_tx, rx) = mpsc::channel(8);
     rx
+}
+
+fn pending_author_choice() -> PendingAuthorChoice {
+    PendingAuthorChoice {
+        id: "author_choice_prompt_001".to_string(),
+        prompt: "输出格式？".to_string(),
+        options: vec![ChoiceOptionData {
+            id: "json".to_string(),
+            label: "JSON".to_string(),
+            description: None,
+        }],
+        source_node_id: None,
+    }
+}
+
+#[tokio::test]
+async fn story_author_choice_followup_prompt_includes_output_contract_short_reference() {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let checkpoint_tmp = TempDir::new().unwrap();
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+        event_tx,
+        make_session("sess_story_choice_prompt"),
+    );
+    // choice 续跑是同一物理 provider 会话的 resume 轮（双测算裁决 2026-09-26）。
+    engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "author-session-1".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        last_node_id: None,
+    }];
+    engine.pending_author_choice = Some(pending_author_choice());
+
+    let content = engine
+        .take_pending_author_choice_prompt(
+            "author_choice_prompt_001",
+            vec!["json".to_string()],
+            Some("保持可读性".to_string()),
+        )
+        .await
+        .expect("Story choice followup content");
+
+    // 应答内容保持原样（问题/选择/补充与继续生成指令不丢）；F-60 P0 后 choice
+    // 点只产问答内容，不再自行拼契约（避免契约文本进入 session 历史）。
+    assert!(
+        content.contains(
+            "用户回答了 author 的确认问题：\n问题：输出格式？\n选择：\n- JSON\n补充：保持可读性"
+        ),
+        "{content}"
+    );
+    assert!(
+        content.contains("请基于该回答继续生成完整候选产物"),
+        "{content}"
+    );
+    assert!(!content.contains("[artifact_schema_contract]"), "{content}");
+
+    // F-60 P0（防线 2 语义保留 + 用户裁决 2026-09-26 分层）：续跑 delta 经
+    // build_streaming_input 出口以一行短引用收尾——点名全部必需 heading 与
+    // [REQ-*]/[AC-*]/source id 关键追踪 token，指向会话开头完整合同。
+    let prompt = engine
+        .build_streaming_input(content.trim(), AuthorPromptMode::DeltaOnly)
+        .expect("Story choice followup streaming input")
+        .prompt;
+    assert!(
+        prompt.starts_with("用户回答了 author 的确认问题："),
+        "{prompt}"
+    );
+    assert!(prompt.contains("输出格式契约（本轮简引"), "{prompt}");
+    assert!(prompt.contains("完整 artifact fenced block"), "{prompt}");
+    assert!(
+        prompt.contains("fence 内第一行是 Story Spec 一级标题"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("四反引号 ````artifact"), "{prompt}");
+    assert!(prompt.contains("[artifact_schema_contract]"), "{prompt}");
+    assert!(prompt.contains("`[REQ-*]`"), "{prompt}");
+    assert!(prompt.contains("`[AC-*]`"), "{prompt}");
+    assert!(prompt.contains("source id"), "{prompt}");
+    assert!(prompt.contains("## 待确认项"), "{prompt}");
+    assert!(prompt.contains("## 成功标准"), "{prompt}");
+    assert!(prompt.contains("author-decision-*"), "{prompt}");
+    // 分层：后续轮不重复全文（完整装配独有块不得出现）。
+    assert!(!prompt.contains("输出纪律（负面清单）"), "{prompt}");
+    assert!(!prompt.contains("最小结构骨架示例"), "{prompt}");
+}
+
+#[tokio::test]
+async fn design_author_choice_followup_prompt_includes_output_contract_and_decision_traceability() {
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let checkpoint_tmp = TempDir::new().unwrap();
+    let mut session = make_session("sess_design_choice_prompt");
+    session.workspace_type = WorkspaceType::Design;
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(checkpoint_tmp.path().to_path_buf())),
+        event_tx,
+        session,
+    );
+    engine.session.provider_conversations = vec![ProviderConversationRef {
+        role: ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "author-session-1".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        last_node_id: None,
+    }];
+    engine.pending_author_choice = Some(pending_author_choice());
+
+    let content = engine
+        .take_pending_author_choice_prompt(
+            "author_choice_prompt_001",
+            vec!["json".to_string()],
+            None,
+        )
+        .await
+        .expect("Design choice followup content");
+    assert!(!content.contains("[artifact_schema_contract]"), "{content}");
+
+    let prompt = engine
+        .build_streaming_input(content.trim(), AuthorPromptMode::DeltaOnly)
+        .expect("Design choice followup streaming input")
+        .prompt;
+    assert!(prompt.contains("输出格式契约（本轮简引"), "{prompt}");
+    assert!(
+        prompt.contains("fence 内第一行是 Design Spec 一级标题"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("四反引号 ````artifact"), "{prompt}");
+    assert!(prompt.contains("## 设计决策"), "{prompt}");
+    assert!(prompt.contains("## 追踪关系"), "{prompt}");
+    assert!(prompt.contains("author-decision-*"), "{prompt}");
+    assert!(prompt.contains("`[DEC-*]`"), "{prompt}");
+    assert!(prompt.contains("source id"), "{prompt}");
+    assert!(!prompt.contains("最小结构骨架示例"), "{prompt}");
 }
 
 #[derive(Default)]
@@ -353,10 +511,15 @@ impl StreamingProviderAdapter for ImmediateOutputRecordingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, None)))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output, None,
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -393,15 +556,22 @@ impl StreamingProviderAdapter for SessionRecordingProvider {
         let (command_tx, _command_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             let output = if call_no == 1 {
-                "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n".to_string()
+                "climb_stairs(n) 对 n <= 0 应该如何处理？\nA. 返回 0\nB. 抛出 ValueError\n"
+                    .to_string()
             } else {
                 complete_story_artifact("对 n <= 0 返回 0。", "n <= 0 时返回 0。")
             };
             let _ = event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("provider-author-session-1".to_string()))))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        output,
+                        Some("provider-author-session-1".to_string()),
+                    ),
+                ))
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -462,7 +632,10 @@ async fn author_choice_followup_resumes_author_provider_session() {
         inputs[1].resume_provider_session_id.as_deref(),
         Some("provider-author-session-1")
     );
-    assert_eq!(inputs[1].prompt, prompt);
+    // normalize_generation_prompt 在转发前 trim；出口装配的契约块（F-60 P0）
+    // 追加在 delta 内容之后——直通语义以「内容逐字节开头 + 末端契约在场」断言。
+    assert!(inputs[1].prompt.starts_with(prompt.trim()));
+    assert!(inputs[1].prompt.contains("[artifact_schema_contract]"));
     assert!(
         inputs[1]
             .prompt
@@ -610,6 +783,7 @@ async fn structured_choice_response_is_audited_for_reviewer_for_workspace_artifa
 
         let drive = engine.drive_provider_session(ProviderSessionDriveInput {
             session: Ok(ProviderSession {
+                native_session_id: None,
                 events: provider_event_rx,
                 commands: provider_command_tx,
             }),
@@ -659,6 +833,7 @@ async fn structured_choice_response_is_audited_for_reviewer_for_workspace_artifa
                             free_text: Some("首版仅两个 provider".to_string()),
                         },
                     ],
+                    receipt: None,
                 })
                 .await
                 .expect("send choice response");
@@ -670,7 +845,12 @@ async fn structured_choice_response_is_audited_for_reviewer_for_workspace_artifa
                 "{workspace_type:?} should forward choice response to provider"
             );
             provider_event_tx
-                .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(artifact, Some("provider-author-session-1".to_string()))))
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                        artifact,
+                        Some("provider-author-session-1".to_string()),
+                    ),
+                ))
                 .await
                 .expect("send completed");
         };
@@ -711,10 +891,12 @@ async fn persistent_engine_recovers_pending_text_fallback_choice_after_restart()
             entity_id: "story_spec_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("workspace session");
     lifecycle_store

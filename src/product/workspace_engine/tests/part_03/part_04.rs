@@ -1,3 +1,190 @@
+use std::collections::BTreeMap;
+
+use crate::product::logical_codebase::LogicalRepositoryId;
+use uuid::Uuid;
+
+#[test]
+fn compile_rejects_draft_without_target_and_does_not_publish_partial_items() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_compile_target_missing");
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
+        .expect("load previous plan");
+    let api = LogicalRepositoryId(Uuid::from_u128(1));
+    let web = LogicalRepositoryId(Uuid::from_u128(2));
+    let draft_a = target_draft(&plan_id, "outline_a", "draft_a", Some(api));
+    let draft_b = target_draft(&plan_id, "outline_b", "draft_b", None);
+    let targets = BTreeMap::from([
+        (api, "repository_api".to_string()),
+        (web, "repository_web".to_string()),
+    ]);
+
+    let persisted_before = lifecycle
+        .count_work_items("project_0001", "issue_0001")
+        .expect("count existing work item records");
+    let error = engine
+        .project_work_item_plan_drafts_for_compile(
+            &previous_plan,
+            &[draft_a, draft_b],
+            compile_projection_context(&["outline_a", "outline_b"], Some(&targets)),
+            &[],
+        )
+        .expect_err("missing target must block the whole compile projection");
+
+    assert!(error.contains("work_item_target_missing"));
+    assert!(error.contains("target_repository_id_missing"));
+    assert_eq!(
+        lifecycle
+            .count_work_items("project_0001", "issue_0001")
+            .expect("count work item records"),
+        persisted_before,
+        "compile blocker must not persist a partial work item record"
+    );
+}
+
+#[test]
+fn compile_allows_same_target_across_items_but_rejects_target_outside_selection() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_compile_target_outside_selection");
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
+        .expect("load previous plan");
+    let api = LogicalRepositoryId(Uuid::from_u128(1));
+    let web = LogicalRepositoryId(Uuid::from_u128(2));
+    let removed = LogicalRepositoryId(Uuid::from_u128(3));
+    let drafts = [
+        target_draft(&plan_id, "outline_a", "draft_a", Some(api)),
+        target_draft(&plan_id, "outline_b", "draft_b", Some(api)),
+        target_draft(&plan_id, "outline_c", "draft_c", Some(removed)),
+    ];
+    let targets = BTreeMap::from([
+        (api, "repository_api".to_string()),
+        (web, "repository_web".to_string()),
+    ]);
+
+    let persisted_before = lifecycle
+        .count_work_items("project_0001", "issue_0001")
+        .expect("count existing work item records");
+    let error = engine
+        .project_work_item_plan_drafts_for_compile(
+            &previous_plan,
+            &drafts,
+            compile_projection_context(
+                &["outline_a", "outline_b", "outline_c"],
+                Some(&targets),
+            ),
+            &[],
+        )
+        .expect_err("target outside effective selection must block compile");
+
+    assert!(error.contains("work_item_target_missing"));
+    assert!(error.contains("target_repository_id_not_effective"));
+    assert_eq!(
+        lifecycle
+            .count_work_items("project_0001", "issue_0001")
+            .expect("count work item records"),
+        persisted_before,
+        "invalid target must not publish a partial set"
+    );
+}
+
+#[test]
+fn compile_publishes_distinct_targets_in_single_transaction() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_compile_distinct_targets");
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
+        .expect("load previous plan");
+    let api = LogicalRepositoryId(Uuid::from_u128(1));
+    let web = LogicalRepositoryId(Uuid::from_u128(2));
+    let drafts = [
+        target_draft(&plan_id, "outline_a", "draft_a", Some(api)),
+        target_draft(&plan_id, "outline_b", "draft_b", Some(web)),
+    ];
+    let targets = BTreeMap::from([
+        (api, "repository_api".to_string()),
+        (web, "repository_web".to_string()),
+    ]);
+
+    let (_plan, items, _verification_plans) = engine
+        .project_work_item_plan_drafts_for_compile(
+            &previous_plan,
+            &drafts,
+            compile_projection_context(&["outline_a", "outline_b"], Some(&targets)),
+            &[],
+        )
+        .expect("distinct valid targets must compile together");
+
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].target_repository_id, Some(api));
+    assert_eq!(items[1].target_repository_id, Some(web));
+    assert_ne!(items[0].repository_id, items[1].repository_id);
+    assert!(items.iter().all(|item| item.target_repository_id.is_some()));
+}
+
+fn target_draft(
+    plan_id: &str,
+    outline_id: &str,
+    draft_id: &str,
+    target_repository_id: Option<LogicalRepositoryId>,
+) -> WorkItemDraftRecord {
+    let mut draft = test_work_item_draft_record(
+        plan_id,
+        outline_id,
+        draft_id,
+        WorkItemDraftStatus::Accepted,
+        WorkItemGenerationMode::Serial,
+        None,
+    );
+    draft.candidate.target_repository_id = target_repository_id;
+    draft
+}
+
+fn compile_projection_context<'a>(
+    outline_ids: &[&str],
+    logical_targets: Option<&'a BTreeMap<LogicalRepositoryId, String>>,
+) -> WorkItemPlanCompileProjectionContext<'a> {
+    let outline_order = Box::leak(
+        outline_ids
+            .iter()
+            .map(|outline_id| (*outline_id).to_string())
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    let outline_to_work_item_id = Box::leak(Box::new(
+        outline_ids
+            .iter()
+            .enumerate()
+            .map(|(index, outline_id)| {
+                (
+                    (*outline_id).to_string(),
+                    format!("work_item_{:03}", index + 1),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+    ));
+    let outline_to_verification_plan_id = Box::leak(Box::new(
+        outline_ids
+            .iter()
+            .enumerate()
+            .map(|(index, outline_id)| {
+                (
+                    (*outline_id).to_string(),
+                    format!("verification_plan_{:03}", index + 1),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+    ));
+    WorkItemPlanCompileProjectionContext {
+        outline_order,
+        outline_to_work_item_id,
+        outline_to_verification_plan_id,
+        repository_id: "repository_legacy",
+        logical_targets,
+        now: "2026-08-10T00:00:00Z",
+    }
+}
+
 #[test]
 fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
     let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
@@ -94,8 +281,10 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
                     ("outline_c".to_string(), "verification_plan_c".to_string()),
                 ]),
                 repository_id: "repo_0001",
+                logical_targets: None,
                 now: "2026-06-27T00:00:00Z",
             },
+            &[],
         )
         .expect("project compile records");
 
@@ -162,8 +351,10 @@ fn final_compile_projects_source_draft_context_into_work_items() {
                     "verification_plan_a".to_string(),
                 )]),
                 repository_id: "repo_0001",
+                logical_targets: None,
                 now: "2026-06-30T00:00:00Z",
             },
+            &[],
         )
         .expect("project compile records");
 
@@ -297,45 +488,6 @@ async fn work_item_plan_confirm_rejects_confirmed_plan_without_compiled_work_ite
     assert!(error.contains("compiled WorkItem"));
 }
 
-#[tokio::test]
-async fn outline_generation_metadata_updates_current_artifact_without_new_version() {
-    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_metadata_no_version");
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    let version_count_before = engine.artifact_versions.len();
-    let current_version_before = engine
-        .artifact_versions
-        .iter()
-        .find(|version| version.is_current)
-        .map(|version| version.version)
-        .expect("current outline version");
-
-    engine
-        .update_work_item_plan_outline_generation_metadata(
-            Some("round_0002".to_string()),
-            Some(WorkItemGenerationModeDto::Serial),
-        )
-        .await
-        .expect("update outline metadata");
-
-    assert_eq!(engine.artifact_versions.len(), version_count_before);
-    let current_version = engine
-        .artifact_versions
-        .iter()
-        .find(|version| version.is_current)
-        .expect("current outline version after metadata update");
-    assert_eq!(current_version.version, current_version_before);
-    let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } =
-        &current_version.payload
-    else {
-        panic!("expected outline artifact");
-    };
-    assert_eq!(
-        outline_candidate.current_generation_round_id.as_deref(),
-        Some("round_0002")
-    );
-    assert_eq!(
-        outline_candidate.selected_generation_mode,
-        Some(WorkItemGenerationModeDto::Serial)
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`outline_generation_metadata_updates_current_artifact_without_new_version` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

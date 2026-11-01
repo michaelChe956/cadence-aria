@@ -6,8 +6,8 @@ use crate::product::coding_evaluation_context::{
     EvaluationContextRole, build_evaluation_context_pack,
 };
 use crate::product::coding_models::{
-    CodingAttemptPlanBinding, CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun,
-    CodingUnitRunStatus,
+    CodingAttemptPlanBinding, CodingExecutionAttempt, CodingExecutionUnit,
+    CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
 };
 use crate::product::coding_work_item_context::load_coding_work_item_context;
 use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
@@ -16,6 +16,7 @@ use crate::product::models::{
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
     WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
+use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_contract::{
     ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
@@ -34,6 +35,7 @@ use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::web::coding_ws_handler::repository_path_for_attempt;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use sha2::Digest;
+use std::path::PathBuf;
 
 #[test]
 fn initial_plan_publication_store_allocates_ids_deterministically_without_live_writes() {
@@ -78,6 +80,40 @@ fn initial_plan_publication_store_allocates_ids_deterministically_without_live_w
 }
 
 #[test]
+fn initial_publication_fingerprint_covers_optional_provenance_binding() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkItemRevisionStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let journal = initial_publication_journal(&store);
+    let mut artifacts = journal.artifacts.clone();
+    artifacts.publication_provenance_ref = Some(
+        "project/project_0001/issue/issue_0001/plan/work_item_plan_0001/publication_provenance/compile_0001"
+            .to_string(),
+    );
+    artifacts.publication_provenance_content_hash = Some("provenance-content-hash".to_string());
+    artifacts.plan_revision.publication_provenance_ref =
+        artifacts.publication_provenance_ref.clone();
+
+    let bound = store
+        .build_initial_plan_publication_journal(
+            "compile_0001",
+            "outline_0001",
+            BTreeMap::from([(WORK_ITEM_ID.to_string(), "draft_revision_0001".to_string())]),
+            "2026-07-17T00:00:20Z",
+            artifacts.clone(),
+        )
+        .unwrap();
+    assert_ne!(bound.artifact_fingerprint, journal.artifact_fingerprint);
+    assert_eq!(
+        bound.artifacts.publication_provenance_ref,
+        artifacts.publication_provenance_ref
+    );
+    assert_eq!(
+        bound.artifacts.publication_provenance_content_hash,
+        artifacts.publication_provenance_content_hash
+    );
+}
+
+#[test]
 fn initial_plan_publication_resumes_each_store_write_failure_after_restart() {
     for checkpoint in [
         InitialPlanPublicationCheckpoint::LineageWritten,
@@ -106,6 +142,11 @@ fn initial_plan_publication_resumes_each_store_write_failure_after_restart() {
                 .to_string()
                 .contains("initial_publication_failpoint")
         );
+        let interrupted = store
+            .get_initial_plan_publication_journal(PROJECT_ID, ISSUE_ID, PLAN_ID, "compile_0001")
+            .expect("checkpoint 前缀必须已 durable journal");
+        assert_eq!(interrupted.phase, InitialPlanPublicationPhase::Prepared);
+        assert!(interrupted.error.is_some());
         drop(failpoint);
 
         let restarted = WorkItemRevisionStore::new(paths);
@@ -115,6 +156,14 @@ fn initial_plan_publication_resumes_each_store_write_failure_after_restart() {
 
         assert_eq!(published.phase, InitialPlanPublicationPhase::PlanActivated);
         assert_eq!(published.error, None);
+        assert_eq!(published.id, interrupted.id);
+        assert_eq!(published.compile_id, interrupted.compile_id);
+        assert_eq!(published.allocated_ids, interrupted.allocated_ids);
+        assert_eq!(
+            published.artifact_fingerprint,
+            interrupted.artifact_fingerprint
+        );
+        assert_eq!(published.artifacts, interrupted.artifacts);
         assert_initial_publication_is_complete(&restarted, &journal);
     }
 }
@@ -135,6 +184,7 @@ fn initial_plan_publication_rejects_projection_failure_before_journal_or_live_fa
                 code: "projection_binding_mismatch".to_string(),
                 projection: "coder".to_string(),
                 contract_ref: None,
+                kind: None,
                 message: "projection does not match the allocated revision".to_string(),
             },
         );
@@ -230,6 +280,7 @@ fn initial_plan_publication_boundary_rejects_invalid_validation_reports_without_
                             code: "projection_binding_mismatch".to_string(),
                             projection: "coder".to_string(),
                             contract_ref: None,
+                            kind: None,
                             message: "projection does not match publication".to_string(),
                         },
                     );
@@ -270,6 +321,7 @@ fn contract_validation_error() -> ContractValidationFinding {
         contract_ref: None,
         capability_ref: None,
         message: "contract validation failed".to_string(),
+        kind: None,
     }
 }
 
@@ -377,6 +429,7 @@ fn initial_publication_journal(
             dependency_graph_revision_id: ids.dependency_graph_revision_id.clone(),
             validation_report_ref: ids.validation_report_id.clone(),
             plan_projection_bundle_id: ids.plan_projection_bundle_id.clone(),
+            publication_provenance_ref: None,
             created_at: timestamp.to_string(),
         },
         dependency_graph_revision: DependencyGraphRevision {
@@ -395,6 +448,8 @@ fn initial_publication_journal(
             created_at: timestamp.to_string(),
         },
         plan_projection_bundle: plan_projection,
+        publication_provenance_ref: None,
+        publication_provenance_content_hash: None,
         work_items: vec![InitialWorkItemPublicationArtifacts {
             logical_work_item: LogicalWorkItem {
                 id: WORK_ITEM_ID.to_string(),
@@ -614,82 +669,55 @@ fn runtime_reader_rejects_missing_or_non_work_item_workspace_bindings() {
     }
 }
 
+#[test]
+fn bound_coder_markdown_carries_write_scope_section_from_projection() {
+    let (_temp, fixture) = bound_group_attempt_fixture();
+    let reader = WorkItemRuntimeReader::new(fixture.paths.clone());
+    let (projection, _coder_hash) = reader
+        .coder_projection_for_unit(&fixture.attempt, &fixture.unit, Some(&fixture.run))
+        .unwrap();
+    let markdown = load_coding_work_item_context(&fixture.paths, &fixture.attempt)
+        .unwrap()
+        .markdown
+        .expect("bound coder projection markdown");
+
+    // group（schema v2）路径的 markdown 同样带规范范围段：否则 group 兜底路径
+    // （rendered_context 缺失时走 build_coding_prompt）会误报「范围未知」。
+    assert!(markdown.contains("## 写入范围（硬边界）"));
+    assert_eq!(markdown.matches("## 写入范围（硬边界）").count(), 1);
+    assert!(markdown.contains("### 允许修改范围（exclusive_write_scopes）"));
+    assert!(markdown.contains("### 禁止修改范围（forbidden_write_scopes）"));
+    // 列表与机器门同源：逐字取自 coder projection 的 write_policy，
+    // 即 runtime.work_item_revision.canonical_contract.write_policy。
+    assert!(!projection.write_policy.exclusive_scopes.is_empty());
+    assert!(!projection.write_policy.forbidden_scopes.is_empty());
+    for scope in &projection.write_policy.exclusive_scopes {
+        assert!(
+            markdown.contains(&format!("- {scope}\n")),
+            "missing exclusive scope {scope}"
+        );
+    }
+    for scope in &projection.write_policy.forbidden_scopes {
+        assert!(
+            markdown.contains(&format!("- {scope}\n")),
+            "missing forbidden scope {scope}"
+        );
+    }
+    assert!(!markdown.contains("范围未知"));
+}
+
 #[tokio::test]
 async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatch() {
-    let temp = TempDir::new().unwrap();
-    let paths = ProductAppPaths::new(temp.path().join(".aria"));
-    let repository = RepositoryStore::new(paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: PROJECT_ID.to_string(),
-            name: "Runtime Reader Repository".to_string(),
-            path: temp.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-        })
-        .unwrap();
-    let issue = IssueStore::new(paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: PROJECT_ID.to_string(),
-            repo_id: Some(repository.id.clone()),
-            title: "Runtime Reader Issue".to_string(),
-            description: None,
-            change_id: None,
-        })
-        .unwrap();
-    assert_eq!(issue.id, ISSUE_ID);
-    let revision_store = WorkItemRevisionStore::new(paths.clone());
-    let published = revision_store
-        .publish_or_resume_initial_plan_revision(&initial_publication_journal(&revision_store))
-        .unwrap();
-    let binding = runtime_binding(&published);
-    let attempt_store = CodingAttemptStore::new(paths.clone());
-    let attempt = attempt_store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: PROJECT_ID.to_string(),
-            issue_id: ISSUE_ID.to_string(),
-            plan_id: binding.plan_id.clone(),
-            current_work_item_id: binding.logical_work_item_id.clone(),
-            base_branch: "main".to_string(),
-            branch_name: "aria/work-items/runtime-reader".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Codex,
-                reviewer: Some(ProviderName::ClaudeCode),
-                review_rounds: 1,
-                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
-            },
-            max_auto_rework: 2,
-        })
-        .unwrap();
-    attempt_store
-        .save_plan_binding(
-            &attempt,
-            &CodingAttemptPlanBinding {
-                attempt_id: attempt.id.clone(),
-                plan_id: binding.plan_id.clone(),
-                bound_plan_revision_id: binding.plan_revision_id.clone(),
-                applied_amendment_ids: Vec::new(),
-                updated_at: "2026-07-26T00:00:00Z".to_string(),
-            },
-        )
-        .unwrap();
-    let unit = attempt_store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            plan_id: binding.plan_id.clone(),
-            logical_work_item_id: binding.logical_work_item_id.clone(),
-            work_item_revision_id: binding.work_item_revision_id.clone(),
-            dependency_logical_work_item_ids: Vec::new(),
-            order_index: 0,
-            status: CodingExecutionUnitStatus::Running,
-        })
-        .unwrap();
-    let attempt = attempt_store
-        .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
-        .unwrap();
-    let run = coding_unit_run(&unit, &binding);
+    let (_temp, fixture) = bound_group_attempt_fixture();
+    let BoundGroupAttemptFixture {
+        paths,
+        repository_id,
+        repository_path,
+        attempt,
+        unit,
+        run,
+        binding,
+    } = fixture;
     let reader = WorkItemRuntimeReader::new(paths.clone());
 
     let resolved = reader
@@ -739,7 +767,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
         evaluation.work_item.artifact_id,
         binding.logical_work_item_id
     );
-    assert_eq!(evaluation.work_item.repository_id, repository.id);
+    assert_eq!(evaluation.work_item.repository_id, repository_id);
     assert_eq!(
         evaluation.work_item.title,
         resolved.projection_bundle.human_projection.title
@@ -766,7 +794,7 @@ async fn runtime_reader_derives_coding_unit_binding_and_rejects_run_hash_mismatc
 
     assert_eq!(
         repository_path_for_attempt(&paths, &attempt).unwrap(),
-        repository.path
+        repository_path
     );
 
     let mut different_hash = run;
@@ -812,18 +840,43 @@ fn work_item_workspace_session(
         workspace_type: WorkspaceType::WorkItem,
         status: WorkspaceSessionStatus::Open,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,
         reviewer_enabled_at_start: None,
         superpowers_enabled: true,
         openspec_enabled: true,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: Default::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        human_gate_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
         work_item_runtime_binding,
+        work_item_child_binding: None,
         provider_conversations: Vec::new(),
         messages: Vec::new(),
         created_at: "2026-07-26T00:00:00Z".to_string(),
         updated_at: "2026-07-26T00:00:00Z".to_string(),
+        sc_recovery_claim: None,
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
+        structural_governance_state: None,
+        review_identity_id: String::new(),
     }
 }
 
@@ -856,4 +909,118 @@ fn coding_unit_run(unit: &CodingExecutionUnit, binding: &WorkItemRuntimeBinding)
         created_at: "2026-07-26T00:00:00Z".to_string(),
         updated_at: "2026-07-26T00:00:00Z".to_string(),
     }
+}
+
+/// group（schema v2）attempt 的已发布绑定 + 活动 coding unit/run 夹具：
+/// `load_coding_work_item_context` 走 `bound_coder_work_item_context` 分支的最小
+/// 完整前置（project / repository / issue / 已发布初始计划 / group attempt /
+/// plan binding / coding unit）。
+struct BoundGroupAttemptFixture {
+    paths: ProductAppPaths,
+    repository_id: String,
+    repository_path: PathBuf,
+    attempt: CodingExecutionAttempt,
+    unit: CodingExecutionUnit,
+    run: CodingUnitRun,
+    binding: WorkItemRuntimeBinding,
+}
+
+fn bound_group_attempt_fixture() -> (TempDir, BoundGroupAttemptFixture) {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    ProjectStore::new(paths.clone())
+        .create(CreateProjectInput {
+            name: "runtime reader project".to_string(),
+            description: None,
+        })
+        .unwrap();
+    let repository = RepositoryStore::new(paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: PROJECT_ID.to_string(),
+            name: "Runtime Reader Repository".to_string(),
+            path: temp.path().to_path_buf(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+            idempotency_key: "runtime-reader-repository".to_string(),
+        })
+        .unwrap();
+    let issue = IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
+            title: "Runtime Reader Issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .unwrap();
+    assert_eq!(issue.id, ISSUE_ID);
+    let revision_store = WorkItemRevisionStore::new(paths.clone());
+    let published = revision_store
+        .publish_or_resume_initial_plan_revision(&initial_publication_journal(&revision_store))
+        .unwrap();
+    let binding = runtime_binding(&published);
+    let attempt_store = CodingAttemptStore::new(paths.clone());
+    let attempt = attempt_store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: binding.plan_id.clone(),
+            current_work_item_id: binding.logical_work_item_id.clone(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/work-items/runtime-reader".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        })
+        .unwrap();
+    attempt_store
+        .save_plan_binding(
+            &attempt,
+            &CodingAttemptPlanBinding {
+                attempt_id: attempt.id.clone(),
+                plan_id: binding.plan_id.clone(),
+                bound_plan_revision_id: binding.plan_revision_id.clone(),
+                applied_amendment_ids: Vec::new(),
+                updated_at: "2026-07-26T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    let unit = attempt_store
+        .create_coding_unit(CreateCodingExecutionUnitInput {
+            attempt_id: attempt.id.clone(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            plan_id: binding.plan_id.clone(),
+            logical_work_item_id: binding.logical_work_item_id.clone(),
+            work_item_revision_id: binding.work_item_revision_id.clone(),
+            dependency_logical_work_item_ids: Vec::new(),
+            order_index: 0,
+            status: CodingExecutionUnitStatus::Running,
+        })
+        .unwrap();
+    let attempt = attempt_store
+        .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap();
+    let run = coding_unit_run(&unit, &binding);
+    (
+        temp,
+        BoundGroupAttemptFixture {
+            paths,
+            repository_id: repository.id,
+            repository_path: repository.path,
+            attempt,
+            unit,
+            run,
+            binding,
+        },
+    )
 }

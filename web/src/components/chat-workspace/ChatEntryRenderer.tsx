@@ -1,8 +1,9 @@
+import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
 import type { ChatEntry } from "../../state/chat-entries";
-import type { RevisionPath } from "../../api/types";
 import { ArtifactUpdateEntry } from "./entries/ArtifactUpdateEntry";
 import { ChoiceRequestEntry } from "./entries/ChoiceRequestEntry";
 import { ChoiceResponseEntry } from "./entries/ChoiceResponseEntry";
+import { DeliveryFactsEntry } from "./entries/DeliveryFactsEntry";
 import { ErrorEntry } from "./entries/ErrorEntry";
 import { ExecutionEventEntry } from "./entries/ExecutionEventEntry";
 import { GatePromptEntry } from "./entries/GatePromptEntry";
@@ -23,19 +24,17 @@ interface ChatEntryRendererProps {
     entry: ChatEntry,
     response: { selected_option_ids: string[]; free_text: string | null },
   ) => void;
-  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) => void;
+  actions?: CockpitActionFacade;
+  /** F-38：门卡「查看产物」入口——切到产物视图（cockpit 产物审核页签）。 */
+  onOpenArtifact?: () => void;
 }
 
 export function ChatEntryRenderer({
   entry,
   onPermissionResponse,
   onChoiceResponse,
-  onSelectRevisionPath,
-  onHumanConfirm,
+  actions,
+  onOpenArtifact,
 }: ChatEntryRendererProps) {
   switch (entry.type) {
     case "context_note":
@@ -46,6 +45,8 @@ export function ChatEntryRenderer({
       return <ProviderStreamEntry entry={entry} />;
     case "execution_event":
       return <ExecutionEventEntry entry={entry} />;
+    case "delivery_facts":
+      return <DeliveryFactsEntry entry={entry} />;
     case "permission_request":
       return <PermissionRequestEntry entry={entry} onRespond={onPermissionResponse} />;
     case "permission_response":
@@ -57,9 +58,16 @@ export function ChatEntryRenderer({
     case "artifact_update":
       return <ArtifactUpdateEntry entry={entry} />;
     case "review_verdict":
-      return <ReviewVerdictEntry entry={entry} onSelectPath={onSelectRevisionPath} />;
+      // 退役留档（T5/REQ-RET-02）：review_decision 路径动作面已删，verdict 仅只读呈现。
+      return <ReviewVerdictEntry entry={entry} />;
     case "gate_prompt":
-      return <GatePromptEntry entry={entry} onDecision={onHumanConfirm} />;
+      return (
+        <GatePromptEntry
+          entry={entry}
+          actions={actions}
+          onOpenArtifact={onOpenArtifact}
+        />
+      );
     case "human_decision":
       return <HumanDecisionEntry entry={entry} />;
     case "stage_change":

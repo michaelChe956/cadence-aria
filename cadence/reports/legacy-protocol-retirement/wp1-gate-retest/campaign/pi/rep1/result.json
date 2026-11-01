@@ -1,0 +1,252 @@
+{
+  "provider": "pi",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/legacy-protocol-retirement/wp1-gate-retest/campaign/pi/rep1",
+  "startedAt": "2026-09-19T01:51:12.924Z",
+  "finishedAt": "2026-09-19T01:57:24.837Z",
+  "elapsedSec": 371.912,
+  "issue_id": "issue_0282",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0452",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "pi",
+    "reviewer_provider": "pi",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.68,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.754,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 294.642,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 345.812,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 371.912,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 371.912,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 294.642,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::unlocked 为布尔值",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=unlocked 为布尔值",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability unlocked 为布尔值 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- unlocked 为布尔值",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::静态资源按相对路径读取并返回对应 Content-Type",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源按相对路径读取并返回对应 Content-Type",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源按相对路径读取并返回对应 Content-Type required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源按相对路径读取并返回对应 Content-Type",
+          "severity": "must_fix"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 371.912,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::unlocked 为布尔值",
+          "evidence": "work_item=WI-002 contract=CT-001 capability=unlocked 为布尔值",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability unlocked 为布尔值 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- unlocked 为布尔值",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::静态资源按相对路径读取并返回对应 Content-Type",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源按相对路径读取并返回对应 Content-Type",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源按相对路径读取并返回对应 Content-Type required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源按相对路径读取并返回对应 Content-Type",
+          "severity": "must_fix"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::unlocked 为布尔值",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=unlocked 为布尔值",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability unlocked 为布尔值 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- unlocked 为布尔值",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::静态资源按相对路径读取并返回对应 Content-Type",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源按相对路径读取并返回对应 Content-Type",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源按相对路径读取并返回对应 Content-Type required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源按相对路径读取并返回对应 Content-Type",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::unlocked 为布尔值",
+      "evidence": "work_item=WI-002 contract=CT-001 capability=unlocked 为布尔值",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability unlocked 为布尔值 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- unlocked 为布尔值",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::静态资源按相对路径读取并返回对应 Content-Type",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源按相对路径读取并返回对应 Content-Type",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源按相对路径读取并返回对应 Content-Type required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源按相对路径读取并返回对应 Content-Type",
+      "severity": "must_fix"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "stopped_needs_human",
+  "error": null,
+  "completed": false,
+  "session_status": "stopped_needs_human",
+  "flow_kind": "single_candidate",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 1,
+    "manual_repairs_used": 0,
+    "transitions_used": 1,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [
+      {
+        "class": "repairable",
+        "fingerprint": "92d7931262f39c2e8fbc87b78832c97b4de770206431dd6e8ad8eade2f51416a",
+        "category": "contract_gap",
+        "severity": "must_fix",
+        "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability unlocked 为布尔值 required by WI-002",
+        "evidence": "work_item=WI-002 contract=CT-001 capability=unlocked 为布尔值",
+        "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- unlocked 为布尔值",
+        "contract_field": "CT-001::unlocked 为布尔值"
+      },
+      {
+        "class": "repairable",
+        "fingerprint": "f78b3bab7886bed5e0e22c3d4e0d35a0c84c6a9a60c972a35811495d4bb5dbb2",
+        "category": "contract_gap",
+        "severity": "must_fix",
+        "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 静态资源按相对路径读取并返回对应 Content-Type required by WI-003",
+        "evidence": "work_item=WI-003 contract=CT-002 capability=静态资源按相对路径读取并返回对应 Content-Type",
+        "required_action": "在 WI-001 的 Outputs 契约 CT-002 的 capabilities 列表追加一行（逐字复制）：- 静态资源按相对路径读取并返回对应 Content-Type",
+        "contract_field": "CT-002::静态资源按相对路径读取并返回对应 Content-Type"
+      }
+    ],
+    "repeated_fingerprints": [
+      "92d7931262f39c2e8fbc87b78832c97b4de770206431dd6e8ad8eade2f51416a",
+      "f78b3bab7886bed5e0e22c3d4e0d35a0c84c6a9a60c972a35811495d4bb5dbb2"
+    ],
+    "attempts_used": 1,
+    "manual_repairs_remaining": 3,
+    "trigger": "repeated_fingerprint",
+    "resumable": true
+  },
+  "provider_start_count": 2,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0452:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0452:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 371912,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.074,
+    "1:running": 292.888,
+    "2:cross_review": 51.17,
+    "3:running": 26.1,
+    "4:cross_review": 0,
+    "5:completed": 0
+  }
+}

@@ -526,7 +526,9 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &initial, true, false);
@@ -535,12 +537,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
         .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
         .unwrap();
     let mut attempt = store
-        .update_attempt_status(
-            &initial.project_id,
-            &initial.issue_id,
-            &initial.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&initial.project_id, &initial.issue_id, &initial.id)
         .unwrap();
     let units = store
         .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -586,6 +583,18 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
         CodingUnitRunStatus::Running,
         None,
     );
+    // T6 起点事实：unit-0 已以 commit_completed 完成，组 attempt 的 head
+    // 即修订前事实；amendment run 物化经 journal 的
+    // materialization_head_commit 携带 start_commit，缺失即触发
+    // unit_run_start_commit_missing 停等（真缺失才停等，此处非真缺失）。
+    attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some("commit_completed".to_string()),
+        )
+        .unwrap();
     attempt = store
         .update_attempt_stage(
             &attempt.project_id,
@@ -603,10 +612,12 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
             entity_id: plan.id.clone(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let request = PlanRepairRequest {
@@ -662,6 +673,44 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
     revision_store
         .put_work_item_revision(&plan, &revised)
         .unwrap();
+    // 补 amended revision 的 source draft record：validate_group_single_target 拒绝任何
+    // source_draft_error，Legacy 单仓 unit 的 target 仍为 None。
+    WorkItemPlanStore::new(paths.clone())
+        .put_draft_record(&WorkItemDraftRecord {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: plan.id.clone(),
+            draft_id: revised.source_draft_revision_id.clone(),
+            outline_id: "outline_0101".to_string(),
+            generation_round_id: "round_0001".to_string(),
+            batch_id: None,
+            attempt_index: 1,
+            outline_version_ref: "outline_version_0001".to_string(),
+            generation_mode: WorkItemGenerationMode::Serial,
+            generation_diagnostics: None,
+            candidate: WorkItemDraftCandidate {
+                target_repository_id: None,
+                outline_id: "outline_0101".to_string(),
+                logical_work_item_id: revised.logical_work_item_id.clone(),
+                canonical_contract_candidate: revised.canonical_contract.clone(),
+                verification_plan: WorkItemDraftVerificationPlan {
+                    checks: revised.canonical_contract.verification_checks.clone(),
+                },
+            },
+            status: WorkItemDraftStatus::Accepted,
+            active: true,
+            superseded_by_draft_id: None,
+            supersede_reason: None,
+            copied_from_draft_id: None,
+            review_node_id: None,
+            review_verdict_ref: None,
+            generated_from_node_id: "timeline_node_0001".to_string(),
+            accepted_at: Some("2026-07-19T00:00:01Z".to_string()),
+            superseded_at: None,
+            created_at: "2026-07-19T00:00:01Z".to_string(),
+            updated_at: "2026-07-19T00:00:01Z".to_string(),
+        })
+        .unwrap();
     let mut revised_bundle = old_bundle;
     revised_bundle.id = revised.work_item_projection_bundle_id.clone();
     revised_bundle.work_item_revision_id = revised.id.clone();
@@ -713,6 +762,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
         dependency_graph_revision_id: previous_plan.dependency_graph_revision_id,
         validation_report_ref: "validation_report_0002".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0002".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-19T00:00:01Z".to_string(),
     };
     let previous_plan_projection = revision_store
@@ -883,5 +933,11 @@ fn reset_completed_application_to_unfinished_finalization(
         .get_attempt(&applied.project_id, &applied.issue_id, &applied.id)
         .unwrap();
     applying.status = CodingAttemptStatus::ApplyingPlanAmendment;
-    fixture.store.save_coding_attempt(&applying).unwrap();
+    // 生产不变式：admission 票据只随 Running 会话消费，离开 Running 后标记必为空。
+    // 直接回写状态绕过了受控转换，这里补上会话标记清理以保持状态一致。
+    applying.admission_ticket_consumed_at = None;
+    fixture
+        .store
+        .write_coding_attempt_for_test(&applying)
+        .unwrap();
 }

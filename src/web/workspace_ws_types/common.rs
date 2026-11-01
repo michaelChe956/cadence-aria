@@ -52,6 +52,7 @@ pub enum WsExecutionEventKind {
     Command,
     Output,
     Artifact,
+    Usage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

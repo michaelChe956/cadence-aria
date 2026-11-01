@@ -65,9 +65,20 @@ impl StreamingProviderAdapter for FakeStreamingProvider {
         });
 
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
+    }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径(fake 输出语义保持)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
     }
 }
 
@@ -75,8 +86,17 @@ fn fake_provider_output(input: &StreamingProviderInput) -> String {
     if matches!(input.role, AdapterRole::Reviewer)
         && let Some(contract) = input.structured_output_contract.as_ref()
     {
+        // verdict 词汇按契约 schema 区分：coding 侧 code review 契约
+        // （coding_workspace_code_review）消费 approve/request_changes/blocked
+        // （ReviewVerdict snake_case，无法解析时 fail-closed 落 Blocked 门）；
+        // workspace review 契约沿用 pass 词汇。
+        let verdict = if contract.schema_name == "coding_workspace_code_review" {
+            "approve"
+        } else {
+            "pass"
+        };
         return format!(
-            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{{\"verdict\":\"pass\",\"summary\":\"审核通过\",\"findings\":[]}}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
+            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{{\"nonce\":\"{}\",\"verdict\":\"{verdict}\",\"summary\":\"审核通过\",\"findings\":[]}}</ARIA_STRUCTURED_OUTPUT>",
             contract.nonce, contract.nonce
         );
     }
@@ -321,12 +341,21 @@ fn fake_workspace_markdown(prompt: &str) -> String {
                 ]
             })
         };
+        let nonce = prompt
+            .split_once("<ARIA_STRUCTURED_OUTPUT nonce=\"")
+            .and_then(|(_, tail)| tail.split_once('"'))
+            .map(|(nonce, _)| nonce)
+            .unwrap_or("FAKE0001");
+        let mut structured_output = structured_output;
+        structured_output
+            .as_object_mut()
+            .expect("fake work-item structured output must be an object")
+            .insert("nonce".to_string(), serde_json::json!(nonce));
         return format!(
             "Fake Work Item Plan streaming draft\n\n\
              - 分析 Story/Design 约束\n\
              - 拆分可执行 Work Item\n\n\
-             <ARIA_STRUCTURED_OUTPUT>{}</ARIA_STRUCTURED_OUTPUT>",
-            structured_output
+             <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{structured_output}</ARIA_STRUCTURED_OUTPUT>"
         );
     }
 

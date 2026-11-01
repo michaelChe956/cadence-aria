@@ -23,23 +23,37 @@ impl WorkspaceEngine {
             .as_ref()
             .map(|contract| contract.schema_name.clone())
             .unwrap_or_else(|| "workspace_review".to_string());
+        let original_output = if completion.readable_output.is_empty() {
+            String::new()
+        } else {
+            format!("原始输出：\n{}\n", completion.readable_output)
+        };
         let prompt = format!(
             "上一轮审核业务内容已经完成，但结构化输出格式无效。\n\
              只能修复 JSON 与 ARIA_STRUCTURED_OUTPUT 封装；不得重新审核，不得改变 verdict、summary、findings、review_scope、affects_items 或其他业务字段。\n\
              schema_name: {}\n\
              error_code: {}\n\
-             已恢复的原业务 JSON（必须逐字段保持语义一致）：\n{}\n\
-             原始输出：\n{}\n\
+             已恢复的原业务 JSON（必须逐字段保持语义一致；nonce 必须是本请求签发值，禁止使用 EXAMPLE_NONCE 或原始输出中出现的任何其他 nonce）：\n{}\n\
+             {}\
              请只返回以下 nonce block，不要输出其他说明：\n\
-             <ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{修复后的原业务 JSON}}\n</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n",
+             <ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"nonce\":\"{}\",修复后的原业务 JSON}}\n</ARIA_STRUCTURED_OUTPUT>\n",
             schema_name,
             error.code(),
             recoverable_json,
-            completion.full_output,
+            original_output,
             nonce,
             nonce,
         );
         Ok(StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            // 批2 Task 11(T20 前中间态):Reviewer wire 面全开(无 deny);
+            // 纪律=ReviewerVerify+窗口合同,真窗归 T20;执行审计按角色保留。
+            // 批2 Task 20b(决策项⑦):Reviewer 输入铸造 ReviewerVerify 窗口
+            // 合同(活动审查窗的窗口 id;无活动窗=None,由四家启动检查/
+            // 网关复验拒绝,不 fallback)。
+            tool_policy: self.reviewer_verify_policy(),
+            audit_sink: None,
             provider_type: base_input.provider_type.clone(),
             role: AdapterRole::Reviewer,
             prompt,

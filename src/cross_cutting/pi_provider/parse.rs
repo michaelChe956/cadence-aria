@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::cross_cutting::streaming_provider::UsageReportData;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PiToolStart {
     pub(crate) tool_call_id: String,
@@ -75,14 +77,52 @@ pub(crate) fn is_pi_terminal(value: &Value) -> bool {
 }
 
 pub(crate) fn parse_pi_session_id(value: &Value) -> Option<String> {
+    pi_get_state_data(value, "sessionId")
+}
+
+/// Pi RPC `get_state` 返回的绝对本地会话记录路径。该文件由 Pi CLI 管理，仅在
+/// 协议 `data.cost` 缺失时用作 usage fallback；缺失或非绝对路径时不读取。
+pub(crate) fn parse_pi_session_file(value: &Value) -> Option<std::path::PathBuf> {
+    let path = pi_get_state_data(value, "sessionFile")?;
+    let path = std::path::PathBuf::from(path);
+    path.is_absolute().then_some(path)
+}
+
+fn pi_get_state_data(value: &Value, field: &str) -> Option<String> {
     (value.get("type").and_then(Value::as_str) == Some("response")).then_some(())?;
     (value.get("command").and_then(Value::as_str) == Some("get_state")).then_some(())?;
     (value.get("success").and_then(Value::as_bool) == Some(true)).then_some(())?;
     value
-        .pointer("/data/sessionId")
+        .pointer(&format!("/data/{field}"))
         .and_then(Value::as_str)
-        .filter(|session_id| !session_id.is_empty())
+        .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+/// 解析 pi RPC `get_state` 响应中的 `data.cost` 用量快照。
+///
+/// pi 的 get_state 响应见过 `cost: { input, output, cacheRead, cacheWrite }`（数值，
+/// 可能为浮点）；此处统一取整为 u64。任一字段缺失记 `None`，整个 cost 缺失返回
+/// `None`（best-effort，不视为错误）。注意：该计数为会话累计值。
+pub(crate) fn parse_pi_usage(value: &Value, role: &str) -> Option<UsageReportData> {
+    let cost = value.pointer("/data/cost")?;
+    let number = |name: &str| -> Option<u64> {
+        cost.get(name)
+            .and_then(Value::as_number)
+            .and_then(|number| {
+                number
+                    .as_u64()
+                    .or_else(|| number.as_f64().map(|float| float as u64))
+            })
+    };
+    let report = UsageReportData {
+        role: role.to_string(),
+        input_tokens: number("input"),
+        output_tokens: number("output"),
+        cache_read_tokens: number("cacheRead"),
+        cache_creation_tokens: number("cacheWrite"),
+    };
+    report.has_any_tokens().then_some(report)
 }
 
 pub(crate) fn parse_pi_failure(value: &Value) -> Option<String> {

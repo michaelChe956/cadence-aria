@@ -157,12 +157,5 @@ fn trimmed_non_empty(value: &str) -> Option<&str> {
 }
 
 fn role_label(role: &ProviderConversationRole) -> &'static str {
-    match role {
-        ProviderConversationRole::Author => "author",
-        ProviderConversationRole::Reviewer => "reviewer",
-        ProviderConversationRole::Coder => "coder",
-        ProviderConversationRole::Analyst => "analyst",
-        ProviderConversationRole::CodeReviewer => "code_reviewer",
-        ProviderConversationRole::InternalReviewer => "internal_reviewer",
-    }
+    role.wire_label()
 }

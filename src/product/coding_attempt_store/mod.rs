@@ -2,6 +2,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::CodingExecutionAttempt;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 
+pub(crate) mod admission;
 mod amendment_arbitration;
 mod amendment_delivery;
 mod amendment_recovery;
@@ -9,6 +10,9 @@ mod attempt;
 mod attempt_creation;
 mod context;
 mod gate;
+/// 批 2 T2：终止判定助手 crate 级出口（web 层 runner/stage 门消费）。
+pub(crate) use gate::automation_plan_terminated_for_attempt;
+pub use gate::{ArchivedBlockedGateFacts, ResolveOutcome, StartupBlockedGateState};
 mod git_operation;
 mod group;
 mod group_final_readiness;
@@ -17,32 +21,62 @@ mod group_review_store;
 mod group_terminal;
 mod group_validation;
 mod inputs;
+mod issue_cross_repo_review;
+mod issue_delivery;
 pub(crate) mod locking;
 mod paths;
+mod plan_amendment_context;
 mod plan_binding;
+mod plan_group_projection;
 pub(crate) mod plan_repair_reconcile;
 mod recovery;
 mod report;
+mod rework_claim;
 mod role_run;
 mod role_run_event;
+mod run_exclusion;
+mod split_audit;
+mod verification_triage;
+pub use split_audit::*;
+pub mod target_snapshot;
 mod timeline;
 mod unit_run;
 mod unit_run_amendment;
 mod unit_run_handoff;
 mod utils;
 
+#[allow(unused_imports)]
+pub(crate) use admission::{
+    AdmissionTicketRecord, StableCode, admit_attempt_for_execution,
+    transition_to_awaiting_manual_recovery, transition_to_executable, transition_to_terminal,
+};
 #[cfg(test)]
 pub(crate) use amendment_delivery::register_plan_amendment_delivery_mark_failpoint;
+pub use attempt::ClaimCodingStartOutcome;
 pub use attempt_creation::WorkItemAttemptCreationGuard;
 pub use git_operation::*;
 pub use group_initialization::*;
 pub use group_validation::*;
 pub use inputs::*;
+pub use issue_delivery::{DeliveryEntry, IssueDeliveryOverall, IssueDeliverySummary};
+pub use plan_group_projection::{PlanGroupOverall, PlanGroupProjection, PlanTargetEntry};
 pub(crate) use recovery::{
     FAILED_CODE_REVIEW_RECOVERY_JOURNAL_FILE, is_failed_review_manual_retry,
 };
 pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhase};
+pub use rework_claim::{ReworkClaimOutcome, ReworkInstructionClaim};
+pub use role_run_event::{
+    VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH, VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE,
+    VERIFICATION_EVIDENCE_PLAN_UNDECLARED, VerificationCommandEvidence, VerificationFailureClass,
+    verification_evidence_copy, verification_failure_class_copy,
+};
+pub use run_exclusion::{CodingAttemptCommandRecord, CodingRunExclusionDecision};
+#[allow(unused_imports)]
 pub(crate) use utils::*;
+pub use verification_triage::{
+    EnterVerificationTriageInput, VerificationTriageConclusion, VerificationTriageDecision,
+    VerificationTriageRecord, VerificationTriageStatus,
+};
 
 #[derive(Debug, Clone)]
 pub struct CodingAttemptStore {

@@ -38,6 +38,10 @@ fn fixture_command(name: &str) -> PathBuf {
 
 fn input(resume: Option<&str>, timeout_secs: u64) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
+        baseline_tree: None,
+        tool_policy: None,
+        audit_sink: None,
         provider_type: ProviderType::KimiCode,
         role: AdapterRole::Orchestrator,
         prompt: "fixture prompt".to_string(),
@@ -144,6 +148,14 @@ async fn supervised_tool_approval_approved_maps_to_allow_once() {
         send_message(
             &mut writer,
             serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":"approval_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"approved and done"}}}
+            }),
+        )
+        .await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
                 "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
             }),
         )
@@ -151,21 +163,27 @@ async fn supervised_tool_approval_approved_maps_to_allow_once() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    let permission_id = match tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-        .await
-        .expect("permission request event")
-        .expect("permission request value")
-    {
-        ProviderEvent::StatusChanged(_) => match events.recv().await.expect("permission event") {
-            ProviderEvent::PermissionRequest(request) => {
-                assert_eq!(request.tool_name, "Bash");
-                assert_eq!(request.description, "pwd");
-                request.id
+    let permission_id = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("permission request event")
+            .expect("permission request value");
+        match event {
+            // 批2 Task 7：会话启动时一次投递的活动快照，跳过后再收权限事件。
+            ProviderEvent::TerminalActivity(_) => continue,
+            ProviderEvent::StatusChanged(_) => {
+                match events.recv().await.expect("permission event") {
+                    ProviderEvent::PermissionRequest(request) => {
+                        assert_eq!(request.tool_name, "Bash");
+                        assert_eq!(request.description, "pwd");
+                        break request.id;
+                    }
+                    other => panic!("unexpected provider event: {other:?}"),
+                }
             }
+            ProviderEvent::PermissionRequest(request) => break request.id,
             other => panic!("unexpected provider event: {other:?}"),
-        },
-        ProviderEvent::PermissionRequest(request) => request.id,
-        other => panic!("unexpected provider event: {other:?}"),
+        }
     };
     commands
         .send(ProviderCommand::PermissionResponse {
@@ -234,6 +252,14 @@ async fn supervised_tool_approval_rejected_maps_to_reject_once_and_continues() {
         send_message(
             &mut writer,
             serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":"approval_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"rejected and done"}}}
+            }),
+        )
+        .await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
                 "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
             }),
         )
@@ -248,7 +274,7 @@ async fn supervised_tool_approval_rejected_maps_to_reject_once_and_continues() {
             .expect("permission request value")
         {
             ProviderEvent::PermissionRequest(request) => break request.id,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -351,12 +377,13 @@ async fn askuserquestion_maps_to_choice_request() {
                         selected_option_ids: vec!["yes".to_string()],
                         free_text: None,
                         answers: vec![],
+                        receipt: None,
                     })
                     .await
                     .expect("choice response");
                 break;
             }
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     }
@@ -388,6 +415,7 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
             reply["result"]["outcome"],
             serde_json::json!({"outcome":"selected","optionId":"choice-a"})
         );
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ask_select_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"selection made"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -398,7 +426,7 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -408,6 +436,7 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
             selected_option_ids: vec!["choice-a".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -464,7 +493,7 @@ async fn askuserquestion_free_text_takes_priority_over_selected() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -474,6 +503,7 @@ async fn askuserquestion_free_text_takes_priority_over_selected() {
             selected_option_ids: vec!["selected".to_string()],
             free_text: Some(" custom answer ".to_string()),
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -526,6 +556,7 @@ async fn askuserquestion_free_text_only_no_selected() {
             second_prompt["params"]["prompt"][0]["text"],
             "free text only"
         );
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ask_text_only_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"free text answered"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":second_prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -536,7 +567,7 @@ async fn askuserquestion_free_text_only_no_selected() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -546,6 +577,7 @@ async fn askuserquestion_free_text_only_no_selected() {
             selected_option_ids: vec![],
             free_text: Some("free text only".to_string()),
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("choice response");
@@ -580,6 +612,7 @@ async fn multiquestion_serial_one_at_a_time() {
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":"ask-q2","method":"session/request_permission","params":{"options":[{"optionId":"q2-b","name":"Option B","kind":"allow_once"}],"toolCall":{"toolCallId":"ask-q2-tool","title":"AskUserQuestion","content":{"type":"text","text":"Question 2?"}}}})).await;
         let second_reply = read_request(&mut reader).await;
         assert_eq!(second_reply["result"]["outcome"]["optionId"], "q2-b");
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"multi_question_fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"questions answered"}}}})).await;
         send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
@@ -591,7 +624,7 @@ async fn multiquestion_serial_one_at_a_time() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -603,6 +636,7 @@ async fn multiquestion_serial_one_at_a_time() {
             selected_option_ids: vec!["q1-a".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("first response");
@@ -623,6 +657,7 @@ async fn multiquestion_serial_one_at_a_time() {
             selected_option_ids: vec!["q2-b".to_string()],
             free_text: None,
             answers: vec![],
+            receipt: None,
         })
         .await
         .expect("second response");
@@ -679,5 +714,210 @@ async fn askuser_question_multiple_questions_emits_protocol_error() {
         "{}",
         err.to_string()
     );
+    server_task.await.expect("server task");
+}
+
+#[tokio::test]
+async fn session_new_params_omit_permission_mode() {
+    let (peer, server) = test_peer();
+    let (_commands, _events, run) = direct_session_events(peer, input(None, 10)).await;
+    let server_task = tokio::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let initialize = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}})).await;
+        let _initialized = read_request(&mut reader).await;
+        let new = read_request(&mut reader).await;
+        assert_eq!(new["method"], "session/new");
+        assert!(
+            new["params"].get("permissionMode").is_none(),
+            "session/new params must not carry permissionMode (kimi ACP sets mode via session/set_mode): {}",
+            new["params"]
+        );
+        assert!(new["params"].get("cwd").is_some());
+        send_message(&mut writer, serde_json::json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"omit_mode_fixture"}})).await;
+    });
+    let err = run
+        .await
+        .expect("run join")
+        .expect_err("server task ends without completing a prompt");
+    assert!(
+        !err.to_string().contains("permissionMode"),
+        "{}",
+        err.to_string()
+    );
+    server_task.await.expect("server task");
+}
+
+fn acp_fixture(name: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src/cross_cutting/kimi_code_provider/tests/fixtures")
+        .join(name);
+    serde_json::from_str(&std::fs::read_to_string(path).expect("fixture file"))
+        .expect("fixture json")
+}
+
+/// Replace `<REDACTED>` placeholders (sessionId) with the live session id so
+/// the recorded transcript can be replayed; opaque ids are left verbatim.
+fn reseat_redacted(value: &Value, key: &str, replacement: &str) -> Value {
+    match value {
+        Value::String(text) if text == "<REDACTED>" => Value::String(replacement.to_string()),
+        Value::String(text) => Value::String(text.clone()),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| reseat_redacted(item, key, replacement))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(field, item)| {
+                    (
+                        field.clone(),
+                        if field == key {
+                            reseat_redacted(item, key, replacement)
+                        } else {
+                            item.clone()
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Replay the captured kimi ACP 0.38.0 fixtures against a fake peer:
+/// - `acp_request_permission_bash.redacted.json`: the recorded
+///   `session/request_permission` request must produce a client response
+///   field-for-field identical to the recorded response (after approving).
+/// - `acp_session_update_tool_call_update.redacted.json`: the recorded
+///   `session/update` notification must parse (content array shape) and its
+///   text must surface in the tool result; as a notification it has no
+///   JSON-RPC response.
+#[tokio::test]
+async fn fake_peer_fixture_replay_matches_recorded_transcript() {
+    let permission_fixture = acp_fixture("acp_request_permission_bash.redacted.json");
+    let update_fixture = acp_fixture("acp_session_update_tool_call_update.redacted.json");
+    const SESSION: &str = "fixture_replay_session";
+    let expected_text = update_fixture["notification"]["params"]["update"]["content"][0]["content"]
+        ["text"]
+        .as_str()
+        .expect("fixture text")
+        .to_string();
+    let update_fixture = update_fixture.clone();
+
+    let (peer, server) = test_peer();
+    let mut session_input = input(None, 10);
+    session_input.permission_mode = ProviderPermissionMode::Supervised;
+    let (commands, mut events, run) = direct_session_events(peer, session_input).await;
+    let server_task = tokio::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let initialize = read_request(&mut reader).await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            }),
+        )
+        .await;
+        let _initialized = read_request(&mut reader).await;
+        let new = read_request(&mut reader).await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":new["id"], "result":{"sessionId":SESSION}
+            }),
+        )
+        .await;
+        let prompt = read_request(&mut reader).await;
+
+        // Replay the recorded permission request (sessionId de-redacted).
+        let recorded_request =
+            reseat_redacted(&permission_fixture["request"], "sessionId", SESSION);
+        send_message(&mut writer, recorded_request).await;
+        let reply = read_request(&mut reader).await;
+        // Field-for-field comparison with the recorded response.
+        assert_eq!(reply, permission_fixture["response"]);
+
+        // Replay the recorded session/update notification; it must not
+        // produce any JSON-RPC response (notifications are one-way).
+        let recorded_notification =
+            reseat_redacted(&update_fixture["notification"], "sessionId", SESSION);
+        send_message(&mut writer, recorded_notification.clone()).await;
+        // Complete the same tool call so the buffered content flushes as a
+        // tool result; only the status field differs from the recording.
+        let mut completed = recorded_notification.clone();
+        completed["params"]["update"]["status"] = serde_json::json!("completed");
+        send_message(&mut writer, completed).await;
+
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "method":"session/update",
+                "params":{"sessionId":SESSION,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replayed and done"}}}
+            }),
+        )
+        .await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
+            }),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    });
+
+    // Approve the recorded Bash permission request.
+    let permission_id = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("permission request event")
+            .expect("permission request value")
+        {
+            ProviderEvent::PermissionRequest(request) => {
+                assert_eq!(request.tool_name, "Bash");
+                break request.id;
+            }
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
+            other => panic!("unexpected provider event: {other:?}"),
+        }
+    };
+    commands
+        .send(ProviderCommand::PermissionResponse {
+            id: permission_id,
+            approved: true,
+            reason: None,
+        })
+        .await
+        .expect("approval response");
+
+    // The recorded tool_call_update content must surface verbatim.
+    let mut saw_tool_result = false;
+    while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+        .await
+        .expect("terminal event")
+    {
+        if let ProviderEvent::ToolResult(result) = &event {
+            assert!(
+                result.output.contains(&expected_text),
+                "tool result must contain the recorded fixture text: {:?}",
+                result.output
+            );
+            assert!(!result.is_error);
+            saw_tool_result = true;
+        }
+        if matches!(event, ProviderEvent::Completed(_)) {
+            break;
+        }
+    }
+    assert!(
+        saw_tool_result,
+        "recorded tool_call_update must flush a tool result"
+    );
+    assert!(run.await.expect("run join").is_ok());
     server_task.await.expect("server task");
 }

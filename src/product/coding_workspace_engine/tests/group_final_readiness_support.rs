@@ -9,16 +9,16 @@ use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, WorkItemRevisionHistoryDto,
 };
 
-pub(super) struct ReadinessFixture {
-    pub(super) _root: tempfile::TempDir,
-    pub(super) worktree: std::path::PathBuf,
-    pub(super) store: CodingAttemptStore,
-    pub(super) engine: CodingWorkspaceEngine,
-    pub(super) attempt: CodingExecutionAttempt,
-    pub(super) start_commit: String,
+pub(crate) struct ReadinessFixture {
+    pub(crate) _root: tempfile::TempDir,
+    pub(crate) worktree: std::path::PathBuf,
+    pub(crate) store: CodingAttemptStore,
+    pub(crate) engine: CodingWorkspaceEngine,
+    pub(crate) attempt: CodingExecutionAttempt,
+    pub(crate) start_commit: String,
 }
 
-pub(super) fn readiness_fixture() -> ReadinessFixture {
+pub(crate) fn readiness_fixture() -> ReadinessFixture {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -42,7 +42,9 @@ pub(super) fn readiness_fixture() -> ReadinessFixture {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_schema_v2_group_attempt_fixture(&store, &attempt, true, false, &[]);
@@ -111,9 +113,8 @@ pub(super) fn seed_completed_run(
     let coder_renderer = renderer_for(&providers.coder)
         .renderer_version()
         .to_string();
-    let reviewer_renderer = renderer_for(&providers.code_reviewer)
-        .renderer_version()
-        .to_string();
+    let reviewer_renderer =
+        renderer_version_for_optional_provider(providers.code_reviewer.as_ref()).to_string();
     let run = CodingUnitRun {
         id: format!("coding_unit_run_{}", unit.order_index + 1),
         unit_id: unit.id.clone(),
@@ -227,10 +228,12 @@ pub(super) fn seed_runner_revision_history(fixture: &ReadinessFixture) {
                 .expect("group plan id"),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("plan workspace session");
     lifecycle
@@ -321,16 +324,11 @@ pub(super) fn seed_complete_group_readiness(fixture: &ReadinessFixture) -> Codin
     attempt.head_commit = Some(completion);
     fixture
         .store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("attempt head");
     fixture
         .store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt")
 }
 
@@ -375,6 +373,8 @@ pub(super) fn review_report(
         role_run_id: None,
         run_no: Some(1),
         unit_run_id: Some(run.id.clone()),
+        acceptance: None,
+        review_window_id: None,
     }
 }
 

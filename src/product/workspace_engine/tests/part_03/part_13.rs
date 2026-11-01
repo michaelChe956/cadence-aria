@@ -22,7 +22,8 @@ async fn plan_repair_review_race_fixture() -> PlanRepairReviewRaceFixture {
         .next()
         .unwrap()
         .clone();
-    let previous_work_item_revision_id = outcome.plan_revision.work_item_bindings[&logical_id].clone();
+    let previous_work_item_revision_id =
+        outcome.plan_revision.work_item_bindings[&logical_id].clone();
     let minimum_scope_unit = outcome
         .plan_revision
         .work_item_bindings
@@ -32,9 +33,7 @@ async fn plan_repair_review_race_fixture() -> PlanRepairReviewRaceFixture {
         .clone();
     let amendment_id = "plan_amendment_review_race_0001";
     let request_id = "plan_repair_request_review_race_0001";
-    let plan = store
-        .acquire_active_amendment(&plan, amendment_id)
-        .unwrap();
+    let plan = store.acquire_active_amendment(&plan, amendment_id).unwrap();
     let request = crate::product::models::PlanRepairRequest {
         id: request_id.to_string(),
         plan_id: plan.id.clone(),
@@ -191,16 +190,25 @@ async fn plan_repair_review_race_fixture() -> PlanRepairReviewRaceFixture {
 async fn plan_repair_review_context_rejects_request_field_divergence_from_authoritative_store() {
     for field in ["evidence", "refs", "reason", "status", "updated_at"] {
         let mut fixture = plan_repair_review_race_fixture().await;
-        let request = &mut fixture.engine.plan_repair_snapshot.as_mut().unwrap().request;
+        let request = &mut fixture
+            .engine
+            .plan_repair_snapshot
+            .as_mut()
+            .unwrap()
+            .request;
         match field {
-            "evidence" => request.evidence.push(crate::product::models::PlanDefectEvidence {
-                kind: "review_note".to_string(),
-                source_ref: "review://tampered".to_string(),
-                message: "tampered evidence".to_string(),
-            }),
+            "evidence" => request
+                .evidence
+                .push(crate::product::models::PlanDefectEvidence {
+                    kind: "review_note".to_string(),
+                    source_ref: "review://tampered".to_string(),
+                    message: "tampered evidence".to_string(),
+                }),
             "refs" => {
                 request.contract_refs.push("contract.tampered".to_string());
-                request.capability_refs.push("tampered_capability".to_string());
+                request
+                    .capability_refs
+                    .push("tampered_capability".to_string());
             }
             "reason" => request.reason_code = "tampered_reason".to_string(),
             "status" => {
@@ -263,12 +271,15 @@ impl StreamingProviderAdapter for PlanRepairReviewRequestRaceProvider {
 #[tokio::test]
 async fn plan_repair_review_completion_rejects_request_evidence_race_without_attestation() {
     let mut fixture = plan_repair_review_race_fixture().await;
-    fixture.engine.begin_work_item_plan_outline_review_run().await;
+    fixture
+        .engine
+        .begin_work_item_plan_outline_review_run()
+        .await;
     let prompt = Arc::new(Mutex::new(None));
 
     fixture
         .engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(PlanRepairReviewRequestRaceProvider {
                 inner: ReviewVerdictStreamingProvider {
                     output: r#"Plan Repair candidate passed.
@@ -303,7 +314,11 @@ async fn plan_repair_review_completion_rejects_request_evidence_race_without_att
     let verdict = fixture.engine.latest_review_verdict.as_ref().unwrap();
     assert_eq!(verdict.verdict, ReviewVerdictType::Pass);
     assert_eq!(
-        verdict.work_item_plan_review.as_ref().unwrap().review_action,
+        verdict
+            .work_item_plan_review
+            .as_ref()
+            .unwrap()
+            .review_action,
         WorkItemPlanReviewAction::Continue
     );
     assert_eq!(fixture.engine.current_stage(), WorkspaceStage::HumanConfirm);

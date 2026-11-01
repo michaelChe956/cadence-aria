@@ -106,10 +106,24 @@ pub(crate) async fn create_repository_and_wait(
     panic!("repository initialization did not reach a terminal state: {last_snapshot}");
 }
 
+#[path = "it_web/candidate_attempt_metrics_api.rs"]
+mod candidate_attempt_metrics_api;
+#[path = "it_web/evidence_query.rs"]
+mod evidence_query;
+#[path = "it_web/issue_delivery_summary.rs"]
+mod issue_delivery_summary;
+#[path = "it_web/pointer_publication.rs"]
+mod pointer_publication;
+#[path = "it_web/provider_capability_fixture.rs"]
+mod provider_capability_fixture;
+#[path = "it_web/provider_gateway_envelope.rs"]
+mod provider_gateway_envelope;
 #[path = "it_web/web_api_handlers.rs"]
 mod web_api_handlers;
 #[path = "it_web/web_cli.rs"]
 mod web_cli;
+#[path = "it_web/web_codebases_api.rs"]
+mod web_codebases_api;
 #[path = "it_web/web_coding_attempt_api.rs"]
 mod web_coding_attempt_api;
 #[path = "it_web/web_coding_ws_handler.rs"]
@@ -122,6 +136,17 @@ mod web_events;
 mod web_hard_gate;
 #[path = "it_web/web_image_create_file_storage.rs"]
 mod web_image_create_file_storage;
+#[path = "it_web/web_lc_bootstrap_repair.rs"]
+mod web_lc_bootstrap_repair;
+#[path = "it_web/web_lc_capability_revalidate.rs"]
+mod web_lc_capability_revalidate;
+#[path = "it_web/web_lc_gateway_multi_provider/mod.rs"]
+mod web_lc_gateway_multi_provider;
+
+#[path = "it_web/web_lc_operations_api.rs"]
+mod web_lc_operations_api;
+#[path = "it_web/web_lc_registration_api.rs"]
+mod web_lc_registration_api;
 #[path = "it_web/web_lifecycle_api.rs"]
 mod web_lifecycle_api;
 #[path = "it_web/web_listening_line.rs"]
@@ -188,3 +213,43 @@ mod web_work_item_plan_staged_flow;
 mod web_work_item_split_flow;
 #[path = "it_web/web_workspace_recovery_consistency.rs"]
 mod web_workspace_recovery_consistency;
+#[path = "it_web/web_workspace_takeover_api.rs"]
+mod web_workspace_takeover_api;
+
+/// Fixture 初始状态播种：受控写 API 既不允许改 attempt 身份（id/issue），也不允许
+/// 直接写 status；fixture 沿 store 路径直接落盘初始 record（等价于 lib 测试的
+/// write_coding_attempt_for_test，仅用于集成测试初始状态，不代表生产写路径）。
+pub(crate) fn seed_coding_attempt_record(
+    store: &cadence_aria::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &cadence_aria::product::coding_models::CodingExecutionAttempt,
+) {
+    cadence_aria::product::json_store::write_json(
+        &store
+            .paths()
+            .issue_root(&attempt.project_id, &attempt.issue_id)
+            .join("coding-attempts")
+            .join(format!("{}.json", attempt.id)),
+        attempt,
+    )
+    .expect("seed coding attempt record fixture");
+}
+
+/// Fixture 初始状态播种：将 attempt 置为 Running 可执行态。先经 store 读取 record，
+/// 置 status=Running 并写入 admission 会话标记，再经 `seed_coding_attempt_record`
+/// 落盘——模拟「已经 admission CAS 进入」的合法可执行状态（状态机已封死直达
+/// Running 通道；播种不经 `update_attempt_status`，仅用于集成测试初始状态，
+/// 不代表生产写路径）。
+pub(crate) fn seed_coding_attempt_running(
+    store: &cadence_aria::product::coding_attempt_store::CodingAttemptStore,
+    project_id: &str,
+    issue_id: &str,
+    attempt_id: &str,
+) -> cadence_aria::product::coding_models::CodingExecutionAttempt {
+    let mut attempt = store
+        .get_attempt(project_id, issue_id, attempt_id)
+        .expect("load coding attempt for Running seeding");
+    attempt.status = cadence_aria::product::coding_models::CodingAttemptStatus::Running;
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
+    seed_coding_attempt_record(store, &attempt);
+    attempt
+}

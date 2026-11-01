@@ -203,6 +203,10 @@ async fn work_item_plan_reviewer_prompt_contains_projection_validation_and_contr
     });
 
     let input = engine.build_work_item_plan_review_input().unwrap();
+    // 批2 Task 11（T20 前中间态）：Reviewer wire 面全开（无 deny）——
+    // 纪律=ReviewerVerify+窗口合同，真窗归 T20，不回退旧 deny fallback。
+    assert_eq!(input.role, AdapterRole::Reviewer);
+    assert!(input.tool_policy.is_none());
 
     assert!(input.prompt.contains("## Plan Review Context"));
     assert!(input.prompt.contains("Story / Design Traceability"));
@@ -562,17 +566,15 @@ fn workspace_artifact_version_binding_recovers_for_story_design_and_work_item() 
         let (tmp, checkpoint_store) = setup();
         let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
         let session_record = lifecycle
-            .create_workspace_session(CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: entity_id.to_string(),
-                workspace_type: workspace_type.clone(),
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 1,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            })
+            .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: entity_id.to_string(),
+            workspace_type: workspace_type.clone(),
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+
+            review_rounds: 1,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .unwrap();
         let session_id = session_record.id.clone();
         let source_node_id = format!("node_{workspace_type:?}").to_lowercase();

@@ -56,8 +56,14 @@ impl StreamingProviderAdapter for CapturingProjectionProvider {
                 .output
                 .split_once('\n')
                 .expect("sentinel payload requires receipt and JSON payload");
+            let mut payload: serde_json::Value =
+                serde_json::from_str(payload).expect("sentinel payload must be JSON");
+            payload
+                .as_object_mut()
+                .expect("sentinel payload must be an object")
+                .insert("nonce".to_string(), serde_json::json!(nonce));
             format!(
-                "{receipt}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{payload}</ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">"
+                "{receipt}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">{payload}</ARIA_STRUCTURED_OUTPUT>"
             )
         } else {
             self.output.clone()
@@ -74,6 +80,7 @@ impl StreamingProviderAdapter for CapturingProjectionProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -104,21 +111,18 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let mut attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     attempt.head_commit = Some(head.clone());
     attempt.stage = CodingExecutionStage::Coding;
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let coder = CapturingProjectionProvider::new(current_plan_defect_output());
@@ -149,7 +153,28 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
             },
         )
         .unwrap();
-    assert_eq!(coder.input().prompt, expected_coder.text);
+    // S6（DesignPushLocal2 Q6/Q4②，审查加强）：最终 prompt 是绑定渲染
+    // envelope 与 HostCoding CHECK 自跑合同（批2 T15 审查修复轮1 F3 同步
+    // 本精确断言）及 platform_directives 段的精确拼接（前缀零改写、
+    // 中段零插入）；执行上下文哈希仍等于渲染 content_hash（追加不动冻结
+    // 哈希面）。
+    // 写入范围规范段（WI 越界根修 F1）：group 主路径的投影渲染不带 legacy
+    // markdown 的范围段，最终 prompt 在 render→bind 之后追加一份与 legacy
+    // 逐字同源的规范段（数据取 coder projection 的 write_policy）。
+    let expected_write_scope = crate::product::coding_work_item_context::write_scope_section_text(
+        &bundle.coder_projection.write_policy.exclusive_scopes,
+        &bundle.coder_projection.write_policy.forbidden_scopes,
+    );
+    assert_eq!(
+        coder.input().prompt,
+        format!(
+            "{}{}{}{}",
+            expected_coder.text,
+            expected_write_scope,
+            host_coding_check_contract(),
+            platform_directives_section()
+        )
+    );
     assert_eq!(
         run.coder_provider_renderer_version,
         expected_coder.renderer_version
@@ -231,10 +256,11 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
         "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
         contract.nonce
     )));
-    assert!(input.prompt.contains(&format!(
-        "</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-        contract.nonce
-    )));
+    assert!(
+        input
+            .prompt
+            .contains(&"</ARIA_STRUCTURED_OUTPUT>".to_string())
+    );
     assert!(input.prompt.ends_with("最终结论的 JSON 必须是合法对象。\n"));
     assert!(input.prompt.starts_with(&expected_reviewer.text));
     assert_eq!(
@@ -273,17 +299,14 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     let attempt = store
         .update_attempt_stage(
@@ -319,6 +342,9 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
                 created_at: "2026-07-19T00:00:00Z".to_string(),
                 updated_at: "2026-07-19T00:00:00Z".to_string(),
                 push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
+                revoked: false,
             },
         )
         .unwrap();
@@ -528,7 +554,7 @@ pub(super) fn current_plan_defect_finding() -> serde_json::Value {
     })
 }
 
-fn current_plan_defect_output() -> String {
+pub(super) fn current_plan_defect_output() -> String {
     serde_json::json!({
         "plan_defect_findings": [current_plan_defect_finding()]
     })
@@ -567,7 +593,9 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, true);
@@ -627,11 +655,14 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .unwrap();
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则会在
+    // ensure_provider_run_allowed 处先被拒，无法到达 handoff 校验。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::Coding;
     attempt.current_work_item_id = Some(second.logical_work_item_id.clone());
     attempt.active_unit_id = Some(second.id.clone());
     attempt.head_commit = Some(head);
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let provider = CapturingProjectionProvider::new("must not run");

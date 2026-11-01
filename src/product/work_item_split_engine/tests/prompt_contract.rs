@@ -1,3 +1,6 @@
+const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
+    "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。";
+
 #[test]
 fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
@@ -11,12 +14,11 @@ fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
     for required in [
-        "当前仅处于 human-confirmation 之前的候选阶段",
-        "writing-plans 的拆分、TDD、验证与交接质量纪律",
         "不得创建 cadence/plans/ 或任何 workspace 文件",
         "不得提前执行 writing-plans 的落盘步骤",
         "仅在最后一个 nonce sentinel block 返回唯一 Canonical Contract Candidate JSON",
@@ -25,10 +27,138 @@ fn single_item_prompt_scopes_writing_plans_to_pre_confirmation_candidate() {
     ] {
         assert!(
             invocation.prompt.contains(required),
-            "draft prompt must scope writing-plans persistence to a later phase; missing {required}: {}",
+            "draft prompt must retain the C-layer output/writeback boundary; missing {required}: {}",
             invocation.prompt
         );
     }
+    assert!(
+        !invocation
+            .prompt
+            .contains("writing-plans 的拆分、TDD、验证与交接质量纪律"),
+        "draft prompt must not teach the B-layer planning process: {}",
+        invocation.prompt
+    );
+}
+
+#[test]
+fn single_item_prompt_behavior_layer_removed_but_output_boundaries_retained() {
+    let mut outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    outline.work_item_outlines[0].target_repository_id = Some(
+        crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::from_u128(1)),
+    );
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("draft invocation");
+
+    for removed in [
+        "必调 Skill：using-superpowers → writing-plans。",
+        "[superpowers_contract]",
+        "必须遵守 using-superpowers 的先读规则与 writing-plans 的计划结构要求。",
+        "生成的是计划和任务拆分，不执行代码修改。",
+        "每个 outline/draft 必须给出后续 coding agent 可执行的目标、范围、非目标、TDD 顺序、结构化验证方案、依赖输入、交接输出和风险；其中 draft 只有存在目标仓库可信证据时才可给出 command，证据不足必须进入 manual/repair/blocker，不得臆造命令。",
+        "每个 outline/draft 的 TDD 与验证闭环必须在当前项的 exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行；不得把后续 Work Item 才会提供的注册、接线、生成或部署作为当前项验证的前提。无法根据目标仓库事实建立该闭环时，必须调整拆分或进入既有 repair/blocker 路由。",
+        "当前仅处于 human-confirmation 之前的候选阶段：必须读取并遵守 writing-plans 的拆分、TDD、验证与交接质量纪律；只将这些纪律体现在本候选中。",
+    ] {
+        assert!(
+            !invocation.prompt.contains(removed),
+            "B-layer text must be absent: {removed}: {}",
+            invocation.prompt
+        );
+    }
+    assert!(!invocation.prompt.contains("[superpowers_contract]"));
+
+    for retained in [
+        "不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段",
+        "不得提前执行 writing-plans 的落盘步骤",
+        "当前 Draft 的 target_repository_id 必须逐字保留 [current_work_item_outline] 的 target_repository_id",
+        "source_story_spec_ids/source_design_spec_ids",
+        "00000000-0000-0000-0000-000000000001",
+        "[openspec_contract]",
+        "[allowed_outputs]",
+        "[forbidden_outputs]",
+        "exclusive_scopes",
+        "verification_checks",
+        "handoff_contract",
+        "候选，不能写入 canonical artifact",
+    ] {
+        assert!(
+            invocation.prompt.contains(retained),
+            "C-layer contract text must remain: {retained}: {}",
+            invocation.prompt
+        );
+    }
+    assert_eq!(
+        invocation
+            .prompt
+            .matches("不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段")
+            .count(),
+        1
+    );
+    assert_eq!(
+        invocation
+            .prompt
+            .matches("不得提前执行 writing-plans 的落盘步骤")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn single_item_prompt_merge_gate_keeps_c_layer_and_excludes_b_layer_schema() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "[openspec_contract]",
+        "[canonical_field_contract]",
+        "[allowed_outputs]",
+        "[forbidden_outputs]",
+        "不得输出 writing-plans 的 Markdown Plan 或新增 JSON 字段",
+        "候选，不能写入 canonical artifact",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "prompt merge gate must retain C-layer contract: {required}"
+        );
+    }
+    for forbidden in [
+        "writing-plans 的拆分、TDD、验证与交接质量纪律",
+        "[superpowers_contract]",
+        "[output_schema]",
+        "[artifact_schema_contract]",
+    ] {
+        assert!(
+            !invocation.prompt.contains(forbidden),
+            "prompt merge gate must exclude B-layer or duplicated schema: {forbidden}"
+        );
+    }
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES
+            && invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+        "prompt must remain within quality and hard byte limits: {} bytes",
+        invocation.prompt.len()
+    );
 }
 
 #[test]
@@ -44,6 +174,7 @@ fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline(
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -59,16 +190,12 @@ fn single_item_prompt_uses_compact_contract_without_duplicate_schema_or_outline(
         invocation.prompt
     );
     assert!(
-        invocation
-            .prompt
-            .contains("必须且只能含所列字段"),
+        invocation.prompt.contains("必须且只能含所列字段"),
         "draft prompt must retain the canonical contract field whitelist in the shorthand field contract: {}",
         invocation.prompt
     );
     assert!(
-        invocation
-            .prompt
-            .contains("verification_plan: obj{checks:"),
+        invocation.prompt.contains("verification_plan: obj{checks:"),
         "draft prompt must retain the verification-plan field contract in the shorthand field contract: {}",
         invocation.prompt
     );
@@ -108,6 +235,7 @@ fn single_item_prompt_accepts_maximum_legal_trusted_command_catalog_within_budge
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("maximum legal catalog must remain invocable");
 
@@ -143,6 +271,7 @@ fn single_item_prompt_rejects_short_catalog_that_exceeds_semantic_limit_before_p
         &[],
         None,
         "nonce",
+        &RoutingReferenceContext::Legacy,
     );
     assert!(
         prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
@@ -156,13 +285,11 @@ fn single_item_prompt_rejects_short_catalog_that_exceeds_semantic_limit_before_p
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect_err("short catalog exceeding maxItems must fail before provider invocation");
 
-    assert_eq!(
-        error.code,
-        "trusted_verification_command_catalog_too_large"
-    );
+    assert_eq!(error.code, "trusted_verification_command_catalog_too_large");
 }
 
 #[test]
@@ -188,13 +315,11 @@ fn single_item_prompt_rejects_oversized_trusted_command_catalog_before_provider_
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect_err("oversized trusted catalog must fail before provider invocation");
 
-    assert_eq!(
-        error.code,
-        "trusted_verification_command_catalog_too_large"
-    );
+    assert_eq!(error.code, "trusted_verification_command_catalog_too_large");
     assert_eq!(
         error.message,
         "outline outline_backend trusted verification command catalog exceeds the maximum of 3 entries"
@@ -214,6 +339,7 @@ fn single_item_prompt_projects_planning_discipline_into_canonical_fields() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -245,6 +371,7 @@ fn single_item_prompt_requires_observable_acceptance_criteria_and_forbids_proces
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -274,6 +401,7 @@ fn single_item_prompt_requires_registration_projection_and_self_check() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -312,6 +440,7 @@ fn single_item_prompt_routes_manual_items_to_acceptance_criteria() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -333,9 +462,7 @@ fn single_item_prompt_routes_manual_items_to_acceptance_criteria() {
         "draft prompt must not force every check to be optional when the catalog is empty"
     );
     assert!(
-        !invocation
-            .prompt
-            .contains("人工核对必须 required=true"),
+        !invocation.prompt.contains("人工核对必须 required=true"),
         "draft prompt must not make manual checks a Coder delivery precondition"
     );
 }
@@ -357,6 +484,7 @@ fn empty_trusted_command_catalog_placeholder_allows_required_manual_checks() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -367,10 +495,57 @@ fn empty_trusted_command_catalog_placeholder_allows_required_manual_checks() {
         "empty-catalog placeholder must state that manual checks can remain required"
     );
     assert!(
-        invocation.prompt.contains(
-            "Use an operational_gate blocker only when verification cannot be grounded even by manual checks."
-        ),
-        "empty-catalog placeholder must narrow the operational_gate trigger"
+        invocation
+            .prompt
+            .contains("the draft MUST include a route=operational_gate blocker"),
+        "empty-catalog placeholder must require an operational_gate blocker"
+    );
+    assert!(
+        invocation
+            .prompt
+            .contains("manual check (command=null) cannot substitute for that blocker"),
+        "empty-catalog placeholder must forbid substituting a manual check for the operational_gate blocker"
+    );
+}
+
+/// Draft Prompt 正文必须与现行校验器硬规则逐字对齐：
+/// - 可信目录为空时 draft 必须含 route=operational_gate 的 blocker（manual check 不能替代）。
+/// - plan_repair_current / plan_repair_upstream / subgraph_replan 路由 blocker 的
+///   target_contract_refs 必须非空且每个 ref 逐字等于已登记 input/output contract_id。
+///
+/// 旧冲突句「不得因缺人工环境输出 operational_gate blocker」必须消失。
+#[test]
+fn single_item_prompt_aligns_draft_hard_rules_with_validators() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_backend",
+        WorkItemGenerationMode::Serial,
+        &[],
+        None,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("draft invocation");
+
+    for required in [
+        "不得把可由人工确认的事项升级为 operational_gate",
+        "可信目录为空时，必须输出 route=operational_gate blocker；manual check 不能替代该 blocker",
+        "plan_repair_current / plan_repair_upstream / subgraph_replan 路由的 blocker，target_contract_refs 必须非空，且每个 ref 逐字等于已登记 input/output contract_id",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "draft prompt must state validator hard rules; missing {required}"
+        );
+    }
+    assert!(
+        !invocation
+            .prompt
+            .contains("不得因缺人工环境输出 operational_gate blocker"),
+        "draft prompt must not keep the contradictory clause that forbids operational_gate when manual environment is missing"
     );
 }
 
@@ -387,13 +562,14 @@ fn single_item_prompt_requires_reviewer_checks_to_equal_criteria() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
     assert!(
-        invocation.prompt.contains(
-            "reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致"
-        ),
+        invocation
+            .prompt
+            .contains("reviewer_check_refs 必须与全部且仅 acceptance criterion ID 集合完全一致"),
         "draft prompt must require reviewer checks to contain only acceptance criterion IDs"
     );
 }
@@ -411,6 +587,7 @@ fn single_item_prompt_includes_closed_typed_canonical_field_contract() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -443,6 +620,7 @@ fn work_item_plan_prompts_keep_json_contract_without_markdown_schema() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -480,6 +658,7 @@ fn single_item_prompt_relaxes_handoff_provided_contract_refs_for_terminal_items(
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -496,9 +675,9 @@ fn single_item_prompt_relaxes_handoff_provided_contract_refs_for_terminal_items(
         );
     }
     assert!(
-        !invocation
-            .prompt
-            .contains("required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复"),
+        !invocation.prompt.contains(
+            "required_fields、provided_contract_refs、reviewer_check_refs 均非空且不重复"
+        ),
         "draft prompt must not require non-empty provided_contract_refs: {}",
         invocation.prompt
     );
@@ -527,6 +706,7 @@ fn draft_prompt_requires_input_contract_ids_to_reference_upstream_output_contrac
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -534,6 +714,7 @@ fn draft_prompt_requires_input_contract_ids_to_reference_upstream_output_contrac
         "input_contracts 的 contract_id 与 required_capabilities 元素都是对上游的引用而非新命名",
         "不得改写前缀（如 oc_ 换成 ic_）、意译或自行描述",
         "provider_logical_work_item_id 必须是真正声明该 contract 的上游 logical_work_item_id",
+        "provider_logical_work_item_id 必须逐字取自本计划中被依赖 item 的 logical_work_item_id（如 WI-001）；不得使用 story_spec/design_spec 或其他 id。",
         "输出前把每个 input_contracts 的 contract_id 与 required_capabilities 元素在 [直接依赖的可消费交接合同] 中做字面量查找",
     ] {
         assert!(
@@ -559,6 +740,7 @@ fn single_item_prompt_spells_out_required_evidence_as_array() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -587,6 +769,7 @@ fn single_item_prompt_names_both_verification_check_owners() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -601,4 +784,883 @@ fn single_item_prompt_names_both_verification_check_owners() {
             "draft prompt must name both verification check owners; missing {required}"
         );
     }
+}
+
+#[test]
+fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_list_is_empty() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &[],
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
+                routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
+            },
+        )
+        .expect("markdown author prompt");
+
+    for required in [
+        "[design_requirements] （无；不得编造）",
+        "[cross_reference_discipline]",
+        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。",
+        "违反会被编译器最终校验拒绝：lowering_error/trusted_commands「同一 Work Item 不得重复引用 trusted command。」——整份计划编译失败，需人工修复后重新编译。",
+        "反例：同一 item 的 CHECK-001 与 CHECK-002 都写 `- command: npm test` → lowering_error 拒绝。",
+        "正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。",
+        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
+        "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "markdown prompt must retain cross-reference discipline with an empty design list; missing {required}: {prompt}"
+        );
+    }
+}
+
+#[test]
+fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let design_requirement_ids = vec!["REQ-002".to_string(), "NFR-001".to_string()];
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &design_requirement_ids,
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
+                routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
+            },
+        )
+        .expect("markdown author prompt");
+
+    assert!(prompt.contains(
+        "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
+    ));
+    assert!(
+        prompt.contains("Verification.command 直接声明，将按声明执行"),
+        "完整 author 必须说明 Verification.command 是直接声明的执行来源"
+    );
+    assert!(!prompt.contains("受信命令目录"));
+    assert!(!prompt.contains("outline_commands"));
+
+    for section in crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS {
+        let heading = format!("### {section}");
+        assert!(
+            prompt.contains(&heading),
+            "markdown prompt must inline every structured section; missing {heading}"
+        );
+    }
+    for required in [
+        crate::product::work_item_plan_compiler::grammar::EARS_STATEMENT_TEMPLATE,
+        "所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 14 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。",
+        "未知结构化 key 必须拒绝（fail_closed）",
+        "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
+        "；intent=create、existing（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）",
+        "Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo；intent_target_kind=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。两分支 key 不顶替。intent_target_repo 取值来源按会话类型唯一、不得混填：单仓会话（本 prompt 无成员仓清单）逐字取 [issue] 头 repo= 的 repository id；LC 多仓会话（有成员仓清单）逐字取该清单的物理成员仓 ID。",
+        "intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）",
+        "[design_requirements] REQ-002、NFR-001",
+        "[cross_reference_discipline]",
+        "done_when_refs 仅引用先定义 criterion_id",
+        "target_contract_refs 仅逐字引用已登记 input/output contract_id",
+        "requirement_refs 仅引用清单；清单外 REQ-* 拒绝",
+        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "同 contract_id：provider output_capabilities 覆盖 WI input_contracts required_capabilities。",
+        "require_all=全部覆盖（缺一项→required_capability_missing）；require_any=至少一项相交（交集空→required_capability_missing）。",
+        "端点/动作如 `GET /api/levels` 须显式声明；字段/记录不隐含端点。",
+        "反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。",
+        "正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。",
+        "canonical fail-closed：required_capability_missing 拒绝 plan。",
+        "Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。",
+        "Handoff Schema 段只允许这三个 key；其他 key（如 requested_fields）会被编译器拒绝（unknown_structured_key）。",
+        "Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空；验证/集成类 Work Item 同样声明其产出的证据类契约。",
+        "provided_contract_refs 列出本 WI 交接给下游的契约引用：只列会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的引用；没有要交接的引用时，该字段的值写 []——[] 是 provided_contract_refs 的合法取值，不是省略字段，也不表示其他 section 可以为空。",
+        "正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → 合法。",
+        "反例：WI-002 提供 CT-005 但无下游引用它 → 从 provided_contract_refs 移除 CT-005（该字段值可为 []）或补齐精确下游 Inputs；不得以省略字段、写 blocker、改 ID 或自然语言掩盖。",
+        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
+        "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
+        "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
+        "明确允许新增和维护 tests/integration/**",
+        "GET / 只验证三个容器与 level-select.js 加载",
+        "通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用",
+        "WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格",
+        "`」` 收尾时同样必须",
+        "`WHEN 点击「重开」 THE SYSTEM SHALL 清空` 合法",
+        "`WHEN 点击「重开」THE SYSTEM SHALL 清空` 非法",
+        "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
+        "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
+        "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
+        "Inputs 四行且 contract_id 首行",
+        "provider_logical_work_item_id、required_capabilities、compatibility_policy",
+        "require_all|require_any",
+        "四行缺一不可",
+        "示例：若 WI-002 依赖 WI-001 的输出，则 WI-002 的 Inputs 写：\n- contract_id: <逐字复制 WI-001 Outputs 的 contract_id>\n- provider_logical_work_item_id: WI-001\n- required_capabilities: <该契约的能力>\n- compatibility_policy: require_all\n无依赖时 Inputs 留空 section。",
+        "反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。",
+        "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
+        "必须使用中文",
+        "保持 grammar 指定的英文原样",
+        "字段行分隔符必须是半角 ASCII",
+        "禁止全角冒号",
+        "中文仅出现在值的自由文本中",
+        "任务拆分与验证设计遵循测试先行纪律",
+        "大范围定位优先检索工具",
+    ] {
+        assert!(
+            prompt.contains(required),
+            "markdown prompt must retain grammar/boundary/few-shot evidence; missing {required}"
+        );
+    }
+
+    assert_eq!(
+        prompt
+            .matches("WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录")
+            .count(),
+        1,
+        "完整 author 的 CJK 反例只能出现在明确标记为非法的教学中"
+    );
+    assert!(
+        !prompt.contains("unconsumed_required_handoff"),
+        "SC author must not retain the redundant handoff-consumption rule"
+    );
+    assert!(
+        !prompt.contains("按需查阅其中适用章节即可"),
+        "SC author must replace the legacy pointer-style project-rules text"
+    );
+
+    let dependency_key = crate::product::work_item_plan_compiler::grammar::DEPENDENCIES_KEY;
+    let item_id_prefix = crate::product::work_item_plan_compiler::grammar::ITEM_ID_PREFIX;
+    for example in [
+        format!("`- {dependency_key}: []`"),
+        format!("`- {dependency_key}: {item_id_prefix}001`"),
+        format!(
+            "`- {dependency_key}: {item_id_prefix}001`\n`- {dependency_key}: {item_id_prefix}002`"
+        ),
+    ] {
+        assert!(
+            prompt.contains(&example),
+            "完整 author 必须教授合法 Dependencies 形态：{example}"
+        );
+    }
+    assert!(
+        prompt.contains("禁止括号列表、空格或逗号分隔多值"),
+        "完整 author 必须禁止 parser 不接受的 Dependencies 多值写法"
+    );
+
+    let golden: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
+    )))
+    .expect("golden findings JSON");
+    let expected_few_shot_ids =
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_FEW_SHOT_IDS
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+    let selected_few_shot_ids = golden
+        .as_array()
+        .expect("golden findings array")
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("id")?.as_str()?;
+            expected_few_shot_ids.contains(id).then_some((id, entry))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected_few_shot_ids
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_few_shot_ids,
+        "markdown few-shot selection must be keyed by the exported raw-provider ID set, not fixture order"
+    );
+    for (id, entry) in selected_few_shot_ids {
+        let finding = entry.get("finding").expect("finding payload");
+        for field in ["message", "evidence", "required_action"] {
+            let value = finding
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .expect("provider raw finding field");
+            assert!(
+                prompt.contains(value),
+                "markdown prompt must inline provider raw few-shot {id} field {field}: {value}"
+            );
+        }
+    }
+    for forbidden in [
+        "请读取 aria 仓 fixture",
+        "<ARIA_STRUCTURED_OUTPUT",
+        "canonical_field_contract",
+        "class_hint",
+        "annotated_variant",
+        "human_annotation",
+        "annotated_fields",
+        "rep2-f1-annotated",
+        "rep3-f1-annotated",
+        "rep4-f1-annotated",
+    ] {
+        assert!(
+            !prompt.contains(forbidden),
+            "markdown author prompt must not retain private JSON/sentinel/classifier instruction {forbidden}: {prompt}"
+        );
+    }
+    let (_, minimum_source) = prompt
+        .split_once("[minimum_legal_source] 仅示语法形状；按当前上下文替换，勿照抄。\n")
+        .expect("markdown prompt must inline a minimum source");
+    let (minimum_source, _) = minimum_source
+        .split_once("[real_finding_few_shot]")
+        .expect("minimum source must precede few-shot findings");
+    assert_eq!(
+        crate::product::work_item_plan_compiler::parse_work_item_plan(minimum_source)
+            .expect("minimum prompt source must satisfy the compiler grammar")
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        23_500
+    );
+    assert!(
+        prompt.len()
+            < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        "markdown prompt must remain below its dedicated quality budget: {} bytes",
+        prompt.len()
+    );
+    eprintln!(
+        "SC author prompt bytes={} margin={}",
+        prompt.len(),
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
+            - prompt.len()
+    );
+}
+
+#[test]
+fn p2_author_handoff_consumption_prompt_teaches_exact_pair_and_counterexample() {
+    work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings();
+}
+
+#[test]
+fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &[],
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
+                routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
+            },
+        )
+        .expect("markdown author prompt");
+
+    assert!(prompt.contains("Outputs 与 Handoff Schema 相互独立"));
+    assert!(prompt.contains(
+        "每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空"
+    ));
+    for teaching in [
+        "能力必须原子化",
+        "每个 `- capabilities:` 与 `- required_capabilities:` 字段一行只写一个精确能力字符串",
+        "禁止用「A + B」、逗号、斜杠或自然语言把多个能力合并为一个字符串",
+        "`require_all` 按字符串逐字精确匹配",
+        "假性 `required_capability_missing`",
+    ] {
+        assert!(
+            prompt.contains(teaching),
+            "missing capability teaching: {teaching}"
+        );
+    }
+    assert!(prompt.contains("该字段的值写 []"));
+    assert!(prompt.contains("不表示其他 section 可以为空"));
+    assert!(!prompt.contains("若本 WI 没有任何下游 consumer edge（链路末端"));
+    assert!(!prompt.contains("provided_contract_refs 中每项必须被至少一个下游"));
+}
+
+#[test]
+fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+                story_context: "story_spec_0001: level selection",
+                design_context: "design_spec_0001: levels API",
+                design_requirement_ids: &[],
+                repository_structure: "src/product/levels; web/src/levels; tests/integration",
+                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
+                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
+                routing_context: &RoutingReferenceContext::Legacy,
+                member_targets: None,
+                change_order: &[],
+            },
+        )
+        .expect("markdown author prompt");
+
+    let few_shot_pos = prompt
+        .find("[real_finding_few_shot]")
+        .expect("few-shot block marker");
+    let clamp_pos = prompt
+        .find("[format_clamp]")
+        .expect("tail format clamp must appear after few-shot and before [output]");
+    let output_pos = prompt.find("[output]").expect("output directive marker");
+    assert!(
+        few_shot_pos < clamp_pos,
+        "尾部钳制块必须位于 few-shot 之后，补上 lost-in-the-middle 的尾部盲区"
+    );
+    assert!(
+        clamp_pos < output_pos,
+        "尾部钳制块必须是 [output] 之前的最后一段指令"
+    );
+
+    let clamp_block = &prompt[clamp_pos..output_pos];
+    assert!(
+        clamp_block.len() <= 360,
+        "尾部钳制块必须 ≤360 字节（F2-C 反前导语行 ~109B 并入后 250→360），实测 {}: {clamp_block}",
+        clamp_block.len()
+    );
+    for required in [
+        "[markdown_grammar]",
+        "[minimum_legal_source]",
+        "# Work Item Plan",
+        "###",
+    ] {
+        assert!(
+            clamp_block.contains(required),
+            "尾部钳制必须重申英文标题逐字来源 {required}: {clamp_block}"
+        );
+    }
+    assert!(clamp_block.contains("自由文本"));
+    assert!(clamp_block.contains("禁止翻译"));
+
+    let heading_pos = prompt
+        .find("标题正反例")
+        .expect("heading counterexample few-shot must exist in the few-shot region");
+    assert!(
+        few_shot_pos < heading_pos && heading_pos < clamp_pos,
+        "标题正反例必须位于 real_finding_few_shot 区域内"
+    );
+    let heading_example_end = heading_pos
+        + prompt[heading_pos..]
+            .find('\n')
+            .expect("heading few-shot line terminator");
+    let heading_example = &prompt[heading_pos..heading_example_end];
+    assert!(
+        heading_example.len() <= 200,
+        "标题正反例必须 ≤200 字节，实测 {}: {heading_example}",
+        heading_example.len()
+    );
+    for required in [
+        "❌ `# 工作项计划`",
+        "`### 身份`",
+        "✅ `# Work Item Plan`",
+        "`### Identity`",
+        "内容中文",
+        "标题英文逐字",
+    ] {
+        assert!(
+            heading_example.contains(required),
+            "标题正反例必须包含 {required}: {heading_example}"
+        );
+    }
+
+    assert_eq!(
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        23_500,
+        "第 14 次提额：Plan Intent 分支必填教学注入（kimi-10 plan fresh 现场）后预算上调至整百级 23,500"
+    );
+    assert!(
+        prompt.len()
+            < crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES,
+        "fixture prompt 必须低于上调后质量预算，实测 {} bytes",
+        prompt.len()
+    );
+    eprintln!(
+        "P1-A SC author prompt bytes={} margin={}",
+        prompt.len(),
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES
+            - prompt.len()
+    );
+}
+
+use crate::product::models::{LcRecoveryBusinessContext, LcRecoveryRunContext, NodeDetail};
+
+// ---------------------------------------------------------------------------
+// B2b2（Task 5.3，tasks.md 5.3 / 设计 §5.3）：LC 显式 fresh 恢复的 outline
+// 反馈族 full fresh invocation 契约——prompt 自足（完整 story/design/
+// repository 材料 + context_resolutions + 上一版 outline 全文 + durable
+// feedback + review 记录）；legacy outline 三 tag 之外 typed 拒；rebuild
+// origin feedback 不丢；空反馈注入默认文案（禁止无反馈出生 full）。
+// ---------------------------------------------------------------------------
+
+struct OutlineFreshContractFixture {
+    #[allow(dead_code)]
+    temp: tempfile::TempDir,
+    lifecycle: LifecycleStore,
+    issue: IssueRecord,
+    repository: RepositoryRecord,
+    request: GenerateWorkItemsRequest,
+    /// 会话标识:断言只读 record,字段保留供排障定位。
+    #[allow(dead_code)]
+    session_id: String,
+}
+
+fn outline_fresh_artifact_version(
+    version: u32,
+    outline: crate::product::models::WorkItemPlanOutline,
+) -> crate::web::workspace_ws_types::ArtifactVersion {
+    crate::web::workspace_ws_types::ArtifactVersion {
+        version,
+        payload: crate::web::workspace_ws_types::ArtifactPayload::WorkItemPlanOutlineCandidate {
+            outline_candidate: Box::new(
+                crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto {
+                    outline,
+                    design_context_gaps: Vec::new(),
+                    validator_findings: Vec::new(),
+                    context_blockers: Vec::new(),
+                    current_generation_round_id: None,
+                    selected_generation_mode: None,
+                },
+            ),
+        },
+        generated_by: ProviderName::ClaudeCode,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current: version == 2,
+        created_at: "2026-10-12T00:00:00Z".to_string(),
+        source_node_id: "timeline_node_001".to_string(),
+    }
+}
+
+fn outline_fresh_review_node_detail(session_id: &str, node_id: &str) -> NodeDetail {
+    NodeDetail {
+        node_id: node_id.to_string(),
+        session_id: session_id.to_string(),
+        node_type: crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun,
+        status: crate::web::workspace_ws_types::TimelineNodeStatus::Completed,
+        agent_role: None,
+        provider: None,
+        prompt: None,
+        messages: Vec::new(),
+        streaming_content: String::new(),
+        execution_events: Vec::new(),
+        permission_events: Vec::new(),
+        verdict: Some(serde_json::json!({
+            "verdict": "revise",
+            "summary": "T15评审意见摘要"
+        })),
+        artifact_ref: None,
+        is_revision: false,
+        revision_feedback: None,
+        base_artifact_ref: None,
+        started_at: "2026-10-12T00:00:00Z".to_string(),
+        ended_at: None,
+    }
+}
+
+fn outline_fresh_business(review_refs: Vec<String>) -> LcRecoveryBusinessContext {
+    LcRecoveryBusinessContext {
+        entity_id: "issue_work_item_plan_0001".to_string(),
+        plan_id: Some("issue_work_item_plan_0001".to_string()),
+        workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+        business_repository_physical_id: None,
+        business_repository_logical_id: None,
+        business_checkout_id: None,
+        business_repository_path: None,
+        source_story_ids: Vec::new(),
+        source_design_ids: Vec::new(),
+        plan_options_ref: None,
+        artifact_refs: Vec::new(),
+        review_refs,
+        author_provider: ProviderName::ClaudeCode,
+        effective_reviewer_provider: Some(ProviderName::Codex),
+        original_node_id: Some("timeline_node_001".to_string()),
+        original_role_run_seq: None,
+    }
+}
+
+fn outline_fresh_contract_fixture() -> OutlineFreshContractFixture {
+    use crate::product::lifecycle_store::{
+        AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput,
+        CreateWorkspaceSessionInput,
+    };
+    use crate::product::models::{
+        DesignContextCapabilities, IssuePhase, IssueStatus, OutlineContextBlockerResolution,
+        OutlineContextIndex,
+    };
+    use crate::product::work_item_plan_store::WorkItemPlanStore;
+    use crate::web::types::GenerateWorkItemsRequest;
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "T15 故事规格".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    lifecycle
+        .append_version(AppendSpecVersionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id.clone(),
+            markdown: "## 架构\nREQ-0001 提供后端接口。".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+    let design = lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "T15 设计规格".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    lifecycle
+        .append_version(AppendSpecVersionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: design.id.clone(),
+            markdown: "## 模块\nREQ-0002 模块拆分。".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "issue_work_item_plan_0001".to_string(),
+            workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .unwrap();
+
+    // 上一版 outline 全文：v1（run_context 钉选版）与 v2（最新版）策略标记互斥。
+    let prior = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let mut pinned = prior.clone();
+    pinned.strategy_summary = "T15上一版大纲策略全文标记".to_string();
+    let mut latest = prior;
+    latest.strategy_summary = "T15更新版大纲策略标记".to_string();
+    lifecycle
+        .save_artifact_versions(
+            &session.id,
+            &[
+                outline_fresh_artifact_version(1, pinned),
+                outline_fresh_artifact_version(2, latest),
+            ],
+        )
+        .unwrap();
+
+    lifecycle
+        .save_node_detail(
+            &session.id,
+            "timeline_node_review_0001",
+            &outline_fresh_review_node_detail(&session.id, "timeline_node_review_0001"),
+        )
+        .unwrap();
+
+    WorkItemPlanStore::new(paths)
+        .save_outline_context_index(&OutlineContextIndex {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "issue_work_item_plan_0001".to_string(),
+            generation_round_id: "outline_stage".to_string(),
+            blocker_resolutions: vec![OutlineContextBlockerResolution {
+                blocker_node_id: "timeline_node_blocker".to_string(),
+                resolution_node_id: "timeline_node_resolution".to_string(),
+                resolution_artifact_ref: "T15上下文补充决议".to_string(),
+                estimated_tokens: 512,
+                created_at: "2026-10-12T00:00:00Z".to_string(),
+                summary: None,
+                merged_count: None,
+            }],
+            design_context_gaps: Vec::new(),
+            design_context_capabilities: DesignContextCapabilities {
+                has_architecture: true,
+                has_module_breakdown: true,
+                has_tech_stack: true,
+                has_test_strategy: true,
+                has_key_paths: true,
+            },
+            updated_at: "2026-10-12T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+    let issue = IssueRecord {
+        id: "issue_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        repo_id: Some("repository_0001".to_string()),
+        base_branch: None,
+        logical_codebase_id: None,
+        title: "T15 计划".to_string(),
+        description: Some("T15 描述".to_string()),
+        change_id: "change_0001".to_string(),
+        phase: IssuePhase::Development,
+        status: IssueStatus::InProgress,
+        active_binding_id: None,
+        created_at: "2026-10-12T00:00:00Z".to_string(),
+        updated_at: "2026-10-12T00:00:00Z".to_string(),
+    };
+    let repo_root = temp.path().join("repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let repository = RepositoryRecord {
+        id: "repository_0001".to_string(),
+        project_id: "project_0001".to_string(),
+        name: "Repo".to_string(),
+        path: repo_root,
+        repo_hash: "sha256:repo".to_string(),
+        runtime_root: temp.path().to_path_buf(),
+        default_policy_preset: "default".to_string(),
+        default_provider_mode: "interactive".to_string(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 1,
+        created_at: "2026-10-12T00:00:00Z".to_string(),
+        updated_at: "2026-10-12T00:00:00Z".to_string(),
+    };
+    let request = GenerateWorkItemsRequest {
+        title: "T15".to_string(),
+        story_spec_ids: vec![story.id],
+        design_spec_ids: vec![design.id],
+        include_integration_tests: Some(false),
+        include_e2e_tests: Some(false),
+        force_frontend_backend_split: Some(false),
+        require_execution_plan_confirm: Some(false),
+        author_provider: None,
+        reviewer_provider: None,
+        review_rounds: None,
+        superpowers_enabled: None,
+        openspec_enabled: None,
+        revision_feedback: None,
+    };
+    OutlineFreshContractFixture {
+        temp,
+        lifecycle,
+        issue,
+        repository,
+        request,
+        session_id: session.id,
+    }
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_prompt_is_self_sufficient() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineRevision {
+        business: outline_fresh_business(vec!["timeline_node_review_0001".to_string()]),
+        normalized_feedback: "T15返修反馈全文标记：补充验收边界".to_string(),
+        outline_ref: Some("artifact_current".to_string()),
+        outline_version: Some(1),
+        outline_hash: None,
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh revision invocation");
+
+    // 完整材料（与出生 full 同源）+ durable 事实全部在 prompt 内。
+    for required in [
+        "[confirmed_story_specs]",
+        "T15 故事规格",
+        "[confirmed_design_specs]",
+        "T15 设计规格",
+        "[repository_structure_summary]",
+        "[context_blocker_resolutions]",
+        "T15上下文补充决议",
+        "[previous_outline]",
+        "T15上一版大纲策略全文标记",
+        "[revision_feedback]",
+        "T15返修反馈全文标记：补充验收边界",
+        "[review_feedback]",
+        "T15评审意见摘要",
+        "不依赖任何历史会话",
+    ] {
+        assert!(
+            invocation.prompt.contains(required),
+            "outline fresh prompt 必须自足携带 {required}，got: {}",
+            invocation.prompt
+        );
+    }
+    // 钉选 v1，不误取最新 v2。
+    assert!(
+        !invocation.prompt.contains("T15更新版大纲策略标记"),
+        "run_context 钉选 outline_version=1 时不得回退最新版"
+    );
+    assert!(!invocation.sentinel_nonce.is_empty());
+    assert_eq!(
+        invocation.worktree_path,
+        fixture.repository.path.to_string_lossy().to_string()
+    );
+    assert_eq!(invocation.author_provider, ProviderName::ClaudeCode);
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_rejects_non_outline_tags() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyDraft {
+        business: outline_fresh_business(Vec::new()),
+        generation_round_id: "round_0001".to_string(),
+        active_outline_id: "outline_backend".to_string(),
+        draft_refs: Vec::new(),
+        pending_feedback: None,
+        outline_ref: None,
+        candidate_ref: None,
+    };
+    let error = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect_err("非 legacy outline tag 必须 typed 拒");
+    assert_eq!(error.code, "lc_resume_recovery_context_unsupported");
+    assert!(
+        error.message.contains("legacy_draft"),
+        "typed 拒文案必须携带 tag 短名，got: {}",
+        error.message
+    );
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_keeps_rebuild_origin_feedback_and_outline() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineRebuild {
+        business: outline_fresh_business(Vec::new()),
+        origin: crate::product::models::LcOutlineRebuildOrigin::OutlineRevision(
+            crate::product::models::LcLegacyOutlineRevisionPayload {
+                normalized_feedback: "T15重建前返修反馈".to_string(),
+                outline_ref: None,
+                outline_version: Some(1),
+                outline_hash: None,
+            },
+        ),
+        previous_snapshot_access_fingerprint: Some("sha256:t15-snap".to_string()),
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh rebuild invocation");
+
+    // rebuild origin=outline_revision：feedback 不丢 + 旧稿全文携带。
+    assert!(invocation.prompt.contains("T15重建前返修反馈"));
+    assert!(invocation.prompt.contains("T15上一版大纲策略全文标记"));
+    assert!(!invocation.prompt.contains("T15更新版大纲策略标记"));
+}
+
+#[test]
+fn anchor_t15_outline_fresh_revision_defaults_empty_feedback() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineRevision {
+        business: outline_fresh_business(Vec::new()),
+        normalized_feedback: String::new(),
+        outline_ref: None,
+        outline_version: None,
+        outline_hash: None,
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh revision invocation");
+
+    assert!(
+        invocation
+            .prompt
+            .contains("用户在 Author Confirm 阶段要求返修当前 Outline"),
+        "durable 反馈为空时必须注入默认返修文案（禁止无反馈出生 full）"
+    );
+    assert!(invocation.prompt.contains("[revision_feedback]"));
+}
+
+#[test]
+fn anchor_t15_outline_fresh_author_tag_carries_prior_outline_without_feedback_section() {
+    let fixture = outline_fresh_contract_fixture();
+    let source_context = LcRecoveryRunContext::LegacyOutlineAuthor {
+        business: outline_fresh_business(Vec::new()),
+        flow: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        original_provider_node_id: None,
+        outline_ref: Some("artifact_current".to_string()),
+    };
+    let invocation = crate::product::work_item_split_engine::WorkItemSplitEngine::build_outline_fresh_revision_invocation(
+        &fixture.request,
+        &fixture.lifecycle,
+        &fixture.issue,
+        &fixture.repository,
+        ProviderName::ClaudeCode,
+        &source_context,
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("fresh author invocation");
+
+    // 已产旧稿 → full 修订携旧稿（无版本钉选取最新版）；author tag 无 durable
+    // 反馈，不注入 [revision_feedback] 小节（不伪造成返修）。
+    assert!(invocation.prompt.contains("[previous_outline]"));
+    assert!(invocation.prompt.contains("T15更新版大纲策略标记"));
+    assert!(!invocation.prompt.contains("[revision_feedback]"));
+    assert!(
+        !invocation
+            .prompt
+            .contains("用户在 Author Confirm 阶段要求返修当前 Outline")
+    );
 }

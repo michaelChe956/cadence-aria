@@ -16,15 +16,18 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             path: repository_path,
             default_policy_preset: None,
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "plan-repair-fixture-repository".to_string(),
         })
         .expect("repository");
     let issue = IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id),
+            logical_codebase_id: None,
             title: "plan repair fixture".to_string(),
             description: None,
             change_id: None,
+            base_branch: None,
         })
         .expect("issue");
     assert_eq!(issue.id, "issue_0001");
@@ -44,7 +47,9 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     let revision_store = WorkItemRevisionStore::new(paths.clone());
@@ -72,6 +77,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         &upstream,
         "work_item_revision_upstream",
         CanonicalWorkItemContract {
+            intent_contract: None,
             output_contracts: vec![PromisedOutputContract {
                 contract_id: "contract_upstream".to_string(),
                 capabilities: vec!["capability_existing".to_string()],
@@ -128,6 +134,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         &current,
         "work_item_revision_current",
         CanonicalWorkItemContract {
+            intent_contract: None,
             input_contracts: vec![RequiredInputContract {
                 contract_id: "contract_upstream".to_string(),
                 provider_logical_work_item_id: upstream.id.clone(),
@@ -208,6 +215,7 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         dependency_graph_revision_id: dependency_graph.id.clone(),
         validation_report_ref: "validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-19T00:00:00Z".to_string(),
     };
     let ordered_logical_work_item_ids = vec![upstream.id.clone(), current.id.clone()];
@@ -343,10 +351,13 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则过不了
+    // ensure_provider_run_allowed 的第二道防线。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::CodeReview;
     attempt.active_unit_id = Some(unit.id.clone());
     attempt.current_work_item_id = Some(current.id.clone());
-    store.save_coding_attempt(&attempt).unwrap();
+    store.write_coding_attempt_for_test(&attempt).unwrap();
     store
         .create_coding_unit_run(
             &attempt,
@@ -393,10 +404,12 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             entity_id: plan.id.clone(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     lifecycle
@@ -474,6 +487,8 @@ pub(super) fn internal_plan_defect_review(
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 
@@ -548,6 +563,7 @@ fn logical_item(id: &str, plan_id: &str) -> LogicalWorkItem {
 
 fn contract(logical_id: &str) -> CanonicalWorkItemContract {
     CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_id.to_string(),
@@ -558,6 +574,7 @@ fn contract(logical_id: &str) -> CanonicalWorkItemContract {
             summary: logical_id.to_string(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts: Vec::new(),
         output_contracts: Vec::new(),
         tasks: Vec::new(),
@@ -641,5 +658,26 @@ pub(super) fn plan_defect_report(finding: ReviewFinding) -> CodeReviewReport {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
+    }
+}
+
+/// T19:plan repair fixture worktree 补 git 身份(review 窗口硬前提)。
+pub(super) fn init_plan_repair_worktree_git(worktree: &std::path::Path) {
+    std::fs::write(worktree.join("t19-seed.txt"), "seed\n").expect("seed file");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t19@aria.invalid"],
+        vec!["config", "user.name", "t19"],
+        vec!["add", "-A"],
+        vec!["commit", "-qm", "t19 base"],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(worktree)
+            .output()
+            .expect("git fixture init");
+        assert!(output.status.success(), "git {args:?} failed: {output:?}");
     }
 }

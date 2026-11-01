@@ -1,0 +1,529 @@
+{
+  "provider": "kimi_code",
+  "repetition": 3,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep3",
+  "startedAt": "2026-09-18T17:05:43.699Z",
+  "finishedAt": "2026-09-18T17:40:43.701Z",
+  "elapsedSec": 2100.001,
+  "issue_id": "issue_0279",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0448",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.655,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.715,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 571.502,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 948.754,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1135.606,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1674.758,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1785.441,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 571.502,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "evidence": "work_item=WI-002 contract=CT-003 capability=message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::错误响应体为 {error:{code",
+          "evidence": "work_item=WI-002 contract=CT-003 capability=错误响应体为 {error:{code",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 错误响应体为 {error:{code required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 错误响应体为 {error:{code",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-001::port 为 0 时分配临时监听端口以支持测试隔离",
+          "evidence": "work_item=WI-003 contract=CT-001 capability=port 为 0 时分配临时监听端口以支持测试隔离",
+          "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability port 为 0 时分配临时监听端口以支持测试隔离 required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- port 为 0 时分配临时监听端口以支持测试隔离",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8 required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-004::静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容",
+          "evidence": "work_item=WI-003 contract=CT-004 capability=静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容",
+          "message": "required_capability_missing: provider WI-001 contract CT-004 lacks capability 静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容 required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-004 的 capabilities 列表追加一行（逐字复制）：- 静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-005::web/level-select.js 以相对路径 /api/levels 调用关卡列表 API",
+          "evidence": "work_item=WI-003 contract=CT-005 capability=web/level-select.js 以相对路径 /api/levels 调用关卡列表 API",
+          "message": "required_capability_missing: provider WI-002 contract CT-005 lacks capability web/level-select.js 以相对路径 /api/levels 调用关卡列表 API required by WI-003",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-005 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径 /api/levels 调用关卡列表 API",
+          "severity": "must_fix"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 948.754,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "evidence": "work_item=WI-002 contract=CT-003 capability=message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "severity": "must_fix"
+        },
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::错误响应体为 {error:{code",
+          "evidence": "work_item=WI-002 contract=CT-003 capability=错误响应体为 {error:{code",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 错误响应体为 {error:{code required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 错误响应体为 {error:{code",
+          "severity": "must_fix"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 1257.861,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-003].capabilities；WI-002.input_contracts[CT-003].required_capabilities",
+          "evidence": "edge: WI-001 -> WI-002；contract_id: CT-003；missing_capabilities: [『message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节』,『错误响应体为 {error:{code』]；WI-001 CT-003 provided_capabilities 仅含『状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8』；compatibility_policy= require_all。",
+          "message": "coverage entry（WI-001 -> WI-002，contract CT-003，require_all）的 missing_capabilities 非空：WI-002 侧要求『错误响应体为 {error:{code,message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节』，而 WI-001 的 CT-003 供给能力仅有错误响应头 Content-Type 一项，机械规则强制按 contract_gap 返回 must_fix；疑似根因是能力文本内裸逗号（{code,message}）被拆分且供给侧未声明该能力。",
+          "required_action": "返修契约文本后重新编译投影：在 WI-001 CT-003 capabilities 中显式补充『错误响应体为 {error:{code,message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节』（或将能力串内裸逗号改为不被拆分的写法，如全角逗号或 {code|message}），并同步修正 WI-002 侧 required_capabilities，使该 coverage entry 的 missing_capabilities 为空；AC-003/TASK-004 已声明该错误体形状，可直接据以补写。",
+          "severity": "must_fix"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "",
+          "message": "机械校验摘要含 1 条 warning：e2e tests are skipped（error_count=0）；当前 CHECK-001~003 均为 node --test 分层验证且 manual_instruction 均为 null，可按报告建议在验收前补充人工联调验证指引，属完备度建议，不影响本轮发布判定。",
+          "required_action": "",
+          "severity": "suggestion"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 1537.374,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "evidence": "work_item=WI-002 contract=CT-003 capability=错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节 required by WI-002",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+          "severity": "must_fix"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 1674.757,
+      "findings": [
+        {
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8 required by WI-003",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+          "severity": "must_fix"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "evidence": "work_item=WI-002 contract=CT-003 capability=message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::错误响应体为 {error:{code",
+      "evidence": "work_item=WI-002 contract=CT-003 capability=错误响应体为 {error:{code",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 错误响应体为 {error:{code required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 错误响应体为 {error:{code",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-001::port 为 0 时分配临时监听端口以支持测试隔离",
+      "evidence": "work_item=WI-003 contract=CT-001 capability=port 为 0 时分配临时监听端口以支持测试隔离",
+      "message": "required_capability_missing: provider WI-001 contract CT-001 lacks capability port 为 0 时分配临时监听端口以支持测试隔离 required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-001 的 capabilities 列表追加一行（逐字复制）：- port 为 0 时分配临时监听端口以支持测试隔离",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8 required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-004::静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容",
+      "evidence": "work_item=WI-003 contract=CT-004 capability=静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容",
+      "message": "required_capability_missing: provider WI-001 contract CT-004 lacks capability 静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容 required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-004 的 capabilities 列表追加一行（逐字复制）：- 静态资源以 staticRoot 为站点根映射且 GET /level-select.js 返回脚本内容",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-005::web/level-select.js 以相对路径 /api/levels 调用关卡列表 API",
+      "evidence": "work_item=WI-003 contract=CT-005 capability=web/level-select.js 以相对路径 /api/levels 调用关卡列表 API",
+      "message": "required_capability_missing: provider WI-002 contract CT-005 lacks capability web/level-select.js 以相对路径 /api/levels 调用关卡列表 API required by WI-003",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-005 的 capabilities 列表追加一行（逐字复制）：- web/level-select.js 以相对路径 /api/levels 调用关卡列表 API",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "evidence": "work_item=WI-002 contract=CT-003 capability=message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::错误响应体为 {error:{code",
+      "evidence": "work_item=WI-002 contract=CT-003 capability=错误响应体为 {error:{code",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 错误响应体为 {error:{code required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 错误响应体为 {error:{code",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-003].capabilities；WI-002.input_contracts[CT-003].required_capabilities",
+      "evidence": "edge: WI-001 -> WI-002；contract_id: CT-003；missing_capabilities: [『message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节』,『错误响应体为 {error:{code』]；WI-001 CT-003 provided_capabilities 仅含『状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8』；compatibility_policy= require_all。",
+      "message": "coverage entry（WI-001 -> WI-002，contract CT-003，require_all）的 missing_capabilities 非空：WI-002 侧要求『错误响应体为 {error:{code,message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节』，而 WI-001 的 CT-003 供给能力仅有错误响应头 Content-Type 一项，机械规则强制按 contract_gap 返回 must_fix；疑似根因是能力文本内裸逗号（{code,message}）被拆分且供给侧未声明该能力。",
+      "required_action": "返修契约文本后重新编译投影：在 WI-001 CT-003 capabilities 中显式补充『错误响应体为 {error:{code,message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节』（或将能力串内裸逗号改为不被拆分的写法，如全角逗号或 {code|message}），并同步修正 WI-002 侧 required_capabilities，使该 coverage entry 的 missing_capabilities 为空；AC-003/TASK-004 已声明该错误体形状，可直接据以补写。",
+      "severity": "must_fix"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "",
+      "message": "机械校验摘要含 1 条 warning：e2e tests are skipped（error_count=0）；当前 CHECK-001~003 均为 node --test 分层验证且 manual_instruction 均为 null，可按报告建议在验收前补充人工联调验证指引，属完备度建议，不影响本轮发布判定。",
+      "required_action": "",
+      "severity": "suggestion"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "evidence": "work_item=WI-002 contract=CT-003 capability=错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节 required by WI-002",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 错误响应体为 {error:{code|message}} 且 message 可读且不含堆栈、绝对路径或内部实现细节",
+      "severity": "must_fix"
+    },
+    {
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8 required by WI-003",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+      "severity": "must_fix"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 39934,
+      "output_tokens": 5308,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "hard_timeout",
+  "error": "硬超时 2100000ms",
+  "completed": false,
+  "session_status": "waiting_for_human",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 3,
+    "manual_repairs_used": 0,
+    "transitions_used": 2,
+    "initial_review_count": 5,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_007": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_009": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_011": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "attempts_used": 3,
+    "findings": [
+      {
+        "category": "contract_gap",
+        "class": "repairable",
+        "contract_field": "CT-003::状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+        "evidence": "work_item=WI-003 contract=CT-003 capability=状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+        "fingerprint": "8e272a7fa977241ec7e0452236c7ad9e19b3a409b6d79f8685d8972896810fa1",
+        "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8 required by WI-003",
+        "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- 状态 500/404/405 的 API 错误响应头 Content-Type 均为 application/json; charset=utf-8",
+        "severity": "must_fix"
+      }
+    ],
+    "manual_repairs_remaining": 3,
+    "repeated_fingerprints": [
+      "8e272a7fa977241ec7e0452236c7ad9e19b3a409b6d79f8685d8972896810fa1"
+    ],
+    "resumable": false,
+    "trigger": "repeated_fingerprint"
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-18T17:21:32.454Z",
+      "elapsedSec": 948.755,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_006",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-79b5eca24f",
+        "feedback_digest": "15fb8244d479f62e1e80efdaf0922ba2c0a85b76f3898c832336c51fc474e120",
+        "feedback_length": 9
+      },
+      "sentAt": "2026-09-18T17:21:32.455Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-18T17:33:38.457Z",
+      "elapsedSec": 1674.757,
+      "stage": "cross_review",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_011",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-a559e4d47a",
+        "feedback_digest": "15fb8244d479f62e1e80efdaf0922ba2c0a85b76f3898c832336c51fc474e120",
+        "feedback_length": 9
+      },
+      "sentAt": "2026-09-18T17:33:38.457Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-79b5eca24f",
+      "feedback_digest": "15fb8244d479f62e1e80efdaf0922ba2c0a85b76f3898c832336c51fc474e120",
+      "feedback_length": 9,
+      "turn_id": "human_gate_turn_b6a065ad-318e-4ab4-85e4-fcb8639c10ad",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_003"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-a559e4d47a",
+      "feedback_digest": "15fb8244d479f62e1e80efdaf0922ba2c0a85b76f3898c832336c51fc474e120",
+      "feedback_length": 9,
+      "turn_id": "human_gate_turn_bb068b95-55e0-41df-979b-a24a8c2fe5c2",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_006"
+    },
+    {
+      "action_index": 2,
+      "command_id": "cmd-human_gate_feedback-2-d3f22f72a0",
+      "feedback_digest": "15fb8244d479f62e1e80efdaf0922ba2c0a85b76f3898c832336c51fc474e120",
+      "feedback_length": 9,
+      "turn_id": null,
+      "remaining_budget": null,
+      "status": "sent",
+      "busy_events": 0
+    }
+  ],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 5,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0448:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0448:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_b6a065ad-318e-4ab4-85e4-fcb8639c10ad:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0448:3",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0448:4",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 2100001,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.06,
+    "1:running": 569.787,
+    "2:cross_review": 377.252,
+    "3:human_confirm": 186.852,
+    "4:cross_review": 539.152,
+    "5:human_confirm": 110.683,
+    "6:cross_review": 314.56
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 1,
+    "stage_errors": 0,
+    "pending_action_index": 2
+  }
+}

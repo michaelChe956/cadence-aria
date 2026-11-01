@@ -23,6 +23,7 @@ fn initial_outline_prompt_spells_out_enabled_split_option_semantics() {
         "",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(
@@ -53,6 +54,7 @@ fn initial_outline_prompt_omits_semantics_when_options_disabled() {
         "",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(
@@ -75,6 +77,7 @@ fn initial_outline_prompt_only_lists_enabled_flags() {
         "",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("force_frontend_backend_split=true：本次拆分必须产出至少一个 kind=backend"));
@@ -95,7 +98,7 @@ fn outline_revision_prompt_spells_out_enabled_split_option_semantics() {
     request.include_integration_tests = Some(true);
     request.include_e2e_tests = Some(true);
 
-    let (prompt, _nonce) = build_outline_revision_prompt(&request, &issue, "修正 kind 分类");
+    let (prompt, _nonce) = build_outline_revision_prompt(&request, &issue, "修正 kind 分类", &RoutingReferenceContext::Legacy);
 
     assert!(
         prompt.contains("[user_option_semantics]"),
@@ -114,7 +117,7 @@ fn outline_revision_prompt_spells_out_enabled_split_option_semantics() {
 fn outline_revision_prompt_omits_semantics_when_options_disabled() {
     let (request, issue, _repository) = split_prompt_fixture();
 
-    let (prompt, _nonce) = build_outline_revision_prompt(&request, &issue, "修正 kind 分类");
+    let (prompt, _nonce) = build_outline_revision_prompt(&request, &issue, "修正 kind 分类", &RoutingReferenceContext::Legacy);
 
     assert!(
         !prompt.contains("[user_option_semantics]"),

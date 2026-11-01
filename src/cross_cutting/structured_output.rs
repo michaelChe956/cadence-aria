@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 
 const START_PREFIX: &str = "<ARIA_STRUCTURED_OUTPUT";
 const END_PREFIX: &str = "</ARIA_STRUCTURED_OUTPUT";
+pub const MAX_JSON_BYTES: usize = 65_536;
+pub const MAX_JSON_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredOutputContract {
@@ -32,8 +35,10 @@ pub struct StructuredOutputError {
 pub enum StructuredOutputErrorCode {
     MissingStartTag,
     MissingEndTag,
-    MissingEndNonce,
     NonceMismatch,
+    MissingJsonNonce,
+    JsonNonceMismatch,
+    InvalidEndTag,
     InvalidJson,
 }
 
@@ -41,6 +46,9 @@ pub enum StructuredOutputErrorCode {
 pub struct StructuredOutputParse {
     pub readable_output: String,
     pub state: StructuredOutputState,
+    /// Set only by the SC reviewer adapter when it deterministically discards
+    /// text preceding the required first-line nonce sentinel.
+    pub preamble_trimmed: bool,
 }
 
 impl StructuredOutputErrorCode {
@@ -48,8 +56,10 @@ impl StructuredOutputErrorCode {
         match self {
             Self::MissingStartTag => "missing_start_tag",
             Self::MissingEndTag => "missing_end_tag",
-            Self::MissingEndNonce => "missing_end_nonce",
             Self::NonceMismatch => "nonce_mismatch",
+            Self::MissingJsonNonce => "missing_json_nonce",
+            Self::JsonNonceMismatch => "json_nonce_mismatch",
+            Self::InvalidEndTag => "invalid_end_tag",
             Self::InvalidJson => "invalid_json",
         }
     }
@@ -59,8 +69,7 @@ pub fn parse_structured_output(
     output: &str,
     contract: &StructuredOutputContract,
 ) -> StructuredOutputParse {
-    let expected_start = format!("{START_PREFIX} nonce=\"{}\">", contract.nonce);
-    let Some(start) = output.rfind(&expected_start) else {
+    let Some(start) = output.rfind(START_PREFIX) else {
         return failed(
             output,
             None,
@@ -75,20 +84,74 @@ pub fn parse_structured_output(
     parse_block_at(output, start, Some(contract.nonce.as_str()))
 }
 
-pub fn parse_last_structured_output_value(
+/// Parses a reviewer response that requires its nonce sentinel on the first
+/// line. When a valid, expected sentinel is preceded by text, the preamble is
+/// deterministically discarded before parsing and the result records that trim.
+/// This intentionally remains opt-in so legacy/story/design parsing is unchanged.
+pub fn parse_structured_output_first_line_nonce(
     output: &str,
-) -> Result<Option<Value>, StructuredOutputError> {
+    contract: &StructuredOutputContract,
+) -> StructuredOutputParse {
+    let Some(start) = output.rfind(START_PREFIX) else {
+        return parse_structured_output(output, contract);
+    };
+    if !output[..start].trim().is_empty() {
+        let mut parsed = parse_block_at(&output[start..], 0, Some(contract.nonce.as_str()));
+        parsed.preamble_trimmed = true;
+        return parsed;
+    }
+    parse_block_at(output, start, Some(contract.nonce.as_str()))
+}
+
+/// Parses the final sentinel under the same protocol used by contract-bound consumers.
+///
+/// This is intended for legacy workspace call sites that discover the nonce from the
+/// sentinel itself. The JSON envelope nonce is still required and removed before the
+/// value is returned.
+pub fn parse_last_structured_output(
+    output: &str,
+) -> Result<Option<(String, Value)>, StructuredOutputError> {
     let Some(start) = output.rfind(START_PREFIX) else {
         return Ok(None);
     };
-    let (nonce, _) = parse_start_tag(output, start, None)?;
-    let parsed = parse_block_at(output, start, nonce.as_deref());
-
+    let parsed = parse_block_at(output, start, None);
     match parsed.state {
-        StructuredOutputState::Parsed(value) => Ok(Some(value)),
+        StructuredOutputState::Parsed(value) => Ok(Some((parsed.readable_output, value))),
         StructuredOutputState::Failed(error) => Err(error),
         StructuredOutputState::NotRequested => Ok(None),
     }
+}
+
+/// 解析 output 中**全部** `<ARIA_STRUCTURED_OUTPUT` 标签块（按出现序）。
+///
+/// 缺陷 #3（2026-10-02 全链 E2E）：真实 AI 常在产物中回显提示词模板（同
+/// nonce、占位值），「只取最后一个标签」在模板位于真值之后时必然失败，且
+/// 失败会被 `extract_structured_json` 的围栏兜底掩蔽成语义失真的错误。逐块
+/// 解析让聚合调用方择「最后一个可用块」，并保留真实标签错误供上报。
+pub fn parse_all_structured_output_blocks(
+    output: &str,
+) -> Vec<Result<(String, Value), StructuredOutputError>> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = output[cursor..].find(START_PREFIX) {
+        let start = cursor + offset;
+        let parsed = parse_block_at(output, start, None);
+        match parsed.state {
+            StructuredOutputState::Parsed(value) => {
+                blocks.push(Ok((parsed.readable_output, value)));
+            }
+            StructuredOutputState::Failed(error) => blocks.push(Err(error)),
+            StructuredOutputState::NotRequested => {}
+        }
+        cursor = start + START_PREFIX.len();
+    }
+    blocks
+}
+
+pub fn parse_last_structured_output_value(
+    output: &str,
+) -> Result<Option<Value>, StructuredOutputError> {
+    parse_last_structured_output(output).map(|parsed| parsed.map(|(_, value)| value))
 }
 
 fn parse_block_at(
@@ -102,34 +165,36 @@ fn parse_block_at(
             return StructuredOutputParse {
                 readable_output: output[..start_index].trim().to_string(),
                 state: StructuredOutputState::Failed(error),
+                preamble_trimmed: false,
             };
         }
     };
-    if start_nonce.as_deref() != expected_nonce {
+    if expected_nonce.is_some_and(|expected| start_nonce != expected) {
         return failed(
             output,
             Some(start_index),
             StructuredOutputErrorCode::NonceMismatch,
             "structured output start nonce mismatch",
             expected_nonce.map(str::to_string),
-            start_nonce,
+            Some(start_nonce),
             None,
         );
     }
 
+    let expected_json_nonce = expected_nonce.unwrap_or(start_nonce.as_str());
     let after_start = &output[json_start..];
-    let Some(end_relative) = after_start.find(END_PREFIX) else {
+    let Some(end_relative) = find_end_tag_outside_json_strings(after_start) else {
         return failed(
             output,
             None,
             StructuredOutputErrorCode::MissingEndTag,
             "missing structured output end tag",
-            expected_nonce.map(str::to_string),
+            Some(expected_json_nonce.to_string()),
             None,
-            parse_json_candidate(after_start),
+            recoverable_value(after_start, expected_json_nonce),
         );
     };
-    let json_text = after_start[..end_relative].trim();
+    let json_text = &after_start[..end_relative];
     let after_end_prefix = &after_start[end_relative + END_PREFIX.len()..];
     let Some(tag_close) = after_end_prefix.find('>') else {
         return failed(
@@ -137,75 +202,60 @@ fn parse_block_at(
             None,
             StructuredOutputErrorCode::MissingEndTag,
             "structured output end tag is not closed",
-            expected_nonce.map(str::to_string),
+            Some(expected_json_nonce.to_string()),
             None,
-            parse_json_candidate(json_text),
+            recoverable_value(json_text, expected_json_nonce),
         );
     };
 
-    let attrs = after_end_prefix[..tag_close].trim();
+    let end_attrs = after_end_prefix[..tag_close].trim();
     let end_tag_len = END_PREFIX.len() + tag_close + 1;
     let block_end = json_start + end_relative + end_tag_len;
     let readable_output = format!("{}{}", &output[..start_index], &output[block_end..])
         .trim()
         .to_string();
-
-    if attrs.is_empty() && expected_nonce.is_some() {
-        return StructuredOutputParse {
+    if !end_attrs.is_empty() {
+        return parse_failure(
             readable_output,
-            state: StructuredOutputState::Failed(StructuredOutputError {
-                code: StructuredOutputErrorCode::MissingEndNonce,
-                message: "structured output end tag is missing nonce".to_string(),
-                expected_nonce: expected_nonce.map(str::to_string),
-                observed_nonce: None,
-                recoverable_value: parse_json_candidate(json_text),
-            }),
-        };
+            StructuredOutputErrorCode::InvalidEndTag,
+            "structured output end tag must not have attributes",
+            Some(expected_json_nonce.to_string()),
+            None,
+            recoverable_value(json_text, expected_json_nonce),
+        );
     }
 
-    let observed_nonce = match parse_nonce(attrs) {
-        Ok(nonce) => nonce,
-        Err(_) => {
-            return StructuredOutputParse {
+    let mut value = match recover_json_object(json_text) {
+        Ok(value) => value,
+        Err(()) => {
+            return parse_failure(
                 readable_output,
-                state: StructuredOutputState::Failed(StructuredOutputError {
-                    code: StructuredOutputErrorCode::NonceMismatch,
-                    message: "structured output nonce mismatch".to_string(),
-                    expected_nonce: expected_nonce.map(str::to_string),
-                    observed_nonce: None,
-                    recoverable_value: parse_json_candidate(json_text),
-                }),
-            };
+                StructuredOutputErrorCode::InvalidJson,
+                "invalid structured output json",
+                Some(expected_json_nonce.to_string()),
+                None,
+                None,
+            );
         }
     };
-    if observed_nonce.as_deref() != expected_nonce {
-        return StructuredOutputParse {
-            readable_output,
-            state: StructuredOutputState::Failed(StructuredOutputError {
-                code: StructuredOutputErrorCode::NonceMismatch,
-                message: "structured output nonce mismatch".to_string(),
-                expected_nonce: expected_nonce.map(str::to_string),
-                observed_nonce,
-                recoverable_value: parse_json_candidate(json_text),
-            }),
-        };
-    }
-
-    match parse_json_candidate(json_text) {
-        Some(value) => StructuredOutputParse {
+    let recoverable_value = business_payload_without_nonce(&value);
+    match strip_and_validate_json_nonce(&mut value, expected_json_nonce) {
+        Ok(()) => StructuredOutputParse {
             readable_output,
             state: StructuredOutputState::Parsed(value),
+            preamble_trimmed: false,
         },
-        None => StructuredOutputParse {
-            readable_output,
-            state: StructuredOutputState::Failed(StructuredOutputError {
-                code: StructuredOutputErrorCode::InvalidJson,
-                message: "invalid structured output json".to_string(),
-                expected_nonce: expected_nonce.map(str::to_string),
-                observed_nonce,
-                recoverable_value: None,
-            }),
-        },
+        Err(mut error) => {
+            // A nonce failure is never accepted as business output. Retaining only the
+            // nonce-stripped object lets the existing repair turn restore an otherwise
+            // complete verdict without granting the invalid envelope any authority.
+            error.recoverable_value = recoverable_value;
+            StructuredOutputParse {
+                readable_output,
+                state: StructuredOutputState::Failed(error),
+                preamble_trimmed: false,
+            }
+        }
     }
 }
 
@@ -213,42 +263,312 @@ fn parse_start_tag(
     output: &str,
     start_index: usize,
     expected_nonce: Option<&str>,
-) -> Result<(Option<String>, usize), StructuredOutputError> {
+) -> Result<(String, usize), StructuredOutputError> {
     let after_start_prefix = &output[start_index + START_PREFIX.len()..];
     let Some(tag_close) = after_start_prefix.find('>') else {
-        return Err(StructuredOutputError {
-            code: StructuredOutputErrorCode::MissingStartTag,
-            message: "structured output start tag is not closed".to_string(),
-            expected_nonce: expected_nonce.map(str::to_string),
-            observed_nonce: None,
-            recoverable_value: None,
-        });
+        return Err(error(
+            StructuredOutputErrorCode::MissingStartTag,
+            "structured output start tag is not closed",
+            expected_nonce,
+            None,
+            None,
+        ));
     };
     let attrs = after_start_prefix[..tag_close].trim();
-    let nonce = parse_nonce(attrs).map_err(|message| StructuredOutputError {
-        code: StructuredOutputErrorCode::MissingStartTag,
-        message: format!("structured output start tag {message}"),
-        expected_nonce: expected_nonce.map(str::to_string),
-        observed_nonce: None,
-        recoverable_value: None,
+    let nonce = parse_nonce(attrs).ok_or_else(|| {
+        error(
+            StructuredOutputErrorCode::MissingStartTag,
+            "structured output start tag must contain a valid nonce attribute",
+            expected_nonce,
+            None,
+            None,
+        )
     })?;
     Ok((nonce, start_index + START_PREFIX.len() + tag_close + 1))
 }
 
-fn parse_nonce(attrs: &str) -> Result<Option<String>, &'static str> {
-    if attrs.is_empty() {
-        return Ok(None);
+fn parse_nonce(attrs: &str) -> Option<String> {
+    let value = attrs.strip_prefix("nonce=")?;
+    // 引号字形不是信任边界（见下方值比较注释）：CJK 输入法现场曾把属性值
+    // 整体输出为全角弯引号（nonce=“86bc0a08”），直引号剥离失败即
+    // missing_start_tag 楔死 needs_human；r57b run8 又实测弯/直**混排**
+    // （nonce=“lcg-matrix-split"，U+201C 开 + ASCII 闭）。开/闭字形各自
+    // 独立接受直/弯，值等式仍在。
+    let nonce = strip_attribute_quote_glyphs(value)?;
+    // The contract generates compact random nonces, while its intentional few-shot
+    // placeholder is `EXAMPLE_NONCE`; format is not the trust boundary. The exact
+    // value comparison below is, so retain any non-empty attribute value here.
+    (!nonce.is_empty()).then(|| nonce.to_string())
+}
+
+/// 剥离属性值两侧的引号字形：开侧接受 `"`/`“`，闭侧接受 `"`/`”`，弯/直可
+/// 混排（r57b run8 实测形态）。字形只是定界结构位，不是信任边界；nonce 值
+/// 本身由调用方逐字比较（parse_block_at 的值等式）。
+fn strip_attribute_quote_glyphs(value: &str) -> Option<&str> {
+    const OPEN_GLYPHS: [char; 2] = ['"', '\u{201c}'];
+    const CLOSE_GLYPHS: [char; 2] = ['"', '\u{201d}'];
+    let open = value.chars().next()?;
+    let close = value.chars().next_back()?;
+    if !OPEN_GLYPHS.contains(&open) || !CLOSE_GLYPHS.contains(&close) {
+        return None;
     }
-    let Some(nonce) = attrs
-        .strip_prefix("nonce=\"")
-        .and_then(|value| value.strip_suffix('"'))
-    else {
-        return Err("has unsupported attributes");
+    let inner_start = open.len_utf8();
+    let inner_end = value.len() - close.len_utf8();
+    if inner_start > inner_end {
+        // 单字形值（如整个属性值只有一个引号字符）无内部内容。
+        return None;
+    }
+    Some(&value[inner_start..inner_end])
+}
+
+fn recoverable_value(text: &str, expected_nonce: &str) -> Option<Value> {
+    let mut value = recover_json_object(text).ok()?;
+    strip_and_validate_json_nonce(&mut value, expected_nonce)
+        .ok()
+        .map(|()| value)
+}
+
+fn business_payload_without_nonce(value: &Value) -> Option<Value> {
+    let mut value = value.clone();
+    value.as_object_mut()?.remove("nonce");
+    Some(value)
+}
+
+fn strip_and_validate_json_nonce(
+    value: &mut Value,
+    expected_nonce: &str,
+) -> Result<(), StructuredOutputError> {
+    let Some(object) = value.as_object_mut() else {
+        return Err(error(
+            StructuredOutputErrorCode::InvalidJson,
+            "structured output json must be an object",
+            Some(expected_nonce),
+            None,
+            None,
+        ));
     };
-    if nonce.len() != 8 || !nonce.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-        return Err("has invalid nonce");
+    let Some(nonce) = object.remove("nonce") else {
+        return Err(error(
+            StructuredOutputErrorCode::MissingJsonNonce,
+            "structured output json is missing envelope nonce",
+            Some(expected_nonce),
+            None,
+            None,
+        ));
+    };
+    let observed_nonce = nonce.as_str().map(str::to_string);
+    if observed_nonce.as_deref() != Some(expected_nonce) {
+        return Err(error(
+            StructuredOutputErrorCode::JsonNonceMismatch,
+            "structured output json envelope nonce mismatch",
+            Some(expected_nonce),
+            observed_nonce.as_deref(),
+            None,
+        ));
     }
-    Ok(Some(nonce.to_string()))
+    Ok(())
+}
+
+/// Recovers exactly one top-level JSON object from the sentinel body. The state
+/// machine deliberately understands strings and escapes, but it does not repair
+/// JSON; serde remains the final authority on JSON validity.
+fn find_end_tag_outside_json_strings(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+        } else if bytes[index..].starts_with(END_PREFIX.as_bytes()) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn recover_json_object(text: &str) -> Result<Value, ()> {
+    let text = normalize_curly_json_delimiters(text);
+    let candidate = sentinel_json_candidate(&text)?;
+    let object = extract_unique_json_object(candidate)?;
+    if object.len() > MAX_JSON_BYTES {
+        return Err(());
+    }
+    serde_json::from_str(object).map_err(|_| ())
+}
+
+/// 确定性机械修复：CJK 输入法现场曾把 sentinel JSON 的全部定界引号输出为
+/// 全角弯引号（`{“nonce”:“86bc0a08”}`）。仅在**结构位置**把弯引号定界符
+/// 归一为直引号——字符串外 `“` 视为开定界；弯引号串内 `”` 仅当后随
+/// 结构字符（`,` `:` `}` `]` 或结尾）才视为闭定界，其余逐字保留；直引号
+/// 串内的弯引号是数据，一律不动。serde 仍是 JSON 合法性的最终权威：
+/// 归一后仍非法则照旧 `invalid_json`，不静默放行。
+fn normalize_curly_json_delimiters(text: &str) -> Cow<'_, str> {
+    // r47b:全角结构标点(，：)与弯引号同族——任一在场即进入归一。
+    if !text.contains('\u{201c}')
+        && !text.contains('\u{201d}')
+        && !text.contains('\u{ff0c}')
+        && !text.contains('\u{ff1a}')
+    {
+        return Cow::Borrowed(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut curly_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_string {
+            if escaped {
+                // k3 P2：转义弯引号（\“/\”）→ 合法 JSON 转义 \"——
+                // RFC 8259 只允许 \" \\ \/ \b \f \n \r \t \uXXXX；
+                // 反斜杠已在 out（上一轮 else 分支 push），只需把弯引号
+                // 字符替换为 ASCII 引号即可形成合法 \"。
+                if ch == '\u{201c}' || ch == '\u{201d}' {
+                    out.push('"');
+                } else {
+                    out.push(ch);
+                }
+                escaped = false;
+            } else {
+                out.push(ch);
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                } else if curly_string && ch == '\u{201d}' && next_is_structural(&chars, index + 1)
+                {
+                    out.pop();
+                    out.push('"');
+                    in_string = false;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '"' => {
+                out.push('"');
+                in_string = true;
+                curly_string = false;
+            }
+            '\u{201c}' => {
+                out.push('"');
+                in_string = true;
+                curly_string = true;
+            }
+            // r47b(claude r47b verification review 现场):IME 形态下结构位
+            // 的字段分隔逗号(，U+FF0C)与键值冒号(：U+FF1A)也输出为全角
+            // ——弯引号归一后全角标点残留,serde 仍 invalid_json
+            //(raw_output_preview 实测:[]”,“category”: 形态)。字符串外
+            // 归一为 ASCII;字符串内(in_string 分支已 continue)是数据,
+            // 逐字保留。
+            '\u{ff0c}' => out.push(','),
+            '\u{ff1a}' => out.push(':'),
+            _ => out.push(ch),
+        }
+        index += 1;
+    }
+    Cow::Owned(out)
+}
+
+/// 弯引号串内的 `”` 后随（跳过空白） `,` `:` `}` `]` 或输入结尾时判定为
+/// 闭定界符；否则视为内容字符保留。
+fn next_is_structural(chars: &[char], from: usize) -> bool {
+    chars[from..]
+        .iter()
+        .find(|ch| !ch.is_whitespace())
+        .is_none_or(|ch| matches!(ch, ',' | ':' | '}' | ']' | '\u{ff0c}' | '\u{ff1a}'))
+}
+fn sentinel_json_candidate(text: &str) -> Result<&str, ()> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("```") {
+        return Ok(trimmed);
+    }
+
+    let after_open = &trimmed[3..];
+    let Some(newline) = after_open.find('\n') else {
+        return Err(());
+    };
+    let inner_with_end = &after_open[newline + 1..];
+    let Some(inner) = inner_with_end.strip_suffix("```") else {
+        return Err(());
+    };
+    Ok(inner.trim())
+}
+
+fn extract_unique_json_object(text: &str) -> Result<&str, ()> {
+    let bytes = text.as_bytes();
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .ok_or(())?;
+    if bytes[start] != b'{' {
+        return Err(());
+    }
+
+    let mut stack = Vec::with_capacity(MAX_JSON_DEPTH);
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' => {
+                stack.push(b'}');
+                if stack.len() > MAX_JSON_DEPTH {
+                    return Err(());
+                }
+            }
+            b'[' => {
+                stack.push(b']');
+                if stack.len() > MAX_JSON_DEPTH {
+                    return Err(());
+                }
+            }
+            b'}' | b']' => {
+                if stack.pop() != Some(byte) {
+                    return Err(());
+                }
+                if stack.is_empty() {
+                    if bytes[index + 1..]
+                        .iter()
+                        .any(|byte| !byte.is_ascii_whitespace())
+                    {
+                        return Err(());
+                    }
+                    return Ok(&text[start..=index]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(())
 }
 
 fn failed(
@@ -265,6 +585,24 @@ fn failed(
         .unwrap_or(output)
         .trim()
         .to_string();
+    parse_failure(
+        readable_output,
+        code,
+        message,
+        expected_nonce,
+        observed_nonce,
+        recoverable_value,
+    )
+}
+
+fn parse_failure(
+    readable_output: String,
+    code: StructuredOutputErrorCode,
+    message: &str,
+    expected_nonce: Option<String>,
+    observed_nonce: Option<String>,
+    recoverable_value: Option<Value>,
+) -> StructuredOutputParse {
     StructuredOutputParse {
         readable_output,
         state: StructuredOutputState::Failed(StructuredOutputError {
@@ -274,25 +612,24 @@ fn failed(
             observed_nonce,
             recoverable_value,
         }),
+        preamble_trimmed: false,
     }
 }
 
-fn parse_json_candidate(text: &str) -> Option<Value> {
-    serde_json::from_str(text).ok().or_else(|| {
-        let candidate = extract_json_candidate(text)?;
-        serde_json::from_str(candidate).ok()
-    })
-}
-
-fn extract_json_candidate(text: &str) -> Option<&str> {
-    let start = text.find(['{', '['])?;
-    let close = match text.as_bytes()[start] {
-        b'{' => '}',
-        b'[' => ']',
-        _ => return None,
-    };
-    let end = text.rfind(close)?;
-    (end >= start).then_some(&text[start..=end])
+fn error(
+    code: StructuredOutputErrorCode,
+    message: &str,
+    expected_nonce: Option<&str>,
+    observed_nonce: Option<&str>,
+    recoverable_value: Option<Value>,
+) -> StructuredOutputError {
+    StructuredOutputError {
+        code,
+        message: message.to_string(),
+        expected_nonce: expected_nonce.map(str::to_string),
+        observed_nonce: observed_nonce.map(str::to_string),
+        recoverable_value,
+    }
 }
 
 #[cfg(test)]
@@ -307,13 +644,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parses_matching_nonce_and_removes_structured_block_from_readable_output() {
-        let output = "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n{\"verdict\":\"pass\"}\n</ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">";
+    fn block(json: &str) -> String {
+        format!("<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{json}</ARIA_STRUCTURED_OUTPUT>")
+    }
 
+    fn failed_error(output: &str) -> StructuredOutputError {
         let parsed = parse_structured_output(output, &contract());
+        let StructuredOutputState::Failed(error) = parsed.state else {
+            panic!("expected structured output failure: {parsed:?}");
+        };
+        error
+    }
 
-        assert_eq!(parsed.readable_output, "审核说明");
+    #[test]
+    fn first_line_nonce_parser_discards_preamble_and_records_the_trim() {
+        let output = format!(
+            "路由回执：开始审核\n{}\n闭合后文本",
+            block(r#"{"nonce":"96aca42f","verdict":"pass"}"#)
+        );
+
+        let parsed = parse_structured_output_first_line_nonce(&output, &contract());
+
+        assert!(parsed.preamble_trimmed);
+        assert_eq!(parsed.readable_output, "闭合后文本");
         assert_eq!(
             parsed.state,
             StructuredOutputState::Parsed(json!({"verdict": "pass"}))
@@ -321,98 +674,296 @@ mod tests {
     }
 
     #[test]
-    fn classifies_missing_start_tag_without_recoverable_value() {
-        let output = "审核说明\n{\"verdict\":\"pass\"}";
+    fn first_line_nonce_parser_preserves_no_preamble_path() {
+        let parsed = parse_structured_output_first_line_nonce(
+            &block(r#"{"nonce":"96aca42f","verdict":"pass"}"#),
+            &contract(),
+        );
 
-        let parsed = parse_structured_output(output, &contract());
+        assert!(!parsed.preamble_trimmed);
+        assert_eq!(parsed.readable_output, "");
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
+    }
 
-        let StructuredOutputState::Failed(error) = parsed.state else {
-            panic!("expected structured output failure");
+    #[test]
+    fn first_line_nonce_parser_does_not_hide_a_missing_start_tag() {
+        let error = match parse_structured_output_first_line_nonce("前言但没有标签", &contract())
+            .state
+        {
+            StructuredOutputState::Failed(error) => error,
+            state => panic!("expected missing-start-tag failure: {state:?}"),
         };
+
         assert_eq!(error.code, StructuredOutputErrorCode::MissingStartTag);
-        assert!(error.recoverable_value.is_none());
-        assert_eq!(parsed.readable_output, output);
     }
 
     #[test]
-    fn classifies_missing_end_tag_and_keeps_recoverable_value() {
-        let output =
-            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n{\"verdict\":\"revise\"}";
+    fn parses_new_protocol_strips_envelope_and_trailing_text_into_readable_output() {
+        let output = format!(
+            "审核说明\n{}\n闭合后的可读说明",
+            block(r#"{"nonce":"96aca42f","verdict":"pass"}"#)
+        );
 
-        let parsed = parse_structured_output(output, &contract());
+        let parsed = parse_structured_output(&output, &contract());
 
-        let StructuredOutputState::Failed(error) = parsed.state else {
-            panic!("expected structured output failure");
-        };
-        assert_eq!(error.code, StructuredOutputErrorCode::MissingEndTag);
-        assert_eq!(error.recoverable_value, Some(json!({"verdict": "revise"})));
-        assert_eq!(parsed.readable_output, output);
+        assert_eq!(parsed.readable_output, "审核说明\n\n闭合后的可读说明");
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
     }
 
     #[test]
-    fn missing_or_unclosed_end_boundary_keeps_full_readable_output() {
-        for output in [
-            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n{\"verdict\":\"revise\"}\nReviewer 尾随说明仍需展示",
-            "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n{\"verdict\":\"revise\"}\n</ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\"\nReviewer 尾随说明仍需展示",
+    fn classifies_missing_and_mismatched_json_nonce_with_distinct_stable_codes() {
+        let missing = failed_error(&block(r#"{"verdict":"pass"}"#));
+        let mismatch = failed_error(&block(r#"{"nonce":"deadbeef","verdict":"pass"}"#));
+
+        assert_eq!(missing.code, StructuredOutputErrorCode::MissingJsonNonce);
+        assert_eq!(missing.code.as_str(), "missing_json_nonce");
+        assert_eq!(mismatch.code, StructuredOutputErrorCode::JsonNonceMismatch);
+        assert_eq!(mismatch.code.as_str(), "json_nonce_mismatch");
+        assert_eq!(mismatch.observed_nonce.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn rejects_old_double_closed_protocol_with_distinct_stable_code() {
+        let output = format!(
+            "<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}}</ARIA_STRUCTURED_OUTPUT{}>",
+            " nonce=\"96aca42f\""
+        );
+
+        let error = failed_error(&output);
+
+        assert_eq!(error.code, StructuredOutputErrorCode::InvalidEndTag);
+        assert_eq!(error.code.as_str(), "invalid_end_tag");
+    }
+
+    #[test]
+    fn rejects_copied_example_nonce() {
+        let copied_example = "<ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\
+            {\"nonce\":\"EXAMPLE_NONCE\",\"verdict\":\"pass\"}\
+            </ARIA_STRUCTURED_OUTPUT>";
+        let error = failed_error(copied_example);
+
+        assert_eq!(error.code, StructuredOutputErrorCode::NonceMismatch);
+        assert_eq!(error.observed_nonce.as_deref(), Some("EXAMPLE_NONCE"));
+    }
+
+    #[test]
+    fn rejects_non_whitespace_between_json_and_closing_tag() {
+        let error = failed_error(&block(r#"{"nonce":"96aca42f","verdict":"pass"}说明"#));
+
+        assert_eq!(error.code, StructuredOutputErrorCode::InvalidJson);
+    }
+
+    #[test]
+    fn recovers_single_json_object_inside_one_complete_fence() {
+        let parsed = parse_structured_output(
+            &block("\n```json\n{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}\n```\n"),
+            &contract(),
+        );
+
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
+    }
+
+    #[test]
+    fn rejects_fence_external_text_multiple_candidates_and_trailing_commas() {
+        for json in [
+            "explanation\n```json\n{\"nonce\":\"96aca42f\"}\n```",
+            "{\"nonce\":\"96aca42f\"}{\"nonce\":\"96aca42f\"}",
+            "{\"nonce\":\"96aca42f\",}",
         ] {
-            let parsed = parse_structured_output(output, &contract());
-
-            let StructuredOutputState::Failed(error) = parsed.state else {
-                panic!("expected structured output failure");
-            };
-            assert_eq!(error.code, StructuredOutputErrorCode::MissingEndTag);
-            assert_eq!(error.recoverable_value, Some(json!({"verdict": "revise"})));
-            assert_eq!(parsed.readable_output, output);
+            assert_eq!(
+                failed_error(&block(json)).code,
+                StructuredOutputErrorCode::InvalidJson,
+                "must reject {json}"
+            );
         }
     }
 
     #[test]
-    fn classifies_missing_end_nonce_and_keeps_recoverable_value() {
-        let output = "审核说明\n<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n{\"verdict\":\"revise\"}\n</ARIA_STRUCTURED_OUTPUT>";
+    fn recovery_is_string_and_escape_aware_and_rejects_mismatched_brackets() {
+        let valid = block(
+            r#"{"nonce":"96aca42f","message":"literal { } and escaped quote: \" plus slash: \\"}"#,
+        );
+        let parsed = parse_structured_output(&valid, &contract());
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(
+                json!({"message": "literal { } and escaped quote: \" plus slash: \\"})
+            )
+        );
 
-        let parsed = parse_structured_output(output, &contract());
-
-        let StructuredOutputState::Failed(error) = parsed.state else {
-            panic!("expected structured output failure");
-        };
-        assert_eq!(error.code, StructuredOutputErrorCode::MissingEndNonce);
-        assert_eq!(error.expected_nonce.as_deref(), Some("96aca42f"));
-        assert_eq!(error.recoverable_value, Some(json!({"verdict": "revise"})));
-        assert_eq!(parsed.readable_output, "审核说明");
+        let invalid = block(r#"{"nonce":"96aca42f","items":[}"#);
+        assert_eq!(
+            failed_error(&invalid).code,
+            StructuredOutputErrorCode::InvalidJson
+        );
     }
 
     #[test]
-    fn classifies_nonce_mismatch() {
-        let output = "<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT nonce=\"deadbeef\">";
+    fn accepts_json_depth_and_byte_limits_at_boundary_and_rejects_overflow() {
+        let at_depth_limit = nested_payload(MAX_JSON_DEPTH - 1);
+        let over_depth_limit = nested_payload(MAX_JSON_DEPTH);
+        assert!(matches!(
+            parse_structured_output(&block(&at_depth_limit), &contract()).state,
+            StructuredOutputState::Parsed(_)
+        ));
+        assert_eq!(
+            failed_error(&block(&over_depth_limit)).code,
+            StructuredOutputErrorCode::InvalidJson
+        );
+
+        let base = r#"{"nonce":"96aca42f","payload":""}"#;
+        let at_byte_limit = format!(
+            r#"{{"nonce":"96aca42f","payload":"{}"}}"#,
+            "x".repeat(MAX_JSON_BYTES - base.len())
+        );
+        assert_eq!(at_byte_limit.len(), MAX_JSON_BYTES);
+        assert!(matches!(
+            parse_structured_output(&block(&at_byte_limit), &contract()).state,
+            StructuredOutputState::Parsed(_)
+        ));
+        // Insert one byte into the JSON string, not after its object boundary.
+        let over_byte_limit = format!(
+            r#"{{"nonce":"96aca42f","payload":"{}"}}"#,
+            "x".repeat(MAX_JSON_BYTES - base.len() + 1)
+        );
+        assert_eq!(over_byte_limit.len(), MAX_JSON_BYTES + 1);
+        assert_eq!(
+            failed_error(&block(&over_byte_limit)).code,
+            StructuredOutputErrorCode::InvalidJson
+        );
+    }
+
+    fn nested_payload(nested_object_count: usize) -> String {
+        let mut payload = "{\"nonce\":\"96aca42f\",\"value\":".to_string();
+        for _ in 0..nested_object_count {
+            payload.push_str("{\"nested\":");
+        }
+        payload.push('0');
+        payload.push_str(&"}".repeat(nested_object_count));
+        payload.push('}');
+        payload
+    }
+
+    #[test]
+    fn parse_last_value_uses_the_same_protocol_and_strips_nonce() {
+        let output = format!(
+            "prefix {} suffix",
+            block(r#"{"nonce":"96aca42f","verdict":"pass"}"#)
+        );
+
+        assert_eq!(
+            parse_last_structured_output_value(&output).expect("new protocol"),
+            Some(json!({"verdict": "pass"}))
+        );
+    }
+
+    #[test]
+    fn ignores_end_tag_text_inside_a_json_string_and_serializes_new_codes_in_snake_case() {
+        let parsed = parse_structured_output(
+            &block(r#"{"nonce":"96aca42f","message":"literal </ARIA_STRUCTURED_OUTPUT> text"}"#),
+            &contract(),
+        );
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(
+                json!({"message": "literal </ARIA_STRUCTURED_OUTPUT> text"})
+            )
+        );
+        assert_eq!(
+            serde_json::to_string(&StructuredOutputErrorCode::MissingJsonNonce).expect("serialize"),
+            "\"missing_json_nonce\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StructuredOutputErrorCode::InvalidEndTag).expect("serialize"),
+            "\"invalid_end_tag\""
+        );
+    }
+
+    #[test]
+    fn normalizes_fullwidth_curly_quoted_sentinel_into_authoritative_parse() {
+        // 门重测 rep2/rep4 现场形态：CJK 输入法把 sentinel 的定界引号全部
+        // 输出为全角弯引号（属性与 JSON 双侧），修复前 missing_start_tag 楔死
+        // needs_human。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f”>\n{“nonce”:“96aca42f”,“verdict”:“pass”,“summary”:“全候选评估通过”}\n</ARIA_STRUCTURED_OUTPUT>";
 
         let parsed = parse_structured_output(output, &contract());
 
-        let StructuredOutputState::Failed(error) = parsed.state else {
-            panic!("expected structured output failure");
-        };
+        assert_eq!(parsed.readable_output, "");
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass", "summary": "全候选评估通过"}))
+        );
+    }
+
+    #[test]
+    fn curly_normalization_keeps_curly_quotes_inside_straight_quoted_values() {
+        // 合法 JSON 字符串值内的弯引号是数据而非定界符，必须逐字保留。
+        let parsed = parse_structured_output(
+            &block(r#"{"nonce":"96aca42f","summary":"保留“弯引号”与“嵌套”内容"}"#),
+            &contract(),
+        );
+
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"summary": "保留“弯引号”与“嵌套”内容"}))
+        );
+    }
+
+    #[test]
+    fn curly_normalization_is_structural_and_handles_nested_payloads() {
+        // 嵌套 findings 数组（reviewer 现场形态）+ 弯引号串内内容级弯引号：
+        // 仅后随结构字符（, : } ] 或结尾）的 ” 视为定界符，其余逐字保留。
+        let body = "{“nonce”:“96aca42f”,“verdict”:“revise”,“findings”:[{“severity”:“must_fix”,“message”:“引用“内层”文本”}]}";
+
+        let parsed = parse_structured_output(
+            &format!("<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f”>{body}</ARIA_STRUCTURED_OUTPUT>"),
+            &contract(),
+        );
+
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({
+                "verdict": "revise",
+                "findings": [{"severity": "must_fix", "message": "引用“内层”文本"}]
+            }))
+        );
+    }
+
+    #[test]
+    fn curly_quoted_nonce_attribute_still_enforces_exact_value_equality() {
+        // 放宽的是引号字形，不是 nonce 值等式——值不匹配仍 NonceMismatch。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“deadbeef”>{“nonce”:“96aca42f”,“verdict”:“pass”}</ARIA_STRUCTURED_OUTPUT>";
+
+        let error = failed_error(output);
+
         assert_eq!(error.code, StructuredOutputErrorCode::NonceMismatch);
         assert_eq!(error.observed_nonce.as_deref(), Some("deadbeef"));
     }
 
     #[test]
-    fn classifies_invalid_json_without_trusting_value() {
-        let output = "<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">{invalid}</ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">";
+    fn parses_mixed_curly_straight_attribute_quote_glyphs() {
+        // r57b run8 现场(claude split fresh denied):prompt 正确下发直引号
+        // 标签模板,AI 回显起始标签却弯/直混排——nonce=“lcg-matrix-split"
+        // (U+201C 开 + ASCII 闭)。既有弯引号归一只认成对 “ ”,混排仍
+        // missing_start_tag 楔死。开/闭字形独立归一,值等式仍是信任边界。
+        let curly_open = "<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f\">\n{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}\n</ARIA_STRUCTURED_OUTPUT>";
+        let parsed = parse_structured_output(curly_open, &contract());
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({"verdict": "pass"}))
+        );
 
-        let parsed = parse_structured_output(output, &contract());
-
-        let StructuredOutputState::Failed(error) = parsed.state else {
-            panic!("expected structured output failure");
-        };
-        assert_eq!(error.code, StructuredOutputErrorCode::InvalidJson);
-        assert!(error.recoverable_value.is_none());
-    }
-
-    #[test]
-    fn parses_fenced_json_inside_matching_nonce_block() {
-        let output = "<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">\n```json\n{\"verdict\":\"pass\"}\n```\n</ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f\">";
-
-        let parsed = parse_structured_output(output, &contract());
-
+        let curly_close = "<ARIA_STRUCTURED_OUTPUT nonce=\"96aca42f”>\n{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}\n</ARIA_STRUCTURED_OUTPUT>";
+        let parsed = parse_structured_output(curly_close, &contract());
         assert_eq!(
             parsed.state,
             StructuredOutputState::Parsed(json!({"verdict": "pass"}))
@@ -420,12 +971,50 @@ mod tests {
     }
 
     #[test]
-    fn legacy_parser_rejects_unsupported_end_attributes_without_start_nonce() {
-        let output = "<ARIA_STRUCTURED_OUTPUT>{\"verdict\":\"pass\"}</ARIA_STRUCTURED_OUTPUT bogus=\"value\">";
+    fn split_sync_bridge_legacy_path_parses_mixed_glyph_nonce() {
+        // run8 实测链:gateway sync bridge 兜底走 parse_last_structured_output
+        // (nonce 从 sentinel 自发现,JSON envelope 等式仍强制)——混排引号
+        // 在该路径同样必须可解析。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“lcg-matrix-split\">\n{\"nonce\":\"lcg-matrix-split\",\"plan\":{\"work_item_ids\":[]}}\n</ARIA_STRUCTURED_OUTPUT>";
 
-        let error = parse_last_structured_output_value(output)
-            .expect_err("unsupported end attributes must fail");
+        let parsed = parse_last_structured_output(output)
+            .expect("mixed glyph nonce must parse")
+            .expect("sentinel present");
+
+        assert_eq!(parsed.1, json!({"plan": {"work_item_ids": []}}));
+    }
+
+    #[test]
+    fn mixed_glyph_nonce_attribute_still_enforces_exact_value_equality() {
+        // 字形归一不放宽值等式:混排引号下值不匹配仍 NonceMismatch。
+        let output = "<ARIA_STRUCTURED_OUTPUT nonce=“deadbeef\">\n{\"nonce\":\"96aca42f\",\"verdict\":\"pass\"}\n</ARIA_STRUCTURED_OUTPUT>";
+
+        let error = failed_error(output);
 
         assert_eq!(error.code, StructuredOutputErrorCode::NonceMismatch);
+        assert_eq!(error.observed_nonce.as_deref(), Some("deadbeef"));
+    }
+    #[test]
+    fn normalizes_fullwidth_structural_punctuation_alongside_curly_quotes() {
+        // r47b 现场(claude verification review):reviewer 的 sentinel JSON
+        // 弯引号+全角逗号/冒号混排(IME 形态)——弯引号归一后全角标点残留
+        // 结构位,serde 仍 invalid_json(raw_output_preview 实测:[]”，“category”: 形态)。
+        // 修:结构位(字符串外)全角标点归一 ASCII;字符串内是数据保留。
+        let body = "{“nonce”:“96aca42f”，“verdict”:“pass”，“summary”:“含数据逗号，与冒号：保留”，“findings”:[{“severity”:“suggestion”，“message”:“建议文本”}]}";
+
+        let parsed = parse_structured_output(
+            &format!("<ARIA_STRUCTURED_OUTPUT nonce=“96aca42f”>{body}</ARIA_STRUCTURED_OUTPUT>"),
+            &contract(),
+        );
+
+        assert_eq!(
+            parsed.state,
+            StructuredOutputState::Parsed(json!({
+                "verdict": "pass",
+                "summary": "含数据逗号，与冒号：保留",
+                "findings": [{"severity": "suggestion", "message": "建议文本"}]
+            })),
+            "结构位全角标点归一后必须解析成功,字符串内全角标点是数据保留"
+        );
     }
 }

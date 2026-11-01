@@ -1,0 +1,1 @@
+f5b920cafbc18cdc43d2def5fa97efcfad591492ebf9445959c5a667753759cb  golden/design_0001.golden.json

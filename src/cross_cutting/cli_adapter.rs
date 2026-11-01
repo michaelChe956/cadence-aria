@@ -2,6 +2,9 @@ use crate::cross_cutting::adapter_compatibility::{
     AdapterCompatibilityEntry, CommandSpec, PromptInputMode, StructuredOutputMode,
 };
 use crate::cross_cutting::document_ops::compute_sha256;
+use crate::cross_cutting::process_manager::ProcessStartIdentity;
+#[cfg(unix)]
+use crate::cross_cutting::process_manager::signal_group_if_live_identity;
 use crate::cross_cutting::provider_adapter::{
     ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, parse_last_structured_output,
 };
@@ -84,10 +87,20 @@ impl ProviderAdapter for CliProviderAdapter {
                 sink: Arc::clone(sink),
             });
         let stream_log_dir = input.provider_stream_log_dir.as_deref().map(Path::new);
+        // A1-a(Bug45 批2 环境回退底座):同步 CLI 旁路不再构造显式空环境
+        // ——`env_vars` 非空时作为调用方显式覆盖层注入,空时传 None(平台
+        // 不构造、不覆盖),子进程直接继承宿主环境;绝不把宿主 env 抄进
+        // BTreeMap 冒充继承(那会丢非 UTF-8 值)。
+        let environment = if input.env_vars.is_empty() {
+            None
+        } else {
+            Some(&input.env_vars)
+        };
         let raw = run_command_capture_with_stream(
             &command,
             worktree_path,
             stream_log_dir,
+            environment,
             Some(&input.prompt),
             Some(Duration::from_secs(input.timeout)),
             stream_context,
@@ -195,7 +208,15 @@ pub fn run_command_capture(
     stdin_text: Option<&str>,
     timeout: Option<Duration>,
 ) -> Result<CapturedCommandOutput, ProviderAdapterError> {
-    run_command_capture_with_stream(command_spec, current_dir, None, stdin_text, timeout, None)
+    run_command_capture_with_stream(
+        command_spec,
+        current_dir,
+        None,
+        None,
+        stdin_text,
+        timeout,
+        None,
+    )
 }
 
 /// `current_dir` 是 provider 子进程的工作目录（目标仓库），`stream_log_dir` 是
@@ -205,6 +226,7 @@ fn run_command_capture_with_stream(
     command_spec: &CommandSpec,
     current_dir: Option<&Path>,
     stream_log_dir: Option<&Path>,
+    environment: Option<&BTreeMap<String, String>>,
     stdin_text: Option<&str>,
     timeout: Option<Duration>,
     stream_context: Option<OutputStreamContext>,
@@ -214,6 +236,12 @@ fn run_command_capture_with_stream(
     command.args(&command_spec.args);
     if let Some(current_dir) = current_dir {
         command.current_dir(current_dir);
+    }
+    // A1-a(Bug45 批2 环境回退底座):独立 env_clear 已删——`Some(env)` 只是
+    // 调用方显式覆盖层(envs 覆盖同名键),`None` 为平台不构造不覆盖;两条
+    // 路径下子进程都继承宿主环境。环境具体值不写入流日志/错误信息。
+    if let Some(env) = environment {
+        command.envs(env);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_text.is_some() {
@@ -241,6 +269,9 @@ fn run_command_capture_with_stream(
             ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
         }
     })?;
+    // PID 复用防护:spawn 即冻结组长 (pid, /proc starttime)。超时/提前完成
+    // 的组清理只在身份仍匹配时发射——pid 复用后裸 killpg 会打掉无关进程组。
+    let child_identity = ProcessStartIdentity::freeze(child.id());
 
     let stdout_stream_path =
         provider_stream_path(stream_log_dir, &command_spec.program, child.id(), "stdout");
@@ -283,7 +314,7 @@ fn run_command_capture_with_stream(
             if structured_output_complete(&stdout_reader) {
                 let first_seen = structured_output_seen_at.get_or_insert_with(Instant::now);
                 if first_seen.elapsed() >= Duration::from_millis(500) {
-                    terminate_child_group(&mut child);
+                    terminate_child_group(&mut child, child_identity);
                     let _ = child.wait().map_err(|error| {
                         ProviderAdapterError::execution_failed(
                             None,
@@ -304,7 +335,7 @@ fn run_command_capture_with_stream(
                 }
             }
             if started.elapsed() >= timeout {
-                terminate_child_group(&mut child);
+                terminate_child_group(&mut child, child_identity);
                 let _ = child.wait().map_err(|error| {
                     ProviderAdapterError::execution_failed(
                         None,
@@ -503,10 +534,12 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
-fn terminate_child_group(child: &mut Child) {
+/// 超时/提前完成的组清理：先按冻结身份核对再 killpg（pid 复用防护），
+/// 随后回收直接子进程。身份不符只回收直接子进程，绝不向复用的 pgid 发信号。
+fn terminate_child_group(child: &mut Child, identity: Option<ProcessStartIdentity>) {
     #[cfg(unix)]
-    unsafe {
-        let _ = libc::killpg(child.id() as i32, libc::SIGKILL);
+    if let Ok(pgid) = i32::try_from(child.id()) {
+        let _ = signal_group_if_live_identity(identity, pgid, libc::SIGKILL);
     }
     let _ = child.kill();
 }
@@ -628,5 +661,181 @@ mod provider_stream_tests {
             path.file_name().and_then(|name| name.to_str()),
             Some("cl_ude-42-stderr.log")
         );
+    }
+}
+
+/// A1-a(Bug45 批2 环境回退底座)绿证:同步 CLI 捕获通道的宿主继承语义。
+#[cfg(all(test, unix))]
+mod host_inheritance_tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn sh_spec(script: &str) -> CommandSpec {
+        CommandSpec::new(
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        )
+    }
+
+    /// 隔离父进程不构造 marker env(空 env_vars → None):真实子进程读到
+    /// 宿主 PATH/HOME——子进程拿到的是宿主值,不是输入 map 快照。
+    #[test]
+    fn sync_capture_inherits_host_environment_without_explicit_map() {
+        let host_home = std::env::var("HOME").expect("host HOME");
+        let host_path = std::env::var("PATH").expect("host PATH");
+
+        let output = run_command_capture_with_stream(
+            &sh_spec("printf '%s\\n%s' \"$HOME\" \"$PATH\""),
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture inherits host env");
+
+        assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
+        assert_eq!(output.stdout, format!("{host_home}\n{host_path}"));
+    }
+
+    /// 显式 env map 是覆盖层而非快照:自定义 token 注入生效,map 外的
+    /// 宿主键(HOME)仍从宿主继承到达子进程。
+    #[test]
+    fn sync_capture_env_map_overrides_host_without_replacing_it() {
+        let host_home = std::env::var("HOME").expect("host HOME");
+        let environment =
+            BTreeMap::from([("ARIA_A1A_TOKEN".to_string(), "override-ok".to_string())]);
+
+        let output = run_command_capture_with_stream(
+            &sh_spec("printf '%s|%s' \"$ARIA_A1A_TOKEN\" \"$HOME\""),
+            None,
+            None,
+            Some(&environment),
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture applies env map as overrides");
+
+        assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
+        assert_eq!(output.stdout, format!("override-ok|{host_home}"));
+    }
+}
+
+/// PID 复用防护:超时/提前完成的组清理只在冻结的 (pid, starttime) 身份
+/// 仍匹配时发射 `killpg`。身份不符只回收直接子进程——组内孙进程存活是
+/// 「拒绝发射」的可观察证据(旧实现裸 killpg 会连带杀掉复用后的无关组)。
+#[cfg(all(test, unix))]
+mod pid_reuse_tests {
+    use std::os::unix::process::CommandExt;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn spawn_group_holder(dir: &Path) -> (Child, PathBuf) {
+        let grandchild_pid = dir.join("grandchild.pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "sleep 30 & printf '%s' \"$!\" > '{}'; wait",
+                grandchild_pid.display()
+            ),
+        ]);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+        (command.spawn().expect("spawn group holder"), grandchild_pid)
+    }
+
+    fn read_pid(path: &Path) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("grandchild pid file never appeared: {}", path.display());
+    }
+
+    fn process_state(pid: i32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(") ")
+            .and_then(|(_, tail)| tail.chars().next())
+    }
+
+    fn pid_alive(pid: i32) -> bool {
+        matches!(process_state(pid), Some(state) if state != 'Z')
+    }
+
+    /// 有界轮询等待进程真实停止(僵尸/消失)。信号送达与 /proc 更新之间
+    /// 有毫秒级窗口,不能直接断言。
+    fn wait_until_stopped(pid: i32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !pid_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn terminate_child_group_signals_group_when_identity_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut child, grandchild_pid_file) = spawn_group_holder(dir.path());
+        let child_pid = child.id();
+        let identity = ProcessStartIdentity::freeze(child_pid).expect("freeze leader");
+        let grandchild_pid = read_pid(&grandchild_pid_file);
+        assert!(pid_alive(grandchild_pid), "孙进程必须在组内运行");
+
+        terminate_child_group(&mut child, Some(identity));
+        assert!(
+            wait_until_stopped(grandchild_pid),
+            "身份匹配时必须整组收口(孙进程不得存活)"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn terminate_child_group_skips_group_signal_when_identity_is_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut child, grandchild_pid_file) = spawn_group_holder(dir.path());
+        let child_pid = child.id();
+        let live = ProcessStartIdentity::freeze(child_pid).expect("freeze leader");
+        let grandchild_pid = read_pid(&grandchild_pid_file);
+        assert!(pid_alive(grandchild_pid), "孙进程必须在组内运行");
+
+        // 「pgid 已被复用」等价状态:同一 pid 位置的 starttime 变了。
+        let stale =
+            ProcessStartIdentity::with_start_time_ticks(child_pid, live.start_time_ticks() + 1);
+        terminate_child_group(&mut child, Some(stale));
+        // 组信号若被误发,孙进程会在毫秒级内消失;观察窗口内持续存活
+        // 即证明未发射组信号。
+        for _ in 0..20 {
+            assert!(
+                pid_alive(grandchild_pid),
+                "身份不符时不得 killpg(组内孙进程存活即未发组信号)"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.wait();
+        unsafe {
+            libc::kill(grandchild_pid, libc::SIGKILL);
+        }
     }
 }

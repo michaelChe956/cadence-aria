@@ -1,6 +1,11 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::issue_baseline::resolve_effective_base_branch;
+use crate::product::logical_codebase::{
+    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore, LogicalRepositoryId,
+    MemberStatus,
+};
 
 pub async fn list_workspaces(
     State(state): State<WebAppState>,
@@ -90,22 +95,50 @@ pub async fn list_repositories(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
 ) -> ApiResult<Json<RepositoryListResponse>> {
-    let store = RepositoryStore::new(product_app_paths(&state));
-    let repositories = store.list(&project_id).map_err(product_store_api_error)?;
-    Ok(Json(RepositoryListResponse {
-        repositories: repositories.into_iter().map(repository_dto).collect(),
-    }))
+    let app_paths = product_app_paths(&state);
+    ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+    // R6（v1.3 §4）：多仓 project 防护语义废除——GET /repositories 是单仓代码库
+    // CRUD，只读 repos.json，绝不投影逻辑成员（统一列表经 /codebases）。
+    let repositories = RepositoryStore::new(app_paths)
+        .list(&project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .map(repository_dto)
+        .collect();
+    Ok(Json(RepositoryListResponse { repositories }))
 }
 
 pub async fn delete_repository(
     State(state): State<WebAppState>,
+    headers: axum::http::HeaderMap,
     Path((project_id, repository_id)): Path<(String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = RepositoryStore::new(product_app_paths(&state));
-    store
-        .delete(&project_id, &repository_id)
+) -> ApiResult<Json<RepositoryDeletionReceipt>> {
+    let app_paths = product_app_paths(&state);
+    ProjectStore::new(app_paths.clone())
+        .get(&project_id)
         .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
+    let operation_id = headers
+        .get("Idempotency-Key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::validation("idempotency_key_required", "Idempotency-Key is required")
+        })?;
+    // R6：纯单仓删除语义（repos.json + 删除回执），不按 project 判定逻辑 feature。
+    RepositoryStore::new(app_paths)
+        .delete(
+            &project_id,
+            &repository_id,
+            DeleteRepositoryCommand {
+                operation_id: operation_id.to_string(),
+                expected_updated_at: None,
+                allow_tombstone_reactivation: false,
+            },
+        )
+        .map(Json)
+        .map_err(product_store_api_error)
 }
 
 pub async fn list_product_issues(
@@ -127,22 +160,280 @@ pub async fn create_product_issue(
     Path(project_id): Path<String>,
     Json(request): Json<CreateProductIssueRequest>,
 ) -> ApiResult<Json<ProductIssueDto>> {
+    let app_paths = product_app_paths(&state);
+    ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+
     let repository_id = request
         .repository_id
+        .as_deref()
         .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
+
+    match request.logical_codebase_id.as_deref() {
+        Some(logical_codebase_id) => create_logical_codebase_issue(
+            &state,
+            &app_paths,
+            &project_id,
+            logical_codebase_id,
+            repository_id,
+            &request,
+        ),
+        None => {
+            // 单仓路径保持 legacy create 语义，绝不写 codebase-selection.json，
+            // 也绝不触碰 LC store（for_project 过渡语义已移除）。
+            let repository = find_repository(&app_paths, &project_id, repository_id)?;
+            // REQ-PIB-01：基准分支创建时解析并锁定（默认链 main→master；皆无且
+            // 未显式选择即 fail-closed 拒绝；显式选择须本地存在）。逻辑代码库
+            // issue（多仓非目标）不经此分支，保持无基线语义。
+            let base_branch =
+                resolve_effective_base_branch(&repository.path, request.base_branch.as_deref())
+                    .map_err(issue_baseline_api_error)?;
+            let store = IssueStore::new(app_paths);
+            let issue = store
+                .create_with_repository(CreateProductIssueWithRepositoryInput {
+                    project_id,
+                    repo_id: repository_id.to_string(),
+                    logical_codebase_id: None,
+                    base_branch: Some(base_branch),
+                    title: request.title,
+                    description: request.description,
+                    change_id: request.change_id,
+                })
+                .map_err(product_store_api_error)?;
+            Ok(Json(product_issue_dto(issue, None)))
+        }
+    }
+}
+
+/// REQ-PIB-01 分支列表端点：默认仓库全部本地分支（refs/heads，不隐式 fetch）
+/// + 服务端默认链（main→master→null）。供创建表单选择器消费；创建时仍按
+///   同一解析规则重新校验（不信任页面加载时的旧列表）。
+pub async fn list_repository_branches(
+    State(state): State<WebAppState>,
+    Path((project_id, repository_id)): Path<(String, String)>,
+) -> ApiResult<Json<RepositoryBranchListResponse>> {
     let app_paths = product_app_paths(&state);
-    let _repository = find_repository(&app_paths, &project_id, &repository_id)?;
-    let store = IssueStore::new(app_paths);
+    let repository = find_repository(&app_paths, &project_id, &repository_id)?;
+    let branches = crate::product::issue_baseline::list_local_branches(&repository.path)
+        .map_err(issue_baseline_api_error)?;
+    let default_branch = match (
+        branches.iter().any(|branch| branch == "main"),
+        branches.iter().any(|branch| branch == "master"),
+    ) {
+        (true, _) => Some("main".to_string()),
+        (false, true) => Some("master".to_string()),
+        (false, false) => None,
+    };
+    Ok(Json(RepositoryBranchListResponse {
+        branches,
+        default_branch,
+    }))
+}
+
+pub(crate) fn issue_baseline_api_error(
+    error: crate::product::issue_baseline::IssueBaselineError,
+) -> ApiError {
+    match error {
+        crate::product::issue_baseline::IssueBaselineError::BranchMissing { .. } => {
+            ApiError::validation("issue_base_branch_not_found", error.diagnosis())
+        }
+        crate::product::issue_baseline::IssueBaselineError::NoDefaultBranch => {
+            ApiError::validation("issue_base_branch_required", error.diagnosis())
+        }
+        crate::product::issue_baseline::IssueBaselineError::GitUnavailable { .. } => {
+            ApiError::validation("repository_branch_list_failed", error.diagnosis())
+        }
+    }
+}
+
+/// 逻辑代码库 issue（v1.3）：guard LC 存在（404）→ primary 校验（须属该 LC active
+/// member）→ focus 勾选集校验（REQ-MRE-01）→ 建 issue 并持久化归属 → 写该 LC
+/// selection（键含 lc_id）：带 focus → Explicit（include=focus=勾选集），否则存量
+/// all_members。
+/// D4 补偿事务：selection 写失败删除刚建 issue → 422；删除亦失败记 orphan → 500。
+fn create_logical_codebase_issue(
+    state: &WebAppState,
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    repository_id: &str,
+    request: &CreateProductIssueRequest,
+) -> ApiResult<Json<ProductIssueDto>> {
+    require_logical_codebase(app_paths, project_id, logical_codebase_id)?;
+    validate_logical_codebase_primary(app_paths, project_id, logical_codebase_id, repository_id)?;
+    // REQ-MRE-01：focus 勾选集先于 issue 创建校验（fail-closed，不留半成品 issue）。
+    let focus = resolve_focus_repository_ids(
+        app_paths,
+        project_id,
+        logical_codebase_id,
+        &request.focus_repository_ids,
+    )?;
+
+    let store = IssueStore::new(app_paths.clone());
     let issue = store
         .create_with_repository(CreateProductIssueWithRepositoryInput {
-            project_id,
-            repo_id: repository_id,
-            title: request.title,
-            description: request.description,
-            change_id: request.change_id,
+            project_id: project_id.to_string(),
+            repo_id: repository_id.to_string(),
+            logical_codebase_id: Some(logical_codebase_id.to_string()),
+            // 多仓差异基线为 Non-Goal：逻辑代码库 issue 不设置基准分支。
+            base_branch: None,
+            title: request.title.clone(),
+            description: request.description.clone(),
+            change_id: request.change_id.clone(),
         })
         .map_err(product_store_api_error)?;
+
+    // REQ-MRE-01：请求带 focus → Explicit selection（include=focus=勾选集，durable
+    // 校验 focus⊆include 恒过，授权上界=勾选集原样，change design 关键点 0）；
+    // 不带/空 → 维持存量 all_members（存量兼容，上界=resolve_effective_members）。
+    let selection = if focus.is_empty() {
+        IssueCodebaseSelection::all_members(project_id, &issue.id, None)
+            .for_logical_codebase(logical_codebase_id)
+    } else {
+        IssueCodebaseSelection::explicit(
+            project_id,
+            &issue.id,
+            focus.clone(),
+            Vec::new(),
+            focus,
+            None,
+        )
+        .for_logical_codebase(logical_codebase_id)
+    };
+    let selection_result = state.test_controls.save_issue_selection(|| {
+        IssueCodebaseSelectionStore::for_lc(app_paths.clone(), logical_codebase_id).save(&selection)
+    });
+    if let Err(selection_error) = selection_result {
+        let delete_result = state
+            .test_controls
+            .delete_issue(|| store.delete(project_id, &issue.id));
+        return match delete_result {
+            Ok(()) => Err(issue_selection_write_failed_api_error()),
+            Err(delete_error) => {
+                tracing::error!(
+                    project_id = %project_id,
+                    issue_id = %issue.id,
+                    original_error = %selection_error,
+                    delete_error = %delete_error,
+                    "orphaned issue after codebase selection write failure"
+                );
+                Err(ApiError::runtime(
+                    "product_store_error",
+                    "product store operation failed",
+                    json!({}),
+                ))
+            }
+        };
+    }
+
     Ok(Json(product_issue_dto(issue, None)))
+}
+
+/// REQ-MRE-01：解析并校验 focus 勾选集。空（缺省/空数组）=未指定成员范围（调用方
+/// 维持存量 all_members）；非空须 ⊆ 该 LC active 成员（logical id），逐项解析 UUID
+/// 并按请求序去重。越界/非 UUID → 422 fail-closed（先于 issue 创建，不留半成品）。
+fn resolve_focus_repository_ids(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    focus: &[String],
+) -> ApiResult<Vec<LogicalRepositoryId>> {
+    if focus.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 与 validate_logical_codebase_primary 同一 for_lc scoping：校验读到的
+    // manifest/member 与 selection 写入、后续规划解析完全一致。
+    let authority = LogicalCodebaseStore::for_lc(app_paths.clone(), logical_codebase_id);
+    let manifest = authority
+        .load_manifest(project_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: logical_codebase_id.to_string(),
+            })
+        })?;
+    let active_member_ids: std::collections::BTreeSet<LogicalRepositoryId> = authority
+        .list_members(project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|member| {
+            manifest.member_ids.contains(&member.logical_repository_id)
+                && member.status == MemberStatus::Active
+        })
+        .map(|member| member.logical_repository_id)
+        .collect();
+
+    let invalid_error = |details: serde_json::Value| {
+        ApiError::validation_with_details(
+            "focus_repository_outside_active_members",
+            "focus_repository_ids must be logical repository ids of active members",
+            details,
+        )
+    };
+    let mut resolved: Vec<LogicalRepositoryId> = Vec::with_capacity(focus.len());
+    let mut unknown: Vec<String> = Vec::new();
+    for raw in focus {
+        let parsed = match uuid::Uuid::parse_str(raw) {
+            Ok(id) => LogicalRepositoryId(id),
+            Err(_) => return Err(invalid_error(json!({ "invalid_repository_id": raw }))),
+        };
+        if active_member_ids.contains(&parsed) {
+            if !resolved.contains(&parsed) {
+                resolved.push(parsed);
+            }
+        } else {
+            unknown.push(raw.clone());
+        }
+    }
+    if !unknown.is_empty() {
+        return Err(invalid_error(json!({ "unknown_repository_ids": unknown })));
+    }
+    Ok(resolved)
+}
+
+/// 逻辑 issue 的 primary 校验：repository_id 必须来自该 LC manifest 的 active member。
+/// 预校验发生在 IssueStore::create_with_repository 之前，避免留下没有 selection 的 issue。
+fn validate_logical_codebase_primary(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    repository_id: &str,
+) -> ApiResult<()> {
+    // 与 routing/resolver 同一 scoping 机制（for_lc）：legacy 默认首个 LC 回退
+    // project 级路径，非 legacy LC 落在 logical-codebases/{lc_id}/ 子树，保证
+    // primary 校验读到的 manifest/member 与后续规划解析完全一致。
+    let authority = LogicalCodebaseStore::for_lc(app_paths.clone(), logical_codebase_id);
+    let manifest = authority
+        .load_manifest(project_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "logical_codebase_manifest",
+                id: logical_codebase_id.to_string(),
+            })
+        })?;
+    let active_members = authority
+        .list_members(project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter(|member| {
+            manifest.member_ids.contains(&member.logical_repository_id)
+                && member.status == MemberStatus::Active
+        })
+        .collect::<Vec<_>>();
+    if active_members.is_empty()
+        || !active_members
+            .iter()
+            .any(|member| member.physical_repository_id == repository_id)
+    {
+        return Err(product_store_api_error(ProductStoreError::NotFound {
+            kind: "repository",
+            id: repository_id.to_string(),
+        }));
+    }
+    Ok(())
 }
 
 pub async fn delete_product_issue(
@@ -209,6 +500,9 @@ pub(super) mod create_repository_tests {
                 default_provider_mode: "claude_code".to_string(),
                 created_at: "2026-07-14T00:00:00Z".to_string(),
                 updated_at: "2026-07-14T00:00:00Z".to_string(),
+                logical_repository_id: None,
+                primary_checkout_id: None,
+                identity_schema_version: 0,
             },
             cadence_skills: CadenceSkillsPreparationSummary {
                 source_mode: "offline".to_string(),

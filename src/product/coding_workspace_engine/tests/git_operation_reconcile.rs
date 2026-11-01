@@ -26,6 +26,7 @@ async fn worktree_prepare_persists_completed_git_operation_journal() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -47,6 +48,85 @@ async fn worktree_prepare_persists_completed_git_operation_journal() {
     assert_eq!(
         git_stdout(&repo, &["rev-parse", &journal.branch_name]).trim(),
         journal.before_head
+    );
+}
+
+#[tokio::test]
+async fn worktree_prepare_issues_evidence_token_and_rewrites_per_attempt() {
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    init_test_git_repo(&repo);
+    let base_branch = git_stdout(&repo, &["branch", "--show-current"])
+        .trim()
+        .to_string();
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+
+    let create_attempt = |branch_name: &str| {
+        store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: base_branch.clone(),
+                branch_name: branch_name.to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
+                    ),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+            })
+            .expect("create attempt")
+    };
+
+    let attempt = create_attempt("aria/work-items/work_item_0001/attempt-1");
+    let updated = engine
+        .execute_worktree_prepare(&attempt, &repo)
+        .await
+        .expect("first worktree prepare");
+    let first_worktree = updated.worktree_path.clone().expect("first worktree path");
+    let first_token = fs::read_to_string(first_worktree.join(".aria/evidence-token"))
+        .expect("first evidence token");
+    assert!(!first_token.trim().is_empty(), "token must be non-empty");
+
+    // 关闭首个 attempt（Created → Aborted），腾出同 work item 的 active 槽位，
+    // 以便创建 attempt_no=2 的新 attempt，验证令牌按 attempt 重写。
+    store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .expect("abort first attempt");
+
+    let second = create_attempt("aria/work-items/work_item_0001/attempt-2");
+    let second_updated = engine
+        .execute_worktree_prepare(&second, &repo)
+        .await
+        .expect("second worktree prepare");
+    let second_token = fs::read_to_string(
+        second_updated
+            .worktree_path
+            .as_ref()
+            .expect("second worktree path")
+            .join(".aria/evidence-token"),
+    )
+    .expect("second evidence token");
+    assert!(
+        !second_token.trim().is_empty(),
+        "second token must be non-empty"
+    );
+    assert_ne!(
+        first_token, second_token,
+        "token must be rewritten per attempt"
     );
 }
 
@@ -74,6 +154,7 @@ async fn cancellation_after_branch_exit_compensates_before_returning_aborted() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -134,6 +215,7 @@ async fn cancellation_after_worktree_add_exit_removes_worktree_and_branch_before
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -199,6 +281,7 @@ async fn cancellation_after_commit_exit_mixed_resets_head_and_preserves_changes(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -289,6 +372,7 @@ async fn cancellation_after_successful_push_exit_records_authoritative_completio
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -385,6 +469,7 @@ async fn cancellation_after_push_exit_keeps_ambiguous_push_started_and_local_com
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -502,6 +587,7 @@ async fn abort_reconciles_unjournaled_worktree_side_effect_before_aborted_status
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -557,4 +643,696 @@ async fn abort_reconciles_unjournaled_worktree_side_effect_before_aborted_status
         .expect("journal persisted");
     assert_eq!(journal.phase, CodingGitOperationPhase::BranchCreated);
     assert_eq!(reconciled.phase, CodingGitOperationPhase::Compensated);
+}
+
+/// 现场形态（2026-10-14 组删 500，coding_attempt_8d1183a5…）：仓库无任何
+/// 远端（journal.remote 是 push 启动时的默认 origin），runner 死在
+/// review_request/push_started。远端未配置 = push 确定未发生——终止
+/// reconcile 不得跑 ls-remote（无远端仓必 fatal → CommandFailed 500），应按
+/// S2a 本地交付同模式以 SkippedNotConfigured 确定性收完 journal。
+#[tokio::test]
+async fn termination_reconcile_completes_push_started_journal_when_remote_not_configured() {
+    use crate::product::coding_models::PushStatus;
+
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    init_test_git_repo(&repo);
+    let base_branch = git_stdout(&repo, &["branch", "--show-current"])
+        .trim()
+        .to_string();
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch,
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    let (prepare_tx, _prepare_rx) = tokio::sync::mpsc::channel(8);
+    let prepared =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), prepare_tx)
+            .execute_worktree_prepare(&attempt, &repo)
+            .await
+            .expect("prepare worktree");
+    let worktree = prepared.worktree_path.clone().expect("worktree path");
+    let head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    // 模拟 runner 死在 push_started：journal 停在 push_started（现场
+    // commit_sha == before_head 同形），无 push 终态。
+    let journal = store
+        .prepare_coding_git_operation(
+            &prepared,
+            PrepareCodingGitOperationInput {
+                kind: CodingGitOperationKind::ReviewRequest,
+                repo_path: repo.canonicalize().expect("canonical repo"),
+                worktree_path: worktree.canonicalize().expect("canonical worktree"),
+                branch_name: prepared.branch_name.clone(),
+                base_branch: prepared.base_branch.clone(),
+                before_head: head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("feat: implement work item".to_string()),
+            },
+        )
+        .expect("seed review journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("advance commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(head.clone()),
+        )
+        .expect("advance commit created");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::PushStarted,
+            None,
+        )
+        .expect("advance push started");
+    assert_eq!(journal.phase, CodingGitOperationPhase::PushStarted);
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let reconciled =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+            .reconcile_coding_git_operation_for_termination(&prepared)
+            .await
+            .expect("termination reconcile converges unconfigured push journal");
+    assert_eq!(reconciled.id, prepared.id);
+
+    let journal = store
+        .get_coding_git_operation(&reconciled)
+        .expect("journal read")
+        .expect("journal persisted");
+    assert_eq!(journal.phase, CodingGitOperationPhase::Completed);
+    assert_eq!(journal.push_status, Some(PushStatus::SkippedNotConfigured));
+    assert_eq!(journal.push_error, None);
+    assert!(journal.review_request_id.is_some());
+    // 收敛只补 journal 终态，不动本地：head 保持原位。
+    assert_eq!(git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(), head);
+}
+
+// ---------------------------------------------------------------------------
+// T19:平台写通道守卫(窗口冻结期间 stage/commit/push/补偿拒绝;窗外不变)
+// ---------------------------------------------------------------------------
+
+use crate::cross_cutting::provider_resources::{
+    ProviderRunResourceScope, ResourceScopeKey, new_boot_identity,
+};
+use crate::product::reviewer_snapshot::{ReviewerSnapshotStore, SnapshotBudget as T19Budget};
+use crate::product::reviewer_window::{ReviewerWindowBeginRequest, begin_review_window};
+use crate::product::reviewer_window_store::ReviewerWindowStore as T19WindowStore;
+
+/// T17 API 直连开窗(单主 scope;空登记 Quiescent 即合法静止证明)。
+async fn t19_open_window(
+    root: &Path,
+    attempt: &CodingExecutionAttempt,
+    worktree: &Path,
+    window_id: &str,
+) -> crate::product::reviewer_window::ReviewerWindowHandle {
+    let window_store = T19WindowStore::new(root.join(".aria").join("reviewer-windows"));
+    let snapshot_store = ReviewerSnapshotStore::new(root.join(".aria").join("reviewer-snapshots"));
+    let private = root.join("t19-scope-private").join(window_id);
+    fs::create_dir_all(&private).expect("scope private root");
+    let scope_store_root = root.join("t19-scope-store");
+    let key = ResourceScopeKey {
+        scope_id: format!("t19-{window_id}"),
+        run_id: format!("run-{window_id}"),
+        boot_identity: new_boot_identity(),
+    };
+    let scope = ProviderRunResourceScope::open_for_recovery(
+        &key,
+        Some(window_id),
+        &private,
+        &scope_store_root,
+        None,
+    )
+    .expect("open scope");
+    let targets: [&ProviderRunResourceScope; 1] = [&scope];
+    begin_review_window(
+        &window_store,
+        &snapshot_store,
+        &ReviewerWindowBeginRequest {
+            window_id,
+            attempt_id: &attempt.id,
+            run_id: &format!("run-{window_id}"),
+            provider: "claude_code",
+            worktree,
+            quiesce_targets: &targets,
+            platform_write_paths: Vec::new(),
+            budget: T19Budget::generous(),
+            drain_timeout: std::time::Duration::from_secs(5),
+        },
+    )
+    .await
+    .expect("open reviewer window")
+}
+
+/// B2/F3 适配:把本窗租约 owner 改写为「真实已死进程」身份(身份字段
+/// 不动,与生产 acquire_lease 接管写同形)——模拟崩溃重启现场:旧
+/// owner 进程确已死亡,启动补偿经租约闸门判死后接管续接。
+fn t19_dead_window_owner(root: &Path, worktree: &Path, window_id: &str) {
+    use crate::cross_cutting::process_manager::process_start_time_ticks;
+    use crate::product::reviewer_window_store::{WindowLeaseRecord, tree_key_of};
+
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn dead owner child");
+    let pid = child.id();
+    let ticks = process_start_time_ticks(pid).expect("dead owner starttime");
+    child.kill().expect("kill dead owner child");
+    child.wait().expect("reap dead owner child");
+
+    let window_store = T19WindowStore::new(root.join(".aria").join("reviewer-windows"));
+    let tree_key = tree_key_of(&worktree.canonicalize().expect("canonical worktree"));
+    let mut lease: WindowLeaseRecord = window_store
+        .load_lease(&tree_key)
+        .expect("load lease")
+        .expect("lease held");
+    assert_eq!(lease.window_id, window_id, "改写前租约必须属本窗");
+    lease.owner_pid = pid;
+    lease.owner_start_ticks = ticks;
+    let path = root
+        .join(".aria")
+        .join("reviewer-windows")
+        .join("leases")
+        .join(format!("{tree_key}.json"));
+    fs::write(
+        &path,
+        serde_json::to_string(&lease).expect("serialize lease"),
+    )
+    .expect("rewrite lease owner");
+}
+
+#[tokio::test]
+async fn review_request_platform_write_rejected_while_window_frozen_resumes_after_release() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("deliver.rs"), "pub fn deliver() {}\n").expect("coder delivery");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-guard-window").await;
+    let head_before = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let staged_before = git_stdout(&worktree, &["diff", "--cached", "--name-only"]);
+
+    // 窗口冻结期间平台交付(stage/commit/push)拒绝,无 Git mutation。
+    let error = engine
+        .execute_review_request(&attempt, "origin", "feat: t19 delivery")
+        .await
+        .expect_err("frozen window must reject platform git write");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        head_before,
+        "no commit may land while frozen"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["diff", "--cached", "--name-only"]),
+        staged_before,
+        "no stage may land while frozen"
+    );
+
+    // 干净回收释放锁(T19 生命周期面)。
+    engine
+        .recycle_reviewer_window(&handle, "t19_teardown")
+        .await
+        .expect("clean recycle releases the tree");
+
+    // 正常 Coder 窗外交付不变:交付照常完成。
+    let request = engine
+        .execute_review_request(&attempt, "origin", "feat: t19 delivery")
+        .await
+        .expect("delivery outside window succeeds");
+    assert_eq!(request.push_status, PushStatus::SkippedNotConfigured);
+    assert_ne!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        head_before,
+        "delivery commit must land after window release"
+    );
+    assert!(
+        store
+            .get_coding_git_operation(&attempt)
+            .expect("journal")
+            .expect("journal persisted")
+            .is_terminal()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_review_commit_compensation_rejected_while_window_frozen() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    // journal 推进到 CommitCreated(真实 commit 已存在;通道依次进出,
+    // CommitCreated 相位无在途登记)。
+    let before_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(worktree.join("committed.rs"), "pub fn committed() {}\n").expect("staged change");
+    git_stdout(&worktree, &["add", "."]);
+    git_stdout(
+        &worktree,
+        &[
+            "-c",
+            "user.email=t19@aria.invalid",
+            "-c",
+            "user.name=t19",
+            "commit",
+            "-qm",
+            "t19 commit",
+        ],
+    );
+    let commit_sha = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            crate::product::coding_attempt_store::PrepareCodingGitOperationInput {
+                kind: crate::product::coding_attempt_store::CodingGitOperationKind::ReviewRequest,
+                repo_path: worktree.clone(),
+                worktree_path: worktree.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head: before_head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("t19 commit".to_string()),
+            },
+        )
+        .expect("prepare journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(commit_sha),
+        )
+        .expect("commit created");
+
+    // 冻结窗口(无在途 writer,直接 Frozen)。
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-comp-window").await;
+
+    // 补偿(reset)被拒:窗口冻结期间平台补偿同样拒绝。
+    let error = engine
+        .compensate_cancelled_review_commit(&attempt, &journal)
+        .await
+        .expect_err("frozen window must reject compensation");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        journal.commit_sha.clone().expect("commit sha"),
+        "compensation reset must not run while frozen"
+    );
+    assert_eq!(
+        store
+            .get_coding_git_operation(&attempt)
+            .expect("journal")
+            .expect("journal persisted")
+            .phase,
+        CodingGitOperationPhase::CommitCreated,
+        "journal stays at CommitCreated for later compensation retry"
+    );
+
+    // 释放后补偿可续接(终止收敛面)。
+    engine
+        .recycle_reviewer_window(&handle, "t19_teardown")
+        .await
+        .expect("recycle");
+    engine
+        .compensate_cancelled_review_commit(&attempt, &journal)
+        .await
+        .expect("compensation resumes after window release");
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        before_head,
+        "reset restores before_head after release"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T19 修复轮 1:F1 补偿 mid-flow 冻结钉测 + resume/terminate 参数化用例
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn compensation_reguards_after_commit_created_advance_when_frozen_mid_flow() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    // journal 停在 CommitStarted,真实 commit 已存在(head != before_head):
+    // 补偿 inner 会先 advance(CommitCreated)——其自愈式 exit-all 清掉
+    // 外层 Compensation 登记——随后才 reset。
+    let before_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(worktree.join("committed.rs"), "pub fn committed() {}\n").expect("staged change");
+    git_stdout(&worktree, &["add", "."]);
+    git_stdout(
+        &worktree,
+        &[
+            "-c",
+            "user.email=t19@aria.invalid",
+            "-c",
+            "user.name=t19",
+            "commit",
+            "-qm",
+            "t19 midflow commit",
+        ],
+    );
+    let commit_sha = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            crate::product::coding_attempt_store::PrepareCodingGitOperationInput {
+                kind: crate::product::coding_attempt_store::CodingGitOperationKind::ReviewRequest,
+                repo_path: worktree.clone(),
+                worktree_path: worktree.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head: before_head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("t19 midflow commit".to_string()),
+            },
+        )
+        .expect("prepare journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+
+    // 复刻外层 enter(Compensation) 成功(冻结前的窗口期)。
+    engine
+        .guard_platform_write_channel(
+            &journal.worktree_path,
+            crate::product::reviewer_window_store::WriteChannelKind::Compensation,
+            &attempt.id,
+        )
+        .expect("outer compensation enter while gate open");
+    // 复刻 inner 第一段:advance(CommitCreated) 的 exit-all 清登记。
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(commit_sha),
+        )
+        .expect("commit created advance clears channel registration");
+    // 冻结恰好发生在 enter 之后(间隙窗口):
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-midflow-window").await;
+
+    // inner 直驱:re-guard 必须拒绝,reset 不在冻结窗口内裸跑。
+    let error = engine
+        .compensate_cancelled_review_commit_inner(&attempt, &journal)
+        .await
+        .expect_err("mid-flow freeze must reject the compensation reset");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        journal.commit_sha.clone().expect("commit sha"),
+        "reset must not run inside the frozen window"
+    );
+
+    engine
+        .recycle_reviewer_window(&handle, "t19 teardown")
+        .await
+        .expect("recycle");
+    engine
+        .compensate_cancelled_review_commit_inner(&attempt, &journal)
+        .await
+        .expect("compensation resumes after release");
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        before_head,
+        "reset restores before_head after release"
+    );
+}
+
+#[tokio::test]
+async fn terminated_attempt_reconcile_rejected_while_window_frozen() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    // journal 推到 CommitCreated(终止路径的补偿输入形态)。
+    let before_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(worktree.join("committed.rs"), "pub fn terminated() {}\n").expect("staged change");
+    git_stdout(&worktree, &["add", "."]);
+    git_stdout(
+        &worktree,
+        &[
+            "-c",
+            "user.email=t19@aria.invalid",
+            "-c",
+            "user.name=t19",
+            "commit",
+            "-qm",
+            "t19 terminate commit",
+        ],
+    );
+    let commit_sha = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            crate::product::coding_attempt_store::PrepareCodingGitOperationInput {
+                kind: crate::product::coding_attempt_store::CodingGitOperationKind::ReviewRequest,
+                repo_path: worktree.clone(),
+                worktree_path: worktree.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head,
+                remote: Some("origin".to_string()),
+                commit_message: Some("t19 terminate commit".to_string()),
+            },
+        )
+        .expect("prepare");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(commit_sha),
+        )
+        .expect("commit created");
+
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-terminate-window").await;
+
+    // terminate(AbortAttempt 收口面):reconcile_for_termination 驱动补偿,
+    // 冻结窗口内被拒——不 partial 收口、HEAD 不动。
+    let error = engine
+        .reconcile_coding_git_operation_for_termination(&attempt)
+        .await
+        .expect_err("termination reconcile must fail closed while frozen");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        journal.commit_sha.clone().expect("commit sha"),
+        "termination compensation must not run while frozen"
+    );
+
+    engine
+        .recycle_reviewer_window(&handle, "t19 teardown")
+        .await
+        .expect("recycle");
+    let reconciled = engine
+        .reconcile_coding_git_operation_for_termination(&attempt)
+        .await
+        .expect("termination reconcile resumes after release");
+    assert_eq!(
+        reconciled.status,
+        crate::product::coding_models::CodingAttemptStatus::Running
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T21:启动补偿驱动——窗口冻结期被拒的取消补偿,在窗口恢复释放后续接
+// ---------------------------------------------------------------------------
+
+/// T21 锁序证明:冻结窗口期间补偿拒绝(T19 已钉);启动补偿先恢复窗口
+/// (restore 将树按原 manifest 回写)→ 释放 → 被拒的 ReviewRequest 取消
+/// 补偿(reset/advance Compensated)在同一驱动内续接完成。复用 T19
+/// lock order(窗口租约/冻结在前,attempt git 补偿只在释放后)。
+#[tokio::test]
+async fn startup_compensation_resumes_cancelled_review_commit_after_window_release() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    // journal 推进到 CommitCreated(真实 commit 已存在;复用 T19 夹具手法)。
+    let before_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(worktree.join("committed.rs"), "pub fn committed() {}\n").expect("staged change");
+    git_stdout(&worktree, &["add", "."]);
+    git_stdout(
+        &worktree,
+        &[
+            "-c",
+            "user.email=t21@aria.invalid",
+            "-c",
+            "user.name=t21",
+            "commit",
+            "-qm",
+            "t21 commit",
+        ],
+    );
+    let commit_sha = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            crate::product::coding_attempt_store::PrepareCodingGitOperationInput {
+                kind: crate::product::coding_attempt_store::CodingGitOperationKind::ReviewRequest,
+                repo_path: worktree.clone(),
+                worktree_path: worktree.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head: before_head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("t21 commit".to_string()),
+            },
+        )
+        .expect("prepare journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(commit_sha),
+        )
+        .expect("commit created");
+    // 取消已决定的形态:attempt 离开 Running(终止态补偿续接面)。
+    store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            crate::product::coding_models::CodingAttemptStatus::Aborted,
+        )
+        .expect("abort attempt");
+
+    // 冻结窗口开在同树(T19 API 直连;无在途 writer,直接 Frozen)。
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t21-comp-window").await;
+    // B2/F3:模拟崩溃重启——开窗进程(旧 owner)确已死亡,启动补偿的
+    // 租约闸门判死后接管,而非对存活 owner 的窗口动树。
+    t19_dead_window_owner(root.path(), &worktree, "t21-comp-window");
+    let error = engine
+        .compensate_cancelled_review_commit(&attempt, &journal)
+        .await
+        .expect_err("frozen window must reject compensation");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+
+    // 「崩溃重启」后的启动补偿驱动:窗口恢复(按原 manifest 回写→
+    // HEAD 回 baseline)→ 释放 → 取消补偿在同一驱动内续接完成。
+    let (driver_tx, _driver_rx) = mpsc::channel(8);
+    let driver = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), driver_tx);
+    let outcomes = driver.compensate_open_reviewer_windows_at_startup().await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].released, "窗口恢复完整且无违规→释放");
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        before_head,
+        "补偿续接完成后 HEAD 回 before_head"
+    );
+    let journal_after = store
+        .get_coding_git_operation(&attempt)
+        .expect("journal")
+        .expect("journal persisted");
+    assert_eq!(
+        journal_after.phase,
+        CodingGitOperationPhase::Compensated,
+        "释放后取消补偿被启动驱动续接"
+    );
+    // 租约/通道已收口:同树可再开窗(死锁反证)。
+    let reopened = t19_open_window(root.path(), &attempt, &worktree, "t21-after-window").await;
+    driver
+        .recycle_reviewer_window(&reopened, "t21_teardown")
+        .await
+        .expect("clean reopen proves release");
+    drop(handle);
 }

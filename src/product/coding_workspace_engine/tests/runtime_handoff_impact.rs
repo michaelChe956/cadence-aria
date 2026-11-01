@@ -78,7 +78,9 @@ fn runtime_handoff_fixture(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     let revision_store = WorkItemRevisionStore::new(store.paths());
@@ -219,6 +221,7 @@ fn runtime_handoff_fixture(
         dependency_graph_revision_id: graph.id,
         validation_report_ref: "validation_report_0002".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0002".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-20T00:00:02Z".to_string(),
     };
     revision_store
@@ -387,8 +390,7 @@ fn runtime_handoff_fixture(
                             .renderer_version()
                             .to_string(),
                     reviewer_provider_renderer_version:
-                        crate::product::work_item_projection::renderer_for(&providers.code_reviewer)
-                            .renderer_version()
+                        crate::product::work_item_projection::renderer_version_for_optional_provider(providers.code_reviewer.as_ref())
                             .to_string(),
                     internal_reviewer_provider_renderer_version: None,
                     coder_projection_hash: registration_bundle.coder_projection_hash.clone(),
@@ -454,6 +456,7 @@ fn runtime_contract(
     capabilities: Vec<&str>,
 ) -> CanonicalWorkItemContract {
     CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_id.to_string(),
@@ -464,6 +467,7 @@ fn runtime_contract(
             summary: logical_id.to_string(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts,
         output_contracts: vec![PromisedOutputContract {
             contract_id: "registration_contract".to_string(),

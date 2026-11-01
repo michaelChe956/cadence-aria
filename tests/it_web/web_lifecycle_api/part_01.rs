@@ -418,47 +418,9 @@ async fn delete_lifecycle_entities_removes_cards_and_workspace_sessions() {
     bootstrap_confirmed_work_item_session(root.path(), ProviderName::Fake, ProviderName::Fake)
         .await;
 
-    let (status, response) = request_json(
-        app.clone(),
-        Method::DELETE,
-        "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(response["status"], "deleted");
-    let (_, lifecycle) = request_json(
-        app.clone(),
-        Method::GET,
-        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 0);
-    assert_eq!(lifecycle["design_specs"].as_array().unwrap().len(), 1);
-    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 1);
-    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 2);
-
-    let (status, response) = request_json(
-        app.clone(),
-        Method::DELETE,
-        "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(response["status"], "deleted");
-    let (_, lifecycle) = request_json(
-        app.clone(),
-        Method::GET,
-        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
-        json!({}),
-    )
-    .await;
-    assert_eq!(lifecycle["design_specs"].as_array().unwrap().len(), 0);
-    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 1);
-    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 1);
-
+    // D2.2 迁移：按引用序「先删后置」——work item 引用 design、design 引用
+    // story（REQ-DEL-03 下倒序会被 entity_referenced 拒）；design 已 confirm，
+    // 须显式确认一次（REQ-DEL-04）。
     let (status, response) = request_json(
         app.clone(),
         Method::DELETE,
@@ -469,12 +431,46 @@ async fn delete_lifecycle_entities_removes_cards_and_workspace_sessions() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["status"], "deleted");
     let (_, lifecycle) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/issues/issue_0001/lifecycle?project_id=project_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 1);
+    assert_eq!(lifecycle["design_specs"].as_array().unwrap().len(), 1);
+    assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 0);
+    assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 2);
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001?confirmed=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["status"], "deleted");
+
+    let (status, response) = request_json(
+        app.clone(),
+        Method::DELETE,
+        // D2.2 迁移：该 story 亦已 confirm（fixture 会话确认），同须确认一次。
+        "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001?confirmed=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "story delete: {response}");
+    assert_eq!(response["status"], "deleted");
+    let (_, lifecycle) = request_json(
         app,
         Method::GET,
         "/api/issues/issue_0001/lifecycle?project_id=project_0001",
         json!({}),
     )
     .await;
+    assert_eq!(lifecycle["story_specs"].as_array().unwrap().len(), 0);
+    assert_eq!(lifecycle["design_specs"].as_array().unwrap().len(), 0);
     assert_eq!(lifecycle["work_items"].as_array().unwrap().len(), 0);
     assert_eq!(lifecycle["workspace_sessions"].as_array().unwrap().len(), 0);
 }
@@ -512,13 +508,7 @@ async fn generating_story_specs_returns_404_when_bound_repository_was_deleted() 
         }),
     )
     .await;
-    request_json(
-        app.clone(),
-        Method::DELETE,
-        "/api/projects/project_0001/repositories/repository_0001",
-        json!({}),
-    )
-    .await;
+    delete_repository_with_idempotency_key(app.clone(), "project_0001", "repository_0001").await;
 
     let (status, error) = request_json(
         app,

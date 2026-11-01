@@ -12,14 +12,7 @@ async fn execute_code_review_forwards_provider_execution_events() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = EventThenCompletedProvider {
         output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
     };
@@ -48,14 +41,7 @@ async fn execute_code_review_persists_role_run_events_while_forwarding_realtime_
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = EventThenCompletedProvider {
         output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
     };
@@ -106,14 +92,7 @@ async fn execute_code_review_persists_provider_control_and_tool_event_payloads()
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = ReviewControlEventProvider;
     let (tx, mut rx) = mpsc::channel(32);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -195,14 +174,7 @@ async fn execute_code_review_records_permission_timeout_as_timeout_event() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = ReviewPermissionTimeoutProvider;
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -250,14 +222,7 @@ async fn execute_internal_pr_review_forwards_provider_execution_events() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .save_review_request(&attempt, &sample_review_request(&attempt.id))
         .expect("save review request");
@@ -289,14 +254,7 @@ async fn execute_code_review_persists_report_and_emits_review_events() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = ReviewStreamingProvider;
@@ -355,6 +313,24 @@ async fn execute_code_review_persists_report_and_emits_review_events() {
             node_id: Some("coding_node_0001".to_string()),
         }
     );
+    // dc54ffb8（C2 Task 1 REQ-CRO-01 durable-first）：完成事实先落盘再发射
+    // 观察事件——complete_timeline_node 的 CodingTimelineNodeUpdated 先于
+    // chat entry 与 CodeReviewComplete（src 侧契约测试
+    // code_review_complete_persists_facts_before_emitting_events 同序钉死）。
+    match rx.recv().await.expect("code review node completed") {
+        CodingWsOutMessage::CodingTimelineNodeUpdated {
+            node_id,
+            status,
+            summary,
+            completed_at,
+        } => {
+            assert_eq!(node_id, "coding_node_0001");
+            assert_eq!(status, CodingTimelineNodeStatus::Completed);
+            assert_eq!(summary.as_deref(), Some("code review 通过"));
+            assert!(completed_at.is_some());
+        }
+        other => panic!("expected code review node completed, got {other:?}"),
+    }
     match rx.recv().await.expect("code review chat entry") {
         CodingWsOutMessage::CodingChatEntryCreated { entry } => {
             assert_eq!(entry.node_id.as_deref(), Some("coding_node_0001"));
@@ -381,20 +357,6 @@ async fn execute_code_review_persists_report_and_emits_review_events() {
         }
         other => panic!("expected code review complete, got {other:?}"),
     }
-    match rx.recv().await.expect("code review node completed") {
-        CodingWsOutMessage::CodingTimelineNodeUpdated {
-            node_id,
-            status,
-            summary,
-            completed_at,
-        } => {
-            assert_eq!(node_id, "coding_node_0001");
-            assert_eq!(status, CodingTimelineNodeStatus::Completed);
-            assert_eq!(summary.as_deref(), Some("code review 通过"));
-            assert!(completed_at.is_some());
-        }
-        other => panic!("expected code review node completed, got {other:?}"),
-    }
 }
 
 #[tokio::test]
@@ -411,14 +373,7 @@ async fn parses_real_provider_review_finding_aliases() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let provider = InputCapturingProvider {
@@ -471,14 +426,7 @@ async fn review_payload_parse_failure_records_blocked_reviewer_evidence() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = InputCapturingProvider {

@@ -4,6 +4,12 @@ use crate::product::coding_models::{
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
+    /// T18 采信契约:`CodeReviewReport`/`InternalPrReview` 的可选
+    /// `acceptance`/`review_window_id` 字段由本 store **忠实透传**,
+    /// 缺字段 = 历史未核验(不默认 Accepted,不改历史 JSON)。本 store
+    /// 不建立第二份采信判定——权威记录是 reviewer window store 的
+    /// `report_acceptance`;交付/approve 消费者必须回查 T18 同源窗口
+    /// 记录,不得只看模型 verdict 或本投影字段。
     pub fn save_code_review_report(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -81,11 +87,42 @@ impl super::CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
     ) -> Result<Vec<ReviewRequest>, ProductStoreError> {
-        super::list_json_records(
+        let mut requests: Vec<ReviewRequest> = super::list_json_records(
             &self
                 .attempt_dir(project_id, issue_id, attempt_id)
                 .join("review-requests"),
+        )?;
+        requests.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(requests)
+    }
+
+    /// PointerPublication 来源的 ReviewRequest 独立分区落盘：
+    /// `pointer-publications/{publication_id}/review-requests/{request_id}.json`。
+    /// 不塞进 attempt_dir（attempt_dir 有 scoped 校验，强绑定 issue/attempt）。
+    /// request_id 建议 `rr-{publication_id}-{member_repo_id}`（每仓一条，可覆盖更新）。
+    pub fn save_pointer_review_request(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+        request: &ReviewRequest,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(&request.id)?;
+        write_json(
+            &self.pointer_review_request_path(project_id, publication_id, &request.id),
+            request,
         )
+    }
+
+    pub fn list_pointer_review_requests(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+    ) -> Result<Vec<ReviewRequest>, ProductStoreError> {
+        super::list_json_records(&self.pointer_review_requests_root(project_id, publication_id))
     }
 
     pub fn save_internal_pr_review(

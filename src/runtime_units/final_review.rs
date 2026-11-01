@@ -9,6 +9,7 @@ use crate::cross_cutting::provider_context_builder::{
 };
 use crate::cross_cutting::provider_router::ProviderRunRequest;
 use crate::cross_cutting::provider_run::provider_run_record_from_output;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{AdapterInput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::runtime_units::{
@@ -144,8 +145,26 @@ pub(crate) fn run_final_provider_node(
 ) -> Result<Value, FinalClosureError> {
     let context = build_provider_context(builder_input(input, node_id))?;
     let adapter_input = final_adapter_input_for_node(&context)?;
+    // 批2 Task 11（硬约束1）：先构 run 请求（真实 provider_run_id，不自造），
+    // 再经受信载体冻结执行合同（legacy Direct 形态 identity=HostCoding/
+    // Coder，T10 裁定）——矩阵失配在 run 之前零副作用拒绝；合同摘要作为
+    // traceability binding 随请求进入 durable run record（实际载体，不丢弃）。
+    let mut request = provider_run_request(node_id, &context.context_package.context_package_id);
+    let execution_contract = crate::runtime_units::freeze_runtime_unit_execution(
+        &input.session_id,
+        node_id,
+        adapter_input.provider_type.clone(),
+        context.context_package.runtime_role.clone(),
+        &request.provider_run_id,
+    )?;
+    request.traceability_binding_refs = vec![format!(
+        "execution_contract:{}",
+        execution_contract.contract_digest()
+    )];
+    // A1-b1(Bug45 批2 环境回退):freeze 点停止注入环境——provider 子进程
+    // 经底座(cli_adapter)继承宿主环境,adapter_input 原样透传(env_vars
+    // 仅作 caller 显式覆盖层);冻结合同摘要仍落 traceability refs。
     let output = provider.run(&adapter_input)?;
-    let request = provider_run_request(node_id, &context.context_package.context_package_id);
     let record = provider_run_record_from_output(&request, &adapter_input, &output);
     let artifact = output
         .structured_output
@@ -275,6 +294,7 @@ fn builder_input(input: &FinalClosureInput, node_id: &str) -> ProviderContextBui
         constraint_summary: "final closure constraints".to_string(),
         context_files: input.context_files.clone(),
         worktree_path: Some(input.worktree_path.clone()),
+        routing_reference_context: RoutingReferenceContext::Legacy,
     }
 }
 

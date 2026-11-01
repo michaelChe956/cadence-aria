@@ -1,12 +1,60 @@
 use super::*;
-use crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference;
+use crate::cross_cutting::structured_output::StructuredOutputContract;
+use crate::product::cadence_skills::routing_reference::{
+    RoutingReferenceContext, generation_cadence_routing_rules_reference,
+};
+use crate::product::logical_codebase::member_reality::MEMBER_REALITY_SECTION_MARKER;
 
 mod author_revision;
+mod baseline_teaching;
+mod history_compaction;
+mod human_gate_revision;
+mod human_gate_revision_prompt;
+mod owner_guidance_rules;
+use owner_guidance_rules::{FINDING_SCOPE_RULES, OWNER_GUIDANCE_RULES};
 mod review;
 mod review_context;
+
+// REQ-WSC-13/14：已处置事实段的构造器对同 crate 的测试面可见（生产调用点
+// 仍在 `review` 与 `single_candidate_input` 两处，故非测试构建下该 re-export
+// 视为未使用）。
+/// 作者阶段结构拒收教学重驱的修复指令复用同一修订教学口径（单源）。
+pub(crate) use human_gate_revision::REVISION_TEACHING;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use review_context::human_dispositions_section;
 mod review_repair;
+mod reviewer_boundary_examples;
 mod reviewer_context_filter;
 mod revision;
+
+use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_history};
+
+// SG5.2 接口 re-export：生产消费在 SG5.3 delivery / SG6a.2 handler 接线，
+// 允许未使用（先例：尚未接线 typed 接口仅测试引用）。
+#[allow(unused_imports)]
+pub(crate) use human_gate_revision::{
+    FrozenStructuralPrompt, LANGUAGE_RULE_FILE_CONTENT, ScCandidateTransport,
+    ScManualRevisionPromptInput, assemble_sc_revision_input, assembly_digest_of,
+    build_sc_manual_revision_prompt, build_structural_revision_prompt, sc_provider_input_budget,
+    validate_sc_manual_revision_feedback,
+};
+#[cfg(test)]
+pub(crate) use human_gate_revision::{
+    SC_MANUAL_REVISION_FEEDBACK_MAX_BYTES, SC_MANUAL_REVISION_PROMPT_QUALITY_BUDGET_BYTES,
+    reassemble_sc_revision_delivery, render_sc_revision_delivery,
+};
+#[cfg(test)]
+pub(crate) use review::review_scope_instructions;
+#[cfg(test)]
+pub(crate) use review_context::{
+    SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES, ensure_single_candidate_review_prompt_budget,
+    single_candidate_previous_round_findings_section,
+};
+
+/// 聚合视野材料块的唯一 marker（`aggregate_scope_material_prompt` 以 `## 聚合代码库成员清单`
+/// 开头）。用于在 `build_streaming_input` 中识别 Logical（有 aggregate scope）Story/Design 会话；
+/// 同时是历史压缩后「多仓 canonical inputs 必须原文重放」的判据（REQ-PLN-13）。
+const AGGREGATE_SCOPE_MARKER: &str = "## 聚合代码库成员清单";
 
 pub(crate) fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
     match workspace_type {
@@ -35,7 +83,8 @@ pub(crate) fn normalize_generation_prompt(
 
 fn initial_author_runtime_contract(
     workspace_type: &WorkspaceType,
-    include_direct_routing_reference: bool,
+    include_routing_reference: bool,
+    context: &RoutingReferenceContext,
 ) -> String {
     let (phase, required_skill) = match workspace_type {
         WorkspaceType::Story => (
@@ -56,16 +105,47 @@ fn initial_author_runtime_contract(
         ),
     };
 
-    let routing_reference = if include_direct_routing_reference {
-        direct_cadence_routing_rules_reference()
+    let routing_reference = if include_routing_reference {
+        generation_cadence_routing_rules_reference(context)
     } else {
-        ""
+        String::new()
     };
 
     format!(
         "{routing_reference}当前阶段：{phase}。\n必调 Skill：{required_skill}。\n前置 gate：仅生成候选产物；Aria 的人工确认与 daemon canonical writeback 边界保持不变。\n\n",
     )
 }
+
+/// REQ-ACS-03 弱模型输出负面清单：Story/Design/Work Item/legacy Work Item Plan 的
+/// author prompt 三个注入点——Web 初次 `[output_schema]`、共享 author output
+/// contract、artifact retry contract——必须引用本常量，禁止各写一份。
+///
+/// 本教学是预防层，不改变 REQ-ACS-01 的 artifact gate 判定语义；Work Item Plan 的
+/// split/outline JSON 结构化输出流（`WorkItemSplitProviderOutput`）不注入本清单。
+pub(crate) const AUTHOR_ARTIFACT_NEGATIVE_LIST: &str = "\
+输出纪律（负面清单）：
+- 最终响应只生成一个完整的顶层 artifact fenced block；不要输出多个完整候选、示意 block，或把早前示例复制成 block。
+- 过程说明、思考与决策解释必须写在最终 artifact fence 之外；不要输出 <thinking>/</thinking> 标签。
+- artifact 正文不得包含另一个 artifact fence。
+- 正文内需要三反引号代码块时，外层使用四反引号 ````artifact ... ```` 包裹；不要用与外层同长度的 fence 造成边界歧义。
+- prompt 中的骨架/示例只是结构说明，不得作为最终候选回显；最终 fence 内第一行必须是当前工作类型的一级标题。
+";
+
+/// F-60 P0（用户裁决 2026-09-26，分层合同注入）：Story/Design markdown author 族
+///（WorkItem/WorkItemPlan 同构）的 prompt 质量预算——无历史、无基线注入夹具下
+/// 「初次生成完整合同装配后」prompt 的字节上限，参照 plan 链
+/// `WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES` 预算先例。
+/// 分层后实测（2026-09-26，empty-session 夹具）：Story 3,583 B / Design 3,076 B
+///（runtime contract + 完整合同 + 决策归档 + 负面清单 + 骨架）；会话历史与基线
+/// 教学注入不计入本预算（由既有滑动窗口/基线预算约束）。
+#[cfg(test)]
+pub(crate) const MARKDOWN_AUTHOR_PROMPT_MAX_BYTES: usize = 6_000;
+
+/// F-60 P0 分层短引用（后续轮：choice 续跑 delta／resume 增量修订）字节上限。
+/// 分层后实测（2026-09-26）：Story 659 B / Design 713 B / WorkItem 587 B /
+/// WorkItemPlan 645 B（对照完整装配块 1-3KB，后续轮每轮省 ~80%）。
+#[cfg(test)]
+pub(crate) const MARKDOWN_AUTHOR_DELTA_REFERENCE_MAX_BYTES: usize = 1_200;
 
 pub(crate) fn build_artifact_retry_prompt(
     workspace_type: &WorkspaceType,
@@ -76,9 +156,12 @@ pub(crate) fn build_artifact_retry_prompt(
     let mut prompt = format!(
         "上一轮已结束，但没有输出完整 artifact。\n\
          不要继续调研，不要只解释。\n\
-         请基于已有上下文和刚才读取的文件，立即输出完整 ```artifact``` {artifact_name}。\n\
-         只能输出一个完整 artifact fenced block；不要拆成多个 artifact block，不要在 artifact 内输出 <thinking>。\n\
-         如仍有需要用户确认的问题，必须先使用 AskUserQuestion 等结构化交互；不要把未解决问题写进最终 artifact 的待确认项/open_items，若 schema 包含待确认项则写“无”。\n"
+         请基于已有上下文和刚才读取的文件，立即输出完整 ```artifact``` {artifact_name}。\n"
+    );
+    prompt.push('\n');
+    prompt.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
+    prompt.push_str(
+        "如仍有需要用户确认的问题，必须先调用本会话可用的结构化交互提问工具（Claude 为 AskUserQuestion；Codex 为 requestUserInput）获得回答后再产出 artifact；不要把未解决问题写进最终 artifact 的待确认项/open_items，若 schema 包含待确认项则写“无”。\n",
     );
     if !blocking_reasons.is_empty() {
         prompt.push_str("\n具体失败原因:\n");
@@ -98,6 +181,7 @@ pub(crate) fn build_artifact_retry_prompt(
     if let Some(schema) = author_artifact_schema_contract_for(workspace_type) {
         prompt.push_str(&schema);
     }
+    prompt.push_str(author_artifact_skeleton_example(workspace_type));
     prompt.push_str(structured_interaction_artifact_decision_contract(
         workspace_type,
     ));
@@ -113,18 +197,148 @@ pub(crate) fn structured_output_nonce() -> String {
         .collect()
 }
 
-pub(crate) fn reviewer_output_contract(nonce: &str, schema: &str, intro: &str) -> String {
+/// F2-B：SC compile 失败教学重驱 prompt（每 candidate 恰一次）。复用
+/// [`build_artifact_retry_prompt`] 的模板形态（「上一轮已结束，但没有输出完整
+/// artifact…不要继续调研，不要只解释…立即输出完整…」）+ compile 错误原文
+/// 逐条回灌 + work-item-plan markdown source 的硬性重驱指令（第一行即文档标题）。
+///
+/// r46 核心修(三角色收敛):并入登记 ID 清单+短规则——compile 教学重驱
+/// 此前只有错误原文+B1 白名单,ID 纪律裸奔(现场:r46 首轮漏填
+/// requirement_id → 重驱改编号/新增清单外编号,震荡不收敛)。清单与
+/// IR 重驱/harness 反馈轮同集(story+design 双源 REQ-/NFR-/AC-)。
+pub(crate) fn build_work_item_plan_compile_reredrive_prompt(
+    blocking_reasons: &[String],
+    registered_requirement_ids: &[String],
+) -> String {
+    let mut prompt = String::from(
+        "上一轮已结束，但没有输出完整的 work-item-plan markdown source。\n\
+         不要继续调研，不要只解释，不要输出任何前言或路由回执。\n\
+         请基于已有上下文和刚才读取的文件，立即输出完整 work-item-plan markdown source；第一行即文档标题 `# Work Item Plan`。\n",
+    );
+    if !blocking_reasons.is_empty() {
+        prompt.push_str("\n具体失败原因:\n");
+        for reason in blocking_reasons {
+            prompt.push_str("- ");
+            prompt.push_str(reason);
+            prompt.push('\n');
+        }
+        // r41 B1(诊断增强):unknown_structured_key 类失败附「合法 section/key
+        // 白名单 + 具体动作」——错误码单行不足以让 AI 自纠(它不知道合法集)。
+        if blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("unknown_structured_key"))
+        {
+            let sections =
+                crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS.join("、");
+            let free =
+                crate::product::work_item_plan_compiler::grammar::FREE_TEXT_SECTIONS.join("、");
+            prompt.push_str(&format!(
+                "\n结构化 section/key 白名单(结构化段只允许这些 key):\n- 结构化: {sections}\n- 自由文本: {free}\n\
+                 动作:删除违例 section,或将其内容并入语义最近的合法 section 后重新输出完整 plan。\n"
+            ));
+        }
+    }
+    // r46 核心修:登记 ID 清单 + 短规则(与 IR 重驱同集;措辞与校验器字面量
+    // 对齐:三元组缺 requirement_id → lowering_error「traceability 缺少
+    // requirement_id」拒绝)。
+    if !registered_requirement_ids.is_empty() {
+        prompt.push_str(&format!(
+            "\n[design_requirements] {}\n\
+             每条 Traceability 三元组 requirement_id 必填且逐字取自上列清单;\
+             修复引用时不重编号、禁止新增清单外 REQ-*/NFR-*/AC-*/TASK;\
+             done_when 只指向已定义编号。\n",
+            registered_requirement_ids.join("、")
+        ));
+    }
+    prompt.push('\n');
+    prompt
+}
+
+/// 聚合 Story/Design author 的 structured output schema（仅 build_streaming_input 注入用）。
+pub(crate) fn aggregate_author_schema_for(workspace_type: &WorkspaceType) -> &'static str {
+    match workspace_type {
+        WorkspaceType::Story => {
+            r#"{"involved_repository_ids":["<logical_repository_id>"],"focus_repository_id":"<logical_repository_id>|null"}"#
+        }
+        WorkspaceType::Design => {
+            r#"{"involved_repository_ids":["<logical_repository_id>"],"change_order":["<logical_repository_id>"]}"#
+        }
+        _ => "",
+    }
+}
+
+pub(crate) fn aggregate_author_schema_name_for(workspace_type: &WorkspaceType) -> &'static str {
+    match workspace_type {
+        WorkspaceType::Story => "story_aggregate",
+        WorkspaceType::Design => "design_aggregate",
+        _ => "",
+    }
+}
+
+/// 聚合 Story/Design author 的 nonce sentinel 输出指令。 The envelope nonce
+/// is authenticated by the single structured-output parser, then removed before
+/// aggregate business schema deserialization.
+///
+/// 缺陷（2026-10-02 E2E story/design 首跑标签形态）：真实 AI 首跑常回显模板
+/// 占位值或省 nonce 属性（E2E 靠反馈样板才收敛）。与 reviewer 契约同款，注入
+/// 「完整示例（占位 nonce，绝不可照抄）+ 实际输出模板（本请求 nonce）+
+/// 替换占位值说明」三段，首跑即钉死标签格式。
+pub(crate) fn aggregate_author_output_contract(nonce: &str, schema: &str) -> String {
+    format!(
+        "\n\n聚合视野结构化输出（aggregate Story/Design 必须提供）：\n\
+         artifact 之外必须额外输出一个 nonce sentinel block 承载聚合视野 JSON，\
+         不得用 Markdown code fence 包裹该 JSON；involved_repository_ids 只能取成员清单中的 \
+         logical_repository_id，不确定即声明 blocker。JSON 顶层 nonce 必须与开始标签一致。\n\
+         完整示例（仅用于理解结构；EXAMPLE_NONCE 是占位值，绝不可照抄）：\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\n\
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n\
+         实际输出模板（把占位值 EXAMPLE_NONCE 替换为本请求 nonce，开始标签属性与 \
+         JSON 顶层必须同为该 nonce）：\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n",
+        schema_with_nonce("EXAMPLE_NONCE", schema),
+        schema_with_nonce(nonce, schema),
+    )
+}
+
+pub(crate) fn reviewer_output_contract(
+    nonce: &str,
+    schema: &str,
+    intro: &str,
+    context: &RoutingReferenceContext,
+) -> String {
     format!(
         "{}\
          当前阶段：候选产物审查。\n\
          必调 Skill：using-superpowers。\n\
          前置 gate：仅只读审核当前材料；Aria 的人工确认与 daemon canonical writeback 边界保持不变。\n\
+         输出硬约束：实际 nonce 开始标签必须是输出第一行；此前禁止任何前言、声明、路由回执、说明、空白行或代码围栏。\n\
          {intro}\
+         {OWNER_GUIDANCE_RULES}\
+         {FINDING_SCOPE_RULES}\
+         完整示例（仅用于理解结构，绝不可照抄 nonce）：\n\
+         <ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\n\
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n\
+         实际输出模板（必须使用本请求 nonce）：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n\
-         {schema}\n\
-         </ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n",
-        direct_cadence_routing_rules_reference(),
+         {}\n\
+         </ARIA_STRUCTURED_OUTPUT>\n",
+        generation_cadence_routing_rules_reference(context),
+        schema_with_nonce("EXAMPLE_NONCE", schema),
+        schema_with_nonce(nonce, schema),
     )
+}
+
+fn schema_with_nonce(nonce: &str, schema: &str) -> String {
+    let schema = schema.trim();
+    let body = schema
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .expect("structured output schema must be a JSON object");
+    format!(r#"{{"nonce":"{nonce}",{body}}}"#)
 }
 
 impl WorkspaceEngine {
@@ -139,16 +353,61 @@ impl WorkspaceEngine {
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
         let provider = self.session.author_provider.clone();
-        let resume_provider_session_id =
-            self.provider_resume_session_id(ProviderConversationRole::Author, &provider);
+        // B1a（Task 4.1，BP2）：先传播 candidateErr（typed 类别保留），
+        // 只有成功候选才提取 native id——错误不参与「fresh 完整 prompt」
+        // 选择，不得折 None 降级。
+        let candidate = self
+            .provider_resume_session_candidate(ProviderConversationRole::Author, &provider)
+            .map_err(|error| error.to_string())?;
+        let resume_provider_session_id = candidate.map(|candidate| candidate.native_id);
+
+        let mut prompt = match prompt_mode {
+            AuthorPromptMode::FullConversation => self.build_prompt(user_content),
+            AuthorPromptMode::DeltaOnly => user_content.to_string(),
+        };
+        // Blocker 1 修复：聚合 Story/Design（session 含聚合视野 context，即 Logical routing）
+        // 协议闭环 —— 给 AI 注入带 nonce 的 ARIA_STRUCTURED_OUTPUT 指令并设置 contract，
+        // 使 write_back_aggregate_output 的 extract_structured_json 能取到 nonce 标签。
+        // 单仓/WorkItemPlan 保持 structured_output_contract: None（红线：单仓行为不变）。
+        let structured_output_contract = if self.is_aggregate_story_or_design() {
+            let nonce = structured_output_nonce();
+            let schema = aggregate_author_schema_for(&self.session.workspace_type);
+            let schema_name = aggregate_author_schema_name_for(&self.session.workspace_type);
+            prompt.push_str(&aggregate_author_output_contract(&nonce, schema));
+            Some(StructuredOutputContract {
+                nonce,
+                schema_name: schema_name.to_string(),
+            })
+        } else {
+            None
+        };
+
+        // REQ-PIB-02：基线解析（不可解析 fail-closed 终止生成，T2.3）+ 软限制
+        // 教学注入（provider 无关——host 通道另有硬边界，见 baseline_teaching_block）。
+        let baseline_tree = self.append_author_baseline_teaching(&mut prompt)?;
+
+        // F-60 P0（因素三 + 用户裁决 2026-09-26 分层合同注入 + 双测算裁决修正）：
+        // 契约出口强制注入——Full/Delta 两模式发出 prompt 前，末端最后可信合同块
+        // 无条件在位，不因历史消息或 delta 原文中出现旧 marker 而省略。分层判据
+        // 与 revision 出口一致，以 resume_provider_session_id 为准（不依赖 adapter
+        // 自称）：可信同一物理会话 resume（DeltaOnly 且有 resume id）= 一行短引用
+        //（会话开头已有完整合同）；fresh／resume 不可用（含 adapter 策略漂移成
+        // fresh）= 完整装配——否则短引用指针悬空。FullConversation 初次 = 完整装配。
+        prompt.push_str(&markdown_author_output_contract_for_round(
+            &self.session.workspace_type,
+            matches!(prompt_mode, AuthorPromptMode::DeltaOnly)
+                && resume_provider_session_id.is_some(),
+            false,
+        ));
 
         Ok(StreamingProviderInput {
+            working_directory: None,
+            baseline_tree,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Orchestrator,
-            prompt: match prompt_mode {
-                AuthorPromptMode::FullConversation => self.build_prompt(user_content),
-                AuthorPromptMode::DeltaOnly => user_content.to_string(),
-            },
+            prompt,
             working_dir,
             workspace_session_id: Some(self.session.session_id.clone()),
             resume_provider_session_id,
@@ -156,10 +415,50 @@ impl WorkspaceEngine {
                 &provider,
                 self.session.permission_modes.author.clone(),
             ),
-            structured_output_contract: None,
+            structured_output_contract,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
+    }
+
+    /// 会话上下文是否包含聚合视野 prompt（web 的 `ensure_workspace_context_message` 在
+    /// Logical routing 下注入 `## 聚合代码库成员清单`）。
+    fn has_aggregate_scope_system_context(&self) -> bool {
+        self.session
+            .messages
+            .iter()
+            .any(|message| message.content.contains(AGGREGATE_SCOPE_MARKER))
+    }
+
+    /// 聚合 Story/Design（Logical routing 且有 aggregate scope）—— structured output 协议生效。
+    fn is_aggregate_story_or_design(&self) -> bool {
+        matches!(
+            self.session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design
+        ) && self.has_aggregate_scope_system_context()
+    }
+
+    /// 聚合规划会话（Story/Design/WorkItemPlan × 聚合视野 context）—— issue
+    /// 基线解析整体跳过（Non-Goal 多仓差异基线）：Logical routing 下
+    /// `session.repository_path` 为聚合根视图（无 `.git`），默认链 `git show-ref`
+    /// 必 128；与 `plan_preflight` 的 repo_id=None 跳过口径对齐。仅用于
+    /// `resolve_issue_baseline_tree` 跳过，不得接入 structured output 合同
+    /// （`aggregate_author_schema_for` 只有 Story/Design 两臂）。
+    fn is_aggregate_planning_session(&self) -> bool {
+        matches!(
+            self.session.workspace_type,
+            WorkspaceType::Story | WorkspaceType::Design | WorkspaceType::WorkItemPlan
+        ) && self.has_aggregate_scope_system_context()
+    }
+
+    /// 多仓形态门禁（REQ-PLN-11）：`logical_provider_gateway` 非空即逻辑
+    /// 代码库 issue（`IssueRecord.logical_codebase_id == Some(_)` 的运行期
+    /// 信号，Web 接入 task 注入 gateway）；未注入即单仓形态。这是后续所有
+    /// 多仓分支的唯一判据。注意与 `is_aggregate_story_or_design` /
+    /// `is_aggregate_planning_session`（聚合视野判据：workspace_type ×
+    /// aggregate scope marker）区分——形态判据只看 gateway 注入，不看视野。
+    pub(crate) fn is_logical_codebase_issue(&self) -> bool {
+        self.logical_provider_gateway().is_some()
     }
 
     pub fn build_work_item_plan_streaming_input(
@@ -168,10 +467,70 @@ impl WorkspaceEngine {
         prompt: String,
         worktree_path: String,
         author_provider: ProviderName,
-    ) -> StreamingProviderInput {
-        let resume_provider_session_id =
-            self.provider_resume_session_id(ProviderConversationRole::Author, &author_provider);
-        StreamingProviderInput {
+        contract_family: PlanAuthorOutputContract,
+    ) -> Result<StreamingProviderInput, String> {
+        let resume_provider_session_id = self
+            .provider_resume_session_candidate(ProviderConversationRole::Author, &author_provider)
+            .map_err(|error| error.to_string())?
+            .map(|candidate| candidate.native_id);
+        self.build_work_item_plan_streaming_input_with_session(
+            provider_type,
+            prompt,
+            worktree_path,
+            author_provider,
+            resume_provider_session_id,
+            contract_family,
+        )
+    }
+
+    /// StaleContext 重建（B3 round3）专用：provider **全新启动**，不携带
+    /// `provider_resume_session_id`（不读取旧 Author conversation），避免以 `--resume`
+    /// 复用旧 provider 原生会话而沿用旧会话内容。legacy 正常 resume 仍走
+    /// `build_work_item_plan_streaming_input`（携带会话 id，行为不变）。
+    pub fn build_work_item_plan_streaming_input_fresh(
+        &self,
+        provider_type: ProviderType,
+        prompt: String,
+        worktree_path: String,
+        author_provider: ProviderName,
+        contract_family: PlanAuthorOutputContract,
+    ) -> Result<StreamingProviderInput, String> {
+        self.build_work_item_plan_streaming_input_with_session(
+            provider_type,
+            prompt,
+            worktree_path,
+            author_provider,
+            None,
+            contract_family,
+        )
+    }
+
+    pub(crate) fn build_work_item_plan_streaming_input_with_session(
+        &self,
+        provider_type: ProviderType,
+        mut prompt: String,
+        worktree_path: String,
+        author_provider: ProviderName,
+        resume_provider_session_id: Option<String>,
+        contract_family: PlanAuthorOutputContract,
+    ) -> Result<StreamingProviderInput, String> {
+        // REQ-PIB-02（T2.3）：基线解析 fail-closed（不可解析终止生成）+ 软限制
+        // 教学注入（provider 无关，kimi 同注入冗余无害）。
+        let baseline_tree = self.append_author_baseline_teaching(&mut prompt)?;
+        // F-60 P0（因素三）：仅对显式声明 Markdown artifact 的 author invocation
+        // 注入同一出口装配（WorkItemPlan gate 全条款）；JSON Outline／Split／
+        // Draft 与 SC compiler-source 保持 Structured，不误拼 Markdown 合同。
+        if matches!(contract_family, PlanAuthorOutputContract::MarkdownArtifact) {
+            prompt.push_str(&markdown_author_output_contract_block(
+                &WorkspaceType::WorkItemPlan,
+                false,
+            ));
+        }
+        Ok(StreamingProviderInput {
+            working_directory: None,
+            baseline_tree,
+            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            audit_sink: None,
             provider_type,
             role: AdapterRole::WorkItemSplitter,
             prompt,
@@ -185,30 +544,43 @@ impl WorkspaceEngine {
             structured_output_contract: None,
             env_vars: BTreeMap::new(),
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
-        }
+        })
     }
 
     pub(crate) fn build_prompt(&self, user_content: &str) -> String {
+        let context = self.routing_reference_context();
         let mut prompt = initial_author_runtime_contract(
             &self.session.workspace_type,
             !self.has_direct_cadence_routing_rules_system_context(),
+            &context,
         );
-        if !self.has_author_artifact_schema_system_context()
-            && let Some(schema) = author_artifact_schema_contract_for(&self.session.workspace_type)
-        {
-            prompt.push_str(&schema);
-        }
+        // F-60 P0（因素三）：schema 契约与骨架不再在 build_prompt 顶部条件注入
+        //（旧逻辑遇 system marker 会整段省略）——由 build_streaming_input 出口
+        // 无条件装配到 prompt 末端，保证末端最后可信合同始终是当前类型全条款。
         let last_current_user_message_index =
             self.session.messages.len().checked_sub(1).filter(|index| {
                 let message = &self.session.messages[*index];
                 message.role == "user" && message.content == user_content
             });
-        for (index, msg) in self.session.messages.iter().enumerate() {
-            if Some(index) == last_current_user_message_index {
-                continue;
-            }
-            prompt.push_str(&format!("[{}]: {}\n", msg.role, msg.content));
-        }
+        let history = compact_history(HistoryCompactionInput {
+            messages: &self.session.messages,
+            artifact_versions: &self.artifact_versions,
+            timeline_nodes: &self.timeline_nodes,
+            latest_review_verdict: self.latest_review_verdict.as_ref(),
+            mode: HistoryCompactionMode::Author,
+            detail_findings: self.is_logical_codebase_issue(),
+        });
+        let history = if let Some(index) = last_current_user_message_index {
+            let current = &self.session.messages[index];
+            history
+                .rendered
+                .strip_suffix(&format!("[{}]: {}\n", current.role, current.content))
+                .unwrap_or(&history.rendered)
+                .to_string()
+        } else {
+            history.rendered
+        };
+        prompt.push_str(&history);
 
         for note in self.missing_context_note_summaries() {
             prompt.push_str(&format!("[user]: {note}\n"));
@@ -223,18 +595,14 @@ impl WorkspaceEngine {
         prompt
     }
 
-    fn has_author_artifact_schema_system_context(&self) -> bool {
-        self.session.messages.iter().any(|message| {
-            message.role == "system" && message.content.contains(ARTIFACT_SCHEMA_CONTRACT_MARKER)
-        })
-    }
-
+    /// 会话 system 上下文是否已含路由引用段标记(`[cadence_project_rules]`)。
+    ///
+    /// Legacy 与 Logical 两变体都以该段标记开头,故判定对两变体同判:上下文已带
+    /// 任一变体时 prompt 不再重复注入。Legacy-only 会话行为与改造前等价(改造前
+    /// 匹配完整 legacy 文本,该文本同样以 `[cadence_project_rules]` 开头)。
     pub(crate) fn has_direct_cadence_routing_rules_system_context(&self) -> bool {
         self.session.messages.iter().any(|message| {
-            message.role == "system"
-                && message
-                    .content
-                    .contains(direct_cadence_routing_rules_reference())
+            message.role == "system" && message.content.contains("[cadence_project_rules]")
         })
     }
 
@@ -273,36 +641,110 @@ impl WorkspaceEngine {
             prompt.push_str(&format!("- {note}\n"));
         }
     }
+}
 
-    pub(crate) fn append_author_artifact_output_contract(
-        &self,
-        prompt: &mut String,
-        mentions_prior_artifact: bool,
-    ) {
-        prompt.push_str("\n\n输出格式契约：");
-        if mentions_prior_artifact {
-            prompt.push_str(
-                "上一版 Artifact 是 daemon 已提取的 markdown，外层 artifact fence 已被剥离；不要把上一版 Artifact 的裸 markdown 形态当作原始返回格式样例。",
-            );
-        } else {
-            prompt.push_str(
-                "当前 provider 会话中的既有 artifact 是 daemon 已提取的 markdown，外层 artifact fence 可能已被剥离；不要把裸 markdown 形态当作原始返回格式样例。",
-            );
-        }
-        prompt.push_str("原始返回必须使用完整 artifact fenced block，fence 内第一行必须是 ");
-        prompt.push_str(workspace_type_title(&self.session.workspace_type));
-        prompt.push_str(
-            " 一级标题。正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact ... ````，避免和内部代码块冲突。\
-             过程说明必须放在 artifact fence 外，最终候选产物必须放在 artifact fence 内。",
+/// F-60 P0（因素三）：Markdown author 输出契约的唯一出口装配（完整形态）。
+///
+/// 以 [`artifact_constraint_spec_for`] 为唯一规则源（经
+/// [`author_artifact_schema_contract_for`] 渲染），同一装配合并：
+/// - fence／一级标题／内部代码块（四反引号）处理与旧稿裸 markdown 防误教；
+/// - 按类型 gate 正文（必需 heading／稳定 ID／追踪 token／禁止项）——**无条件**
+///   渲染当前类型全条款，不因 prompt 或历史中出现 `[artifact_schema_contract]`
+///   旧 marker 而省略；
+/// - choice 决策归档（`author-decision-*` 绑定）；
+/// - 负面清单（[`AUTHOR_ARTIFACT_NEGATIVE_LIST`]）与结构骨架。
+///
+/// 调用点是最终构造 [`StreamingProviderInput::prompt`] 的出口
+/// （`build_streaming_input` 覆盖初次 Full；`build_revision_input_with_resume`
+/// 覆盖 fresh 修订轮；计划流出口按显式合同族），各业务分支不再自行「记得追加」。
+/// 后续轮（DeltaOnly 续跑／resume 增量修订）走
+/// [`markdown_author_output_contract_short_reference`]（用户裁决 2026-09-26 分层）。
+pub(crate) fn markdown_author_output_contract_block(
+    workspace_type: &WorkspaceType,
+    mentions_prior_artifact: bool,
+) -> String {
+    let mut block = String::new();
+    block.push_str("\n\n输出格式契约：");
+    if mentions_prior_artifact {
+        block.push_str(
+            "上一版 Artifact 是 daemon 已提取的 markdown，外层 artifact fence 已被剥离；不要把上一版 Artifact 的裸 markdown 形态当作原始返回格式样例。",
         );
-        if !prompt.contains(ARTIFACT_SCHEMA_CONTRACT_MARKER)
-            && let Some(schema) = author_artifact_schema_contract_for(&self.session.workspace_type)
-        {
-            prompt.push_str(&schema);
+    } else {
+        block.push_str(
+            "当前 provider 会话中的既有 artifact 是 daemon 已提取的 markdown，外层 artifact fence 可能已被剥离；不要把裸 markdown 形态当作原始返回格式样例。",
+        );
+    }
+    block.push_str("原始返回必须使用完整 artifact fenced block，fence 内第一行必须是 ");
+    block.push_str(workspace_type_title(workspace_type));
+    block.push_str(
+        " 一级标题。正文内部包含 ``` 代码块时，外层使用四反引号 ````artifact ... ````，避免和内部代码块冲突。\
+         过程说明必须放在 artifact fence 外，最终候选产物必须放在 artifact fence 内。",
+    );
+    if let Some(schema) = author_artifact_schema_contract_for(workspace_type) {
+        block.push_str(&schema);
+    }
+    block.push_str(structured_interaction_artifact_decision_contract(
+        workspace_type,
+    ));
+    block.push_str("\n\n");
+    block.push_str(AUTHOR_ARTIFACT_NEGATIVE_LIST);
+    block.push_str(author_artifact_skeleton_example(workspace_type));
+    block
+}
+
+/// F-60 P0（用户裁决 2026-09-26，分层合同注入）：出口装配的轮次分发。
+///
+/// - 初次生成（FullConversation／fresh 修订轮／Markdown 直发）＝ 完整装配
+///   （现状语义不变）；
+/// - 后续轮（choice 续跑 delta／resume 增量修订返修）＝ 一行短引用——点名当前
+///   类型全部必需 heading 与关键追踪 token（[REQ-*]/[AC-*]/source id 按类型置换），
+///   指向会话开头的完整合同，不重复全文（实测全合同 1-3KB ×N 轮膨胀上下文）。
+///
+/// 短引用有效性由 P2 真实 provider 测量验证，不够再升级为完整装配。
+pub(crate) fn markdown_author_output_contract_for_round(
+    workspace_type: &WorkspaceType,
+    subsequent_round: bool,
+    mentions_prior_artifact: bool,
+) -> String {
+    if subsequent_round {
+        markdown_author_output_contract_short_reference(workspace_type)
+    } else {
+        markdown_author_output_contract_block(workspace_type, mentions_prior_artifact)
+    }
+}
+
+/// F-60 P0 分层短引用：条目来自 [`author_artifact_short_reference_items`]（同一
+/// `artifact_constraint_spec_for` 规则源），字节预算见
+/// [`MARKDOWN_AUTHOR_DELTA_REFERENCE_MAX_BYTES`]。
+pub(crate) fn markdown_author_output_contract_short_reference(
+    workspace_type: &WorkspaceType,
+) -> String {
+    format!(
+        "\n\n输出格式契约（本轮简引；完整合同见本会话开头的 [artifact_schema_contract]）：\
+         最终返回仍必须是完整 artifact fenced block，fence 内第一行是 {} 一级标题，\
+         正文内代码块用四反引号 ````artifact 外层 fence；{}——续写/返修不得丢失任一项；\
+         已确认的选择仍须按该完整合同记入决策归档（author-decision-*）。",
+        workspace_type_title(workspace_type),
+        author_artifact_short_reference_items(workspace_type),
+    )
+}
+
+fn author_artifact_skeleton_example(workspace_type: &WorkspaceType) -> &'static str {
+    match workspace_type {
+        // Story's six required headings are shown without any REQ/AC, source ID,
+        // or traceability token, so an exact copy is rejected by the artifact gate.
+        WorkspaceType::Story => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Story Spec 标题\n\n## 范围\n\n## 用户故事\n\n## 功能需求\n\n## 成功标准\n\n## 待确认项\n\n## 非功能需求\n```\n"
         }
-        prompt.push_str(structured_interaction_artifact_decision_contract(
-            &self.session.workspace_type,
-        ));
+        WorkspaceType::Design => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺少稳定 ID（[DEC-*]/[CMP-*]/[API-*]）与 source id 追踪 token，不能照抄）：\n```artifact\n# Design Spec 标题\n\n## 设计范围\n\n## 设计决策\n\n## 公共组件\n\n## API 契约\n\n## 数据模型\n\n## 风险\n\n## 追踪关系\n```\n"
+        }
+        WorkspaceType::WorkItem => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Work Item 标题\n\n## 目标\n\n## 范围\n\n## 实现步骤\n\n## 依赖\n\n## 验证命令\n\n## 风险\n\n## 追踪关系\n```\n"
+        }
+        WorkspaceType::WorkItemPlan => {
+            "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n# Work Item Plan 标题\n\n## 计划范围\n\n## 任务拆分\n\n## 依赖图\n\n## 验证计划\n\n## 执行顺序\n\n## 风险\n\n## 追踪关系\n```\n"
+        }
     }
 }
 
@@ -322,5 +764,904 @@ fn structured_interaction_artifact_decision_contract(
         WorkspaceType::WorkItemPlan => {
             "如果本轮或历史会话包含结构化交互审计记录（daemon 捕获的 AskUserQuestion、requestUserInput 或 text_fallback 回答），更新后的 Work Item Plan 必须在计划范围、任务拆分或追踪关系中写明相关用户确认决策 author-decision-*，并绑定到来源 Story/Design ID。"
         }
+    }
+}
+
+/// 聚合评审材料块（进 `[canonical_inputs]` 稳定注入面；REQ-PLN-13）。
+///
+/// - 首行是唯一 marker `AGGREGATE_SCOPE_MARKER`（`has_aggregate_scope_system_context`
+///   据此识别多仓会话；历史压缩后据此判定「多仓 canonical inputs 必须原文重放」）；
+/// - 正文是全量成员清单 + 逐仓实况段（来自 `InventoryInjection.rendered`，已按
+///   500 KiB 预算截断）。实况段以 `MEMBER_REALITY_SECTION_MARKER` 起头，本渲染器
+///   把它整理成独立小节（成员清单小节 + 逐仓实况小节），保证每节标题只出现一次；
+/// - 正文 MUST NOT 出现 `\n\n[`——`generation_brief_section` 以 `\n\n[` 切段，
+///   出现即截断 `[constraint_summary]` 等后续材料段；故空行一律丢弃。
+pub fn aggregate_scope_material_prompt(inventory_rendered: &str) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(AGGREGATE_SCOPE_MARKER);
+    prompt.push('\n');
+    let mut reality_heading_written = false;
+    for line in inventory_rendered.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == MEMBER_REALITY_SECTION_MARKER {
+            // 逐仓实况段标题只渲染一次（重复出现不重复渲染标题）。
+            if reality_heading_written {
+                continue;
+            }
+            reality_heading_written = true;
+            prompt.push_str(MEMBER_REALITY_SECTION_MARKER);
+            prompt.push('\n');
+            continue;
+        }
+        prompt.push_str(line);
+        prompt.push('\n');
+    }
+    prompt
+}
+
+/// 逻辑代码库分支的 Story 指令块（留消息尾部；成员清单材料块见
+/// `aggregate_scope_material_prompt`）。
+///
+/// 附加「必须列出涉及仓库，不确定即 blocker」指令。`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威），用于在指令中明示可选仓库范围。
+///
+/// 接入点：由 Web Story 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
+/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取
+/// `inventory_injection` 后注入）。
+pub fn aggregate_story_scope_instruction_prompt(
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("## 聚合视野要求\n");
+    prompt.push_str(
+        "本次 Story 位于聚合代码库。你必须在 artifact 中明确列出涉及的逻辑仓库 \n\
+         (`involved_repository_ids`，只能取上述成员清单中的 logical_repository_id)。\n\
+         若无法确定具体涉及仓库，必须明确声明并进入 blocker，禁止猜测、禁止默认全部成员、\n\
+         禁止回落到任意单一仓库。",
+    );
+    append_optional_member_range(
+        &mut prompt,
+        effective_member_ids,
+        "可选仓库范围（logical_repository_id）：",
+    );
+    prompt
+}
+
+/// 在指令块尾部追加可选仓库范围（有效成员 ID 列表）。
+fn append_optional_member_range(
+    prompt: &mut String,
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+    label: &str,
+) {
+    if effective_member_ids.is_empty() {
+        return;
+    }
+    prompt.push('\n');
+    prompt.push_str(label);
+    for member in effective_member_ids {
+        prompt.push_str(&format!("\n- {member:?}"));
+    }
+}
+
+/// 逻辑代码库分支的 Design 指令块（留消息尾部；成员清单材料块见
+/// `aggregate_scope_material_prompt`）。
+///
+/// 附加「必须列出涉及仓库与改动顺序，不确定即 blocker」指令。`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威），用于在指令中明示可选仓库范围。
+///
+/// 与 `aggregate_story_scope_instruction_prompt` 同模式：`involved_repository_ids` 只能取
+/// 成员清单中的 logical_repository_id；`change_order` 作为 WorkItem `depends_on` 依据，
+/// 顺序为执行顺序图（如「先改公共契约 → 再改 provider → 最后改 consumer」），必须恰好覆盖
+/// 全部 involved 仓库且不重复；AI 不确定涉及仓库或顺序时必须进入 blocker，禁止猜测、
+/// 禁止默认全部成员、禁止回落到任意单一仓库。
+///
+/// 接入点：由 Web Design 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
+/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取
+/// `inventory_injection` 后注入）。
+///
+/// pi-7 钉定缺口根修（e78a97c6）：调用方钉定此前只落 record 出生值，不进 AI 输入
+/// ——AI sentinel 自决声明经方案X阶段2 write-back 覆写钉定值，Confirmed 后 plan
+/// 单候选 preflight 按设计硬拒。
+///
+/// add-multi-repo-issue-entry（组2 2.1）钉定块上界化：`pinned_bound` 非空时注入
+/// 「聚合视野上界钉定」块——勾选授权集是**硬上界**：involved 必须是其**非空子集**
+/// （实际涉及仓可少于上界，AI 界内收敛），**界外即拒**（write-back 拒回写，范围
+/// 异议走 artifact blocker 修订反馈）。取代 e78a97c6 的「原样输出」精确回显语义
+/// （其禁止少于钉定与「AI 在勾选范围内收敛 involved」的产品语义冲突）。
+/// 上界与出生值/write-back/preflight 四面同源（`IssueCodebaseSelection::
+/// resolved_upper_bound`）；未钉定（空）保持 AI 自决指令面不变。
+pub fn aggregate_design_scope_instruction_prompt(
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+    pinned_bound: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("## 聚合视野要求\n");
+    prompt.push_str(
+        "本次 Design 位于聚合代码库。你必须在 artifact 中明确列出涉及的逻辑仓库 \n\
+         (`involved_repository_ids`，只能取上述成员清单中的 logical_repository_id)。\n\
+         若无法确定具体涉及仓库，必须明确声明并进入 blocker，禁止猜测、禁止默认全部成员、\n\
+         禁止回落到任意单一仓库。\n\n",
+    );
+    prompt.push_str(
+        "改动顺序（change_order）是执行顺序图而非服务调用图，将作为后续 Work Item 的 \n\
+         depends_on 依据。change_order 必须恰好覆盖全部 involved_repository_ids 且不重复；\n\
+         顺序按契约依赖推进，例如「先改公共契约 → 再改 provider → 最后改 consumer」。\n\
+         若无法确定涉及仓库或改动顺序，必须明确声明并进入 blocker，禁止猜测。",
+    );
+    if !pinned_bound.is_empty() {
+        let bound_list = pinned_bound
+            .iter()
+            .map(|member| member.0.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        prompt.push_str("\n\n## 聚合视野上界钉定（调用方授权范围，界外即拒）\n");
+        prompt.push_str(&format!(
+            "本次 Design 的聚合视野上界已由调用方钉定（与 issue 勾选集同源）：\n\
+             - involved_repository_ids 上界 = [{bound_list}]\n\
+             你的 <ARIA_STRUCTURED_OUTPUT> sentinel 必须遵守：\n\
+             - involved_repository_ids 必须是上界的非空子集：实际涉及的仓库可少于上界\n\
+               （允许界内子集收敛），但不得为空；\n\
+             - 任何界外仓出现在 sentinel 中即被拒绝（回写不生效）：若你判断改动确需\n\
+               界外仓，必须在 artifact 正文中声明 blocker 并说明理由，\n\
+               禁止 sentinel 自决越界；\n\
+             - change_order 必须恰好覆盖你声明的 involved_repository_ids（全部界内）\n\
+               且不重复，依赖顺序由你确定。"
+        ));
+    }
+    append_optional_member_range(
+        &mut prompt,
+        effective_member_ids,
+        "可选仓库范围（logical_repository_id）：",
+    );
+    prompt
+}
+
+/// 逻辑代码库分支的 WorkItem 指令块（留消息尾部；成员清单材料块见
+/// `aggregate_scope_material_prompt`）。
+///
+/// Outline 的每一个 item 都必须声明目标逻辑仓库。候选 Draft 将逐字继承该 target，
+/// Final Compile 只接受 `IssueCodebaseSelection` 的有效成员，绝不猜测目标仓库。
+pub fn aggregate_work_item_target_scope_instruction_prompt(
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("## WorkItem 目标仓库要求\n");
+    prompt.push_str(
+        "本次 WorkItem Plan 位于聚合代码库。work_item_outlines[] 的每一项必须提供 \\\n         target_repository_id，且只能取上述成员清单中的 logical_repository_id。\\n\
+         target_repository_id 不确定、缺失或不在有效成员中时必须进入 blocker；禁止猜测、\\n\
+         禁止回落到任意单一仓库。多个 WorkItem 可以使用同一 target_repository_id。",
+    );
+    append_optional_member_range(
+        &mut prompt,
+        effective_member_ids,
+        "可选目标仓库范围（logical_repository_id）：",
+    );
+    prompt
+}
+
+/// 逻辑代码库分支的 WorkItem Outline prompt 注入片段（材料块 + 指令块）。
+///
+/// 该调用方（WorkItem Plan legacy author）把片段整体接在 provider prompt 末尾，
+/// 没有 `[canonical_inputs]` 稳定注入面，故此处一次性给出材料块与指令块。
+pub fn aggregate_work_item_target_scope_prompt(
+    inventory_rendered: &str,
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::from("\n\n");
+    prompt.push_str(&aggregate_scope_material_prompt(inventory_rendered));
+    prompt.push_str(&aggregate_work_item_target_scope_instruction_prompt(
+        effective_member_ids,
+    ));
+    prompt
+}
+
+#[cfg(test)]
+mod aggregate_work_item_target_scope_prompt_tests {
+    use super::aggregate_work_item_target_scope_prompt;
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use uuid::Uuid;
+
+    #[test]
+    fn aggregate_work_item_target_scope_prompt_requires_member_target_and_blocker() {
+        let api = LogicalRepositoryId(Uuid::from_u128(1));
+        let web = LogicalRepositoryId(Uuid::from_u128(2));
+        let prompt = aggregate_work_item_target_scope_prompt("api | service", &[api, web]);
+
+        assert!(
+            prompt.contains("聚合代码库成员清单"),
+            "缺成员清单材料块：{prompt}"
+        );
+        assert!(prompt.contains("api | service"), "缺成员行：{prompt}");
+        assert!(prompt.contains("target_repository_id"));
+        assert!(prompt.contains("只能取上述成员清单"));
+        assert!(
+            prompt.contains("禁止回落到任意单一仓库"),
+            "缺禁止单一仓库回落指令：{prompt}"
+        );
+        assert!(
+            !prompt.to_lowercase().contains("primary"),
+            "WorkItem 目标仓库 prompt 不得再出现 primary 字样(REQ-PLN-11 条目 1)：{prompt}"
+        );
+        assert!(prompt.contains("00000000-0000-0000-0000-000000000001"));
+        assert!(prompt.contains("00000000-0000-0000-0000-000000000002"));
+    }
+}
+
+#[cfg(test)]
+mod aggregate_scope_prompt_tests {
+    use super::{
+        aggregate_design_scope_instruction_prompt, aggregate_scope_material_prompt,
+        aggregate_story_scope_instruction_prompt,
+    };
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use uuid::Uuid;
+
+    const fn stable_uuid(seed: u16) -> Uuid {
+        let mut bytes = [0u8; 16];
+        bytes[14] = (seed >> 8) as u8;
+        bytes[15] = seed as u8;
+        bytes[6] = 0x70;
+        bytes[8] = 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    const API: LogicalRepositoryId = LogicalRepositoryId(stable_uuid(0x0001));
+    const WEB: LogicalRepositoryId = LogicalRepositoryId(stable_uuid(0x0002));
+
+    /// REQ-PLN-13：材料块正文不得出现裸段界 `\n\n[`——`generation_brief_section` 以
+    /// `\n\n[` 切段，出现即截断 `[constraint_summary]` 等后续材料段。
+    #[test]
+    fn aggregate_material_block_has_no_bare_bracket_break() {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n\n[oops]\n";
+        let material = aggregate_scope_material_prompt(inventory);
+
+        assert!(
+            !material.contains("\n\n["),
+            "材料块不得含裸段界（会截断后续材料段）：{material}"
+        );
+    }
+
+    /// 材料块必须保留聚合 scope marker（多仓会话判据）与全量成员清单。
+    #[test]
+    fn aggregate_scope_marker_preserved_in_material() {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let material = aggregate_scope_material_prompt(inventory);
+
+        assert!(
+            material.starts_with(super::AGGREGATE_SCOPE_MARKER),
+            "材料块首行必须是聚合 scope marker：{material}"
+        );
+        assert!(
+            material.contains("api/ | service"),
+            "材料块缺成员行：{material}"
+        );
+    }
+
+    /// REQ-PLN-13：材料块落在 `[canonical_inputs]` 稳定注入面后，reviewer 侧按
+    /// `generation_brief_section` 抽取该段时必须仍能看到完整成员清单（不被段界截断）。
+    #[test]
+    fn aggregate_material_survives_reviewer_canonical_inputs_extraction() {
+        let material = aggregate_scope_material_prompt(
+            "00000000-0000-7000-8000-000000000001 | api | api/ | service\n",
+        );
+        let message = crate::product::workspace_engine::SessionMessage {
+            id: "msg_001".to_string(),
+            role: "system".to_string(),
+            content: format!(
+                "Workspace 生成任务已准备\n\n[system]\n{system}\n\n[canonical_inputs]\nWorkspace 类型: Story\nRepository 路径: /repo\n{material}关联上下文:\n\n\n[constraint_summary]\n约束。",
+                system = "story spec",
+            ),
+            checkpoint_id: None,
+            created_at: "2026-10-23T00:00:00Z".to_string(),
+        };
+
+        let reviewer = super::reviewer_context_filter::reviewer_context_content(&message)
+            .expect("reviewer context");
+
+        assert!(
+            reviewer.contains("[canonical_inputs]"),
+            "reviewer 上下文必须取自 canonical inputs 段：{reviewer}"
+        );
+        assert!(
+            reviewer.contains("api/ | service"),
+            "reviewer 上下文必须保留成员清单：{reviewer}"
+        );
+        assert!(
+            reviewer.contains("约束。"),
+            "canonical inputs 截断不得影响后续段：{reviewer}"
+        );
+    }
+
+    /// REQ-PLN-14：材料块 MUST 保留逐仓实况段（每仓 5 行），且实况段标题只出现一次。
+    #[test]
+    fn aggregate_material_block_keeps_member_reality_section() {
+        let material = format!(
+            "00000000-0000-7000-8000-000000000001 | api | api/ | service\n{}\n\
+             职责: 后端服务（成员 00000000-0000-7000-8000-000000000001）\n\
+             关键目录: src/（成员 00000000-0000-7000-8000-000000000001）\n\
+             入口: Cargo.toml（成员 00000000-0000-7000-8000-000000000001）\n\
+             构建/测试命令: cargo test（成员 00000000-0000-7000-8000-000000000001）\n\
+             基线: feature/api（成员 00000000-0000-7000-8000-000000000001）\n",
+            super::MEMBER_REALITY_SECTION_MARKER,
+        );
+
+        let block = aggregate_scope_material_prompt(&material);
+
+        assert!(
+            block.contains("api/ | service"),
+            "材料块必须保留成员清单：{block}"
+        );
+        assert!(
+            block.contains(super::MEMBER_REALITY_SECTION_MARKER),
+            "材料块必须保留逐仓实况段：{block}"
+        );
+        for label in ["职责", "关键目录", "入口", "构建/测试命令", "基线"] {
+            assert!(
+                block.contains(&format!("{label}:")),
+                "逐仓实况段必须含「{label}」行：{block}"
+            );
+        }
+        assert!(
+            block.contains("基线: feature/api"),
+            "逐仓基线必须可见：{block}"
+        );
+        assert_eq!(
+            block
+                .lines()
+                .filter(|line| line.trim() == super::MEMBER_REALITY_SECTION_MARKER)
+                .count(),
+            1,
+            "逐仓实况段标题只出现一次：{block}"
+        );
+        assert!(!block.contains("\n\n["), "材料块不得含裸段界：{block}");
+    }
+
+    #[test]
+    fn aggregate_story_scope_instruction_prompt_lists_inventory_and_blocker_directive() {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_story_scope_instruction_prompt(&[API, WEB]),
+        );
+
+        assert!(
+            prompt.contains("聚合代码库成员清单"),
+            "缺成员清单标题：{prompt}"
+        );
+        assert!(prompt.contains("api/ | service"), "缺成员行：{prompt}");
+        assert!(
+            prompt.contains("involved_repository_ids"),
+            "缺 involved_repository_ids 指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("禁止回落到任意单一仓库"),
+            "缺禁止单一仓库回落指令：{prompt}"
+        );
+        assert!(
+            !prompt.to_lowercase().contains("primary"),
+            "聚合视野 prompt 不得再出现 primary 字样(REQ-PLN-11 条目 1)：{prompt}"
+        );
+        // 有效成员 ID 列出以限定 involved 取值范围。
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000002"));
+    }
+
+    #[test]
+    fn aggregate_design_scope_instruction_prompt_lists_inventory_involved_change_order_and_blocker()
+    {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_design_scope_instruction_prompt(&[API, WEB], &[]),
+        );
+
+        assert!(
+            prompt.contains("聚合代码库成员清单"),
+            "缺成员清单标题：{prompt}"
+        );
+        assert!(prompt.contains("api/ | service"), "缺成员行：{prompt}");
+        assert!(
+            prompt.contains("involved_repository_ids"),
+            "缺 involved_repository_ids 指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("禁止回落到任意单一仓库"),
+            "缺禁止单一仓库回落指令：{prompt}"
+        );
+        assert!(
+            !prompt.to_lowercase().contains("primary"),
+            "聚合视野 prompt 不得再出现 primary 字样(REQ-PLN-11 条目 1)：{prompt}"
+        );
+        // change_order 作为 WorkItem depends_on 依据，且必须恰好覆盖全部 involved 仓库。
+        assert!(
+            prompt.contains("change_order"),
+            "缺 change_order 指令：{prompt}"
+        );
+        assert!(
+            prompt.contains("depends_on"),
+            "缺 depends_on 依据说明：{prompt}"
+        );
+        assert!(
+            prompt.contains("先改公共契约") && prompt.contains("最后改 consumer"),
+            "缺改动顺序示例（公共契约 → provider → consumer）：{prompt}"
+        );
+        assert!(
+            prompt.contains("恰好覆盖全部 involved_repository_ids"),
+            "缺 change_order 覆盖 involved 指令：{prompt}"
+        );
+        // 不确定涉及仓库或改动顺序 → blocker，禁止猜测。
+        assert!(
+            prompt.contains("进入 blocker，禁止猜测"),
+            "缺 blocker 指令：{prompt}"
+        );
+        // 有效成员 ID 列出以限定 involved 取值范围。
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
+        assert!(prompt.contains("00000000-0000-7000-8000-000000000002"));
+    }
+
+    #[test]
+    fn aggregate_design_scope_instruction_prompt_pins_upper_bound_allowing_subset_and_rejecting_out_of_bound()
+     {
+        // add-multi-repo-issue-entry(组2 2.1):钉定块上界化——勾选集(selection.focus,
+        // resolved 同源)是硬上界:AI 在界内收敛 involved(允许非空子集),界外即拒;
+        // 取代 e78a97c6 的「原样输出」精确回显语义(那要求 AI 不得少于钉定,与
+        // 「实际涉及仓可少于勾选」的产品语义冲突)。
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_design_scope_instruction_prompt(&[API, WEB], &[API]),
+        );
+
+        assert!(
+            prompt.contains("聚合视野上界钉定"),
+            "缺上界钉定块标题：{prompt}"
+        );
+        assert!(
+            prompt
+                .contains("involved_repository_ids 上界 = [00000000-0000-7000-8000-000000000001]"),
+            "缺上界集合实值：{prompt}"
+        );
+        assert!(
+            prompt.contains("非空子集"),
+            "缺子集允许措辞（实际涉及仓可少于上界）：{prompt}"
+        );
+        assert!(
+            prompt.contains("界外") && prompt.contains("拒绝"),
+            "缺界外即拒措辞：{prompt}"
+        );
+        assert!(
+            prompt.contains("声明 blocker"),
+            "缺范围异议修订出口：{prompt}"
+        );
+        assert!(
+            !prompt.contains("原样输出"),
+            "上界语义不得保留原样输出指令（与子集收敛矛盾）：{prompt}"
+        );
+    }
+
+    #[test]
+    fn aggregate_design_scope_instruction_prompt_unpinned_keeps_self_decide_directive_only() {
+        // 不钉定(AI 自决流)保持原指令面,无钉定块——语义不回归。
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_design_scope_instruction_prompt(&[API, WEB], &[]),
+        );
+
+        assert!(
+            !prompt.contains("聚合视野上界钉定"),
+            "未钉定不应出现上界钉定块：{prompt}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod routing_reference_prompt_tests {
+    use super::*;
+    use crate::product::cadence_skills::routing_reference::{
+        LogicalPolicyReference, RoutingReferenceContext,
+    };
+
+    fn logical_context() -> RoutingReferenceContext {
+        RoutingReferenceContext::Logical(LogicalPolicyReference {
+            policy_id: "policy/project_0001/logical_0001/3".into(),
+            policy_revision: 3,
+            policy_digest: "sha256:abc123".into(),
+            authority_root: "/data/aria/aggregate/policy".into(),
+        })
+    }
+
+    #[test]
+    fn initial_author_runtime_contract_legacy_uses_on_demand_generation_reference() {
+        let prompt = initial_author_runtime_contract(
+            &WorkspaceType::Story,
+            true,
+            &RoutingReferenceContext::Legacy,
+        );
+        assert!(prompt.contains("按需查阅"), "{prompt}");
+        assert!(prompt.contains("忽略规则约束"), "{prompt}");
+        assert!(!prompt.contains("项目规则未加载"), "{prompt}");
+        assert!(!prompt.contains("完整读取"), "{prompt}");
+        assert!(!prompt.contains("只报告阻塞"), "{prompt}");
+        assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
+    }
+
+    #[test]
+    fn initial_author_runtime_contract_logical_declares_policy_envelope() {
+        let prompt =
+            initial_author_runtime_contract(&WorkspaceType::Story, true, &logical_context());
+        assert!(
+            prompt.contains("authority_root: /data/aria/aggregate/policy"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("policy_id: policy/project_0001/logical_0001/3"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("policy_revision: 3"), "{prompt}");
+        assert!(prompt.contains("sha256:abc123"), "{prompt}");
+        assert!(prompt.contains("不作为政策正文"), "{prompt}");
+        assert!(prompt.contains("只报告阻塞"), "{prompt}");
+    }
+
+    #[test]
+    fn author_skeletons_are_gate_incomplete_and_reviewer_example_uses_an_unissued_nonce() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+            WorkspaceType::WorkItemPlan,
+        ] {
+            let expected_prefix = match workspace_type {
+                WorkspaceType::Design => {
+                    "\n\n最小结构骨架示例（仅示意 heading，缺少稳定 ID（[DEC-*]/[CMP-*]/[API-*]）与 source id 追踪 token，不能照抄）：\n```artifact\n"
+                }
+                _ => {
+                    "\n\n最小结构骨架示例（仅示意 heading，缺稳定 ID、REQ/AC 与追踪 token，不能照抄）：\n```artifact\n"
+                }
+            };
+            let skeleton = author_artifact_skeleton_example(&workspace_type)
+                .strip_prefix(expected_prefix)
+                .and_then(|value| value.strip_suffix("```\n"))
+                .expect("skeleton has the expected artifact fence");
+            assert!(
+                !validate_workspace_artifact_constraints(skeleton, &workspace_type).passed,
+                "{workspace_type:?} skeleton must not pass the artifact gate"
+            );
+        }
+
+        let reviewer = reviewer_output_contract(
+            "96aca42f",
+            r#"{"verdict":"pass|revise|needs_human","summary":"...","findings":[]}"#,
+            "intro",
+            &RoutingReferenceContext::Legacy,
+        );
+        assert!(reviewer.contains("nonce=\"EXAMPLE_NONCE\""));
+        assert!(reviewer.contains("\"nonce\":\"EXAMPLE_NONCE\""));
+        assert!(reviewer.contains("\"nonce\":\"96aca42f\""));
+        assert!(
+            reviewer.find("EXAMPLE_NONCE").expect("example")
+                < reviewer.find("96aca42f").expect("actual nonce")
+        );
+    }
+
+    #[test]
+    fn reviewer_output_contract_logical_declares_policy_envelope() {
+        let prompt = reviewer_output_contract("nonce", "{}", "intro", &logical_context());
+        assert!(
+            prompt.contains("authority_root: /data/aria/aggregate/policy"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("policy_id: policy/project_0001/logical_0001/3"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("policy_revision: 3"), "{prompt}");
+        assert!(prompt.contains("sha256:abc123"), "{prompt}");
+        assert!(prompt.contains("不作为政策正文"), "{prompt}");
+        assert!(prompt.contains("只报告阻塞"), "{prompt}");
+    }
+}
+
+#[cfg(test)]
+mod reredrive_prompt_tests {
+    use super::build_work_item_plan_compile_reredrive_prompt;
+
+    /// r41 B1:unknown_structured_key 类失败的重驱 prompt 必须附 14 合法
+    /// section/key 白名单与具体动作(AI 不知道合法集就无法自纠)。
+    #[test]
+    fn compile_reredrive_prompt_lists_section_whitelist_for_unknown_key() {
+        let reasons = vec!["unknown_structured_key:1:未知结构化 key `NotAPermission`".to_string()];
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
+        assert!(prompt.contains("unknown_structured_key"));
+        assert!(
+            prompt.contains("结构化: Identity"),
+            "白名单必须列出合法 section 集: {prompt}"
+        );
+        assert!(prompt.contains("Traceability"));
+        assert!(
+            prompt.contains("删除违例 section"),
+            "必须给具体动作: {prompt}"
+        );
+    }
+
+    /// 对照:非 unknown_structured_key 失败不附白名单(保持既有形态)。
+    #[test]
+    fn compile_reredrive_prompt_keeps_plain_form_without_unknown_key() {
+        let reasons = vec!["missing_section:0:缺 Identity".to_string()];
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
+        assert!(!prompt.contains("白名单"));
+    }
+
+    /// r46 核心修 TDD(精确复现 r46 首轮漏填形态):compile 教学重驱 prompt
+    /// 必须含真实登记清单+必填规则——此前只有错误原文+B1 白名单,ID 纪律
+    /// 裸奔,重驱改编号/新增清单外编号震荡不收敛。
+    #[test]
+    fn compile_reredrive_prompt_carries_registered_ids_and_discipline() {
+        let reasons = vec!["lowering_error:42:traceability 缺少 requirement_id。".to_string()];
+        let registered = vec![
+            "REQ-ENV-01".to_string(),
+            "NFR-PERF-02".to_string(),
+            "AC-001".to_string(),
+        ];
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &registered);
+        assert!(
+            prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02、AC-001"),
+            "真实登记清单(双源同集 REQ/NFR/AC)必须并入: {prompt}"
+        );
+        assert!(
+            prompt.contains("requirement_id 必填且逐字取自上列清单"),
+            "必填规则必须在场: {prompt}"
+        );
+        assert!(
+            prompt.contains("不重编号、禁止新增清单外 REQ-*/NFR-*/AC-*/TASK"),
+            "修复纪律必须在场: {prompt}"
+        );
+        assert!(
+            prompt.contains("done_when 只指向已定义编号"),
+            "done_when 约束必须在场: {prompt}"
+        );
+    }
+
+    /// r46:清单空时不注入(无 spec 上下文的老会话零变化)。
+    #[test]
+    fn compile_reredrive_prompt_omits_empty_registered_ids() {
+        let reasons = vec!["missing_section:0:缺 Identity".to_string()];
+        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
+        assert!(!prompt.contains("[design_requirements]"));
+    }
+}
+
+/// REQ-PLN-11 形态门禁单测：`logical_provider_gateway` 非空即多仓逻辑代码库
+/// issue（`IssueRecord.logical_codebase_id == Some(_)` 的运行期信号——Web 接入
+/// task 为逻辑代码库 issue 注入 gateway；未注入即单仓 `None` 形态）。
+/// 只测门禁本身两分支；「单仓行为逐字不变」由既有 part_* / drive_tests 回归覆盖。
+#[cfg(test)]
+mod is_logical_codebase_issue_tests {
+    use super::*;
+    use crate::cross_cutting::provider_adapter::ProviderAdapter;
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::checkpoint_store::CheckpointStore;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, LogicalCodebaseProviderGateway, PolicyTarget,
+        PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
+        ProviderRef, SessionLaunchRequest, SessionPolicyAction,
+    };
+    use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// 未注入 gateway 的最小 engine（单仓形态基线）。
+    fn engine_without_logical_gateway() -> WorkspaceEngine {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let store = Arc::new(CheckpointStore::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = WorkspaceSession {
+            session_id: "sess_logical_codebase_gate".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            stage: WorkspaceStage::Revision,
+            messages: Vec::new(),
+            artifact: None,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            provisional_reviewer_provider: None,
+            reviewer_enabled_at_start: None,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            session_status: WorkspaceSessionStatus::Open,
+            flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+            run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+            run_history: Default::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            repair_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
+            single_candidate_phase: None,
+            work_item_plan_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            approval_attempt_id: None,
+            approved_at: None,
+            compile_reservation: None,
+            provider_conversations: Vec::new(),
+            logical_launch_fingerprints: Vec::new(),
+            superseded_native_sessions: Vec::new(),
+            lc_resume_recovery: None,
+            structural_governance_state: None,
+            review_identity_id: String::new(),
+            repository_path: None,
+        };
+        WorkspaceEngine::new(store, event_tx, session)
+    }
+
+    /// 占位 capability source：门禁只读 `Option::is_some()`，不触任何 capability
+    /// 相位；恒拒即可（与生产 fail-closed 语义一致）。
+    struct UnusedCapabilitySource;
+
+    impl ProviderCapabilitySource for UnusedCapabilitySource {
+        fn require_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_resume_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_write_boundary(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            _provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+    }
+
+    /// 占位 target resolver：透传请求 target（不会被调用）。
+    struct UnusedTargetResolver;
+
+    impl PolicyTargetResolver for UnusedTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &SessionLaunchRequest,
+        ) -> Result<PolicyTarget, ProviderGatewayError> {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// 占位同步 adapter：gateway 构造参数，不会被调用。
+    struct UnusedSyncAdapter;
+
+    impl ProviderAdapter for UnusedSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            Ok(AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = chrono::Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+            snapshot,
+        ))))
+    }
+
+    /// 构造仅满足形态判据的最小 gateway（不 bootstrap 政策：门禁只读
+    /// `Option::is_some()`，不触 validate 链）。
+    fn stub_logical_gateway() -> Arc<LogicalCodebaseProviderGateway> {
+        let root = tempfile::tempdir().expect("gateway fixture root under /tmp");
+        let authority_root = root.path().join("authority");
+        std::fs::create_dir_all(&authority_root).expect("create authority root");
+        Arc::new(LogicalCodebaseProviderGateway::new(
+            AggregatePolicyArtifactStore::new(ProductAppPaths::new(root.path().join(".aria"))),
+            Arc::new(UnusedCapabilitySource),
+            Arc::new(UnusedTargetResolver),
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(UnusedSyncAdapter),
+            always_available_gate(),
+            authority_root,
+        ))
+    }
+
+    #[test]
+    fn is_logical_codebase_issue_is_false_without_logical_gateway() {
+        let engine = engine_without_logical_gateway();
+        assert!(
+            !engine.is_logical_codebase_issue(),
+            "未注入 logical gateway(单仓形态)必须判 false"
+        );
+    }
+
+    #[test]
+    fn is_logical_codebase_issue_is_true_with_logical_gateway() {
+        let engine =
+            engine_without_logical_gateway().with_logical_provider_gateway(stub_logical_gateway());
+        assert!(
+            engine.is_logical_codebase_issue(),
+            "注入 logical gateway(多仓逻辑代码库形态)必须判 true"
+        );
     }
 }

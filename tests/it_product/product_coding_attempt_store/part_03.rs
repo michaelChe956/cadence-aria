@@ -113,14 +113,10 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
         .create_attempt(create_input("work_item_0001"))
         .expect("create target attempt");
     target.id = "coding_attempt_0001".to_string();
-    store
-        .save_coding_attempt(&target)
-        .expect("save legacy target attempt");
+    crate::write_coding_attempt_record_for_test(&store, &target);
     let mut other = target.clone();
     other.issue_id = "issue_0002".to_string();
-    store
-        .save_coding_attempt(&other)
-        .expect("save duplicate legacy attempt");
+    crate::write_coding_attempt_record_for_test(&store, &other);
 
     store
         .create_stage_gate(
@@ -172,6 +168,7 @@ fn scoped_writes_target_only_exact_legacy_attempt_identity() {
                 }],
                 allow_multiple: false,
                 allow_free_text: false,
+                questions: Vec::new(),
             },
         )
         .expect("target choice gate");

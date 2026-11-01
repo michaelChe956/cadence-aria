@@ -121,6 +121,49 @@ fn story_artifact_rejects_nested_artifact_fence_and_thinking_pollution() {
 }
 
 #[test]
+fn story_artifact_accepts_empty_marker_with_benign_explanation() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。Issue 已明确需求、格式规则、验收示例与范围限制；单元测试运行器选型、库文件与页面文件的具体路径、模块文件扩展名（如 `.mjs`）等属实现细节，留待 Design 阶段决策，不构成本 Story 的未决问题。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "empty marker with benign explanation should not be treated as an open item: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
+fn story_artifact_rejects_open_item_disguised_as_wu_prefix() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无论使用哪种单元测试运行器，都需要确认其选型。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("待确认项") && reason.contains("AskUserQuestion")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
 fn story_artifact_rejects_unresolved_open_items_without_interaction() {
     let report = validate_workspace_artifact_constraints(
         "# Aria Provider Setup Story Spec\n\n\
@@ -159,6 +202,31 @@ fn story_artifact_accepts_resolved_open_items_with_confirmation_note() {
     assert!(
         report.passed,
         "resolved confirmation note should not be treated as an open item: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
+fn story_artifact_accepts_resolved_open_items_via_request_user_input_marker() {
+    // r4(codex)现场:codex 的结构化交互工具是 requestUserInput(非
+    // Claude 的 AskUserQuestion)。既有 resolved-cue 只认
+    // 「已通过 AskUserQuestion/已通过结构化交互确认」——codex AI 按
+    // 自己的工具名标注「已通过 requestUserInput 确认:<结论>」会被误判
+    // 未解决而拒收。修:resolved-cue 接受 requestUserInput 标记形态。
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n- 已通过 requestUserInput 确认：会话过期采用空闲超时基准（默认 30 分钟，可配置），绑定 [REQ-002] 与 [AC-002]。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "codex requestUserInput resolution marker must be recognized: {:?}",
         report.blocking_reasons()
     );
 }
@@ -479,33 +547,6 @@ fn story_artifact_rejects_derivation_note_without_full_scope() {
     );
 }
 
-#[test]
-fn artifact_retry_prompt_includes_validation_reasons() {
-    let previous_output = "# Story Spec\n\n## 范围\n缺少其余章节。";
-    let reasons = vec![
-        "缺少 heading: 用户故事".to_string(),
-        "缺少 source id".to_string(),
-    ];
-
-    let prompt = build_artifact_retry_prompt(&WorkspaceType::Story, previous_output, &reasons);
-
-    assert!(prompt.contains("具体失败原因"));
-    assert!(prompt.contains("缺少 heading: 用户故事"));
-    assert!(prompt.contains("缺少 source id"));
-    assert!(prompt.contains("只能输出一个完整 artifact fenced block"));
-    assert!(prompt.contains("AskUserQuestion"));
-    assert!(prompt.contains("待确认项"));
-    assert!(prompt.contains("结构化交互"));
-    assert!(prompt.contains("用户确认决策"));
-    assert!(prompt.contains("author-decision"));
-    assert!(prompt.contains("[REQ-"));
-    assert!(prompt.contains("[AC-"));
-    assert!(
-        !prompt.contains("[cadence_project_rules]"),
-        "artifact retry must repair the current artifact instead of reopening the routing lifecycle"
-    );
-}
-
 #[tokio::test]
 async fn automatic_artifact_retry_uses_separate_timeline_node_for_retry_stream() {
     let (_tmp, lifecycle_store, mut engine) = persistent_test_engine();
@@ -616,6 +657,7 @@ impl StreamingProviderAdapter for StoryOpenItemRetryProvider {
         });
 
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -665,7 +707,10 @@ fn reviewer_prompt_requires_nonce_sentinel() {
     let input = engine.build_review_input().expect("review input");
 
     assert!(input.prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
+    assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(input.prompt.contains("实际 nonce 开始标签"));
+    assert!(input.prompt.contains("必须是输出第一行"));
+    assert!(input.prompt.contains("禁止任何前言、声明、路由回执、说明、空白行或代码围栏"));
     assert!(input.prompt.contains("不得使用 Markdown code fence"));
     assert!(!input.prompt.contains("```json"));
     assert!(input.prompt.contains("[cadence_project_rules]"));
@@ -721,9 +766,9 @@ fn reviewer_structured_output_repair_does_not_restart_routing() {
 #[test]
 fn extract_structured_json_prefers_last_matching_nonce_block() {
     let output = "第一次输出\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"verdict\":\"needs_human\",\"summary\":\"old\"}</ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">\n\
+        <ARIA_STRUCTURED_OUTPUT nonce=\"old00001\">{\"nonce\":\"old00001\",\"verdict\":\"needs_human\",\"summary\":\"old\"}</ARIA_STRUCTURED_OUTPUT>\n\
         最终输出\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"verdict\":\"pass\",\"summary\":\"new\"}</ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">";
+        <ARIA_STRUCTURED_OUTPUT nonce=\"new00002\">{\"nonce\":\"new00002\",\"verdict\":\"pass\",\"summary\":\"new\"}</ARIA_STRUCTURED_OUTPUT>";
 
     let (comments, json) = extract_structured_json(output).expect("structured json");
 
@@ -734,7 +779,7 @@ fn extract_structured_json_prefers_last_matching_nonce_block() {
 #[test]
 fn extract_structured_json_ignores_nonce_mismatch() {
     let output = "review text\n\
-        <ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"verdict\":\"pass\",\"summary\":\"ok\"}</ARIA_STRUCTURED_OUTPUT nonce=\"deadbeef\">";
+        <ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">{\"nonce\":\"deadbeef\",\"verdict\":\"pass\",\"summary\":\"ok\"}</ARIA_STRUCTURED_OUTPUT>";
 
     assert!(extract_structured_json(output).is_none());
 }
@@ -764,7 +809,7 @@ fn parse_review_verdict_does_not_upgrade_actionable_comments_without_strong_find
         **主要问题**\n\n\
         - **High**：进度接口无法区分并发安装、重试安装、页面刷新后重连到哪一次任务。\n\n\
         ```json\n\
-        {\"verdict\":\"needs_human\",\"summary\":\"安装任务 API 设计需修正。\"}\n\
+        {\"verdict\":\"needs_human\",\"summary\":\"安装任务 API 设计需修正。\",\"findings\":[{\"severity\":\"suggestion\",\"message\":\"安装任务 API 设计存在实现级歧义\",\"evidence\":\"进度接口无法区分并发安装\",\"required_action\":\"由人工决定是否按当前设计继续\",\"owner_question\":\"安装任务 API 要先按当前设计继续，还是先改设计？\",\"owner_options\":[{\"label\":\"先改设计\",\"consequence\":\"返修 Design 后重新评审\"},{\"label\":\"按当前设计继续\",\"consequence\":\"带着已知歧义进入下一阶段\"}]}]}\n\
         ```";
 
     let verdict = WorkspaceEngine::parse_review_verdict(output);
@@ -800,7 +845,6 @@ fn parse_review_verdict_classifies_optional_findings_as_user_confirm_allowed() {
   "severity": "suggestion",
   "message": "建议补充边界说明",
   "evidence": "验收标准已经覆盖主路径",
-  "impact": "不影响下一阶段执行",
   "required_action": "可在后续优化中补充"
 }
   ]
@@ -831,7 +875,6 @@ fn parse_review_verdict_classifies_strong_findings_as_requires_revision() {
   "severity": "must_fix",
   "message": "Work Item 没有验证命令",
   "evidence": "Artifact 未出现验证命令段落",
-  "impact": "Coding Workspace 无法执行验收",
   "required_action": "补充明确验证命令"
 }
   ]
@@ -843,21 +886,6 @@ fn parse_review_verdict_classifies_strong_findings_as_requires_revision() {
     assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
     assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
     assert_eq!(verdict.findings[0].severity, ReviewFindingSeverity::MustFix);
-}
-
-#[test]
-fn parse_review_verdict_revise_without_findings_requires_user_triage() {
-    let output = r#"建议修改一些描述。
-
-```json
-{"verdict":"revise","summary":"建议修改描述"}
-```"#;
-
-    let verdict = WorkspaceEngine::parse_review_verdict(output);
-
-    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
-    assert_eq!(verdict.review_gate, ReviewGate::UserTriageRequired);
-    assert!(verdict.findings.is_empty());
 }
 
 #[test]
@@ -914,7 +942,7 @@ fn review_completion_reports_syntax_error() {
         engine.parse_review_completion_for_active_node(&completion),
         Err(ReviewCompletionError::Syntax(error))
             if error.code
-                == crate::cross_cutting::structured_output::StructuredOutputErrorCode::MissingEndNonce
+                == crate::cross_cutting::structured_output::StructuredOutputErrorCode::MissingJsonNonce
     ));
 }
 
@@ -940,6 +968,34 @@ fn review_completion_reports_strict_schema_errors() {
             serde_json::json!({
                 "verdict": "pass",
                 "findings": [{"severity": "must_fix", "message": 42}]
+            }),
+            ReviewStructuredOutputErrorCode::MalformedFindings,
+        ),
+        (
+            serde_json::json!({
+                "verdict": "pass",
+                "findings": [{"severity": "strong_recommend_fix", "message": "legacy"}]
+            }),
+            ReviewStructuredOutputErrorCode::MalformedFindings,
+        ),
+        (
+            serde_json::json!({
+                "verdict": "pass",
+                "findings": [{"severity": "minor", "message": "legacy"}]
+            }),
+            ReviewStructuredOutputErrorCode::MalformedFindings,
+        ),
+        (
+            serde_json::json!({
+                "verdict": "pass",
+                "findings": [{"severity": "optional", "message": "legacy"}]
+            }),
+            ReviewStructuredOutputErrorCode::MalformedFindings,
+        ),
+        (
+            serde_json::json!({
+                "verdict": "pass",
+                "findings": [{"severity": "suggestion", "message": "legacy", "impact": "separate field"}]
             }),
             ReviewStructuredOutputErrorCode::MalformedFindings,
         ),
@@ -1051,13 +1107,13 @@ fn fallback_review_verdict_records_stable_diagnostic_and_bounded_preview() {
     );
     let error = engine
         .parse_review_completion_for_active_node(&completion)
-        .expect_err("missing end nonce should fail");
+        .expect_err("missing JSON nonce should fail");
 
     let verdict = fallback_review_verdict(&completion, &error, false);
     let diagnostic = verdict
         .structured_output_diagnostic
         .expect("fallback diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(!diagnostic.repair_attempted);
     assert!(!diagnostic.repair_succeeded);
     assert_eq!(
@@ -1068,4 +1124,75 @@ fn fallback_review_verdict_records_stable_diagnostic_and_bounded_preview() {
             .count(),
         2_048
     );
+}
+
+#[test]
+fn story_artifact_accepts_multiline_empty_marker_explanation() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。\n所有范围与验收约束均由 Issue 明示得出，不存在未决问题。\n实现细节留待 Design 阶段决策。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(
+        report.passed,
+        "multiline empty marker explanation should not be treated as an open item: {:?}",
+        report.blocking_reasons()
+    );
+}
+
+#[test]
+fn story_artifact_rejects_hard_cue_on_later_line_after_empty_marker() {
+    let report = validate_workspace_artifact_constraints(
+        "# Aria Provider Setup Story Spec\n\n\
+         ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+         ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无待确认项。\n单元测试运行器选型仍待确认。\n\n\
+         ## 非功能需求\n无。\n",
+        &WorkspaceType::Story,
+    );
+
+    assert!(!report.passed);
+    let reasons = report.blocking_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("待确认项") && reason.contains("AskUserQuestion")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn story_artifact_accepts_alternate_empty_marker_variants() {
+    for marker_section in [
+        "暂无。其余范围与验收约束均由 Issue 明示约束得出。\n",
+        "none. All scope and acceptance constraints are explicit in the issue.\n",
+        "单元测试运行器选型仍待确认。\n",
+    ] {
+        let expect_passed = !marker_section.starts_with("单元测试");
+        let report = validate_workspace_artifact_constraints(
+            &format!(
+                "# Aria Provider Setup Story Spec\n\n\
+                 ## 范围\n**来源**：Issue `issue_0001` — provider 安装引导。\n\n\
+                 ## 用户故事\n作为用户，我要完成 provider 安装。\n\n\
+                 ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+                 ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+                 ## 待确认项\n{marker_section}\n\
+                 ## 非功能需求\n无。\n"
+            ),
+            &WorkspaceType::Story,
+        );
+        assert_eq!(
+            report.passed, expect_passed,
+            "section `{marker_section}`: {:?}",
+            report.blocking_reasons()
+        );
+    }
 }

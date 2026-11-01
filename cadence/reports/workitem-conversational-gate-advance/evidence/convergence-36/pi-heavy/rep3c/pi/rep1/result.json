@@ -1,0 +1,661 @@
+{
+  "provider": "pi",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/pi-heavy-v5/rep3c/pi/rep1",
+  "startedAt": "2026-09-08T11:52:09.987Z",
+  "finishedAt": "2026-09-08T12:31:32.664Z",
+  "elapsedSec": 2362.676,
+  "issue_id": "issue_0165",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0226",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "pi",
+    "reviewer_provider": "pi",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.983,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.047,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 737.401,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 737.648,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1194.1,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1194.353,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1660.997,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1661.306,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1819.381,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1982.28,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1982.579,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 2131.353,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 2256.549,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 2256.807,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 2358.901,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 2362.413,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 2362.458,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [
+    {
+      "id": "462535ad-03c9-418d-9307-1387786235f3",
+      "elapsedSec": 534.233,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "strategy": "first_option",
+      "selected_label": "Yes",
+      "reason": "无跳过/继续偏好选项，选首项保持流程继续"
+    },
+    {
+      "id": "521b7a68-ba96-4c5e-9117-e5ad985d2dbe",
+      "elapsedSec": 576.427,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "strategy": "first_option",
+      "selected_label": "Yes",
+      "reason": "无跳过/继续偏好选项，选首项保持流程继续"
+    },
+    {
+      "id": "2c0679c6-7eae-40db-a4f0-81063951fa57",
+      "elapsedSec": 589.351,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "strategy": "first_option",
+      "selected_label": "Yes",
+      "reason": "无跳过/继续偏好选项，选首项保持流程继续"
+    },
+    {
+      "id": "cdb7a8db-96e2-4bd2-af00-1f2aad92c92e",
+      "elapsedSec": 612.937,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "strategy": "first_option",
+      "selected_label": "Yes",
+      "reason": "无跳过/继续偏好选项，选首项保持流程继续"
+    }
+  ],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 839.468,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "edge WI-001 -> WI-002 上契约 CT-002 存在 require_all 能力缺口：WI-002 请求『数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体 {error:{code,message}}，code 为 LEVEL_DATA_UNAVAILABLE，message 不含堆栈、绝对路径或内部实现细节』，而 WI-001 的 CT-002 output capabilities 仅声明 API 错误响应头 Content-Type，未声明该 500 统一错误体能力；该行为在 AC-002/TASK-003 已存在但未落入 output_contracts。",
+          "evidence": "coverage entry from WI-001 to WI-002，contract_id=CT-002，missing_capabilities=[数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体 {error:{code ｜ message}}，code 为 LEVEL_DATA_UNAVAILABLE，message 不含堆栈、绝对路径或内部实现细节]；两个片段系 {error:{code,message}} 内逗号被切分所致，实质为同一条能力，按机械规则必须以缺口上报，不得以 pass 或 advisory 掩盖。",
+          "required_action": "在 WI-001 output_contracts 的 CT-002 capabilities 中补充声明 500+LEVEL_DATA_UNAVAILABLE 统一错误体能力，并将 WI-002 input_contracts 中 CT-002 被逗号切分的能力字符串规整为单条完整表述，使该 edge 的 missing_capabilities 为空。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "edge WI-001 -> WI-003 上契约 CT-003 存在 require_all 能力缺口：WI-003 请求『静态托管将 staticRoot 下资源按请求路径返回并按扩展名映射 Content-Type，GET / 返回页面入口文件（默认 web/index.html）』，而 WI-001 的 CT-003 output capabilities 仅声明路径规范化与越界拒绝，未声明资源返回、Content-Type 映射与入口文件能力；相关行为在 AC-004/TASK-005 已覆盖但未落入 output_contracts。",
+          "evidence": "coverage entry from WI-001 to WI-003，contract_id=CT-003，missing_capabilities=[静态托管将 staticRoot 下资源按请求路径返回并按扩展名映射 Content-Type，GET / 返回页面入口文件（默认 web/index.html）]。",
+          "required_action": "在 WI-001 output_contracts 的 CT-003 capabilities 中补充声明静态资源按请求路径返回、按扩展名映射 Content-Type 及 GET / 返回入口文件（默认 web/index.html）能力，使该 edge 的 missing_capabilities 为空。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 1342.438,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "能力覆盖缺口：coverage entry WI-001 -> WI-002（contract_id CT-002，compatibility_policy require_all）的 missing_capabilities 非空——consumer WI-002 input_contracts CT-002 要求「数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体（code 为 LEVEL_DATA_UNAVAILABLE 且 message 不含堆栈、绝对路径或内部实现细节）」，而 provider WI-001 output_contracts CT-002.capabilities 仅声明「API 错误响应（500、404、405）响应头包含 Content-Type 为 application/json; charset=utf-8」，未声明该 500/LEVEL_DATA_UNAVAILABLE 统一错误体能力，供需不匹配。",
+          "evidence": "edge WI-001 -> WI-002，contract_id CT-002，require_all；missing capability：数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体（code 为 LEVEL_DATA_UNAVAILABLE 且 message 不含堆栈、绝对路径或内部实现细节）。",
+          "required_action": "在 WI-001 的 output_contracts CT-002.capabilities 中补充上述 500/LEVEL_DATA_UNAVAILABLE 统一错误体能力声明（该行为已由 AC-002 与 TASK-003 覆盖，属声明缺口而非实现缺口），或拆分/重命名契约 ID 以消除同名 CT-002 的能力歧义，使 provider 声明与 WI-002 required_capabilities 完全一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-002].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "能力覆盖缺口：coverage entry WI-001 -> WI-003（contract_id CT-003，compatibility_policy require_all）的 missing_capabilities 非空——consumer WI-003 input_contracts CT-003 要求「GET / 返回页面入口文件（默认 web/index.html）」，而 provider WI-001 output_contracts CT-003.capabilities 仅声明「静态路径以 node:path 规范化并与 staticRoot 前缀比对，解析到静态根目录之外的请求被拒绝」，未声明入口文件返回能力，供需不匹配。",
+          "evidence": "edge WI-001 -> WI-003，contract_id CT-003，require_all；missing capability：GET / 返回页面入口文件（默认 web/index.html）。",
+          "required_action": "在 WI-001 的 output_contracts CT-003.capabilities 中补充「GET / 返回页面入口文件（默认 web/index.html）」能力声明（AC-004 已覆盖入口返回行为，属声明缺口），与 WI-003 required_capabilities 及 AC-011/TASK-012 集成断言对齐。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-003].capabilities"
+        },
+        {
+          "severity": "suggestion",
+          "message": "WI-002 output_contracts CT-006.capabilities 的能力描述在 initLevelSelect({document,fetchImpl}) 的参数逗号处被拆分为两条碎片（「web/level-select.js 导出 initLevelSelect({document」与「fetchImpl})，支持……」），建议合并为单条完整能力串，避免下游契约匹配产生歧义。",
+          "evidence": "Cross-Item Contract Supply/Demand 中 supplies[WI-002].CT-006.capabilities 两条元素于逗号处断开。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "WI-002.output_contracts[CT-006].capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 3,
+      "elapsedSec": 1819.381,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械校验警告 integration_or_e2e_skipped_risk（e2e 跳过）不构成发布阻断：WI-003 已以 start({port:0}) 同源 HTTP 级联调（AC-011/AC-012，CHECK-003）对页面入口、静态脚本引用与 API 成功/500 契约提供可观测验收证据，浏览器级 e2e 缺失属可接受的验证策略，建议验收阶段保留可选的人工冒烟检查即可。",
+          "evidence": "Projection Validation Report.findings[0].code=integration_or_e2e_skipped_risk（severity=warning，error_count=0）；WI-003 output_contracts CT-013 已声明同源联调证据产出。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        },
+        {
+          "severity": "suggestion",
+          "message": "CHECK-001/002/003 的验证命令均依赖 node --test 对带引号 glob 参数（如 \"tests/backend/**/*.test.js\"）的支持（Node ≥22 特性）；低版本 Node 会将其按字面路径处理导致检查以可见方式失败。虽非契约自相矛盾且不会静默误报，建议执行环境显式声明 Node ≥22 或改用目录形式命令以提升验证健壮性。",
+          "evidence": "WI-001 CHECK-001、WI-002 CHECK-002、WI-003 CHECK-003 命令均含引号 glob 形式的 node --test 参数。",
+          "required_action": "",
+          "category": "other",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 4,
+      "elapsedSec": 2131.353,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械校验唯一提示为 e2e 跳过（integration_or_e2e_skipped_risk）：计划已以同源 HTTP 集成测试覆盖页面入口、脚本引用与 API 契约，且 NFR 明确以 DOM 替身运行、不启动浏览器，属设计内取舍，不构成契约缺口或机械硬错误。",
+          "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk severity=warning，error_count=0、warning_count=1；WI-003 已产出同源联调证据契约 CT-013（tests/integration/levels-http.test.js）",
+          "required_action": "可选：在人工验收说明中补充一次浏览器冒烟检查记录，无需修改契约或用例。",
+          "category": "completeness",
+          "class_hint": "advisory"
+        },
+        {
+          "severity": "suggestion",
+          "message": "CT-002 与 CT-007 的 capabilities 中内嵌示例 JSON 被按引号拆分为多条 capability 文本（如 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\" 与 \"message\":...}} 分离）；因供需两侧文本逐字一致且全部 coverage entry 的 missing_capabilities 为空，本次不构成契约缺口，仅建议后续轮次将示例并入单条完整 capability 描述，降低精确字符串匹配的脆弱性。",
+          "evidence": "WI-001 output_contracts CT-002/CT-007 与 Cross-Item Supply/Demand 及 capability_coverage 对应 entry 的 required/provided 文本完全一致且缺失为空",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 5,
+      "elapsedSec": 2358.901,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "CT-002/CT-007/CT-013 的 capabilities 数组存在同源切分伪影：内嵌 JSON 错误响应示例在逗号处被拆成多个数组元素（如 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\" 与 \"message\":\"关卡数据暂不可用，请稍后重试\"}} 各成一项）。因 required_capabilities 与 provided_capabilities 两侧切分逐字一致，能力匹配与覆盖判定不受影响，不构成契约缺口，不影响发布；建议上游序列化对内嵌示例 JSON 做转义或聚合为单条 capability，避免后续按数组元素做语义比对时误判。",
+          "evidence": "coverage entries WI-001->WI-002 与 WI-001->WI-003 中 contract_id 为 CT-002、CT-007 的 required_capabilities 与 provided_capabilities 均含被逗号切分的示例片段，两侧逐字一致且 missing_capabilities 均为空",
+          "required_action": "",
+          "category": "other",
+          "class_hint": "advisory",
+          "contract_field": "output_contracts.capabilities"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "edge WI-001 -> WI-002 上契约 CT-002 存在 require_all 能力缺口：WI-002 请求『数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体 {error:{code,message}}，code 为 LEVEL_DATA_UNAVAILABLE，message 不含堆栈、绝对路径或内部实现细节』，而 WI-001 的 CT-002 output capabilities 仅声明 API 错误响应头 Content-Type，未声明该 500 统一错误体能力；该行为在 AC-002/TASK-003 已存在但未落入 output_contracts。",
+      "evidence": "coverage entry from WI-001 to WI-002，contract_id=CT-002，missing_capabilities=[数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体 {error:{code ｜ message}}，code 为 LEVEL_DATA_UNAVAILABLE，message 不含堆栈、绝对路径或内部实现细节]；两个片段系 {error:{code,message}} 内逗号被切分所致，实质为同一条能力，按机械规则必须以缺口上报，不得以 pass 或 advisory 掩盖。",
+      "required_action": "在 WI-001 output_contracts 的 CT-002 capabilities 中补充声明 500+LEVEL_DATA_UNAVAILABLE 统一错误体能力，并将 WI-002 input_contracts 中 CT-002 被逗号切分的能力字符串规整为单条完整表述，使该 edge 的 missing_capabilities 为空。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "edge WI-001 -> WI-003 上契约 CT-003 存在 require_all 能力缺口：WI-003 请求『静态托管将 staticRoot 下资源按请求路径返回并按扩展名映射 Content-Type，GET / 返回页面入口文件（默认 web/index.html）』，而 WI-001 的 CT-003 output capabilities 仅声明路径规范化与越界拒绝，未声明资源返回、Content-Type 映射与入口文件能力；相关行为在 AC-004/TASK-005 已覆盖但未落入 output_contracts。",
+      "evidence": "coverage entry from WI-001 to WI-003，contract_id=CT-003，missing_capabilities=[静态托管将 staticRoot 下资源按请求路径返回并按扩展名映射 Content-Type，GET / 返回页面入口文件（默认 web/index.html）]。",
+      "required_action": "在 WI-001 output_contracts 的 CT-003 capabilities 中补充声明静态资源按请求路径返回、按扩展名映射 Content-Type 及 GET / 返回入口文件（默认 web/index.html）能力，使该 edge 的 missing_capabilities 为空。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "能力覆盖缺口：coverage entry WI-001 -> WI-002（contract_id CT-002，compatibility_policy require_all）的 missing_capabilities 非空——consumer WI-002 input_contracts CT-002 要求「数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体（code 为 LEVEL_DATA_UNAVAILABLE 且 message 不含堆栈、绝对路径或内部实现细节）」，而 provider WI-001 output_contracts CT-002.capabilities 仅声明「API 错误响应（500、404、405）响应头包含 Content-Type 为 application/json; charset=utf-8」，未声明该 500/LEVEL_DATA_UNAVAILABLE 统一错误体能力，供需不匹配。",
+      "evidence": "edge WI-001 -> WI-002，contract_id CT-002，require_all；missing capability：数据文件缺失、不可读、JSON 解析失败或字段校验失败时 GET /api/levels 返回 500 与统一错误体（code 为 LEVEL_DATA_UNAVAILABLE 且 message 不含堆栈、绝对路径或内部实现细节）。",
+      "required_action": "在 WI-001 的 output_contracts CT-002.capabilities 中补充上述 500/LEVEL_DATA_UNAVAILABLE 统一错误体能力声明（该行为已由 AC-002 与 TASK-003 覆盖，属声明缺口而非实现缺口），或拆分/重命名契约 ID 以消除同名 CT-002 的能力歧义，使 provider 声明与 WI-002 required_capabilities 完全一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-002].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "能力覆盖缺口：coverage entry WI-001 -> WI-003（contract_id CT-003，compatibility_policy require_all）的 missing_capabilities 非空——consumer WI-003 input_contracts CT-003 要求「GET / 返回页面入口文件（默认 web/index.html）」，而 provider WI-001 output_contracts CT-003.capabilities 仅声明「静态路径以 node:path 规范化并与 staticRoot 前缀比对，解析到静态根目录之外的请求被拒绝」，未声明入口文件返回能力，供需不匹配。",
+      "evidence": "edge WI-001 -> WI-003，contract_id CT-003，require_all；missing capability：GET / 返回页面入口文件（默认 web/index.html）。",
+      "required_action": "在 WI-001 的 output_contracts CT-003.capabilities 中补充「GET / 返回页面入口文件（默认 web/index.html）」能力声明（AC-004 已覆盖入口返回行为，属声明缺口），与 WI-003 required_capabilities 及 AC-011/TASK-012 集成断言对齐。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-003].capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "WI-002 output_contracts CT-006.capabilities 的能力描述在 initLevelSelect({document,fetchImpl}) 的参数逗号处被拆分为两条碎片（「web/level-select.js 导出 initLevelSelect({document」与「fetchImpl})，支持……」），建议合并为单条完整能力串，避免下游契约匹配产生歧义。",
+      "evidence": "Cross-Item Contract Supply/Demand 中 supplies[WI-002].CT-006.capabilities 两条元素于逗号处断开。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "WI-002.output_contracts[CT-006].capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验警告 integration_or_e2e_skipped_risk（e2e 跳过）不构成发布阻断：WI-003 已以 start({port:0}) 同源 HTTP 级联调（AC-011/AC-012，CHECK-003）对页面入口、静态脚本引用与 API 成功/500 契约提供可观测验收证据，浏览器级 e2e 缺失属可接受的验证策略，建议验收阶段保留可选的人工冒烟检查即可。",
+      "evidence": "Projection Validation Report.findings[0].code=integration_or_e2e_skipped_risk（severity=warning，error_count=0）；WI-003 output_contracts CT-013 已声明同源联调证据产出。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "CHECK-001/002/003 的验证命令均依赖 node --test 对带引号 glob 参数（如 \"tests/backend/**/*.test.js\"）的支持（Node ≥22 特性）；低版本 Node 会将其按字面路径处理导致检查以可见方式失败。虽非契约自相矛盾且不会静默误报，建议执行环境显式声明 Node ≥22 或改用目录形式命令以提升验证健壮性。",
+      "evidence": "WI-001 CHECK-001、WI-002 CHECK-002、WI-003 CHECK-003 命令均含引号 glob 形式的 node --test 参数。",
+      "required_action": "",
+      "category": "other",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验唯一提示为 e2e 跳过（integration_or_e2e_skipped_risk）：计划已以同源 HTTP 集成测试覆盖页面入口、脚本引用与 API 契约，且 NFR 明确以 DOM 替身运行、不启动浏览器，属设计内取舍，不构成契约缺口或机械硬错误。",
+      "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk severity=warning，error_count=0、warning_count=1；WI-003 已产出同源联调证据契约 CT-013（tests/integration/levels-http.test.js）",
+      "required_action": "可选：在人工验收说明中补充一次浏览器冒烟检查记录，无需修改契约或用例。",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "CT-002 与 CT-007 的 capabilities 中内嵌示例 JSON 被按引号拆分为多条 capability 文本（如 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\" 与 \"message\":...}} 分离）；因供需两侧文本逐字一致且全部 coverage entry 的 missing_capabilities 为空，本次不构成契约缺口，仅建议后续轮次将示例并入单条完整 capability 描述，降低精确字符串匹配的脆弱性。",
+      "evidence": "WI-001 output_contracts CT-002/CT-007 与 Cross-Item Supply/Demand 及 capability_coverage 对应 entry 的 required/provided 文本完全一致且缺失为空",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "CT-002/CT-007/CT-013 的 capabilities 数组存在同源切分伪影：内嵌 JSON 错误响应示例在逗号处被拆成多个数组元素（如 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\" 与 \"message\":\"关卡数据暂不可用，请稍后重试\"}} 各成一项）。因 required_capabilities 与 provided_capabilities 两侧切分逐字一致，能力匹配与覆盖判定不受影响，不构成契约缺口，不影响发布；建议上游序列化对内嵌示例 JSON 做转义或聚合为单条 capability，避免后续按数组元素做语义比对时误判。",
+      "evidence": "coverage entries WI-001->WI-002 与 WI-001->WI-003 中 contract_id 为 CT-002、CT-007 的 required_capabilities 与 provided_capabilities 均含被逗号切分的示例片段，两侧逐字一致且 missing_capabilities 均为空",
+      "required_action": "",
+      "category": "other",
+      "class_hint": "advisory",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 31060,
+      "output_tokens": 4855,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json",
+    "artifact-v10.json",
+    "artifact-v11.json",
+    "artifact-v12.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 2,
+    "manual_repairs_used": 0,
+    "transitions_used": 3,
+    "initial_review_count": 5,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_007": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_009": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_011": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 2,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-08T12:22:29.369Z",
+      "elapsedSec": 1819.382,
+      "stage": "human_confirm",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_008",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-e3f6e1972f",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T12:22:29.370Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-08T12:27:41.341Z",
+      "elapsedSec": 2131.353,
+      "stage": "prepare_context",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_009",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-b47da11e00",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T12:27:41.341Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-08T12:31:28.889Z",
+      "elapsedSec": 2358.901,
+      "stage": "prepare_context",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_011",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-08T12:31:28.889Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-e3f6e1972f",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_5ebed950-5f98-4c47-bc61-ec579ca694f9",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_004"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-b47da11e00",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_71a39be6-71a2-40e0-bcbc-0b4035d3846d",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_005"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 3,
+      "command_id": "cmd-advance-3-01df8de197",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_6c7227cd1b1e4bc7814b7f8a983c5b72",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0165"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_5ebed950-5f98-4c47-bc61-ec579ca694f9:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_71a39be6-71a2-40e0-bcbc-0b4035d3846d:attempt:1",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_5ebed950-5f98-4c47-bc61-ec579ca694f9:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_71a39be6-71a2-40e0-bcbc-0b4035d3846d:attempt:1",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 5,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0226:2",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_5ebed950-5f98-4c47-bc61-ec579ca694f9:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_71a39be6-71a2-40e0-bcbc-0b4035d3846d:attempt:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 2362676,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.064,
+    "1:running": 736.354,
+    "2:cross_review": 0.247,
+    "3:prepare_context": 456.452,
+    "4:cross_review": 0.253,
+    "5:prepare_context": 466.644,
+    "6:cross_review": 0.309,
+    "7:prepare_context": 158.075,
+    "8:human_confirm": 162.899,
+    "9:cross_review": 0.299,
+    "10:prepare_context": 148.774,
+    "11:human_confirm": 125.196,
+    "12:cross_review": 0.258,
+    "13:prepare_context": 102.094,
+    "14:human_confirm": 3.512,
+    "15:running": 0.045,
+    "16:completed": 0.218
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

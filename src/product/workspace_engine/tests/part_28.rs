@@ -14,29 +14,51 @@ async fn plan_repair_review_revise_routes_to_existing_review_decision_without_at
     engine.begin_work_item_plan_outline_review_run().await;
 
     engine
-        .route_plan_repair_candidate_review(ReviewVerdict {
-            verdict: ReviewVerdictType::Revise,
-            comments: "candidate requires revision".to_string(),
-            summary: "revise candidate".to_string(),
-            findings: vec![],
-            review_gate: ReviewGate::RequiresRevision,
-            work_item_plan_review: Some(WorkItemPlanReviewComplete {
-                verdict: WorkItemPlanReviewVerdict::Revise,
-                review_scope: WorkItemPlanReviewScope::Outline,
-                target_outline_id: None,
-                generation_round_id: "round_0001".to_string(),
-                draft_id: None,
-                batch_id: None,
-                review_action: WorkItemPlanReviewAction::ReviseOutline,
-                gates: vec![WorkItemPlanReviewGate::RequiresPlanReopen],
-                affects_items: vec![],
-                warnings: vec![],
-            }),
-            structured_output_diagnostic: None,
-        })
+        .complete_review(
+            ProviderCompletion::plain("candidate requires revision", None),
+            ReviewVerdict {
+                verdict: ReviewVerdictType::Revise,
+                comments: "candidate requires revision".to_string(),
+                summary: "revise candidate".to_string(),
+                findings: vec![],
+                review_gate: ReviewGate::RequiresRevision,
+                work_item_plan_review: Some(WorkItemPlanReviewComplete {
+                    verdict: WorkItemPlanReviewVerdict::Revise,
+                    review_scope: WorkItemPlanReviewScope::Outline,
+                    target_outline_id: None,
+                    generation_round_id: "round_0001".to_string(),
+                    draft_id: None,
+                    batch_id: None,
+                    review_action: WorkItemPlanReviewAction::ReviseOutline,
+                    gates: vec![WorkItemPlanReviewGate::RequiresPlanReopen],
+                    affects_items: vec![],
+                    warnings: vec![],
+                }),
+                structured_output_diagnostic: None,
+            },
+        )
         .await;
 
     assert_eq!(engine.current_stage(), WorkspaceStage::ReviewDecision);
+    assert_eq!(
+        engine.session.run_history.initial_review_count, 1,
+        "PlanRepair candidate review must pass through the durable policy route before legacy dispatch"
+    );
+    let persisted_session = lifecycle
+        .get_workspace_session(&engine.session.session_id)
+        .expect("PlanRepair policy history must be durable");
+    assert_eq!(persisted_session.run_history.initial_review_count, 1);
+    assert_eq!(persisted_session.run_history.review_cycles.len(), 1);
+    assert_eq!(
+        persisted_session
+            .run_history
+            .review_cycles
+            .values()
+            .next()
+            .expect("PlanRepair review must create a review cycle")
+            .initial_count,
+        1
+    );
     assert!(
         engine
             .plan_repair_session_state()

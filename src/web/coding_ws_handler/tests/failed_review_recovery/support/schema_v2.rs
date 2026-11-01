@@ -32,6 +32,7 @@ pub(super) fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &Coding
         .put_logical_work_item(&lineage, &logical_work_item)
         .expect("logical work item");
     let contract = CanonicalWorkItemContract {
+        intent_contract: None,
         schema_version: 1,
         identity: WorkItemContractIdentity {
             logical_work_item_id: logical_work_item.id.clone(),
@@ -42,6 +43,7 @@ pub(super) fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &Coding
             summary: logical_work_item.title.clone(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts: Vec::new(),
         output_contracts: Vec::new(),
         tasks: Vec::new(),
@@ -142,6 +144,7 @@ pub(super) fn seed_group_plan_facts(store: &CodingAttemptStore, attempt: &Coding
         dependency_graph_revision_id: dependency_graph.id.clone(),
         validation_report_ref: "validation_report_0001".to_string(),
         plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+        publication_provenance_ref: None,
         created_at: "2026-07-12T00:00:00Z".to_string(),
     };
     let compiled_plan = CompiledPlanProjections {

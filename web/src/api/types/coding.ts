@@ -1,4 +1,5 @@
 import type {
+  ChoiceAnswer,
   ChoiceOption,
   ExecutionEvent,
   WorkspaceChoiceRequestSource,
@@ -8,6 +9,7 @@ import type {
   WorkItemExecutionPlan,
   WorkspaceProviderName,
 } from "./common";
+import type { CodingAttentionItemDto } from "./lifecycle";
 import type {
   PlanAmendmentManifest,
   PlanRepairRequest,
@@ -38,6 +40,7 @@ export type CodingAttemptStatus =
   | "running"
   | "waiting_for_human"
   | "blocked"
+  | "awaiting_manual_recovery"
   | "awaiting_plan_amendment"
   | "applying_plan_amendment"
   | "amendment_apply_failed"
@@ -105,7 +108,9 @@ export type CodingAttempt = {
   worktree_path: string | null;
   rework_count: number;
   head_commit: string | null;
-  push_status: "not_pushed" | "pushed" | "failed" | null;
+  // 复用 PushStatus 单一值域别名（含 skipped_not_configured 本地交付）；不再内联
+  // 复制一份联合类型，避免两套值域漂移。
+  push_status: PushStatus | null;
   review_request_url: string | null;
   created_at: string;
   updated_at: string;
@@ -203,6 +208,16 @@ export type CodingRoleProviderConfigSnapshot = {
   permission_modes: CodingRolePermissionModes;
 };
 
+// Bug2-C(Task 5)：gate-retry 入口创建 run 时的门关联首写事实——
+// (gate_id, generation, action_id) 三元组。serde 可选字段:旧数据缺省
+// null/缺失(按无关联解释,不猜);generation 对应服务端门的
+// resolution_generation,重开递增后旧 origin 代次失配不误关新门。
+export type CodingRoleRunGateOrigin = {
+  gate_id: string;
+  generation: number;
+  action_id: string;
+};
+
 export type CodingRoleRun = {
   id: string;
   attempt_id: string;
@@ -219,6 +234,7 @@ export type CodingRoleRun = {
   supersedes_run_id?: string | null;
   superseded_by_run_id?: string | null;
   reason_code?: string | null;
+  gate_origin?: CodingRoleRunGateOrigin | null;
   raw_provider_output_refs: string[];
   artifact_refs: string[];
   event_summary?: CodingRoleRunEventSummary | null;
@@ -227,6 +243,19 @@ export type CodingRoleRun = {
 
 export type CodingReviewVerdict = "approve" | "request_changes" | "blocked";
 export type FindingSeverity = "error" | "warning" | "info";
+// B 档采信投影(T18):与模型 verdict 独立。仅 reviewer 窗口经三域对账+
+// 人工门判定后 accepted;缺字段 = 历史报告未核验(不是 accepted)。
+// 权威记录是 reviewer window 的 report_acceptance,本字段为同源投影。
+export type ReviewReportAcceptance =
+  | "pending_acceptance"
+  | "accepted"
+  | "invalidated";
+// wire 值域运行时锁(review-acceptance.test.ts 消费)。
+export const REVIEW_REPORT_ACCEPTANCE_VALUES = [
+  "pending_acceptance",
+  "accepted",
+  "invalidated",
+] as const satisfies readonly ReviewReportAcceptance[];
 
 export type ReviewFinding = {
   severity: FindingSeverity;
@@ -254,6 +283,9 @@ export type CodeReviewReport = {
   raw_provider_output_ref?: string | null;
   role_run_id?: string | null;
   run_no?: number | null;
+  // T18 采信投影(可选;缺字段 = 历史未核验)。
+  acceptance?: ReviewReportAcceptance;
+  review_window_id?: string;
 };
 
 export type ReviewRequestKind =
@@ -262,7 +294,14 @@ export type ReviewRequestKind =
   | "github_pull_request"
   | "manual_external_request";
 export type RemoteKind = "github" | "gitlab" | "generic_git" | "unknown";
-export type PushStatus = "not_pushed" | "pushed" | "failed";
+// push_status 值域。FE-1（设计 Q1 冻结）：新增 skipped_not_configured —— 仓库未
+// 配置远端时的本地交付终态，既不是 pushed 也不是 failed；UI 必须与「已推送」
+// 区分（标签「本地交付(无远端)」）。
+export type PushStatus =
+  | "not_pushed"
+  | "pushed"
+  | "failed"
+  | "skipped_not_configured";
 
 export type ReviewRequest = {
   id: string;
@@ -297,6 +336,8 @@ export type InternalPrReview = {
   raw_provider_output_ref?: string | null;
   role_run_id?: string | null;
   run_no?: number | null;
+  acceptance?: ReviewReportAcceptance;
+  review_window_id?: string;
 };
 
 export type GroupReviewArtifactRef = {
@@ -371,6 +412,11 @@ export type CodingChatEntry = {
   created_at: string;
 };
 
+export type CodingExecutionEventReplay = {
+  event: ExecutionEvent;
+  created_at: string;
+};
+
 export type CodingGateActionType =
   | "send_to_coder"
   | "confirm_stage"
@@ -381,6 +427,7 @@ export type CodingGateActionType =
   | "provide_context"
   | "manual_continue"
   | "retry_coding"
+  | "retry_coding_with_context"
   | "retry_review"
   | "retry_internal_review"
   | "retry_group_review_shard"
@@ -407,6 +454,13 @@ export type CodingGateRequired = {
   evidence_refs?: string[];
   raw_provider_output_ref?: string | null;
   diagnostic?: CodingGateDiagnostic | null;
+  /** change `triage-gate-actions-by-verdict`：三个 Code Review 分诊门派生
+   *  `available_actions` 所用的事实——该 attempt 最新一条 Code Review 结论的 verdict
+   *（读不到为 null/缺失，即 fail-closed 三项派生）。`available_actions` 仍是权威
+   *  动作集合；本字段只用于「为什么没有送回 Coder」文案，前端不得据此增删动作。 */
+  latest_review_verdict?: CodingReviewVerdict | null;
+  /** P2-c（REQ-CRO-09）：分诊卡三段大白话投影；旧门 JSON 无该字段 → 前端回落 description。 */
+  triage_summary?: CodingTriageSummary | null;
 };
 
 export type CodingGateDiagnostic = {
@@ -416,12 +470,89 @@ export type CodingGateDiagnostic = {
   run_failure_code: string;
 };
 
+/** P2-d（REQ-CRO-09）：与后端 `CodingTriageSummary` 同构（块 2 设计 §4.2）。 */
+export type CodingTriageFinding = {
+  reason_code: string;
+  message: string;
+};
+
+export type CodingTriageDid = {
+  changed_files: string[];
+  commit_sha?: string | null;
+  verification_exit_code?: number | null;
+  environment_note?: string | null;
+};
+
+export type CodingTriageSummary = {
+  problem: string;
+  findings?: CodingTriageFinding[];
+  did?: CodingTriageDid | null;
+  unverified?: string[];
+};
+
+/** C2 Task 8（#19）：attempt-scoped 验证处理记录（旁路 DTO，不进门动作枚举）。 */
+export type VerificationTriageStatus = "pending" | "approved" | "rejected";
+
+export type VerificationTriageConclusion =
+  | "approve_plan_revision"
+  | "accept_equivalent_evidence"
+  | "grant_scoped_environment_exception";
+
+export type VerificationTriageRecord = {
+  triage_id: string;
+  attempt_id: string;
+  finding_id: string;
+  check_id: string;
+  plan_revision_id: string;
+  original_command?: string | null;
+  alternative_command?: string | null;
+  cwd?: string | null;
+  outcome?: string | null;
+  test_execution_count?: number | null;
+  environment?: string | null;
+  scope: string[];
+  expires_at: string;
+  status: VerificationTriageStatus;
+  conclusion?: VerificationTriageConclusion | null;
+  reason?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
+};
+
+/** C2 Task 9（#2/#9）：计划命令与实际命令并列证据。actual 缺失 → "未记录"。 */
+export type VerificationCommandEvidence = {
+  check_id: string;
+  planned_command?: string | null;
+  planned_manual_instruction?: string | null;
+  actual_command?: string | null;
+  actual_cwd?: string | null;
+  exit_code?: number | null;
+  test_execution_count?: number | null;
+  environment_summary?: string | null;
+  /** 批2 Task 15：原始输出引用（有界尾摘；超限输出经 artifact 全文派生）。 */
+  raw_output_excerpt?: string | null;
+  /** 批2 Task 15：CHECK 失败四分类（missing_dependency/auth_failure/permission_failure/assertion_failure/unclassified）；通过为 null。 */
+  failure_class?: string | null;
+  mismatch: boolean;
+};
+
 export type CodingChoiceGateStatus = "open" | "resolved" | "stale" | "cancelled";
 
 export type CodingChoiceGateResponse = {
   selected_option_ids: string[];
   free_text?: string | null;
   responded_at: string;
+  /** P0 1.3：完整逐题答案原样落盘；旧单题 gate 缺省为空。 */
+  answers?: ChoiceAnswer[];
+};
+
+/** P0 1.3：coding choice 逐题结构（与 workspace `ChoiceQuestion` 同构）。 */
+export type CodingChoiceQuestion = {
+  id: string;
+  prompt: string;
+  options: ChoiceOption[];
+  allow_multiple: boolean;
+  allow_free_text: boolean;
 };
 
 export type CodingChoiceGate = {
@@ -439,6 +570,13 @@ export type CodingChoiceGate = {
   allow_free_text: boolean;
   status: CodingChoiceGateStatus;
   response?: CodingChoiceGateResponse | null;
+  /** P0 1.3：多问题透传；旧 gate 缺省为空（前端按单一 default 题兼容）。 */
+  questions?: CodingChoiceQuestion[];
+  /**
+   * P0 1.3（REQ-WIGA-05）Task 11：应答须绑定的 run 化身（REST claim 精确匹配
+   * active incarnation）；服务端 handler 层注入——无活跃 run 时缺省，不猜 run。
+   */
+  expected_run_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -481,6 +619,236 @@ export type ArtifactContentResponse = {
   content: string;
 };
 
+// ── N6（REQ-CS-01/06）：plan 一键启动与聚合进度 DTO（N3 冻结，前端只读镜像）──
+
+export type PlanCodingStartRequest = {
+  command_id: string;
+  expected_plan_revision_id: string;
+};
+
+// lease_state 沿 repo worktree lock 事实（absent|held|contested），不猜 provider 运行。
+export type PlanCodingLeaseState = "absent" | "held" | "contested";
+
+// execution_state 值域 initialized|running|waiting_dependency|waiting_slot|paused|
+// completed|invalidated——provider 事实与初始化桶首 unit Running（物化事实）
+// 严格区分；invalidated 为 plan-run 授权失效投影（成员删除/精确 purge 后），
+// 不与 unit 事实状态混写。
+// FE-1（设计 Q3 冻结，additive）：attempt 状态守卫生效后新增
+// awaiting_manual_recovery|waiting_human|failed|aborted —— unit 仍是 Running
+// 但 attempt 已进入人工恢复/等待/终态时，投影不得继续报 provider 运行中。
+export type PlanCodingExecutionState =
+  | "initialized"
+  | "running"
+  | "waiting_dependency"
+  | "waiting_slot"
+  | "paused"
+  | "completed"
+  | "invalidated"
+  | "awaiting_manual_recovery"
+  | "waiting_human"
+  | "failed"
+  | "aborted";
+
+// waiting_reason 值域 dependency_not_ready|execution_slot_occupied|
+// plan_coding_continuation_not_enabled（依赖优先于暂停文案）——三种「编排等待」
+// 语义仍由本联合类型描述。
+// FE-1（设计 Q3）：awaiting_manual_recovery 时 waiting_reason 透传
+// attempt.manual_recovery_reason（开放值集，如 coding_runner_failed_while_running），
+// 故 DTO 字段放宽为 string | null，本类型只作为编排等待子集保留。
+export type PlanCodingWaitingReason =
+  | "dependency_not_ready"
+  | "execution_slot_occupied"
+  | "plan_coding_continuation_not_enabled";
+
+// operation_state 沿现 accepted|replayed|needs_human|rejected 语义。
+export type PlanCodingOperationState =
+  | "accepted"
+  | "replayed"
+  | "needs_human"
+  | "rejected";
+
+// N2 tagged 首启真实回执（kind=started|already_started|needs_human）。
+export type CodingPlanStartOutcome =
+  | { kind: "started"; attempt_id: string }
+  | { kind: "already_started"; attempt_id: string }
+  | { kind: "needs_human"; attempt_id: string; reason: string };
+
+// FE-1（设计 Q5 / S3 后端契约冻结）：PlanCodingTargetDto 补九字段逐仓事实镜像，
+// 供 coding 页在多 target（work_item_group）时逐仓渲染 PR 面板；单仓/非 group 的
+// 顶部 header 零变化。字段名与 S3 后端 serde snake_case 一致，类型均 string|null
+// （stage/push_status 保持字符串口径，未命中标签时回落原值）。
+export type PlanCodingTargetDto = {
+  target_repository_id: string;
+  attempt_id: string;
+  attempt_status: CodingAttemptStatus;
+  worktree_path: string | null;
+  lease_state: PlanCodingLeaseState;
+  repository_name: string | null;
+  branch_name: string | null;
+  base_branch: string | null;
+  stage: string | null;
+  head_commit: string | null;
+  push_status: string | null;
+  push_error: string | null;
+  review_request_id: string | null;
+  manual_recovery_reason: string | null;
+};
+
+export type PlanCodingUnitProgressDto = {
+  unit_id: string;
+  logical_work_item_id: string;
+  target_repository_id: string;
+  attempt_id: string;
+  unit_status: CodingExecutionUnitStatus;
+  execution_state: PlanCodingExecutionState;
+  unsatisfied_dependency_ids: string[];
+  // 编排等待取 PlanCodingWaitingReason 三值；awaiting_manual_recovery 时为
+  // attempt.manual_recovery_reason 原文（开放值集），故放宽为 string。
+  waiting_reason: string | null;
+  // Slice B（仪表盘跨仓依赖投影）：全量直接依赖（权威绑定，跨桶不失真）、
+  // 全图拓扑序与桶内摘要，供前端重建 plan 全图拓扑/依赖链。
+  dependency_logical_work_item_ids: string[];
+  order_index: number;
+  summary: string | null;
+};
+
+// 按 bound target attempts 聚合的 plan 进度；primary 仅打开入口，不代表整 plan
+// 执行或完成（plan_complete 只在全部 authoritative units Completed 时为 true）。
+export type PlanCodingProgressDto = {
+  plan_id: string;
+  bound_plan_revision_id: string;
+  command_id: string | null;
+  mode: string | null;
+  phase: string | null;
+  primary_attempt_id: string | null;
+  selected_unit_id: string | null;
+  selected_attempt_id: string | null;
+  target_attempts: PlanCodingTargetDto[];
+  units: PlanCodingUnitProgressDto[];
+  // P1-b（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认就绪投影——state 值域
+  // not_ready|ready|partial|done（Confirmed 视为已确认）。additive：旧响应
+  // 缺省按 not_ready 空投影处理（服务端 serde default 同口径）。
+  final_confirm?: PlanCodingFinalConfirmDto;
+  // P1-b（REQ-MTG-12）：本 plan 同源待处理事项（块 4 A1 镜像），总览待办
+  // 徽标消费。additive：旧响应缺省按无待办处理。
+  attention_items?: CodingAttentionItemDto[];
+  plan_complete: boolean;
+  // H5（设计 C 节冻结，additive）：workspace_lifecycle 事实——generation、现存/
+  // 缺失成员数、状态；数据来自服务端交叉核验，不从 attempt_status 猜物理存在
+  // 性。旧响应缺省（H4 端点后行）。
+  workspace_lifecycle?: PlanWorkspaceLifecycleDto | null;
+};
+
+// workspace_lifecycle.state 值域：clean=无执行内容、complete=整轮完成、
+// incomplete=成员缺失（部分删除后）、clearing=清理进行中（旧 runner 退出中）。
+export type PlanWorkspaceLifecycleState =
+  | "clean"
+  | "complete"
+  | "incomplete"
+  | "clearing";
+
+export type PlanWorkspaceLifecycleDto = {
+  generation: number;
+  existing_member_count: number;
+  missing_member_count: number;
+  state: PlanWorkspaceLifecycleState;
+};
+
+// P1-b（REQ-MTG-11 / 契约 A2）：未齐备的冻结 target（GET `blocking` 条目；
+// POST not_ready 回执的失败项同构）。
+export type PlanCodingFinalConfirmBlockingDto = {
+  attempt_id: string;
+  reason_code: string;
+  message: string;
+};
+
+// P1-b（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认投影——Confirmed 视为已
+// 确认；全 Completed → done；部分 Completed 且剩余全就绪 → partial；零确认且
+// 全就绪 → ready；其余（含 blocking 非空/plan 未执行完成）→ not_ready。
+export type PlanCodingFinalConfirmDto = {
+  state: PlanCodingFinalConfirmState;
+  ready_attempt_ids: string[];
+  confirmed_attempt_ids: string[];
+  blocking: PlanCodingFinalConfirmBlockingDto[];
+};
+
+export type PlanCodingFinalConfirmState =
+  | "not_ready"
+  | "ready"
+  | "partial"
+  | "done";
+
+// P1-b（契约 A2）：POST `.../coding-final-confirm` 回执逐仓结果——
+// status 值域 confirmed|already_completed|failed|not_attempted。
+export type PlanCodingFinalConfirmResultItemDto = {
+  attempt_id: string;
+  target_repository_id: string;
+  status: PlanCodingFinalConfirmResultStatus;
+  error_code?: string | null;
+  message?: string | null;
+};
+
+export type PlanCodingFinalConfirmResultStatus =
+  | "confirmed"
+  | "already_completed"
+  | "failed"
+  | "not_attempted";
+
+// P1-b（契约 A2）：POST 回执——outcome 值域 all_confirmed|partially_confirmed|
+// not_ready；partial 只表示本次未全成，成功数按 `results` 计算（失败仓
+// error_code/message 可见；不加 command_id/generation 防重放）。
+export type PlanCodingFinalConfirmResultDto = {
+  plan_id: string;
+  outcome: PlanCodingFinalConfirmOutcome;
+  results: PlanCodingFinalConfirmResultItemDto[];
+};
+
+export type PlanCodingFinalConfirmOutcome =
+  | "all_confirmed"
+  | "partially_confirmed"
+  | "not_ready";
+
+// H5（设计 C 节冻结）：DELETE …/coding-workspaces 成功 200 回执；重复同
+// command 同 generation 返回 replayed，不扫下一代刚创建的 attempts。
+export type PlanCodingWorkspaceDeletionResultDto = {
+  plan_id: string;
+  command_id: string;
+  operation_state: "accepted" | "replayed";
+  generation: number;
+  deleted_attempt_ids: string[];
+  remaining_attempt_ids: string[];
+};
+
+// 一键启动结果：start_outcome 为冻结首启回执；waiting_units 为等待绑定集合。
+export type PlanCodingStartResultDto = {
+  plan_id: string;
+  bound_plan_revision_id: string;
+  command_id: string;
+  operation_state: PlanCodingOperationState;
+  primary_attempt_id: string | null;
+  target_attempts: PlanCodingTargetDto[];
+  selected_unit_id: string | null;
+  selected_attempt_id: string | null;
+  start_outcome: CodingPlanStartOutcome | null;
+  waiting_units: PlanCodingUnitProgressDto[];
+  progress: PlanCodingProgressDto;
+};
+/**
+ * 批 2 T4（REQ-WIGA-08/09）：coding WS 快照的同源管理投影（T3 REST/WS
+ * 一致，`models/automation.rs::AutomationOwnership` 同形）。manual/无绑定
+ * 缺省 null（旧帧兼容）；terminated 后仍 managed（owner 保持 server），
+ * `terminated_at` 非空即终态呈现判据。
+ */
+export type CodingSessionAutomation = {
+  owner: "client" | "server";
+  enrollment_id: string | null;
+  policy_revision: number | null;
+  enabled: boolean;
+  plan_id?: string | null;
+  terminated_at?: string | null;
+};
+
+
 export type CodingWsInMessage =
   | { type: "coding_hello"; attempt_id: string; last_seen_node_id?: string | null }
   | { type: "start_coding" }
@@ -507,7 +875,12 @@ export type CodingWsInMessage =
   | { type: "max_auto_rework_select"; max_auto_rework: number }
   | { type: "stage_gate_confirm"; stage: CodingExecutionStage }
   | { type: "final_confirm" }
+  | { type: "retry_push" }
   | { type: "abort_attempt" }
+  /** F-16：awaiting_manual_recovery 显式恢复动作（重走 admission CAS 回 running）。 */
+  | { type: "recover_coding" }
+  /** F-44：aborted/failed 终态显式重新开始动作（重走 admission CAS 回 running 并重启 runner）。 */
+  | { type: "restart_coding" }
   | { type: "request_manual_pause" }
   | { type: "coding_ping" };
 
@@ -533,12 +906,15 @@ export type CodingWsOutMessage =
       pushed_remote: string | null;
       role_provider_config_snapshot: CodingRoleProviderConfigSnapshot;
       chat_entries: CodingChatEntry[];
+      execution_events?: CodingExecutionEventReplay[];
       work_item_markdown: string | null;
       verification_commands: string[];
       work_item_execution_plan: WorkItemExecutionPlan | null;
       linked_plan_repair: PlanRepairSessionSnapshot | null;
       group_review_artifacts?: GroupReviewArtifactProjection | null;
       require_execution_plan_confirm: boolean;
+      /** 批 2 T4：同源管理投影（managed/terminated 判据）；旧帧缺省 null。 */
+      automation?: CodingSessionAutomation | null;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }
   | { type: "coding_timeline_node_created"; node: CodingTimelineNode }
@@ -565,6 +941,8 @@ export type CodingWsOutMessage =
       options: ChoiceOption[];
       allow_multiple: boolean;
       allow_free_text: boolean;
+      /** P2-e（REQ-CRO-11）：多题透传（与快照 `CodingChoiceGate.questions` 同形）；旧帧缺省。 */
+      questions?: CodingChoiceQuestion[];
     }
   | {
       type: "coding_choice_response_ack";

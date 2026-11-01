@@ -1,5 +1,13 @@
-import { beforeEach, vi } from "vitest";
-import type { CodingAttempt, IssueWorkItemPlanDetailDto } from "../../api/types";
+import { beforeEach, vi, type Mock } from "vitest";
+import type {
+  AggregateIndexActiveResponse,
+  AggregateInitializationOperationSnapshot,
+  CodingAttempt,
+  IssueWorkItemPlanDetailDto,
+  PointerPublicationDto,
+  RegistrationBatchDto,
+  RegistrationPreflightResponse,
+} from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import {
   codingAttemptRecord,
@@ -13,11 +21,25 @@ import {
   jsonResponse,
   projectRecord,
   repositoryRecord,
+  sharedIdLifecycleData,
   workspaceSessionRecord,
   type MockLifecycleData,
 } from "./IssueLifecycleWorkbench.test-data";
 
 export * from "./IssueLifecycleWorkbench.test-data";
+import {
+  aggregateInitializationOperation,
+  createAggregateInitializationRoutes,
+  type LifecycleFetchOptions,
+} from "./IssueLifecycleWorkbench.test-utils-aggregate";
+import {
+  createAutomationEnrollmentRoutes,
+} from "./IssueLifecycleWorkbench.test-utils-automation";
+
+export {
+  aggregateInitializationOperation,
+  type LifecycleFetchOptions,
+} from "./IssueLifecycleWorkbench.test-utils-aggregate";
 
 export function installIssueLifecycleWorkbenchTestHooks() {
   beforeEach(() => {
@@ -28,23 +50,14 @@ export function installIssueLifecycleWorkbenchTestHooks() {
   });
 }
 
-export function lifecycleFetch(options?: {
-  duplicateCardIds?: boolean;
-  sharedLifecycleIdsAcrossIssues?: boolean;
-  emptyLifecycle?: boolean;
-  invalidLifecycle?: boolean;
-  confirmedWorkItem?: boolean;
-  issueDescription?: string;
-  issueTitles?: string[];
-  issueTitlesByProject?: Record<string, string>;
-  projects?: Array<ReturnType<typeof projectRecord>>;
-  repositoriesByProject?: Record<string, ReturnType<typeof repositoryRecord>[]>;
-  projectResponses?: Array<Promise<Response>>;
-  splitWorkItems?: boolean;
-  workItemPlans?: unknown[];
-  skippedIntegrationRisk?: boolean;
-  codingAttempts?: CodingAttempt[];
-}) {
+// lifecycleFetch 的 mock fetch 契约（F-29 测试按命名类型引用，不用 ReturnType 推导）。
+export type LifecycleFetchMock = Mock<
+  (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+>;
+
+export function lifecycleFetch(
+  options?: LifecycleFetchOptions,
+): LifecycleFetchMock {
   const projects = [
     ...(options?.projects ?? [projectRecord("project_0001", "Aria")]),
   ];
@@ -61,12 +74,28 @@ export function lifecycleFetch(options?: {
   const issueCallsByProject = new Map<string, number>();
   const latestIssueTitlesByProject = new Map<string, string>();
   const lifecycleByIssue = new Map<string, MockLifecycleData>();
+  let pointerPublications = [...(options?.pointerPublications ?? [])];
+  let logicalCodebasesList = [...(options?.logicalCodebases ?? [])];
+  // 2026-10-29：墓碑 LC（软删后进入「已删除」分区；purge 后彻底消失）。
+  let deletedLogicalCodebasesList = [
+    ...(options?.deletedLogicalCodebases ?? []).map((codebase) => ({
+      id: codebase.id,
+      name: codebase.name,
+      deleted_at: codebase.deleted_at ?? "2026-10-29T00:00:00Z",
+    })),
+  ];
+  const aggregateInitializationRoutes =
+    createAggregateInitializationRoutes(options);
+
+  const automationEnrollmentRoutes =
+    createAutomationEnrollmentRoutes(options);
 
   function issueRecord(issueId: string, title: string) {
     return {
       issue_id: issueId,
       project_id: "project_0001",
       repo_id: "repository_0001",
+      base_branch: null,
       workspace_id: null,
       task_id: null,
       session_id: null,
@@ -80,68 +109,6 @@ export function lifecycleFetch(options?: {
       created_at: "2026-05-16T00:00:00Z",
       updated_at: "2026-05-16T00:00:00Z",
     };
-  }
-
-  function sharedIdLifecycleData(issueId: string): MockLifecycleData {
-    const planId = "issue_work_item_plan_0001";
-    const data = initialLifecycleData(
-      issueId,
-      false,
-      false,
-      true,
-      false,
-      [
-        issueWorkItemPlanRecord({
-          id: planId,
-          issue_id: issueId,
-          status: "confirmed",
-          work_item_ids: ["work_item_0001"],
-        }),
-      ],
-      false,
-    );
-    data.story_specs[0] = {
-      ...data.story_specs[0],
-      issue_id: issueId,
-      title: `${issueId} Story`,
-    };
-    data.design_specs[0] = {
-      ...data.design_specs[0],
-      issue_id: issueId,
-      title: `${issueId} Design`,
-    };
-    data.work_items[0] = {
-      ...data.work_items[0],
-      issue_id: issueId,
-      title: `${issueId} Child`,
-    };
-    data.workspace_sessions = [
-      workspaceSessionRecord(
-        "story",
-        "story_spec_0001",
-        `workspace_session_${issueId}_story`,
-        { issue_id: issueId },
-      ),
-      workspaceSessionRecord(
-        "design",
-        "design_spec_0001",
-        `workspace_session_${issueId}_design`,
-        { issue_id: issueId },
-      ),
-      workspaceSessionRecord(
-        "work_item",
-        "work_item_0001",
-        `workspace_session_${issueId}_work_item`,
-        { issue_id: issueId },
-      ),
-      workspaceSessionRecord(
-        "work_item_plan",
-        planId,
-        `workspace_session_${issueId}_work_item_plan`,
-        { issue_id: issueId },
-      ),
-    ];
-    return data;
   }
 
   function lifecycleData(issueId: string) {
@@ -161,12 +128,30 @@ export function lifecycleFetch(options?: {
           options?.skippedIntegrationRisk,
           options?.codingAttempts,
         );
+    if (options?.emptyDesignSpecs) {
+      initial.design_specs = [];
+    }
+    if (options?.storyDraftInitially) {
+      for (const story of initial.story_specs) {
+        story.confirmation_status = "draft";
+      }
+    }
+    if (options?.designDraftInitially) {
+      for (const design of initial.design_specs) {
+        design.confirmation_status = "draft";
+      }
+    }
     lifecycleByIssue.set(issueId, initial);
     return initial;
   }
 
+
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const automationResponse = automationEnrollmentRoutes(url, init);
+    if (automationResponse) {
+      return automationResponse;
+    }
     if (url === "/api/projects" && init?.method === "POST") {
       const payload = JSON.parse(String(init.body)) as {
         name: string;
@@ -249,6 +234,7 @@ export function lifecycleFetch(options?: {
         issue_id: "issue_0002",
         project_id: "project_0001",
         repo_id: "repository_0001",
+      base_branch: null,
         workspace_id: null,
         task_id: null,
         session_id: null,
@@ -684,12 +670,17 @@ export function lifecycleFetch(options?: {
             : [],
         });
       }
+      const configuredIssues = options?.issuesByProject?.[projectId];
+      if (configuredIssues) {
+        return jsonResponse({ issues: configuredIssues });
+      }
       return jsonResponse({
         issues: [
           {
             issue_id: issueId,
             project_id: "project_0001",
             repo_id: "repository_0001",
+      base_branch: null,
             workspace_id: null,
             task_id: null,
             session_id: null,
@@ -749,6 +740,7 @@ export function lifecycleFetch(options?: {
           design_specs: [],
           work_item_plans: [],
           work_items: [],
+          work_item_repository_groups: [],
           workspace_sessions: [],
           coding_attempts: [],
         });
@@ -776,10 +768,310 @@ export function lifecycleFetch(options?: {
         design_specs: data.design_specs,
         work_item_plans: data.work_item_plans,
         work_items: data.work_items,
+        work_item_repository_groups:
+          options?.workItemRepositoryGroups ??
+          data.work_item_repository_groups,
         workspace_sessions: data.workspace_sessions,
         coding_attempts: data.coding_attempts,
+        ...(options?.deliverySummary
+          ? { delivery_summary: options.deliverySummary }
+          : {}),
       });
     }
+    const codebasesMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/codebases$/,
+    );
+    if (codebasesMatch) {
+      const projectId = codebasesMatch[1];
+      const codebases = [
+        ...(repositoriesByProject.get(projectId) ?? []).map((repository) => ({
+          id: repository.repository_id,
+          name: repository.name,
+          kind: "single_repo",
+          repository_id: repository.repository_id,
+          logical_codebase_id: null,
+          member_count: null,
+        })),
+        ...logicalCodebasesList.map((codebase) => ({
+          id: codebase.id,
+          name: codebase.name,
+          kind: "logical",
+          repository_id: null,
+          logical_codebase_id: codebase.id,
+          member_count: codebase.member_count ?? 0,
+        })),
+      ];
+      return jsonResponse({ codebases });
+    }
+    const logicalCodebaseListMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases(?:\?.*)?$/,
+    );
+    if (logicalCodebaseListMatch && (init?.method ?? "GET") === "GET") {
+      const includeDeleted = url.includes("include_deleted=true");
+      return jsonResponse({
+        logical_codebases: [
+          ...logicalCodebasesList.map((codebase) => ({
+            id: codebase.id,
+            name: codebase.name,
+            aggregate_root: `/workspace/${codebase.name}`,
+            created_at: "2026-08-19T00:00:00Z",
+            deleted: false,
+            deleted_at: null,
+          })),
+          ...(includeDeleted
+            ? deletedLogicalCodebasesList.map((codebase) => ({
+                id: codebase.id,
+                name: codebase.name,
+                aggregate_root: `/workspace/${codebase.name}`,
+                created_at: "2026-08-19T00:00:00Z",
+                deleted: true,
+                deleted_at: codebase.deleted_at,
+              }))
+            : []),
+        ],
+      });
+    }
+    const logicalCodebaseCreateMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases$/,
+    );
+    if (logicalCodebaseCreateMatch && init?.method === "POST") {
+      const payload = JSON.parse(String(init.body)) as {
+        name: string;
+        aggregate_root: string;
+      };
+      return jsonResponse({
+        id: "lc_0001",
+        name: payload.name,
+        aggregate_root: payload.aggregate_root,
+        created_at: "2026-08-19T00:00:00Z",
+      });
+    }
+    const logicalCodebaseDeleteMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)$/,
+    );
+    if (
+      logicalCodebaseDeleteMatch &&
+      init?.method === "DELETE" &&
+      !codebasesMatch
+    ) {
+      const lcId = decodeURIComponent(logicalCodebaseDeleteMatch[2]);
+      const removed = logicalCodebasesList.find(
+        (codebase) => codebase.id === lcId,
+      );
+      logicalCodebasesList = logicalCodebasesList.filter(
+        (codebase) => codebase.id !== lcId,
+      );
+      if (removed) {
+        deletedLogicalCodebasesList = [
+          ...deletedLogicalCodebasesList,
+          {
+            id: removed.id,
+            name: removed.name,
+            deleted_at: "2026-10-29T00:00:00Z",
+          },
+        ];
+      }
+      return jsonResponse({ status: "deleted" });
+    }
+    const logicalCodebaseRestoreMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/restore$/,
+    );
+    if (logicalCodebaseRestoreMatch && init?.method === "POST") {
+      const lcId = decodeURIComponent(logicalCodebaseRestoreMatch[2]);
+      const restored = deletedLogicalCodebasesList.find(
+        (codebase) => codebase.id === lcId,
+      );
+      deletedLogicalCodebasesList = deletedLogicalCodebasesList.filter(
+        (codebase) => codebase.id !== lcId,
+      );
+      if (restored) {
+        logicalCodebasesList = [
+          ...logicalCodebasesList,
+          { id: restored.id, name: restored.name },
+        ];
+      }
+      return jsonResponse({
+        status: "restored",
+        codebase: {
+          id: lcId,
+          name: restored?.name ?? lcId,
+          aggregate_root: `/workspace/${restored?.name ?? lcId}`,
+          created_at: "2026-08-19T00:00:00Z",
+        },
+      });
+    }
+    const logicalCodebasePurgeMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/purge$/,
+    );
+    if (logicalCodebasePurgeMatch && init?.method === "DELETE") {
+      const lcId = decodeURIComponent(logicalCodebasePurgeMatch[2]);
+      deletedLogicalCodebasesList = deletedLogicalCodebasesList.filter(
+        (codebase) => codebase.id !== lcId,
+      );
+      return jsonResponse({ status: "purged" });
+    }
+    const registrationPreflightMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations\/preflight$/,
+    );
+    if (registrationPreflightMatch && init?.method === "POST") {
+      return jsonResponse(
+        options?.registrationPreflight ?? {
+          preflight_id: "preflight_0001",
+          created_at: "2026-08-18T00:00:00Z",
+          items: [],
+        },
+      );
+    }
+    const registrationActionMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations\/([^/]+)(?:\/(resume|cancel))?$/,
+    );
+    if (registrationActionMatch) {
+      const action = registrationActionMatch[3];
+      if (action === "resume" && init?.method === "POST") {
+        return jsonResponse(options?.registrationResume ?? options?.registrationSubmit ?? {});
+      }
+      if (action === "cancel" && init?.method === "POST") {
+        return jsonResponse(options?.registrationCancel ?? options?.registrationSubmit ?? {});
+      }
+      return jsonResponse(options?.registrationSubmit ?? {});
+    }
+    const registrationSubmitMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations$/,
+    );
+    if (registrationSubmitMatch && init?.method === "POST") {
+      return jsonResponse(options?.registrationSubmit ?? {});
+    }
+    const aggregateResponse = aggregateInitializationRoutes(url, init);
+    if (aggregateResponse) {
+      return aggregateResponse;
+    }
+    const pointerPublicationsMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/pointer-publications$/,
+    );
+    const logicalCodebaseMembersMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/members$/,
+    );
+    if (logicalCodebaseMembersMatch) {
+      const lcId = decodeURIComponent(logicalCodebaseMembersMatch[2]);
+      const byLc = options?.logicalCodebaseMembersByLc?.[lcId];
+      return jsonResponse({
+        members:
+          byLc ??
+          options?.logicalCodebaseMembers ?? [
+            {
+              logical_repository_id: "repository_0001",
+              physical_repository_id: "repository_0001",
+              alias: "api",
+              status: "active",
+            },
+          ],
+      });
+    }
+    if (pointerPublicationsMatch) {
+      if (init?.method !== "POST") {
+        return jsonResponse(pointerPublications);
+      }
+      const payload = JSON.parse(String(init.body)) as {
+        batch_kind: "full" | "incremental";
+      };
+      const current = pointerPublications[0];
+      const publication: PointerPublicationDto = {
+        id: current?.id ?? "publication_0001",
+        project_id: pointerPublicationsMatch[1],
+        logical_codebase_id: "logical-0001",
+        batch_kind: payload.batch_kind,
+        entries: [
+          {
+            member_repo_id: "repository_0001",
+            state: "failed",
+            branch_name: `aria-pointer/repository_0001/${payload.batch_kind}`,
+            commit_sha: null,
+            push_error: "remote rejected",
+            conflict_detail: null,
+          },
+        ],
+        status: "completed_partial",
+        created_at: "2026-08-14T00:00:00Z",
+        updated_at: "2026-08-14T00:00:00Z",
+      };
+      pointerPublications = [publication];
+      return jsonResponse(publication);
+    }
+    const pointerPublicationActionMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/pointer-publications\/([^/]+)\/(retry-repo|revoke)$/,
+    );
+    if (pointerPublicationActionMatch && init?.method === "POST") {
+      const [projectId, publicationId, action] = [
+        pointerPublicationActionMatch[1],
+        pointerPublicationActionMatch[3],
+        pointerPublicationActionMatch[4],
+      ];
+      const current = pointerPublications.find(
+        (publication) => publication.id === publicationId,
+      );
+      const publication: PointerPublicationDto = {
+        id: publicationId,
+        project_id: projectId,
+        logical_codebase_id: current?.logical_codebase_id ?? "logical-0001",
+        batch_kind: current?.batch_kind ?? "full",
+        entries:
+          action === "revoke"
+            ? (current?.entries ?? []).map((entry) => ({
+                ...entry,
+                state: "revoked",
+              }))
+            : [
+                {
+                  member_repo_id: "repository_0001",
+                  state: "review_created",
+                  branch_name: "aria-pointer/repository_0001/retried",
+                  commit_sha: "abc123def456",
+                  push_error: null,
+                  conflict_detail: null,
+                },
+              ],
+        status: action === "revoke" ? "revoked" : "completed_all",
+        created_at: current?.created_at ?? "2026-08-14T00:00:00Z",
+        updated_at: "2026-08-14T00:00:01Z",
+      };
+      pointerPublications = [publication];
+      return jsonResponse(publication);
+    }
     return jsonResponse({});
+  });
+}
+
+
+export function aggregateInitializationFetch(
+  operationSnapshots: AggregateInitializationOperationSnapshot[],
+  options?: Parameters<typeof lifecycleFetch>[0],
+) {
+  const baseFetch = lifecycleFetch(options);
+  let getCount = 0;
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input).replace(/\/$/u, "");
+    const startMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations$/,
+    );
+    if (startMatch && init?.method === "POST") {
+      return jsonResponse(operationSnapshots[0] ?? aggregateInitializationOperation("created"));
+    }
+    const cancelMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations\/([^/]+)\/cancel$/,
+    );
+    if (cancelMatch && init?.method === "POST") {
+      return jsonResponse(aggregateInitializationOperation("cancelled"));
+    }
+    const getMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/initializations\/([^/]+)$/,
+    );
+    if (getMatch && init?.method !== "POST") {
+      const snapshot =
+        operationSnapshots[getCount] ??
+        operationSnapshots[operationSnapshots.length - 1];
+      getCount += 1;
+      return jsonResponse(snapshot);
+    }
+    return baseFetch(input, init);
   });
 }

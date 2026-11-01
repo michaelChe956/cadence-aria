@@ -11,9 +11,9 @@ import {
   deleteStorySpec,
   deleteWorkItem,
   deleteWorkItemPlan,
-  deleteCodingAttempt,
   generateDesignSpecs,
   generateStorySpecs,
+  getAutomationEnrollmentControl,
   getProviderStatus,
   getIssueLifecycle,
   getRepositoryInitialization,
@@ -22,13 +22,25 @@ import {
   listProjects,
   listRepositories,
   normalizeApiError,
+  postAutomationEnrollmentTerminate,
+  parseAutomationTerminationIdentity,
+  postAutomationContinuePlan,
+  postCodingGateResponse,
   recheckProviders,
+  restartCodingAttempt,
+  rebindAutomationEnrollment,
+  postRetryFailedScRun,
+  takeoverWorkspaceSession,
+  workspaceSessionWebSocketUrl,
 } from "./client";
 import type {
+  AutomationEnrollmentRebindRequest,
   CreateRepositoryResponse,
   RepositoryInitializationOperationSnapshot,
   RepositoryInitializationStep,
 } from "./types";
+import { imageCreateChatWebSocketUrl } from "./image-create";
+import { scopedCodingAttemptWebSocketUrl } from "../hooks/useCodingWorkspaceWs";
 
 function repositoryInitializationResult(): CreateRepositoryResponse {
   return {
@@ -466,7 +478,11 @@ describe("api client", () => {
     );
 
     await deleteProject("project/with space");
-    await deleteRepository("project/with space", "repository/with space");
+    await deleteRepository(
+      "project/with space",
+      "repository/with space",
+      "delete-repository-test-1",
+    );
     await deleteProductIssue("project/with space", "issue/with space");
     await deleteStorySpec(
       "project/with space",
@@ -488,11 +504,6 @@ describe("api client", () => {
       "issue/with space",
       "plan/with space",
     );
-    await deleteCodingAttempt({
-      projectId: "project/with space",
-      issueId: "issue/with space",
-      attemptId: "attempt/with space",
-    });
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects/project%2Fwith%20space",
@@ -502,23 +513,584 @@ describe("api client", () => {
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/design-specs/design%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items/work%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2Fwith%20space",
-      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/attempt%2Fwith%20space",
     ]);
     expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
+    expect(calls[1]?.init?.headers).toMatchObject({
+      "Idempotency-Key": "delete-repository-test-1",
+    });
   });
 
-  it("handles delete coding attempt 204 response without parsing json", async () => {
+  it("cascade_d2_3: lifecycle entity deletes default to no query and encode confirmed option", async () => {
+    // 级联删除 D2.3（plan §0.2）：三类实体删除第 4 参 options——默认 URL 无
+    // query；仅确认弹窗同意后显式携带 confirmed=true。
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(null, { status: 204 })),
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify({ status: "deleted" }), {
+          status: 200,
+        });
+      }),
     );
 
-    await expect(
-      deleteCodingAttempt({
-        projectId: "project_0001",
-        issueId: "issue_0001",
-        attemptId: "coding_attempt_0001",
+    await deleteStorySpec("project_0001", "issue_0001", "story_spec_0001");
+    await deleteDesignSpec("project_0001", "issue_0001", "design_spec_0001");
+    await deleteWorkItemPlan("project_0001", "issue_0001", "issue_plan_0001");
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
+      "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
+    ]);
+
+    await deleteStorySpec("project/with space", "issue_0001", "story/with space", {
+      confirmed: true,
+    });
+    await deleteDesignSpec("project_0001", "issue_0001", "design/with space", {
+      confirmed: true,
+    });
+    await deleteWorkItemPlan("project_0001", "issue_0001", "plan/with space", {
+      confirmed: true,
+    });
+
+    expect(calls.slice(3).map((call) => call.input)).toEqual([
+      "/api/projects/project%2Fwith%20space/issues/issue_0001/story-specs/story%2Fwith%20space?confirmed=true",
+      "/api/projects/project_0001/issues/issue_0001/design-specs/design%2Fwith%20space?confirmed=true",
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/plan%2Fwith%20space?confirmed=true",
+    ]);
+  });
+
+  it("cascade_d2_3: delete errors surface ApiRequestError code without automatic retry", async () => {
+    // ApiRequestError code/details 为权威；普通 4xx/5xx 不自动重试（二次删除
+    // 只能来自用户确认，不来自客户端自动循环）。
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            code: "entity_busy",
+            message: "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+            details: { entity_kind: "work_item_plan", entity_id: "issue_plan_0001" },
+          }),
+          { status: 409 },
+        );
       }),
-    ).resolves.toBeUndefined();
+    );
+
+    const error: ApiRequestError = await deleteWorkItemPlan(
+      "project_0001",
+      "issue_0001",
+      "issue_plan_0001",
+    ).then(
+      () => {
+        throw new Error("expected entity_busy rejection");
+      },
+      (reason: ApiRequestError) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error.code).toBe("entity_busy");
+    expect(error.details.entity_id).toBe("issue_plan_0001");
+    expect(callCount).toBe(1);
+  });
+
+  it("posts takeover with an encoded workspace session id", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          workspace_session_id: "child_1",
+          issue_id: "issue_1",
+          entity_id: "entity_1",
+          workspace_type: "work_item_plan",
+          status: "open",
+          author_provider: "claude_code",
+          reviewer_provider: "codex",
+          review_rounds: 1,
+          superpowers_enabled: true,
+          openspec_enabled: false,
+          messages: [],
+          parent_session_id: "parent/with space",
+          takeover_event_id: "takeover_1",
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(takeoverWorkspaceSession("parent/with space")).resolves.toMatchObject({
+      workspace_session_id: "child_1",
+      parent_session_id: "parent/with space",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/workspace-sessions/parent%2Fwith%20space/takeover",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("posts enrollment rebind with exact URL and body", async () => {
+    const rebindResult = {
+      command_id: "rebind_cmd_0001",
+      state: "accepted",
+      enrollment: {
+        enrollment_id: "enrollment_0001",
+        selection_key: "human-choice-1",
+        project_id: "project_1",
+        issue_id: "issue 1",
+        enabled: true,
+        policy_revision: 4,
+        source: { stories: [], designs: [] },
+        options: {
+          author_provider: "fake",
+          reviewer_provider: "fake",
+          review_rounds: 1,
+          superpowers_enabled: false,
+          openspec_enabled: false,
+          plan_options: {
+            include_integration_tests: true,
+            include_e2e_tests: false,
+            force_frontend_backend_split: false,
+            require_execution_plan_confirm: false,
+          },
+        },
+        // C5 Task 1：旧代响应快照仍含已删除的顶层 logical_repository_id——
+        // 宽解析必须容忍多余字段（新契约以 target 为准）。
+        logical_repository_id: "00000000-0000-0000-0000-000000000001",
+        prepare_intent_id: "enrollment_0001",
+        plan_id: "plan_0002",
+        session_id: "session_0002",
+        created_at: "2026-09-28T00:00:00Z",
+        updated_at: "2026-09-28T00:00:00Z",
+        target: {
+          kind: "logical_codebase",
+          logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+          logical_repository_id: "00000000-0000-0000-0000-000000000001",
+        },
+        binding_history: {
+          current: {
+            binding_version: 2,
+            enrollment_id: "enrollment_0001",
+            plan_id: "plan_0002",
+            session_id: "session_0002",
+            source: { stories: [], designs: [] },
+            target: {
+              kind: "logical_codebase",
+              logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+              logical_repository_id: "00000000-0000-0000-0000-000000000001",
+            },
+            author_provider: "fake",
+            reviewer_provider: "fake",
+          },
+          previous: [],
+        },
+      },
+    };
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify(rebindResult), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const request: AutomationEnrollmentRebindRequest = {
+      command_id: "rebind_cmd_0001",
+      expected_policy_revision: 3,
+      expected_binding_version: 1,
+      binding: {
+        plan_id: "plan_0002",
+        session_id: "session_0002",
+        source: {
+          stories: [{ id: "story_0001", version: 1 }],
+          designs: [{ id: "design_0001", version: 1 }],
+        },
+        target: {
+          kind: "logical_codebase",
+          logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+          logical_repository_id: "00000000-0000-0000-0000-000000000001",
+        },
+        author_provider: "fake",
+        reviewer_provider: "fake",
+      },
+      reason: "recover after failed generation",
+    };
+    await expect(
+      rebindAutomationEnrollment("project_1", "issue 1", request),
+    ).resolves.toMatchObject({
+      command_id: "rebind_cmd_0001",
+      state: "accepted",
+      enrollment: { binding_history: { current: { binding_version: 2 } } },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue%201/automation-enrollment/rebind",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(request),
+      }),
+    );
+  });
+
+  // C2 Task 12（REQ-CRO-06）：驾驶舱 coding REST 的真实 URL／body 断言
+  //（restart／gate-responses；command_id＋expected 版本随 body 出站）。
+  it("posts coding restart and gate response with exact URLs and bodies", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ command_id: "c", state: "accepted" }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const address = {
+      projectId: "project_1",
+      issueId: "issue 1",
+      attemptId: "attempt_9",
+    };
+
+    await restartCodingAttempt(address, {
+      command_id: "cmd-c2-restart-attempt_9",
+      attempt_id: "attempt_9",
+      expected_attempt_version: 3,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue%201/coding-attempts/attempt_9/restart",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-c2-restart-attempt_9",
+          attempt_id: "attempt_9",
+          expected_attempt_version: 3,
+        }),
+      }),
+    );
+
+    fetchMock.mockClear();
+    await postCodingGateResponse(address, {
+      command_id: "cmd-c2-gate-gate_0007-retry_review",
+      gate_id: "gate_0007",
+      action_id: "retry_review",
+      expected_version: 7,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue%201/coding-attempts/attempt_9/gate-responses",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-c2-gate-gate_0007-retry_review",
+          gate_id: "gate_0007",
+          action_id: "retry_review",
+          expected_version: 7,
+        }),
+      }),
+    );
+  });
+
+  // 批 2 P5（REQ-WIGA-10）：plan 阶段失败继续的 control/continue REST 通道
+  //（消费 P4 落地的 GET automation-enrollment/control 与 POST continue-plan）。
+  const p5ControlBinding = {
+    binding_version: 1,
+    enrollment_id: "enrollment_0001",
+    plan_id: "plan_0001",
+    session_id: "session_0001",
+    source: { stories: [], designs: [] },
+    target: {
+      kind: "logical_codebase" as const,
+      logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+      logical_repository_id: "00000000-0000-0000-0000-000000000001",
+    },
+    author_provider: "fake" as const,
+    reviewer_provider: "fake" as const,
+  };
+
+  it("gets the automation enrollment control projection with encoded ids", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            managed: true,
+            binding: p5ControlBinding,
+            plan_id: "plan_0001",
+            session_id: "session_0001",
+            terminated_at: null,
+            stop_key: "plan_failed:node_1",
+            stage: "failed",
+            allowed_actions: ["continue_plan"],
+            context_required: false,
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getAutomationEnrollmentControl("project 1", "issue 1"),
+    ).resolves.toMatchObject({
+      managed: true,
+      stop_key: "plan_failed:node_1",
+      stage: "failed",
+      allowed_actions: ["continue_plan"],
+      context_required: false,
+    });
+    // requestJson 缺省走 fetch 默认 GET（不显式携带 method），与
+    // getAutomationEnrollment 等既有 GET 通道同式。
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project%201/issues/issue%201/automation-enrollment/control",
+      expect.objectContaining({ headers: { "content-type": "application/json" } }),
+    );
+  });
+
+  it("posts continue-plan with exact URL and body", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            command_id: "cmd-continue-1",
+            state: "accepted",
+            session_id: "session_0001",
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      postAutomationContinuePlan("project_1", "issue_0001", {
+        command_id: "cmd-continue-1",
+        expected_binding: p5ControlBinding,
+        expected_stop_key: "plan_failed:node_1",
+        context: "请重点看依赖声明",
+      }),
+    ).resolves.toMatchObject({
+      command_id: "cmd-continue-1",
+      state: "accepted",
+      session_id: "session_0001",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue_0001/automation-enrollment/continue-plan",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-continue-1",
+          expected_binding: p5ControlBinding,
+          expected_stop_key: "plan_failed:node_1",
+          context: "请重点看依赖声明",
+        }),
+      }),
+    );
+  });
+
+  it("surfaces continue-plan server rejections as ApiRequestError without retry", async () => {
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            code: "automation_continue_context_required",
+            message: "a non-empty context note is required to continue a stopped human gate",
+            details: {},
+          }),
+          { status: 422 },
+        );
+      }),
+    );
+
+    const error: ApiRequestError = await postAutomationContinuePlan(
+      "project_1",
+      "issue_0001",
+      {
+        command_id: "cmd-continue-1",
+        expected_binding: p5ControlBinding,
+        expected_stop_key: "plan_gate:session_0001",
+      },
+    ).then(
+      () => {
+        throw new Error("expected context_required rejection");
+      },
+      (reason: ApiRequestError) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error.code).toBe("automation_continue_context_required");
+    expect(callCount).toBe(1);
+  });
+});
+// ── 批 2 T4（REQ-WIGA-09）：统一「终止自动化」REST 通道与 428 身份解析 ──
+describe("postAutomationEnrollmentTerminate（T4 统一终止）", () => {
+  it("posts confirmed termination with encoded ids and returns the durable receipt", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            command_id: "cmd-fe-terminate-enrollment_0001",
+            state: "accepted",
+            enrollment_id: "enrollment_0001",
+            plan_id: "plan_0001",
+            terminated_at: "2026-10-16T06:00:00Z",
+            outcome: "terminated",
+            results: [],
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await postAutomationEnrollmentTerminate("project 1", "issue/1", {
+      command_id: "cmd-fe-terminate-enrollment_0001",
+      expected_enrollment_id: "enrollment_0001",
+      expected_policy_revision: 3,
+      confirmed: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project%201/issues/issue%2F1/automation-enrollment/terminate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-fe-terminate-enrollment_0001",
+          expected_enrollment_id: "enrollment_0001",
+          expected_policy_revision: 3,
+          confirmed: true,
+        }),
+      }),
+    );
+    expect(result.outcome).toBe("terminated");
+    expect(result.terminated_at).toBe("2026-10-16T06:00:00Z");
+  });
+
+  it("surfaces the 428 automation_plan_termination_required identity via ApiRequestError details", async () => {
+    const details = {
+      confirm_required: true,
+      plan_id: "plan_0001",
+      session_id: "session_0001",
+      enrollment_id: "enrollment_0001",
+      policy_revision: 3,
+      binding_version: 2,
+      terminated_at: null as string | null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: "automation_plan_termination_required",
+              message: "automation plan termination requires unified confirmation",
+              details,
+            }),
+            { status: 428 },
+          ),
+      ),
+    );
+
+    const error: ApiRequestError = await postAutomationEnrollmentTerminate(
+      "project_0001",
+      "issue_0001",
+      {
+        command_id: "cmd-probe",
+        expected_enrollment_id: "enrollment_0001",
+        expected_policy_revision: 3,
+        confirmed: false,
+      },
+    ).then(
+      () => {
+        throw new Error("expected 428 rejection");
+      },
+      (reason: ApiRequestError) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error.code).toBe("automation_plan_termination_required");
+    expect(parseAutomationTerminationIdentity(error.details)).toEqual(details);
+  });
+
+  it("parses the WS message JSON identity payload and rejects malformed input", () => {
+    expect(
+      parseAutomationTerminationIdentity(
+        JSON.stringify({
+          confirm_required: true,
+          plan_id: "plan_0001",
+          session_id: null,
+          enrollment_id: "enrollment_0001",
+          policy_revision: 2,
+          binding_version: null,
+          terminated_at: null,
+        }),
+      ),
+    ).toEqual({
+      confirm_required: true,
+      plan_id: "plan_0001",
+      session_id: null,
+      enrollment_id: "enrollment_0001",
+      policy_revision: 2,
+      binding_version: null,
+      terminated_at: null,
+    });
+    expect(parseAutomationTerminationIdentity("not json")).toBeNull();
+    expect(
+      parseAutomationTerminationIdentity({ enrollment_id: "missing-revision" }),
+    ).toBeNull();
+  });
+});
+
+describe("postRetryFailedScRun（批2 T1 修复轮 F1：wire 契约防退化）", () => {
+  it("sends POST with same-origin credentials to the failed-sc retry route", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(
+          JSON.stringify({
+            command_id: "cmd-sc-retry-node_0007",
+            failed_node_id: "node_0007",
+            state: "accepted",
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    await postRetryFailedScRun("sess_0001", "node_0007");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].input).toBe(
+      "/api/workspace-sessions/sess_0001/failed-sc-runs/node_0007/retry",
+    );
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.credentials).toBe("same-origin");
+    expect(String(calls[0].init?.body)).toContain("cmd-sc-retry-node_0007");
+  });
+});
+
+describe("ws urls carry no token material", () => {
+  it("workspace / coding / image-create WS URLs have no query or token", () => {
+    const workspace = workspaceSessionWebSocketUrl("sess/1", {
+      protocol: "https:",
+      host: "aria.local:4317",
+    });
+    expect(workspace).toBe(
+      "wss://aria.local:4317/api/workspace-sessions/sess%2F1/ws",
+    );
+
+    const coding = scopedCodingAttemptWebSocketUrl("p/1", "i/1", "a/1", {
+      protocol: "http:",
+      host: "aria.local:4317",
+    });
+    expect(coding).toBe(
+      "ws://aria.local:4317/ws/projects/p%2F1/issues/i%2F1/coding-attempts/a%2F1",
+    );
+
+    const imageCreate = imageCreateChatWebSocketUrl("img/1", {
+      protocol: "http:",
+      host: "aria.local:4317",
+    });
+    expect(imageCreate).toBe(
+      "ws://aria.local:4317/api/image-create/sessions/img%2F1/chat",
+    );
+
+    for (const url of [workspace, coding, imageCreate]) {
+      expect(url).not.toContain("?");
+      expect(url).not.toContain("token");
+    }
   });
 });

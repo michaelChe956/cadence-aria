@@ -1,4 +1,26 @@
+use crate::cross_cutting::document_ops::compute_sha256;
+use crate::product::artifact_extraction::{
+    extract_artifact_content, scan_top_level_fenced_candidates,
+};
 use crate::product::models::WorkspaceType;
+
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static ARTIFACT_CONSTRAINT_SPEC_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_artifact_constraint_spec_call_count() {
+    ARTIFACT_CONSTRAINT_SPEC_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn artifact_constraint_spec_call_count() -> usize {
+    ARTIFACT_CONSTRAINT_SPEC_CALLS.with(Cell::get)
+}
 
 pub(crate) const ARTIFACT_SCHEMA_CONTRACT_MARKER: &str = "[artifact_schema_contract]";
 
@@ -79,6 +101,8 @@ impl ArtifactValidationReport {
 pub(crate) fn artifact_constraint_spec_for(
     workspace_type: &WorkspaceType,
 ) -> ArtifactConstraintSpec {
+    #[cfg(test)]
+    ARTIFACT_CONSTRAINT_SPEC_CALLS.with(|calls| calls.set(calls.get() + 1));
     match workspace_type {
         WorkspaceType::Story => ArtifactConstraintSpec {
             workspace_type: workspace_type.clone(),
@@ -113,7 +137,7 @@ pub(crate) fn artifact_constraint_spec_for(
                 id_rule("[AC-*]", ArtifactTokenPattern::BracketPrefix("AC-")),
             ],
             open_item_policy_hint: Some(
-                "## 待确认项：若某项已通过 AskUserQuestion 交互解决，必须标注「已通过 AskUserQuestion 确认：<结论>」；若无开放问题，写「无待确认项」。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项。",
+                "## 待确认项：若某项已通过结构化交互提问解决（Claude 用 AskUserQuestion；Codex 用 requestUserInput），必须标注「已通过 <工具名> 确认：<结论>」；若无开放问题，只写「无待确认项」四个字，不得附加解释，解释性内容写入其他章节。不得以含糊描述（如「经提问未获回答，作者自行决定」）把已解决决策留在待确认项，也不得把未决问题写入待确认项——未决问题必须先用交互工具提问获得回答。",
             ),
             reviewer_must_fix_rules: vec![
                 "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix.",
@@ -296,13 +320,216 @@ pub(crate) fn validate_workspace_artifact_constraints(
     }
 }
 
-pub(crate) fn reviewer_boundary_rules_for(workspace_type: &WorkspaceType) -> String {
+/// 既有优先路径的 XML artifact 起始 marker：存在时由调用方沿用既有单候选抽取
+/// （本次不扩 XML 多候选）。
+const XML_ARTIFACT_OPEN_TAG: &str = "<artifact>";
+
+/// 候选选择结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectionVerdict {
+    /// 恰好一个候选通过 gate，已选中该候选。
+    Unique,
+    /// 零个候选通过 gate（fail-closed，不回落候选外文本）。
+    NoPassing,
+    /// 多个候选通过 gate，语义歧义（fail-closed，不取末块/最长块）。
+    Ambiguous,
+}
+
+/// 单个候选的 gate 结果与其在原输出中的边界、正文 hash。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateGateResult {
+    /// 1-based 行号：fenced 候选为 opening/closing fence 行；legacy fallback 候选为
+    /// 抽取区间首/末行。
+    pub(crate) opening_line: usize,
+    pub(crate) closing_line: usize,
+    pub(crate) opening_byte: usize,
+    pub(crate) closing_byte_end: usize,
+    /// 候选正文（不含 fence 行）的 sha256 hex。
+    pub(crate) sha256: String,
+    pub(crate) passed: bool,
+    /// 未通过时的既有 gate 阻断原因（逐候选保留，零通过时全部上报）。
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
+/// workspace-aware 候选选择结果（Task 3/4 消费）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateSelection {
+    pub(crate) verdict: SelectionVerdict,
+    /// 仅 `SelectionVerdict::Unique` 时为 `Some`（待选正文）。
+    pub(crate) selected_markdown: Option<String>,
+    pub(crate) candidates: Vec<CandidateGateResult>,
+    pub(crate) raw_output_chars: usize,
+    pub(crate) raw_output_sha256: String,
+    /// 是否走了既有单候选 fallback：无顶层 fenced 候选，或存在 XML `<artifact>`
+    /// 优先路径时。
+    pub(crate) used_legacy_fallback: bool,
+}
+
+/// workspace-aware artifact 选择：枚举顶层 fenced 候选，逐个以当前 workspace type 的
+/// 既有 gate 校验，**恰好一个通过**才选中（change `artifact-candidate-selection`
+/// REQ-ACS-01）。
+///
+/// - 零通过或多通过一律 fail-closed：不取「最后一个」「最长一个」，存在完整候选但全部
+///   失败时也不回落 heading fallback 猜测产物；
+/// - 候选正文内的禁止 token（nested artifact fence、`<thinking>` 等）仍由既有 gate
+///   硬拒绝，不做任何放宽；
+/// - XML `<artifact>` marker 存在时沿用既有优先路径；无任何顶层 fenced 候选时走既有
+///   单候选 `extract_artifact_content` fallback，并以 `used_legacy_fallback` 标记。
+pub(crate) fn select_workspace_artifact(
+    full_output: &str,
+    workspace_type: WorkspaceType,
+) -> CandidateSelection {
+    let raw_output_chars = full_output.chars().count();
+    let raw_output_sha256 = compute_sha256(full_output.as_bytes());
+
+    if full_output.contains(XML_ARTIFACT_OPEN_TAG) {
+        return legacy_candidate_selection(
+            full_output,
+            workspace_type,
+            raw_output_chars,
+            raw_output_sha256,
+        );
+    }
+
+    let scanned = scan_top_level_fenced_candidates(full_output);
+    if scanned.is_empty() {
+        return legacy_candidate_selection(
+            full_output,
+            workspace_type,
+            raw_output_chars,
+            raw_output_sha256,
+        );
+    }
+
+    let mut candidates = Vec::with_capacity(scanned.len());
+    let mut passing_index = None;
+    let mut passing_count = 0usize;
+    for (index, candidate) in scanned.iter().enumerate() {
+        let report = validate_workspace_artifact_constraints(&candidate.markdown, &workspace_type);
+        if report.passed {
+            passing_count += 1;
+            if passing_index.is_none() {
+                passing_index = Some(index);
+            }
+        }
+        candidates.push(CandidateGateResult {
+            opening_line: candidate.opening_line,
+            closing_line: candidate.closing_line,
+            opening_byte: candidate.opening_byte,
+            closing_byte_end: candidate.closing_byte_end,
+            sha256: candidate.sha256.clone(),
+            passed: report.passed,
+            blocking_reasons: report.blocking_reasons(),
+        });
+    }
+
+    let verdict = match passing_count {
+        0 => SelectionVerdict::NoPassing,
+        1 => SelectionVerdict::Unique,
+        _ => SelectionVerdict::Ambiguous,
+    };
+    let selected_markdown = match (verdict, passing_index) {
+        // 只克隆被选中的候选正文：其余候选正文不进入结果、不再复制。
+        (SelectionVerdict::Unique, Some(index)) => Some(scanned[index].markdown.clone()),
+        _ => None,
+    };
+
+    CandidateSelection {
+        verdict,
+        selected_markdown,
+        candidates,
+        raw_output_chars,
+        raw_output_sha256,
+        used_legacy_fallback: false,
+    }
+}
+
+/// 既有单候选路径（XML marker 优先 / 无 fenced 候选）：结果仍走同一 workspace gate。
+fn legacy_candidate_selection(
+    full_output: &str,
+    workspace_type: WorkspaceType,
+    raw_output_chars: usize,
+    raw_output_sha256: String,
+) -> CandidateSelection {
+    let markdown = extract_artifact_content(full_output);
+    let report = validate_workspace_artifact_constraints(&markdown, &workspace_type);
+    let (opening_line, closing_line, opening_byte, closing_byte_end) =
+        legacy_extraction_span(full_output, &markdown);
+    let candidate = CandidateGateResult {
+        opening_line,
+        closing_line,
+        opening_byte,
+        closing_byte_end,
+        sha256: compute_sha256(markdown.as_bytes()),
+        passed: report.passed,
+        blocking_reasons: report.blocking_reasons(),
+    };
+    let verdict = if report.passed {
+        SelectionVerdict::Unique
+    } else {
+        SelectionVerdict::NoPassing
+    };
+
+    CandidateSelection {
+        verdict,
+        selected_markdown: report.passed.then_some(markdown),
+        candidates: vec![candidate],
+        raw_output_chars,
+        raw_output_sha256,
+        used_legacy_fallback: true,
+    }
+}
+
+/// legacy 抽取区间的 1-based 行列与字节边界：`markdown` 是 `full_output` 的连续子串
+/// （既有抽取只做切片与 trim），故按首处出现定位。
+fn legacy_extraction_span(full_output: &str, markdown: &str) -> (usize, usize, usize, usize) {
+    let start = full_output.find(markdown).unwrap_or_default();
+    let end = start + markdown.len();
+    let opening_line = line_number_at(full_output, start);
+    let closing_line = if markdown.is_empty() {
+        opening_line
+    } else {
+        line_number_at(full_output, end - 1)
+    };
+    (opening_line, closing_line, start, end)
+}
+
+/// `byte` 落在 `output` 的第几行（1-based，按 `\n` 计数；按字节扫描以免切到多字节
+/// 字符中间）。
+fn line_number_at(output: &str, byte: usize) -> usize {
+    output.as_bytes()[..byte.min(output.len())]
+        .iter()
+        .filter(|current| **current == b'\n')
+        .count()
+        + 1
+}
+
+/// REQ-PLN-15（设计 A 条目 8）：多仓（logical codebase）形态在既有
+/// must-fix 规则之后追加的四类必查项——需求漏项、仓库选择不合理、
+/// 验收不可判定、跨仓影响缺失。单仓形态不追加。
+const LOGICAL_CODEBASE_REVIEWER_MUST_FIX_RULES: [&str; 4] = [
+    "多仓（logical codebase）artifact：Issue 需求或范围未被覆盖时，需求漏项必须报告为 must_fix。",
+    "多仓（logical codebase）artifact：仓库选择不合理必须报告为 must_fix——列出了却不涉及本次改动，或实际涉及却未列出。",
+    "多仓（logical codebase）artifact：验收标准不可判定／验收不可判定必须报告为 must_fix——缺少可判定的判据，或无法据以判断是否达成。",
+    "多仓（logical codebase）artifact：跨仓影响缺失必须报告为 must_fix——未说明本次改动对其他成员仓的契约、接口或行为影响。",
+];
+
+/// 形态参数 `logical` 只做追加：`false` 时同一 `Vec`、同一循环，输出与
+/// 改造前逐字相同（REQ-PLN-15「单仓文案逐字不变」）。
+pub(crate) fn reviewer_boundary_rules_for(workspace_type: &WorkspaceType, logical: bool) -> String {
     let spec = artifact_constraint_spec_for(workspace_type);
     let mut output = String::from("\n[artifact_boundary_must_fix_rules]\n");
     for rule in spec.reviewer_must_fix_rules {
         output.push_str("- ");
         output.push_str(rule);
         output.push('\n');
+    }
+    if logical {
+        for rule in LOGICAL_CODEBASE_REVIEWER_MUST_FIX_RULES {
+            output.push_str("- ");
+            output.push_str(rule);
+            output.push('\n');
+        }
     }
     output
 }
@@ -316,6 +543,33 @@ pub(crate) fn author_artifact_schema_contract_for(
         .push_str("最终 Markdown artifact 必须同时满足以下 parser schema；任一必需项缺一不可。\n");
     append_markdown_artifact_schema_items(&mut output, &spec);
     Some(output)
+}
+
+/// F-60 P0（用户裁决 2026-09-26，分层合同注入）：后续轮（choice 续跑/修订/返修
+/// delta）一行短引用的条目渲染——同一 `artifact_constraint_spec_for` 规则源，
+/// 点名当前类型全部必需二级 heading、必需稳定 ID 与追踪 token（含 source id）。
+pub(crate) fn author_artifact_short_reference_items(workspace_type: &WorkspaceType) -> String {
+    let spec = artifact_constraint_spec_for(workspace_type);
+    let mut items = format!(
+        "全部必需二级 heading：{}",
+        format_markdown_heading_labels(&spec.required_headings)
+    );
+    if !spec.required_id_patterns.is_empty() || !spec.required_tokens.is_empty() {
+        items.push_str("；必需稳定 ID 与追踪 token：");
+        let mut labels = Vec::new();
+        for rule in &spec.required_id_patterns {
+            labels.push(format!(
+                "`{}`（例如 `{}`）",
+                rule.label,
+                example_for_token_pattern(&rule.pattern)
+            ));
+        }
+        for rule in &spec.required_tokens {
+            labels.push(format!("`{}`", rule.label));
+        }
+        items.push_str(&labels.join("、"));
+    }
+    items
 }
 
 pub(crate) fn reviewer_artifact_schema_gate_for(workspace_type: &WorkspaceType) -> Option<String> {
@@ -555,9 +809,25 @@ fn open_item_section_is_resolved(section: &str) -> bool {
         return true;
     }
 
-    normalized
-        .iter()
-        .all(|line| open_item_line_is_resolved(line))
+    // 首个非空行声明空标记后，后续解释行仅硬未解决 cue 才破坏整节已解决判定；
+    // 软 cue（如否定语境下的“未决问题”）不再单独拒绝良性解释（见 change
+    // tolerate-explained-empty-open-items spec Requirement 1）。
+    let mut section_declared_empty = false;
+    for (index, line) in normalized.iter().enumerate() {
+        if index == 0 && open_item_empty_marker_raw_remainder(line).is_some() {
+            section_declared_empty = true;
+        }
+        if section_declared_empty && index > 0 {
+            if open_item_line_has_hard_unresolved_cue(line) {
+                return false;
+            }
+            continue;
+        }
+        if !open_item_line_is_resolved(line) {
+            return false;
+        }
+    }
+    true
 }
 
 fn open_item_line_is_resolved(line: &str) -> bool {
@@ -578,7 +848,9 @@ fn open_item_line_is_resolved(line: &str) -> bool {
         if open_item_line_has_hard_unresolved_cue(line) {
             return false;
         }
-        return !has_unresolved_cue || has_resolved_cue;
+        // 行首已声明空标记且无硬未解决 cue：剩余解释中的软 cue（如否定语境下的
+        // “未决问题”）不再单独拒绝该行（见 change tolerate-explained-empty-open-items）。
+        return true;
     }
 
     has_resolved_cue && !has_unresolved_cue
@@ -686,7 +958,35 @@ fn open_item_empty_marker_raw_remainder(line: &str) -> Option<String> {
         lower
             .starts_with(marker)
             .then(|| trimmed[marker.len()..].to_string())
+            // 空标记后必须紧跟句读边界（或行尾），防止「无论…」「无关…」等词被
+            // 单字「无」前缀误判为空标记声明。
+            .filter(|remainder| open_item_marker_boundary(remainder))
     })
+}
+
+fn open_item_marker_boundary(remainder: &str) -> bool {
+    let Some(first) = remainder.chars().next() else {
+        return true;
+    };
+    matches!(
+        first,
+        '。' | '.'
+            | '，'
+            | ','
+            | '；'
+            | ';'
+            | '：'
+            | ':'
+            | '！'
+            | '!'
+            | '？'
+            | '?'
+            | '（'
+            | '('
+            | ' '
+            | '\t'
+            | '\u{3000}'
+    )
 }
 
 fn normalize_open_item_inline_markdown(text: &str) -> String {
@@ -757,9 +1057,14 @@ fn open_item_line_has_hard_unresolved_cue(line: &str) -> bool {
 fn open_item_line_has_resolved_cue(line: &str) -> bool {
     let normalized = normalize_open_item_inline_markdown(line);
     let lower = normalized.to_ascii_lowercase();
+    // r4(codex):codex 的结构化交互工具是 requestUserInput——标记形态与
+    // AskUserQuestion 同构(带/不带空格两种),缺省只认 Claude 工具名会把
+    // codex 已解决的决策误判为未解决(r4 story gate 现场同因的另一面)。
     line.contains("已通过结构化交互确认")
         || line.contains("已通过 AskUserQuestion")
         || lower.contains("已通过askuserquestion")
+        || line.contains("已通过 requestUserInput")
+        || lower.contains("已通过requestuserinput")
         || normalized.contains("已确认")
         || normalized.contains("均已确认")
         || normalized.contains("非待确认项")

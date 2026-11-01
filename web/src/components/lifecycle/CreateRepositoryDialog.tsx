@@ -12,6 +12,7 @@ import type {
 } from "../../api/types";
 import { getProviderOptions } from "../../state/provider-options";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { DialogShell } from "../shared/DialogShell";
 
 const POLL_INTERVAL_MS = 1_000;
 
@@ -64,7 +65,7 @@ export function CreateRepositoryDialog({
   const submittingRef = useRef(false);
   const fetchOperationRef = useRef(onFetchOperation);
   const initializationCompletedRef = useRef(onInitializationCompleted);
-  const dialogRef = useRef<HTMLFormElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const shouldFocusNameInputRef = useRef(false);
   const completedOperationIdsRef = useRef(new Set<string>());
@@ -241,32 +242,21 @@ export function CreateRepositoryDialog({
   const closeDisabled = submitting || isOperationRunning;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
+    <DialogShell
+      label="添加代码库"
+      onClose={onClose}
+      closeLabel="关闭"
+      closeDisabled={closeDisabled}
+      widthClass="max-w-md"
+      dialogRef={dialogRef}
+    >
       <form
-        ref={dialogRef}
-        role="dialog"
-        tabIndex={-1}
-        aria-label="添加代码库"
-        aria-modal="true"
         onSubmit={handleSubmit}
-        className="flex max-h-[85vh] w-full max-w-md flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
+        className="flex min-h-0 flex-1 flex-col"
       >
-        <div className="mb-4 flex shrink-0 items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-[var(--aria-ink)]">
-            添加代码库
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={closeDisabled}
-            className="cursor-pointer rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:cursor-not-allowed"
-          >
-            关闭
-          </button>
-        </div>
         {operation ? (
           <>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
               {completedResult ? (
                 <>
                   <RepositoryInitializationProgress operation={operation} />
@@ -452,7 +442,7 @@ export function CreateRepositoryDialog({
           </>
         )}
       </form>
-    </div>
+    </DialogShell>
   );
 }
 

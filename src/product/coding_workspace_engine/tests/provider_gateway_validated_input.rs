@@ -1,0 +1,711 @@
+//! Task 6: `validated_streaming_input_for_role` 三分支单测。
+//!
+//! - Legacy attempt（`target_snapshot` 为 `None`）→ `Ok(None)`。
+//! - 逻辑 attempt 但引擎未注入 gateway → `Ok(None)`。
+//! - 逻辑 attempt + 已注入 gateway + Coder → `Ok(Some)` 且 action 为
+//!   `CodingTargetWrite`。
+//! - Codex 名字 → gateway 路由级阻断 `codex_danger_full_access_unsupported`。
+
+use super::*;
+
+use std::sync::Arc;
+
+use chrono::Utc;
+
+use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use crate::cross_cutting::provider_availability_gate::{
+    ProviderAvailabilityGate, ProviderHealthSource,
+};
+use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
+use crate::product::coding_models::AttemptTargetSnapshot;
+use crate::product::coding_models::provider_config::{
+    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+};
+use crate::product::logical_codebase::{
+    AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+    GatewayRunAudit, LogicalCodebaseManifest, LogicalCodebaseProviderGateway, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, PolicyTarget, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderDialect, ProviderGatewayError, ProviderRef, ProviderRefType,
+    RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    SessionLaunchRequest, SessionPolicyAction,
+};
+use crate::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
+
+/// pass-through target resolver:直接返回请求中冻结的 target。
+struct PassThroughTargetResolver;
+
+impl PolicyTargetResolver for PassThroughTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        Ok(request.target.clone())
+    }
+}
+
+/// 测试 capability source:按 provider ref 返回对应 dialect 的 capability
+/// (Task 2b 分格形状:launch/resume/write_boundary 恒 Confirmed)。
+/// Codex 的 danger-full-access 阻断由 gateway 自身的路由级硬门施加,不在此处。
+struct StaticCapabilitySource;
+
+impl StaticCapabilitySource {
+    fn capability(provider: &ProviderRef, action: SessionPolicyAction) -> ProviderCapability {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::ProviderWireDialect;
+        use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        let (adapter_dialect, wire_dialect) = match provider.provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version: "1.0.0".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: format!("projection-digest-{action:?}"),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
+
+impl ProviderCapabilitySource for StaticCapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(Self::capability(provider, action))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        if provider.provider_type != ProviderRefType::ClaudeCode {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                    .to_string(),
+            ));
+        }
+        Ok(Self::capability(
+            provider,
+            SessionPolicyAction::PlanningReadOnly,
+        ))
+    }
+}
+
+/// 同步 adapter stub:`validate` 不触达 sync adapter,仅满足 gateway 构造签名。
+struct StubSyncAdapter;
+
+impl ProviderAdapter for StubSyncAdapter {
+    fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            structured_output: None,
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = Utc::now();
+    let snapshot = Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+            .into_iter()
+            .map(|provider| ProviderHealthEntry {
+                provider,
+                command: "stub".to_string(),
+                available: true,
+                version: Some("1.0".to_string()),
+                reason_code: None,
+                reason: None,
+                checked_at,
+            })
+            .collect(),
+    });
+    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+        snapshot,
+    ))))
+}
+
+/// 为 `project_id` 组装一个 bootstrap 政策就绪的 gateway。
+fn build_gateway(paths: &ProductAppPaths, project_id: &str) -> LogicalCodebaseProviderGateway {
+    build_gateway_with_registry(
+        paths,
+        project_id,
+        Arc::new(ProviderRegistry::new()),
+        Arc::new(GatewayRunAudit::new()),
+    )
+}
+
+/// 用注入的 registry 与 audit 组装 gateway,供 engine 级测试注册 fake streaming
+/// adapter 并断言 `GatewayRunAudit` 的 Stream 启动计数。
+pub(super) fn build_gateway_with_registry(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    registry: Arc<ProviderRegistry>,
+    audit: Arc<GatewayRunAudit>,
+) -> LogicalCodebaseProviderGateway {
+    // Task 2.8（cwd authority 契约）：真实拓扑成员 worktree 位于聚合根之下；
+    // 本 fixture 的 worktree 在 workspace root（.aria 的父目录），manifest
+    // root 取该公共父目录，否则 cwd 会被 gateway authority 早门拒绝。
+    let manifest = LogicalCodebaseManifest::new(
+        project_id,
+        paths.root().parent().unwrap().to_path_buf(),
+        vec![],
+    );
+    let policies = AggregatePolicyArtifactStore::new(paths.clone());
+    policies
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap policy");
+    LogicalCodebaseProviderGateway::with_audit(
+        policies,
+        Arc::new(StaticCapabilitySource),
+        Arc::new(PassThroughTargetResolver),
+        registry,
+        Arc::new(StubSyncAdapter),
+        always_available_gate(),
+        audit,
+        manifest.provider_context_root.clone(),
+    )
+}
+
+/// 覆写 attempt 的 `target_snapshot` 为逻辑代码库 target 并落盘。
+fn with_target_snapshot(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> CodingExecutionAttempt {
+    let worktree = attempt
+        .worktree_path
+        .clone()
+        .expect("running attempt must have a worktree");
+    let mut logical = attempt.clone();
+    logical.target_snapshot = Some(AttemptTargetSnapshot {
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+        physical_repository_id: "repository_0001".to_string(),
+        canonical_path: worktree,
+        git_dir_identity: "git-dir-identity".to_string(),
+        revision: None,
+        policy_digest: String::new(),
+        membership_revision: 1,
+        captured_at: "2026-08-09T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    });
+    let attempt_path = store
+        .paths()
+        .issue_lifecycle_root(&logical.project_id, &logical.issue_id)
+        .join("coding-attempts")
+        .join(format!("{}.json", logical.id));
+    crate::product::json_store::write_json(&attempt_path, &logical)
+        .expect("write attempt with target snapshot");
+    logical
+}
+
+/// Task 7 专用:为逻辑 attempt 播种 LogicalCodebaseStore 的 manifest 与主 checkout,
+/// 使 provider run 启动前的跨仓越界 baseline 采集(Task 14)能成功。
+pub(super) fn seed_logical_codebase_checkout(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let logical_store = LogicalCodebaseStore::new(store.paths());
+    let repository_id = LogicalRepositoryId(uuid::Uuid::nil());
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    let manifest = LogicalCodebaseManifest::new(
+        &attempt.project_id,
+        store.paths().root().to_path_buf(),
+        vec![repository_id],
+    );
+    logical_store
+        .save_manifest(&attempt.project_id, &manifest)
+        .expect("save manifest");
+    // Task 1.7：D4 窗口按成员状态取 active 主 checkout——fixture 补齐 member
+    // 记录（真实流程 manifest 与 member 记录同写；缺失即证据不足 fail-closed）。
+    logical_store
+        .save_member(
+            &attempt.project_id,
+            &CodebaseMemberRecord {
+                logical_repository_id: repository_id,
+                physical_repository_id: "repository_0001".to_string(),
+                alias: "repo".to_string(),
+                role: "repository".to_string(),
+                ordinal: 1,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &worktree,
+                    worktree.join(".git"),
+                    None,
+                ),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![RepositoryCheckoutId(uuid::Uuid::nil())],
+                status: MemberStatus::Active,
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save member");
+    logical_store
+        .save_checkout(
+            &attempt.project_id,
+            &RepositoryCheckoutRecord {
+                checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+                logical_repository_id: repository_id,
+                physical_repository_id: "repository_0001".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: worktree,
+                checkout_path_hash: "checkout-path-hash".to_string(),
+                git_dir_identity: "git-dir-identity".to_string(),
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: "2026-08-09T00:00:00Z".to_string(),
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save checkout");
+}
+
+pub(super) fn engine(
+    store: &CodingAttemptStore,
+    gateway: Option<LogicalCodebaseProviderGateway>,
+) -> CodingWorkspaceEngine {
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    match gateway {
+        Some(gateway) => engine.with_logical_provider_gateway(Arc::new(gateway)),
+        None => engine,
+    }
+}
+
+/// 把 attempt 的 Coder role provider 覆盖为 ClaudeCode,避免 fixture 默认 author=Codex
+/// 触发 gateway 的 Codex danger-full-access 路由级硬门。
+fn override_coder_to_claude_code(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) {
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::ClaudeCode,
+                code_reviewer: Some(ProviderName::ClaudeCode),
+                internal_reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
+            },
+        )
+        .expect("override coder to ClaudeCode");
+}
+
+fn streaming_input(working_dir: PathBuf, provider_type: ProviderType) -> StreamingProviderInput {
+    StreamingProviderInput {
+        working_directory: None,
+        baseline_tree: None,
+        tool_policy: None,
+        audit_sink: None,
+        provider_type,
+        role: AdapterRole::Executor,
+        prompt: "probe".to_string(),
+        working_dir,
+        workspace_session_id: None,
+        resume_provider_session_id: None,
+        permission_mode: ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: Default::default(),
+        timeout_secs: 1,
+    }
+}
+
+/// Task 7:注册进 gateway registry 的 review streaming adapter。`start` 立即完成
+/// 并输出固定 review JSON,使 engine 级 internal review 能唯一经 gateway 跑通。
+struct ReviewStreamingAdapter {
+    output: String,
+}
+
+impl ReviewStreamingAdapter {
+    fn new(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ReviewStreamingAdapter {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let structured_output_contract = input.structured_output_contract.clone();
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        let output = self.output.clone();
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::Completed(
+                    crate::cross_cutting::streaming_provider::ProviderCompletion::from_output(
+                        output,
+                        structured_output_contract.as_ref(),
+                        None,
+                    ),
+                ))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+    /// Task 1b 段③:prepared launch 经 `start_validated` 分发——拆出 input
+    /// 后与裸 `start` 同路径。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
+}
+
+#[test]
+fn validated_streaming_input_for_role_produces_review_read_only_for_review_roles() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
+    let engine = engine(&store, Some(gateway));
+
+    for role in [
+        CodingProviderRole::CodeReviewer,
+        CodingProviderRole::InternalReviewer,
+    ] {
+        let input = streaming_input(
+            logical_attempt.worktree_path.clone().expect("worktree"),
+            ProviderType::ClaudeCode,
+        );
+        let policy = engine
+            .resolve_launch_policy_for_role(&logical_attempt, role, &input.working_dir)
+            .expect("helper returns Ok")
+            .expect("logical attempt + gateway must produce policy");
+        let (_input, policy) = ValidatedStreamingProviderInput::new(input, policy).into_parts();
+        assert_eq!(
+            policy.envelope().action,
+            SessionPolicyAction::ReviewReadOnly
+        );
+        assert!(policy.envelope().writable_roots.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn logical_internal_review_launches_through_gateway() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    seed_logical_codebase_checkout(&store, &logical_attempt);
+
+    store
+        .save_review_request(
+            &logical_attempt,
+            &ReviewRequest {
+                id: "review_request_0001".to_string(),
+                attempt_id: logical_attempt.id.clone(),
+                kind: ReviewRequestKind::GitBranchOnly,
+                remote_kind: RemoteKind::GenericGit,
+                remote: "origin".to_string(),
+                base_branch: logical_attempt.base_branch.clone(),
+                branch_name: logical_attempt.branch_name.clone(),
+                commit_sha: git_stdout(
+                    logical_attempt.worktree_path.as_ref().unwrap(),
+                    &["rev-parse", "HEAD"],
+                ),
+                push_status: PushStatus::Pushed,
+                external_url: None,
+                manual_instructions: Vec::new(),
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+                push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
+                revoked: false,
+            },
+        )
+        .expect("review request");
+
+    let audit = Arc::new(GatewayRunAudit::new());
+    let adapter = Arc::new(ReviewStreamingAdapter::new(
+        serde_json::json!({
+            "verdict": "approve",
+            "summary": "logical review ok",
+            "findings": []
+        })
+        .to_string(),
+    ));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, adapter.clone());
+    let gateway = build_gateway_with_registry(
+        &store.paths(),
+        &logical_attempt.project_id,
+        Arc::new(registry),
+        audit.clone(),
+    );
+
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
+
+    let review = engine
+        .execute_internal_pr_review(&logical_attempt, adapter.as_ref())
+        .await
+        .expect("logical internal review must launch through gateway");
+
+    assert_eq!(review.verdict, ReviewVerdict::Approve);
+    assert_eq!(audit.stream_launches(), 1);
+}
+
+#[test]
+fn validated_streaming_input_for_role_returns_none_for_legacy_attempt() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let gateway = build_gateway(&store.paths(), &attempt.project_id);
+    let engine = engine(&store, Some(gateway));
+    let input = streaming_input(
+        attempt.worktree_path.clone().expect("worktree"),
+        ProviderType::ClaudeCode,
+    );
+
+    let policy = engine
+        .resolve_launch_policy_for_role(&attempt, CodingProviderRole::Coder, &input.working_dir)
+        .expect("helper returns Ok");
+
+    assert!(
+        policy.is_none(),
+        "legacy attempt must not produce validated input"
+    );
+}
+
+#[test]
+fn validated_streaming_input_for_role_returns_none_without_injected_gateway() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let engine = engine(&store, None);
+    let input = streaming_input(
+        logical_attempt.worktree_path.clone().expect("worktree"),
+        ProviderType::ClaudeCode,
+    );
+
+    let policy = engine
+        .resolve_launch_policy_for_role(
+            &logical_attempt,
+            CodingProviderRole::Coder,
+            &input.working_dir,
+        )
+        .expect("helper returns Ok");
+
+    assert!(
+        policy.is_none(),
+        "missing gateway must not produce validated input"
+    );
+}
+
+#[test]
+fn validated_streaming_input_for_role_produces_coding_target_write_for_coder() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    override_coder_to_claude_code(&store, &logical_attempt);
+    let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
+    let engine = engine(&store, Some(gateway));
+    let worktree = logical_attempt.worktree_path.clone().expect("worktree");
+    let input = streaming_input(worktree.clone(), ProviderType::ClaudeCode);
+
+    let policy = engine
+        .resolve_launch_policy_for_role(
+            &logical_attempt,
+            CodingProviderRole::Coder,
+            &input.working_dir,
+        )
+        .expect("helper returns Ok")
+        .expect("logical attempt + gateway must produce policy");
+
+    let (_input, policy) = ValidatedStreamingProviderInput::new(input, policy).into_parts();
+    assert_eq!(
+        policy.envelope().action,
+        SessionPolicyAction::CodingTargetWrite
+    );
+    assert_eq!(policy.envelope().writable_roots, vec![worktree]);
+}
+
+#[test]
+fn validated_streaming_input_targets_coding_worktree_not_primary_checkout() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+
+    // 覆盖 target_snapshot.canonical_path 为主 checkout（与嵌套 coding worktree 不同），
+    // 验证 CodingTargetWrite 的 target worktree 取 input.working_dir（嵌套 worktree）而非
+    // 主 checkout——与 C-1 多仓 worktree 路由（checkout/.worktrees/aria-issues/{issue}）一致。
+    let nested_worktree = logical_attempt
+        .worktree_path
+        .clone()
+        .expect("worktree path");
+    let primary_checkout = nested_worktree.parent().expect("parent").join("checkout");
+    let mut logical = logical_attempt.clone();
+    logical.target_snapshot = Some(AttemptTargetSnapshot {
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+        physical_repository_id: "repository_0001".to_string(),
+        canonical_path: primary_checkout,
+        git_dir_identity: "git-dir-identity".to_string(),
+        revision: None,
+        policy_digest: String::new(),
+        membership_revision: 1,
+        captured_at: "2026-08-09T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    });
+    let attempt_path = store
+        .paths()
+        .issue_lifecycle_root(&logical.project_id, &logical.issue_id)
+        .join("coding-attempts")
+        .join(format!("{}.json", logical.id));
+    crate::product::json_store::write_json(&attempt_path, &logical)
+        .expect("write attempt with nested-worktree snapshot");
+
+    let gateway = build_gateway(&store.paths(), &logical.project_id);
+    let engine = engine(&store, Some(gateway));
+    override_coder_to_claude_code(&store, &logical);
+    let input = streaming_input(nested_worktree.clone(), ProviderType::ClaudeCode);
+
+    let policy = engine
+        .resolve_launch_policy_for_role(&logical, CodingProviderRole::Coder, &input.working_dir)
+        .expect("helper returns Ok")
+        .expect("logical attempt + gateway must produce policy");
+
+    let (_input, policy) = ValidatedStreamingProviderInput::new(input, policy).into_parts();
+    assert_eq!(
+        policy.envelope().action,
+        SessionPolicyAction::CodingTargetWrite
+    );
+    assert_eq!(policy.envelope().target.worktree, nested_worktree);
+    assert_eq!(policy.envelope().writable_roots, vec![nested_worktree]);
+}
+
+#[test]
+fn validated_streaming_input_for_role_rejects_codex_danger_full_access() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
+    let engine = engine(&store, Some(gateway));
+    let worktree = logical_attempt.worktree_path.clone().expect("worktree");
+
+    // r47:路由级 Codex 全阻已移除(LC 投影恒非 danger;本 fixture 的
+    // capability double 放行)→ validate 成功。反硬编码契约(C-2)以成功
+    // 形态钉死:validated 的 dialect 恒 Codex,绝不静默顶替 Claude。
+    let policy = engine
+        .resolve_launch_policy_for_role(&logical_attempt, CodingProviderRole::Coder, &worktree)
+        .expect("codex coder must validate through LC gateway (capability source permitting)");
+
+    let validated = policy.expect("validated policy present");
+    assert_eq!(
+        validated.envelope().provider_dialect,
+        crate::product::logical_codebase::policy::ProviderDialect::CodexCliV1,
+        "validated dialect must stay Codex (never silently swapped to Claude)"
+    );
+}
+
+#[test]
+fn routing_reference_context_from_policy_maps_envelope_fields() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let _root = root;
+    let logical_attempt = with_target_snapshot(&store, &attempt);
+    override_coder_to_claude_code(&store, &logical_attempt);
+    let gateway = build_gateway(&store.paths(), &logical_attempt.project_id);
+    let engine = engine(&store, Some(gateway));
+    let worktree = logical_attempt.worktree_path.clone().expect("worktree");
+
+    let policy = engine
+        .resolve_launch_policy_for_role(&logical_attempt, CodingProviderRole::Coder, &worktree)
+        .expect("helper returns Ok")
+        .expect("logical attempt + gateway must produce policy");
+
+    let envelope = policy.envelope();
+    let context = routing_reference_context_from_policy(&policy);
+    match context {
+        RoutingReferenceContext::Logical(logical) => {
+            assert_eq!(logical.policy_id, envelope.policy_id);
+            assert_eq!(logical.policy_revision, envelope.policy_revision);
+            assert_eq!(logical.policy_digest, envelope.policy_digest);
+            assert_eq!(
+                logical.authority_root,
+                envelope.authority_root.to_string_lossy()
+            );
+        }
+        RoutingReferenceContext::Legacy => panic!("expected Logical routing reference context"),
+    }
+}
+
+// Task 1.7：D4 生产 seam（LC coding run 全员基线）测试族拆分到子模块
+// d4_member_baseline.rs（large_file_guard 1200 行红线，纯移动）。
+mod d4_member_baseline;

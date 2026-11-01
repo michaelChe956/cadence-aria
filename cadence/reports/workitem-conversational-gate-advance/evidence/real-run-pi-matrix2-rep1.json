@@ -1,0 +1,47 @@
+{
+  "provider": "pi",
+  "stage": "levels matrix2 (post-fix rerun, 新二进制 PID 745190)",
+  "task": "B 修复后重跑 · 阶段 B",
+  "runs": [
+    {
+      "rep": 1,
+      "dir": "/tmp/aria-stage35-20260903/matrix2/pi/rep1",
+      "issue_id": "issue_0113",
+      "plan_id": "issue_work_item_plan_0001",
+      "workspace_session_id": "workspace_session_0130",
+      "startedAt": "2026-09-03T13:55:56.707Z",
+      "finishedAt": "2026-09-03T14:25:56.756Z",
+      "elapsedSec": 1800.047,
+      "completed": false,
+      "session_status": "open",
+      "flow_kind": "single_candidate",
+      "run_policy": "interactive",
+      "failureClass": "hard_timeout",
+      "error": "硬超时 1800000ms",
+      "run_history": {"repairs_used": 0, "manual_repairs_used": 0, "transitions_used": 0, "initial_review_count": 0, "verification_review_count": 0},
+      "verdicts": [["revise", 1], ["revise", 2], ["revise", 3]],
+      "stages_seen": ["running", "cross_review", "prepare_context"],
+      "gate_turns": 0,
+      "advance_actions": [],
+      "permission_approvals": 0,
+      "choices": 0,
+      "product_store_conflict_count": 0,
+      "budget_events": 0,
+      "usage_by_role": {"reviewer": {"input_tokens": 10049, "output_tokens": 1981, "cache_read_tokens": 26496, "cache_creation_tokens": 0}},
+      "note": "provider 全程 running(review_complete×3 均 revise),30 分钟墙钟耗尽仍无交付终态;与任务预期『pi levels 可能 hard_timeout,如实记录』一致"
+    }
+  ],
+  "verdict_v6_0_2_2_4": {
+    "①门回合>0": "unevaluable — gate_turns=0(未到人工门)",
+    "②预算逐turn恰扣一次": "unevaluable — 无 budget 事件(gate 不可达)",
+    "③advance后Ready+ledger零新增": "unevaluable — advance_actions=[](从未 advance)",
+    "④同attempt": "unevaluable — 无 advance/resume 序列"
+  },
+  "fix2_observation": {
+    "target": "dc4d0d0d Evaluate policy route(第5死路:SC 人工修订完成后 confirm 不再撞 product_store_conflict)",
+    "result": "NOT EXERCISED — 未到达 turn 完成→confirm 路径;product_store_conflict 计数 0(未触达,不构成修复有效/无效证据)",
+    "quota": "hard_timeout 1/2(Phase A amendment 线另有 hard_timeout×1,为不同接缝的非环境失败;本跑用 1 次后按『两阶段完即停』收束)"
+  },
+  "rerun_discipline": "pi 计 1 跑(matrix 规格);无伪造",
+  "server_health_after": "ok"
+}

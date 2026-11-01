@@ -1,0 +1,612 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep2e/codex/rep1",
+  "startedAt": "2026-09-08T15:36:13.616Z",
+  "finishedAt": "2026-09-08T15:56:17.616Z",
+  "elapsedSec": 1203.999,
+  "issue_id": "issue_0170",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0234",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.026,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.091,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 231.127,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 231.468,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 384.924,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 385.236,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 447.294,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 528.1,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 528.377,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 654.736,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 655.019,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 795.205,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 795.487,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 842.959,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 920.651,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 920.955,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 983.992,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1059.834,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1060.106,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1203.772,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 290.787,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 的 ct-backend-levels-v1 输出契约未供给 WI-002 要求的 API 404/405 错误能力，require_all 匹配失败。",
+          "evidence": "edge WI-001 -> WI-002；contract_id ct-backend-levels-v1；missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+          "required_action": "将该完整 404/405 API 错误能力加入 ct-backend-levels-v1 的 provided capabilities。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 的 ct-frontend-level-page-v1 输出契约能力数组被逗号错误拆分，且未供给 WI-003 要求的脚本引用 /api/levels 能力，require_all 匹配失败。",
+          "evidence": "edge WI-002 -> WI-003；contract_id ct-frontend-level-page-v1；missing_capabilities [web/level-select.js references /api/levels]",
+          "required_action": "修正能力数组结构，并将 web/level-select.js references /api/levels 作为完整供给能力加入 ct-frontend-level-page-v1。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 447.294,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 的 ct-backend-levels-v1 输出契约缺少 WI-002 要求的 API 404/405 错误能力。",
+          "evidence": "coverage edge WI-001 -> WI-002, contract_id ct-backend-levels-v1, missing capability: unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape",
+          "required_action": "将两项 API 错误响应能力完整加入 WI-001 的 provided_output_contracts.capabilities，并重新生成覆盖投影。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 的 ct-frontend-level-page-v1 输出契约缺少 WI-003 要求的脚本引用能力。",
+          "evidence": "coverage edge WI-002 -> WI-003, contract_id ct-frontend-level-page-v1, missing capability: web/level-select.js references /api/levels",
+          "required_action": "将 web/level-select.js references /api/levels 加入 WI-002 的 provided_output_contracts.capabilities，并重新生成覆盖投影。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 572.251,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-002 的 require_all 契约覆盖失败，provider 未声明 API 404/405 能力。",
+          "evidence": "edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+          "required_action": "在 WI-001 的 ct-backend-levels-v1 output contract capabilities 中补齐 API unknown-path 404 JSON 与 unsupported-method 405 JSON 能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 -> WI-003 的 require_all 契约覆盖失败，provider 未声明前端脚本引用 /api/levels 的能力。",
+          "evidence": "edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities [web/level-select.js references /api/levels]",
+          "required_action": "在 WI-002 的 ct-frontend-level-page-v1 output contract capabilities 中补齐 web/level-select.js references /api/levels 能力，并避免将自然语言逗号拆成错误 capability。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 733.297,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 未向 WI-002 提供 required_all 契约中列出的 API 404/405 能力。",
+          "evidence": "Edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities=[unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+          "required_action": "将 WI-001 的 output contract capabilities 补齐为包含该能力，或调整 WI-002 的 required capability 使供需一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 未向 WI-003 提供 required_all 契约中列出的 /api/levels 引用能力。",
+          "evidence": "Edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities=[web/level-select.js references /api/levels]",
+          "required_action": "将 WI-002 的 output contract capabilities 补齐为包含该能力，或调整 WI-003 的 required capability 使供需一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 842.958,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 输出契约未向 WI-002 提供 required capabilities 中声明的 API 404/405 能力。",
+          "evidence": "coverage edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities: [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+          "required_action": "将 WI-001 的 ct-backend-levels-v1 provided capabilities 扩展为包含该 API 404/405 能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 输出契约未向 WI-003 提供 required capabilities 中声明的脚本 API 引用能力，且当前 provided capabilities 数组被逗号错误拆分。",
+          "evidence": "coverage edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities: [web/level-select.js references /api/levels]",
+          "required_action": "修正 ct-frontend-level-page-v1 capability 文案拆分问题，并确保 provided capabilities 包含 web/level-select.js references /api/levels。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 6,
+      "elapsedSec": 983.992,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 输出契约未声明 WI-002 要求的 API 404/405 能力，require_all 覆盖失败。",
+          "evidence": "edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+          "required_action": "在 ct-backend-levels-v1 的 provided capabilities 中补充该 capability，使 WI-001 -> WI-002 覆盖无缺失。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 输出契约未声明 WI-003 要求的脚本引用 /api/levels 能力，require_all 覆盖失败。",
+          "evidence": "edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities [web/level-select.js references /api/levels]",
+          "required_action": "在 ct-frontend-level-page-v1 的 provided capabilities 中补充 web/level-select.js references /api/levels，并修正被逗号拆分的错误状态 capability 表述，使 WI-002 -> WI-003 覆盖无缺失。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 7,
+      "elapsedSec": 1203.772,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 输出契约缺少 WI-002 要求的 API 404/405 错误处理能力。",
+          "evidence": "edge WI-001 -> WI-002, contract_id ct-backend-levels-v1, missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+          "required_action": "在 WI-001 的 ct-backend-levels-v1 provided capabilities 中补充完整 API 404/405 能力描述。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 输出契约缺少 WI-003 要求的脚本 API 引用能力，且现有错误处理能力字符串被错误拆分。",
+          "evidence": "edge WI-002 -> WI-003, contract_id ct-frontend-level-page-v1, missing_capabilities [web/level-select.js references /api/levels]",
+          "required_action": "修正 ct-frontend-level-page-v1 的能力字符串，补充 web/level-select.js references /api/levels，并将 fetch/HTTP/invalid-response 错误处理合并为完整能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "WI-001 的 ct-backend-levels-v1 输出契约未供给 WI-002 要求的 API 404/405 错误能力，require_all 匹配失败。",
+      "evidence": "edge WI-001 -> WI-002；contract_id ct-backend-levels-v1；missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+      "required_action": "将该完整 404/405 API 错误能力加入 ct-backend-levels-v1 的 provided capabilities。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 的 ct-frontend-level-page-v1 输出契约能力数组被逗号错误拆分，且未供给 WI-003 要求的脚本引用 /api/levels 能力，require_all 匹配失败。",
+      "evidence": "edge WI-002 -> WI-003；contract_id ct-frontend-level-page-v1；missing_capabilities [web/level-select.js references /api/levels]",
+      "required_action": "修正能力数组结构，并将 web/level-select.js references /api/levels 作为完整供给能力加入 ct-frontend-level-page-v1。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 的 ct-backend-levels-v1 输出契约缺少 WI-002 要求的 API 404/405 错误能力。",
+      "evidence": "coverage edge WI-001 -> WI-002, contract_id ct-backend-levels-v1, missing capability: unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape",
+      "required_action": "将两项 API 错误响应能力完整加入 WI-001 的 provided_output_contracts.capabilities，并重新生成覆盖投影。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 的 ct-frontend-level-page-v1 输出契约缺少 WI-003 要求的脚本引用能力。",
+      "evidence": "coverage edge WI-002 -> WI-003, contract_id ct-frontend-level-page-v1, missing capability: web/level-select.js references /api/levels",
+      "required_action": "将 web/level-select.js references /api/levels 加入 WI-002 的 provided_output_contracts.capabilities，并重新生成覆盖投影。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-002 的 require_all 契约覆盖失败，provider 未声明 API 404/405 能力。",
+      "evidence": "edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+      "required_action": "在 WI-001 的 ct-backend-levels-v1 output contract capabilities 中补齐 API unknown-path 404 JSON 与 unsupported-method 405 JSON 能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 -> WI-003 的 require_all 契约覆盖失败，provider 未声明前端脚本引用 /api/levels 的能力。",
+      "evidence": "edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities [web/level-select.js references /api/levels]",
+      "required_action": "在 WI-002 的 ct-frontend-level-page-v1 output contract capabilities 中补齐 web/level-select.js references /api/levels 能力，并避免将自然语言逗号拆成错误 capability。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 未向 WI-002 提供 required_all 契约中列出的 API 404/405 能力。",
+      "evidence": "Edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities=[unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+      "required_action": "将 WI-001 的 output contract capabilities 补齐为包含该能力，或调整 WI-002 的 required capability 使供需一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 未向 WI-003 提供 required_all 契约中列出的 /api/levels 引用能力。",
+      "evidence": "Edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities=[web/level-select.js references /api/levels]",
+      "required_action": "将 WI-002 的 output contract capabilities 补齐为包含该能力，或调整 WI-003 的 required capability 使供需一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 输出契约未向 WI-002 提供 required capabilities 中声明的 API 404/405 能力。",
+      "evidence": "coverage edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities: [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+      "required_action": "将 WI-001 的 ct-backend-levels-v1 provided capabilities 扩展为包含该 API 404/405 能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 输出契约未向 WI-003 提供 required capabilities 中声明的脚本 API 引用能力，且当前 provided capabilities 数组被逗号错误拆分。",
+      "evidence": "coverage edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities: [web/level-select.js references /api/levels]",
+      "required_action": "修正 ct-frontend-level-page-v1 capability 文案拆分问题，并确保 provided capabilities 包含 web/level-select.js references /api/levels。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 输出契约未声明 WI-002 要求的 API 404/405 能力，require_all 覆盖失败。",
+      "evidence": "edge WI-001 -> WI-002; contract_id ct-backend-levels-v1; missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+      "required_action": "在 ct-backend-levels-v1 的 provided capabilities 中补充该 capability，使 WI-001 -> WI-002 覆盖无缺失。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 输出契约未声明 WI-003 要求的脚本引用 /api/levels 能力，require_all 覆盖失败。",
+      "evidence": "edge WI-002 -> WI-003; contract_id ct-frontend-level-page-v1; missing_capabilities [web/level-select.js references /api/levels]",
+      "required_action": "在 ct-frontend-level-page-v1 的 provided capabilities 中补充 web/level-select.js references /api/levels，并修正被逗号拆分的错误状态 capability 表述，使 WI-002 -> WI-003 覆盖无缺失。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 输出契约缺少 WI-002 要求的 API 404/405 错误处理能力。",
+      "evidence": "edge WI-001 -> WI-002, contract_id ct-backend-levels-v1, missing_capabilities [unknown API paths return 404 JSON and unsupported API methods return 405 JSON with the error shape]",
+      "required_action": "在 WI-001 的 ct-backend-levels-v1 provided capabilities 中补充完整 API 404/405 能力描述。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 输出契约缺少 WI-003 要求的脚本 API 引用能力，且现有错误处理能力字符串被错误拆分。",
+      "evidence": "edge WI-002 -> WI-003, contract_id ct-frontend-level-page-v1, missing_capabilities [web/level-select.js references /api/levels]",
+      "required_action": "修正 ct-frontend-level-page-v1 的能力字符串，补充 web/level-select.js references /api/levels，并将 fetch/HTTP/invalid-response 错误处理合并为完整能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 23009,
+      "output_tokens": 1372,
+      "cache_read_tokens": 22144,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "single-candidate approval compile failed; human gate remains open",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-08T15:43:40.911Z",
+      "elapsedSec": 447.295,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_006",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-e76ed70a87",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T15:43:40.912Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-08T15:50:16.575Z",
+      "elapsedSec": 842.958,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_011",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-541876bc3e",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T15:50:16.575Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-08T15:52:37.609Z",
+      "elapsedSec": 983.992,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_013",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-2-0d6dde3508",
+        "feedback_digest": "701e0d83a7788e4c6e72b224fa22eaf9b154558398f2e52760a8f83a4eb45070",
+        "feedback_length": 63
+      },
+      "sentAt": "2026-09-08T15:52:37.609Z"
+    },
+    {
+      "sequence": 4,
+      "enteredAt": "2026-09-08T15:56:17.389Z",
+      "elapsedSec": 1203.772,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_015",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-08T15:56:17.389Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-e76ed70a87",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_b434f5e2-5d02-4e18-a61b-a5bff24e3e28",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_003"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-541876bc3e",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_2ee55f74-3e29-401b-a7d3-3e5ec2c629fc",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_006"
+    },
+    {
+      "action_index": 2,
+      "command_id": "cmd-human_gate_feedback-2-0d6dde3508",
+      "feedback_digest": "701e0d83a7788e4c6e72b224fa22eaf9b154558398f2e52760a8f83a4eb45070",
+      "feedback_length": 63,
+      "turn_id": "human_gate_turn_54de0439-a2f8-49d1-8b66-3d089a66e582",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_007"
+    }
+  ],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 1203999,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.065,
+    "1:running": 230.036,
+    "2:cross_review": 0.341,
+    "3:prepare_context": 153.456,
+    "4:cross_review": 0.312,
+    "5:prepare_context": 62.058,
+    "6:human_confirm": 80.806,
+    "7:cross_review": 0.277,
+    "8:prepare_context": 126.359,
+    "9:cross_review": 0.283,
+    "10:prepare_context": 140.186,
+    "11:cross_review": 0.282,
+    "12:prepare_context": 47.472,
+    "13:human_confirm": 77.692,
+    "14:cross_review": 0.304,
+    "15:prepare_context": 63.037,
+    "16:human_confirm": 75.842,
+    "17:cross_review": 0.272,
+    "18:prepare_context": 143.666,
+    "19:human_confirm": 0.227
+  },
+  "stage3_gate_return": {
+    "waits": 3,
+    "dispatched": 3,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

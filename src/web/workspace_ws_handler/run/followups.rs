@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::PlanAuthorOutputContract;
 
 pub(super) fn work_item_plan_findings_feedback(findings: &[WorkItemSplitFinding]) -> String {
     findings
@@ -49,6 +50,56 @@ pub(super) fn work_item_plan_retry_error(
         })
 }
 
+/// B2b3（Task 5.4，设计 §5.3 legacy_plan_revision 行）：fresh 时重算
+/// retained/redo 与 durable payload 的对照规则——保留项按序逐项 item_id
+/// 相等；redo 按 old_item_id 与 feedback 精确相等（feedback 为捕获期同一
+/// 重算的冻结值，不重算不归一）。任一不一致返回 Err（调用方以
+/// `lc_resume_recovery_stale` typed 拒收，不用旧权限强行完成）。
+pub(super) fn legacy_plan_revision_payload_matches_recompute(
+    payload_retained: &[crate::product::models::LcRetainedPlanItemRef],
+    payload_redo: &[crate::product::models::LcRecoveryRedoSpec],
+    retained: &[crate::product::models::LifecycleWorkItemRecord],
+    redo_specs: &[crate::product::work_item_split_engine::RedoSpec],
+) -> Result<(), String> {
+    if payload_retained.len() != retained.len() {
+        return Err(format!(
+            "legacy_plan_revision payload retained count {} != recomputed {}",
+            payload_retained.len(),
+            retained.len()
+        ));
+    }
+    for (payload_item, record) in payload_retained.iter().zip(retained.iter()) {
+        if payload_item.item_id != record.id {
+            return Err(format!(
+                "legacy_plan_revision payload retained item {} != recomputed {}",
+                payload_item.item_id, record.id
+            ));
+        }
+    }
+    if payload_redo.len() != redo_specs.len() {
+        return Err(format!(
+            "legacy_plan_revision payload redo count {} != recomputed {}",
+            payload_redo.len(),
+            redo_specs.len()
+        ));
+    }
+    for (payload_spec, spec) in payload_redo.iter().zip(redo_specs.iter()) {
+        if payload_spec.old_item_id != spec.old_id {
+            return Err(format!(
+                "legacy_plan_revision payload redo old_id {} != recomputed {}",
+                payload_spec.old_item_id, spec.old_id
+            ));
+        }
+        if payload_spec.feedback.as_deref() != Some(spec.feedback.as_str()) {
+            return Err(format!(
+                "legacy_plan_revision payload redo feedback for {} drifted from recomputed value",
+                payload_spec.old_item_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 macro_rules! workspace_ws_work_item_plan_revision_arm {
     (
         $engine:ident,
@@ -58,16 +109,52 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
         $command_rx:ident,
         $run_label:ident,
         $outbound_tx_for_task:ident,
-        $current_run_for_task:ident,
-        $workspace_runs_for_task:ident,
-        $session_id_for_task:ident,
+        $manager_for_task:ident,
         $run_token:ident,
+        $provider_drive_guard:ident,
         $feedback:ident
     ) => {{
                 let lifecycle_for_run = LifecycleStore::new($run_context_clone.app_paths.clone());
                 let app_paths_for_run = $run_context_clone.app_paths.clone();
                 let session_record_for_run = $run_context_clone.session_record.clone();
                 let mut $command_rx = $command_rx;
+
+                // B2b3（Task 5.4，设计 §5.3 legacy_plan_revision 行）：显式
+                // fresh 接管——重算 retained/redo 必须与 durable payload
+                // 一致（不一致 typed Stale 拒收回等待，不用旧权限强行完
+                // 成、不转 OutlineRebuild）；feedback 消费 payload 冻结值，
+                // stale 收口后无活动节点时重建 Revision 运行节点，provider
+                // 全新启动（fresh builder，resume=None）。
+                let plan_revision_fresh_payload = match lc_fresh_recovery_record_if_running(
+                    &$run_context_clone.app_paths,
+                    &$engine.session().session_id,
+                ) {
+                    Ok(Some(recovery)) => match &recovery.run_context {
+                        crate::product::models::LcRecoveryRunContext::LegacyPlanRevision {
+                            retained_items,
+                            redo_specs,
+                            overall_feedback,
+                            ..
+                        } => Some((
+                            retained_items.clone(),
+                            redo_specs.clone(),
+                            overall_feedback.clone(),
+                        )),
+                        _ => None,
+                    },
+                    Ok(None) => None,
+                    Err(message) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let $feedback = match &plan_revision_fresh_payload {
+                    Some((_, _, overall)) => overall.clone(),
+                    None => $feedback,
+                };
 
                 let (retained, redo_specs, request) = match build_work_item_plan_revision_input(
                     &$engine,
@@ -85,6 +172,47 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         return;
                     }
                 };
+
+                // B2b3：fresh 时对照 payload——重算结果与捕获事实不一致即
+                // typed Stale 拒收（op Failed + recovery 回 Waiting + typed
+                // 帧上浮；零 provider start）。
+                if let Some((payload_retained, payload_redo, _)) = &plan_revision_fresh_payload
+                    && let Err(reason) = super::followups::legacy_plan_revision_payload_matches_recompute(
+                        payload_retained,
+                        payload_redo,
+                        &retained,
+                        &redo_specs,
+                    )
+                {
+                    if let Ok(latest_record) = lifecycle_for_run
+                        .get_workspace_session(&$engine.session().session_id)
+                        && let Some(recovery) = latest_record
+                            .lc_resume_recovery
+                            .clone()
+                            .filter(|recovery| {
+                                recovery.state
+                                    == crate::product::models::LcResumeRecoveryState::FreshRunning
+                            })
+                        && let Some(operation_id) = recovery.operation_id.clone()
+                    {
+                        super::gateway_start::lc_fail_fresh_operation_to_waiting(
+                            &lifecycle_for_run,
+                            &$engine.session().session_id,
+                            &$outbound_tx_for_task,
+                            &latest_record,
+                            &recovery,
+                            &operation_id,
+                            &super::gateway_start::LcFreshDispatchRejection {
+                                code: crate::product::lifecycle_store::LcFreshClaimOutcome::STALE_SUPERSEDED,
+                                message: reason,
+                            },
+                        )
+                        .await;
+                    }
+                    $engine.mark_active_run_finished(&$run_label);
+                    drop($engine);
+                    return;
+                }
 
                 let repository = match workspace_repository_for_session(
                     &app_paths_for_run,
@@ -120,6 +248,19 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                 };
 
                 let author_provider = $engine.session().author_provider.clone();
+                let plan_launch = match resolve_plan_author_launch(&*$engine) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("logical plan launch failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                let routing_context = plan_launch.routing_context();
                 let invocation = match WorkItemSplitEngine::build_revision_invocation(
                     &request,
                     &lifecycle_for_run,
@@ -128,6 +269,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     author_provider,
                     &retained,
                     &redo_specs,
+                    &routing_context,
                 ) {
                     Ok(invocation) => invocation,
                     Err(error) => {
@@ -140,6 +282,40 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         return;
                     }
                 };
+                // B2b3：fresh 且 stale 收口后无活动节点——重建 Revision 运行
+                // 节点（与 `request_work_item_plan_revision` 的节点形态同构，
+                // 不要求 AuthorConfirm 前置阶段）。
+                if plan_revision_fresh_payload.is_some()
+                    && $engine.active_timeline_node_id().is_none()
+                {
+                    $engine
+                        .transition_stage(WorkspaceStage::Revision)
+                        .await;
+                    let revision_round = ($engine
+                        .timeline_nodes
+                        .iter()
+                        .filter(|node| {
+                            node.node_type
+                                == crate::web::workspace_ws_types::TimelineNodeType::ReviewerRun
+                        })
+                        .count() as u32)
+                        .max(1);
+                    let fresh_revision_agent = $engine.session().author_provider.clone();
+                    let _ = $engine
+                        .create_timeline_node(
+                            crate::product::workspace_engine::TimelineNodeDraft {
+                            node_type: crate::web::workspace_ws_types::TimelineNodeType::Revision,
+                            agent: Some(fresh_revision_agent),
+                            stage: WorkspaceStage::Revision,
+                            round: Some(revision_round),
+                            title: format!("返修 Round {revision_round}"),
+                            summary: Some(
+                                "LC 显式 fresh 恢复：按 durable 反馈返修".to_string(),
+                            ),
+                            status: crate::web::workspace_ws_types::TimelineNodeStatus::Active,
+                        })
+                        .await;
+                }
                 let Some(node_id) = $engine.active_timeline_node_id() else {
                     $engine.mark_active_run_finished(&$run_label);
                     drop($engine);
@@ -149,43 +325,104 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
                     return;
                 };
-                let provider_input = $engine.build_work_item_plan_streaming_input(
-                    invocation.provider_type.clone(),
-                    invocation.prompt.clone(),
-                    invocation.worktree_path.clone(),
-                    invocation.author_provider.clone(),
-                );
-                let provider_session = $provider_for_run
-                    .start(provider_input, $run_cancel.clone())
-                    .await;
-                let full_output = match $engine
-                    .drive_work_item_plan_provider_session_to_output(
-                        provider_session,
-                        &mut $command_rx,
-                        node_id,
+                // B2b3：fresh provider 全新启动（fresh builder，resume=None，
+                // 不回捞旧 native 会话）。
+                let provider_input = if plan_revision_fresh_payload.is_some() {
+                    $engine.build_work_item_plan_streaming_input_fresh(
+                        invocation.provider_type.clone(),
+                        invocation.prompt.clone(),
+                        invocation.worktree_path.clone(),
                         invocation.author_provider.clone(),
+                        PlanAuthorOutputContract::Structured,
                     )
-                    .await
-                {
-                    Ok(output) => output,
-                    Err(_) => {
-                        $engine.mark_active_run_finished(&$run_label);
-                        return;
-                    }
+                } else {
+                    $engine.build_work_item_plan_streaming_input(
+                        invocation.provider_type.clone(),
+                        invocation.prompt.clone(),
+                        invocation.worktree_path.clone(),
+                        invocation.author_provider.clone(),
+                        PlanAuthorOutputContract::Structured,
+                    )
                 };
-                let structured_output = match parse_work_item_split_structured_output(&full_output)
-                {
-                    Ok(output) => output,
+                let provider_input = match provider_input {
+                    Ok(provider_input) => provider_input,
                     Err(message) => {
                         $engine.mark_active_run_finished(&$run_label);
                         drop($engine);
-                        let err = WsOutMessage::Error {
-                            message: format!("split generate_revision failed: {message}"),
-                        };
+                        let err = WsOutMessage::Error { message };
                         let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
+                // Task 1b 段②生产臂:Logical 启动先 begin split run 身份
+                // (retry 每次新 handle);begin 失败 fail-closed 上浮。
+                let plan_split_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                    &plan_launch,
+                    &lifecycle_for_run,
+                    &session_record_for_run.project_id,
+                    &session_record_for_run.issue_id,
+                    &invocation.author_provider,
+                    &$engine.session().session_id,
+                ) {
+                    Ok(run) => run,
+                    Err(message) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        return;
+                    }
+                };
+                 let provider_input = $engine.attach_tool_policy_audit(provider_input);
+                 let provider_session = start_work_item_plan_author(
+                     plan_launch,
+                     $provider_for_run.clone(),
+                     provider_input,
+                     $run_cancel.clone(),
+                    plan_split_run.as_ref(),
+                 )
+                 .await;
+                 let full_output = match $engine
+                     .drive_work_item_plan_provider_session_to_output(
+                         provider_session,
+                         &mut $command_rx,
+                         node_id,
+                         invocation.author_provider.clone(),
+                     )
+                     .await
+                 {
+                     Ok(output) => output,
+                    Err(message) => {
+                        crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                            plan_split_run.as_ref(),
+                            &format!("provider session drive failed: {message}"),
+                        );
+                         $engine.mark_active_run_finished(&$run_label);
+                         return;
+                     }
+                 };
+                 let structured_output = match parse_work_item_split_structured_output(&full_output)
+                 {
+                     Ok(output) => output,
+                     Err(message) => {
+                        crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                            plan_split_run.as_ref(),
+                            &format!("structured output parse failed: {message}"),
+                        );
+                         $engine.mark_active_run_finished(&$run_label);
+                         drop($engine);
+                         let err = WsOutMessage::Error {
+                             message: format!("split generate_revision failed: {message}"),
+                         };
+                         let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                         return;
+                     }
+                 };
+                crate::web::workspace_ws_handler::run::close_plan_split_run(
+                    plan_split_run.as_ref(),
+                    &invocation.prompt,
+                    &full_output,
+                );
                 let output = match WorkItemSplitEngine::complete_revision_from_structured_output(
                     &request,
                     &lifecycle_for_run,
@@ -229,25 +466,15 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
                             $engine.mark_active_run_finished(&$run_label);
                             drop($engine);
-                            clear_active_run_if_token(
-                                &$current_run_for_task,
-                                &$workspace_runs_for_task,
-                                &$session_id_for_task,
-                                $run_token,
-                            )
-                            .await;
+                            drop($provider_drive_guard.take());
+                            $manager_for_task.finish_run($run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
                             $engine.mark_active_run_finished(&$run_label);
                             drop($engine);
-                            clear_active_run_if_token(
-                                &$current_run_for_task,
-                                &$workspace_runs_for_task,
-                                &$session_id_for_task,
-                                $run_token,
-                            )
-                            .await;
+                            drop($provider_drive_guard.take());
+                            $manager_for_task.finish_run($run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::AutoRevision { findings: _ } => {
@@ -283,6 +510,19 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
 
                             // 整组 AutoRevision 时丢弃局部 retained/redo，使用完整 generate_revision。
                             let author_provider = $engine.session().author_provider.clone();
+                            let plan_launch = match resolve_plan_author_launch(&*$engine) {
+                                Ok(launch) => launch,
+                                Err(error) => {
+                                    $engine.mark_active_run_finished(&$run_label);
+                                    drop($engine);
+                                    let err = WsOutMessage::Error {
+                                        message: format!("logical plan launch failed: {error}"),
+                                    };
+                                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                            let routing_context = plan_launch.routing_context();
                             let invocation = match WorkItemSplitEngine::build_revision_invocation(
                                 &request,
                                 &lifecycle_for_run,
@@ -291,6 +531,7 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 author_provider,
                                 &[],
                                 &[],
+                                &routing_context,
                             ) {
                                 Ok(invocation) => invocation,
                                 Err(error) => {
@@ -309,15 +550,51 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                             let node_id = $engine
                                 .begin_work_item_plan_auto_revision_run(revision_iterations)
                                 .await;
-                            let provider_input = $engine.build_work_item_plan_streaming_input(
-                                invocation.provider_type.clone(),
-                                invocation.prompt.clone(),
-                                invocation.worktree_path.clone(),
-                                invocation.author_provider.clone(),
-                            );
-                            let provider_session = $provider_for_run
-                                .start(provider_input, $run_cancel.clone())
-                                .await;
+                            let provider_input = match $engine
+                                .build_work_item_plan_streaming_input(
+                                    invocation.provider_type.clone(),
+                                    invocation.prompt.clone(),
+                                    invocation.worktree_path.clone(),
+                                    invocation.author_provider.clone(),
+                                    PlanAuthorOutputContract::Structured,
+                                ) {
+                                Ok(provider_input) => provider_input,
+                                Err(message) => {
+                                    $engine.mark_active_run_finished(&$run_label);
+                                    drop($engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                            let provider_input = $engine.attach_tool_policy_audit(provider_input);
+                            // Task 1b 段②生产臂:AutoRevision retry 每次迭代
+                            // begin 新 handle(retry 不复用旧身份)。
+                            let plan_split_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                                &plan_launch,
+                                &lifecycle_for_run,
+                                &session_record_for_run.project_id,
+                                &session_record_for_run.issue_id,
+                                &invocation.author_provider,
+                                &$engine.session().session_id,
+                            ) {
+                                Ok(run) => run,
+                                Err(message) => {
+                                    $engine.mark_active_run_finished(&$run_label);
+                                    drop($engine);
+                                    let err = WsOutMessage::Error { message };
+                                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                                    return;
+                                }
+                            };
+                            let provider_session = start_work_item_plan_author(
+                                plan_launch,
+                                $provider_for_run.clone(),
+                                provider_input,
+                                $run_cancel.clone(),
+                                plan_split_run.as_ref(),
+                            )
+                            .await;
                             let full_output = match $engine
                                 .drive_work_item_plan_provider_session_to_output(
                                     provider_session,
@@ -328,7 +605,11 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 .await
                             {
                                 Ok(output) => output,
-                                Err(_) => {
+                                Err(message) => {
+                                    crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                                        plan_split_run.as_ref(),
+                                        &format!("provider session drive failed: {message}"),
+                                    );
                                     $engine.mark_active_run_finished(&$run_label);
                                     return;
                                 }
@@ -337,6 +618,10 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                 match parse_work_item_split_structured_output(&full_output) {
                                     Ok(output) => output,
                                     Err(message) => {
+                                        crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                                            plan_split_run.as_ref(),
+                                            &format!("structured output parse failed: {message}"),
+                                        );
                                         $engine.mark_active_run_finished(&$run_label);
                                         drop($engine);
                                         let err = WsOutMessage::Error {
@@ -349,6 +634,11 @@ macro_rules! workspace_ws_work_item_plan_revision_arm {
                                         return;
                                     }
                                 };
+                            crate::web::workspace_ws_handler::run::close_plan_split_run(
+                                plan_split_run.as_ref(),
+                                &invocation.prompt,
+                                &full_output,
+                            );
                             let output =
                                 match WorkItemSplitEngine::complete_revision_from_structured_output(
                                     &request,
@@ -397,41 +687,60 @@ macro_rules! workspace_ws_provider_run_followups {
     (
         $engine:ident,
         $provider_registry_for_run:ident,
-        $current_run_for_task:ident,
-        $workspace_runs_for_task:ident,
-        $session_id_for_task:ident,
+        $manager_for_task:ident,
         $run_token:ident,
         $run_label:ident,
         $outbound_tx_for_task:ident,
         $run_cancel:ident,
-        $run_context_clone:ident
+        $run_context_clone:ident,
+        $provider_drive_guard:ident
     ) => {{
-        while $engine.session().stage == WorkspaceStage::CrossReview {
-            let reviewer_name = $engine
-                .session()
-                .reviewer_provider
-                .clone()
-                .unwrap_or(ProviderName::Codex);
+        loop {
+            if $engine.session().stage != WorkspaceStage::CrossReview {
+                break;
+            }
+            // SC 修订接力顶杀在途 run 根修（oracle 候选6）：CrossReview 对 SC 流
+            // 语义二义——phase=Evaluate 待驱评审（在途 run 自续 reviewer），
+            // phase=Generate 表示 policy 路由已把返修 author 重跑委托给
+            // ProviderRunRequested{WorkItemPlanSingleCandidateAuthor} 接力（唯一
+            // 接续路径）。委托态若仍按 stage 驱 reviewer，会误燃第二轮（候选已
+            // 裁决 revise），接力 spawn 的 supersede 随即取消在途 token 杀死该
+            // 误燃握手（现场：claude policy session: handshake failed: cancelled）。
+            // 让位接力，registry/节点由接力 run 接续。legacy 流不受影响。
+            if $engine.sc_author_rerun_delegated() {
+                tracing::debug!(
+                    session_id = %$engine.session().session_id,
+                    phase = ?$engine.session().single_candidate_phase,
+                    "single-candidate author rerun delegated; followups yields review loop to relay"
+                );
+                break;
+            }
+            // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不起 review
+            // followup——绝不以 Codex 顶替。
+            let Some(reviewer_name) = $engine.session().reviewer_provider.clone() else {
+                break;
+            };
             let Some(provider_for_review) = $provider_registry_for_run.get(&reviewer_name) else {
                 break;
             };
             let (review_command_tx, review_command_rx) = mpsc::channel(8);
-            {
-                let mut current = $current_run_for_task.lock().await;
-                if let Some(active) = current.as_mut()
-                    && active.token == $run_token
-                {
-                    active.command_tx = review_command_tx.clone();
-                }
+            $manager_for_task
+                .replace_command_tx_if_token($run_token, review_command_tx)
+                .await;
+            if $engine.logical_provider_gateway().is_some() {
+                $engine
+                    .drive_review_session_via_gateway(review_command_rx)
+                    .await;
+            } else {
+                $engine
+                    .drive_review_session(provider_for_review, review_command_rx)
+                    .await;
             }
-            $workspace_runs_for_task
-                .replace_command_tx_if_token(&$session_id_for_task, $run_token, review_command_tx)
-                .await;
-            $engine
-                .drive_review_session(provider_for_review, review_command_rx)
-                .await;
         }
+        // 仅当持久化策略路由属于当前节点时，才由 ProviderRunRequested 消费者启动。
+        // 先前 artifact 的路由作用域不能阻断刚创建的 serial Outline run。
         if $engine.session().workspace_type == WorkspaceType::WorkItemPlan
+            && !$engine.policy_route_targets_active_node()
             && $engine.session().stage == WorkspaceStage::Running
             && $engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemPlanOutlineRun)
@@ -444,26 +753,13 @@ macro_rules! workspace_ws_provider_run_followups {
                     message: format!("provider unavailable: {author_name:?}"),
                 };
                 let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                clear_active_run_if_token(
-                    &$current_run_for_task,
-                    &$workspace_runs_for_task,
-                    &$session_id_for_task,
-                    $run_token,
-                )
-                .await;
+                drop($provider_drive_guard.take());
+                $manager_for_task.finish_run($run_token).await;
                 return;
             };
             let (outline_command_tx, mut outline_command_rx) = mpsc::channel(8);
-            {
-                let mut current = $current_run_for_task.lock().await;
-                if let Some(active) = current.as_mut()
-                    && active.token == $run_token
-                {
-                    active.command_tx = outline_command_tx.clone();
-                }
-            }
-            $workspace_runs_for_task
-                .replace_command_tx_if_token(&$session_id_for_task, $run_token, outline_command_tx)
+            $manager_for_task
+                .replace_command_tx_if_token($run_token, outline_command_tx)
                 .await;
             match drive_current_work_item_plan_outline_run(
                 &mut $engine,
@@ -484,13 +780,8 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: "work item plan outline auto revision after review is not supported in follow-up run".to_string(),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
                 Err(message) => {
@@ -498,18 +789,16 @@ macro_rules! workspace_ws_provider_run_followups {
                     drop($engine);
                     let err = WsOutMessage::Error { message };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             }
         }
+        // 同上：仅当前节点的策略路由会改由 ProviderRunRequested 启动；历史 scope
+        // 不能吞掉 serial 当前项返修的直接 follow-up。
         if $engine.session().workspace_type == WorkspaceType::WorkItemPlan
+            && !$engine.policy_route_targets_active_node()
             && $engine.session().stage == WorkspaceStage::Running
             && $engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
@@ -522,68 +811,63 @@ macro_rules! workspace_ws_provider_run_followups {
                     message: format!("provider unavailable: {author_name:?}"),
                 };
                 let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                clear_active_run_if_token(
-                    &$current_run_for_task,
-                    &$workspace_runs_for_task,
-                    &$session_id_for_task,
-                    $run_token,
-                )
-                .await;
+                drop($provider_drive_guard.take());
+                $manager_for_task.finish_run($run_token).await;
                 return;
             };
             let (draft_command_tx, mut draft_command_rx) = mpsc::channel(8);
-            {
-                let mut current = $current_run_for_task.lock().await;
-                if let Some(active) = current.as_mut()
-                    && active.token == $run_token
-                {
-                    active.command_tx = draft_command_tx.clone();
-                }
-            }
-            $workspace_runs_for_task
-                .replace_command_tx_if_token(&$session_id_for_task, $run_token, draft_command_tx)
+            $manager_for_task
+                .replace_command_tx_if_token($run_token, draft_command_tx)
                 .await;
             let mut feedback = $engine.pending_revision_context.clone();
             while $engine.active_node_type()
                 == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)
             {
-            let Some(node_id) = $engine.active_timeline_node_id() else {
-                $engine.mark_active_run_finished(&$run_label);
-                drop($engine);
-                let err = WsOutMessage::Error {
-                    message: "work item draft run node unavailable".to_string(),
-                };
-                let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                clear_active_run_if_token(
-                    &$current_run_for_task,
-                    &$workspace_runs_for_task,
-                    &$session_id_for_task,
-                    $run_token,
-                )
-                .await;
-                return;
-            };
-            let provider_input = match $engine
-                .build_current_work_item_draft_streaming_input(feedback.as_deref())
-            {
-                Ok(input) => input,
-                Err(message) => {
-                    $engine
-                        .finish_active_run_with_failed_node(message.clone())
-                        .await;
+                let Some(node_id) = $engine.active_timeline_node_id() else {
+                    $engine.mark_active_run_finished(&$run_label);
                     drop($engine);
-                    let err = WsOutMessage::Error { message };
+                    let err = WsOutMessage::Error {
+                        message: "work item draft run node unavailable".to_string(),
+                    };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
                     return;
-                }
-            };
+                };
+                let plan_launch = match resolve_plan_author_launch(&*$engine) {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        $engine.mark_active_run_finished(&$run_label);
+                        drop($engine);
+                        let err = WsOutMessage::Error {
+                            message: format!("logical plan launch failed: {error}"),
+                        };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        drop($provider_drive_guard.take());
+                        $manager_for_task.finish_run($run_token).await;
+                        return;
+                    }
+                };
+                let routing_context = plan_launch.routing_context();
+                let provider_input = match $engine
+                    .build_current_work_item_draft_streaming_input(
+                        feedback.as_deref(),
+                        &routing_context,
+                    )
+                {
+                    Ok(input) => input,
+                    Err(message) => {
+                        $engine
+                            .finish_active_run_with_failed_node(message.clone())
+                            .await;
+                        drop($engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                        drop($provider_drive_guard.take());
+                        $manager_for_task.finish_run($run_token).await;
+                        return;
+                    }
+                };
             $engine
                 .emit_provider_prompt_event(
                     &node_id,
@@ -596,9 +880,38 @@ macro_rules! workspace_ws_provider_run_followups {
                     Some(author_name.clone()),
                 )
                 .await;
-            let provider_session = provider_for_draft
-                .start(provider_input, $run_cancel.clone())
-                .await;
+            let provider_input = $engine.attach_tool_policy_audit(provider_input);
+            // Task 1b 段②生产臂:RetryOnce 循环每轮 begin 新 handle。
+            let draft_prompt = provider_input.prompt.clone();
+            let plan_split_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
+                &plan_launch,
+                &crate::product::lifecycle_store::LifecycleStore::new(
+                    $run_context_clone.app_paths.clone(),
+                ),
+                &$run_context_clone.session_record.project_id,
+                &$run_context_clone.session_record.issue_id,
+                &author_name,
+                &$engine.session().session_id,
+            ) {
+                Ok(run) => run,
+                Err(message) => {
+                    $engine.mark_active_run_finished(&$run_label);
+                    drop($engine);
+                    let err = WsOutMessage::Error { message };
+                    let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
+                    return;
+                }
+            };
+            let provider_session = start_work_item_plan_author(
+                plan_launch,
+                provider_for_draft.clone(),
+                provider_input,
+                $run_cancel.clone(),
+                plan_split_run.as_ref(),
+            )
+            .await;
             let full_output = match $engine
                 .drive_work_item_plan_provider_session_to_output(
                     provider_session,
@@ -609,7 +922,11 @@ macro_rules! workspace_ws_provider_run_followups {
                 .await
             {
                 Ok(output) => output,
-                Err(_) => {
+                Err(message) => {
+                    crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                        plan_split_run.as_ref(),
+                        &format!("provider session drive failed: {message}"),
+                    );
                     $engine.mark_active_run_finished(&$run_label);
                     return;
                 }
@@ -617,22 +934,26 @@ macro_rules! workspace_ws_provider_run_followups {
             let structured_output = match parse_work_item_split_structured_output(&full_output) {
                 Ok(output) => output,
                 Err(message) => {
+                    crate::web::workspace_ws_handler::run::fail_plan_split_run(
+                        plan_split_run.as_ref(),
+                        &format!("structured output parse failed: {message}"),
+                    );
                     $engine.mark_active_run_finished(&$run_label);
                     drop($engine);
                     let err = WsOutMessage::Error {
                         message: format!("work item draft generate failed: {message}"),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             };
+            crate::web::workspace_ws_handler::run::close_plan_split_run(
+                plan_split_run.as_ref(),
+                &draft_prompt,
+                &full_output,
+            );
             let candidate = match parse_work_item_draft_output(structured_output) {
                 Ok(candidate) => candidate,
                 Err(error) => {
@@ -642,13 +963,8 @@ macro_rules! workspace_ws_provider_run_followups {
                         message: format!("work item draft parse failed: {}", error.message),
                     };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             };
@@ -666,13 +982,8 @@ macro_rules! workspace_ws_provider_run_followups {
                     drop($engine);
                     let err = WsOutMessage::Error { message };
                     let _ = send_json_outbound(&$outbound_tx_for_task, &err).await;
-                    clear_active_run_if_token(
-                        &$current_run_for_task,
-                        &$workspace_runs_for_task,
-                        &$session_id_for_task,
-                        $run_token,
-                    )
-                    .await;
+                    drop($provider_drive_guard.take());
+                    $manager_for_task.finish_run($run_token).await;
                     return;
                 }
             }
@@ -701,6 +1012,9 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
     let mut revision_iterations = 0;
     loop {
         let author_provider = engine.session().author_provider.clone();
+        let plan_launch = resolve_plan_author_launch(engine)
+            .map_err(|error| format!("logical plan launch failed: {error}"))?;
+        let routing_context = plan_launch.routing_context();
         let context_resolutions = load_work_item_plan_outline_context_resolutions(
             app_paths,
             session_record,
@@ -715,6 +1029,7 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             &repository,
             author_provider,
             &context_resolutions,
+            &routing_context,
         )
         .map_err(|error| format!("split generate failed: {}", error.message))?;
         let node_id = engine
@@ -725,16 +1040,46 @@ pub(crate) async fn drive_current_work_item_plan_outline_run(
             invocation.prompt.clone(),
             invocation.worktree_path.clone(),
             invocation.author_provider.clone(),
-        );
-        let provider_session = provider.start(provider_input, run_cancel.clone()).await;
-        let full_output = engine
+            PlanAuthorOutputContract::Structured,
+        )?;
+        let provider_input = engine.attach_tool_policy_audit(provider_input);
+        // Task 1b 段②生产臂:AutoRevision 循环每轮 begin 新 handle。
+        let plan_split_run = begin_plan_split_run_if_logical(
+            &plan_launch,
+            &lifecycle,
+            &session_record.project_id,
+            &session_record.issue_id,
+            &invocation.author_provider,
+            &engine.session().session_id,
+        )
+        .map_err(|message| format!("begin plan split run failed: {message}"))?;
+        let provider_session = start_work_item_plan_author(
+            plan_launch,
+            provider.clone(),
+            provider_input,
+            run_cancel.clone(),
+            plan_split_run.as_ref(),
+        )
+        .await;
+        let full_output = match engine
             .drive_work_item_plan_provider_session_to_output(
                 provider_session,
                 command_rx,
                 node_id,
                 invocation.author_provider.clone(),
             )
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(message) => {
+                fail_plan_split_run(
+                    plan_split_run.as_ref(),
+                    &format!("provider session drive failed: {message}"),
+                );
+                return Err(message);
+            }
+        };
+        close_plan_split_run(plan_split_run.as_ref(), &invocation.prompt, &full_output);
         let outcome =
             complete_work_item_plan_outline_author_from_output(engine, &full_output).await?;
 

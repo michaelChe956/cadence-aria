@@ -1,13 +1,35 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
+use crate::product::lifecycle_store::{
+    AggregateDesignSpecScope, AggregateStorySpecScope, ConfirmAggregateGateError,
+};
+use crate::product::logical_codebase::{
+    LogicalRepositoryId, PlanningContextResolver, PlanningContextSetResolver, RepositoryRouting,
+};
 use crate::product::models::WorkItemRuntimeBinding;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use crate::product::workspace_engine::group_work_items_by_target;
 use std::collections::{BTreeMap, BTreeSet};
 
-mod deletion;
-pub use deletion::{delete_work_item, delete_work_item_plan};
+// 仅测试模块消费（`mod tests` 经 `use super::*` 取用；lib 目标不编译）。
+#[cfg(test)]
+use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+#[cfg(test)]
+use preflight::{SingleCandidatePreflightDecision, preflight_single_repository_candidate};
+
+pub(crate) mod deletion;
+pub(crate) mod plan_preparation;
+pub(crate) mod preflight;
+
+pub use deletion::{
+    delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan,
+};
+pub(crate) use plan_preparation::{PreparedPlanRecords, prepare_plan_records};
+// 仅测试模块消费（见 lifecycle_tests.inc.rs）。
+#[cfg(test)]
+pub(crate) use plan_preparation::PreparedPlanIds;
 
 pub async fn issue_lifecycle(
     State(state): State<WebAppState>,
@@ -18,6 +40,9 @@ pub async fn issue_lifecycle(
         .project_id
         .ok_or_else(|| ApiError::validation("project_required", "project_id is required"))?;
     let app_paths = product_app_paths(&state);
+    let project = ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
@@ -60,18 +85,53 @@ pub async fn issue_lifecycle(
     let work_item_plan_records = lifecycle
         .list_issue_work_item_plans(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    // REQ-MTG-04（WP3）：plan 级 group 聚合只读投影 additive 附着于 plan DTO
+    // （从 target-attempt durable 事实现算，无第二状态机；缺省 None=旧响应兼容）。
     let work_item_plans = work_item_plan_records
         .iter()
-        .map(issue_work_item_plan_detail_dto)
-        .collect::<Vec<_>>();
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
-    let mut coding_attempts = Vec::new();
-    let repository_id = issue.repo_id.clone().ok_or_else(|| {
-        product_store_api_error(ProductStoreError::NotFound {
-            kind: "issue_repository",
-            id: issue.id.clone(),
+        .map(|plan| {
+            let group_projection = coding_store
+                .compute_plan_group_projection(&project_id, &issue_id, &plan.id)
+                .map_err(product_store_api_error)
+                .map(plan_group_projection_dto)?;
+            // F-26b：plan 会话的 reviewer 节点证据同样投影到 plan DTO。
+            let plan_session = workspace_session_for_entity(
+                &workspace_sessions,
+                &plan.id,
+                &WorkspaceType::WorkItemPlan,
+            );
+            let review_status = session_review_status(
+                &lifecycle,
+                &project_id,
+                &issue_id,
+                plan_session.map(|session| session.id.as_str()),
+            );
+            Ok(issue_work_item_plan_detail_dto(
+                plan,
+                Some(group_projection),
+                review_status,
+            ))
         })
-    })?;
+        .collect::<ApiResult<Vec<_>>>()?;
+    let mut coding_attempts = Vec::new();
+    // 方案 X 阶段1：按 RepositoryRouting 三态分流。Logical（多仓）不要求 issue.repo_id，
+    // 后续经 manifest/selection 解析（聚合视野）；Legacy（单仓）保持原无条件要求 repo_id，
+    // 向后兼容；FailClosed 由下游解析按稳定错误码 repository_routing_* 报错（阶段A已实现）。
+    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let repository_id = match routing {
+        RepositoryRouting::Legacy { .. } => issue.repo_id.clone().ok_or_else(|| {
+            product_store_api_error(ProductStoreError::NotFound {
+                kind: "issue_repository",
+                id: issue.id.clone(),
+            })
+        })?,
+        RepositoryRouting::Logical { .. } | RepositoryRouting::FailClosed { .. } => {
+            // Logical 不要求 repo_id（manifest/selection 权威）；FailClosed 在后续解析时报稳定错误码。
+            issue.repo_id.clone().unwrap_or_default()
+        }
+    };
     let revision_store = WorkItemRevisionStore::new(app_paths.clone());
     let runtime_reader = WorkItemRuntimeReader::new(app_paths.clone());
     let mut schema_v2_plan_ids = BTreeSet::new();
@@ -141,15 +201,19 @@ pub async fn issue_lifecycle(
             ));
         }
 
-        let group_attempt = coding_store
-            .get_attempt_for_work_item_group(&project_id, &issue_id, &plan.id)
+        // REQ-MTG-02（WP2 消费面适配）：多 target 拆分后一个 plan 可有多
+        // attempt——全部纳入 DTO 与 units 索引（单 target 场景仅一 attempt，
+        // 语义零变化；units 按 target 分入各自 attempt，logical id 跨 attempt
+        // 不重复，完整性检查语义保持）。
+        let group_attempts = coding_store
+            .list_attempts_for_work_item_group(&project_id, &issue_id, &plan.id)
             .map_err(product_store_api_error)?;
-        let units_by_logical_id = if let Some(attempt) = group_attempt.as_ref() {
-            coding_attempts.push(coding_attempt_dto(attempt));
+        let mut units_by_logical_id = BTreeMap::new();
+        for attempt in &group_attempts {
+            coding_attempts.push(coding_attempt_dto(&coding_store, attempt)?);
             let units = coding_store
                 .list_coding_units(&project_id, &issue_id, &attempt.id)
                 .map_err(product_store_api_error)?;
-            let mut units_by_logical_id = BTreeMap::new();
             for unit in units {
                 if unit.plan_id != plan.id
                     || plan_revision
@@ -168,10 +232,7 @@ pub async fn issue_lifecycle(
                     ));
                 }
             }
-            units_by_logical_id
-        } else {
-            BTreeMap::new()
-        };
+        }
 
         for human_projection in &plan_projection.human_group_projection.work_items {
             let work_item_revision_id = plan_revision
@@ -220,6 +281,14 @@ pub async fn issue_lifecycle(
                 &WorkspaceType::WorkItem,
             );
             let unit = units_by_logical_id.get(&human_projection.logical_work_item_id);
+            let latest_attempt = match unit {
+                Some(unit) => group_attempts
+                    .iter()
+                    .find(|attempt| attempt.id == unit.attempt_id)
+                    .map(|attempt| coding_attempt_dto(&coding_store, attempt))
+                    .transpose()?,
+                None => None,
+            };
             work_items.push(lifecycle_work_item_runtime_dto(
                 &lifecycle,
                 LifecycleWorkItemRuntimeDtoInput {
@@ -227,7 +296,7 @@ pub async fn issue_lifecycle(
                     plan_id: &plan.id,
                     runtime: &runtime,
                     human_projection,
-                    latest_attempt: group_attempt.as_ref().map(coding_attempt_dto),
+                    latest_attempt,
                     unit,
                     session_id: session.map(|session| session.id.as_str()),
                     require_execution_plan_confirm: plan.options.require_execution_plan_confirm,
@@ -254,8 +323,13 @@ pub async fn issue_lifecycle(
             let attempts = coding_store
                 .list_attempts_for_work_item(&project_id, &issue_id, &work_item.id)
                 .map_err(product_store_api_error)?;
-            let latest_attempt = attempts.last().map(coding_attempt_dto);
-            coding_attempts.extend(attempts.iter().map(coding_attempt_dto));
+            let latest_attempt = match attempts.last() {
+                Some(attempt) => Some(coding_attempt_dto(&coding_store, attempt)?),
+                None => None,
+            };
+            for attempt in &attempts {
+                coding_attempts.push(coding_attempt_dto(&coding_store, attempt)?);
+            }
             let session = workspace_session_for_entity(
                 &workspace_sessions,
                 &work_item.id,
@@ -270,10 +344,190 @@ pub async fn issue_lifecycle(
         })
         .collect::<ApiResult<Vec<_>>>()?;
     work_items.extend(legacy_work_items);
+
+    // REQ-TGT-05：按 target_repository_id 分组的聚合视图（向后兼容，保留扁平 work_items）。
+    // 数据源为 Issue 下已持久化的 LifecycleWorkItemRecord（含 target_repository_id）；
+    // alias 优先取 planning context 的 RepositoryContextSet.alias，缺失时回落到
+    // resolve_logical_repository 的物理投影名。Plan 3 范围：schema-v2 规划投影 item
+    // 尚未落库（Plan 4 贯通 publish 链路），分组视图当前反映已持久化记录。
+    // list_work_items 是分组视图的主数据源：失败必须传播，禁止静默跳过（避免与扁平
+    // work_items 不一致的空分组）。alias 增强（planning context / 物理投影名）保持
+    // best-effort：规划上下文缺失时跳过 alias 增强是合理的。
+    let persisted_work_items = lifecycle
+        .list_work_items(&project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let mut member_index: BTreeMap<LogicalRepositoryId, String> = BTreeMap::new();
+    if let Ok(resolution) =
+        PlanningContextSetResolver::new(app_paths.clone()).resolve(&project_id, &issue_id)
+    {
+        for member in &resolution.set {
+            member_index.insert(member.member_id, member.alias.clone());
+        }
+    }
+    let repository_store = RepositoryStore::for_project(app_paths.clone(), &project);
+    // 展示名补充是 best-effort 分支:以 issue 归属 LC 解析(v1.3 per-LC 子树),
+    // 不经 project 级 ensure 驱动权威迁移(路由权威重灌事故触发点,2026-10-13 诊断)。
+    let issue_lc_id = crate::product::issue_store::IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .ok()
+        .and_then(|issue| issue.logical_codebase_id);
+    for record in &persisted_work_items {
+        if let Some(target) = record.target_repository_id {
+            if member_index.contains_key(&target) {
+                continue;
+            }
+            if let Ok((_, _, repository)) = repository_store
+                .resolve_logical_repository_for_issue_codebase(
+                    &project_id,
+                    issue_lc_id.as_deref(),
+                    target,
+                )
+            {
+                member_index.insert(target, repository.name.clone());
+            }
+        }
+    }
+    let groups = group_work_items_by_target(&persisted_work_items, &member_index)
+        .map_err(product_store_api_error)?;
+    let work_item_repository_groups = groups
+        .into_iter()
+        .map(|group| {
+            work_item_repository_group_dto(group, |record| {
+                let attempts = coding_store
+                    .list_attempts_for_work_item(&project_id, &issue_id, &record.id)
+                    .map_err(product_store_api_error)?;
+                let latest_attempt = match attempts.last() {
+                    Some(attempt) => Some(coding_attempt_dto(&coding_store, attempt)?),
+                    None => None,
+                };
+                let session = workspace_session_for_entity(
+                    &workspace_sessions,
+                    &record.id,
+                    &WorkspaceType::WorkItem,
+                );
+                lifecycle_work_item_dto(
+                    &lifecycle,
+                    record,
+                    latest_attempt,
+                    session.map(|session| session.id.as_str()),
+                )
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+
+    // P0 1.2（REQ-WIGA-08）：summary 列表同源注入 durable automation 归属；
+    // 读取失败按 HTTP 显式错误传播，不伪 client。
+    let automation_store =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
     let workspace_sessions = workspace_sessions
         .iter()
-        .map(workspace_session_summary_dto)
-        .collect();
+        .map(|summary| {
+            let automation = automation_store
+                .ownership_for_ids(&summary.project_id, &summary.issue_id, &summary.id)
+                .map_err(product_store_api_error)?;
+            Ok(workspace_session_summary_dto(summary, automation))
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+
+    let delivery_summary = issue_delivery_summary_dto(
+        coding_store
+            .compute_issue_delivery_summary(&project_id, &issue_id)
+            .map_err(product_store_api_error)?,
+    );
+
+    // P1（REQ-WIGA-07）：只读确认信息与列表同源派生；读取失败按 HTTP 显式
+    // 错误传播（不伪 client、不吞为空）。
+    let plan_confirmed_info = crate::web::plan_confirmed_info::issue_plan_confirmed_info(
+        &app_paths,
+        &project_id,
+        &issue_id,
+    )
+    .map_err(product_store_api_error)?;
+
+    // P2（REQ-WIGA-07/R5）：coding FinalConfirm 等待信息与列表同源派生；
+    // 读取失败按 HTTP 显式错误传播（不伪 client、不吞为空）。
+    let coding_final_confirm_info =
+        crate::web::coding_final_confirm_info::issue_coding_final_confirm_info(
+            &app_paths,
+            &project_id,
+            &issue_id,
+        )
+        .map_err(product_store_api_error)?;
+
+    // P4-c（REQ-CRO-12 / 契约 A1）：durable 事实待处理事项与列表同源派生；
+    // 读取失败按 HTTP 显式错误传播（不伪 client、不吞为空）。
+    let mut coding_attention_items =
+        crate::web::coding_attention_info::issue_coding_attention_items(
+            &app_paths,
+            &project_id,
+            &issue_id,
+        )
+        .map_err(product_store_api_error)?;
+    // 批 2 N1（REQ-WIGA-12，块 3 §7.1）：N0 三类 automation 事实
+    //（plan_question/automation_failed/review_limit）在既有 coding 事项后
+    // 合并——只读 mapper 直读 enrollment（不递归调 GET、不写事实），未
+    // watched 也计数/展示；原 7 类事项及顺序不变。读取失败按 HTTP 显式
+    // 错误传播。
+    coding_attention_items.extend(
+        crate::web::automation_attention_info::issue_automation_attention_items(
+            &app_paths,
+            &project_id,
+            &issue_id,
+        )
+        .map_err(product_store_api_error)?,
+    );
+
+    // P3（REQ-WIGA-07）：issue 级有界近期完成目录；仅在显式携带
+    // recent_since 时计算（旧 URL/旧两 info 数组原样保持）。parsed_since
+    // = max(RFC3339 query, now-24h)，limit 缺省 32、越界/孤立 422。
+    let recent_completion_info = match query.recent_since.as_deref() {
+        None if query.recent_limit.is_none() => Vec::new(),
+        None => {
+            return Err(ApiError::validation(
+                "recent_since_required",
+                "recent_since is required",
+            ));
+        }
+        Some(raw) => {
+            let since = chrono::DateTime::parse_from_rfc3339(raw)
+                .map_err(|_| {
+                    ApiError::validation("invalid_recent_since", "recent_since must be RFC3339")
+                })?
+                .with_timezone(&chrono::Utc);
+            let limit = query
+                .recent_limit
+                .unwrap_or(crate::web::recent_completion_info::RECENT_COMPLETION_MAX_LIMIT);
+            if !(1..=crate::web::recent_completion_info::RECENT_COMPLETION_MAX_LIMIT)
+                .contains(&limit)
+            {
+                return Err(ApiError::validation(
+                    "invalid_recent_limit",
+                    "recent_limit must be 1..=32",
+                ));
+            }
+            let since = since.max(
+                chrono::Utc::now()
+                    - chrono::Duration::hours(
+                        crate::web::recent_completion_info::RECENT_COMPLETION_WINDOW_HOURS,
+                    ),
+            );
+            crate::web::recent_completion_info::recent_completion_info(
+                &project_id,
+                &issue_id,
+                &plan_confirmed_info,
+                &coding_final_confirm_info,
+                since,
+                limit,
+            )
+            .map_err(product_store_api_error)?
+        }
+    };
+
+    // C1（enrollment-recovery-surface Task 9）：durable 恢复等待项投影——
+    // 与列表同源派生，读取失败按 HTTP 显式错误传播（不伪 client、不吞为空）。
+    let c1_waiting_items =
+        crate::web::plan_confirmed_info::list_c1_waiting_items(&app_paths, &project_id, &issue_id)
+            .map_err(product_store_api_error)?;
 
     Ok(Json(IssueLifecycleResponse {
         issue: product_issue_dto_with_binding(&app_paths, issue)?,
@@ -281,8 +535,15 @@ pub async fn issue_lifecycle(
         design_specs,
         work_item_plans,
         work_items,
+        work_item_repository_groups,
         workspace_sessions,
         coding_attempts,
+        delivery_summary,
+        plan_confirmed_info,
+        coding_final_confirm_info,
+        recent_completion_info,
+        c1_waiting_items,
+        coding_attention_items,
     }))
 }
 
@@ -297,24 +558,74 @@ pub async fn generate_story_specs(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        state.test_provider_enabled,
         &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);
     let issue = IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
-    let repository_id = issue
-        .repo_id
-        .clone()
-        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
-    find_repository(&app_paths, &project_id, &repository_id)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    // 方案 X 阶段1：按 RepositoryRouting 三态分流。Legacy（单仓）保持原 repository_id 校验 +
+    // find_repository；Logical（多仓）接 PlanningContextResolver + 草稿态聚合视野
+    // （aggregate_codebase=Some，involved 空由 AI 自决，create 跳过 repository_id 校验）；
+    // FailClosed 报稳定错误码 repository_routing_*。
+    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let (repository_id, aggregate_codebase) = match routing {
+        RepositoryRouting::Legacy { .. } => {
+            reject_aggregate_scope_on_legacy_project(
+                request.involved_repository_ids.is_some(),
+                false,
+            )?;
+            let repository_id = issue.repo_id.clone().ok_or_else(|| {
+                ApiError::validation("repository_required", "repository_id is required")
+            })?;
+            find_repository(&app_paths, &project_id, &repository_id)?;
+            (repository_id, None)
+        }
+        RepositoryRouting::Logical { manifest, .. } => {
+            // Omission remains the existing AI-undetermined draft behavior. When
+            // a fake/gateway test supplies targets, validate them against the
+            // fresh authoritative selection before persisting the spec.
+            let resolved = PlanningContextResolver::new(app_paths.clone())
+                .build_with_fresh_index(&project_id, &issue_id, &[])
+                .await
+                .map_err(product_store_api_error)?;
+            let involved_repository_ids = request.involved_repository_ids.unwrap_or_default();
+            validate_requested_aggregate_scope(
+                &resolved.snapshot.effective_member_ids,
+                &involved_repository_ids,
+                &[],
+            )?;
+            // r23 指纹漂移根修:调用方钉定 involved 非空时派生 focus=首成员。
+            // 此前 focus 恒 None——story 路由(workspace_repository.rs)对
+            // focus=None ∧ involved 非空恒 TargetMissing,pin 面结构性不可用;
+            // AI 自决流的首轮 launch 只能锚聚合根视图,回写 involved/focus 后
+            // 修订轮锚成员 checkout,指纹 target 三元组+git identity 维度必
+            // 漂移(resume_fingerprint_mismatch supersede,r23 现场)。钉定
+            // 即首轮锚成员,门上修订指纹可比对(原生恢复可达);单成员钉定
+            // 下 focus=该成员是唯一合法取值(focus ∈ involved)。
+            let focus_repository_id = involved_repository_ids.first().cloned();
+            let scope = AggregateStorySpecScope {
+                logical_codebase_ref: manifest.logical_codebase_id,
+                effective_member_ids: resolved.snapshot.effective_member_ids.clone(),
+                involved_repository_ids,
+                focus_repository_id,
+            };
+            (String::new(), Some(scope))
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_api_error(code, &reason));
+        }
+    };
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             repository_id,
             title: request.title,
+            aggregate_codebase,
         })
         .map_err(product_store_api_error)?;
     let session = lifecycle
@@ -324,19 +635,25 @@ pub async fn generate_story_specs(
             entity_id: story.id.clone(),
             workspace_type: WorkspaceType::Story,
             author_provider: workspace_config.author_provider,
-            reviewer_provider: workspace_config.reviewer_provider,
+            reviewer_provider: Some(workspace_config.reviewer_provider),
             review_rounds: workspace_config.review_rounds,
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
+            work_item_plan_options: None,
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .map_err(product_store_api_error)?;
 
     let story_dto = story_spec_dto(&lifecycle, &story, Some(session.id.as_str()))?;
+    let automation =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .ownership_for_session(&session)
+            .map_err(product_store_api_error)?;
     Ok(Json(GenerateStorySpecsResponse {
         story_specs: vec![story_dto],
-        workspace_session: workspace_session_dto(session),
+        workspace_session: workspace_session_dto(session, automation),
     }))
 }
 
@@ -351,6 +668,7 @@ pub async fn generate_design_specs(
         request.review_rounds,
         request.superpowers_enabled,
         request.openspec_enabled,
+        state.test_provider_enabled,
         &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);
@@ -359,12 +677,58 @@ pub async fn generate_design_specs(
         .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
+    // 方案 X 阶段1：Logical（多仓）接 PlanningContextResolver + 草稿态聚合视野
+    // （aggregate_codebase=Some，involved/change_order 空由 AI 自决）；Legacy 保持现状
+    // （aggregate_codebase=None）；FailClosed 报稳定错误码 repository_routing_*。
+    let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
+        .map_err(product_store_api_error)?;
+    let aggregate_codebase = match routing {
+        RepositoryRouting::Legacy { .. } => {
+            reject_aggregate_scope_on_legacy_project(
+                request.involved_repository_ids.is_some(),
+                request.change_order.is_some(),
+            )?;
+            None
+        }
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
+            let resolved = PlanningContextResolver::new(app_paths.clone())
+                .build_with_fresh_index(&project_id, &issue_id, &[])
+                .await
+                .map_err(product_store_api_error)?;
+            let involved_repository_ids = request.involved_repository_ids.unwrap_or_default();
+            let change_order = request.change_order.unwrap_or_default();
+            // add-multi-repo-issue-entry（组2 2.3，k3 P2-5）出生值守卫：resolved 上界 =
+            // selection.focus 非空取原集 / 空取 resolved 有效成员（与钉定块/write-back/
+            // preflight 四面同源）。请求 involved ⊄ 上界在 generate 入口即拒（4xx），
+            // 收敛早于 preflight——界外意图不落 record 出生值。
+            let resolved_bound =
+                selection.resolved_upper_bound(&resolved.snapshot.effective_member_ids);
+            validate_requested_aggregate_scope(
+                &resolved_bound,
+                &involved_repository_ids,
+                &change_order,
+            )?;
+            Some(AggregateDesignSpecScope {
+                logical_codebase_ref: manifest.logical_codebase_id,
+                effective_member_ids: resolved.snapshot.effective_member_ids.clone(),
+                involved_repository_ids,
+                change_order,
+            })
+        }
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_api_error(code, &reason));
+        }
+    };
     let design = lifecycle
         .create_design_spec(CreateDesignSpecInput {
             project_id: project_id.clone(),
             issue_id: issue_id.clone(),
             story_spec_ids: request.story_spec_ids,
             title: request.title,
+            aggregate_codebase,
         })
         .map_err(product_store_api_error)?;
     let session = lifecycle
@@ -374,19 +738,25 @@ pub async fn generate_design_specs(
             entity_id: design.id.clone(),
             workspace_type: WorkspaceType::Design,
             author_provider: workspace_config.author_provider,
-            reviewer_provider: workspace_config.reviewer_provider,
+            reviewer_provider: Some(workspace_config.reviewer_provider),
             review_rounds: workspace_config.review_rounds,
             superpowers_enabled: workspace_config.superpowers_enabled,
             openspec_enabled: workspace_config.openspec_enabled,
+            work_item_plan_options: None,
         })
         .map_err(product_store_api_error)?;
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .map_err(product_store_api_error)?;
 
     let design_dto = design_spec_dto(&lifecycle, &design, Some(session.id.as_str()))?;
+    let automation =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .ownership_for_session(&session)
+            .map_err(product_store_api_error)?;
     Ok(Json(GenerateDesignSpecsResponse {
         design_specs: vec![design_dto],
-        workspace_session: workspace_session_dto(session),
+        workspace_session: workspace_session_dto(session, automation),
     }))
 }
 
@@ -395,94 +765,85 @@ pub async fn prepare_work_item_plan(
     Path((project_id, issue_id)): Path<(String, String)>,
     Json(request): Json<PrepareWorkItemPlanRequest>,
 ) -> ApiResult<Json<PrepareWorkItemPlanResponse>> {
-    let workspace_config = provider_workspace_config(
-        request.author_provider.as_deref(),
-        request.reviewer_provider.as_deref(),
-        request.review_rounds,
-        request.superpowers_enabled,
-        request.openspec_enabled,
-        &*state.provider_availability,
-    )?;
+    // 单 plan 不变量（REQ-WPS-01/REQ-WPS-02 Scenario「重新 prepare 不产生第二个
+    // plan」）：建立新 plan **之前**先按同一闭包完整删除旧 plan；删除未成功
+    // MUST NOT 建立新 plan（fail-closed）。
     let app_paths = product_app_paths(&state);
-    let issue = IssueStore::new(app_paths.clone())
-        .get(&project_id, &issue_id)
-        .map_err(product_store_api_error)?;
-    let repository_id = issue
-        .repo_id
-        .clone()
-        .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
-    find_repository(&app_paths, &project_id, &repository_id)?;
+    // 单 plan 不变量（REQ-WPS-01）：「删旧 + 建立」落在同一 issue 级
+    // plan-slot 互斥区——两个并发 prepare 不得各建一个 plan。
+    let plan_slot = crate::product::plan_generation_supersede::acquire_issue_plan_slot(
+        &app_paths,
+        &project_id,
+        &issue_id,
+    )
+    .await
+    .map_err(deletion::cascade_delete_api_error)?;
+    let supersede = crate::product::plan_generation_supersede::ensure_single_plan_generation(
+        &app_paths,
+        &plan_slot,
+        &project_id,
+        &issue_id,
+        &[],
+        crate::product::entity_deletion_cascade::PlanSupersedeReason::Reprepare,
+        Some(state.workspace_root.as_path()),
+    )
+    .await
+    .map_err(deletion::cascade_delete_api_error)?;
+    deletion::evict_workspace_session_managers(&state, &supersede.evicted_session_ids).await;
+
+    // P1 WIGA Task 3：共用 prepare 数据面（manual ids=None）；异步上下文消息与
+    // 响应投影留在此 handler，契约与失败诊断语义不变。
+    let records = prepare_plan_records(&state, &project_id, &issue_id, request, None)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
-    validate_confirmed_design_specs(&lifecycle, &project_id, &issue_id, &request.design_spec_ids)?;
+    let PreparedPlanRecords { plan, session } = records;
+    let session_id = session.id.clone();
+    let session = match ensure_workspace_context_message(&app_paths, &lifecycle, session).await {
+        Ok(session) => session,
+        Err(error) => {
+            // Session 已落盘即跨过 fallback 屏障；永不重试 legacy prepare。尽力把错误写成
+            // durable terminal + diagnostic，保留原始 HTTP 错误给调用方。
+            mark_single_candidate_prepare_failure(
+                &lifecycle,
+                &session_id,
+                &format!("single-candidate prepare failed after session persistence: {error}"),
+            );
+            return Err(product_store_api_error(error));
+        }
+    };
 
-    let plan = lifecycle
-        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
-            id: None,
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            source_story_spec_ids: request.story_spec_ids,
-            source_design_spec_ids: request.design_spec_ids,
-            options: crate::product::models::IssueWorkItemPlanOptions {
-                include_integration_tests: request.include_integration_tests.unwrap_or(true),
-                include_e2e_tests: request.include_e2e_tests.unwrap_or(false),
-                force_frontend_backend_split: request.force_frontend_backend_split.unwrap_or(false),
-                require_execution_plan_confirm: request
-                    .require_execution_plan_confirm
-                    .unwrap_or(false),
-            },
-            status: IssueWorkItemPlanStatus::Draft,
-            work_item_ids: Vec::new(),
-            repository_profile_ref: None,
-            verification_plan_ids: Vec::new(),
-            dependency_graph: Vec::new(),
-            created_from_provider_run: None,
-            validator_findings: Vec::new(),
-        })
-        .map_err(product_store_api_error)?;
-
-    let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id,
-            issue_id,
-            entity_id: plan.id.clone(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: workspace_config.author_provider,
-            reviewer_provider: workspace_config.reviewer_provider,
-            review_rounds: workspace_config.review_rounds,
-            superpowers_enabled: workspace_config.superpowers_enabled,
-            openspec_enabled: workspace_config.openspec_enabled,
-        })
-        .map_err(product_store_api_error)?;
-    let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
-        .map_err(product_store_api_error)?;
-
+    // REQ-MTG-04（WP3）：prepare 响应同款 additive 投影——新建 plan 尚无
+    // target-attempt，投影为 NotStarted 空条目（与 issue_lifecycle 同形）。
+    let group_projection = CodingAttemptStore::new(app_paths.clone())
+        .compute_plan_group_projection(&plan.project_id, &plan.issue_id, &plan.id)
+        .map_err(product_store_api_error)
+        .map(plan_group_projection_dto)?;
+    let automation =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .ownership_for_session(&session)
+            .map_err(product_store_api_error)?;
     Ok(Json(PrepareWorkItemPlanResponse {
-        work_item_plan: issue_work_item_plan_detail_dto(&plan),
-        workspace_session: workspace_session_dto(session),
+        work_item_plan: issue_work_item_plan_detail_dto(
+            &plan,
+            Some(group_projection),
+            session_review_status(
+                &lifecycle,
+                &plan.project_id,
+                &plan.issue_id,
+                Some(&session.id),
+            ),
+        ),
+        workspace_session: workspace_session_dto(session, automation),
     }))
 }
 
-pub async fn delete_story_spec(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id, story_spec_id)): Path<(String, String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = LifecycleStore::new(product_app_paths(&state));
-    store
-        .delete_story_spec(&project_id, &issue_id, &story_spec_id)
-        .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
-}
-
-pub async fn delete_design_spec(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id, design_spec_id)): Path<(String, String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = LifecycleStore::new(product_app_paths(&state));
-    store
-        .delete_design_spec(&project_id, &issue_id, &design_spec_id)
-        .map_err(product_store_api_error)?;
-    Ok(Json(json!({"status":"deleted"})))
+fn mark_single_candidate_prepare_failure(
+    lifecycle: &LifecycleStore,
+    session_id: &str,
+    message: &str,
+) {
+    let _ =
+        lifecycle.append_workspace_message(session_id, "system".to_string(), message.to_string());
+    let _ = lifecycle.update_workspace_session_status(session_id, WorkspaceSessionStatus::Failed);
 }
 
 pub async fn confirm_gate(
@@ -666,100 +1027,15 @@ pub(crate) fn backfill_legacy_spec_versions(
     Ok(())
 }
 
-pub(crate) fn validate_confirmed_story_specs(
-    lifecycle: &LifecycleStore,
-    project_id: &str,
-    issue_id: &str,
-    story_spec_ids: &[String],
-) -> ApiResult<()> {
-    if story_spec_ids.is_empty() {
-        return Err(ApiError::validation(
-            "story_spec_required",
-            "story_spec_ids is required",
-        ));
-    }
+include!("lifecycle_aggregate_scope.inc.rs");
 
-    let stories = lifecycle
-        .list_story_specs(project_id, issue_id)
-        .map_err(product_store_api_error)?;
-    for story_id in story_spec_ids {
-        let Some(story) = stories.iter().find(|story| story.id == *story_id) else {
-            return Err(ApiError::runtime(
-                "story_spec_not_found",
-                "story spec not found",
-                json!({}),
-            ));
-        };
-        if story.confirmation_status != LifecycleConfirmationStatus::Confirmed {
-            return Err(ApiError::validation(
-                "story_spec_not_confirmed",
-                "story spec must be confirmed before generating downstream artifacts",
-            ));
-        }
-    }
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub(crate) fn validate_confirmed_design_specs(
-    lifecycle: &LifecycleStore,
-    project_id: &str,
-    issue_id: &str,
-    design_spec_ids: &[String],
-) -> ApiResult<()> {
-    if design_spec_ids.is_empty() {
-        return Err(ApiError::validation(
-            "design_spec_required",
-            "design_spec_ids is required",
-        ));
-    }
-
-    let designs = lifecycle
-        .list_design_specs(project_id, issue_id)
-        .map_err(product_store_api_error)?;
-    for design_id in design_spec_ids {
-        let Some(design) = designs.iter().find(|design| design.id == *design_id) else {
-            return Err(ApiError::runtime(
-                "design_spec_not_found",
-                "design spec not found",
-                json!({}),
-            ));
-        };
-        if design.confirmation_status != LifecycleConfirmationStatus::Confirmed {
-            return Err(ApiError::validation(
-                "design_spec_not_confirmed",
-                "design spec must be confirmed before generating work items",
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn confirm_workspace_entity(
-    lifecycle: &LifecycleStore,
-    session: &WorkspaceSessionRecord,
-) -> ApiResult<()> {
-    match session.workspace_type {
-        WorkspaceType::Story | WorkspaceType::Design => lifecycle
-            .update_spec_confirmation_status(
-                &session.project_id,
-                &session.issue_id,
-                &session.entity_id,
-                LifecycleConfirmationStatus::Confirmed,
-            )
-            .map_err(product_store_api_error),
-        WorkspaceType::WorkItem => lifecycle
-            .update_work_item_plan_status(
-                &session.project_id,
-                &session.issue_id,
-                &session.entity_id,
-                WorkItemPlanStatus::Confirmed,
-            )
-            .map(|_| ())
-            .map_err(product_store_api_error),
-        WorkspaceType::WorkItemPlan => Err(ApiError::runtime(
-            "work_item_plan_confirm_not_supported",
-            "confirm is not yet supported for work item plan sessions",
-            json!({}),
-        )),
-    }
+    include!("lifecycle_tests.inc.rs");
+    include!("lifecycle_tests_wps.inc.rs");
+    include!("lifecycle_tests_n7.inc.rs");
+    include!("lifecycle_recent_completion_tests.inc.rs");
+    include!("lifecycle_tests_n1.inc.rs");
 }

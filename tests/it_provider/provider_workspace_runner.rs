@@ -32,15 +32,18 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             path: repo_root.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "provider-workspace-runner-repository".to_string(),
         })
         .expect("repository");
     let issue = IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "会话过期".to_string(),
             description: Some("描述".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .expect("issue");
     let store = LifecycleStore::new(paths.clone());
@@ -50,6 +53,7 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             issue_id: issue.id.clone(),
             repository_id: repository.id.clone(),
             title: "会话过期提示".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     let session = store
@@ -59,10 +63,12 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             entity_id: story.id.clone(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 3,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
     store
@@ -104,7 +110,7 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
     assert_eq!(output.review_rounds[0].author_provider, ProviderName::Codex);
     assert_eq!(
         output.review_rounds[0].reviewer_provider,
-        ProviderName::ClaudeCode
+        Some(ProviderName::ClaudeCode)
     );
     assert_eq!(
         output.version.review_refs,

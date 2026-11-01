@@ -137,6 +137,9 @@ async fn repository_initialization_completed_operation_get_sanitizes_persisted_r
             default_provider_mode: "claude_code".to_string(),
             created_at: "2026-07-14T03:00:12Z".to_string(),
             updated_at: "2026-07-14T03:00:12Z".to_string(),
+            logical_repository_id: None,
+            primary_checkout_id: None,
+            identity_schema_version: 0,
         },
         cadence_skills:
             cadence_aria::product::repository_store::CadenceSkillsPreparationSummary {

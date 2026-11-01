@@ -10,7 +10,8 @@ use crate::product::repository_store::{
     RepositoryInitializationOperation, RepositoryInitializationOperationInput,
     RepositoryInitializationOperationStatus, RepositoryInitializationProgress,
     RepositoryInitializationStepKind, RepositoryInitializationStepStatus,
-    RepositoryInitializationSummary, RepositoryRegistrationError, RepositoryRegistrationSuccess,
+    RepositoryInitializationSummary, RepositoryRegistrationError,
+    RepositoryRegistrationErrorDetails, RepositoryRegistrationSuccess,
 };
 
 const CREATED_AT: &str = "2026-07-22T00:00:00Z";
@@ -77,6 +78,9 @@ fn success_result(project_id: &str) -> RepositoryRegistrationSuccess {
             default_provider_mode: "claude_code".to_string(),
             created_at: COMPLETED_AT.to_string(),
             updated_at: COMPLETED_AT.to_string(),
+            logical_repository_id: None,
+            primary_checkout_id: None,
+            identity_schema_version: 0,
         },
         cadence_skills: CadenceSkillsPreparationSummary {
             source_mode: "cached".to_string(),
@@ -108,7 +112,7 @@ fn success_result(project_id: &str) -> RepositoryRegistrationSuccess {
 }
 
 fn repository_persist_failed_error() -> RepositoryRegistrationError {
-    RepositoryRegistrationError {
+    RepositoryRegistrationErrorDetails {
         stage: "repository_persist".to_string(),
         provider: None,
         command_index: None,
@@ -119,6 +123,7 @@ fn repository_persist_failed_error() -> RepositoryRegistrationError {
         retryable: true,
         action: "Inspect the repository and retry persistence.".to_string(),
     }
+    .into()
 }
 
 include!("tests/lifecycle.rs");

@@ -37,6 +37,7 @@ impl StreamingProviderAdapter for CountingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -68,14 +69,7 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
 
     let seen_modes = Arc::new(Mutex::new(Vec::new()));
     let provider = CountingProvider {
@@ -88,8 +82,8 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
 
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::ClaudeCode,
-        internal_reviewer: ProviderName::ClaudeCode,
+        code_reviewer: Some(ProviderName::ClaudeCode),
+        internal_reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes {
             coder: CodingProviderPermissionMode::Supervised,
@@ -125,14 +119,7 @@ async fn pi_failure_does_not_trigger_fresh_retry() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
 
     let pi_starts = Arc::new(AtomicUsize::new(0));
     let provider = CountingProvider {
@@ -142,8 +129,8 @@ async fn pi_failure_does_not_trigger_fresh_retry() {
     };
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::ClaudeCode,
-        internal_reviewer: ProviderName::ClaudeCode,
+        code_reviewer: Some(ProviderName::ClaudeCode),
+        internal_reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes::default(),
     };
@@ -177,14 +164,7 @@ async fn coding_prompt_includes_rework_fix_hints() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .save_rework_instruction(&attempt, &CodingReworkInstruction {
             id: "coding_rework_instruction_0001".to_string(),
@@ -239,14 +219,7 @@ async fn execute_coding_includes_unconsumed_context_notes_and_consumes_them() {
             ..create_input()
         })
         .expect("create attempt");
-    attempt = store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    attempt = crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     attempt = store
         .increment_attempt_rework_count("project_0001", "issue_0001", &attempt.id)
         .expect("first rework");
@@ -311,21 +284,14 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                code_reviewer: ProviderName::Fake,
-                internal_reviewer: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let captured_input = Arc::new(Mutex::new(None));
     let provider = InputCapturingProvider {
         input: Arc::clone(&captured_input),
@@ -373,21 +339,14 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Codex,
-                code_reviewer: ProviderName::Fake,
-                internal_reviewer: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = EventEmittingCodingProvider;
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
@@ -456,14 +415,7 @@ async fn execute_coding_persists_coder_role_run_and_full_output_chat_entry() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = FileWritingStreamingProvider;
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -548,14 +500,7 @@ async fn execute_coding_forwards_provider_permission_choice_and_status_events() 
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = ControlEventCodingProvider;
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
@@ -597,6 +542,7 @@ async fn execute_coding_forwards_provider_permission_choice_and_status_events() 
                     options,
                     allow_multiple,
                     allow_free_text,
+                    ..
                 } if id == "choice_0001"
                     && prompt == "Select implementation strategy"
                     && source == "provider_choice"
@@ -633,14 +579,7 @@ async fn execute_coding_forwards_permission_responses_to_provider_session() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = PermissionAwaitingProvider;
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let (command_tx, mut command_rx) = mpsc::channel(8);
@@ -691,14 +630,7 @@ async fn execute_coding_persists_provider_choice_and_resumes_after_response() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = ChoiceAwaitingProvider;
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let (command_tx, mut command_rx) = mpsc::channel(8);
@@ -743,6 +675,8 @@ async fn execute_coding_persists_provider_choice_and_resumes_after_response() {
                             id: "choice_0001".to_string(),
                             selected_option_ids: vec!["backend_first".to_string()],
                             free_text: Some("先控制范围".to_string()),
+                            answers: Vec::new(),
+                            receipt: None,
                         })
                         .await
                         .expect("send choice response");
@@ -774,14 +708,7 @@ async fn execute_coding_blocks_when_provider_completes_before_choice_response() 
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = ControlEventCodingProvider;
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -823,14 +750,7 @@ async fn execute_coding_blocks_later_permission_before_choice_response() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = ChoiceThenPermissionProvider;
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -881,14 +801,7 @@ async fn execute_coding_stops_forwarding_provider_events_after_abort_command() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let provider = PermissionAwaitingProvider;
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let (command_tx, mut command_rx) = mpsc::channel(8);

@@ -1,0 +1,33 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0247",
+  "plan_id": "issue_work_item_plan_0001",
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "repository_id": "repository_0001",
+  "provider": "kimi_code",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "plan_confirmation_status": "confirmed",
+  "execution_plan_confirm_required": false,
+  "outDir": "/tmp/aria-36-matrix/kimi-heavy-v15/rep35/kimi_code/rep1"
+}

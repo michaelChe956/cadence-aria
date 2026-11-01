@@ -1,8 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  DesignSpec,
   IssueWorkItemPlanDetailDto,
   LifecycleWorkItem,
+  StorySpec,
 } from "../../api/types";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
 import { LifecycleCard } from "./LifecycleCard";
@@ -56,6 +58,79 @@ describe("LifecycleCard", () => {
     expect(screen.getByText("Work Item")).toBeInTheDocument();
     expect(screen.getByText("Work Item Group")).toBeInTheDocument();
   });
+  // 统一视觉语言：status chip 只跟「状态」走（本地化文案 + 语义色调），
+  // 不跟 kind 走——story 与 design 的同状态 chip 必须完全同构。
+  it("unifies status chips across story and design: localized label, tone, identical styling", () => {
+    const cards = [
+      { ...lifecycleCard("story_spec", "已确认故事"), status: "confirmed" },
+      { ...lifecycleCard("design_spec", "已确认设计"), status: "confirmed" },
+      { ...lifecycleCard("story_spec", "草稿故事"), status: "draft" },
+      { ...lifecycleCard("design_spec", "草稿设计"), status: "draft" },
+      { ...lifecycleCard("design_spec", "未知状态设计"), status: "weird_state" },
+    ];
+    render(
+      <div>
+        {cards.map((card) => (
+          <LifecycleCard
+            key={`${card.kind}-${card.title}`}
+            card={card}
+            selected={false}
+            onSelect={vi.fn()}
+          />
+        ))}
+      </div>,
+    );
+
+    const chips = screen.getAllByTestId("lifecycle-card-status-chip");
+    expect(chips).toHaveLength(5);
+
+    // 本地化文案（与抽屉共享同一套 label）
+    expect(screen.getAllByText("已确认")).toHaveLength(2);
+    expect(screen.getAllByText("草稿")).toHaveLength(2);
+    expect(screen.getByText("weird_state")).toBeInTheDocument();
+
+    // 同状态跨 kind：tone 与样式类完全一致
+    expect(chips[0]).toHaveAttribute("data-tone", "confirmed");
+    expect(chips[1]).toHaveAttribute("data-tone", "confirmed");
+    expect(chips[0].className).toBe(chips[1].className);
+    expect(chips[2]).toHaveAttribute("data-tone", "draft");
+    expect(chips[3]).toHaveAttribute("data-tone", "draft");
+    expect(chips[2].className).toBe(chips[3].className);
+    // 不同状态样式必须可区分
+    expect(chips[0].className).not.toBe(chips[2].className);
+    // 未知状态回落中性
+    expect(chips[4]).toHaveAttribute("data-tone", "neutral");
+  });
+
+  // chips 的数据类元素（id/version）不随 kind 变色——kind 色只属于
+  // 边框/图标/标签等结构元素，story 与 design 的 chips 视觉完全同构。
+  it("keeps id and version chips neutral instead of kind-tinted", () => {
+    const cards = [
+      { ...lifecycleCard("story_spec", "故事一"), version: 3 },
+      { ...lifecycleCard("design_spec", "设计一"), version: 3 },
+    ];
+    render(
+      <div>
+        {cards.map((card) => (
+          <LifecycleCard
+            key={card.kind}
+            card={card}
+            selected={false}
+            onSelect={vi.fn()}
+          />
+        ))}
+      </div>,
+    );
+
+    const idChips = screen.getAllByTestId("lifecycle-card-id-chip");
+    const versionChips = screen.getAllByTestId("lifecycle-card-version-chip");
+    expect(idChips[0].className).toBe(idChips[1].className);
+    expect(versionChips[0].className).toBe(versionChips[1].className);
+    expect(versionChips[0].className).not.toMatch(/emerald|violet|sky|amber/);
+    expect(versionChips[0]).toHaveTextContent("v3");
+    expect(versionChips[1]).toHaveTextContent("v3");
+  });
+
 
   it("allows long card titles to use two lines before truncating", () => {
     render(
@@ -74,6 +149,19 @@ describe("LifecycleCard", () => {
     );
     expect(screen.getByTestId("lifecycle-card-title")).not.toHaveClass(
       "truncate",
+    );
+  });
+
+  it("正常态不渲染 aria-busy（ARIA 惯例：省略即不忙）", () => {
+    render(
+      <LifecycleCard
+        card={lifecycleCard("story_spec", "会话过期提示")}
+        selected={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("lifecycle-card-story_spec")).not.toHaveAttribute(
+      "aria-busy",
     );
   });
 
@@ -133,6 +221,75 @@ describe("LifecycleCard", () => {
     expect(screen.getByText("前端")).toBeInTheDocument();
     expect(screen.getByText(/等待依赖完成：后端 API/)).toBeInTheDocument();
   });
+
+  // F-26b：timeline reviewer_run 证据（review_status）必须映射到生命周期卡片——
+  // 用户从 issue 工作台即可看到「review 已做/进行中」，不必进会话页翻 timeline。
+  it("projects workspace review evidence onto spec and plan cards", () => {
+    const storyCard = lifecycleCard("story_spec", "登录会话过期提示");
+    const storyView = render(
+      <LifecycleCard
+        card={
+          {
+            ...storyCard,
+            raw: { ...(storyCard.raw as StorySpec), review_status: "completed" },
+          } as LifecycleCardData
+        }
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(storyView.container).getByTestId("lifecycle-card-review-status").textContent).toBe(
+      "Review 已完成",
+    );
+
+    const designCard = lifecycleCard("design_spec", "会话管理设计");
+    const designView = render(
+      <LifecycleCard
+        card={
+          {
+            ...designCard,
+            raw: { ...(designCard.raw as DesignSpec), review_status: "running" },
+          } as LifecycleCardData
+        }
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(designView.container).getByTestId("lifecycle-card-review-status").textContent).toBe(
+      "Review 进行中",
+    );
+
+    const planCard = lifecycleCard("work_item_group", "Work Item Group");
+    const planView = render(
+      <LifecycleCard
+        card={
+          {
+            ...planCard,
+            raw: { ...workItemPlanRaw(), review_status: "completed" },
+          } as LifecycleCardData
+        }
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(planView.container).getByTestId("lifecycle-card-review-status").textContent).toBe(
+      "Review 已完成",
+    );
+
+    // 无 review 证据的 spec 卡不渲染指示（零证据零展示）。
+    const bareView = render(
+      <LifecycleCard
+        card={lifecycleCard("story_spec", "无审核故事")}
+        selected={false}
+        onSelect={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(within(bareView.container).queryByTestId("lifecycle-card-review-status")).toBeNull();
+  });
 });
 
 function lifecycleCard(
@@ -158,6 +315,7 @@ function lifecycleCard(
         issue_id: "issue_0001",
         project_id: "project_0001",
         repo_id: "repository_0001",
+        base_branch: null,
         workspace_id: null,
         task_id: null,
         session_id: null,

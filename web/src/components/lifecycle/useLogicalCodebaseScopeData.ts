@@ -1,0 +1,414 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
+import { getActiveAggregateIndex } from "../../api/aggregate-index";
+import {
+  getActiveAggregateInitialization,
+  getAggregateInitialization,
+} from "../../api/aggregate-initialization";
+import {
+  getLogicalCodebaseBootstrap,
+  postLogicalCodebaseBootstrapAdvance,
+} from "../../api/logical-codebase-bootstrap";
+import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
+import { listPointerPublications } from "../../api/pointer-publication";
+import type {
+  AggregateIndexActiveResponse,
+  AggregateInitializationOperationSnapshot,
+  BootstrapActionName,
+  LogicalCodebaseBootstrapProjection,
+  LogicalCodebaseMemberDto,
+  PointerPublicationDto,
+} from "../../api/types";
+
+const POLL_INTERVAL_MS = 2_000;
+
+type UseLogicalCodebaseScopeDataArgs = {
+  selectedProjectId: string | null;
+  activeLogicalCodebaseId: string | null;
+};
+
+type LogicalCodebaseScopeData = {
+  logicalCodebaseMembers: LogicalCodebaseMemberDto[];
+  setLogicalCodebaseMembers: Dispatch<
+    SetStateAction<LogicalCodebaseMemberDto[]>
+  >;
+  pointerPublications: PointerPublicationDto[];
+  setPointerPublications: Dispatch<SetStateAction<PointerPublicationDto[]>>;
+  aggregateIndex: AggregateIndexActiveResponse | null;
+  setAggregateIndex: Dispatch<
+    SetStateAction<AggregateIndexActiveResponse | null>
+  >;
+  aggregateInitialization: AggregateInitializationOperationSnapshot | null;
+  setAggregateInitialization: Dispatch<
+    SetStateAction<AggregateInitializationOperationSnapshot | null>
+  >;
+  bootstrapProjection: LogicalCodebaseBootstrapProjection | null;
+  refreshBootstrap: (projection?: LogicalCodebaseBootstrapProjection) => void;
+  refreshScope: () => void;
+  /** 登记完成后的自动推进：每个 LC 只自动调一次，失败只提示不重试。 */
+  autoAdvanceBootstrap: (logicalCodebaseId: string) => Promise<string | null>;
+  latestPointerPublication: PointerPublicationDto | null;
+  showIncrementalHint: boolean;
+};
+
+// 自动推进只认这两个动作（首建的 canonical 动作）：其余（retry/revalidate/
+// repair/republish）属人工介入面，不得在登记完成时自动触发。
+const AUTO_ADVANCE_ACTIONS = new Set<BootstrapActionName>(["prepare", "continue"]);
+
+function hasAutoAdvanceableStep(
+  projection: LogicalCodebaseBootstrapProjection | null,
+): boolean {
+  if (!projection) {
+    return false;
+  }
+  return (projection.steps ?? []).some((step) =>
+    (step.allowed_actions ?? []).some((action) =>
+      AUTO_ADVANCE_ACTIONS.has(action),
+    ),
+  );
+}
+
+/**
+ * 选中 LC 作用域的数据加载 hook（纯搬运自 IssueLifecycleWorkbench，无行为改动）：
+ * 成员/指针发布/聚合索引按选中 LC 拉取 + 指针发布/聚合初始化轮询。
+ *
+ * - R8：多 LC 并存时面板数据随选中态切换。
+ * - I1：LC/Project 切换时同步重置 aggregateInitialization，避免残留上一 LC 的
+ *   operation（其轮询会带着陈旧 operation_id 打到新 LC 路径上）。
+ */
+export function useLogicalCodebaseScopeData({
+  selectedProjectId,
+  activeLogicalCodebaseId,
+}: UseLogicalCodebaseScopeDataArgs): LogicalCodebaseScopeData {
+  const [pointerPublications, setPointerPublications] = useState<
+    PointerPublicationDto[]
+  >([]);
+  const [logicalCodebaseMembers, setLogicalCodebaseMembers] = useState<
+    LogicalCodebaseMemberDto[]
+  >([]);
+  const [aggregateIndex, setAggregateIndex] =
+    useState<AggregateIndexActiveResponse | null>(null);
+  const [aggregateInitialization, setAggregateInitialization] =
+    useState<AggregateInitializationOperationSnapshot | null>(null);
+  const [bootstrapProjection, setBootstrapProjection] =
+    useState<LogicalCodebaseBootstrapProjection | null>(null);
+  const [bootstrapRefreshTick, setBootstrapRefreshTick] = useState(0);
+  // 已自动推进过的 LC：登记完成后的自动推进对每个 LC 只做一次。
+  const autoAdvancedRef = useRef<Set<string>>(new Set());
+  // 作用域显式补读 tick：登记完成等「成员已变化」事件后整域重拉用；
+  // 与 LC/Project 切换不同，补读不清空 aggregateInitialization 等进行面。
+  const [scopeRefreshTick, setScopeRefreshTick] = useState(0);
+
+  const latestPointerPublication = useMemo<PointerPublicationDto | null>(() => {
+    if (pointerPublications.length === 0) {
+      return null;
+    }
+    return [...pointerPublications].sort((left, right) =>
+      right.created_at.localeCompare(left.created_at),
+    )[0];
+  }, [pointerPublications]);
+
+  const latestPointerPublicationId =
+    latestPointerPublication?.status === "in_progress"
+      ? latestPointerPublication.id
+      : null;
+  const latestCompletedPointerPublication =
+    useMemo<PointerPublicationDto | null>(() => {
+      const completed = pointerPublications.filter(
+        (publication) => publication.status !== "in_progress",
+      );
+      if (completed.length === 0) {
+        return null;
+      }
+      return [...completed].sort((left, right) =>
+        right.created_at.localeCompare(left.created_at),
+      )[0];
+    }, [pointerPublications]);
+  const showIncrementalHint =
+    latestCompletedPointerPublication !== null &&
+    logicalCodebaseMembers.length >
+      latestCompletedPointerPublication.entries.length;
+
+  // I1/R8：LC/Project 作用域切换时重置跨切面状态——aggregateInitialization
+  // 残留的 operation_id 会带着上一 LC 的身份打到新 LC 路径；bootstrapProjection
+  // 同步清空避免新 LC 数据到达前闪旧 LC 的投影。显式补读（scopeRefreshTick）
+  // 不触发重置：只重拉数据，不打断进行中的等待面。
+  useEffect(() => {
+    setAggregateInitialization(null);
+    setBootstrapProjection(null);
+  }, [selectedProjectId, activeLogicalCodebaseId]);
+
+  // 成员/指针发布/聚合索引/最新初始化 operation 拉取：作用域切换或显式
+  // 补读（登记完成等成员已变化的事件）时重拉。active 投影恢复任意状态
+  // 的最新 operation（含 completed/failed/cancelled；未初始化为 null），
+  // 避免刷新/切换后完成态面板退回「尚未初始化」。
+  useEffect(() => {
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      setLogicalCodebaseMembers([]);
+      setPointerPublications([]);
+      setAggregateIndex(null);
+      return;
+    }
+    let disposed = false;
+    (async () => {
+      try {
+        const [membersResponse, publicationResponse, activeInitialization] =
+          await Promise.all([
+            listLogicalCodebaseMembers(
+              selectedProjectId,
+              activeLogicalCodebaseId,
+            ),
+            listPointerPublications(selectedProjectId, activeLogicalCodebaseId),
+            getActiveAggregateInitialization(
+              selectedProjectId,
+              activeLogicalCodebaseId,
+            ),
+          ]);
+        if (disposed) {
+          return;
+        }
+        setLogicalCodebaseMembers(membersResponse.members ?? []);
+        setAggregateInitialization(activeInitialization);
+        setPointerPublications(publicationResponse ?? []);
+        setAggregateIndex(
+          (membersResponse.members ?? []).length > 0
+            ? await getActiveAggregateIndex(
+                selectedProjectId,
+                activeLogicalCodebaseId,
+              )
+            : null,
+        );
+      } catch {
+        // LC 作用域数据加载失败保持现状，交由全局 refresh 重试。
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [selectedProjectId, activeLogicalCodebaseId, scopeRefreshTick]);
+
+  // C4 Task 9：选中 LC 的 bootstrap 纯投影拉取/刷新（动作成功后经
+  // refreshBootstrap 立即补读；GET 本身零副作用）。SSE/失效唤醒由全局
+  // 目录刷新汇入，这里只维护当前 LC 的等待面。
+  useEffect(() => {
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      return;
+    }
+    let disposed = false;
+    (async () => {
+      try {
+        const projection = await getLogicalCodebaseBootstrap(
+          selectedProjectId,
+          activeLogicalCodebaseId,
+        );
+        if (!disposed && projection !== null && Array.isArray(projection.steps)) {
+          setBootstrapProjection(projection);
+        }
+      } catch {
+        // bootstrap 投影读取失败保持现状，交由轮询/全局 refresh 重试。
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [selectedProjectId, activeLogicalCodebaseId, bootstrapRefreshTick]);
+
+  // 冷启动进行中（任一步骤 Running）时按固定间隔轮询；到达稳定态
+  // （planning_ready 或全部 Failed/等待人工）即停止，等待显式动作唤醒。
+  const bootstrapPolling =
+    bootstrapProjection !== null &&
+    !bootstrapProjection.planning_ready &&
+    (bootstrapProjection.steps ?? []).some((step) => step.status === "running");
+  useEffect(() => {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !bootstrapPolling
+    ) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setBootstrapRefreshTick((tick) => tick + 1);
+    }, POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [selectedProjectId, activeLogicalCodebaseId, bootstrapPolling]);
+
+  // 冷启动补读：动作/推进响应已含最终投影时直接采用（免一次 GET）；
+  // 无投影时按 tick 补读同一 GET。
+  const refreshBootstrap = useCallback(
+    (projection?: LogicalCodebaseBootstrapProjection) => {
+      if (projection) {
+        setBootstrapProjection(projection);
+        return;
+      }
+      setBootstrapRefreshTick((tick) => tick + 1);
+    },
+    [],
+  );
+
+  // 登记完成等成员已变化的事件后整域补读：成员/指针发布/聚合索引与
+  // bootstrap 投影一并重拉（后端在登记批内推进 identity/manifest_checkout
+  // 并落成员，宿主不得沿用登记前的陈旧快照）。
+  const refreshScope = useCallback(() => {
+    setScopeRefreshTick((tick) => tick + 1);
+    setBootstrapRefreshTick((tick) => tick + 1);
+  }, []);
+
+  // 冷启动推进（2026-10-29）：服务端按 identity→manifest_checkout→
+  // rules_policy→member_index→aggregate_index_active 顺序推进到可动步骤
+  // 耗尽或 PlanningReady；端点幂等（重复调用不重复推进/不重复 provider turn）。
+  const advanceBootstrap = useCallback(
+    async (logicalCodebaseId: string): Promise<string | null> => {
+      if (!selectedProjectId) {
+        return "缺少 Project";
+      }
+      try {
+        const result = await postLogicalCodebaseBootstrapAdvance(
+          selectedProjectId,
+          logicalCodebaseId,
+        );
+        if (result?.projection && logicalCodebaseId === activeLogicalCodebaseId) {
+          setBootstrapProjection(result.projection);
+        }
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : "冷启动推进失败";
+      }
+    },
+    [selectedProjectId, activeLogicalCodebaseId],
+  );
+
+  // 登记完成后的自动推进：每个 LC 只自动调一次（登记重放/恢复不再重复触发）；
+  // 失败只如实返回错误消息，由宿主提示，不重试。
+  const autoAdvanceBootstrap = useCallback(
+    async (logicalCodebaseId: string): Promise<string | null> => {
+      if (!logicalCodebaseId || autoAdvancedRef.current.has(logicalCodebaseId)) {
+        return null;
+      }
+      autoAdvancedRef.current.add(logicalCodebaseId);
+      if (!selectedProjectId) {
+        return "缺少 Project";
+      }
+      // 先读最新投影（GET 只读、零副作用）：登记刚完成时客户端快照可能过期，
+      // 判定必须基于服务端当前事实（已就绪/无可动步骤则不推进）。
+      let projection: LogicalCodebaseBootstrapProjection | null = null;
+      try {
+        projection = await getLogicalCodebaseBootstrap(
+          selectedProjectId,
+          logicalCodebaseId,
+        );
+      } catch {
+        projection = null;
+      }
+      if (projection?.planning_ready) {
+        return null;
+      }
+      if (projection && !hasAutoAdvanceableStep(projection)) {
+        return null;
+      }
+      return advanceBootstrap(logicalCodebaseId);
+    },
+    [selectedProjectId, advanceBootstrap],
+  );
+
+  useEffect(() => {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !latestPointerPublicationId
+    ) {
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const publications = await listPointerPublications(
+          selectedProjectId,
+          activeLogicalCodebaseId,
+        );
+        if (!disposed) {
+          setPointerPublications(publications);
+        }
+      } catch {
+        // 轮询失败保持现状，下一次间隔重试。
+      } finally {
+        inFlight = false;
+      }
+    };
+    const interval = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [latestPointerPublicationId, selectedProjectId, activeLogicalCodebaseId]);
+
+  useEffect(() => {
+    if (
+      !selectedProjectId ||
+      !activeLogicalCodebaseId ||
+      !aggregateInitialization ||
+      (aggregateInitialization.status !== "created" &&
+        aggregateInitialization.status !== "running")
+    ) {
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const operation = await getAggregateInitialization(
+          selectedProjectId,
+          activeLogicalCodebaseId,
+          aggregateInitialization.operation_id,
+        );
+        if (!disposed) {
+          setAggregateInitialization(operation);
+        }
+      } catch {
+        // 轮询失败保持现状，下一次间隔重试。
+      } finally {
+        inFlight = false;
+      }
+    };
+    const interval = window.setInterval(() => void poll(), POLL_INTERVAL_MS);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [
+    selectedProjectId,
+    activeLogicalCodebaseId,
+    aggregateInitialization?.operation_id,
+    aggregateInitialization?.status,
+  ]);
+
+  return {
+    logicalCodebaseMembers,
+    setLogicalCodebaseMembers,
+    pointerPublications,
+    setPointerPublications,
+    aggregateIndex,
+    setAggregateIndex,
+    aggregateInitialization,
+    setAggregateInitialization,
+    bootstrapProjection,
+    refreshBootstrap,
+    refreshScope,
+    autoAdvanceBootstrap,
+    latestPointerPublication,
+    showIncrementalHint,
+  };
+}

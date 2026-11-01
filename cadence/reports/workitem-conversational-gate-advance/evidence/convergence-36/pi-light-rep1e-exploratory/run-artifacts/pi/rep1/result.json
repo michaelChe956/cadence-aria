@@ -1,0 +1,339 @@
+{
+  "provider": "pi",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/pi-light/rep1e/pi/rep1",
+  "startedAt": "2026-09-07T08:35:05.466Z",
+  "finishedAt": "2026-09-07T09:02:40.449Z",
+  "elapsedSec": 1654.982,
+  "issue_id": "issue_0140",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0168",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "pi",
+    "reviewer_provider": "pi",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "92cd2ef9d70bf14b3a46dff9ec34406e91fef4237d49a954ea49afd199d47655"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.782,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.852,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1044.454,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1044.712,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1523.928,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1524.199,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1651.901,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1654.828,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 1654.873,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 1217.942,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "coverage gap：WI-002 以 require_all 消费 CT-001，provider WI-001 的 output_contracts.capabilities 未声明所需能力，require_all 策略下该缺口阻断依赖边能力覆盖校验。",
+          "evidence": "edge WI-001 -> WI-002, contract_id CT-001, compatibility_policy=require_all, missing_capabilities=[API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象], provided_capabilities 仅=[非允许 HTTP 方法返回 405]",
+          "required_action": "在 WI-001 的 CT-001 capabilities 中补充声明「API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象」；该行为已由 AC-003/TASK-003/TASK-007 覆盖，仅缺契约声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "coverage gap：WI-003 以 require_all 消费 CT-001，provider WI-001 的 output_contracts.capabilities 未声明未知 API 路径 404 能力，require_all 策略下该缺口阻断依赖边能力覆盖校验。",
+          "evidence": "edge WI-001 -> WI-003, contract_id CT-001, compatibility_policy=require_all, missing_capabilities=[未知 API 路径返回 404], provided_capabilities 仅=[非允许 HTTP 方法返回 405]",
+          "required_action": "在 WI-001 的 CT-001 capabilities 中补充声明「未知 API 路径返回 404」；该行为已由 AC-003/TASK-007 覆盖，仅缺契约声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "coverage gap：WI-003 以 require_all 消费 CT-002，provider WI-001 的 output_contracts.capabilities 未声明静态托管能力，require_all 策略下该缺口阻断依赖边能力覆盖校验。",
+          "evidence": "edge WI-001 -> WI-003, contract_id CT-002, compatibility_policy=require_all, missing_capabilities=[静态资源按 staticRoot 提供文件与 Content-Type], provided_capabilities 仅=[默认监听 3000 端口且可用环境变量 PORT 覆盖]",
+          "required_action": "在 WI-001 的 CT-002 capabilities 中补充声明「静态资源按 staticRoot 提供文件与 Content-Type」；该行为已由 AC-004/TASK-004/TASK-008 覆盖，仅缺契约声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "coverage gap：WI-003 以 require_all 消费 CT-003，provider WI-002 的 output_contracts.capabilities 未声明相对路径 /api/levels 引用能力；且现有 capability 字符串「initLevelSelect({ document, fetchImpl })」被半角逗号拆分为「web/level-select.js 导出 initLevelSelect({ document」与「fetchImpl }) 可测试接口」两个残片，属契约数据自损。",
+          "evidence": "edge WI-002 -> WI-003, contract_id CT-003, compatibility_policy=require_all, missing_capabilities=[web/level-select.js 引用相对路径 /api/levels], provided_capabilities 为被半角逗号拆断的残片=[web/level-select.js 导出 initLevelSelect({ document, fetchImpl }) 可测试接口]",
+          "required_action": "在 WI-002 的 CT-003 capabilities 中补充声明「web/level-select.js 引用相对路径 /api/levels」（TASK-015 已实现），并将被拆断的残片合并重写为不含半角逗号的完整 capability 字符串（如改用全角逗号或去逗号表述），避免再次被逗号切分。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "suggestion",
+          "message": "机械校验报告提示 integration_or_e2e_skipped_risk：无浏览器 e2e 且 CHECK-003 的 manual_instruction=null；不阻断本轮判定，建议为 WI-003 补充 manual 验证说明或注明 node --test 同源集成套件已覆盖真实 HTTP 联调证据。",
+          "evidence": "Projection Validation Report finding code=integration_or_e2e_skipped_risk (warning)；CHECK-003 manual_instruction=null",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 2,
+      "elapsedSec": 1651.901,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械校验的 integration_or_e2e_skipped_risk 警告属于完备度建议而非发布阻塞：本项目已显式声明不引入浏览器 e2e，并以 AC-011 至 AC-014 绑定 non_zero_test_execution 的同源 node --test 集成套件（CHECK-003）提供真实 HTTP 联调证据，同时以 CHECK-004 手动验证指令留档该决策，建议验收阶段按 CHECK-004 说明确认即可。",
+          "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk severity=warning 且 summary.error_count=0；WI-003 verification_checks CHECK-004（required=false, manual_instruction 已声明同等覆盖）；WI-003 depends_on=[WI-001,WI-002] 与 topological_order 一致；全部 17 条 handoff_consumption consumed=true；全部 capability_coverage 条目 missing_capabilities=[]；write_scope_conflicts 仅记录 exclusive 与 forbidden 的互补配对，无两个 WorkItem 对同一 scope 同时声明 exclusive。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "coverage gap：WI-002 以 require_all 消费 CT-001，provider WI-001 的 output_contracts.capabilities 未声明所需能力，require_all 策略下该缺口阻断依赖边能力覆盖校验。",
+      "evidence": "edge WI-001 -> WI-002, contract_id CT-001, compatibility_policy=require_all, missing_capabilities=[API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象], provided_capabilities 仅=[非允许 HTTP 方法返回 405]",
+      "required_action": "在 WI-001 的 CT-001 capabilities 中补充声明「API 错误响应 Content-Type 为 application/json; charset=utf-8 且体为含 error.code 与 error.message 的 JSON 对象」；该行为已由 AC-003/TASK-003/TASK-007 覆盖，仅缺契约声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "coverage gap：WI-003 以 require_all 消费 CT-001，provider WI-001 的 output_contracts.capabilities 未声明未知 API 路径 404 能力，require_all 策略下该缺口阻断依赖边能力覆盖校验。",
+      "evidence": "edge WI-001 -> WI-003, contract_id CT-001, compatibility_policy=require_all, missing_capabilities=[未知 API 路径返回 404], provided_capabilities 仅=[非允许 HTTP 方法返回 405]",
+      "required_action": "在 WI-001 的 CT-001 capabilities 中补充声明「未知 API 路径返回 404」；该行为已由 AC-003/TASK-007 覆盖，仅缺契约声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "coverage gap：WI-003 以 require_all 消费 CT-002，provider WI-001 的 output_contracts.capabilities 未声明静态托管能力，require_all 策略下该缺口阻断依赖边能力覆盖校验。",
+      "evidence": "edge WI-001 -> WI-003, contract_id CT-002, compatibility_policy=require_all, missing_capabilities=[静态资源按 staticRoot 提供文件与 Content-Type], provided_capabilities 仅=[默认监听 3000 端口且可用环境变量 PORT 覆盖]",
+      "required_action": "在 WI-001 的 CT-002 capabilities 中补充声明「静态资源按 staticRoot 提供文件与 Content-Type」；该行为已由 AC-004/TASK-004/TASK-008 覆盖，仅缺契约声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "coverage gap：WI-003 以 require_all 消费 CT-003，provider WI-002 的 output_contracts.capabilities 未声明相对路径 /api/levels 引用能力；且现有 capability 字符串「initLevelSelect({ document, fetchImpl })」被半角逗号拆分为「web/level-select.js 导出 initLevelSelect({ document」与「fetchImpl }) 可测试接口」两个残片，属契约数据自损。",
+      "evidence": "edge WI-002 -> WI-003, contract_id CT-003, compatibility_policy=require_all, missing_capabilities=[web/level-select.js 引用相对路径 /api/levels], provided_capabilities 为被半角逗号拆断的残片=[web/level-select.js 导出 initLevelSelect({ document, fetchImpl }) 可测试接口]",
+      "required_action": "在 WI-002 的 CT-003 capabilities 中补充声明「web/level-select.js 引用相对路径 /api/levels」（TASK-015 已实现），并将被拆断的残片合并重写为不含半角逗号的完整 capability 字符串（如改用全角逗号或去逗号表述），避免再次被逗号切分。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验报告提示 integration_or_e2e_skipped_risk：无浏览器 e2e 且 CHECK-003 的 manual_instruction=null；不阻断本轮判定，建议为 WI-003 补充 manual 验证说明或注明 node --test 同源集成套件已覆盖真实 HTTP 联调证据。",
+      "evidence": "Projection Validation Report finding code=integration_or_e2e_skipped_risk (warning)；CHECK-003 manual_instruction=null",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验的 integration_or_e2e_skipped_risk 警告属于完备度建议而非发布阻塞：本项目已显式声明不引入浏览器 e2e，并以 AC-011 至 AC-014 绑定 non_zero_test_execution 的同源 node --test 集成套件（CHECK-003）提供真实 HTTP 联调证据，同时以 CHECK-004 手动验证指令留档该决策，建议验收阶段按 CHECK-004 说明确认即可。",
+      "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk severity=warning 且 summary.error_count=0；WI-003 verification_checks CHECK-004（required=false, manual_instruction 已声明同等覆盖）；WI-003 depends_on=[WI-001,WI-002] 与 topological_order 一致；全部 17 条 handoff_consumption consumed=true；全部 capability_coverage 条目 missing_capabilities=[]；write_scope_conflicts 仅记录 exclusive 与 forbidden 的互补配对，无两个 WorkItem 对同一 scope 同时声明 exclusive。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 6130,
+      "output_tokens": 574,
+      "cache_read_tokens": 33088,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 1,
+    "manual_repairs_used": 0,
+    "transitions_used": 1,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 1,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-07T09:02:37.368Z",
+      "elapsedSec": 1651.902,
+      "stage": "human_confirm",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_006",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-07T09:02:37.369Z"
+    }
+  ],
+  "human_gate_turns": [],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 2,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0168:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0168:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 1654982,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.07,
+    "1:running": 1043.602,
+    "2:cross_review": 0.258,
+    "3:prepare_context": 479.216,
+    "4:cross_review": 0.271,
+    "5:prepare_context": 127.702,
+    "6:human_confirm": 2.927,
+    "7:running": 0.045,
+    "8:completed": 0.109
+  }
+}

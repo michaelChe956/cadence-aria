@@ -1,0 +1,177 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_83010089c773089032773513",
+    "work_item_revision_id": "work_item_revision_83010089c773089032773513",
+    "canonical_contract_hash": "3d65b44871d941b4945056fe625cf3eb3c0ea01966415631cfc45cfeb27a1dd1",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "Hello API",
+      "goal": "WHEN 客户端请求 GET /api/hello THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+      "non_goals": [
+        "不引入任何第三方依赖；不新增数据库、认证、外部服务或前端页面；不修改 package.json；不做本契约之外的任何拆分。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/hello 返回 200 且 body 恰为 {\"message\":\"hello\"}；错误响应示例：WHEN 请求方法非 GET THE SYSTEM SHALL 返回 405 且 body 恰为 {\"error\":\"method not allowed\"}；WHEN 请求路径非 /api/hello THE SYSTEM SHALL 返回 404 且 body 恰为 {\"error\":\"not found\"}"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "第三方依赖、数据库、认证、外部服务、前端页面"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 客户端请求 GET /api/hello THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "TASK-001",
+        "TASK-002",
+        "design_requirement_placeholder"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_83010089c773089032773513",
+      "objective": "WHEN 客户端请求 GET /api/hello THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 编写验收测试 THE SYSTEM SHALL 在 test/hello.test.js 使用 node --test 内置测试运行器起服务请求 /api/hello 并断言状态码 200 且 body 恰为 {\"message\":\"hello\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 实现服务 THE SYSTEM SHALL 新建 server.js 仅用 node:http 监听 127.0.0.1:3000 使 GET /api/hello 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "第三方依赖、数据库、认证、外部服务、前端页面"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN 客户端请求 GET /api/hello THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "files_changed",
+          "verification_command",
+          "test_result"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_83010089c773089032773513",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "第三方依赖、数据库、认证、外部服务、前端页面"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/hello 返回 200 且 body 恰为 {\"message\":\"hello\"}；错误响应示例：WHEN 请求方法非 GET THE SYSTEM SHALL 返回 405 且 body 恰为 {\"error\":\"method not allowed\"}；WHEN 请求路径非 /api/hello THE SYSTEM SHALL 返回 404 且 body 恰为 {\"error\":\"not found\"}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "108960d00b21b2867871d1d6fd5188ba1353fc02565e3d234e9637fae07cf12d",
+    "coder_projection_hash": "171054bdd725d168610822935439e5b59e3c920c094d5602232eb1855bc1041b",
+    "reviewer_projection_hash": "0a0beb74876bd400e9670761c82404d60646de0e34629a12f57e82915b1c0cda",
+    "created_at": "2026-09-07T16:06:51.113607476+00:00"
+  }
+}

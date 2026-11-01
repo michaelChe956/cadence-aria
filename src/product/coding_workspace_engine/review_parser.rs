@@ -154,6 +154,7 @@ where
             Ok(Some(CodingExecutionStage::InternalPrReview))
         }
         "final_confirm" => Ok(Some(CodingExecutionStage::FinalConfirm)),
+        "issue_cross_repo_review" => Ok(Some(CodingExecutionStage::IssueCrossRepoReview)),
         other => Err(serde::de::Error::unknown_variant(
             other,
             &[
@@ -165,6 +166,7 @@ where
                 "internal_pr_review",
                 "group_final_review",
                 "final_confirm",
+                "issue_cross_repo_review",
             ],
         )),
     }

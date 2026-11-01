@@ -1,0 +1,1149 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::logical_codebase::aggregate_index::{
+        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
+    };
+    use crate::product::logical_codebase::planning_context_set::PLANNING_MATERIAL_MAX_BYTES;
+    use crate::product::logical_codebase::policy::{
+        AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
+    };
+    use crate::product::logical_codebase::{
+        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+        IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore, MemberStatus,
+        RepositoryCheckoutId, RepositoryCheckoutRecord, RepositoryContextResolution,
+        RepositoryContextSet, RepositorySourceIdentity, RepositoryType,
+    };
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    /// 稳定 UUID：禁止运行时随机，保证测试可复现；ID 组成磁盘路径前受
+    /// `validate_relative_id` 约束（本测试使用 `project_0001` / `issue_0001` 等稳定 id）。
+    const API_MEMBER_UUID: Uuid = stable_uuid(0x0001);
+
+    const fn stable_uuid(seed: u16) -> Uuid {
+        let mut bytes = [0u8; 16];
+        bytes[14] = (seed >> 8) as u8;
+        bytes[15] = seed as u8;
+        // version 7 + variant 10xx，满足 Uuid::from_bytes 的合法构造。
+        bytes[6] = 0x70;
+        bytes[8] = 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    struct ResolverFixture {
+        // 保留 temp 以持有临时目录生命周期；paths 派生自 temp.path()。
+        #[allow(dead_code)]
+        temp: TempDir,
+        paths: ProductAppPaths,
+        api_member_id: LogicalRepositoryId,
+        cached_policy_digest: Option<String>,
+    }
+
+    impl ResolverFixture {
+        fn resolver(&self) -> PlanningContextResolver {
+            PlanningContextResolver::new(self.paths.clone())
+        }
+
+        fn aggregate_root(&self) -> PathBuf {
+            self.temp.path().join("aggregate-root")
+        }
+
+        /// planning 只读启动使用的 provider ref。与 gateway `ProviderRef` 对齐,
+        /// planning 走 ClaudeCode(Codex danger-full-access 在 gateway 路由级被阻断)。
+        fn provider_ref(&self) -> crate::product::logical_codebase::provider_gateway::ProviderRef {
+            crate::product::logical_codebase::provider_gateway::ProviderRef::claude_code(
+                "cap_claude_code_1_4_0",
+            )
+        }
+
+        /// planning 启动携带的托管配置 artifact 引用(envelope 冻结其 digest)。
+        fn config_artifact_ref(&self) -> String {
+            "sha256:managed-config-artifact".to_string()
+        }
+
+        fn membership_revision(&self) -> u64 {
+            1
+        }
+
+        fn policy_digest(&self) -> String {
+            self.cached_policy_digest
+                .clone()
+                .expect("write_active_manifest_index_and_policy must run first")
+        }
+
+        /// 写入单成员 manifest（api，active）+ 显式 selection(issue_0001 → api) +
+        /// active aggregate index（membership_revision 与 manifest 对齐）+ 政策
+        /// bootstrap artifact，覆盖 resolver 的所有必读依赖。
+        fn write_active_manifest_index_and_policy(&mut self) {
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                vec![self.api_member_id],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(self.api_member_id, "api", MemberStatus::Active),
+                )
+                .unwrap();
+            store
+                .save_checkout("project_0001", &self.api_checkout())
+                .unwrap();
+
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![self.api_member_id],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&selection)
+                .unwrap();
+
+            // active aggregate index：成员快照与 api member 对齐。
+            let index = active_index_record("project_0001", self.api_member_id);
+            AggregateIndexStore::new(self.paths.clone())
+                .create("project_0001", index.clone())
+                .unwrap();
+            let mut activated = index.clone();
+            activated.status = AggregateIndexStatus::Active;
+            AggregateIndexStore::new(self.paths.clone())
+                .replace_active("project_0001", activated)
+                .unwrap();
+
+            // 政策 bootstrap artifact。
+            let policy = AggregatePolicyArtifactStore::new(self.paths.clone())
+                .ensure_bootstrap(&manifest)
+                .unwrap();
+            self.cached_policy_digest = Some(policy.digest);
+        }
+
+        /// 写入一个 issue（issue_empty）的显式空 selection，使 resolver 对该 issue
+        /// 解析出空有效成员集合，触发 fail-closed blocker。
+        fn write_selection_with_no_effective_members(&self) {
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_empty",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&selection)
+                .unwrap();
+        }
+
+        /// 两成员场景：api（active，在 manifest.member_ids）+ web（status=Removed，不在
+        /// manifest.member_ids）。selection 显式 include 两者 → api 有效、web 失效，
+        /// 触发 selection/snapshot 失效标记（REQ-PLN-02）。active aggregate index 与政策
+        /// artifact 覆盖 resolver 其余必读依赖。
+        fn write_active_manifest_index_and_policy_with_removed_member(&mut self) {
+            let web = LogicalRepositoryId(stable_uuid(0x0002));
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                vec![self.api_member_id],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(self.api_member_id, "api", MemberStatus::Active),
+                )
+                .unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(web, "web", MemberStatus::Removed),
+                )
+                .unwrap();
+            store
+                .save_checkout("project_0001", &self.api_checkout())
+                .unwrap();
+
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![self.api_member_id, web],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&selection)
+                .unwrap();
+
+            // active aggregate index：成员快照仅含 api（有效成员），web 为失效成员。
+            let index = active_index_record("project_0001", self.api_member_id);
+            AggregateIndexStore::new(self.paths.clone())
+                .create("project_0001", index.clone())
+                .unwrap();
+            let mut activated = index.clone();
+            activated.status = AggregateIndexStatus::Active;
+            AggregateIndexStore::new(self.paths.clone())
+                .replace_active("project_0001", activated)
+                .unwrap();
+
+            let policy = AggregatePolicyArtifactStore::new(self.paths.clone())
+                .ensure_bootstrap(&manifest)
+                .unwrap();
+            self.cached_policy_digest = Some(policy.digest);
+        }
+
+        /// 真实 tombstone 语义（Plan 1 `apply_delete_tombstone`）：web 仍留在
+        /// manifest.member_ids 但 status=Tombstoned；selection 只 include api。resolver
+        /// 必须按 Active 过滤使 web 进入 invalid → selection/snapshot 失效 → resume
+        /// 强制 StaleContext。
+        fn write_active_manifest_index_and_policy_with_tombstoned_member_in_manifest(&mut self) {
+            let web = LogicalRepositoryId(stable_uuid(0x0002));
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let manifest = LogicalCodebaseManifest::new(
+                "project_0001",
+                self.aggregate_root(),
+                // web 仍在 manifest（tombstone 不修改 manifest.member_ids）。
+                vec![self.api_member_id, web],
+            );
+            store.save_manifest("project_0001", &manifest).unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(self.api_member_id, "api", MemberStatus::Active),
+                )
+                .unwrap();
+            store
+                .save_member(
+                    "project_0001",
+                    &self.member_record(web, "web", MemberStatus::Tombstoned),
+                )
+                .unwrap();
+            store
+                .save_checkout("project_0001", &self.api_checkout())
+                .unwrap();
+
+            // selection 不含删除成员：失效由 manifest 不一致兑底触发。
+            let selection = IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                vec![self.api_member_id],
+                Vec::new(),
+                Vec::new(),
+                None,
+            );
+            IssueCodebaseSelectionStore::new(self.paths.clone())
+                .save(&selection)
+                .unwrap();
+
+            // active aggregate index：成员快照仅含 api（有效成员），web 为失效成员。
+            let index = active_index_record("project_0001", self.api_member_id);
+            AggregateIndexStore::new(self.paths.clone())
+                .create("project_0001", index.clone())
+                .unwrap();
+            let mut activated = index.clone();
+            activated.status = AggregateIndexStatus::Active;
+            AggregateIndexStore::new(self.paths.clone())
+                .replace_active("project_0001", activated)
+                .unwrap();
+
+            let policy = AggregatePolicyArtifactStore::new(self.paths.clone())
+                .ensure_bootstrap(&manifest)
+                .unwrap();
+            self.cached_policy_digest = Some(policy.digest);
+        }
+
+        /// 模拟成员变更：manifest membership_revision 1 → 2 并同步推进 active aggregate
+        /// index 的 membership_revision 与成员 checkout revision，使 planning snapshot
+        /// 指纹漂移（membership/index/checkout 任一变化都会改变 access_fingerprint）。
+        /// 与 `write_active_manifest_index_and_policy` 保持同一项目数据，供 resume 测试使用。
+        fn change_membership_revision(&self) {
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let mut manifest = store.load_manifest("project_0001").unwrap().unwrap();
+            manifest.membership_revision = 2;
+            store.save_manifest("project_0001", &manifest).unwrap();
+
+            let index_store = AggregateIndexStore::new(self.paths.clone());
+            let mut index = index_store.active("project_0001").unwrap().unwrap();
+            index.membership_revision = 2;
+            for snapshot in &mut index.member_snapshots {
+                snapshot.revision = "def456".to_string();
+            }
+            index.updated_at = "2026-08-10T01:00:00Z".to_string();
+            index_store.replace_active("project_0001", index).unwrap();
+        }
+
+        /// 模拟 checkout identity 更换：仅变更 active aggregate index 成员的
+        /// checkout_id（revision/dirty/availability/membership 均不变）。B2 验证
+        /// checkout_id 参与指纹哈希，避免 checkout 更换被漂移检测绕过。
+        fn change_checkout_id(&self) {
+            let index_store = AggregateIndexStore::new(self.paths.clone());
+            let mut index = index_store.active("project_0001").unwrap().unwrap();
+            for snapshot in &mut index.member_snapshots {
+                snapshot.checkout_id = RepositoryCheckoutId(stable_uuid(0x0002));
+            }
+            index.updated_at = "2026-08-10T02:00:00Z".to_string();
+            index_store.replace_active("project_0001", index).unwrap();
+        }
+
+        /// Task 2.8（REQ-PLN-03）：模拟聚合根迁移——manifest
+        /// `provider_context_root` 换新根（成员/索引/政策 digest 全不变）。
+        /// cwd 维度冻结进 planning snapshot 并参与 access fingerprint，
+        /// 根漂移必须触发 StaleContext 重建，不得以旧 cwd 续接旧 session。
+        fn change_manifest_root(&self) {
+            let store = LogicalCodebaseStore::new(self.paths.clone());
+            let mut manifest = store.load_manifest("project_0001").unwrap().unwrap();
+            manifest.provider_context_root = self.temp.path().join("moved-aggregate-root");
+            store.save_manifest("project_0001", &manifest).unwrap();
+        }
+
+        fn member_record(
+            &self,
+            id: LogicalRepositoryId,
+            alias: &str,
+            status: MemberStatus,
+        ) -> CodebaseMemberRecord {
+            let now = "2026-08-10T00:00:00Z".to_string();
+            let checkout_path = self.aggregate_root().join(alias);
+            CodebaseMemberRecord {
+                logical_repository_id: id,
+                physical_repository_id: format!("repository_{alias}"),
+                alias: alias.to_string(),
+                role: "service".to_string(),
+                ordinal: 1,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &checkout_path,
+                    checkout_path.join(".git"),
+                    Some(format!("ssh://git@example.test/acme/{alias}.git")),
+                ),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".to_string()],
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![RepositoryCheckoutId(Uuid::nil())],
+                status,
+                created_at: now.clone(),
+                updated_at: now,
+            }
+        }
+
+        fn api_checkout(&self) -> RepositoryCheckoutRecord {
+            let now = "2026-08-10T00:00:00Z".to_string();
+            RepositoryCheckoutRecord {
+                checkout_id: RepositoryCheckoutId(Uuid::nil()),
+                logical_repository_id: self.api_member_id,
+                physical_repository_id: "repository_api".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: self.aggregate_root().join("api"),
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: "sha256:git-dir".to_string(),
+                revision: Some("abc123".to_string()),
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            }
+        }
+
+        /// 构造可 `validate` 的 planning gateway（不触达真实 adapter start）。
+        /// 政策 store 复用本 fixture 的 paths——bootstrap 政策已由
+        /// `write_active_manifest_index_and_policy` 写入，validate 可直接冻结
+        /// envelope。authority_root 取 manifest 的 provider_context_root
+        /// （aggregate-root，canonicalize 前需真实存在）。
+        fn planning_gateway(
+            &self,
+        ) -> crate::product::logical_codebase::provider_gateway::LogicalCodebaseProviderGateway
+        {
+            use crate::cross_cutting::provider_registry::ProviderRegistry;
+            use crate::product::logical_codebase::provider_gateway::{
+                GatewayRunAudit, LogicalCodebaseProviderGateway,
+            };
+
+            let policy_store = AggregatePolicyArtifactStore::new(self.paths.clone());
+            let authority_root = std::fs::canonicalize(self.aggregate_root())
+                .expect("aggregate root exists for canonicalize");
+            LogicalCodebaseProviderGateway::with_audit(
+                policy_store,
+                Arc::new(PlanningStaticCapabilitySource),
+                Arc::new(PlanningPassThroughTargetResolver),
+                Arc::new(ProviderRegistry::new()),
+                Arc::new(PlanningStubSyncAdapter),
+                planning_always_available_gate(),
+                Arc::new(GatewayRunAudit::new()),
+                authority_root,
+            )
+        }
+    }
+
+    /// planning gateway 测试用 capability source：固定 version/dialect,分格
+    /// 恒 `Confirmed`(与 provider_gateway_tests 的 StaticCapabilitySource
+    /// 同构,仅服务于 `validate` 冻结 envelope)。
+    struct PlanningStaticCapabilitySource;
+
+    impl PlanningStaticCapabilitySource {
+        fn capability(
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            action: SessionPolicyAction,
+        ) -> crate::product::logical_codebase::provider_gateway::ProviderCapability {
+            use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+            use crate::product::logical_codebase::policy::{ProviderDialect, ProviderWireDialect};
+            use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+            use crate::product::logical_codebase::provider_gateway::{
+                ProviderCapability, ProviderRefType,
+            };
+            let (adapter_dialect, wire_dialect) = match provider.provider_type {
+                ProviderRefType::ClaudeCode => (
+                    ProviderDialect::ClaudeCodeCliV1,
+                    ProviderWireDialect::ClaudeCodeStreamJson,
+                ),
+                ProviderRefType::Codex => (
+                    ProviderDialect::CodexCliV1,
+                    ProviderWireDialect::CodexAppServerRpc,
+                ),
+                ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+                ProviderRefType::KimiCode => {
+                    (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp)
+                }
+            };
+            ProviderCapability {
+                provider_type: provider.provider_type,
+                version: "1.4.0".to_string(),
+                adapter_dialect,
+                wire_dialect,
+                capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+                action_capability: ProviderActionCapability {
+                    action,
+                    launch: ProviderCapabilityEvidence::Confirmed,
+                    resume: ProviderCapabilityEvidence::Confirmed,
+                    write_boundary: ProviderCapabilityEvidence::Confirmed,
+                    projection_digest: format!("projection-digest-{action:?}"),
+                    evidence_ref: format!("probe://{action:?}"),
+                },
+                trust: ProviderCapabilityEvidence::Confirmed,
+            }
+        }
+    }
+
+    impl crate::product::logical_codebase::provider_gateway::ProviderCapabilitySource
+        for PlanningStaticCapabilitySource
+    {
+        fn require_supported(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            Ok(Self::capability(provider, action))
+        }
+
+        fn require_resume_supported(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            Ok(Self::capability(provider, action))
+        }
+
+        fn require_write_boundary(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            action: SessionPolicyAction,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            Ok(Self::capability(provider, action))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            provider: &crate::product::logical_codebase::provider_gateway::ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<
+            crate::product::logical_codebase::provider_gateway::ProviderCapability,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            use crate::product::logical_codebase::provider_gateway::{
+                ProviderGatewayError, ProviderRefType,
+            };
+            if provider.provider_type != ProviderRefType::ClaudeCode {
+                return Err(ProviderGatewayError::UnsupportedCapability(
+                    crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                        .to_string(),
+                ));
+            }
+            Ok(Self::capability(
+                provider,
+                SessionPolicyAction::PlanningReadOnly,
+            ))
+        }
+    }
+
+    /// planning gateway 测试用 target resolver：透传请求 target（validate 阶段
+    /// 不做 canonical 复验，复验在 spawn 前的 `revalidate_before_spawn`）。
+    struct PlanningPassThroughTargetResolver;
+
+    impl crate::product::logical_codebase::provider_gateway::PolicyTargetResolver
+        for PlanningPassThroughTargetResolver
+    {
+        fn resolve_and_revalidate(
+            &self,
+            request: &crate::product::logical_codebase::provider_gateway::SessionLaunchRequest,
+        ) -> Result<
+            PolicyTarget,
+            crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
+        > {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// planning gateway 测试用同步 adapter stub：`run` 返回最小成功输出。
+    struct PlanningStubSyncAdapter;
+
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for PlanningStubSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            use crate::protocol::contracts::TimeoutStatus;
+            Ok(crate::protocol::contracts::AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    /// planning gateway 测试用 availability gate：所有 provider 恒可用（与
+    /// workspace_engine part_32 的 `review_always_available_gate` 同构）。
+    fn planning_always_available_gate()
+    -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
+        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
+        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+        use crate::product::models::ProviderName;
+
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = chrono::Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(
+            crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate::new(
+                Arc::new(AlwaysHealthy(snapshot)),
+            ),
+        )
+    }
+
+    fn active_index_record(
+        project_id: &str,
+        member_id: LogicalRepositoryId,
+    ) -> AggregateIndexRecord {
+        let now = "2026-08-10T00:00:00Z".to_string();
+        AggregateIndexRecord::building(
+            "aggregate_index_0001".to_string(),
+            project_id.to_string(),
+            1,
+            vec![AggregateIndexMemberSnapshot::indexed(
+                member_id,
+                RepositoryCheckoutId(Uuid::nil()),
+                "abc123".to_string(),
+                false,
+                now,
+            )],
+            "2026-08-10T00:00:00Z".to_string(),
+        )
+    }
+
+    struct ScriptedFreshness {
+        store: AggregateIndexStore,
+        next: Arc<Mutex<Vec<AggregateIndexFreshness>>>,
+        sync_count: Arc<Mutex<usize>>,
+    }
+
+    impl PlanningIndexFreshness for ScriptedFreshness {
+        fn assess(&self, project_id: &str) -> Result<AggregateIndexFreshness, AggregateIndexError> {
+            if let Some(assessment) = self.next.lock().unwrap().pop() {
+                return Ok(assessment);
+            }
+            let record = self.store.active_required(project_id)?;
+            Ok(AggregateIndexFreshness::active(record))
+        }
+
+        fn sync_if_stale(
+            &self,
+            project_id: &str,
+        ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+            *self.sync_count.lock().unwrap() += 1;
+            let mut record = self.store.active_required(project_id)?;
+            record.aggregate_index_id = "aggregate_index_fresh".to_string();
+            record.status = AggregateIndexStatus::Active;
+            self.store.replace_active(project_id, record.clone())?;
+            Ok(record)
+        }
+
+        fn for_lc(&self, _lc_id: &str) -> Arc<dyn PlanningIndexFreshness> {
+            // 脚本桩语义保持：共享脚本队列与计数器，store 随作用域克隆
+            //（本桩仅用于无 lc 归属的 fixture，lc 分支不会被触达）。
+            Arc::new(ScriptedFreshness {
+                store: self.store.clone(),
+                next: Arc::clone(&self.next),
+                sync_count: Arc::clone(&self.sync_count),
+            })
+        }
+    }
+
+    fn resolver_fixture() -> ResolverFixture {
+        let temp = tempfile::tempdir().unwrap();
+        ResolverFixture {
+            paths: ProductAppPaths::new(temp.path()),
+            temp,
+            api_member_id: LogicalRepositoryId(API_MEMBER_UUID),
+            cached_policy_digest: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_planning_read_syncs_then_builds_but_degraded_only_carries_warning() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let store = AggregateIndexStore::new(fixture.paths.clone());
+        let stale = store.active_required("project_0001").unwrap();
+        let sync_count = Arc::new(Mutex::new(0));
+        let resolver = PlanningContextResolver::with_freshness_service(
+            fixture.paths.clone(),
+            Arc::new(ScriptedFreshness {
+                store: store.clone(),
+                next: Arc::new(Mutex::new(vec![AggregateIndexFreshness::stale(
+                    stale.clone(),
+                    "fixture_stale",
+                )])),
+                sync_count: sync_count.clone(),
+            }),
+        );
+        let resolved = resolver
+            .build_with_fresh_index("project_0001", "issue_0001", &[])
+            .await
+            .unwrap();
+        assert_eq!(resolved.aggregate_index_id, "aggregate_index_fresh");
+        assert_eq!(*sync_count.lock().unwrap(), 1);
+
+        let warning = "sync command failed";
+        let active_id = store
+            .active_required("project_0001")
+            .unwrap()
+            .aggregate_index_id;
+        let degraded = store
+            .mark_status(
+                "project_0001",
+                &active_id,
+                AggregateIndexStatus::Degraded,
+                Some(warning.to_string()),
+            )
+            .unwrap();
+        let degraded_resolver = PlanningContextResolver::with_freshness_service(
+            fixture.paths.clone(),
+            Arc::new(ScriptedFreshness {
+                store: store.clone(),
+                next: Arc::new(Mutex::new(vec![AggregateIndexFreshness::degraded(
+                    degraded, warning,
+                )])),
+                sync_count: sync_count.clone(),
+            }),
+        );
+        let degraded_context = degraded_resolver
+            .build_with_fresh_index("project_0001", "issue_0001", &[])
+            .await
+            .unwrap();
+        assert!(
+            degraded_context
+                .inventory_injection
+                .rendered
+                .contains("aggregate index warning: sync command failed")
+        );
+        assert_eq!(*sync_count.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn resolver_produces_single_snapshot_cwd_and_inventory_for_all_artifacts() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        assert_eq!(resolved.cwd, fixture.aggregate_root());
+        assert_eq!(
+            resolved.snapshot.membership_revision,
+            fixture.membership_revision()
+        );
+        assert_eq!(resolved.snapshot.policy_digest, fixture.policy_digest());
+        assert!(
+            resolved.inventory_injection.rendered.len() <= PLANNING_MATERIAL_MAX_BYTES,
+            "渲染材料必须在 500 KiB 绝对上限内"
+        );
+        assert_eq!(
+            resolved.best_effort_readonly_status,
+            BestEffortReadonlyStatus::BestEffortConfigured
+        );
+    }
+
+    #[test]
+    fn planning_launch_has_no_write_roots_and_cwd_is_aggregate_root() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+
+        let request =
+            resolved.launch_request(fixture.provider_ref(), fixture.config_artifact_ref());
+        assert_eq!(request.action, SessionPolicyAction::PlanningReadOnly);
+        assert!(request.writable_roots.is_empty());
+        assert_eq!(request.readable_roots, vec![fixture.aggregate_root()]);
+        assert_eq!(
+            request.target,
+            PolicyTarget::aggregate_root(fixture.aggregate_root())
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_primary_fallback_when_selection_empty() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        fixture.write_selection_with_no_effective_members();
+
+        let error = fixture
+            .resolver()
+            .build("project_0001", "issue_empty", &[])
+            .unwrap_err();
+        assert!(error.to_string().contains("effective_member_empty"));
+    }
+
+    #[test]
+    fn resume_with_matching_fingerprint_reuses_context_and_mismatch_rebuilds() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let first = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        let persisted_fingerprint = first.snapshot.access_fingerprint.clone();
+        // build 返回的 snapshot 携带冻结指纹，与落盘一致（Task 11 一致性修正）。
+        assert!(!persisted_fingerprint.is_empty());
+
+        let same = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(same, ResumeDecision::SameContext(_)));
+
+        fixture.change_membership_revision(); // 模拟成员变更，指纹漂移
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(
+            stale,
+            ResumeDecision::StaleContext { reason, .. } if reason != persisted_fingerprint
+        ));
+    }
+
+    #[test]
+    fn resume_is_readonly_and_rejected_reconnect_stays_stale() {
+        // B1/TOCTOU 修复：resume 先加载既有 snapshot（load 只读、不写）再比较，禁止
+        // 先写后比。因此漂移首次拒绝后，同一会话重连（未启动新会话）仍是 StaleContext，
+        // 绝不因 snapshot 被 build 提前更新而误判 SameContext。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let first = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        let persisted_fingerprint = first.snapshot.access_fingerprint.clone();
+
+        fixture.change_membership_revision(); // 指纹漂移
+
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(stale, ResumeDecision::StaleContext { .. }));
+
+        // resume 不落盘：拒绝后落盘快照仍为旧指纹（未被 build 更新）。
+        let store = PlanningContextSnapshotStore::new(fixture.paths.clone());
+        let persisted = store.load("project_0001", "issue_0001").unwrap().unwrap();
+        assert_eq!(persisted.access_fingerprint, persisted_fingerprint);
+
+        // 重连（未启动新会话）仍是 StaleContext。
+        let again = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(again, ResumeDecision::StaleContext { .. }));
+    }
+
+    #[test]
+    fn checkout_identity_change_triggers_fingerprint_drift() {
+        // B2 修复：access_fingerprint_value 哈希 checkout_id。checkout identity 更换而
+        // revision/dirty/availability 不变时，也必须触发漂移（StaleContext）。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+
+        let same = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(same, ResumeDecision::SameContext(_)));
+
+        fixture.change_checkout_id(); // 仅更换 checkout identity
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(stale, ResumeDecision::StaleContext { .. }));
+    }
+
+    #[test]
+    fn removed_member_marks_snapshot_invalidated_and_resume_forces_stale_rebuild() {
+        // REQ-PLN-02：规划后成员删除/停用 → build 结果附失效警告，落盘快照标记失效；
+        // resume 强制 StaleContext 重建，绝不沿用可能已失效的旧上下文。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy_with_removed_member();
+
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        assert!(resolved.invalidation.is_some());
+        assert_eq!(
+            resolved
+                .invalidation
+                .as_ref()
+                .map(|record| record.reason.as_str()),
+            Some("member_removed")
+        );
+        assert_eq!(resolved.context_resolution.invalid_member_ids.len(), 1);
+        assert_eq!(resolved.context_resolution.set.len(), 1);
+
+        // build 已落盘失效快照 → resume 走 invalidated 分支强制 StaleContext。
+        let decision = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(
+            decision,
+            ResumeDecision::StaleContext { reason, .. }
+                if reason.starts_with("invalidated:")
+        ));
+
+        // selection 失效标记也已自动写入。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.paths.clone());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn tombstoned_member_in_manifest_invalidates_snapshot_and_forces_stale_rebuild() {
+        // REQ-PLN-02 fix round 1：真实 tombstone（status=Tombstoned 但仍留在
+        // manifest.member_ids）→ resolver 按 Active 过滤 → snapshot 失效 + resume 强制
+        // StaleContext；selection 由 manifest 不一致兑底标记失效。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy_with_tombstoned_member_in_manifest();
+
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        assert!(resolved.invalidation.is_some());
+        assert_eq!(
+            resolved
+                .invalidation
+                .as_ref()
+                .map(|record| record.reason.as_str()),
+            Some("member_removed")
+        );
+        // set 只含 api（Tombstoned 成员被排除）。
+        assert_eq!(resolved.context_resolution.set.len(), 1);
+        assert_eq!(resolved.context_resolution.set[0].alias, "api");
+        // manifest.member_ids 含 web 但 status=Tombstoned → invalid_member_ids 含 web。
+        let web = LogicalRepositoryId(stable_uuid(0x0002));
+        assert!(
+            resolved
+                .context_resolution
+                .invalid_member_ids
+                .contains(&web)
+        );
+
+        // build 已落盘失效快照 → resume 走 invalidated 分支强制 StaleContext。
+        let decision = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(
+            decision,
+            ResumeDecision::StaleContext { reason, .. }
+                if reason.starts_with("invalidated:")
+        ));
+
+        // selection 失效标记也已写入（manifest 不一致兑底，selection 自身不含删除成员）。
+        let selection_store = IssueCodebaseSelectionStore::new(fixture.paths.clone());
+        assert!(
+            selection_store
+                .is_invalidated("project_0001", "issue_0001")
+                .unwrap()
+        );
+    }
+
+    /// F3 裁决（契约 oracle S1 终裁 + REQ-ENV-09 矩阵）：gateway-mediated
+    /// planning 路径的 `validated_planning_input` role=Orchestrator 必带
+    /// `DenyFileWriteBuiltins`——tool_policy 沿 `ValidatedStreamingProviderInput`
+    /// 传到 adapter；envelope 的 `PlanningReadOnly` 语义不动（语义策略叠加，
+    /// 不取代只读 action）。Task 3.1 双向守卫落地后 Orchestrator+None 会被
+    /// fail-closed 拒绝、打断 gateway planning 路径，故在此锁定。
+    #[tokio::test]
+    async fn validated_planning_input_pairs_orchestrator_with_deny_file_write_policy() {
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        // authority_root canonicalize 需聚合根真实存在。
+        std::fs::create_dir_all(fixture.aggregate_root()).unwrap();
+        let resolved = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        let gateway = fixture.planning_gateway();
+
+        let validated = resolved
+            .validated_planning_input(
+                &gateway,
+                fixture.provider_ref(),
+                fixture.config_artifact_ref(),
+                "planning prompt".to_string(),
+            )
+            .unwrap();
+
+        let (input, launch) = validated.into_parts();
+        assert_eq!(
+            input.role,
+            crate::protocol::contracts::AdapterRole::Orchestrator
+        );
+        assert!(
+            matches!(
+                input.tool_policy,
+                Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                    intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins
+                })
+            ),
+            "gateway planning 路径 Orchestrator 必带 DenyFileWriteBuiltins"
+        );
+        // envelope 的 PlanningReadOnly 语义不动（空 writable_roots 的只读 action
+        // 与语义 tool_policy 叠加共存）。
+        assert_eq!(
+            launch.envelope().action,
+            SessionPolicyAction::PlanningReadOnly
+        );
+        assert!(launch.envelope().writable_roots.is_empty());
+    }
+
+    #[test]
+    fn manifest_root_change_triggers_fingerprint_drift() {
+        // Task 2.8（REQ-PLN-03）：canonical working directory 冻结进 planning
+        // snapshot 并参与 access fingerprint——聚合根迁移（成员/checkout/policy/
+        // index 全不变）也必须拒绝沿用旧 session（StaleContext），不得继续以
+        // 旧 cwd resume 或静默换根续接。
+        let mut fixture = resolver_fixture();
+        fixture.write_active_manifest_index_and_policy();
+        let first = fixture
+            .resolver()
+            .build("project_0001", "issue_0001", &[])
+            .unwrap();
+        assert_eq!(first.cwd, fixture.aggregate_root());
+        // Task 2.8（REQ-PLN-03）：cwd 冻结进 snapshot（context 的唯一事实来源）。
+        assert_eq!(first.snapshot.working_directory, fixture.aggregate_root());
+
+        let same = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(matches!(same, ResumeDecision::SameContext(_)));
+
+        fixture.change_manifest_root();
+        let stale = fixture
+            .resolver()
+            .resume("project_0001", "issue_0001")
+            .unwrap();
+        assert!(
+            matches!(stale, ResumeDecision::StaleContext { .. }),
+            "聚合根迁移必须触发 planning snapshot 重建"
+        );
+    }
+
+    // --- REQ-PLN-12：仓库清单全量注入 + 500 KiB 超限阻断 ---
+
+    /// 纯内存成员集合夹具：直接构造 `RepositoryContextResolution`，避免落盘依赖。
+    /// `alias_pad` 控制单行长度，用于构造超过 500 KiB 上限的成员集。
+    fn inventory_resolution(count: usize, alias_pad: usize) -> RepositoryContextResolution {
+        let set = (0..count)
+            .map(|index| RepositoryContextSet {
+                member_id: LogicalRepositoryId(stable_uuid(0x0200 + index as u16)),
+                alias: format!("member_{index:04}_{}", "a".repeat(alias_pad)),
+                root_relative_path: format!(
+                    "services/member_{index:04}/{}",
+                    "p".repeat(alias_pad)
+                ),
+                role: "service".to_string(),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".to_string()],
+            })
+            .collect();
+        RepositoryContextResolution {
+            set,
+            invalid_member_ids: Vec::new(),
+            membership_revision: 1,
+            member_checkout_paths: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn inventory_renders_all_members_without_omitted_count() {
+        // REQ-PLN-12：多仓评审材料 MUST 全量注入成员清单，MUST NOT 以
+        // omitted/truncated 形式的缺员标记呈现被省略成员。
+        let resolution = inventory_resolution(3, 8);
+        let targets: Vec<LogicalRepositoryId> = resolution
+            .set
+            .iter()
+            .take(2)
+            .map(|member| member.member_id)
+            .collect();
+
+        let injection = render_compact_inventory(&resolution, &targets).unwrap();
+
+        for member in &resolution.set {
+            assert!(
+                injection.rendered.contains(&member.alias),
+                "清单必须含成员 alias：{}",
+                member.alias
+            );
+            assert!(
+                injection.rendered.contains(&member.member_id.0.to_string()),
+                "清单必须含成员 id：{}",
+                member.member_id.0
+            );
+        }
+        // 3 个成员 → 3 行（每行投影 id | alias | path | role | profile）。
+        assert_eq!(
+            injection
+                .rendered
+                .lines()
+                .filter(|line| line.contains(" | "))
+                .count(),
+            3,
+            "清单必须逐行列出全部成员：\n{}",
+            injection.rendered
+        );
+        // 绝不出现任何缺员标记。
+        assert!(!injection.rendered.contains("omitted_member_count"));
+        assert!(!injection.rendered.contains("omitted_member_ids"));
+        assert!(!injection.rendered.contains("truncated"));
+
+        // 超出旧 soft 预算（4 KiB）的成员集：裁剪式实现在此会丢掉非目标成员并输出
+        // `omitted_member_count`——全量实现必须仍逐行列出全部成员（静默缺员即失败）。
+        let wide = inventory_resolution(50, 64);
+        let wide_targets = vec![wide.set[0].member_id];
+        let wide_injection = render_compact_inventory(&wide, &wide_targets).unwrap();
+        assert!(
+            !wide_injection.rendered.contains("omitted_member_count"),
+            "50 成员清单不得出现缺员标记：\n{}",
+            wide_injection.rendered
+        );
+        assert_eq!(
+            wide_injection
+                .rendered
+                .lines()
+                .filter(|line| line.contains(" | "))
+                .count(),
+            50,
+            "50 成员清单必须逐行列出全部成员"
+        );
+        for member in &wide.set {
+            assert!(
+                wide_injection.rendered.contains(&member.alias),
+                "清单必须含成员 alias：{}",
+                member.alias
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_over_500kib_is_rejected_not_truncated() {
+        // REQ-PLN-12：渲染材料超过 500 KiB 绝对上限时 MUST 以
+        // `planning_material_over_budget` 显式阻断，MUST NOT 裁剪成员后继续。
+        // 单成员行 ≈ 235 字节；4000 成员 ≈ 940 KiB > 512 KiB。
+        let resolution = inventory_resolution(4_000, 64);
+        let targets = vec![resolution.set[0].member_id];
+
+        let error = render_compact_inventory(&resolution, &targets).unwrap_err();
+
+        match error {
+            ProductStoreError::InvalidRecord { kind, reason } => {
+                assert_eq!(kind, "planning_material_over_budget");
+                assert!(
+                    reason.contains(&PLANNING_MATERIAL_MAX_BYTES.to_string()),
+                    "阻断原因必须含字节上限：{reason}"
+                );
+            }
+            other => panic!("期望 planning_material_over_budget，实际：{other:?}"),
+        }
+    }
+}

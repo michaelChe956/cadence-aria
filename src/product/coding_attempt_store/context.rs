@@ -1,9 +1,10 @@
 use chrono::Utc;
 
 use crate::product::coding_models::{
-    CodingChatEntry, CodingContextNote, CodingExecutionAttempt, CodingReworkInstruction,
+    CodingAgentRole, CodingChatEntry, CodingContextNote, CodingEntryType, CodingExecutionAttempt,
+    CodingReworkInstruction,
 };
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
@@ -21,7 +22,9 @@ impl super::CodingAttemptStore {
         let notes_root = self
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("context-notes");
-        let id = next_sequential_id("coding_context_note", super::count_json_files(&notes_root)?);
+        let id = next_sequential_id_in_directory("coding_context_note", &notes_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", notes_root.display())),
+        )?;
         let note = CodingContextNote {
             id: id.clone(),
             attempt_id: attempt.id.clone(),
@@ -121,6 +124,48 @@ impl super::CodingAttemptStore {
                 .then_with(|| left.id.cmp(&right.id))
         });
         Ok(entries)
+    }
+
+    /// F-16/§3#5 死因可考：runner 死亡转人工恢复时，把稳定 reason 码与原始
+    /// 错误串作为 System/SystemEvent 尾帧落入 attempt chat-entries——WS 瞬时帧
+    /// 与服务 tty 均不可回收，durable 层此前零痕迹。
+    ///
+    /// id 用独立 `coding_manual_recovery_diagnostic_NNNN` 号段，不占
+    /// `coding_chat_entry_NNNN`：备注侧 chat entry id 由备注序号派生同号
+    /// （`chat_entry_id_for_context_note`），共用号段会被后到的同号备注
+    /// write_json 静默覆盖——死因证据必须永不被备注覆盖（k3 P2）。
+    pub fn append_manual_recovery_diagnostic(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        reason_stable_code: &str,
+        failure_detail: &str,
+    ) -> Result<CodingChatEntry, ProductStoreError> {
+        let entries_root = self
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("chat-entries");
+        let id =
+            next_sequential_id_in_directory("coding_manual_recovery_diagnostic", &entries_root)
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("read {}: {error}", entries_root.display()))
+                })?;
+        let entry = CodingChatEntry {
+            id,
+            attempt_id: attempt.id.clone(),
+            node_id: None,
+            role: CodingAgentRole::System,
+            entry_type: CodingEntryType::SystemEvent {
+                event_type: "manual_recovery_transition".to_string(),
+                message: format!("{reason_stable_code}: {failure_detail}"),
+            },
+            content: None,
+            metadata: Some(serde_json::json!({
+                "manual_recovery_reason": reason_stable_code,
+                "failure_detail": failure_detail,
+            })),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.save_chat_entry(attempt, &entry)?;
+        Ok(entry)
     }
 
     pub fn save_rework_instruction(

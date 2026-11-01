@@ -1,0 +1,386 @@
+{
+  "type": "artifact_update",
+  "version": 10,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_e025f8cb4fbb072e478c94e3",
+    "work_item_revision_id": "work_item_revision_e025f8cb4fbb072e478c94e3",
+    "canonical_contract_hash": "c8b691a12a09dbb951ec4db5fa998688940c1f86b3f5cf41b6bcf7c7177d2373",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-003",
+      "title": "前后端同源联调集成验证",
+      "goal": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 在同一来源下以 node --test 验证页面可达性、HTML 可观测结构与 API 契约符合性，并使三个测试目录全部通过。",
+      "non_goals": [
+        "不修改 server/**、web/**、data/levels.json、tests/backend/** 与 tests/frontend/**，仅新增并维护 tests/integration/**",
+        "不重复断言前端运行时渲染与降级行为，该行为由前端测试以 DOM 替身负责",
+        "不引入浏览器自动化或任何 npm 依赖"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "contract_id": "CT-002",
+          "capabilities": [
+            "静态资源缺失返回 404 文本响应"
+          ],
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "contract_id": "CT-003",
+          "capabilities": [
+            "port 为 0 时分配临时端口且 origin 形如 http://127.0.0.1:<port>"
+          ],
+          "source_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-005",
+          "capabilities": [
+            "集成断言记录同源页面可达与 API 契约符合性"
+          ],
+          "source_refs": [
+            "CT-005"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 以 port 为 0 启动服务并请求 origin 下 GET / THE SYSTEM SHALL 获得 200 的 HTML 响应且包含三个容器标记与 web/level-select.js 脚本引用，GET /web/level-select.js 响应体包含相对路径 /api/levels。",
+        "WHEN 请求同一 origin 下 GET /api/levels THE SYSTEM SHALL 获得 200 顶层数组且恰含 5 个满足 EXE-006 字段约束的元素。",
+        "WHEN 请求未知 API 路径、以不支持方法请求 API 或请求不存在的静态资源 THE SYSTEM SHALL 分别返回 API-002 JSON 结构的 404 与 405 响应及 404 文本响应且 Content-Type 符合契约。",
+        "WHEN 运行 tests/backend、tests/frontend 与 tests/integration 三个目录的 node --test THE SYSTEM SHALL 全部用例通过且无失败。"
+      ],
+      "source_refs": [
+        "AC-009",
+        "AC-010",
+        "AC-011",
+        "AC-012",
+        "CHECK-003",
+        "CHECK-004",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "CT-005",
+        "NFR-001",
+        "REQ-002",
+        "REQ-004",
+        "TASK-012",
+        "TASK-013",
+        "TASK-014"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_e025f8cb4fbb072e478c94e3",
+      "objective": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 在同一来源下以 node --test 验证页面可达性、HTML 可观测结构与 API 契约符合性，并使三个测试目录全部通过。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "静态资源缺失返回 404 文本响应"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "port 为 0 时分配临时端口且 origin 形如 http://127.0.0.1:<port>"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-012",
+        "TASK-013",
+        "TASK-014"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-012",
+          "statement": "WHEN tests/integration 缺少同源联调测试 THE SYSTEM SHALL 先编写以 port 为 0 启动服务的失败测试，断言 GET / 的 HTML 含三容器标记与脚本引用、GET /web/level-select.js 含相对路径 /api/levels 且 GET /api/levels 返回恰 5 项合法数组。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-010"
+          ]
+        },
+        {
+          "task_id": "TASK-013",
+          "statement": "WHEN tests/integration 缺少错误语义测试 THE SYSTEM SHALL 先编写断言未知 API 路径 404 JSON、不支持方法 405 JSON 与静态资源缺失 404 文本响应及 Content-Type 的失败测试。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-011"
+          ]
+        },
+        {
+          "task_id": "TASK-014",
+          "statement": "WHEN 交付集成 THE SYSTEM SHALL 使 node --test tests/integration/*.test.js 与三目录聚合 node --test 全部通过。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-012"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-009",
+          "statement": "WHEN 以 port 为 0 启动服务并请求 origin 下 GET / THE SYSTEM SHALL 获得 200 的 HTML 响应且包含三个容器标记与 web/level-select.js 脚本引用，GET /web/level-select.js 响应体包含相对路径 /api/levels。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-010",
+          "statement": "WHEN 请求同一 origin 下 GET /api/levels THE SYSTEM SHALL 获得 200 顶层数组且恰含 5 个满足 EXE-006 字段约束的元素。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-011",
+          "statement": "WHEN 请求未知 API 路径、以不支持方法请求 API 或请求不存在的静态资源 THE SYSTEM SHALL 分别返回 API-002 JSON 结构的 404 与 405 响应及 404 文本响应且 Content-Type 符合契约。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-012",
+          "statement": "WHEN 运行 tests/backend、tests/frontend 与 tests/integration 三个目录的 node --test THE SYSTEM SHALL 全部用例通过且无失败。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/integration/*.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "node --test tests/backend/*.test.js tests/frontend/*.test.js tests/integration/*.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "tests/integration 测试文件清单、node --test 运行结果、同源联调断言记录"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-009",
+          "AC-010",
+          "AC-011",
+          "AC-012"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_e025f8cb4fbb072e478c94e3",
+      "criterion_refs": [
+        "AC-009",
+        "AC-010",
+        "AC-011",
+        "AC-012"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-009",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-010",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-011",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-012",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "web/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "静态资源缺失返回 404 文本响应"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "port 为 0 时分配临时端口且 origin 形如 http://127.0.0.1:<port>"
+          ],
+          "compatibility_policy": "require_all"
+        },
+        {
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-005",
+          "capabilities": [
+            "集成断言记录同源页面可达与 API 契约符合性"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/integration/*.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        },
+        {
+          "check_id": "CHECK-004",
+          "command": "node --test tests/backend/*.test.js tests/frontend/*.test.js tests/integration/*.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "0e914ab315e5b7d0a42237304194b0214e37ad6f29f9f40a4ccfae73cbcb77fe",
+    "coder_projection_hash": "839223196662e0456ec848770bc0f5d446b9e53a5ee0adce5792b059b565e615",
+    "reviewer_projection_hash": "4d97fc98bc19a0ee64b8b9a278fe65ddae9b9189b8c3d36053bcb37bdff12f12",
+    "created_at": "2026-09-12T06:54:18.883431997+00:00"
+  }
+}

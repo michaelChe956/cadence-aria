@@ -1,0 +1,72 @@
+{
+  "provider": "codex",
+  "stage": "levels matrix2 (post-fix rerun, 新二进制 PID 745190)",
+  "task": "B 修复后重跑 · 阶段 B",
+  "runs": [
+    {
+      "rep": 1,
+      "dir": "/tmp/aria-stage35-20260903/matrix2/codex/rep1",
+      "issue_id": "issue_0112",
+      "plan_id": "issue_work_item_plan_0001",
+      "workspace_session_id": "workspace_session_0129",
+      "startedAt": "2026-09-03T13:42:16.705Z",
+      "finishedAt": "2026-09-03T13:47:30.135Z",
+      "elapsedSec": 313.429,
+      "completed": false,
+      "session_status": "open",
+      "flow_kind": "single_candidate",
+      "run_policy": "interactive",
+      "failureClass": "workspace_error",
+      "error": "compile markdown source failed: invalid_work_item_id:172:标识符不得重复。",
+      "run_history": {"repairs_used": 0, "manual_repairs_used": 0, "transitions_used": 0, "initial_review_count": 0, "verification_review_count": 0},
+      "verdicts": [["revise", 1]],
+      "stages_seen": ["running", "cross_review", "prepare_context"],
+      "gate_turns": 0,
+      "advance_actions": [],
+      "permission_approvals": 0,
+      "choices": 0,
+      "product_store_conflict_count": 0,
+      "budget_events": 0,
+      "usage_by_role": {"reviewer": {"input_tokens": 21380, "output_tokens": 733, "cache_read_tokens": 19968, "cache_creation_tokens": 0}}
+    },
+    {
+      "rep": 2,
+      "dir": "/tmp/aria-stage35-20260903/matrix2-rep2/codex/rep1",
+      "issue_id": "issue_0114",
+      "workspace_session_id": null,
+      "startedAt": "2026-09-03T14:28:31.227Z",
+      "finishedAt": "2026-09-03T14:32:43.989Z",
+      "elapsedSec": 252.761,
+      "completed": false,
+      "session_status": "open",
+      "flow_kind": "single_candidate",
+      "run_policy": "interactive",
+      "failureClass": "workspace_error",
+      "error": "validate plan candidate IR failed: duplicate_contract_id:0:duplicate contract id CT-001; duplicate_contract_id:0:duplicate contract id CT-002; duplicate_contract_id:0:duplicate contract id CT-002; duplicate_contract_id:0:duplicate contract id CT-004",
+      "run_history": {"repairs_used": 0, "manual_repairs_used": 0, "transitions_used": 0, "initial_review_count": 0, "verification_review_count": 0},
+      "verdicts": [["revise", 1]],
+      "stages_seen": ["running", "cross_review", "prepare_context"],
+      "gate_turns": 0,
+      "advance_actions": [],
+      "permission_approvals": 0,
+      "choices": 0,
+      "product_store_conflict_count": 0,
+      "budget_events": 0,
+      "usage_by_role": {}
+    }
+  ],
+  "verdict_v6_0_2_2_4": {
+    "①门回合>0": "unevaluable — gate_turns=0(两跑均未到人工门)",
+    "②预算逐turn恰扣一次": "unevaluable — 无 budget 事件(gate 不可达)",
+    "③advance后Ready+ledger零新增": "unevaluable — advance_actions=[](从未 advance)",
+    "④同attempt": "unevaluable — 无 advance/resume 序列"
+  },
+  "fix2_observation": {
+    "target": "dc4d0d0d Evaluate policy route(第5死路:SC 人工修订完成后 confirm 不再撞 product_store_conflict)",
+    "result": "NOT EXERCISED — 两跑均在 provider 侧 markdown/IR 编译校验阶段失败,未到达 turn 完成→confirm 路径;product_store_conflict 计数 0(因未触达,不构成修复有效证据,亦无复发)",
+    "failure_nature": "codex provider 输出缺陷(重复标识符):rep1=invalid_work_item_id(工作项 ID 重复),rep2=duplicate_contract_id(契约 ID 重复);与本轮两修复代码路径无交集(失败点在修复点上游的编译校验),系既往已记录的 codex 输出缺陷形态(预试验 2/2、正式矩阵亦有同类)",
+    "quota": "workspace_error 2/2 用尽,按纪律停"
+  },
+  "rerun_discipline": "codex 计 2 跑(matrix 规格 1 跑 + workspace_error 类复跑 1 跑补测修复观察点,均在 ≤2 限额);无伪造",
+  "server_health_after": "ok"
+}

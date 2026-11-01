@@ -1,8 +1,7 @@
 use cadence_aria::cross_cutting::integration_queue::IntegrationQueue;
 use cadence_aria::cross_cutting::openspec_constraints::build_openspec_source_manifest;
 use cadence_aria::cross_cutting::provider_adapter::{
-    ProviderAdapter, ProviderAdapterError, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
-    parse_last_structured_output,
+    ProviderAdapter, ProviderAdapterError, parse_last_structured_output, structured_output_sentinel,
 };
 use cadence_aria::cross_cutting::worktree::WorktreeLeaseManager;
 use cadence_aria::protocol::constraints::{
@@ -296,8 +295,8 @@ impl ProviderAdapter for SmokeProvider {
             other => panic!("unexpected schema {other}"),
         };
         let stdout = format!(
-            "provider log\n{STRUCTURED_OUTPUT_START}\n{}\n{STRUCTURED_OUTPUT_END}\n",
-            serde_json::to_string(&payload).expect("payload json")
+            "provider log\n{}\n",
+            structured_output_sentinel("fix00001", &payload)
         );
         Ok(AdapterOutput {
             exit_code: Some(0),

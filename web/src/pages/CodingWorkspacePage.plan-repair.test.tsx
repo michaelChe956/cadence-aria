@@ -6,6 +6,7 @@ import {
   repairAwaitingConfirmationFixture,
 } from "../components/coding-workspace/plan-repair-test-fixtures";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
@@ -19,7 +20,6 @@ import {
 } from "./CodingWorkspacePage.test-utils";
 
 vi.mock("../api/client", () => ({
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
 }));
 
@@ -27,7 +27,8 @@ vi.mock("../hooks/useCodingWorkspaceWs", () => ({
   useCodingWorkspaceWs: vi.fn(),
 }));
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
@@ -96,14 +97,10 @@ describe("CodingWorkspacePage plan repair", () => {
         "用户取消修订",
       );
     } else {
-      expect(repairApi.sendHumanConfirm).toHaveBeenCalledWith(
-        "request-change",
-        {
-          description:
-            action === "regenerate"
-              ? "要求重新生成 Plan Repair 修订"
-              : "调整 Plan Repair 修订范围",
-        },
+      expect(repairApi.sendRequestRevision).toHaveBeenCalledWith(
+        action === "regenerate"
+          ? "要求重新生成 Plan Repair 修订"
+          : "调整 Plan Repair 修订范围",
       );
     }
   });
@@ -139,7 +136,7 @@ describe("CodingWorkspacePage plan repair", () => {
       workspace_type: "design",
       relation: "design_amendment",
     });
-    expect(repairApi.sendHumanConfirm).not.toHaveBeenCalled();
+    expect(repairApi.sendRequestRevision).not.toHaveBeenCalled();
     expect(window.location.pathname).toContain("/coding/coding_attempt_0001");
   });
 
@@ -229,7 +226,7 @@ describe("CodingWorkspacePage plan repair", () => {
 
     expect(repairApi.confirmPlanAmendment).toHaveBeenCalledTimes(1);
     expect(repairApi.cancelPlanAmendment).not.toHaveBeenCalled();
-    expect(repairApi.sendHumanConfirm).not.toHaveBeenCalled();
+    expect(repairApi.sendRequestRevision).not.toHaveBeenCalled();
     expect(screen.getByText("正在提交 Repair 操作，等待 Child Workspace 响应。"))
       .toBeInTheDocument();
 
@@ -305,6 +302,17 @@ describe("CodingWorkspacePage plan repair", () => {
         session_id: repair.childSessionId,
         workspace_type: "work_item",
         stage: "human_confirm",
+        session_status: "waiting_for_human",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: 0,
+          verification_review_count: 0,
+        },
         messages: [],
         checkpoints: [],
         artifact: null,
@@ -327,6 +335,17 @@ describe("CodingWorkspacePage plan repair", () => {
         session_id: repair.childSessionId,
         workspace_type: "work_item",
         stage: "human_confirm",
+        session_status: "waiting_for_human",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: 0,
+          verification_review_count: 0,
+        },
         messages: [],
         checkpoints: [],
         artifact: null,
@@ -541,6 +560,17 @@ function setChildWorkspaceState(sessionId: string) {
     session_id: sessionId,
     workspace_type: "work_item",
     stage: "human_confirm",
+    session_status: "waiting_for_human",
+    flow_kind: "legacy",
+    run_policy: "interactive",
+    run_history: {
+      seen_fingerprints: [],
+      repairs_used: 0,
+      manual_repairs_used: 0,
+      transitions_used: 0,
+      initial_review_count: 0,
+      verification_review_count: 0,
+    },
     messages: [],
     checkpoints: [],
     artifact: null,

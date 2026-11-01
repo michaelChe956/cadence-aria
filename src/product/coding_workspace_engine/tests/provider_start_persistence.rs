@@ -5,6 +5,9 @@ use std::time::Duration;
 use super::provider_execution_context::{CapturingProjectionProvider, review_plan_defect_output};
 use super::*;
 
+mod choice_receipt_gate;
+mod prestart_zero_output;
+
 #[test]
 fn permission_wait_timeout_preserves_interaction_without_retry_budget() {
     let outcome = classify_provider_failure(&CodingWorkspaceEngineError::ProviderStream(
@@ -26,17 +29,47 @@ use crate::product::coding_models::CodingChoiceGateStatus;
 use crate::product::work_item_projection::ReviewerWorkItemProjection;
 use tokio::sync::Notify;
 
+// 组 3：429 失败轮经引擎分类为 attempt 级可重试（upstream 429/5xx 类）。
+// 错误取组 1 透传形态：adapter 以 parse_error 原样携带上游 429 文案（
+// "exceeded retry limit, last status: 429 Too Many Requests"，spike T2-resume-writes）。
+#[test]
+fn provider_retry_classifier_maps_turn_failed_429_to_retryable_upstream() {
+    let error = CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError::parse_error(
+        "exceeded retry limit, last status: 429 Too Many Requests",
+        "",
+        "",
+    ));
+    let classification = classify_provider_failure(&error);
+    assert!(
+        classification.is_retryable(),
+        "429 turn failure must be attempt-level retryable: {classification:?}"
+    );
+    match classification {
+        crate::product::coding_workspace_engine::provider_retry::ProviderFailureClassification::Retryable {
+            failure,
+            ..
+        } => assert!(
+            matches!(
+                failure,
+                crate::product::coding_workspace_engine::provider_retry::RetryableProviderFailure::Upstream5xx { status: 429 }
+            ),
+            "expected upstream 429 classification, got {failure:?}"
+        ),
+        other => panic!("expected retryable classification, got {other:?}"),
+    }
+}
+
 #[derive(Default)]
 struct ProviderStartProbe {
     cancelled: AtomicBool,
     completion_delivered: AtomicBool,
 }
 
-struct ProviderStartPersistenceFixture {
+pub(super) struct ProviderStartPersistenceFixture {
     _root: tempfile::TempDir,
-    store: CodingAttemptStore,
+    pub(super) store: CodingAttemptStore,
     engine: CodingWorkspaceEngine,
-    attempt: CodingExecutionAttempt,
+    pub(super) attempt: CodingExecutionAttempt,
     reviewer_projection: ReviewerWorkItemProjection,
 }
 
@@ -89,6 +122,7 @@ impl StreamingProviderAdapter for ModernProviderStartPersistenceFailure {
         let (command_tx, _command_rx) = mpsc::channel(1);
         spawn_modern_output(event_tx, self.output.clone(), cancel, self.probe.clone());
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -143,6 +177,7 @@ impl StreamingProviderAdapter for CompletedInvocationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -171,6 +206,7 @@ impl StreamingProviderAdapter for PartialThenFailedInvocationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -196,6 +232,7 @@ impl StreamingProviderAdapter for ChoiceThenWaitInvocationProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -222,6 +259,7 @@ impl StreamingProviderAdapter for ChoiceThenTextInvocationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -279,6 +317,7 @@ async fn completed_provider_invocation_persists_retrievable_raw_output_ref() {
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
@@ -324,6 +363,7 @@ async fn failed_provider_invocation_persists_in_memory_partial_output_to_role_ru
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
@@ -371,6 +411,7 @@ async fn choice_request_then_timeout_stays_non_retryable_with_open_choice_gate()
         timeout: Some(Duration::from_secs(1)),
         timeout_reason_code: None,
         suppress_failure_side_effects: false,
+        validated_input: None,
     });
     tokio::pin!(invocation);
     tokio::select! {
@@ -428,6 +469,7 @@ async fn unresolved_provider_choice_stays_non_retryable_interaction_wait() {
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
@@ -445,65 +487,6 @@ async fn unresolved_provider_choice_stays_non_retryable_interaction_wait() {
         &attempt,
         &role_run,
         "must not continue before choice",
-    );
-}
-
-#[tokio::test]
-async fn modern_start_io_invocation_keeps_typed_error_and_raw_output_ref() {
-    let (_root, store, attempt) = running_attempt_with_worktree();
-    let role_run = store
-        .create_role_run(
-            &attempt,
-            CodingExecutionStage::Coding,
-            CodingProviderRole::Coder,
-            CodingRoleRunTrigger::Initial,
-            Some("coding_invocation_start_io".to_string()),
-        )
-        .expect("role run");
-    let (event_tx, _event_rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
-    let provider = StartIoInvocationProvider::default();
-    let (legacy_input, input) = provider_invocation_inputs(&attempt);
-    let provider_name = ProviderName::Codex;
-    let (_command_tx, mut command_rx) = mpsc::channel(1);
-
-    let outcome = engine
-        .run_provider_stream_invocation(CodingProviderStreamRun {
-            attempt: &attempt,
-            node_id: "coding_invocation_start_io",
-            role_run: Some(&role_run),
-            provider: &provider,
-            legacy_input: &legacy_input,
-            input,
-            provider_name: &provider_name,
-            provider_role: CodingProviderRole::Coder,
-            command_rx: &mut command_rx,
-            allow_legacy_stream_fallback: false,
-            timeout: None,
-            timeout_reason_code: None,
-            suppress_failure_side_effects: false,
-        })
-        .await;
-
-    assert!(matches!(
-        outcome,
-        ProviderInvocationOutcome::RetryableTransport {
-            failure: RetryableProviderFailure::StartIo,
-            ref reason_code,
-            ref message,
-            ref partial_output,
-        } if reason_code == "provider_start_io"
-            && message.contains("ProviderExecutionFailed")
-            && message.contains("Text file busy")
-            && partial_output.is_empty()
-    ));
-    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-    assert_role_run_raw_output(&store, &attempt, &role_run, "");
-    assert!(
-        store
-            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("open gates")
-            .is_empty()
     );
 }
 
@@ -586,7 +569,7 @@ async fn coding_provider_stream_uses_engine_cancellation_child_token() {
     );
 }
 
-async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture {
+pub(super) async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture {
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
@@ -608,21 +591,20 @@ async fn provider_start_persistence_fixture() -> ProviderStartPersistenceFixture
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let mut attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     attempt.head_commit = Some(head);
     attempt.stage = CodingExecutionStage::Coding;
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     let (event_tx, _event_rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
     let coder = CapturingProjectionProvider::new(
@@ -662,6 +644,8 @@ fn provider_invocation_inputs(
 ) -> (AdapterInput, StreamingProviderInput) {
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let legacy_input = AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Executor,
         worktree_path: Some(worktree.to_string_lossy().to_string()),
@@ -873,4 +857,435 @@ async fn assert_provider_start_persistence_failure(
         !probe.completion_delivered.load(Ordering::SeqCst),
         "{mode} provider completion was consumed after ProviderStart persistence failed"
     );
+}
+
+// ---- Task 3.2（REQ-ENV-09/D7）：coding reviewer 策略会话的 durable sink 接线 ----
+
+#[tokio::test]
+async fn coding_policy_review_input_carries_run_bound_durable_audit_sink() {
+    let fixture = provider_start_persistence_fixture().await;
+    let provider = CapturingProjectionProvider::new(review_plan_defect_output());
+
+    let result = fixture
+        .engine
+        .execute_code_review(&fixture.attempt, &provider)
+        .await;
+
+    // 批2 Task 20:CodeReviewer wire 面携 ReviewerVerify 窗口合同(T19 开窗
+    // 的窗口 id;无合同=0 会话);engine 在 provider 启动前绑定 run-bound
+    // durable sink(执行审计不随去 deny 丢失)。
+    let input = provider.input();
+    assert!(
+        matches!(
+            input.tool_policy.as_ref().map(|policy| &policy.intent),
+            Some(crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. })
+        ),
+        "review input must carry the ReviewerVerify window contract (T20): {:?}",
+        input.tool_policy
+    );
+    assert!(
+        input.audit_sink.is_some(),
+        "review run must carry the run-bound durable audit sink"
+    );
+    assert!(result.is_ok(), "review flow must not regress: {result:?}");
+}
+
+// ---- F3 Task 4.1（REQ-ENV-09/GC10）：审计通道严格分离回归 ----
+
+/// 递归收集目录下全部文件路径。
+fn collect_files_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// Coder（非策略）run 的执行审计只落既有 role-run-events（execution_event_audit
+/// 通道）；批2 Task 13 起 reviewer wire 面去 deny 后的 durable run 事件文件由
+/// codex 合同驱动 provider_start 补齐（T20 剩余=ReviewerVerify 真窗/审批
+/// durable 面）。两通道无交叉记录。
+#[tokio::test]
+async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
+    use crate::cross_cutting::codex_provider::CodexProvider;
+    use crate::cross_cutting::streaming_provider::ProviderVersionSupplier;
+
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let aria_root = root.path().join(".aria");
+    let tool_policy_partition = aria_root.join("tool-policy-run-audit");
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+
+    // —— Coder（非策略）run：完整 provider 调用，execution 审计照常落盘 ——
+    let coder_role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("audit_isolation_coder".to_string()),
+        )
+        .expect("coder role run");
+    let provider = CompletedInvocationProvider;
+    let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "audit_isolation_coder",
+            role_run: Some(&coder_role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+            validated_input: None,
+        })
+        .await;
+    assert!(
+        matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "coder run must complete: {outcome:?}"
+    );
+    assert_role_run_raw_output(
+        &store,
+        &attempt,
+        &coder_role_run,
+        "completed invocation evidence",
+    );
+    // Coder run 不得产生任何 tool-policy durable 记录（分区目录不存在）。
+    assert!(
+        !tool_policy_partition.exists(),
+        "non-policy coder runs must never create the tool-policy-run-audit partition"
+    );
+
+    // —— 策略 reviewer run：真实 CodexProvider（wire fixture）走 engine 接线 ——
+    let reviewer_role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            Some("audit_isolation_policy_reviewer".to_string()),
+        )
+        .expect("reviewer role run");
+    // 批2 Task 11（T20 前中间态）：reviewer run 不再是 deny 策略会话——
+    // 改用无三联动前置的 completed-only wire fixture（thread/start 无策略
+    // 前置）；审计通道分离断言不变（sink 由 engine 按 Reviewer 角色分配）。
+    let fixture = {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/provider/codex_app_server_completed_only_fixture.sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("fixture metadata {}: {error}", path.display()))
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions)
+                .unwrap_or_else(|error| panic!("chmod fixture: {error}"));
+        }
+        path
+    };
+    let supplier: ProviderVersionSupplier =
+        std::sync::Arc::new(|| Ok("codex 0.124.0-isolation-fixture".to_string()));
+    let policy_provider = CodexProvider::new(fixture).with_version_supplier(supplier);
+    let worktree = attempt.worktree_path.clone().expect("worktree path");
+    // 批2 Task 20:reviewer wire 面携 ReviewerVerify 窗口合同(受信装配
+    // 铸造;无合同=0 会话);审计通道分离语义不变——sink 由 engine 按
+    // Reviewer 角色分配。
+    let policy_input = StreamingProviderInput {
+        working_directory: None,
+        baseline_tree: None,
+        tool_policy: Some(
+            crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                "w-t20-audit-isolation",
+            ),
+        ),
+        audit_sink: None,
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Reviewer,
+        prompt: "audit isolation policy prompt".to_string(),
+        working_dir: worktree,
+        workspace_session_id: Some("ws-coding-audit-isolation".to_string()),
+        resume_provider_session_id: None,
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: BTreeMap::new(),
+        timeout_secs: 60,
+    };
+    let policy_legacy_input = AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
+        provider_type: ProviderType::Codex,
+        role: AdapterRole::Reviewer,
+        worktree_path: policy_input
+            .working_dir
+            .clone()
+            .to_str()
+            .map(str::to_string),
+        provider_stream_log_dir: None,
+        prompt: policy_input.prompt.clone(),
+        context_files: Vec::new(),
+        output_schema: "coding_workspace_markdown".to_string(),
+        timeout: 60,
+        max_retries: 0,
+    };
+    let (_policy_command_tx, mut policy_command_rx) = mpsc::channel(1);
+    let policy_outcome = engine
+        .run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "audit_isolation_policy_reviewer",
+            role_run: Some(&reviewer_role_run),
+            provider: &policy_provider,
+            legacy_input: &policy_legacy_input,
+            input: policy_input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::CodeReviewer,
+            command_rx: &mut policy_command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: None,
+            timeout_reason_code: None,
+            suppress_failure_side_effects: false,
+            validated_input: None,
+        })
+        .await;
+    assert!(
+        matches!(policy_outcome, ProviderInvocationOutcome::Completed(ref outcome)
+            if outcome.full_output == "Codex completed-only chunk"),
+        "reviewer run must complete via the wire fixture: {policy_outcome:?}"
+    );
+
+    // 策略通道（T13 合同驱动）：reviewer run 携带 engine 分配的 run-bound
+    // sink → adapter 落 provider_start 首行（无策略 digest=空串，
+    // sandbox/approval 与实际启动参数同源）。
+    // （`role-run-seq.jsonl` 是 seq 分配高水位 marker，不是事件文件，排除。）
+    let partition_dir = tool_policy_partition.join("ws-coding-audit-isolation");
+    let mut partition_files = Vec::new();
+    collect_files_recursive(&partition_dir, &mut partition_files);
+    let run_files: Vec<_> = partition_files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name != "role-run-seq.jsonl")
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    // 批2 Task 13（合同驱动 durable 分区，B2T11 裁定缺口补齐）：无策略
+    // reviewer run 的 durable provider_start 首行在位；ReviewerVerify 真窗
+    // 接线与审批 durable 面归 T20。
+    assert_eq!(
+        run_files.len(),
+        1,
+        "contract-bound reviewer run must write exactly one durable run file: {run_files:?}"
+    );
+    let run_lines = std::fs::read_to_string(&run_files[0]).unwrap();
+    let first_line = run_lines.lines().next().unwrap();
+    let first: serde_json::Value = serde_json::from_str(first_line).unwrap();
+    assert_eq!(
+        first["event_type"], "provider_start",
+        "reviewer run file must start with provider_start: {first_line}"
+    );
+    assert_eq!(first["role"], "reviewer");
+    assert_eq!(first["sandbox"], "danger-full-access");
+    assert_eq!(first["approval_policy"], "never");
+    // 决策项②(T20b):ReviewerVerify 合同 run 的 provider_start digest=
+    // 窗口域 canonical(与决策审计/LC 同源可 join)。
+    let expected_window_digest = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
+        &crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+            "w-t20-audit-isolation",
+        ),
+    )
+    .expect("window-domain canonical digest")
+    .digest;
+    assert_eq!(
+        first["tool_policy_canonical_digest"], expected_window_digest,
+        "ReviewerVerify contract run carries the window-domain canonical digest"
+    );
+    assert!(
+        partition_dir.join("role-run-seq.jsonl").exists(),
+        "engine must still allocate the reviewer tool-policy role run seq (audit kept post-deny)"
+    );
+
+    // 执行通道：role-run-events（execution_event_audit）不含任何 tool-policy
+    // durable canonical 事件（策略事件不串入执行审计）。注意执行通道有既有的
+    // 生命周期事件 `"event_type":"provider_start"`（CodingRoleRunEventType），与
+    // durable 分区同名不同载体；用 tool-policy DTO 独有键与专属事件类型作标记。
+    let events_root =
+        store.role_run_events_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+    let mut execution_files = Vec::new();
+    collect_files_recursive(&events_root, &mut execution_files);
+    assert!(
+        !execution_files.is_empty(),
+        "coder run must keep producing execution_event_audit records"
+    );
+    for file in &execution_files {
+        if let Ok(content) = std::fs::read_to_string(file) {
+            for marker in [
+                "\"tool_policy_canonical_digest\"",
+                "\"event_type\":\"approval_decision\"",
+                "\"event_type\":\"protocol_warning\"",
+                "\"event_type\":\"session_terminated\"",
+            ] {
+                assert!(
+                    !content.contains(marker),
+                    "execution audit channel must not carry tool-policy events: {} contains {marker}",
+                    file.display()
+                );
+            }
+        }
+    }
+    drop(engine);
+    event_drain.await.expect("event drain");
+}
+
+// ---- N4（REQ-CS-04/REQ-ENV-10/11）：Logical envelope 接线回归 ----
+
+/// N4：逻辑 launch envelope 的 root cwd/写根边界——Coder 角色 cwd 冻结为
+/// authority_root（readable 随 root 化），唯一 writable root 是所选 target 派生
+/// worktree（root 不可写），PolicyTarget 匹配冻结 logical/checkout 身份；reviewer
+/// 角色可写根恒空且 root 仍不可写。真实 provider 进入由 controller 统一终验。
+#[test]
+fn plan_coding_n4_logical_launch_keeps_root_cwd_and_only_target_writable() {
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::coding_models::AttemptTargetSnapshot;
+    use crate::product::coding_models::provider_config::CodingRoleProviderConfigSnapshot;
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::{
+        GatewayRunAudit, LogicalRepositoryId, RepositoryCheckoutId,
+    };
+
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+
+    // 冻结 target snapshot：logical/checkout 身份 + canonical path（成员 worktree
+    // 位于聚合根之下，与 build_gateway_with_registry 的 cwd authority 契约一致）。
+    let mut logical = attempt.clone();
+    logical.target_snapshot = Some(AttemptTargetSnapshot {
+        // 两个互不相同的非零 UUID：使下方 PolicyTarget 身份断言具串位判别力
+        // （nil 值下实现若将 checkout_id 串位填入 logical 槽断言仍会通过）。
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::new_v4()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::new_v4()),
+        physical_repository_id: "repository_0001".to_string(),
+        canonical_path: worktree.clone(),
+        git_dir_identity: "git-dir-identity".to_string(),
+        revision: None,
+        policy_digest: String::new(),
+        membership_revision: 1,
+        captured_at: "2026-10-13T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    });
+    let attempt_path = store
+        .paths()
+        .issue_lifecycle_root(&logical.project_id, &logical.issue_id)
+        .join("coding-attempts")
+        .join(format!("{}.json", logical.id));
+    crate::product::json_store::write_json(&attempt_path, &logical)
+        .expect("persist logical attempt");
+
+    store
+        .update_role_provider_config_snapshot(
+            &logical.project_id,
+            &logical.issue_id,
+            &logical.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: crate::product::models::ProviderName::ClaudeCode,
+                code_reviewer: Some(crate::product::models::ProviderName::ClaudeCode),
+                internal_reviewer: Some(crate::product::models::ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+        )
+        .expect("seed role provider config");
+
+    let gateway = super::provider_gateway_validated_input::build_gateway_with_registry(
+        &store.paths(),
+        &logical.project_id,
+        Arc::new(ProviderRegistry::new()),
+        Arc::new(GatewayRunAudit::new()),
+    );
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
+
+    // Coder：root cwd + 唯一 target 写根。
+    let policy = engine
+        .resolve_launch_policy_for_role(&logical, CodingProviderRole::Coder, &worktree)
+        .expect("coder launch policy resolves")
+        .expect("logical attempt + gateway must produce policy");
+    let envelope = policy.envelope();
+    assert_eq!(envelope.action, SessionPolicyAction::CodingTargetWrite);
+    assert_eq!(
+        envelope.working_directory, envelope.authority_root,
+        "session cwd stays the LC authority root (REQ-ENV-10)"
+    );
+    assert_eq!(
+        envelope.readable_roots,
+        vec![envelope.authority_root.clone()],
+        "readable roots follow the root cwd"
+    );
+    assert_eq!(
+        envelope.writable_roots,
+        vec![worktree.clone()],
+        "Coder has exactly one writable root: the derived target worktree"
+    );
+    assert_ne!(envelope.authority_root, worktree);
+    assert!(
+        !envelope.writable_roots.contains(&envelope.authority_root),
+        "root cwd must not become writable (REQ-ENV-11)"
+    );
+    let snapshot = logical.target_snapshot.as_ref().expect("snapshot");
+    assert_eq!(
+        envelope.target.worktree, worktree,
+        "PolicyTarget worktree is the derived target worktree"
+    );
+    assert_eq!(
+        envelope.target.logical_repository_id,
+        snapshot.logical_repository_id.0.to_string(),
+        "PolicyTarget keeps the frozen logical identity"
+    );
+    assert_eq!(
+        envelope.target.checkout_id,
+        snapshot.checkout_id.0.to_string(),
+        "PolicyTarget keeps the frozen checkout identity"
+    );
+
+    // reviewer：可写根恒空，cwd 仍为 root 且 root 不可写。
+    for role in [
+        CodingProviderRole::CodeReviewer,
+        CodingProviderRole::InternalReviewer,
+    ] {
+        let policy = engine
+            .resolve_launch_policy_for_role(&logical, role, &worktree)
+            .expect("reviewer launch policy resolves")
+            .expect("reviewer policy present");
+        let envelope = policy.envelope();
+        assert_eq!(envelope.action, SessionPolicyAction::ReviewReadOnly);
+        assert_eq!(
+            envelope.working_directory, envelope.authority_root,
+            "reviewer session cwd stays the authority root"
+        );
+        assert!(envelope.writable_roots.is_empty());
+        assert!(
+            !envelope.writable_roots.contains(&envelope.authority_root),
+            "root cwd stays non-writable for reviewer roles"
+        );
+    }
+
+    drop(root);
 }

@@ -26,7 +26,11 @@ pub(crate) fn validate_outline_ids(
     }
 
     for outline_id in duplicated {
+        // F2b：身份重复缺封闭 kind 事实，折叠 Unknown（不免费 L1）。
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "duplicate_outline_id".to_string(),
+            },
             "duplicate_outline_id",
             format!("outline id {outline_id} is duplicated"),
             vec![outline_id],
@@ -34,6 +38,9 @@ pub(crate) fn validate_outline_ids(
     }
     for logical_work_item_id in duplicated_logical_ids {
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "duplicate_logical_work_item_identity".to_string(),
+            },
             "duplicate_logical_work_item_identity",
             format!("logical work item identity {logical_work_item_id} is duplicated"),
             vec![logical_work_item_id],
@@ -46,80 +53,119 @@ pub(crate) fn validate_outline_traceability_and_scopes(
     findings: &mut Vec<WorkItemSplitFinding>,
 ) {
     for item in &outline.work_item_outlines {
-        if item.source_story_spec_ids.is_empty() || item.source_design_spec_ids.is_empty() {
-            findings.push(error(
-                "traceability_required",
-                format!(
-                    "outline {} must reference at least one story spec and design spec",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            ));
-        }
-        if item.goal.trim().is_empty() {
-            findings.push(error(
-                "outline_goal_required",
-                format!("outline {} must include a goal", item.outline_id),
-                vec![item.outline_id.clone()],
-            ));
-        }
-        if item.scope.is_empty() {
-            findings.push(error(
-                "outline_scope_required",
-                format!("outline {} must include a scope", item.outline_id),
-                vec![item.outline_id.clone()],
-            ));
-        }
-        if item.exclusive_write_scopes.is_empty() {
-            findings.push(error(
-                "write_scope_required",
-                format!(
-                    "outline {} must include at least one exclusive_write_scope",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            ));
-        }
+        validate_outline_traceability_scope_and_budget_item(item, findings);
         validate_trusted_verification_command_catalog(item, findings);
-        match item.estimated_context_tokens {
-            Some(value)
-                if value > 0 && value <= SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT => {}
-            Some(0) | None => findings.push(error(
-                "outline_budget_required",
-                format!(
-                    "outline {} must include estimated_context_tokens between 1 and 50000",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            )),
-            Some(value) => findings.push(error(
-                "outline_exceeds_single_session_budget",
-                format!(
-                    "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <=50000",
-                    item.outline_id, value
-                ),
-                vec![item.outline_id.clone()],
-            )),
-        }
-        match item.session_fit.as_ref() {
-            Some(WorkItemOutlineSessionFit::FitsSingleAgentSession) => {}
-            Some(WorkItemOutlineSessionFit::TooLargeMustSplit) => findings.push(error(
-                "outline_too_large_must_split",
-                format!(
-                    "outline {} is marked too_large_must_split and must be split before draft generation",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            )),
-            None => findings.push(error(
-                "outline_session_fit_required",
-                format!(
-                    "outline {} must declare session_fit=fits_single_agent_session",
-                    item.outline_id
-                ),
-                vec![item.outline_id.clone()],
-            )),
-        }
+    }
+}
+
+pub(crate) fn validate_outline_traceability_scopes_and_budget(
+    outline: &WorkItemPlanOutline,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    for item in &outline.work_item_outlines {
+        validate_outline_traceability_scope_and_budget_item(item, findings);
+    }
+}
+
+fn validate_outline_traceability_scope_and_budget_item(
+    item: &WorkItemOutline,
+    findings: &mut Vec<WorkItemSplitFinding>,
+) {
+    if item.source_story_spec_ids.is_empty() || item.source_design_spec_ids.is_empty() {
+        findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "traceability_required".to_string(),
+            },
+            "traceability_required",
+            format!(
+                "outline {} must reference at least one story spec and design spec",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    if item.goal.trim().is_empty() {
+        findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "outline_goal_required".to_string(),
+            },
+            "outline_goal_required",
+            format!("outline {} must include a goal", item.outline_id),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    if item.scope.is_empty() {
+        findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "outline_scope_required".to_string(),
+            },
+            "outline_scope_required",
+            format!("outline {} must include a scope", item.outline_id),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    if item.exclusive_write_scopes.is_empty() {
+        findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "write_scope_required".to_string(),
+            },
+            "write_scope_required",
+            format!(
+                "outline {} must include at least one exclusive_write_scope",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        ));
+    }
+    match item.estimated_context_tokens {
+        Some(value) if value > 0 && value <= SINGLE_AGENT_SESSION_CONTEXT_TOKEN_HARD_LIMIT => {}
+        Some(0) | None => findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "outline_budget_required".to_string(),
+            },
+            "outline_budget_required",
+            format!(
+                "outline {} must include estimated_context_tokens between 1 and 50000",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        )),
+        Some(value) => findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "outline_exceeds_single_session_budget".to_string(),
+            },
+            "outline_exceeds_single_session_budget",
+            format!(
+                "outline {} estimated_context_tokens {} exceeds the single-agent session budget of <=50000",
+                item.outline_id, value
+            ),
+            vec![item.outline_id.clone()],
+        )),
+    }
+    match item.session_fit.as_ref() {
+        Some(WorkItemOutlineSessionFit::FitsSingleAgentSession) => {}
+        Some(WorkItemOutlineSessionFit::TooLargeMustSplit) => findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "outline_too_large_must_split".to_string(),
+            },
+            "outline_too_large_must_split",
+            format!(
+                "outline {} is marked too_large_must_split and must be split before draft generation",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        )),
+        None => findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "outline_session_fit_required".to_string(),
+            },
+            "outline_session_fit_required",
+            format!(
+                "outline {} must declare session_fit=fits_single_agent_session",
+                item.outline_id
+            ),
+            vec![item.outline_id.clone()],
+        )),
     }
 }
 
@@ -128,7 +174,12 @@ pub(crate) fn validate_trusted_verification_command_catalog(
     findings: &mut Vec<WorkItemSplitFinding>,
 ) {
     if item.trusted_verification_commands.len() > MAX_TRUSTED_DRAFT_VERIFICATION_COMMANDS {
+        // F2b：可信目录形状/预算是确定性内容规则，但无封闭 L1 kind 事实，
+        // 折叠 Unknown（不是授权缺口，不给 operational 等待面）。
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "trusted_verification_command_catalog_too_large".to_string(),
+            },
             "trusted_verification_command_catalog_too_large",
             format!(
                 "outline {} trusted verification command catalog exceeds the maximum of {} entries",
@@ -146,13 +197,16 @@ pub(crate) fn validate_trusted_verification_command_catalog(
                 > MAX_TRUSTED_DRAFT_VERIFICATION_SOURCE_REF_LENGTH;
         if field_too_large {
             findings.push(error(
-                    "trusted_verification_command_catalog_field_too_large",
-                    format!(
-                        "outline {} trusted verification command catalog contains a field exceeding its maximum length",
-                        item.outline_id
-                    ),
-                    vec![item.outline_id.clone()],
-                ));
+                PlanningFailureKind::Unknown {
+                    code: "trusted_verification_command_catalog_field_too_large".to_string(),
+                },
+                "trusted_verification_command_catalog_field_too_large",
+                format!(
+                    "outline {} trusted verification command catalog contains a field exceeding its maximum length",
+                    item.outline_id
+                ),
+                vec![item.outline_id.clone()],
+            ));
         }
     }
     let trusted_catalog_prompt_bytes = if item.trusted_verification_commands.is_empty() {
@@ -164,15 +218,18 @@ pub(crate) fn validate_trusted_verification_command_catalog(
     };
     if trusted_catalog_prompt_bytes > MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES {
         findings.push(error(
-                "trusted_verification_command_catalog_projection_too_large",
-                format!(
-                    "outline {} trusted verification command catalog projects to {} bytes, exceeding the {}-byte prompt budget",
-                    item.outline_id,
-                    trusted_catalog_prompt_bytes,
-                    MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES
-                ),
-                vec![item.outline_id.clone()],
-            ));
+            PlanningFailureKind::Unknown {
+                code: "trusted_verification_command_catalog_projection_too_large".to_string(),
+            },
+            "trusted_verification_command_catalog_projection_too_large",
+            format!(
+                "outline {} trusted verification command catalog projects to {} bytes, exceeding the {}-byte prompt budget",
+                item.outline_id,
+                trusted_catalog_prompt_bytes,
+                MAX_TRUSTED_DRAFT_VERIFICATION_CATALOG_PROMPT_BYTES
+            ),
+            vec![item.outline_id.clone()],
+        ));
     }
 }
 
@@ -190,7 +247,12 @@ pub(crate) fn validate_outline_dependencies(
     for item in &outline.work_item_outlines {
         for dependency in &item.depends_on {
             if !outline_ids.contains(dependency.as_str()) {
+                // F2b：depends_on/声明图引用缺口不是 canonical Inputs 供需
+                // 三元组（无 contract_id），折叠 Unknown，不冒充 UnknownProvider。
                 findings.push(error(
+                    PlanningFailureKind::Unknown {
+                        code: "dependency_not_in_outline".to_string(),
+                    },
                     "dependency_not_in_outline",
                     format!(
                         "outline {} depends on {} which is not present",
@@ -209,6 +271,9 @@ pub(crate) fn validate_outline_dependencies(
         let to_known = outline_ids.contains(edge.to_outline_id.as_str());
         if !from_known {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "dependency_not_in_outline".to_string(),
+                },
                 "dependency_not_in_outline",
                 format!(
                     "dependency graph references missing from_outline_id {}",
@@ -219,6 +284,9 @@ pub(crate) fn validate_outline_dependencies(
         }
         if !to_known {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "dependency_not_in_outline".to_string(),
+                },
                 "dependency_not_in_outline",
                 format!(
                     "dependency graph references missing to_outline_id {}",
@@ -264,6 +332,9 @@ fn validate_outline_dependency_graph_projection(
         }
         if declared_edges.contains(&(item.clone(), dependency.clone())) {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "dependency_graph_direction_reversed".to_string(),
+                },
                 "dependency_graph_direction_reversed",
                 format!(
                     "outline {item} depends_on {dependency}, so dependency_graph must contain {dependency} -> {item}; found reversed {item} -> {dependency}"
@@ -272,6 +343,9 @@ fn validate_outline_dependency_graph_projection(
             ));
         } else {
             findings.push(error(
+                PlanningFailureKind::Unknown {
+                    code: "dependency_graph_mismatch".to_string(),
+                },
                 "dependency_graph_mismatch",
                 format!(
                     "outline {item} depends_on {dependency}, so dependency_graph must contain {dependency} -> {item}"
@@ -286,6 +360,9 @@ fn validate_outline_dependency_graph_projection(
             continue;
         }
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "dependency_graph_mismatch".to_string(),
+            },
             "dependency_graph_mismatch",
             format!(
                 "dependency_graph edge {from} -> {to} is not derived from work_item_outlines[].depends_on"
@@ -351,7 +428,12 @@ pub(crate) fn validate_outline_dependency_cycles(
     }
 
     if cycle_found {
+        // F2b：声明图 DFS 只给布尔事实，不是有效图有向 witness（REQ-PLN-10），
+        // 不编造 DependencyCycle typed payload；真实 witness 归 SG1 有效图。
         findings.push(error(
+            PlanningFailureKind::Unknown {
+                code: "dependency_cycle".to_string(),
+            },
             "dependency_cycle",
             "outline depends_on dependencies contain a cycle",
             Vec::new(),
@@ -386,6 +468,9 @@ pub(crate) fn validate_outline_scope_conflicts(
                 .unwrap_or(false);
             if left_reaches_right || right_reaches_left {
                 findings.push(error(
+                    PlanningFailureKind::Unknown {
+                        code: "write_scope_conflict".to_string(),
+                    },
                     "write_scope_conflict",
                     format!(
                         "dependent outlines {} and {} have overlapping exclusive write scopes",
@@ -395,6 +480,9 @@ pub(crate) fn validate_outline_scope_conflicts(
                 ));
             } else {
                 findings.push(error(
+                    PlanningFailureKind::Unknown {
+                        code: "parallel_scope_overlap".to_string(),
+                    },
                     "parallel_scope_overlap",
                     format!(
                         "outlines {} and {} have no dependency ordering but their write scopes overlap",

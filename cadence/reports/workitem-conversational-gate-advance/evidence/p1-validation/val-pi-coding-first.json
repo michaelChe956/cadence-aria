@@ -1,0 +1,94 @@
+{
+  "stage": "2-coding-first-pass-rep",
+  "source": {
+    "provider": "pi",
+    "rep": 1,
+    "handoff": "/tmp/aria-stage35-p1val/pi/rep1/handoff.json",
+    "issue_id": "issue_0121",
+    "plan_id": "issue_work_item_plan_0001",
+    "plan_confirmation_status": "confirmed",
+    "execution_plan_confirm_required": false
+  },
+  "criterion_a": {
+    "create_adoption": {
+      "ok": true,
+      "evidence": "阶段 1 advance 创建 coding_attempt_716f01a1293e4c7d9f210c4388f1b37e;阶段 2 coding_run_campaign 回读 handoff 后收养同一 attempt(coding_hello/start_coding 均带同一 attempt_id,outDir=coding-pi-coding_attempt_716f01a1293e4c7d9f210c4388f1b37e)"
+    },
+    "materialization": {
+      "ok": true,
+      "evidence": "worktree_path=/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0121,branch=aria/issues/issue_0121,base=main,head=d14fc0b185055ff8bf852f8c25e2516ed05dab41;review_request(kind=git_branch_only, commit_sha=d14fc0b...)"
+    },
+    "real_coding_drive": {
+      "ok": true,
+      "evidence": "coder=pi 真实驱动:coding_execution_event 74 条(command/read 24、command/bash 24、command/todo 12、command/write 4、provider 生命周期 8),stream_chunk 2261;真实提交 d14fc0b 'feat(api): 仅用 node:http 实现 GET /api/hello 并新增唯一 node --test 冒烟测试'(server.js + test/hello.test.js,worktree git status 干净)"
+    }
+  },
+  "flow": {
+    "stage_timeline": [
+      { "stage": "prepare_context", "elapsedSec": 0.081 },
+      { "stage": "worktree_prepare", "elapsedSec": 0.118 },
+      { "stage": "coding", "elapsedSec": 436.302 },
+      { "stage": "review_request", "elapsedSec": 717.934 },
+      { "stage": "final_confirm", "elapsedSec": 722.36 }
+    ],
+    "stage_gates_observed": [
+      {
+        "gate_id": "coding_stage_gate_0001",
+        "kind": "stage_gate",
+        "stage": "coding",
+        "title": "Coding Stage Gate",
+        "actions": ["confirm_stage", "abort"],
+        "at": "2026-09-04T07:53:35.450Z",
+        "expires_at": "2026-09-04T07:53:40.434Z",
+        "driver_action": "no_response_wait_for_hard_timeout",
+        "note": "5s 后过期,coding 仍自动开始并真实执行"
+      },
+      {
+        "gate_id": "coding_stage_gate_0002",
+        "kind": "stage_gate",
+        "stage": "code_review",
+        "title": "CodeReview Stage Gate",
+        "actions": ["confirm_stage", "abort"],
+        "at": "2026-09-04T08:00:51.562Z",
+        "expires_at": "2026-09-04T08:00:56.542Z",
+        "driver_action": "no_response_wait_for_hard_timeout",
+        "note": "5s 后过期,code review 仍自动开始并完成"
+      }
+    ],
+    "code_review": {
+      "report_id": "code_review_0001",
+      "round": 1,
+      "verdict": "approve",
+      "findings": [],
+      "summary_digest": "diff 仅新增独占范围内 server.js 与 test/hello.test.js;node --test 实测 1 pass/0 fail/exit 0;GET /api/hello 200 + body {message:hello} 断言;server.js:18-19 存在 500 {error:internal} 错误响应,满足 CT-001;无阻塞问题"
+    },
+    "final_node": {
+      "node_id": "coding_node_0005",
+      "stage": "final_confirm",
+      "title": "等待人工最终确认",
+      "summary": "所有 Work Item 已完成独立审查,等待人工最终确认",
+      "created_at": "2026-09-04T08:05:37.606Z",
+      "gate_message_after": "无(final_confirm 后再无 coding_gate_required 或其他服务端消息,直至硬超时)"
+    },
+    "amendment_script": {
+      "script": "request-change:移除对不存在依赖的引用并按契约实现;confirm",
+      "mode": "enabled",
+      "discovered": null,
+      "gate_turns": [],
+      "confirm": null,
+      "note": "review verdict=approve 且 findings=[],无修订门可触发;final_confirm 无 gate 消息,amendment 剧本无作用点"
+    },
+    "driver_outbound": ["coding_hello", "start_coding"]
+  },
+  "outcome": {
+    "completed": false,
+    "terminal_stage": "final_confirm(等待人工最终确认)",
+    "failure_class": "unknown_gate_timeout",
+    "error": "未知/不可理解 Coding gate 后等待至硬超时 1800000ms",
+    "elapsed_sec": 1800.1,
+    "hard_timeout_ms": 1800000,
+    "idle_wait_after_final_confirm_sec": 1077.9,
+    "usage": "usage_unavailable(无 usage 事件)",
+    "verdict_against_contract": "完整案例未到 completed;判据 A 三环节全部成立"
+  }
+}

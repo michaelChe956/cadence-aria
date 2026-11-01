@@ -1,0 +1,922 @@
+{
+  "provider": "pi",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/pi-heavy-v5/rep1c/pi/rep1",
+  "startedAt": "2026-09-08T09:20:33.721Z",
+  "finishedAt": "2026-09-08T09:58:37.562Z",
+  "elapsedSec": 2283.839,
+  "issue_id": "issue_0163",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0218",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "pi",
+    "reviewer_provider": "pi",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.946,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.01,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 651.831,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 652.092,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 859.503,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 859.739,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1073.853,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1074.098,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1497.314,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1497.564,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1633.029,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1722.252,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1722.522,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 2036.147,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 2036.42,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 2109.293,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 2185.131,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 2185.377,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 2280.232,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 2283.612,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 2283.654,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 781.421,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "edge WI-001 -> WI-002：契约 CT-001 的 provided capabilities 未包含 WI-002 以 require_all 声明的 capability「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」，构成能力缺口。",
+          "evidence": "coverage entry from=WI-001, to=WI-002, contract_id=CT-001, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；WI-001 的 CT-001 仅声明 API error responses Content-Type application/json; charset=utf-8，未声明 LEVEL_DATA_UNAVAILABLE 错误码、500 状态与可读信息能力。",
+          "required_action": "在 WI-001 的 CT-001 capabilities 中补充该 capability 声明（对应行为已在 AC-003 覆盖，仅需契约文本对齐），或将 WI-002 的 required_capabilities 对齐现有 provided 表述，消除 require_all 缺口。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "edge WI-001 -> WI-003：契约 CT-002 的 provided capabilities 未包含 WI-003 以 require_all 声明的 capability「port 0 binds an ephemeral port for parallel test isolation」，构成能力缺口。",
+          "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-002, missing_capabilities=[port 0 binds an ephemeral port for parallel test isolation]；CT-002 现仅声明 server imports only node builtin modules node:http node:fs node:path。",
+          "required_action": "在 WI-001 的 CT-002 capabilities 中补充 port 0 绑定临时端口以支持并行测试隔离的能力声明（对应行为已在 AC-001 覆盖），消除 require_all 缺口。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[CT-002].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "edge WI-001 -> WI-003：契约 CT-003 的 provided capabilities 未包含 WI-003 以 require_all 声明的 capability「static file not found returns HTTP 404 with plain text response」，构成能力缺口。",
+          "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-003, missing_capabilities=[static file not found returns HTTP 404 with plain text response]；CT-003 现仅声明 backend static hosting tests use fixture staticRoot under tests/backend/fixtures and never read web/**。",
+          "required_action": "在 WI-001 的 CT-003 capabilities 中补充静态资源缺失返回 404 文本响应的能力声明（对应行为已在 AC-005 覆盖），消除 require_all 缺口。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[CT-003].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "edge WI-002 -> WI-003：契约 CT-004 的 provided capabilities 未包含 WI-003 以 require_all 声明的 capability「web/level-select.js references relative path /api/levels」，构成能力缺口。",
+          "evidence": "coverage entry from=WI-002, to=WI-003, contract_id=CT-004, missing_capabilities=[web/level-select.js references relative path /api/levels]；CT-004 现仅声明 web pages use only native HTML and JavaScript with no npm dependency。",
+          "required_action": "在 WI-002 的 CT-004 capabilities 中补充脚本以相对路径引用 /api/levels 的能力声明（对应行为已在 AC-007 覆盖），消除 require_all 缺口。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[CT-004].capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 1006.588,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "边 WI-001 -> WI-002 契约 CT-001 能力缺口：demand 要求 \"data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message\"，provider 提供的 capabilities 未包含该条。",
+          "evidence": "coverage entry from=WI-001, to=WI-002, contract_id=CT-001, compatibility_policy=require_all, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；WI-001 CT-001 仅提供 [API error responses with status 500 or 404 or 405 use Content-Type application/json; charset=utf-8]。",
+          "required_action": "在 WI-001 的 CT-001 output contract capabilities 中补充 \"data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message\"（该行为已由 AC-003 与 TASK-002 背书，属声明对齐，无需改动实现）。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "边 WI-001 -> WI-003 契约 CT-002 能力缺口：demand 要求 \"port 0 binds an ephemeral port for parallel test isolation\"，provider 提供的 capabilities 未包含该条。",
+          "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-002, compatibility_policy=require_all, missing_capabilities=[port 0 binds an ephemeral port for parallel test isolation]；WI-001 CT-002 仅提供 [server imports only node builtin modules node:http node:fs node:path]。",
+          "required_action": "在 WI-001 的 CT-002 output contract capabilities 中补充 \"port 0 binds an ephemeral port for parallel test isolation\"（AC-001 已要求 port 0 启动并返回实际监听端口，属声明对齐）。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "边 WI-001 -> WI-003 契约 CT-003 能力缺口：demand 要求 \"static file not found returns HTTP 404 with plain text response\"，provider 提供的 capabilities 未包含该条。",
+          "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-003, compatibility_policy=require_all, missing_capabilities=[static file not found returns HTTP 404 with plain text response]；WI-001 CT-003 仅提供 [backend static hosting tests use fixture staticRoot under tests/backend/fixtures and never read web/**]。",
+          "required_action": "在 WI-001 的 CT-003 output contract capabilities 中补充 \"static file not found returns HTTP 404 with plain text response\"（TASK-003 与 AC-013 已背书该行为，属声明对齐）。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "边 WI-002 -> WI-003 契约 CT-004 能力缺口：demand 要求 \"web/level-select.js references relative path /api/levels\"，provider 提供的 capabilities 未包含该条。",
+          "evidence": "coverage entry from=WI-002, to=WI-003, contract_id=CT-004, compatibility_policy=require_all, missing_capabilities=[web/level-select.js references relative path /api/levels]；WI-002 CT-004 仅提供 [web pages use only native HTML and JavaScript with no npm dependency]。",
+          "required_action": "在 WI-002 的 CT-004 output contract capabilities 中补充 \"web/level-select.js references relative path /api/levels\"（AC-007 已要求脚本以相对路径引用 /api/levels，属声明对齐）。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "suggestion",
+          "message": "编译器警告 integration_or_e2e_skipped_risk（e2e tests are skipped）不构成发布阻断：本计划采用无浏览器验证策略，WI-003 已通过 start({port:0}) 真实 HTTP 同源集成测试覆盖页面入口与 API 契约。",
+          "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk severity=warning；WI-003 CHECK-005 为 node --test tests/integration/ 且 AC-011~AC-013 覆盖真实服务的 API 与静态请求语义。",
+          "required_action": "无需返修；可留档说明浏览器级 e2e 被真实 HTTP 集成测试策略有意替代。",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 1239.961,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "契约覆盖缺口：edge WI-001 -> WI-002（contract_id CT-001，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；CT-001 仅声明错误响应 Content-Type 能力，未声明 LEVEL_DATA_UNAVAILABLE 500 错误能力（该行为已由 WI-001 AC-003 支撑，属输出契约声明缺口）。",
+          "evidence": "coverage entry from=WI-001 to=WI-002, contract_id=CT-001, required=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message], provided=[API error responses with status 500 or 404 or 405 use Content-Type application/json; charset=utf-8], missing=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]",
+          "required_action": "在 WI-001 输出契约 CT-001 的 capabilities 中补充 data 错误返回 HTTP 500 且 error.code=LEVEL_DATA_UNAVAILABLE、message 用户可读的能力声明，使该边 missing_capabilities 清空。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "契约覆盖缺口：edge WI-001 -> WI-003（contract_id CT-002，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [port 0 binds an ephemeral port for parallel test isolation]；CT-002 仅声明仅导入 node 内置模块，未声明 port 0 临时端口绑定能力（该行为已由 WI-001 AC-001 与 start({ port }) 生命周期支撑，属声明缺口）。",
+          "evidence": "coverage entry from=WI-001 to=WI-003, contract_id=CT-002, required=[port 0 binds an ephemeral port for parallel test isolation], provided=[server imports only node builtin modules node:http node:fs node:path], missing=[port 0 binds an ephemeral port for parallel test isolation]",
+          "required_action": "在 WI-001 输出契约 CT-002 的 capabilities 中补充 port 0 绑定临时端口以支持并行测试隔离的能力声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "契约覆盖缺口：edge WI-001 -> WI-003（contract_id CT-003，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [static file not found returns HTTP 404 with plain text response]；CT-003 仅声明夹具静态托管测试约定，未声明静态资源缺失返回 404 纯文本能力（该行为已由 WI-001 AC-005 与 TASK-003 支撑，属声明缺口）。",
+          "evidence": "coverage entry from=WI-001 to=WI-003, contract_id=CT-003, required=[static file not found returns HTTP 404 with plain text response], provided=[backend static hosting tests use fixture staticRoot under tests/backend/fixtures and never read web/**], missing=[static file not found returns HTTP 404 with plain text response]",
+          "required_action": "在 WI-001 输出契约 CT-003 的 capabilities 中补充静态资源缺失返回 HTTP 404 纯文本响应的能力声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-003].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "契约覆盖缺口：edge WI-002 -> WI-003（contract_id CT-004，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [web/level-select.js references relative path /api/levels]；CT-004 仅声明纯原生 HTML/JS 无 npm 依赖，未声明相对路径引用 /api/levels 能力（该行为已由 WI-002 AC-007 支撑，属声明缺口）。",
+          "evidence": "coverage entry from=WI-002 to=WI-003, contract_id=CT-004, required=[web/level-select.js references relative path /api/levels], provided=[web pages use only native HTML and JavaScript with no npm dependency], missing=[web/level-select.js references relative path /api/levels]",
+          "required_action": "在 WI-002 输出契约 CT-004 的 capabilities 中补充 web/level-select.js 以相对路径引用 /api/levels 的能力声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+        },
+        {
+          "severity": "suggestion",
+          "message": "机械校验警告 integration_or_e2e_skipped_risk：前端以 DOM 替身验证、无浏览器级 e2e，属设计取舍且 error_count=0，不影响发布；建议验收时结合 CHECK-004 人工审查补充浏览器走查确认。",
+          "evidence": "Projection Validation Report findings[0]=integration_or_e2e_skipped_risk(warning)，summary.error_count=0、warning_count=1",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        },
+        {
+          "severity": "suggestion",
+          "message": "AC 到任务完成标准的追溯建议：AC-001、AC-008、AC-011、AC-013 未被任何 task 的 done_when_refs 引用（其行为分别由 TASK-001、TASK-007、TASK-009、TASK-010 的 statement 覆盖）；机械校验未判错、不影响发布，建议返修时顺带补全 done_when_refs 以增强追溯。",
+          "evidence": "WI-001 done_when_refs 覆盖 AC-002..AC-006 但缺 AC-001；WI-002 缺 AC-008；WI-003 缺 AC-011、AC-013",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "tasks[].done_when_refs"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 4,
+      "elapsedSec": 1633.029,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械 warning integration_or_e2e_skipped_risk（error_count=0）为完备度提示：计划已用 DOM 替身前端单测加 WI-003 真实 HTTP 集成测试覆盖页面入口、API 形状与错误语义，且 WI-001 CHECK-002、WI-002 CHECK-004 已含人工审查检查，浏览器级手工冒烟仅为可选补充。",
+          "evidence": "Projection Validation Report findings[0]=integration_or_e2e_skipped_risk(warning)；WI-003 CHECK-005 node --test tests/integration/ 覆盖 AC-011~AC-014；WI-001 CHECK-002 与 WI-002 CHECK-004 为必选人工审查。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        },
+        {
+          "severity": "suggestion",
+          "message": "WI-001 未把 GET /api/levels 成功路径（200 与恰好 5 项校验形状）形式化为 output capability，WI-002 的 input_contracts 亦未显式 demand 该能力；因 WI-003 AC-011 已端到端断言该形状且 TASK-007 要求 initLevelSelect 自带响应形状校验，不构成发布缺口，建议后续在 CT 声明中补齐该 capability。",
+          "evidence": "Supplies WI-001 CT-001~CT-003 仅含 500 错误、port 0、静态 404；Demands WI-002 仅 require CT-001；AC-002 与 AC-011 已含成功形状验证。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 1880.685,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "coverage 边 WI-001 -> WI-002 在契约 CT-001（compatibility_policy=require_all）下缺失 capability「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」：WI-001 的 CT-001 output contract 仅声明 HTTP 405/404 错误体示例，未声明数据错误能力，而消费方 WI-002 input_contracts 明确要求该能力且不得掩盖。",
+          "evidence": "coverage edge WI-001 -> WI-002, contract_id=CT-001, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；WI-001 CT-001 capabilities 仅含 METHOD_NOT_ALLOWED/API_NOT_FOUND 错误体示例字符串。",
+          "required_action": "在 WI-001 的 CT-001 output_contract capabilities 中补充声明与 AC-003/TASK-002 行为一致的能力串「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "coverage 边 WI-001 -> WI-003 在契约 CT-001（require_all）下同样缺失 capability「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」，provider 侧未声明导致供需不匹配，不得以 pass 或 advisory 掩盖。",
+          "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-001, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]。",
+          "required_action": "随 CT-001 同一修复：在 WI-001 的 CT-001 capabilities 补充该能力串，两条消费边（WI-001 -> WI-002、WI-001 -> WI-003）随同一声明一并收敛。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "coverage 边 WI-001 -> WI-003 在契约 CT-003（require_all）下缺失 capability「static file not found returns HTTP 404 with plain text response」：WI-001 声明的是「static file not found 404 plain text body example is 404 Not Found」，语义近似但 capability 字符串未与消费方要求对齐，机械匹配失败。",
+          "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-003, missing_capabilities=[static file not found returns HTTP 404 with plain text response]；provided=[static file not found 404 plain text body example is 404 Not Found]。",
+          "required_action": "将 WI-001 的 CT-003 capability 字符串与消费方要求统一（如改为「static file not found returns HTTP 404 with plain text response」或消费方按 provider 等价措辞声明），确保 require_all 机械匹配通过。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-003].capabilities"
+        },
+        {
+          "severity": "suggestion",
+          "message": "WI-001 的 AC-004（API 不支持方法返回 405、未知 API 路径返回 404 的 JSON 错误）未被任何 task 的 done_when_refs 显式归因：TASK-001 仅引用 AC-001，其语句虽覆盖 405/404 行为，验收条目与任务映射不完备；不影响发布判定，仅建议补齐。",
+          "evidence": "WI-001 tasks 的 done_when_refs 覆盖 AC-001/AC-002/AC-003/AC-005/AC-006，无 AC-004；TASK-001.statement 含 405/404 行为描述。",
+          "required_action": "可选：将 AC-004 加入 TASK-001.done_when_refs。",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 6,
+      "elapsedSec": 2109.293,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械校验唯一警告 integration_or_e2e_skipped_risk 风险可控：WI-003 已通过 start({ port: 0 }) 启动真实服务以真实 HTTP 同源断言页面结构与 API 契约形状，WI-001/WI-002 各配人工审查检查项，建议人工验收时顺带确认同源请求链路即可，无需返修。",
+          "evidence": "Projection Validation Report findings[0] severity=warning 且 error_count=0；WI-003 AC-011~AC-013 与 CHECK-005 已覆盖真实服务集成验证；WI-001 CHECK-002 与 WI-002 CHECK-004 已含人工审查。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 7,
+      "elapsedSec": 2280.231,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械报告提示 integration_or_e2e_skipped_risk；该缺口实际已由 WI-003 以 start({port:0}) 启动真实服务并同源断言 API 契约形状、页面结构与 404/405 错误语义所覆盖，验收时知悉该 warning 为编译器启发式提示而非集成验证缺失即可。",
+          "evidence": "Projection Validation Report findings[0]: integration_or_e2e_skipped_risk (severity=warning, work_item_ids=[])；WI-003 AC-011~AC-014 与 CHECK-005 (node --test tests/integration/) 提供真实 HTTP 同源集成验证。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "edge WI-001 -> WI-002：契约 CT-001 的 provided capabilities 未包含 WI-002 以 require_all 声明的 capability「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」，构成能力缺口。",
+      "evidence": "coverage entry from=WI-001, to=WI-002, contract_id=CT-001, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；WI-001 的 CT-001 仅声明 API error responses Content-Type application/json; charset=utf-8，未声明 LEVEL_DATA_UNAVAILABLE 错误码、500 状态与可读信息能力。",
+      "required_action": "在 WI-001 的 CT-001 capabilities 中补充该 capability 声明（对应行为已在 AC-003 覆盖，仅需契约文本对齐），或将 WI-002 的 required_capabilities 对齐现有 provided 表述，消除 require_all 缺口。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "edge WI-001 -> WI-003：契约 CT-002 的 provided capabilities 未包含 WI-003 以 require_all 声明的 capability「port 0 binds an ephemeral port for parallel test isolation」，构成能力缺口。",
+      "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-002, missing_capabilities=[port 0 binds an ephemeral port for parallel test isolation]；CT-002 现仅声明 server imports only node builtin modules node:http node:fs node:path。",
+      "required_action": "在 WI-001 的 CT-002 capabilities 中补充 port 0 绑定临时端口以支持并行测试隔离的能力声明（对应行为已在 AC-001 覆盖），消除 require_all 缺口。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[CT-002].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "edge WI-001 -> WI-003：契约 CT-003 的 provided capabilities 未包含 WI-003 以 require_all 声明的 capability「static file not found returns HTTP 404 with plain text response」，构成能力缺口。",
+      "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-003, missing_capabilities=[static file not found returns HTTP 404 with plain text response]；CT-003 现仅声明 backend static hosting tests use fixture staticRoot under tests/backend/fixtures and never read web/**。",
+      "required_action": "在 WI-001 的 CT-003 capabilities 中补充静态资源缺失返回 404 文本响应的能力声明（对应行为已在 AC-005 覆盖），消除 require_all 缺口。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[CT-003].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "edge WI-002 -> WI-003：契约 CT-004 的 provided capabilities 未包含 WI-003 以 require_all 声明的 capability「web/level-select.js references relative path /api/levels」，构成能力缺口。",
+      "evidence": "coverage entry from=WI-002, to=WI-003, contract_id=CT-004, missing_capabilities=[web/level-select.js references relative path /api/levels]；CT-004 现仅声明 web pages use only native HTML and JavaScript with no npm dependency。",
+      "required_action": "在 WI-002 的 CT-004 capabilities 中补充脚本以相对路径引用 /api/levels 的能力声明（对应行为已在 AC-007 覆盖），消除 require_all 缺口。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[CT-004].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "边 WI-001 -> WI-002 契约 CT-001 能力缺口：demand 要求 \"data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message\"，provider 提供的 capabilities 未包含该条。",
+      "evidence": "coverage entry from=WI-001, to=WI-002, contract_id=CT-001, compatibility_policy=require_all, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；WI-001 CT-001 仅提供 [API error responses with status 500 or 404 or 405 use Content-Type application/json; charset=utf-8]。",
+      "required_action": "在 WI-001 的 CT-001 output contract capabilities 中补充 \"data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message\"（该行为已由 AC-003 与 TASK-002 背书，属声明对齐，无需改动实现）。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "边 WI-001 -> WI-003 契约 CT-002 能力缺口：demand 要求 \"port 0 binds an ephemeral port for parallel test isolation\"，provider 提供的 capabilities 未包含该条。",
+      "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-002, compatibility_policy=require_all, missing_capabilities=[port 0 binds an ephemeral port for parallel test isolation]；WI-001 CT-002 仅提供 [server imports only node builtin modules node:http node:fs node:path]。",
+      "required_action": "在 WI-001 的 CT-002 output contract capabilities 中补充 \"port 0 binds an ephemeral port for parallel test isolation\"（AC-001 已要求 port 0 启动并返回实际监听端口，属声明对齐）。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "边 WI-001 -> WI-003 契约 CT-003 能力缺口：demand 要求 \"static file not found returns HTTP 404 with plain text response\"，provider 提供的 capabilities 未包含该条。",
+      "evidence": "coverage entry from=WI-001, to=WI-003, contract_id=CT-003, compatibility_policy=require_all, missing_capabilities=[static file not found returns HTTP 404 with plain text response]；WI-001 CT-003 仅提供 [backend static hosting tests use fixture staticRoot under tests/backend/fixtures and never read web/**]。",
+      "required_action": "在 WI-001 的 CT-003 output contract capabilities 中补充 \"static file not found returns HTTP 404 with plain text response\"（TASK-003 与 AC-013 已背书该行为，属声明对齐）。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "边 WI-002 -> WI-003 契约 CT-004 能力缺口：demand 要求 \"web/level-select.js references relative path /api/levels\"，provider 提供的 capabilities 未包含该条。",
+      "evidence": "coverage entry from=WI-002, to=WI-003, contract_id=CT-004, compatibility_policy=require_all, missing_capabilities=[web/level-select.js references relative path /api/levels]；WI-002 CT-004 仅提供 [web pages use only native HTML and JavaScript with no npm dependency]。",
+      "required_action": "在 WI-002 的 CT-004 output contract capabilities 中补充 \"web/level-select.js references relative path /api/levels\"（AC-007 已要求脚本以相对路径引用 /api/levels，属声明对齐）。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "编译器警告 integration_or_e2e_skipped_risk（e2e tests are skipped）不构成发布阻断：本计划采用无浏览器验证策略，WI-003 已通过 start({port:0}) 真实 HTTP 同源集成测试覆盖页面入口与 API 契约。",
+      "evidence": "Projection Validation Report findings[0] code=integration_or_e2e_skipped_risk severity=warning；WI-003 CHECK-005 为 node --test tests/integration/ 且 AC-011~AC-013 覆盖真实服务的 API 与静态请求语义。",
+      "required_action": "无需返修；可留档说明浏览器级 e2e 被真实 HTTP 集成测试策略有意替代。",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "must_fix",
+      "message": "契约覆盖缺口：edge WI-001 -> WI-002（contract_id CT-001，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；CT-001 仅声明错误响应 Content-Type 能力，未声明 LEVEL_DATA_UNAVAILABLE 500 错误能力（该行为已由 WI-001 AC-003 支撑，属输出契约声明缺口）。",
+      "evidence": "coverage entry from=WI-001 to=WI-002, contract_id=CT-001, required=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message], provided=[API error responses with status 500 or 404 or 405 use Content-Type application/json; charset=utf-8], missing=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]",
+      "required_action": "在 WI-001 输出契约 CT-001 的 capabilities 中补充 data 错误返回 HTTP 500 且 error.code=LEVEL_DATA_UNAVAILABLE、message 用户可读的能力声明，使该边 missing_capabilities 清空。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "契约覆盖缺口：edge WI-001 -> WI-003（contract_id CT-002，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [port 0 binds an ephemeral port for parallel test isolation]；CT-002 仅声明仅导入 node 内置模块，未声明 port 0 临时端口绑定能力（该行为已由 WI-001 AC-001 与 start({ port }) 生命周期支撑，属声明缺口）。",
+      "evidence": "coverage entry from=WI-001 to=WI-003, contract_id=CT-002, required=[port 0 binds an ephemeral port for parallel test isolation], provided=[server imports only node builtin modules node:http node:fs node:path], missing=[port 0 binds an ephemeral port for parallel test isolation]",
+      "required_action": "在 WI-001 输出契约 CT-002 的 capabilities 中补充 port 0 绑定临时端口以支持并行测试隔离的能力声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "契约覆盖缺口：edge WI-001 -> WI-003（contract_id CT-003，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [static file not found returns HTTP 404 with plain text response]；CT-003 仅声明夹具静态托管测试约定，未声明静态资源缺失返回 404 纯文本能力（该行为已由 WI-001 AC-005 与 TASK-003 支撑，属声明缺口）。",
+      "evidence": "coverage entry from=WI-001 to=WI-003, contract_id=CT-003, required=[static file not found returns HTTP 404 with plain text response], provided=[backend static hosting tests use fixture staticRoot under tests/backend/fixtures and never read web/**], missing=[static file not found returns HTTP 404 with plain text response]",
+      "required_action": "在 WI-001 输出契约 CT-003 的 capabilities 中补充静态资源缺失返回 HTTP 404 纯文本响应的能力声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-003].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "契约覆盖缺口：edge WI-002 -> WI-003（contract_id CT-004，compatibility_policy=require_all）missing_capabilities 非空，缺失 capability [web/level-select.js references relative path /api/levels]；CT-004 仅声明纯原生 HTML/JS 无 npm 依赖，未声明相对路径引用 /api/levels 能力（该行为已由 WI-002 AC-007 支撑，属声明缺口）。",
+      "evidence": "coverage entry from=WI-002 to=WI-003, contract_id=CT-004, required=[web/level-select.js references relative path /api/levels], provided=[web pages use only native HTML and JavaScript with no npm dependency], missing=[web/level-select.js references relative path /api/levels]",
+      "required_action": "在 WI-002 输出契约 CT-004 的 capabilities 中补充 web/level-select.js 以相对路径引用 /api/levels 的能力声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验警告 integration_or_e2e_skipped_risk：前端以 DOM 替身验证、无浏览器级 e2e，属设计取舍且 error_count=0，不影响发布；建议验收时结合 CHECK-004 人工审查补充浏览器走查确认。",
+      "evidence": "Projection Validation Report findings[0]=integration_or_e2e_skipped_risk(warning)，summary.error_count=0、warning_count=1",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "AC 到任务完成标准的追溯建议：AC-001、AC-008、AC-011、AC-013 未被任何 task 的 done_when_refs 引用（其行为分别由 TASK-001、TASK-007、TASK-009、TASK-010 的 statement 覆盖）；机械校验未判错、不影响发布，建议返修时顺带补全 done_when_refs 以增强追溯。",
+      "evidence": "WI-001 done_when_refs 覆盖 AC-002..AC-006 但缺 AC-001；WI-002 缺 AC-008；WI-003 缺 AC-011、AC-013",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "tasks[].done_when_refs"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械 warning integration_or_e2e_skipped_risk（error_count=0）为完备度提示：计划已用 DOM 替身前端单测加 WI-003 真实 HTTP 集成测试覆盖页面入口、API 形状与错误语义，且 WI-001 CHECK-002、WI-002 CHECK-004 已含人工审查检查，浏览器级手工冒烟仅为可选补充。",
+      "evidence": "Projection Validation Report findings[0]=integration_or_e2e_skipped_risk(warning)；WI-003 CHECK-005 node --test tests/integration/ 覆盖 AC-011~AC-014；WI-001 CHECK-002 与 WI-002 CHECK-004 为必选人工审查。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "WI-001 未把 GET /api/levels 成功路径（200 与恰好 5 项校验形状）形式化为 output capability，WI-002 的 input_contracts 亦未显式 demand 该能力；因 WI-003 AC-011 已端到端断言该形状且 TASK-007 要求 initLevelSelect 自带响应形状校验，不构成发布缺口，建议后续在 CT 声明中补齐该 capability。",
+      "evidence": "Supplies WI-001 CT-001~CT-003 仅含 500 错误、port 0、静态 404；Demands WI-002 仅 require CT-001；AC-002 与 AC-011 已含成功形状验证。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "must_fix",
+      "message": "coverage 边 WI-001 -> WI-002 在契约 CT-001（compatibility_policy=require_all）下缺失 capability「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」：WI-001 的 CT-001 output contract 仅声明 HTTP 405/404 错误体示例，未声明数据错误能力，而消费方 WI-002 input_contracts 明确要求该能力且不得掩盖。",
+      "evidence": "coverage edge WI-001 -> WI-002, contract_id=CT-001, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]；WI-001 CT-001 capabilities 仅含 METHOD_NOT_ALLOWED/API_NOT_FOUND 错误体示例字符串。",
+      "required_action": "在 WI-001 的 CT-001 output_contract capabilities 中补充声明与 AC-003/TASK-002 行为一致的能力串「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "coverage 边 WI-001 -> WI-003 在契约 CT-001（require_all）下同样缺失 capability「data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message」，provider 侧未声明导致供需不匹配，不得以 pass 或 advisory 掩盖。",
+      "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-001, missing_capabilities=[data errors return HTTP 500 with error code LEVEL_DATA_UNAVAILABLE and user-readable message]。",
+      "required_action": "随 CT-001 同一修复：在 WI-001 的 CT-001 capabilities 补充该能力串，两条消费边（WI-001 -> WI-002、WI-001 -> WI-003）随同一声明一并收敛。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "coverage 边 WI-001 -> WI-003 在契约 CT-003（require_all）下缺失 capability「static file not found returns HTTP 404 with plain text response」：WI-001 声明的是「static file not found 404 plain text body example is 404 Not Found」，语义近似但 capability 字符串未与消费方要求对齐，机械匹配失败。",
+      "evidence": "coverage edge WI-001 -> WI-003, contract_id=CT-003, missing_capabilities=[static file not found returns HTTP 404 with plain text response]；provided=[static file not found 404 plain text body example is 404 Not Found]。",
+      "required_action": "将 WI-001 的 CT-003 capability 字符串与消费方要求统一（如改为「static file not found returns HTTP 404 with plain text response」或消费方按 provider 等价措辞声明），确保 require_all 机械匹配通过。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-003].capabilities"
+    },
+    {
+      "severity": "suggestion",
+      "message": "WI-001 的 AC-004（API 不支持方法返回 405、未知 API 路径返回 404 的 JSON 错误）未被任何 task 的 done_when_refs 显式归因：TASK-001 仅引用 AC-001，其语句虽覆盖 405/404 行为，验收条目与任务映射不完备；不影响发布判定，仅建议补齐。",
+      "evidence": "WI-001 tasks 的 done_when_refs 覆盖 AC-001/AC-002/AC-003/AC-005/AC-006，无 AC-004；TASK-001.statement 含 405/404 行为描述。",
+      "required_action": "可选：将 AC-004 加入 TASK-001.done_when_refs。",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械校验唯一警告 integration_or_e2e_skipped_risk 风险可控：WI-003 已通过 start({ port: 0 }) 启动真实服务以真实 HTTP 同源断言页面结构与 API 契约形状，WI-001/WI-002 各配人工审查检查项，建议人工验收时顺带确认同源请求链路即可，无需返修。",
+      "evidence": "Projection Validation Report findings[0] severity=warning 且 error_count=0；WI-003 AC-011~AC-013 与 CHECK-005 已覆盖真实服务集成验证；WI-001 CHECK-002 与 WI-002 CHECK-004 已含人工审查。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "机械报告提示 integration_or_e2e_skipped_risk；该缺口实际已由 WI-003 以 start({port:0}) 启动真实服务并同源断言 API 契约形状、页面结构与 404/405 错误语义所覆盖，验收时知悉该 warning 为编译器启发式提示而非集成验证缺失即可。",
+      "evidence": "Projection Validation Report findings[0]: integration_or_e2e_skipped_risk (severity=warning, work_item_ids=[])；WI-003 AC-011~AC-014 与 CHECK-005 (node --test tests/integration/) 提供真实 HTTP 同源集成验证。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 12114,
+      "output_tokens": 611,
+      "cache_read_tokens": 17024,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json",
+    "artifact-v10.json",
+    "artifact-v11.json",
+    "artifact-v12.json",
+    "artifact-v13.json",
+    "artifact-v14.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 4,
+    "manual_repairs_used": 0,
+    "transitions_used": 3,
+    "initial_review_count": 7,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_007": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_009": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_011": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_013": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_015": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 4,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-08T09:47:46.752Z",
+      "elapsedSec": 1633.031,
+      "stage": "human_confirm",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_010",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-b5515e32dc",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T09:47:46.754Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-08T09:55:43.016Z",
+      "elapsedSec": 2109.293,
+      "stage": "prepare_context",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_013",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-80f4f48b9a",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T09:55:43.016Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-08T09:58:33.954Z",
+      "elapsedSec": 2280.231,
+      "stage": "prepare_context",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_015",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-08T09:58:33.954Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-b5515e32dc",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_b62b0fff-b104-4552-addd-ab28f47ba621",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_005"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-80f4f48b9a",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_b8e364d7-1f06-4d45-b28a-006e8b5600ab",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_007"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 3,
+      "command_id": "cmd-advance-3-73f48d09e3",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_7d01844fd98a4d709447b6246bf0d66d",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0163"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:3",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_b62b0fff-b104-4552-addd-ab28f47ba621:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:4",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_b8e364d7-1f06-4d45-b28a-006e8b5600ab:attempt:1",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:2",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:3",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_b62b0fff-b104-4552-addd-ab28f47ba621:attempt:1",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:4",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_b8e364d7-1f06-4d45-b28a-006e8b5600ab:attempt:1",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 7,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:2",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:3",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_b62b0fff-b104-4552-addd-ab28f47ba621:attempt:1",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0218:4",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_b8e364d7-1f06-4d45-b28a-006e8b5600ab:attempt:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 2283839,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.064,
+    "1:running": 650.821,
+    "2:cross_review": 0.261,
+    "3:prepare_context": 207.411,
+    "4:cross_review": 0.236,
+    "5:prepare_context": 214.114,
+    "6:cross_review": 0.245,
+    "7:prepare_context": 423.216,
+    "8:cross_review": 0.25,
+    "9:prepare_context": 135.465,
+    "10:human_confirm": 89.223,
+    "11:cross_review": 0.27,
+    "12:prepare_context": 313.625,
+    "13:cross_review": 0.273,
+    "14:prepare_context": 72.873,
+    "15:human_confirm": 75.838,
+    "16:cross_review": 0.246,
+    "17:prepare_context": 94.855,
+    "18:human_confirm": 3.38,
+    "19:running": 0.042,
+    "20:completed": 0.185
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

@@ -165,35 +165,24 @@ impl CodingWorkspaceEngine {
         Ok(changed_files.into_iter().collect())
     }
 
-    pub(super) fn validate_changed_files_for_runtime(
+    pub(crate) fn validate_changed_files_for_runtime(
         &self,
+        attempt: &CodingExecutionAttempt,
         runtime: &ResolvedWorkItemRuntime,
         changed_files: &[String],
         worktree_path: Option<&PathBuf>,
     ) -> Result<(), CodingWorkspaceEngineError> {
-        let write_policy = &runtime.work_item_revision.canonical_contract.write_policy;
-        for relative_path in changed_files {
-            let candidate = std::path::Path::new(relative_path);
-            if write_policy
-                .forbidden_scopes
-                .iter()
-                .any(|scope| scope_allows_path(scope, relative_path, true))
-            {
-                return Err(CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
-                    relative_path.clone(),
-                ));
-            }
-            if !write_policy.exclusive_scopes.is_empty()
-                && let Some(base) = worktree_path
-            {
-                let _ = validate_write_path(base, &write_policy.exclusive_scopes, candidate, true)
-                    .map_err(|_| {
-                        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
-                            relative_path.clone(),
-                        )
-                    })?;
-            }
+        if changed_files.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let write_policy = &runtime.work_item_revision.canonical_contract.write_policy;
+        let member_prefix = self.scope_member_prefix(attempt)?;
+        super::validate_changed_files_in_scope(
+            &write_policy.exclusive_scopes,
+            &write_policy.forbidden_scopes,
+            changed_files,
+            worktree_path,
+            member_prefix.as_deref(),
+        )
     }
 }

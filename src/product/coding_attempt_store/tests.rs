@@ -3,24 +3,34 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingExecutionUnitStatus,
-    CodingGateAction, CodingGateActionType, CodingProviderRole, FindingSeverity,
+    AttemptTargetSnapshot, CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus,
+    CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction, CodingGateActionType,
+    CodingProviderRole, CodingStartOrigin, CodingStartPhase, CodingStartRunPolicy, FindingSeverity,
     GroupFinalReadinessDiagnostic, GroupFinalReadinessDiagnosticKind, GroupFinalReadinessSnapshot,
-    GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
+    GroupFinalReadinessStatus, GroupFinalReadinessUnit, PushStatus, RemoteKind, ReviewFinding,
+    ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use crate::product::json_store::write_json;
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
 use crate::product::models::{
     PlanDefectClass, PlanDefectRoute, ProviderName, RepairTarget, RepairTargetKind,
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+mod advance_attempt_isolation;
 mod attempt_creation_concurrency;
+mod coding_start_claim;
 mod failed_review_recovery;
 mod failed_review_recovery_rollback;
 mod git_operation;
+mod git_operation_pointer;
 mod group_final_readiness;
+mod group_split_target;
 mod group_uniqueness;
+mod issue_cross_repo_review;
+mod issue_delivery;
 mod plan_repair;
+mod pointer_review_request;
 mod provider_stream_log_root;
 mod role_run;
 mod unit_run_execution_context;
@@ -52,10 +62,50 @@ fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .unwrap();
     (tmp, store, attempt)
+}
+
+#[test]
+fn list_review_requests_orders_by_created_at_then_id() {
+    let (_tmp, store, attempt) = setup();
+    let request = |id: &str, created_at: &str| ReviewRequest {
+        id: id.to_string(),
+        attempt_id: attempt.id.clone(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: format!("aria/{id}"),
+        commit_sha: format!("commit-{id}"),
+        push_status: PushStatus::Pushed,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
+        created_at: created_at.to_string(),
+        updated_at: created_at.to_string(),
+    };
+    let older = request("zz-request", "2026-08-14T00:00:00Z");
+    let newer = request("aa-request", "2026-08-14T00:00:01Z");
+    store.save_review_request(&attempt, &newer).unwrap();
+    store.save_review_request(&attempt, &older).unwrap();
+
+    let listed = store
+        .list_review_requests(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["zz-request", "aa-request"]
+    );
 }
 
 fn provider_snapshot() -> ProviderConfigSnapshot {
@@ -64,6 +114,353 @@ fn provider_snapshot() -> ProviderConfigSnapshot {
         reviewer: Some(ProviderName::ClaudeCode),
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    }
+}
+
+/// P2 Task 2：旧 attempt JSON 缺 `start_run_policy` 字段反序列化默认 Manual；
+/// copy-update（`update_attempt_non_status_fields`）不得覆盖已冻结 policy。
+#[test]
+fn old_attempt_json_defaults_to_manual_and_frozen_policy_survives_updates() {
+    let (_tmp, store, created) = setup();
+    let mut json = serde_json::to_value(&created).unwrap();
+    json.as_object_mut().unwrap().remove("start_run_policy");
+    let old: CodingExecutionAttempt = serde_json::from_value(json).unwrap();
+    assert_eq!(old.start_run_policy, CodingStartRunPolicy::Manual);
+
+    let mut replacement = created.clone();
+    replacement.start_run_policy = CodingStartRunPolicy::AutoStartOnce {
+        enrollment_id: "enrollment_0001".into(),
+        policy_revision: 1,
+        source_plan_revision: "work_item_plan_revision_0001".into(),
+    };
+    store
+        .update_attempt_non_status_fields(&replacement)
+        .unwrap();
+    assert_eq!(
+        store
+            .get_attempt(&created.project_id, &created.issue_id, &created.id)
+            .unwrap()
+            .start_run_policy,
+        CodingStartRunPolicy::Manual
+    );
+}
+
+#[test]
+fn update_attempt_non_status_fields_preserves_status_and_frozen_admission_fields() {
+    let (_tmp, store, attempt) = setup();
+    let original_status = attempt.status.clone();
+    let original_target_snapshot = attempt.target_snapshot.clone();
+    let original_version = attempt.version;
+    let original_manual_recovery_reason = attempt.manual_recovery_reason.clone();
+    let mut replacement = attempt.clone();
+    replacement.status = CodingAttemptStatus::Running;
+    replacement.version = original_version + 1;
+    replacement.manual_recovery_reason = Some("replacement recovery reason".to_string());
+    replacement.target_snapshot = Some(AttemptTargetSnapshot {
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+        physical_repository_id: "repository_replacement".to_string(),
+        canonical_path: std::path::PathBuf::from("/replacement/repository"),
+        git_dir_identity: "replacement-git-dir".to_string(),
+        revision: Some("replacement-revision".to_string()),
+        policy_digest: "replacement-policy".to_string(),
+        membership_revision: 99,
+        captured_at: "2026-08-11T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    });
+    replacement.head_commit = Some("head_commit_replacement".to_string());
+    replacement.pushed_remote = Some("origin/replacement".to_string());
+
+    store
+        .update_attempt_non_status_fields(&replacement)
+        .expect("update non-status fields");
+
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reload attempt");
+    assert_eq!(persisted.status, original_status);
+    assert_eq!(persisted.version, original_version);
+    assert_eq!(
+        persisted.manual_recovery_reason,
+        original_manual_recovery_reason
+    );
+    assert_eq!(persisted.target_snapshot, original_target_snapshot);
+    assert_eq!(
+        persisted.head_commit.as_deref(),
+        Some("head_commit_replacement")
+    );
+    assert_eq!(
+        persisted.pushed_remote.as_deref(),
+        Some("origin/replacement")
+    );
+}
+
+#[test]
+fn status_machine_rejects_direct_blocked_to_running_and_manual_recovery_only_to_abort() {
+    let (_tmp, store, attempt) = setup();
+    let running = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("start attempt");
+    let blocked = store
+        .update_attempt_status(
+            &running.project_id,
+            &running.issue_id,
+            &running.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("block attempt");
+    // Blocked→Running 直达已删除：直接改状态必须被拒。
+    let rejected = store.update_attempt_status(
+        &blocked.project_id,
+        &blocked.issue_id,
+        &blocked.id,
+        CodingAttemptStatus::Running,
+    );
+    assert!(matches!(
+        rejected,
+        Err(ProductStoreError::Io(message))
+            if message.contains("invalid_coding_attempt_status_transition")
+    ));
+    // Blocked 只能重走 admission 进入 Running。
+    let running = store
+        .admit_and_transition_attempt_to_executable(
+            &blocked.project_id,
+            &blocked.issue_id,
+            &blocked.id,
+        )
+        .expect("reopen blocked attempt through admission");
+    assert_eq!(running.status, CodingAttemptStatus::Running);
+    assert!(running.admission_ticket_consumed_at.is_some());
+
+    store
+        .write_coding_attempt_for_test(&CodingExecutionAttempt {
+            status: CodingAttemptStatus::AwaitingManualRecovery,
+            version: 0,
+            manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            ..running
+        })
+        .expect("seed manual-recovery attempt");
+
+    for status in [
+        CodingAttemptStatus::Created,
+        CodingAttemptStatus::Running,
+        CodingAttemptStatus::WaitingForHuman,
+        CodingAttemptStatus::Blocked,
+        CodingAttemptStatus::AwaitingManualRecovery,
+        CodingAttemptStatus::AwaitingPlanAmendment,
+        CodingAttemptStatus::ApplyingPlanAmendment,
+        CodingAttemptStatus::AmendmentApplyFailed,
+        CodingAttemptStatus::Completed,
+        CodingAttemptStatus::Failed,
+    ] {
+        let rejected = store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            status.clone(),
+        );
+        assert!(matches!(
+            rejected,
+            Err(ProductStoreError::Io(message))
+                if message == format!(
+                    "invalid_coding_attempt_status_transition: AwaitingManualRecovery -> {status:?}"
+                )
+        ));
+    }
+
+    let aborted = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .expect("abort manual-recovery attempt");
+    assert_eq!(aborted.status, CodingAttemptStatus::Aborted);
+}
+
+#[test]
+fn aborting_manual_recovery_attempt_preserves_reason_for_audit() {
+    let (_tmp, store, attempt) = setup();
+    let running = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("start attempt");
+    store
+        .write_coding_attempt_for_test(&CodingExecutionAttempt {
+            status: CodingAttemptStatus::AwaitingManualRecovery,
+            version: 0,
+            manual_recovery_reason: Some("attempt_awaiting_manual_recovery".to_string()),
+            admission_ticket_consumed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            ..running
+        })
+        .expect("seed manual-recovery attempt");
+
+    let aborted = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Aborted,
+        )
+        .expect("abort manual-recovery attempt");
+
+    assert_eq!(aborted.status, CodingAttemptStatus::Aborted);
+    assert_eq!(
+        aborted.manual_recovery_reason,
+        Some("attempt_awaiting_manual_recovery".to_string())
+    );
+
+    let reloaded = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reload aborted attempt");
+    assert_eq!(
+        reloaded.manual_recovery_reason,
+        Some("attempt_awaiting_manual_recovery".to_string())
+    );
+}
+
+#[test]
+fn status_machine_has_no_direct_entry_into_running_from_any_state() {
+    // 进入 Running 的唯一途径是 admission CAS；`update_attempt_status` 对 Running 目标
+    // 必须从任何源状态（含 Running 自身的幂等调用）返回 invalid_coding_attempt_status_transition。
+    let sources = [
+        CodingAttemptStatus::Created,
+        CodingAttemptStatus::WaitingForHuman,
+        CodingAttemptStatus::Blocked,
+        CodingAttemptStatus::AwaitingPlanAmendment,
+        CodingAttemptStatus::ApplyingPlanAmendment,
+        CodingAttemptStatus::AmendmentApplyFailed,
+        CodingAttemptStatus::AwaitingManualRecovery,
+        CodingAttemptStatus::Running,
+    ];
+    for source in sources {
+        let (_tmp, store, attempt) = setup();
+        let mut seeded = attempt.clone();
+        seeded.status = source.clone();
+        seeded.admission_ticket_consumed_at = None;
+        store
+            .write_coding_attempt_for_test(&seeded)
+            .unwrap_or_else(|error| panic!("{source:?}: seed source state: {error}"));
+        let rejected = store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Running,
+        );
+        assert!(
+            matches!(&rejected, Err(ProductStoreError::Io(message))
+            if message == &format!(
+                "invalid_coding_attempt_status_transition: {source:?} -> Running"
+            )),
+            "{source:?}: unexpected result: {rejected:?}"
+        );
+        let persisted = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap_or_else(|error| panic!("{source:?}: reload attempt: {error}"));
+        assert_eq!(
+            persisted.status, source,
+            "{source:?}: rejected transition must not persist"
+        );
+    }
+}
+
+#[test]
+fn provider_run_rejected_when_running_attempt_lacks_admission_marker() {
+    // 绕过 admission 手动把 attempt 写成 Running（marker 缺失）时，
+    // ensure_provider_run_allowed 必须拒绝 provider run（第二道防线）。
+    let (_tmp, store, attempt) = setup();
+    let forged = CodingExecutionAttempt {
+        status: CodingAttemptStatus::Running,
+        admission_ticket_consumed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        ..attempt.clone()
+    };
+    store
+        .write_coding_attempt_for_test(&forged)
+        .expect("bypass admission and hand-write Running status");
+    let error = store
+        .ensure_provider_run_allowed(&forged)
+        .expect_err("Running without admission marker must not start a provider run");
+    assert!(
+        matches!(&error, ProductStoreError::Io(message)
+            if message == "admission_missing_blocks_provider_run"),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn provider_run_allowed_after_admission_transition_for_legacy_attempt() {
+    // Legacy attempt（无 target_snapshot）经 admit→transition 进入 Running 后，
+    // ensure_provider_run_allowed 必须放行；admission marker 是 provider run 的前置条件。
+    let (_tmp, store, attempt) = setup();
+    assert!(attempt.target_snapshot.is_none());
+    let running = store
+        .admit_and_transition_attempt_to_executable(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )
+        .expect("legacy admission via legacy digest path");
+    assert_eq!(running.status, CodingAttemptStatus::Running);
+    assert!(running.admission_ticket_consumed_at.is_some());
+    let allowed = store
+        .ensure_provider_run_allowed(&running)
+        .expect("admitted running attempt may start a provider run");
+    assert_eq!(allowed.status, CodingAttemptStatus::Running);
+    assert_eq!(
+        allowed.admission_ticket_consumed_at,
+        running.admission_ticket_consumed_at
+    );
+}
+
+#[test]
+fn leaving_running_clears_admission_marker_on_every_controlled_exit() {
+    // 会话语义守卫：离开 Running 的受控转换必须在同一次锁内清空 marker，
+    // 使下一个 Running 会话可以重新 admission。
+    let targets = [
+        CodingAttemptStatus::WaitingForHuman,
+        CodingAttemptStatus::Blocked,
+        CodingAttemptStatus::AwaitingPlanAmendment,
+        CodingAttemptStatus::Completed,
+        CodingAttemptStatus::Failed,
+        CodingAttemptStatus::Aborted,
+    ];
+    for target in targets {
+        let (_tmp, store, attempt) = setup();
+        let running = store
+            .admit_and_transition_attempt_to_executable(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )
+            .unwrap_or_else(|error| panic!("{target:?}: admission entry: {error}"));
+        assert!(
+            running.admission_ticket_consumed_at.is_some(),
+            "{target:?}: admission must leave the session marker"
+        );
+        let updated = store
+            .update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                target.clone(),
+            )
+            .unwrap_or_else(|error| panic!("{target:?}: leave Running: {error}"));
+        assert_eq!(updated.status, target);
+        assert!(
+            updated.admission_ticket_consumed_at.is_none(),
+            "{target:?}: leaving Running must clear the admission session marker"
+        );
+        let persisted = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap_or_else(|error| panic!("{target:?}: reload attempt: {error}"));
+        assert!(
+            persisted.admission_ticket_consumed_at.is_none(),
+            "{target:?}: persisted attempt must have no admission session marker"
+        );
     }
 }
 
@@ -130,12 +527,7 @@ fn code_review_can_route_directly_back_to_coding_for_reviewer_feedback() {
 fn failed_code_review_attempt_cannot_be_reopened_as_recoverable() {
     let (_tmp, store, attempt) = setup();
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("start attempt");
     let attempt = store
         .update_attempt_stage(
@@ -189,12 +581,7 @@ fn reopen_failed_code_review_attempt_rejects_other_terminal_states_without_persi
     for (case_name, stage, status) in cases {
         let (_tmp, store, attempt) = setup();
         let attempt = store
-            .update_attempt_status(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                CodingAttemptStatus::Running,
-            )
+            .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .unwrap_or_else(|error| panic!("{case_name}: start attempt: {error}"));
         let attempt = store
             .update_attempt_stage(&attempt.project_id, &attempt.issue_id, &attempt.id, stage)
@@ -255,11 +642,17 @@ fn legacy_attempt_without_scope_deserializes_as_work_item_scope() {
     let attempt: CodingExecutionAttempt = serde_json::from_value(json).expect("attempt");
 
     assert_eq!(attempt.scope, CodingAttemptScope::WorkItem);
+    assert_eq!(attempt.version, 0);
+    assert!(attempt.manual_recovery_reason.is_none());
     assert_eq!(
         attempt.current_work_item_id.as_deref(),
         Some("work_item_0001")
     );
     assert!(attempt.work_item_group_id.is_none());
+    assert_eq!(attempt.admission_kind, CodingAdmissionKind::LegacyGroup);
+
+    let json = serde_json::to_value(&attempt).expect("serialized attempt");
+    assert_eq!(json["admission_kind"], serde_json::json!("legacy_group"));
 }
 
 #[test]
@@ -280,28 +673,30 @@ fn saving_group_attempt_preserves_explicit_internal_reviewer_role_config() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
     let mut role_config = store
         .get_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id)
         .expect("bootstrap role config");
-    assert_eq!(role_config.internal_reviewer, ProviderName::Codex);
+    assert_eq!(role_config.internal_reviewer, Some(ProviderName::Codex));
 
-    role_config.internal_reviewer = ProviderName::ClaudeCode;
+    role_config.internal_reviewer = Some(ProviderName::ClaudeCode);
     store
         .update_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id, role_config)
         .expect("select internal reviewer");
 
     store
-        .save_coding_attempt(&group_attempt)
+        .update_attempt_non_status_fields(&group_attempt)
         .expect("save after group unit completion");
 
     let persisted = store
         .get_role_provider_config_snapshot(PROJECT_ID, ISSUE_ID, &group_attempt.id)
         .expect("persisted role config");
-    assert_eq!(persisted.internal_reviewer, ProviderName::ClaudeCode);
+    assert_eq!(persisted.internal_reviewer, Some(ProviderName::ClaudeCode));
 }
 
 #[test]
@@ -318,7 +713,9 @@ fn creates_group_attempt_and_units_with_single_active_unit() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -379,7 +776,9 @@ fn rejects_creating_second_active_unit_for_same_attempt() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -427,7 +826,9 @@ fn rejects_updating_pending_unit_to_active_when_another_unit_is_active() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -491,7 +892,9 @@ fn rejects_group_attempt_when_active_group_attempt_already_exists_for_other_plan
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("first group attempt");
 
@@ -505,7 +908,9 @@ fn rejects_group_attempt_when_active_group_attempt_already_exists_for_other_plan
             branch_name: "aria/issues/issue_0001-b".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect_err("should reject second active attempt");
 
@@ -532,7 +937,9 @@ fn rejects_group_attempt_when_active_work_item_attempt_exists() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect_err("should reject when single attempt is active");
 
@@ -558,7 +965,9 @@ fn clears_current_work_item_when_last_active_unit_completes() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -607,7 +1016,9 @@ fn blocked_or_waiting_units_do_not_set_started_at() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
 
@@ -733,457 +1144,31 @@ fn blocked_gate_creation_is_idempotent_for_same_node_and_reason() {
     );
 }
 
-// Group final readiness persistence regression coverage.
-
-fn final_readiness_finding() -> ReviewFinding {
-    ReviewFinding {
-        severity: FindingSeverity::Warning,
-        file_path: Some("src/product/coding_attempt_store/group_final_readiness.rs".to_string()),
-        line: Some(42),
-        message: "review evidence is preserved".to_string(),
-        required_action: Some("confirm the finding".to_string()),
-        source_stage: CodingExecutionStage::CodeReview,
-        evidence: vec!["test-output/review-evidence.txt".to_string()],
-        plan_defect_evidence: Vec::new(),
-        related_requirements: Vec::new(),
-        related_design_constraints: Vec::new(),
-        related_work_item_tasks: vec!["work_item_0001".to_string()],
-        defect_class: PlanDefectClass::ImplementationDefect,
-        reason_code: Some("review_evidence".to_string()),
-        contract_refs: Vec::new(),
-        capability_refs: Vec::new(),
-        repair_target: None,
-        recommended_route: PlanDefectRoute::CoderRework,
-        confidence: None,
-    }
-}
-
-fn ready_unit(
-    unit_id: &str,
-    logical_work_item_id: &str,
-    unit_run_id: &str,
-) -> GroupFinalReadinessUnit {
-    GroupFinalReadinessUnit {
-        unit_id: unit_id.to_string(),
-        logical_work_item_id: logical_work_item_id.to_string(),
-        unit_run_id: Some(unit_run_id.to_string()),
-        start_commit: Some(format!("start_commit_{unit_id}")),
-        completion_commit: Some(format!("completion_commit_{unit_id}")),
-        commit_shas: vec![
-            format!("start_commit_{unit_id}"),
-            format!("completion_commit_{unit_id}"),
-        ],
-        diff_ref: format!("diffs/{unit_id}.patch"),
-        empty_observation: false,
-        code_review_report_id: Some(format!("code_review_report_{unit_id}")),
-        review_verdict: Some(ReviewVerdict::Approve),
-        review_summary: Some(format!("{unit_id} review approved")),
-        review_findings: Some(vec![final_readiness_finding()]),
-        review_raw_provider_output_ref: Some(format!("provider-raw/code-review/{unit_id}.txt")),
-        handoff_revision_id: Some(format!("handoff_revision_{unit_id}")),
-        plan_revision_id: Some(format!("plan_revision_{unit_id}")),
-    }
-}
-
 #[test]
-fn group_final_readiness_round_trips_complete_snapshot() {
+fn create_context_note_after_deleting_middle_uses_id_above_existing_maximum() {
     let (_tmp, store, attempt) = setup();
-    let snapshot = GroupFinalReadinessSnapshot {
-        attempt_id: attempt.id.clone(),
-        status: GroupFinalReadinessStatus::Complete,
-        units: vec![
-            ready_unit("unit_0001", "work_item_0001", "unit_run_0001"),
-            ready_unit("unit_0002", "work_item_0002", "unit_run_0002"),
-        ],
-        diagnostics: Vec::new(),
-        created_at: "caller-supplied-value-must-not-be-persisted".to_string(),
-    };
-
-    store
-        .write_group_final_readiness_snapshot(&attempt, &snapshot)
-        .expect("write readiness snapshot");
-
-    let restored = store
-        .get_group_final_readiness_snapshot(&attempt)
-        .expect("read readiness snapshot")
-        .expect("snapshot exists");
-
-    assert_eq!(restored.status, GroupFinalReadinessStatus::Complete);
-    assert_eq!(restored.units, snapshot.units);
-    assert_eq!(
-        restored.units[0].commit_shas,
-        vec!["start_commit_unit_0001", "completion_commit_unit_0001"]
-    );
-    assert_eq!(
-        restored.units[0].unit_run_id.as_deref(),
-        Some("unit_run_0001")
-    );
-    assert_eq!(
-        restored.units[0].start_commit.as_deref(),
-        Some("start_commit_unit_0001")
-    );
-    assert_eq!(
-        restored.units[0].completion_commit.as_deref(),
-        Some("completion_commit_unit_0001")
-    );
-    assert_eq!(
-        restored.units[0].review_findings,
-        Some(vec![final_readiness_finding()])
-    );
-    assert_eq!(
-        restored.units[0].review_raw_provider_output_ref.as_deref(),
-        Some("provider-raw/code-review/unit_0001.txt")
-    );
-    assert!(
-        serde_json::to_value(&restored)
-            .expect("serialize restored snapshot")
-            .get("units")
-            .and_then(|units| units.get(0))
-            .and_then(|unit| unit.get("review_raw_ref"))
-            .is_none()
-    );
-    assert!(
-        serde_json::to_value(&restored)
-            .expect("serialize restored snapshot")
-            .get("units")
-            .and_then(|units| units.get(0))
-            .and_then(|unit| unit.get("review_raw_provider_output_ref"))
-            .is_some()
-    );
-    let created_at = chrono::DateTime::parse_from_rfc3339(&restored.created_at)
-        .expect("writer stamps snapshot with RFC3339 time");
-    assert_eq!(created_at.offset().local_minus_utc(), 0);
-    assert_ne!(restored.created_at, snapshot.created_at);
-    assert_eq!(
-        restored.units[1].handoff_revision_id.as_deref(),
-        Some("handoff_revision_unit_0002")
-    );
-    assert_eq!(
-        restored.units[1].plan_revision_id.as_deref(),
-        Some("plan_revision_unit_0002")
-    );
-    assert!(!restored.units[1].empty_observation);
-}
-
-#[test]
-fn group_final_readiness_empty_observation_requires_empty_git_facts() {
-    let (_tmp, store, attempt) = setup();
-    let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
-    unit.empty_observation = true;
-    unit.commit_shas.clear();
-    unit.diff_ref.clear();
-    let snapshot = GroupFinalReadinessSnapshot {
-        attempt_id: attempt.id.clone(),
-        status: GroupFinalReadinessStatus::Complete,
-        units: vec![unit.clone()],
-        diagnostics: Vec::new(),
-        created_at: String::new(),
-    };
-
-    store
-        .write_group_final_readiness_snapshot(&attempt, &snapshot)
-        .expect("empty observation snapshot");
-    assert!(
+    let _first = store
+        .create_context_note(&attempt, "first".to_string())
+        .unwrap();
+    let middle = store
+        .create_context_note(&attempt, "middle".to_string())
+        .unwrap();
+    let _last = store
+        .create_context_note(&attempt, "last".to_string())
+        .unwrap();
+    std::fs::remove_file(
         store
-            .get_group_final_readiness_snapshot(&attempt)
-            .expect("read snapshot")
-            .expect("snapshot")
-            .units[0]
-            .empty_observation
-    );
-
-    unit.commit_shas = vec!["completion_commit_unit_0001".to_string()];
-    let inconsistent = GroupFinalReadinessSnapshot {
-        units: vec![unit],
-        ..snapshot
-    };
-    assert_invalid_group_final_readiness_snapshot(
-        store
-            .write_group_final_readiness_snapshot(&attempt, &inconsistent)
-            .expect_err("empty observation must not include git facts"),
-        "empty observation unit unit_0001 must not include git range facts",
-    );
-}
-
-#[test]
-fn group_final_readiness_rejects_snapshot_for_different_attempt() {
-    let (_tmp, store, attempt) = setup();
-    let mut snapshot = GroupFinalReadinessSnapshot {
-        attempt_id: "coding_attempt_other".to_string(),
-        status: GroupFinalReadinessStatus::Complete,
-        units: vec![ready_unit("unit_0001", "work_item_0001", "unit_run_0001")],
-        diagnostics: Vec::new(),
-        created_at: String::new(),
-    };
-
-    assert!(matches!(
-        store.write_group_final_readiness_snapshot(&attempt, &snapshot),
-        Err(ProductStoreError::IdentityMismatch {
-            kind: "group_final_readiness_snapshot",
-            ..
-        })
-    ));
-
-    snapshot.attempt_id = attempt.id.clone();
-    store
-        .write_group_final_readiness_snapshot(&attempt, &snapshot)
-        .expect("write valid snapshot");
-    snapshot.attempt_id = "../other-attempt".to_string();
-    write_json(
-        &store.group_final_readiness_snapshot_path(&attempt),
-        &snapshot,
+            .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("context-notes")
+            .join(format!("{}.json", middle.id)),
     )
-    .expect("forge mismatched persisted snapshot");
+    .unwrap();
 
-    assert!(matches!(
-        store.get_group_final_readiness_snapshot(&attempt),
-        Err(ProductStoreError::IdentityMismatch {
-            kind: "group_final_readiness_snapshot",
-            ..
-        })
-    ));
+    let replacement = store
+        .create_context_note(&attempt, "replacement".to_string())
+        .unwrap();
+
+    assert_eq!(replacement.id, "coding_context_note_0004");
 }
 
-#[test]
-fn group_final_readiness_incomplete_snapshot_keeps_explicit_diagnostics() {
-    let (_tmp, store, attempt) = setup();
-    let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
-    unit.code_review_report_id = None;
-    unit.review_verdict = None;
-    unit.review_summary = None;
-    unit.review_findings = None;
-    unit.review_raw_provider_output_ref = None;
-    let snapshot = GroupFinalReadinessSnapshot {
-        attempt_id: attempt.id.clone(),
-        status: GroupFinalReadinessStatus::Incomplete,
-        units: vec![unit],
-        diagnostics: vec![GroupFinalReadinessDiagnostic {
-            kind: GroupFinalReadinessDiagnosticKind::CodeReviewMissing,
-            unit_id: Some("unit_0001".to_string()),
-            message: "unit_0001 is missing code-review evidence".to_string(),
-        }],
-        created_at: String::new(),
-    };
-
-    store
-        .write_group_final_readiness_snapshot(&attempt, &snapshot)
-        .expect("write incomplete snapshot");
-    let restored = store
-        .get_group_final_readiness_snapshot(&attempt)
-        .expect("read incomplete snapshot")
-        .expect("snapshot exists");
-
-    assert_eq!(restored.status, GroupFinalReadinessStatus::Incomplete);
-    assert_eq!(restored.diagnostics, snapshot.diagnostics);
-    assert!(restored.units[0].review_verdict.is_none());
-}
-
-#[test]
-fn group_final_readiness_returns_none_when_snapshot_does_not_exist() {
-    let (_tmp, store, attempt) = setup();
-
-    assert_eq!(
-        store
-            .get_group_final_readiness_snapshot(&attempt)
-            .expect("read missing snapshot"),
-        None
-    );
-}
-
-#[test]
-fn group_final_readiness_rejects_complete_snapshot_without_authoritative_evidence() {
-    let (_tmp, store, attempt) = setup();
-    let missing_evidence: [MissingEvidenceCase; 6] = [
-        (
-            "code_review_report_id",
-            |unit: &mut GroupFinalReadinessUnit| unit.code_review_report_id = None,
-        ),
-        ("review_verdict", |unit: &mut GroupFinalReadinessUnit| {
-            unit.review_verdict = None
-        }),
-        ("review_summary", |unit: &mut GroupFinalReadinessUnit| {
-            unit.review_summary = None
-        }),
-        ("review_findings", |unit: &mut GroupFinalReadinessUnit| {
-            unit.review_findings = None
-        }),
-        (
-            "handoff_revision_id",
-            |unit: &mut GroupFinalReadinessUnit| unit.handoff_revision_id = None,
-        ),
-        ("plan_revision_id", |unit: &mut GroupFinalReadinessUnit| {
-            unit.plan_revision_id = None
-        }),
-    ];
-
-    let empty_units = GroupFinalReadinessSnapshot {
-        attempt_id: attempt.id.clone(),
-        status: GroupFinalReadinessStatus::Complete,
-        units: Vec::new(),
-        diagnostics: Vec::new(),
-        created_at: String::new(),
-    };
-    assert_invalid_group_final_readiness_snapshot(
-        store
-            .write_group_final_readiness_snapshot(&attempt, &empty_units)
-            .expect_err("complete snapshot without units must be rejected"),
-        "complete snapshot must include at least one unit",
-    );
-
-    for (field, clear_field) in missing_evidence {
-        let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
-        clear_field(&mut unit);
-        let snapshot = GroupFinalReadinessSnapshot {
-            attempt_id: attempt.id.clone(),
-            status: GroupFinalReadinessStatus::Complete,
-            units: vec![unit],
-            diagnostics: Vec::new(),
-            created_at: String::new(),
-        };
-
-        assert_invalid_group_final_readiness_snapshot(
-            store
-                .write_group_final_readiness_snapshot(&attempt, &snapshot)
-                .expect_err("complete snapshot without authoritative evidence must be rejected"),
-            &format!("complete unit unit_0001 is missing {field}"),
-        );
-    }
-}
-
-#[test]
-fn group_final_readiness_rejects_empty_or_blank_diagnostics_as_invalid_records() {
-    let (_tmp, store, attempt) = setup();
-    let empty_diagnostics = GroupFinalReadinessSnapshot {
-        attempt_id: attempt.id.clone(),
-        status: GroupFinalReadinessStatus::Incomplete,
-        units: Vec::new(),
-        diagnostics: Vec::new(),
-        created_at: String::new(),
-    };
-    assert_invalid_group_final_readiness_snapshot(
-        store
-            .write_group_final_readiness_snapshot(&attempt, &empty_diagnostics)
-            .expect_err("empty incomplete diagnostics must be rejected"),
-        "incomplete snapshot must include diagnostics",
-    );
-
-    let blank_message = GroupFinalReadinessSnapshot {
-        attempt_id: attempt.id.clone(),
-        status: GroupFinalReadinessStatus::Incomplete,
-        units: Vec::new(),
-        diagnostics: vec![GroupFinalReadinessDiagnostic {
-            kind: GroupFinalReadinessDiagnosticKind::CodeReviewMissing,
-            unit_id: None,
-            message: " \t ".to_string(),
-        }],
-        created_at: String::new(),
-    };
-    assert_invalid_group_final_readiness_snapshot(
-        store
-            .write_group_final_readiness_snapshot(&attempt, &blank_message)
-            .expect_err("blank diagnostic messages must be rejected"),
-        "diagnostic message must not be empty",
-    );
-}
-
-#[test]
-fn group_final_readiness_rejects_escaping_repair_target_ids() {
-    let (_tmp, store, attempt) = setup();
-    for repair_target in [
-        RepairTarget {
-            kind: RepairTargetKind::CurrentWorkItem,
-            logical_work_item_ids: vec!["../work-item".to_string()],
-            work_item_revision_ids: vec!["work_item_revision_0001".to_string()],
-        },
-        RepairTarget {
-            kind: RepairTargetKind::CurrentWorkItem,
-            logical_work_item_ids: vec!["work_item_0001".to_string()],
-            work_item_revision_ids: vec!["../work-item-revision".to_string()],
-        },
-    ] {
-        let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
-        let mut finding = final_readiness_finding();
-        finding.repair_target = Some(repair_target);
-        unit.review_findings = Some(vec![finding]);
-        let snapshot = GroupFinalReadinessSnapshot {
-            attempt_id: attempt.id.clone(),
-            status: GroupFinalReadinessStatus::Complete,
-            units: vec![unit],
-            diagnostics: Vec::new(),
-            created_at: String::new(),
-        };
-
-        assert!(matches!(
-            store.write_group_final_readiness_snapshot(&attempt, &snapshot),
-            Err(ProductStoreError::PathEscape(_))
-        ));
-    }
-}
-
-#[test]
-fn group_final_readiness_rejects_escaping_artifact_references() {
-    let (_tmp, store, attempt) = setup();
-    let mut unit = ready_unit("unit_0001", "work_item_0001", "unit_run_0001");
-    unit.review_raw_provider_output_ref = Some("../outside.txt".to_string());
-    let snapshot = GroupFinalReadinessSnapshot {
-        attempt_id: attempt.id.clone(),
-        status: GroupFinalReadinessStatus::Complete,
-        units: vec![unit],
-        diagnostics: Vec::new(),
-        created_at: String::new(),
-    };
-
-    assert!(matches!(
-        store.write_group_final_readiness_snapshot(&attempt, &snapshot),
-        Err(ProductStoreError::PathEscape(value)) if value == "../outside.txt"
-    ));
-}
-
-#[test]
-fn group_final_readiness_model_defaults_missing_future_fields() {
-    let snapshot: GroupFinalReadinessSnapshot = read_json_from_str(
-        r#"{
-            "attempt_id": "coding_attempt_0001",
-            "status": "incomplete",
-            "units": [{
-                "unit_id": "unit_0001",
-                "logical_work_item_id": "work_item_0001",
-                "unit_run_id": "unit_run_0001",
-                "start_commit": "start_commit_0001",
-                "completion_commit": "completion_commit_0001"
-            }]
-        }"#,
-    );
-
-    assert!(snapshot.diagnostics.is_empty());
-    assert!(snapshot.created_at.is_empty());
-    assert_eq!(
-        snapshot.units[0].unit_run_id.as_deref(),
-        Some("unit_run_0001")
-    );
-    assert_eq!(
-        snapshot.units[0].start_commit.as_deref(),
-        Some("start_commit_0001")
-    );
-    assert_eq!(
-        snapshot.units[0].completion_commit.as_deref(),
-        Some("completion_commit_0001")
-    );
-    assert!(!snapshot.units[0].empty_observation);
-    assert_eq!(snapshot.units[0].commit_shas, Vec::<String>::new());
-    assert!(snapshot.units[0].review_verdict.is_none());
-}
-
-fn assert_invalid_group_final_readiness_snapshot(error: ProductStoreError, expected_reason: &str) {
-    assert!(matches!(
-        error,
-        ProductStoreError::InvalidRecord {
-            kind: "group_final_readiness_snapshot",
-            reason,
-        } if reason == expected_reason
-    ));
-}
-
-fn read_json_from_str(value: &str) -> GroupFinalReadinessSnapshot {
-    serde_json::from_str(value).expect("deserialize readiness snapshot")
-}
+include!("tests/group_final_readiness_snapshots.rs");

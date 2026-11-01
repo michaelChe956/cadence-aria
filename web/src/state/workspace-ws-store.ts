@@ -1,12 +1,22 @@
 import { create } from "zustand";
+import type { LcResumeRecoveryDto } from "../api/types";
+import { isLcResumeRecoveryDto } from "../api/types";
 import type { ChatEntry, ChoiceResponsePayload } from "./chat-entries";
+import { snapshotGateFingerprint } from "./cockpit-action-routing";
+import { gateArchiveClosedCopy, gateArchiveFeedbackCopy } from "./gate-prompt-copy";
 import {
   emptyWorkspaceContentCache,
   getWorkspaceContentCacheValue,
   setWorkspaceContentCacheEntry,
 } from "./workspace-content-cache";
+import { durableRejectionTurnFromSession, humanGateActions } from "./workspace-ws-store-human-gate";
 import { refreshPreparedContextAuthorGuidance } from "./workspace-ws-store-guidance";
 import { setProviderSelection } from "./workspace-ws-store-providers";
+import {
+  appendBufferedStreamChunk,
+  clearBufferedStream,
+  flushBufferedStream,
+} from "./workspace-ws-store-stream-buffers";
 import {
   beginHumanPresentationSave,
   completeHumanPresentationSave,
@@ -25,9 +35,11 @@ import {
   emptyWorkItemPlanProjectionArtifacts,
   emptyNodeDetail,
   ensureNodeDetail,
+  mergeSnapshotNodeDetail,
   mergeVisitedStages,
   normalizeTimelineNodeDetails,
   normalizeWorkspaceArtifact,
+  pendingChoiceRequestsFromSession,
   STREAMING_STAGES,
   upsertArtifactVersionSummary,
   upsertEvent,
@@ -44,13 +56,19 @@ export {
   workspaceContentCacheKey,
 } from "./workspace-ws-selectors";
 export type {
+  AdvanceCommandState,
   ArtifactVersion,
   ArtifactVersionSummary,
   ExecutionEvent,
   ExecutionEventKind,
   ExecutionEventStatus,
+  GateClosureDecision,
+  HumanGateClosure,
+  HumanGateTurnState,
+  HumanGateTurnStatus,
   NodeDetailSummary,
   PermissionRequest,
+  ProtocolDiagnostic,
   ProtocolErrorState,
   RecoverableInterruptedRun,
   ProviderConfigSnapshot,
@@ -82,10 +100,30 @@ const initialState: WorkspaceWsState = {
   stage: "prepare_context",
   superpowersEnabled: false,
   openSpecEnabled: false,
+  sessionStatus: null,
+  flowKind: null,
+  runPolicy: null,
+  runHistory: null,
+  reviewInvocationScope: null,
+  humanGateSnapshot: null,
+  previousGateFindings: null,
+  repairReservation: null,
+  snapshotGateIdentity: null,
+  snapshotGateOpenedAt: null,
+  policyDiagnostics: [],
+  providerStartLedger: [],
+  singleCandidatePhase: null,
+  // REQ-WSC-18：候选编译失败事实（session_state 归一；null=无/旧失败）。
+  candidateCompileFailure: null,
+  workItemPlanSourceRevisionRef: null,
+  planCandidateIrRef: null,
+  mechanicalReportRef: null,
+  publicationProvenanceRef: null,
   visitedStages: ["prepare_context"],
   messages: [],
   checkpoints: [],
   chatEntries: [],
+  pendingChoiceRequests: [],
   artifact: null,
   workItemPlanCandidate: null,
   workItemPlanArtifact: null,
@@ -113,6 +151,12 @@ const initialState: WorkspaceWsState = {
   error: null,
   activeRunId: null,
   recoverableInterruptedRun: null,
+  // C1（Task 6.1）：LC 恢复权威投影；reset/切会话/首帧前为 null（无事实）。
+  lcResumeRecovery: null,
+  // 「登记并重试」最近回执；reset/切会话清空（跨会话不保留旧登记）。
+  trustRegistration: null,
+  // trust 指引卡结构化指导；reset/切会话/新 error 帧清空（只配对最近错误）。
+  trustMissingGuidance: null,
   protocolError: null,
   providerLocked: false,
   providerSnapshot: null,
@@ -123,7 +167,92 @@ const initialState: WorkspaceWsState = {
   permissionModes: { author: "auto", reviewer: "auto" },
   pendingReviewDecision: null,
   pendingReviewerSummary: null,
+  humanGateTurn: null,
+  // P2（REQ-WSC-15 归因扩展）：error 帧归因线索与排除失败事实（瞬态，
+  // 动作/回执/关门/reset 清空）。
+  lastGateLocalAction: null,
+  gateExclusionFailure: null,
+  planRepair: null,
+  // P0 1.2：durable automation 归属；reset/首帧前保持 null（未知）。
+  automation: null,
+  humanGateClosure: null,
+  advanceCommands: {},
+  protocolDiagnostics: [],
+  connectionCloseDiagnostics: [],
 };
+
+/**
+ * C1（Task 6.1）：session_state.lc_resume_recovery 的权威全量替换口径。
+ * 字段缺席/显式 null = 当前无恢复事实（清卡，resolved 后续帧同规）；
+ * 畸形载荷不构成清卡权威事实——fail-closed 保留同会话旧投影（跨会话传
+ * previous=null 即不保留），不伪造 null 态、不从错误文本推恢复事实。
+ */
+function lcResumeRecoveryFromWire(
+  raw: unknown,
+  previous: LcResumeRecoveryDto | null,
+): LcResumeRecoveryDto | null {
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+  return isLcResumeRecoveryDto(raw) ? raw : previous;
+}
+
+function snapshotIdentityFor(
+  fingerprint: string,
+  openedAt: string,
+): string {
+  return `snapshot:${openedAt}:${fingerprint}`;
+}
+
+function isArchivedGateEntry(entry: ChatEntry): boolean {
+  return entry.type === "gate_prompt" && typeof entry.metadata?.gate_archive_round === "number";
+}
+
+/**
+ * F-49 A1/B5：把被新一轮门取代的旧门卡留档——只读（resolved=true）+ 轮次 + 该轮
+ * 提交的反馈摘要（未记录到反馈时不谎报「已提交反馈」）。resolution 用
+ * `superseded`，与 confirm/terminate（关门决定）区分。
+ */
+function archiveGateEntry(entry: ChatEntry, round: number): ChatEntry {
+  const submitted = entry.metadata?.submitted_feedback;
+  const note =
+    typeof submitted === "string" && submitted.trim()
+      ? gateArchiveFeedbackCopy(round, submitted)
+      : gateArchiveClosedCopy(round);
+  return {
+    ...entry,
+    resolved: true,
+    resolution: "superseded",
+    metadata: {
+      ...entry.metadata,
+      gate_archive_round: round,
+      gate_archive_note: note,
+    },
+  };
+}
+
+/**
+ * F-49 A1：门内轮次切换即收口旧门卡。命中条件是「未决 + 门身份与来卡不同」——
+ * 同身份重放（引擎同 turn_id 重放）只更新同一条目，不触发留档。
+ */
+function supersedeStaleGateEntries(entries: ChatEntry[], incoming: ChatEntry): ChatEntry[] {
+  const incomingIdentity = incoming.metadata?.gate_identity;
+  if (typeof incomingIdentity !== "string") {
+    // 无门身份的卡（legacy 形态）不构成「新一轮」凭据：fail-closed 不动既有卡。
+    return [...entries];
+  }
+  let round = entries.filter(isArchivedGateEntry).length;
+  return entries.map((entry) => {
+    if (entry.type !== "gate_prompt" || entry.resolved === true) {
+      return entry;
+    }
+    if (entry.metadata?.gate_identity === incomingIdentity) {
+      return entry;
+    }
+    round += 1;
+    return archiveGateEntry(entry, round);
+  });
+}
 
 export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((set, get) => ({
   ...initialState,
@@ -158,17 +287,110 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         state.human_presentation_revisions,
       );
 
+      const sameSession = prev.sessionId === state.session_id;
+      const snapshotGateFingerprintValue = state.human_gate_snapshot
+        ? snapshotGateFingerprint(state.human_gate_snapshot)
+        : null;
+      const snapshotGateOpenedAt = snapshotGateFingerprintValue
+        ? sameSession && prev.snapshotGateIdentity?.endsWith(`:${snapshotGateFingerprintValue}`)
+          ? prev.snapshotGateOpenedAt
+          : new Date().toISOString()
+        : null;
+      const snapshotGateIdentity = snapshotGateFingerprintValue && snapshotGateOpenedAt
+        ? snapshotIdentityFor(snapshotGateFingerprintValue, snapshotGateOpenedAt)
+        : null;
+      const snapshotGateChanged = sameSession && snapshotGateIdentity !== prev.snapshotGateIdentity;
+      const humanGateSnapshot = state.human_gate_snapshot
+        ? { ...state.human_gate_snapshot, opened_at: snapshotGateOpenedAt ?? undefined }
+        : null;
+      // C2（REQ-HGC-02 场景 3）：跨轮 delta 的前轮事实——同会话且快照被替换
+      // （复评重建；与 T1 后端 carry-forward 同一「快照在场=同一 logical gate
+      // episode」判据）时保留旧快照 findings；首次开门/关门/跨会话/刷新一律
+      // null（历史不全 → 门卡显式 unknown，不猜）。
+      const previousGateFindings =
+        sameSession && humanGateSnapshot !== null && snapshotGateChanged
+          ? prev.humanGateSnapshot?.findings ?? null
+          : humanGateSnapshot !== null && sameSession
+            ? prev.previousGateFindings
+            : null;
+      const durableGateStillOpen = humanGateSnapshot !== null;
+      // REQ-WSC-14（k3 REQ-WSC-14 不符合项）：刷新/重建后仍要读到「最近一次
+      // 拒收」——否则 owner 换一次页面，被拒原因就只剩一条失败行。
+      const durableRejectionTurn = durableRejectionTurnFromSession(state, prev, sameSession, {
+        changed: snapshotGateChanged,
+        openedAt: snapshotGateOpenedAt,
+      });
+      // 重建口径：durable snapshot 在场即门仍开；否则要求仍处 legacy human_confirm 阶段。
+      const gateProjectionStillOpen = durableGateStillOpen || state.stage === "human_confirm";
+      // F-47 REQ-NDR-01：快照应用是 merge 而非重建——原实现整表重建 nodeDetails，
+      // 任何一帧 session_state 都会把 REST 已水合的 detail 换成空壳，而水合去重 ref
+      // 阻止二次拉取 → token 行静默消失且不自愈（诊断 §2.2 B2，探针实测）。
+      // 保留规则：同会话 + 节点仍在 timeline 中 + 条目已物化（REST 水合 / 内联 /
+      // 本地内容落库，参见 `hydration_pending`）。纯占位壳按当前节点重建，避免沿用
+      // 陈旧 status/ended_at；快照内联 detail 最后覆盖（REQ-NDR-01 场景二：内联优先）。
+      // 跨会话不保留：节点 id 同构（timeline_node_00N），串场即错误数据。
+      const timelineNodeIdSet = new Set(timelineNodes.map((node) => node.node_id));
+      const preservedNodeDetails = sameSession
+        ? Object.fromEntries(
+            Object.entries(prev.nodeDetails).filter(
+              ([nodeId, detail]) =>
+                timelineNodeIdSet.has(nodeId) && detail.hydration_pending !== true,
+            ),
+          )
+        : {};
+      // 快照内联 detail 覆盖对应节点（场景二：内联优先），但对已物化条目走 merge——
+      // 内联投影裁剪掉的执行事件 output 不覆盖已水合的载荷（见 mergeSnapshotNodeDetail）。
+      const inlineNodeDetails = Object.fromEntries(
+        Object.entries(normalizeTimelineNodeDetails(state.timeline_node_details ?? {})).map(
+          ([nodeId, inline]) => [
+            nodeId,
+            preservedNodeDetails[nodeId]
+              ? mergeSnapshotNodeDetail(preservedNodeDetails[nodeId], inline)
+              : inline,
+          ],
+        ),
+      );
       const nextState: WorkspaceWsState = {
         ...prev,
         sessionId: state.session_id,
         workspaceType: state.workspace_type,
+        // P0 1.2（REQ-WIGA-08）：服务端省略（读取失败/未知）保持 null，不猜 client。
+        automation: state.automation ?? null,
+        planRepair: state.plan_repair ?? null,
         stage: state.stage,
         superpowersEnabled: state.superpowers_enabled ?? false,
         openSpecEnabled: state.openspec_enabled ?? false,
+        sessionStatus: state.session_status,
+        flowKind: state.flow_kind,
+        runPolicy: state.run_policy,
+        runHistory: state.run_history,
+        previousGateFindings,
+        reviewInvocationScope: state.review_invocation_scope ?? null,
+        humanGateSnapshot,
+        snapshotGateIdentity,
+        snapshotGateOpenedAt,
+        repairReservation: state.repair_reservation ?? null,
+        policyDiagnostics: state.policy_diagnostics ?? [],
+        providerStartLedger: state.provider_start_ledger ?? [],
+        singleCandidatePhase: state.single_candidate_phase ?? null,
+        // REQ-WSC-18：候选编译失败事实全量替换（后端对旧候选失败整体省略
+        // 该字段——缺席即回 null，不保留旧值，防「已重生成仍显示失败」）。
+        candidateCompileFailure: state.candidate_compile_failure ?? null,
+        workItemPlanSourceRevisionRef: state.work_item_plan_source_revision_ref ?? null,
+        planCandidateIrRef: state.plan_candidate_ir_ref ?? null,
+        mechanicalReportRef: state.mechanical_report_ref ?? null,
+        publicationProvenanceRef: state.publication_provenance_ref ?? null,
         visitedStages: visitedStagesFor(state.stage),
         messages,
         checkpoints: state.checkpoints,
         chatEntries: [],
+        // F-59：pending_choice_requests 归一进 store（等待提示条数据源；
+        // 首见时刻同会话跨帧保留）。
+        pendingChoiceRequests: pendingChoiceRequestsFromSession(
+          state.pending_choice_requests,
+          prev.pendingChoiceRequests,
+          sameSession,
+        ),
         artifact: artifactMarkdown,
         workItemPlanCandidate,
         workItemPlanArtifact,
@@ -195,7 +417,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         selectedNodeId: selectedNodeStillExists ? prev.selectedNodeId : defaultSelectedNodeId,
         nodeDetails: {
           ...detailsForTimelineNodes(timelineNodes, state.session_id),
-          ...normalizeTimelineNodeDetails(state.timeline_node_details ?? {}),
+          ...preservedNodeDetails,
+          ...inlineNodeDetails,
         },
         nodeSummaries: state.timeline_node_summaries ?? {},
         contentCache:
@@ -212,6 +435,33 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         protocolError: null,
         activeRunId: state.active_run_id ?? null,
         recoverableInterruptedRun: state.recoverable_interrupted_run ?? null,
+        // C1（Task 6.1）：恢复事实随权威 SessionState 全量替换；跨会话
+        // 不保留旧投影（previous 传 null），畸形载荷 fail-closed 不清卡。
+        lcResumeRecovery: lcResumeRecoveryFromWire(
+          state.lc_resume_recovery,
+          sameSession ? prev.lcResumeRecovery : null,
+        ),
+        // 「登记并重试」回执是本会话修复事实：同会话保留，跨会话清空。
+        trustRegistration: sameSession ? prev.trustRegistration : null,
+        // 结构化 trust 指导是易失错误伴影：SessionState 全量替换时清空
+        //（error 本身也不在 SessionState 里，重连后由新帧重建）。
+        trustMissingGuidance: null,
+        // D8：同会话重连保留 turn/command 去重集与诊断（不丢弃）；
+        // 跨会话一律清空，避免上一会话的门与推进记忆串到新会话。
+        // REQ-WSC-14：durable 最近拒收优先重建终态 turn（刷新后四要素仍可读）；
+        // 否则沿用同会话的 live turn。
+        humanGateTurn: durableRejectionTurn
+          ? durableRejectionTurn
+          : sameSession && gateProjectionStillOpen && prev.humanGateClosure === null
+            ? prev.humanGateTurn
+            : null,
+        humanGateClosure:
+          sameSession && gateProjectionStillOpen && !snapshotGateChanged
+            ? prev.humanGateClosure
+            : null,
+        advanceCommands: sameSession ? prev.advanceCommands : {},
+        protocolDiagnostics: sameSession ? prev.protocolDiagnostics : [],
+        connectionCloseDiagnostics: sameSession ? prev.connectionCloseDiagnostics : [],
         reviewerEnabled: state.reviewer_enabled_at_start ?? prev.reviewerEnabled,
       };
       return {
@@ -228,59 +478,22 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       const details = { ...prev.nodeDetails };
       const detail = ensureNodeDetail(details, nodeId);
       detail.streaming_content += content;
-      return { nodeDetails: details };
+      const lastEventAt = new Date().toISOString();
+      return {
+        nodeDetails: details,
+        // REQ-UI37-18：持续流式事件刷新节点事件钟，长 running 行不得被判为静默。
+        timelineNodes: prev.timelineNodes.some((node) => node.node_id === nodeId)
+          ? prev.timelineNodes.map((node) =>
+              node.node_id === nodeId ? { ...node, last_event_at: lastEventAt } : node,
+            )
+          : prev.timelineNodes,
+      };
     }),
 
   appendBufferedStreamChunk: (content, nodeId, role) =>
-    set((prev) => {
-      const existing = prev.streamBuffers[nodeId] ?? { chunks: [], visibleText: "", role };
-      return {
-        streamBuffers: {
-          ...prev.streamBuffers,
-          [nodeId]: {
-            ...existing,
-            role,
-            chunks: [...existing.chunks, content],
-          },
-        },
-      };
-    }),
+    set((prev) => appendBufferedStreamChunk(prev, content, nodeId, role)),
 
-  flushBufferedStream: (nodeId) =>
-    set((prev) => {
-      const buffer = prev.streamBuffers[nodeId];
-      if (!buffer || buffer.chunks.length === 0) {
-        return {};
-      }
-      const appended = buffer.chunks.join("");
-      const visibleText = buffer.visibleText + appended;
-      const entryId = chatEntryId(nodeId, "stream-active");
-      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
-      const timelineNode = prev.timelineNodes.find((candidate) => candidate.node_id === nodeId);
-      const provider = timelineNode?.agent ?? prev.nodeDetails[nodeId]?.provider?.name ?? null;
-      const entry: ChatEntry = {
-        id: entryId,
-        type: "provider_stream",
-        role: buffer.role,
-        content: visibleText,
-        timestamp: new Date().toISOString(),
-        node_id: nodeId,
-        content_ref: { kind: "node_stream", nodeId },
-        metadata: providerEntryMetadata(timelineNode, provider),
-      };
-      const chatEntries = index === -1 ? [...prev.chatEntries, entry] : [...prev.chatEntries];
-      if (index !== -1) {
-        chatEntries[index] = entry;
-      }
-      return {
-        chatEntries,
-        streamBuffers: {
-          ...prev.streamBuffers,
-          [nodeId]: { ...buffer, chunks: [], visibleText },
-        },
-        activeStreamEntryId: entryId,
-      };
-    }),
+  flushBufferedStream: (nodeId) => set((prev) => flushBufferedStream(prev, nodeId)),
 
   completeBufferedStream: (nodeId, messageId, checkpointId) => {
     get().flushBufferedStream(nodeId);
@@ -288,14 +501,7 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     get().clearBufferedStream(nodeId);
   },
 
-  clearBufferedStream: (nodeId) =>
-    set((prev) => {
-      if (!prev.streamBuffers[nodeId]) {
-        return {};
-      }
-      const { [nodeId]: _removed, ...streamBuffers } = prev.streamBuffers;
-      return { streamBuffers };
-    }),
+  clearBufferedStream: (nodeId) => set((prev) => clearBufferedStream(prev, nodeId)),
 
   clearAllStreamBuffers: () => set({ streamBuffers: {} }),
 
@@ -361,17 +567,97 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
-  resolveGateEntry: (resolution) =>
+  // F-49 A1：门卡专用 upsert——门内轮次切换（门载体从 durable snapshot 切到 typed
+  // turn）即收口旧门卡，保证任一时刻只有一张可动作门卡。判据是门身份
+  // （gate_identity）而非条目 id：同一次门内存活期内 id 会变
+  // （snapshot:<opened_at>:<fp> → <turn_id>），只有身份能识别「同一张门」。
+  upsertGatePromptEntry: (entry) =>
     set((prev) => {
-      const entries = [...prev.chatEntries];
-      for (let index = entries.length - 1; index >= 0; index -= 1) {
-        const entry = entries[index];
-        if (entry.type === "gate_prompt" && entry.resolved !== true) {
-          entries[index] = { ...entry, resolved: true, resolution };
-          return { chatEntries: entries };
-        }
+      const next = supersedeStaleGateEntries(prev.chatEntries, entry);
+      const index = next.findIndex((existing) => existing.id === entry.id);
+      if (index === -1) {
+        next.push(entry);
+      } else {
+        next[index] = entry;
       }
-      return { chatEntries: prev.chatEntries };
+      return { chatEntries: next };
+    }),
+
+  // REQ-WSC-13/14：人工门动作族拆到独立模块（单文件行数门禁）。
+  ...humanGateActions(set),
+
+  applyAdvanceCompleted: (commandId, attemptId, workspaceEntry) =>
+    set((prev) => {
+      const existing = prev.advanceCommands[commandId];
+      if (existing?.status === "completed" || existing?.status === "rejected") {
+        return {};
+      }
+      return {
+        advanceCommands: {
+          ...prev.advanceCommands,
+          [commandId]: {
+            command_id: commandId,
+            status: "completed",
+            code: null,
+            reason: null,
+            attempt_id: attemptId,
+            workspace_entry: workspaceEntry,
+            inlineError: null,
+          },
+        },
+      };
+    }),
+
+  applyAdvanceRejected: (commandId, code, reason) =>
+    set((prev) => {
+      const existing = prev.advanceCommands[commandId];
+      if (existing?.status === "completed" || existing?.status === "rejected") {
+        return {};
+      }
+      return {
+        advanceCommands: {
+          ...prev.advanceCommands,
+          [commandId]: {
+            command_id: commandId,
+            status: "rejected",
+            code,
+            reason,
+            attempt_id: null,
+            workspace_entry: null,
+            inlineError: null,
+          },
+        },
+      };
+    }),
+
+  recordProtocolDiagnostic: (diagnostic) =>
+    set((prev) => ({
+      protocolDiagnostics: [...prev.protocolDiagnostics, diagnostic].slice(-50),
+    })),
+  recordConnectionCloseDiagnostic: (diagnostic) =>
+    set((prev) => ({
+      connectionCloseDiagnostics: [...prev.connectionCloseDiagnostics, diagnostic].slice(-50),
+    })),
+
+
+  applyGateProtocolError: (turnId, error) =>
+    set((prev) =>
+      prev.humanGateTurn?.turn_id === turnId
+        ? { humanGateTurn: { ...prev.humanGateTurn, inlineError: error } }
+        : {},
+    ),
+
+  applyAdvanceProtocolError: (commandId, error) =>
+    set((prev) => {
+      const command = prev.advanceCommands[commandId];
+      return command
+        ? {
+            advanceCommands: {
+              ...prev.advanceCommands,
+              [commandId]: { ...command, inlineError: error },
+            },
+          }
+        : {};
     }),
 
   updateStreamingEntry: (entryId, content) =>
@@ -405,6 +691,18 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       };
     }),
 
+  setEntryUsage: (entryId, usage) =>
+    set((prev) => {
+      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
+      if (index === -1) {
+        return {};
+      }
+      const next = [...prev.chatEntries];
+      const current = next[index];
+      next[index] = { ...current, metadata: { ...current.metadata, usage } };
+      return { chatEntries: next };
+    }),
+
   finalizeStreamingEntry: (entryId) =>
     set((prev) =>
       prev.activeStreamEntryId === entryId
@@ -423,6 +721,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       stage,
       visitedStages: mergeVisitedStages(prev.visitedStages, stage),
       streamingContent: STREAMING_STAGES.has(stage) ? prev.streamingContent : "",
+      // 进入 human_confirm = 新一代 legacy 门开启：清上一轮闭环，避免新门被误判为已收。
+      // 其余阶段迁移不清：闭环绑定在当前 turn/snapshot 上，清掉会让已收敛的门在收件箱复活
+      // （terminate 时序为 HumanGateClosed → StageChange("completed")）；
+      // 新 typed 门的旧闭环由 applyHumanGateTurnOpen 清除。
+      humanGateClosure:
+        stage === "human_confirm" && stage !== prev.stage ? null : prev.humanGateClosure,
     })),
 
   setArtifact: (markdown, version) =>
@@ -519,6 +823,16 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set((prev) => failPendingHumanPresentationSaves(prev, message)),
   addTimelineNode: (node) =>
     set((prev) => {
+      // v38 复验 #1（重复「Review Round 1」卡）：活跃 run 期间重连/初帧 attach，服务端把
+      // snapshot 基线压到补发窗口首事件之前并重发窗口帧（attachment.rs 的
+      // activate_attachment_with_initial_frames / journal.rs 的 active_run_window），窗口内
+      // 含客户端已消化的 timeline_node_created 重叠帧；前端对 session_state 无条件拉低
+      // event_seq 基线（useWorkspaceWs.ts），重叠 created 帧必然通过 seq 去重到达这里。
+      // 因此按 node_id 幂等：节点已在列表即忽略追加（首写优先——已有节点可能是快照终态
+      // 或已吸收 update 帧，重放的初态 created 不得回退它），active/selected 亦不动。
+      if (prev.timelineNodes.some((existing) => existing.node_id === node.node_id)) {
+        return prev;
+      }
       const retrySourceNodeId = node.retry?.retry_of_node_id ?? null;
       const streamBuffers = { ...prev.streamBuffers };
       if (retrySourceNodeId) {
@@ -528,7 +842,10 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         ? chatEntryId(retrySourceNodeId, "stream-active")
         : null;
       return {
-        timelineNodes: [...prev.timelineNodes, node],
+        timelineNodes: [
+          ...prev.timelineNodes,
+          { ...node, last_event_at: node.last_event_at ?? new Date().toISOString() },
+        ],
         activeNodeId: node.node_id,
         selectedNodeId: node.node_id,
         nodeDetails: {
@@ -557,6 +874,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
               status,
               summary: summary ?? node.summary,
               completed_at: completedAt ?? node.completed_at,
+              // REQ-UI37-18：timeline_node_updated 本身就是一次引擎事件。
+              last_event_at: new Date().toISOString(),
             }
           : node,
       ),
@@ -758,6 +1077,31 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
 
   setProviderStatus: (status) => set({ providerStatus: status }),
 
+  // 「登记并重试」回执对账（owner 2026-10-12 直批）：幂等覆盖最近回执；
+  // 不自动重新生成、不改 error 原文（卡片据 provider 匹配切成功态）。
+  applyTrustEntryRegistered: (receipt) => set({ trustRegistration: receipt }),
+
+  // 结构化 trust 指导（owner 2026-10-12 直批卡简化）：与最近一次
+  // trust 缺失 error 帧配对；null=清空（新 error 帧/reset/切会话）。
+  applyTrustMissingGuidance: (guidance) => set({ trustMissingGuidance: guidance }),
+
+  setTimelineNodesForTest: (nodes) => set({ timelineNodes: nodes }),
+  setActiveNodeId: (nodeId) => set({ activeNodeId: nodeId }),
+  setSessionStatus: (status) => set({ sessionStatus: status }),
+  setHumanGateSnapshot: (snapshot) =>
+    set((prev) => {
+      const openedAt = snapshot ? snapshot.opened_at ?? new Date().toISOString() : null;
+      const snapshotGateIdentity = snapshot && openedAt
+        ? snapshotIdentityFor(snapshotGateFingerprint(snapshot), openedAt)
+        : null;
+      return {
+        humanGateSnapshot: snapshot ? { ...snapshot, opened_at: openedAt ?? undefined } : null,
+        snapshotGateOpenedAt: openedAt,
+        snapshotGateIdentity,
+      };
+    }),
+  setSessionIdForTest: (sessionId) => set({ sessionId }),
+
   upsertExecutionEvent: (event) =>
     set((prev) => {
       if (event.node_id) {
@@ -808,3 +1152,4 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set({ acknowledgedAbortedNodes: Array.from(new Set(nodeIds)) }),
   reset: () => set(initialState),
 }));
+

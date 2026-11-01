@@ -1,0 +1,176 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_6bdfae2798350275bcae0dab",
+    "work_item_revision_id": "work_item_revision_6bdfae2798350275bcae0dab",
+    "canonical_contract_hash": "219e4eab23e40508c20bd932eb59246b6efcaa9f6b964461de915f4f7ac60305",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "Hello API 最小后端服务",
+      "goal": "WHEN 联调冒烟需要问候接口 THE SYSTEM SHALL 提供 GET /api/hello 并返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+      "non_goals": [
+        "不引入任何第三方依赖、数据库、认证、外部服务或前端页面。",
+        "不新增 GET /api/hello 之外的端点或契约，不做任何其他拆分。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/hello 内部错误返回 500 且 body 恰为 {\"error\":\"internal\"}，错误响应示例：{\"error\":\"internal\"}"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "tests/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "web/"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "TASK-001",
+        "TASK-002",
+        "design_requirement_placeholder"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_6bdfae2798350275bcae0dab",
+      "objective": "WHEN 联调冒烟需要问候接口 THE SYSTEM SHALL 提供 GET /api/hello 并返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 首次执行 node --test tests/hello.test.js 而服务未实现 THE SYSTEM SHALL 测试失败。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 依据失败测试实现 server.js THE SYSTEM SHALL 仅用 Node 内置 node:http 监听 127.0.0.1:3000 使 GET /api/hello 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "tests/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "web/"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN 收到 GET /api/hello 请求 THE SYSTEM SHALL 返回 200 且 body 恰为 {\"message\":\"hello\"}。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/hello.test.js",
+          "manual_instruction": "无",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "server.js、tests/hello.test.js、CHECK-001 通过证据"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_6bdfae2798350275bcae0dab",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [
+            "design_requirement_placeholder"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "tests/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "web/"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "GET /api/hello 内部错误返回 500 且 body 恰为 {\"error\":\"internal\"}，错误响应示例：{\"error\":\"internal\"}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test tests/hello.test.js",
+          "manual_instruction": "无",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "1123eacac7d037e9bf8fbbc1de9983973fe1e802a8da760434b47a4c599a3584",
+    "coder_projection_hash": "db56b165cb48a64c6a798a546f28016db4cb1256bf7d675a219b8af65735c0ea",
+    "reviewer_projection_hash": "4a061530f42eae2672ce5aecdb9d2187fcf8e18fad958df2a1ce4a2c2e0a03a0",
+    "created_at": "2026-09-08T19:19:22.410735095+00:00"
+  }
+}

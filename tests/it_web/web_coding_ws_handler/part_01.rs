@@ -6,42 +6,44 @@ use cadence_aria::cross_cutting::streaming_provider::{
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::{
-    CodingAttemptStore, CreateBlockedGateInput, CreateCodingAttemptInput,
-    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
+    CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
+    CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput, ResolveChoiceGateInput,
+};
+use cadence_aria::product::coding_models::{
+    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptStatus, CodingChoiceOption,
+    CodingEntryType, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus,
+    CodingGateAction, CodingGateActionType, CodingGateKind, CodingGateRequired,
+    CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunEventType, CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingTimelineNode, CodingTimelineNodeStatus, PushStatus, RemoteKind, ReviewRequest,
+    ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict, WorkItemExecutionPlan,
 };
 use cadence_aria::product::coding_workspace_runner::CodingRunnerCommand;
-use cadence_aria::product::coding_models::{
-    CodingAgentRole, CodingAttemptPlanBinding, CodingAttemptStatus, CodingEntryType,
-    CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnitStatus, CodingGateAction,
-    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunEventType,
-    CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger, CodingTimelineNode,
-    CodingTimelineNodeStatus,
-    PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewVerdict, WorkItemExecutionPlan,
-};
-use cadence_aria::product::lifecycle_store::{
-    CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput,
-    LifecycleStore,
-};
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
+use cadence_aria::product::lifecycle_store::{
+    CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
+};
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
     DependencyGraphRevision, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem,
     PlanProjectionBundle, PlanRevisionReason, ProviderName, VerificationPlanRevision,
-    WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle,
-    WorkItemRevision, WorkspaceSessionStatus, WorkspaceType,
+    WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
+    WorkItemDraftVerificationPlan, WorkItemGenerationMode, WorkItemPlanLineage,
+    WorkItemPlanRevision, WorkItemPlanStatus, WorkItemProjectionBundle, WorkItemRevision,
+    WorkspaceSessionStatus, WorkspaceType,
 };
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use cadence_aria::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, HandoffContract,
     WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy, canonical_contract_hash,
 };
-use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
+use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
 use cadence_aria::product::work_item_projection::{
     CoderGroupContext, CompiledPlanProjections, HumanGroupProjection, HumanGroupWorkItemSummary,
     ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler, projection_hashes,
 };
+use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
 use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::coding_ws_handler::{
@@ -75,6 +77,7 @@ fn create_legacy_coding_attempt_fixture(
     store: &CodingAttemptStore,
     input: CreateCodingAttemptInput,
 ) -> CodingExecutionAttempt {
+    seed_legacy_project_fixture(&store.paths());
     let attempt = store.create_attempt(input).expect("create attempt");
     rewrite_as_legacy_coding_attempt_fixture(store, attempt)
 }
@@ -83,6 +86,7 @@ fn create_legacy_group_coding_attempt_fixture(
     store: &CodingAttemptStore,
     input: CreateGroupCodingAttemptInput,
 ) -> CodingExecutionAttempt {
+    seed_legacy_project_fixture(&store.paths());
     let attempt = store
         .create_group_attempt(input)
         .expect("create group attempt");
@@ -98,9 +102,8 @@ fn rewrite_as_legacy_coding_attempt_fixture(
         .delete_attempt(&attempt.project_id, &attempt.issue_id, &generated_id)
         .expect("delete generated attempt fixture");
     attempt.id = "coding_attempt_0001".to_string();
-    store
-        .save_coding_attempt(&attempt)
-        .expect("save legacy attempt fixture");
+    // 受控写 API 不允许改 attempt 身份；fixture 重新键值后直接播种初始 record。
+    crate::seed_coding_attempt_record(store, &attempt);
     attempt
 }
 
@@ -332,6 +335,8 @@ fn coding_gate_required_out_message_preserves_action_contract() {
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
         diagnostic: None,
+        triage_summary: None,
+        latest_review_verdict: None,
     };
     let message = CodingWsOutMessage::CodingGateRequired { gate };
 
@@ -376,7 +381,7 @@ async fn coding_ws_sends_session_state_on_connect_and_responds_to_ping() {
             assert_eq!(role_provider_config_snapshot.coder, ProviderName::Fake);
             assert_eq!(
                 role_provider_config_snapshot.code_reviewer,
-                ProviderName::Fake
+                Some(ProviderName::Fake)
             );
             assert!(timeline_nodes.is_empty());
         }
@@ -519,7 +524,8 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
         .expect("attempt");
     attempt.status = CodingAttemptStatus::Blocked;
     attempt.stage = CodingExecutionStage::CodeReview;
-    store.save_coding_attempt(&attempt).expect("blocked attempt");
+    // 受控写 API 不回写 status；fixture 直接播种带状态的初始 record。
+    crate::seed_coding_attempt_record(&store, &attempt);
 
     let failed_node = CodingTimelineNode {
         id: "coding_node_0009".to_string(),
@@ -533,7 +539,9 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
         completed_at: Some("2026-08-07T00:00:01Z".to_string()),
         artifact_refs: Vec::new(),
     };
-    store.save_timeline_node(&attempt, failed_node).expect("failed node");
+    store
+        .save_timeline_node(&attempt, failed_node)
+        .expect("failed node");
     let first = store
         .create_role_run(
             &attempt,
@@ -575,7 +583,12 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
             Some("provider_connection_interrupted".to_string()),
         )
         .expect("first failure");
-    let cycle_id = first.retry_metadata.as_ref().expect("cycle metadata").cycle_id.clone();
+    let cycle_id = first
+        .retry_metadata
+        .as_ref()
+        .expect("cycle metadata")
+        .cycle_id
+        .clone();
     let second = store
         .create_retry_role_run(
             &attempt,
@@ -702,7 +715,10 @@ async fn rest_and_ws_snapshots_share_persisted_retry_runs_and_actionable_exhaust
         serde_json::json!([raw_refs[2]])
     );
     assert_eq!(rest["pending_gates"][0]["gate_id"], gate.gate_id);
-    assert_eq!(rest["pending_gates"][0]["reason_code"], "code_review_provider_interrupted");
+    assert_eq!(
+        rest["pending_gates"][0]["reason_code"],
+        "code_review_provider_interrupted"
+    );
     assert_eq!(rest["role_runs"][2]["retry_metadata"]["attempt_no"], 3);
     assert_eq!(rest["role_runs"][2]["status"], "failed");
     let retry_exhausted = |snapshot: &serde_json::Value| {
@@ -803,7 +819,8 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
-                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             }),
         )
         .expect("create stage gate");
@@ -821,8 +838,14 @@ async fn coding_ws_session_state_includes_persisted_open_stage_gates() {
             assert_eq!(pending_gates.len(), 1);
             assert_eq!(pending_gates[0].gate_id, "coding_stage_gate_0001");
             assert_eq!(pending_gates[0].kind, CodingGateKind::StageGate);
-            assert_eq!(pending_gates[0].stage, Some(CodingExecutionStage::CodeReview));
-            assert_eq!(pending_gates[0].role, Some(CodingProviderRole::CodeReviewer));
+            assert_eq!(
+                pending_gates[0].stage,
+                Some(CodingExecutionStage::CodeReview)
+            );
+            assert_eq!(
+                pending_gates[0].role,
+                Some(CodingProviderRole::CodeReviewer)
+            );
             assert_eq!(
                 pending_gates[0].expires_at.as_deref(),
                 Some("2026-05-28T00:00:05Z")

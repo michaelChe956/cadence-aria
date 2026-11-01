@@ -260,7 +260,7 @@ describe("useWorkspaceWs stream reconstruction", () => {
       });
     });
     act(() => {
-      vi.advanceTimersByTime(80);
+      vi.advanceTimersByTime(50);
     });
     act(() => {
       harness.ws.receive({
@@ -296,6 +296,69 @@ describe("useWorkspaceWs stream reconstruction", () => {
         }),
       ]),
     );
+  });
+
+  it("keeps work item plan stream chunks during single-candidate generation with no workspace stage", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_work_item_plan_single_candidate");
+
+    act(() => {
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_work_item_plan_single_candidate",
+        workspace_type: "work_item_plan",
+        stage: null,
+        single_candidate_phase: "generate",
+        messages: [],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: "codex" },
+        timeline_nodes: [
+          {
+            node_id: "timeline_node_work_item_plan_single_candidate",
+            node_type: "author_run",
+            agent: "claude_code",
+            stage: "running",
+            round: null,
+            status: "active",
+            title: "Work Item Plan 单候选生成",
+            summary: null,
+            started_at: "2026-09-18T10:00:00Z",
+            completed_at: null,
+            duration_ms: null,
+            artifact_ref: null,
+            provider_config_snapshot: {
+              author: "claude_code",
+              reviewer: "codex",
+              review_rounds: 1,
+            },
+          },
+        ],
+        active_node_id: "timeline_node_work_item_plan_single_candidate",
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: "run-work-item-plan-single-candidate-1",
+      });
+      harness.ws.receive({
+        type: "stream_chunk",
+        role: "author",
+        content: "Single-candidate Work Item Plan streaming draft",
+        node_id: "timeline_node_work_item_plan_single_candidate",
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+
+    expect(useWorkspaceStore.getState().chatEntries).toEqual([
+      expect.objectContaining({
+        type: "provider_stream",
+        role: "author",
+        content: "Single-candidate Work Item Plan streaming draft",
+        node_id: "timeline_node_work_item_plan_single_candidate",
+        metadata: expect.objectContaining({ provider: "claude_code" }),
+      }),
+    ]);
   });
 
   it("keeps work item plan stream chunks when active run arrives before provider stage", () => {
@@ -346,7 +409,7 @@ describe("useWorkspaceWs stream reconstruction", () => {
       });
     });
     act(() => {
-      vi.advanceTimersByTime(80);
+      vi.advanceTimersByTime(50);
     });
 
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
@@ -358,6 +421,50 @@ describe("useWorkspaceWs stream reconstruction", () => {
         metadata: expect.objectContaining({ provider: "claude_code" }),
       }),
     ]);
+  });
+
+  it("coalesces stream chunks until the 50ms frame boundary", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "node-frame",
+          node_type: "author_run",
+          agent: "claude_code",
+          stage: "running",
+          round: null,
+          status: "active",
+          title: "生成",
+          summary: null,
+          started_at: "2026-09-17T10:00:00Z",
+          completed_at: null,
+          duration_ms: null,
+          artifact_ref: null,
+          provider_config_snapshot: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
+        },
+      });
+      harness.ws.receive({ type: "stage_change", stage: "running" });
+      harness.ws.receive({ type: "stream_chunk", role: "author", content: "第一", node_id: "node-frame" });
+      harness.ws.receive({ type: "stream_chunk", role: "author", content: "段", node_id: "node-frame" });
+      vi.advanceTimersByTime(49);
+    });
+
+    const entriesBeforeFrame = useWorkspaceStore.getState().chatEntries.filter(
+      (entry) => entry.id === "node-frame:stream-active",
+    );
+
+    expect(entriesBeforeFrame).toHaveLength(0);
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(useWorkspaceStore.getState().chatEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "node-frame:stream-active", content: "第一段" }),
+      ]),
+    );
   });
 
   it("routes work item plan auto revision stream chunks to the revision node", () => {

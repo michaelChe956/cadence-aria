@@ -11,7 +11,7 @@ const ISSUE_ID: &str = "issue_0001";
 const WORK_ITEM_ID: &str = "work_item_0001";
 const NODE_ID: &str = "coding_node_0009";
 
-struct TransportFailuresThenSuccessProvider {
+pub(super) struct TransportFailuresThenSuccessProvider {
     failures_before_success: usize,
     starts: AtomicUsize,
     inputs: Mutex<Vec<StreamingProviderInput>>,
@@ -38,7 +38,7 @@ impl CancelledProvider {
     }
 }
 
-enum RetryBoundaryMutation {
+pub(super) enum RetryBoundaryMutation {
     Abort {
         store: CodingAttemptStore,
         attempt: CodingExecutionAttempt,
@@ -57,13 +57,13 @@ enum RetryBoundaryMutation {
     },
 }
 
-struct RetryBoundaryMutationProvider {
+pub(super) struct RetryBoundaryMutationProvider {
     starts: AtomicUsize,
     mutation: Mutex<Option<RetryBoundaryMutation>>,
 }
 
 impl RetryBoundaryMutationProvider {
-    fn new(mutation: RetryBoundaryMutation) -> Self {
+    pub(super) fn new(mutation: RetryBoundaryMutation) -> Self {
         Self {
             starts: AtomicUsize::new(0),
             mutation: Mutex::new(Some(mutation)),
@@ -72,7 +72,7 @@ impl RetryBoundaryMutationProvider {
 }
 
 impl TransportFailuresThenSuccessProvider {
-    fn new(failures_before_success: usize, output: impl Into<String>) -> Self {
+    pub(super) fn new(failures_before_success: usize, output: impl Into<String>) -> Self {
         Self {
             failures_before_success,
             starts: AtomicUsize::new(0),
@@ -132,6 +132,7 @@ impl StreamingProviderAdapter for TransportFailuresThenSuccessProvider {
             let _ = event_tx.send(event).await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -224,6 +225,7 @@ impl StreamingProviderAdapter for RetryBoundaryMutationProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -248,6 +250,7 @@ impl StreamingProviderAdapter for PermissionTimeoutProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -270,6 +273,7 @@ impl StreamingProviderAdapter for CancelledProvider {
             std::future::pending::<()>().await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -728,10 +732,9 @@ async fn reviewer_transport_failure_then_invalid_structured_output_stops_without
     assert!(report.summary.contains("不是有效 JSON"));
     let inputs = provider.recorded_inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("reviewer-session-before-retry")
-    );
+    // 契约(仅 Coder 可 resume):历史 reviewer 会话不进 resume 通道,
+    // 每轮评审均为 fresh spawn;attempt_no>1 恒 fresh(既有行为)。
+    assert_eq!(inputs[0].resume_provider_session_id, None);
     assert_eq!(inputs[1].resume_provider_session_id, None);
     let persisted = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -964,6 +967,7 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -971,12 +975,7 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
         .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, &attempt.id)
         .expect("bind owner");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     let provider = RetryBoundaryMutationProvider::new(RetryBoundaryMutation::OwnerChange {
         lifecycle,
@@ -1026,5 +1025,532 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
     );
 }
 
+// ---------- T14:Coder code_delivery 资源窗与中断保留 ----------
+
+use crate::cross_cutting::provider_resources::{
+    OwnedResourceKind, OwnedResourceSpec, ProviderRunResourceScope, ResourceScopeKey,
+    StartedResourceIdentity,
+};
+
+fn t14_delivery_private_root(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> PathBuf {
+    store
+        .provider_stream_log_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("code-delivery")
+}
+
+fn t14_scratch_dir(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) -> PathBuf {
+    t14_delivery_private_root(store, attempt).join("scratch")
+}
+
+fn t14_store_root(store: &CodingAttemptStore) -> PathBuf {
+    store.paths().root().join("provider-resources")
+}
+
+/// 伪造崩溃残留 scope:旧 boot + 已确认登记的 run-owned scratch(内含
+/// 临时物),模拟 Coder 中断后未收口的 durable 事实。
+fn t14_fabricate_crashed_scratch_scope(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    run_id: &str,
+    boot: &str,
+) -> ResourceScopeKey {
+    let key = ResourceScopeKey {
+        scope_id: CodingWorkspaceEngine::coder_delivery_scope_id(attempt),
+        run_id: run_id.to_string(),
+        boot_identity: boot.to_string(),
+    };
+    let private_root = t14_delivery_private_root(store, attempt);
+    let scratch = private_root.join("scratch");
+    fs::create_dir_all(&scratch).expect("crashed scratch dir");
+    fs::write(scratch.join("run-owned.tmp"), "registered run-owned temp\n")
+        .expect("crashed scratch artifact");
+    let canonical = scratch.canonicalize().expect("canonical crashed scratch");
+    let scope = ProviderRunResourceScope::open_for_recovery(
+        &key,
+        None,
+        &private_root,
+        &t14_store_root(store),
+        None,
+    )
+    .expect("open crashed scope");
+    let reservation = scope
+        .reserve_owned_resource(
+            &OwnedResourceSpec::new(
+                "coder-run-scratch",
+                OwnedResourceKind::Directory,
+                "code_delivery run-owned scratch directory",
+            )
+            .with_private_path(canonical.clone())
+            .with_label("kind", "code_delivery"),
+        )
+        .expect("reserve crashed scratch");
+    scope
+        .confirm_started_resource(&reservation, StartedResourceIdentity::directory(&canonical))
+        .expect("confirm crashed scratch");
+    key
+}
+
+/// 伪造未知 writer 残留:旧 boot + 未确认的进程预留(崩溃窗口——是否
+/// 已 spawn 不可证,T5 合同停等)。
+fn t14_fabricate_unknown_writer_scope(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    boot: &str,
+) -> ResourceScopeKey {
+    let key = ResourceScopeKey {
+        scope_id: CodingWorkspaceEngine::coder_delivery_scope_id(attempt),
+        run_id: "coding_role_run_0001".to_string(),
+        boot_identity: boot.to_string(),
+    };
+    let private_root = t14_delivery_private_root(store, attempt);
+    fs::create_dir_all(&private_root).expect("private root");
+    let scope = ProviderRunResourceScope::open_for_recovery(
+        &key,
+        None,
+        &private_root,
+        &t14_store_root(store),
+        None,
+    )
+    .expect("open unknown-writer scope");
+    scope
+        .reserve_owned_resource(&OwnedResourceSpec::new(
+            "coder-worker-process",
+            OwnedResourceKind::Process,
+            "spawn coder worker (crash window: unconfirmed)",
+        ))
+        .expect("reserve unconfirmed process");
+    key
+}
+
+/// 与既有取消用例同款:启动 coder 执行流并在 provider 起跑后取消。
+async fn t14_cancelled_coder_run(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+    let provider = CancelledProvider::new();
+    let (tx, _rx) = mpsc::channel(16);
+    let cancellation = CancellationToken::new();
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_cancellation(cancellation.clone());
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let execute = async {
+        engine
+            .execute_coding_with_commands(
+                attempt,
+                &provider,
+                &CodingExecutionContext::default(),
+                &mut command_rx,
+            )
+            .await
+    };
+    let cancel = async {
+        tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
+            .await
+            .expect("coder provider did not start");
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(execute, cancel);
+    result
+}
+
+#[tokio::test]
+async fn coder_cancel_preserves_worktree_and_clears_only_registered_run_owned_artifacts() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("attempt worktree");
+    init_test_git_repo(&worktree);
+    // Coder 中断前事实:改源码 + stage + commit + 未暂存 dirty。
+    fs::write(worktree.join("src_lib.rs"), "pub fn coder_change() {}\n")
+        .expect("coder source change");
+    run_test_git(&worktree, &["add", "src_lib.rs"]);
+    run_test_git(&worktree, &["commit", "-m", "coder interrupted delivery"]);
+    fs::write(worktree.join("dirty.rs"), "pub fn dirty() {}\n").expect("unstaged dirty change");
+    let head_before = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    // 崩溃残留(旧 boot)的登记 run-owned 临时物 + 未登记用户临时物。
+    t14_fabricate_crashed_scratch_scope(
+        &store,
+        &attempt,
+        "coding_role_run_0001",
+        "t14-crashed-boot",
+    );
+    let unregistered = store
+        .provider_stream_log_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("unregistered-tmp");
+    fs::create_dir_all(&unregistered).expect("unregistered temp dir");
+    fs::write(unregistered.join("keep.txt"), "user temp\n").expect("user temp artifact");
+    let _ = root;
+    let scratch = t14_scratch_dir(&store, &attempt);
+
+    let error = t14_cancelled_coder_run(&store, &attempt)
+        .await
+        .expect_err("cancelled coder invocation stops without retry");
+    assert!(matches!(error, CodingWorkspaceEngineError::Aborted));
+
+    // 只有登记的 run-owned 临时物被清(先 quiesce 再清):
+    assert!(!scratch.exists(), "登记 run-owned scratch 必须清理");
+    assert!(
+        unregistered.join("keep.txt").exists(),
+        "未登记临时物不得清理"
+    );
+    // 源码/dirty/staged/commit 完整——不调 Reviewer baseline restore、
+    // 不 git clean、不整树 reset:
+    assert_eq!(
+        fs::read_to_string(worktree.join("src_lib.rs")).expect("source survives"),
+        "pub fn coder_change() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("dirty.rs")).expect("dirty survives"),
+        "pub fn dirty() {}\n"
+    );
+    assert!(
+        git_stdout(&worktree, &["log", "--oneline"]).contains("coder interrupted delivery"),
+        "Coder 合法提交必须保留"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        head_before,
+        "HEAD 不得被重置"
+    );
+    assert!(
+        !store.paths().root().join("reviewer-windows").exists(),
+        "Coder 取消不得触发 Reviewer baseline restore/窗口机制"
+    );
+    // 资源窗收口完毕(无残留登记):
+    assert!(
+        store
+            .coder_delivery_scope_keys_for_attempt(&attempt.id)
+            .expect("scope keys")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn coder_delivery_cancel_and_recycle_are_idempotent() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("attempt worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("kept.rs"), "pub fn kept() {}\n").expect("source before cancel");
+
+    let error = t14_cancelled_coder_run(&store, &attempt)
+        .await
+        .expect_err("cancelled coder invocation stops without retry");
+    assert!(matches!(error, CodingWorkspaceEngineError::Aborted));
+
+    // 取消已收口;重复取消/重复收口幂等(登记项缺失=已清,不报错、
+    // 不重复副作用)。
+    let key = ResourceScopeKey {
+        scope_id: CodingWorkspaceEngine::coder_delivery_scope_id(&attempt),
+        run_id: "coding_role_run_0001".to_string(),
+        boot_identity: format!("aria-engine-{}", std::process::id()),
+    };
+    let private_root = t14_delivery_private_root(&store, &attempt);
+    fs::create_dir_all(&private_root).expect("private root for repeat close");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let scope = ProviderRunResourceScope::open_for_recovery(
+        &key,
+        None,
+        &private_root,
+        &t14_store_root(&store),
+        None,
+    )
+    .expect("reopen closed scope");
+    engine
+        .recycle_coder_delivery_scope(&scope, "repeat-cancel-1")
+        .await
+        .expect("first repeat close is idempotent");
+    engine
+        .recycle_coder_delivery_scope(&scope, "repeat-cancel-2")
+        .await
+        .expect("second repeat close is idempotent");
+    assert!(
+        fs::read_to_string(worktree.join("kept.rs"))
+            .expect("source kept")
+            .contains("fn kept")
+    );
+    assert!(
+        store
+            .coder_delivery_scope_keys_for_attempt(&attempt.id)
+            .expect("scope keys")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn coder_technical_retry_rotates_scope_within_original_budget_and_keeps_interrupted_changes()
+{
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    let provider = TransportFailuresThenSuccessProvider::new(1, "coder retry completed")
+        .with_first_failure_worktree_update(
+            worktree.join("interrupted.rs"),
+            "pub fn interrupted_change() {}\n",
+        );
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let completed = engine
+        .execute_coding_with_commands(
+            &attempt,
+            &provider,
+            &CodingExecutionContext {
+                work_item_markdown: Some("# Retry work item\n\nKeep the full context.".to_string()),
+                verification_commands: vec!["cargo test --locked --lib retry".to_string()],
+            },
+            &mut command_rx,
+        )
+        .await
+        .expect("second fresh coder invocation succeeds");
+
+    assert_eq!(completed.status, CodingAttemptStatus::Running);
+    let inputs = provider.recorded_inputs();
+    // 沿原预算:资源窗旋转不增加 invocation 次数(不复制窗口额度)。
+    assert_eq!(inputs.len(), 2);
+    // 重试同 worktree 读中断改动:首轮部分写入保留在树上,不回滚、
+    // 不调 Reviewer baseline restore。
+    assert_eq!(
+        fs::read_to_string(worktree.join("interrupted.rs"))
+            .expect("interrupted change survives retry"),
+        "pub fn interrupted_change() {}\n"
+    );
+    assert_eq!(inputs[1].working_dir, worktree);
+    // 前 run 资源窗已旋转收口、终窗随成功收口:无残留登记。
+    assert!(
+        store
+            .coder_delivery_scope_keys_for_attempt(&attempt.id)
+            .expect("scope keys")
+            .is_empty()
+    );
+    assert!(
+        !store.paths().root().join("reviewer-windows").exists()
+            && !store.paths().root().join("reviewer-snapshots").exists(),
+        "Coder 重试路径不得触碰 Reviewer baseline/窗口机制"
+    );
+}
+
+#[tokio::test]
+async fn stale_coder_scope_with_unknown_writer_waits_recovery_fail_closed() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("attempt worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("source.rs"), "pub fn source() {}\n").expect("source before stall");
+    let unknown_key =
+        t14_fabricate_unknown_writer_scope(&store, &attempt, "t14-unknown-writer-boot");
+    let provider = TransportFailuresThenSuccessProvider::new(0, "unused");
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_coding_with_commands(
+            &attempt,
+            &provider,
+            &CodingExecutionContext::default(),
+            &mut command_rx,
+        )
+        .await
+        .expect_err("未知 writer 停等:stale 残留收口失败必须 fail-closed");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("coder_delivery"),
+        "错误须显式归属 code_delivery 资源窗: {message}"
+    );
+    assert!(
+        message.contains("recovery"),
+        "错误须显式恢复等待语义: {message}"
+    );
+    // provider 未启动(fail-closed 先于任何 invocation):
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 0);
+    // durable 停等事实不动(交恢复驱动/人工接管):
+    let keys = store
+        .coder_delivery_scope_keys_for_attempt(&attempt.id)
+        .expect("scope keys");
+    assert_eq!(keys, vec![unknown_key]);
+    // 源码不受影响:
+    assert!(
+        fs::read_to_string(worktree.join("source.rs"))
+            .expect("source survives")
+            .contains("fn source")
+    );
+}
+
+#[tokio::test]
+async fn stale_coder_scope_registered_artifacts_recovered_on_next_run() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("attempt worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("source.rs"), "pub fn source() {}\n").expect("source before crash");
+    t14_fabricate_crashed_scratch_scope(
+        &store,
+        &attempt,
+        "coding_role_run_0001",
+        "t14-crashed-boot-next",
+    );
+    let unregistered = store
+        .provider_stream_log_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("unregistered-tmp");
+    fs::create_dir_all(&unregistered).expect("unregistered temp dir");
+    fs::write(unregistered.join("keep.txt"), "user temp\n").expect("user temp artifact");
+    let scratch = t14_scratch_dir(&store, &attempt);
+    let provider = TransportFailuresThenSuccessProvider::new(0, "coder fresh after crash");
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let completed = engine
+        .execute_coding_with_commands(
+            &attempt,
+            &provider,
+            &CodingExecutionContext::default(),
+            &mut command_rx,
+        )
+        .await
+        .expect("next run succeeds after stale delivery recovery");
+
+    assert_eq!(completed.status, CodingAttemptStatus::Running);
+    assert!(
+        !scratch.exists(),
+        "崩溃残留的登记 run-owned 临时物必须在下一轮开窗前清掉"
+    );
+    assert!(
+        unregistered.join("keep.txt").exists(),
+        "未登记临时物不得清理"
+    );
+    assert!(
+        fs::read_to_string(worktree.join("source.rs"))
+            .expect("source survives")
+            .contains("fn source")
+    );
+    assert!(
+        store
+            .coder_delivery_scope_keys_for_attempt(&attempt.id)
+            .expect("scope keys")
+            .is_empty(),
+        "终窗随成功收口"
+    );
+}
+
+#[tokio::test]
+async fn coder_delivery_scope_binds_real_run_and_worktree_coordination_label() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("attempt worktree");
+    init_test_git_repo(&worktree);
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("coder role run");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let scope = engine
+        .begin_coder_delivery_scope(&attempt, &role_run, &worktree)
+        .await
+        .expect("open code_delivery scope");
+
+    let key = scope.key().clone();
+    assert_eq!(key.scope_id, format!("code-delivery-{}", attempt.id));
+    assert_eq!(
+        key.run_id, role_run.id,
+        "scope 绑定真实 role_run/run_id 并持久化(T5 store 三元组)"
+    );
+    // durable 归属事实(Preparing→Running):
+    let records =
+        crate::product::provider_resource_store::ProviderResourceStore::new(t14_store_root(&store))
+            .list_scope(&key)
+            .expect("delivery records");
+    assert_eq!(records.len(), 1);
+    let labels = &records[0].reserved_labels;
+    let tree_key = crate::product::reviewer_window_store::tree_key_of(
+        &worktree.canonicalize().expect("canonical worktree"),
+    );
+    assert_eq!(
+        labels.get("aria.worktree").map(String::as_str),
+        Some(tree_key.as_str()),
+        "硬约束2:aria.worktree 协调标签必须在 Coder scope 登记时打上"
+    );
+    assert_eq!(
+        labels.get("kind").map(String::as_str),
+        Some("code_delivery")
+    );
+    assert!(
+        records[0].started_identity.is_some(),
+        "run-owned scratch 已确认(Preparing→Running)"
+    );
+    // 收口后无残留:
+    engine
+        .recycle_coder_delivery_scope(&scope, "bind-check")
+        .await
+        .expect("close bound scope");
+    assert!(!t14_scratch_dir(&store, &attempt).exists());
+    assert!(
+        store
+            .coder_delivery_scope_keys_for_attempt(&attempt.id)
+            .expect("scope keys")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn terminated_attempt_coder_scopes_recovered_via_engine_driver() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    t14_fabricate_crashed_scratch_scope(
+        &store,
+        &attempt,
+        "coding_role_run_0001",
+        "t14-terminate-boot-1",
+    );
+    t14_fabricate_crashed_scratch_scope(
+        &store,
+        &attempt,
+        "coding_role_run_0002",
+        "t14-terminate-boot-2",
+    );
+    let scratch = t14_scratch_dir(&store, &attempt);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let recovered = engine
+        .recover_coder_delivery_scopes_for_attempt(&attempt)
+        .await
+        .expect("recover terminated attempt delivery scopes");
+    assert_eq!(recovered, 2);
+    assert!(!scratch.exists(), "终止收口清掉登记 run-owned 临时物");
+    assert!(
+        store
+            .coder_delivery_scope_keys_for_attempt(&attempt.id)
+            .expect("scope keys")
+            .is_empty()
+    );
+
+    // 未知 writer 停等:恢复驱动 fail-closed 且 durable 不动(可重入)。
+    let unknown = t14_fabricate_unknown_writer_scope(&store, &attempt, "t14-terminate-unknown");
+    let error = engine
+        .recover_coder_delivery_scopes_for_attempt(&attempt)
+        .await
+        .expect_err("unknown writer waits in recovery");
+    assert!(
+        error.to_string().contains("coder_delivery"),
+        "错误须显式归属 code_delivery 资源窗: {error}"
+    );
+    let keys = store
+        .coder_delivery_scope_keys_for_attempt(&attempt.id)
+        .expect("scope keys");
+    assert_eq!(keys, vec![unknown]);
+}
+
+mod logical_legacy_fallback;
+mod provider_idle_stall;
 mod retry_and_gate;
 mod reviewer_recovery;
+mod t19_window_lifecycle;

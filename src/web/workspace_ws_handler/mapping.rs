@@ -42,17 +42,8 @@ pub(crate) fn refresh_coding_runtime_revision_history(
     Ok(projection.history)
 }
 
-pub(crate) fn map_revision_path(
-    path: RevisionPath,
-    extra_context: Option<String>,
-) -> (String, Option<String>) {
-    match path {
-        RevisionPath::Revise => ("continue".to_string(), None),
-        RevisionPath::ReviseWithContext => ("continue_with_context".to_string(), extra_context),
-        RevisionPath::SkipToHuman => ("human_intervene".to_string(), None),
-    }
-}
-
+// 退役留档（T5/REQ-RET-02）：`map_revision_path`（SelectRevisionPath→review
+// decision 映射）随 SelectRevisionPath 消息族删除（wp5-attribution-table §1）。
 pub(crate) fn ws_permission_risk_level(risk_level: RiskLevel) -> WsPermissionRiskLevel {
     match risk_level {
         RiskLevel::Low => WsPermissionRiskLevel::Low,
@@ -117,6 +108,7 @@ pub(crate) fn ws_execution_event_kind(kind: ProviderExecutionEventKind) -> WsExe
         ProviderExecutionEventKind::Command => WsExecutionEventKind::Command,
         ProviderExecutionEventKind::Output => WsExecutionEventKind::Output,
         ProviderExecutionEventKind::Artifact => WsExecutionEventKind::Artifact,
+        ProviderExecutionEventKind::Usage => WsExecutionEventKind::Usage,
     }
 }
 
@@ -229,18 +221,182 @@ pub(crate) fn load_work_item_plan_outline_context_resolutions(
     Ok(index.blocker_resolutions)
 }
 
+pub(crate) fn map_engine_event(event: EngineEvent) -> Option<WsOutMessage> {
+    Some(match event {
+        EngineEvent::StreamChunk {
+            role,
+            content,
+            node_id,
+        } => WsOutMessage::StreamChunk {
+            role,
+            content,
+            node_id,
+        },
+        EngineEvent::MessageComplete {
+            message_id,
+            checkpoint_id,
+            node_id,
+        } => WsOutMessage::MessageComplete {
+            message_id,
+            checkpoint_id,
+            node_id,
+        },
+        EngineEvent::StageChange { stage } => WsOutMessage::StageChange { stage },
+        EngineEvent::ArtifactUpdate { version, payload } => ws_artifact_update(version, payload),
+        EngineEvent::ArtifactBatchUpdate { .. }
+        | EngineEvent::ChoicePendingChanged
+        | EngineEvent::ProviderRunRequested { .. }
+        | EngineEvent::HumanGateOpened { .. }
+        // A1c（Task 2.2，BP1）：内部恢复事实变化仅触发 authoritative
+        // session_state 全量同步，不是客户端 wire delta；真实广播接线由
+        // Task 2.4（A1b2）router 串行接管。
+        | EngineEvent::LcResumeRecoveryChanged => {
+            return None;
+        }
+        EngineEvent::PermissionRequest {
+            id,
+            tool_name,
+            description,
+            risk_level,
+        } => WsOutMessage::PermissionRequest {
+            id,
+            tool_name,
+            description,
+            risk_level: ws_permission_risk_level(risk_level),
+        },
+        EngineEvent::ChoiceRequest {
+            id,
+            prompt,
+            options,
+            allow_multiple,
+            allow_free_text,
+            questions,
+            source,
+        } => WsOutMessage::ChoiceRequest {
+            id,
+            prompt,
+            options: options.into_iter().map(ws_choice_option).collect(),
+            allow_multiple,
+            allow_free_text,
+            questions: questions.into_iter().map(ws_choice_question).collect(),
+            source: source.as_str().to_string(),
+        },
+        EngineEvent::ProviderStatus { status } => WsOutMessage::ProviderStatus {
+            status: ws_provider_status(status),
+        },
+        EngineEvent::ExecutionEvent {
+            event,
+            node_id,
+            agent,
+        } => WsOutMessage::ExecutionEvent {
+            event: ws_execution_event(event, node_id, agent),
+        },
+        EngineEvent::TimelineNodeCreated { node } => WsOutMessage::TimelineNodeCreated { node },
+        EngineEvent::TimelineNodeUpdated {
+            node_id,
+            status,
+            summary,
+            completed_at,
+        } => WsOutMessage::TimelineNodeUpdated {
+            node_id,
+            status,
+            summary,
+            completed_at,
+        },
+        EngineEvent::ReviewComplete {
+            node_id,
+            round,
+            verdict,
+            comments,
+            summary,
+            findings,
+            review_gate,
+            work_item_plan_review,
+            structured_output_diagnostic,
+        } => WsOutMessage::ReviewComplete {
+            node_id,
+            round,
+            verdict,
+            comments,
+            summary,
+            findings,
+            review_gate,
+            work_item_plan_review,
+            structured_output_diagnostic,
+        },
+        EngineEvent::ReviewDecisionRequired {
+            node_id,
+            round,
+            options,
+        } => WsOutMessage::ReviewDecisionRequired {
+            node_id,
+            round,
+            options,
+        },
+        EngineEvent::HumanGateClosed { decision, stage } => {
+            WsOutMessage::HumanGateClosed { decision, stage }
+        }
+        EngineEvent::Error { message } => WsOutMessage::Error { message },
+        // 指引卡简化补缺：结构化指导帧紧随 error 帧映射（前端 error 清
+        // 旧指导、此帧重建——与 SC admission waiting 路径同 pattern）。
+        EngineEvent::TrustMissingGuidance { waiting } => {
+            WsOutMessage::trust_missing_guidance_from_waiting(&waiting)
+        }
+        EngineEvent::ProtocolError {
+            code,
+            message,
+            context,
+        } => WsOutMessage::ProtocolError {
+            code,
+            message,
+            context,
+        },
+        EngineEvent::PermissionTimeout {
+            permission_id,
+            node_id,
+        } => WsOutMessage::ProtocolError {
+            code: "PERMISSION_TIMEOUT".to_string(),
+            message: format!("Permission request {permission_id} timed out"),
+            context: Some(serde_json::json!({
+                "permission_id": permission_id,
+                "node_id": node_id,
+            })),
+        },
+    })
+}
+#[cfg(test)]
 pub(crate) fn spawn_engine_event_forward_task(
     mut engine_rx: mpsc::Receiver<EngineEvent>,
     outbound_tx: mpsc::Sender<OutboundControl>,
-    session_id: String,
-    workspace_runs: WorkspaceRunRegistry,
+    run_context: Option<ProviderRunContext>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = engine_rx.recv().await {
-            let event = match event {
+            match event {
+                EngineEvent::ProviderRunRequested { kind, node_id } => {
+                    if let Some(run_context) = run_context.as_ref() {
+                        let run_context = run_context.clone();
+                        let outbound_tx = outbound_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(message) = spawn_provider_run_from_event(
+                                run_context,
+                                kind,
+                                node_id,
+                                outbound_tx.clone(),
+                            )
+                            .await
+                            {
+                                let _ = send_json_outbound(
+                                    &outbound_tx,
+                                    &WsOutMessage::Error { message },
+                                )
+                                .await;
+                            }
+                        });
+                    }
+                }
                 EngineEvent::ArtifactBatchUpdate { mut updates } => {
                     updates.sort_by_key(|update| update.version);
-                    let mut connected = true;
                     for update in updates {
                         if !send_json_outbound(
                             &outbound_tx,
@@ -248,54 +404,10 @@ pub(crate) fn spawn_engine_event_forward_task(
                         )
                         .await
                         {
-                            connected = false;
-                            break;
+                            return;
                         }
                     }
-                    if !connected {
-                        break;
-                    }
-                    continue;
                 }
-                event => event,
-            };
-            let ws_msg = match event {
-                EngineEvent::StreamChunk {
-                    role,
-                    content,
-                    node_id,
-                } => WsOutMessage::StreamChunk {
-                    role,
-                    content,
-                    node_id,
-                },
-                EngineEvent::MessageComplete {
-                    message_id,
-                    checkpoint_id,
-                    node_id,
-                } => WsOutMessage::MessageComplete {
-                    message_id,
-                    checkpoint_id,
-                    node_id,
-                },
-                EngineEvent::StageChange { stage } => WsOutMessage::StageChange { stage },
-                EngineEvent::ArtifactUpdate { version, payload } => {
-                    ws_artifact_update(version, payload)
-                }
-                EngineEvent::ArtifactBatchUpdate { .. } => {
-                    unreachable!("artifact batches are expanded before single-event mapping")
-                }
-                EngineEvent::PermissionRequest {
-                    id,
-                    tool_name,
-                    description,
-                    risk_level,
-                } => WsOutMessage::PermissionRequest {
-                    id,
-                    tool_name,
-                    description,
-                    risk_level: ws_permission_risk_level(risk_level),
-                },
                 EngineEvent::ChoiceRequest {
                     id,
                     prompt,
@@ -305,20 +417,30 @@ pub(crate) fn spawn_engine_event_forward_task(
                     questions,
                     source,
                 } => {
-                    eprintln!(
-                        "[aria-choice-diag] ws outbound choice_request session={} id={} source={} options={} prompt_chars={}",
-                        session_id,
-                        id,
-                        source.as_str(),
-                        options.len(),
-                        prompt.chars().count()
-                    );
-                    if source != ChoiceRequestSource::TextFallback {
-                        let _ = workspace_runs
-                            .register_choice(&session_id, id.clone())
-                            .await;
+                    if source != ChoiceRequestSource::TextFallback
+                        && let Some(run_context) = run_context.as_ref()
+                    {
+                        run_context.manager.register_pending_choice_frame(
+                            WsOutMessage::ChoiceRequest {
+                                id: id.clone(),
+                                prompt: prompt.clone(),
+                                options: options
+                                    .clone()
+                                    .into_iter()
+                                    .map(ws_choice_option)
+                                    .collect(),
+                                allow_multiple,
+                                allow_free_text,
+                                questions: questions
+                                    .clone()
+                                    .into_iter()
+                                    .map(ws_choice_question)
+                                    .collect(),
+                                source: source.as_str().to_string(),
+                            },
+                        );
                     }
-                    WsOutMessage::ChoiceRequest {
+                    let message = WsOutMessage::ChoiceRequest {
                         id,
                         prompt,
                         options: options.into_iter().map(ws_choice_option).collect(),
@@ -326,86 +448,18 @@ pub(crate) fn spawn_engine_event_forward_task(
                         allow_free_text,
                         questions: questions.into_iter().map(ws_choice_question).collect(),
                         source: source.as_str().to_string(),
+                    };
+                    if !send_json_outbound(&outbound_tx, &message).await {
+                        return;
                     }
                 }
-                EngineEvent::ProviderStatus { status } => WsOutMessage::ProviderStatus {
-                    status: ws_provider_status(status),
-                },
-                EngineEvent::ExecutionEvent {
-                    event,
-                    node_id,
-                    agent,
-                } => WsOutMessage::ExecutionEvent {
-                    event: ws_execution_event(event, node_id, agent),
-                },
-                EngineEvent::TimelineNodeCreated { node } => {
-                    WsOutMessage::TimelineNodeCreated { node }
+                event => {
+                    if let Some(message) = map_engine_event(event)
+                        && !send_json_outbound(&outbound_tx, &message).await
+                    {
+                        return;
+                    }
                 }
-                EngineEvent::TimelineNodeUpdated {
-                    node_id,
-                    status,
-                    summary,
-                    completed_at,
-                } => WsOutMessage::TimelineNodeUpdated {
-                    node_id,
-                    status,
-                    summary,
-                    completed_at,
-                },
-                EngineEvent::ReviewComplete {
-                    node_id,
-                    round,
-                    verdict,
-                    comments,
-                    summary,
-                    findings,
-                    review_gate,
-                    work_item_plan_review,
-                    structured_output_diagnostic,
-                } => WsOutMessage::ReviewComplete {
-                    node_id,
-                    round,
-                    verdict,
-                    comments,
-                    summary,
-                    findings,
-                    review_gate,
-                    work_item_plan_review,
-                    structured_output_diagnostic,
-                },
-                EngineEvent::ReviewDecisionRequired {
-                    node_id,
-                    round,
-                    options,
-                } => WsOutMessage::ReviewDecisionRequired {
-                    node_id,
-                    round,
-                    options,
-                },
-                EngineEvent::Error { message } => WsOutMessage::Error { message },
-                EngineEvent::ProtocolError {
-                    code,
-                    message,
-                    context,
-                } => WsOutMessage::ProtocolError {
-                    code,
-                    message,
-                    context,
-                },
-                EngineEvent::PermissionTimeout {
-                    permission_id,
-                    node_id,
-                } => WsOutMessage::ProtocolError {
-                    code: "PERMISSION_TIMEOUT".to_string(),
-                    message: format!("Permission request {permission_id} timed out"),
-                    context: Some(serde_json::json!({
-                        "permission_id": permission_id,
-                        "node_id": node_id,
-                    })),
-                },
-            };
-            if !send_json_outbound(&outbound_tx, &ws_msg).await {
-                break;
             }
         }
     })

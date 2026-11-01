@@ -1,0 +1,162 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_c63291418c586e613e4773fb",
+    "work_item_revision_id": "work_item_revision_c63291418c586e613e4773fb",
+    "canonical_contract_hash": "21966770ee7a6c42dbaebcd7694f81c635405612a7e811f944360529bcddd1b8",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "Hello API",
+      "goal": "WHEN 服务收到 GET /api/hello THE SYSTEM SHALL 返回 200 且响应体恰为 {\"message\":\"hello\"}。",
+      "non_goals": [
+        "不实现数据库、认证、外部服务、前端页面或其他接口。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "internal error responds 500 with JSON body exactly {\"error\":\"internal\"}"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "node_modules/**",
+          "web/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 客户端向运行中的服务发送 GET /api/hello THE SYSTEM SHALL 返回 200 且响应体恰为 {\"message\":\"hello\"}。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "TASK-001",
+        "[]"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_c63291418c586e613e4773fb",
+      "objective": "WHEN 服务收到 GET /api/hello THE SYSTEM SHALL 返回 200 且响应体恰为 {\"message\":\"hello\"}。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 构建 Hello API THE SYSTEM SHALL 先编写唯一的 node --test 请求测试，再使用 node:http 实现服务与端点。",
+          "requirement_refs": [],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "node_modules/**",
+          "web/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN 客户端向运行中的服务发送 GET /api/hello THE SYSTEM SHALL 返回 200 且响应体恰为 {\"message\":\"hello\"}。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": null,
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "source_diff"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_c63291418c586e613e4773fb",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "package.json",
+          "node_modules/**",
+          "web/**"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "internal error responds 500 with JSON body exactly {\"error\":\"internal\"}"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": null,
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "807e562bb244acd48627950f42e225ac3b9ffb1efef8d0d0ecc5e50d7b20d743",
+    "coder_projection_hash": "4f150af071a4fc4d365244f32aa2c4637761cb4e439d21117570f2e934ca75e2",
+    "reviewer_projection_hash": "27d9a045ba27f537a3cd35b90128cec4d54a57d5d9343a13946d1ff78eb80347",
+    "created_at": "2026-09-08T03:42:07.063075114+00:00"
+  }
+}

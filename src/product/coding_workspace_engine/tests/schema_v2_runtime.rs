@@ -26,7 +26,9 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     let required_checks = [VerificationCheck {
@@ -153,6 +155,8 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
                     role_run_id: None,
                     run_no: Some(1),
                     unit_run_id: Some(format!("coding_unit_run_{}", unit.order_index + 1)),
+                    acceptance: None,
+                    review_window_id: None,
                 },
             )
             .expect("code review report");
@@ -183,7 +187,7 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
     attempt.stage = CodingExecutionStage::FinalConfirm;
     attempt.head_commit = Some(head);
     store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("final review attempt");
 
     let (tx, _rx) = mpsc::channel(8);

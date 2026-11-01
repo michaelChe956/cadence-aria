@@ -1,0 +1,208 @@
+pub mod aggregate_artifact_cleanup;
+pub mod aggregate_index;
+pub mod aggregate_initialization;
+pub mod aggregate_initialization_coordinator;
+pub mod aggregate_initialization_store;
+pub mod bootstrap;
+pub mod evidence_audit;
+pub mod evidence_budget;
+pub mod evidence_index;
+pub mod evidence_injection;
+pub mod evidence_mediator;
+pub mod evidence_token;
+pub mod feature;
+pub mod identity_repair;
+pub mod issue_selection;
+pub mod legacy_shared_worktree_migration;
+pub mod member_reality;
+pub mod migration;
+pub mod planning_context;
+pub mod planning_context_resolver;
+pub mod planning_context_set;
+pub mod pointer_publication;
+pub mod pointer_publication_coordinator;
+pub mod policy;
+pub mod production_policy_resolvers;
+pub mod provider_admission_preflight;
+pub mod provider_boundary_probe;
+pub mod provider_capability_probe;
+pub mod provider_capability_revalidate;
+pub mod provider_capability_store;
+pub mod provider_gateway;
+pub mod provider_projection;
+pub mod provider_trust;
+pub mod provider_trust_adapters;
+pub mod provider_trust_store;
+pub mod reference_scanner;
+pub mod registration;
+pub mod registration_preflight_snapshot_store;
+pub mod registry;
+pub mod repository_routing;
+pub mod root_recipe_receipt;
+pub mod snapshot_validator;
+pub mod store;
+pub mod types;
+
+pub use aggregate_initialization::{
+    AGGREGATE_INITIALIZATION_LAYOUT_VERSION, AGGREGATE_INITIALIZATION_OPERATION_KIND,
+    AggregateCancellationRecord, AggregateInitializationActionRecord,
+    AggregateInitializationErrorRecord, AggregateInitializationIdempotencyIdentity,
+    AggregateInitializationOperation, AggregateInitializationOperationInput,
+    AggregateInitializationOperationStatus, AggregateInitializationProfile,
+    AggregateInitializationStepKind, AggregateInitializationStepRecord,
+    AggregateInitializationStepStatus, RepositoryTypeEvidence,
+};
+pub use aggregate_initialization_coordinator::{
+    AggregateInitializationCoordinator, AggregateInitializationError,
+    AggregatePreflightMemberProjection, AggregatePreflightService, AggregatePreflightSnapshot,
+    AggregateProviderTurnDriver, AggregateProviderTurnRequest, AggregateSkillsPreparation,
+    DeterministicAggregatePreflightService, DeterministicRepositoryTypeDetector,
+    MachineSkillsPreparation, RepositoryTypeDetector, profile_preflight_commands,
+    resolve_aggregate_profile,
+};
+pub use aggregate_initialization_store::{
+    AggregateInitializationOperationStore, root_recipe_command_index,
+};
+pub use bootstrap::{
+    BootstrapActionError, BootstrapActionOutcome, BootstrapActionRequest, BootstrapActionResult,
+    BootstrapAdvanceAttempt, BootstrapAdvanceRequest, BootstrapAdvanceResult, BootstrapAdvanceStop,
+    BootstrapCheckpoint, BootstrapFailure, BootstrapPrepareDispatcher, BootstrapPrepareOutcome,
+    BootstrapPrepareRequest, BootstrapStepProjection, LogicalCodebaseBootstrapNotice,
+    LogicalCodebaseBootstrapProjection, LogicalCodebaseBootstrapProjector,
+    LogicalCodebaseBootstrapService, LogicalCodebaseBootstrapStep,
+    LogicalCodebaseBootstrapStepStatus,
+};
+pub use evidence_mediator::{
+    EvidenceIndexPinRecord, EvidenceQueryInput, EvidenceQueryResponse, EvidenceRole,
+    POLICY_REAUTHORIZATION_TTL_HOURS, PolicyAccessError, PolicyReauthorizationRequest,
+    PolicyReauthorizationResult, PolicyTextQueryInput, PolicyVerificationWaitingRecord,
+    handle_evidence_query, handle_policy_reauthorization, handle_policy_text_query,
+    load_policy_verification_waiting_fact, read_policy_text_for_attempt, resolve_attempt_by_token,
+};
+pub use feature::LogicalCodebaseFeature;
+pub use identity_repair::{
+    IdentityJournalDiagnostic, IdentityMappingSubmission, IdentityRepairActionKind,
+    IdentityRepairActionRequest, IdentityRepairService, RepairContinuation,
+};
+pub use issue_selection::{
+    EffectiveMemberResolution, InvalidationRecord, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, SelectionPolicy, load_selection,
+};
+pub use legacy_shared_worktree_migration::{
+    LegacySharedWorktreeMigration, LegacySharedWorktreeMigrationJournal,
+    LegacySharedWorktreeRecord, LegacySharedWorktreeRedirect,
+};
+pub use member_reality::{
+    MEMBER_REALITY_SECTION_MARKER, MEMBER_REALITY_UNKNOWN, MemberReality, collect_member_reality,
+    render_member_reality, summarize_key_directories, summarize_layered_directories,
+};
+pub use migration::{
+    IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,
+    IdentityMigrationPhase, IdentityMigrationVerifier, IdentityRepairAuditEntry,
+    MigrationFaultInjector, RepositoryIdentityMapping,
+};
+pub use planning_context::{
+    MemberCheckoutFingerprint, PlanningContextSnapshot, PlanningContextSnapshotStore,
+};
+pub use planning_context_resolver::{
+    BestEffortReadonlyStatus, PlanningContextResolver, ResolvedPlanningContext, ResumeDecision,
+};
+pub use planning_context_set::{
+    InventoryInjection, PLANNING_MATERIAL_MAX_BYTES, PlanningContextSetResolver,
+    RepositoryContextResolution, RepositoryContextSet, render_compact_inventory,
+};
+pub use pointer_publication::{
+    PointerBlockFields, PointerMergeVerdict, PointerPublication, PointerPublicationBatchKind,
+    PointerPublicationEntry, PointerPublicationEntryState, PointerPublicationStatus,
+    PointerPublicationStore, apply_append, classify_merge, render_pointer_block,
+};
+pub use pointer_publication_coordinator::{
+    POINTER_FILE_NAME, PointerPublishCoordinator, PointerPublishError,
+};
+pub use policy::{
+    AggregatePolicyArtifact, AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect,
+    ProviderWireDialect, SessionPolicyAction, SessionPolicyEnvelope,
+};
+pub use production_policy_resolvers::{
+    ProductionPolicyTargetResolver, StoreBackedProviderCapabilitySource,
+    assert_canonical_lc_root_consistent,
+};
+pub use provider_admission_preflight::{
+    BootstrapActionKind, LogicalCodebaseProviderAdmissionPreflight, ProviderAdmissionError,
+    ProviderAdmissionPreflightResult, ProviderRuleReference,
+};
+pub use provider_boundary_probe::{
+    BoundaryFixture, HostOpenProbeScope, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec,
+};
+pub use provider_capability_probe::{ProviderCapabilityProbeError, ProviderCapabilityProbeService};
+pub use provider_capability_store::{
+    CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
+    ProviderCapabilityStore, RootRecipeEvidence,
+};
+pub use provider_gateway::{
+    GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LaunchTrustFailureClassification,
+    LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderCapability,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
+    SessionLaunchRequest, SessionResumeFingerprint, ValidatedSessionLaunchPolicy,
+};
+pub use provider_projection::{
+    ProviderPolicyProjection, ProviderPolicyProjector, ProviderProjectionError,
+    ProviderProjectionInput, UnprovisionedProviderPolicyProjector,
+};
+pub use provider_trust::{
+    HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustError,
+    ProviderTrustOwnership, ProviderTrustPrecondition, ProviderTrustPreparationResult,
+    ProviderTrustRegistration, ProviderTrustRegistrationResult, ProviderTrustRegistry,
+    ProviderTrustRevocation, ProviderTrustRevocationOutcome, ProviderTrustScenario,
+    ProviderTrustVerification, ProviderTrustWaiting, requires_workspace_trust,
+};
+pub use provider_trust_adapters::{
+    CodexTrustAdapter, KimiTrustAdapter, ProviderTrustEntryState, ProviderTrustHomeAdapter,
+    ProviderTrustWriteOutcome,
+};
+pub use provider_trust_store::{
+    ProviderTrustAuditRecord, ProviderTrustOwnershipRecord, ProviderTrustStore,
+    ProviderTrustWaitingRecord,
+};
+pub use reference_scanner::{
+    RepositoryReference, RepositoryReferenceReport, RepositoryReferenceScanner,
+};
+pub use registration::{
+    AggregateRootPreflight, AggregateRootPreflightError, AttachOnlyRegistrationInput,
+    CanonicalAggregateRoot, ConfirmedRegistrationBatchInput, DetectedRepositoryProfile,
+    LogicalCodebaseRegistrationCoordinator, RegistrationBatchItem, RegistrationBatchRecord,
+    RegistrationBatchStatus, RegistrationBatchStore, RegistrationCandidate,
+    RegistrationCandidateState, RegistrationItemStatus, RegistrationPreflightInput,
+    RegistrationPreflightResult, RepositoryProfileDetector,
+};
+pub use registration_preflight_snapshot_store::{
+    RegistrationPreflightSnapshot, RegistrationPreflightSnapshotStore,
+};
+pub use registry::{
+    IdentityRegistry, IdentityRegistryEntry, IdentityRegistryState, IdentityRegistryStore,
+};
+pub use repository_routing::{
+    AuthorityAggregateIndexReference, AuthorityPolicyReference, PolicyReadError, PolicyTextResult,
+    RepositoryAuthorityResolution, RepositoryAuthorityResolver, RepositoryRouting,
+    RepositoryRoutingErrorCode, RepositoryRoutingRequest, RepositoryTargetKind,
+    ResolvedTargetIdentity, read_policy_text_for_reference, resolve_issue_logical_codebase_id,
+};
+pub use root_recipe_receipt::{
+    ROOT_RECIPE_ALLOWLIST, RootRecipeChangeClass, RootRecipeChangeKind, RootRecipeCommandReceipt,
+    RootRecipeCommandSummary, RootRecipeCommandVerdict, RootRecipeCommandWatch,
+    RootRecipeFilesystemAuditor, RootRecipeFilesystemSnapshot, RootRecipeObservedChange,
+    RootRecipeReceipt, RootRecipeReceiptStore, RootRecipeSnapshotBudget, RootRecipeSnapshotEntry,
+    RootRecipeSnapshotEntryKind,
+};
+pub(crate) use store::lc_scope_root;
+pub(crate) use store::legacy_logical_codebase_id;
+pub use store::{
+    LogicalCodebaseCreateInput, LogicalCodebaseDeletedRecord, LogicalCodebaseLayout,
+    LogicalCodebaseManifest, LogicalCodebaseRecord, LogicalCodebaseRestoreOutcome,
+    LogicalCodebaseStore,
+};
+pub use types::{
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, EnrollmentTarget,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositorySourceIdentity, RepositoryType,
+};

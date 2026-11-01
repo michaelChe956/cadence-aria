@@ -64,10 +64,9 @@ fn work_item_plan_item_review_pass_with_strong_finding_requires_current_item_rev
         "summary": "整体可继续，但存在运行时阻塞问题",
         "affects_items": [{ "target_outline_id": "outline_api" }],
         "findings": [{
-            "severity": "strong_recommend_fix",
+            "severity": "must_fix",
             "message": "sync 方法在 tokio runtime 内 block_on 会 panic",
             "evidence": "snapshot 被 tokio::spawn 调用",
-            "impact": "后续实现会在运行时崩溃",
             "required_action": "当前 draft 需明确 spawn_blocking 或改为 async 方案"
         }]
     }"#;
@@ -83,15 +82,15 @@ fn work_item_plan_item_review_pass_with_strong_finding_requires_current_item_rev
     assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
     assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
     assert_eq!(verdict.findings.len(), 1);
-    assert_eq!(
-        verdict.findings[0].severity,
-        ReviewFindingSeverity::StrongRecommendFix
-    );
+    assert_eq!(verdict.findings[0].severity, ReviewFindingSeverity::MustFix);
     let review = verdict
         .work_item_plan_review
         .expect("work item plan extension");
     assert_eq!(review.verdict, WorkItemPlanReviewVerdict::Revise);
-    assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseCurrentItem);
+    assert_eq!(
+        review.review_action,
+        WorkItemPlanReviewAction::ReviseCurrentItem
+    );
     assert_eq!(
         review.gates,
         vec![WorkItemPlanReviewGate::RequiresCurrentItemRevision]
@@ -110,7 +109,6 @@ fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revis
             "severity": "must_fix",
             "message": "依赖图遗漏必需前置 item",
             "evidence": "outline_api 消费 outline_store 但 depends_on 为空",
-            "impact": "串行生成时会缺少上游 handoff",
             "required_action": "补充 depends_on"
         }]
     }"#;
@@ -129,7 +127,10 @@ fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revis
         .work_item_plan_review
         .expect("work item plan extension");
     assert_eq!(review.verdict, WorkItemPlanReviewVerdict::Revise);
-    assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseOutline);
+    assert_eq!(
+        review.review_action,
+        WorkItemPlanReviewAction::ReviseOutline
+    );
     assert_eq!(
         review.gates,
         vec![WorkItemPlanReviewGate::RequiresPlanReopen]
@@ -172,6 +173,19 @@ fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
         "affects_items": [
             { "target_outline_id": "outline_api" },
             { "target_outline_id": "outline_missing" }
+        ],
+        "findings": [
+            {
+                "severity": "suggestion",
+                "message": "整组是否继续按当前拆分推进需要人工判断",
+                "evidence": "affects_items 引用了不存在 item",
+                "required_action": "由人工确认拆分边界",
+                "owner_question": "这一组 Work Item 要继续按当前拆分推进吗？",
+                "owner_options": [
+                    { "label": "继续推进", "consequence": "系统保留当前拆分并继续后续阶段" },
+                    { "label": "重新拆分", "consequence": "系统重开 Outline 再拆一次" }
+                ]
+            }
         ]
     }"#;
 
@@ -380,7 +394,7 @@ async fn optional_review_findings_route_author_confirm_or_human_confirm_for_all_
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"建议补充说明。
 
@@ -390,10 +404,9 @@ async fn optional_review_findings_route_author_confirm_or_human_confirm_for_all_
   "summary": "仅有可选建议",
   "findings": [
 {
-  "severity": "optional",
+  "severity": "suggestion",
   "message": "可补充说明",
   "evidence": "当前主路径完整",
-  "impact": "不影响下一阶段执行",
   "required_action": "可后续优化"
 }
   ]
@@ -464,7 +477,7 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
     engine.begin_work_item_plan_outline_review_run().await;
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 outline 可以继续，但建议补充 handoff 描述。
 
@@ -476,10 +489,9 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
   "summary": "仅有可选建议",
   "findings": [
 {
-  "severity": "optional",
+  "severity": "suggestion",
   "message": "handoff 描述可以更明确",
   "evidence": "handoff_strategy 只有简短描述",
-  "impact": "不影响 Draft 生成",
   "required_action": "可补充上下游交接说明"
 }
   ]
@@ -522,256 +534,14 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
     );
 }
 
-#[tokio::test]
-async fn work_item_plan_outline_optional_choice_can_skip_and_continue() {
-    let (_tmp, store) = setup();
-    let (tx, _) = mpsc::channel(64);
-    let mut session = make_session("sess_wip_outline_skip_optional");
-    session.workspace_type = WorkspaceType::WorkItemPlan;
-    session.stage = WorkspaceStage::ReviewDecision;
-    session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
-        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(Vec::new()),
-            design_context_gaps: vec![],
-            validator_findings: vec![],
-            context_blockers: vec![],
-            current_generation_round_id: Some("round_0001".to_string()),
-            selected_generation_mode: None,
-        }),
-    });
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-    engine.latest_review_verdict = Some(ReviewVerdict {
-        verdict: ReviewVerdictType::Pass,
-        comments: "当前 outline 可以继续，但有可选建议".to_string(),
-        summary: "仅有可选建议".to_string(),
-        findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Optional,
-            message: "handoff 描述可以更明确".to_string(),
-            evidence: "handoff_strategy 只有简短描述".to_string(),
-            impact: "不影响 Draft 生成".to_string(),
-            required_action: "可补充上下游交接说明".to_string(),
-        }],
-        review_gate: ReviewGate::UserConfirmAllowed,
-        work_item_plan_review: Some(WorkItemPlanReviewComplete {
-            verdict: WorkItemPlanReviewVerdict::Pass,
-            review_scope: WorkItemPlanReviewScope::Outline,
-            target_outline_id: None,
-            generation_round_id: "round_0001".to_string(),
-            draft_id: None,
-            batch_id: None,
-            review_action: WorkItemPlanReviewAction::Continue,
-            gates: Vec::new(),
-            affects_items: Vec::new(),
-            warnings: Vec::new(),
-        }),
-        structured_output_diagnostic: None,
-    });
-    engine
-        .enter_review_decision(1, "仅有可选建议".to_string())
-        .await;
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_outline_optional_choice_can_skip_and_continue` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    let outcome = engine
-        .handle_review_decision("skip_optional_findings".to_string(), None)
-        .await
-        .expect("skip optional findings should continue original pass route");
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_optional_outline_review_actions_survive_session_restore` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    assert_eq!(outcome, ReviewDecisionOutcome::HumanConfirm);
-    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-    let active_node = engine
-        .timeline_nodes
-        .iter()
-        .find(|node| Some(&node.node_id) == engine.active_node_id.as_ref())
-        .expect("active generation mode node");
-    assert_eq!(active_node.node_type, TimelineNodeType::WorkItemGenerationMode);
-}
-
-#[tokio::test]
-async fn work_item_plan_optional_outline_review_actions_survive_session_restore() {
-    let (_tmp, checkpoint_store, lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_optional_restore");
-    let persisted_session = lifecycle
-        .list_workspace_sessions("project_0001", "issue_0001")
-        .expect("workspace sessions")
-        .into_iter()
-        .next()
-        .expect("persisted workspace session");
-    engine.session.session_id = persisted_session.id;
-    engine
-        .update_artifact(ArtifactPayload::WorkItemPlanOutlineCandidate {
-            outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-                outline: test_work_item_plan_outline(Vec::new()),
-                design_context_gaps: vec![],
-                validator_findings: vec![],
-                context_blockers: vec![],
-                current_generation_round_id: Some("round_0001".to_string()),
-                selected_generation_mode: None,
-            }),
-        })
-        .await;
-    let verdict = ReviewVerdict {
-        verdict: ReviewVerdictType::Pass,
-        comments: "当前 outline 可以继续，但有可选建议".to_string(),
-        summary: "仅有可选建议".to_string(),
-        findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Minor,
-            message: "handoff 描述可以更明确".to_string(),
-            evidence: "handoff_strategy 只有简短描述".to_string(),
-            impact: "不影响 Draft 生成".to_string(),
-            required_action: "可补充上下游交接说明".to_string(),
-        }],
-        review_gate: ReviewGate::UserConfirmAllowed,
-        work_item_plan_review: Some(WorkItemPlanReviewComplete {
-            verdict: WorkItemPlanReviewVerdict::Pass,
-            review_scope: WorkItemPlanReviewScope::Outline,
-            target_outline_id: None,
-            generation_round_id: "round_0001".to_string(),
-            draft_id: None,
-            batch_id: None,
-            review_action: WorkItemPlanReviewAction::Continue,
-            gates: Vec::new(),
-            affects_items: Vec::new(),
-            warnings: Vec::new(),
-        }),
-        structured_output_diagnostic: None,
-    };
-    let review_node_id = engine
-        .create_timeline_node(TimelineNodeDraft {
-            node_type: TimelineNodeType::WorkItemPlanOutlineReview,
-            agent: Some(ProviderName::Codex),
-            stage: WorkspaceStage::CrossReview,
-            round: Some(1),
-            title: "WorkItemPlan Outline Review Round 1".to_string(),
-            summary: None,
-            status: TimelineNodeStatus::Active,
-        })
-        .await;
-    engine.active_node_id = Some(review_node_id.clone());
-    engine
-        .persist_review_verdict(
-            &review_node_id,
-            serde_json::json!({
-                "verdict": verdict.verdict,
-                "comments": verdict.comments,
-                "summary": verdict.summary,
-                "findings": verdict.findings,
-                "review_gate": verdict.review_gate,
-                "work_item_plan_review": verdict.work_item_plan_review,
-            }),
-        )
-        .await
-        .expect("persist review verdict");
-    engine
-        .update_timeline_node(
-            &review_node_id,
-            TimelineNodeStatus::Completed,
-            Some("仅有可选建议".to_string()),
-        )
-        .await;
-    engine.latest_review_verdict = Some(verdict);
-    engine
-        .enter_review_decision(1, "仅有可选建议".to_string())
-        .await;
-
-    let restored_session_id = engine.session().session_id.clone();
-    let apply_session = WorkspaceSession::from_record(
-        lifecycle
-            .get_workspace_session(&restored_session_id)
-            .expect("workspace session should be persisted"),
-    );
-    let skip_session = WorkspaceSession::from_record(
-        lifecycle
-            .get_workspace_session(&restored_session_id)
-            .expect("workspace session should be persisted"),
-    );
-    let (apply_tx, _) = mpsc::channel(64);
-    let (skip_tx, _) = mpsc::channel(64);
-    let mut apply_engine = WorkspaceEngine::new_persistent(
-        checkpoint_store.clone(),
-        lifecycle.clone(),
-        apply_tx,
-        apply_session,
-    );
-    let mut skip_engine =
-        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle, skip_tx, skip_session);
-
-    assert_eq!(
-        apply_engine.review_decision_options(),
-        vec![
-            "apply_optional_findings".to_string(),
-            "skip_optional_findings".to_string(),
-        ],
-        "restored engine should keep optional WorkItemPlan review actions"
-    );
-
-    let apply_outcome = apply_engine
-        .handle_review_decision("apply_optional_findings".to_string(), None)
-        .await
-        .expect("apply optional findings should work after restore");
-    assert!(matches!(
-        apply_outcome,
-        ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
-    ));
-
-    let skip_outcome = skip_engine
-        .handle_review_decision("skip_optional_findings".to_string(), None)
-        .await
-        .expect("skip optional findings should work after restore");
-    assert_eq!(skip_outcome, ReviewDecisionOutcome::HumanConfirm);
-    assert_eq!(skip_engine.session().stage, WorkspaceStage::AuthorConfirm);
-    let active_node = skip_engine
-        .timeline_nodes
-        .iter()
-        .find(|node| Some(&node.node_id) == skip_engine.active_node_id.as_ref())
-        .expect("active generation mode node");
-    assert_eq!(active_node.node_type, TimelineNodeType::WorkItemGenerationMode);
-}
-
-#[tokio::test]
-async fn request_outline_revision_is_allowed_from_outline_confirm_node() {
-    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_request_outline_revision_from_confirm");
-    engine.session.stage = WorkspaceStage::AuthorConfirm;
-    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
-        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(Vec::new()),
-            design_context_gaps: vec![],
-            validator_findings: vec![],
-            context_blockers: vec![],
-            current_generation_round_id: Some("round_0001".to_string()),
-            selected_generation_mode: None,
-        }),
-    });
-    let confirm_node_id = engine
-        .create_timeline_node(TimelineNodeDraft {
-            node_type: TimelineNodeType::WorkItemPlanOutlineConfirm,
-            agent: None,
-            stage: WorkspaceStage::AuthorConfirm,
-            round: None,
-            title: "WorkItemPlan Outline 确认".to_string(),
-            summary: Some("等待作者确认".to_string()),
-            status: TimelineNodeStatus::Paused,
-        })
-        .await;
-    engine.active_node_id = Some(confirm_node_id.clone());
-
-    engine
-        .request_work_item_plan_outline_revision(Some("缩小 scope".to_string()))
-        .await
-        .expect("outline confirm node should allow outline revision");
-
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-    let confirm_node = engine
-        .timeline_nodes
-        .iter()
-        .find(|node| node.node_id == confirm_node_id)
-        .expect("confirm node");
-    assert_eq!(confirm_node.status, TimelineNodeStatus::Completed);
-    assert!(
-        engine
-            .timeline_nodes
-            .iter()
-            .any(|node| node.node_type == TimelineNodeType::WorkItemPlanOutlineRun
-                && node.status == TimelineNodeStatus::Active),
-        "requesting outline revision from confirm should start a new outline run"
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`request_outline_revision_is_allowed_from_outline_confirm_node` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

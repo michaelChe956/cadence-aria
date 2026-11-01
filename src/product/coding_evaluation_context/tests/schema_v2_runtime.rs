@@ -32,6 +32,10 @@ fn schema_v2_attempt_without_active_unit_binding_fails_closed() {
         attempt_no: 1,
         scope: CodingAttemptScope::WorkItemGroup,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/schema-v2".to_string(),
@@ -53,7 +57,10 @@ fn schema_v2_attempt_without_active_unit_binding_fails_closed() {
         provider_conversations: Vec::new(),
         created_at: "2026-07-27T00:00:00Z".to_string(),
         updated_at: "2026-07-27T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
 
     let error = schema_v2_active_unit_runtime(&paths, &attempt)

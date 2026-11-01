@@ -1,0 +1,176 @@
+{
+  "type": "artifact_update",
+  "version": 4,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_7f0d2acbab51432039200d4f",
+    "work_item_revision_id": "work_item_revision_7f0d2acbab51432039200d4f",
+    "canonical_contract_hash": "d88a47f37d26b61a8f8f7bc2ff109e546476c2ebd41fc011aae486f14fd0a9c8",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-001",
+      "title": "最小 Hello API 后端服务",
+      "goal": "WHEN naruto H5 需要联调冒烟用的最小后端问候接口 THE SYSTEM SHALL 按 CT-001 提供仅用 node:http 实现的 GET /api/hello 服务并通过唯一 node --test 完成验证。",
+      "non_goals": [
+        "不引入任何第三方依赖。",
+        "不新增数据库、认证、外部服务或前端页面。",
+        "不拆分出 GET /api/hello 之外的其他契约或工作项。"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "零第三方依赖"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependencies": [],
+      "scope_summary": {
+        "owned_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "除 server.js 与 test/hello.test.js 外的所有仓库路径"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 客户端向 http://127.0.0.1:3000/api/hello 发起 GET 请求 THE SYSTEM SHALL 返回 200 且响应体恰为 {\"message\":\"hello\"}。"
+      ],
+      "source_refs": [
+        "AC-001",
+        "CHECK-001",
+        "CT-001",
+        "REQ-001",
+        "REQ-002",
+        "TASK-001",
+        "TASK-002"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_7f0d2acbab51432039200d4f",
+      "objective": "WHEN naruto H5 需要联调冒烟用的最小后端问候接口 THE SYSTEM SHALL 按 CT-001 提供仅用 node:http 实现的 GET /api/hello 服务并通过唯一 node --test 完成验证。",
+      "required_input_contracts": [],
+      "task_refs": [
+        "TASK-001",
+        "TASK-002"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-001",
+          "statement": "WHEN 运行 node --test THE SYSTEM SHALL 在 test/hello.test.js 中启动服务、请求 GET /api/hello 并断言状态码为 200 且响应体恰为 {\"message\":\"hello\"}。",
+          "requirement_refs": [
+            "REQ-001"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        },
+        {
+          "task_id": "TASK-002",
+          "statement": "WHEN 实现 Hello API THE SYSTEM SHALL 新增 server.js 使用 node:http 监听 127.0.0.1:3000 并对 GET /api/hello 返回 CT-001 声明的响应。",
+          "requirement_refs": [
+            "REQ-002"
+          ],
+          "done_when_refs": [
+            "AC-001"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "除 server.js 与 test/hello.test.js 外的所有仓库路径"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-001",
+          "statement": "WHEN 客户端向 http://127.0.0.1:3000/api/hello 发起 GET 请求 THE SYSTEM SHALL 返回 200 且响应体恰为 {\"message\":\"hello\"}。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "server.js 变更、test/hello.test.js 变更、node --test 执行通过结果"
+        ],
+        "provided_contract_refs": [],
+        "reviewer_check_refs": [
+          "AC-001"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_7f0d2acbab51432039200d4f",
+      "criterion_refs": [
+        "AC-001"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-001",
+          "requirement_refs": [
+            "REQ-001",
+            "REQ-002"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "server.js",
+          "test/hello.test.js"
+        ],
+        "forbidden_scopes": [
+          "除 server.js 与 test/hello.test.js 外的所有仓库路径"
+        ]
+      },
+      "input_contract_checks": [],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "零第三方依赖"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-001",
+          "command": "node --test test/hello.test.js",
+          "manual_instruction": "null",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "bae3b5f6138ca99f140f674c2026ff7b722f0ad817a691afd05b8d0fad2a4cc7",
+    "coder_projection_hash": "fc00988e3251a6ba11ad407cdc39b764d5120d6a1a977349cfcb46d3f58b3417",
+    "reviewer_projection_hash": "5532b742fc75a7333489ecff03c24cc26442b01c5ea786e3e0f65e9de712c95f",
+    "created_at": "2026-09-07T16:52:27.330321771+00:00"
+  }
+}

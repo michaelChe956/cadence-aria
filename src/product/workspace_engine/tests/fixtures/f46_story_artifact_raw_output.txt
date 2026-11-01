@@ -1,0 +1,366 @@
+Using using-superpowers to establish skill discipline. Next: brainstorming.Using using-superpowers → brainstorming (按 Cadence L0 路由内核 v5；已完整读取 `AGENTS.md` 与 `CLAUDE.md`)。
+
+**路由回执**：阶段=新需求/行为变化的 Story 候选探索；必调 Skill=`using-superpowers`（已调）→ `brainstorming`（已调）；角色=workspace_story_spec author（advisory，只产出候选 Markdown）；边界=不写 canonical artifact、不改 OpenSpec、不做 daemon projection。
+
+**已完成的摸底**（仅只读）：
+- 主工作区 `naruto` 是配置壳（无源码），源码只存在于 issue worktree：`.worktrees/aria-issues/issue_0001/` 下有 `server.js`、`status.html`、`test/status-{page,server,integration}.test.js`。
+- `server.js:1` 已确立仓库先例：仅 `node:http`/`node:fs`/`node:path`，导出未监听的 `createServer()` 工厂，`require.main === module` 时才监听；`GET /status.html` 走 `fs.readFile` 返回 `text/html; charset=utf-8`。
+- `test/status-page.test.js:37` 已确立仓库先例：用 `node:vm` 沙箱直接执行页面内联脚本断言页面交互，不引入 jsdom 等依赖。
+- `package.json:18` 的 `test` 脚本仍是 `exit 1` 占位；`openspec/specs`、`openspec/changes` 为空。
+
+按 brainstorming 纪律分类：本需求新增页面 + 规则模块 + 服务路由，属**architectural**形态；但本阶段只产出 Story 候选，不进入 design/plan。
+
+Issue 对规则语义（≥5 连判胜、六连判胜、四连不判胜、满盘无五连判平局）、页面行为、依赖边界都已明示，多数结论可直接推导。有一处**验收口径**在 Issue 中完全未约束，需要你确认。已记录：**Q1 → 纳入，用 node:vm 沙箱**（延续 `test/status-page.test.js:37` 的既有做法，不新增依赖）。
+
+还有一处验收口径 Issue 未约束，需要你确认：<thinking>Both questions answered. Now write the artifact.
+
+Decisions:
+- author-decision-001: 页面交互行为纳入自动化测试范围，用 node:vm 沙箱（沿用仓库既有 test/status-page.test.js 做法），不新增依赖。来源机制 AskUserQuestion。
+- author-decision-002: 移动端浏览器可玩性（棋盘自适应不溢出 + 触控落子）纳入验收范围，作为非功能需求 + 验收项。
+
+Now build the Story Spec.
+
+Required headings (二级):
+## 范围
+## 用户故事
+## 功能需求
+## 成功标准
+## 待确认项
+## 非功能需求
+
+Plus ## 用户确认决策 (since interaction resolved things).
+
+Required tokens: `[REQ-*]`, `[AC-*]`, `source id`.
+Forbidden: Work Items, 任务拆分, 实施计划, 执行计划, 开发任务; [TASK-*], WI-*.
+
+Note: existing repo code uses TASK- ids but I must NOT use them.
+
+Let me construct REQs bound to file/module where issue indicates:
+
+Issue source: issue_0002. Each REQ gets `source id: issue_0002#<item>`.
+
+REQ list:
+
+Range/non-goals:
+- REQ-001: 范围 — 本次仅交付本地双人五子棋对战页这一功能；不做 AI 对手、不做网络/联机对战、不做悔棋与棋谱记录。 source id: issue_0002#范围
+  Hmm — issue numbering: items 1-6 前端, 7-8 后端, 9-10 测试, 范围 statement.
+
+Let me enumerate:
+
+[REQ-001] 15×15 标准棋盘，黑白轮流点击空交叉点落子；已落子点位不可再落 — gomoku.html。source id: issue_0002#req-1
+[REQ-002] 实时显示当前轮次方（黑/白） — gomoku.html。source id: issue_0002#req-2
+[REQ-003] 任一方向横/竖/两斜线连成 5 子（含以上）判胜；显示获胜方并锁定棋盘，后续点击不生效。source id: issue_0002#req-3
+[REQ-004] 225 个交叉点落满且无人获胜时显示平局并锁盘。source id: issue_0002#req-4
+[REQ-005] 「重新开始」按钮：清空棋盘、恢复黑方先行。source id: issue_0002#req-5
+[REQ-006] 胜负判定逻辑位于独立 CommonJS 模块 gomoku-rules.js 并导出判定函数；页面与测试共用同一实现；gomoku.html 内不得重复实现判定逻辑。source id: issue_0002#req-6
+[REQ-007] 服务端 GET /gomoku.html 返回五子棋页面，Content-Type text/html；仅使用 node:http、node:fs、node:path 与 process；不新增任何依赖。服务入口文件由实现决定。source id: issue_0002#req-7
+[REQ-008] 不为游戏提供任何 API；对战状态仅存前端内存，服务端不持有对局状态。source id: issue_0002#req-8
+[REQ-009] gomoku-rules.js 单元测试（node --test）覆盖：四个方向恰好五连判胜、六连同样判胜、被阻断的四连不判胜、空盘不判胜、满盘无五连判平局。source id: issue_0002#req-9
+[REQ-010] 服务测试：GET /gomoku.html 返回 200 且 content-type 为 text/html。source id: issue_0002#req-10
+[REQ-011] 范围边界：只做五子棋对战页这一功能；不做 AI 对手、不做网络/联机对战、不做悔棋与棋谱记录。source id: issue_0002#scope
+
+Now the constraint summary requires: "文件/模块归属覆盖具体 API/行为时，需求必须将该具体 API/行为与所属文件/模块直接绑定" — REQ-001..005 bind to gomoku.html; REQ-006 binds rules to gomoku-rules.js; REQ-007 binds GET /gomoku.html to 服务入口文件（实现者自定）; REQ-009 binds tests to gomoku-rules.js + node --test.
+
+Also "若明示规则之间存在例外、优先级或集合包含关系，需求必须保留该关系及适用范围，不得把带例外的规则写成无条件绝对规则" — the ≥5 连 (含六连) 是"五连"的超集关系；平局规则以"无人获胜"为例外条件（胜利优先）。需保留。
+
+So REQ-003 must express: 连成恰好 5 子或 6 子及以上（长连）均判胜（集合包含关系：≥5 即胜，不采用"仅恰好五连"或禁手规则）。And REQ-004 must express: 平局仅在 225 点落满 **且无人获胜** 时成立（胜利优先于平局）。
+
+Now decisions:
+[REQ-012] 页面交互行为的自动化验收（author-decision-001）：gomoku.html 的交互行为必须由自动化测试覆盖，沿用仓库既有做法用 node:vm 沙箱执行页面内联脚本，不新增依赖。source id: author-decision-001
+[REQ-013] 移动端可玩性（author-decision-002）：页面须在移动端浏览器可玩——棋盘随视口自适应不溢出、触控可落子。source id: author-decision-002
+
+Hmm, REQ-013 is 非功能 — but it's fine as REQ under 功能需求? Better put it in 非功能需求 section with a REQ id. The schema says REQ-* required, doesn't say where. I'll put mobile REQ in 非功能需求 section too and reference in 功能需求? Hmm.
+
+Actually let me structure:
+
+## 功能需求
+- REQ-001 .. REQ-010 (issue-derived, 功能/服务/测试责任)
+Hmm, test obligations are 成功标准-ish but issue 明示为需求. I'll put 规则/页面/服务 in 功能需求, and 测试责任 in 成功标准? Hmm — but constraint says "若 Issue 明示...自动化验证责任，必须把每项约束分别固化为带 source id 的稳定 [REQ-*]". So test obligations should be REQ too. I'll put REQ-009/010 in 功能需求 as 验证责任需求, or in 成功标准. Let me put them in 成功标准 section as REQ + AC. Hmm, that's fine — REQ ids can appear in 成功标准.
+
+Let me plan the doc:
+
+# 新增五子棋双人对战页面 Story Spec
+
+(intro paragraph: 来源 issue_0002, repository naruto, 追踪)
+
+## 范围
+- 目标: ...
+- 交付物: gomoku.html, gomoku-rules.js, 服务入口（自定）, 测试
+- 非目标
+- REQ-011 (范围边界)
+
+## 用户故事
+- US-1 .. US-4 (as plain narrative; no forbidden ids)
+
+Note: 用户故事 — should I add stable IDs? Schema only requires REQ-* and AC-*. I'll write user stories as narrative with reference to REQ ids. Maybe [US-*]? Not required; but harmless? Risky — no, [US-*] isn't forbidden. But keep simple: narrative bullets referencing REQ ids.
+
+## 功能需求
+REQ-001..REQ-008, each with source id. Plus 规则语义边界 (包含关系/优先级) explicitly.
+
+## 成功标准
+AC-001..AC-0xx, each tracing to REQ ids, plus 验证命令.
+
+## 用户确认决策
+author-decision-001, author-decision-002.
+
+## 待确认项
+无
+
+Wait — schema: "如果通过交互已解决所有疑问，## 待确认项 写「无」" and also "若无开放问题，只写「无待确认项」四个字". The artifact_schema_contract says: "若无开放问题，只写「无待确认项」四个字". The output_schema says "「## 待确认项」写「无」". Slight conflict. The more specific one ([artifact_schema_contract]) says 只写「无待确认项」四个字. Hmm, "无待确认项" is 5 characters. Whatever. I'll write "无待确认项" exactly, no explanation. That's the strictest reading of the schema contract. Hmm, but the output_schema says 「无」. The artifact_schema_contract is described as "唯一的 Markdown 结构、稳定 ID、追踪与禁止项合同" — authoritative. Go with "无待确认项".
+
+## 非功能需求
+- NFR with REQ ids: REQ-012 (无新增依赖/仅内置模块), REQ-013 (移动端可玩), REQ-014 (页面单文件无外部资源/无构建), REQ-015 (自动化测试用 node --test).
+
+Hmm, need to be careful not to invent. Let me derive NFRs:
+- REQ: 服务端不新增任何运行时依赖（issue #7/#8 明示仅内置模块）→ NFR.
+- REQ: gomoku.html 为原生 HTML/CSS/JS 单页，无框架、无构建步骤（issue 明示）→ NFR.
+- REQ: 对战状态仅存前端内存，服务端不持久化、不提供 API（issue #8）→ could be 功能需求 or NFR. I'll put in 功能需求 REQ-008.
+- REQ: 移动端可玩（decision-002）→ NFR.
+- REQ: 测试用 node --test，无新增测试依赖（issue #9；decision-001 补充页面自动化测试同样不新增依赖）→ NFR.
+
+Ordering: let me number sequentially.
+
+功能需求:
+- REQ-001 棋盘与落子 (gomoku.html) — source id: issue_0002#前端-1
+- REQ-002 轮次显示 (gomoku.html) — issue_0002#前端-2
+- REQ-003 胜负判定与锁盘 (gomoku.html + gomoku-rules.js) — issue_0002#前端-3
+- REQ-004 平局判定 (gomoku.html + gomoku-rules.js) — issue_0002#前端-4
+- REQ-005 重新开始 (gomoku.html) — issue_0002#前端-5
+- REQ-006 规则模块归属与共用 (gomoku-rules.js) — issue_0002#前端-6
+- REQ-007 静态托管 (服务入口文件) — issue_0002#后端-7
+- REQ-008 无游戏 API / 内存态 (服务入口文件 + 前端) — issue_0002#后端-8
+- REQ-009 规则单元测试 (gomoku-rules.js, node --test) — issue_0002#测试-9
+- REQ-010 服务测试 (服务入口, GET /gomoku.html) — issue_0002#测试-10
+- REQ-011 范围边界与非目标 — issue_0002#范围
+
+非功能需求:
+- REQ-012 仅 Node 内置模块、不新增依赖 — issue_0002#后端-7 (and #8)
+- REQ-013 页面单页原生、无框架无构建 — issue_0002#前端
+- REQ-014 移动端可玩（自适应 + 触控） — author-decision-002
+- REQ-015 页面交互行为纳入自动化测试（node:vm 沙箱、不新增依赖） — author-decision-001
+- REQ-016 测试统一由 node --test 驱动 — issue_0002#测试-9
+
+Hmm, REQ-015 is arguably 成功标准. Let me keep 验证责任 in 成功标准 as AC + a REQ. Actually simpler: put REQ-015 in 成功标准 section, since it's about verification. Hmm. But 非功能需求 is a fine home for "可测试性". Hmm.
+
+Let me put REQ-015 (页面交互自动化验收) in 成功标准 section alongside test REQs 009/010. Hmm, but 成功标准 should contain ACs. It can contain REQs too. Hmm, actually maybe cleaner: put all test/verification REQs (009, 010, 015) in 成功标准.
+
+Let me finalize:
+
+## 功能需求: REQ-001..REQ-008, REQ-011(范围边界) ... hmm REQ-011 范围边界 better in 范围 section. Fine — put REQ-011 in 范围.
+
+## 成功标准: REQ-009, REQ-010, REQ-015 + AC-001..AC-0xx
+
+## 非功能需求: REQ-012, REQ-013, REQ-014, REQ-016
+
+OK.
+
+Now ACs. Each AC must trace to REQ(s). Let me write ACs as observable acceptance criteria, with verification commands.
+
+AC-001: 打开 /gomoku.html，棋盘为 15×15 交叉点；点击空点落入当前方棋子。→ REQ-001
+AC-002: 落子后当前轮次指示切换为另一方；点击已落子点不改变棋盘与轮次。→ REQ-001, REQ-002
+AC-003: 构造横/竖/两斜任一方向 ≥5 连，页面显示获胜方且棋盘锁定（后续点击无变化）。→ REQ-003
+AC-004: 225 点落满且无 ≥5 连时显示平局并锁盘；最后一手同时成五连时不判平局（胜利优先）。→ REQ-004
+AC-005: 点击「重新开始」清空棋盘并恢复黑方先行（对局中与结束后均可）。→ REQ-005
+AC-006: gomoku-rules.js 单测通过：四方向恰好五连判胜、六连判胜、被阻断四连不判胜、空盘不判胜、满盘无五连判平局。→ REQ-006, REQ-009
+AC-007: 静态检查：gomoku.html 中不存在独立于 gomoku-rules.js 的胜负判定实现（页面引入/调用 gomoku-rules.js）。→ REQ-006
+AC-008: GET /gomoku.html 返回 200 且 content-type 以 text/html 开头。→ REQ-007, REQ-010
+AC-009: 服务端源码仅 require node:http/node:fs/node:path；package.json dependencies/devDependencies 为空。→ REQ-007, REQ-012
+AC-010: 服务端无游戏相关 API 路由；对局状态仅存前端内存（刷新页面即重置，服务端不返回对局数据）。→ REQ-008
+AC-011: 页面交互自动化测试（node:vm 沙箱执行内联脚本）覆盖落子、轮次、锁盘、平局、重开；测试通过且未新增依赖。→ REQ-015, REQ-001..005
+AC-012: 移动端视口下棋盘宽度不超出视口（无横向滚动），触控可落子。→ REQ-014
+AC-013: 全部测试由 node --test 执行并通过。→ REQ-016, REQ-009, REQ-010
+
+Verification commands: 
+- `node --test` (issue 明示 node --test)
+- maybe `node --test test/` 
+Let me state: `node --test` in 仓库根目录；以及 `node --test test/gomoku-rules.test.js` etc. Hmm — file names for tests are not fixed by issue. Issue says "node --test". I'll use `node --test` as the primary command and note that 服务测试与页面测试同样由 node --test 驱动.
+
+Hmm, `package.json` test script is `exit 1`. Should I require `npm test` to work? Not stated. `node --test` is explicit. I'll use `node --test`. Maybe also mention that package.json 的 test 脚本非本 story 范围. Hmm — that's a risk: reviewer might want `npm test`. It's derivable? Issue says "node --test" → use node --test directly. Keep it.
+
+Now 用户确认决策 section:
+- author-decision-001: 问题=页面交互行为是否必须纳入自动化测试范围；用户选择=纳入，用 node:vm 沙箱执行页面内联脚本，不新增依赖；来源机制=AskUserQuestion；影响=[REQ-015], [AC-011]。
+- author-decision-002: 问题=是否包含移动端可玩性；用户选择=纳入；来源机制=AskUserQuestion；影响=[REQ-014], [AC-012]。
+
+Now tracking: "必需追踪 token：source id" — include `source id: ...` on each REQ and AC.
+
+Also must 保留与上游 Issue 的需求追踪叙述 — mention issue_0002, repository_0001, story_spec_0001.
+
+Forbidden headings: 开发任务, 任务拆分, 实施计划, 执行计划, Work Items. Make sure none appear. Note: I must avoid "实现步骤" wording. Also avoid "[TASK-*]" and "WI-*".
+
+Careful: I should not include the word "任务拆分" etc. even in prose? The rule says 禁止 heading — headings specifically. Prose is fine but let me avoid anyway.
+
+Also markdown-format rule: nested code blocks use 4 backticks outer / 3 inner. My artifact is wrapped in ```artifact — the fence is given by the daemon format. Inside, if I use a code block for verification commands, I should use... hmm. The outer artifact fence is ```artifact (3 backticks). If I nest a code block inside, I'd need 4 backticks for the inner one? No — nesting rule: outer uses more than inner. My outer is ``` (3), so inner must use ≤2 backticks? Hmm, the rule says "代码块嵌套使用 4 反引号/3 反引号" — meaning outer 4, inner 3.
+
+But the daemon requires the artifact fenced block as ```artifact. Hmm. To be safe, I'll avoid code fences inside the artifact entirely — use inline code or plain lines for commands. That sidesteps the nesting issue.
+
+Actually, the artifact block itself — the daemon's schema says "最终候选 Markdown 必须用 ```artifact fenced block 包裹". So I use exactly that. Inside, avoid nested fences. Good.
+
+Let me now also double check: "fenced block 内第一行必须是 Story Spec 一级标题". So:
+
+```artifact
+# 新增五子棋双人对战页面 Story Spec
+...
+```
+
+Wait — but if I need to avoid nested code blocks, and the markdown-format rule wants 4/3... I'll just not use code blocks inside.
+
+Now, one concern: the `artifact` fence with 3 backticks — and my content has no fences. Fine.
+
+Let me write the content.
+
+Also should I include ## 用户确认决策 — schema says "必须在 artifact 正文加入 ## 用户确认决策". Yes.
+
+Let me also think about whether 用户故事 should be in "作为...我希望...以便..." format. Yes, user-readable.
+
+用户故事:
+- 本地双人场景：作为同一台设备上的两名玩家，我们希望黑白轮流在同一棋盘落子并随时看到轮到谁，以便不用纸笔就能对战。
+- 作为玩家，我希望某方连成五子时立刻看到谁赢了并无法再落子，以便结果无可争议。
+- 作为玩家，我希望棋盘下满仍未分胜负时看到平局提示，以便明确结束。
+- 作为玩家，我希望一键重新开始，以便马上再来一局。
+- 作为维护者，我希望胜负规则只有一份实现（gomoku-rules.js）并被页面与测试共用，以便规则改动只有一处。
+- 作为访问者，我希望通过 GET /gomoku.html 直接打开页面，以便无需额外服务或依赖。
+
+Good.
+
+Now 范围:
+- 交付物：gomoku.html（原生单页）、gomoku-rules.js（CommonJS 规则模块）、服务入口文件（实现者自定，提供 GET /gomoku.html）、node --test 测试。
+- 非目标：AI 对手、网络/联机对战、悔棋、棋谱记录、任何游戏 API、后端对局状态。REQ-011。
+- 不在本 story 定义：服务入口文件的具体文件名与是否复用既有服务入口（Issue 明示"服务入口文件自定"）。
+
+Hmm — should I mention that? It's useful and honest. Put it as a note under 范围, or as Design 阶段输入. The output_schema says "实现细节类选择只记录为 Design 阶段输入，不要固化成 Story 范围或验收标准." So I can note it as Design 阶段输入. But careful: "Design 阶段输入" wording is fine (not a forbidden heading). I'll add a short bullet noting it's delegated to design.
+
+Hmm, but careful not to create a forbidden heading. Bullet text is fine.
+
+Also I should note: 关联上下文 = 无; 但仓库既有先例（server.js, test/status-page.test.js）作为实现参考 — hmm, that's design input too. Keep brief.
+
+Let me write it now.
+
+One more: tracking token "source id" — I'll write each REQ/AC line with `source id: issue_0002#前端-1`. The schema says 必需追踪 token：source id. So the literal string "source id" must appear. ✓
+
+Let me now write the final artifact.
+
+Also: should each AC reference REQ ids? Yes — "可观察行为的验收必须用 [AC-*] 关联相应 [REQ-*]".
+
+Let me write.
+
+Let me be careful with 规则语义 relations:
+REQ-003 must state: 判胜条件为"在横、竖、两条斜线任一方向上出现连续同色棋子数 ≥ 5"；即恰好 5 连判胜，6 连及以上（长连）同样判胜——"恰好五连"是判胜条件的子集，不是判胜的充分必要条件；不采用"仅恰好五连判胜"或黑方长连禁手（Renju）规则。
+And: 被阻断的四连（连续同色仅 4 子，含两端被封堵的情形）不满足 ≥5，不判胜。
+And 被对手棋子隔断、不连续的同色棋子不构成连子。
+
+REQ-004: 平局成立条件为"225 个交叉点全部落满 且 无人满足 REQ-003 的判胜条件"；胜利优先于平局——若最后一手同时使棋盘落满并形成 ≥5 连，按胜利处理，不判平局。
+
+Good — preserves 例外/优先级关系.
+
+Now write.
+
+Let me draft the final markdown carefully.
+
+Also I must place 过程说明 outside the fenced block.
+
+Length: keep reasonable.
+
+Let me write the final answer.
+
+I also need to double-check forbidden token check: no `[TASK-`, no `WI-`. I must not write "WI-" anywhere. OK.
+
+Let me write.</thinking>
+两处验收口径已通过 AskUserQuestion 确认完毕，以下为 Story Spec 候选。过程说明在 fenced block 之外；正文未写入任何 canonical 产物，OpenSpec 未改动。
+
+```artifact
+# 新增五子棋双人对战页面（前端棋盘交互 + 后端静态托管 + 规则模块测试） Story Spec
+
+上游追踪：story_spec_0001 ← issue_0002 ← repository_0001（/home/michaelche/workspace/github/naruto）。
+
+本 Story 目标：为 naruto H5 游戏新增一个本地双人五子棋对战页，同一浏览器内黑白轮流落子，胜负规则由独立模块统一实现并被页面与测试共用，页面由仅依赖 Node 内置模块的服务提供静态托管。
+
+## 范围
+
+范围边界（含非目标）由 issue 明示：
+
+- [REQ-011] 本次只交付「五子棋双人对战页」这一功能；不做 AI 对手、不做网络/联机对战、不做悔棋、不做棋谱记录。凡上述未列出的对局增强能力，均不在本 Story 的可验收范围内。 source id: issue_0002#范围
+- 交付物四件：`gomoku.html`（原生 HTML/CSS/JS 单页，无框架无构建）、`gomoku-rules.js`（CommonJS 规则模块，被页面与测试共用）、服务入口文件（提供 `GET /gomoku.html`）、由 `node --test` 驱动的测试。 source id: issue_0002#前端-6, issue_0002#后端-7, issue_0002#测试-9
+- Issue 明示「服务入口文件自定」，因此**服务入口的具体文件名与是否复用既有服务入口属实现选择，本 Story 只约束其可观察行为（见 [REQ-007]）**，不写入 Story 范围。 source id: issue_0002#后端-7
+- 对局状态不落地、不持久化：页面刷新即从头开始。 source id: issue_0002#后端-8
+
+## 用户故事
+
+- 作为同一台设备上的两名玩家，我们希望黑白轮流在同一张棋盘上落子并随时看到当前轮到哪方，以便不使用纸笔即可对战。
+- 作为对局中的玩家，我希望某一方连成五子时立即看到获胜方且无法再落子，以便结果无可争议。
+- 作为对局中的玩家，我希望棋盘下满仍未分出胜负时看到平局提示，以便明确知道本局结束。
+- 作为对局中的玩家，我希望一键「重新开始」清空棋盘并恢复黑方先行，以便立刻再来一局。
+- 作为规则维护者，我希望胜负判定只有一份实现并被页面与测试共用，以便规则调整时只需改一处、且页面行为与测试断言不会分叉。
+- 作为页面访问者，我希望直接访问 `GET /gomoku.html` 就能打开对战页，以便不需要额外服务或安装依赖。
+
+## 功能需求
+
+页面行为需求（文件归属：`gomoku.html`）：
+
+- [REQ-001] 页面提供 15×15 标准棋盘；黑白双方轮流点击空交叉点落子；已落子点位不可再次落子。 source id: issue_0002#前端-1
+- [REQ-002] 页面实时显示当前轮到哪一方（黑 / 白）。 source id: issue_0002#前端-2
+- [REQ-003] 页面在任一方满足判胜条件时显示获胜方并锁定棋盘，锁定后的点击不再改变任何对局状态与显示。判胜条件的完整语义（含集合包含关系与不判胜情形）由 [REQ-006] 的规则模块判定，页面不得自行重写该语义。 source id: issue_0002#前端-3
+- [REQ-004] 页面在 225 个交叉点全部落满且无人获胜时显示平局并锁定棋盘。 source id: issue_0002#前端-4
+- [REQ-005] 页面提供「重新开始」按钮：清空棋盘并恢复黑方先行。 source id: issue_0002#前端-5
+
+规则模块需求（文件归属：`gomoku-rules.js`）：
+
+- [REQ-006] 胜负判定逻辑必须位于独立 CommonJS 模块 `gomoku-rules.js` 并导出判定函数；该模块是判胜与判平的唯一实现，`gomoku.html` 与测试必须共用同一份实现，页面内不得重复实现一份判定逻辑。判定语义必须完整保留以下关系，不得简化：
+  - 判胜方向为横、竖、两条斜线（主对角线 / 副对角线）共四个方向。
+  - 判胜条件为「某方向上存在连续同色棋子数 ≥ 5」；恰好 5 连判胜，6 连及以上（长连）同样判胜——即「恰好五连」是判胜条件的子集，而非判胜的充分必要条件。因此不采用「仅恰好五连判胜」，也不采用黑方长连禁手（Renju）类规则。
+  - 被阻断的四连不判胜：连续同色棋子仅 4 子（含两端被对方棋子封堵的情形）不满足 ≥5，不判胜。
+  - 被对方棋子隔断、不连续的同色棋子不构成连子。
+  - 平局以「无人获胜」为前置条件：仅当 225 个交叉点全部落满且无人满足上述判胜条件时才判平局；胜利优先于平局，若最后一手同时使棋盘落满并形成 ≥5 连，按胜利处理而不判平局。
+  source id: issue_0002#前端-6, issue_0002#前端-3, issue_0002#前端-4
+
+后端静态托管需求（文件归属：服务入口文件，文件名由实现决定）：
+
+- [REQ-007] 服务入口必须响应 `GET /gomoku.html`，返回五子棋页面（`text/html`）。该行为与「服务入口文件」直接绑定：无论实现者选择新建入口还是扩展现有入口，`GET /gomoku.html` 的可观察行为均按本需求验收。 source id: issue_0002#后端-7
+- [REQ-008] 服务端不为游戏提供任何 API；对战状态仅存于前端内存，服务端不持有、不返回、不持久化任何对局状态。 source id: issue_0002#后端-8
+
+## 成功标准
+
+验证责任需求：
+
+- [REQ-009] 必须为 `gomoku-rules.js` 提供单元测试，并由 `node --test` 执行；用例至少覆盖：四个方向各自「恰好五连」判胜、六连同样判胜、被阻断的四连不判胜、空盘不判胜、满盘无五连判平局。 source id: issue_0002#测试-9
+- [REQ-010] 必须提供服务测试：`GET /gomoku.html` 返回 200 且 content-type 为 `text/html`。 source id: issue_0002#测试-10
+- [REQ-015] `gomoku.html` 的交互行为必须纳入自动化测试范围，采用仓库既有做法：以 `node:vm` 沙箱执行页面内联脚本并断言交互结果，不新增测试依赖。 source id: author-decision-001
+
+可观察验收标准（每条关联其 [REQ-*]）：
+
+- [AC-001] 访问 `/gomoku.html` 时页面呈现 15×15 棋盘；点击空交叉点后该点出现当前方的棋子。关联 [REQ-001]。 source id: issue_0002#前端-1
+- [AC-002] 落子后轮次指示切换为另一方；点击已落子点位时棋盘内容与轮次指示均不变化。关联 [REQ-001]、[REQ-002]。 source id: issue_0002#前端-1, issue_0002#前端-2
+- [AC-003] 在横、竖、任一斜线方向上出现连续同色棋子 ≥5 时，页面显示获胜方并锁定棋盘；此后继续点击不再产生任何棋盘变化。关联 [REQ-003]、[REQ-006]。 source id: issue_0002#前端-3
+- [AC-004] 225 个交叉点落满且无任何方向形成 ≥5 连时，页面显示平局并锁盘；若最后一手落子同时使棋盘落满并形成 ≥5 连，则显示获胜方而非平局（胜利优先）。关联 [REQ-004]、[REQ-006]。 source id: issue_0002#前端-4
+- [AC-005] 点击「重新开始」后棋盘被清空且恢复黑方先行；对局进行中与胜负已分后点击均生效。关联 [REQ-005]。 source id: issue_0002#前端-5
+- [AC-006] `gomoku-rules.js` 单元测试通过，且断言覆盖「四方向恰好五连判胜、六连判胜、被阻断的四连不判胜、空盘不判胜、满盘无五连判平局」。关联 [REQ-006]、[REQ-009]。 source id: issue_0002#测试-9
+- [AC-007] 页面不存在独立于 `gomoku-rules.js` 的第二份胜负判定实现：`gomoku.html` 通过引入 `gomoku-rules.js` 获得判定结果，页面代码内不重复实现连子扫描逻辑。关联 [REQ-006]。 source id: issue_0002#前端-6
+- [AC-008] `GET /gomoku.html` 返回 200，且 content-type 以 `text/html` 开头。关联 [REQ-007]、[REQ-010]。 source id: issue_0002#测试-10
+- [AC-009] 服务入口源码仅引用 Node 内置模块，且未新增任何依赖：源码中的 `require` 目标限于 `node:http`、`node:fs`、`node:path`，`package.json` 的 dependencies / devDependencies 保持为空。关联 [REQ-007]、[REQ-012]。 source id: issue_0002#后端-7
+- [AC-010] 服务端不存在对局相关 API 路由；对局状态仅存前端内存——刷新页面即回到初始空盘状态，服务端不返回任何对局数据。关联 [REQ-008]。 source id: issue_0002#后端-8
+- [AC-011] 页面交互自动化测试在 `node:vm` 沙箱中执行 `gomoku.html` 的内联脚本并通过，断言覆盖落子、轮次切换、胜负锁盘、平局锁盘与重新开始；测试运行未新增依赖。关联 [REQ-015]、[REQ-001]、[REQ-002]、[REQ-003]、[REQ-004]、[REQ-005]。 source id: author-decision-001
+- [AC-012] 在移动端视口下棋盘不超出视口宽度（无横向溢出滚动），并可经触控准确落到交叉点。关联 [REQ-014]。 source id: author-decision-002
+- [AC-013] 上述全部测试由 `node --test` 执行并通过（规则模块单测、服务测试、页面交互测试同属该命令覆盖范围）。关联 [REQ-016]、[REQ-009]、[REQ-010]、[REQ-015]。 source id: issue_0002#测试-9
+
+验证命令：在仓库根目录执行 `node --test`。
+
+## 用户确认决策
+
+- author-decision-001：问题为「`gomoku.html` 的交互行为（点击落子、轮次显示、胜负/平局锁盘、重新开始）是否必须纳入自动化测试范围」——Issue 仅明示「`gomoku-rules.js` 单元测试」与「`GET /gomoku.html` 服务测试」两类，对页面交互的验收方式未作约束。用户选择：纳入，采用 `node:vm` 沙箱执行页面内联脚本的方式（延续仓库既有做法），且不新增依赖。来源机制：AskUserQuestion。受影响需求/验收：[REQ-015]、[AC-011]。 source id: author-decision-001
+- author-decision-002：问题为「本次验收是否包含移动端浏览器可玩性（棋盘自适应 + 触控落子）」——Issue 描述的是「naruto H5 游戏」的本地双人页，但未对移动端适配作出约束。用户选择：纳入，要求移动端可玩。来源机制：AskUserQuestion。受影响需求/验收：[REQ-014]、[AC-012]。 source id: author-decision-002
+
+## 非功能需求
+
+- [REQ-012] 服务端不得新增任何依赖：仅使用 `node:http`、`node:fs`、`node:path` 与 `process`。 source id: issue_0002#后端-7
+- [REQ-013] `gomoku.html` 为原生 HTML/CSS/JS 单页，无框架、无构建步骤、无构建产物依赖；页面可被服务直接原样托管。 source id: issue_0002#前端
+- [REQ-014] 页面须在移动端浏览器可玩：棋盘随视口自适应、不产生横向溢出滚动，且触控点击可准确落在 15×15 交叉点上。 source id: author-decision-002
+- [REQ-016] 测试统一由 Node 内置测试运行器 `node --test` 驱动，不引入任何测试框架或断言库依赖。 source id: issue_0002#测试-9
+
+## 待确认项
+
+无待确认项
+```
+
+需要提醒的两点边界：
+
+- 本 Story 已把「服务入口文件名与是否复用既有入口」明确排除在范围外（Issue 明示「自定」），实现阶段若要复用 `server.js` 需自行确认「既有 `GET /api/status`、`GET /status.html` 行为不被破坏」——这属于实现侧回归责任，本 Story 未把它固化为验收项。
+- 仓库现状提示：主工作区 `naruto` 是配置壳，`server.js` / `status.html` / `test/*` 目前只存在于 issue_0001 的 worktree 分支；`package.json:18` 的 `test` 脚本仍是 `exit 1` 占位，因此验证命令按 Issue 原文取 `node --test` 而非 `npm test`。

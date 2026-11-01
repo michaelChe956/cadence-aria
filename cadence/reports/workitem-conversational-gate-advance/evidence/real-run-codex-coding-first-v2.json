@@ -1,0 +1,91 @@
+{
+  "stage": "phase2_coding_first_test_and_amendment_chain (post-fix rerun v2)",
+  "task": "B 修复后重跑 · 阶段 A",
+  "date": "2026-09-03",
+  "handoff": "/tmp/aria-stage35-20260903/amendment/codex/rep2/handoff.json",
+  "deployment_episode": {
+    "summary": "第 1 跑前发现修复未部署:运行中服务器 PID 401632 于 14:15:25 启动,exe 指向已删除旧 inode 222175111(构建于 09:51:43);磁盘新二进制 inode 225117478 构建于 20:45:51(含 1e7a7247+dc4d0d0d)从未被启动",
+    "resolution": "supervisor 决策 A:kill 旧进程,新进程 PID 745190 于 21:01:14 启动,md5/inode 内容级验证一致",
+    "evidence": "/tmp/aria-stage35-20260903/deployment-check/deployment-mismatch-evidence.md",
+    "run0": {
+      "dir": "/tmp/aria-stage35-20260903/amendment-rerun/coding-codex-preflight-failed-20260903125638535",
+      "elapsed_sec": 0.061,
+      "failure_class": "environment(deployment not effective)",
+      "error": "create group coding attempt HTTP 400: existing group coding attempt is only partially initialized or inconsistent",
+      "quota": "环境类,不占额度(supervisor 确认)"
+    }
+  },
+  "seam_fix_verification": {
+    "claim": "1e7a7247 create group coding attempt 按 journal 冻结准入身份重放,收养 sc_advance journal",
+    "verdict": "VERIFIED at the 400 seam",
+    "evidence": "修复后 3/3 次运行(含 rep2 重跑)create group coding attempt 均成功收养 sc_advance attempt coding_attempt_0e1328ed63964f2396e0ed12888e3ea4,400 coding_group_attempt_incomplete 未再出现;curl 复现亦通过(adoption 幂等稳定)",
+    "durable": "coding-attempts/coding_attempt_0e1328ed….json: admission_kind=sc_advance, status=running, stage=coding, worktree_path=<naruto>/.worktrees/aria-issues/issue_0111, head_commit=null"
+  },
+  "criterion_A": {
+    "verdict": "NOT satisfied",
+    "reason": "attempt 创建成功(接缝修复点通过)但 coding 段无法真实驱动前进:run1 在 start_attempt 后 0.125s 死于 git_workspace_io(worktree 从未物化);run2 重连后 30 分钟 WS 零事件直至硬超时。权限/选择/阶段驱动事件计数 0/0(仅 prepare_context/coding 状态行)"
+  },
+  "criterion_B": {
+    "verdict": "not triggered (amendment_not_triggered)",
+    "reason": "coding 段 provider 从未启动,BlockedByPlanDefect/plan_repair_required/三 WS 线不可达;amendment.discovered=null, gate_turns=[], resume=null(两跑一致)"
+  },
+  "runs": [
+    {
+      "dir": "/tmp/aria-stage35-20260903/amendment-rerun/coding-codex-coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+      "started_at": "2026-09-03T13:02:30.469Z",
+      "elapsed_sec": 0.125,
+      "failure_class": "protocol_error",
+      "error": "coding_start_failed: git_workspace_io: git rev-parse --show-toplevel in /home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0111: No such file or directory (os error 2)",
+      "attempt_created": true,
+      "attempt_id": "coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+      "ws_connected": true,
+      "start_coding_sent": true,
+      "stage_timeline": [["prepare_context", 0.088]],
+      "permission_approvals": 0,
+      "choices": 0,
+      "root_cause": {
+        "deterministic": true,
+        "chain": [
+          "advance 侧 initialize_advance_inner(advance.rs:462-471)仅记录 worktree_path=Some(repo/.worktrees/aria-issues/<issue>),不物化 git worktree(设计:物化延迟到 coding 侧 WorktreePrepare 阶段,唯一物化点 lifecycle.rs:316 execute_worktree_prepare→create_worktree)",
+          "修复后 create 端点收养 journal,attempt 持久化 worktree_path=Some(...)",
+          "start_attempt(lifecycle.rs:226)对 scope=WorkItemGroup && worktree_path.is_some() 的 attempt 直接跳过 WorktreePrepare 阶段置 stage=Coding,再 git_current_head(worktree_path)",
+          "该短路(ea556779, 2026-07-08)假设 worktree_path.is_some() ⇒ worktree 已物化,对 sc_advance 延迟物化语义不成立",
+          "→ git 于不存在目录 spawn ENOENT(os error 2) → coding_start_failed"
+        ],
+        "corroboration": "naruto/.worktrees/aria-issues/ 目录 mtime=Aug 13 14:20(当日无创建/删除);git worktree list 仅主 worktree;分支 aria/issues/issue_0111 不存在 ⇒ worktree 从未在本机物化,非环境丢失"
+      }
+    },
+    {
+      "dir": "/tmp/aria-stage35-20260903/amendment-rerun-rep2/coding-codex-coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+      "started_at": "2026-09-03T13:09:08.609Z",
+      "elapsed_sec": 1800.1,
+      "failure_class": "hard_timeout",
+      "error": "Coding 硬超时 1800000ms",
+      "attempt_created": true,
+      "attempt_id": "coding_attempt_0e1328ed63964f2396e0ed12888e3ea4",
+      "ws_connected": true,
+      "start_coding_sent": false,
+      "stage_timeline": [["coding", 0.092]],
+      "permission_approvals": 0,
+      "choices": 0,
+      "ws_trace": "coding_attempt_created → ws_open → coding_hello(out) → coding_session_state(in: status=running, stage=coding, head_commit=null) → [30min 无任何事件] → 客户端硬超时",
+      "root_cause": {
+        "deterministic": true,
+        "chain": [
+          "run1 死前已持久化 status=running + stage=coding(durable 佐证 updated_at=13:02:30Z, run2 全程未再更新 attempt 记录)",
+          "run2 attach 时 driver 见 attempt 已 running/coding,不再发送 start_coding(ws.jsonl 无 out start_coding)",
+          "run1 的 runner task 已随其 WS 断开而取消,服务端无活动 runner;无 runner 存活探测/自恢复机制",
+          "→ 双方互等:driver 等事件,服务端无驱动 → 30 分钟死寂 → ARIA_CODING_HARD_TIMEOUT_MS 硬超时",
+          "暴露第二层接缝缺陷:半启动(status=running, stage=coding, head_commit=null, 无 runner)的 sc_advance attempt 不可恢复、不可重启"
+        ]
+      }
+    }
+  ],
+  "failure_classes": {
+    "protocol_error": 1,
+    "hard_timeout": 1
+  },
+  "rerun_discipline": "环境类 1 次(部署未生效,不占额度);非环境类 protocol_error×1、hard_timeout×1,均在 ≤2 限额内;两失败机制均已代码级定根,第三跑无信息增量(且 run1 前置条件已被 run2 改变),停",
+  "next_fix_hint": "sc_advance attempt 收养后需走 WorktreePrepare 物化分支(或 start_attempt 对 worktree_path 已置位但目录缺失/非 git 仓时回落物化),并补半启动 attempt 的 runner 恢复/重启语义;第 1 死点在 lifecycle.rs:226 短路,第 2 死点在 driver 与服务端对 running/coding 态的互等",
+  "server_health_after": "ok (PID 745190, 新二进制, 全程未再动)"
+}

@@ -1,0 +1,1545 @@
+use super::*;
+use crate::cross_cutting::streaming_provider::ProviderCompletion;
+use crate::product::json_store::write_json;
+use crate::product::models::{SingleCandidatePhase, WorkItemSplitFinding, WorkspaceSessionStatus};
+use crate::product::work_item_plan_compiler::{
+    PlanCandidateIr, PlanCandidateItemIr, PlanCandidateMechanicalReport,
+    WORK_ITEM_PLAN_COMPILER_VERSION,
+};
+use crate::product::work_item_plan_policy::{
+    FindingClassHint, HumanReason, ReviewCycleState, ReviewFindingCategory, ReviewInvocationScope,
+    RunBudgets, RunHistory, RunPolicy, WorkItemPlanFlowKind,
+};
+use crate::product::work_item_plan_source_store::{
+    PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
+    WorkItemPlanSourceStore,
+};
+use crate::web::workspace_ws_types::{
+    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
+};
+use sha2::{Digest, Sha256};
+
+use crate::product::workspace_engine::review::policy_routing::RoutingAction;
+
+pub(super) fn single_candidate_record(
+    lifecycle: &LifecycleStore,
+    engine: &mut WorkspaceEngine,
+    phase: SingleCandidatePhase,
+    policy: RunPolicy,
+) {
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.run_policy = policy;
+    record.single_candidate_phase = Some(phase.clone());
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist candidate session");
+    let artifact = engine.session.artifact.clone();
+    engine.session = WorkspaceSession::from_record(record);
+    engine.session.artifact = artifact;
+    let refs = persist_candidate_artifacts(lifecycle, engine, "initial");
+    update_durable_candidate_refs(lifecycle, engine, phase, refs);
+}
+
+fn pass_verdict() -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Pass,
+        comments: "review pass".to_string(),
+        summary: "review pass".to_string(),
+        findings: Vec::new(),
+        review_gate: ReviewGate::UserConfirmAllowed,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+fn repairable_verdict(message: &str) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "repair required".to_string(),
+        summary: "repair required".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::MustFix,
+            message: message.to_string(),
+            evidence: "evidence".to_string(),
+            required_action: "repair".to_string(),
+            category: Some(ReviewFindingCategory::ContractGap),
+            class_hint: Some(FindingClassHint::Repairable),
+            contract_field: Some("WI-001.output_contracts[CT-001].capabilities".to_string()),
+            machine_repair: None,
+            owner_question: None,
+            owner_options: None,
+            disposition: None,
+            target_work_item_id: None,
+            finding_key: None,
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+fn mechanical_report_ref(engine: &WorkspaceEngine) -> &str {
+    engine
+        .session()
+        .mechanical_report_ref
+        .as_deref()
+        .expect("durable mechanical report ref")
+}
+
+fn persist_candidate_artifacts(
+    lifecycle: &LifecycleStore,
+    engine: &WorkspaceEngine,
+    suffix: &str,
+) -> (String, String, String) {
+    let project_id = &engine.session().project_id;
+    let issue_id = &engine.session().issue_id;
+    let plan_id = &engine.session().entity_id;
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let source_text = format!("# immutable single candidate source {suffix}\\n");
+    let source_hash = hex::encode(Sha256::digest(source_text.as_bytes()));
+    let mut source = SourceRevisionRecord {
+        id: format!("source-{suffix}"),
+        source: source_text,
+        source_revision_hash: source_hash.clone(),
+        content_hash: String::new(),
+    };
+    source.content_hash = source.content_hash().expect("source content hash");
+    let source_ref = source_store
+        .put_source_revision(project_id, issue_id, plan_id, &source)
+        .expect("persist source");
+
+    let store = engine.work_item_plan_store().expect("plan store");
+    let index = store
+        .load_active_index(project_id, issue_id, plan_id)
+        .expect("active index")
+        .expect("active index exists");
+    let outline = engine
+        .latest_work_item_plan_outline_candidate()
+        .expect("outline candidate");
+    let order = work_item_plan_outline_topological_order(&outline.outline).expect("outline order");
+    let drafts = engine
+        .accepted_active_draft_records_for_compile(&store, &index, &order)
+        .expect("accepted drafts");
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan(project_id, issue_id, plan_id)
+        .expect("previous plan");
+    let repository_id = engine
+        .work_item_plan_repository_id(lifecycle, &previous_plan)
+        .expect("repository id");
+    let mut ir = PlanCandidateIrRecord {
+        id: format!("ir-{suffix}"),
+        source_revision_id: source.id.clone(),
+        ir: PlanCandidateIr {
+            source_revision_hash: source_hash,
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            items: drafts
+                .iter()
+                .map(|draft| PlanCandidateItemIr {
+                    target_repository_id: repository_id.to_string(),
+                    contract: draft.candidate.canonical_contract_candidate.clone(),
+                    verification_plan: draft.candidate.verification_plan.clone(),
+                    trusted_commands: Vec::new(),
+                })
+                .collect(),
+        },
+        content_hash: String::new(),
+    };
+    ir.content_hash = ir.content_hash().expect("IR content hash");
+    let ir_ref = source_store
+        .put_plan_candidate_ir(project_id, issue_id, plan_id, &ir)
+        .expect("persist IR");
+
+    let mut report = PlanCandidateMechanicalReportRecord {
+        id: format!("report-{suffix}"),
+        source_revision_id: source.id,
+        ir_id: ir.id,
+        report: PlanCandidateMechanicalReport {
+            source_revision_hash: ir.ir.source_revision_hash.clone(),
+            compiler_version: ir.ir.compiler_version.clone(),
+            findings: Vec::<WorkItemSplitFinding>::new(),
+        },
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
+        content_hash: String::new(),
+    };
+    report.content_hash = report.content_hash().expect("report content hash");
+    let report_ref = source_store
+        .put_mechanical_report(project_id, issue_id, plan_id, &report)
+        .expect("persist mechanical report");
+    (source_ref, ir_ref, report_ref)
+}
+
+fn update_durable_candidate_refs(
+    lifecycle: &LifecycleStore,
+    engine: &mut WorkspaceEngine,
+    phase: SingleCandidatePhase,
+    refs: (String, String, String),
+) {
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load candidate session");
+    record.single_candidate_phase = Some(phase);
+    record.work_item_plan_source_revision_ref = Some(refs.0);
+    record.plan_candidate_ir_ref = Some(refs.1);
+    record.mechanical_report_ref = Some(refs.2);
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist candidate refs");
+    let artifact = engine.session.artifact.clone();
+    engine.session = WorkspaceSession::from_record(record);
+    engine.session.artifact = artifact;
+}
+
+fn complete_repair_generation(
+    lifecycle: &LifecycleStore,
+    engine: &mut WorkspaceEngine,
+    suffix: &str,
+) {
+    let refs = persist_candidate_artifacts(lifecycle, engine, suffix);
+    let expected = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("reload repairing session");
+    let generated = lifecycle
+        .compare_and_save_single_candidate_generation(&expected, &refs.0, &refs.1)
+        .expect("persist repaired source and IR refs");
+    let saved = lifecycle
+        .compare_and_save_single_candidate_evaluation(&generated, &refs.2)
+        .expect("persist repaired mechanical report ref");
+    let artifact = engine.session.artifact.clone();
+    engine.session = WorkspaceSession::from_record(saved);
+    engine.session.artifact = artifact;
+}
+
+async fn complete_single_candidate_review(engine: &mut WorkspaceEngine, verdict: ReviewVerdict) {
+    engine
+        .complete_review(
+            ProviderCompletion::plain("review".to_string(), None),
+            verdict,
+        )
+        .await;
+}
+
+mod internal_generation_mode {
+    use super::*;
+    use crate::product::models::ProviderName;
+    use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
+
+    fn generation_input(
+        provider: ProviderName,
+        candidate_item_count: usize,
+    ) -> SingleCandidateGenerationDecisionInput {
+        SingleCandidateGenerationDecisionInput {
+            provider,
+            candidate_item_count,
+        }
+    }
+
+    #[test]
+    fn internal_generation_mode_uses_compiled_ir_item_count_and_provider_profile() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
+        ));
+        let ir = crate::product::work_item_plan_compiler::compile_work_item_plan(
+            source,
+            &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
+                target_repository_id: "repo-levels".to_string(),
+                member_targets: None,
+            },
+        )
+        .expect("rep4 source must compile to IR");
+        assert_eq!(ir.items.len(), 3);
+        assert_eq!(
+            select_internal_generation_mode(&generation_input(ProviderName::Codex, ir.items.len())),
+            WorkItemGenerationModeDto::Batch,
+            "three compiled items with the Codex profile remain batch-diagnostic eligible"
+        );
+        assert_eq!(
+            select_internal_generation_mode(&generation_input(ProviderName::Pi, ir.items.len())),
+            WorkItemGenerationModeDto::Serial,
+            "the Pi provider profile remains conservatively serial"
+        );
+        assert_eq!(
+            select_internal_generation_mode(&generation_input(ProviderName::Codex, 4)),
+            WorkItemGenerationModeDto::Serial,
+            "four compiled items must be serial regardless of profile"
+        );
+    }
+
+    #[test]
+    fn internal_generation_mode_is_deterministic_for_identical_input() {
+        let input = generation_input(ProviderName::Codex, 3);
+        assert_eq!(
+            select_internal_generation_mode(&input),
+            select_internal_generation_mode(&input)
+        );
+    }
+}
+
+mod phase_machine {
+    use super::*;
+
+    #[tokio::test]
+    async fn auto_valid_advances_evaluate_approval_completed_without_legacy_route() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::AutoIfValid,
+        );
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+
+        let persisted = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load persisted session");
+        assert_eq!(
+            persisted.single_candidate_phase,
+            Some(SingleCandidatePhase::Completed),
+            "status={:?}, diagnostics={:#?}, messages={:#?}",
+            persisted.status,
+            persisted.policy_diagnostics,
+            engine.session().messages,
+        );
+        assert_eq!(persisted.status, WorkspaceSessionStatus::Confirmed);
+        assert!(persisted.approval_attempt_id.is_some());
+        assert!(persisted.approved_at.is_some());
+        assert!(persisted.compile_reservation.is_some());
+    }
+
+    #[tokio::test]
+    async fn interactive_approval_confirmation_compiles_and_reaches_completed() {
+        let (_tmp, lifecycle, plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+        assert_eq!(
+            engine.session().single_candidate_phase,
+            Some(SingleCandidatePhase::Approval)
+        );
+
+        let outcome = engine
+            .handle_confirm()
+            .await
+            .expect("interactive Approval confirmation compiles and confirms");
+        assert_eq!(outcome, WorkspaceConfirmOutcome::None);
+        let persisted = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load completed session");
+        assert_eq!(engine.session().stage, WorkspaceStage::Completed);
+        assert_eq!(
+            persisted.single_candidate_phase,
+            Some(SingleCandidatePhase::Completed)
+        );
+        assert_eq!(persisted.status, WorkspaceSessionStatus::Confirmed);
+        assert_eq!(
+            lifecycle
+                .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
+                .expect("confirmed plan")
+                .status,
+            crate::product::models::IssueWorkItemPlanStatus::Confirmed
+        );
+        let transaction_count = engine
+            .work_item_plan_store()
+            .expect("plan store")
+            .list_compile_transactions("project_0001", "issue_0001", &engine.session().entity_id)
+            .expect("compile transactions")
+            .len();
+        assert_eq!(transaction_count, 1, "confirmation compiles exactly once");
+
+        let replay = engine
+            .handle_confirm()
+            .await
+            .expect("Completed confirmation is absorbing");
+        assert_eq!(replay, WorkspaceConfirmOutcome::None);
+        assert_eq!(
+            engine
+                .work_item_plan_store()
+                .expect("plan store")
+                .list_compile_transactions(
+                    "project_0001",
+                    "issue_0001",
+                    &engine.session().entity_id
+                )
+                .expect("compile transactions")
+                .len(),
+            transaction_count,
+            "terminal confirmation must not run compile again"
+        );
+    }
+
+    /// F-54 B2（诊断 §4.1）：SC Final Compile 的可恢复失败（failure() 通道）不得
+    /// 把 durable 落成 `Failed`——三条门重开路径只写 WaitingForHuman，残留 Failed
+    /// 会形成 `(waiting_for_human, failed)` 矛盾对（0009：confirm/abandon 双拒，
+    /// 全通路死锁）。可恢复失败只追加 diagnostics，门重开落在 Approval 相位，
+    /// close CAS 授权面仍可过。
+    #[tokio::test]
+    async fn compile_failure_reopens_gate_confirmable_without_failed_phase() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+        assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+
+        // 篡改机械报告文件（内容与 content_hash 失配）→ 下一次 approve 的
+        // Final Compile 在 reload 检查点经 failure() 通道确定性失败。
+        let report_ref = mechanical_report_ref(&engine).to_string();
+        let report_path = lifecycle
+            .app_paths()
+            .issue_root("project_0001", "issue_0001")
+            .join("work-item-plan-sources")
+            .join(&engine.session().entity_id)
+            .join("mechanical_report")
+            .join(format!("{}.json", report_ref.rsplit('/').next().unwrap()));
+        let tampered = std::fs::read_to_string(&report_path).expect("read mechanical report");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&tampered).expect("parse mechanical report");
+        value["report"]["source_revision_hash"] = serde_json::json!("tampered-by-f54-test");
+        std::fs::write(&report_path, serde_json::to_string(&value).unwrap())
+            .expect("tamper mechanical report");
+
+        engine.handle_confirm().await.expect("confirm outcome");
+
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("durable after failed compile");
+        assert_eq!(durable.status, WorkspaceSessionStatus::WaitingForHuman);
+        assert_eq!(
+            durable.single_candidate_phase,
+            Some(SingleCandidatePhase::Approval),
+            "F-54 B2: 门重开后相位必须落在授权面 {{approval, evaluate}}，不得残留 Failed"
+        );
+        assert!(durable.policy_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "SOURCE_STORE_CONTENT_HASH_MISMATCH"
+                && diagnostic
+                    .message
+                    .contains("mechanical report reload failed")
+        }));
+        assert_eq!(
+            engine.session().session_status,
+            WorkspaceSessionStatus::WaitingForHuman
+        );
+        assert_eq!(
+            engine.session().single_candidate_phase,
+            Some(SingleCandidatePhase::Approval)
+        );
+
+        // 用户未被锁死：门开形态仍过 close CAS（confirm 授权面不动）。
+        lifecycle
+            .compare_and_save_human_gate_close(&durable, WorkspaceSessionStatus::Running)
+            .expect("gate stays confirmable after a recoverable compile failure");
+    }
+
+    #[tokio::test]
+    async fn ensure_reconciles_stale_memory_scope_from_durable_candidate_and_cycle() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        let repaired_refs = persist_candidate_artifacts(&lifecycle, &engine, "r23-repaired");
+        update_durable_candidate_refs(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            repaired_refs,
+        );
+        let durable_candidate = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load durable candidate");
+        let current_ir_ref = durable_candidate
+            .plan_candidate_ir_ref
+            .clone()
+            .expect("durable candidate IR");
+        let report_ref = durable_candidate
+            .mechanical_report_ref
+            .clone()
+            .expect("durable mechanical report");
+        let mut durable = durable_candidate;
+        // 锚定语义下 durable 在途 scope 是 Initial（初评被中断重跑）；
+        // Verification scope 由 ensure 在返修后派生，不再作为夹具起点。
+        durable.review_invocation_scope =
+            Some(ReviewInvocationScope::initial(current_ir_ref.clone()));
+        let _ = report_ref;
+        durable.run_history = RunHistory {
+            review_cycles: std::collections::BTreeMap::from([(
+                "sc:candidate:repaired".to_string(),
+                ReviewCycleState::default(),
+            )]),
+            ..RunHistory::default()
+        };
+        write_json(
+            &lifecycle
+                .app_paths()
+                .issue_root(&durable.project_id, &durable.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", durable.id)),
+            &durable,
+        )
+        .expect("persist durable current candidate and new-node cycle");
+
+        // Simulate r23: the worker retained a round-one scope and candidate while the
+        // durable session has the current candidate/report and a different reviewer node.
+        engine.session.review_invocation_scope = Some(ReviewInvocationScope::initial("stale-ir"));
+        engine.session.plan_candidate_ir_ref = Some("stale-ir".to_string());
+        engine.active_node_id = Some("new-reviewer-node".to_string());
+
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("ensure must reconcile from durable state");
+
+        let expected_scope = ReviewInvocationScope::initial(current_ir_ref.clone());
+        assert_eq!(
+            engine.session().review_invocation_scope,
+            Some(expected_scope.clone())
+        );
+        expected_scope
+            .validate_digest()
+            .expect("reconciled Initial scope digest must be valid");
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load reconciled durable session");
+        assert_eq!(durable.review_invocation_scope, Some(expected_scope));
+
+        let action = engine
+            .work_item_policy_action("new-reviewer-node", &pass_verdict())
+            .expect("policy action");
+        assert!(
+            !matches!(action, RoutingAction::AbortFatal { .. }),
+            "durable-first reconciliation must not produce a policy fatal: {action:?}"
+        );
+        let durable = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load verdict-updated durable session");
+        assert_eq!(
+            durable
+                .run_history
+                .review_cycles
+                .get("sc:candidate:repaired")
+                .expect("anchored candidate cycle")
+                .initial_count,
+            1,
+            "the merged verdict must consume the new node's Initial review budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn repairable_runs_once_then_same_node_recovery_uses_real_mechanical_report_ref() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        engine.start_review().await;
+        let initial_node_id = engine
+            .active_node_id
+            .clone()
+            .expect("start_review creates the initial ReviewerRun node");
+
+        complete_single_candidate_review(&mut engine, repairable_verdict("missing contract")).await;
+
+        let after_repair = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("repair persisted");
+        assert_eq!(after_repair.run_history.repairs_used, 1);
+        assert_eq!(
+            after_repair.single_candidate_phase,
+            Some(SingleCandidatePhase::Generate),
+            "repair provider must be reserved after durable Generate transition"
+        );
+        complete_repair_generation(&lifecycle, &mut engine, "verification");
+        let evaluated = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("verification refs persisted");
+        assert_eq!(
+            evaluated.single_candidate_phase,
+            Some(SingleCandidatePhase::Evaluate)
+        );
+        assert!(matches!(
+            evaluated.review_invocation_scope,
+            Some(ReviewInvocationScope::Initial { .. })
+        ));
+
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("same ReviewerRun node must materialize Verification from durable refs");
+        let verified = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("verification scope persisted");
+        let scope = verified
+            .review_invocation_scope
+            .expect("verification scope persisted");
+        match scope {
+            crate::product::work_item_plan_policy::ReviewInvocationScope::Verification {
+                repaired_revision_id,
+                mechanical_report_ref: persisted_report_ref,
+                ..
+            } => {
+                assert_eq!(
+                    repaired_revision_id,
+                    verified.plan_candidate_ir_ref.unwrap()
+                );
+                assert_eq!(persisted_report_ref, mechanical_report_ref(&engine));
+            }
+            other => panic!("expected verification scope for {initial_node_id}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_then_second_review_passes_with_one_durable_reviewer_cycle() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        engine.start_review().await;
+        let node_a = engine
+            .active_node_id
+            .clone()
+            .expect("start_review creates round-one ReviewerRun node");
+        complete_single_candidate_review(&mut engine, repairable_verdict("missing contract")).await;
+        let after_repair = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("repair route persisted");
+        assert_eq!(
+            after_repair.single_candidate_phase,
+            Some(SingleCandidatePhase::Generate)
+        );
+        assert_eq!(after_repair.run_history.repairs_used, 1);
+
+        complete_repair_generation(&lifecycle, &mut engine, "second-review-pass");
+        let evaluated = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("repaired evaluation persisted");
+        assert!(matches!(
+            evaluated.review_invocation_scope,
+            Some(ReviewInvocationScope::Initial { .. })
+        ));
+
+        engine.start_review().await;
+        let node_b = engine
+            .active_node_id
+            .clone()
+            .expect("start_review creates a new ReviewerRun node for round two");
+        assert_ne!(
+            node_a, node_b,
+            "each review start must create a distinct node"
+        );
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("node rotation must stay anchored on the initial candidate cycle");
+        let second_scope = engine
+            .session()
+            .review_invocation_scope
+            .clone()
+            .expect("scope materialized for node B");
+        // REQ-TOP-04 场景 6：节点轮换不得重开开放式初审——同候选链复评相位
+        // 必须是 Verification（cycle 锚定初评候选，跨 ReviewerRun 节点不换 key）。
+        assert!(
+            matches!(second_scope, ReviewInvocationScope::Verification { .. }),
+            "node rotation must materialize Verification, got {second_scope:?}"
+        );
+        second_scope
+            .validate_digest()
+            .expect("node B verification scope digest is valid");
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+
+        let completed = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("second review persisted");
+        assert_eq!(
+            completed.single_candidate_phase,
+            Some(SingleCandidatePhase::Approval)
+        );
+        assert_eq!(completed.status, WorkspaceSessionStatus::WaitingForHuman);
+        assert!(
+            !completed
+                .policy_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "verification_scope_violation"),
+            "node rotation must not terminate from an invocation/cycle phase mismatch"
+        );
+        let reviewer_cycles = completed
+            .run_history
+            .review_cycles
+            .iter()
+            .filter(|(key, _)| key.starts_with("sc:candidate:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reviewer_cycles.len(),
+            1,
+            "one anchored review cycle spans the repair round across reviewer nodes"
+        );
+        for (_, cycle) in reviewer_cycles {
+            assert_eq!(cycle.initial_count, 1);
+            assert_eq!(cycle.verification_count, 1);
+            assert!(cycle.repairs_used <= 1);
+        }
+        // REQ-TOP-04 场景 7：终态 action 关闭本 review cycle——durable scope 置空，
+        // 人工修订后的新候选不得误入旧 cycle 的 Verification。
+        assert_eq!(
+            completed.review_invocation_scope, None,
+            "terminal ContinueToCompleted must close the anchored review cycle"
+        );
+    }
+
+    /// REQ-TOP-04 场景 7（F-52）：终态关闭 cycle 后，人工修订产生的新候选开
+    /// 全新 Initial cycle——旧 cycle 计数不被触碰，新 cycle 不继承 Verification。
+    #[tokio::test]
+    async fn terminal_cycle_closure_gives_next_candidate_a_fresh_initial_cycle() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::Interactive,
+        );
+        engine.start_review().await;
+        complete_single_candidate_review(&mut engine, repairable_verdict("first round")).await;
+        complete_repair_generation(&lifecycle, &mut engine, "auto-repair-round");
+        engine.start_review().await;
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("repaired candidate stays in the anchored Verification cycle");
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+
+        let first_terminal = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("first terminal persisted");
+        assert_eq!(
+            first_terminal.review_invocation_scope, None,
+            "ContinueToCompleted must close the review cycle durably"
+        );
+        let first_cycle = first_terminal
+            .run_history
+            .review_cycles
+            .iter()
+            .filter(|(key, _)| key.starts_with("sc:candidate:"))
+            .map(|(key, cycle)| (key.clone(), cycle.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(first_cycle.len(), 1);
+        let (first_key, first_counts) = first_cycle[0].clone();
+        assert_eq!(first_counts.initial_count, 1);
+        assert_eq!(first_counts.verification_count, 1);
+
+        // 人工修订轮：新候选（新 source_revision 身份）→ 新 cycle。人工修订
+        // 不走自动返修的 generation CAS（该 CAS 仅放行 Prepare/Generate 相位），
+        // 按 durable 直写模拟人工产物落盘。
+        let manual_refs = persist_candidate_artifacts(&lifecycle, &engine, "manual-revision-round");
+        update_durable_candidate_refs(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            manual_refs,
+        );
+        engine.start_review().await;
+        engine
+            .ensure_review_invocation_scope()
+            .await
+            .expect("manual revision must materialize a fresh Initial scope");
+        let manual_scope = engine
+            .session()
+            .review_invocation_scope
+            .clone()
+            .expect("manual revision scope");
+        assert!(
+            matches!(manual_scope, ReviewInvocationScope::Initial { .. }),
+            "manual revision must not inherit the closed cycle's Verification, got {manual_scope:?}"
+        );
+        manual_scope
+            .validate_digest()
+            .expect("manual revision initial scope digest is valid");
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+
+        let second_terminal = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("manual revision review persisted");
+        let anchored_cycles = second_terminal
+            .run_history
+            .review_cycles
+            .iter()
+            .filter(|(key, _)| key.starts_with("sc:candidate:"))
+            .map(|(key, cycle)| (key.clone(), cycle.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            anchored_cycles.len(),
+            2,
+            "the manual revision candidate opens a second anchored cycle"
+        );
+        let (second_key, second_counts) = anchored_cycles
+            .iter()
+            .find(|(key, _)| key != &first_key)
+            .expect("the new cycle key differs from the closed one")
+            .clone();
+        assert_eq!(second_counts.initial_count, 1);
+        assert_eq!(second_counts.verification_count, 0);
+        assert_eq!(
+            second_terminal
+                .run_history
+                .review_cycles
+                .get(&first_key)
+                .expect("closed cycle counts remain durable"),
+            &first_counts,
+            "the closed cycle's counters must stay untouched by the new cycle"
+        );
+        assert!(second_key.starts_with("sc:candidate:"));
+    }
+
+    #[tokio::test]
+    async fn repeated_fingerprint_enters_the_policy_terminal_for_each_run_policy() {
+        for (policy, expected_status) in [
+            (
+                RunPolicy::Interactive,
+                WorkspaceSessionStatus::WaitingForHuman,
+            ),
+            (
+                RunPolicy::AutoIfValid,
+                WorkspaceSessionStatus::StoppedNeedsHuman,
+            ),
+        ] {
+            let (_tmp, lifecycle, _plan_id, mut engine) =
+                make_work_item_plan_engine_with_accepted_contract_drafts();
+            single_candidate_record(
+                &lifecycle,
+                &mut engine,
+                SingleCandidatePhase::Evaluate,
+                policy,
+            );
+            engine.start_review().await;
+            let finding = repairable_verdict("duplicate contract finding");
+            complete_single_candidate_review(&mut engine, finding.clone()).await;
+            complete_repair_generation(&lifecycle, &mut engine, "repeated");
+            engine
+                .ensure_review_invocation_scope()
+                .await
+                .expect("same ReviewerRun must materialize Verification after repair");
+            complete_single_candidate_review(&mut engine, finding).await;
+
+            let persisted = lifecycle
+                .get_workspace_session(&engine.session().session_id)
+                .expect("terminal persisted");
+            assert_eq!(persisted.status, expected_status);
+            assert_eq!(persisted.run_history.repairs_used, 1);
+            assert!(matches!(
+                persisted.human_gate_snapshot,
+                Some(ref snapshot) if snapshot.trigger == HumanReason::RepeatedFingerprint
+            ));
+            for cycle in persisted.run_history.review_cycles.values() {
+                assert!(cycle.initial_count <= 1);
+                assert!(cycle.verification_count <= 1);
+                assert!(cycle.repairs_used <= 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_budget_exhaustion_with_new_fingerprint_stops_for_human_not_failed() {
+        for (policy, expected_status) in [
+            (
+                RunPolicy::Interactive,
+                WorkspaceSessionStatus::WaitingForHuman,
+            ),
+            (
+                RunPolicy::AutoIfValid,
+                WorkspaceSessionStatus::StoppedNeedsHuman,
+            ),
+        ] {
+            let (_tmp, lifecycle, _plan_id, mut engine) =
+                make_work_item_plan_engine_with_accepted_contract_drafts();
+            single_candidate_record(
+                &lifecycle,
+                &mut engine,
+                SingleCandidatePhase::Evaluate,
+                policy,
+            );
+            engine.start_review().await;
+            complete_single_candidate_review(&mut engine, repairable_verdict("first finding"))
+                .await;
+            complete_repair_generation(&lifecycle, &mut engine, "budget");
+            engine
+                .ensure_review_invocation_scope()
+                .await
+                .expect("same ReviewerRun must materialize Verification after repair");
+            complete_single_candidate_review(&mut engine, repairable_verdict("new finding")).await;
+
+            let persisted = lifecycle
+                .get_workspace_session(&engine.session().session_id)
+                .expect("terminal persisted");
+            assert_eq!(persisted.status, expected_status);
+            assert_ne!(persisted.status, WorkspaceSessionStatus::Failed);
+            assert!(persisted.human_gate_snapshot.is_some());
+            assert!(
+                !persisted
+                    .policy_diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "verification_scope_violation"),
+                "a Verification-scope external finding must retain its human route"
+            );
+            for cycle in persisted.run_history.review_cycles.values() {
+                assert!(cycle.initial_count <= 1);
+                assert!(cycle.verification_count <= 1);
+                assert!(cycle.repairs_used <= 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_transition_budget_is_failed_and_failed_is_absorbing() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        single_candidate_record(
+            &lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Evaluate,
+            RunPolicy::AutoIfValid,
+        );
+        engine.session.run_history = RunHistory {
+            transitions_used: RunBudgets::default().max_transitions,
+            ..RunHistory::default()
+        };
+        let mut record = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load record");
+        record.run_history = engine.session.run_history.clone();
+        write_json(
+            &lifecycle
+                .app_paths()
+                .issue_root(&record.project_id, &record.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist exhausted budget");
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+        let failed = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("failed session");
+        assert_eq!(
+            failed.single_candidate_phase,
+            Some(SingleCandidatePhase::Failed)
+        );
+        assert_eq!(failed.status, WorkspaceSessionStatus::Failed);
+
+        complete_single_candidate_review(&mut engine, pass_verdict()).await;
+        let replayed = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("failed session after replay");
+        assert_eq!(replayed, failed, "failed phase must be absorbing");
+    }
+}
+
+/// F5-A：SC author 修订轮判定——只有 SC 流且最近 verdict 要求返修时才回灌
+/// findings；首轮（无 verdict）与 Pass verdict 不触发，legacy 流永不触发。
+#[test]
+fn single_candidate_pending_revision_verdict_only_flags_sc_revise_rounds() {
+    let (_tmp, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    assert!(
+        engine.single_candidate_pending_revision_verdict().is_none(),
+        "no review verdict yet: first author round must keep the byte-identical first prompt"
+    );
+
+    engine.latest_review_verdict = Some(repairable_verdict("pending contract gap"));
+    assert!(
+        engine.single_candidate_pending_revision_verdict().is_none(),
+        "legacy flow must never consume the single-candidate revision predicate"
+    );
+
+    engine.session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    let pending = engine
+        .single_candidate_pending_revision_verdict()
+        .expect("single-candidate revise verdict must mark a revision round");
+    assert_eq!(pending.verdict, ReviewVerdictType::Revise);
+    assert_eq!(pending.findings.len(), 1);
+
+    engine.latest_review_verdict = Some(pass_verdict());
+    assert!(
+        engine.single_candidate_pending_revision_verdict().is_none(),
+        "a pass verdict must not be treated as a revision round"
+    );
+}
+
+/// F5-B：SC legacy 修订循环防打转闸门——run1d 形态（verdict=Revise、findings 无
+/// category/class_hint，policy 旁路臂进入 route_legacy_review）下，连续 2 轮
+/// 非 advisory findings 指纹集合相同必须强制 human_confirm（reason=repeated_findings）。
+fn plain_revise_verdict(message: &str) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "reviewer 意见：契约缺口需返修".to_string(),
+        summary: "契约缺口需返修".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::MustFix,
+            message: message.to_string(),
+            evidence: "work-item-plan.md WI-002 Inputs".to_string(),
+            required_action: "补齐 capability 声明".to_string(),
+            category: None,
+            class_hint: None,
+            contract_field: None,
+            machine_repair: None,
+            owner_question: None,
+            owner_options: None,
+            disposition: None,
+            target_work_item_id: None,
+            finding_key: None,
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+fn advisory_only_revise_verdict(message: &str) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "建议性意见".to_string(),
+        summary: "建议性意见".to_string(),
+        findings: vec![ReviewFinding {
+            severity: ReviewFindingSeverity::Suggestion,
+            message: message.to_string(),
+            evidence: "Traceability section".to_string(),
+            required_action: "建议补登记行".to_string(),
+            category: None,
+            class_hint: Some(FindingClassHint::Advisory),
+            contract_field: None,
+            machine_repair: None,
+            owner_question: None,
+            owner_options: None,
+            disposition: None,
+            target_work_item_id: None,
+            finding_key: None,
+        }],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+include!("single_candidate/legacy_revise_gate.rs");
+
+#[tokio::test]
+async fn sc_legacy_revise_gate_ignores_new_findings_and_advisory_only_repetition() {
+    let (_tmp, lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    engine.start_review().await;
+    complete_single_candidate_review(&mut engine, plain_revise_verdict("gap: CT-001 capability"))
+        .await;
+    // 第二轮 findings 指纹不同：不触发闸门。
+    engine.start_review().await;
+    complete_single_candidate_review(&mut engine, plain_revise_verdict("gap: CT-002 coverage"))
+        .await;
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::HumanConfirm,
+        "不同指纹的连续 revise 不触发闸门（L2 重钉：SC revise 一律进 human gate）"
+    );
+
+    // advisory-only findings 连续两轮相同：非 advisory 集合为空，不触发闸门。
+    let (_tmp2, lifecycle2, _plan_id2, mut engine2) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_record(
+        &lifecycle2,
+        &mut engine2,
+        SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    engine2.start_review().await;
+    complete_single_candidate_review(
+        &mut engine2,
+        advisory_only_revise_verdict("建议: 补 Traceability"),
+    )
+    .await;
+    engine2.start_review().await;
+    complete_single_candidate_review(
+        &mut engine2,
+        advisory_only_revise_verdict("建议: 补 Traceability"),
+    )
+    .await;
+    assert_eq!(
+        engine2.session().stage,
+        WorkspaceStage::HumanConfirm,
+        "advisory-only findings 重复不触发闸门（L2 重钉：SC revise 一律进 human gate）"
+    );
+}
+
+mod sg3a1_structure_gate {
+    use super::contract_prerevision::{author_round_record, clean_candidate};
+    use super::*;
+    use crate::product::work_item_plan_compiler::{
+        PlanCandidateIr, PlanCandidateItemIr, WORK_ITEM_PLAN_COMPILER_VERSION,
+        WorkItemPlanSourceContext, compile_work_item_plan,
+    };
+    use crate::product::workspace_engine::plan_projection::{
+        PLANNING_STRUCTURE_RULE_VERSION, assess_single_candidate_structure,
+        planning_structure_items_from_ir,
+    };
+    use crate::web::workspace_ws_types::TimelineNodeType;
+
+    /// R1 环候选：干净基线 + WI-001 反向消费 WI-002（canonical 输入环——
+    /// SG1 有效图两个方向的真实边互相等待）。
+    pub(super) fn cycle_candidate() -> String {
+        clean_candidate().replace(
+            "### Inputs\n\n### Outputs\n- contract_id: contract.levels-api",
+            "### Inputs\n- contract_id: contract.level-selector\n- provider_logical_work_item_id: WI-002\n- required_capabilities: ui.level-selector.rendered\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.levels-api",
+        )
+    }
+
+    /// scope 坏候选：WI-002 的 canonical 输入引用不在本批的 provider。
+    pub(super) fn unknown_provider_candidate() -> String {
+        clean_candidate().replace(
+            "- provider_logical_work_item_id: WI-001\n- required_capabilities: api.levels.read",
+            "- provider_logical_work_item_id: WI-009\n- required_capabilities: api.levels.read",
+        )
+    }
+
+    /// parser 坏候选：非法二级 heading（F1.2 第414行同族——非固定 heading，
+    /// 补齐器不规范化，compiler fail-closed）。
+    fn illegal_heading_candidate() -> String {
+        clean_candidate().replace(
+            "## Work Item WI-001: Backend levels API",
+            "## Work Item WI-001: Backend levels API\n### 验收说明",
+        )
+    }
+
+    fn assert_zero_promotion_and_zero_review(
+        lifecycle: &LifecycleStore,
+        engine: &WorkspaceEngine,
+        before: &crate::product::models::WorkspaceSessionRecord,
+        before_reviewer_nodes: usize,
+    ) {
+        let after = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load session after rejected candidate");
+        assert!(
+            after.work_item_plan_source_revision_ref.is_none()
+                && after.plan_candidate_ir_ref.is_none()
+                && after.mechanical_report_ref.is_none(),
+            "current refs must not be promoted for a gate-rejected candidate"
+        );
+        assert_eq!(
+            after.review_rounds, before.review_rounds,
+            "review rounds must not grow for a gate-rejected candidate"
+        );
+        assert_eq!(
+            after.provider_start_ledger.len(),
+            before.provider_start_ledger.len(),
+            "gate-rejected candidate must not start any provider run"
+        );
+        assert!(
+            after.review_invocation_scope.is_none(),
+            "gate-rejected candidate must not materialize a review invocation scope"
+        );
+        assert_eq!(
+            after.single_candidate_phase,
+            Some(crate::product::models::SingleCandidatePhase::Generate),
+            "phase must stay in Generate; no confirm surface is opened"
+        );
+        let reviewer_nodes = engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| matches!(node.node_type, TimelineNodeType::ReviewerRun))
+            .count();
+        assert_eq!(
+            reviewer_nodes, before_reviewer_nodes,
+            "no new reviewer node may appear for a gate-rejected candidate"
+        );
+    }
+
+    /// SG3a.1 拒收的**收尾面**（2026-10-31 现场缺口修法）：不再硬失败，而是
+    /// 落人工门——会话 WaitingForHuman（不是 failed）、门快照在场、恰好一扇
+    /// 门节点。零提升/零评审由 `assert_zero_promotion_and_zero_review` 继续钉。
+    fn assert_rejection_landed_on_human_gate(
+        lifecycle: &LifecycleStore,
+        engine: &WorkspaceEngine,
+        before_confirm_nodes: usize,
+    ) {
+        let after = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load session after rejected candidate");
+        assert_eq!(
+            after.status,
+            crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+            "gate rejection must stop on the human gate instead of hard-failing"
+        );
+        assert!(
+            after.human_gate_snapshot.is_some(),
+            "gate rejection must persist a human gate snapshot"
+        );
+        let confirm_nodes = engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| matches!(node.node_type, TimelineNodeType::HumanConfirm))
+            .count();
+        assert_eq!(
+            confirm_nodes,
+            before_confirm_nodes + 1,
+            "gate rejection opens exactly one human confirm node"
+        );
+    }
+
+    fn reviewer_and_confirm_node_counts(engine: &WorkspaceEngine) -> (usize, usize) {
+        (
+            engine
+                .timeline_nodes
+                .iter()
+                .filter(|node| matches!(node.node_type, TimelineNodeType::ReviewerRun))
+                .count(),
+            engine
+                .timeline_nodes
+                .iter()
+                .filter(|node| matches!(node.node_type, TimelineNodeType::HumanConfirm))
+                .count(),
+        )
+    }
+
+    /// 作者阶段收口调用助手：固定本文件既有的仓库夹具与「不重驱」参数，
+    /// 让每个用例只表达「喂哪个候选」这一件事（同时守住行数上限）。
+    async fn complete_author(
+        engine: &mut WorkspaceEngine,
+        candidate: String,
+    ) -> Result<crate::product::workspace_engine::SingleCandidateAuthorCompletion, String> {
+        engine
+            .complete_single_candidate_work_item_plan_author(
+                candidate,
+                "repo_fixture".to_string(),
+                None,
+                false,
+            )
+            .await
+    }
+
+    /// SG3a.1（plan Step1：`sg_03a_1_bad_candidate_zero_review`）：R1/parser/
+    /// scope 坏 output 保留 typed evidence，但 current refs/version 不提升、
+    /// review start 0、无 confirm；target 未授权由同一纯评估门单测覆盖；
+    /// 合法候选随 current refs 绑定 Some 结构报告。
+    #[tokio::test]
+    async fn sg_03a_1_bad_candidate_zero_review() {
+        // —— R1：canonical 输入环 → 系统门拒收，零提升/零评审/零确认 ——
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle, &mut engine);
+        let before = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("session before cycle candidate");
+        let (reviewer_before, confirm_before) = reviewer_and_confirm_node_counts(&engine);
+        // REQ-SG-02 语义不变（零提升/零评审），但收尾从「硬失败 Err」改为
+        // typed 失败路：durable 诊断 + 尝试流水 + 人工门（REQ-WSC-18/25）。
+        let completion = complete_author(&mut engine, cycle_candidate())
+            .await
+            .expect("R1 cycle candidate must be gate-rejected without hard-failing");
+        assert_eq!(
+            completion,
+            crate::product::workspace_engine::SingleCandidateAuthorCompletion::Routed,
+            "拒收必须表达「已路由」（重写/人工门），而不是生成了候选"
+        );
+        let durable = lifecycle
+            .load_candidate_compile_status(&engine.session().session_id)
+            .expect("load candidate compile status")
+            .expect("gate rejection must leave a durable typed failure");
+        let durable_failure = durable.failure.expect("durable failure present");
+        assert!(
+            durable_failure.message.contains("构成依赖环"),
+            "typed gate stop point required: {}",
+            durable_failure.message
+        );
+        assert!(
+            durable_failure.detail.contains("WI-001") && durable_failure.detail.contains("WI-002"),
+            "witness-path evidence must ride the typed stop: {}",
+            durable_failure.detail
+        );
+        assert_zero_promotion_and_zero_review(&lifecycle, &engine, &before, reviewer_before);
+        assert_rejection_landed_on_human_gate(&lifecycle, &engine, confirm_before);
+
+        // —— parser：非法 heading 在 compiler 期 fail-closed（同一零提升面）——
+        let (_tmp2, lifecycle2, _plan_id2, mut engine2) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle2, &mut engine2);
+        let before2 = lifecycle2
+            .get_workspace_session(&engine2.session().session_id)
+            .expect("session before parser candidate");
+        // parser 拒收仍走 compiler 硬失败（不落门）：confirm 节点数刻意不与本用例比较。
+        let (reviewer2_before, _confirm2_before) = reviewer_and_confirm_node_counts(&engine2);
+        let error2 = complete_author(&mut engine2, illegal_heading_candidate())
+            .await
+            .expect_err("illegal heading candidate must fail closed at compile");
+        assert!(
+            error2.contains("compile markdown source failed"),
+            "parser evidence surfaces the compiler diagnostics: {error2}"
+        );
+        assert_zero_promotion_and_zero_review(&lifecycle2, &engine2, &before2, reviewer2_before);
+
+        // —— scope：canonical 输入引用批外 provider → 系统门拒收 ——
+        let (_tmp3, lifecycle3, _plan_id3, mut engine3) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle3, &mut engine3);
+        let before3 = lifecycle3
+            .get_workspace_session(&engine3.session().session_id)
+            .expect("session before scope candidate");
+        let (reviewer3_before, confirm3_before) = reviewer_and_confirm_node_counts(&engine3);
+        let completion3 = complete_author(&mut engine3, unknown_provider_candidate())
+            .await
+            .expect("unknown-provider candidate must be gate-rejected without hard-failing");
+        assert_eq!(
+            completion3,
+            crate::product::workspace_engine::SingleCandidateAuthorCompletion::Routed,
+            "scope 拒收同样必须表达「已路由」"
+        );
+        let durable3 = lifecycle3
+            .load_candidate_compile_status(&engine3.session().session_id)
+            .expect("load candidate compile status")
+            .expect("scope rejection must leave a durable typed failure");
+        let durable_failure3 = durable3.failure.expect("durable failure present");
+        assert!(
+            durable_failure3.detail.contains("unknown_provider")
+                && durable_failure3.detail.contains("WI-009"),
+            "scope evidence must carry provider/consumer ids: {}",
+            durable_failure3.detail
+        );
+        assert_zero_promotion_and_zero_review(&lifecycle3, &engine3, &before3, reviewer3_before);
+        assert_rejection_landed_on_human_gate(&lifecycle3, &engine3, confirm3_before);
+
+        // —— target：未授权 logical target → 同一纯评估门 typed 拒收 ——
+        // （legacy 单仓不裁归属——与 lowering 同口径；本例用非空成员表
+        // 且缺该成员授权的最小上下文驱动同一门。）
+        let gateway = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+        let frontend = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+        let mut contract = crate::product::work_item_contract::canonical_contract_fixture("wi-a");
+        contract.intent_contract =
+            Some(crate::product::work_item_contract::WorkItemIntentContract {
+                intent: crate::product::work_item_contract::WorkItemIntent::Create,
+                provider_work_item_id: "wi-a".to_string(),
+                depends_on: Vec::new(),
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+                target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                    logical_codebase_id: "lc-fixture".to_string(),
+                    logical_repository_id: frontend,
+                },
+            });
+        let ir = PlanCandidateIr {
+            source_revision_hash: "target-mismatch-source-hash".to_string(),
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            items: vec![PlanCandidateItemIr {
+                target_repository_id: "repository_gateway".to_string(),
+                contract,
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: Vec::new(),
+                },
+                trusted_commands: Vec::new(),
+            }],
+        };
+        let context = crate::product::workspace_engine::draft_batch::compile_support::PlanningStructureContext {
+            source_revision_ref: "plan-source/sg3a1-target".to_string(),
+            plan_candidate_ir_ref: "plan-ir/sg3a1-target".to_string(),
+            source_hash: "target-mismatch-source-hash".to_string(),
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            rule_version: PLANNING_STRUCTURE_RULE_VERSION.to_string(),
+            context_digest: "sg3a1-target-context-digest".to_string(),
+            confirmed_design_id: None,
+            confirmed_design_digest: None,
+            member_table_digest: None,
+            selection_digest: None,
+            physical_by_logical: std::collections::BTreeMap::from([(
+                gateway,
+                "repository_gateway".to_string(),
+            )]),
+            change_order: vec![gateway],
+            options_digest: "sg3a1-options-digest".to_string(),
+            baseline_tree_digest: None,
+            intent_digest: None,
+        };
+        let assessment = assess_single_candidate_structure(String::new(), &ir, &context);
+        let stop =
+            crate::product::workspace_engine::plan_projection::structural_assessment_stop_reason(
+                &assessment,
+            )
+            .expect_err("unauthorized logical target must be rejected");
+        assert!(
+            stop.contains("structure gate rejected") && stop.contains("target_mismatch[wi-a]"),
+            "typed target evidence: {stop}"
+        );
+
+        // —— 合法候选：current refs 绑定 Some 结构报告（同 refs/content_hash）——
+        let (_tmp5, lifecycle5, _plan_id5, mut engine5) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle5, &mut engine5);
+        let completion5 = complete_author(&mut engine5, clean_candidate())
+            .await
+            .expect("clean candidate must pass the structure gate");
+        assert_eq!(
+            completion5,
+            crate::product::workspace_engine::SingleCandidateAuthorCompletion::Candidate {
+                item_count: 3,
+            }
+        );
+        let report_ref = engine5
+            .session()
+            .mechanical_report_ref
+            .clone()
+            .expect("promoted mechanical report ref");
+        let source_store = WorkItemPlanSourceStore::new(lifecycle5.app_paths());
+        let record = source_store
+            .get_mechanical_report(
+                &crate::product::work_item_plan_source_store::SourceStoreScope {
+                    project_id: engine5.session().project_id.clone(),
+                    issue_id: engine5.session().issue_id.clone(),
+                    plan_id: engine5.session().entity_id.clone(),
+                },
+                &report_ref,
+            )
+            .expect("reload promoted mechanical report record");
+        let structure = record
+            .structure_report
+            .as_ref()
+            .expect("legal candidate binds a Some structure report");
+        assert_eq!(structure.source_revision_id, record.source_revision_id);
+        assert_eq!(structure.ir_id, record.ir_id);
+        assert!(structure.structurally_valid);
+        assert!(!structure.context_digest.trim().is_empty());
+        assert_eq!(structure.rule_version, PLANNING_STRUCTURE_RULE_VERSION);
+        assert!(
+            !structure.effective_edges.is_empty(),
+            "clean candidate carries its canonical input edges"
+        );
+        // 独立重投影与冻结 payload 的边集合一致（producer 单源事实）。
+        let ir_record = source_store
+            .get_plan_candidate_ir(
+                &crate::product::work_item_plan_source_store::SourceStoreScope {
+                    project_id: engine5.session().project_id.clone(),
+                    issue_id: engine5.session().issue_id.clone(),
+                    plan_id: engine5.session().entity_id.clone(),
+                },
+                engine5
+                    .session()
+                    .plan_candidate_ir_ref
+                    .as_deref()
+                    .expect("promoted IR ref"),
+            )
+            .expect("reload promoted IR record");
+        let live_context = engine5
+            .build_single_candidate_structure_context(
+                &ir_record.ir,
+                engine5
+                    .session()
+                    .work_item_plan_source_revision_ref
+                    .as_deref()
+                    .expect("promoted source ref"),
+                engine5
+                    .session()
+                    .plan_candidate_ir_ref
+                    .as_deref()
+                    .expect("promoted IR ref"),
+            )
+            .expect("live context for the promoted candidate");
+        assert_eq!(structure.context_digest, live_context.context_digest);
+        let items = planning_structure_items_from_ir(&ir_record.ir);
+        let edges: Vec<String> = structure
+            .effective_edges
+            .iter()
+            .map(|edge| format!("{}->{}", edge.from, edge.to))
+            .collect();
+        let projected =
+            crate::product::workspace_engine::draft_batch::compile_support::project_effective_planning_graph(
+                &items, &live_context,
+            );
+        let projected_edges: Vec<String> = projected
+            .effective_edges
+            .iter()
+            .map(|edge| format!("{}->{}", edge.from, edge.to))
+            .collect();
+        assert_eq!(edges, projected_edges);
+    }
+
+    #[test]
+    fn sg3a1_helper_fixtures_compile_through_real_compiler() {
+        // 守卫：三个坏 fixture 都必须通过真实 compiler（环/未授权引用是
+        // 结构层失败，不是语法失败），确保上面断的是系统门而非 parser。
+        for source in [cycle_candidate(), unknown_provider_candidate()] {
+            compile_work_item_plan(
+                &source,
+                &WorkItemPlanSourceContext {
+                    target_repository_id: "repo_fixture".to_string(),
+                    member_targets: None,
+                },
+            )
+            .expect("structural fixtures must compile");
+        }
+        assert!(
+            compile_work_item_plan(
+                &illegal_heading_candidate(),
+                &WorkItemPlanSourceContext {
+                    target_repository_id: "repo_fixture".to_string(),
+                    member_targets: None,
+                },
+            )
+            .is_err(),
+            "illegal heading fixture must fail at compile"
+        );
+    }
+}
+
+// A1（REQ-WG-01/REQ-WG-02）：候选门与终编译依赖图奇偶性（大文件守卫拆分）。
+include!("single_candidate/author_structure_gate_typed.rs");
+include!("single_candidate/structure_parity.rs");
+// F5 契约机械校验前移（contract_prerevision）用例按大文件守卫(>1200 行)拆分至子文件内联。
+include!("single_candidate/contract_prerevision.rs");
+// DEF-PVR-ALL 确定性 capability 补齐器（contract_autorepair）用例拆分至子文件内联。
+include!("single_candidate/contract_autorepair.rs");
+// C1 Task 1 options 预检回灌链用例拆分至子文件内联。
+include!("single_candidate/preflight_options_loop.rs");
+// P2 GAP-E/G/H（Task 0.1/0.3）：SC Evaluate reviewer 失败收敛与 503 诊断。
+include!("single_candidate/p2_reviewer_failure.rs");
+// B2c（Task 5.5）：SC 显式 fresh 返修 prompt 契约（大文件守卫拆分）。
+include!("single_candidate/anchor_t17.rs");
+// 作者阶段结构门拒收的恰一次教学重驱（与 compile/IR 重驱共享唯一槽位）。
+include!("single_candidate/author_structure_gate_reredrive.rs");

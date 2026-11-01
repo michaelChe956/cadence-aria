@@ -9,13 +9,20 @@ use crate::product::coding_models::{
     CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus, GroupReviewArtifactRef,
 };
 use crate::product::coding_workspace_engine::{
-    CodingWorkspaceEngineError, recoverable_failed_code_review,
+    CodingExecutionContext, CodingWorkspaceEngineError, recoverable_failed_code_review,
 };
 use crate::product::json_store::ProductStoreError;
+use crate::product::models::ProviderName;
 use crate::web::handlers::{coding_attempt_scope_text, coding_execution_unit_dto};
 use crate::web::types::GroupReviewArtifactProjection;
+use crate::web::workspace_ws_types::{
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+};
 
-use super::{CodingWsOutMessage, coding_execution_context, stage_gate_required};
+use super::protocol::CodingExecutionEventReplay;
+use super::{
+    CodingWsOutMessage, coding_choice_request_frame, coding_execution_context, stage_gate_required,
+};
 
 pub(crate) fn build_coding_session_state(
     coding_store: &CodingAttemptStore,
@@ -23,7 +30,21 @@ pub(crate) fn build_coding_session_state(
 ) -> Result<CodingWsOutMessage, CodingWorkspaceEngineError> {
     let reconciliation = coding_store.reconcile_linked_plan_repair_pause(&attempt)?;
     let attempt = reconciliation.attempt;
-    let execution_context = coding_execution_context(&coding_store.paths(), &attempt)?;
+    // r61(pi-5 现场):快照装配不得因 bound context 解析失败整体失败——
+    // runner 死亡转 AwaitingManualRecovery 后,attach 与死亡路径的会话快照
+    // 是 WS 客户端唯一可见信号;store 完整性受损(如 verification plan 文件
+    // 被覆盖致 runtime_binding_integrity_mismatch)时 context 降级为空
+    // (markdown/验证命令缺席),快照仍下发(状态/门/时间线完整),否则客户端
+    // 只能烧满阶段超时(现场 fresh/resume 双格 2×3600s 空转)。
+    let execution_context = coding_execution_context(&coding_store.paths(), &attempt)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                attempt_id = %attempt.id,
+                error = %error,
+                "coding session snapshot degraded: bound work item context unavailable"
+            );
+            CodingExecutionContext::default()
+        });
     let timeline_nodes =
         coding_store.get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let active_node_id = active_coding_timeline_node_id(&timeline_nodes);
@@ -75,6 +96,7 @@ pub(crate) fn build_coding_session_state(
     let chat_entries =
         coding_store.list_chat_entries(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let role_runs = coding_role_run_snapshots(coding_store, &attempt)?;
+    let execution_events = coding_execution_event_replay(coding_store, &attempt);
     let work_item_execution_plan = coding_store.get_work_item_execution_plan(
         &attempt.project_id,
         &attempt.issue_id,
@@ -90,6 +112,22 @@ pub(crate) fn build_coding_session_state(
     } else {
         Vec::new()
     };
+    let (group_coding_progress, group_progress) =
+        if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+            let (progress, aggregate) =
+                crate::web::handlers::build_group_work_item_progress(coding_store, &attempt)?;
+            (Some(progress), Some(aggregate))
+        } else {
+            (None, None)
+        };
+    // 批 2 T3（REQ-WIGA-08/09）＋k3 波5 F1：同源管理投影（REST
+    // `ownership_for_ids` 同判据：owner=Server iff enabled||terminated，
+    // 仅 Disable 为 client）；未绑定 None 保持旧帧。
+    let automation = crate::web::handlers::automation_enrollment::automation_ownership_for_attempt(
+        &coding_store.paths(),
+        &attempt,
+    )
+    .map_err(CodingWorkspaceEngineError::Store)?;
 
     Ok(CodingWsOutMessage::CodingSessionState {
         project_id: attempt.project_id.clone(),
@@ -100,6 +138,8 @@ pub(crate) fn build_coding_session_state(
         current_work_item_id: attempt.current_work_item_id.clone(),
         active_unit_id: attempt.active_unit_id.clone(),
         units,
+        group_coding_progress: Box::new(group_coding_progress),
+        group_progress: Box::new(group_progress),
         status: attempt.status,
         stage: attempt.stage,
         branch_name: attempt.branch_name,
@@ -112,6 +152,7 @@ pub(crate) fn build_coding_session_state(
         role_provider_config_snapshot: Box::new(role_provider_config_snapshot),
         provider_config_snapshot: Box::new(attempt.provider_config_snapshot),
         chat_entries: Box::new(chat_entries),
+        execution_events: Box::new(execution_events),
         timeline_nodes: Box::new(timeline_nodes),
         active_node_id: Box::new(active_node_id),
         code_review_reports: Box::new(code_review_reports),
@@ -126,7 +167,240 @@ pub(crate) fn build_coding_session_state(
         verification_commands: Box::new(execution_context.verification_commands),
         work_item_execution_plan: Box::new(work_item_execution_plan),
         linked_plan_repair: Box::new(linked_plan_repair),
+        automation,
     })
+}
+
+/// F-43：新连接 attach 时必须补发的未决 provider choice 帧。
+///
+/// 源是 durable choice-gate 目录（引擎 `emit_choice_request` 落盘的那份），只取
+/// `status=Open`：`resolve_choice_gate` 会把已答 gate 移入 `resolved/`，过期/撤销
+/// 亦不在 Open 集内，因此「已答/过期不重发」由数据本身保证，无需额外时间戳比对。
+///
+/// 为什么投影（快照 `pending_choices`）之外还要补帧：快照只重建卡片数据，不重建
+/// 客户端按帧维护的「待答卡」接线；页面刷新/新开连接若不补帧，coder 等服务端、
+/// 界面等入口——刷新即死锁（同构 F-24 workspace WS 的重订阅补发）。
+pub(crate) fn pending_choice_frames(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Vec<CodingWsOutMessage>, CodingWorkspaceEngineError> {
+    Ok(coding_store
+        .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        .iter()
+        .map(coding_choice_request_frame)
+        .collect())
+}
+
+/// F-13 刷新回放：实时 `coding_execution_event` 只广播不落 chat_entries，运行期
+/// 对话（prompt、provider 生命周期、命令执行）持久化在 role-run 审计 journal。
+/// 此处从 journal 重建与实时广播同形的 `WsExecutionEvent` 列表，随
+/// `coding_session_state` 快照下发，前端刷新/重连后按序装载回运行对话；
+/// TextDelta/权限/选择等仍走既有实时与快照通道，不在此回放。
+pub(crate) fn coding_execution_event_replay(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> Vec<CodingExecutionEventReplay> {
+    let Ok(runs) = coding_store.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+    else {
+        return Vec::new();
+    };
+    let mut replay = Vec::new();
+    for run in runs {
+        let Ok(events) = coding_store.list_role_run_events(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &run.id,
+        ) else {
+            continue;
+        };
+        for event in events {
+            if let Some(ws_event) = replay_ws_event_from_journal_event(&event) {
+                replay.push(CodingExecutionEventReplay {
+                    event: ws_event,
+                    created_at: event.created_at.clone(),
+                });
+            }
+        }
+    }
+    // runs 已按 id 排序、journal 已按 sequence 排序；跨 run 以 created_at 稳定归并。
+    replay.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    replay
+}
+
+fn replay_ws_event_from_journal_event(event: &CodingRoleRunEvent) -> Option<WsExecutionEvent> {
+    let payload = event.payload.as_object()?;
+    let node_id = event.node_id.clone();
+    let agent = payload
+        .get("provider")
+        .and_then(|value| serde_json::from_value::<ProviderName>(value.clone()).ok());
+    match event.event_type {
+        CodingRoleRunEventType::ProviderPrompt => Some(WsExecutionEvent {
+            event_id: format!(
+                "{}_prompt",
+                node_id.as_deref().unwrap_or(&event.role_run_id)
+            ),
+            node_id,
+            agent,
+            kind: WsExecutionEventKind::Output,
+            status: WsExecutionEventStatus::Started,
+            title: "Provider Prompt".to_string(),
+            detail: journal_payload_text(payload, "role"),
+            command: None,
+            cwd: None,
+            output: journal_payload_text(payload, "prompt"),
+            exit_code: None,
+        }),
+        CodingRoleRunEventType::StatusChanged => {
+            let status_text = journal_payload_text(payload, "status")?;
+            let (status, snake) = replay_provider_status(&status_text)?;
+            Some(WsExecutionEvent {
+                event_id: format!(
+                    "{}_provider_status_{snake}",
+                    node_id.as_deref().unwrap_or(&event.role_run_id)
+                ),
+                node_id,
+                agent,
+                kind: WsExecutionEventKind::Provider,
+                status,
+                title: format!("Provider {snake}"),
+                detail: None,
+                command: None,
+                cwd: None,
+                output: None,
+                exit_code: None,
+            })
+        }
+        CodingRoleRunEventType::ExecutionEvent => Some(WsExecutionEvent {
+            event_id: journal_payload_text(payload, "event_id")
+                .unwrap_or_else(|| format!("{}_{}", event.role_run_id, event.sequence)),
+            node_id,
+            agent,
+            kind: journal_payload_text(payload, "kind")
+                .map(|text| text.to_lowercase())
+                .and_then(|text| replay_event_kind(&text))
+                .unwrap_or(WsExecutionEventKind::Provider),
+            status: journal_payload_text(payload, "status")
+                .and_then(|text| replay_event_status(&text))
+                .unwrap_or(WsExecutionEventStatus::Completed),
+            title: journal_payload_text(payload, "title")
+                .unwrap_or_else(|| "Execution event".to_string()),
+            detail: journal_payload_text(payload, "detail"),
+            command: journal_payload_text(payload, "command"),
+            cwd: journal_payload_text(payload, "cwd"),
+            output: journal_payload_text(payload, "output"),
+            exit_code: payload
+                .get("exit_code")
+                .and_then(|value| value.as_i64())
+                .map(|code| code as i32),
+        }),
+        CodingRoleRunEventType::ToolCall => {
+            let tool_name = journal_payload_text(payload, "tool_name")?;
+            Some(WsExecutionEvent {
+                event_id: journal_payload_text(payload, "id").unwrap_or_else(|| {
+                    format!("{}_{}_tool_call", event.role_run_id, event.sequence)
+                }),
+                node_id,
+                agent,
+                kind: WsExecutionEventKind::Command,
+                status: WsExecutionEventStatus::Started,
+                title: tool_name,
+                detail: payload
+                    .get("input")
+                    .and_then(|value| serde_json::to_string(value).ok()),
+                command: payload
+                    .get("input")
+                    .and_then(|value| value.get("command"))
+                    .and_then(|value| value.as_str())
+                    .map(|text| text.to_string()),
+                cwd: None,
+                output: None,
+                exit_code: None,
+            })
+        }
+        CodingRoleRunEventType::ToolResult => {
+            let is_error = payload
+                .get("is_error")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            Some(WsExecutionEvent {
+                event_id: journal_payload_text(payload, "tool_use_id").unwrap_or_else(|| {
+                    format!("{}_{}_tool_result", event.role_run_id, event.sequence)
+                }),
+                node_id,
+                agent,
+                kind: WsExecutionEventKind::Command,
+                status: if is_error {
+                    WsExecutionEventStatus::Failed
+                } else {
+                    WsExecutionEventStatus::Completed
+                },
+                title: "Tool result".to_string(),
+                detail: None,
+                command: None,
+                cwd: None,
+                output: journal_payload_text(payload, "output"),
+                exit_code: Some(i32::from(is_error)),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// journal 超长文本字段被归一化为 `{preview, artifact_ref, truncated}`，
+/// 回放取 preview（全文在 artifact，按需扩展）。
+fn journal_payload_text(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<String> {
+    match payload.get(field)? {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Object(object) => object
+            .get("preview")
+            .and_then(|value| value.as_str())
+            .map(|text| text.to_string()),
+        _ => None,
+    }
+}
+
+/// journal 记录的 `ProviderStatus` Debug 名 →（Ws 状态, snake 文案），
+/// 与 `ws_event_from_provider_status` 实时映射保持同形。
+fn replay_provider_status(text: &str) -> Option<(WsExecutionEventStatus, &'static str)> {
+    match text {
+        "Starting" => Some((WsExecutionEventStatus::Started, "starting")),
+        "Running" => Some((WsExecutionEventStatus::Running, "running")),
+        "WaitingApproval" => Some((WsExecutionEventStatus::WaitingApproval, "waiting_approval")),
+        "Completed" => Some((WsExecutionEventStatus::Completed, "completed")),
+        "Failed" => Some((WsExecutionEventStatus::Failed, "failed")),
+        "Aborted" => Some((WsExecutionEventStatus::Aborted, "aborted")),
+        _ => None,
+    }
+}
+
+/// journal 记录的 `ProviderExecutionEventKind` Debug 名（转小写后即 serde 名）。
+fn replay_event_kind(snake: &str) -> Option<WsExecutionEventKind> {
+    match snake {
+        "provider" => Some(WsExecutionEventKind::Provider),
+        "turn" => Some(WsExecutionEventKind::Turn),
+        "command" => Some(WsExecutionEventKind::Command),
+        "output" => Some(WsExecutionEventKind::Output),
+        "artifact" => Some(WsExecutionEventKind::Artifact),
+        "usage" => Some(WsExecutionEventKind::Usage),
+        _ => None,
+    }
+}
+
+/// journal 记录的 `ProviderExecutionEventStatus` Debug 名。
+fn replay_event_status(text: &str) -> Option<WsExecutionEventStatus> {
+    match text {
+        "Started" => Some(WsExecutionEventStatus::Started),
+        "Running" => Some(WsExecutionEventStatus::Running),
+        "WaitingApproval" => Some(WsExecutionEventStatus::WaitingApproval),
+        "Completed" => Some(WsExecutionEventStatus::Completed),
+        "Failed" => Some(WsExecutionEventStatus::Failed),
+        "Aborted" => Some(WsExecutionEventStatus::Aborted),
+        _ => None,
+    }
 }
 
 pub(crate) fn coding_pending_gates(
@@ -163,6 +437,8 @@ pub(crate) fn coding_pending_gates(
             evidence_refs: vec![recovery.failed_node_id, recovery.stale_role_run_id],
             raw_provider_output_ref: None,
             diagnostic: None,
+            latest_review_verdict: None,
+            triage_summary: None,
         });
     }
     Ok(pending_gates)
@@ -183,7 +459,8 @@ fn blocked_gate_is_actionable_for_attempt(
     match attempt.status {
         CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman => true,
         CodingAttemptStatus::Running => attempt.stage == CodingExecutionStage::FinalConfirm,
-        CodingAttemptStatus::AwaitingPlanAmendment
+        CodingAttemptStatus::AwaitingManualRecovery
+        | CodingAttemptStatus::AwaitingPlanAmendment
         | CodingAttemptStatus::ApplyingPlanAmendment
         | CodingAttemptStatus::AmendmentApplyFailed => false,
         CodingAttemptStatus::Created

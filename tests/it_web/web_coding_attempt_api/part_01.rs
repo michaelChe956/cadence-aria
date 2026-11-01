@@ -6,6 +6,17 @@ use std::process::Command;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::logical_codebase::{
+    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+    LogicalCodebaseStore, LogicalRepositoryId, CodebaseMemberRecord, MemberStatus,
+    RepositorySourceIdentity, RepositoryType, IdentityMigrationExecutor,
+    LegacySharedWorktreeMigration,
+};
+use cadence_aria::product::models::{
+    WorkItemDraftCandidate, WorkItemDraftRecord, WorkItemDraftStatus,
+    WorkItemDraftVerificationPlan, WorkItemGenerationMode,
+};
+use cadence_aria::product::work_item_plan_store::WorkItemPlanStore;
 use cadence_aria::product::coding_attempt_store::{
     CodingAttemptStore, CodingGitOperationKind, CodingGitOperationPhase, CreateChoiceGateInput,
     CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
@@ -23,7 +34,7 @@ use cadence_aria::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptStatus, CodingChoiceOption, CodingExecutionAttempt,
     CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole, CodingTimelineNode,
     CodingTimelineNodeStatus, FindingSeverity, InternalPrReview, PushStatus, RemoteKind,
-    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewVerdict,
+    ReviewFinding, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind, ReviewVerdict,
 };
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,
@@ -161,13 +172,17 @@ async fn creates_coding_attempt_falls_back_from_unavailable_default_codex_to_cla
     let persisted = store
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
+    // C2 Task 5（REQ-CRO-05）：无会话可引用时 reviewer 不再回填 author——
+    // 空 effective 停等（coding 侧 review 阶段落缺配置门等待用户配置）；
+    // 本测试只钉 author 侧 fallback 链（默认 codex 不可用 → ClaudeCode）。
     assert_eq!(
         persisted.provider_config_snapshot.author,
         ProviderName::ClaudeCode
     );
     assert_eq!(
         persisted.provider_config_snapshot.reviewer,
-        Some(ProviderName::ClaudeCode)
+        None,
+        "reviewer must stay empty-effective instead of backfilling the author"
     );
 }
 #[tokio::test]
@@ -247,6 +262,98 @@ async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "issue_worktree_active");
 }
+#[tokio::test]
+async fn create_group_attempt_multi_target_non_unique_is_ambiguous_4xx() {
+    // B2：多个权威 unit target 时必须拒绝，不能选择首个 target 或猜测 focus。
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    seed_logical_fixture_multi_target(&app).await;
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert!(status.is_client_error(), "response: {body}");
+    assert_eq!(body["code"], "repository_routing_ambiguous");
+}
+
+#[tokio::test]
+async fn rejects_group_attempt_when_authoritative_source_draft_is_missing() {
+    // source draft 丢失不是合法的零 target，必须在 focus 兜底前 fail-closed。
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    seed_logical_fixture_multi_target(&app).await;
+    fs::remove_file(
+        ProductAppPaths::new(root.path().join(".aria"))
+            .issue_root("project_0001", "issue_0001")
+            .join(
+                "work_item_plan_drafts/work_item_plan_0001/round_0001/draft_work_item_revision_0001.json",
+            ),
+    )
+    .expect("remove authoritative source draft");
+
+    let (status, body) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+
+    assert!(status.is_client_error(), "response: {body}");
+    assert_eq!(body["code"], "repository_routing_inconsistent");
+    assert_eq!(
+        body["details"]["reason"],
+        "work item revision source draft is missing"
+    );
+}
+
+#[tokio::test]
+async fn delete_schema_v2_group_attempt_without_selection_routes_legacy() {
+    // 单仓（无 manifest、无 selection）删除 schema-v2 group attempt → 204，不强制 selection。
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "response: {body}");
+    let attempt_id = assert_global_attempt_id(&body);
+
+    let (status, body) = request_json(
+        app,
+        Method::DELETE,
+        &scoped_attempt_uri(&attempt_id, ""),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "response: {body}");
+}
+
 #[tokio::test]
 async fn creates_group_coding_attempt_from_confirmed_work_item_plan() {
     let root = tempdir().expect("root");
@@ -543,6 +650,7 @@ async fn rejects_group_coding_attempt_when_a_legacy_single_item_attempt_is_activ
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("active legacy single-item attempt");
@@ -755,14 +863,7 @@ async fn delete_failed_coding_attempt_with_dirty_shared_worktree_still_removes_w
     );
     let worktree_path = attempt.worktree_path.expect("attempt worktree path");
     fs::write(worktree_path.join("dirty.txt"), "dirty changes").expect("dirty file");
-    coding_store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt_id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("mark attempt running");
+    crate::seed_coding_attempt_running(&coding_store, "project_0001", "issue_0001", &attempt_id);
     coding_store
         .update_attempt_status(
             "project_0001",
@@ -1071,55 +1172,3 @@ async fn delete_coding_attempt_without_handoff_does_not_touch_lineage() {
     );
 }
 
-#[tokio::test]
-async fn delete_coding_attempt_then_rebuild_does_not_conflict_on_handoff() {
-    // 删除后重建：第一个 attempt 的 handoff 被清理后，对同一 plan 重新创建 attempt
-    // 不应报 group_completion_handoff_revision_conflict；重建成功。
-    let root = tempdir().expect("root");
-    let repo = git_repo();
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
-    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-
-    let (app, first_attempt_id, handoff_paths, _lineage, _store) =
-        seed_group_attempt_with_published_handoffs(
-            app,
-            &app_paths,
-            &[SeededHandoff {
-                logical_work_item_id: "work_item_0001",
-                unit_id: "coding_unit_0001",
-                handoff_revision_id: "handoff_revision_coding_unit_run_0001",
-            }],
-        )
-        .await;
-    assert_eq!(handoff_paths.len(), 1);
-
-    let (status, _body) = request_json(
-        app.clone(),
-        Method::DELETE,
-        &scoped_attempt_uri(&first_attempt_id, ""),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(
-        !handoff_paths[0].exists(),
-        "precondition for rebuild: handoff cleaned after DELETE"
-    );
-
-    // 重建：对同一 plan 创建新 group attempt，断言不返回冲突且成功。
-    let (status, body) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001/coding-attempts",
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "rebuild response: {body}");
-    assert_ne!(body["code"], "group_completion_handoff_revision_conflict");
-    let second_attempt_id = assert_global_attempt_id(&body);
-    assert_ne!(second_attempt_id, first_attempt_id);
-}

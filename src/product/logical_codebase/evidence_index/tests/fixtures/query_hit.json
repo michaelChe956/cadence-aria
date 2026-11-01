@@ -1,0 +1,46 @@
+[
+  {
+    "node": {
+      "id": "function:3731294f53fda115d0576852b36d2b9d",
+      "kind": "function",
+      "name": "format_compact_duration",
+      "qualifiedName": "format_compact_duration",
+      "filePath": "api/src/lib.ts",
+      "language": "typescript",
+      "startLine": 1,
+      "endLine": 5,
+      "startColumn": 7,
+      "endColumn": 1,
+      "signature": "(millis: number): string",
+      "visibility": null,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1786938231431
+    },
+    "score": 91.64573642580777
+  },
+  {
+    "node": {
+      "id": "import:bba0a6ba9564cd7b7db8d6804859612c",
+      "kind": "import",
+      "name": "../../api/src/lib",
+      "qualifiedName": "../../api/src/lib",
+      "filePath": "web/src/app.ts",
+      "language": "typescript",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 60,
+      "signature": "import { format_compact_duration } from \"../../api/src/lib\";",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1786938231435
+    },
+    "score": 1.9064450413688998
+  }
+]

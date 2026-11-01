@@ -100,7 +100,6 @@ async fn plan_repair_awaiting_rejects_persisted_outline_review_for_old_revision(
 
 struct PlanRepairCancelFixture {
     _tmp: TempDir,
-    lifecycle: LifecycleStore,
     revision_store: crate::product::work_item_revision_store::WorkItemRevisionStore,
     plan: crate::product::models::WorkItemPlanLineage,
     request: crate::product::models::PlanRepairRequest,
@@ -132,7 +131,6 @@ async fn plan_repair_cancel_ready(fingerprint: &str) -> PlanRepairCancelFixture 
     .unwrap();
     PlanRepairCancelFixture {
         _tmp: tmp,
-        lifecycle,
         revision_store,
         plan,
         request,
@@ -147,6 +145,30 @@ fn plan_repair_assert_cancel_rejected(error: crate::product::plan_repair::PlanRe
         crate::product::plan_repair::PlanRepairError::InvalidRepairTarget(_)
             | crate::product::plan_repair::PlanRepairError::AmendmentConflict { .. }
     ));
+}
+
+/// 直接改写 durable session 记录注入权威面漂移。
+///
+/// `update_workspace_session_status` 自 3b20f89a（REQ-WIGA-09）起对
+/// `Terminated` 终态的迟到写有意 no-op，公开 setter 无法在取消后制造
+/// Running 漂移；本 helper 仅服务测试注入，不改产品终态守卫语义。
+fn inject_durable_session_status_drift(
+    tmp: &TempDir,
+    project_id: &str,
+    issue_id: &str,
+    session_id: &str,
+    status: crate::product::models::WorkspaceSessionStatus,
+) {
+    let session_path = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"))
+        .issue_lifecycle_root(project_id, issue_id)
+        .join("workspace-sessions")
+        .join(format!("{session_id}.json"));
+    let mut session: crate::product::models::WorkspaceSessionRecord =
+        crate::product::json_store::read_json(&session_path)
+            .expect("read durable workspace session");
+    session.status = status;
+    crate::product::json_store::write_json(&session_path, &session)
+        .expect("write durable workspace session drift");
 }
 
 #[tokio::test]
@@ -239,18 +261,14 @@ async fn plan_repair_cancel_direct_revalidates_package_base_and_active_lock() {
                     .revision_store
                     .put_plan_revision(
                         &fixture.plan,
-                        &crate::product::models::WorkItemPlanRevision {
-                            id: "plan_revision_external".to_string(),
-                            plan_id: fixture.plan.id.clone(),
-                            revision_no: 2,
-                            supersedes: Some(fixture.request.base_plan_revision_id.clone()),
-                            reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
-                            work_item_bindings: std::collections::BTreeMap::new(),
-                            dependency_graph_revision_id: "dependency_graph_external".to_string(),
-                            validation_report_ref: "validation_external".to_string(),
-                            plan_projection_bundle_id: "projection_external".to_string(),
-                            created_at: "2026-07-18T00:00:03Z".to_string(),
-                        },
+                        &crate::product::models::WorkItemPlanRevision { id: "plan_revision_external".to_string(),
+                        plan_id: fixture.plan.id.clone(),
+                        revision_no: 2,
+                        supersedes: Some(fixture.request.base_plan_revision_id.clone()),
+                        reason: crate::product::models::PlanRevisionReason::SubgraphReplan,
+                        work_item_bindings: std::collections::BTreeMap::new(),
+                        dependency_graph_revision_id: "dependency_graph_external".to_string(),
+                        validation_report_ref: "validation_external".to_string(), plan_projection_bundle_id: "projection_external".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:03Z".to_string(),  },
                     )
                     .unwrap();
                 fixture
@@ -317,13 +335,13 @@ async fn plan_repair_cancel_replay_requires_authoritative_terminal_state() {
                     .unwrap();
             }
             "authoritative_session" => {
-                fixture
-                    .lifecycle
-                    .update_workspace_session_status(
-                        &fixture.engine.session.session_id,
-                        crate::product::models::WorkspaceSessionStatus::Running,
-                    )
-                    .unwrap();
+                inject_durable_session_status_drift(
+                    &fixture._tmp,
+                    &fixture.engine.session.project_id,
+                    &fixture.engine.session.issue_id,
+                    &fixture.engine.session.session_id,
+                    crate::product::models::WorkspaceSessionStatus::Running,
+                );
             }
             "snapshot_stage" => {
                 fixture.engine.plan_repair_snapshot.as_mut().unwrap().stage =

@@ -1,0 +1,178 @@
+{
+  "provider": "codex",
+  "repetition": 3,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/codex-ab/codex/rep3",
+  "startedAt": "2026-09-20T01:25:07.845Z",
+  "finishedAt": "2026-09-20T01:30:18.494Z",
+  "elapsedSec": 310.648,
+  "issue_id": "issue_0288",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0465",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.784,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.856,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 287.047,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 310.565,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 310.567,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 310.565,
+      "findings": [
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "verification_checks",
+          "evidence": "Projection Validation Report finding code=integration_or_e2e_skipped_risk, work_item_ids=[]，当前三份 contract 的 verification_checks 均为 node --test 限定目录且 non_zero_test_execution_required=true。",
+          "message": "机械校验提示存在 integration/e2e 跳过风险，建议在集成层或更高层级补充显式的 manual verification 路径以增强发布信心。",
+          "required_action": "在集成 WorkItem 的 acceptance_criteria 或 verification_checks 中补充或引用显式 manual verification 机制以覆盖 e2e 缺口，或确认当前分层验证策略已足够。",
+          "severity": "suggestion"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "verification_checks",
+      "evidence": "Projection Validation Report finding code=integration_or_e2e_skipped_risk, work_item_ids=[]，当前三份 contract 的 verification_checks 均为 node --test 限定目录且 non_zero_test_execution_required=true。",
+      "message": "机械校验提示存在 integration/e2e 跳过风险，建议在集成层或更高层级补充显式的 manual verification 路径以增强发布信心。",
+      "required_action": "在集成 WorkItem 的 acceptance_criteria 或 verification_checks 中补充或引用显式 manual verification 机制以覆盖 e2e 缺口，或确认当前分层验证策略已足够。",
+      "severity": "suggestion"
+    },
+    {
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "severity": "warning",
+      "work_item_ids": []
+    },
+    {
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "severity": "warning",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 18638,
+      "output_tokens": 302,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 1,
+    "initial_review_count": 1,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "provider_start_count": 1,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0465:0",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 310648,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.072,
+    "1:running": 285.191,
+    "2:cross_review": 23.518,
+    "3:running": 0.002,
+    "4:completed": 0.081
+  }
+}

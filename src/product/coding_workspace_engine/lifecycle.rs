@@ -1,5 +1,11 @@
 use super::*;
-use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_models::{CodingAdmissionKind, CodingAttemptScope};
+use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
+use crate::product::logical_codebase::provider_gateway::{
+    ProviderGatewayError, SessionLaunchRequest, ValidatedSessionLaunchPolicy,
+};
+use crate::product::work_item_split_engine::engine::provider_ref_for_name;
+use std::sync::Arc;
 
 impl CodingWorkspaceEngine {
     pub fn new(
@@ -13,7 +19,172 @@ impl CodingWorkspaceEngine {
             _git_service: git_service,
             event_tx: CancellableCodingEventSender::new(event_tx, cancellation.clone()),
             cancellation,
+            logical_provider_gateway: None,
         }
+    }
+
+    /// 注入逻辑代码库 provider gateway。Task 11:Web 接入 task 为逻辑代码库 issue
+    /// 构造 gateway 后调用此方法,使 provider stream 经 gateway 启动;未调用时
+    /// 引擎保留直接 `provider.start` 路径。
+    pub fn with_logical_provider_gateway(
+        mut self,
+        gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+    ) -> Self {
+        self.logical_provider_gateway = Some(gateway);
+        self
+    }
+
+    /// 逻辑 target + 已注入 gateway 时 resolve 出 validated launch policy；否则
+    /// `Ok(None)`（Legacy 直连）。
+    ///
+    /// 裁决 A 两阶段：`validate` 前移，使 prompt 构建先于
+    /// `ValidatedStreamingProviderInput` 捆绑。`working_dir` 由调用点从 provider
+    /// input 取出（原 `input.working_dir`）。
+    ///
+    /// Coder 角色映射 `CodingTargetWrite`（writable_roots 为 worktree），其余角色
+    /// 映射 `ReviewReadOnly`（writable_roots 为空）。provider 由角色从 attempt 的
+    /// role provider config snapshot 推导，与调用点 `provider_type_for_name` 1:1。
+    pub(crate) fn resolve_launch_policy_for_role(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+        working_dir: &Path,
+    ) -> Result<Option<ValidatedSessionLaunchPolicy>, ProviderGatewayError> {
+        let Some(gateway) = self.logical_provider_gateway.as_ref() else {
+            return Ok(None);
+        };
+        let Some(request) =
+            self.coding_session_launch_request_for_role(attempt, role, working_dir)?
+        else {
+            return Ok(None);
+        };
+        let validated = gateway.validate(request)?;
+        Ok(Some(validated))
+    }
+
+    /// Task 1b 段③:Coding/Review caller 的 validated streaming prepare 入口。
+    /// 分流与 `resolve_launch_policy_for_role` 一致(gateway 未注入/非逻辑
+    /// attempt → `Ok(None)`,Legacy 直连零变化);逻辑 attempt 经 gateway
+    /// `prepare_streaming_launch` 组装 validated input——prepare 前绑定
+    /// run-bound audit sink(无通用 tool_policy 的 Coder/Kimi 同样绑定,
+    /// 统一写 launch audit),外来非法 `Some(policy)` 由 gateway 直接拒绝。
+    /// `role_run_seq` 与 `attach_tool_policy_audit` 同一分配器
+    /// (`next_tool_policy_role_run_seq`),workspace 会话身份同源
+    /// (`input.workspace_session_id`,缺省回填 `coding-{attempt_id}`)。
+    pub(crate) fn prepare_streaming_launch_for_role(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+        working_dir: &Path,
+        input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+    ) -> Result<
+        Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
+        ProviderGatewayError,
+    > {
+        let Some(gateway) = self.logical_provider_gateway.as_ref() else {
+            return Ok(None);
+        };
+        // A1-b1(Bug45 批2 环境回退):coding 角色受信环境注入停止——子进程
+        // 经底座(process_manager)继承宿主环境,caller 传入 env_vars 原样
+        // 透传(仅作显式覆盖层);Reviewer 族窗口/岗位纪律仍由 tool_policy
+        // 投影与 start 漏斗窗口守卫把关,与启动环境解耦。
+        let Some(request) =
+            self.coding_session_launch_request_for_role(attempt, role, working_dir)?
+        else {
+            return Ok(None);
+        };
+        let workspace_session_id = input
+            .workspace_session_id
+            .clone()
+            .unwrap_or_else(|| format!("coding-{}", attempt.id));
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(self.store.paths());
+        let role_run_seq = lifecycle
+            .next_tool_policy_role_run_seq(&workspace_session_id)
+            .map_err(|error| {
+                ProviderGatewayError::PolicyMissing(format!(
+                    "tool_policy_role_run_seq_alloc_failed: {error}"
+                ))
+            })?;
+        let context =
+            crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext {
+                workspace_session_id,
+                role_run_seq,
+                audit_sink: std::sync::Arc::new(lifecycle),
+            };
+        let prepared = gateway.prepare_streaming_launch(input, request, context)?;
+        Ok(Some(prepared))
+    }
+
+    /// 逻辑 target + 已注入 gateway 时构造该角色的 launch request(不含
+    /// validate);否则 `Ok(None)`(Legacy 直连)。Coder 角色映射
+    /// `CodingTargetWrite`(writable_roots 为 worktree),其余角色映射
+    /// `ReviewReadOnly`(writable_roots 为空)。provider 由角色从 attempt 的
+    /// role provider config snapshot 推导,与调用点 `provider_type_for_name`
+    /// 1:1。
+    fn coding_session_launch_request_for_role(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+        working_dir: &Path,
+    ) -> Result<Option<SessionLaunchRequest>, ProviderGatewayError> {
+        let Some(gateway) = self.logical_provider_gateway.as_ref() else {
+            return Ok(None);
+        };
+        let Some(snapshot) = attempt.target_snapshot.as_ref() else {
+            return Ok(None);
+        };
+        let action = match role {
+            CodingProviderRole::Coder => SessionPolicyAction::CodingTargetWrite,
+            CodingProviderRole::CodeReviewer | CodingProviderRole::InternalReviewer => {
+                SessionPolicyAction::ReviewReadOnly
+            }
+        };
+        let writable_roots = match role {
+            CodingProviderRole::Coder => vec![working_dir.to_path_buf()],
+            CodingProviderRole::CodeReviewer | CodingProviderRole::InternalReviewer => Vec::new(),
+        };
+        let role_config = self.store.get_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）时该角色无 provider
+        // 可推导——launch request 无从构造，fail-closed（缺配置门已在 execute 入口拦截，
+        // 此处是防御性兜底，绝不以 author 顶替）。
+        let provider_name = match role {
+            CodingProviderRole::Coder => Some(role_config.coder),
+            CodingProviderRole::CodeReviewer => role_config.code_reviewer,
+            CodingProviderRole::InternalReviewer => role_config.internal_reviewer,
+        }
+        .ok_or_else(|| {
+            ProviderGatewayError::PolicyMissing(format!(
+                "reviewer_configuration_missing: role={role:?} attempt={}",
+                attempt.id
+            ))
+        })?;
+        let root = gateway.authority_root().to_path_buf();
+        Ok(Some(SessionLaunchRequest {
+            project_id: attempt.project_id.clone(),
+            provider: provider_ref_for_name(&provider_name)?,
+            action,
+            // CodingTargetWrite 的 single writable root 与 target worktree 都是当前 coding
+            // 嵌套 worktree（C-1 行为：checkout/.worktrees/aria-issues/{issue}），主 checkout
+            // 只提供身份（logical_repository_id/checkout_id 仍取 snapshot 身份）。
+            target: PolicyTarget::checkout(
+                snapshot.logical_repository_id.0.to_string(),
+                snapshot.checkout_id.0.to_string(),
+                working_dir.to_path_buf(),
+            ),
+            // Task 2.7（REQ-ENV-10）：LC 分支 cwd=canonical root（gateway 冻结的
+            // authority root，与 2.1/2.3/2.6 的 author/revision/coder launch 同源），
+            // 独立于 target；readable roots 随 cwd root 化；writable roots 不随
+            // cwd 扩大（Coder=target worktree，REQ-ENV-11；reviewer 角色恒空）。
+            // 单仓/legacy 在早门前已返回 Ok(None)，cwd==worktree 直连零变化。
+            working_directory: root.clone(),
+            readable_roots: vec![root],
+            writable_roots,
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+        }))
     }
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
@@ -115,19 +286,40 @@ impl CodingWorkspaceEngine {
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         if current.scope == CodingAttemptScope::WorkItemGroup {
+            if current.admission_kind == CodingAdmissionKind::ScAdvance {
+                let advance_store =
+                    crate::product::advance_store::AdvanceStore::new(self.store.paths());
+                let plan_id = current.work_item_group_id.as_deref().ok_or_else(|| {
+                    CodingWorkspaceEngineError::ProviderProtocol(
+                        "SC advance attempt is missing its plan binding".to_string(),
+                    )
+                })?;
+                if !advance_store
+                    .advance_is_ready_for_attempt(project_id, issue_id, plan_id, attempt_id)?
+                {
+                    return Err(CodingWorkspaceEngineError::ProviderProtocol(
+                        "SC advance attempt must be Ready before StartCoding".to_string(),
+                    ));
+                }
+            }
             self.store.validate_group_attempt_integrity(&current)?;
         }
         let running = if current.status == CodingAttemptStatus::Running {
             current
         } else {
-            self.store.update_attempt_status(
-                project_id,
-                issue_id,
-                attempt_id,
-                CodingAttemptStatus::Running,
-            )?
+            self.store
+                .admit_and_transition_attempt_to_executable(project_id, issue_id, attempt_id)?
         };
-        if running.scope == CodingAttemptScope::WorkItemGroup && running.worktree_path.is_some() {
+        // sc_advance 建组时仅登记 worktree_path、不物化目录(延迟物化);
+        // 目录缺失时不得短路直进 Coding,否则 git 在未物化目录 ENOENT。
+        // 回落到下方标准 WorktreePrepare 阶段,由 runner 调用 execute_worktree_prepare
+        // 物化后再进 Coding;已物化路径(legacy group 等)行为不变。
+        if running.scope == CodingAttemptScope::WorkItemGroup
+            && running
+                .worktree_path
+                .as_deref()
+                .is_some_and(std::path::Path::exists)
+        {
             let mut attempt = self.store.update_attempt_stage(
                 project_id,
                 issue_id,
@@ -172,6 +364,52 @@ impl CodingWorkspaceEngine {
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node })
             .await;
         Ok(attempt)
+    }
+
+    /// 半启动恢复（3b 第 2 死点）：attach 重启 runner 前，对 Running +
+    /// WorktreePrepare/Coding 的 attempt 补物化判定（与 `start_attempt` 的
+    /// group 短路同语义）：
+    /// - stage 已是 WorktreePrepare → 原样返回，由 runner 管道既有
+    ///   `execute_worktree_prepare` 分支物化；
+    /// - stage=Coding 且 worktree 已物化 → 仅 group 半启动在 head 缺失时补
+    ///   git head（WorkItem Coding 中态 head 延迟到 review request 落盘，
+    ///   不得越权补写）；
+    /// - stage=Coding 但 worktree 未登记/目录不存在（sc_advance 延迟物化、
+    ///   目录丢失）→ 回落 WorktreePrepare 重新物化后再进 Coding。
+    pub async fn prepare_resumed_attempt_for_runner(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        if attempt.stage != CodingExecutionStage::Coding {
+            return Ok(attempt.clone());
+        }
+        let materialized_worktree = attempt
+            .worktree_path
+            .as_deref()
+            .filter(|path| std::path::Path::exists(path));
+        let Some(worktree_path) = materialized_worktree else {
+            return self
+                .store
+                .demote_unprepared_attempt_to_worktree_prepare(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                )
+                .map_err(CodingWorkspaceEngineError::from);
+        };
+        if attempt.head_commit.is_none() && attempt.scope == CodingAttemptScope::WorkItemGroup {
+            let base_head = self._git_service.git_current_head(worktree_path).await?;
+            return self
+                .store
+                .update_attempt_head_commit(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    Some(base_head),
+                )
+                .map_err(CodingWorkspaceEngineError::from);
+        }
+        Ok(attempt.clone())
     }
 
     pub async fn execute_worktree_prepare(
@@ -243,12 +481,79 @@ impl CodingWorkspaceEngine {
         let updated = if journal.phase
             == crate::product::coding_attempt_store::CodingGitOperationPhase::WorktreeCreated
         {
-            let updated = self.store.update_attempt_worktree_path(
+            let mut updated = self.store.update_attempt_worktree_path(
                 &attempt.project_id,
                 &attempt.issue_id,
                 &attempt.id,
                 journal.worktree_path.clone(),
             )?;
+            // C-4 T8：worktree 创建完成后幂等签发/重写 attempt 级证据令牌
+            // （issue_evidence_token），并随注入物复制端口文件（inject_web_endpoint）。
+            // 两者均为证据检索辅助能力，失败仅 warn 降级、不阻断 attempt 启动。
+            // admission 置 Running 早于 worktree 创建，若把挂点前置会 create_dir_all
+            // 提前建目录破坏 `git worktree add`，故挂在此处。
+            let evidence_paths = self.store.paths();
+            if let Err(error) =
+                crate::product::logical_codebase::evidence_token::issue_evidence_token(
+                    &evidence_paths,
+                    repo_path,
+                    &updated,
+                )
+            {
+                tracing::warn!(
+                    %error,
+                    attempt_id = %updated.id,
+                    "issue evidence token failed; degrading without blocking worktree prepare"
+                );
+            }
+            match evidence_paths.root().parent() {
+                Some(workspace_root) => {
+                    if let Err(error) =
+                        crate::product::logical_codebase::evidence_injection::inject_web_endpoint(
+                            workspace_root,
+                            &journal.worktree_path,
+                        )
+                    {
+                        tracing::warn!(
+                            %error,
+                            attempt_id = %updated.id,
+                            "inject web endpoint failed; degrading without blocking worktree prepare"
+                        );
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        attempt_id = %updated.id,
+                        "evidence paths root has no parent; skipping web endpoint injection"
+                    );
+                }
+            }
+
+            // C-4 T7：worktree 创建完成后幂等注入证据查询脚本（T0 审计点 2 首挂点）。
+            crate::product::logical_codebase::evidence_injection::write_evidence_query_script(
+                &journal.worktree_path,
+            )
+            .map_err(|error| {
+                CodingWorkspaceEngineError::EvidenceScriptInjection(error.to_string())
+            })?;
+            // C2 Task 6 补齐（决策 6/#13）：sc_advance 延迟物化路径不经
+            // `start_attempt` 的已物化短路，group attempt 认领前的
+            // `head_commit` 在 worktree 创建完成处冻结（write-if-none，与
+            // `start_attempt` 短路同语义）——初始 unit run 物化时以此携带
+            // start_commit；置于 journal 推进 Completed 前，崩溃重放重入
+            // 本分支即补冻结，不留「Completed 但 head 缺失」窗口。
+            if updated.scope == CodingAttemptScope::WorkItemGroup && updated.head_commit.is_none() {
+                let claim_head = self
+                    ._git_service
+                    .git_current_head(&journal.worktree_path)
+                    .await?;
+                updated = self.store.update_attempt_head_commit(
+                    &updated.project_id,
+                    &updated.issue_id,
+                    &updated.id,
+                    Some(claim_head),
+                )?;
+            }
             self.store.advance_coding_git_operation(
                 &updated,
                 &journal,

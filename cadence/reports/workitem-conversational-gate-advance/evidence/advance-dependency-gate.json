@@ -1,0 +1,60 @@
+{
+  "schema": "advance-campaign-evidence/v1",
+  "sanitized": "only digests/lengths/ids/counts; no candidate text, no feedback content, no provider payload",
+  "scenario": "step2_dependency_gate_and_8_3_a_admission_isolation",
+  "proven_by": [
+    "rust:campaign_stage3_dependency_gate_never_skips_unready_unit",
+    "rust:campaign_stage3_dependency_invalid_graph_and_handoff_mismatch_fail_closed",
+    "rust:campaign_stage3_admission_kind_separates_sc_dependency_gate_from_legacy_order",
+    "rust:campaign_stage3_advance_failed_or_aborted_returns_original_attempt",
+    "rust:campaign_stage3_advance_journal_crash_resumes_same_identity"
+  ],
+  "generated_from": "pure fake campaign fixtures + durable readback assertions of the listed tests; no real provider run",
+  "evidence": {
+    "waiting_shape": {
+      "consumer_status": "pending",
+      "gate_status": "Waiting",
+      "pending_units": 1,
+      "consumer_runs": 0
+    },
+    "fail_closed_reason_codes": [
+      "SC_GROUP_DEPENDENCY_CYCLE",
+      "SC_GROUP_DEPENDENCY_UNKNOWN",
+      "SC_GROUP_DEPENDENCY_SELF",
+      "SC_GROUP_HANDOFF_PLAN_BINDING_MISMATCH"
+    ],
+    "concurrency": {
+      "engines": 2,
+      "running_units_after": 1,
+      "active_work_item": "work_item_0002"
+    },
+    "admission_isolation": {
+      "sc": "waits_on_gate",
+      "legacy": "runs_by_order_index",
+      "gate_snapshot": "sc_only"
+    },
+    "terminal_replay": {
+      "statuses": [
+        "failed",
+        "aborted"
+      ],
+      "replay_code": "ADVANCE_REPLAY_NOT_READY",
+      "counts_unchanged": [
+        "attempts",
+        "units",
+        "lock"
+      ]
+    },
+    "crash_resume_checkpoints": [
+      "record",
+      "attempt",
+      "binding",
+      "lock",
+      "units"
+    ],
+    "provider_start_counts": {
+      "before": 0,
+      "after": 0
+    }
+  }
+}

@@ -1,0 +1,351 @@
+{
+  "provider": "pi",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/pi-light/rep1m2/pi/rep1",
+  "startedAt": "2026-09-07T15:59:37.362Z",
+  "finishedAt": "2026-09-07T16:06:52.150Z",
+  "elapsedSec": 434.787,
+  "issue_id": "issue_0142",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0174",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "pi",
+    "reviewer_provider": "pi",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": false,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": false,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "1e6b03fbb6625dbadd5331efb0757263ed696a19ca9e8a57fde0b791918bdffd",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "cbee45515e5c2f0d5292338e9e0a6bfdcfd15cfea6a9b757a081ada891a5f466"
+  },
+  "description_digest": "ca55406242eaee710da8959e99d7861b03be5c692b30b9d81f50f1ae79ac39fe",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.776,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.811,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 167.202,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 167.445,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 242.15,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 308.498,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 308.769,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 433.723,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 434.68,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 434.721,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 242.15,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "机械校验提示 e2e 与 integration 测试跳过（integration_or_e2e_skipped_risk，warning 级）；CHECK-001 已设置 required=true 且 non_zero_test_execution_required=true，主验证链完整，建议人工验收阶段按需补充对 GET /api/hello 的手动验证，不构成发布阻断。",
+          "evidence": "Projection Validation Report findings 两条 warning（work_item_ids 为空，error_count=0）；CHECK-001 command=node --test test/hello.test.js，non_zero_test_execution_required=true；AC-001 与 TASK-001/TASK-002 的 done_when_refs 一致指向 AC-001。",
+          "required_action": "人工验收时可按 manual 流程补充验证，无需自动返修。",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 2,
+      "elapsedSec": 433.722,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "CT-001 以“错误响应示例”声明的 405/404 行为未纳入任何任务实现或验收/验证覆盖（TASK-001/TASK-002 与 CHECK-001 仅断言 GET /api/hello 200 正常路径）；因无下游消费方（capability_coverage、demands 均为空），不影响跨项匹配与发布，仅建议实现时明确是否落地该示例行为。",
+          "evidence": "CT-001 capabilities 含 'WHEN 请求方法非 GET … 405' 与 'WHEN 请求路径非 /api/hello … 404'，而 CHECK-001（node --test test/hello.test.js）仅覆盖 200 正常路径。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "output_contracts.CT-001.capabilities"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "suggestion",
+      "message": "机械校验提示 e2e 与 integration 测试跳过（integration_or_e2e_skipped_risk，warning 级）；CHECK-001 已设置 required=true 且 non_zero_test_execution_required=true，主验证链完整，建议人工验收阶段按需补充对 GET /api/hello 的手动验证，不构成发布阻断。",
+      "evidence": "Projection Validation Report findings 两条 warning（work_item_ids 为空，error_count=0）；CHECK-001 command=node --test test/hello.test.js，non_zero_test_execution_required=true；AC-001 与 TASK-001/TASK-002 的 done_when_refs 一致指向 AC-001。",
+      "required_action": "人工验收时可按 manual 流程补充验证，无需自动返修。",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "CT-001 以“错误响应示例”声明的 405/404 行为未纳入任何任务实现或验收/验证覆盖（TASK-001/TASK-002 与 CHECK-001 仅断言 GET /api/hello 200 正常路径）；因无下游消费方（capability_coverage、demands 均为空），不影响跨项匹配与发布，仅建议实现时明确是否落地该示例行为。",
+      "evidence": "CT-001 capabilities 含 'WHEN 请求方法非 GET … 405' 与 'WHEN 请求路径非 /api/hello … 404'，而 CHECK-001（node --test test/hello.test.js）仅覆盖 200 正常路径。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "output_contracts.CT-001.capabilities"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 4679,
+      "output_tokens": 564,
+      "cache_read_tokens": 19264,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 2,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 0,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-07T16:03:39.513Z",
+      "elapsedSec": 242.151,
+      "stage": "human_confirm",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_004",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-1238e8c71b",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-07T16:03:39.514Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-07T16:06:51.085Z",
+      "elapsedSec": 433.722,
+      "stage": "prepare_context",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_005",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-07T16:06:51.085Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-1238e8c71b",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_b175e69a-1fcd-4de2-b421-ad63329959fa",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_002"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 2,
+      "command_id": "cmd-advance-2-77b23e3770",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_975b5096290a464cad2f22ecbe3f14fb",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0142"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0174:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_b175e69a-1fcd-4de2-b421-ad63329959fa:attempt:1",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0174:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_b175e69a-1fcd-4de2-b421-ad63329959fa:attempt:1",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 2,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0174:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_b175e69a-1fcd-4de2-b421-ad63329959fa:attempt:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 434787,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.035,
+    "1:running": 166.391,
+    "2:cross_review": 0.243,
+    "3:prepare_context": 74.705,
+    "4:human_confirm": 66.348,
+    "5:cross_review": 0.271,
+    "6:prepare_context": 124.954,
+    "7:human_confirm": 0.957,
+    "8:running": 0.041,
+    "9:completed": 0.066
+  },
+  "stage3_gate_return": {
+    "waits": 1,
+    "dispatched": 1,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

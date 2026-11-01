@@ -1,0 +1,14 @@
+{
+  "id": "advance_advance_dcc46e62-b485-46ff-8334-0aacf15b1fa1",
+  "command_id": "advance_dcc46e62-b485-46ff-8334-0aacf15b1fa1",
+  "project_id": "project_0001",
+  "issue_id": "issue_0278",
+  "plan_id": "issue_work_item_plan_0001",
+  "plan_revision_id": "plan_revision_df3c368566e7510049ddd504",
+  "attempt_id": "coding_attempt_41c86f73dfc04decb1fcf9a1df74ec88",
+  "status": "failed",
+  "workspace_entry": null,
+  "error": "existing group initialization is bound to another advance identity",
+  "created_at": "2026-09-18T17:43:01.249988268+00:00",
+  "updated_at": "2026-09-18T17:43:01.255886058+00:00"
+}

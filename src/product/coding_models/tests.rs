@@ -1,8 +1,14 @@
 use crate::product::coding_models::{
-    CodeReviewReport, CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingGateKind,
-    CodingGateRequired, CodingProviderRole, FindingSeverity, InternalPrReview, ReviewFinding,
-    ReviewVerdict,
+    CodeReviewReport, CodingAttemptStatus, CodingExecutionStage, CodingGateAction,
+    CodingGateActionType, CodingGateKind, CodingGateRequired, CodingProviderRole, FindingSeverity,
+    InternalPrReview, PushStatus, RemoteKind, ReviewFinding, ReviewRequest, ReviewRequestKind,
+    ReviewRequestOwnerKind, ReviewVerdict,
 };
+
+#[test]
+fn awaiting_manual_recovery_is_not_active() {
+    assert!(!CodingAttemptStatus::AwaitingManualRecovery.is_active());
+}
 
 #[test]
 fn retained_coding_stages_keep_their_relative_order_after_testing_removal() {
@@ -14,9 +20,37 @@ fn retained_coding_stages_keep_their_relative_order_after_testing_removal() {
         CodingExecutionStage::ReviewRequest,
         CodingExecutionStage::InternalPrReview,
         CodingExecutionStage::FinalConfirm,
+        CodingExecutionStage::IssueCrossRepoReview,
     ];
 
-    assert_eq!(stages.map(|stage| stage.order()), [0_u8, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        stages.map(|stage| stage.order()),
+        [0_u8, 1, 2, 3, 4, 5, 6, 7]
+    );
+}
+
+/// REQ-GFR-CR-07：跨仓 findings 的 `source_stage` 新取值排在 `FinalConfirm` 之后，
+/// 既有 7 个成员的相对序不变。
+#[test]
+fn issue_cross_repo_review_stage_order_is_seven() {
+    assert_eq!(CodingExecutionStage::IssueCrossRepoReview.order(), 7);
+    assert!(
+        CodingExecutionStage::IssueCrossRepoReview.order()
+            > CodingExecutionStage::FinalConfirm.order()
+    );
+}
+
+#[test]
+fn issue_cross_repo_review_serializes_to_snake_case() {
+    assert_eq!(
+        serde_json::to_string(&CodingExecutionStage::IssueCrossRepoReview)
+            .expect("serialize cross repo review stage"),
+        "\"issue_cross_repo_review\""
+    );
+
+    let parsed: CodingExecutionStage = serde_json::from_str("\"issue_cross_repo_review\"")
+        .expect("deserialize cross repo review stage");
+    assert_eq!(parsed, CodingExecutionStage::IssueCrossRepoReview);
 }
 
 #[test]
@@ -54,6 +88,8 @@ fn review_artifacts_round_trip_preserves_evidence() {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     };
     let review_value = serde_json::to_value(&review).expect("serialize code review");
     assert_eq!(
@@ -79,6 +115,8 @@ fn review_artifacts_round_trip_preserves_evidence() {
         evidence_refs: vec!["code_review_0001.json".to_string()],
         raw_provider_output_ref: Some("provider-raw/code_review/code_review_0001.txt".to_string()),
         diagnostic: None,
+        latest_review_verdict: None,
+        triage_summary: None,
     };
     let gate_value = serde_json::to_value(&gate).expect("serialize gate");
     assert_eq!(gate_value["reason_code"], "review_payload_parse_error");
@@ -153,4 +191,109 @@ fn legacy_coding_qa_records_deserialize_with_defaults() {
     assert_eq!(gate.reason_code, None);
     assert!(gate.evidence_refs.is_empty());
     assert_eq!(gate.raw_provider_output_ref, None);
+}
+
+#[test]
+fn review_request_deserializes_legacy_json_as_attempt_owner() {
+    let legacy = serde_json::json!({
+        "id": "rr_1", "attempt_id": "attempt_1", "kind": "git_branch_only",
+        "remote_kind": "generic_git", "remote": "origin",
+        "base_branch": "main", "branch_name": "aria/attempt_1",
+        "commit_sha": "abc", "push_status": "pushed",
+        "external_url": null, "manual_instructions": [],
+        "created_at": "2026-08-14T00:00:00Z", "updated_at": "2026-08-14T00:00:00Z"
+    });
+    let req: ReviewRequest = serde_json::from_value(legacy).unwrap();
+    assert_eq!(req.owner_kind, ReviewRequestOwnerKind::Attempt);
+    assert_eq!(req.pointer_publication_id, None);
+    assert!(!req.revoked, "legacy record must default revoked to false");
+}
+
+#[test]
+fn push_status_skipped_not_configured_serde_roundtrip_and_delivered_predicate() {
+    let json = serde_json::to_value(PushStatus::SkippedNotConfigured).unwrap();
+    assert_eq!(json, serde_json::json!("skipped_not_configured"));
+    let back: PushStatus = serde_json::from_value(json).unwrap();
+    assert_eq!(back, PushStatus::SkippedNotConfigured);
+    assert!(PushStatus::Pushed.is_delivered());
+    assert!(PushStatus::SkippedNotConfigured.is_delivered());
+    assert!(!PushStatus::NotPushed.is_delivered());
+    assert!(!PushStatus::Failed.is_delivered());
+}
+
+#[test]
+fn review_request_rejects_json_without_attempt_id() {
+    let missing_attempt_id = serde_json::json!({
+        "id": "rr_1", "kind": "git_branch_only", "remote_kind": "generic_git",
+        "remote": "origin", "base_branch": "main", "branch_name": "aria/attempt_1",
+        "commit_sha": "abc", "push_status": "pushed", "external_url": null,
+        "manual_instructions": [], "created_at": "2026-08-14T00:00:00Z",
+        "updated_at": "2026-08-14T00:00:00Z"
+    });
+
+    let error = serde_json::from_value::<ReviewRequest>(missing_attempt_id)
+        .expect_err("ReviewRequest must require attempt_id");
+    assert!(error.to_string().contains("attempt_id"));
+}
+
+#[test]
+fn review_request_roundtrips_revoked_flag() {
+    let req = ReviewRequest {
+        id: "rr_revoked".to_string(),
+        attempt_id: "attempt_1".to_string(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: "aria/attempt_1".to_string(),
+        commit_sha: "abc".to_string(),
+        push_status: PushStatus::Pushed,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: true,
+        created_at: "2026-08-14T00:00:00Z".to_string(),
+        updated_at: "2026-08-14T00:00:00Z".to_string(),
+    };
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["revoked"], true);
+
+    let decoded: ReviewRequest = serde_json::from_value(value).unwrap();
+    assert!(decoded.revoked);
+}
+
+#[test]
+fn review_request_roundtrips_pointer_publication_owner() {
+    let req = ReviewRequest {
+        id: "rr_2".to_string(),
+        attempt_id: "pointer-pub-pub_1".to_string(),
+        kind: ReviewRequestKind::GitBranchOnly,
+        remote_kind: RemoteKind::GenericGit,
+        remote: "origin".to_string(),
+        base_branch: "main".to_string(),
+        branch_name: "aria/pointer_pub_1".to_string(),
+        commit_sha: "abc".to_string(),
+        push_status: PushStatus::Pushed,
+        external_url: None,
+        manual_instructions: Vec::new(),
+        push_error: None,
+        owner_kind: ReviewRequestOwnerKind::PointerPublication,
+        pointer_publication_id: Some("pub_1".to_string()),
+        revoked: false,
+        created_at: "2026-08-14T00:00:00Z".to_string(),
+        updated_at: "2026-08-14T00:00:00Z".to_string(),
+    };
+    let value = serde_json::to_value(&req).unwrap();
+    assert_eq!(value["owner_kind"], "pointer_publication");
+    assert_eq!(value["pointer_publication_id"], "pub_1");
+
+    let decoded: ReviewRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        decoded.owner_kind,
+        ReviewRequestOwnerKind::PointerPublication
+    );
+    assert_eq!(decoded.pointer_publication_id, Some("pub_1".to_string()));
+    assert_eq!(decoded.attempt_id, "pointer-pub-pub_1");
 }

@@ -1,6 +1,6 @@
+import type { CockpitActionFacade } from "../../state/cockpit-action-routing";
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { RevisionPath } from "../../api/types";
 import type { ChatEntry, ChoiceResponsePayload, WorkspaceContentRef } from "../../state/chat-entries";
 import { ChatEntryRenderer } from "./ChatEntryRenderer";
 import { MessageGroupView } from "./MessageGroupView";
@@ -14,11 +14,9 @@ interface ChatEntryListProps {
   entries: ChatEntry[];
   onPermissionResponse?: (entry: ChatEntry, approved: boolean) => void;
   onChoiceResponse?: (entry: ChatEntry, response: ChoiceResponsePayload) => void;
-  onSelectRevisionPath?: (path: RevisionPath, extraContext?: string) => void;
-  onHumanConfirm?: (
-    decision: "confirm" | "request-change" | "terminate",
-    payload?: unknown,
-  ) => void;
+  actions?: CockpitActionFacade;
+  /** F-38：门卡「查看产物」入口——切到产物视图（cockpit 产物审核页签）。 */
+  onOpenArtifact?: () => void;
   sessionId?: string | null;
   contentCache?: Record<string, string>;
   loadContent?: (sessionId: string, ref: WorkspaceContentRef) => Promise<string>;
@@ -33,8 +31,8 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       entries,
       onPermissionResponse,
       onChoiceResponse,
-      onSelectRevisionPath,
-      onHumanConfirm,
+        actions,
+      onOpenArtifact,
       sessionId,
       contentCache,
       loadContent,
@@ -53,6 +51,14 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       groupedItems.forEach((item, index) => {
         if (item.kind === "group") {
           map.set(entryIdForGroup(item.group), index);
+          // 分组内的条目（如 choice_request 走 interruptEntries）没有独立行：
+          // 按条目 id 定位必须落到它所在的分组行，否则「定位选择卡」静默失败。
+          for (const entry of [
+            ...item.group.interruptEntries,
+            ...item.group.inlineEvents,
+          ]) {
+            map.set(entry.id, index);
+          }
         } else {
           map.set(item.entry.id, index);
         }
@@ -101,12 +107,15 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
       () => ({
         scrollToEntry(entryId: string) {
           const index = entryIndexById.get(entryId);
-          if (index !== undefined) {
-            rowVirtualizer.scrollToIndex(index, { align: "start" });
-            parentRef.current
-              ?.querySelector<HTMLElement>(`[data-entry-id="${entryId}"]`)
-              ?.scrollIntoView({ behavior: "auto", block: "start" });
+          if (index === undefined) {
+            return;
           }
+          rowVirtualizer.scrollToIndex(index, { align: "start" });
+          // 分组行不带条目 id（data-entry-id 是分组 id），按行索引回退定位。
+          const row =
+            parentRef.current?.querySelector<HTMLElement>(`[data-entry-id="${entryId}"]`) ??
+            parentRef.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
+          row?.scrollIntoView({ behavior: "auto", block: "start" });
         },
       }),
       [entryIndexById, rowVirtualizer],
@@ -146,7 +155,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                 return null;
               }
 
-              const rowClassName = "absolute left-0 top-0 w-full min-w-0 pb-3";
+              const rowClassName = "absolute left-0 top-0 w-full min-w-0 pb-4";
               const rowStyle = { transform: `translateY(${virtualRow.start}px)` };
 
               if (item.kind === "group") {
@@ -163,8 +172,7 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                       group={item.group}
                       onPermissionResponse={onPermissionResponse}
                       onChoiceResponse={onChoiceResponse}
-                      onSelectRevisionPath={onSelectRevisionPath}
-                      onHumanConfirm={onHumanConfirm}
+                      actions={actions}
                       sessionId={sessionId}
                       contentCache={contentCache}
                       loadContent={loadContent}
@@ -187,8 +195,8 @@ export const ChatEntryList = forwardRef<ChatEntryListHandle, ChatEntryListProps>
                     entry={item.entry}
                     onPermissionResponse={onPermissionResponse}
                     onChoiceResponse={onChoiceResponse}
-                    onSelectRevisionPath={onSelectRevisionPath}
-                    onHumanConfirm={onHumanConfirm}
+                    actions={actions}
+                    onOpenArtifact={onOpenArtifact}
                   />
                 </div>
               );

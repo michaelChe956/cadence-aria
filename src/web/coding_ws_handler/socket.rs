@@ -1,13 +1,16 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, State};
 use axum::response::IntoResponse;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
+use crate::product::advance_store::AdvanceStore;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionStage};
-use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::coding_models::{
+    CodingAdmissionKind, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+};
+use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
@@ -20,9 +23,9 @@ use super::outbound::{
 use super::{
     CodingWsInMessage, CodingWsOutMessage, build_coding_session_state,
     coding_attempt_lookup_protocol_error, confirm_open_stage_gate, context_note_chat_entry,
-    provider_selection_targets_current_running_stage, should_resume_runner_after_gate_response,
-    spawn_coding_runner, spawn_coding_runner_reserved, update_provider_permission_mode,
-    update_provider_selection,
+    pending_choice_frames, provider_selection_targets_current_running_stage,
+    should_resume_runner_after_gate_response, spawn_coding_runner, spawn_coding_runner_reserved,
+    update_provider_permission_mode, update_provider_selection,
 };
 
 pub(crate) mod abort;
@@ -36,8 +39,16 @@ mod preparation;
 pub(crate) use preparation::{
     CodingMessagePreparation, CodingMessagePreparationError, prepare_coding_message,
 };
+mod resumption;
 #[cfg(test)]
 pub(crate) use preparation::{CodingRecoveryPreparationProbe, prepare_coding_message_with_probe};
+pub(crate) use resumption::{ResumedAttemptRunner, ensure_runner_for_resumed_attempt};
+
+mod message_policy;
+pub use message_policy::is_coding_ws_message_allowed;
+use message_policy::{
+    interactive_runner_sender, manual_command_id_for_this_frame, send_pending_choice_frames,
+};
 
 pub async fn coding_ws(
     ws: WebSocketUpgrade,
@@ -67,7 +78,8 @@ async fn handle_coding_socket(
 ) {
     let (mut socket_tx, mut socket_rx) = socket.split();
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
-    let coding_store = CodingAttemptStore::new(app_paths);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let advance_store = AdvanceStore::new(ProductAppPaths::new(state.workspace_root.join(".aria")));
     let attempt_result = match scope.as_ref() {
         Some((project_id, issue_id)) => coding_store.get_attempt(project_id, issue_id, &attempt_id),
         None => coding_store.get_attempt_by_id(&attempt_id),
@@ -88,20 +100,83 @@ async fn handle_coding_socket(
     let attempt_issue_id = attempt.issue_id.clone();
     let attempt_id = attempt.id.clone();
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
-    let (event_tx, event_rx) = mpsc::channel(1024);
+    let (socket_event_tx, event_rx) = mpsc::channel(1024);
     let socket_token = state
         .coding_sockets
-        .register(&attempt_key, event_tx.clone());
+        .register(&attempt_key, socket_event_tx.clone());
+    // F-19：发射面换用 attempt 级 hub——runner/engine 事件经 registry 路由
+    // fan-out 到所有存活 socket，驱动连接断开不再终结事件流；本 socket 的
+    // event_rx 消费行为（快照/flush/ack）零回归。
+    let event_tx = state.coding_sockets.hub_sender(&attempt_key);
+    let resumed_attempt = attempt.clone();
     if let Ok(snapshot) = build_coding_session_state(&coding_store, attempt)
         && !send_coding_json(&mut socket_tx, &snapshot).await
     {
         state.coding_sockets.remove(&attempt_key, socket_token);
         return;
     }
+    // F-43：attach 初帧补发未决 provider choice（同构 F-24 workspace WS 的
+    // 重订阅补发）。快照里的 `pending_choices` 只重建卡片数据，不重建客户端
+    // 按帧维护的「待答卡」接线；新连接（页面刷新/重开、第二观察者）漏补即
+    // 「coder 等服务端、界面等入口」的刷新死锁。已答/过期 gate 不在 Open 集内，
+    // 天然不重发。
+    if !send_pending_choice_frames(&mut socket_tx, &coding_store, &resumed_attempt).await {
+        state.coding_sockets.remove(&attempt_key, socket_token);
+        return;
+    }
+    // REQ-WIGA-06：attach 补投递 durable 未送达的 plan amendment（快照/choice
+    // 初帧先行，保持 wire 顺序；真实写 ack 才标 Delivered，失败仍 Unsent）。
+    super::delivery_ack::spawn_undelivered_amendment_redelivery(
+        coding_store.clone(),
+        resumed_attempt.clone(),
+        event_tx.clone(),
+    );
 
     let mut event_rx = OutboundEventReceiver::new(event_rx);
     let mut runner_started = false;
     let mut runner_command_tx: Option<mpsc::Sender<CodingRunnerCommand>> = None;
+    // 3b 第 2 死点：半启动 attempt（Running + WorktreePrepare/Coding + 注册表
+    // 无 runner）在快照后自动重启 runner（复用 StartCoding 分支的既有 spawn
+    // 路径），活 runner 重连/普通 attach 判定零动作、行为不变；重启失败转
+    // AwaitingManualRecovery 并发可见事件，不发静默快照。
+    match ensure_runner_for_resumed_attempt(
+        &state,
+        &coding_store,
+        &event_tx,
+        &attempt_key,
+        &resumed_attempt,
+    )
+    .await
+    {
+        ResumedAttemptRunner::NotNeeded => {}
+        ResumedAttemptRunner::Restarted { command_tx } => {
+            runner_started = true;
+            runner_command_tx = Some(command_tx);
+        }
+        ResumedAttemptRunner::ManualRecovery { reason, detail } => {
+            let _ = send_coding_json(
+                &mut socket_tx,
+                &CodingWsOutMessage::CodingProtocolError {
+                    code: "coding_runner_restart_failed".to_string(),
+                    message: format!(
+                        "attempt moved to awaiting_manual_recovery: {reason}: {detail}"
+                    ),
+                },
+            )
+            .await;
+            let reloaded = match scope.as_ref() {
+                Some((project_id, issue_id)) => {
+                    coding_store.get_attempt(project_id, issue_id, &attempt_id)
+                }
+                None => coding_store.get_attempt_by_id(&attempt_id),
+            };
+            if let Ok(updated) = reloaded
+                && let Ok(snapshot) = build_coding_session_state(&coding_store, updated)
+            {
+                let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+            }
+        }
+    }
     'socket: loop {
         tokio::select! {
             event = event_rx.recv() => {
@@ -232,6 +307,57 @@ async fn handle_coding_socket(
                         continue;
                     }
                 };
+                // F-14/F-44：sc_advance attempt 的 durable-ready 门——StartCoding 与
+                // RestartCoding 共用同款语义（半启动恢复 sc_advance_restart_blocked
+                // 亦同源）：未绑定 group / 未 Ready / 读取失败均 fail-closed 拒绝。
+                if matches!(
+                    inbound,
+                    CodingWsInMessage::StartCoding | CodingWsInMessage::RestartCoding
+                ) {
+                    let advance_ready = if current_attempt.admission_kind
+                        == CodingAdmissionKind::ScAdvance
+                    {
+                        match current_attempt.work_item_group_id.as_deref() {
+                            None => false,
+                            Some(plan_id) => match advance_store.advance_is_ready_for_attempt(
+                                &current_attempt.project_id,
+                                &current_attempt.issue_id,
+                                plan_id,
+                                &current_attempt.id,
+                            ) {
+                                Ok(ready) => ready,
+                                Err(error) => {
+                                    drop(mutation_lease);
+                                    let _ = send_coding_json(
+                                        &mut socket_tx,
+                                        &CodingWsOutMessage::CodingProtocolError {
+                                            code: "SC_CODING_REQUIRES_ADVANCE".to_string(),
+                                            message: format!(
+                                                "cannot verify durable advance readiness: {error}"
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            },
+                        }
+                    } else {
+                        true
+                    };
+                    if !advance_ready {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "SC_CODING_REQUIRES_ADVANCE".to_string(),
+                                message: "SC coding attempts must be made ready through advance before StartCoding".to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                }
                 if inbound == CodingWsInMessage::StartCoding {
                     if runner_started {
                         drop(mutation_lease);
@@ -245,27 +371,279 @@ async fn handle_coding_socket(
                         .await;
                         continue;
                     }
-                    let Some(command_tx) = spawn_coding_runner(
-                        state.clone(),
-                        coding_store.clone(),
-                        event_tx.clone(),
-                        current_attempt.clone(),
-                    ) else {
+                    // P2 Task 5：WS 首启与后台编排共用同一 typed service。
+                    // 先释放 mutation lease（service 自持 attempt guard 并在
+                    // 锁内重读，不得持 lease await 同名锁）；Manual origin 用
+                    // 本帧一次性随机合法 command_id。并发失败复用 durable
+                    // claim 的 attempt 状态，绝不发第二个 runner。
+                    drop(mutation_lease);
+                    let start = crate::web::coding_start::start_coding_once(
+                        &state,
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        crate::web::coding_start::StartCodingCommand {
+                            attempt_id: current_attempt.id.clone(),
+                            command_id: manual_command_id_for_this_frame(),
+                            origin: crate::product::coding_models::CodingStartOrigin::Manual,
+                        },
+                    )
+                    .await;
+                    match start {
+                        Ok(
+                            crate::web::coding_start::StartCodingOutcome::Started { .. }
+                            | crate::web::coding_start::StartCodingOutcome::AlreadyStarted { .. },
+                        ) => {
+                            // registry 是 runner 权威：有本进程 runner 即回填本
+                            // 连接句柄（连接级 runner_started 只是观察值）；
+                            // AlreadyStarted 且无本进程 runner（跨进程认领/
+                            // runner 已消亡）时回发 durable 状态快照，不报错。
+                            if let Some(command_tx) =
+                                state.coding_runs.command_sender(&attempt_key)
+                            {
+                                runner_started = true;
+                                runner_command_tx = Some(command_tx);
+                            } else if let Ok(updated) = coding_store.get_attempt(
+                                &current_attempt.project_id,
+                                &current_attempt.issue_id,
+                                &current_attempt.id,
+                            ) && let Ok(snapshot) =
+                                build_coding_session_state(&coding_store, updated)
+                            {
+                                let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                            }
+                        }
+                        Ok(crate::web::coding_start::StartCodingOutcome::NeedsHuman {
+                            reason, ..
+                        }) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_start_needs_human".to_string(),
+                                    message: reason,
+                                },
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: error.code().to_string(),
+                                    message: error.message().to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                } else if inbound == CodingWsInMessage::RestartCoding {
+                    // F-44：中止/失败终态的显式「重新开始」通道——重走 admission
+                    // CAS 回到 Running（重验路由/快照/policy），再复用 StartCoding/
+                    // RecoverCoding 同款 spawn 路径重启 runner，由 runner 既有阶段链
+                    // 从当前 stage 续跑。失败 fail-visible（coding_restart_failed），
+                    // 不吞错误；状态门保证该分支只在 Aborted/Failed 下可达。
+                    // C2 Task 3（REQ-CRO-03）：同进程显式 restart——先确认无活跃
+                    // runner 后清退役围栏（仍在停止 fail-visible），durable 重开失败
+                    // 时补偿恢复围栏；spawn 不再被 retired 拦截，无需重启服务。
+                    let restart_key = CodingAttemptRunKey::from_attempt(&current_attempt);
+                    if matches!(
+                        state.coding_runs.restart_attempt(&restart_key),
+                        crate::web::state::AttemptRestartOutcome::StillStopping
+                    ) {
                         drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,
                             &CodingWsOutMessage::CodingProtocolError {
-                                code: "coding_runner_already_started".to_string(),
-                                message: "coding runner is already active for this attempt"
-                                    .to_string(),
+                                code: "coding_restart_still_stopping".to_string(),
+                                message: "旧运行尚未退出，请稍后重试".to_string(),
                             },
                         )
                         .await;
                         continue;
-                    };
-                    runner_started = true;
-                    runner_command_tx = Some(command_tx);
-                    drop(mutation_lease);
+                    }
+                    match coding_store.restart_terminal_attempt_for_execution(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                    ) {
+                        Ok(updated) => {
+                            // G5（终局关闸缺口）：重开后把 WI 级工作树锁复位到该
+                            // attempt 名下（复用租约三态判定；锁已释放/自持死亡
+                            // 残留重绑，活跃他人/死亡他人/未知证据停等）。失败
+                            // fail-visible 不 spawn——attach 侧再启动会死于编码段
+                            // 校验转 AwaitingManualRecovery，由 RecoverCoding 面
+                            // 收口，不弱化 restart 语义。
+                            let restart_engine = CodingWorkspaceEngine::new(
+                                coding_store.clone(),
+                                GitWorkspaceService::new(),
+                                event_tx.clone(),
+                            );
+                            if let Err(lock_error) = restart_engine
+                                .ensure_issue_worktree_lock_for_resumed_attempt(&updated)
+                            {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_restart_failed".to_string(),
+                                        message: lock_error.to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                            let Some(command_tx) = spawn_coding_runner(
+                                state.clone(),
+                                coding_store.clone(),
+                                event_tx.clone(),
+                                updated.clone(),
+                            ) else {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_runner_already_started".to_string(),
+                                        message:
+                                            "coding runner is already active for this attempt"
+                                                .to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            };
+                            runner_started = true;
+                            runner_command_tx = Some(command_tx);
+                            drop(mutation_lease);
+                            if let Ok(snapshot) =
+                                build_coding_session_state(&coding_store, updated)
+                            {
+                                let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                            }
+                        }
+                        Err(error) => {
+                            // 补偿：durable 重开失败时恢复退役围栏，不弱化 abort 语义。
+                            state.coding_runs.retire_attempt(&restart_key);
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_restart_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                } else if inbound == CodingWsInMessage::RecoverCoding {
+                    // F-16：人工恢复态的显式恢复通道——重走 admission CAS 回到
+                    // Running（完整路由/快照/policy 重验），再复用 StartCoding
+                    // 同款 spawn 路径重启 runner。失败 fail-visible
+                    // （coding_recover_failed），不吞错误；状态门保证该分支只
+                    // 在 AwaitingManualRecovery 下可达。
+                    // G5（终局关闸缺口）：恢复前先把 WI 级工作树锁复位到该
+                    // attempt 名下——确认接管清锁/恢复 spawn 失败遗留的残锁
+                    // 先按租约三态判别复位（自持/已释放/瞬态残留重绑；活跃
+                    // 他人、死亡他人、未知证据停等，绝不抢占）。失败时 attempt
+                    // 保持在 AwaitingManualRecovery，fail-visible 可重试。
+                    let recovery_engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    if let Err(lock_error) = recovery_engine
+                        .ensure_issue_worktree_lock_for_resumed_attempt(&current_attempt)
+                    {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_recover_failed".to_string(),
+                                message: lock_error.to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    // T21(人工恢复续接生产面):树上有未终态 reviewer 窗口
+                    // 时先驱动补偿(停旧登记资源→按原 manifest 续恢复→
+                    // 释放);ManualGate 需显式裁决,补偿未收口即拒——
+                    // 不得带窗重启 runner。
+                    if let Err(window_error) = recovery_engine
+                        .redrive_reviewer_window_recovery_for_attempt(&current_attempt)
+                        .await
+                    {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_recover_reviewer_window_open".to_string(),
+                                message: window_error.to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    let recovered = coding_store.recover_attempt_from_manual_recovery(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                    );
+                    match recovered {
+                        Ok(updated) => {
+                            // S4：恢复清场——残留 Running role run（死亡路径
+                            // 收尾修复落地前遗留的脏数据；先例
+                            // `ensure_failed_code_review_retry_role_run` 的
+                            // stale 收尾）统一标 Superseded。必须在 spawn 之前
+                            // 执行：旧 runner 已死、新 run 未建，此刻仍 Running
+                            // 的只能是残留；失败 fail-visible 告警，不阻断恢复。
+                            if let Err(role_run_error) = coding_store
+                                .supersede_residual_running_role_runs_for_attempt(&updated)
+                            {
+                                tracing::warn!(
+                                    attempt_id = updated.id.as_str(),
+                                    error = %role_run_error,
+                                    "failed to supersede residual running role runs on recovery"
+                                );
+                            }
+                            let Some(command_tx) = spawn_coding_runner(
+                                state.clone(),
+                                coding_store.clone(),
+                                event_tx.clone(),
+                                updated.clone(),
+                            ) else {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_runner_already_started".to_string(),
+                                        message:
+                                            "coding runner is already active for this attempt"
+                                                .to_string(),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            };
+                            runner_started = true;
+                            runner_command_tx = Some(command_tx);
+                            drop(mutation_lease);
+                            if let Ok(snapshot) =
+                                build_coding_session_state(&coding_store, updated)
+                            {
+                                let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                            }
+                        }
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_recover_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 } else if inbound == CodingWsInMessage::FinalConfirm {
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
@@ -295,13 +673,59 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if inbound == CodingWsInMessage::AbortAttempt {
+                    // 批 2 T3（C2，REQ-WIGA-09）：自动绑定 plan 上的 WS Abort
+                    // 统一路由整 plan 终止——零副作用（不取消 runner、不写
+                    // attempt/门状态），按 code+JSON 身份打开同一二次确认面，
+                    // 确认后经统一终止 REST 提交；manual/无绑定原语义。
+                    let managed_identity =
+                        crate::web::handlers::automation_enrollment::automation_identity_for_attempt(
+                            &app_paths,
+                            &current_attempt,
+                        )
+                        .map_err(CodingWorkspaceEngineError::Store);
+                    match managed_identity {
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_automation_lookup_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(Some(identity)) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "automation_plan_termination_required".to_string(),
+                                    message: crate::web::handlers::automation_enrollment::
+                                        automation_plan_termination_required_message(&identity),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(None) => {}
+                    }
                     let attempt_key = CodingAttemptRunKey::from_attempt(&current_attempt);
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     let abort_result = abort_attempt_while_draining_events(
                         &state.coding_runs,
                         &attempt_key,
@@ -352,6 +776,79 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
+                    flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
+                    if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
+                        let _ = send_coding_json(&mut socket_tx, &snapshot).await;
+                    }
+                } else if inbound == CodingWsInMessage::RetryPush {
+                    // runner 存活窗口内优先转发命令臂（覆盖 brief 窗口）；runner 已退出时
+                    // 直接处理（仿 FinalConfirm 臂），复用 execute_review_request 的
+                    // journal 幂等重入：Failed 重开重推，Pushed 幂等返回。
+                    // `runner_command_tx` 仅在 AbortAttempt 时置 None；runner 正常走完
+                    // （FinalConfirm/WaitingForHuman）退出后 receiver drop、channel 关闭，
+                    // sender 仍为 Some。若只看 is_some 转发，send 会返回 Err 被丢弃且
+                    // continue 跳过下方直接处理 → RetryPush 静默吞没。故用
+                    // `!is_closed()` 把「已关闭 sender」也归入直接处理路径。
+                    if let Some(command_tx) = runner_command_tx
+                        .as_ref()
+                        .filter(|tx| !tx.is_closed())
+                    {
+                        let _ = command_tx.send(CodingRunnerCommand::RetryPush).await;
+                        drop(mutation_lease);
+                        continue;
+                    }
+                    let engine = CodingWorkspaceEngine::new(
+                        coding_store.clone(),
+                        GitWorkspaceService::new(),
+                        event_tx.clone(),
+                    );
+                    if let Err(error) = engine
+                        .execute_review_request(
+                            &current_attempt,
+                            "origin",
+                            "feat: implement work item",
+                        )
+                        .await
+                    {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_retry_push_failed".to_string(),
+                                message: error.to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    let updated = match coding_store.get_attempt(
+                        &current_attempt.project_id,
+                        &current_attempt.issue_id,
+                        &current_attempt.id,
+                    ) {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_retry_push_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
@@ -362,6 +859,44 @@ async fn handle_coding_socket(
                     extra_context,
                 } = inbound
                 {
+                    // 批 2 T3（C2，REQ-WIGA-09）：自动绑定 plan 上的门动作
+                    // Abort 执行语义改整 plan 终止——落门前统一路由（零
+                    // 副作用）；非 Abort 动作/manual/无绑定原语义。
+                    let managed_abort = crate::web::handlers::ws_gate_response_routes_termination(
+                        &app_paths,
+                        &coding_store,
+                        &current_attempt,
+                        &gate_id,
+                        &action_id,
+                    )
+                    .map_err(CodingWorkspaceEngineError::Store);
+                    match managed_abort {
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_automation_lookup_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(Some(termination_message)) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "automation_plan_termination_required".to_string(),
+                                    message: termination_message,
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(None) => {}
+                    }
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
                         GitWorkspaceService::new(),
@@ -393,6 +928,10 @@ async fn handle_coding_socket(
                         }
                     };
                     drop(mutation_lease);
+                    state
+                        .coding_sockets
+                        .wait_until_hub_drained(&attempt_key)
+                        .await;
                     flush_queued_coding_events(&mut socket_tx, &mut event_rx).await;
                     if let Ok(snapshot) = build_coding_session_state(&coding_store, updated) {
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
@@ -601,7 +1140,9 @@ async fn handle_coding_socket(
                     reason,
                 } = inbound
                 {
-                    if let Some(command_tx) = runner_command_tx.as_ref() {
+                    if let Some(command_tx) =
+                        interactive_runner_sender(&state, &attempt_key, runner_command_tx.as_ref())
+                    {
                         let _ = command_tx
                             .send(CodingRunnerCommand::PermissionResponse {
                                 id,
@@ -615,18 +1156,19 @@ async fn handle_coding_socket(
                     id,
                     selected_option_ids,
                     free_text,
+                    answers,
+                    command_id,
+                    expected_run_id,
                 } = inbound
                 {
-                    if let Some(command_tx) = runner_command_tx.as_ref() {
-                        let _ = command_tx
-                            .send(CodingRunnerCommand::ChoiceResponse {
-                                id,
-                                selected_option_ids,
-                                free_text,
-                            })
-                            .await;
-                        drop(mutation_lease);
-                    } else {
+                    // P0 1.3（Task 9）：WS 与 REST 共用 registry claim 门面——
+                    // 同 attempt+run-incarnation 唯一认领；缺省 command_id/
+                    // expected_run_id 绑定当前唯一 run。旧单题入站（answers
+                    // 空、selected/free_text 形态）经 legacy 字段转单题答案。
+                    let incarnation = expected_run_id
+                        .clone()
+                        .or_else(|| state.coding_runs.active_run_incarnation(&attempt_key));
+                    let Some(expected_run_id) = incarnation else {
                         drop(mutation_lease);
                         let _ = send_coding_json(
                             &mut socket_tx,
@@ -638,6 +1180,61 @@ async fn handle_coding_socket(
                             },
                         )
                         .await;
+                        continue;
+                    };
+                    let request = crate::web::choice_reply::ChoiceResponseRequest {
+                        command_id: command_id
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        expected_run_id,
+                        answers: if answers.is_empty() {
+                            vec![crate::cross_cutting::streaming_provider::ChoiceAnswerData {
+                                question_id: "default".to_string(),
+                                selected_option_ids: selected_option_ids.clone(),
+                                free_text: free_text.clone(),
+                            }]
+                        } else {
+                            answers
+                        },
+                    };
+                    match state.coding_runs.claim_choice(&attempt_key, &id, &request) {
+                        Ok((_, true)) => {
+                            if let Err(error) = state
+                                .coding_runs
+                                .submit_claimed_choice(&attempt_key, &id, &request)
+                                .await
+                            {
+                                drop(mutation_lease);
+                                let _ = send_coding_json(
+                                    &mut socket_tx,
+                                    &CodingWsOutMessage::CodingProtocolError {
+                                        code: "coding_choice_submit_failed".to_string(),
+                                        message: format!(
+                                            "ChoiceResponse id={id} claim submit failed: {error:?}"
+                                        ),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                            drop(mutation_lease);
+                        }
+                        // 同 command 幂等复看：不二发，ack 由 provider_stream 发出。
+                        Ok((_, false)) => {
+                            drop(mutation_lease);
+                        }
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_choice_claim_rejected".to_string(),
+                                    message: format!(
+                                        "ChoiceResponse id={id} claim rejected: {error:?}"
+                                    ),
+                                },
+                            )
+                            .await;
+                        }
                     }
                 } else if let CodingWsInMessage::ContextNote { content } = inbound {
                     let note = match coding_store.create_context_note(&current_attempt, content)
@@ -695,79 +1292,4 @@ async fn handle_coding_socket(
         }
     }
     state.coding_sockets.remove(&attempt_key, socket_token);
-}
-
-pub fn is_coding_ws_message_allowed(
-    status: &CodingAttemptStatus,
-    stage: &CodingExecutionStage,
-    message: &CodingWsInMessage,
-) -> bool {
-    if matches!(
-        message,
-        CodingWsInMessage::CodingHello { .. } | CodingWsInMessage::CodingPing
-    ) {
-        return true;
-    }
-    if matches!(
-        status,
-        CodingAttemptStatus::Completed | CodingAttemptStatus::Failed | CodingAttemptStatus::Aborted
-    ) {
-        return false;
-    }
-    if matches!(message, CodingWsInMessage::ContextNote { .. }) && status.is_active() {
-        return true;
-    }
-    if matches!(message, CodingWsInMessage::StageGateConfirm { .. }) && status.is_active() {
-        return true;
-    }
-    if matches!(message, CodingWsInMessage::ProviderSelect { .. }) && status.is_active() {
-        return true;
-    }
-    if matches!(message, CodingWsInMessage::PermissionModeSelect { .. }) && status.is_active() {
-        return true;
-    }
-    if matches!(message, CodingWsInMessage::GateResponse { .. })
-        && *status == CodingAttemptStatus::WaitingForHuman
-    {
-        return true;
-    }
-    if *status == CodingAttemptStatus::Blocked {
-        return matches!(
-            message,
-            CodingWsInMessage::GateResponse { .. } | CodingWsInMessage::AbortAttempt
-        );
-    }
-    match stage {
-        CodingExecutionStage::PrepareContext => matches!(
-            message,
-            CodingWsInMessage::ContextNote { .. }
-                | CodingWsInMessage::StartCoding
-                | CodingWsInMessage::ProviderSelect { .. }
-                | CodingWsInMessage::PermissionModeSelect { .. }
-                | CodingWsInMessage::MaxAutoReworkSelect { .. }
-                | CodingWsInMessage::AbortAttempt
-        ),
-        CodingExecutionStage::WorktreePrepare => matches!(message, CodingWsInMessage::AbortAttempt),
-        CodingExecutionStage::ReviewRequest => {
-            matches!(
-                message,
-                CodingWsInMessage::StartCoding | CodingWsInMessage::AbortAttempt
-            )
-        }
-        CodingExecutionStage::Coding
-        | CodingExecutionStage::CodeReview
-        | CodingExecutionStage::InternalPrReview => matches!(
-            message,
-            CodingWsInMessage::ContextNote { .. }
-                | CodingWsInMessage::PermissionResponse { .. }
-                | CodingWsInMessage::ChoiceResponse { .. }
-                | CodingWsInMessage::AbortAttempt
-        ),
-        CodingExecutionStage::FinalConfirm => matches!(
-            message,
-            CodingWsInMessage::FinalConfirm
-                | CodingWsInMessage::GateResponse { .. }
-                | CodingWsInMessage::AbortAttempt
-        ),
-    }
 }

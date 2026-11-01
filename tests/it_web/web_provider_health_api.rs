@@ -150,8 +150,12 @@ fn provider_state(
         4096,
     ));
     let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
-    let state = WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()))
-        .with_provider_health(health.clone(), gate, command_runner);
+    // fake runtime 现在默认 test mode；本 helper 测试真实 provider 健康门禁（gate 型
+    // availability + recheck 真实刷新 + 门禁阻断生命周期/coding），因此在注入 gate 前
+    // 显式切回真实模式语义。fake runtime 仍保证仓库注册走假路径（无网络 clone）。
+    let mut state = WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()));
+    state.test_provider_enabled = false;
+    let state = state.with_provider_health(health.clone(), gate, command_runner);
     (state, health)
 }
 
@@ -311,7 +315,8 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
         .await
         .expect("persist health");
     let gate = state.provider_gate.clone();
-    let fallback = resolve_default_coding_provider("codex", |provider| {
+    // 真实 provider 名（codex）走真实 gate 判定，未配置豁免面不参与：false。
+    let fallback = resolve_default_coding_provider("codex", false, |provider| {
         gate.ensure_available(provider).is_ok()
     })
     .expect("healthy fallback");
@@ -331,6 +336,8 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
     );
     let error = routing
         .run(&AdapterInput {
+            env_vars: Default::default(),
+            working_directory: None,
             provider_type: ProviderType::Codex,
             role: AdapterRole::Executor,
             worktree_path: Some(root.path().to_string_lossy().into_owned()),
@@ -396,10 +403,12 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
             entity_id: "work_item_0001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .expect("session");
     lifecycle
@@ -417,12 +426,25 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
 }
 
 fn git_repo() -> TempDir {
+    // REQ-PIB-01/PIB-03：issue 创建需仓库存在本地默认分支（main/master）——
+    // 空仓（无任何提交）按 fail-closed 拒绝，issue 不落地；而 coding fork 入口
+    // 自 T3.1 起读 issue.base_branch，issue 缺失即 404 先于 provider 门返回，
+    // 会遮蔽本用例要钉的 500 provider_unavailable。夹具补初始提交对齐生产
+    // 不变量（断言语义零改动）。
     let repo = tempdir().expect("repo");
-    let status = Command::new("git")
-        .args(["init", "--quiet"])
-        .current_dir(repo.path())
-        .status()
-        .expect("git init");
-    assert!(status.success());
+    let run_git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .expect("run git fixture command");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    run_git(&["init", "-b", "main", "--quiet"]);
+    run_git(&["config", "user.email", "test@example.com"]);
+    run_git(&["config", "user.name", "Test User"]);
+    std::fs::write(repo.path().join("README.md"), "base\n").expect("write readme");
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "base", "--quiet"]);
     repo
 }

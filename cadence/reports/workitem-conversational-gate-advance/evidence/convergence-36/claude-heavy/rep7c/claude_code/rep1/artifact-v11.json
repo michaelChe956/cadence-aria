@@ -1,0 +1,379 @@
+{
+  "type": "artifact_update",
+  "version": 11,
+  "plan_projection": {
+    "id": "plan_projection_bundle_10b1921e622adea0d8c051b2",
+    "plan_revision_id": "plan_revision_10b1921e622adea0d8c051b2",
+    "dependency_graph_revision_id": "dependency_graph_revision_10b1921e622adea0d8c051b2",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_d9c22cc01fc1b5cbb327337f",
+      "work_item_projection_bundle_f3e13c658babecdbc07fd5e6",
+      "work_item_projection_bundle_a4424ace60dd2cc29af578ce"
+    ],
+    "human_group_projection": {
+      "plan_id": "issue_work_item_plan_0001",
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "split_reason": "由 canonical handoff schema 投影",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "title": "关卡列表 API 与静态托管后端服务",
+          "goal": "WHEN 服务启动 THE SYSTEM SHALL 在仅使用 Node 内置模块的单进程中提供 GET /api/levels 关卡数据 API 与静态页面托管并在数据异常时返回可识别错误",
+          "depends_on": [],
+          "provides": [
+            "CT-001",
+            "CT-002"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ],
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "title": "关卡选择页与渲染异常处理",
+          "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 调用 /api/levels 渲染 5 个关卡的名称难度与锁定态并在请求或响应异常时展示可读错误且不白屏",
+          "depends_on": [
+            "WI-001"
+          ],
+          "provides": [
+            "CT-003"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**"
+            ]
+          }
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "title": "同源联调集成验证",
+          "goal": "WHEN 前后端集成 THE SYSTEM SHALL 以同一 Node 服务的同源 origin 产出页面入口、静态脚本与 API 契约的 HTTP 可观测验证证据",
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "provides": [
+            "CT-004"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "tests/integration/**"
+            ],
+            "forbidden_scopes": [
+              "server/**",
+              "web/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/frontend/**"
+            ]
+          }
+        }
+      ],
+      "contract_flow": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+          ],
+          "provided_capabilities": [
+            "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-001",
+          "required_capabilities": [
+            "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+          ],
+          "provided_capabilities": [
+            "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "contract_id": "CT-002",
+          "required_capabilities": [
+            "createServer(options) 支持 dataPath 注入任意 JSON 文件路径以替换默认数据源"
+          ],
+          "provided_capabilities": [
+            "createServer(options) 支持 dataPath 注入任意 JSON 文件路径以替换默认数据源"
+          ],
+          "missing_capabilities": []
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "contract_id": "CT-003",
+          "required_capabilities": [
+            "level-select.js 经同源 HTTP 可达且以相对路径 /api/levels 发起数据请求"
+          ],
+          "provided_capabilities": [
+            "level-select.js 经同源 HTTP 可达且以相对路径 /api/levels 发起数据请求"
+          ],
+          "missing_capabilities": []
+        }
+      ],
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_group_context": {
+      "plan_id": "issue_work_item_plan_0001",
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "createServer(options) 支持 dataPath 注入任意 JSON 文件路径以替换默认数据源"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "level-select.js 经同源 HTTP 可达且以相对路径 /api/levels 发起数据请求"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "web/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/frontend/**"
+          ]
+        }
+      }
+    },
+    "reviewer_group_matrix": {
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "criterion_refs": [
+            "AC-001",
+            "AC-002",
+            "AC-003",
+            "AC-004",
+            "AC-005",
+            "AC-006"
+          ],
+          "input_contract_refs": [],
+          "output_contract_refs": [
+            "CT-001",
+            "CT-002"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-002",
+          "criterion_refs": [
+            "AC-007",
+            "AC-008",
+            "AC-009",
+            "AC-010"
+          ],
+          "input_contract_refs": [
+            "CT-001"
+          ],
+          "output_contract_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "logical_work_item_id": "WI-003",
+          "criterion_refs": [
+            "AC-011",
+            "AC-012",
+            "AC-013",
+            "AC-014"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003"
+          ],
+          "output_contract_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "to": "WI-002",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-001",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "数据文件缺失不可读解析失败或结构校验失败时 GET /api/levels 返回 500 且体为含 code 等于 LEVEL_DATA_UNAVAILABLE 与可读 message 的 error 对象且 Content-Type 为 application/json; charset=utf-8 且错误体示例为 {\"error\":{\"code\":\"LEVEL_DATA_UNAVAILABLE\"}} 且 message 为暂时无法加载关卡数据，请稍后重试"
+              ],
+              "compatibility_policy": "require_all"
+            },
+            {
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "createServer(options) 支持 dataPath 注入任意 JSON 文件路径以替换默认数据源"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        },
+        {
+          "from": "WI-002",
+          "to": "WI-003",
+          "required_contracts": [
+            {
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "level-select.js 经同源 HTTP 可达且以相对路径 /api/levels 发起数据请求"
+              ],
+              "compatibility_policy": "require_all"
+            }
+          ]
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0007#api",
+          "requirement_id": "REQ-002"
+        },
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0007#api",
+          "requirement_id": "REQ-004"
+        },
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0007#data",
+          "requirement_id": "REQ-003"
+        },
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0007#frontend",
+          "requirement_id": "REQ-005"
+        },
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0007#frontend",
+          "requirement_id": "REQ-006"
+        },
+        {
+          "source_type": "issue_workitem",
+          "source_id": "issue_workitem_0007#verify",
+          "requirement_id": "NFR-001"
+        }
+      ]
+    },
+    "human_group_projection_hash": "5286fe4e70ec78a9c08ac516423dabfc9a34ce7dcc3a6923d1452ce6b2306dba",
+    "coder_group_context_hash": "60b96ae50405a56fda0735b4998bada346e03f9efa1dadf1e4d9505097a828e2",
+    "reviewer_group_matrix_hash": "8b33185d6a65d6e733676687d75fad9abb6f93874bbfb3d5078871571c77359c",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-11T00:16:32.811569193+00:00"
+  }
+}

@@ -1,12 +1,24 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::id::{next_sequential_id, repo_hash_for_path};
+use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+use crate::product::id::{next_sequential_id_from_existing, repo_hash_for_path};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
-use crate::product::models::RepositoryRecord;
+use crate::product::logical_codebase::{
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityMigrationExecutor,
+    IdentityMigrationJournal, IdentityMigrationJournalStore, IdentityRegistryEntry,
+    IdentityRegistryState, IdentityRegistryStore, LogicalCodebaseFeature, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    RepositoryReferenceScanner, RepositorySourceIdentity, RepositoryType,
+};
+use crate::product::models::{ProjectRecord, RepositoryRecord};
 
 mod initializer;
 mod operation;
@@ -15,19 +27,20 @@ mod types;
 
 pub use initializer::ClaudeRepositoryInitializer;
 pub use operation::RepositoryInitializationOperationStore;
-#[allow(unused_imports)]
-pub(crate) use registration::RepositoryInitializationLaunch;
 pub use registration::{
     CadenceSkillsPreparation, ProjectLookup, RepositoryInitializer, RepositoryPersistence,
     RepositoryRegistrationCoordinator,
 };
+#[allow(unused_imports)]
+pub(crate) use registration::{RepositoryInitializationLaunch, RepositoryInitializationResume};
 pub use types::{
     CadenceSkillsPreparationSummary, RepositoryInitializationCommandSummary,
     RepositoryInitializationOperation, RepositoryInitializationOperationInput,
     RepositoryInitializationOperationStatus, RepositoryInitializationProgress,
     RepositoryInitializationStepKind, RepositoryInitializationStepRecord,
     RepositoryInitializationStepStatus, RepositoryInitializationSummary,
-    RepositoryRegistrationError, RepositoryRegistrationInput, RepositoryRegistrationSuccess,
+    RepositoryRegistrationError, RepositoryRegistrationErrorDetails, RepositoryRegistrationInput,
+    RepositoryRegistrationSuccess,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,16 +50,105 @@ pub struct CreateRepositoryInput {
     pub path: PathBuf,
     pub default_policy_preset: Option<String>,
     pub default_provider_mode: Option<String>,
+    /// 调用方持久化的 command/operation ID；用于安全重放创建命令。
+    pub idempotency_key: String,
+}
+
+/// A deletion command must always use a caller-owned stable operation id.
+/// `allow_tombstone_reactivation` is deliberately retained as an explicit
+/// rejected input so callers cannot introduce a force-delete side channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRepositoryCommand {
+    pub operation_id: String,
+    pub expected_updated_at: Option<String>,
+    pub allow_tombstone_reactivation: bool,
+}
+
+/// The durable outcome of a repository delete command.
+///
+/// A feature-disabled legacy deletion has no logical identity or tombstone;
+/// those fields are `None` and `legacy_delete` is `true`. Enabled logical
+/// codebase deletes always return all identity fields and `legacy_delete=false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryDeletionReceipt {
+    pub physical_repository_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_repository_id: Option<LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_id: Option<RepositoryCheckoutId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstone_operation_id: Option<String>,
+    pub deleted_at: String,
+    #[serde(default)]
+    pub legacy_delete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionSource {
+    LogicalAuthority,
+    LegacyProjection,
 }
 
 #[derive(Debug, Clone)]
 pub struct RepositoryStore {
     paths: ProductAppPaths,
+    logical_codebase_feature: LogicalCodebaseFeature,
 }
 
 impl RepositoryStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self::with_logical_codebase_feature(paths, LogicalCodebaseFeature::disabled())
+    }
+
+    /// Transitional project-scoped feature detection. It is enabled only when
+    /// this project has logical-codebase storage (new or legacy/migrated).
+    /// R3/R5 must replace this with per-codebase detection from the request or
+    /// issue; a project itself no longer has a repository-mode attribute.
+    pub fn for_project(paths: ProductAppPaths, project: &ProjectRecord) -> Self {
+        let feature = LogicalCodebaseStore::new(paths.clone())
+            .has_any_storage(&project.id)
+            .map(|has_storage| {
+                if has_storage {
+                    LogicalCodebaseFeature::enabled()
+                } else {
+                    LogicalCodebaseFeature::disabled()
+                }
+            })
+            .unwrap_or_else(|_| LogicalCodebaseFeature::disabled());
+        Self::with_logical_codebase_feature(paths, feature)
+    }
+
+    pub fn with_logical_codebase_feature(
+        paths: ProductAppPaths,
+        feature: LogicalCodebaseFeature,
+    ) -> Self {
+        Self {
+            paths,
+            logical_codebase_feature: feature,
+        }
+    }
+
+    pub fn ensure_identity_schema(&self, project_id: &str) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        // v1.3 原生项目(LC record 在 per-LC 子树、无 repos.json)没有 v1.2
+        // legacy 可迁:槽位 manifest 缺失不得误判为「待迁移」而 bootstrap 出
+        // 指向数据目录、0 成员的假 LC 覆盖默认槽位(路由权威重灌事故,
+        // 2026-10-13 诊断)。迁移执行器的唯一 legacy 源是 repos.json——
+        // 槽位 manifest 缺失时仅当 repos.json 确有仓记录才执行迁移;
+        // 「存在但为空」(legacy 项目删除最后一仓后 delete_legacy 覆写)
+        // 等同无 legacy 布局,干净 no-op(P2 复审:零输入 fail-closed 会把
+        // Failed journal 落盘,永久锁死全部仓库入口)。v1.3 权威在 per-LC
+        // 子树,由 issue 归属解析(resolve_logical_repository_for_issue_codebase)。
+        if self.logical_codebase_feature.is_enabled()
+            && LogicalCodebaseStore::new(self.paths.clone())
+                .load_manifest(project_id)?
+                .is_none()
+            && self.legacy_repositories_present(project_id)?
+        {
+            IdentityMigrationExecutor::new(self.paths.clone())
+                .ensure_identity_schema(project_id)?;
+        }
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -56,6 +158,7 @@ impl RepositoryStore {
 
     pub fn list(&self, project_id: &str) -> Result<Vec<RepositoryRecord>, ProductStoreError> {
         validate_relative_id(project_id)?;
+        self.ensure_identity_schema(project_id)?;
         let path = self.repos_path(project_id);
         if !path.exists() {
             return Ok(Vec::new());
@@ -63,89 +166,29 @@ impl RepositoryStore {
 
         read_json(&path)
     }
+}
 
-    pub fn create(
-        &self,
-        input: CreateRepositoryInput,
-    ) -> Result<RepositoryRecord, ProductStoreError> {
-        let project_id = input.project_id;
-        let mut repositories = self.list(&project_id)?;
-        let existing_len = repositories.len();
-        let id = next_sequential_id("repository", existing_len);
-        let now = Utc::now().to_rfc3339();
-        let canonical_path = canonicalize_repo_path(&input.path)?;
-        let repo_path_text = canonical_path.to_string_lossy();
-        let repository = RepositoryRecord {
-            id: id.clone(),
-            project_id: project_id.clone(),
-            name: input.name,
-            repo_hash: repo_hash_for_path(repo_path_text.as_ref()),
-            runtime_root: canonical_path.join(".aria/runtime"),
-            path: canonical_path,
-            default_policy_preset: input
-                .default_policy_preset
-                .unwrap_or_else(|| "manual-write".to_string()),
-            default_provider_mode: input
-                .default_provider_mode
-                .unwrap_or_else(|| "fake".to_string()),
-            created_at: now.clone(),
-            updated_at: now,
-        };
+include!("repository_store_parts/create.inc.rs");
+include!("repository_store_parts/find.inc.rs");
+include!("repository_store_parts/delete.inc.rs");
+include!("repository_store_parts/resolve.inc.rs");
+include!("repository_store_parts/helpers.inc.rs");
 
-        repositories.push(repository.clone());
-        write_json(&self.repos_path(&project_id), &repositories)?;
-        Ok(repository)
-    }
-
-    pub fn find_by_path(
-        &self,
-        project_id: &str,
-        path: &Path,
-    ) -> Result<Option<RepositoryRecord>, ProductStoreError> {
-        let canonical_path = canonicalize_repo_path(path)?;
-        let canonical_text = canonical_path.to_string_lossy();
-        let target_hash = repo_hash_for_path(canonical_text.as_ref());
-
-        Ok(self.list(project_id)?.into_iter().find(|record| {
-            if record.repo_hash == target_hash {
-                return true;
-            }
-
-            fs::canonicalize(&record.path)
-                .map(|record_path| record_path == canonical_path)
-                .unwrap_or_else(|_| record.path.to_string_lossy() == canonical_text)
-        }))
-    }
-
-    pub fn delete(&self, project_id: &str, repository_id: &str) -> Result<(), ProductStoreError> {
-        validate_relative_id(project_id)?;
-        validate_relative_id(repository_id)?;
-        let mut repositories = self.list(project_id)?;
-        let initial_len = repositories.len();
-        repositories.retain(|record| record.id != repository_id);
-        if repositories.len() == initial_len {
-            return Err(ProductStoreError::NotFound {
-                kind: "repository",
-                id: repository_id.to_string(),
-            });
-        }
-        write_json(&self.repos_path(project_id), &repositories)
-    }
-
+impl RepositoryStore {
     fn repos_path(&self, project_id: &str) -> PathBuf {
         self.paths.project_root(project_id).join("repos.json")
     }
-}
 
-fn canonicalize_repo_path(path: &Path) -> Result<PathBuf, ProductStoreError> {
-    fs::canonicalize(path)
-        .map_err(|error| ProductStoreError::Io(format!("canonicalize {}: {error}", path.display())))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn repository_initialization_launch_is_nameable_through_repository_store() {
-        let _: Option<crate::product::repository_store::RepositoryInitializationLaunch> = None;
+    /// v1.2 legacy 布局的迁移前提:repos.json 存在且确有仓记录。解析失败
+    /// 按读路径现语义上抛(与 `list` 一致);空数组等同无 legacy 布局。
+    fn legacy_repositories_present(&self, project_id: &str) -> Result<bool, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let path = self.repos_path(project_id);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let records: Vec<RepositoryRecord> = read_json(&path)?;
+        Ok(!records.is_empty())
     }
 }
+include!("repository_store_parts/tests.inc.rs");

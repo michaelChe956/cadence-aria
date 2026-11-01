@@ -2,10 +2,24 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "./app-shell";
+import { ONBOARDING_SEEN_KEY } from "./onboarding/useOnboarding";
 import { CURRENT_VERSION } from "./whats-new/changelog";
 
 vi.mock("./components/lifecycle/IssueLifecycleWorkbench", () => ({
-  IssueLifecycleWorkbench: () => <div data-testid="workbench-stub" />,
+  // UI-4：引导触发器移入工作台页头，stub 转发重开接线供外壳级验证。
+  IssueLifecycleWorkbench: ({
+    onReopenOnboarding,
+  }: {
+    onReopenOnboarding?: () => void;
+  }) => (
+    <div data-testid="workbench-stub">
+      {onReopenOnboarding ? (
+        <button type="button" data-testid="workbench-stub-onboarding-reopen" onClick={onReopenOnboarding}>
+          重开引导
+        </button>
+      ) : null}
+    </div>
+  ),
 }));
 
 const SEEN_KEY = "aria-whats-new-seen";
@@ -42,5 +56,60 @@ describe("AppShell 版本更新弹窗", () => {
     await user.click(screen.getByRole("button", { name: "知道了" }));
     expect(window.localStorage.getItem(SEEN_KEY)).toBe(CURRENT_VERSION);
     expect(screen.queryByRole("dialog", { name: "版本更新说明" })).not.toBeInTheDocument();
+  });
+});
+
+describe("AppShell 操作引导", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    // 抑制 WhatsNew，聚焦 onboarding 接线。
+    window.localStorage.setItem(SEEN_KEY, CURRENT_VERSION);
+  });
+
+  it("首次进入（无已读）展示引导并从第一个启用步骤开始", () => {
+    renderShell();
+    expect(screen.getByTestId("onboarding-wizard")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-step-title")).toHaveTextContent("添加 Project");
+    expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 13 步");
+  });
+
+  it("同一设备再次进入不自动展示引导，且重开入口经 props 下传工作台（旧左下位置消失）", () => {
+    window.localStorage.setItem(ONBOARDING_SEEN_KEY, "1");
+    renderShell();
+    expect(screen.queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
+    // 外壳不再直挂固定按钮；AppShell 把 onboarding.reopen 接线到工作台（页头）。
+    expect(screen.queryByTestId("onboarding-help-trigger")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("workbench-stub-onboarding-reopen"),
+    ).toBeInTheDocument();
+  });
+
+  it("跳过后写入已读并关闭", async () => {
+    const user = userEvent.setup();
+    renderShell();
+    await user.click(screen.getByTestId("onboarding-skip"));
+    expect(window.localStorage.getItem(ONBOARDING_SEEN_KEY)).toBe("1");
+    expect(screen.queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
+  });
+
+  it("帮助入口重开引导、回到第一步且不清除已读、不改业务面", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(ONBOARDING_SEEN_KEY, "1");
+    renderShell();
+    expect(screen.queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("workbench-stub-onboarding-reopen"));
+    expect(screen.getByTestId("onboarding-wizard")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 13 步");
+    expect(window.localStorage.getItem(ONBOARDING_SEEN_KEY)).toBe("1");
+    // 工作台业务面照常存在，重开引导未改变它。
+    expect(screen.getByTestId("workbench-stub")).toBeInTheDocument();
+  });
+
+  it("与版本更新弹窗并存：两者可同时呈现", () => {
+    window.localStorage.clear();
+    renderShell();
+    expect(screen.getByRole("dialog", { name: "版本更新说明" })).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-wizard")).toBeInTheDocument();
   });
 });

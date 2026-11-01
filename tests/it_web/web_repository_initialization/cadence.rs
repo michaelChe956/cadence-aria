@@ -11,15 +11,35 @@ impl BoundedCommandRunner for LocalOriginRunner {
         &self,
         mut request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
-        self.calls.lock().expect("calls").push(request.argv.clone());
-        if request.argv.first().map(String::as_str) == Some("clone") {
-            request.argv[1] = self.origin.to_string_lossy().into_owned();
-        } else if request.argv.len() == 4
-            && request.argv[0] == "remote"
-            && request.argv[1] == "set-url"
-            && request.argv[2] == "origin"
+        // Bug45/T4 修复轮2:生产 git_request 在 argv 前置平台受信禁桥参数
+        // (core.hooksPath=/dev/null + core.fsmonitor=false);mock 断言前缀
+        // 在位后按剥桥的逻辑子命令改写镜像 URL 为本地 origin、按逻辑
+        // argv 记录 calls(末尾断言消费逻辑段)。
+        let bridge_len = cadence_aria::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS.len();
+        assert!(
+            request.argv.len() > bridge_len
+                && request.argv[..bridge_len]
+                    .iter()
+                    .zip(
+                        cadence_aria::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS.iter()
+                    )
+                    .all(|(actual, expected)| actual == expected),
+            "git argv missing trusted bridge prefix: {:?}",
+            request.argv
+        );
+        let logical = &request.argv[bridge_len..];
+        self.calls
+            .lock()
+            .expect("calls")
+            .push(logical.to_vec());
+        if logical.first().map(String::as_str) == Some("clone") {
+            request.argv[bridge_len + 1] = self.origin.to_string_lossy().into_owned();
+        } else if logical.len() == 4
+            && logical[0] == "remote"
+            && logical[1] == "set-url"
+            && logical[2] == "origin"
         {
-            request.argv[3] = self.origin.to_string_lossy().into_owned();
+            request.argv[bridge_len + 3] = self.origin.to_string_lossy().into_owned();
         }
         TokioBoundedCommandRunner.run(request).await
     }

@@ -5,7 +5,7 @@ fn build_split_prompt_inlines_schema_and_kind_guidance() {
     // `kind` 是必填字段,按习惯输出 `type` 触发 `missing field kind`。
     // 修复后 prompt 必须内联 schema 正文并给出 kind 合法取值。
     let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(
         !prompt.contains("work_item_split_output_schema.json"),
@@ -37,13 +37,61 @@ fn build_split_prompt_inlines_schema_and_kind_guidance() {
     }
 }
 
+/// REQ-ACS-03：Work Item Plan 的 split/outline JSON 结构化输出 prompt 不注入
+/// Markdown artifact 负面清单，JSON validator 契约不变。
+#[test]
+fn split_json_prompts_never_teach_the_markdown_artifact_negative_list() {
+    let (request, issue, repository) = split_prompt_fixture();
+
+    let split = build_split_prompt(
+        &request,
+        &issue,
+        &repository,
+        &[],
+        &[],
+        "(empty)",
+        &RoutingReferenceContext::Legacy,
+    );
+    let outline = build_outline_prompt(
+        &request,
+        &issue,
+        &repository,
+        &["Story context [REQ-001]".to_string()],
+        &["Design context [DEC-001]".to_string()],
+        "src/product\nweb/src",
+        &[],
+        &[],
+        &RoutingReferenceContext::Legacy,
+    );
+
+    for (kind, prompt) in [("split", split), ("outline", outline)] {
+        assert!(
+            !prompt.contains(crate::product::workspace_engine::AUTHOR_ARTIFACT_NEGATIVE_LIST),
+            "{kind} JSON prompt must not carry the shared markdown artifact negative list"
+        );
+        for keyword in [
+            "负面清单",
+            "四反引号",
+            "不得作为最终候选回显",
+            "artifact fence 之外",
+        ] {
+            assert!(
+                !prompt.contains(keyword),
+                "{kind} JSON prompt must not carry the markdown artifact negative list (`{keyword}`)"
+            );
+        }
+    }
+}
+
 #[test]
 fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
     let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
+    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(!prompt.contains(&["</ARIA_STRUCTURED_OUTPUT", " nonce="].concat()));
+    assert!(prompt.contains("JSON 顶层必须含 `\"nonce\":\""));
     assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
     assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
     assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));
@@ -51,9 +99,37 @@ fn build_split_prompt_allows_readable_stream_before_final_sentinel() {
 }
 
 #[test]
+fn build_split_prompt_pins_nonce_attribute_glyph_discipline() {
+    // r57b run8(claude split fresh denied):nonce 已正确下发(prompt 模板
+    // 直引号),AI 回显起始标签却弯/直混排(nonce=“lcg-matrix-split"),
+    // 解析楔死 missing_start_tag。Ruling 11:方差系统性消除——输出契约钉
+    // nonce 纪律行(属性名/英文直双引号/禁弯引号/逐字回显正例)。
+    let (request, issue, repository) = split_prompt_fixture();
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
+
+    assert!(prompt.contains("nonce 纪律"), "prompt must pin the nonce discipline line: {prompt}");
+    assert!(
+        prompt.contains("属性名恰为 `nonce`"),
+        "discipline line must pin the exact attribute name: {prompt}"
+    );
+    assert!(
+        prompt.contains("英文直双引号"),
+        "discipline line must require straight ASCII double quotes: {prompt}"
+    );
+    assert!(
+        prompt.contains("禁止中文弯引号"),
+        "discipline line must forbid curly quote glyphs: {prompt}"
+    );
+    assert!(
+        prompt.contains("逐字回显 `<ARIA_STRUCTURED_OUTPUT nonce=\""),
+        "discipline line must carry the verbatim positive example: {prompt}"
+    );
+}
+
+#[test]
 fn split_prompt_requests_progress_before_long_operations() {
     let (request, issue, repository) = split_prompt_fixture();
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));
     assert!(prompt.contains("先输出一行简短可读状态"));
@@ -76,6 +152,7 @@ fn build_revision_prompt_inlines_schema_and_kind_guidance() {
         &[],
         &[],
         "(empty)",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(
@@ -122,10 +199,13 @@ fn build_revision_prompt_allows_readable_stream_before_final_sentinel() {
         &[],
         &[],
         "(empty)",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("<ARIA_STRUCTURED_OUTPUT nonce=\""));
-    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce=\""));
+    assert!(prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(!prompt.contains(&["</ARIA_STRUCTURED_OUTPUT", " nonce="].concat()));
+    assert!(prompt.contains("JSON 顶层必须含 `\"nonce\":\""));
     assert!(prompt.contains("可以在最终结构化 JSON 前输出简短、可读的拆分过程"));
     assert!(prompt.contains("最后必须输出一个 nonce sentinel JSON block"));
     assert!(prompt.contains("后端只解析最后一个 nonce 匹配的 <ARIA_STRUCTURED_OUTPUT"));
@@ -148,6 +228,7 @@ fn revision_prompt_requests_progress_before_long_operations() {
         &[],
         &[],
         "(empty)",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("长时间分析、探索代码库或自动修正前"));

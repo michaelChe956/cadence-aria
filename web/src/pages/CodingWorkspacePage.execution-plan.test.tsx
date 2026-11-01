@@ -3,11 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
   confirmWorkItemExecutionPlan,
-  deleteCodingAttempt,
   getCodingAttemptDiff,
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
+import { subscribeToLifecycleInvalidation } from "../state/lifecycle-workbench-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { CodingWorkspacePage } from "./CodingWorkspacePage";
 import {
@@ -22,7 +22,6 @@ import {
 
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
 }));
@@ -181,6 +180,11 @@ describe("CodingWorkspacePage execution plan", () => {
       requireExecutionPlanConfirm: true,
       workItemExecutionPlan: executionPlan({ status: "draft" }),
     });
+    // F-29：confirm 成功应通知 lifecycle invalidation（同页 workbench + 跨 tab）。
+    const invalidations: string[] = [];
+    const unsubscribe = subscribeToLifecycleInvalidation((event) => {
+      invalidations.push(event.issueId);
+    });
 
     render(
       <CodingWorkspacePage
@@ -195,6 +199,8 @@ describe("CodingWorkspacePage execution plan", () => {
       CODING_ATTEMPT_ADDRESS,
     );
     expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.status).toBe("confirmed");
+    expect(invalidations).toEqual([CODING_ATTEMPT_ADDRESS.issueId]);
+    unsubscribe();
   });
 
   it("requests execution plan change and updates store", async () => {

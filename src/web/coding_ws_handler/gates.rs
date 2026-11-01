@@ -12,10 +12,41 @@ use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorks
 use crate::product::coding_workspace_runner::{
     CodingRunnerCommand, coding_provider_role_for_stage,
 };
+use crate::web::workspace_ws_types::{
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus,
+};
 
 use super::{CodingWsOutMessage, build_coding_session_state, update_provider_selection};
 
 const STAGE_GATE_COUNTDOWN_SECONDS: u64 = 5;
+
+/// 「过期自动继续」观测标记（3.6 F7-B 项 2）：倒计时耗尽自动放行时补发一条
+/// 独立可观测事件，含 gate id/阶段/倒计时耗尽原因，供 driver 与报告按 status
+/// 分列 confirmed vs expired_continue（3.5 台账遗留观察：两路径下游无差别、
+/// 审计口径混同）。
+///
+/// 载体刻意选用 `coding_execution_event`（title=`stage_gate_auto_continue`）而
+/// 非新增顶层消息类型：driver（abdddb41 起 stage_gate 豁免）对 coding_execution_event
+/// 不解析 payload（case break），不会触发 unknown_ws_message 停机；倒计时与
+/// 自动继续控制流零变化（发送失败不阻断，后续 session_state 快照行为不变）。
+fn stage_gate_auto_continue_event(gate: &CodingStageGateState) -> WsExecutionEvent {
+    WsExecutionEvent {
+        event_id: format!("stage_gate_auto_continue_{}", gate.gate_id),
+        node_id: None,
+        agent: None,
+        kind: WsExecutionEventKind::Turn,
+        status: WsExecutionEventStatus::Completed,
+        title: "stage_gate_auto_continue".to_string(),
+        detail: Some(format!(
+            "stage gate {} for {:?} countdown exhausted after {}s; auto-continue",
+            gate.gate_id, gate.stage, STAGE_GATE_COUNTDOWN_SECONDS
+        )),
+        command: None,
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
+}
 
 pub(crate) async fn await_stage_gate(
     command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
@@ -59,6 +90,15 @@ pub(crate) async fn await_stage_gate(
                     &gate.gate_id,
                     CodingStageGateStatus::Expired,
                 )?;
+                // 观测标记（仅可观测，不改控制流）：失败不阻断，后续快照行为不变
+                let _ = send_event(
+                    engine,
+                    event_tx,
+                    CodingWsOutMessage::CodingExecutionEvent {
+                        event: stage_gate_auto_continue_event(&gate),
+                    },
+                )
+                .await;
                 let snapshot = build_coding_session_state(coding_store, current.clone())?;
                 send_event(engine, event_tx, snapshot).await?;
                 return Ok(Some(current));
@@ -78,6 +118,16 @@ pub(crate) async fn await_stage_gate(
                         &gate.gate_id,
                         CodingStageGateStatus::Expired,
                     )?;
+                    // 观测标记（仅可观测，不改控制流）：command 通道关闭后仍按期
+                    // 过期自动继续，同样发标记保持 confirmed vs expired 分列
+                    let _ = send_event(
+                        engine,
+                        event_tx,
+                        CodingWsOutMessage::CodingExecutionEvent {
+                            event: stage_gate_auto_continue_event(&gate),
+                        },
+                    )
+                    .await;
                     let snapshot = build_coding_session_state(coding_store, current.clone())?;
                     send_event(engine, event_tx, snapshot).await?;
                     return Ok(Some(current));
@@ -105,7 +155,8 @@ pub(crate) async fn await_stage_gate(
                             .await?;
                     }
                     CodingRunnerCommand::PermissionResponse { .. }
-                    | CodingRunnerCommand::ChoiceResponse { .. } => {}
+                    | CodingRunnerCommand::ChoiceResponse { .. }
+                    | CodingRunnerCommand::RetryPush => {}
                     CodingRunnerCommand::ProviderSelect { role, provider } => {
                         let (updated, changed_role, changed_provider) =
                             match update_provider_selection(
@@ -149,6 +200,20 @@ pub(crate) async fn await_stage_gate(
                         emit_stage_gate(engine, event_tx, coding_store, &current, &gate).await?;
                     }
                     CodingRunnerCommand::AbortAttempt => {
+                        // 批 2 T2（C2/C5，REQ-WIGA-09）：终止发起或已
+                        // terminated——只干净退出（Ok(None)：runner 结束、
+                        // completion 由 registration guard 发出），让位终止
+                        // 编排的专用收口：不改门状态（收口统一关门）、不走
+                        // 旧 handle_abort、不倒计时续跑、零 provider；
+                        // manual/未终止保持原 stage 门 abort 语义。
+                        let paths = coding_store.paths();
+                        if crate::product::coding_attempt_store::automation_plan_terminated_for_attempt(
+                            &paths, &current,
+                        )?
+                        .is_some()
+                        {
+                            return Ok(None);
+                        }
                         let _ = coding_store.update_stage_gate_status(
                             &current.project_id,
                             &current.issue_id,
@@ -246,5 +311,103 @@ pub(crate) fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequi
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
         diagnostic: None,
+        latest_review_verdict: None,
+        triage_summary: None,
+    }
+}
+
+#[cfg(test)]
+mod t3_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    use crate::product::coding_models::CodingAttemptStatus;
+    use crate::product::git_workspace_service::GitWorkspaceService;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    /// 批 2 T3（T1T2 遗留①，REQ-WIGA-09）：stage 门等待中 plan 终止——
+    /// runner 内 AbortAttempt 只干净退出（Ok(None)），不旧 abort、不改门
+    /// 状态（收口统一关门）、不倒计时续跑；attempt 状态零写入。
+    #[tokio::test]
+    async fn stage_gate_abort_attempt_exits_cleanly_for_terminated_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::provider::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        let mut bound = attempt.clone();
+        bound.work_item_group_id = Some("plan_t3_stage".to_string());
+        store.write_coding_attempt_for_test(&bound).unwrap();
+        // 生产中 group attempt 创建时 plan lineage 已由 plan 流程落盘；
+        // 快照装配的 plan-repair reconcile 需读它（最小 lineage 即可）。
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(paths.clone())
+            .put_plan_lineage(
+                &crate::product::models::work_item_revision::WorkItemPlanLineage {
+                    id: "plan_t3_stage".to_string(),
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    story_spec_refs: Vec::new(),
+                    design_spec_refs: Vec::new(),
+                    active_revision_id: None,
+                    active_amendment_id: None,
+                    created_at: "2026-10-16T00:00:00Z".to_string(),
+                    updated_at: "2026-10-16T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        crate::web::handlers::automation_enrollment_test_support::seed_terminated_plan_enrollment(
+            &paths,
+            "project_0001",
+            "issue_0001",
+            "plan_t3_stage",
+            "session_t3_stage",
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let engine =
+            CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx.clone());
+        let (command_tx, mut command_rx) = mpsc::channel(4);
+        command_tx
+            .send(CodingRunnerCommand::AbortAttempt)
+            .await
+            .unwrap();
+
+        let outcome = await_stage_gate(
+            &mut command_rx,
+            &store,
+            &engine,
+            &event_tx,
+            &bound,
+            crate::product::coding_models::CodingExecutionStage::Coding,
+        )
+        .await
+        .expect("terminated stage-gate abort exits cleanly");
+        assert!(outcome.is_none(), "runner must end without resuming");
+
+        // 门仍 Open（不 Cancelled——关门归专用收口），attempt 零状态写入。
+        let gates = store
+            .list_open_stage_gates("project_0001", "issue_0001", &bound.id)
+            .unwrap();
+        assert_eq!(gates.len(), 1, "stage gate stays open for the finalizer");
+        let after = store
+            .get_attempt("project_0001", "issue_0001", &bound.id)
+            .unwrap();
+        assert_eq!(after.status, CodingAttemptStatus::Created);
     }
 }

@@ -9,17 +9,83 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingAttemptAddress, ProviderHealthResponse } from "./api/types";
 import { useProviderAvailabilityStore } from "./state/provider-availability-store";
 import { createAppRouter, router } from "./router";
+import { useWorkspaceSessionObservers } from "./hooks/useWorkspaceSessionObservers";
+import type { CockpitInboxItem } from "./state/workspace-cockpit-projection";
+import { useWorkbenchOverlayDirectory } from "./state/workbench-overlay-store";
+import {
+  closeWorkbenchOverlayPatch,
+  mergeWorkbenchSearch,
+} from "./workbench-search";
 
 vi.mock("./app-shell", () => ({
-  AppShell: () => <div data-testid="workbench-page">Workbench</div>,
+  AppShell: ({
+    onDrawerFocusChange,
+  }: {
+    onDrawerFocusChange?: (entityKey: string | null) => void;
+  }) => (
+    <div data-testid="workbench-page">
+      Workbench
+      {onDrawerFocusChange ? (
+        <button
+          type="button"
+          onClick={() => onDrawerFocusChange("issue:issue_0001:issue_0001")}
+        >
+          聚焦实体
+        </button>
+      ) : null}
+    </div>
+  ),
+}));
+
+vi.mock("./hooks/useWorkspaceSessionObservers", () => ({
+  useWorkspaceSessionObservers: vi.fn(),
 }));
 
 vi.mock("./pages/ChatWorkspacePage", () => ({
-  ChatWorkspacePage: () => <div data-testid="chat-workspace-page">Chat Workspace</div>,
+  ChatWorkspacePage: ({
+    onOpenSession,
+    onOpenInfoCoding,
+  }: {
+    onOpenSession: (sessionId: string) => void;
+    onOpenInfoCoding?: (address: {
+      projectId: string;
+      issueId: string;
+      attemptId: string;
+    }) => void;
+  }) => (
+    <div data-testid="chat-workspace-page">
+      Chat Workspace
+      <button type="button" onClick={() => onOpenSession("session_parent")}>
+        返回父会话
+      </button>
+      {onOpenInfoCoding ? (
+        <button
+          type="button"
+          onClick={() =>
+            onOpenInfoCoding({
+              projectId: "project_1",
+              issueId: "issue_1",
+              attemptId: "coding_attempt_001",
+            })
+          }
+        >
+          查看 Coding Workspace
+        </button>
+      ) : null}
+    </div>
+  ),
 }));
 
 vi.mock("./pages/CodingWorkspacePage", () => ({
-  CodingWorkspacePage: ({ address }: { address: CodingAttemptAddress }) => (
+  CodingWorkspacePage: ({
+    address,
+    onBack,
+    onOpenPlanOverview,
+  }: {
+    address: CodingAttemptAddress;
+    onBack: () => void;
+    onOpenPlanOverview?: (planId: string) => void;
+  }) => (
     <div
       data-testid="coding-workspace-page"
       data-project-id={address.projectId}
@@ -27,6 +93,14 @@ vi.mock("./pages/CodingWorkspacePage", () => ({
       data-attempt-id={address.attemptId}
     >
       Coding Workspace
+      <button type="button" onClick={onBack}>
+        返回
+      </button>
+      {onOpenPlanOverview ? (
+        <button type="button" onClick={() => onOpenPlanOverview("issue_plan_0001")}>
+          查看全部 WI
+        </button>
+      ) : null}
     </div>
   ),
 }));
@@ -76,6 +150,24 @@ const originalActions = {
   reset: useProviderAvailabilityStore.getState().reset,
 };
 
+const mockedUseWorkspaceSessionObservers = vi.mocked(useWorkspaceSessionObservers);
+
+function gateItem(sessionId: string): CockpitInboxItem {
+  return {
+    id: `${sessionId}:gate`,
+    kind: "gate",
+    severity: 3,
+    title: "需要人工确认",
+    summary: "等待处理",
+    triage: false,
+    source: "gate",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+      choice: null,
+  };
+}
+
 function blockedSnapshot(): ProviderHealthResponse {
   return {
     schema_version: 1,
@@ -120,6 +212,43 @@ describe("router", () => {
   beforeEach(() => {
     originalActions.reset();
     useProviderAvailabilityStore.setState(originalActions);
+    useWorkbenchOverlayDirectory
+      .getState()
+      .resetWorkbenchOverlayDirectory();
+    mockedUseWorkspaceSessionObservers.mockReturnValue({
+      records: [],
+      inbox: [],
+      countedInbox: [],
+      watchedSessionIds: [],
+      watchSession: vi.fn(),
+        codingAttemptForSession: () => null,
+      displayItems: [],
+      actionableCount: 0,
+      notificationCandidates: [],
+    });
+  });
+
+  it("navigates an inbox item from an unguarded root page to its workspace", async () => {
+    const sessionId = "session_inbox_001";
+    const history = createMemoryHistory({ initialEntries: ["/image-create"] });
+    mockedUseWorkspaceSessionObservers.mockReturnValue({
+      records: [],
+      inbox: [gateItem(sessionId)],
+      countedInbox: [gateItem(sessionId)],
+      watchedSessionIds: [sessionId],
+      watchSession: vi.fn(),
+        codingAttemptForSession: () => null,
+      displayItems: [gateItem(sessionId)],
+      actionableCount: 1,
+      notificationCandidates: [],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+    await userEvent.click(await screen.findByRole("button", { name: "去处理" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(`/workbench/workspace/${sessionId}`);
+    });
   });
 
   it("registers the coding workspace route", () => {
@@ -134,6 +263,67 @@ describe("router", () => {
       ],
     ).toBeDefined();
     expect(router.routesByPath["/workbench/workspace/$sessionId"]).toBeDefined();
+  });
+
+  it("navigates a parent session through the existing workspace route", async () => {
+    const health = {
+      ...blockedSnapshot(),
+      real_workflow_blocked: false,
+    };
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+    const history = createMemoryHistory({
+      initialEntries: ["/workbench/workspace/child_001"],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+    await userEvent.click(await screen.findByRole("button", { name: "返回父会话" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench/workspace/session_parent");
+    });
+  });
+
+  it("navigates coding final-confirm info to the scoped coding workspace route", async () => {
+    const health = {
+      ...blockedSnapshot(),
+      real_workflow_blocked: false,
+    };
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+    const history = createMemoryHistory({
+      initialEntries: ["/workbench/workspace/session_001"],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "查看 Coding Workspace" }),
+    );
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(
+        "/workbench/projects/project_1/issues/issue_1/coding/coding_attempt_001",
+      );
+    });
+    const page = await screen.findByTestId("coding-workspace-page");
+    expect(page).toHaveAttribute("data-project-id", "project_1");
+    expect(page).toHaveAttribute("data-issue-id", "issue_1");
+    expect(page).toHaveAttribute("data-attempt-id", "coding_attempt_001");
   });
 
   it("replaces a legacy coding workspace address with the scoped address", async () => {
@@ -270,6 +460,27 @@ describe("router", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("wraps image-create routes in the global cockpit shell", async () => {
+    const health = {
+      ...blockedSnapshot(),
+      test_provider_enabled: true,
+    };
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+
+    render(<RouterProvider router={memoryRouter("/image-create")} />);
+
+    expect(await screen.findByTestId("image-create-page")).toBeInTheDocument();
+    expect(screen.getByTestId("cockpit-shell")).toBeInTheDocument();
+  });
+
   it("passes the image-create session id from the independent route", async () => {
     render(
       <RouterProvider
@@ -314,5 +525,269 @@ describe("router", () => {
       await screen.findByRole("dialog", { name: "需要安装或修复 Provider" }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId(pageTestId)).not.toBeInTheDocument();
+  });
+
+
+  // ── UI-1：/workbench 抽屉定位契约（overlay search）──
+
+  function loadAvailableProviders() {
+    const health = {
+      ...blockedSnapshot(),
+      real_workflow_blocked: false,
+    };
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+  }
+
+  function seedPlanAddress() {
+    useWorkbenchOverlayDirectory
+      .getState()
+      .seedWorkbenchOverlayAddress("issue_plan_0001", {
+        projectId: "project_0001",
+        issueId: "issue_0001",
+      });
+  }
+
+  it("merges workbench search patches without dropping unrelated fields", () => {
+    // 硬规则：任何写入必须合并现有 search（含关闭 patch 只清 overlay 字段）。
+    const base = {
+      focus: "work_item_group:issue_0001:issue_plan_0001",
+      overlay: "plan-overview" as const,
+      planId: "issue_plan_0001",
+      attemptId: "coding_attempt_web_0001",
+      gateId: "gate_1",
+    };
+    expect(mergeWorkbenchSearch(base, { focus: undefined })).toEqual({
+      overlay: "plan-overview",
+      planId: "issue_plan_0001",
+      attemptId: "coding_attempt_web_0001",
+      gateId: "gate_1",
+    });
+    expect(
+      mergeWorkbenchSearch(base, {
+        attemptId: "coding_attempt_busi_0001",
+        gateId: undefined,
+      }),
+    ).toEqual({
+      focus: "work_item_group:issue_0001:issue_plan_0001",
+      overlay: "plan-overview",
+      planId: "issue_plan_0001",
+      attemptId: "coding_attempt_busi_0001",
+    });
+    // 契约外字段不透传（防跨路由串味）。
+    expect(
+      mergeWorkbenchSearch(
+        { focus: "f", planId: "p" },
+        closeWorkbenchOverlayPatch(),
+      ),
+    ).toEqual({ focus: "f" });
+  });
+
+  it("replaces a legacy plan overview link with the normalized workbench overlay address", async () => {
+    loadAvailableProviders();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("plan aggregate not configured for this test");
+      }),
+    );
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding-plans/issue_plan_0001",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench");
+    });
+    expect(history.location.search).toContain("overlay=plan-overview");
+    expect(history.location.search).toContain("planId=issue_plan_0001");
+    // replace 语义：不新增历史记录。
+    expect(history.length).toBe(1);
+    // 重定向组件自种地址簿——抽屉直接解析并渲染（取数失败即错误面证据）。
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
+    expect(await screen.findByTestId("plan-overview-error")).toBeInTheDocument();
+  });
+
+  it("opens the plan overview drawer from a coding page and keeps one detail instance", async () => {
+    loadAvailableProviders();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("plan aggregate not configured for this test");
+      }),
+    );
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001?planId=issue_plan_0001",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "返回" }),
+    );
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench");
+    });
+    expect(history.location.search).toContain("overlay=plan-overview");
+    expect(history.location.search).toContain("planId=issue_plan_0001");
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
+    // 离开 coding 路由后详情卸载（背景=Issue 工作台，禁止双挂载）。
+    expect(screen.queryByTestId("coding-workspace-page")).toBeNull();
+  });
+
+  // F-B（owner 复验残项）：「返回」按来源分流——显式抽屉来源仍走抽屉…
+  it("keeps the overlay drawer as the back target for an overlay-sourced coding page", async () => {
+    loadAvailableProviders();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("plan aggregate not configured for this test");
+      }),
+    );
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001" +
+          "?planId=issue_plan_0001&from=workbench-overlay",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench");
+    });
+    expect(history.location.search).toContain("overlay=plan-overview");
+    expect(history.location.search).toContain("planId=issue_plan_0001");
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
+  });
+
+  // …而 A 类（同页「全部 WI」弹窗下钻）回来源 attempt 页并请求重开总览，
+  // 绝不落主页抽屉。
+  it("returns a modal-sourced coding page to its source attempt", async () => {
+    loadAvailableProviders();
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001" +
+          "?planId=issue_plan_0001&workItemId=work_item_0002" +
+          "&from=plan-overview-modal&backAttemptId=coding_attempt_0001",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_0001",
+      );
+    });
+    expect(history.location.search).toContain("openOverview=true");
+    expect(history.location.search).not.toContain("overlay=");
+    expect(screen.queryByTestId("plan-overview-drawer")).toBeNull();
+    expect(screen.getByTestId("coding-workspace-page")).toHaveAttribute(
+      "data-attempt-id",
+      "coding_attempt_0001",
+    );
+  });
+
+  it("clears the overlay fields on drawer close while preserving focus", async () => {
+    loadAvailableProviders();
+    seedPlanAddress();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("plan aggregate not configured for this test");
+      }),
+    );
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench?focus=issue%3Aissue_0001%3Aissue_0001&overlay=plan-overview&planId=issue_plan_0001",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "关闭Coding Plan 总览" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("plan-overview-drawer")).toBeNull();
+    });
+    expect(history.location.search).toContain(
+      "focus=issue%3Aissue_0001%3Aissue_0001",
+    );
+    expect(history.location.search).not.toContain("overlay=");
+    expect(history.location.search).not.toContain("planId=");
+  });
+
+  it("registers the inbox overlay skeleton for UI-3 and closes it via the shared pipeline", async () => {
+    loadAvailableProviders();
+    const history = createMemoryHistory({
+      initialEntries: ["/workbench?overlay=inbox"],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("workbench-inbox-overlay")).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "关闭待处理事项" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("workbench-inbox-overlay")).toBeNull();
+    });
+    expect(history.location.search).not.toContain("overlay=");
+  });
+
+  it("merges focus writes with the open overlay state instead of overwriting it", async () => {
+    loadAvailableProviders();
+    seedPlanAddress();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("plan aggregate not configured for this test");
+      }),
+    );
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench?overlay=plan-overview&planId=issue_plan_0001",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
+
+    // 必改点回归：实体抽屉 focus 写入不得抹掉 overlay 定位字段。
+    await userEvent.click(screen.getByRole("button", { name: "聚焦实体" }));
+
+    await waitFor(() => {
+      expect(history.location.search).toContain(
+        "focus=issue%3Aissue_0001%3Aissue_0001",
+      );
+    });
+    expect(history.location.search).toContain("overlay=plan-overview");
+    expect(history.location.search).toContain("planId=issue_plan_0001");
+    expect(screen.getByTestId("plan-overview-drawer")).toBeInTheDocument();
   });
 });

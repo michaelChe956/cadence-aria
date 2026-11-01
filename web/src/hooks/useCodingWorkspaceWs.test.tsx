@@ -604,6 +604,26 @@ describe("useCodingWorkspaceWs inbound events", () => {
         options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
         allow_multiple: false,
         allow_free_text: true,
+        // P2-e（REQ-CRO-11）：帧带 questions，entry metadata 必须透传（多题
+        // 逐题作答的数据源）。
+        questions: [
+          {
+            id: "q_0",
+            prompt: "是否用动态规划",
+            options: [
+              { id: "dp", label: "Dynamic programming", description: "Iterative" },
+            ],
+            allow_multiple: false,
+            allow_free_text: false,
+          },
+          {
+            id: "q_1",
+            prompt: "是否补测试",
+            options: [],
+            allow_multiple: false,
+            allow_free_text: true,
+          },
+        ],
       });
       harness.api.respondPermission("permission_0001", true);
       harness.api.respondChoice("choice_0001", ["dp"], "use iterative dp");
@@ -642,6 +662,24 @@ describe("useCodingWorkspaceWs inbound events", () => {
           options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
           allow_multiple: false,
           allow_free_text: true,
+          questions: [
+            {
+              id: "q_0",
+              prompt: "是否用动态规划",
+              options: [
+                { id: "dp", label: "Dynamic programming", description: "Iterative" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+            {
+              id: "q_1",
+              prompt: "是否补测试",
+              options: [],
+              allow_multiple: false,
+              allow_free_text: true,
+            },
+          ],
           response: {
             selected_option_ids: ["dp"],
             free_text: "use iterative dp",
@@ -775,5 +813,102 @@ describe("useCodingWorkspaceWs inbound events", () => {
         },
       },
     ]);
+  });
+});
+
+// ── 批 2 T4（REQ-WIGA-09/08）：托管投影进 store＋WS 统一终止确认路由 ──
+describe("automation ownership projection and unified termination routing", () => {
+  installCodingWorkspaceWsTestHooks();
+
+  it("stores the managed automation projection from coding_session_state", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive(
+        codingSessionState({
+          automation: {
+            owner: "server",
+            enrollment_id: "enrollment_0001",
+            policy_revision: 3,
+            enabled: true,
+            plan_id: "plan_0001",
+            terminated_at: null,
+          },
+        }),
+      );
+    });
+
+    expect(useCodingWorkspaceStore.getState().automation).toMatchObject({
+      owner: "server",
+      enrollment_id: "enrollment_0001",
+      policy_revision: 3,
+      enabled: true,
+      plan_id: "plan_0001",
+      terminated_at: null,
+    });
+  });
+
+  it("opens the unified termination confirm surface (not a protocol error) on automation_plan_termination_required", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive(
+        codingSessionState({
+          automation: {
+            owner: "server",
+            enrollment_id: "enrollment_0001",
+            policy_revision: 3,
+            enabled: true,
+            plan_id: "plan_0001",
+            terminated_at: null,
+          },
+        }),
+      );
+    });
+    act(() => {
+      harness.ws.receive({
+        type: "coding_protocol_error",
+        code: "automation_plan_termination_required",
+        message: JSON.stringify({
+          confirm_required: true,
+          plan_id: "plan_0001",
+          session_id: "session_0001",
+          enrollment_id: "enrollment_0001",
+          policy_revision: 3,
+          binding_version: 2,
+          terminated_at: null,
+        }),
+      });
+    });
+
+    const state = useCodingWorkspaceStore.getState();
+    // 终止提示而非错误弹窗：按 message 身份打开统一二次确认面，不落
+    // protocolError（CodingComposer 会把它渲染成错误文案）。
+    expect(state.planTermination.pending).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 3,
+    });
+    expect(state.protocolError).toBeNull();
+  });
+
+  it("keeps the legacy protocol error display for non-termination codes", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.receive({
+        type: "coding_protocol_error",
+        code: "coding_gate_response_rejected",
+        message: "gate response rejected",
+      });
+    });
+
+    const state = useCodingWorkspaceStore.getState();
+    expect(state.planTermination.pending).toBeNull();
+    expect(state.protocolError).toEqual({
+      code: "coding_gate_response_rejected",
+      message: "gate response rejected",
+    });
   });
 });

@@ -1,6 +1,9 @@
 use super::*;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
+use crate::product::coding_work_item_context::load_coding_work_item_context;
 use crate::product::lifecycle_store::{
-    CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkspaceSessionInput,
+    CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,
+    CreateWorkspaceSessionInput,
 };
 use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, RepositoryProfileConfidence,
@@ -113,7 +116,13 @@ fn coding_prompt_requires_material_driven_execution_without_fixed_stack_terms() 
         verification_commands: vec!["./verify-local".to_string()],
     };
 
-    let prompt = build_coding_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 执行协议"));
@@ -145,7 +154,13 @@ fn coding_prompt_includes_final_compile_work_item_context_and_commands() {
         ],
     };
 
-    let prompt = build_coding_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(prompt.contains("验证命令:"));
     assert!(prompt.contains("- cargo test --locked --lib coding_execution_context"));
@@ -169,7 +184,13 @@ fn coding_delta_prompt_requires_material_driven_rework_without_fixed_stack_terms
     let attempt = test_attempt("coding_attempt_0001");
     let context = CodingExecutionContext::default();
 
-    let prompt = build_coding_delta_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_delta_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert_no_fixed_stack_terms(&prompt);
     assert!(prompt.contains("Coder 增量执行协议"));
@@ -192,8 +213,20 @@ fn coding_prompts_require_completion_self_check_contract() {
     let attempt = test_attempt("coding_attempt_0001");
     let context = CodingExecutionContext::default();
 
-    let full_prompt = build_coding_prompt(&attempt, &context, None, None);
-    let delta_prompt = build_coding_delta_prompt(&attempt, &context, None, None);
+    let full_prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+    let delta_prompt = build_coding_delta_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     for prompt in [full_prompt, delta_prompt] {
         assert!(prompt.contains("完成报告要求"));
@@ -220,11 +253,136 @@ fn coding_prompt_preserves_stack_terms_when_they_come_from_work_item_material() 
         verification_commands: vec!["cargo fmt --check".to_string(), "mvn test".to_string()],
     };
 
-    let prompt = build_coding_prompt(&attempt, &context, None, None);
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
 
     assert!(prompt.contains("cargo fmt --check"));
     assert!(prompt.contains("mvn test"));
     assert!(prompt.contains("已确认 Work Item"));
+}
+
+/// 写入范围的唯一载体是已确认 Work Item markdown（coder / reviewer /
+/// evaluation context 三方同源）：prompt 只透传 markdown，不再渲染第二份列表。
+/// 这里用与渲染器同形的 markdown 固定「透传且只出现一次」。
+const WRITE_SCOPE_MARKDOWN_FIXTURE: &str = "\
+# Final Compile Work Item\n\n\
+公告删除交互。\n\n\
+## 写入范围（硬边界）\n\n\
+- 判定基准：工作树根相对路径。\n\n\
+### 允许修改范围（exclusive_write_scopes）\n\n\
+- frontend/src/App.vue\n\
+- frontend/src/api.js\n\n\
+### 禁止修改范围（forbidden_write_scopes）\n\n\
+- frontend/package.json\n";
+
+#[test]
+fn coding_prompt_declares_work_item_write_scopes_with_global_file_boundary() {
+    let attempt = test_attempt("coding_attempt_0001");
+    let context = CodingExecutionContext {
+        work_item_markdown: Some(WRITE_SCOPE_MARKDOWN_FIXTURE.to_string()),
+        verification_commands: Vec::new(),
+    };
+
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+
+    assert!(prompt.contains("## 写入范围（硬边界）"));
+    assert!(prompt.contains("- frontend/src/App.vue"));
+    assert!(prompt.contains("- frontend/src/api.js"));
+    assert!(prompt.contains("- frontend/package.json"));
+    // markdown 是唯一载体：标题与每个 scope 项在 prompt 里恰好出现一次。
+    assert_eq!(prompt.matches("## 写入范围（硬边界）").count(), 1);
+    assert_eq!(prompt.matches("- frontend/src/App.vue").count(), 1);
+    assert_eq!(prompt.matches("- frontend/package.json").count(), 1);
+    // 范围段确实来自 markdown：位于「已确认 Work Item」段内。
+    let work_item_block = prompt
+        .find("已确认 Work Item:")
+        .expect("已确认 Work Item 段");
+    let scope_section = prompt.find("## 写入范围（硬边界）").expect("写入范围段");
+    assert!(scope_section > work_item_block);
+    // markdown 已带范围段时不得再追加 fail-closed 兜底句。
+    assert!(!prompt.contains("范围未知"));
+    assert!(!prompt.contains("（未声明"));
+}
+
+#[test]
+fn coding_prompt_marks_unknown_write_scopes_as_fail_closed() {
+    let attempt = test_attempt("coding_attempt_0001");
+    // markdown 缺失（未读到已确认 Work Item 记录）→ 范围未知，fail-closed：
+    // 不得把「文档未提及范围」当成「不限制」。
+    let context = CodingExecutionContext::default();
+
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+
+    assert!(prompt.contains("修改范围（硬边界）："));
+    assert!(prompt.contains("范围未知（未能读取已确认 Work Item 记录）"));
+    assert!(prompt.contains("不得改动任何仓库文件（含 .gitignore、构建配置等全局文件）"));
+    // 未知时不得渲染规范范围段，也不得出现「（未声明」措辞。
+    assert!(!prompt.contains("## 写入范围"));
+    assert!(!prompt.contains("（未声明"));
+}
+
+#[test]
+fn coding_prompt_declares_empty_write_scopes_as_non_restricting() {
+    let tmp = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Empty write scopes".to_string(),
+            planned_implementation_context: Some("no scope restriction".to_string()),
+            kind: WorkItemKind::Backend,
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create work item");
+    let attempt = test_attempt("coding_attempt_0001");
+
+    // 真实 record fixture：两个 scope 列表都为空 → 不限制可写范围 / 无额外禁止。
+    let compiled = load_coding_work_item_context(&paths, &attempt).expect("coding context");
+    let markdown = compiled.markdown.clone().expect("work item markdown");
+    assert!(markdown.contains("## 写入范围（硬边界）"));
+    assert!(markdown.contains("- （未声明：exclusive 为空 = 不限制可写范围）"));
+    assert!(markdown.contains("- （未声明：forbidden 为空 = 无额外禁止）"));
+
+    let context = CodingExecutionContext {
+        work_item_markdown: compiled.markdown,
+        verification_commands: compiled.verification_commands,
+    };
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+
+    assert!(prompt.contains("- （未声明：exclusive 为空 = 不限制可写范围）"));
+    assert!(prompt.contains("- （未声明：forbidden 为空 = 无额外禁止）"));
+    assert!(prompt.contains("- 默认拒绝：以上范围之外的仓库文件一律不得修改"));
+    assert_eq!(prompt.matches("## 写入范围（硬边界）").count(), 1);
+    // 空列表是「范围已知」：不得出现未知范围的兜底句。
+    assert!(!prompt.contains("范围未知"));
 }
 
 #[test]
@@ -266,8 +424,8 @@ fn reviewer_process_evidence_boundary_contract_excludes_unobservable_unrepairabl
 fn reviewer_material_protocols_define_evidence_kinds_without_weakening_verification_findings() {
     const NON_ZERO_TEST_EXECUTION_SEMANTICS: &str = "non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。";
 
-    let code_review = code_review_material_protocol();
-    let group_final_review = group_final_review_material_protocol();
+    let code_review = code_review_material_protocol(&RoutingReferenceContext::Legacy);
+    let group_final_review = group_final_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     for protocol in [&code_review, &group_final_review] {
         assert!(protocol.contains(NON_ZERO_TEST_EXECUTION_SEMANTICS));
@@ -280,13 +438,19 @@ fn reviewer_material_protocols_define_evidence_kinds_without_weakening_verificat
     assert!(code_review.contains("测试输出显示没有实际测试被执行，不能把它当作有效覆盖"));
     assert!(group_final_review.contains("验证证据缺失"));
     assert!(group_final_review.contains("必须 request_changes 或 blocked"));
-    assert!(coding_execution_protocol().contains("写代码前调用 test-driven-development"));
-    assert!(coding_delta_execution_protocol().contains("写代码前调用 test-driven-development"));
+    assert!(
+        coding_execution_protocol(&RoutingReferenceContext::Legacy)
+            .contains("写代码前调用 test-driven-development")
+    );
+    assert!(
+        coding_delta_execution_protocol(&RoutingReferenceContext::Legacy)
+            .contains("写代码前调用 test-driven-development")
+    );
 }
 
 #[test]
 fn code_review_material_protocol_requires_material_derived_checklist() {
-    let protocol = code_review_material_protocol();
+    let protocol = code_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     assert!(
         protocol.contains("从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单")
@@ -308,8 +472,8 @@ fn code_review_material_protocol_requires_material_derived_checklist() {
 #[test]
 fn review_prompts_list_exact_finding_severity_values() {
     for protocol in [
-        code_review_material_protocol(),
-        group_final_review_material_protocol(),
+        code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
     ] {
         assert!(protocol.contains("verdict 只能使用 approve、request_changes、blocked"));
         assert!(protocol.contains("severity 只能使用 error、warning、info"));
@@ -321,10 +485,10 @@ fn review_prompts_list_exact_finding_severity_values() {
 #[test]
 fn coding_lifecycle_protocols_reuse_the_canonical_cadence_routing_reference() {
     for protocol in [
-        coding_execution_protocol(),
-        coding_delta_execution_protocol(),
-        code_review_material_protocol(),
-        group_final_review_material_protocol(),
+        coding_execution_protocol(&RoutingReferenceContext::Legacy),
+        coding_delta_execution_protocol(&RoutingReferenceContext::Legacy),
+        code_review_material_protocol(&RoutingReferenceContext::Legacy),
+        group_final_review_material_protocol(&RoutingReferenceContext::Legacy),
     ] {
         assert!(
             protocol.contains("[cadence_project_rules]"),
@@ -397,7 +561,7 @@ async fn code_review_prompt_uses_compiled_work_item_without_artifact_version() {
     attempt.worktree_path = Some(worktree.clone());
 
     let prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("code review prompt");
 
@@ -444,10 +608,19 @@ async fn non_group_internal_review_prompt_includes_both_reviewer_boundaries() {
         created_at: "2026-07-28T00:00:00Z".to_string(),
         updated_at: "2026-07-28T00:00:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
     };
 
     let prompt = engine
-        .build_internal_pr_review_prompt(&attempt, &review_request, &worktree, None)
+        .build_internal_pr_review_prompt(
+            &attempt,
+            &review_request,
+            &worktree,
+            None,
+            &RoutingReferenceContext::Legacy,
+        )
         .await
         .expect("non-group internal review prompt");
 
@@ -505,7 +678,7 @@ async fn first_group_code_review_uses_base_branch_without_head_commit() {
     attempt.worktree_path = Some(worktree.clone());
 
     let prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("first group review uses base branch");
 
@@ -550,7 +723,7 @@ async fn group_code_review_uses_previous_unit_head_commit_as_diff_base() {
     attempt.worktree_path = Some(worktree.clone());
 
     let prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("code review prompt");
 
@@ -587,7 +760,7 @@ async fn later_group_code_review_rejects_missing_head_commit() {
     attempt.worktree_path = Some(worktree.clone());
 
     let error = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect_err("group review requires previous unit commit");
 
@@ -639,10 +812,12 @@ async fn group_attempt_prompts_use_current_work_item_id() {
                 entity_id: entity_id.to_string(),
                 workspace_type: WorkspaceType::WorkItem,
                 author_provider: ProviderName::Codex,
-                reviewer_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
+
                 review_rounds: 1,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             })
             .expect("create work item session");
         lifecycle
@@ -709,12 +884,13 @@ async fn group_attempt_prompts_use_current_work_item_id() {
         },
         None,
         None,
+        &RoutingReferenceContext::Legacy,
     );
     assert!(coding_prompt.contains("Work Item: work_item_0002"));
     assert!(!coding_prompt.contains("Work Item: work_item_0001"));
 
     let review_prompt = engine
-        .build_code_review_prompt(&attempt, &worktree, None)
+        .build_code_review_prompt(&attempt, &worktree, None, &RoutingReferenceContext::Legacy)
         .await
         .expect("code review prompt");
     assert_reviewer_browser_environment_boundary(&review_prompt);
@@ -729,7 +905,7 @@ async fn group_attempt_prompts_use_current_work_item_id() {
 
 #[test]
 fn group_final_review_material_protocol_requires_handoff_revision_checks() {
-    let protocol = group_final_review_material_protocol();
+    let protocol = group_final_review_material_protocol(&RoutingReferenceContext::Legacy);
 
     assert!(protocol.contains("Completed Units"));
     assert!(protocol.contains("HandoffRevision"));
@@ -788,4 +964,186 @@ fn prompt_git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
         );
     }
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+// ---------------------------------------------------------------------------
+// S6（DesignPushLocal2 Q6/Q4②）：平台指令段红绿测。
+//
+// Q6 裁定：仓库文件（AGENTS.md / CLAUDE.md）的「不自动提交」类规则会压过
+// 投影的 commit_responsibility，coder 借此漏交。修法不动 render.rs 的
+// commit_responsibility 投影本体（那会牵动 renderer_version 与执行上下文
+// 哈希），改为在最终 prompt 组装后统一追加 platform_directives_section。
+// Q4② 同段承载汇报契约：交付摘要只含四类事实，环境异常只许末尾
+// 「环境备注」一行。本组测试钉住：渲染路径与回落路径的最终 prompt 文本
+// 都必须同时携带两段（哈希计算之后追加，绑定哈希面不动）。
+// ---------------------------------------------------------------------------
+
+fn assert_platform_directives(prompt: &str) {
+    // 段落①：提交责任声明——优先于仓库文件「不自动提交」类规则。
+    assert!(
+        prompt.contains("[platform_directives]"),
+        "S6:最终 prompt 必须携带平台指令段:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("本 Work Item 的提交责任归你"),
+        "S6:提交责任声明必须在场:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("优先于仓库文件"),
+        "S6:提交责任必须声明优先于 AGENTS.md / CLAUDE.md 类仓库规则:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("AGENTS.md / CLAUDE.md"),
+        "S6:提交责任声明必须点名仓库规则文件:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("禁止执行 git push"),
+        "S6:手动 git push 禁令必须在场:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("推送由平台执行"),
+        "S6:push 责任必须归平台:\n{prompt}"
+    );
+    // 段落②：汇报契约——交付摘要事实面 + 环境备注末尾一行 + 命名空间权威。
+    assert!(
+        prompt.contains("交付摘要只包含四类事实"),
+        "S6:汇报契约必须钉住交付摘要事实面:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("「环境备注」"),
+        "S6:环境异常只允许写入末尾固定小节「环境备注」:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("不得占据摘要主体"),
+        "S6:环境备注不得占据摘要主体:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("不得借此省略任何交付事实"),
+        "S6:不得借环境异常省略交付事实:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("以本 prompt 给定的 Worktree Path 为准"),
+        "S6:文件工具与 shell 路径命名空间必须以 Worktree Path 为准:\n{prompt}"
+    );
+    // 段落③（P1-3 / REQ-PROMPT-07）：本地产物屏蔽告知 + .gitignore 禁令。
+    // 平台已在 worktree 准备阶段把本地产物写入仓库本地 `info/exclude`，
+    // agent 不得为产物噪音改 `.gitignore`（改它本身就是越界）。
+    assert!(
+        prompt.contains("本地产物屏蔽"),
+        "P1-3:平台指令段必须告知本地产物已由平台屏蔽:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("info/exclude"),
+        "P1-3:告知句必须点明屏蔽落点是仓库本地 info/exclude:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("不需要也不得为它们修改 `.gitignore`"),
+        "P1-3:必须禁止为产物噪音修改 .gitignore:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("其他未跟踪文件属于仓库工作内容，同样不得擅自加入 `.gitignore`"),
+        "P1-3:其他未跟踪文件同样不得擅自加入 .gitignore:\n{prompt}"
+    );
+    // 目录清单取自单一事实源，不写死字面量。
+    for dir in crate::product::local_artifacts::PLATFORM_LOCAL_ARTIFACT_DIRS {
+        assert!(
+            prompt.contains(dir.trim_end_matches('/')),
+            "P1-3:告知句必须点名本地产物目录 {dir}:\n{prompt}"
+        );
+    }
+}
+
+#[test]
+fn platform_directives_section_carries_commit_responsibility_and_reporting_contract() {
+    assert_platform_directives(&platform_directives_section());
+}
+
+#[tokio::test]
+async fn rendered_coding_prompt_carries_platform_directives() {
+    // 渲染路径：组 attempt 物化 unit run 投影，render_coder_unit_run_context
+    // 渲染 envelope 并绑定执行上下文哈希；平台指令段在渲染合并后的最终
+    // prompt 上追加，两段必须在场且不触碰绑定哈希面。
+    let root = tempdir().unwrap();
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    init_test_git_repo(&worktree);
+    let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: head.clone(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        })
+        .unwrap();
+    seed_group_attempt_fixture(&store, &attempt, true, false);
+    let mut attempt = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap();
+    attempt.head_commit = Some(head);
+    attempt.stage = CodingExecutionStage::Coding;
+    store.write_coding_attempt_for_test(&attempt).unwrap();
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let coder = super::provider_execution_context::CapturingProjectionProvider::new(
+        super::provider_execution_context::current_plan_defect_output(),
+    );
+
+    let coded = engine
+        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .await
+        .unwrap();
+
+    // 渲染路径成立佐证：unit run 落盘且执行上下文哈希已绑定。
+    let run = store
+        .get_active_unit_run(&coded)
+        .expect("rendered unit run");
+    assert!(
+        run.coder_execution_context_hash.is_some(),
+        "渲染路径必须绑定执行上下文哈希"
+    );
+    assert_platform_directives(&coder.input().prompt);
+}
+
+#[tokio::test]
+async fn fallback_coding_prompt_carries_platform_directives() {
+    // 回落路径：非组 attempt 无 unit run 投影，render_coder_unit_run_context
+    // 返回 None，build_coding_prompt 组装最终 prompt——平台指令段同样
+    // 必须在场（S6 注入不设 LC/group 门槛）。
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let coder = super::provider_execution_context::CapturingProjectionProvider::new(
+        super::provider_execution_context::current_plan_defect_output(),
+    );
+
+    let coded = engine
+        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .await
+        .unwrap();
+
+    // 回落路径成立佐证：无 active unit run（渲染路径未触发）。
+    assert!(
+        store.get_active_unit_run(&coded).is_err(),
+        "回落路径不应物化 unit run"
+    );
+    let prompt = coder.input().prompt;
+    assert!(
+        prompt.starts_with("Coding Workspace"),
+        "回落路径必须以 build_coding_prompt 头部开头:\n{prompt}"
+    );
+    assert_platform_directives(&prompt);
 }

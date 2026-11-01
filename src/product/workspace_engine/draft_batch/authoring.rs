@@ -23,21 +23,6 @@ impl WorkspaceEngine {
         );
     }
 
-    pub(crate) fn remember_draft_rewrite_user_feedback(
-        &mut self,
-        outline_id: &str,
-        user_feedback: Option<String>,
-    ) {
-        let state = self
-            .work_item_draft_repair_states
-            .entry(outline_id.to_string())
-            .or_insert(WorkItemDraftRepairState {
-                initial_validation_findings: None,
-                original_user_feedback: None,
-            });
-        state.original_user_feedback = user_feedback;
-    }
-
     pub(crate) async fn complete_work_item_draft_author(
         &mut self,
         candidate: WorkItemDraftCandidate,

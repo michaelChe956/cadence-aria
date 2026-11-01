@@ -160,11 +160,122 @@ async fn coding_ws_start_coding_pushes_engine_stage_and_timeline_events() {
         }
         other => panic!("expected coding timeline node event, got {other:?}"),
     }
-    let updated = store
+    // F-14 契约：该 fixture 的 worktree prepare 会确定性失败，runner 死亡不得
+    // 把 attempt 留在 Running（僵尸 + attach 重连空转），必须 fail-closed 转
+    // AwaitingManualRecovery；失败事件（protocol error）仍推送到 WS。
+    let mut updated = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("updated attempt");
-    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while updated.status == CodingAttemptStatus::Running {
+        if std::time::Instant::now() > deadline {
+            panic!("runner failure must fail closed to awaiting_manual_recovery");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        updated = store
+            .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("updated attempt");
+    }
+    assert_eq!(updated.status, CodingAttemptStatus::AwaitingManualRecovery);
+    assert_eq!(
+        updated.manual_recovery_reason.as_deref(),
+        Some("coding_runner_failed_while_running")
+    );
     assert_eq!(updated.stage, CodingExecutionStage::WorktreePrepare);
+
+    ws.close(None).await.expect("close ws");
+    server.abort();
+}
+
+#[tokio::test]
+async fn coding_ws_recover_coding_revives_awaiting_manual_recovery_attempt() {
+    let _guard = WS_TEST_LOCK.lock().await;
+    let root = tempdir().expect("root");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let app = app_with_attempt(root.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    let _initial = recv_json(&mut ws).await;
+
+    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    // F-14 链：该 fixture 的 worktree prepare 确定性失败 → fail-closed 转
+    // AwaitingManualRecovery。
+    let mut updated = store
+        .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+        .expect("attempt");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while updated.status != CodingAttemptStatus::AwaitingManualRecovery {
+        if std::time::Instant::now() > deadline {
+            panic!("runner failure must fail closed to awaiting_manual_recovery");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        updated = store
+            .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("attempt");
+    }
+    let version_at_manual_recovery = updated.version;
+
+    // F-16：人工恢复态发送显式恢复动作，不得被状态门拒绝（KimiUpgrade v25
+    // 三探测均被 coding_message_not_allowed 拒——本测试的红面）。
+    send_json(&mut ws, &CodingWsInMessage::RecoverCoding).await;
+
+    // 恢复 = admission CAS 回 Running（version +1）+ runner 重启 + 同一确定性
+    // 失败再次 fail-closed 回人工恢复（version 再 +1）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        updated = store
+            .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
+            .expect("attempt");
+        if updated.status == CodingAttemptStatus::AwaitingManualRecovery
+            && updated.version >= version_at_manual_recovery + 2
+        {
+ break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "RecoverCoding must re-admit the attempt and restart the runner \
+                 (version {version_at_manual_recovery} -> {})",
+                updated.version
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        updated.manual_recovery_reason.as_deref(),
+        Some("coding_runner_failed_while_running"),
+        "恢复后的再次失败必须重新持久化稳定 reason 码"
+    );
+
+    // wire 面：任何帧都不得再出现 F-16 拒绝形态 coding_message_not_allowed。
+    let mut rejection = None;
+    let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < drain_deadline {
+        match timeout(Duration::from_millis(250), ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(frame) = serde_json::from_str::<CodingWsOutMessage>(&text)
+                    && let CodingWsOutMessage::CodingProtocolError { code, .. } = &frame
+                    && code == "coding_message_not_allowed"
+                {
+                    rejection = Some(frame);
+                    break;
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(None) => break,
+            Ok(Some(Err(_))) => break,
+            Err(_) => {}
+        }
+    }
+    assert!(
+        rejection.is_none(),
+        "RecoverCoding in awaiting_manual_recovery must not be rejected: {rejection:?}"
+    );
 
     ws.close(None).await.expect("close ws");
     server.abort();
@@ -213,7 +324,9 @@ async fn coding_ws_start_coding_waits_at_stage_gate_and_confirm_resumes_runner()
     )
     .await;
 
-    let node = wait_for_timeline_node(&mut ws, CodingExecutionStage::Coding).await;
+    // 「确认放行」路径不得发过期自动继续标记：阶段启动前无 auto-continue 事件
+    let node =
+        wait_for_stage_start_without_auto_continue(&mut ws, CodingExecutionStage::Coding).await;
     assert_eq!(node.status, CodingTimelineNodeStatus::Running);
 
     ws.close(None).await.expect("close ws");
@@ -267,7 +380,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
         refreshed_gate
             .provider_snapshot
             .as_ref()
-            .map(|snapshot| snapshot.provider_for_role(&CodingProviderRole::CodeReviewer)),
+            .and_then(|snapshot| snapshot.provider_for_role(&CodingProviderRole::CodeReviewer)),
         Some(&ProviderName::Codex)
     );
     assert_eq!(
@@ -275,7 +388,7 @@ async fn coding_ws_provider_select_during_stage_gate_updates_roles_and_refreshes
             .get_role_provider_config_snapshot("project_0001", "issue_0001", "coding_attempt_0001")
             .expect("role provider snapshot")
             .code_reviewer,
-        ProviderName::Codex
+        Some(ProviderName::Codex)
     );
 
     ws.close(None).await.expect("close ws");
@@ -383,8 +496,7 @@ async fn coding_ws_permission_mode_select_normalizes_pi_to_auto() {
             ..
         } => {
             assert_eq!(
-                role_provider_config_snapshot
-                    .permission_mode_for_role(&CodingProviderRole::Coder),
+                role_provider_config_snapshot.permission_mode_for_role(&CodingProviderRole::Coder),
                 CodingProviderPermissionMode::Auto
             );
         }
@@ -422,8 +534,29 @@ async fn coding_ws_stage_gate_timeout_auto_starts_stage() {
     send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
 
     let gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
+    // 「过期自动继续」观测口径：倒计时耗尽自动放行时补发独立标记事件
+    // （含 gate id/阶段/倒计时耗尽原因），供 driver/报告与「确认放行」分列；
+    // 标记先于阶段启动（时间线节点）到达
+    let marker = wait_for_stage_gate_auto_continue(&mut ws, &gate.gate_id).await;
     let node = wait_for_timeline_node(&mut ws, CodingExecutionStage::Coding).await;
     assert_eq!(node.status, CodingTimelineNodeStatus::Running);
+    assert_eq!(
+        marker.status,
+        cadence_aria::web::workspace_ws_types::WsExecutionEventStatus::Completed
+    );
+    let detail = marker.detail.expect("auto-continue detail");
+    assert!(
+        detail.contains(&gate.gate_id),
+        "detail carries gate id: {detail}"
+    );
+    assert!(
+        detail.contains(&format!("{:?}", CodingExecutionStage::Coding)),
+        "detail carries stage: {detail}"
+    );
+    assert!(
+        detail.contains("countdown exhausted"),
+        "detail carries countdown-exhausted reason: {detail}"
+    );
     let gates = store
         .list_stage_gates("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("list stage gates");
@@ -609,11 +742,7 @@ async fn coding_ws_start_coding_drives_full_happy_path_to_review_request_complet
                 stages.push(node.stage);
             }
             CodingWsOutMessage::CodingGateRequired { gate } => {
-                observed.push(format!(
-                    "gate:{:?}:{:?}",
-                    gate.kind,
-                    gate.stage.as_ref()
-                ));
+                observed.push(format!("gate:{:?}:{:?}", gate.kind, gate.stage.as_ref()));
                 assert_eq!(
                     gate.kind,
                     CodingGateKind::StageGate,

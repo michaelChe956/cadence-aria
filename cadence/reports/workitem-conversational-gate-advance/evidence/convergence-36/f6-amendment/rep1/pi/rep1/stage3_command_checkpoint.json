@@ -1,0 +1,7 @@
+{
+  "campaign_run_id": "workitem:pi:rep1:issue_0220",
+  "command_ids": {
+    "human_gate_feedback#0": "cmd-human_gate_feedback-0-475f439dab",
+    "advance#2": "cmd-advance-2-8edba4f25d"
+  }
+}

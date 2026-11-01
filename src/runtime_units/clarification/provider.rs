@@ -11,6 +11,7 @@ use crate::cross_cutting::provider_run::{
     failed_provider_run_record_from_error, provider_run_record_from_output,
 };
 use crate::cross_cutting::runtime_event_log::append_node_event;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::protocol::contracts::{AdapterInput, AdapterOutput, ApprovalPolicy, SandboxMode};
 use crate::protocol::provider_errors::{ProviderErrorRoute, route_provider_error};
 use serde_json::{Value, json};
@@ -38,6 +39,7 @@ pub fn run_provider_node(
         constraint_summary: constraint_summary.into(),
         context_files,
         worktree_path: state.input.worktree_path.clone(),
+        routing_reference_context: RoutingReferenceContext::Legacy,
     })?;
     let adapter_input = planning_adapter_input_for_node(&build_result)?;
     let request = ProviderRunRequest {
@@ -66,6 +68,23 @@ pub fn run_provider_node(
             "output_schema": adapter_input.output_schema.clone(),
         }),
     );
+    // 批2 Task 11（硬约束1）：裸 provider.run 前先经受信载体冻结执行合同
+    // （legacy Direct 形态 identity=HostCoding/Coder，T10 裁定）——矩阵
+    // 失配在 run 之前零副作用拒绝。
+    let execution_contract = crate::runtime_units::freeze_runtime_unit_execution(
+        &state.input.session_id.to_string(),
+        node_id,
+        adapter_input.provider_type.clone(),
+        request.runtime_role.clone(),
+        &request.provider_run_id,
+    )?;
+    // 批2 Task 11：合同摘要随 node_exit 事件落 runtime event log（实际
+    // 载体，不丢弃）。
+    let execution_contract_digest = execution_contract.contract_digest().to_string();
+    // A1-b1(Bug45 批2 环境回退):freeze 点停止注入环境——provider 子进程
+    // 经底座(cli_adapter)继承宿主环境,adapter_input 原样透传(env_vars
+    // 仅作 caller 显式覆盖层);冻结合同摘要仍随 node_exit 事件落
+    // runtime event log。
     let protected_openspec_snapshot = snapshot_directory(&state.openspec_change_dir())?;
     let mut retry_count = 0;
     loop {
@@ -88,6 +107,7 @@ pub fn run_provider_node(
                         "provider_run_id": record.provider_run_id,
                         "duration_ms": record.duration_ms,
                         "retry_count": retry_count,
+                        "execution_contract_digest": execution_contract_digest,
                     }),
                 );
                 return Ok(output);
@@ -118,6 +138,7 @@ pub fn run_provider_node(
                         "error_code": record.error_code,
                         "error_details": record.error_details,
                         "retry_count": retry_count,
+                        "execution_contract_digest": execution_contract_digest,
                     }),
                 );
                 return Err(PlanningUnitError::ProviderAdapter(error));

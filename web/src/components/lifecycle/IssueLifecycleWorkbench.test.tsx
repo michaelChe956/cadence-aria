@@ -1,7 +1,14 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type {
+  AggregateIndexActiveResponse,
+  PointerPublicationDto,
+  RegistrationBatchDto,
+  RegistrationPreflightResponse,
+} from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
+import { defaultCollapsedGroups } from "./issue-queue-derivation";
 import {
   defaultLaunchTitle,
   IssueLifecycleWorkbench,
@@ -10,9 +17,12 @@ import {
   deferred,
   installIssueLifecycleWorkbenchTestHooks,
   issueWorkItemPlanRecord,
+  jsonResponse,
+  jsonResponseValue,
   lifecycleCardTitle,
   lifecycleFetch,
   projectRecord,
+  projectsBody,
   repositoryRecord,
 } from "./IssueLifecycleWorkbench.test-utils";
 
@@ -24,8 +34,303 @@ vi.mock("../shared/MonacoViewer", () => ({
   ),
 }));
 
+function aggregateIndex(
+  overrides: Partial<AggregateIndexActiveResponse> = {},
+): AggregateIndexActiveResponse {
+  return {
+    state: "active",
+    revision: 7,
+    indexed_at: "2026-08-18T00:00:00Z",
+    warning: null,
+    ...overrides,
+  };
+}
+
+function pointerPublication(
+  overrides: Partial<PointerPublicationDto> = {},
+): PointerPublicationDto {
+  return {
+    id: "publication_0001",
+    project_id: "project_0001",
+    logical_codebase_id: "logical_0001",
+    batch_kind: "full",
+    entries: [],
+    status: "completed_all",
+    created_at: "2026-08-14T00:00:00Z",
+    updated_at: "2026-08-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("IssueLifecycleWorkbench base workflow", () => {
   installIssueLifecycleWorkbenchTestHooks();
+
+  it("loads the aggregate index, disables rebuild while pending, replaces it on success, and shows API errors", async () => {
+    const rebuildingResponse = deferred<Response>();
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
+      aggregateIndex: aggregateIndex({ state: "missing", revision: null, indexed_at: null }),
+      aggregateIndexRebuild: aggregateIndex({
+        state: "active",
+        revision: 8,
+        indexed_at: "2026-08-18T01:00:00Z",
+      }),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input) ===
+            "/api/projects/project_0001/logical-codebases/logical-0001/aggregate-indexes/rebuild" &&
+          init?.method === "POST"
+        ) {
+          return rebuildingResponse.promise;
+        }
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：运维面板默认折叠为摘要条，先点「管理」展开。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+
+    expect(await screen.findByTestId("aggregate-index-status")).toHaveTextContent(
+      "missing",
+    );
+    await user.click(screen.getByRole("button", { name: "重建索引" }));
+    expect(screen.getByRole("button", { name: "重建索引" })).toBeDisabled();
+    expect(screen.getByTestId("aggregate-index-spinner")).toBeInTheDocument();
+
+    await act(async () => {
+      rebuildingResponse.resolve(
+        new Response(JSON.stringify(aggregateIndex({ state: "active", revision: 8 }))),
+      );
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("aggregate-index-status")).toHaveTextContent(
+        "active",
+      ),
+    );
+    expect(screen.getByText(/成员版本：8/)).toBeInTheDocument();
+  });
+
+  it("shows ApiRequestError.message when aggregate index rebuild fails", async () => {
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
+      aggregateIndex: aggregateIndex({ state: "stale" }),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input) ===
+            "/api/projects/project_0001/logical-codebases/logical-0001/aggregate-indexes/rebuild" &&
+          init?.method === "POST"
+        ) {
+          return new Response(
+            JSON.stringify({
+              code: "aggregate_index_unavailable",
+              message: "sync failed",
+            }),
+            { status: 422 },
+          );
+        }
+        return fetchMock(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板才能触及「重建索引」。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+    await user.click(await screen.findByRole("button", { name: "重建索引" }));
+
+    expect(await screen.findByText("sync failed")).toBeInTheDocument();
+  });
+
+  it("wires pointer publication actions to APIs and upserts each returned publication", async () => {
+    const initialPublication = pointerPublication({
+      id: "publication_0000",
+      status: "completed_partial",
+      entries: [
+        {
+          member_repo_id: "repository_0001",
+          state: "failed",
+          branch_name: null,
+          commit_sha: null,
+          push_error: "remote rejected",
+          conflict_detail: null,
+        },
+      ],
+    });
+    const fetchMock = lifecycleFetch({
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
+      pointerPublications: [initialPublication],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+    // R8：LC 作用域数据（成员/发布）异步加载，先等面板数据就绪再操作。
+    await screen.findByTestId("pointer-publication-badge");
+    await user.click(screen.getByRole("button", { name: "全量发布" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ batch_kind: "full" }),
+        }),
+      ),
+    );
+    expect(screen.getByTestId("pointer-publication-badge")).toHaveAttribute(
+      "data-status",
+      "completed_partial",
+    );
+    expect(
+      screen.getByText("aria-pointer/repository_0001/full"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "增量发布" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ batch_kind: "incremental" }),
+        }),
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications/publication_0000/retry-repo",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ member_repo_id: "repository_0001" }),
+        }),
+      ),
+    );
+    expect(screen.getByText("aria-pointer/repository_0001/retried")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "撤回" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications/publication_0000/revoke",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      ),
+    );
+    expect(screen.getAllByText("已撤回").length).toBeGreaterThan(0);
+  });
+
+  it("shows the new-members hint and publishes incrementally when member count increased", async () => {
+    const initialPublication = pointerPublication({
+      entries: [
+        {
+          member_repo_id: "repository_0001",
+          state: "pushed",
+          branch_name: null,
+          commit_sha: null,
+          push_error: null,
+          conflict_detail: null,
+        },
+      ],
+    });
+    const fetchMock = lifecycleFetch({
+      logicalCodebases: [{ id: "logical-0001", name: "平台" }],
+      pointerPublications: [initialPublication],
+      logicalCodebaseMembers: [
+        {
+          logical_repository_id: "repository_0001",
+          alias: "api",
+          status: "active",
+        },
+        {
+          logical_repository_id: "repository_0002",
+          alias: "web",
+          status: "active",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+    const hint = await screen.findByTestId(
+      "pointer-publication-new-members-hint",
+    );
+    expect(hint).toHaveTextContent("检测到新增成员，建议增量发布");
+    await user.click(within(hint).getByRole("button", { name: "增量发布" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/project_0001/logical-codebases/logical-0001/pointer-publications",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ batch_kind: "incremental" }),
+        }),
+      ),
+    );
+  });
+
+  it("does not show the new-members hint when member count does not exceed entries", async () => {
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        // hotfix：面板仅在存在逻辑条目时渲染，补一条 LC 使指针发布面板可见
+        logicalCodebases: [
+          { id: "lc_0001", name: "monorepo", member_count: 1 },
+        ],
+        pointerPublications: [
+          pointerPublication({
+            entries: [
+              {
+                member_repo_id: "repository_0001",
+                state: "pushed",
+                branch_name: null,
+                commit_sha: null,
+                push_error: null,
+                conflict_detail: null,
+              },
+            ],
+          }),
+        ],
+        logicalCodebaseMembers: [
+          {
+            logical_repository_id: "repository_0001",
+            alias: "api",
+            status: "active",
+          },
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    // Task 8：先展开运维面板。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+    await screen.findByTestId("pointer-publication-panel");
+    expect(
+      screen.queryByTestId("pointer-publication-new-members-hint"),
+    ).not.toBeInTheDocument();
+  });
 
   it("renders issues as the primary workbench and shows selected issue lifecycle content", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
@@ -43,23 +348,220 @@ describe("IssueLifecycleWorkbench base workflow", () => {
       screen.queryByRole("region", { name: "Story Spec 列" }),
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "登录会话过期" }));
+    // Task 7：队列由 IssueQueue 承载，行选择按钮名为「选择 Issue <标题>」。
+    await user.click(
+      screen.getByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
 
     expect(
       screen.getByRole("region", { name: "Issue 生命周期详情" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Story Spec 内容" }),
-    ).toHaveTextContent("会话过期提示");
-    expect(
-      screen.getByRole("region", { name: "Design Spec 内容" }),
-    ).toHaveTextContent("前端提示设计");
+    // Task 6：单阶段面板一次只渲染当前阶段区域；story/design 均有产物 -> 默认 work_item。
+    expect(screen.getByTestId("stage-tab-work_item")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(
       screen.getByRole("region", { name: "Work Item 内容" }),
     ).toHaveTextContent("Work Item Group");
     expect(
       screen.getByRole("region", { name: "Work Item 内容" }),
     ).not.toHaveTextContent("实现提示组件");
+    expect(
+      screen.queryByRole("region", { name: "Story Spec 内容" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("stage-tab-story"));
+    expect(
+      screen.getByRole("region", { name: "Story Spec 内容" }),
+    ).toHaveTextContent("会话过期提示");
+
+    await user.click(screen.getByTestId("stage-tab-design"));
+    expect(
+      screen.getByRole("region", { name: "Design Spec 内容" }),
+    ).toHaveTextContent("前端提示设计");
+  });
+
+  it("shows the issue delivery panel persistently in the detail region once the issue is selected", async () => {
+    // B1（用户裁决 A，2026-10-10）：恢复 issue 交付面板用户可达入口——交付
+    // 面板原先只挂在 issue 抽屉，而抽屉唯一入口「查看完整 Issue」仅在长描述
+    // （>6 行或 >520 字符）时出现，短描述 issue 的交付状态无从查看。选中
+    // issue 后详情区必须常驻渲染交付状态面板，不依赖描述长度或抽屉开合。
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        deliverySummary: {
+          project_id: "project_0001",
+          issue_id: "issue_0001",
+          overall: "partial",
+          entries: [
+            {
+              repository_name: "cadence-aria",
+              work_item_id: "work_item_0001",
+              attempt_status: "completed",
+              branch_name: "feat/delivery",
+              commit_sha: "abc123def456",
+              push_status: "pushed",
+              push_error: null,
+            },
+          ],
+        },
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
+
+    // 短描述（默认「描述」）不出现「查看完整 Issue」，抽屉不可达——交付
+    // 面板必须常驻详情区。
+    expect(
+      screen.queryByRole("button", { name: "查看完整 Issue" }),
+    ).not.toBeInTheDocument();
+    const detail = screen.getByRole("region", { name: "Issue 生命周期详情" });
+    expect(
+      within(detail).getByTestId("delivery-status-panel"),
+    ).toHaveTextContent("部分交付");
+  });
+
+  it("generates a story spec from the empty story stage panel action", async () => {
+    const fetchMock = lifecycleFetch({ emptyLifecycle: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await screen.findByTestId("stage-stepper");
+    // 全空生命周期 -> 默认 story 阶段，空面板提供生成入口。
+    expect(screen.getByTestId("stage-tab-story")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const storyRegion = screen.getByRole("region", {
+      name: "Story Spec 内容",
+    });
+    await user.click(
+      within(storyRegion).getByRole("button", { name: "生成 Story Spec" }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          title: "登录会话过期 Story Spec",
+        }),
+      }),
+    );
+    expect(onOpenWorkspace).toHaveBeenCalledWith(
+      "workspace_session_story_0001",
+    );
+  });
+
+  it("generates a design spec from the empty design stage panel via the latest story card", async () => {
+    const fetchMock = lifecycleFetch({ emptyDesignSpecs: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByTestId("stage-stepper");
+    // 有 story 无 design -> 默认 design 阶段。
+    expect(screen.getByTestId("stage-tab-design")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const designRegion = screen.getByRole("region", {
+      name: "Design Spec 内容",
+    });
+    await user.click(
+      within(designRegion).getByRole("button", { name: "生成 Design Spec" }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          title: "会话过期提示 Design Spec",
+          story_spec_ids: ["story_spec_0001"],
+        }),
+      }),
+    );
+    // 生成后 design 阶段不再为空：主按钮消失、新卡片可见。
+    await waitFor(() =>
+      expect(designRegion).toHaveTextContent("会话过期提示 Design Spec"),
+    );
+    expect(
+      within(designRegion).queryByRole("button", {
+        name: "生成 Design Spec",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the work item plan options from the empty work item stage panel via the latest design card", async () => {
+    const fetchMock = lifecycleFetch({ workItemPlans: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const onOpenWorkspace = vi.fn();
+
+    render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
+
+    await screen.findByTestId("stage-stepper");
+    // story/design 均有产物且无 plan -> 默认 work_item 阶段，空面板提供准备入口。
+    expect(screen.getByTestId("stage-tab-work_item")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    const workItemRegion = screen.getByRole("region", {
+      name: "Work Item 内容",
+    });
+    await user.click(
+      within(workItemRegion).getByRole("button", {
+        name: "准备 Work Item Plan",
+      }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Work Item Plan 配置",
+    });
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
+    );
+
+    const prepareCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/work-item-plans:prepare"),
+    );
+    expect(prepareCall).toBeDefined();
+    expect(JSON.parse(String(prepareCall?.[1]?.body))).toMatchObject({
+      title: "前端提示设计 Work Item",
+      story_spec_ids: ["story_spec_0001"],
+      design_spec_ids: ["design_spec_0001"],
+    });
+  });
+
+  it("keeps the issue card highlighted while a derived story card is selected", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch());
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
+    // Task 6：story 卡片在 story 阶段页内可见。
+    await user.click(screen.getByTestId("stage-tab-story"));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
+
+    // Task 7：焦点高亮的载体由 LifecycleCard 换为 IssueQueueRow（aria-current）。
+    const focusedRow = screen
+      .getAllByTestId("issue-queue-row")
+      .find((row) => row.getAttribute("data-issue-id") === "issue_0001");
+    expect(focusedRow).toHaveAttribute("aria-current", "true");
   });
 
   it("keeps long selected issue descriptions compact and opens the full content in the drawer", async () => {
@@ -75,7 +577,7 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
     const detail = screen.getByRole("region", { name: "Issue 生命周期详情" });
@@ -182,12 +684,12 @@ describe("IssueLifecycleWorkbench base workflow", () => {
     render(<IssueLifecycleWorkbench />);
 
     expect(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Mobile" }));
 
     expect(
-      await screen.findByRole("button", { name: "移动端刷新" }),
+      await screen.findByRole("button", { name: "选择 Issue 移动端刷新" }),
     ).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0002/issues",
@@ -197,6 +699,39 @@ describe("IssueLifecycleWorkbench base workflow", () => {
         }),
       }),
     );
+  });
+
+  it("opens the member registration wizard from the logical codebase panel", async () => {
+    const preflight: RegistrationPreflightResponse = {
+      preflight_id: "preflight_0001",
+      created_at: "2026-08-18T00:00:00Z",
+      items: [{ path: "/root/api", class: "eligible", reason: null }],
+    };
+    const batch: RegistrationBatchDto = {
+      batch_id: "batch_0001",
+      status: "completed",
+      items: [{ path: "/root/api", status: "completed", failure_reason: null }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        logicalCodebases: [{ id: "lc_0001", name: "monorepo" }],
+        registrationPreflight: preflight,
+        registrationSubmit: batch,
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+    // Task 8：「登记成员」位于运维面板内，先点摘要条展开。
+    await user.click(await screen.findByTestId("lc-summary-toggle"));
+    await user.click(await screen.findByRole("button", { name: "登记成员" }));
+    await user.type(screen.getByLabelText("聚合根目录"), "/root");
+    await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
+    await user.click(await screen.findByRole("button", { name: "提交登记" }));
+
+    expect(await screen.findByText("completed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
   });
 
   it("creates project from the left sidebar and selects it", async () => {

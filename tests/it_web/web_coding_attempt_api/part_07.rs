@@ -22,6 +22,7 @@ fn group_canonical_contract(logical_id: &str, title: &str) -> CanonicalWorkItemC
             summary: title.to_string(),
         },
         non_goals: Vec::new(),
+        depends_on: Vec::new(),
         input_contracts: Vec::new(),
         output_contracts: Vec::new(),
         tasks: Vec::new(),
@@ -38,6 +39,7 @@ fn group_canonical_contract(logical_id: &str, title: &str) -> CanonicalWorkItemC
         },
         blocker_rules: Vec::new(),
         design_traceability: Vec::new(),
+        intent_contract: None,
     }
 }
 
@@ -147,7 +149,9 @@ fn partial_group_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("partial group attempt")
 }
@@ -358,7 +362,7 @@ async fn coding_plan_repair_existing_group_attempt_rejects_invalid_active_pointe
             _ => unreachable!(),
         }
         store
-            .save_coding_attempt(&attempt)
+            .update_attempt_non_status_fields(&attempt)
             .expect("persist corrupt pointers");
 
         let (status, body) = request_json(app, Method::POST, path, json!({})).await;

@@ -7,9 +7,13 @@ use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterErr
 use crate::cross_cutting::provider_health::{
     ProviderHealthReasonCode, ProviderHealthService, ProviderHealthSnapshot,
 };
+use crate::cross_cutting::session_launch::{
+    ValidatedAdapterInput, ValidatedStreamingProviderInput,
+};
 use crate::cross_cutting::streaming_provider::{
     ProviderSession, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::{AdapterInput, AdapterOutput};
 
@@ -141,6 +145,7 @@ fn reason_code_str(reason_code: ProviderHealthReasonCode) -> &'static str {
 pub struct GatedProviderAdapter {
     provider: ProviderName,
     inner: Arc<dyn ProviderAdapter>,
+    projector: Option<Arc<dyn ProviderPolicyProjector>>,
     gate: Arc<ProviderAvailabilityGate>,
 }
 
@@ -150,11 +155,32 @@ impl GatedProviderAdapter {
         inner: Arc<dyn ProviderAdapter>,
         gate: Arc<ProviderAvailabilityGate>,
     ) -> Self {
+        Self::new_with_projector(provider, inner, None, gate)
+    }
+
+    /// 带 projector 的原子构造(Task 1a):装饰器透传 projector,取用时
+    /// 先复验同一 gate(不可用时拒绝提供)。
+    pub fn new_with_projector(
+        provider: ProviderName,
+        inner: Arc<dyn ProviderAdapter>,
+        projector: Option<Arc<dyn ProviderPolicyProjector>>,
+        gate: Arc<ProviderAvailabilityGate>,
+    ) -> Self {
         Self {
             provider,
             inner,
+            projector,
             gate,
         }
+    }
+
+    /// 透传的 projector(取用时复验同一 gate;未携带 projector 的 legacy
+    /// 装饰返回 `None`)。
+    pub fn projector(
+        &self,
+    ) -> Result<Option<Arc<dyn ProviderPolicyProjector>>, ProviderAvailabilityError> {
+        self.gate.ensure_available(&self.provider)?;
+        Ok(self.projector.clone())
     }
 }
 
@@ -165,11 +191,25 @@ impl ProviderAdapter for GatedProviderAdapter {
             .map_err(ProviderAvailabilityError::into_adapter_error)?;
         self.inner.run(input)
     }
+
+    /// validated 透传(Task 1a):先复验同一 gate,再转发 inner 的
+    /// `run_validated`;inner 未接入(默认 unsupported)时错误原样上抛,
+    /// 不回落裸 `run`。
+    fn run_validated(
+        &self,
+        input: ValidatedAdapterInput,
+    ) -> Result<AdapterOutput, ProviderAdapterError> {
+        self.gate
+            .ensure_available(&self.provider)
+            .map_err(ProviderAvailabilityError::into_adapter_error)?;
+        self.inner.run_validated(input)
+    }
 }
 
 pub struct GatedStreamingProviderAdapter {
     provider: ProviderName,
     inner: Arc<dyn StreamingProviderAdapter>,
+    projector: Option<Arc<dyn ProviderPolicyProjector>>,
     gate: Arc<ProviderAvailabilityGate>,
 }
 
@@ -179,11 +219,32 @@ impl GatedStreamingProviderAdapter {
         inner: Arc<dyn StreamingProviderAdapter>,
         gate: Arc<ProviderAvailabilityGate>,
     ) -> Self {
+        Self::new_with_projector(provider, inner, None, gate)
+    }
+
+    /// 带 projector 的原子构造(Task 1a):装饰器透传 projector,取用时
+    /// 先复验同一 gate(不可用时拒绝提供)。
+    pub fn new_with_projector(
+        provider: ProviderName,
+        inner: Arc<dyn StreamingProviderAdapter>,
+        projector: Option<Arc<dyn ProviderPolicyProjector>>,
+        gate: Arc<ProviderAvailabilityGate>,
+    ) -> Self {
         Self {
             provider,
             inner,
+            projector,
             gate,
         }
+    }
+
+    /// 透传的 projector(取用时复验同一 gate;未携带 projector 的 legacy
+    /// 装饰返回 `None`)。
+    pub fn projector(
+        &self,
+    ) -> Result<Option<Arc<dyn ProviderPolicyProjector>>, ProviderAvailabilityError> {
+        self.gate.ensure_available(&self.provider)?;
+        Ok(self.projector.clone())
     }
 }
 
@@ -191,6 +252,13 @@ impl GatedStreamingProviderAdapter {
 impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
     fn supports_tool_calls(&self) -> bool {
         self.inner.supports_tool_calls()
+    }
+
+    fn legacy_tool_policy_audit_sink(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>>
+    {
+        self.inner.legacy_tool_policy_audit_sink()
     }
 
     async fn start(
@@ -202,6 +270,54 @@ impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
             .ensure_available(&self.provider)
             .map_err(ProviderAvailabilityError::into_adapter_error)?;
         self.inner.start(input, cancel).await
+    }
+
+    /// validated 透传(Task 1a):先复验同一 gate,再转发 inner 的
+    /// `start_validated`;inner 未接入(默认 unsupported)时错误原样上抛,
+    /// 不回落裸 `start`。
+    async fn start_validated(
+        &self,
+        input: ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.gate
+            .ensure_available(&self.provider)
+            .map_err(ProviderAvailabilityError::into_adapter_error)?;
+        self.inner.start_validated(input, cancel).await
+    }
+
+    /// B1-1(波 2)F1:受信资源归属入口必须原样转发——生产 registry 对所有
+    /// 真实 provider 用本装饰器包裹,若落到 trait 默认实现,默认面先
+    /// `start`(inner 收不到载体),真实子进程永远不会回填 PID/starttime,
+    /// 登记停在"预留未确认",而尾部按无身份直接注销(B1 直接臂失效)。
+    async fn start_owned(
+        &self,
+        input: StreamingProviderInput,
+        ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.gate
+            .ensure_available(&self.provider)
+            .map_err(ProviderAvailabilityError::into_adapter_error)?;
+        self.inner.start_owned(input, ownership, cancel).await
+    }
+
+    /// Task 3.2(B0a2)透传:先复验同一 gate,再转发 inner 的
+    /// `prepare_lc_facts`;inner 未接入(默认 typed unsupported)时错误
+    /// 原样上抛,不回落裸 `start`、不伪造 facts。
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        crate::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        self.gate
+            .ensure_available(&self.provider)
+            .map_err(ProviderAvailabilityError::into_adapter_error)?;
+        self.inner.prepare_lc_facts(input, launch, cancel).await
     }
 
     async fn run_streaming(
@@ -218,8 +334,10 @@ impl StreamingProviderAdapter for GatedStreamingProviderAdapter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
     use chrono::Utc;
     use tokio::sync::mpsc;
@@ -229,14 +347,24 @@ mod tests {
         GatedProviderAdapter, GatedStreamingProviderAdapter, ProviderAvailabilityError,
         ProviderAvailabilityGate, ProviderHealthSource, ProviderHostReadiness,
     };
+    use crate::cross_cutting::process_manager::{
+        ManagedProcessChild, ProcessManager, process_start_time_ticks,
+    };
     use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
     use crate::cross_cutting::provider_health::{
         ProviderHealthEntry, ProviderHealthReasonCode, ProviderHealthSnapshot,
     };
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, ProviderResourceRecord, ProviderRunResourceScope, ResourceScopeKey,
+        StartedIdentity, TrustedLaunchOwnership,
+    };
     use crate::cross_cutting::streaming_provider::{
         ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
     };
+    use crate::product::logical_codebase::provider_projection::UnprovisionedProviderPolicyProjector;
     use crate::product::models::ProviderName;
+    use crate::product::provider_resource_store::ProviderResourceStore;
     use crate::protocol::contracts::{
         AdapterInput, AdapterOutput, AdapterRole, ProviderType, TimeoutStatus,
     };
@@ -376,6 +504,8 @@ mod tests {
 
     fn adapter_input() -> AdapterInput {
         AdapterInput {
+            env_vars: Default::default(),
+            working_directory: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
             worktree_path: None,
@@ -428,12 +558,20 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             let (_event_tx, events) = mpsc::channel(1);
             let (commands, _command_rx) = mpsc::channel(1);
-            Ok(ProviderSession { events, commands })
+            Ok(ProviderSession {
+                events,
+                commands,
+                native_session_id: None,
+            })
         }
     }
 
     fn streaming_input() -> StreamingProviderInput {
         StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink: None,
             provider_type: ProviderType::Codex,
             role: AdapterRole::Executor,
             prompt: "probe".to_string(),
@@ -475,5 +613,226 @@ mod tests {
         assert_eq!(error.code, ProviderErrorCode::ProviderUnavailable);
         assert_eq!(error.code.as_str(), "provider_unavailable");
         assert_eq!(inner.0.load(Ordering::SeqCst), 1);
+    }
+
+    /// B1 审查 F1 回归探针:inner adapter 覆写 `start_owned`,在收到受信
+    /// 归属后自行预留/真实 spawn/回填 PID+starttime。门禁装饰器必须原样
+    /// 转发 `start_owned`(而不是回落 trait 默认 → `start`),否则生产
+    /// coder/reviewer 的真实进程永远不会被回填身份。
+    struct OwnershipForwardingProbe {
+        start_owned_calls: AtomicUsize,
+        start_calls: AtomicUsize,
+        saw_ownership: AtomicBool,
+        child_pid: AtomicU32,
+        child: Mutex<Option<ManagedProcessChild>>,
+    }
+
+    impl OwnershipForwardingProbe {
+        fn new() -> Self {
+            Self {
+                start_owned_calls: AtomicUsize::new(0),
+                start_calls: AtomicUsize::new(0),
+                saw_ownership: AtomicBool::new(false),
+                child_pid: AtomicU32::new(0),
+                child: Mutex::new(None),
+            }
+        }
+
+        fn child_pid(&self) -> u32 {
+            self.child_pid.load(Ordering::SeqCst)
+        }
+
+        /// 终止并回收真实子进程(测试清理;注销在调用方 `release_after_session_tail`)。
+        async fn terminate_child(&self) {
+            let child = self.child.lock().expect("probe child lock").take();
+            if let Some(mut child) = child {
+                child.terminate().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for OwnershipForwardingProbe {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "gated adapter must forward start_owned, not fall back to bare start",
+                0,
+            ))
+        }
+
+        async fn start_owned(
+            &self,
+            _input: StreamingProviderInput,
+            ownership: Option<TrustedLaunchOwnership>,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            self.start_owned_calls.fetch_add(1, Ordering::SeqCst);
+            let Some(ownership) = ownership else {
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    "probe expected a forwarded ownership carrier",
+                    0,
+                ));
+            };
+            self.saw_ownership.store(true, Ordering::SeqCst);
+            let reservation = ownership.reserve()?;
+            let process = ProcessManager::spawn(
+                "/bin/sleep",
+                &["30"],
+                &std::env::temp_dir(),
+                &BTreeMap::new(),
+                CancellationToken::new(),
+            )
+            .await?;
+            let pid = process
+                .child
+                .spawn_leader_pid()
+                .ok_or_else(|| ProviderAdapterError::provider_unavailable("probe child pid"))?;
+            ownership.backfill_spawned_identity(&reservation, pid)?;
+            self.child_pid.store(pid, Ordering::SeqCst);
+            *self.child.lock().expect("probe child lock") = Some(process.child);
+            let (_events_tx, events) = mpsc::channel(1);
+            let (commands, _commands_rx) = mpsc::channel(1);
+            Ok(ProviderSession {
+                native_session_id: None,
+                events,
+                commands,
+            })
+        }
+    }
+
+    fn process_records(
+        store_root: &std::path::Path,
+        key: &ResourceScopeKey,
+    ) -> Vec<ProviderResourceRecord> {
+        ProviderResourceStore::new(store_root)
+            .list_scope(key)
+            .expect("list gate b1 scope")
+            .into_iter()
+            .filter(|record| matches!(record.kind, OwnedResourceKind::Process))
+            .collect()
+    }
+
+    /// 生产装配路径(`register_gated`)必须把 `start_owned` 原样转发给被
+    /// 装饰 adapter:inner 拿到 `Some(ownership)`、预留落盘并回填真实
+    /// PID+starttime;门禁不可用时零触达 inner。
+    #[tokio::test]
+    async fn gated_streaming_adapter_forwards_start_owned_with_real_identity() {
+        let probe = Arc::new(OwnershipForwardingProbe::new());
+        let mut registry = ProviderRegistry::new();
+        let adapter: Arc<dyn StreamingProviderAdapter> = probe.clone();
+        registry
+            .register_gated(
+                ProviderName::Codex,
+                adapter,
+                Arc::new(UnprovisionedProviderPolicyProjector),
+                gate(false, true, false),
+            )
+            .expect("register gated probe");
+
+        let base = tempfile::tempdir().expect("gate b1 base");
+        let private_root = base.path().join("private-root");
+        std::fs::create_dir_all(&private_root).expect("private root");
+        let store_root = base.path().join("resource-store");
+        std::fs::create_dir_all(&store_root).expect("store root");
+        let key = ResourceScopeKey {
+            scope_id: "code-delivery-attempt-gate-b1".to_string(),
+            run_id: "role-run-gate-b1".to_string(),
+            boot_identity: format!("aria-engine-{}-gate-b1", std::process::id()),
+        };
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            None,
+            &private_root,
+            &store_root,
+            None,
+        )
+        .expect("open gate b1 scope");
+        let ownership = TrustedLaunchOwnership::mint(
+            Arc::new(scope),
+            "code_delivery provider process: gate b1",
+        );
+        let scope_key = ownership.scope_key().clone();
+
+        let gated = registry
+            .get(&ProviderName::Codex)
+            .expect("gated adapter from production assembly");
+        let _session = gated
+            .start_owned(
+                streaming_input(),
+                Some(ownership.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("gate must forward start_owned");
+
+        assert_eq!(
+            probe.start_owned_calls.load(Ordering::SeqCst),
+            1,
+            "inner.start_owned 必须被调用一次"
+        );
+        assert_eq!(
+            probe.start_calls.load(Ordering::SeqCst),
+            0,
+            "转发缺失时默认实现会回落 inner.start"
+        );
+        assert!(
+            probe.saw_ownership.load(Ordering::SeqCst),
+            "inner 必须收到 Some(受信归属)"
+        );
+
+        let records = process_records(&store_root, &scope_key);
+        assert_eq!(records.len(), 1, "预留→回填恰一条 Process 登记");
+        let record = &records[0];
+        let pid = probe.child_pid();
+        assert!(pid > 0, "probe 必须启动真实子进程");
+        assert_eq!(record.resource_id, ownership.resource_id());
+        assert_eq!(
+            record.started_identity,
+            Some(StartedIdentity::Process {
+                pid,
+                start_time_ticks: process_start_time_ticks(pid)
+                    .expect("live probe child starttime must be readable"),
+            }),
+            "登记身份必须是 spawn 点回填的真实 PID+starttime"
+        );
+
+        probe.terminate_child().await;
+        ownership.release_after_session_tail().await;
+        assert!(
+            process_records(&store_root, &scope_key).is_empty(),
+            "收口后登记必须注销"
+        );
+
+        // 门禁不可用:先拒绝,不得触达 inner(零 spawn/零登记)。
+        let blocked = GatedStreamingProviderAdapter::new(
+            ProviderName::Codex,
+            probe.clone(),
+            gate(false, false, false),
+        );
+        let error = blocked
+            .start_owned(streaming_input(), Some(ownership), CancellationToken::new())
+            .await
+            .err()
+            .expect("blocked gate must reject start_owned");
+        assert_eq!(error.code, ProviderErrorCode::ProviderUnavailable);
+        assert_eq!(
+            probe.start_owned_calls.load(Ordering::SeqCst),
+            1,
+            "门禁拒绝不得触达 inner.start_owned"
+        );
+        assert_eq!(
+            probe.start_calls.load(Ordering::SeqCst),
+            0,
+            "门禁拒绝不得触达 inner.start"
+        );
     }
 }

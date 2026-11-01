@@ -1,0 +1,4 @@
+# node-campaign :: node --test campaign_driver_policies.test.mjs stage3_campaign_driver.test.mjs :: run 2026-09-03 (task 8.5 worker re-run)
+ℹ tests 49
+ℹ pass 49
+ℹ fail 0

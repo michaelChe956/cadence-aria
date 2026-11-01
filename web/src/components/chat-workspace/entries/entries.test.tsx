@@ -79,6 +79,57 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("支持手机号登录。")).toBeInTheDocument();
   });
 
+  it("renders usage line with thousands separators when usage metadata present", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          type: "provider_stream",
+          role: "author",
+          content: "设计内容",
+          metadata: {
+            usage: {
+              role: "author",
+              input_tokens: 89035,
+              output_tokens: 8896,
+              cache_read_tokens: 230976,
+              cache_creation_tokens: null,
+            },
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText(/Tokens 输入 89,035/)).toBeInTheDocument();
+  });
+
+  it("omits usage line entirely when metadata absent", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          type: "provider_stream",
+          role: "author",
+          content: "无用量内容",
+        })}
+      />,
+    );
+    expect(screen.queryByText(/Tokens 输入/)).not.toBeInTheDocument();
+  });
+
+  it("omits zero/missing usage segments", () => {
+    render(
+      <ProviderStreamEntry
+        entry={makeEntry({
+          type: "provider_stream",
+          role: "reviewer",
+          content: "部分用量",
+          metadata: {
+            usage: { input_tokens: 12, output_tokens: null, cache_read_tokens: 0 },
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText(/Tokens 输入 12/)).toBeInTheDocument();
+  });
+
   it("labels code reviewer provider stream entries by role", () => {
     render(
       <ProviderStreamEntry
@@ -186,7 +237,7 @@ describe("chat workspace entries", () => {
       type: "provider_stream",
       role: "reviewer",
       content:
-        '发现当前 draft 仍需返修。\n\n<ARIA_STRUCTURED_OUTPUT nonce="review-nonce">\n{"verdict":"pass","review_scope":"item","target_outline_id":"outline_backend_probe","draft_id":"draft_004","summary":"需要修正写域。","findings":[{"severity":"strong_recommend_fix","message":"写域包含 installer 文件","evidence":"exclusive_write_scopes 包含 src/web/provider_installer.rs","impact":"会导致后续 item 边界漂移","required_action":"移除 installer 写域"}]}\n</ARIA_STRUCTURED_OUTPUT nonce="review-nonce">',
+        '发现当前 draft 仍需返修。\n\n<ARIA_STRUCTURED_OUTPUT nonce="review-nonce">\n{"verdict":"pass","review_scope":"item","target_outline_id":"outline_backend_probe","draft_id":"draft_004","summary":"需要修正写域。","findings":[{"severity":"must_fix","message":"写域包含 installer 文件；会导致后续 item 边界漂移","evidence":"exclusive_write_scopes 包含 src/web/provider_installer.rs","required_action":"移除 installer 写域"}]}\n</ARIA_STRUCTURED_OUTPUT nonce="review-nonce">',
     });
 
     const { container } = render(<ProviderStreamEntry entry={entry} />);
@@ -194,7 +245,7 @@ describe("chat workspace entries", () => {
     expect(screen.getByText("发现当前 draft 仍需返修。")).toBeInTheDocument();
     expect(screen.getByText("结构化输出")).toBeInTheDocument();
     expect(screen.getByText("verdict: pass")).toBeInTheDocument();
-    expect(screen.getByText("最高严重度: strong_recommend_fix")).toBeInTheDocument();
+    expect(screen.getByText("最高严重度: must_fix")).toBeInTheDocument();
     expect(screen.getByText("需要修正写域。")).toBeInTheDocument();
     const details = container.querySelector("details");
     expect(details).not.toBeNull();
@@ -357,6 +408,94 @@ describe("chat workspace entries", () => {
     fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
 
     expect(onRespond).toHaveBeenCalledWith(entry, false);
+  });
+  it("renders platform delivery facts frames with commit, files, evidence and handoff", () => {
+    const entry = makeEntry({
+      type: "delivery_facts",
+      role: "system",
+      content: "Work Item work_item_0001 交付完成",
+      metadata: {
+        source: "platform_delivery_facts",
+        logical_work_item_id: "work_item_0001",
+        start_commit: "startsha0000000000000000000000000000000000000000",
+        completion_commit: "completionsha0000000000000000000000000000000000",
+        changed_files: ["src/lib.rs", "src/lib2.rs"],
+        verification: {
+          review_report_id: "code_review_report_0001",
+          verdict: "approve",
+          tested_evidence_refs: ["evidence://tests/cargo-test"],
+        },
+        handoff_revision_id: "handoff_revision_coding_unit_run_0001",
+      },
+    } as Partial<ChatEntry>);
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("交付事实(平台生成)")).toBeInTheDocument();
+    expect(
+      screen.getByText("completionsha0000000000000000000000000000000000"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("src/lib.rs")).toBeInTheDocument();
+    expect(screen.getByText("src/lib2.rs")).toBeInTheDocument();
+    expect(screen.getByText(/code_review_report_0001/)).toBeInTheDocument();
+    expect(screen.getByText(/evidence:\/\/tests\/cargo-test/)).toBeInTheDocument();
+    expect(screen.getByText("handoff_revision_coding_unit_run_0001")).toBeInTheDocument();
+  });
+
+  it("dispatches error entries through the renderer", () => {
+    const entry = makeEntry({
+      type: "error",
+      role: "system",
+      content: "阶段不允许",
+      metadata: { code: "INVALID_MESSAGE_FOR_STAGE" },
+    });
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("错误 INVALID_MESSAGE_FOR_STAGE")).toBeInTheDocument();
+    expect(screen.getByText("阶段不允许")).toBeInTheDocument();
+  });
+
+  it("dispatches execution events through the renderer", () => {
+    const entry = makeEntry({
+      type: "execution_event",
+      role: "system",
+      content: "git push origin",
+      metadata: { command: "git push origin" },
+    });
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("执行事件")).toBeInTheDocument();
+    expect(screen.getAllByText("git push origin").length).toBeGreaterThan(0);
+  });
+
+  it("labels unavailable delivery facts file lists with the platform reason", () => {
+    const entry = makeEntry({
+      type: "delivery_facts",
+      role: "system",
+      content: "Work Item work_item_0001 交付完成",
+      metadata: {
+        source: "platform_delivery_facts",
+        logical_work_item_id: "work_item_0001",
+        start_commit: "startsha",
+        completion_commit: "completionsha",
+        changed_files: [],
+        changed_files_unavailable_reason: "worktree_missing",
+        verification: {
+          review_report_id: null,
+          verdict: null,
+          tested_evidence_refs: [],
+        },
+        handoff_revision_id: "handoff_revision_coding_unit_run_0001",
+      },
+    } as Partial<ChatEntry>);
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("不可用:")).toBeInTheDocument();
+    expect(screen.getByText("worktree_missing")).toBeInTheDocument();
+    expect(screen.queryByText(/^无$/)).not.toBeInTheDocument();
   });
 });
 

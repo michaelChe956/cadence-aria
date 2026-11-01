@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   CodeReviewReport,
   CodingAttemptScope,
+  CodingSessionAutomation,
   CodingAttemptStatus,
   CodingChoiceGate,
   CodingExecutionStage,
@@ -56,6 +57,16 @@ export interface CodingProtocolError {
   message: string;
 }
 
+/**
+ * WS 侧确认「该 attempt/会话已不可用」的错误码（服务端 lookup 失败/身份冲突）：
+ * 页面持有的投影必然陈旧，需要提示用户刷新，而不是继续在旧身份上操作。
+ */
+export const SESSION_INVALID_PROTOCOL_CODES: readonly string[] = [
+  "coding_attempt_not_found",
+  "coding_attempt_ambiguous",
+  "coding_attempt_scope_mismatch",
+];
+
 export interface CodingLogEntry {
   id: string;
   message: string;
@@ -66,6 +77,38 @@ export interface CodingLogEntry {
 export type CodingPendingGate = CodingGateRequired & {
   submitting?: boolean;
   errorCode?: string | null;
+};
+
+/** 批 2 T4（REQ-WIGA-09）：统一终止确认的待确认请求（enrollment 身份缺失
+ * 时由确认面提交前经 GET enrollment 补读，未知不猜）。 */
+export interface AutomationTerminationRequest {
+  projectId: string;
+  issueId: string;
+  enrollmentId: string | null;
+  policyRevision: number | null;
+}
+
+/** 批 2 T4：终止成功后的 durable 结果投影（terminated_at/outcome）。 */
+export interface AutomationTerminationResult {
+  projectId: string;
+  issueId: string;
+  terminatedAt: string;
+  outcome: string;
+}
+
+/** 批 2 T4：统一「终止整个自动化」二次确认面状态（页面/收件箱共用）。 */
+export interface PlanTerminationState {
+  pending: AutomationTerminationRequest | null;
+  submitting: boolean;
+  error: string | null;
+  terminated: AutomationTerminationResult | null;
+}
+
+const initialPlanTermination: PlanTerminationState = {
+  pending: null,
+  submitting: false,
+  error: null,
+  terminated: null,
 };
 
 export interface CodingWorkspaceState {
@@ -107,11 +150,17 @@ export interface CodingWorkspaceState {
   connectionStatus: CodingConnectionStatus;
   pendingGates: CodingPendingGate[];
   protocolError: CodingProtocolError | null;
+  /** WS 侧 attempt 已不存在（被删除/换代）→ 页面身份陈旧，需提示刷新。 */
+  sessionInvalidated: boolean;
   tabLockedByUser: boolean;
   workItemExecutionPlan: WorkItemExecutionPlan | null;
   activePlanRepair: PlanRepairSessionState | null;
   // 门禁开关唯一来源：work item / snapshot 上的 require_execution_plan_confirm
   requireExecutionPlanConfirm: boolean;
+  /** 批 2 T4（REQ-WIGA-08/09）：同源管理投影（managed 判据）；manual 缺省 null。 */
+  automation: CodingSessionAutomation | null;
+  /** 批 2 T4：统一终止确认面状态（open/close/submitting/result 由动作驱动）。 */
+  planTermination: PlanTerminationState;
 }
 
 export interface CodingWorkspaceActions {
@@ -142,6 +191,8 @@ export interface CodingWorkspaceActions {
   completeStream: (nodeId?: string | null) => void;
   setConnectionStatus: (status: CodingConnectionStatus) => void;
   setProtocolError: (error: CodingProtocolError | null) => void;
+  /** 会话失效（WS lookup 失败）：置位页面级提示；新快照到达即清除。 */
+  markSessionInvalidated: () => void;
   setSelectedNode: (nodeId: string | null) => void;
   setActiveTab: (tab: CodingArtifactTab, lockedByUser?: boolean) => void;
   setPlanRepairRequired: (message: PlanRepairRequiredInput) => void;
@@ -166,6 +217,12 @@ export interface CodingWorkspaceActions {
     source?: PlanRepairIdentitySource,
   ) => void;
   clearPlanRepairAfterResume: (amendmentId: string) => void;
+  /** 批 2 T4：打开统一终止确认面（零请求副作用；入口可为页面/门/收件箱/428 路由）。 */
+  openTerminationConfirm: (request: AutomationTerminationRequest) => void;
+  closeTerminationConfirm: () => void;
+  setTerminationSubmitting: (submitting: boolean) => void;
+  setTerminationError: (error: string | null) => void;
+  setTerminationResult: (result: AutomationTerminationResult) => void;
   reset: () => void;
 }
 
@@ -208,10 +265,13 @@ const initialState: CodingWorkspaceState = {
   connectionStatus: "disconnected",
   pendingGates: [],
   protocolError: null,
+  sessionInvalidated: false,
   tabLockedByUser: false,
   workItemExecutionPlan: null,
   activePlanRepair: null,
   requireExecutionPlanConfirm: false,
+  automation: null,
+  planTermination: initialPlanTermination,
 };
 export const useCodingWorkspaceStore = create<
   CodingWorkspaceState & CodingWorkspaceActions
@@ -240,6 +300,13 @@ export const useCodingWorkspaceStore = create<
       const nextTab = selectedNode ? stageToArtifactTab(selectedNode.stage) : null;
       const pendingGates = mergeSnapshotPendingGates(snapshot.pending_gates, prev.pendingGates);
       const roleRuns = withRetryExhaustion(snapshot.role_runs ?? [], pendingGates);
+      const chatEntries = mergePendingChoiceEntries(
+        mergeChatEntriesByTimestamp(
+          (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
+          executionEventChatEntries(snapshot.execution_events ?? [], timelineNodes),
+        ),
+        snapshot.pending_choices ?? [],
+      );
       return {
         projectId: snapshot.project_id,
         issueId: snapshot.issue_id,
@@ -263,10 +330,7 @@ export const useCodingWorkspaceStore = create<
         timelineNodes,
         activeNodeId: snapshot.active_node_id,
         selectedNodeId,
-        chatEntries: mergePendingChoiceEntries(
-          (snapshot.chat_entries ?? []).map(codingChatEntryToChatEntry),
-          snapshot.pending_choices ?? [],
-        ),
+        chatEntries,
         codeReviewReports: snapshot.code_review_reports,
         reviewRequest: snapshot.review_request,
         internalPrReview: snapshot.internal_pr_review,
@@ -277,7 +341,11 @@ export const useCodingWorkspaceStore = create<
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
         activePlanRepair,
         requireExecutionPlanConfirm: snapshot.require_execution_plan_confirm ?? false,
+        // 批 2 T4：同源管理投影随快照落 store（terminated 仍 managed）。
+        automation: snapshot.automation ?? null,
         protocolError: null,
+        // 新快照即活会话（之前 lookup 失败已被本轮 attach 覆盖）。
+        sessionInvalidated: false,
         streamingContent: null,
         activeStreamNodeId: null,
         ...(!prev.tabLockedByUser && nextTab ? { activeTab: nextTab } : {}),
@@ -444,6 +512,8 @@ export const useCodingWorkspaceStore = create<
 
   setProtocolError: (protocolError) => set({ protocolError }),
 
+  markSessionInvalidated: () => set({ sessionInvalidated: true }),
+
   setSelectedNode: (selectedNodeId) =>
     set((state) => {
       const selectedNode = state.timelineNodes.find((node) => node.id === selectedNodeId);
@@ -492,6 +562,42 @@ export const useCodingWorkspaceStore = create<
 
   clearPlanRepairAfterResume: (amendmentId) =>
     set((state) => planRepairResumeStateUpdate(state, amendmentId)),
+
+  openTerminationConfirm: (request) =>
+    set((state) => ({
+      planTermination: {
+        ...state.planTermination,
+        pending: request,
+        submitting: false,
+        error: null,
+      },
+    })),
+
+  closeTerminationConfirm: () =>
+    set((state) => ({
+      planTermination: { ...state.planTermination, pending: null, error: null },
+    })),
+
+  setTerminationSubmitting: (submitting) =>
+    set((state) => ({
+      planTermination: { ...state.planTermination, submitting },
+    })),
+
+  setTerminationError: (error) =>
+    set((state) => ({
+      planTermination: { ...state.planTermination, error, submitting: false },
+    })),
+
+  setTerminationResult: (result) =>
+    set((state) => ({
+      planTermination: {
+        ...state.planTermination,
+        pending: null,
+        submitting: false,
+        error: null,
+        terminated: result,
+      },
+    })),
 
   reset: () => set({ ...initialState }),
 }));
@@ -602,6 +708,36 @@ function isProviderPromptEvent(event: ExecutionEvent) {
   return event.title === "Provider Prompt" && typeof event.output === "string";
 }
 
+/// F-13 刷新回放：coding_session_state 快照携带的历史执行事件 → 运行对话消息。
+/// 与实时 addExecutionEvent 同构（id=event_id、内容取命令/标题、role 随节点），
+/// 后续实时事件按同 id upsert 覆盖，不会重复。
+function executionEventChatEntries(
+  replays: Extract<CodingWsOutMessage, { type: "coding_session_state" }>["execution_events"],
+  nodes: CodingTimelineNode[],
+): ChatEntry[] {
+  return (replays ?? []).map(({ event, created_at }) => {
+    const node = nodeForEvent(nodes, event.node_id ?? null);
+    return {
+      id: event.event_id,
+      type: "execution_event" as const,
+      role: chatRoleForNode(nodes, event.node_id ?? null),
+      content: executionEventMessage(event, node),
+      timestamp: created_at,
+      node_id: event.node_id ?? undefined,
+      metadata: event as unknown as Record<string, unknown>,
+    };
+  });
+}
+
+/// 持久化 chat entries 与回放执行事件按时间稳定归并（两组各自有序）。
+function mergeChatEntriesByTimestamp(persisted: ChatEntry[], replayed: ChatEntry[]): ChatEntry[] {
+  if (persisted.length === 0) return replayed;
+  if (replayed.length === 0) return persisted;
+  return [...persisted, ...replayed].sort((left, right) =>
+    left.timestamp.localeCompare(right.timestamp),
+  );
+}
+
 function updateLegacyProviderConfig(
   snapshot: ProviderConfigSnapshot | null,
   role: CodingProviderSelectRole,
@@ -667,6 +803,14 @@ function pendingChoiceEntry(choice: CodingChoiceGate): ChatEntry {
       allow_multiple: choice.allow_multiple,
       allow_free_text: choice.allow_free_text,
       status: choice.status,
+      // P2-e（REQ-CRO-11）：多题逐题作答的数据源（快照路径恒有；旧 gate
+      // 缺省为空，卡片按单一 default 题回落）。
+      ...(choice.questions && choice.questions.length > 0
+        ? { questions: choice.questions }
+        : {}),
+      // P2-e：REST 应答绑定的 run 化身（handler 层按活跃 run 注入）；无活跃
+      // run 时缺省——提交侧不得猜 run。
+      ...(choice.expected_run_id ? { expected_run_id: choice.expected_run_id } : {}),
       ...(choice.response ? { response: choice.response } : {}),
     },
   };
@@ -747,6 +891,7 @@ function upsertRoleRunFromCompletedProviderEntry(
     supersedes_run_id: existing?.supersedes_run_id ?? null,
     superseded_by_run_id: existing?.superseded_by_run_id ?? null,
     reason_code: existing?.reason_code ?? null,
+    gate_origin: existing?.gate_origin ?? null,
     raw_provider_output_refs: uniqueStrings([
       ...(existing?.raw_provider_output_refs ?? []),
       ...(rawProviderOutputRef ? [rawProviderOutputRef] : []),

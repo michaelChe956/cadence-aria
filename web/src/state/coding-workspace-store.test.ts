@@ -380,6 +380,72 @@ describe("coding workspace store", () => {
     expect(useCodingWorkspaceStore.getState().currentWorkItemId).toBe("work_item_0001");
   });
 
+  // P2-e（REQ-CRO-11）：快照 pending_choices 的 questions 与 expected_run_id
+  // 必须落进 choice entry metadata——多题逐题作答与 REST 应答绑定的数据源。
+  it("carries choice questions and expected_run_id into pending choice entries", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(
+      sessionState({
+        pending_choices: [
+          {
+            gate_id: "coding_choice_gate_0001",
+            choice_id: "choice_0001",
+            attempt_id: "coding_attempt_0001",
+            node_id: null,
+            stage: "coding",
+            role: "coder",
+            provider: "fake",
+            source: "provider",
+            prompt: "编码拆分确认",
+            options: [],
+            allow_multiple: false,
+            allow_free_text: false,
+            status: "open",
+            response: null,
+            questions: [
+              {
+                id: "q-1",
+                prompt: "是否补齐测试",
+                options: [
+                  { id: "yes", label: "补齐" },
+                  { id: "no", label: "暂不" },
+                ],
+                allow_multiple: false,
+                allow_free_text: false,
+              },
+            ],
+            expected_run_id: "run-incarnation-1",
+            created_at: "2026-10-15T00:00:00Z",
+            updated_at: "2026-10-15T00:00:00Z",
+          },
+        ] as never,
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "choice_request:choice_0001",
+        type: "choice_request",
+        metadata: {
+          request_id: "choice_0001",
+          questions: [
+            {
+              id: "q-1",
+              prompt: "是否补齐测试",
+              options: [
+                { id: "yes", label: "补齐" },
+                { id: "no", label: "暂不" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+          ],
+          expected_run_id: "run-incarnation-1",
+        },
+      },
+    ]);
+  });
+
   it("hydrates persisted coding chat entries from a websocket session snapshot", () => {
     const store = useCodingWorkspaceStore.getState();
 
@@ -504,6 +570,49 @@ describe("coding workspace store", () => {
       status: "failed",
       trigger: "automatic_retry",
       retry_metadata: { attempt_no: 2 },
+    });
+  });
+
+  // Bug2-C(修复轮 F1):live provider 完成帧按字段重建 run 时,权威快照
+ // 已携带的 gate_origin 关联事实不得丢失(与 retry_metadata/reason_code
+ // 等可选字段同款保留约定)。
+  it("keeps gate origin when a completed provider entry rebuilds the role run", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(
+      sessionState({
+        role_runs: [
+          roleRun({
+            id: "coding_role_run_0002",
+            status: "running",
+            trigger: "retry_review",
+            gate_origin: {
+              gate_id: "coding_blocked_gate_0001",
+              generation: 0,
+              action_id: "retry_review",
+            },
+          }),
+        ],
+      }),
+    );
+
+    store.replacePendingEntry({
+      id: "coding_chat_entry_0002",
+      type: "provider_stream",
+      role: "code_reviewer",
+      content: "provider completion",
+      timestamp: "2026-06-12T00:01:00Z",
+      node_id: "coding_node_0003",
+      metadata: { role_run_id: "coding_role_run_0002" },
+    });
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
+      id: "coding_role_run_0002",
+      status: "completed",
+      gate_origin: {
+        gate_id: "coding_blocked_gate_0001",
+        generation: 0,
+        action_id: "retry_review",
+      },
     });
   });
 
@@ -872,5 +981,177 @@ describe("coding workspace store", () => {
     });
 
     expect(useCodingWorkspaceStore.getState().workItemExecutionPlan?.goal).toBe("实现后端 API");
+  });
+
+  it("replays execution event history from a session snapshot after refresh", () => {
+    const store = useCodingWorkspaceStore.getState();
+
+    store.setSessionState(
+      sessionState({
+        execution_events: [
+          {
+            event: {
+              event_id: "coding_node_0001_prompt",
+              node_id: "coding_node_0001",
+              agent: "pi",
+              kind: "output",
+              status: "started",
+              title: "Provider Prompt",
+              output: "实现 work item 001",
+            },
+            created_at: "2026-09-18T08:00:00+00:00",
+          },
+          {
+            event: {
+              event_id: "coding_node_0001_provider_status_starting",
+              node_id: "coding_node_0001",
+              agent: "pi",
+              kind: "provider",
+              status: "started",
+              title: "Provider starting",
+            },
+            created_at: "2026-09-18T08:00:01+00:00",
+          },
+          {
+            event: {
+              event_id: "cmd_0001",
+              node_id: "coding_node_0001",
+              agent: "pi",
+              kind: "command",
+              status: "completed",
+              title: "Run tests",
+              command: "pnpm vitest run src/state",
+              output: "tests passed",
+              exit_code: 0,
+            },
+            created_at: "2026-09-18T08:00:02+00:00",
+          },
+        ],
+      } as Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>>),
+    );
+
+    const entries = useCodingWorkspaceStore.getState().chatEntries;
+    expect(entries.map((entry) => entry.type)).toEqual([
+      "execution_event",
+      "execution_event",
+      "execution_event",
+    ]);
+    expect(entries[0]).toMatchObject({
+      id: "coding_node_0001_prompt",
+      role: "coder",
+      content: "代码编写 · Provider Prompt",
+      node_id: "coding_node_0001",
+      timestamp: "2026-09-18T08:00:00+00:00",
+    });
+    expect(entries[1]).toMatchObject({
+      id: "coding_node_0001_provider_status_starting",
+      content: "Provider starting",
+    });
+    expect(entries[2]).toMatchObject({
+      id: "cmd_0001",
+      content: "pnpm vitest run src/state",
+      metadata: { command: "pnpm vitest run src/state" },
+    });
+  });
+});
+
+// ── 批 2 T4（REQ-WIGA-08/09）：管理/终态投影进 store＋统一终止确认态 ──
+describe("automation ownership projection and unified termination confirm state", () => {
+  beforeEach(() => {
+    useCodingWorkspaceStore.getState().reset();
+  });
+
+  it("projects the managed automation ownership from session state (terminated stays managed)", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(
+      sessionState({
+        automation: {
+          owner: "server",
+          enrollment_id: "enrollment_0001",
+          policy_revision: 3,
+          enabled: true,
+          plan_id: "plan_0001",
+          terminated_at: null,
+        },
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().automation).toEqual({
+      owner: "server",
+      enrollment_id: "enrollment_0001",
+      policy_revision: 3,
+      enabled: true,
+      plan_id: "plan_0001",
+      terminated_at: null,
+    });
+
+    store.setSessionState(
+      sessionState({
+        automation: {
+          owner: "server",
+          enrollment_id: "enrollment_0001",
+          policy_revision: 3,
+          enabled: false,
+          plan_id: "plan_0001",
+          terminated_at: "2026-10-16T06:00:00Z",
+        },
+      }),
+    );
+
+    // T3 同源投影语义：terminated 后仍 managed（owner 保持 server）。
+    const terminated = useCodingWorkspaceStore.getState().automation;
+    expect(terminated?.owner).toBe("server");
+    expect(terminated?.terminated_at).toBe("2026-10-16T06:00:00Z");
+  });
+
+  it("keeps automation null for manual attempts (legacy frames omit the field)", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(sessionState());
+    expect(useCodingWorkspaceStore.getState().automation).toBeNull();
+  });
+
+  it("opens and closes the unified termination confirm surface without request side effects", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.openTerminationConfirm({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 3,
+    });
+    expect(useCodingWorkspaceStore.getState().planTermination.pending).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 3,
+    });
+    expect(useCodingWorkspaceStore.getState().planTermination.submitting).toBe(false);
+
+    store.closeTerminationConfirm();
+    expect(useCodingWorkspaceStore.getState().planTermination.pending).toBeNull();
+  });
+
+  it("records the durable termination result (terminated_at + outcome) and closes the surface", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.openTerminationConfirm({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: null,
+      policyRevision: null,
+    });
+    store.setTerminationResult({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      terminatedAt: "2026-10-16T06:00:00Z",
+      outcome: "terminated",
+    });
+
+    const termination = useCodingWorkspaceStore.getState().planTermination;
+    expect(termination.pending).toBeNull();
+    expect(termination.terminated).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      terminatedAt: "2026-10-16T06:00:00Z",
+      outcome: "terminated",
+    });
   });
 });

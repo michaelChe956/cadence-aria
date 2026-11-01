@@ -68,6 +68,18 @@ async fn execute_review_request_keeps_push_started_when_failed_push_cannot_query
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     init_repo(&repo);
+    // 前提：远端「已配置但不可查询」。remote 名必须出现在 `git remote` 列表里
+    // （否则产品按「未配置」走本地交付 SkippedNotConfigured），但 URL 指向
+    // 不存在的路径，使 push 与随后的 `ls-remote --heads missing` 必然失败。
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "missing",
+            root.path().join("missing.git").to_str().unwrap(),
+        ],
+    );
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = store
         .create_attempt(create_input())
@@ -154,18 +166,13 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -317,18 +324,13 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -407,7 +409,9 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
@@ -418,21 +422,14 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Fake,
-                code_reviewer: ProviderName::Fake,
-                internal_reviewer: ProviderName::Codex,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::Codex),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },
         )
         .expect("set role provider snapshot");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -518,14 +515,7 @@ async fn handle_final_confirm_completes_when_required_plan_is_satisfied() {
     let attempt = store
         .create_attempt(create_input())
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -616,6 +606,7 @@ fn create_input() -> CreateCodingAttemptInput {
             review_rounds: 1,
             permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
         },
+        target_snapshot: None,
         max_auto_rework: 2,
     }
 }
@@ -676,17 +667,15 @@ fn seed_work_item_markdown(app_paths: &ProductAppPaths, markdown: &str) {
         })
         .expect("create work item");
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItem,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: Some(ProviderName::Fake),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("create workspace session");
     lifecycle
         .append_artifact_version(

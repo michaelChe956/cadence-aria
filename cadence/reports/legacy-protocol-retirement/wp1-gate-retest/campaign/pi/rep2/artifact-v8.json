@@ -1,0 +1,497 @@
+{
+  "event_seq": 5112,
+  "plan_projection": {
+    "coder_group_context": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+                "困难}、unlocked 为布尔值",
+                "普通"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "数据文件缺失、不可读、JSON 解析失败或结构校验失败时 GET /api/levels 返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与不含堆栈或绝对路径的可读 message"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+                "困难}、unlocked 为布尔值",
+                "普通"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "API 错误响应（未知 API 路径 404、对 /api/levels 不支持方法 405）Content-Type 为 application/json; charset=utf-8 且体为 error.code 与 message 的 API-002 结构"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "port",
+                "server/server.js 导出 createServer({ dataPath",
+                "staticRoot }) 且 dataPath 默认 data/levels.json、staticRoot 默认 web/，并导出 start({ port })，resolve 为 { origin",
+                "stop } 且 origin 为 http://127.0.0.1:<实际端口>、stop() 返回 Promise、port 为 0 时分配临时端口"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-005",
+              "required_capabilities": [
+                "GET / 返回 staticRoot 下 index.html 且静态资源路径以 node:path 的 normalize/resolve 限制在 staticRoot 内且静态资源缺失时返回 404 文本响应"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-006",
+              "required_capabilities": [
+                "web/index.html 包含 id=loading、id=level-list、id=error-message 三个容器标记并引入 web/level-select.js 且 web/level-select.js 以相对路径调用 /api/levels"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**"
+          ],
+          "forbidden_scopes": [
+            "web/**",
+            "tests/frontend/**",
+            "tests/integration/**",
+            "package.json"
+          ]
+        },
+        "WI-002": {
+          "exclusive_scopes": [
+            "web/**",
+            "tests/frontend/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/integration/**",
+            "package.json"
+          ]
+        },
+        "WI-003": {
+          "exclusive_scopes": [
+            "tests/integration/**"
+          ],
+          "forbidden_scopes": [
+            "server/**",
+            "web/**",
+            "data/levels.json",
+            "tests/backend/**",
+            "tests/frontend/**",
+            "package.json"
+          ]
+        }
+      },
+      "ordered_logical_work_item_ids": [
+        "WI-001",
+        "WI-002",
+        "WI-003"
+      ],
+      "plan_id": "issue_work_item_plan_0001"
+    },
+    "coder_group_context_hash": "10e618600a2e10f1a695a69964be38cde8f82d4c79ffc906643e7bafb2a49ea4",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-19T02:04:44.103308053+00:00",
+    "dependency_graph_revision_id": "dependency_graph_revision_c9d941c4f09c5543e6fb608c",
+    "human_group_projection": {
+      "contract_flow": [
+        {
+          "contract_id": "CT-001",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+            "困难}、unlocked 为布尔值",
+            "普通"
+          ],
+          "required_capabilities": [
+            "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+            "困难}、unlocked 为布尔值",
+            "普通"
+          ],
+          "to": "WI-002"
+        },
+        {
+          "contract_id": "CT-002",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "数据文件缺失、不可读、JSON 解析失败或结构校验失败时 GET /api/levels 返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与不含堆栈或绝对路径的可读 message"
+          ],
+          "required_capabilities": [
+            "数据文件缺失、不可读、JSON 解析失败或结构校验失败时 GET /api/levels 返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与不含堆栈或绝对路径的可读 message"
+          ],
+          "to": "WI-002"
+        },
+        {
+          "contract_id": "CT-001",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+            "困难}、unlocked 为布尔值",
+            "普通"
+          ],
+          "required_capabilities": [
+            "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+            "困难}、unlocked 为布尔值",
+            "普通"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-003",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "API 错误响应（未知 API 路径 404、对 /api/levels 不支持方法 405）Content-Type 为 application/json; charset=utf-8 且体为 error.code 与 message 的 API-002 结构"
+          ],
+          "required_capabilities": [
+            "API 错误响应（未知 API 路径 404、对 /api/levels 不支持方法 405）Content-Type 为 application/json; charset=utf-8 且体为 error.code 与 message 的 API-002 结构"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-004",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "port",
+            "server/server.js 导出 createServer({ dataPath",
+            "staticRoot }) 且 dataPath 默认 data/levels.json、staticRoot 默认 web/，并导出 start({ port })，resolve 为 { origin",
+            "stop } 且 origin 为 http://127.0.0.1:<实际端口>、stop() 返回 Promise、port 为 0 时分配临时端口"
+          ],
+          "required_capabilities": [
+            "port",
+            "server/server.js 导出 createServer({ dataPath",
+            "staticRoot }) 且 dataPath 默认 data/levels.json、staticRoot 默认 web/，并导出 start({ port })，resolve 为 { origin",
+            "stop } 且 origin 为 http://127.0.0.1:<实际端口>、stop() 返回 Promise、port 为 0 时分配临时端口"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-005",
+          "from": "WI-001",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "GET / 返回 staticRoot 下 index.html 且静态资源路径以 node:path 的 normalize/resolve 限制在 staticRoot 内且静态资源缺失时返回 404 文本响应"
+          ],
+          "required_capabilities": [
+            "GET / 返回 staticRoot 下 index.html 且静态资源路径以 node:path 的 normalize/resolve 限制在 staticRoot 内且静态资源缺失时返回 404 文本响应"
+          ],
+          "to": "WI-003"
+        },
+        {
+          "contract_id": "CT-006",
+          "from": "WI-002",
+          "missing_capabilities": [],
+          "provided_capabilities": [
+            "web/index.html 包含 id=loading、id=level-list、id=error-message 三个容器标记并引入 web/level-select.js 且 web/level-select.js 以相对路径调用 /api/levels"
+          ],
+          "required_capabilities": [
+            "web/index.html 包含 id=loading、id=level-list、id=error-message 三个容器标记并引入 web/level-select.js 且 web/level-select.js 以相对路径调用 /api/levels"
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "normative": false,
+      "plan_id": "issue_work_item_plan_0001",
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "split_reason": "由 canonical handoff schema 投影",
+      "used_by_provider": false,
+      "work_items": [
+        {
+          "depends_on": [],
+          "goal": "WHEN 服务收到关卡列表或静态页面请求 THE SYSTEM SHALL 以 Node 内置模块提供 GET /api/levels 数据契约、统一错误语义与限定在静态根目录内的托管能力。",
+          "logical_work_item_id": "WI-001",
+          "provides": [
+            "CT-001",
+            "CT-002",
+            "CT-003",
+            "CT-004",
+            "CT-005"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "web/**",
+              "tests/frontend/**",
+              "tests/integration/**",
+              "package.json"
+            ],
+            "owned_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**"
+            ]
+          },
+          "title": "后端关卡列表服务与静态托管"
+        },
+        {
+          "depends_on": [
+            "WI-001"
+          ],
+          "goal": "WHEN 玩家打开关卡选择页 THE SYSTEM SHALL 以原生 HTML 与 JS 调用 /api/levels 渲染 5 项关卡并在请求失败或数据无效时展示可读错误提示而不白屏。",
+          "logical_work_item_id": "WI-002",
+          "provides": [
+            "CT-006"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/integration/**",
+              "package.json"
+            ],
+            "owned_scopes": [
+              "web/**",
+              "tests/frontend/**"
+            ]
+          },
+          "title": "前端关卡选择页与渲染接口"
+        },
+        {
+          "depends_on": [
+            "WI-001",
+            "WI-002"
+          ],
+          "goal": "WHEN 后端服务与前端页面产物就绪 THE SYSTEM SHALL 以 node --test 集成测试验证页面入口与 API 同源可达及 HTTP 可观测契约。",
+          "logical_work_item_id": "WI-003",
+          "provides": [
+            "CT-007"
+          ],
+          "scope_summary": {
+            "forbidden_scopes": [
+              "server/**",
+              "web/**",
+              "data/levels.json",
+              "tests/backend/**",
+              "tests/frontend/**",
+              "package.json"
+            ],
+            "owned_scopes": [
+              "tests/integration/**"
+            ]
+          },
+          "title": "前后端同源联调验证"
+        }
+      ]
+    },
+    "human_group_projection_hash": "d62014781ca995c9fa28286b754cf1ae3e3f4093fc5f2b648c067c4d9a8962cc",
+    "id": "plan_projection_bundle_c9d941c4f09c5543e6fb608c",
+    "plan_revision_id": "plan_revision_c9d941c4f09c5543e6fb608c",
+    "reviewer_group_matrix": {
+      "dependency_edges": [
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+                "困难}、unlocked 为布尔值",
+                "普通"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-002",
+              "required_capabilities": [
+                "数据文件缺失、不可读、JSON 解析失败或结构校验失败时 GET /api/levels 返回 500 且错误体为 error.code=LEVEL_DATA_UNAVAILABLE 与不含堆栈或绝对路径的可读 message"
+              ]
+            }
+          ],
+          "to": "WI-002"
+        },
+        {
+          "from": "WI-001",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-001",
+              "required_capabilities": [
+                "GET /api/levels 成功响应为 200 且 Content-Type 为 application/json; charset=utf-8 且响应体为长度 5 的顶层数组且元素字段满足 id 为非空且文件内唯一字符串、name 为非空字符串、difficulty 属于 {简单",
+                "困难}、unlocked 为布尔值",
+                "普通"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-003",
+              "required_capabilities": [
+                "API 错误响应（未知 API 路径 404、对 /api/levels 不支持方法 405）Content-Type 为 application/json; charset=utf-8 且体为 error.code 与 message 的 API-002 结构"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-004",
+              "required_capabilities": [
+                "port",
+                "server/server.js 导出 createServer({ dataPath",
+                "staticRoot }) 且 dataPath 默认 data/levels.json、staticRoot 默认 web/，并导出 start({ port })，resolve 为 { origin",
+                "stop } 且 origin 为 http://127.0.0.1:<实际端口>、stop() 返回 Promise、port 为 0 时分配临时端口"
+              ]
+            },
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-005",
+              "required_capabilities": [
+                "GET / 返回 staticRoot 下 index.html 且静态资源路径以 node:path 的 normalize/resolve 限制在 staticRoot 内且静态资源缺失时返回 404 文本响应"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        },
+        {
+          "from": "WI-002",
+          "required_contracts": [
+            {
+              "compatibility_policy": "require_all",
+              "contract_id": "CT-006",
+              "required_capabilities": [
+                "web/index.html 包含 id=loading、id=level-list、id=error-message 三个容器标记并引入 web/level-select.js 且 web/level-select.js 以相对路径调用 /api/levels"
+              ]
+            }
+          ],
+          "to": "WI-003"
+        }
+      ],
+      "design_traceability_refs": [
+        {
+          "requirement_id": "NFR-001",
+          "source_id": "story_spec_0001",
+          "source_type": "story"
+        },
+        {
+          "requirement_id": "REQ-002",
+          "source_id": "story_spec_0001",
+          "source_type": "story"
+        },
+        {
+          "requirement_id": "REQ-003",
+          "source_id": "story_spec_0001",
+          "source_type": "story"
+        },
+        {
+          "requirement_id": "REQ-004",
+          "source_id": "story_spec_0001",
+          "source_type": "story"
+        },
+        {
+          "requirement_id": "REQ-005",
+          "source_id": "story_spec_0001",
+          "source_type": "story"
+        },
+        {
+          "requirement_id": "REQ-006",
+          "source_id": "story_spec_0001",
+          "source_type": "story"
+        }
+      ],
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "criterion_refs": [
+            "AC-001",
+            "AC-002",
+            "AC-003",
+            "AC-004"
+          ],
+          "input_contract_refs": [],
+          "logical_work_item_id": "WI-001",
+          "output_contract_refs": [
+            "CT-001",
+            "CT-002",
+            "CT-003",
+            "CT-004",
+            "CT-005"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-005",
+            "AC-006",
+            "AC-007"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-002"
+          ],
+          "logical_work_item_id": "WI-002",
+          "output_contract_refs": [
+            "CT-006"
+          ]
+        },
+        {
+          "criterion_refs": [
+            "AC-008",
+            "AC-009",
+            "AC-010"
+          ],
+          "input_contract_refs": [
+            "CT-001",
+            "CT-003",
+            "CT-004",
+            "CT-005",
+            "CT-006"
+          ],
+          "logical_work_item_id": "WI-003",
+          "output_contract_refs": [
+            "CT-007"
+          ]
+        }
+      ]
+    },
+    "reviewer_group_matrix_hash": "ccf8f16b856b532aa44b2b2ae541cc3760eb2929ac610824408e50e9cb8c69cb",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_5fa5ada1ba9735ac57ddc156",
+      "work_item_projection_bundle_339f418d1ca3ebbc98be21ef",
+      "work_item_projection_bundle_ab67c249e5ec9144fe88272e"
+    ]
+  },
+  "type": "artifact_update",
+  "version": 8
+}

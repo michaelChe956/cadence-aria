@@ -13,7 +13,9 @@ import type {
   WorkItemExecutionPlan,
 } from "../api/types";
 import { GroupFinalReadinessPanel } from "../components/coding-workspace/GroupFinalReadinessPanel";
+import { PUSH_STATUS_LABELS } from "../state/coding-execution-labels";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import { errorMessage } from "./CodingWorkspaceControls";
 
 export function ReviewPanel() {
@@ -184,9 +186,15 @@ function findingLocation(finding: ReviewFinding) {
   return finding.line ? `${finding.file_path}:${finding.line}` : finding.file_path;
 }
 
-export function GitPanel() {
+export function GitPanel({ onRetryPush }: { onRetryPush: () => void }) {
   const store = useCodingWorkspaceStore();
   const request = store.reviewRequest;
+  const canRetryPush =
+    request?.push_status === "failed" &&
+    store.status !== null &&
+    store.status !== "completed" &&
+    store.status !== "failed" &&
+    store.status !== "aborted";
   return (
     <div className="space-y-3 text-xs">
       <dl className="space-y-2">
@@ -194,7 +202,14 @@ export function GitPanel() {
         <InfoRow label="branch" value={store.branchName ?? request?.branch_name ?? "-"} />
         <InfoRow label="commit" value={store.headCommit ?? request?.commit_sha ?? "-"} />
         <InfoRow label="remote" value={store.pushedRemote ?? request?.remote ?? "-"} />
-        <InfoRow label="push" value={request?.push_status ?? "-"} />
+        <InfoRow
+          label="push"
+          value={
+            request
+              ? (PUSH_STATUS_LABELS[request.push_status] ?? request.push_status)
+              : "-"
+          }
+        />
         <InfoRow label="request" value={request?.id ?? "-"} />
       </dl>
       {request?.push_status === "failed" && request.push_error ? (
@@ -204,6 +219,15 @@ export function GitPanel() {
         >
           {request.push_error}
         </p>
+      ) : null}
+      {canRetryPush ? (
+        <button
+          type="button"
+          onClick={onRetryPush}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]"
+        >
+          重新推送
+        </button>
       ) : null}
       {request?.external_url ? (
         <a
@@ -295,6 +319,9 @@ export function PrepareExecutionPlanPanel({
     onError(null);
     try {
       const updated = await confirmWorkItemExecutionPlan(requestAddress);
+      // F-29：确认成功后通知 lifecycle invalidation——workbench 定向刷新该
+      // issue 的 durable 投影（同页 notify + 跨 tab BroadcastChannel）。
+      notifyLifecycleInvalidated(requestAddress.issueId);
       if (
         isCurrentRequest(requestAddressKey, requestGeneration) &&
         codingWorkspaceStoreMatchesAddress(requestAddress)

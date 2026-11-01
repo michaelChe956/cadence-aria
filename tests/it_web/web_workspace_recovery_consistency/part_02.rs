@@ -74,6 +74,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
 
     let state = WsOutMessage::SessionState {
         session_id: "workspace_session_001".to_string(),
+        connection_id: None,
         workspace_type: WorkspaceType::WorkItemPlan,
         stage: "author_confirm".to_string(),
         superpowers_enabled: true,
@@ -115,7 +116,8 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
                 author: cadence_aria::product::models::ProviderName::Fake,
                 reviewer: Some(cadence_aria::product::models::ProviderName::Codex),
                 review_rounds: 1,
-                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             retry: None,
         }],
@@ -129,9 +131,41 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
+        session_status: cadence_aria::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: cadence_aria::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: cadence_aria::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: cadence_aria::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        human_gate_turn_rejection: None,
+        candidate_compile_failure: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        pending_choice_requests: Vec::new(),
+        // T4 类型迁移：引擎自建帧的 automation 缺省投影（client/off）。
+        automation: Some(
+            cadence_aria::product::models::automation::AutomationOwnership::client_default(),
+        ),
+        // A1c（Task 2.2）：无恢复时省略，roundtrip 保持 None。
+        lc_resume_recovery: None,
+        structural_governance: None,
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");
+    assert!(
+        value
+            .as_object()
+            .expect("session state object")
+            .get("lc_resume_recovery")
+            .is_none(),
+        "A1c（Task 2.2）：无恢复时 wire 省略 lc_resume_recovery 字段"
+    );
     let roundtrip: WsOutMessage = serde_json::from_value(value).expect("deserialize SessionState");
 
     match roundtrip {
@@ -150,120 +184,10 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
     }
 }
 
-fn valid_draft_output(outline_id: &str) -> Value {
-    valid_canonical_draft_output(outline_id, "实现后端登录会话 API")
-}
+// 退役留档（T5/REQ-RET-02）：`reconnect_preserves_revert_marks_from_current_artifact_version` 直接驱动已删除的 legacy 决策面
+// （原 #[ignore]：legacy full-candidate revert 恢复已被 WP2 outline 生成取代；本测含 revert_work_item 退役 wire 字面量），
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-fn valid_frontend_draft_output() -> Value {
-    valid_canonical_draft_output("outline_frontend_expiry", "实现前端会话过期提示")
-}
-
-fn valid_integration_draft_output() -> Value {
-    let mut output = valid_canonical_draft_output(
-        "outline_integration_session",
-        "集成测试：会话过期端到端",
-    );
-    output["draft"]["canonical_contract"]["handoff_contract"]["provided_contract_refs"] =
-        json!([]);
-    output
-}
-
-#[tokio::test]
-#[ignore = "legacy full-candidate revert recovery is superseded by WP2 outline generation; WP3+ will replace this coverage"]
-async fn reconnect_preserves_revert_marks_from_current_artifact_version() {
-    let _guard = WS_TEST_LOCK.lock().await;
-    let (app, _repo) = app_with_confirmed_story_and_design(valid_split_output()).await;
-
-    let (_status, prepare_resp) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-item-plans:prepare",
-        json!({
-            "title": "重连恢复 revert 标记测试",
-            "story_spec_ids": ["story_spec_0001"],
-            "design_spec_ids": ["design_spec_0001"],
-            "author_provider": "fake",
-            "reviewer_provider": null,
-            "review_rounds": 1,
-            "superpowers_enabled": false,
-            "openspec_enabled": true,
-            "include_integration_tests": true,
-            "include_e2e_tests": false,
-            "force_frontend_backend_split": true,
-            "require_execution_plan_confirm": false
-        }),
-    )
-    .await;
-    let session_id = prepare_resp["workspace_session"]["workspace_session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let mut ws = connect_ws(app.clone(), &session_id).await;
-    ws.send(Message::Text(
-        json!({
-            "type": "start_generation",
-            "provider_config": { "author": "fake", "reviewer": null, "review_rounds": 0 },
-            "reviewer_enabled": false
-        })
-        .to_string()
-        .into(),
-    ))
-    .await
-    .expect("send start_generation");
-
-    let messages = recv_ws_until(&mut ws, Duration::from_secs(15), |msgs| {
-        msgs.iter().any(|m| m["type"] == "artifact_update")
-            && msgs
-                .iter()
-                .any(|m| m["type"] == "stage_change" && m["stage"] == "author_confirm")
-    })
-    .await;
-    let first_work_item_id = messages
-        .iter()
-        .find(|m| m["type"] == "artifact_update")
-        .unwrap()["candidate"]["work_items"][0]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    ws.send(Message::Text(
-        json!({
-            "type": "revert_work_item",
-            "work_item_id": first_work_item_id,
-            "feedback": "拆得太粗",
-            "clear": false
-        })
-        .to_string()
-        .into(),
-    ))
-    .await
-    .expect("send revert_work_item");
-
-    let _messages = recv_ws_until(&mut ws, Duration::from_secs(5), |msgs| {
-        msgs.iter().any(|m| m["type"] == "artifact_update")
-    })
-    .await;
-    ws.close(None).await.ok();
-
-    // 重连：服务端应发送 SessionState，其中当前 artifact version 保留 revert 标记
-    let mut ws2 = connect_ws(app, &session_id).await;
-    let state_messages = recv_ws_until(&mut ws2, Duration::from_secs(5), |msgs| {
-        msgs.iter().any(|m| m["type"] == "session_state")
-    })
-    .await;
-    let session_state = state_messages
-        .iter()
-        .find(|m| m["type"] == "session_state")
-        .expect("session_state after reconnect");
-    let reverted_item = session_state["artifact"]["candidate"]["work_items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|w| w["id"] == first_work_item_id)
-        .expect("work item still in recovered candidate");
-    assert_eq!(reverted_item["meta"]["reverted"], true);
-    assert_eq!(reverted_item["meta"]["revert_feedback"], "拆得太粗");
-
-    ws2.close(None).await.ok();
-}
+// 退役留档（T5/REQ-RET-02）：draft 输出构造夹具（valid_draft_output/valid_frontend_draft_output/
+// valid_integration_draft_output）为 staged 恢复矩阵测试专用，随消息族一并退役。

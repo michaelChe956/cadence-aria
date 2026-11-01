@@ -3,10 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   confirmWorkItemExecutionPlan,
-  deleteCodingAttempt,
   getCodingAttemptDiff,
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { repairAwaitingConfirmationFixture } from "../components/coding-workspace/plan-repair-test-fixtures";
@@ -23,7 +23,6 @@ import {
 
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
 }));
@@ -32,7 +31,8 @@ vi.mock("../hooks/useCodingWorkspaceWs", () => ({
   useCodingWorkspaceWs: vi.fn(),
 }));
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
@@ -188,6 +188,11 @@ describe("CodingWorkspacePage reports and history", () => {
     expect(gate).toHaveTextContent("review_payload_parse_error");
     expect(gate).toHaveTextContent("code_review_0001.json");
     expect(gate).toHaveTextContent("provider-raw/code_review/code_review_0001.txt");
+    // F-E：本门只有「重试审查」＋「人工继续」，底部提示与门卡统一说"放行说明"，
+    // 不再把放行写成"修复意见"。
+    expect(
+      screen.getByText("请使用上方门禁操作提交人工放行说明（会记入质量豁免审计）"),
+    ).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "重试审查" }));
 
@@ -199,7 +204,9 @@ describe("CodingWorkspacePage reports and history", () => {
     expect(api.respondGate).not.toHaveBeenCalled();
 
     await userEvent.type(
-      screen.getByPlaceholderText("说明跳过该门禁的原因和后续风险处理"),
+      screen.getByPlaceholderText(
+        "说明人工放行的原因和后续风险处理；该说明会写入 context note 并记入质量豁免审计",
+      ),
       "人工确认风险可接受，后续补充真实 E2E",
     );
     await userEvent.click(screen.getByRole("button", { name: "人工继续" }));
@@ -452,7 +459,7 @@ describe("CodingWorkspacePage reports and history", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
-    expect(tabs).toHaveTextContent("pushed");
+    expect(tabs).toHaveTextContent("已推送");
     expect(screen.getByRole("link", { name: "https://git.example/review/1" })).toHaveAttribute(
       "href",
       "https://git.example/review/1",
@@ -502,10 +509,144 @@ describe("CodingWorkspacePage reports and history", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
-    expect(tabs).toHaveTextContent("failed");
+    expect(tabs).toHaveTextContent("推送失败");
     expect(tabs).toHaveTextContent(
       "推送到 origin/aria/work-items/work_item_0001/attempt-1 失败：remote rejected",
     );
+  });
+
+  it("renders retry push button only on push failure and sends retry_push on click", async () => {
+    const api = mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "waiting_for_human",
+      stage: "final_confirm",
+      activeTab: "git",
+      baseBranch: "main",
+      branchName: "aria/work-items/work_item_0001/attempt-1",
+      headCommit: "abc1234",
+      pushedRemote: "origin",
+      reviewRequest: {
+        id: "review_request_0001",
+        attempt_id: "coding_attempt_0001",
+        kind: "git_branch_only",
+        remote_kind: "generic_git",
+        remote: "origin",
+        base_branch: "main",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        commit_sha: "abc1234",
+        push_status: "failed",
+        external_url: null,
+        manual_instructions: [
+          "基于远端 origin/aria/work-items/work_item_0001/attempt-1 发起代码审查",
+        ],
+        push_error: "推送到远端失败：remote rejected",
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:01Z",
+      },
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    const retryButton = screen.getByRole("button", { name: "重新推送" });
+    expect(retryButton).toBeInTheDocument();
+    await userEvent.click(retryButton);
+    expect(api.retryPush).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render retry push button when push succeeded", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "completed",
+      stage: "review_request",
+      activeTab: "git",
+      baseBranch: "main",
+      branchName: "aria/work-items/work_item_0001/attempt-1",
+      headCommit: "abc1234",
+      pushedRemote: "origin",
+      reviewRequest: {
+        id: "review_request_0001",
+        attempt_id: "coding_attempt_0001",
+        kind: "git_branch_only",
+        remote_kind: "generic_git",
+        remote: "origin",
+        base_branch: "main",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        commit_sha: "abc1234",
+        push_status: "pushed",
+        external_url: null,
+        manual_instructions: [],
+        push_error: null,
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:01Z",
+      },
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    expect(
+      screen.queryByRole("button", { name: "重新推送" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders local delivery label for skipped push and no retry button", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "completed",
+      stage: "review_request",
+      activeTab: "git",
+      baseBranch: "main",
+      branchName: "aria/work-items/work_item_0001/attempt-1",
+      headCommit: "abc1234",
+      pushedRemote: null,
+      reviewRequest: {
+        id: "review_request_0001",
+        attempt_id: "coding_attempt_0001",
+        kind: "git_branch_only",
+        remote_kind: "generic_git",
+        remote: "origin",
+        base_branch: "main",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        commit_sha: "abc1234",
+        push_status: "skipped_not_configured",
+        external_url: null,
+        manual_instructions: [
+          "本地交付：分支 aria/work-items/work_item_0001/attempt-1 / commit abc1234（未配置远端）",
+        ],
+        push_error: null,
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:01Z",
+      },
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("本地交付(无远端)");
+    expect(tabs).not.toHaveTextContent("已推送");
+    expect(
+      screen.queryByRole("button", { name: "重新推送" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders role run history and selects linked timeline nodes", async () => {

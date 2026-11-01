@@ -180,12 +180,16 @@ async function submitRequiredFieldsWithFakeTimers() {
   fireEvent.change(screen.getByLabelText("本地路径"), {
     target: { value: "/work/aria" },
   });
-  fireEvent.submit(screen.getByRole("dialog", { name: "添加代码库" }));
+  fireEvent.submit(
+    screen.getByRole("dialog", { name: "添加代码库" }).querySelector("form")!,
+  );
   await flushAsyncWork();
 }
-
 async function flushAsyncWork() {
   await act(async () => {
+    // DialogShell portal 后 React 的提交/effect 微任务链多一拍，逐拍冲到底。
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
   });
 }
@@ -252,7 +256,6 @@ describe("CreateRepositoryDialog", () => {
     );
 
     await submitRequiredFieldsWithFakeTimers();
-
     expect(onFetchOperation).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("status")).toHaveTextContent(
       "正在执行：执行预检查。已完成 1 / 6。",

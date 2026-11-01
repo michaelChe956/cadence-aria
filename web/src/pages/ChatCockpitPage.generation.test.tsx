@@ -1,0 +1,888 @@
+import { useProviderAvailabilityStore } from "../state/provider-availability-store";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
+import type * as ApiClient from "../api/client";
+import type { TakeoverResponse } from "../api/types";
+import { ApiRequestError, takeoverWorkspaceSession } from "../api/client";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  selectCockpitInbox,
+  type CockpitInboxItem,
+} from "../state/workspace-cockpit-projection";
+import { useWorkspaceWs, type WorkspaceWsApi } from "../hooks/useWorkspaceWs";
+import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import {
+  useWorkspaceStore,
+  type TimelineNode,
+  type WorkspaceWsState,
+} from "../state/workspace-ws-store";
+import type { PlanProjectionBundle } from "../api/types";
+import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
+import { planRepairSnapshotFixture } from "../state/workspace-plan-repair-test-fixtures";
+import { observerStateFromSessionState } from "../state/workspace-observer-store";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "../state/workspace-cockpit-projection.test-fixtures";
+import { readCockpitSettings } from "../state/cockpit-settings";
+import { ChatCockpitPage } from "./ChatCockpitPage";
+import { COCKPIT_HOTKEYS } from "../state/cockpit-operation-semantics";
+import { useOperationAuditStore } from "../state/operation-audit-store";
+import {
+  currentMockWorkspaceWs,
+  mockWorkspaceWs,
+} from "./ChatWorkspacePage.test-utils";
+import {
+  bulkConfirmStart,
+  cockpitInbox,
+  cockpitObservedRecords,
+  gateItem,
+  hardErrorItem,
+  installCockpitPageTestHooks,
+  renderCockpit,
+  renderCockpitWith,
+  stoppedItem,
+  timelineNode,
+  watchSession,
+} from "./ChatCockpitPage.test-utils";
+
+vi.mock("../state/bulk-confirm-store", () => ({
+  useBulkConfirmStore: Object.assign(
+    (selector: (state: { runs: readonly unknown[] }) => unknown) => selector({ runs: [] }),
+    { getState: () => ({ start: bulkConfirmStart }) },
+  ),
+}));
+
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
+  useWorkspaceWs: vi.fn(),
+  // D（Task 7.1 / anchor_t21）：页面一次用户动作生成稳定 operation_id——
+  // mock 固定值供 wire 断言（freshSends[0].operation_id === "op-1"）。
+  newCommandId: vi.fn(() => "op-1"),
+}));
+vi.mock("../hooks/useUnloadGuard", () => ({ useUnloadGuard: vi.fn() }));
+
+
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof ApiClient>()),
+  takeoverWorkspaceSession: vi.fn(),
+}));
+vi.mock("../api/workspace-content", () => ({
+  fetchWorkspaceArtifactVersion: vi.fn(),
+  fetchWorkspaceEventOutput: vi.fn(),
+  fetchWorkspaceNodeDetail: vi.fn(),
+  fetchWorkspacePrompt: vi.fn(),
+}));
+vi.mock("../components/shared/MonacoViewer", () => ({
+  MonacoViewer: ({ value, height }: { value: string; height?: string }) => (
+    <div data-testid="monaco-viewer" data-height={height}>
+      {value}
+    </div>
+  ),
+}));
+
+vi.mock("../components/cockpit/CockpitShell", () => ({
+  useCockpitCodingAttemptForSession: () => () => null,
+  useCockpitShellInbox: () =>
+    cockpitInbox.length > 0
+      ? cockpitInbox
+      : selectCockpitInbox(useWorkspaceStore.getState()).map((item) => ({
+          ...item,
+          id: `${useWorkspaceStore.getState().sessionId}:${item.id}`,
+        })),
+  useCockpitInboxPulse: () => false,
+  useCockpitSessionWatch: () => watchSession,
+  useCockpitSettings: () => readCockpitSettings(),
+  useCockpitObservedRecords: () => cockpitObservedRecords,
+  useCockpitSettingsSlotRef: () => () => undefined,
+  // P4-e：coding_action「去处理」导航注入(no-op——保持各测试原有意图)。
+  useCockpitAttentionTargetOpener: () => () => undefined,
+  // UI-3：共享待处理抽屉聚焦（null → 消费方回落旧导航，保持各测试原意图）。
+  useCockpitInboxFocusOpener: () => null,
+}));
+
+describe("ChatCockpitPage", () => {
+  installCockpitPageTestHooks();
+
+  it("renders only the unflushed stream increment beside the active streamed entry", () => {
+    const streamingEntry = {
+      id: "node-stream:stream-active",
+      type: "provider_stream" as const,
+      role: "author" as const,
+      content: "正在起草第一段",
+      timestamp: "2026-09-17T10:00:00Z",
+      node_id: "node-stream",
+    };
+    useWorkspaceStore.setState({
+      stage: "running",
+      activeNodeId: "node-stream",
+      chatEntries: [streamingEntry],
+      streamBuffers: {
+        "node-stream": {
+          chunks: [" 尚未刷到正式条目"],
+          visibleText: streamingEntry.content,
+          role: "author",
+        },
+      },
+    });
+
+    const { rerender } = renderCockpit();
+    expect(screen.getByTestId("cockpit-conversation-flow-list")).toHaveTextContent(
+      "正在起草第一段",
+    );
+    expect(screen.getByTestId("cockpit-streaming-content")).toHaveTextContent(
+      "尚未刷到正式条目",
+    );
+    expect(screen.getByTestId("cockpit-streaming-content")).not.toHaveTextContent(
+      "正在起草第一段",
+    );
+    expect(screen.getByTestId("cockpit-streaming-content")).toHaveAttribute(
+      "data-frame-window-ms",
+      "50",
+    );
+
+    useWorkspaceStore.setState({
+      streamBuffers: {},
+      chatEntries: [{ ...streamingEntry, id: "message-complete" }],
+    });
+    rerender(
+      <ChatCockpitPage
+        sessionId="session_001"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+        workspaceWs={currentMockWorkspaceWs()}
+      />,
+    );
+
+    expect(screen.queryByTestId("cockpit-streaming-content")).toBeNull();
+    expect(screen.getByTestId("cockpit-conversation-flow-list")).toHaveTextContent(
+      "正在起草第一段",
+    );
+  });
+  it("starts generation from cockpit with the legacy provider payload and one optimistic entry", async () => {
+    const user = userEvent.setup();
+    const sendStartGeneration = vi.fn();
+    const workspaceWs = mockWorkspaceWs({
+      sendStartGeneration,
+      connectionStatus: "connected",
+    });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      providers: { author: "pi", reviewer: "codex" },
+      reviewerEnabled: true,
+      reviewRounds: 2,
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByRole("button", { name: "开始生成" }));
+
+    expect(sendStartGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ author: "pi", reviewer: "codex", review_rounds: 2 }),
+      true,
+    );
+    expect(
+      useWorkspaceStore
+        .getState()
+        .chatEntries.filter((entry) => entry.type === "start_generation"),
+    ).toHaveLength(1);
+  });
+
+  it("answers a permission request entry through the injected ws api", async () => {
+    const user = userEvent.setup();
+    const respondPermission = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ respondPermission });
+    useWorkspaceStore.setState({
+      stage: "running",
+      chatEntries: [
+        {
+          id: "perm-1",
+          type: "permission_request",
+          role: "author",
+          content: "请求执行命令",
+          timestamp: new Date().toISOString(),
+          metadata: { request_id: "perm-1" },
+        },
+      ],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByRole("button", { name: "允许" }));
+
+    expect(respondPermission).toHaveBeenCalledWith("perm-1", true, undefined);
+  });
+
+  it("answers a structured choice request through the injected ws api", async () => {
+    const user = userEvent.setup();
+    const sendChoiceResponse = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ sendChoiceResponse });
+    useWorkspaceStore.setState({
+      stage: "running",
+      chatEntries: [
+        {
+          id: "choice-1",
+          type: "choice_request",
+          role: "system",
+          content: "请选择下一步",
+          timestamp: "2026-09-17T10:00:00Z",
+          resolved: false,
+          metadata: {
+            request_id: "choice-1",
+            prompt: "请选择下一步",
+            allow_multiple: false,
+            allow_free_text: false,
+            options: [
+              { id: "continue", label: "继续" },
+              { id: "stop", label: "停止" },
+            ],
+          },
+        },
+      ],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByLabelText("继续"));
+    await user.click(screen.getByRole("button", { name: "提交选择" }));
+
+    // P2-e（REQ-CRO-11）：ChoiceRequestEntry 恒按题号逐题组装 answers——无
+    // questions 的旧单题卡回落单一 default 题，WS 提交第 4 参恒非空。
+    expect(sendChoiceResponse).toHaveBeenCalledWith("choice-1", ["continue"], null, [
+      {
+        question_id: "default",
+        selected_option_ids: ["continue"],
+        free_text: null,
+      },
+    ]);
+  });
+
+  it("guides an unstarted session from the empty inbox instead of an error state", () => {
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({ stage: "prepare_context", timelineNodes: [] });
+
+    renderCockpitWith(workspaceWs);
+
+    expect(
+      screen.getByText("会话尚未开始——在右侧选择 Provider 并点击「开始生成」"),
+    ).toBeVisible();
+  });
+
+  it("keeps interactive entries read-only for a takeover observed session", async () => {
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_perm_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("session_001"));
+    cockpitObservedRecords.push({
+      sessionId: "child_perm_001",
+      state: {
+        ...observerStateFromSessionState({
+          type: "session_state",
+          session_id: "child_perm_001",
+          workspace_type: "work_item",
+          stage: "running",
+          superpowers_enabled: false,
+          openspec_enabled: false,
+          messages: [],
+          checkpoints: [],
+          artifact: null,
+          providers: { author: "claude_code", reviewer: null },
+          timeline_nodes: [],
+          active_node_id: null,
+          artifact_versions: [],
+          timeline_node_details: {},
+          active_run_id: null,
+          human_presentation_revisions: [],
+          session_status: "running",
+          flow_kind: "legacy",
+          run_policy: "interactive",
+          run_history: {
+            seen_fingerprints: [],
+            repairs_used: 0,
+            manual_repairs_used: 0,
+            transitions_used: 0,
+            initial_review_count: 0,
+            verification_review_count: 0,
+          },
+        }),
+        chatEntries: [
+          {
+            id: "perm-obs-1",
+            type: "permission_request",
+            role: "author",
+            content: "请求执行命令",
+            timestamp: "2026-09-17T10:00:00Z",
+            metadata: { request_id: "perm-obs-1" },
+          },
+        ],
+      } as WorkspaceWsState,
+    });
+
+    renderCockpit();
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+
+    expect(await screen.findByText("请求执行命令")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "允许" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "拒绝" })).toBeNull();
+  });
+
+  it("opens the shared provider configuration dialog during prepare context", async () => {
+    const user = userEvent.setup();
+    const workspaceWs = mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+
+    renderCockpitWith(workspaceWs);
+
+    await user.click(screen.getByRole("button", { name: "Provider 配置" }));
+
+    expect(screen.getByRole("dialog", { name: "Provider 配置" })).toBeVisible();
+  });
+
+  it("saves the current provider selection as the workspace default", async () => {
+    const user = userEvent.setup();
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      providers: { author: "pi", reviewer: "codex" } as const,
+      reviewerEnabled: true,
+    });
+
+    renderCockpitWith(workspaceWs);
+    await user.click(screen.getByTestId("save-provider-defaults"));
+
+    expect(window.localStorage.getItem("aria.workspace.provider-defaults")).toContain(
+      '"author":"pi"',
+    );
+    expect(screen.getByText("已设为默认")).toBeVisible();
+  });
+
+  it("applies remembered defaults once when a fresh session enters the editable window", () => {
+    window.localStorage.setItem(
+      "aria.workspace.provider-defaults",
+      JSON.stringify({ author: "pi", reviewer: "kimi_code", reviewerEnabled: true }),
+    );
+    const selectProvider = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ selectProvider });
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      stage: "prepare_context",
+      providers: { author: "claude_code", reviewer: "codex" } as const,
+      reviewerEnabled: false,
+    });
+
+    renderCockpitWith(workspaceWs, "session_001");
+
+    expect(selectProvider).toHaveBeenCalledWith("author", "pi");
+    expect(selectProvider).toHaveBeenCalledWith("reviewer", "kimi_code");
+    expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+
+    act(() => {
+      useWorkspaceStore.setState({
+        providers: { author: "codex", reviewer: "codex" } as const,
+      });
+    });
+    expect(selectProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not apply defaults outside the editable window or for observed sessions", async () => {
+    window.localStorage.setItem(
+      "aria.workspace.provider-defaults",
+      JSON.stringify({ author: "pi", reviewer: "kimi_code", reviewerEnabled: true }),
+    );
+    const selectProvider = vi.fn();
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      stage: "running",
+      providers: { author: "codex", reviewer: "codex" } as const,
+      reviewerEnabled: false,
+    });
+    const runningView = renderCockpitWith(mockWorkspaceWs({ selectProvider }));
+    expect(selectProvider).not.toHaveBeenCalled();
+    runningView.unmount();
+
+    const user = userEvent.setup();
+    vi.mocked(takeoverWorkspaceSession).mockResolvedValue({
+      workspace_session_id: "child_defaults_001",
+    } as TakeoverResponse);
+    cockpitInbox.push(stoppedItem("session_001"));
+    cockpitObservedRecords.push({
+      sessionId: "child_defaults_001",
+      state: observerStateFromSessionState({
+        type: "session_state",
+        session_id: "child_defaults_001",
+        workspace_type: "work_item",
+        stage: "prepare_context",
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        messages: [
+          {
+            id: "message_001",
+            role: "author",
+            content: "子会话待发起",
+            created_at: "2026-09-17T00:00:00Z",
+          },
+        ],
+        checkpoints: [],
+        artifact: null,
+        providers: { author: "claude_code", reviewer: null },
+        timeline_nodes: [],
+        active_node_id: null,
+        artifact_versions: [],
+        timeline_node_details: {},
+        active_run_id: null,
+        human_presentation_revisions: [],
+        session_status: "running",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: 0,
+          verification_review_count: 0,
+        },
+      }),
+    });
+    useWorkspaceStore.setState({ stage: "prepare_context", providers: null });
+    renderCockpitWith(mockWorkspaceWs({ selectProvider }));
+    await user.click(screen.getByRole("button", { name: "接管" }));
+    await user.click(screen.getByRole("button", { name: "确认接管" }));
+    expect(await screen.findByText(/Author：claude_code/)).toBeVisible();
+
+    act(() => {
+      useWorkspaceStore.setState({
+        providers: { author: "codex", reviewer: "codex" } as const,
+      });
+    });
+
+    expect(selectProvider).not.toHaveBeenCalled();
+  });
+
+  it("keeps provider configuration read-only while running", () => {
+    useWorkspaceStore.setState({
+      stage: "running",
+      providers: { author: "pi", reviewer: "codex" } as const,
+    });
+
+    renderCockpitWith(mockWorkspaceWs());
+
+    expect(screen.queryByTestId("save-provider-defaults")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Provider 配置" })).toBeNull();
+    expect(screen.getByText(/Author：pi/)).toBeVisible();
+  });
+
+  it("selects providers through the injected workspace websocket", async () => {
+    const user = userEvent.setup();
+    const selectProvider = vi.fn();
+    const workspaceWs = mockWorkspaceWs({
+      connectionStatus: "connected",
+      selectProvider,
+    });
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+    useProviderAvailabilityStore.setState({
+      snapshot: {
+        schema_version: 1,
+        generation: 1,
+        checked_at: "2026-09-17T00:00:00Z",
+        state_status: "ready",
+        state_error: null,
+        real_workflow_blocked: false,
+        test_provider_enabled: false,
+        providers: [
+          {
+            provider: "claude_code",
+            display_name: "Claude Code",
+            available: true,
+            version: "1.0.0",
+            reason_code: null,
+            reason: null,
+            checked_at: "2026-09-17T00:00:00Z",
+            install_hint: "",
+          },
+          {
+            provider: "codex",
+            display_name: "Codex",
+            available: true,
+            version: "1.0.0",
+            reason_code: null,
+            reason: null,
+            checked_at: "2026-09-17T00:00:00Z",
+            install_hint: "",
+          },
+          {
+            provider: "pi",
+            display_name: "Pi",
+            available: true,
+            version: "1.0.0",
+            reason_code: null,
+            reason: null,
+            checked_at: "2026-09-17T00:00:00Z",
+            install_hint: "",
+          },
+        ],
+      },
+    });
+
+    renderCockpitWith(workspaceWs);
+    await user.click(screen.getByRole("button", { name: "Provider 配置" }));
+    await user.selectOptions(screen.getByLabelText("Author"), "pi");
+
+    expect(selectProvider).toHaveBeenCalledWith("author", "pi");
+  });
+
+  it("hides editable generation controls while running and disables start generation when disconnected", () => {
+    const runningWorkspaceWs = mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({ stage: "running" });
+
+    const view = renderCockpitWith(runningWorkspaceWs);
+
+    expect(screen.queryByRole("button", { name: "Provider 配置" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "开始生成" })).toBeNull();
+
+    view.unmount();
+    const disconnectedWorkspaceWs = mockWorkspaceWs({ connectionStatus: "disconnected" });
+    useWorkspaceStore.setState({ stage: "prepare_context" });
+    renderCockpitWith(disconnectedWorkspaceWs);
+
+    expect(screen.getByRole("button", { name: "开始生成" })).toBeDisabled();
+  });
+
+  // F-19（cadence/notes 2026-09-19 阶段4监控）：v27 story 会话 codex run 楔死
+  // 27min，运行中页面无任何 中止/终止/放弃 控件（abortish 空），用户无法脱困。
+  // cockpit 页 ChatInputBar 此前仅在 prepare_context/author_confirm 渲染；
+  // 生成期（running，矩阵 protocol.rs 已放行 WsInMessage::Abort）必须暴露
+  // 中止入口。
+  it("exposes the abort entry during a running story generation and wires it to ws abort", async () => {
+    const user = userEvent.setup();
+    const abort = vi.fn();
+    const runningWorkspaceWs = mockWorkspaceWs({ abort, connectionStatus: "connected" });
+    useWorkspaceStore.setState({ stage: "running" });
+
+    renderCockpitWith(runningWorkspaceWs);
+
+    const abortButton = screen.getByRole("button", { name: /中止/ });
+    expect(abortButton).toBeEnabled();
+
+    await user.click(abortButton);
+
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "开始生成" })).toBeNull();
+  });
+
+  // F-28（v33 复验 3）：start_generation 被仲裁层 STALE_DRIVER_LEASE 拒收后仅落
+  // 左侧收件箱 hard_error 条目（远离视线），用户在生成按钮旁得不到任何反馈。
+  // 就地错误面必须直出在生成动作区（不受收件箱 actionable 条件限制），
+  // 且重接管保留 ConfirmTwiceButton 二次确认（复用 F-11 sendHello 回调链）。
+  it("shows the stale-lease inline error beside the start generation button and retakes via confirm-twice (F-28)", async () => {
+    const user = userEvent.setup();
+    const sendHello = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ sendHello, connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: {
+        code: "STALE_DRIVER_LEASE",
+        message: "driver connection no longer holds the lease for write message start_generation",
+      },
+      activeNodeId: "node-1",
+      timelineNodes: [timelineNode({ node_id: "node-1" })],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    const inputBar = screen.getByTestId("chat-input-bar");
+    expect(within(inputBar).getByRole("alert")).toHaveTextContent(/连接租约已失效/);
+    expect(
+      within(inputBar).getByRole("button", { name: "开始生成" }),
+    ).toBeInTheDocument();
+
+    await user.click(within(inputBar).getByRole("button", { name: "重新接管" }));
+    expect(sendHello).not.toHaveBeenCalled();
+
+    await user.click(within(inputBar).getByRole("button", { name: "确认重新接管" }));
+    expect(sendHello).toHaveBeenCalledWith("session_001", "node-1");
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(within(inputBar).queryByRole("alert")).toBeNull();
+  });
+
+  it("clears the stale-lease inline error once the protocol error is externally cleared (F-28)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: {
+        code: "STALE_DRIVER_LEASE",
+        message: "driver connection no longer holds the lease",
+      },
+    });
+
+    renderCockpit();
+    expect(screen.getByTestId("chat-input-bar")).toHaveTextContent(/连接租约已失效/);
+
+    act(() => {
+      useWorkspaceStore.getState().setProtocolError(null);
+    });
+
+    expect(screen.queryByText(/连接租约已失效/)).toBeNull();
+  });
+
+  // F-28 二轮（v34 复验「失败态点开始生成零反馈」）：classifyProtocolError 把
+  // gate/advance 分流之外的全部协议错误落 store.protocolError——就地面此前
+  // 只认 STALE_DRIVER_LEASE 一码，长开 tab 断线重连后拒收码变为
+  // OBSERVER_WRITE_REJECTED 或其它 hard_error 时生成按钮旁零显示。
+  it("shows the inline error with a confirm-twice retake for the observer-write-rejected code (F-28 R2)", async () => {
+    const user = userEvent.setup();
+    const sendHello = vi.fn();
+    const workspaceWs = mockWorkspaceWs({ sendHello, connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: {
+        code: "OBSERVER_WRITE_REJECTED",
+        message: "observer connection cannot send write message start_generation",
+      },
+      activeNodeId: "node-1",
+      timelineNodes: [timelineNode({ node_id: "node-1" })],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    const inputBar = screen.getByTestId("chat-input-bar");
+    const alert = within(inputBar).getByRole("alert");
+    expect(alert).toHaveTextContent(/观察者/);
+    expect(alert).toHaveTextContent("OBSERVER_WRITE_REJECTED");
+    expect(
+      within(inputBar).getByRole("button", { name: "开始生成" }),
+    ).toBeInTheDocument();
+
+    await user.click(within(inputBar).getByRole("button", { name: "重新接管" }));
+    expect(sendHello).not.toHaveBeenCalled();
+
+    await user.click(within(inputBar).getByRole("button", { name: "确认重新接管" }));
+    expect(sendHello).toHaveBeenCalledWith("session_001", "node-1");
+    expect(useWorkspaceStore.getState().protocolError).toBeNull();
+    expect(within(inputBar).queryByRole("alert")).toBeNull();
+  });
+
+  // 其余未知 hard_error 码（非 lease 拒收）：错误码直出 + 建议刷新，不给重
+  // 接管钮。SESSION_ALREADY_CONFIRMED 在真实链路伴随终态（F-30 前置禁用按钮），
+  // 此处用非终态上下文隔离就地面自身的渲染契约。
+  it("shows the code and refresh advice without a retake for other hard-error codes (F-28 R2)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      sessionStatus: "open",
+      protocolError: {
+        code: "SESSION_ALREADY_CONFIRMED",
+        message: "会话 session_001 已确认（终态），不能重新开始生成",
+      },
+    });
+
+    renderCockpit();
+
+    // F-50：抽屉错误条同为 role=alert，页级断言按 testid 定位就地面。
+    const alert = screen.getByTestId("hard-error-notice");
+    expect(alert).toHaveTextContent("SESSION_ALREADY_CONFIRMED");
+    expect(alert).toHaveTextContent(/刷新/);
+    expect(alert).not.toHaveTextContent(/连接租约已失效/);
+    expect(screen.queryByRole("button", { name: "重新接管" })).toBeNull();
+  });
+
+  // gate/advance 分流类（classifyProtocolError 非 hard_error）落门面/推进
+  // 记录的 inlineError，不落 store.protocolError——就地面保持零呈现
+  //（既有分流行为：门禁/推进错误在各自动作面就地呈现）。
+  it("keeps gate- and advance-routed protocol errors off the inline hard-error face (F-28 R2)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      protocolError: null,
+      humanGateTurn: {
+        turn_id: "turn-1",
+        command_id: null,
+        remaining_budget: 1,
+        status: "open",
+        artifact_ref: null,
+        failure_class: null,
+        failure_message: null,
+        opened_at: "2026-09-21T00:00:00Z",
+        inlineError: {
+          code: "INVALID_HUMAN_CONFIRM_ACTION",
+          message: "confirm is rejected on this gate",
+        },
+      },
+      advanceCommands: {
+        cmd_1: {
+          command_id: "cmd_1",
+          status: "rejected",
+          code: null,
+          reason: null,
+          attempt_id: null,
+          workspace_entry: null,
+          inlineError: {
+            code: "ADVANCE_REPLAY_NOT_READY",
+            message: "advance replay not ready",
+          },
+        },
+      },
+    });
+
+    renderCockpit();
+
+    const inputBar = screen.getByTestId("chat-input-bar");
+    expect(within(inputBar).queryByRole("alert")).toBeNull();
+  });
+
+  // F-30 共存：终态禁用（按钮 disabled + 如实提示）与 hard_error 就地面
+  // 同屏——禁用态吞不掉错误面（长开 tab 终态残留 + 拒收错误叠加的真实形态）。
+  it("keeps the inline hard-error face visible while start generation is terminal-disabled (F-28 R2 × F-30)", () => {
+    mockWorkspaceWs({ connectionStatus: "connected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      sessionStatus: "confirmed",
+      protocolError: {
+        code: "OBSERVER_WRITE_REJECTED",
+        message: "observer connection cannot send write message start_generation",
+      },
+    });
+
+    renderCockpit();
+
+    expect(screen.getByTestId("start-generation")).toBeDisabled();
+    expect(screen.getByTestId("start-generation-blocked-hint")).toHaveTextContent(
+      /终态/,
+    );
+    expect(screen.getByTestId("hard-error-notice")).toHaveTextContent(
+      /OBSERVER_WRITE_REJECTED/,
+    );
+  });
+
+  // D（Task 7.1 / anchor_t21，设计 §6）：恢复三活跃态隐藏 generic 开始生成
+  // 出口；等待卡「启动新会话继续修订」经 C6.2 sendLcResumeFresh 显式 fresh
+  // （稳定 operation_id 一次用户动作一次；inflight 禁双击）；resolved 卡消
+  // 且 generic 出口复原（不永久屏蔽）。
+  it("anchor_t21_inbox_explicit_native_fresh_and_existing_guards", async () => {
+    const user = userEvent.setup();
+    const freshSends: Array<{
+      recovery_id: string;
+      operation_id: string;
+      provider_config: unknown;
+      reviewer_enabled: boolean;
+    }> = [];
+    const workspaceWs = mockWorkspaceWs({
+      connectionStatus: "connected",
+      sendLcResumeFresh: (recoveryId, operationId, providerConfig, reviewerEnabled) => {
+        freshSends.push({
+          recovery_id: recoveryId,
+          operation_id: operationId,
+          provider_config: providerConfig,
+          reviewer_enabled: reviewerEnabled,
+        });
+        return true;
+      },
+    });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      providers: { author: "codex", reviewer: "codex" },
+      reviewerEnabled: false,
+      lcResumeRecovery: lcResumeRecoveryFixture(),
+    });
+
+    renderCockpitWith(workspaceWs, "session_001");
+
+    // 恢复活跃期：generic「开始生成」被隐藏，恢复卡是唯一动作出口。
+    expect(screen.queryByTestId("start-generation")).toBeNull();
+    const card = screen.getByTestId("cockpit-inbox-item-lc_resume_recovery");
+    expect(card).toHaveTextContent("旧原生会话已失效");
+
+    const button = screen.getByRole("button", { name: "启动新会话继续修订" });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    expect(freshSends).toHaveLength(1);
+    expect(freshSends[0].operation_id).toBe("op-1");
+    expect(freshSends[0].recovery_id).toBe("rec-1");
+    expect(freshSends[0].reviewer_enabled).toBe(false);
+    expect(freshSends[0].provider_config).toEqual({
+      author: "codex",
+      reviewer: "codex",
+      review_rounds: 0,
+      permission_modes: { author: "auto", reviewer: "auto" },
+    });
+
+    // inflight 禁双击：durable 事实未推进前重复点击零出站。
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(freshSends).toHaveLength(1);
+
+    // resolved：恢复卡消失，generic「开始生成」复原（合法后续不被永久屏蔽）。
+    act(() => {
+      useWorkspaceStore.setState({
+        lcResumeRecovery: lcResumeRecoveryFixture({
+          state: "resolved",
+          last_operation: lcFreshOperationFixture({
+            state: "completed",
+            fresh_node: "node-2",
+          }),
+        }),
+      });
+    });
+    expect(screen.queryByTestId("cockpit-inbox-item-lc_resume_recovery")).toBeNull();
+    expect(screen.getByTestId("start-generation")).toBeEnabled();
+  });
+
+  it("anchor_t21_recovery_fresh_button_keeps_connection_guard", () => {
+    const workspaceWs = mockWorkspaceWs({ connectionStatus: "disconnected" });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      lcResumeRecovery: lcResumeRecoveryFixture(),
+    });
+
+    renderCockpitWith(workspaceWs, "session_001");
+
+    const button = screen.getByRole("button", { name: "启动新会话继续修订" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/连接已断开/)).toBeVisible();
+  });
+
+  // D fix-loop r1（P2，审查 2026-10-12）：终态守卫——fresh 链后端绕过
+  // engine.start_generation 的终态拒收（inbound resume_recovery 早退），前端
+  // 必须补位：confirmed/terminated 会话恢复卡按钮禁用＋如实提示＋点击零出站
+  //（与同屏 F-30 generic「开始生成」终态禁用不矛盾）。terminate 不清
+  // lc_resume_recovery，卡面事实保留但动作资格被终态封死。
+  it("anchor_t21_recovery_fresh_button_blocks_terminal_sessions_without_sending", async () => {
+    const user = userEvent.setup();
+    const freshSends: string[] = [];
+    const workspaceWs = mockWorkspaceWs({
+      connectionStatus: "connected",
+      sendLcResumeFresh: (recoveryId) => {
+        freshSends.push(recoveryId);
+        return true;
+      },
+    });
+    useWorkspaceStore.setState({
+      stage: "prepare_context",
+      lcResumeRecovery: lcResumeRecoveryFixture(),
+    });
+
+    for (const [status, hint] of [
+      ["confirmed", /会话已确认（终态）/],
+      ["terminated", /会话已终止（终态）/],
+    ] as const) {
+      freshSends.length = 0;
+      const { unmount } = renderCockpitWith(workspaceWs, "session_001");
+      act(() => {
+        useWorkspaceStore.setState({ sessionStatus: status });
+      });
+
+      const button = screen.getByRole("button", { name: "启动新会话继续修订" });
+      expect(button, `sessionStatus=${status}`).toBeDisabled();
+      // 提示收窄到恢复卡内（ChatInputBar 的 F-30 终态提示同文案同屏共存）。
+      expect(
+        within(screen.getByTestId("cockpit-inbox-item-lc_resume_recovery")).getByText(hint),
+      ).toBeVisible();
+      await user.click(button);
+      expect(freshSends, `sessionStatus=${status} 点击零出站`).toHaveLength(0);
+      unmount();
+    }
+  });
+});

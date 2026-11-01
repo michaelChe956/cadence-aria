@@ -1,0 +1,20 @@
+   Compiling cadence-aria v0.0.9 (/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.89s
+     Running unittests src/lib.rs (target/debug/deps/cadence_aria-cacabfd1eb982389)
+
+running 1 test
+[aria-choice-diag] claude received assistant tool_use AskUserQuestion tool_use_id=call_8900d4a9b30946788eed12c6
+[aria-choice-diag] claude received control_request AskUserQuestion request_id=cae0692c-9a5d-4226-9935-ccc1d0c76d25 tool_use_id=call_8900d4a9b30946788eed12c6
+[aria-choice-diag] bridge emitting choice_request id=cae0692c-9a5d-4226-9935-ccc1d0c76d25 source=ask_user_question options=3
+EVIDENCE choice_request id=cae0692c-9a5d-4226-9935-ccc1d0c76d25 options=[ChoiceOptionData { id: "opt_0", label: "Blue", description: Some("A calm, classic choice.") }, ChoiceOptionData { id: "opt_1", label: "Green", description: Some("A fresh, natural choice.") }, ChoiceOptionData { id: "opt_2", label: "Red", description: Some("A bold, vibrant choice.") }]
+EVIDENCE choice_response_sent
+[aria-choice-diag] bridge received choice_response id=cae0692c-9a5d-4226-9935-ccc1d0c76d25 selected=["opt_0"] free_text_present=false
+[aria-choice-diag] bridge matched pending choice_response id=cae0692c-9a5d-4226-9935-ccc1d0c76d25
+[aria-choice-diag] bridge resolved choice_request id=cae0692c-9a5d-4226-9935-ccc1d0c76d25 selected=["opt_0"] free_text_present=false
+[aria-choice-diag] claude got choice decision for control_request request_id=cae0692c-9a5d-4226-9935-ccc1d0c76d25 selected=["opt_0"] free_text_present=false
+[aria-choice-diag] claude writing control_response request_id=cae0692c-9a5d-4226-9935-ccc1d0c76d25 answer_keys=["Which color do you prefer?"]
+EVIDENCE completed output=smoke-ok
+test cross_cutting::claude_code_provider::tests::live_claude::live_claude_ask_user_question_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3371 filtered out; finished in 12.38s
+

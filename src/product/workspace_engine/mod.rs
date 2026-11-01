@@ -7,26 +7,25 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::provider_adapter::{
-    DEFAULT_PROVIDER_TIMEOUT_SECS, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START,
+    DEFAULT_PROVIDER_TIMEOUT_SECS, STRUCTURED_OUTPUT_END, STRUCTURED_OUTPUT_START_PREFIX,
 };
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderExecutionEvent,
     ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderPermissionMode,
-    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolResult, RiskLevel,
-    StreamingProviderAdapter, StreamingProviderInput,
+    ProviderSession, ProviderStatus, ProviderToolCall, ProviderToolPolicy, ProviderToolResult,
+    RiskLevel, StreamingProviderAdapter, StreamingProviderInput, UsageReportData,
 };
 use crate::cross_cutting::structured_output::{StructuredOutputError, StructuredOutputState};
-use crate::product::artifact_extraction::extract_artifact_content;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{
-    AppendSpecVersionInput, CreateWorkspaceSessionInput, IssueWorkItemPlanUpdate, LifecycleStore,
+    AppendSpecVersionInput, CreateWorkItemChildSessionInput, CreateWorkspaceSessionInput,
+    IssueWorkItemPlanUpdate, LifecycleStore,
 };
 use crate::product::models::{
-    AgentRole, ArtifactRef, DesignContextCapabilities, IssueWorkItemDependencyEdge,
-    IssueWorkItemPlan, LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail,
-    OutlineContextBlockerResolution, OutlineContextIndex, PermissionEvent,
+    AgentRole, ArtifactRef, IssueWorkItemDependencyEdge, IssueWorkItemPlan,
+    LifecycleConfirmationStatus, LifecycleWorkItemRecord, NodeDetail, PermissionEvent,
     PlanRepairSessionSnapshotDto, PlanRepairSessionStage, ProviderConversationRef,
     ProviderConversationRole, ProviderName, ProviderSnapshot, RepositoryProfileConfidence,
     VerificationCommand, VerificationCommandSafety, VerificationCommandSource,
@@ -39,8 +38,8 @@ use crate::product::models::{
     WorkspaceSessionStatus, WorkspaceType,
 };
 use crate::product::work_item_plan_store::{
-    WorkItemPlanStore, copy_draft_for_current_round, mark_draft_active,
-    mark_draft_record_superseded, next_batch_id, next_draft_id, next_generation_round_id,
+    WorkItemPlanStore, mark_draft_active, mark_draft_record_superseded, next_batch_id,
+    next_draft_id,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::product::work_item_split_engine::{
@@ -52,32 +51,47 @@ use crate::product::work_item_split_validator::{
 };
 use crate::protocol::contracts::{AdapterRole, ProviderType};
 use crate::web::types::GenerateWorkItemsRequest;
+#[cfg(test)]
+use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, AuthorDecision, ChoiceOption,
-    ChoiceQuestion, HumanConfirmDecision, NodeDetailSummary, ProviderConfigSnapshot,
-    RecoverableInterruptedOperation, RecoverableInterruptedRun, RepositoryProfileDto,
-    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
-    StructuredOutputDiagnostic, TimelineNode, TimelineNodeRetry, TimelineNodeRetryError,
-    TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto, VerificationCommandDto,
-    VerificationManualCheckDto, VerificationPlanDto, WorkItemBatchDecisionDto,
+    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, ChoiceOption, ChoiceQuestion,
+    NodeDetailSummary, ProviderConfigSnapshot, RecoverableInterruptedOperation,
+    RecoverableInterruptedRun, RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity,
+    ReviewGate, ReviewVerdict, ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode,
+    TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType,
+    ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
     WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload, WorkItemCandidateDto,
     WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload,
-    WorkItemDraftDecisionDto, WorkItemGenerationModeDto, WorkItemPlanCandidateDto,
-    WorkItemPlanCompileRecoveryActionDto, WorkItemPlanCompileReportPayload,
-    WorkItemPlanContextBlockerDto, WorkItemPlanContextBlockerPayload, WorkItemPlanDto,
-    WorkItemPlanOutlineCandidateDto, WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem,
-    WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
-    WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage,
-    WsCheckpointDto, WsMessageDto, WsOutMessage, WsProviderConfig,
+    WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,
+    WorkItemPlanCompileReportPayload, WorkItemPlanContextBlockerDto,
+    WorkItemPlanContextBlockerPayload, WorkItemPlanDto, WorkItemPlanOutlineCandidateDto,
+    WorkItemPlanReviewAction, WorkItemPlanReviewAffectedItem, WorkItemPlanReviewComplete,
+    WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
+    WorkItemSplitOptionsDto, WorkspaceStage as WsWorkspaceStage, WsCheckpointDto, WsMessageDto,
+    WsOutMessage, WsProviderConfig,
 };
 
+mod advance;
+mod advance_split;
+#[cfg(test)]
+pub(crate) use advance::{
+    AdvanceInitializationFailpoint, AdvanceInitializationFailpointMode,
+    register_advance_initialization_failpoint,
+};
+pub mod aggregate_output_parser;
 mod artifact_constraints;
+mod artifact_selection;
 mod author_confirm;
 mod compile;
+pub(crate) mod compile_failure_surface;
 mod compile_parse;
+pub(crate) mod contract_autorepair;
+pub(crate) mod contract_prerevision;
 mod controls;
+pub(crate) mod conversational_gate;
+mod conversational_gate_recovery;
 mod decisions;
-mod draft_batch;
+pub(crate) mod draft_batch;
 mod human_presentation;
 mod interrupted_run_recovery;
 mod lifecycle;
@@ -85,8 +99,11 @@ mod lifecycle_recovery;
 mod linked_workspace_amendment;
 mod mappings;
 pub(crate) use mappings::permission_mode_for_provider_type;
+/// 成员归属唯一来源（REQ-WG-02）：候选结构门与 Final Compile 共用反查。
+pub(crate) mod member_attribution;
 mod parsers;
 mod plan_outline;
+pub(crate) mod plan_preflight;
 mod plan_projection;
 mod plan_repair;
 mod plan_repair_artifacts;
@@ -98,24 +115,58 @@ mod plan_repair_validation;
 mod prompts;
 mod provider_drive;
 mod review;
+mod run_boundary;
 mod session_state;
+mod single_candidate;
+pub(crate) mod single_candidate_structure_failure;
 mod types;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
-pub use human_presentation::{
-    HumanPresentationScope, SaveHumanPresentationRevision, save_human_presentation_revision,
+/// provider 零活动看门狗的**生产取值**常量（不受 `cfg(test)` 影响）——供
+/// crate 内跨模块断言（如 scratch 孤儿 TTL 与看门狗阈值的大小关系）链接生产值。
+/// 仅测试期断言消费，故非测试构建下该 re-export 视为未使用。
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use provider_drive::PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION;
+
+/// provider 启动握手停滞界（生效值 + 测试期注入口）。plan author 启动口
+/// (`start_work_item_plan_author`) 消费，见 `provider_drive::watchdog` 的取值理由。
+pub(crate) use provider_drive::provider_launch_stall_timeout;
+#[cfg(test)]
+pub(crate) use provider_drive::set_provider_launch_stall_timeout_for_test;
+
+pub use advance::{
+    AdvanceInput, AdvanceOutcome, AdvancePlanAdmission, AdvanceRecord, AdvanceStatus,
+    advance_admission_rejected,
 };
+pub use compile::{
+    CompileStores, InitialPlanCompileDurableContext, InitialPlanCompileInput,
+    PreparedInitialPlanCompile, execute_initial_plan_compile, prepare_initial_plan_compile,
+};
+pub use human_presentation::{WorkItemRepositoryGroup, group_work_items_by_target};
 pub use interrupted_run_recovery::{InterruptedRunRecoveryError, InterruptedRunRecoveryOutcome};
 pub use linked_workspace_amendment::restore_linked_workspace_snapshot;
 pub use plan_projection::{
-    CompiledWorkItemRevision, InitialPlanCompileOutcome, WorkspaceEngineError,
-    compile_plan_projection_bundle, compile_work_item_revision, plan_projection_input,
-    publish_initial_plan_revision,
+    CompiledWorkItemRevision, InitialPlanCompileOutcome, InitialPlanPublicationInput,
+    WorkspaceEngineError, compile_plan_projection_bundle, compile_work_item_revision,
+    plan_projection_input, prepare_initial_plan_publication, publish_initial_plan_revision,
+};
+// SG3a.1 §⑥ 移交：SG4b store 侧 commit/restore 对冻结 payload 同源
+// 复验消费（plan §0.6.2——lifecycle_store 不复刻冻结/摘要配方）。
+// freeze 有生产消费点（load_sealed_structure_generation）；其余三名仅
+// 测试构建消费（sg_04b fixture 同源复验），门控以免非测试构建 unused。
+pub(crate) use plan_projection::freeze_persisted_structure_report;
+#[cfg(test)]
+pub(crate) use plan_projection::{
+    PLANNING_STRUCTURE_RULE_VERSION, compute_planning_context_digest,
+    planning_structure_items_from_ir,
+};
+pub use review::policy_routing::{
+    GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome,
 };
 pub use types::{
-    ArtifactUpdateEvent, AuthorDecisionOutcome, EngineEvent, LinkedWorkspaceAmendmentTarget,
+    ArtifactUpdateEvent, EngineEvent, LinkedWorkspaceAmendmentTarget,
     LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,
     SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
     WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceConfirmOutcome,
@@ -123,9 +174,29 @@ pub use types::{
 };
 
 pub(crate) use artifact_constraints::*;
+pub(crate) use artifact_selection::*;
+
+#[cfg(test)]
+pub(crate) async fn single_candidate_compile_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+#[cfg(test)]
+pub(crate) use compile::SingleCandidateCompileCheckpoint;
 #[cfg(test)]
 pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
+pub(crate) use conversational_gate::{
+    HumanGateCloseDecision, HumanGateCloseOutcome, HumanGateCommandOutcome, HumanGateFeedbackInput,
+    ScManualRevisionResult, exclude_only_feedback_requested, normalized_finding_keys,
+};
+pub(crate) use conversational_gate_recovery::{
+    CandidateRecoveryCommand, CandidateRecoveryOutcome, HUMAN_GATE_PROVIDER_MAX_ATTEMPTS,
+    HumanGateRecoveryAction, provider_run_kind_for_human_gate,
+};
 pub(crate) use lifecycle_recovery::*;
 pub(crate) use mappings::*;
 pub(crate) use parsers::*;
@@ -137,13 +208,19 @@ pub(crate) use plan_repair_recovery::*;
 pub(crate) use plan_repair_transaction::*;
 pub(crate) use plan_repair_validation::*;
 pub(crate) use prompts::*;
+pub(crate) use review::trusted_review_comments;
 #[cfg(test)]
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
+pub(crate) use single_candidate::{
+    SingleCandidateAuthorCompletion, SingleCandidateGenerationDecisionInput,
+    select_internal_generation_mode,
+};
 pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
-    ArtifactRetryContext, AuthorPromptMode, OutlineRevisionCrashPoint,
-    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanRepairCrashPoint,
+    ArtifactRetryContext, AuthorPromptMode, HttpConfirmDisposition, OutlineRevisionCrashPoint,
+    OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanAuthorOutputContract,
+    PlanRepairCrashPoint, PlanningCompileFailure, PlanningCompileFailureKind, ProviderRunKind,
     ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
     StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
     WorkItemPlanOutlineRevisionSource,

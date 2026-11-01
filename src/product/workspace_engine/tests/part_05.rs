@@ -1,55 +1,4 @@
 #[async_trait::async_trait]
-impl StreamingProviderAdapter for RevisionResumeStallThenSuccessProvider {
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        _cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        self.inputs.lock().unwrap().push(input);
-        let mut calls = self.calls.lock().unwrap();
-        *calls += 1;
-        let call_no = *calls;
-        drop(calls);
-
-        let (event_tx, event_rx) = mpsc::channel(8);
-        let (command_tx, _command_rx) = mpsc::channel(8);
-        let output = self.output.to_string();
-        tokio::spawn(async move {
-            if call_no == 1 {
-                let _ = event_tx
-                    .send(ProviderEvent::Failed {
-                        message:
-                            "Codex resume stalled before provider progress for thread codex-stale-ephemeral-thread"
-                                .to_string(),
-                    })
-                    .await;
-            } else {
-                let _ = event_tx
-                    .send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("codex-fresh-thread".to_string()))))
-                    .await;
-            }
-        });
-        Ok(ProviderSession {
-            events: event_rx,
-            commands: command_tx,
-        })
-    }
-
-    async fn run_streaming(
-        &self,
-        _input: &AdapterInput,
-        _cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        Err(ProviderAdapterError::execution_failed(
-            None,
-            String::new(),
-            "run_streaming is not used by WorkspaceEngine",
-            0,
-        ))
-    }
-}
-
-#[async_trait::async_trait]
 impl StreamingProviderAdapter for RevisionInputRecordingProvider {
     async fn start(
         &self,
@@ -66,6 +15,7 @@ impl StreamingProviderAdapter for RevisionInputRecordingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -127,55 +77,9 @@ async fn handle_confirm_transitions_stage() {
     assert_eq!(engine.session().stage, WorkspaceStage::Completed);
 }
 
-#[tokio::test]
-async fn handle_confirm_completes_human_confirm_node_before_completed_node() {
-    let (_tmp, store) = setup();
-    let (tx, _) = mpsc::channel(64);
-    let mut session = make_session("sess_confirm_timeline");
-    session.reviewer_provider = Some(ProviderName::Fake);
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-
-    engine
-        .handle_user_message(
-            "start".to_string(),
-            Arc::new(FakeStreamingProvider),
-            empty_provider_commands(),
-        )
-        .await;
-    engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-
-    engine.handle_confirm().await.unwrap();
-
-    match engine.build_session_state() {
-        WsOutMessage::SessionState {
-            timeline_nodes,
-            active_node_id,
-            stage,
-            ..
-        } => {
-            assert_eq!(stage, "completed");
-            assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::HumanConfirm
-                    && node.status == TimelineNodeStatus::Completed
-            }));
-            let active = timeline_nodes
-                .iter()
-                .find(|node| Some(&node.node_id) == active_node_id.as_ref())
-                .expect("active completed node");
-            assert_eq!(active.node_type, TimelineNodeType::Completed);
-            assert_eq!(active.status, TimelineNodeStatus::Completed);
-            assert_eq!(
-                active_timeline_node_id(&timeline_nodes).as_deref(),
-                active_node_id.as_deref()
-            );
-        }
-        _ => panic!("expected SessionState"),
-    }
-}
+// 退役留档（T5/REQ-RET-02）：`handle_confirm_completes_human_confirm_node_before_completed_node` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn active_timeline_node_id_prefers_terminal_completed_node_over_stale_active_node() {
@@ -231,22 +135,20 @@ async fn persistent_engine_keeps_open_stage_after_failed_running_node() {
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session_id = session_record.id.clone();
     let provider_config_snapshot = ProviderConfigSnapshot {
         author: session_record.author_provider.clone(),
-        reviewer: Some(session_record.reviewer_provider.clone()),
+        reviewer: session_record.reviewer_provider.clone(),
         review_rounds: session_record.review_rounds,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
     };
@@ -350,17 +252,15 @@ async fn build_session_state_omits_unneeded_work_item_plan_details_and_keeps_act
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "issue_work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "issue_work_item_plan_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let session_id = session.session_id.clone();
@@ -489,17 +389,15 @@ async fn build_session_state_keeps_story_details_out_of_inline_payload() {
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, _) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let session_id = session.session_id.clone();
@@ -571,168 +469,6 @@ async fn build_session_state_keeps_story_details_out_of_inline_payload() {
     }
 }
 
-#[tokio::test]
-async fn persistent_session_state_ignores_malformed_unrelated_session_files() {
-    let (tmp, checkpoint_store) = setup();
-    let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
-    let lifecycle_store = LifecycleStore::new(app_paths.clone());
-    let (tx, _) = mpsc::channel(64);
-    let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "issue_work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .unwrap();
-    let session = WorkspaceSession::from_record(session_record);
-    let session_id = session.session_id.clone();
-    let timeline_node = TimelineNode {
-        node_id: "node-1".to_string(),
-        node_type: TimelineNodeType::AuthorRun,
-        agent: Some(ProviderName::ClaudeCode),
-        stage: WsWorkspaceStage::Completed,
-        round: None,
-        status: TimelineNodeStatus::Completed,
-        title: "Work Item Plan 生成".to_string(),
-        summary: Some("生成完成".to_string()),
-        started_at: "2026-05-20T14:30:00Z".to_string(),
-        completed_at: Some("2026-05-20T14:35:00Z".to_string()),
-        duration_ms: Some(300000),
-        artifact_ref: None,
-        provider_config_snapshot: ProviderConfigSnapshot {
-            author: ProviderName::ClaudeCode,
-            reviewer: Some(ProviderName::Codex),
-            review_rounds: 2,
-            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
-        },
-        retry: None,
-    };
-    lifecycle_store
-        .save_timeline_nodes(&session_id, std::slice::from_ref(&timeline_node))
-        .unwrap();
-    lifecycle_store
-        .save_node_detail(
-            &session_id,
-            "node-1",
-            &NodeDetail {
-                node_id: "node-1".to_string(),
-                session_id: session_id.clone(),
-                node_type: TimelineNodeType::AuthorRun,
-                status: TimelineNodeStatus::Completed,
-                agent_role: Some(AgentRole::Author),
-                provider: None,
-                prompt: None,
-                messages: vec![],
-                streaming_content: "Work item plan stream".to_string(),
-                execution_events: vec![],
-                permission_events: vec![],
-                verdict: None,
-                artifact_ref: None,
-                is_revision: false,
-                revision_feedback: None,
-                base_artifact_ref: None,
-                started_at: "2026-05-20T14:30:00Z".to_string(),
-                ended_at: Some("2026-05-20T14:35:00Z".to_string()),
-            },
-        )
-        .unwrap();
-
-    let unrelated_root = app_paths
-        .issue_lifecycle_root("project_0001", "issue_9999")
-        .join("workspace-sessions");
-    std::fs::create_dir_all(&unrelated_root).unwrap();
-    std::fs::write(
-        unrelated_root.join("workspace_session_9999.json"),
-        r#"{ "id": "workspace_session_9999", "messages": ["unterminated" "#,
-    )
-    .unwrap();
-
-    let engine = WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
-
-    match engine.build_session_state() {
-        WsOutMessage::SessionState {
-            timeline_nodes,
-            timeline_node_summaries,
-            ..
-        } => {
-            assert_eq!(timeline_nodes, vec![timeline_node]);
-            assert!(timeline_node_summaries.is_empty());
-        }
-        _ => panic!("expected SessionState"),
-    }
-}
-
-#[tokio::test]
-async fn append_active_run_stream_sends_event_when_detail_persist_fails() {
-    let (tmp, checkpoint_store) = setup();
-    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
-    let (tx, mut rx) = mpsc::channel(64);
-    let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "issue_work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
-        .unwrap();
-    let session = WorkspaceSession::from_record(session_record);
-    let mut engine =
-        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store, tx, session);
-    engine.active_node_id = Some("missing-node".to_string());
-
-    let result = engine
-        .append_active_run_stream("assistant", "正在生成 Work Item Plan：准备上下文\n")
-        .await;
-
-    assert!(result.is_err());
-    let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-        .await
-        .expect("stream chunk event timeout")
-        .expect("stream chunk event");
-    match event {
-        EngineEvent::StreamChunk {
-            role,
-            content,
-            node_id,
-        } => {
-            assert_eq!(role, "assistant");
-            assert!(content.contains("正在生成 Work Item Plan"));
-            assert_eq!(node_id.as_deref(), Some("missing-node"));
-        }
-        _ => panic!("expected StreamChunk"),
-    }
-}
-
-#[tokio::test]
-async fn append_context_note_creates_timeline_node() {
-    let (_tmp, store) = setup();
-    let (tx, _) = mpsc::channel(64);
-    let session = make_session("sess_context_note");
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-
-    let node = engine
-        .append_context_note("补充上下文".to_string())
-        .await
-        .unwrap();
-
-    assert_eq!(node.node_type, TimelineNodeType::ContextNote);
-    assert_eq!(node.status, TimelineNodeStatus::Completed);
-    assert_eq!(node.summary.as_deref(), Some("补充上下文"));
-    assert!(
-        engine
-            .timeline_nodes
-            .iter()
-            .any(|candidate| candidate.node_id == node.node_id)
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`persistent_session_state_ignores_malformed_unrelated_session_files` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

@@ -7,7 +7,7 @@ Story/Design workspace 的 AuthorConfirm 阶段以 Canvas 产物审核面板承�
 
 ### Requirement: Canvas 产物审核面板
 
-Story/Design workspace 进入 AuthorConfirm 阶段时，必须在右侧自动滑出产物审核面板展示当前版本 artifact；左侧执行节点栏全程保留；面板随用户开始反馈或新一轮运行收起。
+Story/Design workspace 进入 AuthorConfirm 阶段时，MUST 在右侧自动滑出产物审核面板展示当前版本 artifact；左侧执行节点栏全程保留；面板随用户开始反馈或新一轮运行收起。
 
 #### Scenario: 产出完成自动滑出
 - **WHEN** author 产出完成（含修订完成、review 报告回来）进入 AuthorConfirm 阶段
@@ -43,7 +43,7 @@ Story/Design workspace 进入 AuthorConfirm 阶段时，必须在右侧自动滑
 
 ### Requirement: 三动作视觉分层
 
-终局确认动作与迭代操作必须在位置与样式上明确分层；「发送反馈」不得与终局确认按钮并排呈现。
+终局确认动作与迭代操作 MUST 在位置与样式上明确分层；「发送反馈」不得与终局确认按钮并排呈现。
 
 #### Scenario: 终局确认对在面板操作条
 - **WHEN** 面板展示时
@@ -55,7 +55,7 @@ Story/Design workspace 进入 AuthorConfirm 阶段时，必须在右侧自动滑
 
 ### Requirement: Spec 工作台视觉规范
 
-Spec 工作台视觉迁移到 Claymorphism 蓝紫橙规范；设计规范以 design-system/MASTER.md 持久化为全站唯一事实源。
+Spec 工作台视觉 MUST 迁移到 Claymorphism 蓝紫橙规范；设计规范 MUST 以 design-system/MASTER.md 持久化为全站唯一事实源。
 
 #### Scenario: token 映射落地
 - **WHEN** 实施完成后检查页面

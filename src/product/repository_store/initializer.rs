@@ -1,3 +1,18 @@
+//! 单仓 repository 初始化 provider 驱动。
+//!
+//! `ClaudeRepositoryInitializer` 仅供**单仓** registration 路径
+//! (`RepositoryRegistrationCoordinator`)使用,在单个成员仓 git root 下运行
+//! Claude Code 初始化命令。聚合初始化(`AggregateInitializationCoordinator`)
+//! 走独立的 `GatewayBackedAggregateProviderTurnDriver` + `AggregateAssetPublisher`,
+//! **不**复用本初始化器,也不调用单仓 `git_finalize` 切点——聚合 provider turn
+//! 经 `LogicalCodebaseProviderGateway` 启动,产出只发布到 `.aria/aggregate/**`。
+//! 该隔离由两条行为/可达性回归锁锁定（Task 3.2 起替代原源码 token
+//! 扫描）：`aggregate_initialization_coordinator::tests::
+//! aggregate_root_contract_does_not_reuse_repository_registration_or_git_finalize`
+//! （coordinator 级）与 `web::handlers::aggregate_initialization::tests::
+//! shared_executor_cannot_reach_repository_registration_or_git_finalize`
+//! （生产接线可达性级）。
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -22,6 +37,12 @@ pub struct ClaudeRepositoryInitializer {
     gate: Arc<ProviderAvailabilityGate>,
     registry: Arc<ProviderRegistry>,
     output_limit: usize,
+    /// Task 11:逻辑代码库 aggregate 初始化 provider turn 的唯一启动入口。非空时,
+    /// 初始化命令的 streaming provider 启动改由 `LogicalCodebaseProviderGateway::
+    /// start_streaming` 完成;为 `None` 时保留既有直接 `adapter.start` 路径。
+    /// aggregate provider turn 在 Task 16 通过同一准备方法进入 gateway。
+    logical_provider_gateway:
+        Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>>,
 }
 
 impl ClaudeRepositoryInitializer {
@@ -34,11 +55,21 @@ impl ClaudeRepositoryInitializer {
             gate,
             registry,
             output_limit,
+            logical_provider_gateway: None,
         }
     }
 
-    // 存量大 Err 签名，待后续统一 Box 化重构；新代码不得新增此豁免
-    #[allow(clippy::result_large_err)]
+    /// 注入逻辑代码库 provider gateway(Task 11)。Web 接入 task 在聚合初始化路径
+    /// 构造 gateway 后调用此方法,使初始化 provider turn 经 gateway 启动并留 audit;
+    /// 未调用时保留直接 `adapter.start` 路径。
+    pub fn with_logical_provider_gateway(
+        mut self,
+        gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
+    ) -> Self {
+        self.logical_provider_gateway = Some(gateway);
+        self
+    }
+
     pub async fn initialize(
         &self,
         git_root: &Path,
@@ -81,6 +112,10 @@ impl ClaudeRepositoryInitializer {
                     )
                 })?;
             let input = StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::ClaudeCode,
                 role: AdapterRole::Executor,
                 prompt: command.to_string(),
@@ -145,7 +180,47 @@ impl ClaudeRepositoryInitializer {
             .await
     }
 
-    #[allow(clippy::result_large_err)]
+    /// Task 11:逻辑代码库 aggregate 初始化 provider turn 经 gateway 启动。与
+    /// `run_turn` 对称,但 session 改由 `LogicalCodebaseProviderGateway::start_streaming`
+    /// 产出,使初始化命令的真实 provider 启动唯一由 gateway 完成并留 audit。
+    ///
+    /// 调用方(Task 16/Web 接入)在构造 gateway 后,经 `gateway.validate` +
+    /// `ValidatedStreamingProviderInput::new` 组装 validated input 传入。传统/非
+    /// 逻辑初始化仍走 `run_turn` 的直接 `adapter.start` 路径。
+    #[allow(dead_code)]
+    async fn run_turn_via_gateway(
+        &self,
+        validated_input: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        command_index: usize,
+        command: &str,
+        command_timeout: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<RepositoryInitializationCommandSummary, RepositoryRegistrationError> {
+        let gateway = self
+            .logical_provider_gateway
+            .clone()
+            .expect("logical provider gateway must be injected before gateway turn");
+        let started = Instant::now();
+        let start = gateway.start_streaming(validated_input, cancellation.clone());
+        tokio::pin!(start);
+        let timeout = tokio::time::sleep(command_timeout);
+        tokio::pin!(timeout);
+        let session = tokio::select! {
+            _ = cancellation.cancelled() => {
+                return Err(command_failure(command_index, command, "initialization cancelled", true, self.output_limit));
+            }
+            _ = &mut timeout => {
+                return Err(command_failure(command_index, command, "initialization timed out before session start", true, self.output_limit));
+            }
+            result = &mut start => result.map_err(|error| {
+                command_failure(command_index, command, &error.to_string(), true, self.output_limit)
+            })?,
+        };
+        let remaining = command_timeout.saturating_sub(started.elapsed());
+        self.consume_session(session, command_index, command, remaining, cancellation)
+            .await
+    }
+
     async fn consume_session(
         &self,
         mut session: ProviderSession,
@@ -249,7 +324,13 @@ impl ClaudeRepositoryInitializer {
                         "Run the initialization command manually and resolve the requested interaction before retrying.",
                     ));
                 }
-                Some(ProviderEvent::StatusChanged(_)) | Some(ProviderEvent::ToolCall(_)) => {}
+                Some(ProviderEvent::StatusChanged(_))
+                | Some(ProviderEvent::ToolCall(_))
+                | Some(ProviderEvent::UsageReport(_))
+                | Some(ProviderEvent::ToolPolicyDecision(_))
+                | Some(ProviderEvent::ToolPolicyWarning(_))
+                | Some(ProviderEvent::ToolPolicyTerminated(_))
+                | Some(ProviderEvent::TerminalActivity(_)) => {}
                 None => {
                     return Err(command_failure_with_output(
                         command_index,

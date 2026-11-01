@@ -1,0 +1,32 @@
+{
+  "reason": "coding-drive 硬超时 6600000ms",
+  "code": 3,
+  "status": "running",
+  "stage": "code_review",
+  "current_work_item_id": "WI-001",
+  "gate_releases": 4,
+  "recovers": 0,
+  "permissions_approved": 0,
+  "choices_answered": 0,
+  "final_confirm_sent": false,
+  "review_events": [
+    {
+      "type": "code_review_complete",
+      "at": "2026-09-20T03:02:32.525Z",
+      "verdict": "request_changes"
+    }
+  ],
+  "stage_timeline": [
+    {
+      "stage": "coding",
+      "at": "2026-09-20T02:26:22.095Z",
+      "elapsedSec": 0
+    },
+    {
+      "stage": "code_review",
+      "at": "2026-09-20T03:02:32.529Z",
+      "elapsedSec": 2170
+    }
+  ],
+  "unknown_message_types": []
+}

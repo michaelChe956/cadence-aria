@@ -78,6 +78,7 @@ impl StreamingProviderAdapter for NonTransportReviewerFailureProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -377,4 +378,142 @@ async fn exhausted_reviewer_recovery_rejects_non_transport_terminal_reason() {
         Err(CodingWorkspaceEngineError::ProviderStream(message))
             if message == "coding_failed_review_recovery_state_changed"
     ));
+}
+
+/// 复现 codex/pi/claude 的 LC resume 审计拒绝:start 阶段(spawn 前)
+/// 确定性返回 ProviderParseError,零 child、零输出。
+struct StartRefusedReviewerProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for StartRefusedReviewerProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::parse_error(
+            "codex lc validated start: resume audit drifted or legacy record lacks lc \
+             projection; refusing to spawn a fresh child for an explicit LC resume",
+            "",
+            "",
+        ))
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by CodingWorkspaceEngine".to_string(),
+            0,
+        ))
+    }
+}
+
+/// T25(b45-t23 红因):spawn 前零输出失败(如 LC resume 审计拒绝)必须
+/// 走预留恢复路径——`recoverable_failed_code_review` 判据命中,
+/// `retry_review` 恢复成功且恢复轮 fresh spawn(不 resume 历史
+/// reviewer 会话)。修复前:调用面为零输出失败落空 raw 引用,毒化
+/// `raw_provider_output_refs.is_empty()` 判据 → 恢复认不出中断 →
+/// retry_review 撞 `coding_failed_review_recovery_requires_reservation`。
+#[tokio::test]
+async fn pre_start_zero_output_reviewer_failure_recovers_via_reserved_retry_review() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let first_cycle_error = engine
+        .execute_code_review_with_commands(&attempt, &StartRefusedReviewerProvider, &mut command_rx)
+        .await
+        .expect_err("pre-start refusal opens reviewer gate");
+    assert!(matches!(
+        &first_cycle_error,
+        CodingWorkspaceEngineError::ProviderStream(message)
+            if message.contains("resume audit drifted")
+    ));
+
+    let persisted = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("blocked attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
+    let gate = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reviewer gates")
+        .into_iter()
+        .find(|gate| gate.reason_code.as_deref() == Some("code_review_provider_interrupted"))
+        .expect("reviewer recovery gate");
+    let failed_run = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reviewer role runs")
+        .into_iter()
+        .find(|run| run.status == CodingRoleRunStatus::Failed)
+        .expect("failed reviewer run");
+    assert_eq!(
+        failed_run.reason_code.as_deref(),
+        Some("code_review_provider_interrupted")
+    );
+    // spawn 前零输出失败:无 ProviderStart 事件,也不落空 raw 引用。
+    assert!(
+        failed_run.raw_provider_output_refs.is_empty(),
+        "pre-start zero-output failure must not persist an empty raw output ref"
+    );
+    assert!(
+        store
+            .list_role_run_events(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &failed_run.id
+            )
+            .expect("role run events")
+            .iter()
+            .all(|event| event.event_type != CodingRoleRunEventType::ProviderStart)
+    );
+
+    // 恢复判据命中(修复前被空 raw 引用毒化 → None)。
+    let recovery = recoverable_failed_code_review(&store, &persisted)
+        .expect("recovery probe")
+        .expect("pre-start zero-output failure is recoverable");
+    assert_eq!(recovery.gate_id, gate.gate_id);
+    assert_eq!(recovery.stale_role_run_id, failed_run.id);
+
+    // retry_review 走预留路径恢复(修复前 requires_reservation fail-closed)。
+    let running = engine
+        .recover_failed_code_review(&gate.gate_id)
+        .await
+        .expect("reserved retry_review recovery");
+    assert_eq!(running.status, CodingAttemptStatus::Running);
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("gates after recovery")
+            .is_empty()
+    );
+
+    // 恢复轮 fresh spawn 成功:即使首轮曾记录 reviewer 会话,
+    // 契约(仅 Coder resume)下第二轮评审也不 resume。
+    let recovery_provider = TransportFailuresThenSuccessProvider::new(
+        0,
+        r#"{"verdict":"approve","summary":"reserved retry completed","findings":[]}"#,
+    );
+    let report = engine
+        .execute_code_review_with_commands(&running, &recovery_provider, &mut command_rx)
+        .await
+        .expect("reserved retry cycle succeeds");
+    assert_eq!(report.verdict, ReviewVerdict::Approve);
+    let inputs = recovery_provider.recorded_inputs();
+    assert!(!inputs.is_empty());
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.resume_provider_session_id.is_none()),
+        "recovery cycle reviewer invocations must be fresh (never resume)"
+    );
 }

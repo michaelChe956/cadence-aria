@@ -1,0 +1,634 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1c/codex/rep1",
+  "startedAt": "2026-09-08T13:41:53.807Z",
+  "finishedAt": "2026-09-08T13:58:36.381Z",
+  "elapsedSec": 1002.574,
+  "issue_id": "issue_0167",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0231",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.991,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.057,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 274.798,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 275.042,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 392.308,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 392.608,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 526.466,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 526.752,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 585.407,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 651.617,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 651.894,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 811.29,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 811.581,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 910.984,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 967.646,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 967.947,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1002.345,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 307.111,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 提供给 WI-002 的 CT-001 能力覆盖不足，缺少数据错误响应契约。",
+          "evidence": "edge WI-001 -> WI-002, contract_id CT-001, missing capability: GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data",
+          "required_action": "在 WI-001 的 CT-001 输出能力中补充该数据错误响应能力，或调整 WI-002 的需求为已供应能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 提供给 WI-003 的 CT-002 能力覆盖不足，缺少静态路径安全约束契约。",
+          "evidence": "edge WI-001 -> WI-003, contract_id CT-002, missing capability: static paths resolve safely within configurable staticRoot",
+          "required_action": "在 WI-001 的 CT-002 输出能力中补充静态路径安全解析能力，使 WI-003 的 require_all 输入可匹配。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 提供给 WI-003 的 CT-004 能力覆盖不足，缺少可注入渲染接口契约。",
+          "evidence": "edge WI-002 -> WI-003, contract_id CT-004, missing capabilities: script exports initLevelSelect({ document, fetchImpl })",
+          "required_action": "在 WI-002 的 CT-004 输出能力中补充 initLevelSelect 注入接口能力，或修正被分隔破坏的 capability 表达后重新匹配。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 443.221,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-002 的 CT-001 缺少 require_all 所需能力，导致契约供需不匹配。",
+          "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities: [GET /api/levels validates EXE-006 field constraints]",
+          "required_action": "在 WI-001 的 CT-001 输出契约能力中补齐 GET /api/levels validates EXE-006 field constraints，或调整依赖所需的契约能力声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-003 的 CT-002 缺少 require_all 所需能力，导致集成输入契约无法闭合。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities: [GET / serves page entry from configurable staticRoot]",
+          "required_action": "在 WI-001 的 CT-002 输出契约能力中补齐 GET / serves page entry from configurable staticRoot，或调整 WI-003 的输入契约能力声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 -> WI-003 的 CT-004 缺少 require_all 所需能力，导致页面脚本交接契约无法闭合。",
+          "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities: [page script path is web/level-select.js]",
+          "required_action": "在 WI-002 的 CT-004 输出契约能力中补齐 page script path is web/level-select.js，或调整 WI-003 的输入契约能力声明。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 585.407,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-002 的 CT-001 能力覆盖不满足 require_all，缺少数据错误响应契约。",
+          "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities: [GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data]",
+          "required_action": "将缺失能力加入 WI-001 的 CT-001 输出契约，或调整 WI-002 的 input contract 以匹配现有供应。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-003 的 CT-002 能力覆盖不满足 require_all，缺少静态路径安全边界契约。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities: [static paths resolve safely within configurable staticRoot]",
+          "required_action": "将缺失能力加入 WI-001 的 CT-002 输出契约，或调整 WI-003 的 input contract 以匹配现有供应。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 -> WI-003 的 CT-004 能力覆盖不满足 require_all，缺少可注入渲染接口契约。",
+          "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities: [fetchImpl }), script exports initLevelSelect({ document]",
+          "required_action": "修正 CT-004 能力表达并补齐 initLevelSelect({ document, fetchImpl }) 的完整供应能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 745.345,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 未向 WI-002 提供 CT-001 所需的数据错误能力，require_all 契约覆盖失败。",
+          "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities [GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data]; provided_capabilities [unsupported API method returns 405 JSON error]。",
+          "required_action": "在 WI-001 的 CT-001 输出契约中补充精确 capability：GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 未向 WI-003 提供 CT-002 所需的静态路径安全能力，require_all 契约覆盖失败。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities [static paths resolve safely within configurable staticRoot]; provided_capabilities [missing static resource returns 404 text response]。",
+          "required_action": "在 WI-001 的 CT-002 输出契约中补充精确 capability：static paths resolve safely within configurable staticRoot。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 未向 WI-003 提供 CT-004 所需的渲染初始化能力；且 CT-004 的 required_capabilities 存在对象语法被拆分成的两个不完整 capability。",
+          "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities [fetchImpl }), script exports initLevelSelect({ document]; WI-002 provided_capabilities [DOM renderer shows readable error without blank page]。",
+          "required_action": "将 WI-003 对 CT-004 的 capability 归并为一个合法能力字符串（建议 script exports initLevelSelect({ document, fetchImpl })），并在 WI-002 的 CT-004 输出契约中提供该能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "input_contracts[contract_id=CT-004].required_capabilities; output_contracts[contract_id=CT-004].capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 910.983,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-002 的 CT-001 契约缺少必需能力。",
+          "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities [GET /api/levels returns 200 with top-level array of five level records]",
+          "required_action": "在 WI-001 CT-001 输出能力中补充该 capability，或将 WI-002 的 required_capabilities 调整为已供应且兼容的能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-001 -> WI-003 的 CT-002 契约缺少必需能力。",
+          "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities [GET / serves page entry from configurable staticRoot]",
+          "required_action": "在 WI-001 CT-002 输出能力中补充该 capability，或将 WI-003 的 required_capabilities 调整为已供应且兼容的能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 -> WI-003 的 CT-004 契约缺少必需能力。",
+          "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities [page script path is web/level-select.js]",
+          "required_action": "在 WI-002 CT-004 输出能力中补充该 capability，或将 WI-003 的 required_capabilities 调整为已供应且兼容的能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 6,
+      "elapsedSec": 1002.345,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "Edge WI-001 -> WI-002 的 CT-001 缺少必需能力：GET /api/levels returns 200 with top-level array of five level records。",
+          "evidence": "Projection capability_coverage 显示 from WI-001 to WI-002, contract_id CT-001, missing_capabilities=[GET /api/levels returns 200 with top-level array of five level records]；WI-002 input_contracts 的 compatibility_policy 为 require_all。",
+          "required_action": "在 WI-001 的 CT-001 output_contracts 中补充该成功响应能力，或调整依赖契约需求与实现契约一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-001].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "Edge WI-001 -> WI-003 的 CT-002 缺少必需能力：GET / serves page entry from configurable staticRoot。",
+          "evidence": "Projection capability_coverage 显示 from WI-001 to WI-003, contract_id CT-002, missing_capabilities=[GET / serves page entry from configurable staticRoot]；WI-003 input_contracts 的 compatibility_policy 为 require_all。",
+          "required_action": "在 WI-001 的 CT-002 output_contracts 中补充该首页服务能力，或将 WI-003 的 required_capabilities 修正为当前契约实际承诺且集成验收覆盖的能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "Edge WI-002 -> WI-003 的 CT-004 缺少必需能力：page script path is web/level-select.js。",
+          "evidence": "Projection capability_coverage 显示 from WI-002 to WI-003, contract_id CT-004, missing_capabilities=[page script path is web/level-select.js]；WI-003 input_contracts 的 compatibility_policy 为 require_all。",
+          "required_action": "在 WI-002 的 CT-004 output_contracts 中补充页面脚本路径能力，或调整 WI-003 的 required_capabilities 与前端契约实际供给一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "WI-001 提供给 WI-002 的 CT-001 能力覆盖不足，缺少数据错误响应契约。",
+      "evidence": "edge WI-001 -> WI-002, contract_id CT-001, missing capability: GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data",
+      "required_action": "在 WI-001 的 CT-001 输出能力中补充该数据错误响应能力，或调整 WI-002 的需求为已供应能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 提供给 WI-003 的 CT-002 能力覆盖不足，缺少静态路径安全约束契约。",
+      "evidence": "edge WI-001 -> WI-003, contract_id CT-002, missing capability: static paths resolve safely within configurable staticRoot",
+      "required_action": "在 WI-001 的 CT-002 输出能力中补充静态路径安全解析能力，使 WI-003 的 require_all 输入可匹配。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 提供给 WI-003 的 CT-004 能力覆盖不足，缺少可注入渲染接口契约。",
+      "evidence": "edge WI-002 -> WI-003, contract_id CT-004, missing capabilities: script exports initLevelSelect({ document, fetchImpl })",
+      "required_action": "在 WI-002 的 CT-004 输出能力中补充 initLevelSelect 注入接口能力，或修正被分隔破坏的 capability 表达后重新匹配。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-002 的 CT-001 缺少 require_all 所需能力，导致契约供需不匹配。",
+      "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities: [GET /api/levels validates EXE-006 field constraints]",
+      "required_action": "在 WI-001 的 CT-001 输出契约能力中补齐 GET /api/levels validates EXE-006 field constraints，或调整依赖所需的契约能力声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-003 的 CT-002 缺少 require_all 所需能力，导致集成输入契约无法闭合。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities: [GET / serves page entry from configurable staticRoot]",
+      "required_action": "在 WI-001 的 CT-002 输出契约能力中补齐 GET / serves page entry from configurable staticRoot，或调整 WI-003 的输入契约能力声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 -> WI-003 的 CT-004 缺少 require_all 所需能力，导致页面脚本交接契约无法闭合。",
+      "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities: [page script path is web/level-select.js]",
+      "required_action": "在 WI-002 的 CT-004 输出契约能力中补齐 page script path is web/level-select.js，或调整 WI-003 的输入契约能力声明。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-002 的 CT-001 能力覆盖不满足 require_all，缺少数据错误响应契约。",
+      "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities: [GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data]",
+      "required_action": "将缺失能力加入 WI-001 的 CT-001 输出契约，或调整 WI-002 的 input contract 以匹配现有供应。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-003 的 CT-002 能力覆盖不满足 require_all，缺少静态路径安全边界契约。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities: [static paths resolve safely within configurable staticRoot]",
+      "required_action": "将缺失能力加入 WI-001 的 CT-002 输出契约，或调整 WI-003 的 input contract 以匹配现有供应。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 -> WI-003 的 CT-004 能力覆盖不满足 require_all，缺少可注入渲染接口契约。",
+      "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities: [fetchImpl }), script exports initLevelSelect({ document]",
+      "required_action": "修正 CT-004 能力表达并补齐 initLevelSelect({ document, fetchImpl }) 的完整供应能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 未向 WI-002 提供 CT-001 所需的数据错误能力，require_all 契约覆盖失败。",
+      "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities [GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data]; provided_capabilities [unsupported API method returns 405 JSON error]。",
+      "required_action": "在 WI-001 的 CT-001 输出契约中补充精确 capability：GET /api/levels returns 500 with LEVEL_DATA_UNAVAILABLE JSON for invalid data。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 未向 WI-003 提供 CT-002 所需的静态路径安全能力，require_all 契约覆盖失败。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities [static paths resolve safely within configurable staticRoot]; provided_capabilities [missing static resource returns 404 text response]。",
+      "required_action": "在 WI-001 的 CT-002 输出契约中补充精确 capability：static paths resolve safely within configurable staticRoot。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 未向 WI-003 提供 CT-004 所需的渲染初始化能力；且 CT-004 的 required_capabilities 存在对象语法被拆分成的两个不完整 capability。",
+      "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities [fetchImpl }), script exports initLevelSelect({ document]; WI-002 provided_capabilities [DOM renderer shows readable error without blank page]。",
+      "required_action": "将 WI-003 对 CT-004 的 capability 归并为一个合法能力字符串（建议 script exports initLevelSelect({ document, fetchImpl })），并在 WI-002 的 CT-004 输出契约中提供该能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "input_contracts[contract_id=CT-004].required_capabilities; output_contracts[contract_id=CT-004].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-002 的 CT-001 契约缺少必需能力。",
+      "evidence": "edge WI-001 -> WI-002; contract_id CT-001; missing_capabilities [GET /api/levels returns 200 with top-level array of five level records]",
+      "required_action": "在 WI-001 CT-001 输出能力中补充该 capability，或将 WI-002 的 required_capabilities 调整为已供应且兼容的能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 -> WI-003 的 CT-002 契约缺少必需能力。",
+      "evidence": "edge WI-001 -> WI-003; contract_id CT-002; missing_capabilities [GET / serves page entry from configurable staticRoot]",
+      "required_action": "在 WI-001 CT-002 输出能力中补充该 capability，或将 WI-003 的 required_capabilities 调整为已供应且兼容的能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 -> WI-003 的 CT-004 契约缺少必需能力。",
+      "evidence": "edge WI-002 -> WI-003; contract_id CT-004; missing_capabilities [page script path is web/level-select.js]",
+      "required_action": "在 WI-002 CT-004 输出能力中补充该 capability，或将 WI-003 的 required_capabilities 调整为已供应且兼容的能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "Edge WI-001 -> WI-002 的 CT-001 缺少必需能力：GET /api/levels returns 200 with top-level array of five level records。",
+      "evidence": "Projection capability_coverage 显示 from WI-001 to WI-002, contract_id CT-001, missing_capabilities=[GET /api/levels returns 200 with top-level array of five level records]；WI-002 input_contracts 的 compatibility_policy 为 require_all。",
+      "required_action": "在 WI-001 的 CT-001 output_contracts 中补充该成功响应能力，或调整依赖契约需求与实现契约一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-001].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "Edge WI-001 -> WI-003 的 CT-002 缺少必需能力：GET / serves page entry from configurable staticRoot。",
+      "evidence": "Projection capability_coverage 显示 from WI-001 to WI-003, contract_id CT-002, missing_capabilities=[GET / serves page entry from configurable staticRoot]；WI-003 input_contracts 的 compatibility_policy 为 require_all。",
+      "required_action": "在 WI-001 的 CT-002 output_contracts 中补充该首页服务能力，或将 WI-003 的 required_capabilities 修正为当前契约实际承诺且集成验收覆盖的能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "Edge WI-002 -> WI-003 的 CT-004 缺少必需能力：page script path is web/level-select.js。",
+      "evidence": "Projection capability_coverage 显示 from WI-002 to WI-003, contract_id CT-004, missing_capabilities=[page script path is web/level-select.js]；WI-003 input_contracts 的 compatibility_policy 为 require_all。",
+      "required_action": "在 WI-002 的 CT-004 output_contracts 中补充页面脚本路径能力，或调整 WI-003 的 required_capabilities 与前端契约实际供给一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-004].capabilities"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 21687,
+      "output_tokens": 568,
+      "cache_read_tokens": 64,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "single-candidate approval compile failed; human gate remains open",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-08T13:51:39.214Z",
+      "elapsedSec": 585.409,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_008",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-31483f5269",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T13:51:39.216Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-08T13:57:04.791Z",
+      "elapsedSec": 910.984,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_011",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-c95e45c346",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T13:57:04.791Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-08T13:58:36.152Z",
+      "elapsedSec": 1002.345,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_013",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-08T13:58:36.152Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-31483f5269",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_c6516d20-5a53-4ba6-aa8b-9f3c0338f0aa",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_004"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-c95e45c346",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_209cdd45-54a1-47b6-a73c-b47d6e1680e0",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_006"
+    }
+  ],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 1002574,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.066,
+    "1:running": 273.741,
+    "2:cross_review": 0.244,
+    "3:prepare_context": 117.266,
+    "4:cross_review": 0.3,
+    "5:prepare_context": 133.858,
+    "6:cross_review": 0.286,
+    "7:prepare_context": 58.655,
+    "8:human_confirm": 66.21,
+    "9:cross_review": 0.277,
+    "10:prepare_context": 159.396,
+    "11:cross_review": 0.291,
+    "12:prepare_context": 99.403,
+    "13:human_confirm": 56.662,
+    "14:cross_review": 0.301,
+    "15:prepare_context": 34.398,
+    "16:human_confirm": 0.229
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

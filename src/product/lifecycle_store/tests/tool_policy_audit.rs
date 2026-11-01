@@ -1,0 +1,1431 @@
+// Task 3.2（REQ-ENV-09 GC11）：LifecycleStore durable tool-policy-run-audit 分区
+// 与四类 canonical 事件的 schema/时序/坏行语义测试。
+// 经 include! 引入 tests.rs（large_file_guard 1200 行红线）。
+
+use crate::cross_cutting::tool_policy_audit::{
+    DurableToolPolicyEvent, ToolPolicyAuditError, ToolPolicyAuditLine, ToolPolicyAuditSink,
+};
+
+/// durable sink fixture：真实 LifecycleStore（临时 .aria 根）。
+fn test_tool_policy_audit_sink() -> super::LifecycleStore {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+        tmp.path().join(".aria"),
+    ))
+}
+
+fn provider_start_event(provider: &str) -> DurableToolPolicyEvent {
+    DurableToolPolicyEvent::ProviderStart(
+        crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+            provider: provider.to_string(),
+            role: "orchestrator".to_string(),
+            workspace_session_id: "ws-1".to_string(),
+            provider_session_id: "thread-1".to_string(),
+            tool_policy_canonical_digest: format!("sha256:{provider}-digest"),
+            argv: vec!["--mode".to_string(), "rpc".to_string()],
+            sandbox: None,
+            approval_policy: None,
+            provider_version: "provider 1.2.3".to_string(),
+            adapter_dialect: "codex-app-server-rpc".to_string(),
+            lc_projection: None,
+        },
+    )
+}
+
+fn approval_decision_event(category: &str, request_id: &str) -> DurableToolPolicyEvent {
+    DurableToolPolicyEvent::ApprovalDecision(
+        crate::cross_cutting::tool_policy_audit::ApprovalDecisionAudit {
+            request_id: request_id.to_string(),
+            category: category.to_string(),
+            server_name: None,
+            tool_name: Some("command".to_string()),
+            decision: "decline".to_string(),
+            reason_code: "policy_denies_write_side".to_string(),
+            policy_digest: "sha256:codex-digest".to_string(),
+        },
+    )
+}
+
+fn protocol_warning_event(reason_code: &str) -> DurableToolPolicyEvent {
+    DurableToolPolicyEvent::ProtocolWarning(
+        crate::cross_cutting::tool_policy_audit::ProtocolWarningAudit {
+            reason_code: reason_code.to_string(),
+            method: "item/unknownKind/requestApproval".to_string(),
+            occurrence: 1,
+        },
+    )
+}
+
+fn session_terminated_event(reason_code: &str) -> DurableToolPolicyEvent {
+    DurableToolPolicyEvent::SessionTerminated(
+        crate::cross_cutting::tool_policy_audit::SessionTerminatedAudit {
+            reason_code: reason_code.to_string(),
+        },
+    )
+}
+fn file_change_detected_event(item_id: &str, source_method: &str) -> DurableToolPolicyEvent {
+    DurableToolPolicyEvent::FileChangeDetected(
+        crate::cross_cutting::tool_policy_audit::FileChangeDetectedAudit {
+            item_id: item_id.to_string(),
+            summary: "src/main.rs (modify)".to_string(),
+            source_method: source_method.to_string(),
+            disposition: crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DISPOSITION
+                .to_string(),
+            policy_digest: "sha256:codex-digest".to_string(),
+        },
+    )
+}
+
+/// T13：第五类 canonical 事件 `file_change_detected`（Author 检测型岗位）——
+/// 只能追加在 provider_start 首行之后；durable 序列化键名冻结；必需字段
+/// 缺失 = 解析失败（不以 `#[serde(default)]` 宽容）。既有四类事件与分区键
+/// `(workspace_session_id, role_run_seq)` 不变。
+#[tokio::test]
+async fn tool_policy_audit_file_change_detected_follows_provider_start_and_freezes_fields() {
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-t13", 3, provider_start_event("codex"))
+        .unwrap();
+    sink.append(
+        "ws-t13",
+        3,
+        file_change_detected_event("fc_1", "item/started"),
+    )
+    .unwrap();
+    let lines = sink.read_tool_policy_lines("ws-t13", 3).unwrap();
+    assert_eq!(lines[0].event_type(), "provider_start");
+    assert_eq!(lines[1].event_type(), "file_change_detected");
+    let serialized = serde_json::to_value(&lines[1]).unwrap();
+    for field in [
+        "item_id",
+        "summary",
+        "source_method",
+        "disposition",
+        "policy_digest",
+    ] {
+        assert!(
+            serialized.get(field).is_some(),
+            "file_change_detected missing {field}: {serialized}"
+        );
+    }
+    assert!(
+        serialized["disposition"]
+            .as_str()
+            .is_some_and(|disposition| disposition.contains("turn_interrupted")),
+        "disposition must record the handling fact: {serialized}"
+    );
+
+    // 必需字段缺失 = 解析失败（fail-closed）。
+    let base = serde_json::to_string(&lines[1]).unwrap();
+    for field in [
+        "item_id",
+        "summary",
+        "source_method",
+        "disposition",
+        "policy_digest",
+    ] {
+        let mut value = serde_json::from_str::<serde_json::Value>(&base).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .unwrap_or_else(|| panic!("fixture must carry {field}: {base}"));
+        let line = serde_json::to_string(&value).unwrap();
+        assert!(
+            serde_json::from_str::<ToolPolicyAuditLine>(&line).is_err(),
+            "missing required field {field} must fail parsing"
+        );
+    }
+
+    // 空文件首行不得是 file_change_detected（首行不变量保持）。
+    let fresh = test_tool_policy_audit_sink();
+    let result = fresh.append(
+        "ws-t13b",
+        0,
+        file_change_detected_event("fc_2", "item/completed"),
+    );
+    assert!(
+        result.is_err(),
+        "file_change_detected must not precede provider_start"
+    );
+}
+
+#[tokio::test]
+async fn tool_policy_audit_writes_provider_start_once_then_canonical_events() {
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-1", 7, provider_start_event("codex"))
+        .unwrap();
+    sink.append("ws-1", 7, approval_decision_event("fileChange", "aria-0"))
+        .unwrap();
+    sink.append("ws-1", 7, protocol_warning_event("unknown"))
+        .unwrap();
+    sink.append(
+        "ws-1",
+        7,
+        session_terminated_event("unknown_approval_storm"),
+    )
+    .unwrap();
+    let lines = sink.read_tool_policy_lines("ws-1", 7).unwrap();
+    assert_eq!(lines[0].event_type(), "provider_start");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.event_type() == "provider_start")
+            .count(),
+        1
+    );
+    assert!(lines.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+    // 四类 canonical 事件按写入顺序落盘，且字段含 digest/request id/reason code 契约字段。
+    let types: Vec<&str> = lines.iter().map(|line| line.event_type()).collect();
+    assert_eq!(
+        types,
+        vec![
+            "provider_start",
+            "approval_decision",
+            "protocol_warning",
+            "session_terminated"
+        ]
+    );
+    let serialized = serde_json::to_string(&lines[0]).unwrap();
+    assert!(serialized.contains("sha256:codex-digest"), "{serialized}");
+    assert!(serialized.contains("provider 1.2.3"));
+    assert!(serialized.contains("codex-app-server-rpc"));
+    let serialized = serde_json::to_string(&lines[1]).unwrap();
+    assert!(serialized.contains("aria-0"), "{serialized}");
+    let serialized = serde_json::to_string(&lines[3]).unwrap();
+    assert!(
+        serialized.contains("unknown_approval_storm"),
+        "{serialized}"
+    );
+}
+
+// ---- F3 修复轮 P1-1：D6/D7 冻结字段名与必需字段严格性 ----
+
+#[test]
+fn tool_policy_audit_schema_freezes_d6_d7_persisted_field_names() {
+    // D6/D7 冻结字段名逐字对账：provider_start/approval_decision 的 durable 序列化
+    // 键名必须与契约一致（不得以别名落盘）。
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-frozen", 0, provider_start_event("codex"))
+        .unwrap();
+    sink.append(
+        "ws-frozen",
+        0,
+        approval_decision_event("file_change", "aria-0"),
+    )
+    .unwrap();
+    let lines = sink.read_tool_policy_lines("ws-frozen", 0).unwrap();
+    let start = serde_json::to_value(&lines[0]).unwrap();
+    assert_eq!(start["workspace_session_id"], "ws-frozen", "{start}");
+    assert!(start.get("provider_session_id").is_some(), "{start}");
+    assert!(
+        start.get("tool_policy_canonical_digest").is_some(),
+        "{start}"
+    );
+    assert!(start.get("adapter_dialect").is_some(), "{start}");
+    assert!(start.get("provider_version").is_some(), "{start}");
+    let decision = serde_json::to_value(&lines[1]).unwrap();
+    for field in [
+        "server_name",
+        "tool_name",
+        "reason_code",
+        "policy_digest",
+        "category",
+        "request_id",
+        "decision",
+    ] {
+        assert!(
+            decision.get(field).is_some(),
+            "approval_decision missing {field}: {decision}"
+        );
+    }
+}
+
+#[test]
+fn tool_policy_audit_required_fields_must_be_present_when_parsing() {
+    // 必需字段缺失 = 解析失败：不得以 `#[serde(default)]` 宽容出无指纹记录。
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-strict", 0, provider_start_event("codex"))
+        .unwrap();
+    let lines = sink.read_tool_policy_lines("ws-strict", 0).unwrap();
+    let base = serde_json::to_string(&lines[0]).unwrap();
+    for field in [
+        "workspace_session_id",
+        "provider_session_id",
+        "tool_policy_canonical_digest",
+        "provider_version",
+        "adapter_dialect",
+        "schema_version",
+        "seq",
+    ] {
+        let mut value = serde_json::from_str::<serde_json::Value>(&base).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .unwrap_or_else(|| panic!("fixture must carry {field}: {base}"));
+        let line = serde_json::to_string(&value).unwrap();
+        assert!(
+            serde_json::from_str::<ToolPolicyAuditLine>(&line).is_err(),
+            "missing required field {field} must fail parsing"
+        );
+    }
+}
+
+// ---- F3 修复轮 P1-4：resume drift 的 superseded 事件必须落在被取代旧 run 的文件 ----
+
+/// fake pi：rpc 模式下读 stdin 到 EOF 后退出（策略会话 start 只需子进程可拉起）。
+#[cfg(unix)]
+fn fake_pi_rpc_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("fake-pi-rpc");
+    std::fs::write(&path, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n")
+        .expect("write fixture");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod fixture");
+    path
+}
+
+/// 真实 LifecycleStore 的 drift 端到端（P1-4 裁决）：superseded_policy_drift 的
+/// `session_terminated` 写入被取代旧 run 的文件（其 provider_start 已是首行）；
+/// 新 run 文件照常以 provider_start 开启。RecordingSink 不校验首行不变量，
+/// 必须用真实 store 测。
+#[cfg(unix)]
+#[tokio::test]
+async fn tool_policy_audit_resume_drift_superseded_lands_on_replaced_run_file() {
+    use crate::cross_cutting::pi_provider::{
+        PI_POLICY_DIALECT, PiProvider, TOOL_POLICY_PROVIDER_NAME,
+    };
+    use crate::cross_cutting::streaming_provider::{
+        ProviderToolPolicy, ProviderVersionSupplier, StreamingProviderAdapter as _,
+    };
+    use crate::cross_cutting::tool_policy_audit::{ProviderStartAudit, RoleRunBoundAuditSink};
+    use crate::protocol::contracts::{AdapterRole, ProviderType};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let store = std::sync::Arc::new(super::LifecycleStore::new(
+        crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria")),
+    ));
+    let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        TOOL_POLICY_PROVIDER_NAME,
+        &ProviderToolPolicy::deny_file_write_builtins(),
+    )
+    .expect("canonical policy");
+    // 旧 run（seq 0）：同 native id，但 version 漂移（pi 9.9.9-stale ≠ 当前 supplier）。
+    let stale = ProviderStartAudit {
+        provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
+        role: "orchestrator".to_string(),
+        workspace_session_id: "ws-drift".to_string(),
+        provider_session_id: "pi-session-drift".to_string(),
+        tool_policy_canonical_digest: canonical.digest.clone(),
+        argv: Vec::new(),
+        sandbox: None,
+        approval_policy: None,
+        provider_version: "pi 9.9.9-stale".to_string(),
+        adapter_dialect: PI_POLICY_DIALECT.to_string(),
+        lc_projection: None,
+    };
+    sink_append(store.as_ref(), "ws-drift", 0, stale);
+    let next_seq = store.next_tool_policy_role_run_seq("ws-drift").unwrap();
+    let bound_sink = RoleRunBoundAuditSink::new(store.clone(), "ws-drift", next_seq).into_sink();
+
+    let provider =
+        PiProvider::new(fake_pi_rpc_fixture(tmp.path()))
+            .with_version_supplier(std::sync::Arc::new(
+                || Ok("pi 0.83.0-policy-fixture".to_string()),
+            ) as ProviderVersionSupplier);
+    let input = crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        working_directory: None,
+        baseline_tree: None,
+        tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+        audit_sink: Some(bound_sink),
+        provider_type: ProviderType::Pi,
+        role: AdapterRole::Orchestrator,
+        prompt: "fixture prompt".to_string(),
+        working_dir: tempfile::tempdir().expect("temporary working dir").keep(),
+        workspace_session_id: Some("ws-drift".to_string()),
+        resume_provider_session_id: Some("pi-session-drift".to_string()),
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        structured_output_contract: None,
+        env_vars: std::collections::BTreeMap::new(),
+        timeout_secs: 60,
+    };
+    let session = provider
+        .start(input, tokio_util::sync::CancellationToken::new())
+        .await
+        .expect("drifted resume must supersede and start a fresh session");
+    drop(session.events);
+
+    // 旧 run 文件（seq 0）：provider_start 仍为首行，superseded 终止审计追加其后。
+    let old_lines = store.read_tool_policy_lines("ws-drift", 0).unwrap();
+    assert_eq!(old_lines[0].event_type(), "provider_start");
+    assert_eq!(
+        old_lines.len(),
+        2,
+        "superseded session_terminated must land on the replaced run's file"
+    );
+    assert_eq!(old_lines[1].event_type(), "session_terminated");
+    assert!(
+        serde_json::to_string(&old_lines[1])
+            .unwrap()
+            .contains("superseded_policy_drift")
+    );
+    // 新 run 文件（seq 1）：provider_start 恰为首行，无终止事件前置。
+    let new_lines = store.read_tool_policy_lines("ws-drift", 1).unwrap();
+    assert_eq!(
+        new_lines[0].event_type(),
+        "provider_start",
+        "new run must start with provider_start"
+    );
+    assert!(
+        new_lines
+            .iter()
+            .all(|line| line.event_type() != "session_terminated")
+    );
+}
+
+/// 测试内同步 append 辅助（真实 store 的 sink trait 入口）。
+#[cfg(unix)]
+fn sink_append(
+    store: &super::LifecycleStore,
+    workspace_session_id: &str,
+    role_run_seq: u64,
+    record: crate::cross_cutting::tool_policy_audit::ProviderStartAudit,
+) {
+    use crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink as _;
+    store
+        .append(
+            workspace_session_id,
+            role_run_seq,
+            DurableToolPolicyEvent::ProviderStart(record),
+        )
+        .expect("seed old run provider_start");
+}
+
+// ---- F3 修复轮 P1-5/P1-6/P2-3：互斥串行、seq 持久化分配与坏文件 fail-closed ----
+
+#[test]
+fn tool_policy_audit_concurrent_appends_and_allocations_are_serialized() {
+    // P1-5：两线程并发 append 同一文件 + 并发分配 seq——进程内互斥包住
+    // 「seq 分配+读尾行+append」全临界区，行 seq 无重复、role_run_seq 分配唯一。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
+    let store = super::LifecycleStore::new(paths.clone());
+    store
+        .append("ws-concurrent", 7, provider_start_event("codex"))
+        .unwrap();
+    let s1 = store.clone();
+    let s2 = store.clone();
+    let a1 = store.clone();
+    let a2 = store.clone();
+    let appender = |sink: super::LifecycleStore| {
+        std::thread::spawn(move || {
+            for _ in 0..25 {
+                sink.append(
+                    "ws-concurrent",
+                    7,
+                    approval_decision_event("file_change", "aria-0"),
+                )
+                .expect("concurrent append");
+            }
+        })
+    };
+    let allocator = |sink: super::LifecycleStore| {
+        std::thread::spawn(move || {
+            let mut allocated = Vec::new();
+            for _ in 0..25 {
+                allocated.push(sink.next_tool_policy_role_run_seq("ws-concurrent").unwrap());
+            }
+            allocated
+        })
+    };
+    let handles_appends = vec![appender(s1), appender(s2)];
+    let handles_alloc = vec![allocator(a1), allocator(a2)];
+    for handle in handles_appends {
+        handle.join().expect("appender thread");
+    }
+    let mut allocated = Vec::new();
+    for handle in handles_alloc {
+        allocated.extend(handle.join().expect("allocator thread"));
+    }
+    // 行 seq：provider_start + 50 条决策，全部唯一且单调（文件内顺序）。
+    let lines = store.read_tool_policy_lines("ws-concurrent", 7).unwrap();
+    assert_eq!(lines.len(), 51);
+    let seqs: Vec<u64> = lines.iter().map(|line| line.seq).collect();
+    let mut unique = seqs.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), seqs.len(), "行 seq 不得重复");
+    assert!(lines.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+    // role_run_seq 分配：50 次全部唯一（marker 持久化高水位）。
+    let mut unique_alloc = allocated.clone();
+    unique_alloc.sort_unstable();
+    unique_alloc.dedup();
+    assert_eq!(
+        unique_alloc.len(),
+        allocated.len(),
+        "role_run_seq 分配不得重复"
+    );
+}
+
+#[test]
+fn tool_policy_audit_role_run_seq_allocation_persists_immediately_and_is_not_reused() {
+    // P1-6：seq 分配随 marker 持久化（provider_start 写失败/崩溃后不得复用），
+    // 且重开 store 实例（同进程、同根）继续单调。🔴 单写者约束：这不是跨进程
+    // 保证——跨进程并发需部署层保证单写者，不在本测试范围。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria"));
+    let store = super::LifecycleStore::new(paths.clone());
+    assert_eq!(store.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 0);
+    // 未写任何 provider_start（模拟写失败/崩溃）：再次分配不得复用 0。
+    assert_eq!(store.next_tool_policy_role_run_seq("ws-alloc").unwrap(), 1);
+    // 重开实例（同进程、同根）：进程内高水位继续单调；跨进程需部署层单写者。
+    let reopened = super::LifecycleStore::new(paths);
+    assert_eq!(
+        reopened.next_tool_policy_role_run_seq("ws-alloc").unwrap(),
+        2
+    );
+    // 兼容：无 marker 的既有分区按文件 max 推导。
+    store
+        .append("ws-legacy", 5, provider_start_event("codex"))
+        .unwrap();
+    assert_eq!(store.next_tool_policy_role_run_seq("ws-legacy").unwrap(), 6);
+}
+
+#[test]
+fn tool_policy_audit_append_fails_closed_on_corrupted_file() {
+    // P2-3：append 前校验——文件首行不可解析（或任一行坏行）→ 返回错误，
+    // 不得在损坏文件上继续追加。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp
+        .path()
+        .join(".aria")
+        .join("tool-policy-run-audit")
+        .join("ws-corrupt");
+    std::fs::create_dir_all(&root).expect("partition dir");
+    std::fs::write(root.join("9.jsonl"), "not-json\n").expect("corrupt fixture");
+    let store = super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+        tmp.path().join(".aria"),
+    ));
+    let result = store.append("ws-corrupt", 9, provider_start_event("codex"));
+    assert!(
+        result.is_err(),
+        "append must fail closed on a corrupted partition file"
+    );
+    let raw = std::fs::read_to_string(root.join("9.jsonl")).unwrap();
+    assert_eq!(raw.lines().count(), 1, "损坏文件不得被追加");
+}
+
+#[test]
+fn tool_policy_audit_rejects_duplicate_or_late_provider_start() {
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-2", 0, provider_start_event("codex"))
+        .unwrap();
+    // 同一 (workspace_session_id, role_run_seq) 文件内 provider_start 必须唯一且为首行。
+    let duplicate = sink.append("ws-2", 0, provider_start_event("codex"));
+    assert!(duplicate.is_err(), "duplicate provider_start must error");
+
+    // 已有后续事件的文件不允许再补 provider_start（首行约束）。
+    sink.append("ws-2", 1, provider_start_event("codex"))
+        .unwrap();
+    sink.append("ws-2", 1, approval_decision_event("fileChange", "aria-0"))
+        .unwrap();
+    let late = sink.append("ws-2", 1, provider_start_event("codex"));
+    assert!(late.is_err(), "late provider_start must error");
+
+    // 空/不存在文件不允许以非 provider_start 开头。
+    let orphan = sink.append("ws-2", 2, protocol_warning_event("unknown"));
+    assert!(
+        orphan.is_err(),
+        "canonical file must start with provider_start"
+    );
+}
+
+// ---- F3（最终审）：读端结构校验（有效事件 vs 结构性损坏 fail-closed） ----
+
+/// 手工构造原始 JSONL 行（绕过 append 的不变量），可改写 seq/schema_version。
+fn raw_audit_line(event: &DurableToolPolicyEvent, seq: u64, schema_version: u32) -> String {
+    let mut value =
+        serde_json::to_value(ToolPolicyAuditLine::from_event(seq, event.clone())).unwrap();
+    value["schema_version"] = serde_json::json!(schema_version);
+    serde_json::to_string(&value).unwrap()
+}
+
+/// 直接写原始分区文件（模拟外部损坏/篡改）。
+fn write_raw_audit_file(
+    tmp: &tempfile::TempDir,
+    workspace_session_id: &str,
+    role_run_seq: u64,
+    body: &str,
+) -> std::path::PathBuf {
+    let file = tmp
+        .path()
+        .join(".aria")
+        .join("tool-policy-run-audit")
+        .join(workspace_session_id)
+        .join(format!("{role_run_seq}.jsonl"));
+    std::fs::create_dir_all(file.parent().expect("partition dir")).expect("create partition dir");
+    std::fs::write(&file, body).expect("write raw fixture");
+    file
+}
+
+fn raw_audit_store(tmp: &tempfile::TempDir) -> super::LifecycleStore {
+    super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+        tmp.path().join(".aria"),
+    ))
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_unknown_schema_version() {
+    // F3：schema_version≠1 的可解析行是结构性损坏——读取返回 CorruptAuditFile，
+    // append 拒绝在损坏文件上继续追加，原始文件保持不变。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 2),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-schema", 3, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-schema", 3),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 1 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-schema",
+                3,
+                approval_decision_event("file_change", "aria-9")
+            )
+            .is_err(),
+        "append must refuse a schema-corrupted file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        2,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_seq_regression() {
+    // F3（终审定例）：已有 seq 0,4,2 的文件——seq 倒退是结构性损坏，读取
+    // CorruptAuditFile，且不得在其上追加 seq 3（旧实现会继续追加 3）。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 4, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-1"), 2, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-regression", 5, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-regression", 5),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 3 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-regression",
+                5,
+                approval_decision_event("file_change", "aria-2")
+            )
+            .is_err(),
+        "append must refuse a seq-regressed file (would append seq 3)"
+    );
+    let raw = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        raw.lines().count(),
+        3,
+        "corrupted file must not be appended"
+    );
+    assert!(
+        !raw.contains("aria-2"),
+        "no new event may land on the corrupt file"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_duplicate_seq() {
+    // F3：重复 seq（非严格递增）是结构性损坏。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 1, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-1"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-dup-seq", 7, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-dup-seq", 7),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 3 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-dup-seq",
+                7,
+                approval_decision_event("file_change", "aria-2")
+            )
+            .is_err(),
+        "append must refuse a duplicate-seq file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        3,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_when_first_line_is_not_provider_start() {
+    // F3：首行非 provider_start 是结构性损坏（首行恰为唯一 provider_start）。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 0, 1),
+        raw_audit_line(&protocol_warning_event("unsupported_approval_kind"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-first-line", 9, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-first-line", 9),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 1 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-first-line",
+                9,
+                approval_decision_event("file_change", "aria-9")
+            )
+            .is_err(),
+        "append must refuse a file not opened by provider_start"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        2,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_on_non_first_provider_start_line() {
+    // F3：provider_start 必须唯一且恰为首行——中途再出现即是结构性损坏。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 0, 1),
+        raw_audit_line(&provider_start_event("codex"), 1, 1),
+    );
+    let file = write_raw_audit_file(&tmp, "ws-second-start", 4, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-second-start", 4),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 2 })
+    ));
+    assert!(
+        store
+            .append(
+                "ws-second-start",
+                4,
+                approval_decision_event("file_change", "aria-9")
+            )
+            .is_err(),
+        "append must refuse a file with a non-first provider_start line"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count(),
+        2,
+        "corrupted file must not be appended"
+    );
+}
+
+#[test]
+fn tool_policy_audit_read_fails_closed_when_seq_does_not_start_at_conventional_origin() {
+    // F3：seq 必须从约定起点（0）开始——首行 seq≠0 是结构性损坏。
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let body = format!(
+        "{}\n{}\n",
+        raw_audit_line(&provider_start_event("codex"), 3, 1),
+        raw_audit_line(&approval_decision_event("file_change", "aria-0"), 4, 1),
+    );
+    write_raw_audit_file(&tmp, "ws-seq-origin", 6, &body);
+    let store = raw_audit_store(&tmp);
+    assert!(matches!(
+        store.read_tool_policy_lines_with_warnings("ws-seq-origin", 6),
+        Err(ToolPolicyAuditError::CorruptAuditFile { line_no: 1 })
+    ));
+}
+
+#[test]
+fn tool_policy_audit_bad_line_reader_skips_and_reports_without_writing_back() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp
+        .path()
+        .join(".aria")
+        .join("tool-policy-run-audit")
+        .join("ws-1");
+    std::fs::create_dir_all(&root).expect("partition dir");
+    let file = root.join("7.jsonl");
+    // 首行为完整 provider_start（冻结字段齐全）；第二行坏 JSON。P1-1 后必需字段
+    // 缺失的行同样是坏行（见 required_fields 测试）。
+    let valid_start = serde_json::to_string(&ToolPolicyAuditLine::from_event(
+        0,
+        provider_start_event("codex"),
+    ))
+    .unwrap();
+    std::fs::write(&file, format!("{valid_start}\nnot-json\n")).expect("write bad fixture");
+
+    let store = super::LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+        tmp.path().join(".aria"),
+    ));
+    let result = store
+        .read_tool_policy_lines_with_warnings("ws-1", 7)
+        .unwrap();
+    assert_eq!(result.events.len(), 1);
+    assert_eq!(result.events[0].event_type(), "provider_start");
+    assert_eq!(result.warnings[0].reason_code, "invalid_json_line");
+    // 读取告警不得写回 durable 分区：原始两行保持原样。
+    let raw = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        raw.lines().count(),
+        2,
+        "reader must not mutate the partition"
+    );
+    assert!(raw.contains("not-json"));
+    assert!(!store.contains_tool_policy_event("ws-1", 7, "protocol_warning"));
+}
+
+#[test]
+fn tool_policy_audit_line_seq_is_monotonic_across_appends() {
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-3", 4, provider_start_event("pi")).unwrap();
+    sink.append(
+        "ws-3",
+        4,
+        approval_decision_event("command_execution", "aria-1"),
+    )
+    .unwrap();
+    let lines = sink.read_tool_policy_lines("ws-3", 4).unwrap();
+    assert_eq!(lines[0].seq, 0);
+    assert_eq!(lines[1].seq, 1);
+    // 跨文件复用同一 role_run_seq（新文件企图覆盖既有 run 记录）由 provider_start
+    // 首行唯一性守卫兜底：同 (ws, seq) 再写 provider_start 即 duplicate 错误。
+    let reuse = sink.append("ws-3", 4, provider_start_event("pi"));
+    assert!(reuse.is_err());
+}
+
+#[test]
+fn tool_policy_audit_rejects_path_escape_identifiers() {
+    let sink = test_tool_policy_audit_sink();
+    let escape = sink.append("../escape", 0, provider_start_event("codex"));
+    assert!(escape.is_err(), "workspace id path escape must fail closed");
+    let escape = sink.append("ws/escape", 0, provider_start_event("codex"));
+    assert!(escape.is_err());
+}
+
+#[test]
+fn tool_policy_audit_role_run_seq_allocation_is_monotonic_per_workspace() {
+    let sink = test_tool_policy_audit_sink();
+    assert_eq!(sink.next_tool_policy_role_run_seq("ws-4").unwrap(), 0);
+    sink.append("ws-4", 0, provider_start_event("codex"))
+        .unwrap();
+    assert_eq!(sink.next_tool_policy_role_run_seq("ws-4").unwrap(), 1);
+    // 其它 workspace 互不影响。
+    assert_eq!(sink.next_tool_policy_role_run_seq("ws-5").unwrap(), 0);
+}
+
+impl ToolPolicyAuditLine {
+    fn event_type_text(&self) -> &'static str {
+        self.event_type()
+    }
+}
+
+#[test]
+fn tool_policy_audit_line_exposes_event_type_for_every_canonical_event() {
+    let line = ToolPolicyAuditLine::from_event(0, provider_start_event("codex"));
+    assert_eq!(line.event_type_text(), "provider_start");
+    let line = ToolPolicyAuditLine::from_event(1, approval_decision_event("file_change", "aria-0"));
+    assert_eq!(line.event_type_text(), "approval_decision");
+    let line =
+        ToolPolicyAuditLine::from_event(2, protocol_warning_event("unsupported_approval_kind"));
+    assert_eq!(line.event_type_text(), "protocol_warning");
+    let line =
+        ToolPolicyAuditLine::from_event(3, session_terminated_event("unknown_approval_storm"));
+    assert_eq!(line.event_type_text(), "session_terminated");
+}
+
+// ---- Task 3.3（REQ-ENV-09/GC9）：resume 冻结三元组比对 ----
+
+use crate::cross_cutting::tool_policy_audit::{
+    ResumeDecision, provider_start_record, resume_with_audit_record,
+};
+
+#[test]
+fn resume_rejects_digest_version_or_dialect_drift_and_missing_record() {
+    let stored = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    assert!(matches!(
+        resume_with_audit_record(Some(stored.clone()), &stored),
+        ResumeDecision::Resume
+    ));
+    assert!(matches!(
+        resume_with_audit_record(
+            Some(stored.clone()),
+            &stored.clone().with_digest("sha256:b")
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    assert!(matches!(
+        resume_with_audit_record(
+            Some(stored.clone()),
+            &stored.clone().with_version("provider 1.2.4")
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    assert!(matches!(
+        resume_with_audit_record(
+            Some(stored.clone()),
+            &stored.clone().with_dialect("codex-app-server-rpc-v2")
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    assert!(matches!(
+        resume_with_audit_record(None, &stored),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+}
+
+#[test]
+fn tool_policy_audit_resume_lookup_finds_latest_provider_start_by_native_session() {
+    use crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink as _;
+
+    let sink = test_tool_policy_audit_sink();
+    // 两个 run（seq 0/1）持有同一 native id（resume 重试）；最近（seq 1）生效。
+    sink.append(
+        "ws-6",
+        0,
+        DurableToolPolicyEvent::ProviderStart(
+            provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc")
+                .with_provider_session_id("thread-shared"),
+        ),
+    )
+    .unwrap();
+    sink.append(
+        "ws-6",
+        1,
+        DurableToolPolicyEvent::ProviderStart(
+            provider_start_record("sha256:a2", "provider 1.2.3", "codex-app-server-rpc")
+                .with_provider_session_id("thread-shared"),
+        ),
+    )
+    .unwrap();
+    let found = sink
+        .find_latest_tool_policy_provider_start("ws-6", "thread-shared")
+        .unwrap()
+        .expect("stored provider_start must be found");
+    assert_eq!(found.record.tool_policy_canonical_digest, "sha256:a2");
+    assert_eq!(
+        found.role_run_seq, 1,
+        "lookup must surface the run location (P1-4)"
+    );
+
+    // 其它 native id / 其它 workspace：缺失 → None（resume 决策拒绝并新建）。
+    assert!(
+        sink.find_latest_tool_policy_provider_start("ws-6", "thread-other")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sink.find_latest_tool_policy_provider_start("ws-7", "thread-shared")
+            .unwrap()
+            .is_none()
+    );
+}
+
+// ---- Task 9a(lcg_t09a):LC 完整字面量与旧记录缺 projection 拒 resume ----
+
+use crate::cross_cutting::tool_policy_audit::{
+    LcProjectionAudit, LcProviderStartAudit, resume_with_lc_start_record,
+};
+
+/// LC resume 当前侧完整字面量 fixture(投影摘要 + v2 resume 材料)。
+fn lc_start_literal(projection_digest: &str) -> LcProviderStartAudit {
+    LcProviderStartAudit {
+        action: "coding_target_write".to_string(),
+        wire_dialect: "claude-stream-json".to_string(),
+        capability_projection_digest: "sha256:capability-projection-t09a".to_string(),
+        projection_digest: projection_digest.to_string(),
+        boundary_evidence_ref: "probe://boundary-t09a".to_string(),
+        resume_fingerprint: "sha256:resume-fingerprint-t09a".to_string(),
+        action_evidence_digest: "sha256:capability-projection-t09a".to_string(),
+        target_git_identity: "/main/.git/worktrees/target-t09a".to_string(),
+    }
+}
+
+/// LC 存档记录:lc_projection 携带给定会话投影摘要。
+fn lc_stored_record(
+    projection_digest: &str,
+) -> crate::cross_cutting::tool_policy_audit::ProviderStartAudit {
+    let mut record = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    record.lc_projection = Some(LcProjectionAudit {
+        action: "coding_target_write".to_string(),
+        wire_dialect: "claude-stream-json".to_string(),
+        capability_projection_digest: "sha256:capability-projection-t09a".to_string(),
+        projection_digest: projection_digest.to_string(),
+        boundary_evidence_ref: "probe://boundary-t09a".to_string(),
+    });
+    record
+}
+
+/// Task 9a:LC resume 比对消费完整字面量(含投影摘要与 v2 resume 材料)。
+/// 旧 audit 缺 projection(direct/Task 4 前形态,lc_projection=None)→
+/// 拒绝 resume LC(supersede);投影摘要漂移 → 拒绝;匹配的完整字面量 →
+/// Resume;当前侧 v2 材料不完整(未装配)不得放行。direct 三元组语义由
+/// `resume_rejects_digest_version_or_dialect_drift_and_missing_record` 保持。
+#[test]
+fn lcg_t09a_lc_start_literal_rejects_legacy_missing_projection_and_drift() {
+    let current = lc_start_literal("sha256:session-projection-t09a");
+
+    // 匹配的完整 LC 存档 → Resume。
+    assert!(matches!(
+        resume_with_lc_start_record(
+            &lc_stored_record("sha256:session-projection-t09a"),
+            &current
+        ),
+        ResumeDecision::Resume
+    ));
+    // 旧 audit 缺 projection → 不能 resume LC。
+    let legacy = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    assert!(matches!(
+        resume_with_lc_start_record(&legacy, &current),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    // 投影摘要漂移 → 拒绝(supersede,等待显式新会话)。
+    assert!(matches!(
+        resume_with_lc_start_record(
+            &lc_stored_record("sha256:session-projection-drifted"),
+            &current
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    // 当前侧 v2 材料不完整 → 不得放行 resume。
+    let mut incomplete = lc_start_literal("sha256:session-projection-t09a");
+    incomplete.resume_fingerprint = String::new();
+    assert!(matches!(
+        resume_with_lc_start_record(
+            &lc_stored_record("sha256:session-projection-t09a"),
+            &incomplete
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+    // 边界引用漂移同样拒绝(完整字面量逐字比较)。
+    let mut drifted_boundary = lc_start_literal("sha256:session-projection-t09a");
+    drifted_boundary.boundary_evidence_ref = "probe://boundary-drifted".to_string();
+    assert!(matches!(
+        resume_with_lc_start_record(
+            &lc_stored_record("sha256:session-projection-t09a"),
+            &drifted_boundary
+        ),
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+}
+
+/// Task 9a 决策测试(legacy audit 缺 projection):durable 存档形态的旧
+/// provider_start(无 lc_projection)不能 resume LC——显式 resume 决策
+/// 拒绝、被取代旧 run 追加 superseded 终止审计、零新 provider_start
+/// (等待用户显式新会话,不静默 fresh)。
+#[test]
+fn lcg_t09_legacy_audit_missing_projection_cannot_resume_lc() {
+    let sink = test_tool_policy_audit_sink();
+    // 旧 run(seq 0):legacy/direct 形态 provider_start,无 lc_projection。
+    let mut legacy = provider_start_record("sha256:a", "provider 1.2.3", "codex-app-server-rpc");
+    legacy.provider_session_id = "thread-legacy-t09".to_string();
+    sink.append(
+        "ws-t09",
+        0,
+        DurableToolPolicyEvent::ProviderStart(legacy.clone()),
+    )
+    .unwrap();
+
+    // resume 检索命中旧记录 → LC 完整字面量判定拒绝(缺 projection)。
+    let stored = sink
+        .find_latest_tool_policy_provider_start("ws-t09", "thread-legacy-t09")
+        .unwrap()
+        .expect("legacy provider_start must be found for the resume decision");
+    let current = lc_start_literal("sha256:session-projection-t09a");
+    let decision = resume_with_lc_start_record(&stored.record, &current);
+    assert!(matches!(
+        decision,
+        ResumeDecision::RejectSupersedeAndStartNew
+    ));
+
+    // 拒绝即 supersede:被取代旧 run(seq 0)追加 superseded 终止审计;
+    // 新 run(若调用方尝试重启)不会有任何 provider_start(零 spawn,由
+    // gateway 决策层保证;此处锁定 durable 面的 superseded 落旧 run)。
+    use crate::cross_cutting::tool_policy_audit::append_superseded_policy_drift;
+    append_superseded_policy_drift(&sink, &stored).expect("superseded append lands");
+    let old_run_lines = sink.read_tool_policy_lines("ws-t09", 0).unwrap();
+    let old_run_superseded_recorded = matches!(
+        old_run_lines.last().map(|line| &line.event),
+        Some(DurableToolPolicyEvent::SessionTerminated(terminated))
+            if terminated.reason_code == "superseded_policy_drift"
+    );
+    assert!(old_run_superseded_recorded);
+    // 新 run 分区(seq 1)保持为空:没有伪称恢复的 provider_start。
+    let new_run_lines = sink.read_tool_policy_lines("ws-t09", 1).unwrap();
+    assert!(new_run_lines.is_empty());
+}
+
+// ---- Task 3.7(B0f):四家 audit 同源 durable 面 ----
+
+mod anchor_t10_durable_convergence {
+    use super::*;
+    use crate::cross_cutting::tool_policy_audit::{
+        LcProjectionAudit, LcProviderStartAudit, ProviderStartAudit, ResumeDecision,
+        resume_with_lc_start_record,
+    };
+    use crate::product::logical_codebase::provider_gateway::tests::anchor_t10_support as t10;
+    use std::sync::Arc;
+
+    /// 四家纯矩阵 fixture:action/wire/capability/projection/boundary 逐家
+    /// 形态(与 anchor_t10_support 的家族文本一致)。
+    fn family_projection(wire: &str, capability: &str, projection: &str) -> LcProjectionAudit {
+        LcProjectionAudit {
+            action: "planning_read_only".to_string(),
+            wire_dialect: wire.to_string(),
+            capability_projection_digest: capability.to_string(),
+            projection_digest: projection.to_string(),
+            boundary_evidence_ref: String::new(),
+        }
+    }
+
+    fn family_current_literal(
+        wire: &str,
+        capability: &str,
+        projection: &str,
+    ) -> LcProviderStartAudit {
+        LcProviderStartAudit {
+            action: "planning_read_only".to_string(),
+            wire_dialect: wire.to_string(),
+            capability_projection_digest: capability.to_string(),
+            projection_digest: projection.to_string(),
+            boundary_evidence_ref: String::new(),
+            resume_fingerprint: "sha256:t10-resume-fingerprint".to_string(),
+            action_evidence_digest: capability.to_string(),
+            target_git_identity: "/t10/.git/worktrees/target".to_string(),
+        }
+    }
+
+    fn family_stored(
+        provider: &str,
+        wire: &str,
+        capability: &str,
+        projection: &str,
+    ) -> ProviderStartAudit {
+        let mut record = provider_start_record("sha256:a", "provider 1.2.3", wire);
+        record.provider = provider.to_string();
+        record.lc_projection = Some(family_projection(wire, capability, projection));
+        record
+    }
+
+    /// Task 3.7 Step 1(durable 面):四家公共 fixture 汇总——`resume_with_
+    /// lc_start_record` 对四家同判据(匹配 Resume/跨家 wire 漂移拒/v2
+    /// 不完整拒/旧 basis 缺 lc_projection 拒),audit 同源四家一致。
+    #[test]
+    fn anchor_t10_lc_start_audit_matrix_four_families() {
+        let families: [(&str, &str); 4] = [
+            ("claude-code", "claude-stream-json"),
+            ("codex", "codex-app-server-rpc"),
+            ("pi", "pi-rpc"),
+            ("kimi-code", "kimi-acp"),
+        ];
+        for (provider, wire) in families {
+            let capability = format!("sha256:t10-capability-{provider}");
+            let projection = format!("sha256:t10-projection-{provider}");
+            let current = family_current_literal(wire, &capability, &projection);
+
+            // 匹配的完整字面量 → Resume(同家同判据)。
+            assert!(
+                matches!(
+                    resume_with_lc_start_record(
+                        &family_stored(provider, wire, &capability, &projection),
+                        &current
+                    ),
+                    ResumeDecision::Resume
+                ),
+                "[{provider}] matching full literal must resume"
+            );
+            // v2 材料不完整(三个 v2 字段任一为空)→ 拒,四家一致。
+            for incomplete in [
+                {
+                    let mut literal = current.clone();
+                    literal.resume_fingerprint = String::new();
+                    literal
+                },
+                {
+                    let mut literal = current.clone();
+                    literal.action_evidence_digest = String::new();
+                    literal
+                },
+                {
+                    let mut literal = current.clone();
+                    literal.target_git_identity = String::new();
+                    literal
+                },
+            ] {
+                assert!(
+                    matches!(
+                        resume_with_lc_start_record(
+                            &family_stored(provider, wire, &capability, &projection),
+                            &incomplete
+                        ),
+                        ResumeDecision::RejectSupersedeAndStartNew
+                    ),
+                    "[{provider}] v2-incomplete current literal must not resume"
+                );
+                assert!(!incomplete.is_v2_complete());
+            }
+            // 旧 basis(缺 lc_projection 的 direct/legacy 形态)→ 拒。
+            let legacy = provider_start_record("sha256:a", "provider 1.2.3", wire);
+            assert!(
+                matches!(
+                    resume_with_lc_start_record(&legacy, &current),
+                    ResumeDecision::RejectSupersedeAndStartNew
+                ),
+                "[{provider}] legacy record without lc projection must not resume"
+            );
+        }
+
+        // 跨家混比:claude 当前字面量 vs codex 存档(wire 漂移)→ 拒。
+        let claude_current = family_current_literal(
+            "claude-stream-json",
+            "sha256:t10-capability-claude-code",
+            "sha256:t10-projection-claude-code",
+        );
+        let codex_stored = family_stored(
+            "codex",
+            "codex-app-server-rpc",
+            "sha256:t10-capability-claude-code",
+            "sha256:t10-projection-claude-code",
+        );
+        assert!(
+            matches!(
+                resume_with_lc_start_record(&codex_stored, &claude_current),
+                ResumeDecision::RejectSupersedeAndStartNew
+            ),
+            "cross-family wire drift must not resume"
+        );
+    }
+
+    /// Task 3.7 Step 1(durable 面):full 唯一 start 路径经真实
+    /// LifecycleStore durable 分区落 provider_start——lc_projection 五字段
+    /// 与 gateway 冻结 full projection 同源;fresh(seq 1)与 full-matching
+    /// resume(seq 2)两代 provider_start 投影逐字相等;native id 检索命中
+    /// 最新代。
+    #[tokio::test]
+    async fn anchor_t10_durable_audit_same_source_full_path() {
+        let store = test_tool_policy_audit_sink();
+        let harness = t10::anchor_t10_harness(t10::AnchorT10Family::Codex);
+        harness.install_policy();
+        let sink: Arc<dyn ToolPolicyAuditSink> = Arc::new(store.clone());
+
+        // fresh 启动(seq 1)。
+        let candidate = harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                harness.streaming_input(None),
+                harness.request.clone(),
+                t10::anchor_t10_audit_context(sink.clone(), "ws-t10-durable", 1),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("codex prepare on the durable sink");
+        let session = harness
+            .gateway
+            .start_lc_prepared_streaming(
+                candidate.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("unique full path start");
+        let native_id = session
+            .native_session_id
+            .clone()
+            .expect("fake native id from handshake");
+
+        let first_lines = store.read_tool_policy_lines("ws-t10-durable", 1).unwrap();
+        assert_eq!(first_lines.len(), 1, "provider_start 是首行且唯一");
+        let DurableToolPolicyEvent::ProviderStart(first) = &first_lines[0].event else {
+            panic!("first durable line must be provider_start");
+        };
+        let first_projection = first
+            .lc_projection
+            .as_ref()
+            .expect("durable provider_start carries lc projection");
+        assert_eq!(first.provider, "codex");
+        // f2070d83 + provider-desandbox-full-open 全开基线(owner 裁定):Codex LC
+        // 全相位(含 PlanningReadOnly)sandbox 固定 danger-full-access,approval 仍 on-request。
+        assert_eq!(first.sandbox.as_deref(), Some("danger-full-access"));
+        assert_eq!(first.approval_policy.as_deref(), Some("on-request"));
+        assert_eq!(first.adapter_dialect, "codex-app-server-rpc");
+        assert_eq!(
+            first_projection.projection_digest,
+            candidate.full_projection().projection_digest()
+        );
+        assert_eq!(
+            first_projection.capability_projection_digest,
+            candidate.full_projection().capability_projection_digest()
+        );
+        assert_eq!(first_projection.action, "planning_read_only");
+
+        // full-matching resume(seq 2):durable 检索最新代 → 完整字面量
+        // 判定 Resume → 同一冻结 full projection 再启动,两代投影逐字相等。
+        let stored = store
+            .find_latest_tool_policy_provider_start("ws-t10-durable", &native_id)
+            .unwrap()
+            .expect("durable resume lookup finds the latest provider_start");
+        let current_literal = harness
+            .adapter
+            .last_start_audit_literal()
+            .expect("adapter assembled the same-source literal at first start");
+        assert!(
+            matches!(
+                resume_with_lc_start_record(&stored.record, &current_literal),
+                ResumeDecision::Resume
+            ),
+            "durable stored record must full-match the assembled literal"
+        );
+
+        let resume_candidate = harness
+            .gateway
+            .prepare_lc_streaming_candidate(
+                harness.streaming_input(Some(native_id.clone())),
+                harness.request.clone(),
+                t10::anchor_t10_audit_context(sink, "ws-t10-durable", 2),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("resume prepare");
+        let fingerprint = resume_candidate.full_context_fingerprint();
+        match harness
+            .gateway
+            .resume_or_start_prepared_lc_candidate(
+                &resume_candidate,
+                crate::product::logical_codebase::provider_gateway::PreparedLcResumeBasis::Full {
+                    previous_fingerprint: fingerprint,
+                    previous_session_id: native_id.clone(),
+                },
+            )
+            .expect("full-matching resume disposition")
+        {
+            crate::product::logical_codebase::provider_gateway::GatewaySessionDisposition::Resume(
+                validated,
+            ) => {
+                assert_eq!(
+                    validated.fingerprint().digest,
+                    current_literal.resume_fingerprint,
+                    "gateway full 指纹与 durable audit 字面量同源"
+                );
+            }
+            _ => panic!("full-matching durable record must resume"),
+        }
+        harness
+            .gateway
+            .start_lc_prepared_streaming(
+                resume_candidate,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("resume start via the unique full path");
+
+        let second_lines = store.read_tool_policy_lines("ws-t10-durable", 2).unwrap();
+        assert_eq!(second_lines.len(), 1, "resume run 分区同样首行唯一");
+        let DurableToolPolicyEvent::ProviderStart(second) = &second_lines[0].event else {
+            panic!("resume run first line must be provider_start");
+        };
+        let second_projection = second
+            .lc_projection
+            .as_ref()
+            .expect("resume provider_start carries lc projection");
+        assert_eq!(
+            first_projection, second_projection,
+            "两代 provider_start 的 lc_projection 五字段逐字相等(同源 full projection)"
+        );
+        assert_eq!(second.provider_session_id, native_id);
+
+        // 检索命中最新代(seq 2)。
+        let latest = store
+            .find_latest_tool_policy_provider_start("ws-t10-durable", &native_id)
+            .unwrap()
+            .expect("latest provider_start still found");
+        assert_eq!(latest.role_run_seq, 2);
+    }
+}
+
+// ==== cascade_d1_3b（fix-cascade-deletion Task D1.3b：audit seq/append 迟到写防御）====
+
+/// purging/deleted 实体的会话：迟到 seq 分配与 audit append 必须按删除事实拒，
+/// 分区目录（D1.1 将清理的全局 session 分区）不得复活；other-session（存活会话）
+/// 审计零变化；原 seq 起点/首行 provider_start/唯一合同不动。
+#[test]
+fn cascade_d1_3b_audit_seq_and_append_late_writes_rejected_partition_not_revived() {
+    let (_tmp, store) = setup();
+    let story = d1_3a_story(&store);
+    let session = create_session(&store, &story.id, WorkspaceType::Story);
+
+    // other-session（存活会话）审计不变：seq 从 0 起、provider_start 恰为首行。
+    let other = create_session(&store, &story.id, WorkspaceType::Story);
+    let other_seq = store
+        .next_tool_policy_role_run_seq(&other.id)
+        .expect("live seq allocation for other session");
+    assert_eq!(other_seq, 0);
+    ToolPolicyAuditSink::append(&store, &other.id, other_seq, provider_start_event("codex"))
+        .expect("live audit append for other session");
+    let other_lines = store
+        .read_tool_policy_lines(&other.id, other_seq)
+        .expect("read back other session lines");
+    assert_eq!(other_lines.len(), 1);
+    assert_eq!(other_lines[0].seq, 0);
+    assert_eq!(other_lines[0].event_type(), "provider_start");
+
+    // 受害会话存活面照常（seq/append 可用）。
+    let live_seq = store
+        .next_tool_policy_role_run_seq(&session.id)
+        .expect("live seq allocation");
+    ToolPolicyAuditSink::append(&store, &session.id, live_seq, provider_start_event("codex"))
+        .expect("live audit append");
+
+    // purging + 模拟 D1.1 清掉全局分区：迟到 seq/append 拒且目录不复活。
+    let scope = d1_3a_scope(DeletionEntityKind::Story, &story.id);
+    let lease = d1_3a_begin_purge(&store, &scope);
+    let partition = store
+        .app_paths()
+        .root()
+        .join(crate::cross_cutting::tool_policy_audit::TOOL_POLICY_RUN_AUDIT_PARTITION)
+        .join(&session.id);
+    assert!(partition.exists());
+    std::fs::remove_dir_all(&partition).unwrap();
+    assert!(matches!(
+        store.next_tool_policy_role_run_seq(&session.id),
+        Err(ToolPolicyAuditError::Io(message)) if message.contains("entity_deleting")
+    ));
+    assert!(
+        !partition.exists(),
+        "迟到 seq 分配不得复活 tool-policy-run-audit 分区目录"
+    );
+    assert!(matches!(
+        ToolPolicyAuditSink::append(&store, &session.id, 1, provider_start_event("codex")),
+        Err(ToolPolicyAuditError::Io(message)) if message.contains("entity_deleting")
+    ));
+    assert!(!partition.exists(), "迟到 audit append 不得复活分区目录");
+
+    // deleted（完成）后仍稳定拒。
+    d1_3a_complete_purge(&store, lease);
+    assert!(matches!(
+        store.next_tool_policy_role_run_seq(&session.id),
+        Err(ToolPolicyAuditError::Io(message)) if message.contains("entity_deleting")
+    ));
+    assert!(!partition.exists());
+}

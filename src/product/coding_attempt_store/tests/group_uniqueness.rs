@@ -13,7 +13,9 @@ fn rejects_second_group_attempt_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("first group attempt");
     persist_completed_group_uniqueness_fixture(&store, &mut first);
@@ -28,7 +30,9 @@ fn rejects_second_group_attempt_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect_err("same group must not create a second attempt");
 
@@ -54,7 +58,9 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("first group attempt");
     persist_completed_group_uniqueness_fixture(&store, &mut first);
@@ -69,7 +75,9 @@ fn allows_group_attempt_for_different_plan_after_original_completed() {
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
             provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("different group attempt");
 
@@ -88,6 +96,6 @@ fn persist_completed_group_uniqueness_fixture(
     attempt.completed_at = Some(completed_at.clone());
     attempt.updated_at = completed_at;
     store
-        .save_coding_attempt(attempt)
+        .write_coding_attempt_for_test(attempt)
         .expect("persist terminal group uniqueness fixture");
 }

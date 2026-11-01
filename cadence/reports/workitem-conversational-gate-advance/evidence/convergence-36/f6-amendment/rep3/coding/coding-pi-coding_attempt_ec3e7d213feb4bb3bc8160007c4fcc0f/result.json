@@ -1,0 +1,207 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0222",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "pi",
+  "attempt_id": "coding_attempt_ec3e7d213feb4bb3bc8160007c4fcc0f",
+  "outDir": "/tmp/aria-36-matrix/f6-amendment/coding3/coding-pi-coding_attempt_ec3e7d213feb4bb3bc8160007c4fcc0f",
+  "startedAt": "2026-09-11T10:04:34.053Z",
+  "finishedAt": "2026-09-11T10:15:18.418Z",
+  "elapsedSec": 644.366,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.07,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.105,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 362.101,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.156,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 362.101,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    }
+  ],
+  "permissions": [],
+  "choices": [
+    {
+      "id": "e121b328-dd33-47dc-b01d-ea70e8b53d99",
+      "elapsedSec": 300.969,
+      "selected_option_ids": [
+        "Yes"
+      ],
+      "label": "Yes"
+    }
+  ],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_ec3e7d213feb4bb3bc8160007c4fcc0f",
+      "round": 1,
+      "verdict": "blocked",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "config/hello.json",
+          "line": 1,
+          "message": "实测执行 CHECK-001 非零执行成立（1 个测试），但结果 0 通过 1 失败，失败原因为 ENOENT：config/hello.json 不存在；仓库中 config/ 目录不存在，且 config/ 属于 Forbidden Write Scopes，Coder 无法通过返修自行创建该文件，验证与验收在文件就位前必然受阻。",
+          "required_action": "由需求方线下提供 config/hello.json 并放置于仓库 config/ 目录后，重跑 CHECK-001（node --test test/hello.test.js）复核；本条不属于 Coder 返修项。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "plan_defect_evidence": [
+            {
+              "kind": "non_zero_test_execution",
+              "source_ref": "node --test test/hello.test.js",
+              "message": "实测执行 1 个测试（非零执行成立），0 通过 1 失败，失败堆栈指向 test/hello.test.js 第 12 行 readFileSync 抛出 ENOENT：config/hello.json 不存在。"
+            },
+            {
+              "kind": "source_diff",
+              "source_ref": "main..worktree",
+              "message": "diff 仅新增 server.js 与 test/hello.test.js；仓库中不存在 config/hello.json，且 config/ 在 Forbidden Scopes 内，Coder 不可自建。"
+            }
+          ],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "operational_blocker",
+          "reason_code": "config/hello.json 由需求方线下提供且当前仓库不存在，CHECK-001 在其就位前必然失败。",
+          "contract_refs": [
+            "CT-001"
+          ],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "operational_gate",
+          "confidence": "high"
+        },
+        {
+          "severity": "warning",
+          "file_path": "server.js",
+          "line": 37,
+          "message": "生产启动入口 createServer().listen(port) 未显式绑定主机地址，实测服务绑定为全接口（IPv6 未指定地址）而非仅 127.0.0.1；CT-001 表述为服务以 node:http 监听 127.0.0.1:3000，经 127.0.0.1:3000 访问可达（实测返回 500 系 config 缺失所致，端点本身可达），但若契约意图为仅回环监听，则与字面不符。",
+          "required_action": "在 listen 调用中显式传入 127.0.0.1（如 listen(port, 127.0.0.1, callback)），或在设计层确认允许全接口监听后关闭本条；本条为非阻塞 warning，不影响本次 verdict。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "审查范围 main..worktree 仅含 server.js 与 test/hello.test.js，符合独占 Scope 且未触及 Forbidden Scopes。实现与 AC-001 一致：GET /api/hello 读取 config/hello.json 并以 200 返回其完整内容，其余请求 404，配置不可读时 500；测试断言状态码与响应体逐字一致，实现与测试无自相矛盾。实测执行 CHECK-001（node --test test/hello.test.js）非零执行成立，唯一失败为 ENOENT：config/hello.json 不存在，与 Blocker Routing 预声明的运行环境阻塞完全一致，且 config/ 属 Forbidden Scopes，Coder 无法通过返修消除，故按路由优先级判定 verdict 为 blocked 并路由 operational_gate（目标 CT-001），待需求方线下提供该文件后重跑 CHECK-001 复核。另附一条非阻塞 warning：生产启动入口 listen 未显式绑定 127.0.0.1（实测绑定全接口），若 CT-001 意图为仅回环监听需显式绑定或在设计层确认。",
+      "created_at": "2026-09-11T10:15:18.381426128+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0222",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0222",
+    "head_commit": null,
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 5987,
+    "output_tokens": 6380,
+    "cache_read_tokens": 61696
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 726,
+      "output_tokens": 1170,
+      "cache_read_tokens": 38848,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 5261,
+      "output_tokens": 5210,
+      "cache_read_tokens": 22848,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_ec3e7d213feb4bb3bc8160007c4fcc0f",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-11T10:04:34.155192367+00:00",
+      "completed_at": "2026-09-11T10:04:34.182786789+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_ec3e7d213feb4bb3bc8160007c4fcc0f",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-11T10:04:39.210704715+00:00",
+      "completed_at": "2026-09-11T10:10:36.110835224+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_ec3e7d213feb4bb3bc8160007c4fcc0f",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "running",
+      "agent_role": "reviewer",
+      "summary": null,
+      "started_at": "2026-09-11T10:10:41.173408391+00:00",
+      "completed_at": null,
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": "blocked_gate_awaiting_triage",
+  "error": "Code Review 命中运维阻塞：kind=blocked 门无自动放行（expires_at=null），attempt 留存服务端待人工分诊",
+  "completed": false,
+  "amendment": {
+    "mode": "enabled",
+    "attempt_id": "coding_attempt_ec3e7d213feb4bb3bc8160007c4fcc0f",
+    "script_actions": 2,
+    "discovered": null,
+    "gate_turns": [],
+    "confirm": null,
+    "amendment_event_ids": [],
+    "manifest": null,
+    "resume": null
+  }
+}

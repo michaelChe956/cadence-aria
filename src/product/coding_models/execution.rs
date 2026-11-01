@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::product::logical_codebase::{
+    EnrollmentTarget, LogicalRepositoryId, RepositoryCheckoutId,
+};
 use crate::product::models::ProviderConversationRef;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -15,6 +18,9 @@ pub enum CodingExecutionStage {
     ReviewRequest,
     InternalPrReview,
     FinalConfirm,
+    /// REQ-GFR-CR-07：跨仓最终评审 findings 的 `source_stage` 取值。
+    /// **仅**作 findings 来源标记，**永不**出现在任何 attempt 的 `stage` 字段。
+    IssueCrossRepoReview,
 }
 
 impl CodingExecutionStage {
@@ -27,6 +33,7 @@ impl CodingExecutionStage {
             Self::ReviewRequest => 4,
             Self::InternalPrReview => 5,
             Self::FinalConfirm => 6,
+            Self::IssueCrossRepoReview => 7,
         }
     }
 }
@@ -38,6 +45,7 @@ pub enum CodingAttemptStatus {
     Running,
     WaitingForHuman,
     Blocked,
+    AwaitingManualRecovery,
     AwaitingPlanAmendment,
     ApplyingPlanAmendment,
     AmendmentApplyFailed,
@@ -59,6 +67,80 @@ impl CodingAttemptStatus {
                 | Self::AmendmentApplyFailed
         )
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingAdmissionKind {
+    #[default]
+    LegacyGroup,
+    ScAdvance,
+}
+
+/// P2 Task 2（tasks.md §3.1）：attempt 创建时冻结的首启策略快照。
+///
+/// Manual 是缺省（含旧 JSON 缺字段反序列化）；AutoStartOnce 是 enrollment
+/// 自动路径的授权事实——enrollment id/policy_revision 与**plan revision id**
+/// （非可变 latest ref）在 journal 首建时冻结，之后 enrollment 变更（含
+/// disable）不洗白、copy-update 不覆盖，Task 3/4 认领时按当前 enrollment
+/// 精确复核。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingStartRunPolicy {
+    #[default]
+    Manual,
+    AutoStartOnce {
+        enrollment_id: String,
+        policy_revision: u64,
+        source_plan_revision: String,
+    },
+}
+
+/// P2 Task 3（tasks.md §3.1）：首启请求的 origin 身份，product 层定义
+/// （web::coding_start 只消费同一类型，不建 web 同名类型）。
+///
+/// Manual 是人工 WS 首启；Enrolled 携带 enrollment 精确身份（id +
+/// policy_revision 快照），与 attempt 冻结的 `start_run_policy`、当前
+/// durable enrollment 三方一致才构成自动首启授权。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingStartOrigin {
+    Manual,
+    Enrolled {
+        enrollment_id: String,
+        policy_revision: u64,
+        /// C1 Task 1：claim 时刻的 enrollment binding 身份（additive）。
+        /// 旧 durable claim JSON 缺字段读 `None`——消费侧按身份不完整
+        /// fail-closed，绝不从缺字段或旧 `logical_repository_id` 猜测。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding_version: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<EnrollmentTarget>,
+    },
+}
+
+/// P2 Task 4：首启 claim 的持久相位（不可复位，只沿启动顺序前进或转
+/// 人工分诊）。`ProviderMayHaveStarted` 先于 runner 放行持久——跨进程
+/// 重启在此窗口不保证未触达 provider，恢复只认可信 Running/role run
+/// ledger 或转 `NeedsHuman`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingStartPhase {
+    Claimed,
+    RunnerRegistered,
+    ProviderMayHaveStarted,
+    NeedsHuman,
+}
+
+/// P2 Task 4：attempt 同文件携带的单发首启事实——command 身份 + origin +
+/// 相位 + 认领时间。不以额外 JSON 单据与 attempt 状态相互猜测；copy-update
+/// 不覆写（与 status/admission 同款冻结字段）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingStartClaim {
+    pub command_id: String,
+    pub origin: CodingStartOrigin,
+    pub phase: CodingStartPhase,
+    pub claimed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +168,21 @@ pub enum CodingAttemptScope {
     WorkItemGroup,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptTargetSnapshot {
+    pub logical_repository_id: LogicalRepositoryId,
+    pub checkout_id: RepositoryCheckoutId,
+    pub physical_repository_id: String,
+    pub canonical_path: PathBuf,
+    pub git_dir_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub policy_digest: String,
+    pub membership_revision: u64,
+    pub captured_at: String,
+    pub capture_source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodingExecutionAttempt {
     pub id: String,
@@ -96,6 +193,18 @@ pub struct CodingExecutionAttempt {
     #[serde(default)]
     pub scope: CodingAttemptScope,
     pub status: CodingAttemptStatus,
+    #[serde(default)]
+    pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_recovery_reason: Option<String>,
+    /// Authoritative single-file marker written together with the Running transition.
+    ///
+    /// The admission ticket file is merely a pre-transition credential. Keeping consumption in
+    /// the attempt record prevents a second ticket-file write from creating a half-commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_ticket_consumed_at: Option<String>,
+    #[serde(default)]
+    pub admission_kind: CodingAdmissionKind,
     pub stage: CodingExecutionStage,
     pub base_branch: String,
     pub branch_name: String,
@@ -116,6 +225,14 @@ pub struct CodingExecutionAttempt {
     pub provider_conversations: Vec<ProviderConversationRef>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_snapshot: Option<AttemptTargetSnapshot>,
+    /// P2 Task 2：首启策略冻结快照；旧 JSON 缺字段默认 Manual。
+    #[serde(default)]
+    pub start_run_policy: CodingStartRunPolicy,
+    /// P2 Task 4：durable 单发首启 claim（同文件事实）；旧 JSON 缺字段默认 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_claim: Option<CodingStartClaim>,
     pub completed_at: Option<String>,
 }
 
@@ -129,6 +246,14 @@ struct CodingExecutionAttemptSerde {
     #[serde(default)]
     scope: CodingAttemptScope,
     status: CodingAttemptStatus,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    manual_recovery_reason: Option<String>,
+    #[serde(default)]
+    admission_ticket_consumed_at: Option<String>,
+    #[serde(default)]
+    admission_kind: CodingAdmissionKind,
     stage: CodingExecutionStage,
     base_branch: String,
     branch_name: String,
@@ -149,6 +274,12 @@ struct CodingExecutionAttemptSerde {
     provider_conversations: Vec<ProviderConversationRef>,
     created_at: String,
     updated_at: String,
+    #[serde(default)]
+    target_snapshot: Option<AttemptTargetSnapshot>,
+    #[serde(default)]
+    start_run_policy: CodingStartRunPolicy,
+    #[serde(default)]
+    start_claim: Option<CodingStartClaim>,
     completed_at: Option<String>,
 }
 
@@ -173,6 +304,10 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
             attempt_no: raw.attempt_no,
             scope: raw.scope,
             status: raw.status,
+            version: raw.version,
+            manual_recovery_reason: raw.manual_recovery_reason,
+            admission_ticket_consumed_at: raw.admission_ticket_consumed_at,
+            admission_kind: raw.admission_kind,
             stage: raw.stage,
             base_branch: raw.base_branch,
             branch_name: raw.branch_name,
@@ -189,6 +324,9 @@ impl<'de> Deserialize<'de> for CodingExecutionAttempt {
             provider_conversations: raw.provider_conversations,
             created_at: raw.created_at,
             updated_at: raw.updated_at,
+            target_snapshot: raw.target_snapshot,
+            start_run_policy: raw.start_run_policy,
+            start_claim: raw.start_claim,
             completed_at: raw.completed_at,
         })
     }

@@ -1,0 +1,294 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0140",
+  "plan_id": "issue_work_item_plan_0001",
+  "repository_id": "repository_0001",
+  "provider": "pi",
+  "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+  "outDir": "/tmp/aria-36-matrix/pi-light/rep1e/coding/coding-pi-coding_attempt_b29860382c1848f1a28d51ba8193224e",
+  "startedAt": "2026-09-07T09:03:24.618Z",
+  "finishedAt": "2026-09-07T09:43:24.716Z",
+  "elapsedSec": 2400.099,
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.308,
+      "source": "coding_session_state"
+    },
+    {
+      "stage": "worktree_prepare",
+      "elapsedSec": 0.47,
+      "source": "coding_stage_change"
+    },
+    {
+      "stage": "coding",
+      "elapsedSec": 727.247,
+      "source": "coding_session_state"
+    }
+  ],
+  "gates": [
+    {
+      "elapsedSec": 0.592,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0001",
+      "title": "Coding Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 727.246,
+      "source": "coding_gate_required",
+      "gate_id": "coding_stage_gate_0002",
+      "title": "CodeReview Stage Gate",
+      "kind": "stage_gate",
+      "action": "stage_gate_observed_wait_auto_release"
+    },
+    {
+      "elapsedSec": 1132.892,
+      "source": "coding_gate_required",
+      "gate": {
+        "gate_id": "coding_blocked_gate_0001",
+        "kind": "blocked",
+        "title": "Coder 执行中断",
+        "description": "unexpected status 503 Service Unavailable: Service temporarily unavailable, url: http://103.236.76.196:9527/v1/responses, request id: 8bc85dcf-7040-4966-96df-227a37d199c5 (exit status: signal: 9 (SIGKILL))",
+        "stage": "coding",
+        "role": "coder",
+        "expires_at": null,
+        "provider_snapshot": null,
+        "available_actions": [
+          {
+            "action_id": "retry_coding",
+            "label": "重新启动 Coder",
+            "action_type": "retry_coding"
+          },
+          {
+            "action_id": "abort",
+            "label": "终止",
+            "action_type": "abort"
+          }
+        ],
+        "reason_code": "coder_provider_interrupted",
+        "evidence_refs": [],
+        "raw_provider_output_ref": null,
+        "diagnostic": null
+      },
+      "action": "no_response_wait_for_hard_timeout"
+    }
+  ],
+  "permissions": [],
+  "choices": [],
+  "review_results": [
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "round": 1,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "server/server.js",
+          "line": 66,
+          "message": "CT-004 未按契约校验关卡：difficulty 允许 easy、normal、hard、expert 而不是 简单、普通、困难，未要求 unlocked 为布尔值，也未检查 id 在文件内唯一；当前 data/levels.json 的 5 项均缺失 unlocked 且难度为英文，API 实际载荷已违反字段约束。",
+          "required_action": "将难度枚举改为 简单、普通、困难，校验 unlocked 为布尔值并检查 id 唯一性；同步更新 data/levels.json 与后端测试断言，确保有效数据仍返回恰好 5 项。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        },
+        {
+          "severity": "error",
+          "file_path": "server/server.js",
+          "line": 228,
+          "message": "CT-010 要求 start 以选项对象作为首参调用，但当前导出签名把首参当作 server，并把选项对象作为第二参；直接以选项对象调用会在 server.listen 处抛出 TypeError，已观测错误为 server.listen is not a function。",
+          "required_action": "调整 start 的公开签名为接收首参选项对象，补上单参选项调用测试，并验证返回 Promise resolve 的 origin、实际 port 和 stop；如需保留显式 server 注入，应另行设计不破坏 CT-010 的 API。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "规定验证命令已非沙箱完整执行，15 个后端测试全部通过，且 diff 仅涉及允许范围；但审查发现关卡字段契约和 start 调用契约存在可观测的实现偏差，需要返修。",
+      "created_at": "2026-09-07T09:21:06.651566110+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    },
+    {
+      "id": "code_review_0001",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "round": 1,
+      "verdict": "request_changes",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "server/server.js",
+          "line": 66,
+          "message": "CT-004 未按契约校验关卡：difficulty 允许 easy、normal、hard、expert 而不是 简单、普通、困难，未要求 unlocked 为布尔值，也未检查 id 在文件内唯一；当前 data/levels.json 的 5 项均缺失 unlocked 且难度为英文，API 实际载荷已违反字段约束。",
+          "required_action": "将难度枚举改为 简单、普通、困难，校验 unlocked 为布尔值并检查 id 唯一性；同步更新 data/levels.json 与后端测试断言，确保有效数据仍返回恰好 5 项。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        },
+        {
+          "severity": "error",
+          "file_path": "server/server.js",
+          "line": 228,
+          "message": "CT-010 要求 start 以选项对象作为首参调用，但当前导出签名把首参当作 server，并把选项对象作为第二参；直接以选项对象调用会在 server.listen 处抛出 TypeError，已观测错误为 server.listen is not a function。",
+          "required_action": "调整 start 的公开签名为接收首参选项对象，补上单参选项调用测试，并验证返回 Promise resolve 的 origin、实际 port 和 stop；如需保留显式 server 注入，应另行设计不破坏 CT-010 的 API。",
+          "source_stage": "code_review",
+          "evidence": [],
+          "related_requirements": [],
+          "related_design_constraints": [],
+          "related_work_item_tasks": [],
+          "defect_class": "implementation_defect",
+          "reason_code": null,
+          "contract_refs": [],
+          "capability_refs": [],
+          "repair_target": null,
+          "recommended_route": "coder_rework",
+          "confidence": null
+        }
+      ],
+      "tested_evidence_refs": [],
+      "diff_refs": [],
+      "summary": "规定验证命令已非沙箱完整执行，15 个后端测试全部通过，且 diff 仅涉及允许范围；但审查发现关卡字段契约和 start 调用契约存在可观测的实现偏差，需要返修。",
+      "created_at": "2026-09-07T09:21:06.651566110+00:00",
+      "raw_provider_output_ref": "provider-raw/code_review/code_review_0001.txt",
+      "role_run_id": "coding_role_run_0002",
+      "run_no": 1,
+      "unit_run_id": "coding_unit_run_0001"
+    }
+  ],
+  "worktree": {
+    "branch_name": "aria/issues/issue_0140",
+    "base_branch": "main",
+    "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0140",
+    "head_commit": null,
+    "push_status": null,
+    "review_request_url": null
+  },
+  "usage": {
+    "input_tokens": 101773,
+    "output_tokens": 7779,
+    "cache_read_tokens": 99520
+  },
+  "usage_by_role": {
+    "author": {
+      "input_tokens": 63567,
+      "output_tokens": 3383,
+      "cache_read_tokens": 62720,
+      "cache_creation_tokens": 0
+    },
+    "reviewer": {
+      "input_tokens": 38206,
+      "output_tokens": 4396,
+      "cache_read_tokens": 36800,
+      "cache_creation_tokens": 0
+    }
+  },
+  "timeline_nodes": [
+    {
+      "id": "coding_node_0001",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "stage": "worktree_prepare",
+      "title": "准备 worktree",
+      "status": "completed",
+      "agent_role": "git",
+      "summary": "worktree 已准备",
+      "started_at": "2026-09-07T09:03:25.085433606+00:00",
+      "completed_at": "2026-09-07T09:03:25.119152088+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0002",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "completed",
+      "agent_role": "author",
+      "summary": "代码编写完成",
+      "started_at": "2026-09-07T09:03:30.230203926+00:00",
+      "completed_at": "2026-09-07T09:15:31.687595687+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0003",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "stage": "code_review",
+      "title": "代码审查",
+      "status": "failed",
+      "agent_role": "reviewer",
+      "summary": "code review 要求修改",
+      "started_at": "2026-09-07T09:15:36.874267555+00:00",
+      "completed_at": "2026-09-07T09:21:06.662597618+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0004",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "failed",
+      "agent_role": "author",
+      "summary": "exceeded retry limit, last status: 429 Too Many Requests, request id: 97273ca2-db2d-4f19-b358-92f6792ea6a3 (exit status: signal: 9 (SIGKILL))",
+      "started_at": "2026-09-07T09:21:06.674035749+00:00",
+      "completed_at": "2026-09-07T09:21:22.465979916+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0005",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "failed",
+      "agent_role": "author",
+      "summary": "unexpected status 503 Service Unavailable: Service temporarily unavailable, url: http://103.236.76.196:9527/v1/responses, request id: 43771b1a-04b6-48d2-92e0-5b0cabb6d383 (exit status: signal: 9 (SIGKILL))",
+      "started_at": "2026-09-07T09:21:22.473077199+00:00",
+      "completed_at": "2026-09-07T09:21:49.420778064+00:00",
+      "artifact_refs": []
+    },
+    {
+      "id": "coding_node_0006",
+      "attempt_id": "coding_attempt_b29860382c1848f1a28d51ba8193224e",
+      "stage": "coding",
+      "title": "代码编写",
+      "status": "failed",
+      "agent_role": "author",
+      "summary": "unexpected status 503 Service Unavailable: Service temporarily unavailable, url: http://103.236.76.196:9527/v1/responses, request id: 8bc85dcf-7040-4966-96df-227a37d199c5 (exit status: signal: 9 (SIGKILL))",
+      "started_at": "2026-09-07T09:21:49.434086369+00:00",
+      "completed_at": "2026-09-07T09:22:17.439016214+00:00",
+      "artifact_refs": []
+    }
+  ],
+  "failureClass": "unknown_gate_timeout",
+  "error": "未知/不可理解 Coding gate 后等待至硬超时 2400000ms",
+  "completed": false
+}

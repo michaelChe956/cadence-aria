@@ -1,0 +1,358 @@
+{
+  "event_seq": 4708,
+  "type": "artifact_update",
+  "version": 5,
+  "work_item_projection": {
+    "canonical_contract_hash": "715fd1869041f4fa9935d769ea34fab225473dc7a26472c3fd63296eb8709db2",
+    "coder_projection": {
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-011",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 集成服务启动 THE SYSTEM SHALL 从实际 origin 观测到页面入口、HTML 结构、脚本与 API 成功契约同源可达。"
+        },
+        {
+          "criterion_id": "AC-012",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "statement": "WHEN 集成服务使用无效数据路径 THE SYSTEM SHALL 观测到 API 返回 500 与 LEVEL_DATA_UNAVAILABLE 的 JSON 错误契约。"
+        },
+        {
+          "criterion_id": "AC-013",
+          "required_evidence": [
+            "manual_check"
+          ],
+          "statement": "WHEN 集成验证执行 THE SYSTEM SHALL 仅通过 node --test 的限定目录测试通过。"
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "provided_contract_refs": [],
+        "required_fields": [
+          "integration_command",
+          "service_origin",
+          "page_contract_refs",
+          "api_contract_refs"
+        ],
+        "reviewer_check_refs": [
+          "AC-011",
+          "AC-012",
+          "AC-013"
+        ]
+      },
+      "objective": "WHEN 集成测试使用同一服务运行 THE SYSTEM SHALL 验证同源页面入口、静态脚本引用、API 成功形状和错误响应契约。",
+      "required_input_contracts": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "stop() 返回 Promise 并停止服务"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回注入 staticRoot 的页面入口文件"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 引用 /api/levels"
+          ]
+        }
+      ],
+      "task_refs": [
+        "TASK-011",
+        "TASK-012",
+        "TASK-013"
+      ],
+      "tasks": [
+        {
+          "done_when_refs": [
+            "AC-011"
+          ],
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "statement": "WHEN 编写同源集成测试 THE SYSTEM SHALL 以 port=0 启动服务并断言 GET /、脚本引用、容器标记和 GET /api/levels 成功契约。",
+          "task_id": "TASK-011"
+        },
+        {
+          "done_when_refs": [
+            "AC-012"
+          ],
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "statement": "WHEN 编写 API 错误集成测试 THE SYSTEM SHALL 通过可控无效数据路径断言 500、JSON 错误头和 LEVEL_DATA_UNAVAILABLE 结构。",
+          "task_id": "TASK-012"
+        },
+        {
+          "done_when_refs": [
+            "AC-013"
+          ],
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "statement": "WHEN 执行集成测试命令 THE SYSTEM SHALL 停止服务、使限定目录内的 Node 内置测试全部通过且测试数量不为零。",
+          "task_id": "TASK-013"
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/integration/*.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_57120772b585dd8f4a07eb48",
+      "write_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "web/**",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json 依赖字段"
+        ]
+      }
+    },
+    "coder_projection_hash": "8b2909c8e1873ebeaa8df2cac32874c58d65c3344e5f75d745d7f7445e3253fd",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-20T01:30:12.153371149+00:00",
+    "human_projection": {
+      "completion_summary": [
+        "WHEN 集成服务启动 THE SYSTEM SHALL 从实际 origin 观测到页面入口、HTML 结构、脚本与 API 成功契约同源可达。",
+        "WHEN 集成服务使用无效数据路径 THE SYSTEM SHALL 观测到 API 返回 500 与 LEVEL_DATA_UNAVAILABLE 的 JSON 错误契约。",
+        "WHEN 集成验证执行 THE SYSTEM SHALL 仅通过 node --test 的限定目录测试通过。"
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "goal": "WHEN 集成测试使用同一服务运行 THE SYSTEM SHALL 验证同源页面入口、静态脚本引用、API 成功形状和错误响应契约。",
+      "inputs": [
+        {
+          "capabilities": [
+            "stop() 返回 Promise 并停止服务"
+          ],
+          "contract_id": "CT-001",
+          "source_refs": [
+            "CT-001"
+          ]
+        },
+        {
+          "capabilities": [
+            "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+          ],
+          "contract_id": "CT-002",
+          "source_refs": [
+            "CT-002"
+          ]
+        },
+        {
+          "capabilities": [
+            "GET / 返回注入 staticRoot 的页面入口文件"
+          ],
+          "contract_id": "CT-003",
+          "source_refs": [
+            "CT-003"
+          ]
+        },
+        {
+          "capabilities": [
+            "web/level-select.js 引用 /api/levels"
+          ],
+          "contract_id": "CT-004",
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "logical_work_item_id": "WI-003",
+      "non_goals": [
+        "不重复验证浏览器动态渲染结果。",
+        "不修改后端、前端或上游测试实现。",
+        "不引入浏览器自动化或新增依赖。"
+      ],
+      "normative": false,
+      "outputs": [
+        {
+          "capabilities": [
+            "integration_evidence_api_contract=CT-002"
+          ],
+          "contract_id": "CT-005",
+          "source_refs": [
+            "CT-005"
+          ]
+        }
+      ],
+      "scope_summary": {
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "web/**",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json 依赖字段"
+        ],
+        "owned_scopes": [
+          "tests/integration/**"
+        ]
+      },
+      "source_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013",
+        "CHECK-003",
+        "CT-001",
+        "CT-002",
+        "CT-003",
+        "CT-004",
+        "CT-005",
+        "NFR-001",
+        "REQ-002",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "TASK-011",
+        "TASK-012",
+        "TASK-013"
+      ],
+      "title": "Fullstack Integration Verification",
+      "used_by_provider": false
+    },
+    "human_projection_hash": "7b6a546ddce5b48bc80e0a078dd127e50b605225c1ac73e5a1d7b915919d3c09",
+    "id": "work_item_projection_bundle_57120772b585dd8f4a07eb48",
+    "projection_schema_version": 1,
+    "reviewer_projection": {
+      "blocker_routing": [],
+      "criterion_refs": [
+        "AC-011",
+        "AC-012",
+        "AC-013"
+      ],
+      "input_contract_checks": [
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "stop() 返回 Promise 并停止服务"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-002",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "数据错误返回 error.code=LEVEL_DATA_UNAVAILABLE 和可读 message"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-003",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "GET / 返回注入 staticRoot 的页面入口文件"
+          ]
+        },
+        {
+          "compatibility_policy": "require_all",
+          "contract_id": "CT-004",
+          "provider_logical_work_item_id": "WI-002",
+          "required_capabilities": [
+            "web/level-select.js 引用 /api/levels"
+          ]
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "capabilities": [
+            "integration_evidence_api_contract=CT-002"
+          ],
+          "contract_id": "CT-005"
+        }
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-011",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "REQ-005"
+          ]
+        },
+        {
+          "criterion_id": "AC-012",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "requirement_refs": [
+            "REQ-006"
+          ]
+        },
+        {
+          "criterion_id": "AC-013",
+          "failure_route": "coder_rework",
+          "required_evidence": [
+            "manual_check"
+          ],
+          "requirement_refs": [
+            "NFR-001"
+          ]
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "tests/integration/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "web/**",
+          "tests/backend/**",
+          "tests/frontend/**",
+          "package.json 依赖字段"
+        ]
+      },
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-003",
+          "command": "node --test tests/integration/*.test.js",
+          "manual_instruction": "null",
+          "non_zero_test_execution_required": true,
+          "required": true
+        }
+      ],
+      "work_item_revision_id": "work_item_revision_57120772b585dd8f4a07eb48"
+    },
+    "reviewer_projection_hash": "cc310e838dcadf6eaa651e17b7835ff51eada763a3acfb3f825289adfeffb480",
+    "work_item_revision_id": "work_item_revision_57120772b585dd8f4a07eb48"
+  }
+}

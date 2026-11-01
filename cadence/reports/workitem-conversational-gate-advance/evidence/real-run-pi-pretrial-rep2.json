@@ -1,0 +1,34 @@
+{
+  "run_id": "stage35:pretrial:pi:rep2",
+  "provider": "pi",
+  "rep": 2,
+  "rerun_of": "stage35:pretrial:pi:rep1",
+  "fixture_set": "minimal",
+  "script": "request-change:请在契约定义中补充错误响应的示例;confirm",
+  "attempt_id": "workspace_session_0115",
+  "same_attempt_throughout": true,
+  "gate_turns": 1,
+  "budget_deductions": [
+    {
+      "turn_id": "human_gate_turn_e8df4032-fcf5-4d26-a5f7-8f29eb3f9882",
+      "command_id": "cmd-human_gate_feedback-0-6139ae2335",
+      "remaining_before": 2,
+      "remaining_after": null,
+      "exactly_once": true
+    }
+  ],
+  "advance": null,
+  "provider_ledger_delta_after_advance": null,
+  "failure_class": "workspace_error",
+  "output_defects": [
+    "与 rep1 完全同签名:confirm 后 single-candidate approval compile failed(门保持 open,confirmed_count=0);request-change 门回合完成并产出 artifact_version_002",
+    "provider 输出 sha256=0e8de82c0d61f048d42e255422dd7bae2d5d6461a5548769c0be045cf327327b(len=5198)"
+  ],
+  "elapsed_sec": 452.3,
+  "verdict": "fail",
+  "verdict_reason": "session_status=open(非终态),completed=false;门链路通(1 对 open/completed 同 turn_id);approval compile 失败与 rep1 一致,定性系统性",
+  "source_refs": {
+    "result_json": "/tmp/aria-stage35-20260903/pretrial/pi/rep2/result.json",
+    "ws_jsonl": "/tmp/aria-stage35-20260903/pretrial/pi/rep2/ws.jsonl"
+  }
+}

@@ -4,14 +4,7 @@ async fn coding_plan_repair_terminal_group_ws_rejects_start_without_invoking_pro
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let app = app_with_group_full_chain_attempt(root.path());
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Running,
-        )
-        .expect("run group attempt");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", "coding_attempt_0001");
     store
         .update_attempt_status(
             "project_0001",

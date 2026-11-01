@@ -1,3 +1,5 @@
+use crate::product::logical_codebase::LogicalRepositoryId;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +27,10 @@ pub struct RepositoryProfile {
     pub project_id: String,
     pub issue_id: String,
     pub repository_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_repository_id: Option<LogicalRepositoryId>,
+    #[serde(default)]
+    pub membership_revision: u64,
     pub provider_run_ref: Option<String>,
     pub languages: Vec<String>,
     pub frameworks: Vec<String>,

@@ -46,6 +46,7 @@ async function imageCreateApiError(response: Response): Promise<ApiRequestError>
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
+    credentials: "same-origin",
     headers: {
       "content-type": "application/json",
       ...(init?.headers ?? {}),
@@ -122,6 +123,7 @@ export async function generateImage(
 
   const response = await fetch(`${sessionPath(sessionId)}/generate`, {
     method: "POST",
+    credentials: "same-origin",
     body: form,
   });
   if (!response.ok) {

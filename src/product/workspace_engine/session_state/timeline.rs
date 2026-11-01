@@ -19,11 +19,33 @@ impl WorkspaceEngine {
     }
 
     pub(crate) async fn finish_failed_run(&mut self) {
-        if let Some(store) = &self.lifecycle_store {
-            let _ = store.update_workspace_session_status(
-                &self.session.session_id,
-                WorkspaceSessionStatus::Open,
-            );
+        // 批 2 T2（REQ-WIGA-09）：durable 已 Terminated 的 session，迟到失败
+        // 收口不覆盖状态、不重置 stage（终止终态；store 层另有第二道防线）。
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.get_workspace_session(&self.session.session_id)
+            && record.status == WorkspaceSessionStatus::Terminated
+        {
+            self.session.session_status = WorkspaceSessionStatus::Terminated;
+            self.active_run_id = None;
+            return;
+        }
+        // P2 GAP-E/G（Task 0.1）：SC 已收敛 durable 终态 Failed 的会话保留
+        // Failed（人工显式重驱的恢复现场），其他 flow 维持旧 Open 重置。
+        let status = if self.session.flow_kind
+            == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate
+            && self.session.single_candidate_phase
+                == Some(crate::product::models::SingleCandidatePhase::Failed)
+        {
+            WorkspaceSessionStatus::Failed
+        } else {
+            WorkspaceSessionStatus::Open
+        };
+        self.session.session_status = status.clone();
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) =
+                store.update_workspace_session_status(&self.session.session_id, status)
+        {
+            self.session.session_status = record.status;
         }
         self.active_run_id = None;
         self.transition_stage(WorkspaceStage::PrepareContext).await;
@@ -125,6 +147,12 @@ impl WorkspaceEngine {
         node_id: Option<String>,
     ) {
         tracing::warn!(permission_id = %permission_id, "permission timed out; aborting active run");
+        // 诊断打点（claude×轻 握手谜团第 2 轮，不改行为）：权限超时是 engine 自取消
+        // 位点之一（会取消在途 provider 握手/流）。
+        eprintln!(
+            "[aria-cancellation] workspace permission_timeout trigger=permission_timeout session_id={} role=none permission_id={permission_id}",
+            self.session.session_id
+        );
         if let Some(node_id) = node_id.as_deref() {
             let _ = self
                 .persist_permission_timeout(node_id, permission_id.clone())
@@ -352,8 +380,22 @@ impl WorkspaceEngine {
         let Some(node_id) = self.active_node_id.clone() else {
             return;
         };
-        self.update_timeline_node(&node_id, TimelineNodeStatus::Completed, summary)
-            .await;
+        // F-05：Failed/Paused/Skipped 节点不得被改写为 Completed——重开场景下
+        // active_node_id 可能仍指向上一次失败的 author 节点，其终态与历史字段
+        // （summary/completed_at）必须原样保留。已 Completed 的节点允许幂等
+        // 重放完成：review 流程先在 complete_review 落 verdict summary，路由腿
+        // 再覆写流程 summary（如「Review 完成，报告已进入对话流」），这是既有
+        // 双写契约，不得被守卫吞掉。
+        if self.timeline_nodes.iter().any(|node| {
+            node.node_id == node_id
+                && matches!(
+                    node.status,
+                    TimelineNodeStatus::Active | TimelineNodeStatus::Completed
+                )
+        }) {
+            self.update_timeline_node(&node_id, TimelineNodeStatus::Completed, summary)
+                .await;
+        }
     }
 
     pub(crate) async fn update_timeline_node(
@@ -406,6 +448,28 @@ impl WorkspaceEngine {
                 summary,
                 completed_at,
             })
+            .await;
+    }
+
+    /// A2b（Task 2.6，设计 §4.3/§4.4）：LC 等待收口的旧 provider 节点幂等
+    /// 终态化——仅 Active 节点落 Failed（durable timeline + node detail
+    /// 同步落盘、TimelineNodeUpdated 事件广播）；已终态节点不覆写历史
+    /// summary/completed_at（幂等重放零写）。summary 与纯投影派生同源
+    /// （`lc_waiting_node_summary`），不引入第二套文案。
+    pub(crate) async fn finalize_lc_waiting_provider_node(
+        &mut self,
+        node_id: &str,
+        reason_code: &str,
+    ) {
+        let occupied = self
+            .timeline_nodes
+            .iter()
+            .any(|node| node.node_id == node_id && node.status == TimelineNodeStatus::Active);
+        if !occupied {
+            return;
+        }
+        let summary = Some(Self::lc_waiting_node_summary(reason_code));
+        self.update_timeline_node(node_id, TimelineNodeStatus::Failed, summary)
             .await;
     }
 
@@ -495,5 +559,87 @@ impl WorkspaceEngine {
         if let Some(store) = &self.lifecycle_store {
             let _ = store.save_artifact_versions(&self.session.session_id, &self.artifact_versions);
         }
+    }
+}
+
+#[cfg(test)]
+mod t3_termination_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
+    use crate::product::models::provider::ProviderName;
+    use crate::product::models::{WorkspaceSessionStatus, WorkspaceType};
+
+    fn persistent_engine_with_status(
+        root: &std::path::Path,
+        durable_status: WorkspaceSessionStatus,
+    ) -> (LifecycleStore, WorkspaceEngine) {
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "entity_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .unwrap();
+        if durable_status != WorkspaceSessionStatus::Open {
+            lifecycle
+                .compare_and_update_workspace_session_status(&record, durable_status)
+                .unwrap();
+        }
+        // 引擎内存态保持 Open（模拟迟到收口现场），durable 已是目标状态。
+        let mut in_memory = record.clone();
+        in_memory.status = WorkspaceSessionStatus::Open;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let engine = WorkspaceEngine::new_persistent(
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                root.join("advance-checkpoints"),
+            )),
+            LifecycleStore::new(paths),
+            event_tx,
+            WorkspaceSession::from_record(in_memory),
+        );
+        (lifecycle, engine)
+    }
+
+    /// 批 2 T3（T1T2 遗留③，REQ-WIGA-09）：durable 已 Terminated 的
+    /// session，迟到 `finish_aborted_run` 不覆盖状态（不以 Open/Failed
+    /// 复活）、不重置 stage；对照：durable Open 的迟到收口仍写 Open。
+    #[tokio::test]
+    async fn finish_aborted_run_preserves_durable_terminated_session() {
+        let root = tempfile::tempdir().unwrap();
+        let (lifecycle, mut engine) =
+            persistent_engine_with_status(root.path(), WorkspaceSessionStatus::Terminated);
+        let session_id = engine.session.session_id.clone();
+
+        engine.finish_aborted_run().await;
+
+        assert_eq!(
+            engine.session.session_status,
+            WorkspaceSessionStatus::Terminated,
+            "late abort finalization must not resurrect a terminated session"
+        );
+        assert_eq!(
+            lifecycle.get_workspace_session(&session_id).unwrap().status,
+            WorkspaceSessionStatus::Terminated,
+        );
+
+        // 对照：durable Open 的迟到收口维持旧语义（Open 重置写盘）。
+        let (lifecycle, mut engine) =
+            persistent_engine_with_status(root.path(), WorkspaceSessionStatus::Open);
+        let session_id = engine.session.session_id.clone();
+        engine.finish_aborted_run().await;
+        assert_eq!(
+            lifecycle.get_workspace_session(&session_id).unwrap().status,
+            WorkspaceSessionStatus::Open,
+        );
     }
 }

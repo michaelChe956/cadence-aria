@@ -42,6 +42,22 @@ pub struct WorkItemPlanOutlineValidator;
 
 impl WorkItemPlanOutlineValidator {
     pub fn validate(outline: &WorkItemPlanOutline) -> WorkItemSplitValidationReport {
+        Self::validate_with_catalog(outline)
+    }
+
+    pub(crate) fn validate_for_single_candidate(
+        outline: &WorkItemPlanOutline,
+    ) -> WorkItemSplitValidationReport {
+        let mut findings = Vec::new();
+        outline::validate_outline_ids(outline, &mut findings);
+        outline::validate_outline_traceability_scopes_and_budget(outline, &mut findings);
+        let edges = outline::validate_outline_dependencies(outline, &mut findings);
+        outline::validate_outline_dependency_cycles(outline, &edges, &mut findings);
+        outline::validate_outline_scope_conflicts(outline, &edges, &mut findings);
+        WorkItemSplitValidationReport { findings }
+    }
+
+    fn validate_with_catalog(outline: &WorkItemPlanOutline) -> WorkItemSplitValidationReport {
         let mut findings = Vec::new();
         outline::validate_outline_ids(outline, &mut findings);
         outline::validate_outline_traceability_and_scopes(outline, &mut findings);
@@ -60,6 +76,23 @@ impl WorkItemDraftLocalValidator {
         accepted_dependencies: &[WorkItemDraftCandidate],
         outline: &WorkItemPlanOutline,
     ) -> WorkItemSplitValidationReport {
+        Self::validate_draft_common(current, accepted_dependencies, outline, true)
+    }
+
+    pub(crate) fn validate_for_single_candidate(
+        current: &WorkItemDraftCandidate,
+        accepted_dependencies: &[WorkItemDraftCandidate],
+        outline: &WorkItemPlanOutline,
+    ) -> WorkItemSplitValidationReport {
+        Self::validate_draft_common(current, accepted_dependencies, outline, false)
+    }
+
+    fn validate_draft_common(
+        current: &WorkItemDraftCandidate,
+        accepted_dependencies: &[WorkItemDraftCandidate],
+        outline: &WorkItemPlanOutline,
+        include_trusted_catalog: bool,
+    ) -> WorkItemSplitValidationReport {
         let mut findings = Vec::new();
         draft::validate_canonical_contract_candidate(current, &mut findings);
         let current_outline =
@@ -67,7 +100,7 @@ impl WorkItemDraftLocalValidator {
         draft::validate_draft_provider_logical_ids(current, outline, &mut findings);
         draft::validate_draft_scopes(current, &mut findings);
         draft::validate_draft_verification_plan(current, &mut findings);
-        if let Some(current_outline) = current_outline {
+        if include_trusted_catalog && let Some(current_outline) = current_outline {
             draft::validate_draft_trusted_verification_commands(
                 current,
                 current_outline,

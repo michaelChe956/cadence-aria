@@ -1,0 +1,520 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1v9b/codex/rep1",
+  "startedAt": "2026-09-08T20:03:22.999Z",
+  "finishedAt": "2026-09-08T20:12:20.743Z",
+  "elapsedSec": 537.743,
+  "issue_id": "issue_0178",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0245",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.038,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.102,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 89.086,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 89.321,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 164.699,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 164.699,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 221.027,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 221.261,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 362.015,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 362.015,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 454.289,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 454.584,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 537.525,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 537.525,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 89.087,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+          "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+          "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 164.699,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+          "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+          "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 281.983,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-003 要求 WI-001 提供未知 API 路径返回 404 JSON，但 CT-002 未声明该能力。",
+          "evidence": "edge WI-001 -> WI-003, contract_id CT-002, missing_capabilities [未知 API 路径返回 404 JSON]",
+          "required_action": "将“未知 API 路径返回 404 JSON”加入 WI-001 的 CT-002 output contract capabilities。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-001.output_contracts[CT-002].capabilities"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-003 要求 WI-002 提供 web/level-select.js 相对调用 /api/levels，但 CT-003 未声明该能力。",
+          "evidence": "edge WI-002 -> WI-003, contract_id CT-003, missing_capabilities [`web/level-select.js` 相对调用 `/api/levels`]",
+          "required_action": "将“`web/level-select.js` 相对调用 `/api/levels`”加入 WI-002 的 CT-003 output contract capabilities。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "WI-002.output_contracts[CT-003].capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 362.015,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+          "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+          "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 474.658,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-001 未向 WI-003 提供 CT-002 要求的必需能力。",
+          "evidence": "edge WI-001 -> WI-003, contract_id CT-002, missing_capabilities [未知 API 路径返回 404 JSON]",
+          "required_action": "将“未知 API 路径返回 404 JSON”补充到 WI-001 CT-002 的 output_contracts.capabilities，或调整需求归属使覆盖一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "must_fix",
+          "message": "WI-002 未向 WI-003 提供 CT-003 要求的必需能力。",
+          "evidence": "edge WI-002 -> WI-003, contract_id CT-003, missing_capabilities [`web/level-select.js` 相对调用 `/api/levels`]",
+          "required_action": "将“`web/level-select.js` 相对调用 `/api/levels`”补充到 WI-002 CT-003 的 output_contracts.capabilities，或调整需求归属使覆盖一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 6,
+      "elapsedSec": 537.525,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+          "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+          "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+      "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+      "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+      "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+      "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-003 要求 WI-001 提供未知 API 路径返回 404 JSON，但 CT-002 未声明该能力。",
+      "evidence": "edge WI-001 -> WI-003, contract_id CT-002, missing_capabilities [未知 API 路径返回 404 JSON]",
+      "required_action": "将“未知 API 路径返回 404 JSON”加入 WI-001 的 CT-002 output contract capabilities。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-001.output_contracts[CT-002].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-003 要求 WI-002 提供 web/level-select.js 相对调用 /api/levels，但 CT-003 未声明该能力。",
+      "evidence": "edge WI-002 -> WI-003, contract_id CT-003, missing_capabilities [`web/level-select.js` 相对调用 `/api/levels`]",
+      "required_action": "将“`web/level-select.js` 相对调用 `/api/levels`”加入 WI-002 的 CT-003 output contract capabilities。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "WI-002.output_contracts[CT-003].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+      "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+      "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-001 未向 WI-003 提供 CT-002 要求的必需能力。",
+      "evidence": "edge WI-001 -> WI-003, contract_id CT-002, missing_capabilities [未知 API 路径返回 404 JSON]",
+      "required_action": "将“未知 API 路径返回 404 JSON”补充到 WI-001 CT-002 的 output_contracts.capabilities，或调整需求归属使覆盖一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 未向 WI-003 提供 CT-003 要求的必需能力。",
+      "evidence": "edge WI-002 -> WI-003, contract_id CT-003, missing_capabilities [`web/level-select.js` 相对调用 `/api/levels`]",
+      "required_action": "将“`web/level-select.js` 相对调用 `/api/levels`”补充到 WI-002 CT-003 的 output_contracts.capabilities，或调整需求归属使覆盖一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-002 lacks capability 未知 API 路径返回 404 JSON required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-002 capability=未知 API 路径返回 404 JSON",
+      "required_action": "provider WI-001 的 contract CT-002 需逐字补 capability 未知 API 路径返回 404 JSON（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-002::未知 API 路径返回 404 JSON"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-003 lacks capability `web/level-select.js` 相对调用 `/api/levels` required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=`web/level-select.js` 相对调用 `/api/levels`",
+      "required_action": "provider WI-002 的 contract CT-003 需逐字补 capability `web/level-select.js` 相对调用 `/api/levels`（覆盖消费方 WI-003 的 require_all）",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::`web/level-select.js` 相对调用 `/api/levels`"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 19131,
+      "output_tokens": 653,
+      "cache_read_tokens": 64,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "single-candidate approval compile failed; human gate remains open",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-08T20:06:07.698Z",
+      "elapsedSec": 164.7,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_006",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-33619924d0",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T20:06:07.699Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-08T20:09:25.014Z",
+      "elapsedSec": 362.015,
+      "stage": "cross_review",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_009",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-4692067b09",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T20:09:25.014Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-08T20:12:20.524Z",
+      "elapsedSec": 537.525,
+      "stage": "cross_review",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_013",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-08T20:12:20.524Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-33619924d0",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_393c5f37-0de1-4db0-852c-94068273d104",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_003"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-4692067b09",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_3b0eba3f-4598-4f8c-a4f8-fa0e08f985fd",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_005"
+    }
+  ],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 537743,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.064,
+    "1:running": 87.984,
+    "2:cross_review": 0.235,
+    "3:prepare_context": 75.378,
+    "4:cross_review": 0,
+    "5:human_confirm": 56.328,
+    "6:cross_review": 0.234,
+    "7:prepare_context": 140.754,
+    "8:cross_review": 0,
+    "9:human_confirm": 92.274,
+    "10:cross_review": 0.295,
+    "11:prepare_context": 82.941,
+    "12:cross_review": 0,
+    "13:human_confirm": 0.218
+  },
+  "stage3_gate_return": {
+    "waits": 2,
+    "dispatched": 2,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

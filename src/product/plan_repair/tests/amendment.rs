@@ -589,6 +589,7 @@ pub(super) fn plan_repair_engine_fixture() -> PlanRepairEngineFixture {
                 dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
                 validation_report_ref: "plan_validation_report_0001".to_string(),
                 plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
+                publication_provenance_ref: None,
                 created_at: "2026-07-18T00:00:01Z".to_string(),
             },
         )

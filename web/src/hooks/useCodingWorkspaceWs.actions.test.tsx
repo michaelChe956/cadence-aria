@@ -1,6 +1,9 @@
 import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { CodingRoleRun } from "../api/types";
+import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
 import {
   MockWebSocket,
   blockedGate,
@@ -49,6 +52,61 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       JSON.stringify({ type: "abort_attempt" }),
       JSON.stringify({ type: "coding_ping" }),
     ]);
+  });
+
+  it("marks only an explicitly sent start_coding command as a user startup audit record", () => {
+    useOperationAuditStore.getState().reset();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.startCoding();
+      harness.ws.receive({
+        type: "coding_protocol_error",
+        code: "SC_CODING_REQUIRES_ADVANCE",
+        message: "advance first",
+      });
+    });
+
+    expect(useOperationAuditStore.getState().records.at(-1)).toMatchObject({
+      operation: "start_coding",
+      source: "coding",
+      outcome: "rejected",
+      detail: "SC_CODING_REQUIRES_ADVANCE",
+    });
+  });
+
+  it("sends the terminal restart verb and records it as a user start audit record", () => {
+    useOperationAuditStore.getState().reset();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.sent.length = 0;
+      harness.api.restartCoding();
+    });
+
+    expect(harness.ws.sent).toEqual([JSON.stringify({ type: "restart_coding" })]);
+    expect(useOperationAuditStore.getState().records.at(-1)).toMatchObject({
+      operation: "start_coding",
+      source: "coding",
+      outcome: "sent",
+    });
+  });
+
+  it("does not create a user start audit record from a passive resumed snapshot", () => {
+    useOperationAuditStore.getState().reset();
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(codingSessionState({ status: "running", stage: "coding" }));
+    });
+
+    expect(useOperationAuditStore.getState().records).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ operation: "start_coding", source: "coding" })]),
+    );
   });
 
   it("respond gate waits for server snapshot before resolving gate", () => {
@@ -354,6 +412,61 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
     vi.useRealTimers();
   });
 
+  // P3 WIGA Task 4（tasks.md §4.2 / REQ-WIGA-08）：断线重进以
+  // coding_hello.last_seen_node_id 续读 timeline——携带最后已知节点，
+  // 服务端快照重放不触发第二个 start_coding（单 attempt 单 start）。
+  it("resumes the timeline after reconnect via last_seen_node_id without a second start", () => {
+    vi.useFakeTimers();
+    const resumedNode = {
+      id: "coding_node_0001",
+      attempt_id: "coding_attempt_0001",
+      stage: "code_review" as const,
+      title: "Code review",
+      status: "completed" as const,
+      agent_role: "reviewer" as const,
+      summary: null,
+      started_at: "2026-08-07T00:00:00Z",
+      completed_at: "2026-08-07T00:01:00Z",
+      artifact_refs: [],
+    };
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      useCodingWorkspaceStore.setState({ timelineNodes: [resumedNode] });
+      harness.ws.close(1006);
+    });
+
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+
+    act(() => {
+      MockWebSocket.instances[1].open();
+    });
+
+    expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("connected");
+    expect(MockWebSocket.instances[1].sent).toEqual([
+      JSON.stringify({
+        type: "coding_hello",
+        attempt_id: "coding_attempt_0001",
+        last_seen_node_id: "coding_node_0001",
+      }),
+    ]);
+
+    // 服务端历史重放快照到达后：不发送 start_coding（重连只续读）。
+    act(() => {
+      MockWebSocket.instances[1].receive(codingSessionState());
+    });
+    expect(
+      MockWebSocket.instances[1].sent.filter(
+        (frame) => JSON.parse(frame).type === "start_coding",
+      ),
+    ).toHaveLength(0);
+    harness.unmount();
+    vi.useRealTimers();
+  });
+
   it("hydrates work item execution plan from coding session state", () => {
     const harness = renderCodingHook();
 
@@ -371,5 +484,206 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       allowed_write_scopes: ["src/product/**"],
     });
     expect(useCodingWorkspaceStore.getState().requireExecutionPlanConfirm).toBe(false);
+  });
+
+  it("routes frame-merged stream chunks into the coding log store", () => {
+    vi.useFakeTimers();
+    try {
+      useCodingLogStore.getState().reset();
+      const harness = renderCodingHook();
+      act(() => {
+        harness.ws.open();
+        harness.ws.receive(codingSessionState({}));
+      });
+      act(() => {
+        harness.ws.receive({ type: "coding_stream_chunk", content: "he", node_id: "node_1" });
+        harness.ws.receive({ type: "coding_stream_chunk", content: "llo", node_id: "node_1" });
+      });
+      act(() => {
+        vi.advanceTimersByTime(60);
+      });
+      const lines = useCodingLogStore.getState().lines;
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ text: "hello", nodeId: "node_1", kind: "stream" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("logs execution events with a stable title line and resets the log on address change", () => {
+    useCodingLogStore.getState().reset();
+    const harness = renderCodingHook();
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(codingSessionState({}));
+      harness.ws.receive({
+        type: "coding_execution_event",
+        event: { event_id: "e1", kind: "command", status: "completed", title: "运行验证", command: "pnpm test" },
+      });
+    });
+    expect(useCodingLogStore.getState().lines.at(-1)).toMatchObject({ kind: "event", text: "运行验证 · pnpm test" });
+
+    // test-utils 的 renderCodingHook 返回 rerenderAddress(nextAddress)（useCodingWorkspaceWs.test-utils.tsx:160-162）
+    act(() => {
+      harness.rerenderAddress({
+        projectId: "project_0002",
+        issueId: "issue_0002",
+        attemptId: "coding_attempt_0002",
+      });
+    });
+    expect(useCodingLogStore.getState().lines).toEqual([]);
+  });
+});
+
+// Bug2-C(Task 5)：关门后投影一致性回归锁——snapshot 移除／重连不复活／
+// 事项一致(对照后端 coding_attention_info.rs:317-397:待处理事项只由
+// open 门事实派生,关门归档后事项随权威快照重建自然消失;UI 无特例按钮
+// 逻辑,动作关闭成功→新 snapshot→前端按 pending_gates 重建)。
+describe("coding-attention projection consistency after gate closure", () => {
+  installCodingWorkspaceWsTestHooks();
+
+  const gateRetryRun: CodingRoleRun = {
+    id: "coding_role_run_0002",
+    attempt_id: "coding_attempt_0001",
+    stage: "code_review",
+    role: "code_reviewer",
+    run_no: 2,
+    status: "running",
+    trigger: "retry_review",
+    node_id: null,
+    started_at: "2026-10-17T00:00:00Z",
+    completed_at: null,
+    raw_provider_output_refs: [],
+    artifact_refs: [],
+    // Task 3 gate_origin 首写:serde 可选字段,旧数据缺省 null。
+    gate_origin: {
+      gate_id: "gate_0001",
+      generation: 0,
+      action_id: "retry_review",
+    },
+  };
+
+  it("removes the closed gate on the authoritative snapshot and keeps its origin-linked retry run", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(
+        codingSessionState({
+          status: "blocked",
+          stage: "code_review",
+          pending_gates: [blockedGate()],
+        }),
+      );
+    });
+    expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(1);
+
+    // 动作关闭成功 → 服务端统一关闭原语落盘 → 新 snapshot:门不再投影,
+    // retry run 携带 gate_origin(类型对齐:原样透传,不丢失关联事实)。
+    act(() => {
+      harness.ws.receive(
+        codingSessionState({
+          status: "running",
+          stage: "code_review",
+          pending_gates: [],
+          role_runs: [gateRetryRun],
+        }),
+      );
+    });
+    expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+    expect(useCodingWorkspaceStore.getState().roleRuns).toEqual([
+      expect.objectContaining({
+        id: "coding_role_run_0002",
+        gate_origin: {
+          gate_id: "gate_0001",
+          generation: 0,
+          action_id: "retry_review",
+        },
+      }),
+    ]);
+  });
+
+  it("does not resurrect the closed gate when the reconnect replays the authoritative snapshot", () => {
+    vi.useFakeTimers();
+    try {
+      const harness = renderCodingHook();
+
+      act(() => {
+        harness.ws.open();
+        harness.ws.receive(
+          codingSessionState({
+            status: "blocked",
+            stage: "code_review",
+            pending_gates: [blockedGate()],
+          }),
+        );
+        harness.api.respondGate("gate_0001", "retry_review");
+      });
+      expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(1);
+
+      // 断连重放窗口:动作已发出、确认快照未达即断线;重连后服务端
+      // (Task 3/4 关门幂等收敛)重放权威快照——门已归档,不再复活。
+      act(() => {
+        harness.ws.close(1006);
+      });
+      expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("reconnecting");
+
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+        MockWebSocket.instances[1].open();
+        MockWebSocket.instances[1].receive(
+          codingSessionState({
+            status: "running",
+            stage: "code_review",
+            pending_gates: [],
+            role_runs: [gateRetryRun],
+          }),
+        );
+      });
+
+      expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("connected");
+      expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+      expect(useCodingWorkspaceStore.getState().roleRuns).toEqual([
+        expect.objectContaining({ id: "coding_role_run_0002" }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("projects legacy role runs without gate origin unchanged", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(
+        codingSessionState({
+          status: "running",
+          stage: "code_review",
+          pending_gates: [],
+          role_runs: [
+            {
+              id: "coding_role_run_0001",
+              attempt_id: "coding_attempt_0001",
+              stage: "code_review",
+              role: "code_reviewer",
+              run_no: 1,
+              status: "failed",
+              trigger: "initial",
+              node_id: null,
+              started_at: "2026-10-16T00:00:00Z",
+              completed_at: "2026-10-16T00:01:00Z",
+              raw_provider_output_refs: [],
+              artifact_refs: [],
+            },
+          ],
+        }),
+      );
+    });
+
+    // 旧 run 缺 origin 按 null/缺省解释,投影不受影响(不猜关联)。
+    const run = useCodingWorkspaceStore.getState().roleRuns[0];
+    expect(run?.id).toBe("coding_role_run_0001");
+    expect(run?.gate_origin ?? null).toBeNull();
   });
 });

@@ -45,6 +45,7 @@ impl StreamingProviderAdapter for DesignArtifactRetryProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -94,6 +95,7 @@ impl StreamingProviderAdapter for ExecutionEventStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -141,6 +143,7 @@ fn tool_event_provider_session(full_output: &str) -> ProviderSession {
         .try_send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.to_string(), None)))
         .expect("send completed");
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }
@@ -153,6 +156,7 @@ fn text_choice_provider_session(full_output: &str) -> ProviderSession {
         .try_send(ProviderEvent::Completed(crate::cross_cutting::streaming_provider::ProviderCompletion::plain(full_output.to_string(), Some("provider-author-session-1".to_string()))))
         .expect("send completed");
     ProviderSession {
+        native_session_id: None,
         events: event_rx,
         commands: command_tx,
     }
@@ -286,17 +290,15 @@ async fn provider_session_forwards_tool_call_and_result_events() {
     let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
     let (tx, mut rx) = mpsc::channel(64);
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let session = WorkspaceSession::from_record(session_record);
     let mut engine =
@@ -359,38 +361,58 @@ async fn reviewer_provider_session_forwards_tool_call_and_result_events() {
     assert_tool_call_and_result_events(&events, Some(node_id.as_str()), ProviderName::Codex);
 }
 
+/// 诊断直通（claude×轻 握手谜团第 2 轮）：reviewer provider 启动失败时，adapter
+/// error 的 stderr 字段尾部（有界）必须随 EngineEvent::Error（即 WS error 消息的
+/// 直接前体，mapping.rs 原样透传）上浮——claude D③ 快照未并入 details 的时刻
+/// （如 kimi/codex 直启失败、claude stderr 在 kill 后才落袋）不再被 drive 层丢弃。
 #[tokio::test]
-async fn handle_user_message_from_human_confirm_reenters_running_stage() {
+async fn reviewer_start_failure_error_message_carries_bounded_stderr_tail() {
     let (_tmp, store) = setup();
     let (tx, mut rx) = mpsc::channel(64);
-    let mut session = make_session("sess_007");
-    session.stage = WorkspaceStage::HumanConfirm;
+    let session = make_session("sess_007_start_err_stderr_tail");
     let mut engine = WorkspaceEngine::new(store, tx, session);
+    let _node_id = create_reviewer_run_node(&mut engine).await;
+
+    let stderr_head = "NOISE_HEAD_MARKER".to_string() + &"a".repeat(700);
+    let stderr = format!("{stderr_head}\nSENTINEL_STDERR_TAIL_MARKER");
+    let start_error = ProviderAdapterError::parse_error(
+        "claude policy session: handshake failed: claude policy handshake cancelled",
+        String::new(),
+        stderr,
+    );
     engine
-        .handle_user_message(
-            "revise".to_string(),
-            Arc::new(FakeStreamingProvider),
+        .drive_reviewer_provider_session(
+            Err(start_error),
             empty_provider_commands(),
+            ProviderName::ClaudeCode,
         )
         .await;
 
-    engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-
-    let mut saw_running = false;
-    while let Ok(event) = rx.try_recv() {
-        if matches!(event, EngineEvent::StageChange { stage } if stage == "running") {
-            saw_running = true;
-        }
-    }
+    let events = drain_engine_events(&mut rx);
+    let error_message = events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::Error { message } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("reviewer start failure should emit an engine error event");
     assert!(
-        saw_running,
-        "manual intervention should restart the run stage"
+        error_message.contains("claude policy session: handshake failed"),
+        "error message should keep the original details, got: {error_message}"
     );
-    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
+    assert!(
+        error_message.contains("SENTINEL_STDERR_TAIL_MARKER"),
+        "error message (WS error 前体) should carry the provider stderr tail, got: {error_message}"
+    );
+    assert!(
+        !error_message.contains("NOISE_HEAD_MARKER"),
+        "stderr passthrough should be bounded to the tail, got: {error_message}"
+    );
 }
+
+// 退役留档（T5/REQ-RET-02）：`handle_user_message_from_human_confirm_reenters_running_stage` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 struct ErrorStreamingProvider;
 
@@ -411,6 +433,7 @@ impl StreamingProviderAdapter for ErrorStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -447,6 +470,7 @@ impl StreamingProviderAdapter for EmptyCompletedStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -483,6 +507,7 @@ impl StreamingProviderAdapter for InvalidArtifactStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -654,4 +679,114 @@ async fn finish_active_run_with_failed_node_marks_outline_node_failed() {
         .load_node_detail(&engine.session().session_id, &node_id)
         .expect("node detail");
     assert_eq!(detail.status, TimelineNodeStatus::Failed);
+}
+
+fn usage_report_provider_session() -> ProviderSession {
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (command_tx, _command_rx) = mpsc::channel(8);
+    event_tx
+        .try_send(ProviderEvent::UsageReport(
+            crate::cross_cutting::streaming_provider::UsageReportData {
+                role: "author".to_string(),
+                input_tokens: Some(1200),
+                output_tokens: Some(80),
+                cache_read_tokens: Some(600),
+                cache_creation_tokens: None,
+            },
+        ))
+        .expect("send usage report");
+    event_tx
+        .try_send(ProviderEvent::Completed(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "# Draft".to_string(),
+                None,
+            ),
+        ))
+        .expect("send completed");
+    ProviderSession {
+        native_session_id: None,
+        events: event_rx,
+        commands: command_tx,
+    }
+}
+
+#[tokio::test]
+async fn provider_session_maps_usage_report_to_usage_execution_event() {
+    let (tmp, checkpoint_store) = setup();
+    let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+    let (tx, mut rx) = mpsc::channel(64);
+    let session_record = lifecycle_store
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
+        .unwrap();
+    let session = WorkspaceSession::from_record(session_record);
+    let mut engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+    let node_id = create_author_run_node(&mut engine).await;
+
+    engine
+        .drive_provider_session(ProviderSessionDriveInput {
+            session: Ok(usage_report_provider_session()),
+            command_rx: empty_provider_commands(),
+            node_id: Some(node_id.clone()),
+            agent: Some(ProviderName::ClaudeCode),
+            role: ProviderConversationRole::Author,
+            artifact_retry: None,
+            revision_resume_fallback: None,
+        })
+        .await;
+
+    let events = drain_engine_events(&mut rx);
+    let usage_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EngineEvent::ExecutionEvent { event, .. }
+                    if event.kind == ProviderExecutionEventKind::Usage
+                        && event.event_id == "usage_author"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        usage_events.len(),
+        1,
+        "UsageReport should map to exactly one usage execution event"
+    );
+    let EngineEvent::ExecutionEvent { event, .. } = &usage_events[0] else {
+        unreachable!("filtered to ExecutionEvent above");
+    };
+    assert_eq!(event.title, "author token usage");
+    let output = event.output.as_deref().expect("usage output json");
+    let parsed: serde_json::Value = serde_json::from_str(output).expect("usage output parses");
+    assert_eq!(parsed["role"], "author");
+    assert_eq!(parsed["input_tokens"], 1200);
+    assert_eq!(parsed["output_tokens"], 80);
+    assert_eq!(parsed["cache_read_tokens"], 600);
+    assert_eq!(parsed["cache_creation_tokens"], serde_json::Value::Null);
+
+    // timeline 落盘：node detail 的 execution_events 里 upsert kind=usage 记录。
+    let detail = lifecycle_store
+        .load_node_detail(&engine.session().session_id, &node_id)
+        .unwrap();
+    let persisted = detail
+        .execution_events
+        .iter()
+        .filter(|event| event["event_id"] == "usage_author")
+        .collect::<Vec<_>>();
+    assert_eq!(persisted.len(), 1, "usage event should be persisted once");
+    assert_eq!(persisted[0]["kind"], "usage");
+    assert_eq!(persisted[0]["title"], "author token usage");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(persisted[0]["output"].as_str().unwrap())
+            .unwrap()["input_tokens"],
+        1200
+    );
 }

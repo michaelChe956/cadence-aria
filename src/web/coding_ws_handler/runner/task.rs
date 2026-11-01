@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::coding_models::CodingExecutionAttempt;
+use crate::product::coding_models::{CodingAttemptStatus, CodingExecutionAttempt};
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
@@ -111,21 +114,74 @@ async fn run_coding_runner_task_body(
             }
         }
     }
-    let engine = CodingWorkspaceEngine::new(
+    let mut engine = CodingWorkspaceEngine::new(
         coding_store.clone(),
         GitWorkspaceService::new(),
         event_tx.clone(),
     )
     .with_cancellation(cancellation.clone());
-    let result = execute_start_coding_flow(
-        &state,
-        &coding_store,
-        &engine,
-        &event_tx,
-        command_rx,
-        &attempt,
-    )
-    .await;
+    let mut gateway_build_failure: Option<CodingWorkspaceEngineError> = None;
+    if attempt.target_snapshot.is_some()
+        && let Some(factory) = state.gateway_factory()
+    {
+        let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+        // C4 Task 2：lc 身份经唯一 authority resolver 冻结（conflict fail-closed，
+        // 不再直接按 issue 记录回退 project 级路径）。
+        let resolved =
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(app_paths.clone())
+                .resolve_for_issue(&attempt.project_id, &attempt.issue_id)
+                .map(|authority| authority.and_then(|r| r.target.logical_codebase_id));
+        let gateway = match resolved {
+            // Task 2.8 fix round 1（P1）：LC 作用域的 gateway 组装失败（含
+            // 双工厂 root 投影不一致 fail-closed）必须中止启动——`.ok()`
+            // 静默降级会把「root 不一致 zero spawn」反转成无门禁窗口。
+            // 错误短路 start 流程（provider 零启动），经下方 F-14 失败路径
+            // 双通道可见化（manual-recovery diagnostic + protocol error）。
+            Ok(Some(lc_id)) => {
+                match factory.build_readonly_for_lc(&attempt.project_id, Some(lc_id.as_str())) {
+                    Ok(gateway) => Some(gateway),
+                    Err(error) => {
+                        gateway_build_failure = Some(CodingWorkspaceEngineError::ProviderStream(
+                            format!("logical gateway factory build failed: {error}"),
+                        ));
+                        None
+                    }
+                }
+            }
+            // 无 LC 作用域（单仓/legacy 直连契约）：保持既有降级，不阻断。
+            Ok(None) => factory
+                .build_readonly_for_lc(&attempt.project_id, None)
+                .ok(),
+            Err(error) => {
+                tracing::warn!(
+                    project_id = attempt.project_id.as_str(),
+                    issue_id = attempt.issue_id.as_str(),
+                    %error,
+                    "coding runner: failed to resolve issue logical codebase; skipping gateway injection"
+                );
+                None
+            }
+        };
+        if let Some(gateway) = gateway {
+            engine = engine.with_logical_provider_gateway(Arc::new(gateway));
+        }
+    }
+    // 工厂组装失败即中止：不进入 start 流程（零 provider 启动），错误走
+    // 与 runner 死亡同款的 fail-closed 可见化路径。
+    let result = match gateway_build_failure {
+        Some(error) => Err(error),
+        None => {
+            execute_start_coding_flow(
+                &state,
+                &coding_store,
+                &engine,
+                &event_tx,
+                command_rx,
+                &attempt,
+            )
+            .await
+        }
+    };
     if cancellation.is_cancelled() {
         return;
     }
@@ -148,6 +204,106 @@ async fn run_coding_runner_task_body(
                 );
             }
         } else {
+            // F-14：runner（gate_response retry_coding 放行 / attach 半启动重启
+            // 拉起）在进入任何受管状态（Blocked / WaitingForHuman / terminal）
+            // 之前失败时，attempt 仍停留 Running+Coding——attach 侧
+            // `ensure_runner_for_resumed_attempt` 会再次重启 runner、再开 5s
+            // stage gate、再次死亡，形成「gate 反复创建过期 + provider 零启动」
+            // 静默死循环（现场 coding_attempt_0556a410：stage gate 0006/0007
+            // 相继过期、attempt updated_at 冻结在放行时刻）。与 resumption 的
+            // B 兜底同款 fail-closed：转 AwaitingManualRecovery（abort-only、
+            // 可见、持久 reason），打断重连空转；转换失败仅告警（fail-visible，
+            // 不吞没后续 protocol error）。
+            if let Ok(latest) =
+                coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                && latest.status == CodingAttemptStatus::Running
+            {
+                const MANUAL_RECOVERY_REASON: &str = "coding_runner_failed_while_running";
+                // 死因可考（KimiUpgrade §3#5）：runner pre-provider 死亡此前只发
+                // WS 瞬时帧（连接不在即丢）+ 服务 tty 无落盘，durable 层零痕迹。
+                // 双通道：aria-cancellation 同款 eprintln 直写 stdout（生产可见，
+                // 测试构建保留 tracing）；失败详情随转换落 chat-entries 尾帧。
+                #[cfg(not(test))]
+                eprintln!(
+                    "[aria-runner-death] coding runner failed while running trigger=pre_provider_failure project_id={} issue_id={} attempt_id={} reason={} error={}",
+                    attempt.project_id, attempt.issue_id, attempt.id, MANUAL_RECOVERY_REASON, error
+                );
+                #[cfg(test)]
+                tracing::warn!(
+                    attempt_id = attempt.id.as_str(),
+                    reason = MANUAL_RECOVERY_REASON,
+                    error = %error,
+                    "coding runner failed while running (pre-provider death)"
+                );
+                if let Err(diagnostic_error) = coding_store.append_manual_recovery_diagnostic(
+                    &latest,
+                    MANUAL_RECOVERY_REASON,
+                    &error.to_string(),
+                ) {
+                    tracing::warn!(
+                        attempt_id = attempt.id.as_str(),
+                        error = %diagnostic_error,
+                        "failed to persist manual-recovery diagnostic chat entry"
+                    );
+                }
+                match coding_store
+                    .transition_to_awaiting_manual_recovery(&attempt.id, MANUAL_RECOVERY_REASON)
+                {
+                    Ok(()) => {
+                        // S4：死亡转 AMR 的同步收尾——死亡 runner 名下仍
+                        // Running 的 role run 不再有任何终态写方，必须同批落
+                        // Failed（reason 沿用稳定码），否则 RoleRunHistoryPanel
+                        // 永久投影「运行中」。置于快照重放之前，保证重放投影
+                        // 已含收尾事实；失败仅告警（fail-visible，不吞没后续
+                        // protocol error）。
+                        if let Err(role_run_error) = coding_store
+                            .fail_running_role_runs_for_attempt(&latest, MANUAL_RECOVERY_REASON)
+                        {
+                            tracing::warn!(
+                                attempt_id = attempt.id.as_str(),
+                                error = %role_run_error,
+                                "failed to finalize running role runs after runner death"
+                            );
+                        }
+                        match coding_store.get_attempt(
+                            &attempt.project_id,
+                            &attempt.issue_id,
+                            &attempt.id,
+                        ) {
+                            Ok(manual_recovery) => {
+                                if let Err(snapshot_error) = emit_current_session_state(
+                                    &event_tx,
+                                    &coding_store,
+                                    &manual_recovery,
+                                    &cancellation,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        attempt_id = attempt.id.as_str(),
+                                        error = %snapshot_error,
+                                        "failed to emit manual-recovery session state after runner failure"
+                                    );
+                                }
+                            }
+                            Err(read_error) => {
+                                tracing::warn!(
+                                    attempt_id = attempt.id.as_str(),
+                                    error = %read_error,
+                                    "failed to re-read attempt for manual-recovery snapshot after runner failure"
+                                );
+                            }
+                        }
+                    }
+                    Err(transition_error) => {
+                        tracing::warn!(
+                            attempt_id = attempt.id.as_str(),
+                            error = %transition_error,
+                            "coding runner failed while running; manual-recovery transition failed"
+                        );
+                    }
+                }
+            }
             let code = match &error {
                 CodingWorkspaceEngineError::ExecutionPlanNotConfirmed(_) => {
                     "work_item_execution_plan_not_confirmed".to_string()

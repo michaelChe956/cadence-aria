@@ -1,17 +1,73 @@
 use super::dto::*;
+use super::product_resources::issue_baseline_api_error;
 use super::support::*;
 use super::*;
+use crate::product::coding_attempt_repository::{
+    SchemaV2GroupAttemptScopePolicy, resolve_coding_attempt_repository,
+};
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
-use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
+use crate::product::coding_models::{AttemptTargetSnapshot, CodingAttemptScope};
+use crate::product::issue_store::IssueStore;
+use crate::product::logical_codebase::{
+    LegacySharedWorktreeMigration, RepositoryRouting, RepositoryRoutingErrorCode,
+};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapshots};
 use crate::web::state::CodingAttemptRunKey;
-
+mod advance;
 mod group;
-mod scope;
+mod plan_final_confirm;
+mod plan_start;
+mod progress;
+pub(crate) mod repository_resolution;
+pub(crate) mod scope;
+mod verification_surface;
 
+pub(crate) use verification_surface::{
+    get_coding_policy_text, get_verification_command_evidence, get_verification_triage_records,
+    post_coding_policy_reauthorization, post_rerun_planned_command,
+    post_verification_triage_decision, post_verification_triage_enter,
+};
+mod worktree_route;
+#[allow(unused_imports)]
+pub(crate) use advance::map_advance_outcome;
 pub use group::create_group_coding_attempt;
+/// P1-a（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认纯投影，供
+/// `coding_attention_info`（块 4 A1）与 GET 接线直接调用（不反调
+/// GET/lifecycle，避免循环）。
+pub(crate) use plan_final_confirm::build_plan_final_confirm;
+pub use plan_final_confirm::post_plan_coding_final_confirm;
+/// S2b/S2a 缝合：完成事件→就绪集推进桥（runner 完成链挂点调用；调用方
+/// 须持 `work_item_group:{project}:{issue}:{plan}` 串行锁——见 plan_start.rs
+/// 顶部锁契约）。
+pub(crate) use plan_start::drive_ready_units_for_plan;
+/// 批 2 R2（REQ-WIGA-03/C5-CHAIN、REQ-MTG-03）：Enrolled LC 共享驱动
+/// 服务与 N0 失败事实写口（`autopilot_orchestrator` 消费；锁契约见
+/// plan_start.rs 顶部）。
+pub(crate) use plan_start::{
+    EnrolledPlanDriveIdentity, EnrolledPlanStartStep, enrolled_plan_coding_start,
+    upsert_automation_drive_failure_fact,
+};
+pub use plan_start::{
+    delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start,
+};
+#[cfg(test)]
+#[path = "coding/advance_tests.rs"]
+mod advance_tests;
+#[cfg(test)]
+#[path = "coding/plan_final_confirm_tests.rs"]
+mod plan_final_confirm_tests;
+#[cfg(test)]
+#[path = "coding/plan_start_tests.rs"]
+mod plan_start_tests;
+pub(crate) use progress::build_group_work_item_progress;
+use repository_resolution::{resolve_work_item_repository, routing_error};
 use scope::{CodingAttemptArtifactRoutePath, CodingAttemptRoutePath, resolve_coding_attempt};
+use worktree_route::{
+    IssueWorktreeRoute, issue_worktree_active_api_error, release_worktree_lock,
+    repo_worktree_active_api_error,
+};
 
 pub(crate) struct RuntimeBindingProviderConfigInput<'a> {
     pub project_id: &'a str,
@@ -21,245 +77,87 @@ pub(crate) struct RuntimeBindingProviderConfigInput<'a> {
     pub unit: &'a AuthoritativeCodingUnitBinding,
     pub repository_default_provider: &'a str,
 }
+include!("coding_parts/create_attempt.inc.rs");
 
-pub async fn create_coding_attempt(
-    State(state): State<WebAppState>,
-    Path((project_id, issue_id, work_item_id)): Path<(String, String, String)>,
-) -> ApiResult<Json<CodingAttemptDto>> {
-    let app_paths = product_app_paths(&state);
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    let coding_store = CodingAttemptStore::new(app_paths.clone());
-    let creation_guard = coding_store
-        .acquire_work_item_attempt_creation_async(&project_id, &issue_id, &work_item_id)
-        .await
+/// REQ-PIB-03（T3.1）：coding fork 入口的共享基线解析——读 issue.base_branch 并经
+/// `resolve_effective_base_branch`（三面同源唯一解析链，与创建校验、author 上下文
+/// 基线同一解析点）：显式锁定分支须本地存在，存量 None 走默认链 main→master；
+/// 不可解析（分支被删/皆无/仓库不可用）→ 422 fail-closed，不回退当前检出或
+/// HEAD，防止 coder worktree 分叉点与 author 所见/C1 核对树错位。单件
+/// （create_coding_attempt）与组（create_group_coding_attempt）两入口共用。
+pub(crate) fn fork_base_branch_from_issue(
+    app_paths: &ProductAppPaths,
+    repository_path: &StdPath,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<String> {
+    let issue = IssueStore::new(app_paths.clone())
+        .get(project_id, issue_id)
         .map_err(product_store_api_error)?;
-    let active_attempts = coding_store
-        .list_attempts_for_work_item(&project_id, &issue_id, &work_item_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .filter(|attempt| attempt.status.is_active())
-        .collect::<Vec<_>>();
-    if active_attempts.len() > 1 {
-        return Err(ApiError::runtime(
-            "coding_attempt_ambiguous",
-            "multiple active coding attempts exist for this work item",
-            json!({
-                "attempt_ids": active_attempts
-                    .iter()
-                    .map(|attempt| attempt.id.as_str())
-                    .collect::<Vec<_>>()
-            }),
-        ));
-    }
-    if let Some(active_attempt) = active_attempts.into_iter().next() {
-        if active_attempt.scope == CodingAttemptScope::WorkItem {
-            lifecycle
-                .bind_issue_worktree_lock_to_attempt(
-                    &project_id,
-                    &issue_id,
-                    &work_item_id,
-                    &active_attempt.id,
-                )
-                .map_err(product_store_api_error)?;
-        }
-        return Err(ApiError::runtime(
-            "coding_attempt_active",
-            "work item already has an active coding attempt",
-            json!({ "attempt_id": active_attempt.id }),
-        ));
-    }
-    if is_schema_v2_group_work_item(
-        &app_paths,
-        &lifecycle,
-        &project_id,
-        &issue_id,
-        &work_item_id,
+    crate::product::issue_baseline::resolve_effective_base_branch(
+        repository_path,
+        issue.base_branch.as_deref(),
     )
-    .map_err(product_store_api_error)?
+    .map_err(issue_baseline_api_error)
+}
+
+fn attempt_target_snapshot(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    work_item: &LifecycleWorkItemRecord,
+) -> ApiResult<Option<AttemptTargetSnapshot>> {
+    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+    let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths, project_id, issue_id,
+    )
+    .map_err(product_store_api_error)?;
+    match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
+        .map_err(product_store_api_error)?
     {
-        return Err(ApiError::validation(
-            "schema_v2_group_coding_required",
-            "schema v2 work items must start coding through their work item group",
-        ));
-    }
-    let work_items = lifecycle
-        .list_work_items(&project_id, &issue_id)
-        .map_err(product_store_api_error)?;
-    let work_item = work_item_by_id(&work_items, &work_item_id).ok_or_else(|| {
-        ApiError::runtime("work_item_not_found", "work item not found", json!({}))
-    })?;
-    if work_item.plan_status != WorkItemPlanStatus::Confirmed {
-        return Err(ApiError::validation(
-            "work_item_plan_not_confirmed",
-            "work item plan must be confirmed before coding",
-        ));
-    }
-
-    let missing_dependencies: Vec<String> = work_item
-        .depends_on
-        .iter()
-        .filter(|dep_id| {
-            work_items
-                .iter()
-                .find(|item| &item.id == *dep_id)
-                .map(|item| item.execution_status != WorkItemStatus::Completed)
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect();
-    if !missing_dependencies.is_empty() {
-        return Err(ApiError::validation_with_details(
-            "work_item_dependency_not_completed",
-            "one or more dependency work items are not completed",
-            json!({ "missing_dependencies": missing_dependencies }),
-        ));
-    }
-
-    if work_item.require_execution_plan_confirm
-        && work_item.execution_plan_status != WorkItemExecutionPlanStatus::Confirmed
-    {
-        return Err(ApiError::validation(
-            "work_item_execution_plan_not_confirmed",
-            "work item execution plan must be confirmed before coding",
-        ));
-    }
-
-    let repository = find_repository(&app_paths, &project_id, &work_item.repository_id)?;
-    if !is_git_repo(&repository.path) {
-        return Err(ApiError::validation(
-            "repository_path_not_git_repo",
-            "repository path must point to a git work tree",
-        ));
-    }
-
-    let branch_name = format!("aria/issues/{issue_id}");
-    let base_branch = current_git_branch(&repository.path).unwrap_or_else(|| "HEAD".to_string());
-    let shared_worktree_path = repository
-        .path
-        .join(".worktrees")
-        .join("aria-issues")
-        .join(&issue_id);
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            repository_id: repository.id.clone(),
-            branch_name: branch_name.clone(),
-            worktree_path: shared_worktree_path,
-            base_branch: base_branch.clone(),
-        })
-        .map_err(product_store_api_error)?;
-    let issue_worktree_lease_id = format!("issue_worktree_lease_{}", uuid::Uuid::new_v4().simple());
-    let issue_worktree_lease = lifecycle
-        .try_acquire_issue_worktree_lock(
-            &project_id,
-            &issue_id,
-            &work_item_id,
-            &issue_worktree_lease_id,
-        )
-        .map_err(|error| match error {
-            ProductStoreError::Io(ref msg) if msg.contains("issue_worktree_active") => {
-                ApiError::runtime(
-                    "issue_worktree_active",
-                    "another work item is already active on the issue shared worktree",
-                    json!({}),
-                )
-            }
-            _ => product_store_api_error(error),
-        })?;
-    state
-        .test_controls
-        .pause_coding_attempt_after_worktree_acquire_if_configured()
-        .await;
-
-    let provider_config_snapshot = match coding_provider_config_snapshot(
-        &lifecycle,
-        work_item,
-        &repository.default_provider_mode,
-        &*state.provider_availability,
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            if issue_worktree_lease.acquired {
-                let _ = lifecycle.release_issue_worktree_lock(
-                    &project_id,
-                    &issue_id,
-                    &work_item_id,
-                    &issue_worktree_lease.lease_id,
-                );
-            }
-            return Err(error);
+        RepositoryRouting::Legacy { .. } => Ok(None),
+        RepositoryRouting::Logical { .. } => {
+            let logical_repository_id = work_item.target_repository_id.ok_or_else(|| {
+                product_store_api_error(routing_error(
+                    RepositoryRoutingErrorCode::TargetMissing,
+                    format!("work item {} has no target repository", work_item.id),
+                ))
+            })?;
+            build_attempt_target_snapshot(
+                app_paths,
+                project_id,
+                logical_repository_id,
+                lc_id.as_deref(),
+            )
+            .map(Some)
+            .map_err(target_snapshot_api_error)
         }
-    };
-    let attempt = match coding_store.create_attempt_with_guard(
-        CreateCodingAttemptInput {
-            project_id: project_id.clone(),
-            issue_id: issue_id.clone(),
-            work_item_id: work_item.id.clone(),
-            base_branch,
-            branch_name,
-            worktree_path: None,
-            provider_config_snapshot,
-            max_auto_rework: 2,
-        },
-        &creation_guard,
-    ) {
-        Ok(attempt) => attempt,
-        Err(
-            error @ ProductStoreError::Conflict {
-                kind: "active_coding_attempt",
-                ..
-            },
-        ) => return Err(product_store_api_error(error)),
-        Err(error) => {
-            if issue_worktree_lease.acquired {
-                let _ = lifecycle.release_issue_worktree_lock(
-                    &project_id,
-                    &issue_id,
-                    &work_item_id,
-                    &issue_worktree_lease.lease_id,
-                );
-            }
-            return Err(product_store_api_error(error));
+        RepositoryRouting::FailClosed { code, reason } => {
+            Err(product_store_api_error(routing_error(code, reason)))
         }
-    };
-    if state
-        .test_controls
-        .consume_coding_attempt_after_persist_before_bind_failure()
-    {
-        return Err(ApiError::runtime(
-            "coding_attempt_bind_interrupted",
-            "coding attempt creation interrupted before worktree lease binding",
-            json!({}),
-        ));
     }
-    if let Err(error) = lifecycle.bind_issue_worktree_lock_to_attempt(
-        &project_id,
-        &issue_id,
-        &work_item_id,
-        &attempt.id,
-    ) {
-        let _ = coding_store.delete_attempt(&project_id, &issue_id, &attempt.id);
-        if issue_worktree_lease.acquired {
-            let _ = lifecycle.release_issue_worktree_lock(
-                &project_id,
-                &issue_id,
-                &work_item_id,
-                &issue_worktree_lease.lease_id,
-            );
-        }
-        return Err(product_store_api_error(error));
-    }
+}
 
-    let _ = save_work_item_execution_plan_for_attempt(
-        &coding_store,
-        &lifecycle,
-        &attempt,
-        work_item,
-        &work_items,
-    );
+fn target_snapshot_api_error(
+    error: crate::product::coding_attempt_store::target_snapshot::TargetSnapshotError,
+) -> ApiError {
+    ApiError::runtime(
+        "product_store_error",
+        "coding attempt target snapshot capture failed",
+        json!({ "reason": error.to_string() }),
+    )
+}
 
-    Ok(Json(coding_attempt_dto(&attempt)))
+fn resolve_attempt_repository(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> ApiResult<RepositoryRecord> {
+    resolve_coding_attempt_repository(
+        app_paths,
+        attempt,
+        SchemaV2GroupAttemptScopePolicy::RequireWorkItemGroupScope,
+    )
+    .map_err(product_store_api_error)
 }
 
 pub(crate) fn save_work_item_execution_plan_for_attempt(
@@ -392,34 +290,11 @@ fn is_schema_v2_group_work_item(
     Ok(false)
 }
 
-fn is_schema_v2_group_attempt(
-    app_paths: &ProductAppPaths,
-    attempt: &CodingExecutionAttempt,
-) -> Result<bool, ProductStoreError> {
-    if attempt.scope != CodingAttemptScope::WorkItemGroup {
-        return Ok(false);
-    }
-    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
-        return Ok(false);
-    };
-    match WorkItemRevisionStore::new(app_paths.clone()).get_plan_lineage(
-        &attempt.project_id,
-        &attempt.issue_id,
-        plan_id,
-    ) {
-        Ok(_) => Ok(true),
-        Err(ProductStoreError::NotFound {
-            kind: "work_item_plan_lineage",
-            ..
-        }) => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
 pub(crate) fn coding_provider_config_snapshot(
     lifecycle: &LifecycleStore,
     work_item: &LifecycleWorkItemRecord,
     repository_default_provider: &str,
+    test_provider_enabled: bool,
     provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderConfigSnapshot> {
     let sessions = lifecycle
@@ -435,25 +310,35 @@ pub(crate) fn coding_provider_config_snapshot(
             provider_availability,
         )?
         .provider;
-        let reviewer = resolve_explicit_provider_name(
-            provider_name_key(&session.reviewer_provider),
-            provider_availability,
-        )?
-        .provider;
+        // C2 Task 5（REQ-CRO-05）：reviewer 三值透传——Confirmed WorkItem 会话缺
+        // reviewer 时保持空 effective（coding 侧 review 阶段落缺配置门）。
+        let reviewer = session
+            .reviewer_provider
+            .as_ref()
+            .map(|reviewer| {
+                resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability)
+            })
+            .transpose()?
+            .map(|resolved| resolved.provider);
         return Ok(ProviderConfigSnapshot {
             author,
-            reviewer: Some(reviewer),
+            reviewer,
             review_rounds: session.review_rounds,
             permission_modes: session.permission_modes.clone(),
         });
     }
 
-    let author =
-        resolve_default_coding_provider(repository_default_provider, provider_availability)?
-            .provider;
+    let author = resolve_default_coding_provider(
+        repository_default_provider,
+        test_provider_enabled,
+        provider_availability,
+    )?
+    .provider;
+    // C2 Task 5（REQ-CRO-05）：无会话可引用时不再以 author 顶替 reviewer——
+    // 空 effective，coding 侧 review 阶段落缺配置门等待用户配置。
     Ok(ProviderConfigSnapshot {
         author: author.clone(),
-        reviewer: Some(author),
+        reviewer: None,
         review_rounds: 1,
         permission_modes: WorkspaceRolePermissionModes::default(),
     })
@@ -462,15 +347,21 @@ pub(crate) fn coding_provider_config_snapshot(
 pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
     lifecycle: &LifecycleStore,
     input: RuntimeBindingProviderConfigInput<'_>,
+    test_provider_enabled: bool,
     provider_availability: &dyn Fn(&ProviderName) -> bool,
 ) -> ApiResult<ProviderConfigSnapshot> {
     let sessions = lifecycle
         .list_workspace_sessions(input.project_id, input.issue_id)
         .map_err(product_store_api_error)?;
+    // r41 根修(#13 层 1 家族):runtime binding 六元组匹配即权威——child
+    // WorkItem 会话在 coding 起点是 Open 设计态(终编译 finalizer 创建,
+    // author_provider=plan 会话所选;Confirmed 是 coding 完成后的状态),
+    // 此前的 status==Confirmed 过滤把绑定会话拦在仓默认回退;LC 合成仓
+    // 记录 default_provider_mode 空(resolve.inc.rs 缺陷 #13 层 1 fail-
+    // closed)→组入口 500 default_provider_not_configured(r41 现场)。
     if let Some(session) = sessions.iter().rev().find(|session| {
         session.entity_id == input.unit.logical_work_item_id
             && session.workspace_type == WorkspaceType::WorkItem
-            && session.status == WorkspaceSessionStatus::Confirmed
             && session
                 .work_item_runtime_binding
                 .as_ref()
@@ -489,25 +380,34 @@ pub(crate) fn coding_provider_config_snapshot_for_runtime_binding(
             provider_availability,
         )?
         .provider;
-        let reviewer = resolve_explicit_provider_name(
-            provider_name_key(&session.reviewer_provider),
-            provider_availability,
-        )?
-        .provider;
+        // C2 Task 5（REQ-CRO-05）：reviewer 三值透传——Confirmed WorkItem 会话缺
+        // reviewer 时保持空 effective（coding 侧 review 阶段落缺配置门）。
+        let reviewer = session
+            .reviewer_provider
+            .as_ref()
+            .map(|reviewer| {
+                resolve_explicit_provider_name(provider_name_key(reviewer), provider_availability)
+            })
+            .transpose()?
+            .map(|resolved| resolved.provider);
         return Ok(ProviderConfigSnapshot {
             author,
-            reviewer: Some(reviewer),
+            reviewer,
             review_rounds: session.review_rounds,
             permission_modes: session.permission_modes.clone(),
         });
     }
 
-    let author =
-        resolve_default_coding_provider(input.repository_default_provider, provider_availability)?
-            .provider;
+    let author = resolve_default_coding_provider(
+        input.repository_default_provider,
+        test_provider_enabled,
+        provider_availability,
+    )?
+    .provider;
+    // C2 Task 5（REQ-CRO-05）：同上——不回填 author。
     Ok(ProviderConfigSnapshot {
         author: author.clone(),
-        reviewer: Some(author),
+        reviewer: None,
         review_rounds: 1,
         permission_modes: WorkspaceRolePermissionModes::default(),
     })
@@ -575,9 +475,20 @@ pub(crate) async fn get_coding_attempt(
     let group_final_readiness = coding_store
         .get_group_final_readiness_snapshot(&attempt)
         .map_err(product_store_api_error)?;
-    let pending_choices = coding_store
+    let mut pending_choices = coding_store
         .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    // P0 1.3（REQ-WIGA-05）Task 11：冷驾驶舱 REST 作答依赖快照携带应答绑定
+    // 的 run 化身（claim 要求精确匹配 active_run_incarnation）；无唯一活跃
+    // run 时不注入——消费者不得猜 run。durable 记录恒不带该字段。
+    if let Some(incarnation) = state
+        .coding_runs
+        .active_run_incarnation(&CodingAttemptRunKey::from_attempt(&attempt))
+    {
+        for gate in &mut pending_choices {
+            gate.expected_run_id = Some(incarnation.clone());
+        }
+    }
     let role_runs =
         coding_role_run_snapshots(&coding_store, &attempt).map_err(product_store_api_error)?;
     let pending_gates =
@@ -598,16 +509,26 @@ pub(crate) async fn get_coding_attempt(
     } else {
         Vec::new()
     };
+    let (group_coding_progress, group_progress) =
+        if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup) {
+            let (progress, aggregate) = build_group_work_item_progress(&coding_store, &attempt)
+                .map_err(product_store_api_error)?;
+            (Some(progress), Some(aggregate))
+        } else {
+            (None, None)
+        };
 
     let provider_config_snapshot = attempt.provider_config_snapshot.clone();
 
     Ok(Json(CodingAttemptSnapshotResponse {
-        attempt: coding_attempt_dto(&attempt),
+        attempt: coding_attempt_dto(&coding_store, &attempt)?,
         attempt_scope: coding_attempt_scope_text(&attempt.scope).to_string(),
         work_item_group_id: attempt.work_item_group_id.clone(),
         current_work_item_id: attempt.current_work_item_id.clone(),
         active_unit_id: attempt.active_unit_id.clone(),
         units,
+        group_coding_progress,
+        group_progress,
         provider_config_snapshot,
         timeline_nodes,
         active_node_id,
@@ -667,18 +588,369 @@ pub(crate) async fn abort_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
+    // 批 2 T3（C2，REQ-WIGA-09）：自动绑定 plan 上的旧 abort REST 统一路由
+    // 整 plan 终止——未确认零副作用（不取消 runner、不写 attempt 状态），
+    // 客户端按 details 打开同一二次确认面后经统一终止 REST 提交；
+    // manual/无绑定/异 plan 保持原单 attempt abort 语义。
+    if let Some(identity) =
+        super::automation_enrollment::automation_identity_for_attempt(&app_paths, &attempt)
+            .map_err(product_store_api_error)?
+    {
+        return Err(
+            super::automation_enrollment::automation_plan_termination_required_error(&identity),
+        );
+    }
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     state.coding_runs.abort_attempt(&attempt_key).await;
     let _mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
     let current = coding_store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
-    let engine = coding_workspace_engine_with_dummy_events(coding_store);
+    let engine = coding_workspace_engine_with_dummy_events(coding_store.clone());
     let aborted = engine
         .handle_abort(&current.project_id, &current.issue_id, &current.id)
         .await
         .map_err(coding_workspace_api_error)?;
-    Ok(Json(coding_attempt_dto(&aborted)))
+    Ok(Json(coding_attempt_dto(&coding_store, &aborted)?))
+}
+
+/// C2 Task 3（REQ-CRO-03）：abort 后显式 restart 的 REST 薄入口——与 WS
+/// `RestartCoding` 同一应用服务语义（命令账本→版本/终态门→租约非活跃→
+/// 清退役标记→重开 admission→spawn 新 runner）。状态映射：
+/// Accepted／Replayed→200，NeedsHuman（停等）→202，Rejected（版本／终态
+/// 不符）→409；错对象（body attempt_id 与路径不符）→400。
+pub(crate) async fn restart_coding_attempt(
+    State(state): State<WebAppState>,
+    Path(path): Path<CodingAttemptRoutePath>,
+    Json(request): Json<crate::web::coding_start::RestartCodingAttemptRequest>,
+) -> ApiResult<(
+    axum::http::StatusCode,
+    Json<crate::web::coding_start::RestartCodingAttemptResult>,
+)> {
+    use crate::product::models::automation::OperationState;
+    use axum::http::StatusCode;
+
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
+    if request.attempt_id != attempt.id {
+        return Err(ApiError::validation(
+            "coding_restart_attempt_mismatch",
+            "request attempt_id does not match the routed coding attempt",
+        ));
+    }
+    let result = crate::web::coding_start::restart_coding_attempt(
+        &state,
+        &attempt.project_id,
+        &attempt.issue_id,
+        request,
+    )
+    .await
+    .map_err(|error| {
+        ApiError::runtime(
+            "coding_restart_failed",
+            "coding attempt restart failed",
+            serde_json::json!({ "code": error.code(), "message": error.message() }),
+        )
+    })?;
+    let code = match result.state {
+        OperationState::NeedsHuman => StatusCode::ACCEPTED,
+        OperationState::Rejected => StatusCode::CONFLICT,
+        _ => StatusCode::OK,
+    };
+    Ok((code, Json(result)))
+}
+
+/// C2 Task 12（REQ-CRO-06）：驾驶舱 gate response REST 请求——与 WS
+/// `GateResponse` 同一应用服务（`handle_blocked_gate_response`），外加
+/// REST 契约的稳定 `command_id`＋expected 版本（同 command 同 payload
+/// 重放首次 durable 结果，异 payload fail-closed；旧版本 Rejected
+/// "请刷新"，不启动 provider）。
+#[derive(Debug, serde::Deserialize)]
+pub struct CodingGateResponseRestRequest {
+    pub command_id: String,
+    pub gate_id: String,
+    pub action_id: String,
+    #[serde(default)]
+    pub extra_context: Option<String>,
+    pub expected_version: u64,
+}
+
+/// C2 Task 12：gate response REST 结果（状态语义同 restart：Accepted／
+/// Replayed→200，NeedsHuman→202，Rejected→409）。
+#[derive(Debug, serde::Serialize)]
+pub struct CodingGateResponseRestResult {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub attempt_id: String,
+    pub gate_id: String,
+    pub action_id: String,
+    pub reason: Option<String>,
+}
+
+/// C2 Task 12：POST /coding-attempts/{attempt_id}/gate-responses——无
+/// coding socket 也能作答（复用 C1 "coding choice 从驾驶舱按 attempt
+/// 地址经 REST 作答"模式）；`manual_continue` 等白名单动作在 durable
+/// 落门后按 WS 同款续跑判定唤回 runner。
+pub(crate) async fn post_coding_gate_response(
+    State(state): State<WebAppState>,
+    Path(path): Path<CodingAttemptRoutePath>,
+    Json(request): Json<CodingGateResponseRestRequest>,
+) -> ApiResult<(axum::http::StatusCode, Json<CodingGateResponseRestResult>)> {
+    use crate::product::coding_attempt_store::CodingAttemptCommandRecord;
+    use crate::product::json_store::validate_relative_id;
+    use crate::product::models::automation::OperationState;
+    use crate::web::coding_ws_handler::{
+        should_resume_runner_after_gate_response, spawn_coding_runner,
+    };
+    use axum::http::StatusCode;
+
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
+    validate_relative_id(&request.command_id).map_err(|error| {
+        ApiError::validation(
+            "coding_gate_response_invalid_command_id",
+            format!("invalid gate response command id: {error}"),
+        )
+    })?;
+    if request.gate_id.trim().is_empty() || request.action_id.trim().is_empty() {
+        return Err(ApiError::validation(
+            "coding_gate_response_invalid_identity",
+            "gate_id and action_id must not be blank",
+        ));
+    }
+    // 批 2 T3（C2，REQ-WIGA-09）：门动作集合不变，但自动绑定 plan 上的
+    // Abort 动作执行语义改整 plan 终止——在写命令账本/落门/续跑之前统一
+    // 路由（零副作用），非 Abort 动作原样；manual/无绑定保持原语义。
+    if let Some(identity) =
+        super::automation_enrollment::automation_identity_for_attempt(&app_paths, &attempt)
+            .map_err(product_store_api_error)?
+        && gate_response_action_is_abort(
+            &coding_store,
+            &attempt,
+            &request.gate_id,
+            &request.action_id,
+        )
+        .map_err(|error| {
+            ApiError::runtime(
+                "coding_gate_lookup_failed",
+                format!("pending gate lookup failed: {error}"),
+                serde_json::json!({}),
+            )
+        })?
+    {
+        return Err(
+            super::automation_enrollment::automation_plan_termination_required_error(&identity),
+        );
+    }
+
+    // 命令账本（Task 2）：payload digest 覆盖对象身份＋gate／action／版本
+    //＋extra_context（同 command 异 payload fail-closed"请刷新"）。
+    let extra_digest = {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(request.extra_context.as_deref().unwrap_or("").as_bytes());
+        hex::encode(hasher.finalize())
+    };
+    let payload_digest = format!(
+        "gate-response|{}|{}|{}|{}|{}|{}|{extra_digest}",
+        attempt.project_id,
+        attempt.issue_id,
+        attempt.id,
+        request.gate_id,
+        request.action_id,
+        request.expected_version
+    );
+    let record = |cmd_state: OperationState| CodingAttemptCommandRecord {
+        command_id: request.command_id.clone(),
+        payload_digest: payload_digest.clone(),
+        state: cmd_state,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let result = |cmd_state: OperationState, reason: Option<String>| CodingGateResponseRestResult {
+        command_id: request.command_id.clone(),
+        state: cmd_state,
+        attempt_id: attempt.id.clone(),
+        gate_id: request.gate_id.clone(),
+        action_id: request.action_id.clone(),
+        reason,
+    };
+    let store_error = |error: crate::product::json_store::ProductStoreError| {
+        ApiError::runtime(
+            "coding_gate_response_ledger_failed",
+            "coding gate response command ledger failed",
+            serde_json::json!({ "details": error.to_string() }),
+        )
+    };
+
+    if let Some(existing) = coding_store
+        .find_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request.command_id,
+        )
+        .map_err(store_error)?
+    {
+        if existing.payload_digest != payload_digest {
+            return Err(ApiError::runtime(
+                "coding_gate_response_command_conflict",
+                "同 command 异 payload，请刷新后重试",
+                serde_json::json!({}),
+            ));
+        }
+        // 同 command 同 payload：重放首次 durable 结果，不重复副作用。
+        let cmd_state = if existing.state == OperationState::Accepted {
+            OperationState::Replayed
+        } else {
+            existing.state
+        };
+        return Ok((StatusCode::OK, Json(result(cmd_state, None))));
+    }
+
+    // 版本门（旧页面"请刷新"，不启动 provider、不改 attempt）。
+    if attempt.version != request.expected_version {
+        let _ = coding_store
+            .append_attempt_command_result(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &record(OperationState::Rejected),
+            )
+            .map_err(store_error)?;
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(result(
+                OperationState::Rejected,
+                Some(format!(
+                    "expected version {} but durable version is {}; 请刷新",
+                    request.expected_version, attempt.version
+                )),
+            )),
+        ));
+    }
+
+    // 与 WS 同一应用服务（mutation lease 下 durable 落门）。
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    let mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
+    let engine = coding_workspace_engine_with_dummy_events(coding_store.clone());
+    let updated = match engine
+        .handle_blocked_gate_response(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &request.gate_id,
+            &request.action_id,
+            request.extra_context.clone(),
+        )
+        .await
+    {
+        Ok(updated) => updated,
+        Err(error) => {
+            drop(mutation_lease);
+            return Err(ApiError::runtime(
+                "coding_gate_response_failed",
+                "coding gate response failed",
+                serde_json::json!({ "details": error.to_string() }),
+            ));
+        }
+    };
+    // WS 同款续跑判定：白名单动作且门后 attempt 回到 Running 时唤回
+    // runner（观察通道缺失不阻塞业务事实——C2 Task 1 语义）。
+    if should_resume_runner_after_gate_response(&request.action_id, &attempt)
+        && updated.status == crate::product::coding_models::CodingAttemptStatus::Running
+    {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+        drop(_event_rx);
+        let _ = spawn_coding_runner(
+            state.clone(),
+            coding_store.clone(),
+            event_tx,
+            updated.clone(),
+        );
+    }
+    drop(mutation_lease);
+    coding_store
+        .append_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &record(OperationState::Accepted),
+        )
+        .map_err(store_error)?;
+    Ok((StatusCode::OK, Json(result(OperationState::Accepted, None))))
+}
+
+/// 批 2 T3（C2，REQ-WIGA-09）：gate response 的目标动作是否为 Abort——按
+/// attempt 当前 open 门解析 action_id → action_type；门/动作不存在返回
+/// false（交由引擎按原语义拒绝，不改判）。
+fn gate_response_action_is_abort(
+    coding_store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    gate_id: &str,
+    action_id: &str,
+) -> Result<bool, crate::product::coding_workspace_engine::CodingWorkspaceEngineError> {
+    Ok(
+        crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)?
+            .into_iter()
+            .any(|gate| {
+                gate.gate_id == gate_id
+                    && gate.available_actions.iter().any(|action| {
+                        action.action_id == action_id
+                            && action.action_type
+                                == crate::product::coding_models::CodingGateActionType::Abort
+                    })
+            }),
+    )
+}
+
+/// 批 2 T3（C2，REQ-WIGA-09）：WS GateResponse 的统一终止路由判定——
+/// 自动绑定 plan（精确绑定 attempt 权威 plan）且目标动作是 Abort 时返回
+/// `Some(termination_required JSON 身份载荷)`；其余（manual/无绑定/非
+/// Abort 动作/门或动作不存在）返回 `None` 走原语义。REST gate-responses
+/// 复用同一判定（`gate_response_action_is_abort`＋identity 组合）。
+pub(crate) fn ws_gate_response_routes_termination(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    coding_store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    gate_id: &str,
+    action_id: &str,
+) -> Result<Option<String>, crate::product::json_store::ProductStoreError> {
+    let Some(identity) =
+        super::automation_enrollment::automation_identity_for_attempt(app_paths, attempt)?
+    else {
+        return Ok(None);
+    };
+    let action_is_abort =
+        crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)
+            .map_err(|error| {
+                crate::product::json_store::ProductStoreError::Json(error.to_string())
+            })?
+            .into_iter()
+            .any(|gate| {
+                gate.gate_id == gate_id
+                    && gate.available_actions.iter().any(|action| {
+                        action.action_id == action_id
+                            && action.action_type
+                                == crate::product::coding_models::CodingGateActionType::Abort
+                    })
+            });
+    Ok(if action_is_abort {
+        Some(super::automation_enrollment::automation_plan_termination_required_message(&identity))
+    } else {
+        None
+    })
 }
 
 pub(crate) async fn delete_coding_attempt(
@@ -700,10 +972,20 @@ pub(crate) async fn delete_coding_attempt(
     let attempt = coding_store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    // T21:attempt 删除→reviewer 窗口/租约收口(先恢复 baseline 再弃置
+    // 释放;删除语义=无条件收口,工作树随之删除,不留冻结残锁卡共享
+    // common-dir 的 git mutation),再走 git 终止对账(补偿随释放续接)。
+    coding_workspace_engine_with_dummy_events(coding_store.clone())
+        .close_reviewer_windows_for_attempt(
+            &attempt,
+            crate::product::coding_workspace_engine::AttemptWindowCloseMode::Delete,
+        )
+        .await
+        .map_err(coding_workspace_api_error)?;
     let attempt = coding_workspace_engine_with_dummy_events(coding_store.clone())
         .reconcile_coding_git_operation_for_termination(&attempt)
         .await
-        .map_err(coding_workspace_api_error)?;
+        .map_err(coding_termination_reconcile_api_error)?;
     let _group_initialization_guard = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup)
     {
         Some(
@@ -722,33 +1004,7 @@ pub(crate) async fn delete_coding_attempt(
         .current_work_item_id
         .as_deref()
         .unwrap_or(&attempt.work_item_id);
-    let repository_id =
-        if is_schema_v2_group_attempt(&app_paths, &attempt).map_err(product_store_api_error)? {
-            IssueStore::new(app_paths.clone())
-                .get(&attempt.project_id, &attempt.issue_id)
-                .map_err(product_store_api_error)?
-                .repo_id
-                .ok_or_else(|| {
-                    product_store_api_error(ProductStoreError::NotFound {
-                        kind: "issue_repository",
-                        id: attempt.issue_id.clone(),
-                    })
-                })?
-        } else {
-            lifecycle
-                .list_work_items(&attempt.project_id, &attempt.issue_id)
-                .map_err(product_store_api_error)?
-                .into_iter()
-                .find(|work_item| work_item.id == active_work_item_id)
-                .ok_or_else(|| {
-                    product_store_api_error(ProductStoreError::NotFound {
-                        kind: "work_item",
-                        id: active_work_item_id.to_string(),
-                    })
-                })?
-                .repository_id
-        };
-    let repository = find_repository(&app_paths, &attempt.project_id, &repository_id)?;
+    let repository = resolve_attempt_repository(&app_paths, &attempt)?;
 
     if let Ok(Some(shared)) =
         lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
@@ -779,6 +1035,59 @@ pub(crate) async fn delete_coding_attempt(
         .map_err(product_store_api_error)?;
     finalize_coding_attempt_deletion(&coding_store, &app_paths, &attempt)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// T21:人工门裁决请求体(`decision` ∈ `invalidate` | `require_new_review`)。
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ResolveReviewerWindowRequest {
+    pub decision: String,
+}
+
+/// T21:人工门裁决生产入口(`POST reviewer-window:resolve`)——
+/// ManualGate → 作废关闭/作废后新轮(锁释放,旧报告永久 Invalidated)。
+/// 人工许可新轮=另取租约/新基线(新 run 重开新窗);人工拒绝补偿
+/// (invalidate)不解锁 attempt:不自动复活 runner,续接只经人工恢复
+/// 面/新轮,旧违规报告不可 resume。
+pub(crate) async fn resolve_reviewer_window_manual_gate(
+    State(state): State<WebAppState>,
+    Path(path): Path<CodingAttemptRoutePath>,
+    Json(request): Json<ResolveReviewerWindowRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
+    let decision = match request.decision.as_str() {
+        "invalidate" => crate::product::reviewer_window::ManualGateDecision::Invalidate,
+        "require_new_review" => {
+            crate::product::reviewer_window::ManualGateDecision::RequireNewReview
+        }
+        other => {
+            return Err(ApiError::validation(
+                "reviewer_window_decision_invalid",
+                format!("decision must be invalidate|require_new_review, got {other:?}"),
+            ));
+        }
+    };
+    let resolved = coding_workspace_engine_with_dummy_events(coding_store.clone())
+        .resolve_reviewer_manual_gate_for_attempt(&attempt.id, decision)
+        .map_err(coding_workspace_api_error)?;
+    let acceptance = match resolved.report_acceptance {
+        crate::product::reviewer_window_store::ReportAcceptance::Accepted => "accepted",
+        crate::product::reviewer_window_store::ReportAcceptance::PendingAcceptance => {
+            "pending_acceptance"
+        }
+        crate::product::reviewer_window_store::ReportAcceptance::Invalidated => "invalidated",
+    };
+    Ok(Json(json!({
+        "window_id": resolved.window_id,
+        "state": resolved.state.as_str(),
+        "report_acceptance": acceptance,
+    })))
 }
 
 /// 删除 attempt 时清理该 attempt 各 unit 已认领的 handoff revision。
@@ -905,50 +1214,108 @@ pub(crate) async fn request_work_item_execution_plan_change(
     Ok(Json(plan))
 }
 
-pub(crate) async fn coding_attempt_artifact_content(
-    State(state): State<WebAppState>,
-    Path(path): Path<CodingAttemptArtifactRoutePath>,
-) -> ApiResult<Json<ArtifactContentResponse>> {
-    let artifact_id = path.artifact_id;
-    validate_relative_id(&artifact_id)
-        .map_err(|_| ApiError::validation("invalid_artifact_id", "invalid artifact id"))?;
-    let app_paths = product_app_paths(&state);
-    let coding_store = CodingAttemptStore::new(app_paths);
-    let attempt = resolve_coding_attempt(
-        &coding_store,
-        path.project_id.as_deref(),
-        path.issue_id.as_deref(),
-        &path.attempt_id,
-    )?;
-    let artifact_path = coding_store
-        .attempt_test_output_path(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &artifact_id,
-        )
-        .map_err(product_store_api_error)?;
-    if !artifact_path.is_file() {
-        return Err(ApiError::runtime(
-            "artifact_not_found",
-            "coding attempt artifact not found",
-            json!({}),
-        ));
-    }
-    let content = fs::read_to_string(&artifact_path).map_err(|error| {
-        ApiError::runtime(
-            "artifact_read_failed",
-            "coding attempt artifact could not be read",
-            json!({"error": error.to_string()}),
-        )
-    })?;
+mod artifact_content;
+pub(crate) use artifact_content::coding_attempt_artifact_content;
 
-    Ok(Json(ArtifactContentResponse {
-        artifact_ref: artifact_id,
-        artifact_kind: "coding_attempt_artifact".to_string(),
-        producer_node: None,
-        path: artifact_path.to_string_lossy().to_string(),
-        content_type: "text/plain".to_string(),
-        content,
-    }))
+include!("coding_parts/c2_gate_response_rest_tests.inc.rs");
+
+#[cfg(test)]
+mod coding_provider_snapshot_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::lifecycle_store::inputs::{
+        CreateWorkItemChildSessionInput, CreateWorkspaceSessionInput,
+    };
+    use crate::product::models::work_item_revision::WorkItemRuntimeBinding;
+    use crate::product::models::{ChildBindingIdentity, ProviderName, WorkspaceType};
+
+    fn binding_fixture() -> WorkItemRuntimeBinding {
+        WorkItemRuntimeBinding {
+            plan_id: "plan_0001".to_string(),
+            plan_revision_id: "planrev_0001".to_string(),
+            logical_work_item_id: "WI-001".to_string(),
+            work_item_revision_id: "wirev_0001".to_string(),
+            projection_bundle_id: "bundle_0001".to_string(),
+            verification_plan_revision_id: "verrev_0001".to_string(),
+            canonical_contract_hash: "sha256:0".to_string(),
+            projection_compiler_version: "v1".to_string(),
+            human_projection_hash: "sha256:1".to_string(),
+            coder_projection_hash: "sha256:2".to_string(),
+            reviewer_projection_hash: "sha256:3".to_string(),
+        }
+    }
+
+    /// r41 根修锚点(#13 层 1 家族):LC 合成仓记录 default_provider_mode 空,
+    /// 组入口 provider 解析回退仓默认即 500 default_provider_not_configured。
+    /// 终编译 finalizer 已把 plan 会话所选 provider 写入 child WorkItem 会话
+    /// (author_provider)与 runtime binding——绑定匹配即权威,不该再被
+    /// status==Confirmed 过滤拦在仓默认回退(child 会话在 coding 起点是 Open
+    /// 设计态,Confirm 是 coding 完成后的状态)。
+    #[test]
+    fn runtime_binding_provider_snapshot_prefers_bound_child_session_over_repo_default() {
+        let root = tempfile::tempdir().expect("root");
+        let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(app_paths);
+        let binding = binding_fixture();
+        let child = lifecycle
+            .create_workspace_child_session(CreateWorkItemChildSessionInput {
+                session: CreateWorkspaceSessionInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    entity_id: binding.logical_work_item_id.clone(),
+                    workspace_type: WorkspaceType::WorkItem,
+                    author_provider: ProviderName::ClaudeCode,
+                    reviewer_provider: None,
+                    review_rounds: 1,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    work_item_plan_options: None,
+                },
+                child_binding: ChildBindingIdentity {
+                    plan_id: binding.plan_id.clone(),
+                    plan_revision_id: binding.plan_revision_id.clone(),
+                    logical_work_item_id: binding.logical_work_item_id.clone(),
+                    work_item_revision_id: binding.work_item_revision_id.clone(),
+                    binding_version: 1,
+                    enrollment_id: "enrollment_0001".to_string(),
+                    target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                        logical_codebase_id: "lc_0001".to_string(),
+                        logical_repository_id:
+                            crate::product::logical_codebase::LogicalRepositoryId(
+                                uuid::Uuid::from_u128(1),
+                            ),
+                    },
+                },
+            })
+            .expect("child session");
+        lifecycle
+            .ensure_work_item_runtime_binding(&child.id, &binding)
+            .expect("runtime binding");
+        let unit = AuthoritativeCodingUnitBinding {
+            logical_work_item_id: binding.logical_work_item_id.clone(),
+            work_item_revision_id: binding.work_item_revision_id.clone(),
+            verification_plan_revision_id: binding.verification_plan_revision_id.clone(),
+            projection_bundle_id: binding.projection_bundle_id.clone(),
+            target_repository_id: None,
+            source_draft_error: None,
+            dependency_logical_work_item_ids: Vec::new(),
+        };
+        let snapshot = coding_provider_config_snapshot_for_runtime_binding(
+            &lifecycle,
+            RuntimeBindingProviderConfigInput {
+                project_id: "project_0001",
+                issue_id: "issue_0001",
+                plan_id: &binding.plan_id,
+                plan_revision_id: &binding.plan_revision_id,
+                unit: &unit,
+                // LC 合成仓记录的空默认(#13 层 1)。
+                repository_default_provider: "",
+            },
+            false,
+            &|_provider| true,
+        )
+        .expect("bound child session provider must win over empty repo default");
+        assert_eq!(snapshot.author, ProviderName::ClaudeCode);
+    }
 }

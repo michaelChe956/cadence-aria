@@ -51,6 +51,7 @@ impl StreamingProviderAdapter for ResumeStallThenFreshSuccessProvider {
             }
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -75,6 +76,7 @@ impl StreamingProviderAdapter for AlwaysResumeStallProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -100,6 +102,8 @@ async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_re
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let legacy_input = AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Executor,
         worktree_path: Some(worktree.to_string_lossy().to_string()),
@@ -133,6 +137,7 @@ async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_re
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
+            validated_input: None,
         })
         .await;
 
@@ -430,7 +435,9 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     lifecycle
@@ -443,12 +450,7 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
         .expect("bind shared worktree lock");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     let prior_run = store
         .create_role_run(
@@ -619,5 +621,7 @@ fn review_report_requesting_changes(attempt: &CodingExecutionAttempt) -> CodeRev
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }

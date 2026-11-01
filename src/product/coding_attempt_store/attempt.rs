@@ -1,11 +1,20 @@
 use chrono::Utc;
 use uuid::Uuid;
 
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+
 use crate::product::coding_attempt_store::CreateCodingAttemptInput;
 use crate::product::coding_models::WorkItemExecutionPlan;
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingRoleProviderConfigSnapshot,
+    CodingAdmissionKind, CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
+    CodingExecutionStage, CodingRoleProviderConfigSnapshot,
 };
 use crate::product::json_store::{
     ProductStoreError, read_json, validate_relative_artifact_ref, validate_relative_id, write_json,
@@ -72,6 +81,10 @@ impl super::CodingAttemptStore {
             attempt_no,
             scope: CodingAttemptScope::WorkItem,
             status: CodingAttemptStatus::Created,
+            version: 0,
+            manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
+            admission_kind: CodingAdmissionKind::LegacyGroup,
             stage: CodingExecutionStage::PrepareContext,
             base_branch: input.base_branch,
             branch_name: input.branch_name,
@@ -88,6 +101,10 @@ impl super::CodingAttemptStore {
             provider_conversations: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
+            target_snapshot: input.target_snapshot,
+            // P2 Task 2：legacy 单 attempt 首启策略显式 Manual。
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            start_claim: None,
             completed_at: None,
         };
 
@@ -108,7 +125,185 @@ impl super::CodingAttemptStore {
         Ok(attempt)
     }
 
-    pub fn save_coding_attempt(
+    /// 更新可公开修改的 attempt 字段，同时保留状态和 admission 冻结字段。
+    ///
+    /// 该 API 必须以字段方式构造持久化 record，而非将传入的 `attempt` 整体写盘。
+    /// 因而后续为 admission 添加的新冻结字段时，编译器会强制在这里明确从
+    /// 已持久化 record 保留它们，避免公开 API 无意中取得覆写权限。
+    ///
+    /// ```compile_fail
+    /// use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
+    ///
+    /// // 写入 status 的底层 API 只对 coding_attempt_store 模块可见。
+    /// let _ = CodingAttemptStore::save_coding_attempt_with_status;
+    /// ```
+    pub fn update_attempt_non_status_fields(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            if stored.work_item_id != attempt.work_item_id
+                || stored.attempt_no != attempt.attempt_no
+                || stored.scope != attempt.scope
+                || stored.work_item_group_id != attempt.work_item_group_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_attempt",
+                    id: attempt.id.clone(),
+                });
+            }
+            let updated = CodingExecutionAttempt {
+                id: stored.id,
+                project_id: stored.project_id,
+                issue_id: stored.issue_id,
+                work_item_id: stored.work_item_id,
+                attempt_no: stored.attempt_no,
+                scope: stored.scope,
+                status: stored.status,
+                version: stored.version,
+                manual_recovery_reason: stored.manual_recovery_reason,
+                admission_ticket_consumed_at: stored.admission_ticket_consumed_at,
+                admission_kind: stored.admission_kind,
+                stage: attempt.stage.clone(),
+                base_branch: attempt.base_branch.clone(),
+                branch_name: attempt.branch_name.clone(),
+                worktree_path: attempt.worktree_path.clone(),
+                provider_config_snapshot: attempt.provider_config_snapshot.clone(),
+                rework_count: attempt.rework_count,
+                max_auto_rework: attempt.max_auto_rework,
+                work_item_group_id: stored.work_item_group_id,
+                current_work_item_id: attempt.current_work_item_id.clone(),
+                active_unit_id: attempt.active_unit_id.clone(),
+                head_commit: attempt.head_commit.clone(),
+                pushed_remote: attempt.pushed_remote.clone(),
+                review_request_id: attempt.review_request_id.clone(),
+                provider_conversations: attempt.provider_conversations.clone(),
+                created_at: attempt.created_at.clone(),
+                updated_at: attempt.updated_at.clone(),
+                target_snapshot: stored.target_snapshot,
+                completed_at: attempt.completed_at.clone(),
+                // P2 Task 2：copy-update 保留已冻结 policy，绝不取 attempt 传入值。
+                start_run_policy: stored.start_run_policy,
+                start_claim: stored.start_claim.clone(),
+            };
+            self.save_coding_attempt_with_status(&updated)
+        })
+    }
+}
+
+/// P2 Task 4：durable 单发首启认领结果——`Claimed` 是本次写入的新 claim；
+/// `Existing` 携带已认领的原身份（command/origin/phase），由调用方比较
+/// command 决定续启（幂等重放）或放弃（AlreadyStarted），store 不覆写。
+pub enum ClaimCodingStartOutcome {
+    Claimed(CodingExecutionAttempt),
+    Existing(CodingExecutionAttempt),
+}
+
+impl super::CodingAttemptStore {
+    /// P2 Task 4：attempt 同文件 durable 单发首启认领。attempt 文件锁内
+    /// 重读 CAS：已有 claim 一律返回 `Existing` 原身份（不覆写已认领
+    /// command）；无 claim 且状态仍 Created 才写入新 claim（不可复位身份）。
+    /// 锁内仅同步文件操作，禁止 await/provider 启动。
+    pub fn claim_coding_start(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        command_id: &str,
+        origin: &crate::product::coding_models::CodingStartOrigin,
+    ) -> Result<ClaimCodingStartOutcome, ProductStoreError> {
+        validate_relative_id(command_id)?;
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            if stored.start_claim.is_some() {
+                return Ok(ClaimCodingStartOutcome::Existing(stored));
+            }
+            if stored.status != CodingAttemptStatus::Created {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_start_claim_not_first_start_state",
+                    id: stored.id.clone(),
+                });
+            }
+            let now = Utc::now().to_rfc3339();
+            let mut updated = stored.clone();
+            updated.start_claim = Some(crate::product::coding_models::CodingStartClaim {
+                command_id: command_id.to_string(),
+                origin: origin.clone(),
+                phase: crate::product::coding_models::CodingStartPhase::Claimed,
+                claimed_at: now.clone(),
+            });
+            updated.updated_at = now;
+            self.save_coding_attempt_with_status(&updated)?;
+            Ok(ClaimCodingStartOutcome::Claimed(updated))
+        })
+    }
+
+    /// P2 Task 4：推进首启 claim 相位（同文件锁内重读；command 必须与已
+    /// 认领身份一致，否则 fail-closed）。返回推进后的 attempt 快照。
+    pub fn advance_coding_start_phase(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        command_id: &str,
+        phase: crate::product::coding_models::CodingStartPhase,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let stored = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            let Some(claim) = stored.start_claim.as_ref() else {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_start_claim_missing",
+                    id: stored.id.clone(),
+                });
+            };
+            if claim.command_id != command_id {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_start_claim_command_mismatch",
+                    id: command_id.to_string(),
+                });
+            }
+            let mut updated = stored.clone();
+            updated.start_claim = Some(crate::product::coding_models::CodingStartClaim {
+                phase,
+                ..claim.clone()
+            });
+            updated.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&updated)?;
+            Ok(updated)
+        })
+    }
+}
+
+impl super::CodingAttemptStore {
+    #[cfg(test)]
+    pub(crate) fn write_coding_attempt_for_test(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        self.save_coding_attempt_with_status(attempt)
+    }
+
+    /// 仅供测试播种：将 attempt 直接置为 `Running` 并写入 admission 会话标记，
+    /// 模拟「已经 admission CAS 进入」的合法可执行状态。状态机已封死直达 Running
+    /// 通道，播种不经 `update_attempt_status`；同时维护「Running ⟹ marker 非空」
+    /// 不变式，使播种后的 attempt 能通过 `ensure_provider_run_allowed` 的 admission
+    /// 校验。不推进 version（与旧 `update_attempt_status(Running)` 播种语义一致）。
+    #[cfg(test)]
+    pub(crate) fn seed_running_attempt_for_test(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+        attempt.status = CodingAttemptStatus::Running;
+        attempt.admission_ticket_consumed_at = Some(Utc::now().to_rfc3339());
+        self.save_coding_attempt_with_status(&attempt)?;
+        Ok(attempt)
+    }
+
+    /// 仅供受控状态转换使用的底层全字段持久化方法。
+    pub(super) fn save_coding_attempt_with_status(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<(), ProductStoreError> {
@@ -254,6 +449,34 @@ impl super::CodingAttemptStore {
         Ok(attempts)
     }
 
+    /// H2a（设计 2026-10-14 A 节「全删」判据）：按 `(project, issue, plan)`
+    /// 枚举真实 group attempts（`work_item_group_id == plan`），不含单 WI
+    /// scope 与他 Plan 成员；零成员判定以本枚举为准，不用 issue 空集或
+    /// run 冻结集代替。
+    pub fn list_attempts_for_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Vec<CodingExecutionAttempt>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        let mut attempts: Vec<CodingExecutionAttempt> =
+            super::list_json_records(&self.coding_attempts_root(project_id, issue_id))?
+                .into_iter()
+                .filter(|attempt: &CodingExecutionAttempt| {
+                    attempt.work_item_group_id.as_deref() == Some(plan_id)
+                })
+                .collect();
+        attempts.sort_by(|left, right| {
+            left.attempt_no
+                .cmp(&right.attempt_no)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(attempts)
+    }
+
     pub fn get_active_attempt(
         &self,
         project_id: &str,
@@ -278,6 +501,10 @@ impl super::CodingAttemptStore {
         validate_relative_id(attempt_id)?;
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         self.delete_group_initialization_for_attempt(&attempt)?;
+        // k3 fix round 1（REQ-MTG-05）：增殖审计与 attempt 同生命周期——journal
+        // 删除后清 split-audit 记录，防「删除后重试」在同 (plan,target) 留双
+        // 审计（检索歧义/二期证据污染）。
+        self.delete_split_audit(project_id, issue_id, attempt_id)?;
         super::remove_file_if_exists(&self.attempt_path(project_id, issue_id, attempt_id))?;
         super::remove_dir_all_if_exists(&self.attempt_dir(project_id, issue_id, attempt_id))?;
         Ok(attempt)
@@ -296,6 +523,14 @@ impl super::CodingAttemptStore {
         Ok(attempts)
     }
 
+    /// 将 attempt 置为非可执行目标状态（终态/暂停态）。
+    ///
+    /// 进入 `Running`（可执行目标）不允许走本 API，状态机层已封死直达通道：
+    /// `valid_status_transition` 对 Running 目标一律拒绝（含 Running→Running 幂等调用），
+    /// 生产路径必须经 `admit_and_transition_attempt_to_executable`（admit 拿 ticket →
+    /// CAS 消费）。
+    /// 离开 `Running` 的转换会在同一次锁内清空 `admission_ticket_consumed_at`，
+    /// 因为 admission 票据按「Running 会话」单次消费，会话结束后必须允许重新 admission。
     pub fn update_attempt_status(
         &self,
         project_id: &str,
@@ -341,6 +576,11 @@ impl super::CodingAttemptStore {
             ) {
                 attempt.completed_at = Some(now.clone());
             }
+            if attempt.status == CodingAttemptStatus::Running
+                && status != CodingAttemptStatus::Running
+            {
+                attempt.admission_ticket_consumed_at = None;
+            }
             attempt.status = status;
             attempt.updated_at = now;
             write_json(&path, &attempt)?;
@@ -368,17 +608,19 @@ impl super::CodingAttemptStore {
         stage: CodingExecutionStage,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        if !valid_stage_transition(&attempt.stage, &stage) {
-            return Err(ProductStoreError::Io(format!(
-                "invalid_coding_attempt_stage_transition: {:?} -> {:?}",
-                attempt.stage, stage
-            )));
-        }
-        attempt.stage = stage;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if !valid_stage_transition(&attempt.stage, &stage) {
+                return Err(ProductStoreError::Io(format!(
+                    "invalid_coding_attempt_stage_transition: {:?} -> {:?}",
+                    attempt.stage, stage
+                )));
+            }
+            attempt.stage = stage;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn update_attempt_worktree_path(
@@ -389,13 +631,55 @@ impl super::CodingAttemptStore {
         worktree_path: std::path::PathBuf,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.worktree_path = Some(worktree_path);
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.worktree_path = Some(worktree_path);
+            attempt.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
+    /// 半启动恢复专用：未物化 worktree 的 Running+Coding attempt 回落
+    /// WorktreePrepare 以重新物化。
+    ///
+    /// 正向阶段状态机（`valid_stage_transition`）不提供 Coding→WorktreePrepare
+    /// 通道，本方法是该后退的唯一受控例外；前置校验 fail-closed：仅接受
+    /// status=Running、stage=Coding、head_commit 未落盘的 record（调用方需
+    /// 先判定 worktree 未登记或目录不存在）。读-改-写全程持有 attempt 文件
+    /// 锁，并保留 status/version 等冻结字段，周 `update_attempt_stage` 约定。
+    pub fn demote_unprepared_attempt_to_worktree_prepare(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        let path = self.attempt_path(project_id, issue_id, attempt_id);
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            if attempt.status != CodingAttemptStatus::Running
+                || attempt.stage != CodingExecutionStage::Coding
+                || attempt.head_commit.is_some()
+            {
+                return Err(ProductStoreError::Io(format!(
+                    "coding_attempt_worktree_reprepare_rejected: status={:?} stage={:?} head_commit_present={}",
+                    attempt.status,
+                    attempt.stage,
+                    attempt.head_commit.is_some()
+                )));
+            }
+            attempt.stage = CodingExecutionStage::WorktreePrepare;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
+    }
+
+    /// 更新 head commit，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_head_commit(
         &self,
         project_id: &str,
@@ -404,13 +688,22 @@ impl super::CodingAttemptStore {
         head_commit: Option<String>,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.head_commit = head_commit;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.head_commit = head_commit;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
+    /// 更新 review request 相关字段，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_review_request_state(
         &self,
         project_id: &str,
@@ -421,15 +714,24 @@ impl super::CodingAttemptStore {
         review_request_id: String,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.head_commit = Some(head_commit);
-        attempt.pushed_remote = Some(pushed_remote);
-        attempt.review_request_id = Some(review_request_id);
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.head_commit = Some(head_commit);
+            attempt.pushed_remote = Some(pushed_remote);
+            attempt.review_request_id = Some(review_request_id);
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
+    /// 更新 provider 配置快照，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_provider_config_snapshot(
         &self,
         project_id: &str,
@@ -438,11 +740,15 @@ impl super::CodingAttemptStore {
         provider_config_snapshot: ProviderConfigSnapshot,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.provider_config_snapshot = provider_config_snapshot;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.provider_config_snapshot = provider_config_snapshot;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
     pub fn get_role_provider_config_snapshot(
@@ -482,6 +788,11 @@ impl super::CodingAttemptStore {
         Ok(role_provider_config_snapshot)
     }
 
+    /// 自增 rework 计数，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn increment_attempt_rework_count(
         &self,
         project_id: &str,
@@ -489,13 +800,22 @@ impl super::CodingAttemptStore {
         attempt_id: &str,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.rework_count += 1;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.rework_count += 1;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
+    /// 更新 rework 自动上限，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn update_attempt_max_auto_rework(
         &self,
         project_id: &str,
@@ -505,25 +825,39 @@ impl super::CodingAttemptStore {
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         super::validate_max_auto_rework(max_auto_rework)?;
         let path = self.attempt_path(project_id, issue_id, attempt_id);
-        let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
-        attempt.max_auto_rework = max_auto_rework;
-        attempt.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &attempt)?;
-        Ok(attempt)
+        with_exclusive_lock(&path, || {
+            let mut attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
+            attempt.max_auto_rework = max_auto_rework;
+            attempt.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&attempt)?;
+            Ok(attempt)
+        })
     }
 
+    /// 替换 provider 会话引用，只覆盖该 API 负责的字段。
+    ///
+    /// 读-改-写全程持有 attempt 文件锁，并从锁内最新 record 保留
+    /// status/version/manual_recovery_reason/target_snapshot/
+    /// admission_ticket_consumed_at 等冻结字段，避免并发覆盖 admission CAS 提交。
     pub fn replace_attempt_provider_conversations(
         &self,
         attempt: &CodingExecutionAttempt,
         provider_conversations: Vec<ProviderConversationRef>,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         self.validate_scoped_attempt_record(attempt, &attempt.id, "coding_attempt", &attempt.id)?;
-        let mut updated = self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let path = self.attempt_path(&updated.project_id, &updated.issue_id, &updated.id);
-        updated.provider_conversations = provider_conversations;
-        updated.updated_at = Utc::now().to_rfc3339();
-        write_json(&path, &updated)?;
-        Ok(updated)
+        let path = self.attempt_path(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        with_exclusive_lock(&path, || {
+            let mut updated =
+                self.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+            updated.provider_conversations = provider_conversations;
+            updated.updated_at = Utc::now().to_rfc3339();
+            #[cfg(test)]
+            notify_attempt_write_gap(&path);
+            self.save_coding_attempt_with_status(&updated)?;
+            Ok(updated)
+        })
     }
 
     pub fn read_attempt_artifact_text(
@@ -552,16 +886,22 @@ pub(super) fn valid_status_transition(
     current: &CodingAttemptStatus,
     next: &CodingAttemptStatus,
 ) -> bool {
+    // 进入 `Running` 的唯一途径是 admission CAS（admit 拿 ticket → transition 消费）。
+    // 状态机层不提供任何直达通道：对 Running 目标一律拒绝，含 Running→Running 幂等调用。
+    if next == &CodingAttemptStatus::Running {
+        return false;
+    }
+    if current == &CodingAttemptStatus::AwaitingManualRecovery {
+        // 直达表保持 abort-only（F-14 fail-closed 不动）：恢复唯一通道是
+        // admission.rs 的 `recover_attempt_from_manual_recovery`（显式 wire
+        // 动作 recover_coding → 重验后 CAS 回 Running，F-16）。
+        return next == &CodingAttemptStatus::Aborted;
+    }
     if current == next {
         return true;
     }
     match current {
-        CodingAttemptStatus::Created => {
-            matches!(
-                next,
-                CodingAttemptStatus::Running | CodingAttemptStatus::Aborted
-            )
-        }
+        CodingAttemptStatus::Created => matches!(next, CodingAttemptStatus::Aborted),
         CodingAttemptStatus::Running => matches!(
             next,
             CodingAttemptStatus::WaitingForHuman
@@ -574,18 +914,17 @@ pub(super) fn valid_status_transition(
         CodingAttemptStatus::WaitingForHuman => {
             matches!(
                 next,
-                CodingAttemptStatus::Running
-                    | CodingAttemptStatus::Completed
-                    | CodingAttemptStatus::Aborted
+                CodingAttemptStatus::Completed | CodingAttemptStatus::Aborted
             )
         }
         CodingAttemptStatus::Blocked => {
             matches!(
                 next,
-                CodingAttemptStatus::Running
-                    | CodingAttemptStatus::AwaitingPlanAmendment
-                    | CodingAttemptStatus::Aborted
+                CodingAttemptStatus::AwaitingPlanAmendment | CodingAttemptStatus::Aborted
             )
+        }
+        CodingAttemptStatus::AwaitingManualRecovery => {
+            matches!(next, CodingAttemptStatus::Aborted)
         }
         CodingAttemptStatus::AwaitingPlanAmendment => matches!(
             next,
@@ -593,9 +932,7 @@ pub(super) fn valid_status_transition(
         ),
         CodingAttemptStatus::ApplyingPlanAmendment => matches!(
             next,
-            CodingAttemptStatus::Running
-                | CodingAttemptStatus::AmendmentApplyFailed
-                | CodingAttemptStatus::Aborted
+            CodingAttemptStatus::AmendmentApplyFailed | CodingAttemptStatus::Aborted
         ),
         CodingAttemptStatus::AmendmentApplyFailed => matches!(
             next,
@@ -605,6 +942,22 @@ pub(super) fn valid_status_transition(
         | CodingAttemptStatus::Failed
         | CodingAttemptStatus::Aborted => false,
     }
+}
+
+/// 经 admission CAS（`admit_attempt_for_execution` + `transition_to_executable`）进入
+/// `Running` 的合法源状态集。
+///
+/// `Blocked→Running` 已从 `valid_status_transition` 直达表中删除：Blocked 只能重走
+/// admission 校验（重新验证路由/快照/policy）并经 ticket CAS 进入 Running。
+pub(super) fn valid_executable_admission_transition(current: &CodingAttemptStatus) -> bool {
+    matches!(
+        current,
+        CodingAttemptStatus::Created
+            | CodingAttemptStatus::WaitingForHuman
+            | CodingAttemptStatus::Blocked
+            | CodingAttemptStatus::ApplyingPlanAmendment
+            | CodingAttemptStatus::AmendmentApplyFailed
+    )
 }
 
 fn valid_stage_transition(current: &CodingExecutionStage, next: &CodingExecutionStage) -> bool {
@@ -621,4 +974,107 @@ fn valid_stage_transition(current: &CodingExecutionStage, next: &CodingExecution
         return true;
     }
     next.order() >= current.order()
+}
+
+#[cfg(test)]
+struct AttemptWriteGapHookEntry {
+    registration_id: u64,
+    reached_gap: mpsc::Sender<()>,
+    proceed: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+#[cfg(test)]
+pub(crate) struct AttemptWriteGapHookGuard {
+    attempt_path: PathBuf,
+    registration_id: u64,
+}
+
+#[cfg(test)]
+static ATTEMPT_WRITE_GAP_HOOKS: OnceLock<Mutex<HashMap<PathBuf, AttemptWriteGapHookEntry>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+static NEXT_ATTEMPT_WRITE_GAP_HOOK_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+fn attempt_write_gap_hooks() -> &'static Mutex<HashMap<PathBuf, AttemptWriteGapHookEntry>> {
+    ATTEMPT_WRITE_GAP_HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers a test hook that pauses a full-record attempt write API after it
+/// read the attempt record but before the write-back is persisted. The caller
+/// receives a channel that fires when the gap is reached and a sender that
+/// releases the paused write.
+#[cfg(test)]
+pub(crate) fn register_attempt_write_gap_hook(
+    attempt_path: &Path,
+) -> (
+    AttemptWriteGapHookGuard,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let attempt_path = std::fs::canonicalize(attempt_path)
+        .expect("registered attempt write gap hook path must be canonicalizable");
+    let registration_id = NEXT_ATTEMPT_WRITE_GAP_HOOK_ID.fetch_add(1, Ordering::Relaxed);
+    let (reached_gap_tx, reached_gap_rx) = mpsc::channel();
+    let (proceed_tx, proceed_rx) = mpsc::channel();
+    let mut hooks = attempt_write_gap_hooks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        !hooks.contains_key(&attempt_path),
+        "attempt write gap hook already registered for {}",
+        attempt_path.display()
+    );
+    hooks.insert(
+        attempt_path.clone(),
+        AttemptWriteGapHookEntry {
+            registration_id,
+            reached_gap: reached_gap_tx,
+            proceed: Arc::new(Mutex::new(proceed_rx)),
+        },
+    );
+    (
+        AttemptWriteGapHookGuard {
+            attempt_path,
+            registration_id,
+        },
+        reached_gap_rx,
+        proceed_tx,
+    )
+}
+
+#[cfg(test)]
+fn notify_attempt_write_gap(attempt_path: &Path) {
+    let Ok(attempt_path) = std::fs::canonicalize(attempt_path) else {
+        return;
+    };
+    let Some((reached_gap, proceed)) = attempt_write_gap_hooks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&attempt_path)
+        .map(|entry| (entry.reached_gap.clone(), Arc::clone(&entry.proceed)))
+    else {
+        return;
+    };
+    let _ = reached_gap.send(());
+    let _ = proceed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recv();
+}
+
+#[cfg(test)]
+impl Drop for AttemptWriteGapHookGuard {
+    fn drop(&mut self) {
+        let mut hooks = attempt_write_gap_hooks()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if hooks
+            .get(&self.attempt_path)
+            .is_some_and(|entry| entry.registration_id == self.registration_id)
+        {
+            hooks.remove(&self.attempt_path);
+        }
+    }
 }

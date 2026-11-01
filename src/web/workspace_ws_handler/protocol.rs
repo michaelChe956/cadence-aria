@@ -1,4 +1,76 @@
+use std::collections::BTreeSet;
+
 use super::*;
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+
+const CLIENT_SUBMITTED_SCOPE_FIELDS: [&str; 3] =
+    ["scope", "review_invocation_scope", "review_scope"];
+
+pub(crate) const RETIRED_INBOUND_MESSAGE_TYPES: [&str; 10] = [
+    "review_decision_response",
+    "author_decision",
+    "select_work_item_generation_mode",
+    "select_revision_path",
+    "request_outline_revision",
+    "work_item_draft_decision",
+    "work_item_batch_decision",
+    "save_human_presentation_revision",
+    "human_confirm",
+    "revert_work_item",
+];
+
+/// 已删除的 legacy 决策消息在 parse 面即被拒收（serde 未知变体）；本函数把
+/// 退役 wire 名从通用 parse 错误中识别出来，供 socket 层返回 stage-specific
+/// protocol error（REQ-WSC-08「已删除消息协议错误拒绝」/REQ-RET-03「在途
+/// legacy 会话决策拒绝」——零副作用：识别仅读原始文本，不触碰引擎状态）。
+pub(crate) fn retired_inbound_message_type(text: &str) -> Option<&'static str> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let name = value.get("type")?.as_str()?;
+    RETIRED_INBOUND_MESSAGE_TYPES
+        .iter()
+        .find(|retired| **retired == name)
+        .copied()
+}
+
+pub(crate) fn retired_message_protocol_error(
+    stage: &WorkspaceStage,
+    message_type: &str,
+) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "LEGACY_MESSAGE_RETIRED".to_string(),
+        message: format!(
+            "message type {message_type} was retired with the legacy workitem decision protocol"
+        ),
+        context: Some(serde_json::json!({
+            "stage": stage.as_str(),
+            "received": message_type,
+        })),
+    }
+}
+
+pub(crate) fn single_candidate_scope_submission_error(
+    flow_kind: WorkItemPlanFlowKind,
+    submitted_fields: &BTreeSet<String>,
+) -> Option<WsOutMessage> {
+    if flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+        return None;
+    }
+
+    let forbidden_fields = submitted_fields
+        .iter()
+        .filter(|field| CLIENT_SUBMITTED_SCOPE_FIELDS.contains(&field.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if forbidden_fields.is_empty() {
+        return None;
+    }
+
+    Some(WsOutMessage::ProtocolError {
+        code: "SINGLE_CANDIDATE_SCOPE_FORBIDDEN".to_string(),
+        message: "single-candidate review scope is server-controlled".to_string(),
+        context: Some(serde_json::json!({ "submitted_fields": forbidden_fields })),
+    })
+}
 
 pub(crate) fn missing_active_run_error(message_type: &'static str, id: &str) -> WsOutMessage {
     WsOutMessage::ProtocolError {
@@ -19,13 +91,25 @@ pub(crate) fn choice_id_unmatched_error(id: &str) -> WsOutMessage {
     }
 }
 
-pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceStage) -> bool {
-    if matches!(
-        msg,
-        WsInMessage::Hello { .. }
-            | WsInMessage::Ping
-            | WsInMessage::SaveHumanPresentationRevision { .. }
-    ) {
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_command_id(command_id: &str) -> Result<(), WsOutMessage> {
+    if command_id.trim().is_empty() {
+        return Err(WsOutMessage::ProtocolError {
+            code: "INVALID_COMMAND_ID".to_string(),
+            message: "command_id must not be blank".to_string(),
+            context: None,
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn is_message_valid_for_stage_with_flow(
+    flow_kind: WorkItemPlanFlowKind,
+    msg: &WsInMessage,
+    stage: &WorkspaceStage,
+) -> bool {
+    if matches!(msg, WsInMessage::Hello { .. } | WsInMessage::Ping) {
         return true;
     }
 
@@ -49,54 +133,220 @@ pub(crate) fn is_message_valid_for_stage(msg: &WsInMessage, stage: &WorkspaceSta
                     | WsInMessage::StartLinkedWorkspaceAmendment { .. }
             )
         }
+        // L2 退役后 author_confirm 的 legacy 逐段/author 决策消息已删除
+        //（REQ-RET-02）；RequestRevision 的 WorkItemPlan（SC 流）放行特例在
+        // socket 层（author_confirm + WorkItemPlan），此处不重复。
+        // F-18（w2c 实测矩阵）：story/design 会话（legacy 流）恒停本门，
+        // typed abandon 在此放行补 terminate 通路（approve 走 HTTP confirm
+        // 端点，Confirm 帧继续不放行）；WorkItemPlan 语义边界由引擎
+        // handle_human_gate_termination 的 story 门分流守卫承接。
+        // v38 复验 #2/#3（恢复 C3 前原意）：story/design 门上的反馈修订通道
+        //——非 SC 流放行 RequestRevision（引擎按 workspace_type 分流进 Revision
+        // run；WorkItemPlan plan-repair 链不受影响）；SC 流保持不放行（SC 门
+        // 关门=typed 三命令）。
         WorkspaceStage::AuthorConfirm => {
-            matches!(
-                msg,
-                WsInMessage::AuthorDecision { .. }
-                    | WsInMessage::SelectWorkItemGenerationMode { .. }
-                    | WsInMessage::RequestOutlineRevision { .. }
-                    | WsInMessage::WorkItemDraftDecision { .. }
-                    | WsInMessage::WorkItemBatchDecision { .. }
-                    | WsInMessage::RevertWorkItem { .. }
-                    | WsInMessage::Abort
-            )
+            if flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                matches!(
+                    msg,
+                    WsInMessage::Abort | WsInMessage::AbandonHumanGate { .. }
+                )
+            } else {
+                matches!(
+                    msg,
+                    WsInMessage::Abort
+                        | WsInMessage::AbandonHumanGate { .. }
+                        | WsInMessage::RequestRevision { .. }
+                )
+            }
         }
         WorkspaceStage::CrossReview => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
-        WorkspaceStage::ReviewDecision => matches!(
-            msg,
-            WsInMessage::SelectRevisionPath { .. } | WsInMessage::ReviewDecisionResponse { .. }
-        ),
+        // review_decision 阶段的唯一消息族（决策应答与修订路径选择两类
+        // 入站）已随 L2 删除：任何消息在该阶段均不合法（SC 会话
+        // 已由 review/routing 的 SC 守卫改道 human gate，不落入此阶段）。
+        WorkspaceStage::ReviewDecision => false,
         WorkspaceStage::Revision => {
             matches!(msg, WsInMessage::Abort | WsInMessage::ChoiceResponse { .. })
         }
-        WorkspaceStage::HumanConfirm => matches!(
-            msg,
-            WsInMessage::HumanConfirm { .. }
-                | WsInMessage::ConfirmPlanAmendment { .. }
-                | WsInMessage::CancelPlanAmendment { .. }
-                | WsInMessage::StartLinkedWorkspaceAmendment { .. }
-                | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
-                | WsInMessage::RequestRevision { .. }
-                | WsInMessage::Confirm
-        ),
-        WorkspaceStage::Completed => false,
+        WorkspaceStage::HumanConfirm => {
+            if flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+                matches!(
+                    msg,
+                    WsInMessage::HumanGateFeedback { .. }
+                        | WsInMessage::Confirm
+                        // L0 typed 重承载（REQ-RET-02/REQ-CG-04）：typed abandon
+                        // 门命令与 HumanGateFeedback/Confirm 同族放行。
+                        | WsInMessage::AbandonHumanGate { .. }
+                        // 独立 compile recovery 操作，不属于 typed 三命令
+                        //（REQ-RET-02 边界不变）：durable 事实由引擎守卫校验
+                        //（compile.rs handle_work_item_plan_compile_recovery_action），
+                        // 矩阵层只做 stage/flow 放行，缺失/不匹配 recovery
+                        // 事实在引擎侧 fail-closed 零副作用。
+                        | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
+                )
+            } else {
+                matches!(
+                    msg,
+                    WsInMessage::ConfirmPlanAmendment { .. }
+                        | WsInMessage::CancelPlanAmendment { .. }
+                        | WsInMessage::StartLinkedWorkspaceAmendment { .. }
+                        | WsInMessage::WorkItemPlanCompileRecoveryAction { .. }
+                        // approve（confirm 帧）legacy 分支保留：story/design 等
+                        // 非 SC 流的确认帧面（T4 §4 登记限制的既有形态）。
+                        | WsInMessage::Confirm
+                )
+            }
+        }
+        WorkspaceStage::Completed => {
+            flow_kind == WorkItemPlanFlowKind::SingleCandidate
+                && matches!(msg, WsInMessage::Advance { .. })
+        }
     }
 }
 
+pub(crate) fn human_gate_message_boundary_error(
+    flow_kind: WorkItemPlanFlowKind,
+    stage: WorkspaceStage,
+    message: &WsInMessage,
+) -> Option<WsOutMessage> {
+    if flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        || matches!(message, WsInMessage::HumanGateFeedback { .. })
+    {
+        return None;
+    }
+    if is_message_valid_for_stage_with_flow(flow_kind, message, &stage) {
+        return None;
+    }
+
+    // C3/REQ-HTR-01：Abort 在门开态的拒收必须自带门级动作指路。
+    if matches!(message, WsInMessage::Abort) && stage == WorkspaceStage::HumanConfirm {
+        return Some(abort_human_gate_stage_error(flow_kind, &stage));
+    }
+
+    // Legacy/control traffic keeps its existing routing. New conversational-gate commands and
+    // ordinary user messages fail closed before any provider/store operation.
+    if stage == WorkspaceStage::HumanConfirm || matches!(message, WsInMessage::UserMessage { .. }) {
+        return Some(conversational_gate_stage_error(flow_kind, &stage, message));
+    }
+
+    None
+}
+
+pub(crate) fn conversational_gate_stage_error(
+    flow_kind: WorkItemPlanFlowKind,
+    stage: &WorkspaceStage,
+    msg: &WsInMessage,
+) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID".to_string(),
+        message: format!(
+            "message {} not allowed in stage {}",
+            message_type(msg),
+            stage.as_str()
+        ),
+        context: Some(serde_json::json!({
+            "stage": stage.as_str(),
+            "received": message_type(msg),
+            "flow_kind": flow_kind,
+        })),
+    }
+}
+
+pub(crate) fn advance_stage_error(
+    command_id: String,
+    stage: &WorkspaceStage,
+    flow_kind: WorkItemPlanFlowKind,
+) -> WsOutMessage {
+    let flow_kind = match flow_kind {
+        WorkItemPlanFlowKind::Legacy => "legacy",
+        WorkItemPlanFlowKind::SingleCandidate => "single_candidate",
+    };
+    WsOutMessage::AdvanceRejected {
+        command_id,
+        code: "ADVANCE_STAGE_INVALID".to_string(),
+        reason: format!(
+            "advance is not allowed for {flow_kind} flow in stage {}",
+            stage.as_str()
+        ),
+    }
+}
+
+/// C3/REQ-HTR-01：Abort 不再豁免——矩阵既有放行表即刻生效（PrepareContext/
+/// Running/CrossReview/Revision/AuthorConfirm 受理；HumanConfirm/Completed 拒收）。
+/// 中 run 期消息（Permission/Choice/UserMessage/Rollback）仍豁免：provider run
+/// 全程持有 engine 锁，矩阵校验的 `engine.lock()` 会令它们在 run 期楔死。
+/// Abort 的矩阵校验在 socket 层用非阻塞 stage 读（try_lock + 门开标志），
+/// 不得进入本函数的阻塞路径语义。
 pub(crate) fn requires_stage_validation(msg: &WsInMessage) -> bool {
     !matches!(
         msg,
-        WsInMessage::Abort
-            | WsInMessage::PermissionResponse { .. }
+        WsInMessage::PermissionResponse { .. }
             | WsInMessage::ChoiceResponse { .. }
             | WsInMessage::UserMessage { .. }
             | WsInMessage::Rollback { .. }
             | WsInMessage::Hello { .. }
-            | WsInMessage::SaveHumanPresentationRevision { .. }
             | WsInMessage::Ping
+            // 「登记并重试」是带外修复动作（root 服务端解析、不触碰 run
+            // 状态）：任意阶段可用——trust 缺失错误恰恰出现在 Prepare 停等
+            // 与确认门开态（workspace_confirmation_trust_waiting），矩阵
+            // 豁免保证按钮在最需要它的时刻可达。
+            | WsInMessage::RegisterTrustEntry { .. }
     )
+}
+
+/// C3/REQ-HTR-01：Abort 在人工门开态的拒收指路——run 级中止不占用户「终止」
+/// 心智，错误必须携带可用门级动作（反馈/确认/终止此门）。沿用门态稳定码
+/// WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID（spec 允许的 stage 相关稳定码）。
+pub(crate) fn abort_human_gate_stage_error(
+    flow_kind: WorkItemPlanFlowKind,
+    stage: &WorkspaceStage,
+) -> WsOutMessage {
+    WsOutMessage::ProtocolError {
+        code: "WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID".to_string(),
+        message: format!(
+            "message abort not allowed in stage {}: no provider run to abort while a human gate \
+             is open — use human_gate_feedback (feedback), confirm (approve) or \
+             abandon_human_gate (terminate this gate)",
+            stage.as_str()
+        ),
+        context: Some(serde_json::json!({
+            "stage": stage.as_str(),
+            "received": "abort",
+            "flow_kind": flow_kind,
+            "available_actions": [
+                "human_gate_feedback",
+                "confirm",
+                "abandon_human_gate",
+            ],
+        })),
+    }
+}
+
+/// C3/REQ-HTR-01：无 active run 的 Abort 诚实回执——稳定码 abort_no_active_run
+/// + 当前阶段；门开态附门级动作（与矩阵拒收共用指路面）。
+pub(crate) fn abort_no_active_run_error(stage: &WorkspaceStage) -> WsOutMessage {
+    let mut context = serde_json::json!({
+        "stage": stage.as_str(),
+        "received": "abort",
+    });
+    let message = if *stage == WorkspaceStage::HumanConfirm {
+        context["available_actions"] =
+            serde_json::json!(["human_gate_feedback", "confirm", "abandon_human_gate",]);
+        "no active provider run to abort: a human gate is open — use human_gate_feedback, \
+         confirm or abandon_human_gate (terminate this gate)"
+            .to_string()
+    } else {
+        format!(
+            "no active provider run to abort in stage {}",
+            stage.as_str()
+        )
+    };
+    WsOutMessage::ProtocolError {
+        code: "abort_no_active_run".to_string(),
+        message,
+        context: Some(context),
+    }
 }
 
 pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
@@ -111,24 +361,136 @@ pub(crate) fn message_type(msg: &WsInMessage) -> &'static str {
         WsInMessage::ProviderSelect { .. } => "provider_select",
         WsInMessage::PermissionResponse { .. } => "permission_response",
         WsInMessage::ChoiceResponse { .. } => "choice_response",
-        WsInMessage::ReviewDecisionResponse { .. } => "review_decision_response",
-        WsInMessage::AuthorDecision { .. } => "author_decision",
-        WsInMessage::SelectWorkItemGenerationMode { .. } => "select_work_item_generation_mode",
-        WsInMessage::SelectRevisionPath { .. } => "select_revision_path",
         WsInMessage::RequestRevision { .. } => "request_revision",
-        WsInMessage::RequestOutlineRevision { .. } => "request_outline_revision",
-        WsInMessage::WorkItemDraftDecision { .. } => "work_item_draft_decision",
-        WsInMessage::WorkItemBatchDecision { .. } => "work_item_batch_decision",
         WsInMessage::WorkItemPlanCompileRecoveryAction { .. } => {
             "work_item_plan_compile_recovery_action"
         }
-        WsInMessage::SaveHumanPresentationRevision { .. } => "save_human_presentation_revision",
-        WsInMessage::HumanConfirm { .. } => "human_confirm",
         WsInMessage::ConfirmPlanAmendment { .. } => "confirm_plan_amendment",
         WsInMessage::CancelPlanAmendment { .. } => "cancel_plan_amendment",
         WsInMessage::StartLinkedWorkspaceAmendment { .. } => "start_linked_workspace_amendment",
-        WsInMessage::RevertWorkItem { .. } => "revert_work_item",
+        WsInMessage::HumanGateFeedback { .. } => "human_gate_feedback",
+        WsInMessage::Advance { .. } => "advance",
+        WsInMessage::AbandonHumanGate { .. } => "abandon_human_gate",
+        WsInMessage::RegisterTrustEntry { .. } => "register_trust_entry",
         WsInMessage::Abort => "abort",
         WsInMessage::Ping => "ping",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+    use crate::web::workspace_ws_types::StructuredFeedback;
+
+    #[test]
+    fn retired_legacy_decision_wire_names_are_recognized_for_stage_specific_rejection() {
+        for wire_name in RETIRED_INBOUND_MESSAGE_TYPES {
+            let raw = format!(r#"{{"type":"{wire_name}","decision":"confirm"}}"#);
+            assert_eq!(retired_inbound_message_type(&raw), Some(wire_name));
+        }
+        // 现役消息名不得误判为退役（parse 成功路径）。
+        for live in [
+            "confirm",
+            "advance",
+            "human_gate_feedback",
+            "abandon_human_gate",
+        ] {
+            let raw = format!(r#"{{"type":"{live}","command_id":"cmd"}}"#);
+            assert_eq!(retired_inbound_message_type(&raw), None, "{live}");
+        }
+        assert_eq!(retired_inbound_message_type("not json"), None);
+
+        let error = retired_message_protocol_error(&WorkspaceStage::HumanConfirm, "human_confirm");
+        let WsOutMessage::ProtocolError { code, context, .. } = error else {
+            panic!("expected protocol error");
+        };
+        let context = context.expect("retired error context");
+        assert_eq!(code, "LEGACY_MESSAGE_RETIRED");
+        assert_eq!(context["stage"], "human_confirm");
+        assert_eq!(context["received"], "human_confirm");
+    }
+
+    #[test]
+    fn review_decision_stage_accepts_nothing_after_legacy_retirement() {
+        let confirm = WsInMessage::Confirm;
+        assert!(!is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::Legacy,
+            &confirm,
+            &WorkspaceStage::ReviewDecision,
+        ));
+        assert!(!is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::SingleCandidate,
+            &confirm,
+            &WorkspaceStage::ReviewDecision,
+        ));
+    }
+
+    fn revision_feedback_message() -> WsInMessage {
+        WsInMessage::RequestRevision {
+            feedback: StructuredFeedback {
+                feedback_types: vec!["revision".to_string()],
+                description: "按以下 review 意见修订：第二段缺少冲突".to_string(),
+                target_artifact_version: None,
+            },
+        }
+    }
+
+    /// v38 复验 #2/#3（恢复 C3 前原意）：story/design（legacy 流）在 AuthorConfirm
+    /// 门上提交修订意见——矩阵放行 RequestRevision；SC 流保持不放行（SC 门关门=
+    /// typed 三命令）；其余消息维持仅 Abort/AbandonHumanGate 禁令（F-20 confirm
+    /// 帧仍拒收）；修订请求也仅限门阶段。
+    #[test]
+    fn author_confirm_allows_request_revision_for_legacy_flow_only() {
+        let revision = revision_feedback_message();
+        assert!(
+            is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::Legacy,
+                &revision,
+                &WorkspaceStage::AuthorConfirm,
+            ),
+            "story/design legacy 流的 AuthorConfirm 门必须放行 RequestRevision"
+        );
+        assert!(
+            !is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::SingleCandidate,
+                &revision,
+                &WorkspaceStage::AuthorConfirm,
+            ),
+            "SC 流 AuthorConfirm 不放行 RequestRevision（SC 门关门=typed 三命令）"
+        );
+        for invalid in [
+            WsInMessage::Confirm,
+            WsInMessage::Advance {
+                command_id: "cmd_1".to_string(),
+            },
+            WsInMessage::HumanGateFeedback {
+                command_id: "cmd_1".to_string(),
+                feedback: "补充异常场景".to_string(),
+                excluded_finding_ids: vec![],
+            },
+        ] {
+            assert!(
+                !is_message_valid_for_stage_with_flow(
+                    WorkItemPlanFlowKind::Legacy,
+                    &invalid,
+                    &WorkspaceStage::AuthorConfirm,
+                ),
+                "AuthorConfirm 其余消息禁令不因修订通道放开而松动: {:?}",
+                invalid
+            );
+        }
+        assert!(
+            !is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::Legacy,
+                &revision,
+                &WorkspaceStage::PrepareContext,
+            ) && !is_message_valid_for_stage_with_flow(
+                WorkItemPlanFlowKind::Legacy,
+                &revision,
+                &WorkspaceStage::Revision,
+            ),
+            "RequestRevision 仅在门阶段（AuthorConfirm）放行"
+        );
     }
 }

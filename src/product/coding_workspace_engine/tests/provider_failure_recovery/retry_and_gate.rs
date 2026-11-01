@@ -111,7 +111,11 @@ async fn reviewer_three_transport_failures_open_one_human_gate_after_third_run()
     assert!(
         inputs
             .iter()
-            .all(|input| input.prompt.contains("当前阶段：只读代码审查"))
+            // T20b 决策项⑤:审查协议头不再「只读」——验证临时产物允许,
+            // 禁改交付源码+窗口对账。
+            .all(|input| input
+                .prompt
+                .contains("当前阶段：代码审查（ReviewerVerify）"))
     );
     assert!(
         inputs
@@ -119,9 +123,18 @@ async fn reviewer_three_transport_failures_open_one_human_gate_after_third_run()
             .all(|input| input.prompt.contains("reviewed.rs")
                 && input.prompt.contains("pub fn reviewed"))
     );
+    // T19 旧只读 retry 上下文移除:技术失败的前窗经「干净恢复+回收」后
+    // 才建新窗——首轮失败后的 worktree 部分写入在重试 prompt 中不可见
+    // (baseline 恢复完整后才准入新材料),三轮均只见基线内容。
     assert!(!inputs[0].prompt.contains("reviewed_after_retry"));
-    assert!(inputs[1].prompt.contains("reviewed_after_retry"));
-    assert!(inputs[2].prompt.contains("reviewed_after_retry"));
+    assert!(
+        !inputs[1].prompt.contains("reviewed_after_retry"),
+        "retry material must come from the recycled window's fresh baseline"
+    );
+    assert!(
+        !inputs[2].prompt.contains("reviewed_after_retry"),
+        "retry material must come from the recycled window's fresh baseline"
+    );
     let nonces = inputs
         .iter()
         .map(|input| {
@@ -398,6 +411,27 @@ fn provider_retry_classifier_fails_closed_for_unrecognized_adapter_execution_fai
 }
 
 #[test]
+fn provider_retry_classifier_maps_structured_empty_output_code_to_stable_reason() {
+    let error =
+        CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError::provider_empty_output(
+            "provider_empty_output: Codex turn turn_1 completed without agent output \
+             after one bounded retry",
+        ));
+    let classification = classify_provider_failure(&error);
+    assert!(!classification.is_retryable());
+    match classification {
+        crate::product::coding_workspace_engine::provider_retry::ProviderFailureClassification::NonRetryable {
+            reason_code,
+            interaction_wait,
+        } => {
+            assert_eq!(reason_code, "provider_empty_output");
+            assert!(!interaction_wait);
+        }
+        other => panic!("expected non-retryable classification, got {other:?}"),
+    }
+}
+
+#[test]
 fn provider_invocation_outcome_keeps_typed_failure_and_interaction_wait() {
     let retry = ProviderInvocationOutcome::from_result(
         Err(CodingWorkspaceEngineError::ProviderAdapter(
@@ -482,7 +516,9 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     lifecycle
@@ -502,12 +538,7 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
         })
         .expect("running active unit");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(
@@ -754,16 +785,12 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     store
         .save_timeline_node(
@@ -857,16 +884,12 @@ async fn abort_during_provider_failure_prewrite_pause_is_stable() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
     let attempt = store
-        .update_attempt_status(
-            PROJECT_ID,
-            ISSUE_ID,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(
@@ -1001,16 +1024,12 @@ async fn internal_review_blocked_gates_use_triage_actions_without_coder_rework()
                     permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
                     ),
                 },
+                target_snapshot: None,
                 max_auto_rework: 2,
             })
             .expect("attempt");
         let attempt = store
-            .update_attempt_status(
-                PROJECT_ID,
-                ISSUE_ID,
-                &attempt.id,
-                CodingAttemptStatus::Running,
-            )
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
             .expect("running attempt");
         let attempt = store
             .update_attempt_stage(

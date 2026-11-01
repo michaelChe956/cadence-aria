@@ -42,7 +42,7 @@ pub(crate) fn recover_work_item_plan_outline_review_schema_fallback(
     let persisted_verdict = detail
         .verdict
         .clone()
-        .and_then(|value| serde_json::from_value::<ReviewVerdict>(value).ok());
+        .and_then(|value| deserialize_historical_review_verdict(value).ok());
     let recoverable_diagnostic = persisted_verdict.as_ref().is_some_and(|verdict| {
         verdict
             .structured_output_diagnostic

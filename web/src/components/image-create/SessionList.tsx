@@ -1,4 +1,5 @@
 import { ImagePlus, MessageSquare, Plus, Trash2, X } from "lucide-react";
+import { DialogShell } from "../shared/DialogShell";
 import { useEffect, useState, type FormEvent } from "react";
 import {
   IMAGE_CREATE_PROVIDER_OPTIONS,
@@ -208,34 +209,17 @@ export function SessionList({
         )}
       </div>
       {showCreate ? (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 pt-16 backdrop-blur-sm">
-          <form
-            role="dialog"
-            aria-modal="true"
-            aria-label="创建图片创作会话"
-            onSubmit={handleCreate}
-            className="w-full max-w-md rounded-2xl border border-white/80 bg-[var(--aria-panel)] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.2)]"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--aria-primary-soft)] text-[var(--aria-primary)] shadow-sm">
-                  <ImagePlus aria-hidden="true" className="h-5 w-5" />
-                </span>
-                <div>
-                  <h3 className="text-base font-semibold">新建会话</h3>
-                  <p className="mt-0.5 text-xs text-[var(--aria-ink-muted)]">选择一个创作起点</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                aria-label="关闭"
-                onClick={() => setShowCreate(false)}
-                className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
-              >
-                <X aria-hidden="true" className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="mt-5 space-y-4 rounded-xl bg-[var(--aria-panel-muted)] p-4">
+        <DialogShell
+          label="创建图片创作会话"
+          onClose={() => setShowCreate(false)}
+          closeLabel="关闭"
+          title="新建会话"
+          widthClass="max-w-md"
+          icon={<ImagePlus aria-hidden="true" className="h-4 w-4" />}
+          description="选择一个创作起点"
+        >
+          <form onSubmit={handleCreate}>
+            <div className="space-y-4 rounded-xl bg-[var(--aria-panel-muted)] p-4">
               <CustomSelect
                 label="模板"
                 value={templateSelectionLabel(template)}
@@ -290,7 +274,7 @@ export function SessionList({
               </button>
             </div>
           </form>
-        </div>
+        </DialogShell>
       ) : null}
     </aside>
   );

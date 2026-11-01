@@ -1,5 +1,5 @@
 use crate::product::workspace_engine::serialized_string;
-use crate::web::workspace_ws_types::review::ReviewVerdict;
+use crate::web::workspace_ws_types::review::{ReviewFinding, ReviewVerdict};
 
 pub(crate) fn trusted_review_comments(verdict: &ReviewVerdict) -> Option<&str> {
     let failed_diagnostic = verdict
@@ -11,7 +11,23 @@ pub(crate) fn trusted_review_comments(verdict: &ReviewVerdict) -> Option<&str> {
         .filter(|comments| !comments.is_empty())
 }
 
+/// 全量 finding 视图（留档 / 复盘）：保留每一条 finding 的原文。
 pub(crate) fn format_review_feedback(verdict: &ReviewVerdict) -> String {
+    format_review_feedback_filtered(verdict, |_| true)
+}
+
+/// REQ-WSC-14（作者返修输入面）：只列 `actionable` finding 的反馈变体——注入
+/// 作者返修 prompt 的调用方 MUST 用本函数。owner 强制降级（`disposition=advisory`）
+/// 的 finding 即便 `severity` 仍是 `must_fix`，其 message/required_action 也不得
+/// 进入作者输入面（否则作者被命令去修范围外事实，churn 循环以另一种形态残留）。
+pub(crate) fn format_actionable_review_feedback(verdict: &ReviewVerdict) -> String {
+    format_review_feedback_filtered(verdict, ReviewFinding::is_actionable)
+}
+
+fn format_review_feedback_filtered(
+    verdict: &ReviewVerdict,
+    keep: impl Fn(&ReviewFinding) -> bool,
+) -> String {
     let mut parts = Vec::new();
 
     if !verdict.summary.trim().is_empty() {
@@ -35,21 +51,23 @@ pub(crate) fn format_review_feedback(verdict: &ReviewVerdict) -> String {
         let findings = verdict
             .findings
             .iter()
+            .filter(|finding| keep(finding))
             .enumerate()
             .map(|(index, finding)| {
                 format!(
-                    "{}. severity: {}\n   message: {}\n   evidence: {}\n   impact: {}\n   required_action: {}",
+                    "{}. severity: {}\n   message: {}\n   evidence: {}\n   required_action: {}",
                     index + 1,
                     serialized_string(&finding.severity),
                     finding.message.trim(),
                     finding.evidence.trim(),
-                    finding.impact.trim(),
                     finding.required_action.trim()
                 )
             })
             .collect::<Vec<_>>()
             .join("\n");
-        parts.push(format!("[review_findings]\n{findings}"));
+        if !findings.is_empty() {
+            parts.push(format!("[review_findings]\n{findings}"));
+        }
     }
 
     parts.join("\n\n")
@@ -59,9 +77,9 @@ pub(crate) fn format_review_feedback(verdict: &ReviewVerdict) -> String {
 mod tests {
     use super::*;
     use crate::web::workspace_ws_types::review::{
-        ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
-        WorkItemPlanReviewAction, WorkItemPlanReviewComplete, WorkItemPlanReviewGate,
-        WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
+        ReviewFinding, ReviewFindingDisposition, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
+        ReviewVerdictType, WorkItemPlanReviewAction, WorkItemPlanReviewComplete,
+        WorkItemPlanReviewGate, WorkItemPlanReviewScope, WorkItemPlanReviewVerdict,
     };
 
     #[test]
@@ -74,11 +92,16 @@ mod tests {
                 severity: ReviewFindingSeverity::MustFix,
                 message: "ProviderName 扩展遗漏 match 分支".to_string(),
                 evidence: "src/product/work_item_split_engine/types.rs:86".to_string(),
-                impact: "新增 provider 时 draft 会遗漏运行时映射。".to_string(),
                 required_action:
                     "把 provider_name_to_type 和测试 fixture provider_name 一并纳入本 work item 的写入范围。"
                         .to_string(),
-            }],
+                category: None,
+                class_hint: None,
+                contract_field: None,
+                machine_repair: None,
+                owner_question: None,
+                owner_options: None,
+            disposition: None, target_work_item_id: None, finding_key: None, }],
             review_gate: ReviewGate::RequiresRevision,
             work_item_plan_review: Some(WorkItemPlanReviewComplete {
                 verdict: WorkItemPlanReviewVerdict::Revise,
@@ -104,11 +127,78 @@ mod tests {
         assert!(feedback.contains("severity: must_fix"));
         assert!(feedback.contains("message: ProviderName 扩展遗漏 match 分支"));
         assert!(feedback.contains("evidence: src/product/work_item_split_engine/types.rs:86"));
-        assert!(feedback.contains("impact: 新增 provider 时 draft 会遗漏运行时映射。"));
+        assert!(feedback.contains("message: ProviderName 扩展遗漏 match 分支\n   evidence: src/product/work_item_split_engine/types.rs:86"));
         assert!(feedback.contains("required_action: 把 provider_name_to_type"));
         assert!(feedback.contains("[work_item_plan_review]"));
         assert!(feedback.contains("review_scope: item"));
         assert!(feedback.contains("review_action: revise_current_item"));
+    }
+
+    /// REQ-WSC-14（作者返修输入面）：owner 强制降级（`disposition=advisory`）的
+    /// finding 即便 `severity` 仍是 `must_fix`，也 MUST NOT 进入作者返修输入面；
+    /// 留档视图（`format_review_feedback`）保留全量 finding 供复盘。
+    #[test]
+    fn actionable_variant_omits_owner_downgraded_findings() {
+        let verdict = ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "本轮按 review 意见返修".to_string(),
+            summary: "范围外事实已被 owner 排除".to_string(),
+            findings: vec![
+                ReviewFinding {
+                    severity: ReviewFindingSeverity::MustFix,
+                    message: "本 Work Item 验收标准缺口".to_string(),
+                    evidence: "CT-001 acceptance".to_string(),
+                    required_action: "补齐验收标准".to_string(),
+                    category: None,
+                    class_hint: None,
+                    contract_field: None,
+                    machine_repair: None,
+                    owner_question: None,
+                    owner_options: None,
+                    disposition: None,
+                    target_work_item_id: None,
+                    finding_key: None,
+                },
+                ReviewFinding {
+                    severity: ReviewFindingSeverity::MustFix,
+                    message: "中文 locale 尚未配置".to_string(),
+                    evidence: "docs/frontend-spec.md".to_string(),
+                    required_action: "回写产品侧文档".to_string(),
+                    category: None,
+                    class_hint: None,
+                    contract_field: None,
+                    machine_repair: None,
+                    owner_question: None,
+                    owner_options: None,
+                    disposition: Some(ReviewFindingDisposition::Advisory),
+                    target_work_item_id: None,
+                    finding_key: None,
+                },
+            ],
+            review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        };
+
+        let archived = format_review_feedback(&verdict);
+        assert!(
+            archived.contains("中文 locale 尚未配置"),
+            "留档视图必须保留全量 findings: {archived}"
+        );
+
+        let author_input = format_actionable_review_feedback(&verdict);
+        assert!(
+            author_input.contains("本 Work Item 验收标准缺口"),
+            "actionable finding 必须进入作者返修输入面: {author_input}"
+        );
+        assert!(
+            !author_input.contains("中文 locale 尚未配置"),
+            "降级后的 finding message 不得进入作者返修输入面: {author_input}"
+        );
+        assert!(
+            !author_input.contains("回写产品侧文档"),
+            "降级后的 finding required_action 不得进入作者返修输入面: {author_input}"
+        );
     }
 
     #[test]

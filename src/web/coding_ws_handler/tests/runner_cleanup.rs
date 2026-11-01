@@ -422,7 +422,7 @@ fn seed_http_attempt_with_lease() -> (
     attempt.status = CodingAttemptStatus::Running;
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("persist HTTP attempt fixture");
 
     let repository_path = tmp.path().join("repository");
@@ -443,6 +443,7 @@ fn seed_http_attempt_with_lease() -> (
             path: repository_path,
             default_policy_preset: None,
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "runner-cleanup-repository".to_string(),
         })
         .expect("repository record");
     assert_eq!(repository.id, "repository_0001");

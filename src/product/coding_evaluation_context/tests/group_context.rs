@@ -141,6 +141,10 @@ fn group_attempt_fixture(
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItemGroup,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/issues/issue_0001".to_string(),
@@ -162,7 +166,10 @@ fn group_attempt_fixture(
         provider_conversations: Vec::new(),
         created_at: "2026-06-10T00:00:00Z".to_string(),
         updated_at: "2026-06-10T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
     (tmp, paths, attempt)
 }
@@ -257,6 +264,13 @@ fn save_compile_context_fixture(paths: &ProductAppPaths, plan: &IssueWorkItemPla
         project_id: PROJECT_ID.to_string(),
         issue_id: ISSUE_ID.to_string(),
         plan_id: plan.id.clone(),
+        flow_kind: None,
+        source_revision_id: None,
+        source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        publication_provenance_content_hash: None,
         generation_round_id: "generation_round_0001".to_string(),
         outline_version_ref: "outline_version_0001".to_string(),
         active_draft_ids: vec!["draft_backend".to_string(), "draft_frontend".to_string()],
@@ -328,6 +342,7 @@ fn draft_record(
             contract.write_policy.exclusive_scopes.clear();
             contract.write_policy.forbidden_scopes.clear();
             WorkItemDraftCandidate {
+                target_repository_id: None,
                 outline_id: outline_id.to_string(),
                 logical_work_item_id,
                 verification_plan: crate::product::models::WorkItemDraftVerificationPlan {

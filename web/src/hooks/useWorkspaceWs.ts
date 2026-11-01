@@ -1,21 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+// L2 退役（T5/REQ-RET-02）：修订路径选择/作者决策/生成模式选择/outline 修订
+// 请求/草稿决策/批量决策/review 决策应答的发送器随 wire 消息族删除
+// （wp5-attribution-table.md §1）。
 import type {
-  AuthorDecision,
-  HumanConfirmDecision,
   LinkedWorkspaceAmendmentTarget,
   ProviderConfigSnapshot,
-  RevisionPath,
-  SaveHumanPresentationRevisionMessage,
   WorkspaceProviderName,
-  WorkItemBatchDecision,
-  WorkItemDraftDecision,
-  WorkItemGenerationMode,
   WorkItemPlanCompileRecoveryAction,
   WsInMessage,
 } from "../api/types";
 import { useWorkspaceWsReconnect } from "./useWorkspaceWsReconnect";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
+import { selectGateProjection } from "../state/workspace-cockpit-projection";
+import { STALE_DRIVER_LEASE_CODE } from "../state/protocol-error-copy";
 import type { ChoiceAnswerPayload } from "../state/chat-entries";
 import {
   ACTIVE_PROVIDER_STAGES,
@@ -29,17 +28,55 @@ import {
   type PlanRepairSourceState,
 } from "./useWorkspaceWs-plan-repair";
 
+/**
+ * C2（Task 6.2，接口字典 §0.3 wire/前端）：`StartGeneration.resume_recovery`
+ * 的显式 fresh 意图 TS wire 镜像——snake_case 与后端
+ * `workspace_ws_types/in_.rs::LcResumeRecoveryIntent` 逐字段一致；intent 后端
+ * serde 只收 "fresh"，前端只发显式 fresh，不猜其它回落。
+ */
+export type LcResumeFreshIntentWire = {
+  recovery_id: string;
+  intent: "fresh";
+  operation_id: string;
+};
+
 type WorkspaceWsSendMessage =
   | WsInMessage
-  | { type: "provider_select"; role: string; provider: string };
+  | { type: "provider_select"; role: string; provider: string }
+  | {
+      // C2（Task 6.2）：显式 fresh 恢复的加宽发送变体——普通出生/重跑
+      // sendStartGeneration 仍不带 resume_recovery（literal None）。
+      type: "start_generation";
+      provider_config: ProviderConfigSnapshot;
+      reviewer_enabled: boolean;
+      resume_recovery?: LcResumeFreshIntentWire;
+    };
 
+const CONNECT_TIMEOUT_MS = 5_000;
 const PING_INTERVAL_MS = 25_000;
 const SERVER_SILENCE_TIMEOUT_MS = 60_000;
 const STALE_SOCKET_CLOSE_CODE = 4000;
 const SERVER_SILENCE_CHECK_INTERVAL_MS = 15_000;
-const CONNECT_TIMEOUT_MS = 5_000;
-const STREAM_FLUSH_INTERVAL_MS = 80;
+const STREAM_FLUSH_INTERVAL_MS = 50;
 const DISCONNECTED_PRESENTATION_SAVE_ERROR = "连接已断开，请重连后重试";
+
+// M2：门禁/推进命令 id 唯一生成点。动作发起时生成一次并随动作保存；
+// 重试 / 重连重放由调用方把同一 id 传回 helper（不重新生成）。
+export function newCommandId(): string {
+  return crypto.randomUUID();
+}
+
+/** STALE_DRIVER_LEASE 的 context.received（被拒写命令的 message_type）；缺省 null。 */
+function staleLeaseReceivedMessageType(context: unknown): string | null {
+  if (typeof context !== "object" || context === null) {
+    return null;
+  }
+  const received = (context as Record<string, unknown>).received;
+  return typeof received === "string" ? received : null;
+}
+
+
+export type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
 
 export function useWorkspaceWs(sessionId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -52,6 +89,20 @@ export function useWorkspaceWs(sessionId: string | null) {
     source: null,
   });
   const lastMessageAtRef = useRef(Date.now());
+  const currentConnectionIdRef = useRef<string | null>(null);
+  const lastServerMessageAtRef = useRef<string | null>(null);
+  const lastPongOrServerMessageAtRef = useRef<string | null>(null);
+  const lastPingAtRef = useRef<string | null>(null);
+  const lastEventSeqRef = useRef<number | null>(null);
+  // REQ-DLS-02（driver-lease-self-healing）：写命令 STALE 单次自动重试状态。
+  // 镜像服务端 is_write_message（hello/ping 之外皆写面）记录最近一条已出站
+  // 写命令；STALE_DRIVER_LEASE 到达且该命令未重放过时，先重发 driver hello
+  // 夺回租约再原样重放一次（恰一次）。重放仍 STALE 则回落既有手动接管面。
+  const leaseAutoRetryRef = useRef<{
+    message: WorkspaceWsSendMessage;
+    retried: boolean;
+  } | null>(null);
+
   const [closeCode, setCloseCode] = useState<number | undefined>();
   const [sessionSnapshot, setSessionSnapshot] = useState({
     sessionId: null as string | null,
@@ -104,7 +155,6 @@ export function useWorkspaceWs(sessionId: string | null) {
       useWorkspaceStore.getState().flushBufferedStream(nodeId);
     }, STREAM_FLUSH_INTERVAL_MS);
   }, []);
-
   const connect = useCallback(() => {
     if (!sessionId) return;
 
@@ -143,6 +193,10 @@ export function useWorkspaceWs(sessionId: string | null) {
       ws.close();
     }, CONNECT_TIMEOUT_MS);
 
+    currentConnectionIdRef.current = null;
+    lastServerMessageAtRef.current = null;
+    lastPongOrServerMessageAtRef.current = null;
+    lastPingAtRef.current = null;
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
       clearConnectTimeout();
@@ -156,6 +210,10 @@ export function useWorkspaceWs(sessionId: string | null) {
           type: "hello",
           session_id: sessionId,
           last_seen_node_id: store.activeNodeId ?? store.timelineNodes.at(-1)?.node_id ?? null,
+          role: "driver",
+          ...(lastEventSeqRef.current !== null
+            ? { after_event_seq: lastEventSeqRef.current }
+            : {}),
         }),
       );
     };
@@ -168,6 +226,16 @@ export function useWorkspaceWs(sessionId: string | null) {
       wsRef.current = null;
       socketSessionIdRef.current = null;
       setCloseCode(event.code);
+      useWorkspaceStore.getState().recordConnectionCloseDiagnostic({
+        connectionId: currentConnectionIdRef.current,
+        closeCode: event.code,
+        closeReason: event.reason,
+        wasClean: event.wasClean,
+        visibilityState: document.visibilityState,
+        lastPongOrServerMessageAt: lastPongOrServerMessageAtRef.current,
+        lastPingAt: lastPingAtRef.current,
+        at: new Date().toISOString(),
+      });
       useWorkspaceStore.getState().setConnectionStatus("disconnected");
     };
 
@@ -187,10 +255,33 @@ export function useWorkspaceWs(sessionId: string | null) {
     ws.onmessage = (event) => {
       if (wsRef.current !== ws || socketSessionIdRef.current !== sessionId) return;
       lastMessageAtRef.current = Date.now();
+      const now = new Date().toISOString();
+      lastServerMessageAtRef.current = now;
+      lastPongOrServerMessageAtRef.current = now;
       try {
         const msg = JSON.parse(event.data) as WsServerMessage;
+        if (msg.type === "resync_required") {
+          ws.close(STALE_SOCKET_CLOSE_CODE);
+          return;
+        }
+        if (typeof msg.event_seq === "number") {
+          if (msg.type === "session_state") {
+            lastEventSeqRef.current = msg.event_seq;
+          } else if (
+            lastEventSeqRef.current !== null &&
+            msg.event_seq <= lastEventSeqRef.current
+          ) {
+            return;
+          } else {
+            lastEventSeqRef.current = msg.event_seq;
+          }
+        }
+        if (msg.type === "pong") {
+          lastPongOrServerMessageAtRef.current = now;
+        }
         if (msg.type === "session_state") {
           if (msg.session_id !== sessionId) return;
+          currentConnectionIdRef.current = msg.connection_id ?? null;
           setSessionSnapshot((current) =>
             current.sessionId === sessionId
               ? { sessionId, generation: current.generation + 1 }
@@ -227,6 +318,11 @@ export function useWorkspaceWs(sessionId: string | null) {
   useEffect(() => {
     planRepairSourceRef.current = { hasSnapshot: false, source: null };
     useLinkedWorkspaceAmendmentStore.getState().reset(sessionId);
+    const sessionChanged = useWorkspaceStore.getState().sessionId !== sessionId;
+    if (sessionChanged) {
+      lastEventSeqRef.current = null;
+      useWorkspaceStore.setState({ connectionCloseDiagnostics: [] });
+    }
     if (!sessionId) {
       clearPendingStreams();
       useWorkspaceStore.getState().reset();
@@ -252,6 +348,32 @@ export function useWorkspaceWs(sessionId: string | null) {
   }, [workspaceConnectionStatus, resetReconnect]);
 
   function handleMessage(msg: WsServerMessage) {
+    // REQ-DLS-02：写命令被 STALE_DRIVER_LEASE 拒收时单次自动重试——重发
+    // driver hello 夺回租约（服务端 bind_role 对既有连接同样执行
+    // lease.acquire）后原样重放一次，成功即无感（不落 protocolError 错误
+    // 面）；重放后的再次 STALE 消费完恰一次守卫，回落下方既有手动接管面。
+    if (
+      sessionId &&
+      msg.type === "protocol_error" &&
+      msg.code === STALE_DRIVER_LEASE_CODE
+    ) {
+      const lastWrite = leaseAutoRetryRef.current;
+      const receivedType = staleLeaseReceivedMessageType(msg.context);
+      if (
+        lastWrite !== null &&
+        !lastWrite.retried &&
+        (receivedType === null || receivedType === lastWrite.message.type)
+      ) {
+        lastWrite.retried = true;
+        const store = useWorkspaceStore.getState();
+        sendHello(
+          sessionId,
+          store.activeNodeId ?? store.timelineNodes.at(-1)?.node_id ?? null,
+        );
+        sendWire(lastWrite.message);
+        return;
+      }
+    }
     handleWorkspaceWsMessage(msg, {
       invalidatedPreStageNodeIds: invalidatedPreStageNodeIdsRef.current,
       scheduleFlush,
@@ -260,18 +382,32 @@ export function useWorkspaceWs(sessionId: string | null) {
     aggregatePlanRepairChildMessage(msg, sessionId, planRepairSourceRef.current);
   }
 
-  const sendJson = useCallback((message: WorkspaceWsSendMessage) => {
-    const ws = wsRef.current;
-    if (
-      !sessionId ||
-      socketSessionIdRef.current !== sessionId ||
-      ws?.readyState !== WebSocket.OPEN
-    ) {
-      return false;
-    }
-    ws.send(JSON.stringify(message));
-    return true;
-  }, [sessionId]);
+  const sendWire = useCallback(
+    (message: WorkspaceWsSendMessage) => {
+      const ws = wsRef.current;
+      if (
+        !sessionId ||
+        socketSessionIdRef.current !== sessionId ||
+        ws?.readyState !== WebSocket.OPEN
+      ) {
+        return false;
+      }
+      ws.send(JSON.stringify(message));
+      return true;
+    },
+    [sessionId],
+  );
+
+  const sendJson = useCallback(
+    (message: WorkspaceWsSendMessage) => {
+      const sent = sendWire(message);
+      if (sent && message.type !== "hello" && message.type !== "ping") {
+        leaseAutoRetryRef.current = { message, retried: false };
+      }
+      return sent;
+    },
+    [sendWire],
+  );
 
   const sendContextNote = useCallback(
     (content: string) => {
@@ -300,6 +436,33 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  // C2（Task 6.2，设计 §5.1）：显式 fresh 恢复发送器。沿 sendJson 既有
+  // lease/connection 守卫；发送成功不做任何乐观本地变更（不清 artifact/
+  // feedback/历史、不伪 setProviderStatus("running")）——受理/回放/失败
+  // 一律以 typed `lc_resume_recovery_operation_result` 与 authoritative
+  // session_state 对账。operation_id 由调用方一次用户动作生成并保持稳定，
+  // 本函数不重新生成；running/unknown 结果不自动换新 ID 重发，也不进入
+  // retry_interrupted_run/advance 通道。
+  const sendLcResumeFresh = useCallback(
+    (
+      recoveryId: string,
+      operationId: string,
+      providerConfig: ProviderConfigSnapshot,
+      reviewerEnabled: boolean,
+    ): boolean =>
+      sendJson({
+        type: "start_generation",
+        provider_config: providerConfig,
+        reviewer_enabled: reviewerEnabled,
+        resume_recovery: {
+          recovery_id: recoveryId,
+          intent: "fresh",
+          operation_id: operationId,
+        },
+      }),
+    [sendJson],
+  );
+
   const retryInterruptedRun = useCallback(
     (failedNodeId: string) => {
       const sent = sendJson({
@@ -317,19 +480,34 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
+  // 「登记并重试」按钮（owner 2026-10-12 直批）：显式授权按需登记——
+  // 沿 sendJson 既有 lease/connection 守卫；发送成功不做乐观本地变更
+  //（成功/失败一律以 typed trust_entry_registered / protocol_error 对账）。
+  const sendRegisterTrustEntry = useCallback(
+    (provider: WorkspaceProviderName): boolean =>
+      sendJson({ type: "register_trust_entry", provider }),
+    [sendJson],
+  );
+
   const sendHello = useCallback(
     (targetSessionId: string, lastSeenNodeId?: string | null) => {
       sendJson({
         type: "hello",
         session_id: targetSessionId,
         last_seen_node_id: lastSeenNodeId ?? null,
+        role: "driver",
+        ...(lastEventSeqRef.current !== null
+          ? { after_event_seq: lastEventSeqRef.current }
+          : {}),
       });
     },
     [sendJson],
   );
 
   const sendPing = useCallback(() => {
-    sendJson({ type: "ping" });
+    if (sendJson({ type: "ping" })) {
+      lastPingAtRef.current = new Date().toISOString();
+    }
   }, [sendJson]);
 
   useEffect(() => {
@@ -343,14 +521,33 @@ export function useWorkspaceWs(sessionId: string | null) {
   }, [workspaceConnectionStatus, sendPing]);
 
   useEffect(() => {
+    function handleVisibilityChange() {
+      sendPing();
+      if (!document.hidden) {
+        connect();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [connect, sendPing]);
+
+  useEffect(() => {
     if (workspaceConnectionStatus !== "connected") return;
 
     const interval = window.setInterval(() => {
       const ws = wsRef.current;
-      const stage = useWorkspaceStore.getState().stage;
+      const state = useWorkspaceStore.getState();
+      const hasInFlightHumanConfirm =
+        state.stage === "human_confirm" &&
+        state.activeNodeId !== null &&
+        state.timelineNodes.some(
+          (node) => node.node_id === state.activeNodeId && node.status === "active",
+        );
       if (
         ws?.readyState === WebSocket.OPEN &&
-        !ACTIVE_PROVIDER_STAGES.has(stage) &&
+        !ACTIVE_PROVIDER_STAGES.has(state.stage) &&
+        !hasInFlightHumanConfirm &&
         Date.now() - lastMessageAtRef.current >= SERVER_SILENCE_TIMEOUT_MS
       ) {
         ws.close(STALE_SOCKET_CLOSE_CODE);
@@ -360,37 +557,106 @@ export function useWorkspaceWs(sessionId: string | null) {
     return () => window.clearInterval(interval);
   }, [workspaceConnectionStatus]);
 
-  const sendSelectRevisionPath = useCallback(
-    (path: RevisionPath, extraContext?: string) => {
-      const trimmedContext = extraContext?.trim();
-      sendJson({
-        type: "select_revision_path",
-        path,
-        extra_context: trimmedContext ? trimmedContext : null,
+
+  const recordSentOperation = useCallback(
+    (
+      operation:
+        | "confirm"
+        | "abandon_gate"
+        | "feedback"
+        | "advance"
+        | "confirm_plan_amendment",
+      detail: string | null,
+    ) => {
+      if (!sessionId) {
+        return;
+      }
+      const state = useWorkspaceStore.getState();
+      useOperationAuditStore.getState().record({
+        sessionId,
+        gateId: selectGateProjection(state)?.key ?? null,
+        operation,
+        source: "chat",
+        outcome: "sent",
+        detail,
       });
     },
-    [sendJson],
+    [sessionId],
   );
 
-  const sendHumanConfirm = useCallback(
-    (decision: HumanConfirmDecision, payload?: unknown) => {
-      const sent = sendJson({ type: "human_confirm", decision, payload: payload ?? null });
+  // L1 typed 重承载（REQ-RET-02）：SC 门 approve=既有 `confirm` unit 变体（REQ-CG-02
+  // 接受面不动）；abandon=显式 `abandon_human_gate` 命令（T2 落地）。legacy
+  // `human_confirm` 决策帧（request-change/terminate）不再由前端发送。
+  const sendConfirmGate = useCallback(() => {
+    const sent = sendJson({ type: "confirm" });
+    if (sent) {
+      recordSentOperation("confirm", "confirm");
+    }
+    return sent;
+  }, [recordSentOperation, sendJson]);
+
+  const sendAbandonGate = useCallback(
+    (commandId: string) => {
+      const sent = sendJson({ type: "abandon_human_gate", command_id: commandId });
       if (sent) {
-        useWorkspaceStore.getState().resolveGateEntry(decision);
+        recordSentOperation("abandon_gate", commandId);
+        // 乐观收敛门卡呈现；权威关门以服务端 human_gate_closed 事件为准。
+        useWorkspaceStore.getState().resolveGateEntry("terminate");
       }
       return sent;
     },
-    [sendJson],
+    [recordSentOperation, sendJson],
+  );
+  const sendHumanGateFeedback = useCallback(
+    (feedback: string, commandId?: string, excludedFindingIds?: string[]) => {
+      const trimmed = feedback.trim();
+      const excluded = (excludedFindingIds ?? []).filter(
+        (key) => typeof key === "string" && key.trim().length > 0,
+      );
+      // REQ-WSC-13：空反馈只在携带排除项时放行（纯「排除此项」也是 owner 的
+      // 处置表达）；两者皆空＝旧拒发行为。
+      if (!trimmed && excluded.length === 0) {
+        return false;
+      }
+      const sent = sendJson({
+        type: "human_gate_feedback",
+        command_id: commandId ?? newCommandId(),
+        feedback: trimmed,
+        ...(excluded.length > 0 ? { excluded_finding_ids: excluded } : {}),
+      });
+      if (sent) {
+        recordSentOperation("feedback", trimmed);
+      }
+      return sent;
+    },
+    [recordSentOperation, sendJson],
+  );
+
+  const sendAdvance = useCallback(
+    (commandId?: string) => {
+      const id = commandId ?? newCommandId();
+      const sent = sendJson({ type: "advance", command_id: id });
+      if (sent) {
+        recordSentOperation("advance", id);
+      }
+      return sent;
+    },
+    [recordSentOperation, sendJson],
   );
 
   const confirmPlanAmendment = useCallback(
     (amendmentId: string) => {
       const id = amendmentId.trim();
-      return id
-        ? sendJson({ type: "confirm_plan_amendment", amendment_id: id })
-        : false;
+      if (!id) {
+        return false;
+      }
+      const sent = sendJson({ type: "confirm_plan_amendment", amendment_id: id });
+      if (sent) {
+        recordSentOperation("confirm_plan_amendment", id);
+      }
+      return sent;
     },
-    [sendJson],
+    [recordSentOperation, sendJson],
   );
 
   const cancelPlanAmendment = useCallback(
@@ -442,23 +708,11 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendAuthorDecision = useCallback(
-    (decision: AuthorDecision, feedback?: string) => {
-      // spec-design-dialog-revision T8："revise" 以反馈构造 `{revise: {feedback}}`
-      // 线格式（T1 serde externally tagged），其余变体原样透传。
-      const payload: AuthorDecision =
-        decision === "revise"
-          ? { revise: { feedback: (feedback ?? "").trim() } }
-          : decision;
-      sendJson({ type: "author_decision", decision: payload });
-    },
-    [sendJson],
-  );
 
   const sendRequestRevision = useCallback(
-    (feedback?: string) => {
+    (feedback?: string): boolean => {
       const trimmedFeedback = feedback?.trim();
-      sendJson({
+      return sendJson({
         type: "request_revision",
         feedback: {
           feedback_types: ["revision"],
@@ -469,66 +723,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendRevertWorkItem = useCallback(
-    (workItemId: string, feedback?: string, clear = false) => {
-      sendJson({
-        type: "revert_work_item",
-        work_item_id: workItemId,
-        feedback: feedback?.trim() ?? null,
-        clear,
-      });
-    },
-    [sendJson],
-  );
-
-  const sendSelectWorkItemGenerationMode = useCallback(
-    (mode: WorkItemGenerationMode) => {
-      sendJson({ type: "select_work_item_generation_mode", mode });
-    },
-    [sendJson],
-  );
-
-  const sendRequestOutlineRevision = useCallback(
-    (feedback?: string) => {
-      const trimmedFeedback = feedback?.trim();
-      sendJson({
-        type: "request_outline_revision",
-        feedback: trimmedFeedback ? trimmedFeedback : null,
-      });
-    },
-    [sendJson],
-  );
-
-  const sendWorkItemDraftDecision = useCallback(
-    (outlineId: string, decision: WorkItemDraftDecision, feedback?: string) => {
-      const trimmedFeedback = feedback?.trim();
-      sendJson({
-        type: "work_item_draft_decision",
-        outline_id: outlineId,
-        decision,
-        feedback: trimmedFeedback ? trimmedFeedback : null,
-      });
-    },
-    [sendJson],
-  );
-
-  const sendWorkItemBatchDecision = useCallback(
-    (
-      decision: WorkItemBatchDecision,
-      feedback?: string,
-      firstAffectedOutlineId?: string,
-    ) => {
-      const trimmedFeedback = feedback?.trim();
-      const trimmedOutlineId = firstAffectedOutlineId?.trim();
-      sendJson({
-        type: "work_item_batch_decision",
-        decision,
-        feedback: trimmedFeedback ? trimmedFeedback : null,
-        first_affected_outline_id: trimmedOutlineId ? trimmedOutlineId : null,
-      });
-    },
-    [sendJson],
-  );
 
   const sendWorkItemPlanCompileRecoveryAction = useCallback(
     (action: WorkItemPlanCompileRecoveryAction, reason?: string) => {
@@ -542,21 +736,7 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendHumanPresentationRevision = useCallback(
-    (message: SaveHumanPresentationRevisionMessage) => {
-      const store = useWorkspaceStore.getState();
-      store.beginHumanPresentationSave(message.source_projection_bundle_id);
-      const sent = sendJson(message);
-      if (!sent) {
-        store.failHumanPresentationSave(
-          message.source_projection_bundle_id,
-          "WebSocket 未连接，请重连后重试",
-        );
-      }
-      return sent;
-    },
-    [sendJson],
-  );
+
 
   const sendMessage = useCallback(
     (content: string) => {
@@ -569,13 +749,6 @@ export function useWorkspaceWs(sessionId: string | null) {
   const startGeneration = useCallback(() => {
     console.warn("startGeneration() without args is deprecated");
   }, []);
-
-  const rollback = useCallback(
-    (checkpointId: string) => {
-      sendJson({ type: "rollback", checkpoint_id: checkpointId });
-    },
-    [sendJson],
-  );
 
   const confirm = useCallback(() => {
     sendJson({ type: "confirm" });
@@ -598,14 +771,6 @@ export function useWorkspaceWs(sessionId: string | null) {
     [sendJson],
   );
 
-  const sendReviewDecision = useCallback((decision: string, extraContext?: string) => {
-    const trimmedContext = extraContext?.trim();
-    sendJson({
-      type: "review_decision_response",
-      decision,
-      extra_context: trimmedContext ? trimmedContext : null,
-    });
-  }, [sendJson]);
 
   const respondPermission = useCallback(
     (id: string, approved: boolean, reason?: string) => {
@@ -673,30 +838,25 @@ export function useWorkspaceWs(sessionId: string | null) {
     sendMessage,
     sendContextNote,
     sendStartGeneration,
+    sendLcResumeFresh,
     retryInterruptedRun,
-    sendSelectRevisionPath,
-    sendAuthorDecision,
+    sendRegisterTrustEntry,
     sendRequestRevision,
-    sendRevertWorkItem,
-    sendSelectWorkItemGenerationMode,
-    sendRequestOutlineRevision,
-    sendWorkItemDraftDecision,
-    sendWorkItemBatchDecision,
     sendWorkItemPlanCompileRecoveryAction,
-    sendHumanPresentationRevision,
-    sendHumanConfirm,
+    sendConfirmGate,
+    sendAbandonGate,
+    sendHumanGateFeedback,
+    sendAdvance,
     confirmPlanAmendment,
     cancelPlanAmendment,
     startLinkedWorkspaceAmendment,
     sendHello,
     sendPing,
     startGeneration,
-    rollback,
     confirm,
     abort,
     selectProvider,
     sendProviderSelect,
-    sendReviewDecision,
     respondPermission,
     sendPermissionResponse,
     sendChoiceResponse,

@@ -1,10 +1,13 @@
 import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "../state/chat-entries";
+import type { ProviderConfigSnapshot } from "../api/types";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
 import {
   MockWebSocket,
   installWorkspaceWsTestHooks,
+  lcResumeOperationResultMessage,
+  lcResumeSessionStateMessage,
   makeBatchArtifactPayload,
   makeCompileArtifactPayload,
   makeDraftArtifactPayload,
@@ -12,6 +15,10 @@ import {
   makeWorkItemPlanCandidate,
   renderWorkspaceHook,
 } from "./useWorkspaceWs.test-utils";
+import {
+  lcFreshOperationFixture,
+  lcResumeRecoveryFixture,
+} from "../state/workspace-cockpit-projection.test-fixtures";
 
 describe("useWorkspaceWs outgoing actions", () => {
   installWorkspaceWsTestHooks();
@@ -171,97 +178,77 @@ describe("useWorkspaceWs outgoing actions", () => {
         type: "hello",
         session_id: "session_001",
         last_seen_node_id: "timeline_node_001",
+        role: "driver",
       }),
       JSON.stringify({ type: "ping" }),
     ]);
   });
 
-  it("sends revision path decisions with trimmed optional context", () => {
-    const harness = renderWorkspaceHook();
+  // 退役留档（T5/REQ-RET-02）：`sends revision path decisions with trimmed optional context` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
+  it("sends a typed abandon_human_gate frame and resolves the open gate entry", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-09-19T10:00:00Z",
+    });
+
+    let sent = false;
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
-      harness.api.sendSelectRevisionPath("revise-with-context", " 补充边界条件 ");
-      harness.api.sendSelectRevisionPath("skip-to-human", "   ");
+      sent = harness.api.sendAbandonGate("cmd_abandon_1");
     });
 
+    expect(sent).toBe(true);
     expect(harness.ws.sent).toEqual([
       JSON.stringify({
-        type: "select_revision_path",
-        path: "revise-with-context",
-        extra_context: "补充边界条件",
-      }),
-      JSON.stringify({
-        type: "select_revision_path",
-        path: "skip-to-human",
-        extra_context: null,
+        type: "abandon_human_gate",
+        command_id: "cmd_abandon_1",
       }),
     ]);
+    // 终止动作乐观收敛门卡（与服务端 human_gate_closed 事件前一致呈现「已终止」）。
+    expect(useWorkspaceStore.getState().chatEntries[0]).toMatchObject({
+      id: "gate-1",
+      resolved: true,
+      resolution: "terminate",
+    });
   });
 
-  it("sends human confirm decisions with nullable payload", () => {
+  it("sends a bare confirm frame for gate approve without resolving the gate entry", () => {
     const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-09-19T10:00:00Z",
+    });
 
+    let sent = false;
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
-      harness.api.sendHumanConfirm("request-change", { reason: "需要补充" });
-      harness.api.sendHumanConfirm("confirm");
+      sent = harness.api.sendConfirmGate();
     });
 
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "human_confirm",
-        decision: "request-change",
-        payload: { reason: "需要补充" },
-      }),
-      JSON.stringify({
-        type: "human_confirm",
-        decision: "confirm",
-        payload: null,
-      }),
-    ]);
+    expect(sent).toBe(true);
+    expect(harness.ws.sent).toEqual([JSON.stringify({ type: "confirm" })]);
+    // approve 不乐观收敛门卡：等引擎关门事件（human_gate_closed）再落 resolved。
+    const gateEntry = useWorkspaceStore.getState().chatEntries[0];
+    expect(gateEntry).toMatchObject({ id: "gate-1" });
+    expect(gateEntry).not.toHaveProperty("resolved");
+    expect(gateEntry).not.toHaveProperty("resolution");
   });
 
-  it("sends author decisions", () => {
-    const harness = renderWorkspaceHook();
+  // 退役留档（T5/REQ-RET-02）：`sends author decisions` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
 
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      harness.api.sendAuthorDecision("accept");
-      harness.api.sendAuthorDecision("reject");
-      harness.api.sendAuthorDecision("revise", "补充回滚策略");
-      harness.api.sendAuthorDecision("accept_with_review");
-      harness.api.sendAuthorDecision("accept_finalize");
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "author_decision",
-        decision: "accept",
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: "reject",
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: { revise: { feedback: "补充回滚策略" } },
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: "accept_with_review",
-      }),
-      JSON.stringify({
-        type: "author_decision",
-        decision: "accept_finalize",
-      }),
-    ]);
-  });
-
-  it("marks the latest gate prompt resolved when a human confirm decision is sent", () => {
+  it("waits for the engine gate-close event before resolving a gate prompt", () => {
     const harness = renderWorkspaceHook();
     useWorkspaceStore.getState().appendChatEntry({
       id: "gate-1",
@@ -274,14 +261,39 @@ describe("useWorkspaceWs outgoing actions", () => {
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
-      harness.api.sendHumanConfirm("terminate");
+      harness.api.sendConfirmGate();
+    });
+
+    const gateEntry = useWorkspaceStore.getState().chatEntries[0];
+    expect(gateEntry).toMatchObject({ id: "gate-1" });
+    expect(gateEntry).not.toHaveProperty("resolved");
+    expect(gateEntry).not.toHaveProperty("resolution");
+  });
+
+  it("resolves a confirmed gate only after the engine confirms closure", () => {
+    const harness = renderWorkspaceHook();
+    useWorkspaceStore.getState().appendChatEntry({
+      id: "gate-1",
+      type: "gate_prompt",
+      role: "system",
+      content: "等待人工确认",
+      timestamp: "2026-05-21T10:00:00Z",
+    });
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "human_gate_closed",
+        decision: "confirm",
+        stage: "completed",
+      });
     });
 
     expect(useWorkspaceStore.getState().chatEntries).toEqual([
       expect.objectContaining({
         id: "gate-1",
         resolved: true,
-        resolution: "terminate",
+        resolution: "confirm",
       }),
     ]);
   });
@@ -331,6 +343,7 @@ describe("useWorkspaceWs outgoing actions", () => {
         type: "hello",
         session_id: "session_001",
         last_seen_node_id: "timeline_node_001",
+        role: "driver",
       }),
     ]);
   });
@@ -348,6 +361,120 @@ describe("useWorkspaceWs outgoing actions", () => {
 
     expect(harness.ws.sent).toContain(JSON.stringify({ type: "ping" }));
   });
+
+  it("records browser close attribution with the latest session connection id", () => {
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "session_state",
+        session_id: "session_001",
+        connection_id: "conn-browser-4000",
+        workspace_type: "story",
+        stage: "prepare_context",
+        session_status: "open",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [], repairs_used: 0, manual_repairs_used: 0, transitions_used: 0,
+          initial_review_count: 0, verification_review_count: 0,
+        },
+        messages: [], checkpoints: [], artifact: null,
+        providers: { author: "fake", reviewer: null },
+        timeline_nodes: [], active_node_id: null, artifact_versions: [],
+        timeline_node_details: {}, active_run_id: null, human_presentation_revisions: [],
+      });
+      harness.ws.close(4000, "stale socket", false);
+    });
+
+    expect(useWorkspaceStore.getState().connectionCloseDiagnostics).toEqual([
+      expect.objectContaining({
+        connectionId: "conn-browser-4000",
+        closeCode: 4000,
+        closeReason: "stale socket",
+        wasClean: false,
+        lastPongOrServerMessageAt: expect.any(String),
+        lastPingAt: null,
+      }),
+    ]);
+  });
+
+  it("keeps close diagnostics within one session and clears them on session replacement", () => {
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.close(1000, "page unload", true);
+    });
+    expect(useWorkspaceStore.getState().connectionCloseDiagnostics).toHaveLength(1);
+
+    act(() => harness.switchSession("session_002"));
+
+    expect(useWorkspaceStore.getState().connectionCloseDiagnostics).toEqual([]);
+  });
+
+  it("keeps an in-flight human confirmation socket open after 60 seconds of server silence", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive({
+        type: "timeline_node_created",
+        node: {
+          node_id: "timeline_node_gate_001",
+          node_type: "human_confirm",
+          agent: null,
+          stage: "human_confirm",
+          status: "active",
+          title: "人工确认",
+          started_at: "2026-09-16T00:00:00Z",
+          provider_config_snapshot: {
+            author: "claude_code",
+            reviewer: "codex",
+            review_rounds: 1,
+          },
+        },
+      });
+      harness.ws.receive({ type: "stage_change", stage: "human_confirm" });
+      vi.advanceTimersByTime(75_000);
+    });
+
+    expect(harness.ws.readyState).toBe(MockWebSocket.OPEN);
+    expect(harness.ws.closeCodes).not.toContain(4000);
+  });
+
+  it("sends an application ping whenever page visibility changes", () => {
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      harness.ws.sent.length = 0;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(harness.ws.sent).toEqual([JSON.stringify({ type: "ping" })]);
+  });
+
+  it("reconnects immediately when the page becomes visible with an abnormal closed socket", () => {
+    vi.useFakeTimers();
+    const harness = renderWorkspaceHook("session_001");
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.close(1006);
+    });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+
 
   it("closes stale sockets after 60 seconds without any server message", () => {
     vi.useFakeTimers();
@@ -668,31 +795,8 @@ describe("useWorkspaceWs outgoing actions", () => {
     expect(useWorkspaceStore.getState().chatEntries.at(-1)?.content).not.toContain("-> v4");
   });
 
-  it("sends revert_work_item messages", () => {
-    const harness = renderWorkspaceHook();
-
-    act(() => {
-      harness.ws.open();
-      harness.ws.sent.length = 0;
-      harness.api.sendRevertWorkItem("wi_001", " 范围过大 ", false);
-      harness.api.sendRevertWorkItem("wi_001", undefined, true);
-    });
-
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({
-        type: "revert_work_item",
-        work_item_id: "wi_001",
-        feedback: "范围过大",
-        clear: false,
-      }),
-      JSON.stringify({
-        type: "revert_work_item",
-        work_item_id: "wi_001",
-        feedback: null,
-        clear: true,
-      }),
-    ]);
-  });
+  // 「sends revert_work_item messages」随死发送面删除（L1：Legacy 页剥离后
+  // sendRevertWorkItem 零消费；union 变体留待 T5 归属判定同批删）。
 
   it("sends request_revision messages", () => {
     const harness = renderWorkspaceHook();
@@ -722,60 +826,150 @@ describe("useWorkspaceWs outgoing actions", () => {
     ]);
   });
 
-  it("sends staged work item plan workflow messages", () => {
-    const harness = renderWorkspaceHook();
-    const api = harness.api as unknown as {
-      sendSelectWorkItemGenerationMode: (mode: "serial" | "batch") => void;
-      sendRequestOutlineRevision: (feedback?: string) => void;
-      sendWorkItemDraftDecision: (
-        outlineId: string,
-        decision: "accept" | "rewrite" | "pause",
-        feedback?: string,
-      ) => void;
-      sendWorkItemBatchDecision: (
-        decision: "accept_all" | "rewrite_batch" | "pause" | "downgrade_to_serial",
-        feedback?: string,
-        firstAffectedOutlineId?: string,
-      ) => void;
-      sendWorkItemPlanCompileRecoveryAction: (
-        action: "continue" | "abort_and_rollback" | "human_triage",
-        reason?: string,
-      ) => void;
-    };
+  // 退役留档（T5/REQ-RET-02）：`sends staged work item plan workflow messages` 驱动已删除的 legacy 决策发送面，
+  // 随消息族退役（wp5-attribution-table.md）；T1 矩阵 legacy 回归留档在案。
+});
 
+// C2（Task 6.2 / anchor_t20）：显式 fresh 发送器——稳定 operation_id、
+// explicit fresh wire；发送不做乐观本地变更（不清产物/历史、不伪
+// running，typed authority 确认）；accepted/replayed/unknown 结果帧到达后
+// 不隐式 retry/advance/换新 ID 重发；普通 sendStartGeneration wire 仍不带
+// resume_recovery。与 advance 重放/retry_interrupted_run 通道分离。
+describe("anchor_t20 lc resume fresh sender and typed result reconciliation", () => {
+  installWorkspaceWsTestHooks();
+
+  const providerConfig: ProviderConfigSnapshot = {
+    author: "codex",
+    reviewer: null,
+    review_rounds: 1,
+  };
+
+  const waitingRecovery = () =>
+    lcResumeRecoveryFixture({
+      state: "waiting",
+      last_operation: lcFreshOperationFixture({ state: "not_started" }),
+    });
+
+  it("anchor_t20_fresh_sender_and_typed_operation_result", () => {
+    const harness = renderWorkspaceHook();
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      harness.ws.receive(
+        lcResumeSessionStateMessage("session_001", waitingRecovery()),
+      );
+    });
+    expect(useWorkspaceStore.getState().lcResumeRecovery?.recovery_id).toBe("rec-1");
+
+    // 本地事实哨兵：fresh 发送不得清空产物（对照普通 sendStartGeneration
+    // 的既有清理行为，本路径一律以 typed 结果对账）。
+    useWorkspaceStore.getState().setArtifact("既有产物", 7);
+
+    let sentOk = false;
+    act(() => {
+      sentOk = harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+    });
+    expect(sentOk).toBe(true);
+
+    const startFrames = harness.ws.sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((frame) => frame.type === "start_generation");
+    expect(startFrames).toHaveLength(1);
+    const sent = startFrames[0];
+    expect(sent.type).toBe("start_generation");
+    expect(sent.provider_config).toEqual(providerConfig);
+    expect(sent.reviewer_enabled).toBe(true);
+    expect(sent.resume_recovery).toEqual({
+      recovery_id: "rec-1",
+      intent: "fresh",
+      operation_id: "op-1",
+    });
+    // 不伪运行、不清产物（无乐观本地变更）。
+    expect(useWorkspaceStore.getState().providerStatus).toBe("starting");
+    expect(useWorkspaceStore.getState().artifact).toBe("既有产物");
+
+    // typed 结果帧序列（accepted/reserved → replayed/running → completed）
+    // 与 busy typed 拒收（新 operation_id 被拒）：任何状态都不隐式重发。
+    act(() => {
+      harness.ws.receive(
+        lcResumeOperationResultMessage("rec-1", "op-1", "accepted", "reserved"),
+      );
+      harness.ws.receive(
+        lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "running"),
+      );
+      harness.ws.receive(
+        lcResumeOperationResultMessage("rec-1", "op-1", "replayed", "completed", {
+          fresh_node_id: "node-2",
+        }),
+      );
+      harness.ws.receive({
+        type: "protocol_error",
+        code: "lc_resume_recovery_busy",
+        message: "already holds an accepted fresh operation",
+        context: { active_operation_id: "op-1" },
+      });
+    });
+
+    const frames = harness.ws.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    expect(frames.filter((frame) => frame.type === "start_generation")).toHaveLength(1);
+    const automaticRetries = frames.filter(
+      (frame) =>
+        frame.type === "retry_interrupted_run" ||
+        frame.type === "advance" ||
+        (frame.type === "start_generation" &&
+          (frame.resume_recovery as { operation_id?: string } | undefined)
+            ?.operation_id !== "op-1"),
+    ).length;
+    expect(automaticRetries).toBe(0);
+  });
+
+  it("keeps the caller-provided operation id stable and never regenerates it", () => {
+    const harness = renderWorkspaceHook();
+    act(() => {
+      harness.ws.open();
+    });
+    act(() => {
+      harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+      harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+    });
+
+    const startFrames = harness.ws.sent
+      .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((frame) => frame.type === "start_generation");
+    expect(startFrames).toHaveLength(2);
+    for (const frame of startFrames) {
+      expect(frame.resume_recovery).toEqual({
+        recovery_id: "rec-1",
+        intent: "fresh",
+        operation_id: "op-1",
+      });
+    }
+  });
+
+  it("keeps the plain sendStartGeneration wire free of resume recovery", () => {
+    const harness = renderWorkspaceHook();
     act(() => {
       harness.ws.open();
       harness.ws.sent.length = 0;
-      api.sendSelectWorkItemGenerationMode("serial");
-      api.sendRequestOutlineRevision(" 需要调整拆分 ");
-      api.sendWorkItemDraftDecision("outline_backend", "rewrite", " 缩小范围 ");
-      api.sendWorkItemBatchDecision("downgrade_to_serial", " 严格校验失败 ", "outline_backend");
-      api.sendWorkItemPlanCompileRecoveryAction("human_triage", " 需要人工检查 ");
+      harness.api.sendStartGeneration(providerConfig, true);
     });
 
-    expect(harness.ws.sent).toEqual([
-      JSON.stringify({ type: "select_work_item_generation_mode", mode: "serial" }),
-      JSON.stringify({
-        type: "request_outline_revision",
-        feedback: "需要调整拆分",
-      }),
-      JSON.stringify({
-        type: "work_item_draft_decision",
-        outline_id: "outline_backend",
-        decision: "rewrite",
-        feedback: "缩小范围",
-      }),
-      JSON.stringify({
-        type: "work_item_batch_decision",
-        decision: "downgrade_to_serial",
-        feedback: "严格校验失败",
-        first_affected_outline_id: "outline_backend",
-      }),
-      JSON.stringify({
-        type: "work_item_plan_compile_recovery_action",
-        action: "human_triage",
-        reason: "需要人工检查",
-      }),
-    ]);
+    const frames = harness.ws.sent.map((raw) => JSON.parse(raw) as Record<string, unknown>);
+    expect(frames).toHaveLength(1);
+    expect(frames[0].type).toBe("start_generation");
+    expect("resume_recovery" in frames[0]).toBe(false);
+    // 普通路径保留既有乐观行为（对照：fresh 路径不做本地乐观变更）。
+    expect(useWorkspaceStore.getState().providerStatus).toBe("running");
+  });
+
+  it("returns false without queueing when the socket is not open", () => {
+    const harness = renderWorkspaceHook();
+    let sentOk = true;
+    act(() => {
+      sentOk = harness.api.sendLcResumeFresh("rec-1", "op-1", providerConfig, true);
+    });
+    expect(sentOk).toBe(false);
+    expect(harness.ws.sent).toHaveLength(0);
   });
 });

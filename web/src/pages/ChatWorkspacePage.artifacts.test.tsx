@@ -1,12 +1,13 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceEventOutput,
   fetchWorkspaceNodeDetail,
 } from "../api/workspace-content";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import {
   emptyWorkspaceContentCache,
@@ -31,7 +32,8 @@ import {
   workItemPlanOutlinePayload,
 } from "./ChatWorkspacePage.test-utils";
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
@@ -71,6 +73,9 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
 
 describe("ChatWorkspacePage work item plan artifacts", () => {
   installChatWorkspacePageTestHooks();
+  beforeEach(() => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+  });
 
   it("renders batch queue and review findings", async () => {
     const api = mockWorkspaceWs();
@@ -99,7 +104,7 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -109,12 +114,10 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     expect(
       screen.getByTestId("work-item-plan-artifact-panel"),
     ).toHaveTextContent("validation_failed");
-    await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
-    expect(api.sendWorkItemBatchDecision).toHaveBeenCalledWith(
-      "downgrade_to_serial",
-      undefined,
-      "outline_backend",
-    );
+    // L1/OQ2：Legacy 页 batch 决策按钮（降级串行等）不渲染——发送面剥离。
+    expect(
+      screen.queryByRole("button", { name: "降级串行" }),
+    ).not.toBeInTheDocument();
   });
 
   it("batch confirm shows accept all rewrite pause and downgrade actions", async () => {
@@ -141,30 +144,24 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
-    await userEvent.click(screen.getByRole("button", { name: "接受全部" }));
-    await userEvent.click(screen.getByRole("button", { name: "整组重写" }));
-    await userEvent.click(screen.getByRole("button", { name: "暂停" }));
-    await userEvent.click(screen.getByRole("button", { name: "降级串行" }));
-
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
-      1,
-      "accept_all",
-    );
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
-      2,
-      "rewrite_batch",
-    );
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(3, "pause");
-    expect(api.sendWorkItemBatchDecision).toHaveBeenNthCalledWith(
-      4,
-      "downgrade_to_serial",
-      undefined,
-      "outline_backend",
-    );
+    // L1/OQ2：原「batch confirm shows accept all rewrite pause and downgrade
+    // actions」随 Legacy 页 batch 决策面剥离退役——重钉为按钮缺失。
+    expect(
+      screen.queryByRole("button", { name: "接受全部" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "整组重写" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "暂停" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "降级串行" }),
+    ).not.toBeInTheDocument();
   });
 
   it("compile recovery hides abort rollback after committed marker", async () => {
@@ -191,7 +188,7 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -272,7 +269,7 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -363,7 +360,7 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -412,7 +409,7 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -444,7 +441,7 @@ describe("ChatWorkspacePage work item plan artifacts", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     // spec-workbench-canvas-experience T3/T4：story + author_confirm 走并存面板，
     // 不再互斥 Tab 切换。

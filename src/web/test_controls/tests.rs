@@ -48,6 +48,40 @@ fn test_controls_are_enabled_in_e2e_env() {
 }
 
 #[test]
+fn issue_creation_failure_controls_are_default_closed_and_consumed_once() {
+    let controls = TestControls::default();
+    let mut save_executed = false;
+    controls
+        .save_issue_selection(|| {
+            save_executed = true;
+            Ok(())
+        })
+        .expect("default selection save runs");
+    assert!(save_executed);
+
+    controls.fail_next_issue_selection_save();
+    assert!(controls.save_issue_selection(|| Ok(())).is_err());
+    controls
+        .save_issue_selection(|| Ok(()))
+        .expect("selection save failure is consumed once");
+
+    let mut delete_executed = false;
+    controls
+        .delete_issue(|| {
+            delete_executed = true;
+            Ok(())
+        })
+        .expect("default issue delete runs");
+    assert!(delete_executed);
+
+    controls.fail_next_issue_delete();
+    assert!(controls.delete_issue(|| Ok(())).is_err());
+    controls
+        .delete_issue(|| Ok(()))
+        .expect("issue delete failure is consumed once");
+}
+
+#[test]
 fn large_workspace_fixture_contains_large_lazy_loaded_content() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let app_paths = ProductAppPaths::new(temp_dir.path());
@@ -342,6 +376,10 @@ async fn review_fixture_fake_provider_emits_json_contract_for_reviewer() {
     let mut session = provider
         .start(
             StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "请作为 reviewer 审核当前 Workspace 产物。".to_string(),
@@ -406,6 +444,10 @@ async fn review_fixture_raw_text_preserves_structured_output_failure() {
     let mut session = provider
         .start(
             StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "review raw completion".to_string(),
@@ -435,7 +477,7 @@ async fn review_fixture_raw_text_preserves_structured_output_failure() {
                 matches!(
                     &completion.structured_output,
                     StructuredOutputState::Failed(error)
-                        if error.code.as_str() == "missing_end_nonce"
+                        if error.code.as_str() == "missing_json_nonce"
                 ),
                 "unexpected structured output state: {:?}; output={}",
                 completion.structured_output,
@@ -475,6 +517,10 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
     let mut session = provider
         .start(
             StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "code review".to_string(),
@@ -512,6 +558,10 @@ async fn review_fixture_can_emit_alias_findings_and_malformed_json() {
     let mut malformed_session = provider
         .start(
             StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "code review".to_string(),
@@ -578,6 +628,10 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
     let mut first_review_session = provider
         .start(
             StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "review".to_string(),
@@ -602,6 +656,10 @@ async fn review_fixture_provider_consumes_queued_outputs_in_order() {
     let mut review_session = provider
         .start(
             StreamingProviderInput {
+                working_directory: None,
+                baseline_tree: None,
+                tool_policy: None,
+                audit_sink: None,
                 provider_type: ProviderType::Codex,
                 role: AdapterRole::Reviewer,
                 prompt: "code review".to_string(),
@@ -687,6 +745,10 @@ async fn permission_fixture_fake_provider_emits_timeout_when_unanswered() {
 
 fn streaming_input(session_id: &str) -> StreamingProviderInput {
     StreamingProviderInput {
+        working_directory: None,
+        baseline_tree: None,
+        tool_policy: None,
+        audit_sink: None,
         provider_type: ProviderType::Fake,
         role: AdapterRole::Orchestrator,
         prompt: "生成测试产物".to_string(),

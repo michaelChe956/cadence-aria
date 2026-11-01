@@ -166,8 +166,15 @@ fn context_builder_renders_each_planning_prompt_and_maps_adapter_input() {
             result
                 .adapter_input
                 .prompt
-                .contains("<ARIA_STRUCTURED_OUTPUT>"),
-            "{node_id} prompt must include the exact structured output start sentinel"
+                .contains("<ARIA_STRUCTURED_OUTPUT nonce="),
+            "{node_id} prompt must include the exact structured output start sentinel with nonce"
+        );
+        assert!(
+            result
+                .adapter_input
+                .prompt
+                .contains("JSON 顶层 nonce 必须与开始标签一致"),
+            "{node_id} prompt must require the JSON envelope nonce to match the start tag nonce"
         );
         assert!(
             result
@@ -623,6 +630,7 @@ pub(super) fn builder_input(node_id: &str) -> ProviderContextBuilderInput {
             "tests/fixtures/openspec/changes/sample-change/proposal.md".to_string(),
         ],
         worktree_path: None,
+        routing_reference_context: Default::default(),
     }
 }
 
@@ -665,6 +673,7 @@ pub(super) fn p4_builder_input(node_id: &str) -> ProviderContextBuilderInput {
             ),
         ],
         worktree_path: Some("tests/fixtures/repos/sample-worktree".to_string()),
+        routing_reference_context: Default::default(),
     }
 }
 
@@ -739,6 +748,10 @@ fn full_variables(node_id: &str) -> BTreeMap<String, String> {
         (
             "workflow_discipline_summary".to_string(),
             "workflow summary for test".to_string(),
+        ),
+        (
+            "routing_reference".to_string(),
+            "[cadence_project_rules]\nlegacy fixture".to_string(),
         ),
         (
             "output_schema_summary".to_string(),

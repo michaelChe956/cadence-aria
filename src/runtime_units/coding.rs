@@ -14,6 +14,7 @@ use crate::cross_cutting::provider_run::{
 use crate::cross_cutting::runtime_event_log::append_node_event;
 use crate::cross_cutting::traceability::{TraceabilityIndexes, normalize_traceability};
 use crate::interactive::controller::PendingProviderStep;
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
 use crate::protocol::artifacts::ArtifactKind;
 use crate::protocol::contracts::{AdapterInput, ApprovalPolicy, ProviderRunRecord, SandboxMode};
 use crate::protocol::loop_counters::{LoopCounterName, LoopCounterRegistry};
@@ -249,6 +250,22 @@ impl ExecutionChainState {
                 "output_schema": adapter_input.output_schema.clone(),
             }),
         );
+        // 批2 Task 11（硬约束1）：裸 provider.run 前先经受信载体冻结执行
+        // 合同（legacy Direct 形态 identity=HostCoding/Coder，T10 裁定）
+        // ——矩阵失配在 run 之前零副作用拒绝；合同摘要随 node_exit 事件
+        // 落 runtime event log（实际载体，不丢弃）。
+        let execution_contract = crate::runtime_units::freeze_runtime_unit_execution(
+            &self.input.session_id,
+            node_id,
+            adapter_input.provider_type.clone(),
+            request.runtime_role.clone(),
+            &request.provider_run_id,
+        )?;
+        let execution_contract_digest = execution_contract.contract_digest().to_string();
+        // A1-b1(Bug45 批2 环境回退):freeze 点停止注入环境——provider 子
+        // 进程经底座(cli_adapter)继承宿主环境,adapter_input 原样透传
+        // (env_vars 仅作 caller 显式覆盖层);冻结合同摘要仍随 node_exit
+        // 事件落 runtime event log。
         let output = match provider.run(&adapter_input) {
             Ok(output) => output,
             Err(error) => {
@@ -265,6 +282,7 @@ impl ExecutionChainState {
                         "provider_run_id": request.provider_run_id.clone(),
                         "error_code": error.code.as_str(),
                         "error_details": error.details.clone(),
+                        "execution_contract_digest": execution_contract_digest,
                     }),
                 );
                 self.route_provider_error_to_manual_hold(
@@ -318,6 +336,7 @@ impl ExecutionChainState {
                 "provider_run_id": record_ref.provider_run_id,
                 "duration_ms": record_ref.duration_ms,
                 "retry_count": record_ref.retry_count,
+                "execution_contract_digest": execution_contract_digest,
             }),
         );
         self.artifacts.push(artifact.clone());
@@ -393,6 +412,7 @@ impl ExecutionChainState {
             constraint_summary: "task constraints".to_string(),
             context_files: self.input.context_files.clone(),
             worktree_path: Some(self.input.worktree_path.to_string_lossy().to_string()),
+            routing_reference_context: RoutingReferenceContext::Legacy,
         }
     }
 

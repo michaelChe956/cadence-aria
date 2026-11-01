@@ -8,6 +8,9 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
   const realWorkflowBlocked = useProviderAvailabilityStore(
     (state) => state.realWorkflowBlocked,
   );
+  const testProviderEnabled = useProviderAvailabilityStore(
+    (state) => state.testProviderEnabled,
+  );
   const stateStatus = useProviderAvailabilityStore((state) => state.stateStatus);
   const stateError = useProviderAvailabilityStore((state) => state.stateError);
   const recheckStatus = useProviderAvailabilityStore((state) => state.recheckStatus);
@@ -38,7 +41,7 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
     );
   }
 
-  if (snapshot && !realWorkflowBlocked) {
+  if (snapshot && (testProviderEnabled || !realWorkflowBlocked)) {
     return (
       <>
         {children}
@@ -61,7 +64,7 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
   const rechecking = recheckStatus === "rechecking";
 
   return (
-    <main className="fixed inset-0 z-[100] min-h-screen overflow-y-auto bg-[var(--aria-bg)] p-4 text-[var(--aria-ink)] sm:p-8">
+    <main className="fixed inset-0 z-[100] min-h-screen overflow-y-auto overscroll-contain bg-[var(--aria-bg)] p-4 text-[var(--aria-ink)] sm:p-8">
       <section
         role="dialog"
         aria-modal="true"

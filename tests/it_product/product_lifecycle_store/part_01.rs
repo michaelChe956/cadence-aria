@@ -36,6 +36,7 @@ fn creates_story_design_work_item_and_versions_with_source_links() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "登录用户看到会话过期提示".to_string(),
+        aggregate_codebase: None,
         })
         .expect("story");
     assert_eq!(story.id, "story_spec_0001");
@@ -63,6 +64,7 @@ fn creates_story_design_work_item_and_versions_with_source_links() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "会话过期前端设计".to_string(),
+        aggregate_codebase: None,
         })
         .expect("design");
     assert_eq!(design.story_spec_ids, vec![story.id.clone()]);
@@ -150,17 +152,15 @@ fn persists_workspace_session_and_project_provider_defaults() {
     assert_eq!(defaults.review_rounds, 2);
 
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("session");
 
     assert_eq!(session.id, "workspace_session_0001");
@@ -180,17 +180,15 @@ fn workspace_session_provider_conversations_default_for_legacy_json() {
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let store = LifecycleStore::new(paths.clone());
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create workspace session");
 
     let session_path = paths
@@ -217,17 +215,15 @@ fn updates_workspace_session_provider_conversations() {
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let store = LifecycleStore::new(paths);
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create workspace session");
 
     let conversations = vec![ProviderConversationRef {
@@ -254,17 +250,15 @@ fn persists_workspace_timeline_nodes_and_artifact_versions() {
     let root = tempdir().expect("tempdir");
     let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("session");
     let node = TimelineNode {
         node_id: "timeline_node_001".to_string(),
@@ -321,17 +315,15 @@ fn save_and_load_node_detail() {
     let root = tempdir().expect("tempdir");
     let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("session");
     let detail = NodeDetail {
         node_id: "node-1".to_string(),
@@ -379,17 +371,15 @@ fn load_missing_node_detail_returns_not_found() {
     let root = tempdir().expect("tempdir");
     let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("session");
 
     let err = store.load_node_detail(&session.id, "node-x").unwrap_err();
@@ -409,6 +399,7 @@ fn append_version_uses_max_existing_version_without_overwriting_after_gap() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Story with version gap".to_string(),
+        aggregate_codebase: None,
         })
         .expect("story");
 
@@ -512,6 +503,7 @@ fn list_helpers_ignore_json_directories() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Real story".to_string(),
+        aggregate_codebase: None,
         })
         .expect("story");
 
@@ -533,6 +525,7 @@ fn list_helpers_ignore_json_directories() {
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Next real story".to_string(),
+        aggregate_codebase: None,
         })
         .expect("next story");
     assert_eq!(next_story.id, "story_spec_0002");
@@ -544,43 +537,37 @@ fn workspace_session_ids_are_unique_across_issues() {
     let store = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
 
     let first = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("first session");
     let second = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0002".to_string(),
-            entity_id: "story_spec_0002".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0002".to_string(),
+        entity_id: "story_spec_0002".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("second session");
     let third = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0002".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0003".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0002".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0003".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("third session");
 
     assert_eq!(first.id, "workspace_session_0001");
@@ -595,17 +582,15 @@ fn workspace_session_lookup_ignores_unrelated_json_files() {
     let store = LifecycleStore::new(paths.clone());
 
     store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("first session");
 
     let workspace_sessions_root = paths
@@ -623,17 +608,15 @@ fn workspace_session_lookup_ignores_unrelated_json_files() {
     assert_eq!(session.id, "workspace_session_0001");
 
     let second = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0002".to_string(),
-            entity_id: "story_spec_0002".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0002".to_string(),
+        entity_id: "story_spec_0002".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("second session");
 
     assert_eq!(second.id, "workspace_session_0002");
@@ -646,17 +629,15 @@ fn workspace_session_lookup_ignores_malformed_unrelated_session_files() {
     let store = LifecycleStore::new(paths.clone());
 
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("session");
 
     let unrelated_root = paths
@@ -683,17 +664,15 @@ fn workspace_session_summaries_do_not_parse_messages() {
     let store = LifecycleStore::new(paths.clone());
 
     let session = store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "story_spec_0001".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "story_spec_0001".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: false, work_item_plan_options: None, })
         .expect("session");
 
     let session_path = paths

@@ -1,0 +1,21 @@
+{
+  "project_id": "project_0001",
+  "issue_id": "issue_0140",
+  "attempt_id": "coding_attempt_a65e621e1b064eff92349382b58d1b38",
+  "kind": "review_request",
+  "repo_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0140",
+  "worktree_path": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0140",
+  "branch_name": "aria/issues/issue_0140",
+  "base_branch": "main",
+  "before_head": "c791225b2ed389a3a60bb8a18dd77f64d02cf422",
+  "remote": "origin",
+  "commit_message": "feat: implement work item",
+  "phase": "completed",
+  "commit_sha": "c791225b2ed389a3a60bb8a18dd77f64d02cf422",
+  "push_status": "pushed",
+  "push_error": null,
+  "remote_kind": "github",
+  "review_request_id": "review_request_0001",
+  "created_at": "2026-09-07T13:49:36.225927888+00:00",
+  "updated_at": "2026-09-07T13:49:40.678043470+00:00"
+}

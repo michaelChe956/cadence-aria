@@ -17,7 +17,7 @@ async fn strong_review_findings_route_author_confirm_or_review_decision_for_all_
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"必须补充验收标准。
 
@@ -27,10 +27,9 @@ async fn strong_review_findings_route_author_confirm_or_review_decision_for_all_
   "summary": "必须补充验收标准",
   "findings": [
 {
-  "severity": "strong_recommend_fix",
+  "severity": "must_fix",
   "message": "验收标准不足",
   "evidence": "Artifact 未列出可测试验收值",
-  "impact": "下一阶段无法判断实现是否完成",
   "required_action": "补充明确验收标准"
 }
   ]
@@ -90,7 +89,7 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"Reviewer 明确要求返修，但未输出结构化 finding。
 
@@ -164,7 +163,7 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"Reviewer 明确要求返修，但 findings 结构错误。
 
@@ -216,12 +215,8 @@ fn review_prompt_limits_revise_to_strong_findings() {
 
     let input = engine.build_review_input().expect("review input");
 
-    assert!(
-        input
-            .prompt
-            .contains("blocking|must_fix|strong_recommend_fix")
-    );
-    assert!(input.prompt.contains("suggestion|minor|optional"));
+    assert!(input.prompt.contains("blocking|must_fix|suggestion"));
+    assert!(input.prompt.contains("suggestion"));
     assert!(
         input
             .prompt
@@ -292,17 +287,11 @@ fn four_backtick_artifact_extracts_across_workspace_types_and_suppresses_story_d
     for (workspace_type, artifact) in [
         (
             WorkspaceType::Story,
-            complete_story_artifact(
-                "用户遇到失败时应该如何处理？",
-                "失败路径有明确提示。",
-            ),
+            complete_story_artifact("用户遇到失败时应该如何处理？", "失败路径有明确提示。"),
         ),
         (
             WorkspaceType::Design,
-            complete_design_artifact(
-                "明确失败时应该如何处理？",
-                "返回类型化失败原因。",
-            ),
+            complete_design_artifact("明确失败时应该如何处理？", "返回类型化失败原因。"),
         ),
         (
             WorkspaceType::WorkItem,
@@ -318,15 +307,15 @@ fn four_backtick_artifact_extracts_across_workspace_types_and_suppresses_story_d
              返修完成。"
         );
 
-        let extracted = extract_artifact_content(&output);
+        let selection = select_workspace_artifact(&output, workspace_type.clone());
         assert_eq!(
-            extracted,
-            artifact.trim(),
-            "{workspace_type:?} 应抽取四反引号 artifact 正文"
+            selected_artifact_markdown(&selection).as_deref(),
+            Some(artifact.trim()),
+            "{workspace_type:?} 应唯一选中四反引号 artifact 正文"
         );
         assert!(
-            content_has_complete_workspace_artifact(&extracted, &workspace_type),
-            "{workspace_type:?} 抽取后的 artifact 应通过完整性校验"
+            content_has_complete_workspace_artifact(&output, &workspace_type),
+            "{workspace_type:?} 四反引号 artifact 应通过完整性校验"
         );
 
         if matches!(workspace_type, WorkspaceType::Story | WorkspaceType::Design) {
@@ -366,9 +355,14 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
             let full_output = if let Some(contract) = structured_output_contract.as_ref() {
                 let (comments, json) =
                     extract_structured_json(&output).expect("review fixture structured output");
+                let mut json: serde_json::Value =
+                    serde_json::from_str(&json).expect("review fixture JSON must be an object");
+                json.as_object_mut()
+                    .expect("review fixture JSON must be an object")
+                    .insert("nonce".to_string(), serde_json::json!(contract.nonce));
                 format!(
-                    "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-                    contract.nonce, contract.nonce
+                    "{comments}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{json}</ARIA_STRUCTURED_OUTPUT>",
+                    contract.nonce
                 )
             } else {
                 output
@@ -384,9 +378,21 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// Task 7 分流收口:gateway 只经 validated trait 分发——拆出 input 后
+    /// 与裸 `start` 同路径。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
     }
 
     async fn run_streaming(
@@ -403,84 +409,9 @@ impl StreamingProviderAdapter for ReviewVerdictStreamingProvider {
     }
 }
 
-#[tokio::test]
-async fn drive_review_session_pass_enters_author_confirm() {
-    let (_tmp, store) = setup();
-    let (tx, mut rx) = mpsc::channel(64);
-    let session = make_session("sess_review_pass");
-    let mut engine = WorkspaceEngine::new(store, tx, session);
-
-    engine
-        .handle_user_message(
-            "start".to_string(),
-            Arc::new(FakeStreamingProvider),
-            empty_provider_commands(),
-        )
-        .await;
-    engine
-        .handle_author_decision(AuthorDecision::Accept)
-        .await
-        .unwrap();
-    assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
-
-    let provider_type = Arc::new(Mutex::new(None));
-    let prompt = Arc::new(Mutex::new(None));
-    engine
-        .drive_review_session(
-            Arc::new(ReviewVerdictStreamingProvider {
-                output: "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
-                provider_type: provider_type.clone(),
-                prompt: prompt.clone(),
-            }),
-            empty_provider_commands(),
-        )
-        .await;
-
-    assert_eq!(*provider_type.lock().unwrap(), Some(ProviderType::Codex));
-    assert!(
-        prompt
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .contains("# Story Spec")
-    );
-    // spec-design-dialog-revision T5：Story review pass 完成不得自动定稿，统一回 AuthorConfirm。
-    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
-    match engine.build_session_state() {
-        WsOutMessage::SessionState { timeline_nodes, .. } => {
-            assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::ReviewerRun
-                    && node.status == TimelineNodeStatus::Completed
-            }));
-            // T5：回 AuthorConfirm 必须创建 AuthorConfirm 节点（报告进对话流后等待作者确认）。
-            assert!(timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::AuthorConfirm
-                    && node.status == TimelineNodeStatus::Active
-            }));
-        }
-        _ => panic!("expected SessionState"),
-    }
-
-    let mut saw_review_complete = false;
-    while let Ok(event) = rx.try_recv() {
-        if let EngineEvent::ReviewComplete {
-            verdict,
-            summary,
-            findings,
-            review_gate,
-            ..
-        } = event
-        {
-            assert_eq!(verdict, ReviewVerdictType::Pass);
-            assert_eq!(summary, "可以确认");
-            assert!(findings.is_empty());
-            assert_eq!(review_gate, ReviewGate::UserConfirmAllowed);
-            saw_review_complete = true;
-        }
-    }
-    assert!(saw_review_complete);
-}
+// 退役留档（T5/REQ-RET-02）：`drive_review_session_pass_enters_author_confirm` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn drive_review_session_strong_revise_returns_to_author_confirm() {
@@ -498,7 +429,7 @@ async fn drive_review_session_strong_revise_returns_to_author_confirm() {
         .await;
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"需要补充失败路径。
 
@@ -511,7 +442,6 @@ async fn drive_review_session_strong_revise_returns_to_author_confirm() {
   "severity": "must_fix",
   "message": "缺少失败路径",
   "evidence": "Artifact 未覆盖失败路径",
-  "impact": "下一阶段无法验收异常流程",
   "required_action": "补充失败路径说明"
 }
   ]
@@ -600,6 +530,7 @@ impl StreamingProviderAdapter for QueuedReviewProvider {
             .await
             .unwrap();
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -680,20 +611,21 @@ fn repair_event_statuses(
     events
 }
 
-fn missing_end_nonce_output(json: &str) -> String {
+fn missing_json_nonce_output(json: &str) -> String {
     format!(
         "审核发现需要返修。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT>"
     )
 }
 
 fn valid_structured_output(json: &str) -> String {
+    let json = json.replacen('{', r#"{"nonce":"__NONCE__","#, 1);
     format!(
-        "格式修复完成。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">"
+        "格式修复完成。\n<ARIA_STRUCTURED_OUTPUT nonce=\"__NONCE__\">{json}</ARIA_STRUCTURED_OUTPUT>"
     )
 }
 
 #[tokio::test]
-async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
+async fn kimi_review_repairs_missing_json_nonce_once_for_all_workspace_types() {
     enum KimiReviewRepairCase {
         General {
             name: &'static str,
@@ -704,7 +636,7 @@ async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
         WorkItemPlan,
     }
 
-    let general_review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let general_review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#;
     let cases = [
         KimiReviewRepairCase::General {
             name: "story",
@@ -750,10 +682,11 @@ async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
                 (_tmp, name, review_json, engine, rx, review_node_id)
             }
             KimiReviewRepairCase::WorkItemPlan => {
-                let (_tmp, engine, rx, review_node_id) = queued_work_item_plan_outline_review_engine(
-                    "sess_kimi_review_repair_work_item_plan",
-                )
-                .await;
+                let (_tmp, engine, rx, review_node_id) =
+                    queued_work_item_plan_outline_review_engine(
+                        "sess_kimi_review_repair_work_item_plan",
+                    )
+                    .await;
                 (
                     _tmp,
                     "work_item_plan",
@@ -765,13 +698,13 @@ async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
             }
         };
         let provider = QueuedReviewProvider::new(vec![
-            missing_end_nonce_output(review_json),
+            missing_json_nonce_output(review_json),
             valid_structured_output(review_json),
         ]);
         engine.session.reviewer_provider = Some(ProviderName::KimiCode);
 
         engine
-            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
             .await;
 
         assert_eq!(provider.starts.load(Ordering::SeqCst), 2, "{case_name}");
@@ -794,7 +727,10 @@ async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
                     ProviderExecutionEventStatus::Started,
                     Some(review_node_id.clone())
                 ),
-                (ProviderExecutionEventStatus::Completed, Some(review_node_id)),
+                (
+                    ProviderExecutionEventStatus::Completed,
+                    Some(review_node_id)
+                ),
             ],
             "{case_name}"
         );
@@ -803,26 +739,29 @@ async fn kimi_review_repairs_missing_end_nonce_once_for_all_workspace_types() {
 
 #[tokio::test]
 async fn review_structured_output_repair_failure_persists_diagnostic() {
-    let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let review_json = r#"{"verdict":"revise","summary":"补充失败路径","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(review_json),
-        missing_end_nonce_output(review_json),
+        missing_json_nonce_output(review_json),
+        missing_json_nonce_output(review_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_review_engine("sess_review_repair_failure").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     let diagnostic = verdict
         .structured_output_diagnostic
         .as_ref()
         .expect("repair failure diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(diagnostic.repair_attempted);
     assert!(!diagnostic.repair_succeeded);
     assert!(
@@ -837,19 +776,16 @@ async fn review_structured_output_repair_failure_persists_diagnostic() {
     let repair_events = repair_event_statuses(&mut rx);
     assert_eq!(
         repair_events.last(),
-        Some(&(
-            ProviderExecutionEventStatus::Failed,
-            Some(review_node_id)
-        ))
+        Some(&(ProviderExecutionEventStatus::Failed, Some(review_node_id)))
     );
 }
 
 #[tokio::test]
 async fn review_structured_output_repair_rejects_payload_change() {
-    let first_json = r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#;
+    let first_json = r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#;
     let changed_json = r#"{"verdict":"pass","summary":"可以确认","findings":[]}"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(first_json),
+        missing_json_nonce_output(first_json),
         valid_structured_output(changed_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
@@ -857,11 +793,14 @@ async fn review_structured_output_repair_rejects_payload_change() {
     engine.session.reviewer_provider = Some(ProviderName::KimiCode);
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     let diagnostic = verdict
         .structured_output_diagnostic
@@ -873,36 +812,138 @@ async fn review_structured_output_repair_rejects_payload_change() {
     let repair_events = repair_event_statuses(&mut rx);
     assert_eq!(
         repair_events.last(),
-        Some(&(
-            ProviderExecutionEventStatus::Failed,
-            Some(review_node_id)
-        ))
+        Some(&(ProviderExecutionEventStatus::Failed, Some(review_node_id)))
     );
 }
 
+// C2 改写登记（REQ-HGC-03 场景 2）：invalid_json 现在获得同 invocation 恰一次
+// 静默重试（同一 input 重发，非 repair prompt）；重试仍失败保原始 diagnostic
+// 进人工。「不触发不可验证 repair」的原语义保留——重试不是 payload-equality
+// repair，成功消费的前提是重试输出自身完整可解析。
 #[tokio::test]
-async fn invalid_review_json_does_not_trigger_unverifiable_repair() {
-    let provider = QueuedReviewProvider::new(vec![valid_structured_output(
-        r#"{"verdict":"pass","summary":}"#,
-    )]);
-    let (_tmp, mut engine, _rx, _review_node_id) =
+async fn invalid_review_json_retries_same_input_without_verifiable_payload_repair() {
+    let provider = QueuedReviewProvider::new(vec![
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+    ]);
+    let (_tmp, mut engine, mut rx, _review_node_id) =
         queued_review_engine("sess_review_invalid_json_no_repair").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
-    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let prompts = provider.prompts.lock().unwrap().clone();
+    assert_eq!(prompts[0], prompts[1], "retry resends the original input");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("invalid json diagnostic");
+    assert_eq!(diagnostic.code, "invalid_json");
+    assert!(diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    assert!(repair_event_statuses(&mut rx).is_empty());
+}
+
+// —— C2 human-gate-convergence（REQ-HGC-03 场景 2/F-52 R6）——
+//
+// 现场（issue_0002/workspace_session_0009 R6）：reviewer raw output 实为
+// pass+3 advisory，仅结构化 JSON 非法（invalid_json）——整轮被丢弃降级
+// needs_human，白耗一轮 + 3h 门等待。新契约：解析失败（invalid_json 等
+// Syntax 族）在同 invocation 内恰一次静默重试（同一 input、不发事件、
+// 不记账）；重试成功正常消费；仍失败保原始 diagnostic 进人工，且该轮
+// 不计为一次完整 review（review/cycle/返修计数零增量）。
+#[tokio::test]
+async fn invalid_json_retries_once_within_invocation_and_consumes_recovery() {
+    let provider = QueuedReviewProvider::new(vec![
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+        valid_structured_output(r#"{"verdict":"pass","summary":"格式恢复","findings":[]}"#),
+    ]);
+    let (_tmp, mut engine, mut rx, _review_node_id) =
+        queued_review_engine("sess_review_invalid_json_retry_success").await;
+
+    engine
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    // 同 invocation 静默重试：同一份 input 重新拉起（非 repair prompt），
+    // 续用同一 provider 会话。
+    let prompts = provider.prompts.lock().unwrap().clone();
     assert_eq!(
-        verdict
-            .structured_output_diagnostic
-            .as_ref()
-            .expect("invalid json diagnostic")
-            .code,
-        "invalid_json"
+        prompts[0], prompts[1],
+        "retry must resend the original input"
     );
+    assert!(
+        !prompts[1].contains("结构化输出格式无效"),
+        "retry must not build a repair prompt"
+    );
+    assert_eq!(
+        provider.resume_provider_session_ids.lock().unwrap()[1],
+        Some("review-session-1".to_string())
+    );
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("recovered verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::Pass);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("retry diagnostic");
+    assert_eq!(diagnostic.code, "invalid_json");
+    assert!(diagnostic.repair_attempted);
+    assert!(diagnostic.repair_succeeded);
+    // 静默纪律：不发 structured_output_repair 执行事件。
+    assert!(repair_event_statuses(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn invalid_json_retry_failure_preserves_diagnostic_and_counts_nothing() {
+    let provider = QueuedReviewProvider::new(vec![
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+        valid_structured_output(r#"{"verdict":"pass","summary":}"#),
+    ]);
+    let (_tmp, mut engine, _rx, _review_node_id) =
+        queued_work_item_plan_outline_review_engine("sess_review_invalid_json_retry_failed").await;
+
+    engine
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
+        .await;
+
+    // 恰一次重试：两次 provider 启动后不再追加第三次。
+    assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
+    assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
+    let diagnostic = verdict
+        .structured_output_diagnostic
+        .as_ref()
+        .expect("degraded diagnostic");
+    assert_eq!(diagnostic.code, "invalid_json");
+    assert!(diagnostic.repair_attempted);
+    assert!(!diagnostic.repair_succeeded);
+    assert!(diagnostic.raw_output_preview.is_some());
+    // 零计数增量×3（REQ-HGC-03）：review 计数（含 cycle）/自动返修/人工预算
+    // ——降级轮不计为一次完整 review，人工门以默认预算开门。
+    assert_eq!(engine.session.run_history.initial_review_count, 0);
+    assert!(engine.session.run_history.review_cycles.is_empty());
+    assert_eq!(engine.session.run_history.repairs_used, 0);
+    let gate = engine
+        .session
+        .human_gate_snapshot
+        .as_ref()
+        .expect("degraded round opens the human gate");
+    assert_eq!(gate.manual_repairs_remaining, 3);
+    assert_eq!(gate.accepted_feedback_turns, Some(0));
 }
 
 #[tokio::test]
@@ -914,11 +955,14 @@ async fn malformed_review_findings_do_not_trigger_business_rewrite() {
         queued_review_engine("sess_review_malformed_findings_no_repair").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-    let verdict = engine.latest_review_verdict.as_ref().expect("fallback verdict");
+    let verdict = engine
+        .latest_review_verdict
+        .as_ref()
+        .expect("fallback verdict");
     assert_eq!(verdict.verdict, ReviewVerdictType::NeedsHuman);
     assert_eq!(
         verdict

@@ -19,9 +19,18 @@ describe("ChoiceRequestEntry", () => {
     fireEvent.click(screen.getByLabelText("继续"));
     fireEvent.click(screen.getByRole("button", { name: "提交选择" }));
 
+    // P2-e（REQ-CRO-11）：REST 提交恒按题号逐题组装 answers——无 questions
+    // 的旧单题卡回落单一 default 题，answers 恒非空。
     expect(onRespond).toHaveBeenCalledWith(entry, {
       selected_option_ids: ["continue"],
       free_text: null,
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: ["continue"],
+          free_text: null,
+        },
+      ],
     });
   });
 
@@ -44,6 +53,13 @@ describe("ChoiceRequestEntry", () => {
     expect(onRespond).toHaveBeenCalledWith(entry, {
       selected_option_ids: ["tests", "docs"],
       free_text: null,
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: ["tests", "docs"],
+          free_text: null,
+        },
+      ],
     });
   });
 
@@ -64,7 +80,51 @@ describe("ChoiceRequestEntry", () => {
     expect(onRespond).toHaveBeenCalledWith(entry, {
       selected_option_ids: [],
       free_text: "请继续实现最小方案",
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: [],
+          free_text: "请继续实现最小方案",
+        },
+      ],
     });
+  });
+
+
+  // P2-e 红测④（X1）：无 runner 时页面写入 choice_submit_error 人话提示——
+  // 卡片显示提示、控件保持可用（无「恢复运行」按钮）。
+  it("shows the submit error hint and keeps controls enabled", () => {
+    const onRespond = vi.fn();
+    const entry = makeChoiceEntry({
+      options: [
+        { id: "continue", label: "继续" },
+        { id: "stop", label: "停止" },
+      ],
+      choice_submit_error: "AI 当前没有在运行，这个问题暂时无法回答",
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={onRespond} />);
+
+    expect(
+      screen.getByText("AI 当前没有在运行，这个问题暂时无法回答"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "恢复运行" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("继续"));
+    expect(screen.getByRole("button", { name: "提交选择" })).toBeEnabled();
+  });
+
+  // P2-e 红测⑤：expired → 失效提示（F-9 文案），不渲染作答控件。
+  it("shows the expired banner without submit controls", () => {
+    const onRespond = vi.fn();
+    const entry = makeChoiceEntry({
+      resolved: true,
+      choice_expired: true,
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={onRespond} />);
+
+    expect(screen.getByText("这个问题已失效（AI 已重新开始）")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "提交选择" })).not.toBeInTheDocument();
   });
 
   it("renders and submits all questions in one structured choice request", () => {
@@ -195,6 +255,86 @@ describe("ChoiceRequestEntry", () => {
     );
 
     expect(screen.getByText("已选择：继续")).toBeInTheDocument();
+  });
+
+  // F-43 ①：危险命令全文可达数千字符，此前 prompt 原样铺开把选项按钮推到卡尾
+  // （折叠区外），用户看不到可点控件。契约：prompt 文本 clamp 到 6 行并给出
+  // 「展开全文」，选项区与提交钮紧跟 clamp 之后常显。
+  it("clamps a long prompt and keeps the options right after the clamped text", () => {
+    const onRespond = vi.fn();
+    const entry = makeChoiceEntry({
+      prompt: Array.from({ length: 30 }, (_, index) => `第 ${index + 1} 行说明`).join("\n"),
+      options: [
+        { id: "continue", label: "继续" },
+        { id: "stop", label: "停止" },
+      ],
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={onRespond} />);
+
+    const prompt = screen.getByTestId("choice-prompt-text");
+    expect(prompt.className).toContain("line-clamp-6");
+    const option = screen.getByLabelText("继续");
+    expect(
+      prompt.compareDocumentPosition(option) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(screen.getByRole("button", { name: "提交选择" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开全文" }));
+
+    expect(screen.getByTestId("choice-prompt-text").className).not.toContain("line-clamp-6");
+    expect(screen.getByRole("button", { name: "收起全文" })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("继续"));
+    fireEvent.click(screen.getByRole("button", { name: "提交选择" }));
+    expect(onRespond).toHaveBeenCalledWith(entry, {
+      selected_option_ids: ["continue"],
+      free_text: null,
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: ["continue"],
+          free_text: null,
+        },
+      ],
+    });
+  });
+
+  it("leaves a short prompt unclamped without an expand toggle", () => {
+    render(<ChoiceRequestEntry entry={makeChoiceEntry({ prompt: "请选择下一步" })} />);
+
+    expect(screen.getByTestId("choice-prompt-text").className).not.toContain("line-clamp-6");
+    expect(screen.queryByRole("button", { name: "展开全文" })).toBeNull();
+  });
+
+  // F-43 ①：provider 的危险命令询问（"⚠️ Dangerous command:" + 命令正文 +
+  // "Allow?"）此前整段当普通文本渲染，命令正文丢失等宽可读性。契约：命令正文
+  // 落 <pre> 等宽块并内滚（max-h + overflow-auto + break-words），头尾文字保留。
+  it("renders the dangerous command body as a scrollable monospace block", () => {
+    const command = 'rm -rf "$BASE"; mkdir -p "$BASE"\nnode --test test/status-integration.test.js';
+    const entry = makeChoiceEntry({
+      prompt: `⚠️ Dangerous command:\n\n  ${command}\n\nAllow?`,
+      options: [
+        { id: "Yes", label: "Yes" },
+        { id: "No", label: "No" },
+      ],
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={vi.fn()} />);
+
+    const block = screen.getByTestId("choice-command-block");
+    expect(block.tagName).toBe("PRE");
+    expect(block.className).toContain("font-mono");
+    expect(block.className).toContain("break-words");
+    expect(block.className).toContain("overflow-auto");
+    expect(block.className).toContain("max-h-");
+    expect(block).toHaveTextContent('rm -rf "$BASE"');
+    expect(block).not.toHaveTextContent("Dangerous command");
+    expect(block).not.toHaveTextContent("Allow?");
+    expect(screen.getByText(/Allow\?/)).toBeInTheDocument();
+    // 命令块自身常显，无需展开：选项与提交钮同样直接可见。
+    expect(screen.queryByRole("button", { name: "展开全文" })).toBeNull();
+    expect(screen.getByLabelText("Yes")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交选择" })).toBeInTheDocument();
   });
 });
 

@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub(crate) const REWORK_CONTEXT_NOTE_CHAR_LIMIT: usize = 10_000;
 
@@ -12,8 +13,28 @@ pub enum CodingWorkspaceEngineError {
     ProviderAdapter(#[from] ProviderAdapterError),
     #[error("coding_provider_stream_failed: {0}")]
     ProviderStream(String),
+    /// C2 Task 5（REQ-CRO-05）：reviewer 配置缺失——blocked gate 已落盘
+    /// （reason_code `reviewer_configuration_missing`），绝不以 author 顶替。
+    #[error("reviewer_configuration_missing: attempt={attempt_id}")]
+    ReviewerConfigurationMissing {
+        attempt_id: String,
+        role: CodingProviderRole,
+    },
     #[error("coding_provider_protocol_error: {0}")]
     ProviderProtocol(String),
+    /// P4-a（REQ-PTR-IDLE）：provider 会话零活动挂起——共享 stream 的 idle
+    /// 看门狗触发（Timeout 事件 reason_code `provider_idle_stall`，含空闲
+    /// 诊断）。首次由 retry-cycle 同 provider fresh 重试一次；再次挂起经
+    /// `open_provider_stalled_gate` 转 attempt Blocked＋stalled 门。
+    #[error(
+        "provider_idle_stall: role={role:?} phase={phase} idle_secs={idle_secs} idle_limit_secs={idle_limit_secs}"
+    )]
+    ProviderIdleStall {
+        role: CodingProviderRole,
+        phase: String,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    },
     #[error("group_review_blocked: {reason_code}; gate_id={gate_id:?}")]
     GroupReviewBlocked {
         reason_code: String,
@@ -45,6 +66,10 @@ pub enum CodingWorkspaceEngineError {
     NoReviewableChanges(String),
     #[error("shared_worktree_dirty_manual_gate: {0}")]
     SharedWorktreeDirtyManualGate(String),
+    /// 多仓路径首次访问仓维 worktree 前发现旧 `issue-shared-worktree.json`
+    /// （迁移契约化 §4.2.6 断言 fail-closed）。稳定码 `legacy_shared_worktree_present`。
+    #[error("legacy_shared_worktree_present: {0}")]
+    LegacySharedWorktreePresent(String),
     #[error("work_item_execution_plan_not_confirmed: {0}")]
     ExecutionPlanNotConfirmed(String),
     #[error("completion_commit_missing: {0}")]
@@ -55,6 +80,18 @@ pub enum CodingWorkspaceEngineError {
     VerificationGateFailed(String),
     #[error("work_item_diff_scope_violation: {0}")]
     WorkItemDiffScopeViolation(String),
+    /// 多仓 attempt 的 scope 路径域前缀（成员 checkout 相对聚合根 `provider_context_root`）
+    /// 无法解析：fail-closed，绝不退回无前缀比较（那会让合法改动被拒或 forbidden 空转）。
+    #[error("work_item_scope_domain_unresolved: {0}")]
+    WorkItemScopeDomainUnresolved(String),
+    /// 交付前统一门（Task 15）：任一 provider run 的越界检测基线被破坏（他仓主
+    /// checkout HEAD/工作区变更或基线缺失）时阻断 commit/push，稳定码经
+    /// `StableCode::as_str()` 转字符串填充。
+    #[error("cross_target_delivery_blocked: {0}")]
+    CrossTargetDeliveryBlocked(String),
+    /// C-4 证据查询脚本注入失败（worktree `.aria/bin/aria-evidence-query` 写入失败）。
+    #[error("coding_evidence_script_injection_failed: {0}")]
+    EvidenceScriptInjection(String),
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +119,11 @@ pub(crate) struct CodingProviderStreamRun<'a> {
     /// 组级审查拥有失败状态收口权时，stream 层只返回 transport 错误，不直接
     /// 修改 attempt、role run 或 timeline 状态。
     pub(crate) suppress_failure_side_effects: bool,
+    /// Task 11:逻辑代码库真实 provider 启动的绑定 validated policy input。
+    /// 非空时,`provider_stream` 经 `LogicalCodebaseProviderGateway::start_streaming`
+    /// 启动,而非直接 `provider.start`;传统/非逻辑路径为 `None`,保留既有行为。
+    pub(crate) validated_input:
+        Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
 }
 
 pub(crate) fn run_timeout_sleep(
@@ -133,6 +175,18 @@ pub(crate) fn coding_permission_mode_for_provider(
     coding_permission_mode_for_provider_type(&provider_type_for_name(provider), configured_mode)
 }
 
+/// C2 Task 5：reviewer 缺失（空 effective）时不做 provider 类型归一，
+/// 按配置值直映射——provider 不会在该形态下启动（缺失门先拦）。
+pub(crate) fn coding_permission_mode_for_optional_provider(
+    provider: Option<&ProviderName>,
+    configured_mode: CodingProviderPermissionMode,
+) -> ProviderPermissionMode {
+    match provider {
+        Some(provider) => coding_permission_mode_for_provider(provider, configured_mode),
+        None => coding_provider_permission_mode(configured_mode),
+    }
+}
+
 pub(crate) fn normalize_coding_permission_mode_for_provider(
     provider: &ProviderName,
     configured_mode: CodingProviderPermissionMode,
@@ -140,6 +194,18 @@ pub(crate) fn normalize_coding_permission_mode_for_provider(
     match coding_permission_mode_for_provider(provider, configured_mode) {
         ProviderPermissionMode::Auto => CodingProviderPermissionMode::Auto,
         ProviderPermissionMode::Supervised => CodingProviderPermissionMode::Supervised,
+    }
+}
+
+/// C2 Task 5：reviewer 缺失（空 effective）时权限模式按配置直存——该角色不会
+/// 在缺失形态下启动（缺配置门先拦），不虚构 provider 类型归一。
+pub(crate) fn normalize_coding_permission_mode_for_optional_provider(
+    provider: Option<&ProviderName>,
+    configured_mode: CodingProviderPermissionMode,
+) -> CodingProviderPermissionMode {
+    match provider {
+        Some(provider) => normalize_coding_permission_mode_for_provider(provider, configured_mode),
+        None => configured_mode,
     }
 }
 
@@ -153,7 +219,7 @@ pub(crate) fn role_permission_mode_for_attempt(
         &attempt.issue_id,
         &attempt.id,
     )?;
-    Ok(coding_permission_mode_for_provider(
+    Ok(coding_permission_mode_for_optional_provider(
         snapshot.provider_for_role(&role),
         snapshot.permission_mode_for_role(&role),
     ))
@@ -232,11 +298,11 @@ impl CancellableCodingEventSender {
     pub(crate) async fn send(
         &self,
         event: CodingWsOutMessage,
-    ) -> Result<(), mpsc::error::SendError<CodingWsOutMessage>> {
+    ) -> Result<(), Box<mpsc::error::SendError<CodingWsOutMessage>>> {
         let permit = tokio::select! {
             biased;
             _ = self.cancellation.cancelled() => {
-                return Err(mpsc::error::SendError(event));
+                return Err(Box::new(mpsc::error::SendError(event)));
             }
             permit = self.sender.reserve() => permit,
         };
@@ -245,7 +311,7 @@ impl CancellableCodingEventSender {
                 permit.send(event);
                 Ok(())
             }
-            Err(_) => Err(mpsc::error::SendError(event)),
+            Err(_) => Err(Box::new(mpsc::error::SendError(event))),
         }
     }
 
@@ -278,6 +344,12 @@ pub struct CodingWorkspaceEngine {
     pub(crate) _git_service: GitWorkspaceService,
     pub(crate) event_tx: CancellableCodingEventSender,
     pub(crate) cancellation: CancellationToken,
+    /// Task 11:逻辑代码库真实 provider 启动的唯一入口。非空时,provider stream
+    /// 经 `start_streaming` 启动并留 audit;为 `None` 时(传统单仓/非逻辑 issue)
+    /// 保留直接 `provider.start` 路径,防止本工作包扩大旧 API 行为。Web 接入 task
+    /// 为逻辑代码库 issue 注入真实 gateway。
+    pub(crate) logical_provider_gateway:
+        Option<Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>>,
 }
 
 impl CodingWorkspaceEngine {

@@ -36,7 +36,7 @@ pub(super) async fn run_coding_provider_roles(
 ) -> Result<CodingMatrixOutcome, PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
         .map_err(fixture_error)?
         .ok_or_else(|| fixture_error("provider matrix coding attempt is missing"))?;
     let placeholder_run = store.get_active_unit_run(&attempt).map_err(fixture_error)?;
@@ -54,8 +54,8 @@ pub(super) async fn run_coding_provider_roles(
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: provider.clone(),
-                code_reviewer: provider.clone(),
-                internal_reviewer: provider,
+                code_reviewer: Some(provider.clone()),
+                internal_reviewer: Some(provider),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes::default(),
             },

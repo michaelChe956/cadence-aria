@@ -21,8 +21,8 @@ async fn coder_rework_normalizes_pi_supervised_mode_to_auto() {
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Pi,
-                code_reviewer: ProviderName::ClaudeCode,
-                internal_reviewer: ProviderName::ClaudeCode,
+                code_reviewer: Some(ProviderName::ClaudeCode),
+                internal_reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes {
                     coder: CodingProviderPermissionMode::Supervised,

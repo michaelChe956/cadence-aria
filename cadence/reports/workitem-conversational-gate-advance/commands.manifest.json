@@ -1,0 +1,216 @@
+{
+  "_comment": "阶段 3 Task 8.5 验收命令账。全部条目为 2026-09-03 task 8.5 worker 在本 worktree 的亲跑结果(exit_code/test_count 取自实际输出,非手填通过);摘要日志入 evidence/logs/。基线交叉引用:progress.md 中 controller 最新亲验(--lib 3072/0/2 连续两轮、it_core 149/0、it_web 400/0+12 ignored、Node 49/49、定向 matrix7/amendment3/advance4/dependency3/group_projection1/interactive6)与本账完全一致。",
+  "meta": {
+    "commit": "0e676fe0e43bc788a3da18cf4245d00ef016dd85",
+    "commit_note": "被验收实现态 HEAD(最后一个实现/生产修复 commit);验收证据 commit 由本目录产物单独构成(docs commit),不改变代码行为。",
+    "worktree_status_before": [],
+    "worktree_status_after": [],
+    "worktree_status_note": "before=任务开始时 git status --short 为空;after=验收 commit 落盘后复核为空(见 task-8.5-report.md Step 4 输出)。",
+    "changed_files": [
+      "cadence/reports/workitem-conversational-gate-advance/README.md",
+      "cadence/reports/workitem-conversational-gate-advance/acceptance-report.json",
+      "cadence/reports/workitem-conversational-gate-advance/scenario-evidence.jsonl",
+      "cadence/reports/workitem-conversational-gate-advance/defer-ledger.md",
+      "cadence/reports/workitem-conversational-gate-advance/defer.manifest.json",
+      "cadence/reports/workitem-conversational-gate-advance/commands.manifest.json",
+      "cadence/reports/workitem-conversational-gate-advance/build_acceptance_report.mjs",
+      "cadence/reports/workitem-conversational-gate-advance/acceptance_report.test.mjs",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/fmt.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/clippy.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/check.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/lib.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/it_core.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/it_web.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/node-campaign.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/directed-filters.log",
+      "cadence/reports/workitem-conversational-gate-advance/evidence/logs/acceptance-test.log"
+    ],
+    "review_findings": []
+  },
+  "commands": [
+    {
+      "command": "cargo fmt --check",
+      "exit_code": 0,
+      "test_count": 0,
+      "is_test_command": false,
+      "note": "全量四命令之一",
+      "log_ref": "artifact:evidence/logs/fmt.log"
+    },
+    {
+      "command": "cargo clippy --all-targets --all-features --locked -- -D warnings",
+      "exit_code": 0,
+      "test_count": 0,
+      "is_test_command": false,
+      "note": "全量四命令之一",
+      "log_ref": "artifact:evidence/logs/clippy.log"
+    },
+    {
+      "command": "cargo check --locked",
+      "exit_code": 0,
+      "test_count": 0,
+      "is_test_command": false,
+      "note": "全量四命令之一",
+      "log_ref": "artifact:evidence/logs/check.log"
+    },
+    {
+      "command": "cargo test --locked --lib",
+      "exit_code": 0,
+      "test_count": 3072,
+      "note": "3072 passed / 0 failed / 2 ignored;与 controller 基线(连续两轮)一致",
+      "log_ref": "artifact:evidence/logs/lib.log"
+    },
+    {
+      "command": "cargo test --locked --test it_core",
+      "exit_code": 0,
+      "test_count": 149,
+      "note": "149 passed / 0 failed",
+      "log_ref": "artifact:evidence/logs/it_core.log"
+    },
+    {
+      "command": "cargo test --locked --test it_web",
+      "exit_code": 0,
+      "test_count": 400,
+      "note": "400 passed / 0 failed / 12 ignored",
+      "log_ref": "artifact:evidence/logs/it_web.log"
+    },
+    {
+      "command": "node --test cadence/reports/workitem-coding-campaign/campaign_driver_policies.test.mjs cadence/reports/workitem-coding-campaign/stage3_campaign_driver.test.mjs",
+      "exit_code": 0,
+      "test_count": 49,
+      "note": "49 passed / 0 failed(campaign 两文件)",
+      "log_ref": "artifact:evidence/logs/node-campaign.log"
+    },
+    {
+      "command": "cargo test --locked --lib campaign_stage3_recovery_matrix -- --list && cargo test --locked --lib campaign_stage3_recovery_matrix",
+      "exit_code": 0,
+      "test_count": 7,
+      "note": "--list=7 先行,run 7 passed / 0 failed",
+      "log_ref": "artifact:evidence/logs/directed-filters.log"
+    },
+    {
+      "command": "cargo test --locked --lib campaign_stage3_amendment -- --list && cargo test --locked --lib campaign_stage3_amendment",
+      "exit_code": 0,
+      "test_count": 3,
+      "note": "--list=3 先行,run 3 passed / 0 failed",
+      "log_ref": "artifact:evidence/logs/directed-filters.log"
+    },
+    {
+      "command": "cargo test --locked --lib campaign_stage3_advance -- --list && cargo test --locked --lib campaign_stage3_advance",
+      "exit_code": 0,
+      "test_count": 4,
+      "note": "--list=4 先行,run 4 passed / 0 failed",
+      "log_ref": "artifact:evidence/logs/directed-filters.log"
+    },
+    {
+      "command": "cargo test --locked --lib campaign_stage3_dependency -- --list && cargo test --locked --lib campaign_stage3_dependency",
+      "exit_code": 0,
+      "test_count": 3,
+      "note": "--list=3 先行,run 3 passed / 0 failed",
+      "log_ref": "artifact:evidence/logs/directed-filters.log"
+    },
+    {
+      "command": "cargo test --locked --lib campaign_stage3_group_projection -- --list && cargo test --locked --lib campaign_stage3_group_projection",
+      "exit_code": 0,
+      "test_count": 1,
+      "note": "--list=1 先行,run 1 passed / 0 failed",
+      "log_ref": "artifact:evidence/logs/directed-filters.log"
+    },
+    {
+      "command": "cargo test --locked --lib campaign_stage3_interactive -- --list && cargo test --locked --lib campaign_stage3_interactive",
+      "exit_code": 0,
+      "test_count": 6,
+      "note": "--list=6 先行,run 6 passed / 0 failed",
+      "log_ref": "artifact:evidence/logs/directed-filters.log"
+    },
+    {
+      "command": "node --test cadence/reports/workitem-conversational-gate-advance/acceptance_report.test.mjs",
+      "exit_code": 0,
+      "test_count": 8,
+      "note": "8 passed / 0 failed(本验收报告 fail-closed 测试套)",
+      "log_ref": "artifact:evidence/logs/acceptance-test.log"
+    }
+  ],
+  "real_provider_runs": [
+    {
+      "provider": "codex",
+      "run": "rep1",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "driver_error:flow_kind 配置错误(当时 ARIA_EXPECTED_FLOW_KIND 未设),driver 问题非 provider",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    },
+    {
+      "provider": "codex",
+      "run": "rep2",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "provider_output_defect:lowering_error:283 traceability 缺 source_id(编译 fail-closed)",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    },
+    {
+      "provider": "codex",
+      "run": "rep3",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "provider_output_defect:IR 校验 duplicate contract id CT-001/CT-004",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    },
+    {
+      "provider": "codex",
+      "run": "rep4",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "provider_output_defect:IR 校验 duplicate contract id CT-002/CT-005(codex 对该工作项稳定产出重复契约号,系统性)",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    },
+    {
+      "provider": "pi",
+      "run": "rep1",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "driver_bug:product_store_conflict human_gate_close——driver 真 bug,已修(commit 84e6a7c2)",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    },
+    {
+      "provider": "pi",
+      "run": "rep2",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "driver_bug:SC 重连 hello 被拒——driver 真 bug,已修(commit 84e6a7c2)",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    },
+    {
+      "provider": "pi",
+      "run": "rep3",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "hard_timeout:1800s(31825 条事件/5 轮 review,计划编写未完成,非死路)",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    },
+    {
+      "provider": "pi",
+      "run": "rep4",
+      "authorized": true,
+      "authorization_ref": "用户拍板 2026-09-02:真实 provider 授权沿用阶段 2 常设授权(codex+pi)——progress.md Task 8.2 Step 7 账",
+      "status": "executed_no_confirmed_run",
+      "failure_class": "provider_output_defect:计划 markdown 不合规(缺一级标题/缺 Work Item/未知结构化键),500s",
+      "reached_human_gate": false,
+      "evidence_ref": "ledger:task-8.2-report.md §③ 真实 provider campaign 账"
+    }
+  ],
+  "real_provider_runs_summary": "8 次授权真实跑(codex×4/pi×4)全部 executed_no_confirmed_run:0 次到达人工门(human_gate_turns 全空)。净产出:逼出并修复 2 个 driver 真 bug(84e6a7c2);如实记录 5 个真实 provider 输出质量缺陷。真实 Confirmed campaign 移交专项测量轮(用户拍板 2026-09-02=A + 档期 1:排在本 change 收官之后,届时重新授权,小规模预试验先行)。"
+}

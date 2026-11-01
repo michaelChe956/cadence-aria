@@ -7,7 +7,7 @@ AuthorConfirm 阶段为存在 review 报告的 Story/Design 会话提供一键�
 
 ### Requirement: 一键带入 review 报告
 
-Story/Design workspace 处于 AuthorConfirm 阶段且对话流存在 review 报告时，用户可将报告文本一键带入反馈输入框；带入仅为预填，发送仍由用户显式完成。
+Story/Design workspace 处于 AuthorConfirm 阶段且对话流存在 review 报告时，系统 SHALL 允许用户将报告文本一键带入反馈输入框；带入仅为预填，发送仍由用户显式完成。
 
 #### Scenario: 带入最新 review 报告
 - **WHEN** AuthorConfirm 阶段对话流存在 review 报告，用户点击「采纳 Review 意见」按钮

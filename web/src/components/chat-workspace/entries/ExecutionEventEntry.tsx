@@ -1,12 +1,16 @@
-import { FileText, Wrench } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
+import { executionEventIcon } from "../gate-visual-tokens";
 
 export function ExecutionEventEntry({ entry }: { entry: ChatEntry }) {
   const event = entry.metadata as Record<string, unknown> | undefined;
   const isProviderPrompt =
     entry.content_ref?.kind === "provider_prompt" || event?.title === "Provider Prompt";
-  const EventIcon = isProviderPrompt ? FileText : Wrench;
+  // F-50 视觉 v2 §4：与 InlineEventRow 同一 kind→Lucide 映射（单一事实源）。
+  const EventIcon = executionEventIcon(
+    typeof event?.kind === "string" ? event.kind : undefined,
+    isProviderPrompt,
+  );
 
   return (
     <ChatEntryContainer
@@ -16,7 +20,7 @@ export function ExecutionEventEntry({ entry }: { entry: ChatEntry }) {
     >
       <div className="space-y-2">
         <div className="flex items-start gap-2 text-sm text-[var(--aria-ink)]">
-          <EventIcon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
+          <EventIcon className="mt-0.5 h-4 w-4 shrink-0 text-slate-600" aria-hidden="true" />
           <div className="min-w-0">
             <div className="font-medium">{entry.content}</div>
             {event?.command && typeof event.command === "string" ? (

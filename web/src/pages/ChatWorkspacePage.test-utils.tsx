@@ -1,40 +1,39 @@
 import { beforeEach, vi } from "vitest";
 import type { NodeDetail } from "../api/types";
+import type { WorkspaceWsApi } from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
 import type { ChatEntry } from "../state/chat-entries";
 import { useWorkspaceStore, type TimelineNode } from "../state/workspace-ws-store";
 
-type WorkspaceWsApi = ReturnType<typeof useWorkspaceWs>;
+let currentWorkspaceWs: WorkspaceWsApi | undefined;
 
 export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
   const api: WorkspaceWsApi = {
     sendMessage: vi.fn(),
     sendContextNote: vi.fn(),
     sendStartGeneration: vi.fn(),
+    // C2（Task 6.2）：显式 fresh 发送器 mock——保守缺省 false（未发送），
+    // 需要 fresh 流程的用例经 mockWorkspaceWs({ sendLcResumeFresh: ... }) 覆盖。
+    sendLcResumeFresh: vi.fn(() => false),
     retryInterruptedRun: vi.fn(() => true),
-    sendSelectRevisionPath: vi.fn(),
-    sendAuthorDecision: vi.fn(),
     sendRequestRevision: vi.fn(),
-    sendRevertWorkItem: vi.fn(),
-    sendSelectWorkItemGenerationMode: vi.fn(),
-    sendRequestOutlineRevision: vi.fn(),
-    sendWorkItemDraftDecision: vi.fn(),
-    sendWorkItemBatchDecision: vi.fn(),
+    // 「登记并重试」发送器 mock——保守缺省 false（未发送）。
+    sendRegisterTrustEntry: vi.fn(() => false),
     sendWorkItemPlanCompileRecoveryAction: vi.fn(),
-    sendHumanPresentationRevision: vi.fn(() => true),
-    sendHumanConfirm: vi.fn(() => true),
+    sendConfirmGate: vi.fn(() => true),
+    sendAbandonGate: vi.fn(() => true),
+    sendHumanGateFeedback: vi.fn(() => true),
+    sendAdvance: vi.fn(() => true),
     confirmPlanAmendment: vi.fn(() => true),
     cancelPlanAmendment: vi.fn(() => true),
     startLinkedWorkspaceAmendment: vi.fn(() => true),
     sendHello: vi.fn(),
     sendPing: vi.fn(),
     startGeneration: vi.fn(),
-    rollback: vi.fn(),
     confirm: vi.fn(),
     abort: vi.fn(),
     selectProvider: vi.fn(),
     sendProviderSelect: vi.fn(),
-    sendReviewDecision: vi.fn(),
     respondPermission: vi.fn(),
     sendPermissionResponse: vi.fn(),
     sendChoiceResponse: vi.fn(),
@@ -45,8 +44,16 @@ export function mockWorkspaceWs(overrides: Partial<WorkspaceWsApi> = {}) {
     sessionSnapshotGeneration: 0,
     ...overrides,
   };
+  currentWorkspaceWs = api;
   vi.mocked(useWorkspaceWs).mockReturnValue(api);
   return api;
+}
+
+export function currentMockWorkspaceWs(): WorkspaceWsApi {
+  if (!currentWorkspaceWs) {
+    throw new Error("workspace websocket mock has not been created");
+  }
+  return currentWorkspaceWs;
 }
 
 
@@ -59,6 +66,7 @@ export function installChatWorkspacePageTestHooks() {
     });
     useWorkspaceStore.getState().reset();
     vi.clearAllMocks();
+    currentWorkspaceWs = undefined;
   });
 }
 

@@ -21,10 +21,12 @@ type CodingDiffState = {
 export function CodingArtifactTabs({
   address,
   activeTab,
+  onRetryPush,
   className = "",
 }: {
   address: CodingAttemptAddress;
   activeTab: CodingArtifactTab;
+  onRetryPush: () => void;
   className?: string;
 }) {
   const { projectId, issueId, attemptId } = address;
@@ -113,7 +115,7 @@ export function CodingArtifactTabs({
         {activeTab === "review" ? (
           <ReviewPanel />
         ) : activeTab === "git" ? (
-          <GitPanel />
+          <GitPanel onRetryPush={onRetryPush} />
         ) : activeTab === "logs" ? (
           <LogsPanel />
         ) : (

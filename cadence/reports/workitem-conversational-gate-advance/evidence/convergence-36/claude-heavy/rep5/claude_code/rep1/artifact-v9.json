@@ -1,0 +1,304 @@
+{
+  "type": "artifact_update",
+  "version": 9,
+  "work_item_projection": {
+    "id": "work_item_projection_bundle_b9605504f5afc1af4b3ff03c",
+    "work_item_revision_id": "work_item_revision_b9605504f5afc1af4b3ff03c",
+    "canonical_contract_hash": "74b3c9d4e991a8939a49d626fc4206f1b25cd88529aa078ab7710eec63385c36",
+    "projection_schema_version": 1,
+    "compiler_version": "work-item-projection-v1",
+    "human_projection": {
+      "logical_work_item_id": "WI-002",
+      "title": "实现关卡选择页与可测试渲染逻辑",
+      "goal": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 经 GET /api/levels 渲染关卡名称与难度并在失败或数据无效时保留页面框架展示可读错误提示。",
+      "non_goals": [
+        "不实现关卡玩法、不引入前端框架与任何 npm 依赖、不使用浏览器自动化",
+        "不修改 server/、data/levels.json、tests/backend/ 与 tests/integration/"
+      ],
+      "inputs": [
+        {
+          "contract_id": "CT-001",
+          "capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "source_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ],
+          "source_refs": [
+            "CT-004"
+          ]
+        }
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "scope_summary": {
+        "owned_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "completion_summary": [
+        "WHEN 查看页面产物 THE SYSTEM SHALL 提供 web/index.html 三个容器标记与 script 引入及导出 initLevelSelect 的 web/level-select.js。",
+        "WHEN initLevelSelect 获得有效数据 THE SYSTEM SHALL 经 document 替身断言渲染名称、难度与锁定不可选状态。",
+        "WHEN fetchImpl 替身模拟请求失败或无效结构 THE SYSTEM SHALL 进入错误提示分支展示可读信息且保留页面框架不白屏。",
+        "WHEN 运行 WI-002 验证命令 THE SYSTEM SHALL 全部测试通过且执行非零个测试。"
+      ],
+      "source_refs": [
+        "AC-008",
+        "AC-009",
+        "AC-010",
+        "AC-011",
+        "CHECK-002",
+        "CT-001",
+        "CT-004",
+        "NFR-001",
+        "REQ-005",
+        "REQ-006",
+        "TASK-008",
+        "TASK-009",
+        "TASK-010",
+        "TASK-011"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_projection": {
+      "work_item_revision_id": "work_item_revision_b9605504f5afc1af4b3ff03c",
+      "objective": "WHEN 用户打开关卡选择页 THE SYSTEM SHALL 经 GET /api/levels 渲染关卡名称与难度并在失败或数据无效时保留页面框架展示可读错误提示。",
+      "required_input_contracts": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "task_refs": [
+        "TASK-008",
+        "TASK-009",
+        "TASK-010",
+        "TASK-011"
+      ],
+      "tasks": [
+        {
+          "task_id": "TASK-008",
+          "statement": "WHEN 构建 web/index.html 与 web/level-select.js THE SYSTEM SHALL 提供三个容器标记、script 引入并导出 initLevelSelect({ document, fetchImpl }) 且以相对路径引用 /api/levels。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-008"
+          ]
+        },
+        {
+          "task_id": "TASK-009",
+          "statement": "WHEN 收到有效关卡数据 THE SYSTEM SHALL 展示加载状态并渲染每项名称与难度且将 unlocked 为 false 的项呈现为锁定且不可选。",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "done_when_refs": [
+            "AC-009"
+          ]
+        },
+        {
+          "task_id": "TASK-010",
+          "statement": "WHEN 请求失败、非成功状态或响应结构无效 THE SYSTEM SHALL 展示可读错误提示并保留页面框架不白屏。",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "done_when_refs": [
+            "AC-010"
+          ]
+        },
+        {
+          "task_id": "TASK-011",
+          "statement": "WHEN 编写 tests/frontend 测试 THE SYSTEM SHALL 经 initLevelSelect 注入 document 与 fetchImpl 替身验证渲染、锁定与错误分支且不启动浏览器。",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "done_when_refs": [
+            "AC-011"
+          ]
+        }
+      ],
+      "write_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "acceptance_criteria": [
+        {
+          "criterion_id": "AC-008",
+          "statement": "WHEN 查看页面产物 THE SYSTEM SHALL 提供 web/index.html 三个容器标记与 script 引入及导出 initLevelSelect 的 web/level-select.js。",
+          "required_evidence": [
+            "source_diff"
+          ]
+        },
+        {
+          "criterion_id": "AC-009",
+          "statement": "WHEN initLevelSelect 获得有效数据 THE SYSTEM SHALL 经 document 替身断言渲染名称、难度与锁定不可选状态。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-010",
+          "statement": "WHEN fetchImpl 替身模拟请求失败或无效结构 THE SYSTEM SHALL 进入错误提示分支展示可读信息且保留页面框架不白屏。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        },
+        {
+          "criterion_id": "AC-011",
+          "statement": "WHEN 运行 WI-002 验证命令 THE SYSTEM SHALL 全部测试通过且执行非零个测试。",
+          "required_evidence": [
+            "non_zero_test_execution"
+          ]
+        }
+      ],
+      "verification_checks": [
+        {
+          "check_id": "CHECK-002",
+          "command": "find tests/frontend -name '*.test.js' | grep -q . && node --test 'tests/frontend/**/*.test.js'",
+          "manual_instruction": "可选人工验证，在浏览器打开页面确认 API 失败时错误提示可见且不白屏（对应 AC-010），不作为放行门槛",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_rules": [],
+      "handoff_contract": {
+        "required_fields": [
+          "page_entry_path、script_path、container_ids、init_interface"
+        ],
+        "provided_contract_refs": [
+          "CT-004"
+        ],
+        "reviewer_check_refs": [
+          "AC-008",
+          "AC-009",
+          "AC-010",
+          "AC-011"
+        ]
+      }
+    },
+    "reviewer_projection": {
+      "work_item_revision_id": "work_item_revision_b9605504f5afc1af4b3ff03c",
+      "criterion_refs": [
+        "AC-008",
+        "AC-009",
+        "AC-010",
+        "AC-011"
+      ],
+      "requirement_matrix": [
+        {
+          "criterion_id": "AC-008",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "source_diff"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-009",
+          "requirement_refs": [
+            "REQ-005"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-010",
+          "requirement_refs": [
+            "REQ-006"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        },
+        {
+          "criterion_id": "AC-011",
+          "requirement_refs": [
+            "NFR-001"
+          ],
+          "required_evidence": [
+            "non_zero_test_execution"
+          ],
+          "failure_route": "coder_rework"
+        }
+      ],
+      "scope_policy": {
+        "exclusive_scopes": [
+          "web/**",
+          "tests/frontend/**"
+        ],
+        "forbidden_scopes": [
+          "server/**",
+          "data/levels.json",
+          "tests/backend/**",
+          "tests/integration/**"
+        ]
+      },
+      "input_contract_checks": [
+        {
+          "contract_id": "CT-001",
+          "provider_logical_work_item_id": "WI-001",
+          "required_capabilities": [
+            "API 错误响应 Content-Type 为 application/json; charset=utf-8"
+          ],
+          "compatibility_policy": "require_all"
+        }
+      ],
+      "output_contract_checks": [
+        {
+          "contract_id": "CT-004",
+          "capabilities": [
+            "web/level-select.js 以相对路径引用 /api/levels"
+          ]
+        }
+      ],
+      "verification_evidence_rules": [
+        {
+          "check_id": "CHECK-002",
+          "command": "find tests/frontend -name '*.test.js' | grep -q . && node --test 'tests/frontend/**/*.test.js'",
+          "manual_instruction": "可选人工验证，在浏览器打开页面确认 API 失败时错误提示可见且不白屏（对应 AC-010），不作为放行门槛",
+          "required": true,
+          "non_zero_test_execution_required": true
+        }
+      ],
+      "blocker_routing": []
+    },
+    "human_projection_hash": "941be50801f0040e66aeab9a1ef23e6c77928178f8af93539c2d72f56bbdbab8",
+    "coder_projection_hash": "cb0d6b7ffd4777b51c54f711588524b0489891f795a0b98fa4e73e3fa9bee371",
+    "reviewer_projection_hash": "c16551e423051d75d32a7ff42cba38250090198dacf529bcc5d12aa5f4222b7e",
+    "created_at": "2026-09-10T20:50:58.882244522+00:00"
+  }
+}

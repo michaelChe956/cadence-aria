@@ -1,5 +1,7 @@
 import type {
   HumanPresentationRevision,
+  LcFreshOperationState,
+  LcResumeRecoveryDelivery,
   PlanProjectionBundle,
   ProviderConfigSnapshot,
   ProjectionValidationReport,
@@ -13,8 +15,10 @@ import type {
   WorkItemPlanOutlineCandidatePayload,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
+  UsageReportPayload,
   WsOutMessage,
 } from "../api/types";
+import type { TrustRegistrationReceipt } from "../state/workspace-ws-store-types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import {
   chatRoleForTimelineNode,
@@ -29,6 +33,12 @@ import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artif
 import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
 import { buildGatePromptEntry } from "../state/workspace-chat-rebuild";
+import { isStoryDesignAuthorConfirm } from "../state/workspace-cockpit-projection";
+import {
+  GATE_EXCLUSION_ERROR_CODE,
+  classifyGateExclusionError,
+  classifyProtocolError,
+} from "../state/cockpit-action-routing";
 
 export type WsServerMessage = WsOutMessage & Record<string, unknown>;
 
@@ -51,6 +61,9 @@ const store = useWorkspaceStore.getState();
       invalidatedPreStageNodeIds.clear();
       store.setSessionState(msg as never);
       store.rebuildChatEntries();
+      // F-27：choice 卡不依赖单帧送达——session_state 全量投影带挂起 choice，
+      // rebuild 后按 pending 补挂（幂等 upsert；pending 已移除的卡随 rebuild 消失）。
+      reconcilePendingChoiceRequests(store, msg);
       break;
     case "stream_chunk":
       {
@@ -79,8 +92,24 @@ const store = useWorkspaceStore.getState();
           isActiveProviderNode &&
           typeof nodeId === "string" &&
           !invalidatedPreStageNodeIds.has(nodeId);
+        // work_item_plan 的单候选流不进入 WorkspaceStage 状态机，stage 恒为 null；
+        // 以生成期标记和活跃 run 一同确认该 provider chunk 仍属当前生成。
+        const isSingleCandidateGenerating =
+          store.singleCandidatePhase === "generate" && Boolean(store.activeRunId);
+        // F-49 A6（前端半边）：门内修订（typed turn）在 human_confirm 阶段跑 provider，
+        // 而 ACTIVE_PROVIDER_STAGES 不含该阶段 ⇒ 整段修订流此前被丢弃，用户只看到门卡
+        // 状态变化（「author 修订步不可见」）。判据取「当前门有 in-flight 修订 turn」：
+        // turn 开出（open）或引擎回报 busy 期间该 provider chunk 必属本次修订。
+        const isHumanGateRevisionInFlight =
+          typeof nodeId === "string" &&
+          store.stage === "human_confirm" &&
+          store.humanGateTurn !== null &&
+          (store.humanGateTurn.status === "open" || store.humanGateTurn.status === "busy");
         const acceptsActiveProviderChunk =
-          ACTIVE_PROVIDER_STAGES.has(store.stage) || isPendingInitialProviderNode;
+          ACTIVE_PROVIDER_STAGES.has(store.stage) ||
+          isPendingInitialProviderNode ||
+          isSingleCandidateGenerating ||
+          isHumanGateRevisionInFlight;
         if (!acceptsActiveProviderChunk) {
           break;
         }
@@ -137,10 +166,18 @@ const store = useWorkspaceStore.getState();
           timestamp: new Date().toISOString(),
           metadata: { stage: nextStage },
         });
-        if (nextStage === "human_confirm") {
+        if (
+          nextStage === "human_confirm" ||
+          // F-20：story/design 的 AuthorConfirm 即人工门——live 转换同样落门卡，
+          // 否则门开瞬间无决策面（仅在 session_state 全量重建时才可见）。
+          isStoryDesignAuthorConfirm({
+            stage: nextStage,
+            workspaceType: useWorkspaceStore.getState().workspaceType,
+          })
+        ) {
           const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
           if (gatePrompt) {
-            store.appendChatEntry(gatePrompt);
+            store.upsertGatePromptEntry(gatePrompt);
           }
         }
       }
@@ -246,23 +283,20 @@ const store = useWorkspaceStore.getState();
       });
       break;
     case "choice_request":
-      store.appendChatEntry({
-        id: chatEntryId("choice_request", msg.id as string),
-        type: "choice_request",
-        role: "system",
-        content: msg.prompt as string,
-        timestamp: new Date().toISOString(),
-        node_id: store.activeNodeId ?? undefined,
-        metadata: {
-          request_id: msg.id as string,
-          prompt: msg.prompt as string,
-          options: (msg.options as unknown[]) ?? [],
-          questions: Array.isArray(msg.questions) ? msg.questions : [],
-          allow_multiple: msg.allow_multiple === true,
-          allow_free_text: msg.allow_free_text === true,
-          source: typeof msg.source === "string" ? msg.source : "provider_choice",
-        },
-      });
+      store.appendChatEntry(
+        choiceRequestEntry(
+          {
+            id: msg.id as string,
+            prompt: msg.prompt as string,
+            options: (msg.options as unknown[]) ?? [],
+            questions: msg.questions,
+            allow_multiple: msg.allow_multiple === true,
+            allow_free_text: msg.allow_free_text === true,
+            source: msg.source,
+          },
+          store.activeNodeId,
+        ),
+      );
       break;
     case "provider_status":
       store.setProviderStatus(msg.status as ProviderStatus);
@@ -270,6 +304,10 @@ const store = useWorkspaceStore.getState();
     case "execution_event":
       {
         const event = msg.event as ExecutionEvent;
+        if (event.kind === "usage") {
+          applyUsageEvent(store, event);
+          break;
+        }
         const provider = providerNameForNode(store, event.node_id ?? null, event.agent ?? null);
         store.upsertExecutionEvent(event);
         if (isProviderPromptEvent(event)) {
@@ -358,27 +396,54 @@ const store = useWorkspaceStore.getState();
         options: msg.options as string[],
       });
       break;
-    case "human_presentation_revision_saved":
-      store.completeHumanPresentationSave(msg.revision as HumanPresentationRevision);
-      break;
-    case "human_presentation_revision_save_failed":
-      store.failHumanPresentationSave(
-        msg.source_projection_bundle_id as string,
-        msg.message as string,
-      );
-      break;
-    case "error":
-      store.setError(msg.message as string);
+    // 退役留档（T5/REQ-RET-02）：human_presentation_revision_saved/save_failed
+    // 出站消息随保存命令族删除（wp5-attribution-table.md §2）。
+    case "error": {
+      const errorMessage = msg.message as string;
+      // P2（REQ-WSC-15 归因扩展）：排除-only 帧落盘失败回的是 WsOutMessage::Error
+      //（无 turn/command 关联字段，非 protocol_error）——「最近本地门动作是排除」
+      // 即归因到该门卡：落失败事实，门卡据此撤销乐观「已排除」并就地呈现原因。
+      // 归因一次即消费动作记录；全局 error 面行为保持不变（双呈现，不互相吞）。
+      const exclusionAttribution = classifyGateExclusionError(store);
+      if (exclusionAttribution !== null) {
+        store.applyGateExclusionFailure({
+          code: GATE_EXCLUSION_ERROR_CODE,
+          message: errorMessage,
+          gateKey: exclusionAttribution.gateKey,
+        });
+      }
+      store.setError(errorMessage);
+      // 指引卡简化（owner 2026-10-12 直批）：结构化指导只配对最近一次
+      // 错误——新 error 帧先清空旧指导；若本错误是 trust 缺失，服务端
+      // 紧随其后的 trust_missing_guidance 帧会立即重建。
+      store.applyTrustMissingGuidance(null);
       store.appendChatEntry({
-        id: chatEntryId("error", msg.message as string),
+        id: chatEntryId("error", errorMessage),
         type: "error",
         role: "system",
-        content: msg.message as string,
+        content: errorMessage,
         timestamp: new Date().toISOString(),
         metadata: {
-          message: msg.message as string,
+          message: errorMessage,
         },
       });
+      break;
+    }
+    case "trust_missing_guidance":
+      {
+        // 指引卡结构化指导（owner 2026-10-12 直批卡简化）：镜像 wire 字段
+        // 供收件箱卡「两行说明＋可复制命令窗」直渲，不解析平铺 error 文本。
+        store.applyTrustMissingGuidance({
+          providers: Array.isArray(msg.providers) ? (msg.providers as string[]) : [],
+          canonicalRoot: typeof msg.canonical_root === "string" ? msg.canonical_root : "",
+          reasonCode: typeof msg.reason_code === "string" ? msg.reason_code : "",
+          retryAction: typeof msg.retry_action === "string" ? msg.retry_action : "",
+          commandMarkdown:
+            typeof msg.command_markdown === "string" && msg.command_markdown !== ""
+              ? msg.command_markdown
+              : null,
+        });
+      }
       break;
     case "protocol_error":
       {
@@ -390,22 +455,35 @@ const store = useWorkspaceStore.getState();
             store.rejectChoiceRequest(choiceId, message);
           }
         }
-        store.setProtocolError({
+        const disposition = classifyProtocolError(code, msg.context, store);
+        if (disposition.kind === "gate") {
+          store.applyGateProtocolError(disposition.turnId, { code, message });
+        } else if (disposition.kind === "advance") {
+          store.applyAdvanceProtocolError(disposition.commandId, { code, message });
+        } else {
+          store.setProtocolError({ code, message });
+          store.appendChatEntry({
+            id: chatEntryId("protocol_error", `${code}:${message}`),
+            type: "error",
+            role: "system",
+            content: `${code} · ${message}`,
+            timestamp: new Date().toISOString(),
+            metadata: { code, message },
+          });
+        }
+        store.recordProtocolDiagnostic({
           code,
           message,
+          at: new Date().toISOString(),
+          type: "protocol_error",
         });
+        if (disposition.kind === "gate") {
+          const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+          if (gatePrompt) {
+            store.upsertGatePromptEntry(gatePrompt);
+          }
+        }
       }
-      store.appendChatEntry({
-        id: chatEntryId("protocol_error", `${msg.code as string}:${msg.message as string}`),
-        type: "error",
-        role: "system",
-        content: `${msg.code as string} · ${msg.message as string}`,
-        timestamp: new Date().toISOString(),
-        metadata: {
-          code: msg.code as string,
-          message: msg.message as string,
-        },
-      });
       break;
     case "provider_locked":
       store.setProviderLocked({
@@ -426,8 +504,247 @@ const store = useWorkspaceStore.getState();
       break;
     case "pong":
       break;
+    case "human_gate_turn_open":
+      {
+        store.applyHumanGateTurnOpen(
+          msg.turn_id as string,
+          msg.command_id as string,
+          msg.remaining_budget as number,
+        );
+        // 同 turn_id 重放时 buildGatePromptEntry 产出同一 id，appendChatEntry 为 upsert：
+        // 不新建门卡条目（去重键 turn_id）。
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.upsertGatePromptEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_turn_completed":
+      {
+        store.applyHumanGateTurnCompleted(
+          msg.turn_id as string,
+          msg.artifact_ref as string,
+        );
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.upsertGatePromptEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_turn_failed":
+      {
+        store.applyHumanGateTurnFailed(
+          msg.turn_id as string,
+          msg.failure_class as string,
+          msg.message as string,
+        );
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.upsertGatePromptEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_turn_rejected":
+      {
+        // REQ-WSC-14：终态 validation_reject 的可操作事实（原因/下一步/逐字
+        // 诊断），门卡据此告诉 owner 发生了什么、下一步怎么做。
+        store.applyHumanGateTurnRejected(msg.turn_id as string, {
+          rejected_feedback: String(msg.rejected_feedback ?? ""),
+          rejection_reason: String(msg.rejection_reason ?? ""),
+          rejection_next_actions: Array.isArray(msg.rejection_next_actions)
+            ? (msg.rejection_next_actions as string[])
+            : [],
+          rejection_diagnostics: Array.isArray(msg.rejection_diagnostics)
+            ? (msg.rejection_diagnostics as string[])
+            : [],
+        });
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.upsertGatePromptEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_exclusions_accepted": {
+      // REQ-WSC-13（k3 P0-2A）：排除-only 帧的受理回执——引擎已把排除项落
+      // durable 已处置清单（未建修订 turn）。门卡「已排除」由点击时的乐观
+      // 置位呈现（REQ-WSC-15），此帧只是确认，findings 出站不变，无需重建。
+      // P2（REQ-WSC-15 归因扩展）：回执同时消费归因标记并清残留失败事实——
+      // 排除已 durable 成立，紧随其后的无关 error 帧不得被误归因成排除失败。
+      store.resolveGateExclusion();
+      break;
+    }
+    case "human_gate_busy":
+      store.applyHumanGateBusy(msg.turn_id as string);
+      break;
+    case "human_gate_closed":
+      {
+        const decision = msg.decision as "confirm" | "terminate";
+        store.applyHumanGateClosed(decision, msg.stage as string);
+        store.resolveGateEntry(decision);
+      }
+      break;
+    case "advance_completed":
+      store.applyAdvanceCompleted(
+        msg.command_id as string,
+        msg.attempt_id as string,
+        msg.workspace_entry as string,
+      );
+      break;
+    case "advance_rejected":
+      store.applyAdvanceRejected(
+        msg.command_id as string,
+        msg.code as string,
+        msg.reason as string,
+      );
+      break;
+    case "lc_resume_recovery_operation_result":
+      {
+        // C2（Task 6.2，设计 §5.1）：typed 结果帧对账。recovery_id 必须匹配
+        // store 当前权威恢复——被新漂移替换/权威帧清空后的迟到帧静默丢弃
+        //（不伪造回执、不计协议漂移）。delivery=replayed 为服务端只读回放
+        // 已受理 operation：不重复执行（不重发 start_generation、不触发
+        // retry/advance）。operation_state 直取 wire durable 事实，unknown/
+        // failed 不乐观标成败、不自动换新 ID 重发；回执按 operation_id+
+        // delivery+state 幂等 upsert，权威恢复状态仍由 session_state.
+        // lc_resume_recovery 全量替换承载（本帧不写恢复状态、不从错误
+        // 字符串推导权限）。
+        const recovery = store.lcResumeRecovery;
+        if (recovery && recovery.recovery_id === msg.recovery_id) {
+          const delivery = msg.delivery;
+          const operationState = msg.operation_state;
+          store.appendChatEntry({
+            id: chatEntryId(
+              "lc_resume_recovery_operation_result",
+              `${msg.recovery_id}:${msg.operation_id}:${delivery}:${operationState}`,
+            ),
+            type: "start_generation",
+            role: "system",
+            content: lcResumeOperationReceiptContent(
+              delivery,
+              operationState,
+              msg.reason_code ?? null,
+            ),
+            timestamp: new Date().toISOString(),
+            metadata: {
+              recovery_id: msg.recovery_id,
+              operation_id: msg.operation_id,
+              delivery,
+              operation_state: operationState,
+              fresh_node_id: msg.fresh_node_id ?? null,
+              reason_code: msg.reason_code ?? null,
+            },
+          });
+        }
+      }
+      break;
+    case "trust_entry_registered":
+      {
+        // 「登记并重试」typed 回执对账（owner 2026-10-12 直批）：只记录
+        // 最近回执供卡片切「已登记，请显式重新生成」态；不自动重新生成、
+        // 不清除 error 原文（成功态由 provider 匹配判定）。
+        store.applyTrustEntryRegistered({
+          provider: msg.provider as TrustRegistrationReceipt["provider"],
+          action: msg.action as TrustRegistrationReceipt["action"],
+          trust_key: msg.trust_key as string,
+          canonical_root: msg.canonical_root as string,
+          registered_at: msg.registered_at as string,
+        });
+      }
+      break;
+    // 已知协议成员但本 handler 不做处理：linked_workspace_amendment_created 由
+    // useWorkspaceWs 的 aggregatePlanRepairChildMessage 下游消费（该消息仍会流经本 switch），
+    // provider_select_request 为协议保留成员。二者都不属于协议漂移，不计诊断——
+    // 否则每次到达都会写假诊断，并挤占 protocolDiagnostics 的 50 条上限。
+    case "linked_workspace_amendment_created":
+    case "provider_select_request":
+      break;
+    default:
+      {
+        // default 分支里联合类型已收窄为 never，无法直读判别字段；
+        // 回到未收窄的字典视图读取原始事件名（WsServerMessage 自带 Record<string, unknown>）。
+        const rawMessage: Record<string, unknown> = msg;
+        const unknownEventType = String(rawMessage["type"]);
+        store.recordProtocolDiagnostic({
+          code: "UNRECOGNIZED_EVENT",
+          message: `未识别的出向事件类型：${unknownEventType}`,
+          at: new Date().toISOString(),
+          type: unknownEventType,
+        });
+      }
+      break;
   }
 }
+
+type ChoiceRequestFrame = {
+  id: string;
+  prompt: string;
+  options: unknown[];
+  questions: unknown;
+  allow_multiple: boolean;
+  allow_free_text: boolean;
+  source: unknown;
+};
+
+// choice 卡 chat entry 的唯一构造点：live choice_request 帧与 F-27
+// session_state pending 对账共用，保证两路径逐字段同构；appendChatEntry 按
+// id upsert，同 id 重放不产生重复卡。
+function choiceRequestEntry(frame: ChoiceRequestFrame, nodeId: string | null): ChatEntry {
+  return {
+    id: chatEntryId("choice_request", frame.id),
+    type: "choice_request",
+    role: "system",
+    content: frame.prompt,
+    timestamp: new Date().toISOString(),
+    node_id: nodeId ?? undefined,
+    metadata: {
+      request_id: frame.id,
+      prompt: frame.prompt,
+      options: frame.options ?? [],
+      questions: Array.isArray(frame.questions) ? frame.questions : [],
+      allow_multiple: frame.allow_multiple === true,
+      allow_free_text: frame.allow_free_text === true,
+      source: typeof frame.source === "string" ? frame.source : "provider_choice",
+    },
+  };
+}
+
+// F-27：session_state 全量投影对账——挂起 choice（provider pending 与
+// TextFallback pending 双来源同数组）若尚未挂卡则补挂；pending 已移除的卡
+// 已随 rebuildChatEntries 消失，不重挂即不残留 stale 卡。畸形条目跳过。
+function reconcilePendingChoiceRequests(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  msg: WsServerMessage,
+) {
+  const pending = msg.pending_choice_requests;
+  if (!Array.isArray(pending)) {
+    return;
+  }
+  for (const raw of pending) {
+    if (
+      !isRecord(raw) ||
+      typeof raw.id !== "string" ||
+      raw.id.length === 0 ||
+      typeof raw.prompt !== "string"
+    ) {
+      continue;
+    }
+    store.appendChatEntry(
+      choiceRequestEntry(
+        {
+          id: raw.id,
+          prompt: raw.prompt,
+          options: Array.isArray(raw.options) ? raw.options : [],
+          questions: raw.questions,
+          allow_multiple: raw.allow_multiple === true,
+          allow_free_text: raw.allow_free_text === true,
+          source: raw.source,
+        },
+        store.activeNodeId,
+      ),
+    );
+  }
+}
+
 
 function handleStreamChunk(store: ReturnType<typeof useWorkspaceStore.getState>, msg: WsServerMessage) {
   const nodeId = resolveStreamEntryNodeId(store, msg.node_id as string | null | undefined);
@@ -467,6 +784,41 @@ function resolveStreamEntryNodeId(
   nodeId?: string | null,
 ) {
   return nodeId ?? store.activeNodeId ?? "global";
+}
+
+function applyUsageEvent(
+  store: ReturnType<typeof useWorkspaceStore.getState>,
+  event: ExecutionEvent,
+) {
+  const usage = parseUsagePayload(event.output);
+  if (!usage) {
+    return;
+  }
+  const nodeId = event.node_id ?? store.activeNodeId ?? null;
+  const entryId = `${nodeId ?? "global"}:stream-active`;
+  store.setEntryUsage(entryId, usage);
+}
+
+export function parseUsagePayload(output: string | null | undefined): UsageReportPayload | null {
+  if (typeof output !== "string" || output.length === 0) {
+    return null;
+  }
+  try {
+    const value = JSON.parse(output) as Record<string, unknown>;
+    const numberOrNull = (key: string) => {
+      const raw = value[key];
+      return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+    };
+    return {
+      role: typeof value.role === "string" ? value.role : null,
+      input_tokens: numberOrNull("input_tokens"),
+      output_tokens: numberOrNull("output_tokens"),
+      cache_read_tokens: numberOrNull("cache_read_tokens"),
+      cache_creation_tokens: numberOrNull("cache_creation_tokens"),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function streamEntryId(nodeId: string | null | undefined) {
@@ -537,6 +889,31 @@ function workItemPlanArtifactFromMessage(msg: WsServerMessage): WorkItemPlanArti
 
 function permissionRequestContent(request: { tool_name: string; description: string }) {
   return request.description ? `${request.tool_name} · ${request.description}` : request.tool_name;
+}
+
+// C2（Task 6.2，设计 §5.1/§6）：typed 结果回执文案——三态（running/
+// resolved/prepare 失败）＋unknown/not_started 非乐观收口；replayed 标注
+// 只读回放（不重复执行）。事实性文案，动作资格仍由 wire allowed_actions
+// 镜像，不从 reason_code/错误文本推导。
+function lcResumeOperationReceiptContent(
+  delivery: LcResumeRecoveryDelivery,
+  operationState: LcFreshOperationState,
+  reasonCode: string | null,
+) {
+  const replaySuffix = delivery === "replayed" ? "（回放）" : "";
+  switch (operationState) {
+    case "reserved":
+    case "running":
+      return `LC 恢复：新原生会话正在启动${replaySuffix}`;
+    case "completed":
+      return `LC 恢复：新原生会话已完成${replaySuffix}`;
+    case "failed":
+      return `LC 恢复：新原生会话启动准备失败${reasonCode ? `（${reasonCode}）` : ""}${replaySuffix}`;
+    case "unknown":
+      return `LC 恢复：operation 状态未知，等待权威对账${replaySuffix}`;
+    case "not_started":
+      return `LC 恢复：operation 尚未启动${replaySuffix}`;
+  }
 }
 
 function executionEventContent(event: ExecutionEvent, nodeTitle?: string | null) {

@@ -6,15 +6,40 @@ import type {
   CodingProviderSelectRole,
   CodingWsInMessage,
   CodingWsOutMessage,
+  ExecutionEvent,
   WorkspaceProviderName,
 } from "../api/types";
+import {
+  AUTOMATION_PLAN_TERMINATION_REQUIRED,
+  parseAutomationTerminationIdentity,
+} from "../api/client";
 import type { ChoiceResponsePayload } from "../state/chat-entries";
 import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
-import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import { useCodingLogStore } from "../state/coding-log-store";
+import {
+  SESSION_INVALID_PROTOCOL_CODES,
+  useCodingWorkspaceStore,
+} from "../state/coding-workspace-store";
+import { useOperationAuditStore } from "../state/operation-audit-store";
+import { CODING_START_REJECTION_COPY } from "../state/cockpit-operation-semantics";
 
 interface CodingWsServerMessage {
   type: string;
   [key: string]: unknown;
+}
+
+/**
+ * scoped coding WS URL。控制面边界为 Host/Origin 来源校验（无会话/令牌），
+ * URL 一律不加令牌/查询参数。
+ */
+export function scopedCodingAttemptWebSocketUrl(
+  projectId: string,
+  issueId: string,
+  attemptId: string,
+  location: Pick<Location, "protocol" | "host"> = window.location,
+): string {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${location.host}/ws/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/coding-attempts/${encodeURIComponent(attemptId)}`;
 }
 
 const STREAM_CHUNK_FLUSH_MS = 50;
@@ -26,6 +51,8 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const startupAuditRecordIdsRef = useRef(new Map<string, string>());
+  const replayedLogEventIdsRef = useRef(new Set<string>());
 
   useLayoutEffect(() => {
     const ws = wsRef.current;
@@ -39,7 +66,9 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    replayedLogEventIdsRef.current.clear();
     useCodingWorkspaceStore.getState().reset();
+    useCodingLogStore.getState().reset();
   }, [attemptId, issueId, projectId]);
 
   const sendJson = useCallback((message: CodingWsInMessage) => {
@@ -62,8 +91,35 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
   );
 
   const startCoding = useCallback(() => {
-    sendJson({ type: "start_coding" });
-  }, [sendJson]);
+    if (!attemptId || !sendJson({ type: "start_coding" })) return false;
+    const recordId = useOperationAuditStore.getState().record({
+      sessionId: attemptId,
+      gateId: null,
+      operation: "start_coding",
+      source: "coding",
+      outcome: "sent",
+      detail: null,
+    });
+    startupAuditRecordIdsRef.current.set(attemptId, recordId);
+    return true;
+  }, [attemptId, sendJson]);
+
+  // F-44：中止/失败终态的显式「重新开始」——与 startCoding 同一用户意图
+  // （发起一次 coding 启动）与同一审计/拒绝生命周期，仅 wire 动词不同：
+  // 后端只对终态放行 restart_coding，并重走 admission CAS 回 Running 再 spawn。
+  const restartCoding = useCallback(() => {
+    if (!attemptId || !sendJson({ type: "restart_coding" })) return false;
+    const recordId = useOperationAuditStore.getState().record({
+      sessionId: attemptId,
+      gateId: null,
+      operation: "start_coding",
+      source: "coding",
+      outcome: "sent",
+      detail: null,
+    });
+    startupAuditRecordIdsRef.current.set(attemptId, recordId);
+    return true;
+  }, [attemptId, sendJson]);
 
   const sendContextNote = useCallback(
     (content: string) => {
@@ -164,6 +220,10 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
     sendJson({ type: "final_confirm" });
   }, [sendJson]);
 
+  const retryPush = useCallback(() => {
+    sendJson({ type: "retry_push" });
+  }, [sendJson]);
+
   const abortAttempt = useCallback(() => {
     sendJson({ type: "abort_attempt" });
   }, [sendJson]);
@@ -234,9 +294,8 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
 
     function connect(reconnecting: boolean) {
       if (disposed) return;
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(
-        `${protocol}//${window.location.host}/ws/projects/${encodeURIComponent(scopedProjectId)}/issues/${encodeURIComponent(scopedIssueId)}/coding-attempts/${encodeURIComponent(scopedAttemptId)}`,
+        scopedCodingAttemptWebSocketUrl(scopedProjectId, scopedIssueId, scopedAttemptId),
       );
       wsRef.current = ws;
       useCodingWorkspaceStore
@@ -282,7 +341,10 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
       ws.onmessage = (event) => {
         if (disposed || wsRef.current !== ws) return;
         try {
-          handleCodingWsMessage(JSON.parse(event.data) as CodingWsServerMessage, streamBatcher);
+          const message = JSON.parse(event.data) as CodingWsServerMessage;
+          markStartupRejection(message, scopedAttemptId, startupAuditRecordIdsRef.current);
+          markStartupCompletion(message, scopedAttemptId, startupAuditRecordIdsRef.current);
+          handleCodingWsMessage(message, streamBatcher, replayedLogEventIdsRef.current);
         } catch {
           // Ignore malformed websocket messages; backend protocol errors are handled explicitly.
         }
@@ -304,6 +366,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
 
   return {
     startCoding,
+    restartCoding,
     sendContextNote,
     sendProviderSelect,
     sendPermissionModeSelect,
@@ -313,6 +376,7 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
     respondChoice,
     respondGate,
     finalConfirm,
+    retryPush,
     abortAttempt,
     requestManualPause,
     sendHello,
@@ -343,6 +407,15 @@ function createCodingStreamBatcher() {
     pending.delete(key);
     if (item.content && useCodingWorkspaceStore.getState().status !== "aborted") {
       useCodingWorkspaceStore.getState().appendStreamChunk(item.content, item.nodeId);
+      useCodingLogStore.getState().appendLines([
+        {
+          nodeId: item.nodeId,
+          nodeTitle: codingLogNodeTitle(item.nodeId),
+          text: item.content,
+          at: new Date().toISOString(),
+          kind: "stream",
+        },
+      ]);
     }
   }
 
@@ -385,12 +458,17 @@ function createCodingStreamBatcher() {
   };
 }
 
-function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: CodingStreamBatcher) {
+function handleCodingWsMessage(
+  message: CodingWsServerMessage,
+  streamBatcher: CodingStreamBatcher,
+  replayedLogEventIds: Set<string>,
+) {
   const store = useCodingWorkspaceStore.getState();
   switch (message.type) {
     case "coding_session_state":
       streamBatcher.clear();
       store.setSessionState(message as Extract<CodingWsOutMessage, { type: "coding_session_state" }>);
+      replayCodingLogLines(message, replayedLogEventIds);
       break;
     case "coding_stage_change":
       store.updateStage(message.stage as never);
@@ -421,15 +499,24 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
       streamBatcher.flush((message.node_id as string | null | undefined) ?? null);
       store.completeStream((message.node_id as string | null | undefined) ?? null);
       break;
-    case "coding_execution_event":
+    case "coding_execution_event": {
+      const event = (message as Extract<CodingWsOutMessage, { type: "coding_execution_event" }>).event;
       if (store.status === "aborted") {
         break;
       }
       streamBatcher.flushAll();
-      store.addExecutionEvent(
-        (message as Extract<CodingWsOutMessage, { type: "coding_execution_event" }>).event,
-      );
+      useCodingLogStore.getState().appendLines([
+        {
+          nodeId: event.node_id ?? null,
+          nodeTitle: codingLogNodeTitle(event.node_id ?? null),
+          text: codingExecutionEventLogText(event),
+          at: new Date().toISOString(),
+          kind: "event",
+        },
+      ]);
+      store.addExecutionEvent(event);
       break;
+    }
     case "coding_permission_request": {
       const request = message as Extract<
         CodingWsOutMessage,
@@ -466,6 +553,11 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
           options: request.options,
           allow_multiple: request.allow_multiple,
           allow_free_text: request.allow_free_text,
+          // P2-e（REQ-CRO-11）：帧带 questions 透传进 metadata（多题逐题作答
+          // 数据源）；旧帧缺省不落键，卡片按单一 default 题回落。
+          ...(request.questions && request.questions.length > 0
+            ? { questions: request.questions }
+            : {}),
         },
       });
       break;
@@ -514,14 +606,36 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
         (message as Extract<CodingWsOutMessage, { type: "coding_provider_config_updated" }>).provider,
       );
       break;
-    case "coding_protocol_error":
+    case "coding_protocol_error": {
+      const code = message.code as string;
+      if (code === AUTOMATION_PLAN_TERMINATION_REQUIRED) {
+        // 批 2 T4（REQ-WIGA-09）：托管 plan 的旧 Abort/门动作 Abort 被服务端
+        // 路由为统一终止要求——只打开统一二次确认面（终止提示而非错误
+        // 弹窗），不落 protocolError/门错误；message 为 JSON 身份载荷。
+        const current = useCodingWorkspaceStore.getState();
+        const identity = parseAutomationTerminationIdentity(message.message);
+        current.openTerminationConfirm({
+          projectId: current.projectId ?? "",
+          issueId: current.issueId ?? "",
+          enrollmentId: identity?.enrollment_id ?? null,
+          policyRevision: identity?.policy_revision ?? null,
+        });
+        break;
+      }
       store.setProtocolError({
-        code: message.code as string,
+        code,
         message: message.message as string,
       });
-      markSubmittingGateError(message.code as string);
+      // 会话失效最小提示（owner 2026-10-25 真机）：服务端已经找不到该
+      // attempt（删除/换代）或作用域对不上——页面持有的身份必然陈旧，
+      // 置位页面级提示，要求用户刷新后再操作；不在此做大规模会话失效重构。
+      if (SESSION_INVALID_PROTOCOL_CODES.includes(code)) {
+        store.markSessionInvalidated();
+      }
+      markSubmittingGateError(code);
       rejectCodingChoiceRequestFromError(message.message as string);
       break;
+    }
     case "plan_repair_required": {
       const repair = message as Extract<CodingWsOutMessage, { type: "plan_repair_required" }>;
       store.setPlanRepairRequired(repair);
@@ -542,6 +656,62 @@ function handleCodingWsMessage(message: CodingWsServerMessage, streamBatcher: Co
   }
 }
 
+function markStartupRejection(
+  message: CodingWsServerMessage,
+  attemptId: string,
+  startupAuditRecordIds: Map<string, string>,
+) {
+  if (
+    message.type !== "coding_protocol_error" ||
+    !CODING_START_REJECTION_COPY[message.code as string]
+  ) {
+    return;
+  }
+  const recordId = startupAuditRecordIds.get(attemptId);
+  if (!recordId) return;
+  const record = useOperationAuditStore
+    .getState()
+    .records
+    .find((candidate) =>
+      candidate.id === recordId &&
+      candidate.sessionId === attemptId &&
+      candidate.operation === "start_coding" &&
+      candidate.source === "coding" &&
+      candidate.outcome === "sent",
+    );
+  if (!record) return;
+  useOperationAuditStore.getState().markRejected(recordId, message.code as string);
+  startupAuditRecordIds.delete(attemptId);
+}
+
+function markStartupCompletion(
+  message: CodingWsServerMessage,
+  attemptId: string,
+  startupAuditRecordIds: Map<string, string>,
+) {
+  if (
+    message.type !== "coding_session_state" ||
+    (message.status !== "running" && message.stage === "prepare_context")
+  ) {
+    return;
+  }
+  const recordId = startupAuditRecordIds.get(attemptId);
+  if (!recordId) return;
+  const record = useOperationAuditStore
+    .getState()
+    .records
+    .find((candidate) =>
+      candidate.id === recordId &&
+      candidate.sessionId === attemptId &&
+      candidate.operation === "start_coding" &&
+      candidate.source === "coding" &&
+      candidate.outcome === "sent",
+    );
+  if (!record) return;
+  useOperationAuditStore.getState().markCompleted(recordId);
+  startupAuditRecordIds.delete(attemptId);
+}
+
 function pendingContextNoteId() {
   return `pending_context_note_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
@@ -558,7 +728,10 @@ function gateActionRequiresContext(actionId: string) {
   return (
     actionId === "manual_continue" ||
     actionId === "accept_risk" ||
-    actionId === "send_to_coder"
+    actionId === "send_to_coder" ||
+    // P2-d（REQ-CRO-09/A4）：说明情况重试需非空 extra_context，
+    // 空提交直接置 coding_gate_extra_context_required，不发 WS 帧。
+    actionId === "retry_coding_with_context"
   );
 }
 
@@ -628,4 +801,40 @@ function rejectCodingChoiceRequestFromError(message: string) {
 
 function choiceIdFromProtocolError(message: string) {
   return message.match(/^ChoiceResponse id=([^ ]+)/)?.[1] ?? null;
+}
+
+function codingLogNodeTitle(nodeId: string | null): string | null {
+  if (!nodeId) return null;
+  return useCodingWorkspaceStore.getState().timelineNodes.find((node) => node.id === nodeId)?.title ?? null;
+}
+
+function codingExecutionEventLogText(event: ExecutionEvent): string {
+  return [event.title, event.command].filter(Boolean).join(" · ");
+}
+
+/// F-13 刷新回放：快照携带的历史执行事件同步装载到运行日志（Logs 面板），
+/// 与实时 coding_execution_event 的日志写入同构。
+function replayCodingLogLines(
+  message: CodingWsServerMessage,
+  replayedEventIds: Set<string>,
+) {
+  const replays = (message.execution_events ?? []) as {
+    event: ExecutionEvent;
+    created_at: string;
+  }[];
+  const pending = replays.filter(({ event }) => {
+    if (replayedEventIds.has(event.event_id)) return false;
+    replayedEventIds.add(event.event_id);
+    return true;
+  });
+  if (pending.length === 0) return;
+  useCodingLogStore.getState().appendLines(
+    pending.map(({ event, created_at }) => ({
+      nodeId: event.node_id ?? null,
+      nodeTitle: codingLogNodeTitle(event.node_id ?? null),
+      text: codingExecutionEventLogText(event),
+      at: created_at,
+      kind: "event" as const,
+    })),
+  );
 }

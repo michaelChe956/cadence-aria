@@ -12,6 +12,7 @@ async fn coding_amendment_completed_replay_allows_bound_execution_context() {
         .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
         .await
         .unwrap();
+    settle_amendment_delivery(&fixture, &applied).await;
     let run = fixture
         .store
         .list_unit_runs_by_logical_id(&applied, "work_item_0001")
@@ -54,6 +55,7 @@ async fn coding_amendment_completed_replay_allows_completed_unit_run() {
         .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
         .await
         .unwrap();
+    settle_amendment_delivery(&fixture, &applied).await;
     let run = fixture
         .store
         .list_unit_runs_by_logical_id(&applied, "work_item_0001")
@@ -95,6 +97,7 @@ async fn coding_amendment_completed_replay_preserves_later_attempt_stage() {
             .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
             .await
             .unwrap();
+        settle_amendment_delivery(&fixture, &applied).await;
         let progressed = fixture
             .store
             .update_attempt_stage(
@@ -136,6 +139,7 @@ async fn coding_amendment_completed_replay_accepts_group_completion_head_evoluti
         .apply_plan_amendment(&prepared, &fixture.manifest)
         .await
         .unwrap();
+    settle_amendment_delivery(&fixture, &applied).await;
     let materialized = fixture
         .store
         .list_unit_runs_by_logical_id(&applied, "work_item_0001")
@@ -214,6 +218,7 @@ async fn coding_amendment_completed_replay_accepts_provider_renderer_context_evo
         .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
         .await
         .unwrap();
+    settle_amendment_delivery(&fixture, &applied).await;
     let mut providers = fixture
         .store
         .get_role_provider_config_snapshot(&applied.project_id, &applied.issue_id, &applied.id)
@@ -312,4 +317,46 @@ async fn coding_amendment_completed_replay_accepts_provider_renderer_context_evo
         persisted.reviewer_execution_context_hash,
         Some(reviewer.content_hash)
     );
+}
+
+/// Completed replay 的前置条件确定性：amendment apply 收尾时已经释放 plan 的
+/// `active_amendment_id`，因此 `recover_plan_amendment` 面经
+/// `current_amendment_journal_id` 认定「当前 amendment」时，唯一可用的依据是
+/// 该 amendment 的 durable delivery 状态 == `Delivered`；否则候选为空，返回
+/// `IdentityMismatch { kind: "coding_plan_amendment_application" }`。
+///
+/// 推进该状态的是 `spawn_plan_amendment_delivery_observation` 起的 detached
+/// 任务（send → 夹具 socket 写回执 → mark Delivered），apply 本身不等它。
+/// 测试若直接 replay 就是与调度次序赛跑：全量并行负载下偶发红（隔离运行常绿）。
+/// 这里等到 durable 收口再 replay——前置条件是事件而非墙钟，断言强度不变。
+async fn settle_amendment_delivery(fixture: &AmendmentFixture, attempt: &CodingExecutionAttempt) {
+    use crate::product::coding_models::CodingPlanAmendmentDeliveryStatus;
+
+    const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // 幂等落记录（与 detached 任务同一把 path 锁），避免读到「记录尚未创建」。
+    fixture
+        .store
+        .load_or_prepare_plan_amendment_delivery(attempt, &fixture.manifest.id)
+        .expect("prepare amendment delivery record");
+    let deadline = tokio::time::Instant::now() + SETTLE_TIMEOUT;
+    loop {
+        let status = fixture
+            .store
+            .get_plan_amendment_delivery(attempt, &fixture.manifest.id)
+            .expect("read amendment delivery record")
+            .status;
+        match status {
+            CodingPlanAmendmentDeliveryStatus::Delivered => return,
+            CodingPlanAmendmentDeliveryStatus::Unsent => panic!(
+                "夹具的 socket 写回执未在投递窗口内确认（delivery=Unsent）：replay 前置条件不成立"
+            ),
+            CodingPlanAmendmentDeliveryStatus::Pending => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "amendment delivery 未在 {SETTLE_TIMEOUT:?} 内收口：detached 投递观察未推进（status={status:?}）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
 }

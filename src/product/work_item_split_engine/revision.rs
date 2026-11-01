@@ -150,6 +150,7 @@ fn materialize_redo_items(
             project_id: issue.project_id.clone(),
             issue_id: issue.id.clone(),
             repository_id: repository.id.clone(),
+            target_repository_id: None,
             story_spec_ids: request.story_spec_ids.clone(),
             design_spec_ids: request.design_spec_ids.clone(),
             title: item.title.clone(),
@@ -324,6 +325,8 @@ fn build_revision_provider_output(
         project_id: issue.project_id.clone(),
         issue_id: issue.id.clone(),
         repository_id: repository.id.clone(),
+        logical_repository_id: None,
+        membership_revision: 0,
         provider_run_ref: Some(provider_run_ref.clone()),
         languages: parsed_profile.languages,
         frameworks: parsed_profile.frameworks,
@@ -367,6 +370,8 @@ fn build_revision_provider_output(
         created_from_provider_run: Some(provider_run_ref),
         validator_findings: Vec::new(),
         review_summary: None,
+        // D1.4：候选 parser 内存 record 不把旧未知当新 false；实际 root 创建决定。
+        ever_confirmed: None,
         created_at: String::new(),
         updated_at: String::new(),
     };

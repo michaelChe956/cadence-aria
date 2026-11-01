@@ -1,69 +1,6 @@
-#[tokio::test]
-async fn work_item_plan_outline_optional_choice_can_apply_findings() {
-    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_apply_optional");
-    engine.session.stage = WorkspaceStage::ReviewDecision;
-    engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
-        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(Vec::new()),
-            design_context_gaps: vec![],
-            validator_findings: vec![],
-            context_blockers: vec![],
-            current_generation_round_id: Some("round_0001".to_string()),
-            selected_generation_mode: None,
-        }),
-    });
-    engine.latest_review_verdict = Some(ReviewVerdict {
-        verdict: ReviewVerdictType::Pass,
-        comments: "当前 outline 可以继续，但有可选建议".to_string(),
-        summary: "仅有可选建议".to_string(),
-        findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Suggestion,
-            message: "handoff 描述可以更明确".to_string(),
-            evidence: "handoff_strategy 只有简短描述".to_string(),
-            impact: "不影响 Draft 生成".to_string(),
-            required_action: "补充上下游交接说明".to_string(),
-        }],
-        review_gate: ReviewGate::UserConfirmAllowed,
-        work_item_plan_review: Some(WorkItemPlanReviewComplete {
-            verdict: WorkItemPlanReviewVerdict::Pass,
-            review_scope: WorkItemPlanReviewScope::Outline,
-            target_outline_id: None,
-            generation_round_id: "round_0001".to_string(),
-            draft_id: None,
-            batch_id: None,
-            review_action: WorkItemPlanReviewAction::Continue,
-            gates: Vec::new(),
-            affects_items: Vec::new(),
-            warnings: Vec::new(),
-        }),
-        structured_output_diagnostic: None,
-    });
-    engine
-        .enter_review_decision(1, "仅有可选建议".to_string())
-        .await;
-
-    let outcome = engine
-        .handle_review_decision("apply_optional_findings".to_string(), None)
-        .await
-        .expect("apply optional findings should restart outline author");
-
-    let ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback } = outcome else {
-        panic!("expected outline revision outcome");
-    };
-    let feedback = feedback.expect("outline revision feedback");
-    assert!(feedback.contains("Reviewer 摘要: 仅有可选建议"));
-    assert!(feedback.contains("Reviewer 审核意见:\n当前 outline 可以继续，但有可选建议"));
-    assert!(feedback.contains("[suggestion] handoff 描述可以更明确"));
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-    assert!(
-        !engine
-            .timeline_nodes
-            .iter()
-            .any(|node| node.node_type == TimelineNodeType::Revision),
-        "optional outline findings should use WorkItemPlan outline revision, not generic revision"
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_outline_optional_choice_can_apply_findings` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
@@ -71,8 +8,12 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
         make_work_item_plan_engine_with_draft_candidate("sess_wip_item_optional_review");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    let draft_payload =
-        work_item_draft_artifact_payload(&plan_id, "outline_a", "draft_a", WorkItemDraftStatus::Draft);
+    let draft_payload = work_item_draft_artifact_payload(
+        &plan_id,
+        "outline_a",
+        "draft_a",
+        WorkItemDraftStatus::Draft,
+    );
     engine.update_artifact(draft_payload).await;
     let review_node_id = engine
         .create_timeline_node(TimelineNodeDraft {
@@ -88,7 +29,7 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
     engine.active_node_id = Some(review_node_id);
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 draft 可以继续，但建议补充验证说明。
 
@@ -102,10 +43,9 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
   "summary": "仅有 minor 建议",
   "findings": [
 {
-  "severity": "minor",
+  "severity": "suggestion",
   "message": "验证说明可以更明确",
   "evidence": "verification_plan 只有命令",
-  "impact": "不影响当前 draft 使用",
   "required_action": "补充 manual check 说明"
 }
   ]
@@ -134,98 +74,13 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
     );
 }
 
-#[tokio::test]
-async fn work_item_plan_item_optional_choice_can_skip_and_continue() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_item_skip_optional");
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    engine.session.stage = WorkspaceStage::ReviewDecision;
-    engine.latest_review_verdict = Some(optional_work_item_plan_pass_review(
-        WorkItemPlanReviewScope::Item,
-        Some("outline_a"),
-        Some("draft_a"),
-        None,
-    ));
-    engine
-        .enter_review_decision(1, "仅有可选建议".to_string())
-        .await;
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_item_optional_choice_can_skip_and_continue` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    let outcome = engine
-        .handle_review_decision("skip_optional_findings".to_string(), None)
-        .await
-        .expect("skip optional item findings should continue original pass route");
-
-    assert_eq!(
-        outcome,
-        ReviewDecisionOutcome::StartWorkItemDraft { feedback: None }
-    );
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-    let active_node = engine
-        .timeline_nodes
-        .iter()
-        .find(|node| Some(&node.node_id) == engine.active_node_id.as_ref())
-        .expect("active draft run node");
-    assert_eq!(active_node.node_type, TimelineNodeType::WorkItemDraftRun);
-    assert_eq!(active_node.summary.as_deref(), Some("outline_b · pending"));
-}
-
-#[tokio::test]
-async fn work_item_plan_item_optional_choice_can_apply_findings() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_item_apply_optional");
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    engine.update_artifact(work_item_draft_artifact_payload(
-        &plan_id,
-        "outline_a",
-        "draft_a",
-        WorkItemDraftStatus::Accepted,
-    ))
-    .await;
-    engine.session.stage = WorkspaceStage::ReviewDecision;
-    engine.latest_review_verdict = Some(optional_work_item_plan_pass_review(
-        WorkItemPlanReviewScope::Item,
-        Some("outline_a"),
-        Some("draft_a"),
-        None,
-    ));
-    engine
-        .enter_review_decision(1, "仅有可选建议".to_string())
-        .await;
-
-    let outcome = engine
-        .handle_review_decision("apply_optional_findings".to_string(), None)
-        .await
-        .expect("apply optional item findings should rewrite current draft");
-
-    assert_eq!(
-        outcome,
-        ReviewDecisionOutcome::StartWorkItemDraft { feedback: None }
-    );
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-    let active_node = engine
-        .timeline_nodes
-        .iter()
-        .find(|node| Some(&node.node_id) == engine.active_node_id.as_ref())
-        .expect("active draft run node");
-    assert_eq!(active_node.node_type, TimelineNodeType::WorkItemDraftRun);
-    assert_eq!(active_node.summary.as_deref(), Some("outline_a · pending"));
-    assert!(
-        !engine
-            .timeline_nodes
-            .iter()
-            .any(|node| node.node_type == TimelineNodeType::Revision),
-        "optional item findings should use WorkItemDraft rewrite, not generic revision"
-    );
-    let input = engine
-        .build_current_work_item_draft_streaming_input(None)
-        .expect("draft streaming input");
-    assert!(input.prompt.contains("[review_findings]"));
-    assert!(input.prompt.contains("evidence: 主路径完整"));
-    assert!(input.prompt.contains("impact: 不影响继续"));
-    assert!(input.prompt.contains("required_action: 可补充说明"));
-}
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_item_optional_choice_can_apply_findings` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
@@ -263,7 +118,7 @@ async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
     engine.active_node_id = Some(review_node_id);
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 batch 可以继续，但建议补充 handoff。
 
@@ -276,10 +131,9 @@ async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
   "summary": "仅有 optional 建议",
   "findings": [
 {
-  "severity": "optional",
+  "severity": "suggestion",
   "message": "handoff 可以更明确",
   "evidence": "batch 内 handoff_summary 较短",
-  "impact": "不影响 compile",
   "required_action": "补充 handoff_summary"
 }
   ]
@@ -308,162 +162,26 @@ async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
     );
 }
 
-#[tokio::test]
-async fn work_item_plan_batch_optional_choice_can_skip_and_compile() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_batch_skip_optional");
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
-    engine.session.stage = WorkspaceStage::ReviewDecision;
-    engine.latest_review_verdict = Some(optional_work_item_plan_pass_review(
-        WorkItemPlanReviewScope::Batch,
-        None,
-        None,
-        Some("batch_0001"),
-    ));
-    engine
-        .enter_review_decision(1, "仅有可选建议".to_string())
-        .await;
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_batch_optional_choice_can_skip_and_compile` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    let outcome = engine
-        .handle_review_decision("skip_optional_findings".to_string(), None)
-        .await
-        .expect("skip optional batch findings should compile");
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_batch_optional_choice_can_apply_findings` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-    assert_eq!(outcome, ReviewDecisionOutcome::HumanConfirm);
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-    assert!(matches!(
-        engine.session().artifact,
-        Some(ArtifactPayload::WorkItemPlanProjection { .. })
-    ));
-    assert!(engine.artifact_versions.iter().any(|version| {
-        matches!(
-            version.payload,
-            ArtifactPayload::WorkItemPlanCompileReport { .. }
-        )
-    }));
-    assert!(
-        engine
-            .timeline_nodes
-            .iter()
-            .any(|node| node.node_type == TimelineNodeType::WorkItemPlanCompile
-                && node.status == TimelineNodeStatus::Completed),
-        "skipping optional batch findings should run final compile"
-    );
-}
-
-#[tokio::test]
-async fn work_item_plan_batch_optional_choice_can_apply_findings() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_batch_apply_optional");
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
-    engine.session.stage = WorkspaceStage::ReviewDecision;
-    engine.latest_review_verdict = Some(optional_work_item_plan_pass_review(
-        WorkItemPlanReviewScope::Batch,
-        None,
-        None,
-        Some("batch_0001"),
-    ));
-    engine
-        .enter_review_decision(1, "仅有可选建议".to_string())
-        .await;
-
-    let outcome = engine
-        .handle_review_decision("apply_optional_findings".to_string(), None)
-        .await
-        .expect("apply optional batch findings should rewrite batch");
-
-    assert_eq!(outcome, ReviewDecisionOutcome::StartWorkItemBatch);
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-    let active_node = engine
-        .timeline_nodes
-        .iter()
-        .find(|node| Some(&node.node_id) == engine.active_node_id.as_ref())
-        .expect("active batch run node");
-    assert_eq!(active_node.node_type, TimelineNodeType::WorkItemBatchRun);
-    let input = engine
-        .build_current_work_item_batch_draft_streaming_input(None)
-        .expect("batch streaming input");
-    assert!(
-        input
-            .prompt
-            .contains("当前版本可以继续，但有可选建议"),
-        "batch rewrite prompt should include optional review feedback"
-    );
-    assert!(input.prompt.contains("[review_findings]"));
-    assert!(input.prompt.contains("evidence: 主路径完整"));
-    assert!(input.prompt.contains("impact: 不影响继续"));
-    assert!(input.prompt.contains("required_action: 可补充说明"));
-}
-
-#[tokio::test]
-async fn accepting_work_item_draft_updates_current_artifact_without_new_version() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_accept_draft_no_duplicate");
-    prepare_work_item_plan_outline_artifact(&mut engine).await;
-    save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    engine.session.stage = WorkspaceStage::AuthorConfirm;
-    let confirm_node_id = engine
-        .create_timeline_node(TimelineNodeDraft {
-            node_type: TimelineNodeType::WorkItemDraftConfirm,
-            agent: None,
-            stage: WorkspaceStage::AuthorConfirm,
-            round: None,
-            title: "Work Item Draft 确认".to_string(),
-            summary: Some("等待用户确认".to_string()),
-            status: TimelineNodeStatus::Paused,
-        })
-        .await;
-    engine.active_node_id = Some(confirm_node_id);
-    engine
-        .update_artifact(work_item_draft_artifact_payload(
-            &plan_id,
-            "outline_a",
-            "draft_a",
-            WorkItemDraftStatus::Draft,
-        ))
-        .await;
-    let version_count_before = engine.artifact_versions.len();
-    let current_version_before = engine
-        .artifact_versions
-        .iter()
-        .find(|version| version.is_current)
-        .map(|version| version.version)
-        .expect("current artifact version");
-
-    let outcome = engine
-        .handle_work_item_draft_decision(
-            "outline_a".to_string(),
-            WorkItemDraftDecisionDto::Accept,
-            None,
-        )
-        .await
-        .expect("accept current draft");
-
-    assert_eq!(outcome, WorkItemDraftDecisionOutcome::StartReview);
-    assert_eq!(engine.artifact_versions.len(), version_count_before);
-    let current_version = engine
-        .artifact_versions
-        .iter()
-        .find(|version| version.is_current)
-        .expect("current artifact version");
-    assert_eq!(current_version.version, current_version_before);
-    let ArtifactPayload::WorkItemDraftCandidate { draft_candidate } = &current_version.payload
-    else {
-        panic!("expected work item draft artifact");
-    };
-    assert_eq!(
-        draft_candidate.draft_record.status,
-        WorkItemDraftStatus::Accepted
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`accepting_work_item_draft_updates_current_artifact_without_new_version` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn finishing_work_item_draft_or_batch_run_clears_short_lived_repair_state() {
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_clear_draft_repair_state");
-    for node_type in [TimelineNodeType::WorkItemDraftRun, TimelineNodeType::WorkItemBatchRun] {
+    for node_type in [
+        TimelineNodeType::WorkItemDraftRun,
+        TimelineNodeType::WorkItemBatchRun,
+    ] {
         engine.session.stage = WorkspaceStage::Running;
         let node_id = engine
             .create_timeline_node(TimelineNodeDraft {
@@ -487,7 +205,9 @@ async fn finishing_work_item_draft_or_batch_run_clears_short_lived_repair_state(
 }
 
 async fn prepare_work_item_plan_outline_artifact(engine: &mut WorkspaceEngine) {
-    engine.update_artifact(work_item_plan_outline_artifact()).await;
+    engine
+        .update_artifact(work_item_plan_outline_artifact())
+        .await;
 }
 
 fn work_item_plan_outline_artifact() -> ArtifactPayload {
@@ -651,12 +371,12 @@ fn test_work_item_draft_record(
             contract.verification_checks[0].command =
                 Some(format!("cargo test --locked --lib {outline_id}"));
             WorkItemDraftCandidate {
+                target_repository_id: None,
                 outline_id: outline_id.to_string(),
                 logical_work_item_id,
-                verification_plan:
-                    crate::product::models::WorkItemDraftVerificationPlan {
-                        checks: contract.verification_checks.clone(),
-                    },
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: contract.verification_checks.clone(),
+                },
                 canonical_contract_candidate: contract,
             }
         },
@@ -672,39 +392,5 @@ fn test_work_item_draft_record(
         superseded_at: None,
         created_at: now.clone(),
         updated_at: now,
-    }
-}
-
-fn optional_work_item_plan_pass_review(
-    review_scope: WorkItemPlanReviewScope,
-    target_outline_id: Option<&str>,
-    draft_id: Option<&str>,
-    batch_id: Option<&str>,
-) -> ReviewVerdict {
-    ReviewVerdict {
-        verdict: ReviewVerdictType::Pass,
-        comments: "当前版本可以继续，但有可选建议".to_string(),
-        summary: "仅有可选建议".to_string(),
-        findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::Optional,
-            message: "补充说明".to_string(),
-            evidence: "主路径完整".to_string(),
-            impact: "不影响继续".to_string(),
-            required_action: "可补充说明".to_string(),
-        }],
-        review_gate: ReviewGate::UserConfirmAllowed,
-        work_item_plan_review: Some(WorkItemPlanReviewComplete {
-            verdict: WorkItemPlanReviewVerdict::Pass,
-            review_scope,
-            target_outline_id: target_outline_id.map(str::to_string),
-            generation_round_id: "round_0001".to_string(),
-            draft_id: draft_id.map(str::to_string),
-            batch_id: batch_id.map(str::to_string),
-            review_action: WorkItemPlanReviewAction::Continue,
-            gates: vec![],
-            affects_items: vec![],
-            warnings: vec![],
-        }),
-        structured_output_diagnostic: None,
     }
 }

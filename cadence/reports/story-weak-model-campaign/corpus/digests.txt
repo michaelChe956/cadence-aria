@@ -1,0 +1,8 @@
+# Frozen corpus SHA-256 digests
+
+Digest is SHA-256 over the UTF-8 bytes of each corpus file.
+01-pending-confirmation.md 21219678c97a3935a237645fa077aa842d9460d93afae899ca8dc3afe7eb9ecf
+02-review-revision.md 621c29c8fbf1c86408045650a090b6823fb6286cac1fa7bef548cb35dcaa1937
+03-user-choice-issue-0001.md 27d00c3d24e0fad9a20e6247f19887945afefed6cb79d2e05139c6e71be4b0c1
+04-multiple-constraints.md 781ecab297d869c928d16a3242a15d2d8ad7a6f417f3f6813b2f40879265785f
+05-simple-pure-function.md 7909074717f0ac1db480fcd16064a17fb925b8260a0b95d376241f620a6f18ab

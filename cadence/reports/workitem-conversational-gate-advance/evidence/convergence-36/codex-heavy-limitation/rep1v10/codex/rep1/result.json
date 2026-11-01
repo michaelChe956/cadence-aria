@@ -1,0 +1,154 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1v10/codex/rep1",
+  "startedAt": "2026-09-08T22:04:46.768Z",
+  "finishedAt": "2026-09-08T22:14:22.483Z",
+  "elapsedSec": 575.714,
+  "issue_id": "issue_0184",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0254",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.05,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.113,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 516.577,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 516.864,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 516.577,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability `GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/` required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-003 capability=`GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/`",
+          "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- `GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/`",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-003::`GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/`"
+        },
+        {
+          "severity": "must_fix",
+          "message": "required_capability_missing: provider WI-002 contract CT-004 lacks capability `web/level-select.js` 引用 `/api/levels` required by WI-003",
+          "evidence": "work_item=WI-003 contract=CT-004 capability=`web/level-select.js` 引用 `/api/levels`",
+          "required_action": "在 WI-002 的 Outputs 契约 CT-004 的 capabilities 列表追加一行（逐字复制）：- `web/level-select.js` 引用 `/api/levels`",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "CT-004::`web/level-select.js` 引用 `/api/levels`"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-001 contract CT-003 lacks capability `GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/` required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-003 capability=`GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/`",
+      "required_action": "在 WI-001 的 Outputs 契约 CT-003 的 capabilities 列表追加一行（逐字复制）：- `GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/`",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-003::`GET /` 从 `staticRoot` 返回 HTML 且默认 `staticRoot` 为 `web/`"
+    },
+    {
+      "severity": "must_fix",
+      "message": "required_capability_missing: provider WI-002 contract CT-004 lacks capability `web/level-select.js` 引用 `/api/levels` required by WI-003",
+      "evidence": "work_item=WI-003 contract=CT-004 capability=`web/level-select.js` 引用 `/api/levels`",
+      "required_action": "在 WI-002 的 Outputs 契约 CT-004 的 capabilities 列表追加一行（逐字复制）：- `web/level-select.js` 引用 `/api/levels`",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "CT-004::`web/level-select.js` 引用 `/api/levels`"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "usage_unavailable": true
+  },
+  "artifacts": [
+    "artifact-v1.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "compile markdown source failed: invalid_work_item_id:58:标识符不得重复。",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [],
+  "human_gate_turns": [],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 575714,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.063,
+    "1:running": 515.464,
+    "2:cross_review": 0.287,
+    "3:prepare_context": 58.85
+  }
+}

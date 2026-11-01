@@ -26,6 +26,7 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
             title: "Story".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle_store
@@ -34,6 +35,7 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             issue_id: issue_id.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
 
@@ -61,17 +63,15 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
         .unwrap();
 
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: project_id.to_string(),
-            issue_id: issue_id.to_string(),
-            entity_id: plan.id.clone(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 0,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        entity_id: plan.id.clone(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 0,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .unwrap();
 
     let session = WorkspaceSession::from_record(session_record);
@@ -86,6 +86,8 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             repository_id: "repo_0001".to_string(),
+            logical_repository_id: None,
+            membership_revision: 0,
             provider_run_ref: None,
             languages: vec!["rust".to_string()],
             frameworks: vec![],
@@ -106,6 +108,7 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
             repository_id: "repo_0001".to_string(),
+            target_repository_id: None,
             story_spec_ids: vec![story_id.to_string()],
             design_spec_ids: vec![design_id.to_string()],
             title: "Error work item".to_string(),
@@ -185,6 +188,7 @@ async fn complete_work_item_plan_author_errors_trigger_auto_revision_then_human_
             created_from_provider_run: None,
             validator_findings: vec![],
             review_summary: None,
+            ever_confirmed: None,
             created_at: now.clone(),
             updated_at: now.clone(),
         };

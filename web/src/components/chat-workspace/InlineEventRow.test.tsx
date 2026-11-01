@@ -295,3 +295,62 @@ describe("InlineEventRow", () => {
     expect(loadContent).toHaveBeenCalledTimes(1);
   });
 });
+
+// F-50 视觉 v2（f50-ui-visual-spec-v2 §4）：emoji 图标退役——事件 kind 映射
+// Lucide SVG（provider→zap / usage→gauge / command→terminal），统一 16px
+// stroke-current；折叠箭头改 chevron-right 旋转过渡（不再切换两个图标）。
+describe("InlineEventRow 视觉 v2 图标", () => {
+  function renderKind(kind: string) {
+    const { container } = render(
+      <InlineEventRow
+        entry={{
+          id: `event-${kind}`,
+          type: "execution_event",
+          role: "system",
+          content: `${kind} 事件`,
+          timestamp: "2026-09-24T10:00:00Z",
+          metadata: { kind, title: `${kind} title` },
+        }}
+      />,
+    );
+    return container;
+  }
+
+  it("provider 事件用 zap、usage 用 gauge、command 用 terminal（不再是统一扳手）", () => {
+    expect(renderKind("provider").querySelector("svg.lucide-zap")).not.toBeNull();
+    expect(renderKind("usage").querySelector("svg.lucide-gauge")).not.toBeNull();
+    expect(renderKind("command").querySelector("svg.lucide-terminal")).not.toBeNull();
+  });
+
+  it("图标统一 16px（w-4 h-4）描边随语义色", () => {
+    const zap = renderKind("provider").querySelector("svg.lucide-zap");
+    expect(zap?.getAttribute("class")).toContain("h-4");
+    expect(zap?.getAttribute("class")).toContain("w-4");
+  });
+
+  it("折叠箭头：chevron-right 折叠态不旋转，展开态 rotate-90 过渡", () => {
+    const { container } = render(
+      <InlineEventRow
+        entry={{
+          id: "event-chevron",
+          type: "execution_event",
+          role: "system",
+          content: "读取认证模块",
+          timestamp: "2026-09-24T10:00:00Z",
+          metadata: { command: "cargo build", output: "ok" },
+        }}
+      />,
+    );
+
+    const chevron = container.querySelector("svg.lucide-chevron-right");
+    expect(chevron).not.toBeNull();
+    expect(chevron?.getAttribute("class")).toContain("transition-transform");
+    expect(chevron?.getAttribute("class")).not.toContain("rotate-90");
+
+    fireEvent.click(screen.getByRole("button", { name: /读取认证模块/ }));
+
+    const chevronAfter = container.querySelector("svg.lucide-chevron-right");
+    expect(chevronAfter?.getAttribute("class")).toContain("rotate-90");
+    expect(container.querySelector("svg.lucide-chevron-down")).toBeNull();
+  });
+});

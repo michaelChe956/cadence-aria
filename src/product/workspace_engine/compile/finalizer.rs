@@ -1,11 +1,41 @@
 use super::*;
-use crate::product::models::WorkItemRuntimeBinding;
+use crate::product::issue_automation_store::IssueAutomationStore;
+use crate::product::models::automation::EnrollmentBindingIdentity;
+use crate::product::models::{
+    ChildBindingIdentity, WorkItemContextBudget, WorkItemExecutionPlanStatus,
+    WorkItemRuntimeBinding, WorkItemStatus, match_compile_child,
+};
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
     WorkItemHistoryEntryDto, WorkItemHistoryEntryKind, WorkItemRevisionHistoryDto,
 };
 
 impl WorkspaceEngine {
+    /// C1 Task 8（REQ-C1-CHILD-01）：从 durable enrollment 事实派生当前
+    /// compile 的期望 child binding 身份来源。仅当 enrollment enabled 且
+    /// binding history current 精确指向本 plan/session 时返回 Some；
+    /// enrollment 缺失/关闭/指向他处一律 None（manual 链复用语义），不猜
+    /// 「最新 plan/session」。
+    pub(crate) fn current_enrollment_binding_for_compile(
+        &self,
+        lifecycle: &LifecycleStore,
+        plan_id: &str,
+    ) -> Result<Option<EnrollmentBindingIdentity>, ProductStoreError> {
+        let store = IssueAutomationStore::new(lifecycle.app_paths());
+        let Some(enrollment) = store.get(&self.session.project_id, &self.session.issue_id)? else {
+            return Ok(None);
+        };
+        if !enrollment.enabled {
+            return Ok(None);
+        }
+        Ok(enrollment
+            .binding_history
+            .filter(|history| {
+                history.current.plan_id == plan_id
+                    && history.current.session_id == self.session.session_id
+            })
+            .map(|history| history.current))
+    }
     pub(super) fn resume_initial_plan_compile_transaction(
         &mut self,
         store: &WorkItemPlanStore,
@@ -71,12 +101,190 @@ impl WorkspaceEngine {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
+        // D2.1b 探针：legacy resume 恢复重放位点（resume 还在跑同样 busy）。
+        #[cfg(test)]
+        probe_work_item_plan_compile_admission(
+            &tx.project_id,
+            &tx.issue_id,
+            &tx.plan_id,
+            "legacy_publication_resumed",
+        );
         tx.step_cursor = "publication_resumed".to_string();
         tx.updated_at = tx.created_at.clone();
         store
             .put_compile_transaction(tx)
             .map_err(|error| format!("save resumed publication cursor failed: {error}"))?;
         Ok(outcome)
+    }
+
+    /// park-1（8-19 验收欠账）：finalize 持久化 per-target
+    /// LifecycleWorkItemRecord（work-items/{id}.json）。
+    ///
+    /// 记录 id 取 logical work item id（entity 语义）：coding 会话创建走
+    /// `workspace_repository` 的 WorkItem 臂 `list_work_items →
+    /// find(work_item.id == session.entity_id)`，plan.work_item_ids 与
+    /// child session entity_id 均为 logical 域。归属从 compiled
+    /// work_item_revision（intent target）+ 与 Final Compile 同源的成员
+    /// target 表派生；Legacy 单仓落 story 仓。upsert 幂等：重放不重复建、
+    /// 不清执行态。
+    fn persist_compiled_work_item_records(
+        &self,
+        lifecycle: &LifecycleStore,
+        tx: &mut WorkItemPlanCompileTransaction,
+        outcome: &InitialPlanCompileOutcome,
+    ) -> Result<(), String> {
+        let ordered = &outcome
+            .plan_projection_bundle
+            .coder_group_context
+            .ordered_logical_work_item_ids;
+        let compiled_by_logical_id = outcome
+            .work_items
+            .iter()
+            .map(|item| (item.work_item_revision.logical_work_item_id.as_str(), item))
+            .collect::<BTreeMap<_, _>>();
+        let member_targets = match self
+            .logical_work_item_plan_repository_targets(lifecycle, &tx.previous_plan_snapshot)
+            .map_err(|error| {
+                format!("resolve plan repository targets for work item records failed: {error}")
+            })? {
+            None => None,
+            Some(_) => {
+                let session_record = lifecycle
+                    .get_workspace_session(&self.session.session_id)
+                    .map_err(|error| {
+                        format!("load plan session record for work item records failed: {error}")
+                    })?;
+                let session_repository =
+                    crate::product::workspace_repository::resolve_workspace_repository_context(
+                        &lifecycle.app_paths(),
+                        lifecycle,
+                        &session_record,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "resolve plan session repository for work item records failed: {error}"
+                        )
+                    })?
+                    .business_repository
+                    .map_err(|error| {
+                        format!(
+                            "resolve plan session business repository for work item records failed: {error}"
+                        )
+                    })?;
+                crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(
+                    lifecycle,
+                    &tx.previous_plan_snapshot,
+                    &session_repository,
+                )
+                .map_err(|error| {
+                    format!("resolve plan member targets for work item records failed: {error}")
+                })?
+            }
+        };
+        let legacy_repository_id = if member_targets.is_none() {
+            self.work_item_plan_repository_id(lifecycle, &tx.previous_plan_snapshot)
+                .map_err(|error| {
+                    format!("resolve legacy repository for work item records failed: {error}")
+                })?
+        } else {
+            String::new()
+        };
+        // SC 纪律：finalize 不得读 legacy compile store（panic_on_legacy_
+        // compile_reads 只挂读方法），source_draft_id 不在此派生——消费面
+        // （group draft context）自有 tx 兜底解析。
+        let mut records = Vec::with_capacity(ordered.len());
+        for (index, logical_id) in ordered.iter().enumerate() {
+            let compiled = compiled_by_logical_id.get(logical_id.as_str()).ok_or_else(|| {
+                format!(
+                    "compiled outcome missing logical work item `{logical_id}` during work item record derivation"
+                )
+            })?;
+            let contract = &compiled.work_item_revision.canonical_contract;
+            let intent_target = contract
+                .intent_contract
+                .as_ref()
+                .map(|intent| &intent.target);
+            let (repository_id, target_repository_id) = work_item_record_attribution(
+                member_targets.as_ref(),
+                &legacy_repository_id,
+                intent_target,
+                logical_id,
+            )?;
+            // outline 反查双域兼容：legacy tx 值域为 logical id；SC tx 键域
+            //（outline id == logical id）命中时取键本身，绝不取值（值为物理
+            // work_item id，P2 复审缺陷）。
+            let source_outline_id = tx
+                .outline_to_work_item_id
+                .iter()
+                .find(|(_, value)| value.as_str() == logical_id.as_str())
+                .map(|(outline_id, _)| outline_id.clone())
+                .or_else(|| {
+                    tx.outline_to_work_item_id
+                        .contains_key(logical_id)
+                        .then(|| logical_id.clone())
+                });
+            let source_draft_id = None;
+            let depends_on = outcome
+                .dependency_graph_revision
+                .edges
+                .iter()
+                .filter(|edge| edge.to == *logical_id)
+                .map(|edge| edge.from.clone())
+                .collect::<Vec<_>>();
+            records.push(LifecycleWorkItemRecord {
+                id: logical_id.clone(),
+                project_id: tx.project_id.clone(),
+                issue_id: tx.issue_id.clone(),
+                repository_id,
+                target_repository_id,
+                story_spec_ids: tx.previous_plan_snapshot.source_story_spec_ids.clone(),
+                design_spec_ids: tx.previous_plan_snapshot.source_design_spec_ids.clone(),
+                title: contract.identity.title.clone(),
+                plan_status: WorkItemPlanStatus::Confirmed,
+                execution_status: WorkItemStatus::Pending,
+                worktree_path: None,
+                work_item_set_id: Some(tx.plan_id.clone()),
+                source_work_item_plan_id: Some(tx.plan_id.clone()),
+                source_outline_id,
+                source_draft_id,
+                planned_implementation_context: None,
+                kind: crate::product::work_item_split_engine::types::parse_work_item_kind(
+                    &contract.identity.kind,
+                ),
+                sequence_hint: Some((index + 1) as u32),
+                depends_on,
+                exclusive_write_scopes: contract.write_policy.exclusive_scopes.clone(),
+                forbidden_write_scopes: contract.write_policy.forbidden_scopes.clone(),
+                context_budget: WorkItemContextBudget::default(),
+                verification_plan_ref: Some(compiled.verification_plan_revision.id.clone()),
+                require_execution_plan_confirm: tx
+                    .previous_plan_snapshot
+                    .options
+                    .require_execution_plan_confirm,
+                execution_plan_status: WorkItemExecutionPlanStatus::NotStarted,
+                completion_commit: None,
+                completion_diff_summary_ref: None,
+                created_at: tx.created_at.clone(),
+                updated_at: tx.created_at.clone(),
+            });
+        }
+        for record in records {
+            lifecycle
+                .upsert_compiled_work_item_record(record)
+                .map_err(|error| format!("persist compiled work item record failed: {error}"))?;
+        }
+        tx.created_work_item_ids = ordered.clone();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_compiled_work_item_records_for_test(
+        &self,
+        lifecycle: &LifecycleStore,
+        tx: &mut WorkItemPlanCompileTransaction,
+        outcome: &InitialPlanCompileOutcome,
+    ) -> Result<(), String> {
+        self.persist_compiled_work_item_records(lifecycle, tx, outcome)
     }
 
     pub(super) async fn finalize_initial_plan_compile(
@@ -86,6 +294,50 @@ impl WorkspaceEngine {
         tx: &mut WorkItemPlanCompileTransaction,
         outcome: &InitialPlanCompileOutcome,
     ) -> Result<(), String> {
+        // 单 plan 不变量（REQ-WPS-01/REQ-WPS-02 Scenario「重新编译确认不产生第二
+        // 个 plan」与「原地重编译确认不得跳过旧代运行资源清理」）：编译确认前
+        // 先清旧代运行资源（attempts/worktree/reviewer/锁/workspace lifecycle）
+        // 并删除同 issue 的其它存活 plan；失败 → 不确认新代（fail-closed）。
+        //
+        // plan-slot 互斥覆盖「取代删除 + 编译确认」全过程：并发的 prepare 不得
+        // 在本编译确认期间建出第二个 plan。
+        let plan_slot = crate::product::plan_generation_supersede::acquire_issue_plan_slot(
+            &lifecycle.app_paths(),
+            &tx.project_id,
+            &tx.issue_id,
+        )
+        .await
+        .map_err(|error| {
+            format!("acquire issue plan slot before compile confirm failed: {error:?}")
+        })?;
+        // F2/R2：旧代 **advance engine checkpoint** 的清理根。`ProductAppPaths`
+        // 根是 `<workspace_root>/.aria`（`WebAppState` 的唯一构造口径；与
+        // `logical_codebase::evidence_injection` 的注入根同源），故父目录即
+        // workspace root。此前此处传 `None`，使 `purge_plan_runtime_resources`
+        // 的 checkpoint 清理分支成为死代码——新代仍可能从旧代同 session 的
+        // checkpoint 恢复。
+        let app_paths = lifecycle.app_paths();
+        // 只接受绝对父目录：相对根（如 `ProductAppPaths::new("aria")`）的
+        // `parent()` 是空串，拼出的相对 checkpoint 根会落到进程 CWD——宁可不
+        // 清（fail-safe）也不误删。
+        let workspace_root = app_paths
+            .root()
+            .parent()
+            .filter(|parent| parent.is_absolute())
+            .map(std::path::Path::to_path_buf);
+        crate::product::plan_generation_supersede::ensure_single_plan_generation(
+            &app_paths,
+            &plan_slot,
+            &tx.project_id,
+            &tx.issue_id,
+            std::slice::from_ref(&tx.plan_id),
+            crate::product::entity_deletion_cascade::PlanSupersedeReason::RecompileConfirm,
+            workspace_root.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            format!("plan generation supersede before compile confirm failed: {error:?}")
+        })?;
         let work_item_ids = outcome
             .plan_projection_bundle
             .coder_group_context
@@ -137,6 +389,30 @@ impl WorkspaceEngine {
             WorkItemPlanCompileFinalizerCheckpoint::PlanSummaryPrepared,
         )?;
 
+        // park-1：per-target work item 记录必须在 child session 建立前
+        // 落盘——coding 会话创建的 WorkItem 臂 find(entity_id) 依赖它们。
+        self.persist_compiled_work_item_records(lifecycle, tx, outcome)?;
+        tx.step_cursor = "work_item_records_persisted".to_string();
+        tx.updated_at = tx.created_at.clone();
+        store
+            .put_compile_transaction(tx)
+            .map_err(|error| format!("save work item records cursor failed: {error}"))?;
+        #[cfg(test)]
+        self.maybe_fail_work_item_plan_compile_finalizer(
+            tx,
+            WorkItemPlanCompileFinalizerCheckpoint::WorkItemRecordsPersisted,
+        )?;
+
+        // C1 Task 8（REQ-C1-CHILD-01）：读取 durable enrollment 当前代
+        // binding——仅当 enrollment enabled 且 current binding 精确指向本
+        // plan/session 时，child 按 binding_version/enrollment_id/target
+        // 精确绑定；否则（manual/非 enrolled）expected 为 None，保持既有
+        // entity_id 复用语义。
+        let enrollment_binding = self
+            .current_enrollment_binding_for_compile(lifecycle, &tx.plan_id)
+            .map_err(|error| {
+                format!("load enrollment binding for compile children failed: {error}")
+            })?;
         let mut sessions = lifecycle
             .list_workspace_sessions(&tx.project_id, &tx.issue_id)
             .map_err(|error| format!("list child work item workspaces failed: {error}"))?;
@@ -168,35 +444,52 @@ impl WorkspaceEngine {
                     .reviewer_projection_hash
                     .clone(),
             };
+            let expected_child_binding =
+                enrollment_binding
+                    .as_ref()
+                    .map(|binding| ChildBindingIdentity {
+                        plan_id: tx.plan_id.clone(),
+                        plan_revision_id: outcome.plan_revision.id.clone(),
+                        logical_work_item_id: logical_id.clone(),
+                        work_item_revision_id: compiled.work_item_revision.id.clone(),
+                        binding_version: binding.binding_version,
+                        enrollment_id: binding.enrollment_id.clone(),
+                        target: binding.target.clone(),
+                    });
             let matched = sessions
                 .iter()
                 .filter(|session| {
                     session.workspace_type == WorkspaceType::WorkItem
                         && session.entity_id == *logical_id
+                        && match_compile_child(session, expected_child_binding.as_ref())
                 })
                 .collect::<Vec<_>>();
             let session_id = match matched.as_slice() {
                 [existing] => existing.id.clone(),
                 [] => {
-                    let created = lifecycle
-                        .create_workspace_session(CreateWorkspaceSessionInput {
-                            project_id: tx.project_id.clone(),
-                            issue_id: tx.issue_id.clone(),
-                            entity_id: logical_id.clone(),
-                            workspace_type: WorkspaceType::WorkItem,
-                            author_provider: self.session.author_provider.clone(),
-                            reviewer_provider: self
-                                .session
-                                .reviewer_provider
-                                .clone()
-                                .unwrap_or(ProviderName::Codex),
-                            review_rounds: self.session.review_rounds,
-                            superpowers_enabled: self.session.superpowers_enabled,
-                            openspec_enabled: self.session.openspec_enabled,
-                        })
-                        .map_err(|error| {
-                            format!("create child work item workspace failed: {error}")
-                        })?;
+                    let input = CreateWorkspaceSessionInput {
+                        project_id: tx.project_id.clone(),
+                        issue_id: tx.issue_id.clone(),
+                        entity_id: logical_id.clone(),
+                        workspace_type: WorkspaceType::WorkItem,
+                        author_provider: self.session.author_provider.clone(),
+                        // C2 Task 5（REQ-CRO-05）：三值透传——不回填 Codex。
+                        reviewer_provider: self.session.reviewer_provider.clone(),
+                        review_rounds: self.session.review_rounds,
+                        superpowers_enabled: self.session.superpowers_enabled,
+                        openspec_enabled: self.session.openspec_enabled,
+                        work_item_plan_options: None,
+                    };
+                    let created = match expected_child_binding {
+                        Some(identity) => lifecycle.create_workspace_child_session(
+                            CreateWorkItemChildSessionInput {
+                                session: input,
+                                child_binding: identity,
+                            },
+                        ),
+                        None => lifecycle.create_workspace_session(input),
+                    }
+                    .map_err(|error| format!("create child work item workspace failed: {error}"))?;
                     let id = created.id.clone();
                     sessions.push(created);
                     id
@@ -237,6 +530,7 @@ impl WorkspaceEngine {
                 )?;
             }
             ensure_workspace_context_message(&lifecycle.app_paths(), lifecycle, bound_session)
+                .await
                 .map_err(|error| format!("ensure child workspace context failed: {error}"))?;
             tx.step_cursor = format!("child_session_{:03}_context_prepared", index + 1);
             tx.updated_at = tx.created_at.clone();
@@ -292,6 +586,14 @@ impl WorkspaceEngine {
             WorkItemPlanCompileFinalizerCheckpoint::CompileReportPersisted,
         )?;
 
+        // D2.1b 探针：final 提交位点（commit 段终点，lease 仍持）。
+        #[cfg(test)]
+        probe_work_item_plan_compile_admission(
+            &tx.project_id,
+            &tx.issue_id,
+            &tx.plan_id,
+            "committed",
+        );
         tx.status = WorkItemPlanCompileStatus::Committed;
         tx.plan_commit_state = WorkItemPlanCommitState::Committed;
         tx.committed_at = Some(tx.created_at.clone());
@@ -344,7 +646,9 @@ impl WorkspaceEngine {
                 payload,
             })
         } else {
-            let update = self.append_artifact_version_without_event(payload).await;
+            let update = self
+                .append_artifact_version_without_event(payload, created_at)
+                .await;
             let version = self.artifact_versions.last_mut().ok_or_else(|| {
                 "compile report artifact version missing after update".to_string()
             })?;
@@ -362,22 +666,31 @@ impl WorkspaceEngine {
         let mut updates = vec![compile_report_update];
         for item in &outcome.work_items {
             updates.push(
-                self.ensure_initial_projection_artifact(ArtifactPayload::WorkItemProjection {
-                    projection: Box::new(item.projection_bundle.clone()),
-                })
+                self.ensure_initial_projection_artifact(
+                    ArtifactPayload::WorkItemProjection {
+                        projection: Box::new(item.projection_bundle.clone()),
+                    },
+                    &outcome.plan_revision.created_at,
+                )
                 .await?,
             );
         }
         updates.push(
-            self.ensure_initial_projection_artifact(ArtifactPayload::ProjectionValidation {
-                report: Box::new(outcome.projection_validation.clone()),
-            })
+            self.ensure_initial_projection_artifact(
+                ArtifactPayload::ProjectionValidation {
+                    report: Box::new(outcome.projection_validation.clone()),
+                },
+                &outcome.plan_revision.created_at,
+            )
             .await?,
         );
         updates.push(
-            self.ensure_initial_projection_artifact(ArtifactPayload::WorkItemRevisionHistory {
-                history: Box::new(self.initial_revision_history(outcome)),
-            })
+            self.ensure_initial_projection_artifact(
+                ArtifactPayload::WorkItemRevisionHistory {
+                    history: Box::new(self.initial_revision_history(outcome)),
+                },
+                &outcome.plan_revision.created_at,
+            )
             .await?,
         );
         let plan_payload = ArtifactPayload::WorkItemPlanProjection {
@@ -399,8 +712,11 @@ impl WorkspaceEngine {
             }
         } else {
             self.ensure_projection_identity_is_immutable(&plan_payload)?;
-            self.append_artifact_version_without_event(plan_payload)
-                .await
+            self.append_artifact_version_without_event(
+                plan_payload,
+                &outcome.plan_revision.created_at,
+            )
+            .await
         };
         updates.push(plan_update);
         lifecycle
@@ -416,6 +732,7 @@ impl WorkspaceEngine {
     async fn ensure_initial_projection_artifact(
         &mut self,
         payload: ArtifactPayload,
+        created_at: &str,
     ) -> Result<ArtifactUpdateEvent, String> {
         if let Some(version) = self
             .artifact_versions
@@ -428,12 +745,15 @@ impl WorkspaceEngine {
             });
         }
         self.ensure_projection_identity_is_immutable(&payload)?;
-        Ok(self.append_artifact_version_without_event(payload).await)
+        Ok(self
+            .append_artifact_version_without_event(payload, created_at)
+            .await)
     }
 
     async fn append_artifact_version_without_event(
         &mut self,
         payload: ArtifactPayload,
+        created_at: &str,
     ) -> ArtifactUpdateEvent {
         self.session.artifact = Some(payload.clone());
         for version in &mut self.artifact_versions {
@@ -452,7 +772,7 @@ impl WorkspaceEngine {
             review_verdict: None,
             confirmed_by: None,
             is_current: true,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: created_at.to_string(),
             source_node_id: source_node_id.clone(),
         });
         let _ = self
@@ -566,5 +886,87 @@ impl WorkspaceEngine {
                 .then_with(|| left.id.cmp(&right.id))
         });
         WorkItemRevisionHistoryDto { entries }
+    }
+}
+/// park-1：单个 compiled work item 的仓库归属解析（纯函数，供 finalize 与
+/// 单测共用）。与 Final Compile 的成员归属语义同源（lower.rs
+/// `resolve_item_target_repository_id` / ir_adapter `logical_target_for_ir_item`）：
+/// - Legacy（`member_targets=None`）：story 仓，无逻辑 target；
+/// - LC：intent target 按声明落成员物理仓（logical_codebase 声明直取，
+///   single_repository 声明反查唯一逻辑成员）；未声明 intent 落确定性
+///   回落仓并反查逻辑成员。目标失效/非成员/回落缺失 →
+///   `work_item_target_missing` 语义错 fail-closed，不猜默认。
+pub(crate) fn work_item_record_attribution(
+    member_targets: Option<&crate::product::work_item_plan_compiler::PlanMemberTargets>,
+    legacy_repository_id: &str,
+    intent_target: Option<&crate::product::logical_codebase::EnrollmentTarget>,
+    logical_work_item_id: &str,
+) -> Result<
+    (
+        String,
+        Option<crate::product::logical_codebase::LogicalRepositoryId>,
+    ),
+    String,
+> {
+    use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+    use crate::product::workspace_engine::member_attribution::{
+        MemberReverse, reverse_member_logical,
+    };
+
+    let Some(targets) = member_targets else {
+        // 批 2 R1（REQ-WIGA-01）：无成员表时集合 intent 同样拒绝——集合
+        // target 不能作为单 WI 归属（不落 story 仓兜底，语义错 fail-closed）。
+        if let Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) = intent_target {
+            return Err(format!(
+                "work_item_target_missing: `{logical_work_item_id}` 声明了集合 target\
+                 （logical_codebase_members）；单个 work item 的归属必须是恰一成员"
+            ));
+        }
+        return Ok((legacy_repository_id.to_string(), None));
+    };
+    // REQ-WG-02：物理仓 → 逻辑成员的唯一反查来源（候选结构门共用同一
+    // 函数）；错误文案与三态判定逐字保持既有语义。
+    let reverse_logical = |physical: &str| -> Result<LogicalRepositoryId, String> {
+        match reverse_member_logical(physical, &targets.physical_by_logical) {
+            MemberReverse::Unique(logical) => Ok(logical),
+            MemberReverse::Absent => Err(format!(
+                "work_item_target_missing: physical repository `{physical}` for `{logical_work_item_id}` is not an effective logical member"
+            )),
+            MemberReverse::Ambiguous => Err(format!(
+                "work_item_target_missing: physical repository `{physical}` for `{logical_work_item_id}` maps to multiple logical repositories"
+            )),
+        }
+    };
+    match intent_target {
+        Some(EnrollmentTarget::LogicalCodebase {
+            logical_repository_id,
+            ..
+        }) => {
+            let physical = targets.physical_by_logical.get(logical_repository_id).ok_or_else(
+                || {
+                    format!(
+                        "work_item_target_missing: declared logical member `{logical_repository_id:?}` for `{logical_work_item_id}` is not effective"
+                    )
+                },
+            )?;
+            Ok((physical.clone(), Some(*logical_repository_id)))
+        }
+        // 批 2 R1（REQ-WIGA-01）：集合 intent 拒绝（含成员表在场——集合
+        // target 不能作为单 WI 归属）。
+        Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) => Err(format!(
+            "work_item_target_missing: `{logical_work_item_id}` 声明了集合 target\
+             （logical_codebase_members）；单个 work item 的归属必须是恰一成员"
+        )),
+        Some(EnrollmentTarget::SingleRepository { repository_id }) => {
+            Ok((repository_id.clone(), Some(reverse_logical(repository_id)?)))
+        }
+        None => {
+            let fallback = targets.fallback_physical_id.as_deref().ok_or_else(|| {
+                format!(
+                    "work_item_target_missing: `{logical_work_item_id}` has no intent target and no deterministic fallback repository"
+                )
+            })?;
+            Ok((fallback.to_string(), Some(reverse_logical(fallback)?)))
+        }
     }
 }

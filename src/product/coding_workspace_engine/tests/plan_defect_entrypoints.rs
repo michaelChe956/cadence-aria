@@ -32,6 +32,9 @@ fn coding_plan_repair_entrypoints_internal_and_group_review_use_group_reviewer_r
         created_at: "2026-07-18T00:00:00Z".to_string(),
         updated_at: "2026-07-18T00:00:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
     };
     let projection = reviewer_projection_fixture();
 
@@ -90,6 +93,9 @@ async fn coding_plan_repair_entrypoints_internal_review_execution_persists_safe_
         created_at: "2026-07-18T00:00:00Z".to_string(),
         updated_at: "2026-07-18T00:00:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
     };
     store.save_review_request(&attempt, &request).unwrap();
     let (tx, _rx) = mpsc::channel(64);
@@ -223,7 +229,9 @@ fn coding_plan_repair_group_reviewer_loads_authoritative_no_target_projections()
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -232,8 +240,13 @@ fn coding_plan_repair_group_reviewer_loads_authoritative_no_target_projections()
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("attempt");
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记，否则过不了
+    // ensure_provider_run_allowed 的第二道防线。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::InternalPrReview;
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let review = internal_review_with_finding(no_target_finding(
@@ -268,7 +281,9 @@ fn coding_plan_repair_group_reviewer_rejects_stale_completed_run_when_latest_is_
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
@@ -507,15 +522,21 @@ pub(super) fn prepared_group_review_fixture() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
     complete_group_units_with_authoritative_runs(&store, &attempt);
     attempt.status = CodingAttemptStatus::Running;
+    // 播种合法可执行态：Running 必须带 admission 会话标记（同 prepared_group_review_fixture）。
+    attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::InternalPrReview;
     attempt.head_commit = Some(head.clone());
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     store
         .save_review_request(
             &attempt,
@@ -534,6 +555,9 @@ pub(super) fn prepared_group_review_fixture() -> (
                 created_at: "2026-07-19T00:00:00Z".to_string(),
                 updated_at: "2026-07-19T00:00:00Z".to_string(),
                 push_error: None,
+                owner_kind: ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
+                revoked: false,
             },
         )
         .expect("review request");
@@ -638,6 +662,8 @@ fn internal_review_with_finding(finding: ReviewFinding) -> InternalPrReview {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 

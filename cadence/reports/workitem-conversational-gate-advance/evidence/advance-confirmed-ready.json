@@ -1,0 +1,50 @@
+{
+  "schema": "advance-campaign-evidence/v1",
+  "sanitized": "only digests/lengths/ids/counts; no candidate text, no feedback content, no provider payload",
+  "scenario": "step1_confirmed_plan_is_ready_without_provider_start",
+  "proven_by": [
+    "rust:campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start",
+    "node:campaign_stage3_group_snapshot_readback_after_advance_completed"
+  ],
+  "generated_from": "pure fake campaign fixtures + durable readback assertions of the listed tests; no real provider run",
+  "evidence": {
+    "source": "group_attempt_snapshot_readback",
+    "attempt_id": "attempt_fixture_0001",
+    "attempt_status": "created",
+    "units": [
+      {
+        "logical_work_item_id": "wi_a",
+        "status": "running"
+      },
+      {
+        "logical_work_item_id": "wi_b",
+        "status": "pending"
+      }
+    ],
+    "binding_revision_digest": "fa66bc1e5b5f809c0669040f5dff53ac83a30c05726a96654b8d9526c0b43445",
+    "binding_revision_sources": 2,
+    "lock_id": "attempt_fixture_0001",
+    "advance_record": {
+      "command_id": "cmd-campaign-adv-1",
+      "record_id": "advance_fixture_0001",
+      "status": "ready",
+      "attempt_id": "attempt_fixture_0001"
+    },
+    "provider_start_counts": {
+      "before": 2,
+      "after": 2
+    },
+    "provider_start_violation": false
+  },
+  "rust_durable_assertions": [
+    "advance_record.status=ready",
+    "initialization_journal_phase=ready",
+    "attempts_for_issue=1",
+    "units=all compiled work items",
+    "binding_revision=confirmed active plan revision",
+    "worktree_lock_owner=attempt_id",
+    "admission_kind=sc_advance",
+    "attempt_status=created (StartCoding never sent)",
+    "provider_start_ledger_before_after=byte_equal"
+  ]
+}

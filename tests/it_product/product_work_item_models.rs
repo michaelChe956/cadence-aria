@@ -58,6 +58,7 @@ fn lifecycle_work_item_serializes_new_split_fields_as_snake_case() {
         project_id: "project_0001".to_string(),
         issue_id: "issue_0001".to_string(),
         repository_id: "repo_0001".to_string(),
+        target_repository_id: None,
         story_spec_ids: vec!["story_spec_0001".to_string()],
         design_spec_ids: vec!["design_spec_0001".to_string()],
         title: "Backend API".to_string(),

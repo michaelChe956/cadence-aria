@@ -94,6 +94,10 @@ fn evaluation_context_uses_compiled_work_item_without_artifact_version() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::CodeReview,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -115,7 +119,10 @@ fn evaluation_context_uses_compiled_work_item_without_artifact_version() {
         review_request_id: None,
         created_at: "2026-07-14T00:00:00Z".to_string(),
         updated_at: "2026-07-14T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
@@ -146,6 +153,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             issue_id: ISSUE_ID.to_string(),
             repository_id: REPOSITORY_ID.to_string(),
             title: "Story".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     lifecycle
@@ -166,10 +174,12 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             entity_id: story.id.clone(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
 
@@ -179,6 +189,7 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             issue_id: ISSUE_ID.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     lifecycle
@@ -199,10 +210,12 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             entity_id: design.id.clone(),
             workspace_type: WorkspaceType::Design,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
 
@@ -224,10 +237,12 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
             entity_id: work_item.id.clone(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     lifecycle
@@ -258,6 +273,10 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::CodeReview,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -279,7 +298,10 @@ fn evaluation_context_pack_includes_story_design_work_item_and_contracts() {
         provider_conversations: Vec::new(),
         created_at: "2026-06-10T00:00:00Z".to_string(),
         updated_at: "2026-06-10T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
@@ -348,6 +370,10 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::CodeReview,
         base_branch: "HEAD".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -369,7 +395,10 @@ fn evaluation_context_pack_includes_attempt_diff_context() {
         provider_conversations: Vec::new(),
         created_at: "2026-06-10T00:00:00Z".to_string(),
         updated_at: "2026-06-10T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)
@@ -404,6 +433,10 @@ fn reviewers_do_not_require_work_item_handoff_summary() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::CodeReview,
         base_branch: "main".to_string(),
         branch_name: "aria/issues/issue_0001".to_string(),
@@ -425,7 +458,10 @@ fn reviewers_do_not_require_work_item_handoff_summary() {
         provider_conversations: Vec::new(),
         created_at: "2026-06-10T00:00:00Z".to_string(),
         updated_at: "2026-06-10T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
 
     let reviewer_pack =
@@ -474,6 +510,10 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::CodeReview,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -495,9 +535,14 @@ fn code_reviewer_context_pack_includes_coder_evidence() {
         provider_conversations: Vec::new(),
         created_at: "2026-06-10T00:00:00Z".to_string(),
         updated_at: "2026-06-10T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
-    store.save_coding_attempt(&attempt).expect("save attempt");
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save attempt");
     let role_run = store
         .create_role_run(
             &attempt,
@@ -599,10 +644,12 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
             entity_id: work_item.id.clone(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .unwrap();
     lifecycle
@@ -643,6 +690,10 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
         attempt_no: 1,
         scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::CodeReview,
         base_branch: "main".to_string(),
         branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
@@ -664,7 +715,10 @@ fn evaluation_context_pack_truncates_and_redacts_sensitive_lines() {
         provider_conversations: Vec::new(),
         created_at: "2026-06-10T00:00:00Z".to_string(),
         updated_at: "2026-06-10T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
 
     let pack = build_evaluation_context_pack(paths, &attempt, EvaluationContextRole::CodeReviewer)

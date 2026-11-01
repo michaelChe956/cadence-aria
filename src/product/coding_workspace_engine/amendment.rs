@@ -5,7 +5,7 @@ use chrono::Utc;
 use super::*;
 use crate::product::coding_models::{
     CodingAmendmentApplicationJournal, CodingAmendmentApplicationPhase, CodingAttemptScope,
-    CodingPlanAmendmentDeliveryStatus,
+    CodingPlanAmendmentDeliveryStatus, PlanAmendmentContext, PlanAmendmentContextStatus,
 };
 use crate::product::models::{
     AmendmentResumeMode, PlanAmendmentManifest, PlanRepairRequest, PlanRepairRequestStatus,
@@ -18,6 +18,12 @@ struct AmendmentApplicationAuthority {
     plan: crate::product::models::WorkItemPlanLineage,
     request: PlanRepairRequest,
 }
+
+/// 观察层投递单次尝试的有界窗口（REQ-WIGA-06，k3 审查 F1）：send（含 hub
+/// 容量满时的 reserve 阻塞）与 ack 等待包在同一 timeout 内；超时释放 ack
+/// 注册并 mark Unsent，后续补投递可重试。
+pub(crate) const PLAN_AMENDMENT_DELIVERY_ACK_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
 
 impl CodingWorkspaceEngine {
     pub async fn apply_plan_amendment(
@@ -92,6 +98,155 @@ impl CodingWorkspaceEngine {
         self.recover_plan_amendment_with_history_session(attempt)
             .await
             .map(|(attempt, _)| attempt)
+    }
+
+    /// REQ-GCE-03: resume the ORIGINAL group attempt after an amendment is
+    /// approved. The explicit `PlanAmendmentContext` anchors the original plan
+    /// session gate, the previous plan revision and the manifest-driven resume
+    /// target; incompatible revisions fail the context closed (durable) and
+    /// never switch to another plan, legacy admission, or a new attempt.
+    /// 显式 typed 入口（brief 7.2 契约签名）：amendment approve 后回原 attempt。
+    /// 生产 approve 链（activate_published_plan_amendment→runner→recover）统一经由
+    /// `apply_plan_amendment_from_journal` 的 context 记账；本入口供显式调用与
+    /// 契约测试使用，§8 campaign 接线时由 driver 消费。
+    #[allow(dead_code)]
+    pub(crate) async fn resume_group_after_plan_amendment(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        context: &PlanAmendmentContext,
+        manifest: &PlanAmendmentManifest,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let current = self.store.validate_attempt_lineage(attempt)?;
+        if context.group_attempt_id != current.id {
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context_attempt",
+                    id: context.id.clone(),
+                },
+            ));
+        }
+        let stored = self
+            .store
+            .find_plan_amendment_context_by_finding(&current, &context.trigger_finding_id)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "coding_plan_amendment_context",
+                id: context.id.clone(),
+            })?;
+        if stored.id != context.id {
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context",
+                    id: context.id.clone(),
+                },
+            ));
+        }
+        if stored.status == PlanAmendmentContextStatus::FailedClosed {
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context_failed_closed",
+                    id: format!("{} requires manual disposition", stored.id),
+                },
+            ));
+        }
+        if manifest.previous_plan_revision_id != stored.previous_plan_revision_id {
+            let reason = format!(
+                "product_store_identity_mismatch: manifest previous revision {} does not match context {}",
+                manifest.previous_plan_revision_id, stored.previous_plan_revision_id
+            );
+            self.store
+                .fail_closed_plan_amendment_context(&current, &stored.id, &reason)?;
+            return Err(CodingWorkspaceEngineError::Store(
+                ProductStoreError::IdentityMismatch {
+                    kind: "coding_plan_amendment_context_revision",
+                    id: stored.id,
+                },
+            ));
+        }
+        if stored.status == PlanAmendmentContextStatus::Open {
+            self.store
+                .transition_plan_amendment_context_to_applying(&current, &stored.id)?;
+        }
+        let result = self.apply_plan_amendment(&current, manifest).await;
+        match result {
+            Ok(updated) => {
+                let completed = self.store.complete_plan_amendment_context(
+                    &updated,
+                    &stored.id,
+                    &manifest.new_plan_revision_id,
+                    &manifest.resume_target,
+                )?;
+                self.close_reopened_amendment_gate_if_idle(&completed.plan_session_id)?;
+                Ok(updated)
+            }
+            Err(error) => {
+                if matches!(
+                    &error,
+                    CodingWorkspaceEngineError::Store(
+                        ProductStoreError::IdentityMismatch { .. }
+                            | ProductStoreError::Ambiguous { .. }
+                    )
+                ) {
+                    // 新 revision 或 binding identity 不兼容：context durable
+                    // FailedClosed 并保留 diagnostic，要求人工处置。
+                    self.store.fail_closed_plan_amendment_context(
+                        &current,
+                        &stored.id,
+                        &error.to_string(),
+                    )?;
+                } else if stored.status == PlanAmendmentContextStatus::Open {
+                    // 可重试的应用层失败：回到 Open，允许既有 recover 路径重试。
+                    self.store
+                        .revert_plan_amendment_context_to_open(&current, &stored.id)?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// amendment 应用完成后，把原 plan session 上重开的门关回 Confirmed。
+    /// 处理重开门的两种等待签名且无 in-flight turn 的会话：
+    /// - 重开原签名（WaitingForHuman + phase Completed + 保留快照）；
+    /// - SG6（REQ-CG-03:74 verdict 收口）后的收口重建签名（WaitingForHuman +
+    ///   phase Approval + 保留快照）——合法修订交付后 turn 由原
+    ///   reviewer/synthetic Pass 收口，收口 verdict 经 Evaluate 路由重建
+    ///   Approval 门（I-1「reviewer Pass 后必须路由回 Approval 门」），故
+    ///   resume 时重开门以 Approval 相位等待关回。
+    ///
+    /// 本守卫唯一生产调用点持有刚 Applied、经完整 lineage 校验的
+    /// `PlanAmendmentContext`（其 plan_session_id 即本会话）；首次审批门
+    /// （未经任何 amendment context 重开）不会到达此路径。
+    fn close_reopened_amendment_gate_if_idle(
+        &self,
+        plan_session_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let lifecycle = LifecycleStore::new(self.store.paths());
+        let Ok(record) = lifecycle.get_workspace_session(plan_session_id) else {
+            return Ok(());
+        };
+        if record.status != WorkspaceSessionStatus::WaitingForHuman
+            || !matches!(
+                record.single_candidate_phase,
+                Some(crate::product::models::SingleCandidatePhase::Completed)
+                    | Some(crate::product::models::SingleCandidatePhase::Approval)
+            )
+        {
+            return Ok(());
+        }
+        let has_active_turn = lifecycle
+            .list_human_gate_turns(plan_session_id)?
+            .into_iter()
+            .any(|turn| {
+                matches!(
+                    turn.status,
+                    crate::product::models::HumanGateTurnStatus::Reserved
+                        | crate::product::models::HumanGateTurnStatus::Running
+                )
+            });
+        if has_active_turn {
+            return Ok(());
+        }
+        lifecycle.compare_and_close_reopened_amendment_gate(&record)?;
+        Ok(())
     }
 
     pub(crate) async fn recover_plan_amendment_with_history_session(
@@ -175,6 +330,19 @@ impl CodingWorkspaceEngine {
             manifest,
             journal.phase == CodingAmendmentApplicationPhase::Completed,
         )?;
+        // REQ-GCE-03：approve 显式链路与 recover 重放路径都经由本函数；这里对
+        // 已登记的 PlanAmendmentContext 做幂等记账（Open→Applying，成功后 Applied），
+        // 保证断线恢复后 context 与 attempt/binding 状态一致。
+        let amendment_context = self.store.find_plan_amendment_context_by_finding(
+            attempt,
+            &authority.request.trigger_finding_id,
+        )?;
+        if let Some(context) = &amendment_context
+            && context.status == PlanAmendmentContextStatus::Open
+        {
+            self.store
+                .transition_plan_amendment_context_to_applying(attempt, &context.id)?;
+        }
         if journal.error.is_some() {
             *journal = self
                 .store
@@ -272,11 +440,23 @@ impl CodingWorkspaceEngine {
             &authority.plan,
             &authority.request,
         )?;
-        self.reconcile_plan_amendment_delivery(attempt, manifest)
-            .await?;
-        self.store
+        let resumed = self
+            .store
             .resume_attempt_after_amendment(attempt, manifest)
-            .map_err(CodingWorkspaceEngineError::from)
+            .map_err(CodingWorkspaceEngineError::from)?;
+        if let Some(context) = amendment_context {
+            let completed = self.store.complete_plan_amendment_context(
+                &resumed,
+                &context.id,
+                &manifest.new_plan_revision_id,
+                &manifest.resume_target,
+            )?;
+            self.close_reopened_amendment_gate_if_idle(&completed.plan_session_id)?;
+        }
+        // REQ-WIGA-06：投递是观察面——业务先达 durable 检查点，真实未送达事实
+        // 留给重连/重复确认补投递；不得以投递状态阻塞或失败业务。
+        self.spawn_plan_amendment_delivery_observation(attempt, manifest);
+        Ok(resumed)
     }
 
     fn validate_amendment_application_identity(
@@ -480,39 +660,126 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
-    async fn reconcile_plan_amendment_delivery(
+    /// 观察层投递有界窗口（k3 审查 F1）：send 与 ack 等待包在同一 timeout 内
+    /// 收口——hub 容量满时 `reserve()` 不再无限等待；超时经 future Drop 释放
+    /// ack 注册并 mark Unsent，后续补投递可重试。
+    pub(crate) async fn deliver_plan_amendment_observation_once(
         &self,
         attempt: &CodingExecutionAttempt,
         manifest: &PlanAmendmentManifest,
-    ) -> Result<(), CodingWorkspaceEngineError> {
+    ) -> Result<CodingPlanAmendmentDeliveryStatus, ProductStoreError> {
         let delivery = self
             .store
             .load_or_prepare_plan_amendment_delivery(attempt, &manifest.id)?;
         if delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered {
-            return Ok(());
+            return Ok(delivery.status);
         }
-        let socket_write = register_plan_amendment_socket_write(&delivery.event_id)?;
-        self.event_tx
-            .send(CodingWsOutMessage::PlanAmendmentUpdated {
-                event_id: delivery.event_id.clone(),
-                amendment: Box::new(manifest.clone()),
-            })
-            .await
-            .map_err(|_| {
-                ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
-            })?;
-        tokio::select! {
-            result = socket_write.wait_or_channel_closed(self.event_tx.raw_sender()) => result?,
+        let Ok(socket_write) = register_plan_amendment_socket_write(&delivery.event_id) else {
+            // 他人持有该 event 注册：他路在投，本路跳过发送返回 durable 现状。
+            return Ok(delivery.status);
+        };
+        let event = CodingWsOutMessage::PlanAmendmentUpdated {
+            event_id: delivery.event_id.clone(),
+            amendment: Box::new(manifest.clone()),
+        };
+        let settled = tokio::select! {
+            biased;
+            // 引擎取消：不改 marker，返回 load 时的现状（注册经内层 future
+            // Drop 释放，waiter 不悬挂）。
             _ = self.cancellation.cancelled() => {
-                return Err(CodingWorkspaceEngineError::Aborted);
+                return Ok(delivery.status);
+            }
+            outcome = tokio::time::timeout(PLAN_AMENDMENT_DELIVERY_ACK_TIMEOUT, async {
+                self.event_tx
+                    .send(event)
+                    .await
+                    .map_err(|_| {
+                        ProductStoreError::Io("plan_amendment_delivery_send_failed".to_string())
+                    })?;
+                socket_write
+                    .wait_or_channel_closed(self.event_tx.raw_sender())
+                    .await
+            }) => outcome,
+        };
+        match settled {
+            // 真实 socket 写回执：唯一写 Delivered 的路径。
+            Ok(Ok(())) => Ok(self
+                .store
+                .mark_plan_amendment_delivery_delivered(attempt, &manifest.id, &delivery.event_id)?
+                .status),
+            // 超时/写失败/通道关闭：注册已随 future Drop 释放，落 durable Unsent。
+            Ok(Err(_)) | Err(_) => Ok(self
+                .store
+                .mark_plan_amendment_delivery_unsent(attempt, &manifest.id, &delivery.event_id)?
+                .status),
+        }
+    }
+
+    /// 业务路径唯一的观察发射点（REQ-WIGA-06）：detached tokio::spawn 包
+    /// once；投递是观察面，失败仅 tracing::warn，绝不反写业务错误、绝不
+    /// 阻塞或改写业务终态。
+    pub(crate) fn spawn_plan_amendment_delivery_observation(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        manifest: &PlanAmendmentManifest,
+    ) {
+        let engine = self.clone();
+        let attempt = attempt.clone();
+        let manifest = manifest.clone();
+        tokio::spawn(async move {
+            if let Err(error) = engine
+                .deliver_plan_amendment_observation_once(&attempt, &manifest)
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    amendment_id = %manifest.id,
+                    "plan_amendment_delivery_observation_failed"
+                );
+            }
+        });
+    }
+
+    /// 重连/重复确认补投递（REQ-WIGA-06）：list deliveries -> 跳过 Delivered ->
+    /// 取 manifest（无 manifest 的孤儿记录跳过；plan.active_revision_id !=
+    /// manifest.new_plan_revision_id 的非当前修订跳过）-> once。返回本次真实
+    /// 达成 Delivered 的条数。
+    pub(crate) async fn redeliver_undelivered_plan_amendments(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<usize, ProductStoreError> {
+        let current = self.store.validate_attempt_lineage(attempt)?;
+        let binding = self.store.get_plan_binding(&current)?;
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
+        let plan = revision_store.get_plan_lineage(
+            &current.project_id,
+            &current.issue_id,
+            &binding.plan_id,
+        )?;
+        let mut delivered = 0usize;
+        for record in self.store.list_plan_amendment_deliveries(&current)? {
+            if record.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+                continue;
+            }
+            let Ok(manifest) = revision_store.get_amendment_manifest(&plan, &record.amendment_id)
+            else {
+                // 孤儿记录（有 delivery 文件、无 manifest）：跳过，不阻塞
+                // 其余记录的补投递。
+                continue;
+            };
+            if plan.active_revision_id.as_deref() != Some(manifest.new_plan_revision_id.as_str()) {
+                // 非当前修订：amendment 已被后续修订取代，不再补投。
+                continue;
+            }
+            if self
+                .deliver_plan_amendment_observation_once(&current, &manifest)
+                .await?
+                == CodingPlanAmendmentDeliveryStatus::Delivered
+            {
+                delivered += 1;
             }
         }
-        self.store.mark_plan_amendment_delivery_delivered(
-            attempt,
-            &manifest.id,
-            &delivery.event_id,
-        )?;
-        Ok(())
+        Ok(delivered)
     }
 
     fn finalize_plan_repair_session(

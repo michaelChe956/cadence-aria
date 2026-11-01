@@ -65,6 +65,8 @@ impl ProviderAdapter for RecordingProvider {
 
 fn adapter_input(provider_type: ProviderType) -> AdapterInput {
     AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
         provider_type,
         role: AdapterRole::Orchestrator,
         worktree_path: None,

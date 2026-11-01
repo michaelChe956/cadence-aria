@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { selectLatestReviewReport } from "./workspace-ws-selectors";
+import {
+  selectLatestReviewAdvisoryCount,
+  selectLatestReviewReport,
+} from "./workspace-ws-selectors";
 import type { WorkspaceWsState, TimelineNode } from "./workspace-ws-store-types";
 import type { ChatEntry } from "./chat-entries";
 
@@ -126,5 +129,54 @@ describe("selectLatestReviewReport", () => {
 
   it("无 review_verdict entry 时返回 undefined", () => {
     expect(selectLatestReviewReport(stateWithEntries([]))).toBeUndefined();
+  });
+});
+
+// F-38：单版本产物视图要显「评审结论」——除 verdict 标签外还要给可选建议条数
+// （与 ReviewVerdictEntry 的「可选建议」分组同一判据：severity 非 blocking/must_fix）。
+describe("selectLatestReviewAdvisoryCount", () => {
+  it("只数可选建议，不计必改项", () => {
+    const state = stateWithEntries([
+      reviewVerdictEntry({
+        verdict: "pass",
+        findings: [
+          {
+            severity: "must_fix",
+            message: "必须修复",
+            evidence: "a.rs:1",
+            required_action: "修",
+          },
+          { severity: "suggestion", message: "建议一", evidence: "b.md:2", required_action: "补" },
+          { severity: "suggestion", message: "建议二", evidence: "c.md:3", required_action: "补" },
+          { severity: "suggestion", message: "建议三", evidence: "d.md:4", required_action: "补" },
+        ],
+      }),
+    ]);
+
+    expect(selectLatestReviewAdvisoryCount(state)).toBe(3);
+  });
+
+  it("评审通过且无 findings 时返回 null（不渲染零条标签）", () => {
+    const state = stateWithEntries([reviewVerdictEntry({ verdict: "pass", findings: [] })]);
+    expect(selectLatestReviewAdvisoryCount(state)).toBeNull();
+  });
+
+  it("无 review 结论时返回 null", () => {
+    expect(selectLatestReviewAdvisoryCount(stateWithEntries([]))).toBeNull();
+  });
+
+  it("review 已被完成的 revision 顶替时返回 null", () => {
+    const state = stateWithEntries(
+      [
+        reviewVerdictEntry({
+          verdict: "revise",
+          findings: [{ severity: "suggestion", message: "旧建议", evidence: "e.md:5", required_action: "补" }],
+        }),
+        revisionEntry(),
+      ],
+      [timelineNode("reviewer", "reviewer_run"), timelineNode("revision", "revision")],
+    );
+
+    expect(selectLatestReviewAdvisoryCount(state)).toBeNull();
   });
 });

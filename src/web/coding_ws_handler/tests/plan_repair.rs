@@ -72,7 +72,6 @@ enum ProviderEntry {
     CoderRework,
     CodeReviewer,
     InternalReviewer,
-    GroupFinalReviewer,
 }
 
 #[derive(Clone, Default)]
@@ -375,10 +374,12 @@ async fn coding_plan_repair_ambiguous_parent_workspace_fails_closed_without_link
             entity_id: fixture.plan.id.clone(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let report = plan_defect_report(plan_defect_finding("evidence_a"));
@@ -446,7 +447,10 @@ async fn coding_plan_repair_group_internal_review_uses_unique_completed_unit_run
         .unwrap();
     assert!(attempt.active_unit_id.is_none());
     attempt.stage = CodingExecutionStage::InternalPrReview;
-    fixture.store.save_coding_attempt(&attempt).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&attempt)
+        .unwrap();
     let review = internal_plan_defect_review(&attempt, plan_defect_finding("group_review"));
 
     let updated = fixture
@@ -553,7 +557,10 @@ async fn coding_plan_repair_group_internal_review_ambiguous_run_fails_closed() {
         )
         .unwrap();
     attempt.stage = CodingExecutionStage::InternalPrReview;
-    fixture.store.save_coding_attempt(&attempt).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&attempt)
+        .unwrap();
     let review = internal_plan_defect_review(&attempt, plan_defect_finding("ambiguous"));
 
     let error = fixture
@@ -590,7 +597,6 @@ async fn coding_plan_repair_provider_runs_fail_closed_during_amendment() {
             ProviderEntry::CoderRework,
             ProviderEntry::CodeReviewer,
             ProviderEntry::InternalReviewer,
-            ProviderEntry::GroupFinalReviewer,
         ] {
             assert_provider_entry_blocked(status.clone(), entry).await;
         }
@@ -607,7 +613,10 @@ async fn coding_plan_repair_failed_review_recovery_writes_no_journal_during_amen
         let fixture = plan_repair_fixture();
         let mut attempt = fixture.attempt.clone();
         attempt.status = status.clone();
-        fixture.store.save_coding_attempt(&attempt).unwrap();
+        fixture
+            .store
+            .write_coding_attempt_for_test(&attempt)
+            .unwrap();
 
         let error = fixture
             .engine
@@ -640,7 +649,10 @@ async fn assert_provider_entry_blocked(status: CodingAttemptStatus, entry: Provi
     let fixture = plan_repair_fixture();
     let mut attempt = fixture.attempt.clone();
     attempt.status = status.clone();
-    fixture.store.save_coding_attempt(&attempt).unwrap();
+    fixture
+        .store
+        .write_coding_attempt_for_test(&attempt)
+        .unwrap();
     let before = fixture
         .store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -697,15 +709,6 @@ async fn assert_provider_entry_blocked(status: CodingAttemptStatus, entry: Provi
             .await
             .expect_err("internal reviewer must be blocked")
             .to_string(),
-        ProviderEntry::GroupFinalReviewer => {
-            let (_command_tx, mut command_rx) = mpsc::channel(1);
-            fixture
-                .engine
-                .execute_group_final_review_with_commands(&attempt, &provider, &mut command_rx)
-                .await
-                .expect_err("group final reviewer must be blocked")
-                .to_string()
-        }
     };
 
     assert!(
@@ -747,4 +750,57 @@ async fn assert_provider_entry_blocked(status: CodingAttemptStatus, entry: Provi
         before_rework_instructions,
         "{entry:?} changed rework instructions",
     );
+}
+
+/// r61(pi-5 现场):runner 死亡转 AwaitingManualRecovery 后,attach 与死亡
+/// 路径的会话快照(`build_coding_session_state`)是 WS 客户端唯一可见信号。
+/// 现场 WI-002 的 verification plan revision 文件被 WI-001 内容覆盖
+/// (`python3 -m json.tool .../*.json` glob 第二文件被当 outfile),bound
+/// context 解析(`resolve_coding_unit`)以 runtime_binding_integrity_mismatch
+/// 失败——快照不得整体失败,必须降级下发(work_item_markdown/
+/// verification_commands 缺席,状态/门完整),否则客户端只能烧满阶段超时。
+#[test]
+fn coding_session_state_degrades_when_bound_context_is_corrupt() {
+    let fixture = plan_repair_fixture();
+    let attempt = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .unwrap();
+
+    // 现场 shape:当前 work item(wi_current)的 verification plan 文件被
+    // 上游 work item(wi_upstream)的内容整文件覆盖。
+    let vp_dir = fixture
+        .store
+        .paths()
+        .issue_root(&attempt.project_id, &attempt.issue_id)
+        .join("work-item-revisions")
+        .join("work_item_plan_0001")
+        .join("verification-plan-revisions");
+    let current_vp = vp_dir.join("verification_work_item_revision_current.json");
+    let upstream_vp = vp_dir.join("verification_work_item_revision_upstream.json");
+    let upstream_content = std::fs::read_to_string(&upstream_vp).unwrap();
+    std::fs::write(&current_vp, upstream_content).unwrap();
+
+    // 修前红:bound context 解析失败使整个快照 Err(attach/死亡路径静默)。
+    let state = build_coding_session_state(&fixture.store, attempt.clone())
+        .expect("bound context 损坏时会话快照仍必须可下发");
+    let CodingWsOutMessage::CodingSessionState {
+        status,
+        work_item_markdown,
+        verification_commands,
+        ..
+    } = state
+    else {
+        panic!("expected coding session state");
+    };
+    assert_eq!(status, CodingAttemptStatus::Running);
+    assert!(
+        work_item_markdown.is_none(),
+        "降级快照不得携带 bound context markdown"
+    );
+    assert!(verification_commands.is_empty(), "降级快照不得携带验证命令");
 }

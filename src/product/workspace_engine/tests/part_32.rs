@@ -1,0 +1,772 @@
+// T10b:规划 review via-gateway 骨架的 lib 层单测。
+//
+// 覆盖:
+// - 注入 fake-registry gateway 后调用 `drive_review_session_via_gateway` →
+//   会话驱动正常(reviewer pass → HumanConfirm)+ gateway audit `stream_launches` +1。
+// - 既有 `drive_review_session`(Legacy,未注入 gateway)路径在其余 part 中保持
+//   零变化,本文件不重复覆盖。
+
+use crate::cross_cutting::provider_adapter::ProviderAdapter;
+use crate::cross_cutting::provider_availability_gate::{
+    ProviderAvailabilityGate, ProviderHealthSource,
+};
+use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::product::logical_codebase::{
+    AggregatePolicyArtifactStore, GatewayRunAudit, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, LogicalCodebaseFeature, LogicalCodebaseManifest,
+    LogicalCodebaseProviderGateway, LogicalCodebaseStore, PolicyTarget, PolicyTargetResolver,
+    ProviderCapability, ProviderCapabilitySource, ProviderDialect, ProviderGatewayError,
+    ProviderRef, ProviderRefType, SessionLaunchRequest, SessionPolicyAction,
+};
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+
+/// 同步 adapter stub:`run` 返回最小成功输出,供 gateway 构造。
+struct ReviewStubSyncAdapter;
+
+impl ProviderAdapter for ReviewStubSyncAdapter {
+    fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
+        Ok(AdapterOutput {
+            exit_code: Some(0),
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            structured_output: None,
+            files_modified: Vec::new(),
+            duration_ms: 0,
+            timeout_status: TimeoutStatus::NotTimedOut,
+        })
+    }
+}
+
+/// 测试用 capability source:返回固定 capability,launch/resume/write_boundary
+/// 分格恒为 `Confirmed`,使 review repair 的 resume 启动也能通过 spawn 前复验。
+/// 同时记录每次 `require_supported` 收到的 `ProviderRef`,供断言「launch
+/// request 的 provider ref 随 session.reviewer_provider 透传」(C-2 身份契约)。
+#[derive(Default)]
+struct ReviewStaticCapabilitySource {
+    seen: Arc<Mutex<Vec<ProviderRef>>>,
+}
+
+impl ReviewStaticCapabilitySource {
+    /// 已收到的 provider ref 快照(启动身份审计用)。
+    fn seen_provider_refs(&self) -> Vec<ProviderRef> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn capability(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> ProviderCapability {
+        use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+        use crate::product::logical_codebase::policy::ProviderWireDialect;
+        use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
+        self.seen.lock().unwrap().push(provider.clone());
+        let (adapter_dialect, wire_dialect) = match provider.provider_type {
+            ProviderRefType::ClaudeCode => (
+                ProviderDialect::ClaudeCodeCliV1,
+                ProviderWireDialect::ClaudeCodeStreamJson,
+            ),
+            ProviderRefType::Codex => (
+                ProviderDialect::CodexCliV1,
+                ProviderWireDialect::CodexAppServerRpc,
+            ),
+            ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+            ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+        };
+        ProviderCapability {
+            provider_type: provider.provider_type,
+            version: "1.4.0".to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: provider.capability_snapshot_ref.clone(),
+            action_capability: ProviderActionCapability {
+                action,
+                launch: ProviderCapabilityEvidence::Confirmed,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary: ProviderCapabilityEvidence::Confirmed,
+                projection_digest: format!("projection-digest-{action:?}"),
+                evidence_ref: format!("probe://{action:?}"),
+            },
+            trust: ProviderCapabilityEvidence::Confirmed,
+        }
+    }
+}
+
+impl ProviderCapabilitySource for ReviewStaticCapabilitySource {
+    fn require_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(provider, action))
+    }
+
+    fn require_resume_supported(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(provider, action))
+    }
+
+    fn require_write_boundary(
+        &self,
+        provider: &ProviderRef,
+        action: SessionPolicyAction,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        Ok(self.capability(provider, action))
+    }
+
+    fn require_root_recipe_supported(
+        &self,
+        provider: &ProviderRef,
+        _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+    ) -> Result<ProviderCapability, ProviderGatewayError> {
+        if provider.provider_type != ProviderRefType::ClaudeCode {
+            return Err(ProviderGatewayError::UnsupportedCapability(
+                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
+                    .to_string(),
+            ));
+        }
+        Ok(self.capability(provider, SessionPolicyAction::PlanningReadOnly))
+    }
+}
+
+/// 测试用 target resolver:直接透传 request target。aggregate_root target 的
+/// worktree 与 input.working_dir 相同,spawn 前 canonicalize 复验可通过对等比较。
+struct ReviewPassThroughTargetResolver;
+
+impl PolicyTargetResolver for ReviewPassThroughTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        Ok(request.target.clone())
+    }
+}
+
+fn review_always_available_gate() -> Arc<ProviderAvailabilityGate> {
+    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = chrono::Utc::now();
+    let snapshot = Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
+            .into_iter()
+            .map(|provider| ProviderHealthEntry {
+                provider,
+                command: "stub".to_string(),
+                available: true,
+                version: Some("1.0".to_string()),
+                reason_code: None,
+                reason: None,
+                checked_at,
+            })
+            .collect(),
+    });
+    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+        snapshot,
+    ))))
+}
+
+struct ReviewGatewayFixture {
+    _root: tempfile::TempDir,
+    paths: ProductAppPaths,
+    gateway: Arc<LogicalCodebaseProviderGateway>,
+    capabilities: Arc<ReviewStaticCapabilitySource>,
+    audit: Arc<GatewayRunAudit>,
+    worktree: std::path::PathBuf,
+    member_id: LogicalRepositoryId,
+}
+
+fn review_gateway_fixture() -> ReviewGatewayFixture {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("create review worktree");
+    // 批2 Task 20b(决策项⑦):审查窗口需要 git 身份——fixture 补
+    // git init+种子提交(T19 契约同款;生产规划 review 对象恒为 git 树)。
+    {
+        use std::process::Command as StdCommand;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(&worktree)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
+
+    // Task 2 连带(REQ-ENV-14):lc 内层驱动经 `assert_plan_review_material`
+    // 前置解析材料集合——登记一个 project 级逻辑成员仓(manifest/member/
+    // checkout 由 repository store 的 lc feature 自动接线);issue selection
+    // 由 `equip_plan_review_window` 在 seed issue 后补齐。
+    let member_dir = root.path().join("member-a");
+    std::fs::create_dir_all(&member_dir).expect("create member dir");
+    {
+        use std::process::Command as StdCommand;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(&member_dir)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
+    let member = RepositoryStore::with_logical_codebase_feature(
+        paths.clone(),
+        LogicalCodebaseFeature::enabled(),
+    )
+    .create(CreateRepositoryInput {
+        project_id: "project_0001".to_string(),
+        name: "member-a".to_string(),
+        path: member_dir,
+        default_policy_preset: None,
+        default_provider_mode: None,
+        idempotency_key: "part32-review-gateway-member-a".to_string(),
+    })
+    .expect("member repository");
+    let member_id = member.logical_repository_id.expect("logical member id");
+
+    let manifest = LogicalCodebaseStore::new(paths.clone())
+        .load_manifest("project_0001")
+        .expect("manifest io")
+        .expect("member registration wires the project manifest");
+    let policy_store = AggregatePolicyArtifactStore::new(paths.clone());
+    policy_store
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap aggregate policy");
+
+    // fake registry:ClaudeCode 映射到「输出 pass verdict」的 streaming adapter。
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(ReviewVerdictStreamingProvider {
+            output: "审核通过。\n\n```json\n{\"verdict\":\"pass\",\"summary\":\"可以确认\"}\n```",
+            provider_type: Arc::new(Mutex::new(None)),
+            prompt: Arc::new(Mutex::new(None)),
+        }),
+    );
+
+    let capabilities = Arc::new(ReviewStaticCapabilitySource::default());
+    let audit = Arc::new(GatewayRunAudit::new());
+    let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+        policy_store,
+        capabilities.clone(),
+        Arc::new(ReviewPassThroughTargetResolver),
+        Arc::new(registry),
+        Arc::new(ReviewStubSyncAdapter),
+        review_always_available_gate(),
+        audit.clone(),
+        worktree.clone(),
+    ));
+
+    ReviewGatewayFixture {
+        _root: root,
+        paths,
+        gateway,
+        capabilities,
+        audit,
+        worktree,
+        member_id,
+    }
+}
+
+/// 批2 Task 20b(决策项⑦):gateway review 测试的窗口装备——注入
+/// lifecycle store(窗口/快照 store 根)并开真实规划审查窗(生产入口
+/// 同一 helper 面 `begin_plan_review_window`);内层驱动据此铸造
+/// ReviewerVerify 合同并通过网关复验。
+async fn equip_plan_review_window(
+    engine: &mut crate::product::workspace_engine::types::WorkspaceEngine,
+    fixture: &ReviewGatewayFixture,
+) {
+    let paths = &fixture.paths;
+    engine.lifecycle_store = Some(crate::product::lifecycle_store::LifecycleStore::new(
+        paths.clone(),
+    ));
+    // lifecycle store 注入会激活 author baseline fail-closed 链
+    // (baseline_teaching)——种子最小 issue 记录(base_branch 缺省由
+    // resolve_effective_base_branch 解析默认分支)。
+    let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            base_branch: None,
+            title: "t20b plan review window fixture".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("seed issue for baseline chain");
+    // Task 2 连带(REQ-ENV-14):lc 内层驱动的材料断言
+    // (assert_plan_review_material)需要 issue selection 覆盖 fixture 已
+    // 登记成员——补 project 级 selection,使材料集合可解析出非空成员。
+    IssueCodebaseSelectionStore::new(paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            &issue.id,
+            vec![fixture.member_id],
+            Vec::new(),
+            Vec::new(),
+            None,
+        ))
+        .expect("seed issue selection");
+    let reviewer = engine
+        .session
+        .reviewer_provider
+        .clone()
+        .expect("reviewer provider");
+    let worktree = engine
+        .session
+        .repository_path
+        .clone()
+        .expect("repository path");
+    engine
+        .begin_plan_review_window(&reviewer, worktree)
+        .await
+        .expect("plan review window");
+}
+
+#[tokio::test]
+async fn drive_review_session_via_gateway_records_audit_and_completes() {
+    let fixture = review_gateway_fixture();
+    let audit = fixture.audit.clone();
+    assert_eq!(audit.stream_launches(), 0);
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_review_via_gateway");
+    session.review_rounds = 2;
+    session.reviewer_provider = Some(ProviderName::ClaudeCode);
+    session.artifact = Some(artifact_payload("# Artifact\n\n可以确认"));
+    session.repository_path = Some(fixture.worktree.clone());
+
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone());
+
+    equip_plan_review_window(&mut engine, &fixture).await;
+    engine.start_review_or_skip().await;
+    engine
+        .drive_review_session_via_gateway_with_window(empty_provider_commands())
+        .await;
+
+    assert_eq!(
+        audit.stream_launches(),
+        1,
+        "logical review session must start via gateway once"
+    );
+    // C-2 身份契约:launch request 的 provider ref 必须随 session.reviewer_provider
+    // (此处为 ClaudeCode)透传到 gateway validate,不得硬编码别的 provider。
+    // (validate/spawn 复验会多次咨询 capability source,故断言「全部一致」而非次数。)
+    let seen = fixture.capabilities.seen_provider_refs();
+    assert!(
+        !seen.is_empty(),
+        "gateway must consult capability for the session-configured reviewer provider"
+    );
+    assert!(
+        seen.iter()
+            .all(|r| r == &ProviderRef::claude_code("cap_managed_snapshot")),
+        "every gateway validate/revalidate must use the session-configured reviewer, got {seen:?}"
+    );
+    assert_eq!(
+        engine.session().stage,
+        WorkspaceStage::AuthorConfirm,
+        "Story/Design pass verdict must return its report to author confirmation"
+    );
+    assert!(
+        engine.timeline_nodes.iter().any(|node| {
+            node.node_type == TimelineNodeType::ReviewerRun
+                && node.status == TimelineNodeStatus::Completed
+                && node.summary.as_deref() == Some("Review 完成，报告已进入对话流")
+        }),
+        "Story/Design reviewer run must complete before its report returns to author confirmation"
+    );
+}
+
+/// C-2(组3;lcg_t13 重钉):reviewer 配置 Kimi 时不得静默回退 Claude。
+/// Task 1a 四家映射后 KimiCode 是合法 gateway dialect——launch request
+/// 以 KimiCode ref 透传 gateway validate(映射不再失败),随后在本
+/// fixture 的 availability gate 处 fail-closed(gate 只播种 ClaudeCode/
+/// Codex 健康条目,Kimi 无健康记录 → `provider_unavailable` 点名
+/// KimiCode)、gateway audit 零启动。回归锁定语义不变:修复前该配置会
+/// 静默用 ClaudeCode 跑完整 review;现在任何失败都必须点名配置的
+/// reviewer 且零 session 启动。
+#[tokio::test]
+async fn drive_review_session_via_gateway_fails_closed_for_unavailable_kimi_reviewer() {
+    let fixture = review_gateway_fixture();
+    let audit = fixture.audit.clone();
+    assert_eq!(audit.stream_launches(), 0);
+
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_review_kimi_via_gateway");
+    session.review_rounds = 2;
+    session.reviewer_provider = Some(ProviderName::KimiCode);
+    session.artifact = Some(artifact_payload("# Artifact\n\n可以确认"));
+    session.repository_path = Some(fixture.worktree.clone());
+
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone());
+
+    equip_plan_review_window(&mut engine, &fixture).await;
+    engine.start_review_or_skip().await;
+    engine
+        .drive_review_session_via_gateway_with_window(empty_provider_commands())
+        .await;
+
+    let mut start_failure = None;
+    while let Ok(event) = event_rx.try_recv() {
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            start_failure = Some(message);
+        }
+    }
+    let message = start_failure.expect("unavailable Kimi reviewer must surface an error event");
+    assert!(
+        message.contains("KimiCode"),
+        "the failure must name the session-configured reviewer, got: {message}"
+    );
+    assert!(
+        message.contains("provider_unavailable"),
+        "fixture gate has no Kimi health entry: the launch must fail closed at availability, got: {message}"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        0,
+        "unavailable reviewer must not start any gateway session"
+    );
+    // C-2 身份透传:Kimi reviewer 的 launch request 以 KimiCode ref 到达
+    // gateway validate(映射成功后由 availability gate fail-closed),绝无
+    // 静默 Claude 顶替——fixture registry 只注册了 ClaudeCode adapter,
+    // 若被顶替则启动成功、stream_launches 变 1(上方零启动断言即红)。
+    let seen = fixture.capabilities.seen_provider_refs();
+    assert!(
+        seen.iter()
+            .any(|r| r.provider_type == ProviderRefType::KimiCode
+                && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        "the review launch must validate the session-configured Kimi reviewer, got {seen:?}"
+    );
+}
+
+/// C-2(组2):reviewer 配置 Codex 时，review 启动必须命中 REQ-ENV-05 路由级硬门
+/// (codex_danger_full_access_unsupported)，不得静默改成 Claude 跑 review。
+#[tokio::test]
+async fn drive_review_session_via_gateway_blocks_codex_reviewer_at_route() {
+    let fixture = review_gateway_fixture();
+    let audit = fixture.audit.clone();
+    assert_eq!(audit.stream_launches(), 0);
+
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_review_codex_via_gateway");
+    session.review_rounds = 2;
+    session.reviewer_provider = Some(ProviderName::Codex);
+    session.artifact = Some(artifact_payload("# Artifact\n\n可以确认"));
+    session.repository_path = Some(fixture.worktree.clone());
+
+    let mut engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(
+            fixture.paths.root().join("checkpoints"),
+        )),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(fixture.gateway.clone());
+
+    equip_plan_review_window(&mut engine, &fixture).await;
+    engine.start_review_or_skip().await;
+    engine
+        .drive_review_session_via_gateway_with_window(empty_provider_commands())
+        .await;
+
+    let mut start_failure = None;
+    while let Ok(event) = event_rx.try_recv() {
+        if let crate::product::workspace_engine::EngineEvent::Error { message } = event {
+            start_failure = Some(message);
+        }
+    }
+    let message = start_failure.expect("codex reviewer must surface an error event");
+    // r47:路由级 Codex 全阻已移除(LC 投影恒非 danger);无探针签发行的
+    // codex reviewer 经 capability 行 fail-closed(launch_not_confirmed),
+    // 错误仍必须点名 Codex 且零 session 启动(下两断言不变)。
+    assert!(
+        message.contains("Codex"),
+        "r47:路由全阻移除后,codex reviewer 的失败(此处 fixture 无 registry:         provider_gateway_registry_lookup)仍必须点名 Codex 且零启动, got: {message}"
+    );
+    assert_eq!(
+        audit.stream_launches(),
+        0,
+        "route-blocked reviewer must not start any gateway session"
+    );
+    assert!(
+        fixture
+            .capabilities
+            .seen_provider_refs()
+            .iter()
+            .any(|r| r.provider_type == ProviderRefType::Codex),
+        "the launch must have validated the session-configured Codex reviewer"
+    );
+}
+
+/// 测试用 target resolver：透传 request target 并记录之，用于验证
+/// `routing_reference_context` 构造 aggregate_root target 时镜像 factory 的
+/// canonicalize 语义。
+#[derive(Default)]
+struct RecordingTargetResolver {
+    seen: Arc<Mutex<Option<PolicyTarget>>>,
+}
+
+impl PolicyTargetResolver for RecordingTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        *self.seen.lock().unwrap() = Some(request.target.clone());
+        Ok(request.target.clone())
+    }
+}
+
+/// 测试用 target resolver：恒失败，用于验证 gateway validate Err → Legacy 行为不变。
+struct FailingTargetResolver;
+
+impl PolicyTargetResolver for FailingTargetResolver {
+    fn resolve_and_revalidate(
+        &self,
+        _request: &SessionLaunchRequest,
+    ) -> Result<PolicyTarget, ProviderGatewayError> {
+        Err(ProviderGatewayError::Target("stub failure".to_string()))
+    }
+}
+
+/// 构造一个最小 gateway：静态 capability + 指定 target resolver + 真实 bootstrap 的
+/// aggregate policy。`routing_reference_context` 只走 validate（政策 + capability +
+/// target），不触发真实 provider run。
+fn routing_context_gateway<T: PolicyTargetResolver + 'static>(
+    root: &tempfile::TempDir,
+    resolver: T,
+) -> (Arc<LogicalCodebaseProviderGateway>, std::path::PathBuf) {
+    routing_context_gateway_with_capability(
+        root,
+        resolver,
+        Arc::new(ReviewStaticCapabilitySource::default()),
+    )
+}
+
+/// 同 `routing_context_gateway`，但调用方持有 capability source，供断言
+/// 「投影 request 的 provider ref 随 session.author_provider」（C-2）。
+fn routing_context_gateway_with_capability<T: PolicyTargetResolver + 'static>(
+    root: &tempfile::TempDir,
+    resolver: T,
+    capabilities: Arc<ReviewStaticCapabilitySource>,
+) -> (Arc<LogicalCodebaseProviderGateway>, std::path::PathBuf) {
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("create worktree");
+
+    let manifest = LogicalCodebaseManifest::new("project_0001", worktree.clone(), Vec::new());
+    let policy_store = AggregatePolicyArtifactStore::new(paths.clone());
+    policy_store
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap aggregate policy");
+
+    let gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
+        policy_store,
+        capabilities,
+        Arc::new(resolver),
+        Arc::new(ProviderRegistry::new()),
+        Arc::new(ReviewStubSyncAdapter),
+        review_always_available_gate(),
+        Arc::new(GatewayRunAudit::new()),
+        worktree.clone(),
+    ));
+    (gateway, worktree)
+}
+
+#[test]
+fn routing_reference_context_returns_legacy_without_gateway() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        make_session("sess_no_gateway"),
+    );
+
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Legacy
+    ));
+}
+
+#[test]
+fn routing_reference_context_canonicalizes_aggregate_root_target() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let resolver = RecordingTargetResolver::default();
+    let seen = resolver.seen.clone();
+    let (gateway, worktree) = routing_context_gateway(&root, resolver);
+
+    // repository_path 故意带 `..`，验证 target worktree 在构造时被 canonicalize。
+    let non_canonical = worktree.join("..").join("worktree");
+    let canonical = std::fs::canonicalize(&non_canonical).expect("canonicalize non-canonical path");
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_logical");
+    session.repository_path = Some(non_canonical);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Logical(_)
+    ));
+
+    let recorded = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("resolver must record target");
+    assert_eq!(recorded.worktree, canonical);
+}
+
+/// C-2(组2):author 配置 Codex 时，投影 request 必须以 session 配置的 Codex ref
+/// 校验(被 REQ-ENV-05 路由级硬门阻断后回落 Legacy)——不得硬编码 ClaudeCode
+/// 假装校验通过。
+#[test]
+fn routing_reference_context_projects_session_codex_author_not_hardcoded_claude() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let capabilities = Arc::new(ReviewStaticCapabilitySource::default());
+    let (gateway, worktree) = routing_context_gateway_with_capability(
+        &root,
+        ReviewPassThroughTargetResolver,
+        capabilities.clone(),
+    );
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_codex");
+    session.author_provider = ProviderName::Codex;
+    session.repository_path = Some(worktree);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    // r47:路由级 Codex 全阻移除后 validate 成功(fixture double 放行)→
+    // Logical 投影(反硬编码断言语义不变:Codex 作者不被顶替为 Claude)。
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Logical(_)
+    ));
+    let seen = capabilities.seen_provider_refs();
+    assert!(
+        seen.iter()
+            .any(|r| r.provider_type == ProviderRefType::Codex
+                && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        "projection must validate the session-configured Codex author, got {seen:?}"
+    );
+}
+
+/// C-2(组3;lcg_t13 重钉):Task 1a 四家映射后 Pi 是合法 gateway
+/// dialect——author 配置 Pi 时投影 request 以 session 配置的 Pi ref 经
+/// gateway validate(fixture capability 放行)→ `Logical`,不再回落
+/// Legacy。反硬编码语义不变:Pi 作者不被顶替为 Claude,也不假装
+/// Logical 之外的投影;无 gateway dialect 的 provider(如 Fake)仍回落
+/// Legacy(真实启动在集中映射处 fail-closed,由 provider_ref_mapping
+/// 测试锁定)。
+#[test]
+fn routing_reference_context_projects_session_pi_author_not_hardcoded_claude() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let capabilities = Arc::new(ReviewStaticCapabilitySource::default());
+    let (gateway, worktree) = routing_context_gateway_with_capability(
+        &root,
+        ReviewPassThroughTargetResolver,
+        capabilities.clone(),
+    );
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_author_pi");
+    session.author_provider = ProviderName::Pi;
+    session.repository_path = Some(worktree);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    assert!(
+        matches!(
+            engine.routing_reference_context(),
+            RoutingReferenceContext::Logical(_)
+        ),
+        "Pi is a legal gateway dialect after the four-provider mapping: the projection must validate it instead of silently falling back to Legacy"
+    );
+    let seen = capabilities.seen_provider_refs();
+    assert!(
+        seen.iter().any(|r| r.provider_type == ProviderRefType::Pi
+            && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        "projection must validate the session-configured Pi author, got {seen:?}"
+    );
+}
+
+#[test]
+fn routing_reference_context_returns_legacy_when_validate_fails() {
+    let root = tempfile::tempdir().expect("temporary product root");
+    let (gateway, worktree) = routing_context_gateway(&root, FailingTargetResolver);
+
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut session = make_session("sess_validate_fails");
+    session.repository_path = Some(worktree);
+    let engine = WorkspaceEngine::new(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(gateway);
+
+    // validate Err → Legacy 行为不变。`tracing::warn!` 是日志级副作用，
+    // 无稳定可捕获的断言方式，此处不测试日志输出本身。
+    assert!(matches!(
+        engine.routing_reference_context(),
+        RoutingReferenceContext::Legacy
+    ));
+}

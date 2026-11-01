@@ -1,5 +1,11 @@
 use super::*;
 
+/// B-③教学重驱 timeline node 标题。节点存在性即 attempt 级持久「恰一次」闸门
+/// （仿 workspace_engine provider_drive 的 artifact_retry_attempted bool 语义，
+/// 但选最小持久化面：不新增 store 字段，直接以 timeline node 为准；先建后跑，
+/// 崩溃/重入后闸门仍在，绝不会对同一 attempt 二次重驱）。
+pub(crate) const CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE: &str = "Coding 输出结构化教学重驱";
+
 pub(crate) struct CoderExecutionOutcome {
     pub(crate) attempt: CodingExecutionAttempt,
     pub(crate) plan_defect_decision: Option<CodeReviewFlowDecision>,
@@ -38,12 +44,16 @@ impl CodingWorkspaceEngine {
         context: &CodingExecutionContext,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<CoderExecutionOutcome, CodingWorkspaceEngineError> {
-        let attempt = self.store.ensure_provider_run_allowed(attempt)?;
+        let attempt = self.admit_provider_run(attempt, &CodingExecutionStage::Coding, "execute")?;
         let Some(worktree_path) = attempt.worktree_path.as_ref() else {
             return Err(CodingWorkspaceEngineError::MissingWorktree(
                 attempt.id.clone(),
             ));
         };
+        // C2 Task 6（决策 6/#13）：admission 通过后、role run 创建前冻结
+        // 当时 worktree 真实 HEAD 为本次 execution 的 start_commit。
+        self.freeze_active_unit_run_start_commit(&attempt, worktree_path)
+            .await?;
         let attempt = self.store.update_attempt_stage(
             &attempt.project_id,
             &attempt.issue_id,
@@ -99,6 +109,48 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
             &attempt.id,
         )?;
+        // C-1b（oracle 裁决）：恢复重驱对账 rework-claims journal——认领
+        // 存在而其 node 无 role run 输出（消费标记后、spawn 前中断）时，
+        // 以 claim.instruction_ids 强制入渲染并落 instruction_claim_interrupted
+        // 等待事实；不重写 claim、不二次消费（强制回放的 id 不进本次认领
+        // 集合）。
+        let interrupted_renders = self.store.reconcile_interrupted_rework_claims(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        )?;
+        let mut forced_replay_lines: Vec<String> = Vec::new();
+        for render in &interrupted_renders {
+            for instruction in &render.instructions {
+                if rework_instruction
+                    .as_ref()
+                    .is_none_or(|current| current.id != instruction.id)
+                {
+                    forced_replay_lines.push(format!(
+                        "- [中断认领 {} 强制回放] {}（修复提示：{}）",
+                        render.claim.claim_id,
+                        instruction.summary,
+                        instruction.fix_hints.join("；")
+                    ));
+                }
+            }
+            for note in &render.notes {
+                forced_replay_lines.push(format!(
+                    "- [中断认领 {} 强制回放 ContextNote {}] {}",
+                    render.claim.claim_id,
+                    note.id,
+                    note.content.trim()
+                ));
+            }
+        }
+        let forced_replay_section = if forced_replay_lines.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n中断认领强制回放（上一轮认领后未进入任何 prompt，本轮必须优先完成）:\n{}\n",
+                forced_replay_lines.join("\n")
+            )
+        };
         let context_notes = self.store.list_unconsumed_context_notes(
             &attempt.project_id,
             &attempt.issue_id,
@@ -111,14 +163,21 @@ impl CodingWorkspaceEngine {
         let context_note_input =
             format_rework_context_notes(&context_notes, REWORK_CONTEXT_NOTE_CHAR_LIMIT);
         let coding_context_notes = (!context_note_ids.is_empty()).then_some(&context_note_input);
-        let rendered_context = self.render_coder_unit_run_context(
-            &attempt,
-            &coder_provider,
-            rework_instruction
-                .as_ref()
-                .map(|instruction| instruction.summary.clone()),
-        )?;
-        let full_prompt = rendered_context
+        let policy = self
+            .resolve_launch_policy_for_role(&attempt, CodingProviderRole::Coder, worktree_path)
+            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+        let routing_context = policy
+            .as_ref()
+            .map(routing_reference_context_from_policy)
+            .unwrap_or_default();
+        // G7（终局关闸缺口，#18 原族 rerun 路径残留）：未消费 rework 指令
+        // 不得进入绑定渲染上下文——首启已冻结 coder_execution_context_hash
+        //（render→bind），rerun 指令后 runner 续起若把指令摘要带进 envelope
+        // 会与冻结哈希恒失配（coding_unit_run_execution_context 死循环）。
+        // 与 execute_coder_fix_from_review_outcome 同构：绑定上下文稳定，
+        // 指令经增量段进入实际 prompt，由 Task 7 认领事务消费。
+        let rendered_context = self.render_coder_unit_run_context(&attempt, &coder_provider)?;
+        let mut full_prompt = rendered_context
             .as_ref()
             .map(|rendered| rendered.text.clone())
             .unwrap_or_else(|| {
@@ -127,8 +186,65 @@ impl CodingWorkspaceEngine {
                     context,
                     rework_instruction.as_ref(),
                     coding_context_notes,
+                    &routing_context,
                 )
             });
+        // group 路径（rendered_context 在场）此前只把指令摘要放进 envelope、
+        // fix_hints/questions 与 ContextNote 全文被丢弃——以增量段补进实际
+        // prompt（与 rework 路径同构）；无新增内容时保持原 prompt 形态。
+        if rendered_context.is_some()
+            && (rework_instruction.is_some() || coding_context_notes.is_some())
+        {
+            full_prompt.push_str("\n\n");
+            full_prompt.push_str(&build_coding_delta_prompt(
+                &attempt,
+                context,
+                rework_instruction.as_ref(),
+                coding_context_notes,
+                &routing_context,
+            ));
+        }
+        full_prompt.push_str(&forced_replay_section);
+        // group 主路径（schema v2 投影渲染）的 prompt 不含 legacy markdown 的
+        // 范围规范段——渲染只输出投影 section（Write Policy JSON），没有
+        // 「判定基准／匹配语义非 glob／空列表语义／默认拒绝」的规范语义。
+        // 此处追加一份与 legacy **逐字同源**的规范段：数据取 coder projection
+        // 的 write_policy（即 canonical_contract.write_policy，与机器门
+        // gates/schema_v2.rs 同一份取值），文案由
+        // coding_work_item_context::write_scope_section_text 渲染（legacy 与
+        // group 共用同一渲染器）。追加发生在 render→bind 哈希计算之后，执行
+        // 上下文哈希不受影响；legacy 路径返回 None（范围段已随 Work Item
+        // markdown 进入 prompt，不重复渲染）。
+        if let Some(scope_section) =
+            self.unit_run_write_scope_section(&attempt, CodingProviderRole::Coder)?
+        {
+            full_prompt.push_str(&scope_section);
+        }
+        // r54 越界根修:LC attempt(target_snapshot 在场,与 cross_target_check
+        // 同口径)的 coder prompt 硬钉 worktree 纪律段(见
+        // worktree_discipline_section 文档);legacy 单仓 cwd 本就在 worktree,
+        // 零变化。
+        if attempt.target_snapshot.is_some() {
+            full_prompt.push_str(&worktree_discipline_section(worktree_path));
+        }
+        // S6（DesignPushLocal2 Q6/Q4②）：渲染与回落两路径合并后的最终
+        // prompt 统一追加平台指令段——提交责任声明优先于仓库「不自动
+        // 提交」类规则，汇报契约钉住交付摘要事实面。追加发生在 render→bind
+        // 哈希计算之后，执行上下文哈希不受影响；所有 attempt 无条件注入。
+        // T15（REQ-ENV-CHECK-01,审查修复轮1 F3）：HostCoding CHECK 自跑
+        // 合同——按 platform_directives_section 先例在 render/fallback
+        // 合并后无条件追加（group 首轮 rendered_context 分支不经 builder）；
+        // 追加发生在 render→bind 哈希计算之后，执行上下文哈希不受影响。
+        full_prompt.push_str(host_coding_check_contract());
+        full_prompt.push_str(&platform_directives_section());
+        // P3-a（REQ-COD-07）：跨仓上游交付注入——权威 resolver 结果以运行期
+        // DTO 组段，追加在 render→bind 哈希计算之后（renderer/执行上下文哈希
+        // 不受影响）、下方 claim 记录之前，fresh/delta/rework/teaching/retry
+        // 全部实际 prompt 变体经同一 section 携带；单仓/无跨仓依赖时空段
+        // 零变化。
+        let upstream_deliveries = self.resolved_upstream_deliveries_for_attempt(&attempt)?;
+        let upstream_section = resolved_upstream_deliveries_section(&upstream_deliveries);
+        full_prompt.push_str(&upstream_section);
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -136,30 +252,58 @@ impl CodingWorkspaceEngine {
         };
         let prompt = match prompt_mode {
             CodingPromptMode::FullConversation => full_prompt.clone(),
-            CodingPromptMode::DeltaOnly => build_coding_delta_prompt(
-                &attempt,
-                context,
-                rework_instruction.as_ref(),
-                coding_context_notes,
-            ),
+            CodingPromptMode::DeltaOnly => {
+                let mut delta = build_coding_delta_prompt(
+                    &attempt,
+                    context,
+                    rework_instruction.as_ref(),
+                    coding_context_notes,
+                    &routing_context,
+                );
+                delta.push_str(&forced_replay_section);
+                // r54 越界根修:delta-only resume 轮同样必须携带纪律段
+                //(oracle 裁决:delta/rework 变体必带禁线)。
+                if attempt.target_snapshot.is_some() {
+                    delta.push_str(&worktree_discipline_section(worktree_path));
+                }
+                // S6:delta-only resume 轮同样携带平台指令段（同 r54 禁线
+                // 先例——当前轮必须直接可见）。
+                delta.push_str(&platform_directives_section());
+                // T15:delta-only resume 轮同样携带 HostCoding CHECK 自跑
+                // 合同（当前轮直接可见;builder 不内嵌,单源在此追加）。
+                delta.push_str(host_coding_check_contract());
+                // P3-a：delta-only resume 轮同样携带上游交付段（注入族
+                // 先例——当前轮必须直接可见）。
+                delta.push_str(&upstream_section);
+                delta
+            }
         };
+        // C2 Task 7（#18／BYPASS-18）：渲染完成后的一次可重放原子认领——
+        // 「认领（绑定渲染 digest／上下文 hash）→ 标记消费」在 attempt 级
+        // 锁内一次落盘；中断后重放命中同一认领，指令不被消费第二次。
+        let mut claim_instruction_ids = context_note_ids;
         if let Some(instruction) = rework_instruction.as_ref() {
-            self.store.mark_rework_instruction_consumed(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &instruction.id,
-                &node.id,
-            )?;
+            claim_instruction_ids.push(instruction.id.clone());
         }
-        if !context_note_ids.is_empty() {
-            self.store.mark_context_notes_consumed(
-                &attempt.project_id,
-                &attempt.issue_id,
-                &attempt.id,
-                &context_note_ids,
+        if !claim_instruction_ids.is_empty() {
+            use crate::product::coding_attempt_store::ReworkClaimOutcome;
+            match self.store.claim_and_consume_rework_instructions(
+                &attempt,
+                &node.id,
                 attempt.rework_count,
-            )?;
+                &prompt,
+                rendered_context
+                    .as_ref()
+                    .map(|rendered| rendered.content_hash.as_str()),
+                &claim_instruction_ids,
+            )? {
+                ReworkClaimOutcome::Claimed { .. } | ReworkClaimOutcome::Replayed { .. } => {}
+                ReworkClaimOutcome::RenderFailed => {
+                    return Err(CodingWorkspaceEngineError::ProviderStream(
+                        "rework_render_failed_empty_prompt".to_string(),
+                    ));
+                }
+            }
         }
 
         let retry_success = self
@@ -171,29 +315,57 @@ impl CodingWorkspaceEngine {
                 provider_name: &coder_provider,
                 worktree_path,
                 initial_prompt: prompt,
-                fresh_prompt: full_prompt,
+                fresh_prompt: full_prompt.clone(),
                 initial_prompt_mode: prompt_mode,
                 initial_resume_provider_session_id: resume_provider_session_id,
-                command_rx,
+                command_rx: &mut *command_rx,
             })
             .await?;
-        let full_output = retry_success.outcome.full_output;
-        let role_run = retry_success.role_run;
-        let node = retry_success.node;
-        let (plan_defect_report, plan_defect_decision, plan_defect_error) =
-            match parse_execution_plan_defects(PlanDefectSource::Coder, &full_output) {
-                Ok(report) if report.findings.is_empty() => (None, None, None),
-                Ok(report) => {
-                    let projection = self.reviewer_projection_for_attempt(&attempt)?;
-                    let decision = execution_plan_defect_flow_decision(&report, &projection);
-                    (Some(report), Some(decision), None)
-                }
-                Err(error) => (
-                    None,
-                    Some(CodeReviewFlowDecision::StopForHumanTriage),
-                    Some(error.to_string()),
-                ),
-            };
+        let mut full_output = retry_success.outcome.full_output;
+        let mut role_run = retry_success.role_run;
+        let mut node = retry_success.node;
+        let mut plan_defect_parse =
+            parse_execution_plan_defects(PlanDefectSource::Coder, &full_output);
+        // B-③（3.6 矩阵族③）：解析失败先做恰一次教学重驱（错误原文回灌 +
+        // 共享单源契约），仍失败才落既有 blocked 门；重驱轮的输出与 run/node
+        // 成为本次 coding 的最终状态，后续保存/完成/gate 逻辑不变。
+        if plan_defect_parse.is_err()
+            && !self.coding_output_teaching_reredrive_attempted(&attempt)?
+            && let Err(parse_error) = plan_defect_parse.as_ref()
+            && let Some(reredrive) = self
+                .run_coding_output_teaching_reredrive(
+                    &attempt,
+                    provider,
+                    &coder_provider,
+                    worktree_path,
+                    &node,
+                    &role_run,
+                    parse_error,
+                    &full_prompt,
+                    &upstream_section,
+                    command_rx,
+                )
+                .await?
+        {
+            full_output = reredrive.outcome.full_output;
+            role_run = reredrive.role_run;
+            node = reredrive.node;
+            plan_defect_parse = parse_execution_plan_defects(PlanDefectSource::Coder, &full_output);
+        }
+        let (plan_defect_report, plan_defect_decision, plan_defect_error) = match plan_defect_parse
+        {
+            Ok(report) if report.findings.is_empty() => (None, None, None),
+            Ok(report) => {
+                let projection = self.reviewer_projection_for_attempt(&attempt)?;
+                let decision = execution_plan_defect_flow_decision(&report, &projection);
+                (Some(report), Some(decision), None)
+            }
+            Err(error) => (
+                None,
+                Some(CodeReviewFlowDecision::StopForHumanTriage),
+                Some(error.to_string()),
+            ),
+        };
         let plan_defect_route = plan_defect_decision.map(CodeReviewFlowDecision::label);
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt,
@@ -237,16 +409,30 @@ impl CodingWorkspaceEngine {
             plan_defect_route,
         })
         .await;
-        let attempt = if plan_defect_decision == Some(CodeReviewFlowDecision::StopForHumanTriage) {
-            self.open_coding_output_human_triage_gate(
-                &attempt,
-                &node.id,
-                plan_defect_report.as_ref(),
-                plan_defect_error.as_deref(),
-                Some(raw_provider_output_ref.clone()),
-            )?
-        } else {
-            attempt
+        let attempt = match plan_defect_decision {
+            Some(CodeReviewFlowDecision::StopForHumanTriage) => {
+                self.open_coding_output_human_triage_gate(
+                    &attempt,
+                    &node.id,
+                    plan_defect_report.as_ref(),
+                    plan_defect_error.as_deref(),
+                    Some(raw_provider_output_ref.clone()),
+                )
+                .await?
+            }
+            // P2-b（REQ-COD-08）：运行环境类阻塞落 coding_operational_blocker 门
+            //——此前该决策在 coder 路径无落门分支，attempt 静默停在
+            // Running/Coding 无门无入口。
+            Some(CodeReviewFlowDecision::OpenOperationalGate) => {
+                self.open_coding_operational_blocker_gate(
+                    &attempt,
+                    &node.id,
+                    plan_defect_report.as_ref(),
+                    Some(raw_provider_output_ref.clone()),
+                )
+                .await?
+            }
+            _ => attempt,
         };
         Ok(CoderExecutionOutcome {
             attempt,
@@ -288,6 +474,129 @@ impl CodingWorkspaceEngine {
             }))
     }
 
+    /// B-③：教学重驱是否已在本 attempt 触发过（持久恰一次闸门：以
+    /// `CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE` timeline node 存在性为准，
+    /// 崩溃/重入后闸门仍在）。
+    fn coding_output_teaching_reredrive_attempted(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<bool, CodingWorkspaceEngineError> {
+        Ok(self
+            .store
+            .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .any(|node| node.title == CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE))
+    }
+
+    /// B-③（3.6 矩阵族③）：coder 完成报告 plan_defect_findings 解析失败的
+    /// 「恰一次教学重驱」。流程：
+    /// 1. 按正常路径终态关闭第一轮 role run/node（role run=Completed，
+    ///    失败由门/重驱轮携带，语义与既有 parse 失败路径一致）；
+    /// 2. 先落教学重驱 timeline node（审计留痕 + 恰一次闸门，先建后跑
+    ///    fail-closed），再刷新 attempt 拿第一轮落地的 provider session id；
+    /// 3. 复用 run_coder_with_retry_cycle 跑一次错误原文回灌的教学续跑
+    ///    （有 session 时 delta 续会话，无 session 时 fresh 全量 prompt 尾接
+    ///    教学段）；传输层重试/取消等失败语义复用既有周期机制。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_coding_output_teaching_reredrive(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        provider: &dyn StreamingProviderAdapter,
+        coder_provider: &ProviderName,
+        worktree_path: &Path,
+        previous_node: &CodingTimelineNode,
+        previous_role_run: &CodingRoleRun,
+        parse_error: &CodingWorkspaceEngineError,
+        full_prompt: &str,
+        upstream_section: &str,
+        command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
+    ) -> Result<Option<ProviderRetryCycleSuccess>, CodingWorkspaceEngineError> {
+        let error_summary = truncate_prompt_section(&parse_error.to_string(), 2_000);
+        self.store.update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &previous_role_run.id,
+            CodingRoleRunStatus::Completed,
+            None,
+        )?;
+        self.complete_timeline_node(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &previous_node.id,
+            CodingTimelineNodeStatus::Completed,
+            Some(format!(
+                "输出未通过 plan_defect 契约解析，转教学重驱: {error_summary}"
+            )),
+        )
+        .await?;
+
+        let existing =
+            self.store
+                .get_timeline_nodes(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let node = CodingTimelineNode {
+            id: format!("coding_node_{:04}", existing.len() + 1),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::Coding,
+            title: CODING_OUTPUT_TEACHING_REREDRIVE_NODE_TITLE.to_string(),
+            status: CodingTimelineNodeStatus::Running,
+            agent_role: Some(CodingAgentRole::Author),
+            summary: Some(error_summary),
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        };
+        self.store.save_timeline_node(attempt, node.clone())?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingTimelineNodeCreated { node: node.clone() })
+            .await;
+
+        let refreshed =
+            self.store
+                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &refreshed,
+            &CodingProviderRole::Coder,
+            coder_provider,
+        );
+        let teaching_prompt =
+            build_coding_output_teaching_reredrive_prompt(&parse_error.to_string());
+        let fresh_prompt = format!("{full_prompt}\n\n{teaching_prompt}");
+        // P3-a（REQ-COD-07）：teaching 变体同样携带上游交付段——fresh 面经
+        // full_prompt 已含（不重复拼），delta 面（initial_prompt）补注一次。
+        let mut teaching_delta_prompt = teaching_prompt;
+        teaching_delta_prompt.push_str(upstream_section);
+        let role_run = self.store.create_role_run(
+            &refreshed,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::AutomaticRetry,
+            Some(node.id.clone()),
+        )?;
+        let success = self
+            .run_coder_with_retry_cycle(CoderRetryCycleInput {
+                attempt: &refreshed,
+                initial_node: node,
+                initial_role_run: role_run,
+                provider,
+                provider_name: coder_provider,
+                worktree_path,
+                initial_prompt: teaching_delta_prompt,
+                fresh_prompt,
+                initial_prompt_mode: if resume_provider_session_id.is_some() {
+                    CodingPromptMode::DeltaOnly
+                } else {
+                    CodingPromptMode::FullConversation
+                },
+                initial_resume_provider_session_id: resume_provider_session_id,
+                command_rx: &mut *command_rx,
+            })
+            .await?;
+        Ok(Some(success))
+    }
+
     pub(crate) async fn emit_coder_output_chat_entry(&self, input: CoderOutputChatEntryInput<'_>) {
         let CoderOutputChatEntryInput {
             attempt,
@@ -323,6 +632,35 @@ impl CodingWorkspaceEngine {
             created_at: completed_at,
         };
         self.save_and_emit_chat_entry(attempt, entry).await;
+    }
+
+    /// C2 Task 6（决策 6/#13）：认领前冻结真实 HEAD。仅组 attempt 有活跃
+    /// unit run；重试 execution 的 `start_commit` 为 None 时，把 admission
+    /// 通过后的 worktree 真实 HEAD 写为自身起点（write-if-none：同
+    /// execution 已有 start 时不覆盖，重连／恢复不改写起点）。初始
+    /// execution 的起点由 `start_attempt` 落下的 `attempt.head_commit` 在
+    /// run 物化时携带，同样是认领前事实。
+    pub(crate) async fn freeze_active_unit_run_start_commit(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        worktree_path: &std::path::Path,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        if attempt.scope != crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
+            return Ok(());
+        }
+        let run = match self.store.get_active_unit_run(attempt) {
+            Ok(run) => run,
+            // 尚未物化的初始 run：起点随 render 阶段的物化写入，此处无可冻结对象。
+            Err(ProductStoreError::NotFound { .. }) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if run.start_commit.is_some() {
+            return Ok(());
+        }
+        let real_head = self._git_service.git_current_head(worktree_path).await?;
+        self.store
+            .backfill_coding_unit_run_start_commit(attempt, &run.id, &real_head)?;
+        Ok(())
     }
 }
 

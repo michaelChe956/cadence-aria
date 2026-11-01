@@ -52,10 +52,11 @@ pub(super) async fn run_workspace_provider_roles(
                 entity_id: "work_item_plan_0001".to_string(),
                 workspace_type: WorkspaceType::WorkItemPlan,
                 author_provider: provider.clone(),
-                reviewer_provider: provider.clone(),
+                reviewer_provider: Some(provider.clone()),
                 review_rounds: 1,
                 superpowers_enabled: true,
                 openspec_enabled: true,
+                work_item_plan_options: None,
             },
             session_id.clone(),
         )
@@ -94,7 +95,10 @@ pub(super) async fn run_workspace_provider_roles(
         .active_timeline_node_id()
         .ok_or_else(|| fixture_error("work item author node is missing"))?;
     let author_input = engine
-        .build_current_work_item_draft_streaming_input(None)
+        .build_current_work_item_draft_streaming_input(
+            None,
+            &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy,
+        )
         .map_err(fixture_error)?;
     engine
         .emit_provider_prompt_event(
@@ -146,7 +150,7 @@ pub(super) async fn run_workspace_provider_roles(
         .await;
     let (_review_command_tx, review_command_rx) = mpsc::channel::<ProviderCommand>(1);
     engine
-        .drive_review_session(adapter, review_command_rx)
+        .drive_review_session_with_window(adapter, review_command_rx)
         .await;
 
     let mut plan_review_passed = false;
@@ -181,6 +185,7 @@ fn outline_artifact(contract: &CanonicalWorkItemContract) -> ArtifactPayload {
                 source_design_spec_ids: vec!["design_spec_0001".to_string()],
                 strategy_summary: "validate production provider runners".to_string(),
                 work_item_outlines: vec![WorkItemOutline {
+                    target_repository_id: None,
                     outline_id: "outline_core".to_string(),
                     logical_work_item_id: contract.identity.logical_work_item_id.clone(),
                     title: contract.identity.title.clone(),

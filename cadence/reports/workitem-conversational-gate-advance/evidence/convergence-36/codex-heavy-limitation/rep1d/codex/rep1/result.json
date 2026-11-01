@@ -1,0 +1,568 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/codex-heavy/rep1d/codex/rep1",
+  "startedAt": "2026-09-08T14:18:51.211Z",
+  "finishedAt": "2026-09-08T14:36:17.634Z",
+  "elapsedSec": 1046.422,
+  "issue_id": "issue_0168",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0232",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.996,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.065,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 180.475,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 180.734,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 326.894,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 327.152,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 420.909,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 421.196,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 457.089,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 513.075,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 513.355,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 606.593,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 606.875,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 703.114,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 703.395,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 721.04,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 782.402,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 782.714,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 805.524,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 859.256,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 859.581,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 984.553,
+      "source": "stage_change"
+    },
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 984.863,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 1046.202,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "revise",
+      "round": 1,
+      "elapsedSec": 266.942,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-002 的 CT-002 输出能力未覆盖 WI-003 所需的相对 API 路径引用能力，require_all 契约失败。",
+          "evidence": "coverage edge WI-002 -> WI-003; contract_id CT-002; missing_capabilities [web/level-select.js relative API path reference]",
+          "required_action": "将 WI-002 的 CT-002 输出能力扩展为同时包含 web/level-select.js relative API path reference，或调整 WI-003 的契约需求以匹配已提供能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 2,
+      "elapsedSec": 364.494,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "CT-002 供需能力不匹配：WI-002 提供的能力未包含 WI-003 要求的能力。",
+          "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+          "required_action": "在 CT-002 的 provided capabilities 中补充 web/level-select.js relative API path reference，或移除/对齐 WI-003 对该能力的 demand。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 3,
+      "elapsedSec": 457.089,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-002 -> WI-003 依赖要求 CT-002 提供 web/level-select.js relative API path reference，但 WI-002 输出契约仅声明 API failure degradation behavior，形成 contract_gap。",
+          "evidence": "coverage edge WI-002 -> WI-003；contract_id=CT-002；required/provided capability mismatch；missing_capabilities=[web/level-select.js relative API path reference]；compatibility_policy=require_all。",
+          "required_action": "将 WI-002 的 CT-002 provided_capabilities 扩展为明确包含 web/level-select.js relative API path reference，或同步修订 WI-003 的 CT-002 required_capabilities 为与实际输出契约一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 4,
+      "elapsedSec": 556.768,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-002 向 WI-003 提供的 CT-002 缺少集成侧显式要求的能力，导致 require_all 契约覆盖失败。",
+          "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]; WI-002 supplied [API failure degradation behavior].",
+          "required_action": "将 WI-002 的 CT-002 provided_capabilities 补充为包含 web/level-select.js relative API path reference，或将 WI-003 的 required_capabilities 调整为与同一 CT-002 供给能力一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities / input_contracts.required_capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 5,
+      "elapsedSec": 661.283,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-002 的 CT-002 输出契约未提供 WI-003 要求的能力，导致契约覆盖不完整。",
+          "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+          "required_action": "将 web/level-select.js relative API path reference 加入 WI-002 的 CT-002 provided capabilities，或改由可满足该能力的契约承接 WI-003 输入依赖。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "output_contracts.capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 6,
+      "elapsedSec": 721.04,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-003 要求 CT-002 提供 web/level-select.js relative API path reference，但 WI-002 输出契约未声明该能力。",
+          "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+          "required_action": "将 WI-002 的 CT-002 输出能力补充为包含 web/level-select.js relative API path reference，或调整 WI-003 的依赖需求为已供应能力且保持契约一致。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 7,
+      "elapsedSec": 805.524,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-002 的 CT-002 输出契约缺少 WI-003 要求的能力，require_all 覆盖校验未通过。",
+          "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+          "required_action": "在 WI-002 的 CT-002 provided capabilities 中加入 web/level-select.js relative API path reference，并确保该能力由可验证契约承载。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 8,
+      "elapsedSec": 920.917,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "CT-002 的供应能力无法覆盖 WI-003 对该契约的要求。",
+          "evidence": "edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+          "required_action": "将 web/level-select.js relative API path reference 纳入 WI-002 的 CT-002 提供能力，或调整 WI-003 的 CT-002 需求表达以匹配已声明能力。",
+          "category": "contract_gap",
+          "class_hint": "repairable",
+          "contract_field": "input_contracts.required_capabilities / output_contracts.capabilities"
+        }
+      ]
+    },
+    {
+      "verdict": "revise",
+      "round": 9,
+      "elapsedSec": 1046.202,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "WI-002 的 CT-002 输出契约能力与 WI-003 的 CT-002 输入契约能力不一致，导致依赖边契约覆盖失败。",
+          "evidence": "coverage gap: WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]; provided_capabilities 仅包含 [API failure degradation behavior]。",
+          "required_action": "在 WI-002 的 CT-002 provided capabilities 中补充 web/level-select.js relative API path reference，或按现有 scope 约定同步调整该依赖边的 required capabilities，使 supply/demand 完全覆盖。",
+          "category": "contract_gap",
+          "class_hint": "repairable"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "WI-002 的 CT-002 输出能力未覆盖 WI-003 所需的相对 API 路径引用能力，require_all 契约失败。",
+      "evidence": "coverage edge WI-002 -> WI-003; contract_id CT-002; missing_capabilities [web/level-select.js relative API path reference]",
+      "required_action": "将 WI-002 的 CT-002 输出能力扩展为同时包含 web/level-select.js relative API path reference，或调整 WI-003 的契约需求以匹配已提供能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "CT-002 供需能力不匹配：WI-002 提供的能力未包含 WI-003 要求的能力。",
+      "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+      "required_action": "在 CT-002 的 provided capabilities 中补充 web/level-select.js relative API path reference，或移除/对齐 WI-003 对该能力的 demand。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts[contract_id=CT-002].capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 -> WI-003 依赖要求 CT-002 提供 web/level-select.js relative API path reference，但 WI-002 输出契约仅声明 API failure degradation behavior，形成 contract_gap。",
+      "evidence": "coverage edge WI-002 -> WI-003；contract_id=CT-002；required/provided capability mismatch；missing_capabilities=[web/level-select.js relative API path reference]；compatibility_policy=require_all。",
+      "required_action": "将 WI-002 的 CT-002 provided_capabilities 扩展为明确包含 web/level-select.js relative API path reference，或同步修订 WI-003 的 CT-002 required_capabilities 为与实际输出契约一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 向 WI-003 提供的 CT-002 缺少集成侧显式要求的能力，导致 require_all 契约覆盖失败。",
+      "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]; WI-002 supplied [API failure degradation behavior].",
+      "required_action": "将 WI-002 的 CT-002 provided_capabilities 补充为包含 web/level-select.js relative API path reference，或将 WI-003 的 required_capabilities 调整为与同一 CT-002 供给能力一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities / input_contracts.required_capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 的 CT-002 输出契约未提供 WI-003 要求的能力，导致契约覆盖不完整。",
+      "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+      "required_action": "将 web/level-select.js relative API path reference 加入 WI-002 的 CT-002 provided capabilities，或改由可满足该能力的契约承接 WI-003 输入依赖。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-003 要求 CT-002 提供 web/level-select.js relative API path reference，但 WI-002 输出契约未声明该能力。",
+      "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+      "required_action": "将 WI-002 的 CT-002 输出能力补充为包含 web/level-select.js relative API path reference，或调整 WI-003 的依赖需求为已供应能力且保持契约一致。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 的 CT-002 输出契约缺少 WI-003 要求的能力，require_all 覆盖校验未通过。",
+      "evidence": "coverage edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+      "required_action": "在 WI-002 的 CT-002 provided capabilities 中加入 web/level-select.js relative API path reference，并确保该能力由可验证契约承载。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    },
+    {
+      "severity": "must_fix",
+      "message": "CT-002 的供应能力无法覆盖 WI-003 对该契约的要求。",
+      "evidence": "edge WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]",
+      "required_action": "将 web/level-select.js relative API path reference 纳入 WI-002 的 CT-002 提供能力，或调整 WI-003 的 CT-002 需求表达以匹配已声明能力。",
+      "category": "contract_gap",
+      "class_hint": "repairable",
+      "contract_field": "input_contracts.required_capabilities / output_contracts.capabilities"
+    },
+    {
+      "severity": "must_fix",
+      "message": "WI-002 的 CT-002 输出契约能力与 WI-003 的 CT-002 输入契约能力不一致，导致依赖边契约覆盖失败。",
+      "evidence": "coverage gap: WI-002 -> WI-003, contract_id CT-002, missing_capabilities [web/level-select.js relative API path reference]; provided_capabilities 仅包含 [API failure degradation behavior]。",
+      "required_action": "在 WI-002 的 CT-002 provided capabilities 中补充 web/level-select.js relative API path reference，或按现有 scope 约定同步调整该依赖边的 required capabilities，使 supply/demand 完全覆盖。",
+      "category": "contract_gap",
+      "class_hint": "repairable"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 24128,
+      "output_tokens": 499,
+      "cache_read_tokens": 23936,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "workspace_error",
+  "error": "single-candidate approval compile failed; human gate remains open",
+  "completed": false,
+  "session_status": "open",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 0,
+    "initial_review_count": 0,
+    "verification_review_count": 0,
+    "review_cycles": {}
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-08T14:26:28.301Z",
+      "elapsedSec": 457.09,
+      "stage": "human_confirm",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_008",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-c11ebd1547",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T14:26:28.302Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-08T14:30:52.252Z",
+      "elapsedSec": 721.04,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_013",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-1-643c463d02",
+        "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-08T14:30:52.252Z"
+    },
+    {
+      "sequence": 3,
+      "enteredAt": "2026-09-08T14:32:16.736Z",
+      "elapsedSec": 805.524,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_015",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-2-a346c19a1a",
+        "feedback_digest": "701e0d83a7788e4c6e72b224fa22eaf9b154558398f2e52760a8f83a4eb45070",
+        "feedback_length": 63
+      },
+      "sentAt": "2026-09-08T14:32:16.736Z"
+    },
+    {
+      "sequence": 4,
+      "enteredAt": "2026-09-08T14:36:17.414Z",
+      "elapsedSec": 1046.202,
+      "stage": "prepare_context",
+      "reviewVerdict": "revise",
+      "active_node_id": "timeline_node_019",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-08T14:36:17.414Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-c11ebd1547",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_7b5e1e9b-1a96-476e-bc86-cd7a6ecc08df",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_004"
+    },
+    {
+      "action_index": 1,
+      "command_id": "cmd-human_gate_feedback-1-643c463d02",
+      "feedback_digest": "29aac370a01af9a3e82a2678161caab1b7fd360964029b0d1b12afb29389f564",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_9d2c5fb5-dc5a-4643-9f1b-7304ac137f4b",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_007"
+    },
+    {
+      "action_index": 2,
+      "command_id": "cmd-human_gate_feedback-2-a346c19a1a",
+      "feedback_digest": "701e0d83a7788e4c6e72b224fa22eaf9b154558398f2e52760a8f83a4eb45070",
+      "feedback_length": 63,
+      "turn_id": "human_gate_turn_a7fea312-aab8-4932-821c-d8144b2cccac",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_008"
+    }
+  ],
+  "advance_actions": [],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": null,
+    "after": null
+  },
+  "provider_start_count": 0,
+  "provider_start_ledger": [],
+  "legacy_decision_messages": [],
+  "confirmed_count": 0,
+  "duration_ms": 1046422,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.069,
+    "1:running": 179.41,
+    "2:cross_review": 0.259,
+    "3:prepare_context": 146.16,
+    "4:cross_review": 0.258,
+    "5:prepare_context": 93.757,
+    "6:cross_review": 0.287,
+    "7:prepare_context": 35.893,
+    "8:human_confirm": 55.986,
+    "9:cross_review": 0.28,
+    "10:prepare_context": 93.238,
+    "11:cross_review": 0.282,
+    "12:prepare_context": 96.239,
+    "13:cross_review": 0.281,
+    "14:prepare_context": 17.645,
+    "15:human_confirm": 61.362,
+    "16:cross_review": 0.312,
+    "17:prepare_context": 22.81,
+    "18:human_confirm": 53.732,
+    "19:cross_review": 0.325,
+    "20:prepare_context": 124.972,
+    "21:cross_review": 0.31,
+    "22:prepare_context": 61.339,
+    "23:human_confirm": 0.22
+  },
+  "stage3_gate_return": {
+    "waits": 3,
+    "dispatched": 3,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

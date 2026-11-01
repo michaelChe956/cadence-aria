@@ -1,0 +1,7 @@
+# directed-filters :: cargo test --locked --lib <filter> -- --list + run :: 2026-09-03 (task 8.5 worker re-run)
+campaign_stage3_recovery_matrix --list=7 :: test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 3067 filtered out; finished in 5.42s
+campaign_stage3_amendment --list=3 :: test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3071 filtered out; finished in 0.79s
+campaign_stage3_advance --list=4 :: test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3070 filtered out; finished in 1.73s
+campaign_stage3_dependency --list=3 :: test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3071 filtered out; finished in 0.36s
+campaign_stage3_group_projection --list=1 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3073 filtered out; finished in 0.12s
+campaign_stage3_interactive --list=6 :: test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3068 filtered out; finished in 0.58s

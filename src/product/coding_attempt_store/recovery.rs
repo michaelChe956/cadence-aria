@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole,
     CodingRoleRun, CodingRoleRunEventType, CodingRoleRunRetryMetadata, CodingRoleRunStatus,
-    CodingRoleRunTrigger,
+    CodingRoleRunTrigger, GateOrigin,
 };
-use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
@@ -483,7 +482,10 @@ impl super::CodingAttemptStore {
             validate_retry_role_run(&run, journal)?;
             run
         } else {
-            let id = next_sequential_id("coding_role_run", existing.len());
+            let id = crate::product::id::next_sequential_id_from_existing(
+                "coding_role_run",
+                existing.iter().map(|run| run.id.as_str()),
+            );
             let run_no = existing
                 .iter()
                 .filter(|run| {
@@ -513,6 +515,21 @@ impl super::CodingAttemptStore {
                 supersedes_run_id: Some(journal.expected_stale_role_run_id.clone()),
                 superseded_by_run_id: None,
                 reason_code: Some(journal.recovery_key.clone()),
+                // Bug2-A(Task 3):专用 retry 首写 gate_origin——门当前
+                // open 代次+retry_review 动作;门非 open(罕见重放态)按
+                // None 解释,不虚构关联。
+                gate_origin: self
+                    .open_blocked_gate_generation(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &attempt.id,
+                        &journal.expected_gate_id,
+                    )?
+                    .map(|generation| GateOrigin {
+                        gate_id: journal.expected_gate_id.clone(),
+                        generation,
+                        action_id: "retry_review".to_string(),
+                    }),
                 raw_provider_output_refs: Vec::new(),
                 artifact_refs: Vec::new(),
             };
@@ -558,6 +575,10 @@ impl super::CodingAttemptStore {
         )
     }
 
+    /// Bug2-A(Task 3):专用恢复链关门走统一持久化关闭原语,显式写
+    /// 审计动作 retry_review(旧实现经无 action 的 resolve 把
+    /// resolved_action 写成 None)。四种崩溃前缀由原语幂等收敛;
+    /// 门不存在返回 NotFound。
     pub fn resolve_failed_code_review_gate_idempotent(
         &self,
         project_id: &str,
@@ -570,18 +591,14 @@ impl super::CodingAttemptStore {
             self.acquire_failed_code_review_recovery_arbitration(project_id, issue_id, attempt_id)?;
         let attempt = self.get_attempt(project_id, issue_id, attempt_id)?;
         self.ensure_failed_review_recovery_write_allowed(&attempt)?;
-        let root = self.blocked_gates_root(project_id, issue_id, attempt_id);
-        if super::path_is_regular_file(&root.join(format!("{gate_id}.json")))? {
-            self.resolve_blocked_gate(project_id, issue_id, attempt_id, gate_id)?;
-            return Ok(());
-        }
-        if super::path_is_regular_file(&root.join("resolved").join(format!("{gate_id}.json")))? {
-            return Ok(());
-        }
-        Err(ProductStoreError::NotFound {
-            kind: "coding_blocked_gate",
-            id: gate_id.to_string(),
-        })
+        self.resolve_blocked_gate_with_action(
+            project_id,
+            issue_id,
+            attempt_id,
+            gate_id,
+            Some("retry_review"),
+        )?;
+        Ok(())
     }
 
     pub fn complete_failed_code_review_recovery_journal(
@@ -654,11 +671,10 @@ impl super::CodingAttemptStore {
         let current = self.validate_attempt_lineage(attempt)?;
         self.ensure_failed_review_recovery_write_allowed(&current)?;
         match current.status {
-            CodingAttemptStatus::Blocked => self.update_attempt_status(
+            CodingAttemptStatus::Blocked => self.admit_and_transition_attempt_to_executable(
                 &current.project_id,
                 &current.issue_id,
                 &current.id,
-                CodingAttemptStatus::Running,
             ),
             CodingAttemptStatus::Running => Ok(current),
             _ => Err(recovery_state_changed()),

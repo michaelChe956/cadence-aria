@@ -115,6 +115,66 @@ impl super::CodingAttemptStore {
             Ok(delivery)
         })
     }
+
+    /// 投递尝试失败收口（REQ-WIGA-06）：Pending|Unsent -> Unsent（幂等）；
+    /// 已 Delivered 原样返回，绝不降级、绝不写 delivered_at。
+    /// event_id 不匹配 => IdentityMismatch。
+    pub fn mark_plan_amendment_delivery_unsent(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        amendment_id: &str,
+        event_id: &str,
+    ) -> Result<CodingPlanAmendmentDelivery, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        validate_relative_id(amendment_id)?;
+        validate_relative_id(event_id)?;
+        let path = self.amendment_event_delivery_path(
+            &current.project_id,
+            &current.issue_id,
+            &current.id,
+            amendment_id,
+        );
+        with_exclusive_lock(&path, || {
+            let mut delivery: CodingPlanAmendmentDelivery = read_json(&path)?;
+            validate_delivery(&current.id, amendment_id, &delivery)?;
+            if delivery.event_id != event_id {
+                return Err(identity_mismatch(amendment_id));
+            }
+            if delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered {
+                return Ok(delivery);
+            }
+            let now = Utc::now().to_rfc3339();
+            delivery.status = CodingPlanAmendmentDeliveryStatus::Unsent;
+            delivery.delivered_at = None;
+            delivery.updated_at = now;
+            write_json(&path, &delivery)?;
+            Ok(delivery)
+        })
+    }
+
+    /// 列出该 attempt 目录下全部 delivery 记录（attempt 身份不符的文件 =>
+    /// IdentityMismatch fail-closed；目录缺失 => 空表）；按 created_at、
+    /// event_id 稳定排序。
+    pub fn list_plan_amendment_deliveries(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    ) -> Result<Vec<CodingPlanAmendmentDelivery>, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        let mut deliveries: Vec<CodingPlanAmendmentDelivery> = super::list_json_records(
+            &self
+                .attempt_dir(&current.project_id, &current.issue_id, &current.id)
+                .join("amendment-event-deliveries"),
+        )?;
+        for delivery in &deliveries {
+            validate_delivery(&current.id, &delivery.amendment_id, delivery)?;
+        }
+        deliveries.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.event_id.cmp(&right.event_id))
+        });
+        Ok(deliveries)
+    }
 }
 
 #[cfg(test)]
@@ -191,10 +251,8 @@ fn validate_delivery(
         || delivery.event_id != delivery_event_id(attempt_id, amendment_id)
         || delivery.attempt_id != attempt_id
         || delivery.amendment_id != amendment_id
-        || (delivery.status == CodingPlanAmendmentDeliveryStatus::Pending
-            && delivery.delivered_at.is_some())
-        || (delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered
-            && delivery.delivered_at.is_none())
+        || (delivery.delivered_at.is_some()
+            != (delivery.status == CodingPlanAmendmentDeliveryStatus::Delivered))
     {
         return Err(identity_mismatch(amendment_id));
     }

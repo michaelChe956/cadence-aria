@@ -1,0 +1,4 @@
+node_modules/
+run.manifest.json
+artifacts/
+*.tsbuildinfo

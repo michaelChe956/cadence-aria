@@ -47,6 +47,7 @@ fn plan_repair_parent_engine(
             issue_id: "issue_0001".to_string(),
             repository_id: "repository_0001".to_string(),
             title: "Story 0001".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     assert_eq!(story.id, "story_spec_0001");
@@ -56,6 +57,7 @@ fn plan_repair_parent_engine(
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design 0001".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     assert_eq!(design.id, "design_spec_0001");
@@ -74,38 +76,32 @@ fn plan_repair_parent_engine(
     revision_store
         .put_plan_revision(
             &plan,
-            &crate::product::models::WorkItemPlanRevision {
-                id: "plan_revision_0001".to_string(),
-                plan_id: plan.id.clone(),
-                revision_no: 1,
-                supersedes: None,
-                reason: crate::product::models::PlanRevisionReason::InitialCompile,
-                work_item_bindings: std::collections::BTreeMap::from([(
-                    "logical_work_item_0001".to_string(),
-                    "work_item_revision_0001".to_string(),
-                )]),
-                dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
-                validation_report_ref: "plan_validation_report_0001".to_string(),
-                plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(),
-                created_at: "2026-07-18T00:00:01Z".to_string(),
-            },
+            &crate::product::models::WorkItemPlanRevision { id: "plan_revision_0001".to_string(),
+            plan_id: plan.id.clone(),
+            revision_no: 1,
+            supersedes: None,
+            reason: crate::product::models::PlanRevisionReason::InitialCompile,
+            work_item_bindings: std::collections::BTreeMap::from([(
+                "logical_work_item_0001".to_string(),
+                "work_item_revision_0001".to_string(),
+            )]),
+            dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
+            validation_report_ref: "plan_validation_report_0001".to_string(), plan_projection_bundle_id: "plan_projection_bundle_0001".to_string(), publication_provenance_ref: None, created_at: "2026-07-18T00:00:01Z".to_string(),  },
         )
         .unwrap();
     revision_store
         .set_active_plan_revision(&plan, "plan_revision_0001")
         .unwrap();
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: plan.id,
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 2,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: plan.id,
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 2,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .unwrap();
     let (tx, _) = mpsc::channel(64);
     let engine = WorkspaceEngine::new_persistent(
@@ -245,17 +241,15 @@ async fn plan_repair_child_session_recovers_orphan_without_creating_second_sessi
         .unwrap();
     let orphan = lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: plan.id.clone(),
-                workspace_type: WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 2,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            },
+            CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: plan.id.clone(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+
+            review_rounds: 2,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
             format!("workspace_session_{amendment_id}"),
         )
         .unwrap();
@@ -328,17 +322,15 @@ fn plan_repair_workspace_session_link_is_absent_for_ordinary_workspace_types() {
         let tmp = TempDir::new().unwrap();
         let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
         let session = lifecycle
-            .create_workspace_session(CreateWorkspaceSessionInput {
-                project_id: "project_0001".to_string(),
-                issue_id: "issue_0001".to_string(),
-                entity_id: "entity_0001".to_string(),
-                workspace_type,
-                author_provider: ProviderName::ClaudeCode,
-                reviewer_provider: ProviderName::Codex,
-                review_rounds: 2,
-                superpowers_enabled: true,
-                openspec_enabled: true,
-            })
+            .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "entity_0001".to_string(),
+            workspace_type,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+
+            review_rounds: 2,
+            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
             .unwrap();
 
         assert!(lifecycle.get_session_link(&session.id).is_err());

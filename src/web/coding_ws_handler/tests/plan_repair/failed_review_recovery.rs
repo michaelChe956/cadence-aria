@@ -72,6 +72,7 @@ impl StreamingProviderAdapter for RecoveredReviewerPlanDefectProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -81,8 +82,11 @@ impl StreamingProviderAdapter for RecoveredReviewerPlanDefectProvider {
 #[tokio::test]
 async fn coding_plan_repair_recovered_reviewer_retry_can_start_plan_repair() {
     let fixture = plan_repair_fixture_with_dependency(false);
-    fs::create_dir_all(fixture.attempt.worktree_path.as_ref().expect("worktree"))
-        .expect("create worktree");
+    let fixture_worktree = fixture.attempt.worktree_path.clone().expect("worktree");
+    fs::create_dir_all(&fixture_worktree).expect("create worktree");
+    // T19:review 生命周期统一窗口锁——开窗硬前提是 git 身份(T17),
+    // 生产 coding worktree 恒为 git 树;fixture 补齐 init+种子提交。
+    super::support::init_plan_repair_worktree_git(&fixture_worktree);
     let failed_node_id = "coding_node_0009";
     fixture
         .store

@@ -46,6 +46,7 @@ async fn legacy_coding_ws_reports_ambiguous_instead_of_not_found() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("template");
@@ -53,7 +54,8 @@ async fn legacy_coding_ws_reports_ambiguous_instead_of_not_found() {
         let mut legacy = template.clone();
         legacy.id = "coding_attempt_0001".to_string();
         legacy.issue_id = issue_id.to_string();
-        store.save_coding_attempt(&legacy).expect("legacy attempt");
+        // 受控写 API 不允许改 attempt 身份；fixture 直接播种初始 record。
+        crate::seed_coding_attempt_record(&store, &legacy);
     }
     let app = build_web_router(WebAppState::new(
         root.path().to_path_buf(),
@@ -96,6 +98,7 @@ async fn legacy_coding_ws_reports_scope_mismatch_for_unique_corrupt_alias() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("real attempt");
@@ -171,6 +174,7 @@ async fn scoped_coding_ws_reports_scope_mismatch_for_corrupt_identity() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -218,9 +222,8 @@ async fn scoped_coding_ws_keeps_exact_identity_for_business_messages() {
         .expect("attempt");
     let mut duplicate = attempt.clone();
     duplicate.issue_id = "issue_0002".to_string();
-    store
-        .save_coding_attempt(&duplicate)
-        .expect("duplicate legacy attempt");
+    // 受控写 API 不允许改 attempt 身份；fixture 跨 issue 复制直接播种。
+    crate::seed_coding_attempt_record(&store, &duplicate);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
@@ -273,14 +276,7 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
             captured_prompts: captured,
         }),
     );
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", "coding_attempt_0001");
     store
         .update_attempt_stage(
             "project_0001",
@@ -353,9 +349,8 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
         .expect("attempt")
         .clone();
     duplicate.issue_id = "issue_0002".to_string();
-    store
-        .save_coding_attempt(&duplicate)
-        .expect("duplicate legacy attempt");
+    // 受控写 API 不允许改 attempt 身份；fixture 跨 issue 复制直接播种。
+    crate::seed_coding_attempt_record(&store, &duplicate);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
@@ -453,6 +448,7 @@ impl StreamingProviderAdapter for ScopedSessionProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -469,9 +465,8 @@ async fn scoped_start_coding_persists_target_provider_output_and_conversation() 
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
-    store
-        .save_coding_attempt(&duplicate)
-        .expect("duplicate legacy attempt");
+    // 受控写 API 不允许改 attempt 身份；fixture 跨 issue 复制直接播种。
+    crate::seed_coding_attempt_record(&store, &duplicate);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
@@ -568,9 +563,8 @@ async fn scoped_context_note_updates_only_target_issue_for_legacy_duplicate() {
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
-    store
-        .save_coding_attempt(&duplicate)
-        .expect("duplicate legacy attempt");
+    // 受控写 API 不允许改 attempt 身份；fixture 跨 issue 复制直接播种。
+    crate::seed_coding_attempt_record(&store, &duplicate);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
@@ -624,9 +618,8 @@ async fn scoped_start_coding_persists_target_timeline_without_partial_state() {
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
-    store
-        .save_coding_attempt(&duplicate)
-        .expect("duplicate legacy attempt");
+    // 受控写 API 不允许改 attempt 身份；fixture 跨 issue 复制直接播种。
+    crate::seed_coding_attempt_record(&store, &duplicate);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
@@ -712,9 +705,8 @@ async fn scoped_abort_notifies_only_target_issue_runner_for_legacy_duplicate() {
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
     duplicate.issue_id = "issue_0002".to_string();
-    store
-        .save_coding_attempt(&duplicate)
-        .expect("duplicate legacy attempt");
+    // 受控写 API 不允许改 attempt 身份；fixture 跨 issue 复制直接播种。
+    crate::seed_coding_attempt_record(&store, &duplicate);
     let state = WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),

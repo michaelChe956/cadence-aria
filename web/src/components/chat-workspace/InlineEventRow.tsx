@@ -1,7 +1,8 @@
-import { ChevronDown, ChevronRight, FileText, Wrench } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ChatEntry, WorkspaceContentRef } from "../../state/chat-entries";
 import { workspaceContentCacheKey } from "../../state/workspace-ws-store";
+import { executionEventIcon } from "./gate-visual-tokens";
 import { normalizeDisplayText } from "./text-display";
 
 interface InlineEventRowProps {
@@ -43,7 +44,12 @@ export function InlineEventRow({
   const displayDetail = detail ? normalizeDisplayText(detail) : null;
   const displayCommand = command ? normalizeDisplayText(command) : null;
   const displayOutput = output ? normalizeDisplayText(output) : null;
-  const EventIcon = isProviderPrompt ? FileText : Wrench;
+  // F-50 视觉 v2 §4：emoji 图标退役——事件 kind 映射 Lucide SVG（provider→zap /
+  // usage→gauge / command/output→terminal），统一 16px stroke-current。
+  const EventIcon = executionEventIcon(
+    typeof event?.kind === "string" ? event.kind : undefined,
+    isProviderPrompt,
+  );
   const loadingText = isProviderPrompt ? "加载 Prompt 中..." : "加载输出中...";
   const emptyText = isProviderPrompt ? "暂无 Prompt 内容" : "暂无输出";
   const outputMaxHeight = isProviderPrompt ? "max-h-96" : "max-h-40";
@@ -98,14 +104,16 @@ export function InlineEventRow({
       <button
         type="button"
         onClick={() => setExpanded((current) => !current)}
-        className="flex min-h-9 w-full min-w-0 cursor-pointer items-center gap-2 px-2 text-left text-xs font-medium text-[var(--aria-ink)] transition-colors duration-150 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+        className="flex min-h-9 w-full min-w-0 cursor-pointer items-center gap-2 px-2 text-left text-xs font-medium text-slate-900 transition-colors duration-150 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
       >
-        {expanded ? (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--aria-ink-muted)]" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--aria-ink-muted)]" />
-        )}
-        <EventIcon className="h-3.5 w-3.5 shrink-0 text-[var(--aria-primary)]" />
+        {/* ▶ 折叠→chevron-right 旋转过渡（不再切换两个图标）；减弱动效静止。 */}
+        <ChevronRight
+          className={`h-4 w-4 shrink-0 text-slate-500 transition-transform duration-200 motion-reduce:transition-none ${
+            expanded ? "rotate-90" : ""
+          }`}
+          aria-hidden="true"
+        />
+        <EventIcon className="h-4 w-4 shrink-0 text-slate-600" aria-hidden="true" />
         {isProviderPrompt ? (
           <span className="shrink-0 rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--aria-ink-muted)]">
             PROMPT

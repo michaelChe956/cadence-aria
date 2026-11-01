@@ -1,0 +1,391 @@
+{
+  "provider": "pi",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/aria-36-matrix/f6-amendment/rep2/pi/rep1",
+  "startedAt": "2026-09-11T09:34:02.371Z",
+  "finishedAt": "2026-09-11T09:46:50.118Z",
+  "elapsedSec": 767.746,
+  "issue_id": "issue_0221",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0328",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "pi",
+    "reviewer_provider": "pi",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "interactive",
+    "include_integration_tests": false,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": false,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "083c9e3054d6f5a8952ced1f34f1dc891e30008ba2a4d688a4b0fb67a445d643",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "40070cbb35dcdcb906a6660d77bd037b80674910c587fee9f3c8b9c93abb37f6"
+  },
+  "description_digest": "aacd469fe7efc8bedc3653b737967dc55aaf57097a23b5ccf1f60085d5b20204",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 1.18,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 1.205,
+      "source": "session_state"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 415.015,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 568.247,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 618.162,
+      "source": "stage_change"
+    },
+    {
+      "stage": "human_confirm",
+      "elapsedSec": 766.32,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 767.648,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 767.692,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 568.247,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "CT-001 声明的 500 内部错误 capability 仅由 TASK-002 表述承载，AC 与 verification_checks 均未验证该行为，契约能力缺少验证覆盖。",
+          "evidence": "WI-001 output_contracts[CT-001].capabilities=['内部错误返回 500 且 body 为 {\"error\":\"internal\"}']；AC-001 仅覆盖 200 路径；CHECK-001 仅执行 node --test 断言 200 路径。",
+          "required_action": "可选：补充针对内部错误路径的验收标准或测试断言（如构造 config 读取失败触发 500）。",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "output_contracts"
+        },
+        {
+          "severity": "suggestion",
+          "message": "AC-001 以 'config/hello.json 就位' 为前提，但该文件既不在 exclusive_scopes（且 config/ 被 forbidden）、也无 input_contract、manual_instruction 为字符串 \"null\" 未提供人工准备说明，验收环境准备责任未声明。",
+          "evidence": "WI-001 write_policy.forbidden_scopes 包含 'config/'；input_contracts=[]；CHECK-001.manual_instruction=\"null\"。",
+          "required_action": "建议在人工说明或前置条件中明确由谁在验收前放置 config/hello.json，并将 manual_instruction 规范为 null 或实际说明文本。",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "write_policy"
+        },
+        {
+          "severity": "suggestion",
+          "message": "goal 与 TASK-002 中 '读取 config/hello.json 的 message 字段' 与 'body 恰为该文件完整 JSON 内容' 并存存在措辞张力：若 body 即完整 JSON，读取 message 字段对外不可观察，易引起实现歧义；所有可验证断言（AC-001、TASK-001）均一致约束完整 JSON body，不构成硬性自相矛盾。",
+          "evidence": "WI-001 goal.statement 与 TASK-002.statement 同段并存两种表述；AC-001 与 TASK-001 的断言仅约束完整 JSON 内容。",
+          "required_action": "建议澄清措辞：移除或明确 '读取 message 字段' 的用途，统一为 body 返回完整 JSON 内容。",
+          "category": "completeness",
+          "class_hint": "advisory",
+          "contract_field": "goal"
+        }
+      ]
+    },
+    {
+      "verdict": "pass",
+      "round": 2,
+      "elapsedSec": 766.32,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "goal 与 TASK-002 中『读取 config/hello.json 的 message 字段』为冗余内部行为描述：AC-001/TASK-001 的可验证契约仅约束『200 且 body 恰为该文件完整 JSON 内容』，message 字段未出现在任何断言、证据或输出契约中，不影响验收判定，建议措辞收敛以消除歧义。",
+          "evidence": "AC-001 与 CHECK-001 仅校验 body 与 config/hello.json 完整 JSON 内容一致；CT-001 capabilities 亦只声明 500 错误响应示例。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        },
+        {
+          "severity": "suggestion",
+          "message": "编译器两条 integration/e2e skipped warning（error_count=0）风险有限：CHECK-001 经 TASK-001 以子进程启动 server.js 并对 http://127.0.0.1:3000/api/hello 发起真实 GET，已实质覆盖端到端行为，无需强制补充人工验证指令。",
+          "evidence": "Projection findings 两条 warning 的 work_item_ids 为空且 severity=warning；TASK-001 声明子进程启动 server.js 并断言 200 与完整 JSON body。",
+          "required_action": "",
+          "category": "completeness",
+          "class_hint": "advisory"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "suggestion",
+      "message": "CT-001 声明的 500 内部错误 capability 仅由 TASK-002 表述承载，AC 与 verification_checks 均未验证该行为，契约能力缺少验证覆盖。",
+      "evidence": "WI-001 output_contracts[CT-001].capabilities=['内部错误返回 500 且 body 为 {\"error\":\"internal\"}']；AC-001 仅覆盖 200 路径；CHECK-001 仅执行 node --test 断言 200 路径。",
+      "required_action": "可选：补充针对内部错误路径的验收标准或测试断言（如构造 config 读取失败触发 500）。",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "output_contracts"
+    },
+    {
+      "severity": "suggestion",
+      "message": "AC-001 以 'config/hello.json 就位' 为前提，但该文件既不在 exclusive_scopes（且 config/ 被 forbidden）、也无 input_contract、manual_instruction 为字符串 \"null\" 未提供人工准备说明，验收环境准备责任未声明。",
+      "evidence": "WI-001 write_policy.forbidden_scopes 包含 'config/'；input_contracts=[]；CHECK-001.manual_instruction=\"null\"。",
+      "required_action": "建议在人工说明或前置条件中明确由谁在验收前放置 config/hello.json，并将 manual_instruction 规范为 null 或实际说明文本。",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "write_policy"
+    },
+    {
+      "severity": "suggestion",
+      "message": "goal 与 TASK-002 中 '读取 config/hello.json 的 message 字段' 与 'body 恰为该文件完整 JSON 内容' 并存存在措辞张力：若 body 即完整 JSON，读取 message 字段对外不可观察，易引起实现歧义；所有可验证断言（AC-001、TASK-001）均一致约束完整 JSON body，不构成硬性自相矛盾。",
+      "evidence": "WI-001 goal.statement 与 TASK-002.statement 同段并存两种表述；AC-001 与 TASK-001 的断言仅约束完整 JSON 内容。",
+      "required_action": "建议澄清措辞：移除或明确 '读取 message 字段' 的用途，统一为 body 返回完整 JSON 内容。",
+      "category": "completeness",
+      "class_hint": "advisory",
+      "contract_field": "goal"
+    },
+    {
+      "severity": "suggestion",
+      "message": "goal 与 TASK-002 中『读取 config/hello.json 的 message 字段』为冗余内部行为描述：AC-001/TASK-001 的可验证契约仅约束『200 且 body 恰为该文件完整 JSON 内容』，message 字段未出现在任何断言、证据或输出契约中，不影响验收判定，建议措辞收敛以消除歧义。",
+      "evidence": "AC-001 与 CHECK-001 仅校验 body 与 config/hello.json 完整 JSON 内容一致；CT-001 capabilities 亦只声明 500 错误响应示例。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "suggestion",
+      "message": "编译器两条 integration/e2e skipped warning（error_count=0）风险有限：CHECK-001 经 TASK-001 以子进程启动 server.js 并对 http://127.0.0.1:3000/api/hello 发起真实 GET，已实质覆盖端到端行为，无需强制补充人工验证指令。",
+      "evidence": "Projection findings 两条 warning 的 work_item_ids 为空且 severity=warning；TASK-001 声明子进程启动 server.js 并断言 200 与完整 JSON body。",
+      "required_action": "",
+      "category": "completeness",
+      "class_hint": "advisory"
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "severity": "warning",
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "integration tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 25811,
+      "output_tokens": 520,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "interactive",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 2,
+    "initial_review_count": 2,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      },
+      "review:timeline_node_005": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [],
+    "repeated_fingerprints": [],
+    "attempts_used": 0,
+    "manual_repairs_remaining": 3,
+    "trigger": "native_human_required",
+    "resumable": true
+  },
+  "humanGateActions": [
+    {
+      "sequence": 1,
+      "enteredAt": "2026-09-11T09:43:30.619Z",
+      "elapsedSec": 568.249,
+      "stage": "human_confirm",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_004",
+      "source": "human_script",
+      "message": {
+        "type": "human_gate_feedback",
+        "decision": null,
+        "command_id": "cmd-human_gate_feedback-0-b9f8bbd6f2",
+        "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+        "feedback_length": 16
+      },
+      "sentAt": "2026-09-11T09:43:30.621Z"
+    },
+    {
+      "sequence": 2,
+      "enteredAt": "2026-09-11T09:46:48.692Z",
+      "elapsedSec": 766.32,
+      "stage": "cross_review",
+      "reviewVerdict": "pass",
+      "active_node_id": "timeline_node_005",
+      "source": "human_script",
+      "message": {
+        "type": "confirm",
+        "decision": null,
+        "command_id": null,
+        "feedback_digest": null,
+        "feedback_length": null
+      },
+      "sentAt": "2026-09-11T09:46:48.692Z"
+    }
+  ],
+  "human_gate_turns": [
+    {
+      "action_index": 0,
+      "command_id": "cmd-human_gate_feedback-0-b9f8bbd6f2",
+      "feedback_digest": "dc17400f5bde487cc3f2edbbc27913a69e9c2b05911cd063363288899daa3baa",
+      "feedback_length": 16,
+      "turn_id": "human_gate_turn_6c060474-df6d-4488-bed9-23e81269a366",
+      "remaining_budget": 2,
+      "status": "completed",
+      "busy_events": 0,
+      "artifact_ref": "artifact_version_002"
+    }
+  ],
+  "advance_actions": [
+    {
+      "action_index": 2,
+      "command_id": "cmd-advance-2-36bc528919",
+      "decision": "send",
+      "status": "completed",
+      "attempt_id": "coding_attempt_bf966ccb6d3d4009918dd5345df1e832",
+      "workspace_entry": "/home/michaelche/workspace/github/naruto/.worktrees/aria-issues/issue_0221"
+    }
+  ],
+  "takeover_actions": [],
+  "durable_recovery_checks": [],
+  "provider_start_ledger_before_after": {
+    "before": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0328:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_6c060474-df6d-4488-bed9-23e81269a366:attempt:1",
+        "started": true
+      }
+    ],
+    "after": [
+      {
+        "provider_start_idempotency_key": "single_candidate_author:workspace_session_0328:0",
+        "started": true
+      },
+      {
+        "provider_start_idempotency_key": "human_gate:human_gate_turn_6c060474-df6d-4488-bed9-23e81269a366:attempt:1",
+        "started": true
+      }
+    ]
+  },
+  "provider_start_count": 2,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0328:0",
+      "started": true
+    },
+    {
+      "provider_start_idempotency_key": "human_gate:human_gate_turn_6c060474-df6d-4488-bed9-23e81269a366:attempt:1",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 767746,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.025,
+    "1:running": 413.81,
+    "2:cross_review": 153.232,
+    "3:human_confirm": 49.915,
+    "4:cross_review": 148.158,
+    "5:human_confirm": 1.328,
+    "6:running": 0.044,
+    "7:completed": 0.054
+  },
+  "stage3_gate_return": {
+    "waits": 1,
+    "dispatched": 1,
+    "stage_errors": 0,
+    "pending_action_index": null
+  }
+}

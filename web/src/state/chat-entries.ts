@@ -1,3 +1,4 @@
+import type { GateActionFacade } from "../hooks/useStageUI";
 export type ChatEntryType =
   | "context_note"
   | "start_generation"
@@ -12,6 +13,7 @@ export type ChatEntryType =
   | "gate_prompt"
   | "human_decision"
   | "stage_change"
+  | "delivery_facts"
   | "error";
 
 export type ChatEntryRole =
@@ -22,7 +24,13 @@ export type ChatEntryRole =
   | "code_reviewer"
   | "internal_reviewer"
   | "system";
-export type ChatEntryResolution = "confirm" | "request-change" | "terminate";
+export type ChatEntryResolution = "confirm" | "request-change" | "terminate" | "superseded";
+export type { GateActionFacade };
+
+export interface GateEntryMetadata extends Record<string, unknown> {
+  gate_identity: string;
+  action_facade: GateActionFacade;
+}
 
 export interface ChoiceResponsePayload {
   selected_option_ids: string[];

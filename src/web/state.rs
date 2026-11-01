@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -8,9 +8,13 @@ use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandRunner, TokioBoundedCommandRunner,
 };
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
+use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
+use crate::cross_cutting::codex_provider::CodexPolicyProjector;
 use crate::cross_cutting::codex_provider::CodexProvider;
 use crate::cross_cutting::image_client::ImageClient;
 use crate::cross_cutting::kimi_code_provider::KimiCodeProvider;
+use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
+use crate::cross_cutting::pi_provider::PiPolicyProjector;
 use crate::cross_cutting::pi_provider::PiProvider;
 use crate::cross_cutting::provider_adapter::ProviderAdapter;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
@@ -18,89 +22,102 @@ use crate::cross_cutting::provider_health::{
     ProviderHealthService, ProviderHealthSnapshot, SystemProviderHealthClock,
 };
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::cross_cutting::streaming_provider::ProviderCommand;
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
 };
+// 1c-factory:Unprovisioned 占位已由四家真实 projector 整体替换。
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;
+use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use crate::web::handlers::RepositoryRegistrationDependencies;
 use crate::web::runtime::WebRuntime;
 use crate::web::test_controls::{TestControlledFakeStreamingProvider, TestControls};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_util::sync::CancellationToken;
-
-#[derive(Debug, Clone)]
-pub struct WorkspaceActiveRun {
-    pub id: u64,
-    pub token: u64,
-    pub cancel: CancellationToken,
-    pub command_tx: mpsc::Sender<ProviderCommand>,
-    pub pending_choice_ids: Arc<AsyncMutex<HashSet<String>>>,
-}
 
 mod coding_run_registry;
 pub(crate) use coding_run_registry::CodingAttemptMutationLease;
-pub use coding_run_registry::{CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation};
+pub use coding_run_registry::{
+    AttemptRestartOutcome, CodingAttemptRunKey, CodingRunRegistry, CodingRunReservation,
+};
 mod coding_socket_registry;
 pub use coding_socket_registry::CodingSocketRegistry;
 mod repository_initialization_run_registry;
-pub use repository_initialization_run_registry::RepositoryInitializationRunRegistry;
+pub use repository_initialization_run_registry::{
+    InitializationOperationKind, InitializationRunKey, InitializationRunRegistry,
+    RepositoryInitializationRunRegistry,
+};
+mod aggregate_index_rebuild_registry;
+pub use aggregate_index_rebuild_registry::{
+    AggregateIndexRebuildLease, AggregateIndexRebuildRegistry,
+};
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
-    runs: Arc<AsyncMutex<HashMap<String, WorkspaceActiveRun>>>,
+    /// provider drive 期标记（idle 关闭守卫扩展用）：session → 正在驱动 provider
+    /// 会话的 run 计数。run 所有权由 `WorkspaceSessionManager` 持有；此结构仅追踪
+    /// 与连接无关的跨 socket provider drive 生命周期。
+    provider_drive_depth: Arc<StdMutex<HashMap<String, u32>>>,
+}
+
+/// `begin_provider_drive` 返回的 RAII 守卫：drop 时递减该 session 的 drive
+/// 计数（panic/abort 展开也会走 Drop，不会泄漏压制 idle 回收）。
+pub struct WorkspaceProviderDriveGuard {
+    runs: WorkspaceRunRegistry,
+    session_id: String,
+}
+
+impl Drop for WorkspaceProviderDriveGuard {
+    fn drop(&mut self) {
+        self.runs.end_provider_drive(&self.session_id);
+    }
 }
 
 impl WorkspaceRunRegistry {
-    pub async fn insert(&self, session_id: String, run: WorkspaceActiveRun) {
-        self.runs.lock().await.insert(session_id, run);
-    }
-
-    pub async fn take(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
-        self.runs.lock().await.remove(session_id)
-    }
-
-    pub async fn command_tx(&self, session_id: &str) -> Option<mpsc::Sender<ProviderCommand>> {
-        self.runs
+    /// 标记该 session 进入 provider drive 期；返回的守卫 drop 时结束标记。
+    /// 嵌套 begin 会叠加计数，全部 drop 后才视为结束。
+    pub fn begin_provider_drive(&self, session_id: &str) -> WorkspaceProviderDriveGuard {
+        let mut depth = self
+            .provider_drive_depth
             .lock()
-            .await
-            .get(session_id)
-            .map(|run| run.command_tx.clone())
-    }
-
-    pub async fn run(&self, session_id: &str) -> Option<WorkspaceActiveRun> {
-        self.runs.lock().await.get(session_id).cloned()
-    }
-
-    pub async fn register_choice(&self, session_id: &str, choice_id: String) -> bool {
-        let Some(run) = self.runs.lock().await.get(session_id).cloned() else {
-            return false;
-        };
-        run.pending_choice_ids.lock().await.insert(choice_id);
-        true
-    }
-
-    pub async fn remove_if_token(&self, session_id: &str, token: u64) -> bool {
-        let mut runs = self.runs.lock().await;
-        if runs.get(session_id).is_some_and(|run| run.token == token) {
-            runs.remove(session_id);
-            return true;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *depth.entry(session_id.to_string()).or_insert(0) += 1;
+        WorkspaceProviderDriveGuard {
+            runs: self.clone(),
+            session_id: session_id.to_string(),
         }
-        false
     }
 
-    pub async fn replace_command_tx_if_token(
-        &self,
-        session_id: &str,
-        token: u64,
-        command_tx: mpsc::Sender<ProviderCommand>,
-    ) {
-        if let Some(run) = self.runs.lock().await.get_mut(session_id)
-            && run.token == token
+    fn end_provider_drive(&self, session_id: &str) {
+        let mut depth = self
+            .provider_drive_depth
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = depth.get_mut(session_id)
+            && *count > 0
         {
-            run.command_tx = command_tx;
+            *count -= 1;
+            if *count == 0 {
+                depth.remove(session_id);
+            }
         }
+    }
+
+    /// 该 session 是否有 provider drive 进行中（同步探测，供 idle 关闭守卫的
+    /// 同步闭包使用；锁中毒时保守返回 true——视为活跃，不主动关连接）。
+    pub fn provider_drive_in_progress(&self, session_id: &str) -> bool {
+        match self.provider_drive_depth.lock() {
+            Ok(depth) => depth.contains_key(session_id),
+            Err(_) => true,
+        }
+    }
+
+    /// 当前 provider drive 嵌套深度，只读供连接诊断观察；锁中毒时保守返回 0。
+    pub fn provider_drive_depth(&self, session_id: &str) -> u32 {
+        self.provider_drive_depth
+            .lock()
+            .map(|depth| depth.get(session_id).copied().unwrap_or(0))
+            .unwrap_or(0)
     }
 }
 
@@ -116,15 +133,33 @@ pub struct WebAppState {
     pub provider_gate: Arc<ProviderAvailabilityGate>,
     pub command_runner: Arc<dyn BoundedCommandRunner>,
     repository_registration_dependencies: Option<RepositoryRegistrationDependencies>,
+    aggregate_initialization_dependencies:
+        Option<crate::web::handlers::AggregateInitializationDependencies>,
     pub test_provider_enabled: bool,
+    pub work_item_plan_single_candidate: bool,
     provider_health_error: Arc<StdMutex<Option<String>>>,
     pub test_controls: TestControls,
     pub workspace_runs: WorkspaceRunRegistry,
+    /// P1 WIGA Task 6：autopilot 唤醒 hint（PUT 成功等事件）；有界 tick 由
+    /// `AutopilotOrchestrator::run` 持有，漏唤醒由固定间隔兜底。
+    pub autopilot_wake: tokio::sync::watch::Sender<bool>,
+    pub workspace_sessions: crate::web::workspace_session::WorkspaceSessionRegistry,
     pub coding_runs: CodingRunRegistry,
     pub coding_sockets: CodingSocketRegistry,
     pub repository_initialization_runs: RepositoryInitializationRunRegistry,
+    pub aggregate_index_rebuilds: AggregateIndexRebuildRegistry,
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
+    /// 控制面来源校验状态（Host/Origin 允许列表）。仅生产 `serve_web` 装配；
+    /// 未装配（None）时来源校验中间件直通，进程内测试保持既有行为。
+    pub api_auth: Option<std::sync::Arc<crate::web::api_auth::ApiAuthState>>,
+    pub logical_gateway_factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
+    /// add-provider-revalidate-probe：capability 重验证服务（生产缺省由
+    /// handler 按请求 paths 构造真实 seam；it_web 注入 fake 版本源/
+    /// 探针 runner 断言 HTTP 面）。
+    pub capability_revalidate_service: Option<
+        Arc<crate::product::logical_codebase::provider_capability_revalidate::ProviderCapabilityRevalidateService>,
+    >,
 }
 
 impl WebAppState {
@@ -134,7 +169,8 @@ impl WebAppState {
 
     pub fn with_events(workspace_root: PathBuf, mut runtime: WebRuntime, events: EventHub) -> Self {
         let test_controls = TestControls::default();
-        let test_provider_enabled = provider_mode_is_fake();
+        let test_provider_enabled =
+            provider_mode_is_fake() || !runtime.enforces_real_provider_availability();
         let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(TokioBoundedCommandRunner);
         let provider_health = Arc::new(ProviderHealthService::with_dependencies(
             AriaStatePaths::from_workspace_root(&workspace_root),
@@ -165,7 +201,15 @@ impl WebAppState {
             provider_registry.clone(),
             image_create_run_registry.clone(),
         ));
-        Self {
+        // Task 1c-factory:gateway factory 的同步槽注入 LC gateway sync
+        // bridge——LC 同步栈只接受 validated launch;裸 `provider_adapter`
+        // 仍归单仓 direct 两槽 routing,不迁移。
+        let logical_gateway_factory = Arc::new(LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+            ProductAppPaths::new(workspace_root.join(".aria")),
+            provider_registry.clone(),
+            provider_gate.clone(),
+        ));
+        let mut state = Self {
             workspace_root,
             runtime: Arc::new(StdMutex::new(runtime)),
             events,
@@ -176,16 +220,60 @@ impl WebAppState {
             provider_gate,
             command_runner,
             repository_registration_dependencies: None,
+            aggregate_initialization_dependencies: None,
             test_provider_enabled,
+            work_item_plan_single_candidate: false,
             provider_health_error: Arc::new(StdMutex::new(None)),
             test_controls,
             workspace_runs: WorkspaceRunRegistry::default(),
+            autopilot_wake: tokio::sync::watch::Sender::new(false),
+            workspace_sessions: crate::web::workspace_session::WorkspaceSessionRegistry::default(),
             coding_runs: CodingRunRegistry::default(),
             coding_sockets: CodingSocketRegistry::default(),
             repository_initialization_runs: RepositoryInitializationRunRegistry::default(),
+            aggregate_index_rebuilds: AggregateIndexRebuildRegistry::default(),
             image_create_run_registry,
             image_create_engine,
-        }
+            logical_gateway_factory: Some(logical_gateway_factory),
+            api_auth: None,
+            capability_revalidate_service: None,
+        };
+        state.aggregate_initialization_dependencies = Some(
+            crate::web::handlers::AggregateInitializationDependencies::production(&state)
+                .expect("build aggregate initialization dependencies"),
+        );
+        state
+    }
+
+    /// add-provider-revalidate-probe：注入 capability 重验证服务（it_web
+    /// fake seam；生产缺省走 handler 的真实服务构造）。
+    pub fn with_capability_revalidate_service(
+        mut self,
+        service: Arc<
+            crate::product::logical_codebase::provider_capability_revalidate::ProviderCapabilityRevalidateService,
+        >,
+    ) -> Self {
+        self.capability_revalidate_service = Some(service);
+        self
+    }
+
+    /// 仅由 `web` 启动入口在构造 state 时设置；运行期不会提供可变控制面。
+    pub fn with_work_item_plan_single_candidate(mut self, enabled: bool) -> Self {
+        self.work_item_plan_single_candidate = enabled;
+        self
+    }
+
+    /// 装配控制面来源校验状态（仅生产 `serve_web` 使用）。
+    pub fn with_api_auth(
+        mut self,
+        auth: std::sync::Arc<crate::web::api_auth::ApiAuthState>,
+    ) -> Self {
+        self.api_auth = Some(auth);
+        self
+    }
+
+    pub fn work_item_plan_single_candidate(&self) -> bool {
+        self.work_item_plan_single_candidate
     }
 
     pub fn with_provider_availability<F>(
@@ -227,6 +315,21 @@ impl WebAppState {
             state.provider_registry.clone(),
             state.image_create_run_registry.clone(),
         ));
+        // T4 deferred minor:注入 registry 后必须用注入的 registry 同步重建
+        // `logical_gateway_factory`,否则 factory 持有旧 registry,后续注入 fake
+        // registry 时 gateway 解析不到 fake。Task 1c-factory:重建同步槽仍走
+        // LC sync bridge 注入(与 `with_events` 生产装配同构)。
+        state.logical_gateway_factory = Some(Arc::new(
+            LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+                ProductAppPaths::new(state.workspace_root.join(".aria")),
+                state.provider_registry.clone(),
+                state.provider_gate.clone(),
+            ),
+        ));
+        state.aggregate_initialization_dependencies = Some(
+            crate::web::handlers::AggregateInitializationDependencies::production(&state)
+                .expect("build aggregate initialization dependencies"),
+        );
         state
     }
 
@@ -236,6 +339,19 @@ impl WebAppState {
     ) -> Self {
         self.provider_adapter = provider_adapter;
         self
+    }
+
+    pub fn with_gateway_factory(mut self, factory: Arc<LogicalCodebaseGatewayFactory>) -> Self {
+        self.logical_gateway_factory = Some(factory);
+        self.aggregate_initialization_dependencies = Some(
+            crate::web::handlers::AggregateInitializationDependencies::production(&self)
+                .expect("build aggregate initialization dependencies"),
+        );
+        self
+    }
+
+    pub fn gateway_factory(&self) -> Option<&Arc<LogicalCodebaseGatewayFactory>> {
+        self.logical_gateway_factory.as_ref()
     }
 
     pub fn with_provider_health(
@@ -278,6 +394,62 @@ impl WebAppState {
         &self,
     ) -> Option<RepositoryRegistrationDependencies> {
         self.repository_registration_dependencies.clone()
+    }
+
+    pub fn with_aggregate_initialization_dependencies(
+        mut self,
+        dependencies: crate::web::handlers::AggregateInitializationDependencies,
+    ) -> Self {
+        self.aggregate_initialization_dependencies = Some(dependencies);
+        self
+    }
+
+    /// Replaces only the aggregate-index operation while retaining the
+    /// production initialization coordinator and run registry. This is used
+    /// by integration tests to control the index CLI without replacing the
+    /// HTTP initialization path.
+    pub fn with_aggregate_index_operation(
+        mut self,
+        index: Arc<crate::product::logical_codebase::aggregate_index::AggregateIndexOperation>,
+    ) -> Self {
+        let dependencies = self
+            .aggregate_initialization_dependencies
+            .take()
+            .expect("aggregate initialization dependencies are initialized");
+        // Task 1.8：`with_index` 会重置 trust 字段——换 index 不得丢生产
+        // trust 前置门（route gate 在 begin 前依赖该字段）。
+        let rebuilt = crate::web::handlers::AggregateInitializationDependencies::with_index(
+            dependencies.coordinator,
+            dependencies.runs,
+            index,
+        );
+        let rebuilt = match dependencies.trust.clone() {
+            Some(trust) => rebuilt.with_trust(trust),
+            None => rebuilt,
+        };
+        self.aggregate_initialization_dependencies = Some(rebuilt);
+        self
+    }
+
+    /// Returns a clone of dependencies constructed once for this state.
+    /// Every clone keeps the same coordinator, index operation and run registry.
+    pub(crate) fn aggregate_initialization_dependencies(
+        &self,
+    ) -> crate::web::handlers::AggregateInitializationDependencies {
+        self.aggregate_initialization_dependencies
+            .clone()
+            .expect("aggregate initialization dependencies are initialized")
+    }
+
+    /// 聚合初始化依赖中的生产 trust 前置门（单仓显式登记按钮的
+    /// fallback）；依赖图未初始化/未装配 trust 时如实 `None`（测试态
+    /// WebAppState），不 panic——调用方按 fail-closed 等待处理。
+    pub(crate) fn aggregate_initialization_trust(
+        &self,
+    ) -> Option<Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>> {
+        self.aggregate_initialization_dependencies
+            .as_ref()
+            .and_then(|dependencies| dependencies.trust.clone())
     }
 
     pub async fn refresh_provider_health(&self) -> Arc<ProviderHealthSnapshot> {
@@ -338,64 +510,92 @@ fn default_provider_registry(
     provider_gate: Arc<ProviderAvailabilityGate>,
     test_provider_enabled: bool,
 ) -> Arc<ProviderRegistry> {
-    let mut registry = ProviderRegistry::new();
-    if test_provider_enabled {
-        registry.register(
-            ProviderName::Fake,
-            Arc::new(TestControlledFakeStreamingProvider::new(
-                test_controls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderName::ClaudeCode,
-            Arc::new(TestControlledFakeStreamingProvider::new(
-                test_controls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderName::Codex,
-            Arc::new(TestControlledFakeStreamingProvider::new(
-                test_controls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderName::Pi,
-            Arc::new(TestControlledFakeStreamingProvider::new(
-                test_controls.clone(),
-            )),
-        );
-        registry.register(
-            ProviderName::KimiCode,
-            Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
-        );
-        return Arc::new(registry);
-    }
+    let registry = if test_provider_enabled {
+        fake_mode_provider_registry(test_controls)
+    } else {
+        real_provider_registry(provider_gate)
+    };
+    Arc::new(registry)
+}
 
+/// 生产模式 registry:注册所有实际 provider，不含 `ProviderName::Fake`。
+///
+/// Task 1c-factory:四家按 `register_gated` 原子装配 adapter/projector/gate
+/// 三件套,projector 为各 provider 的真实实现(替换 1a 的 Unprovisioned
+/// 占位)。装配期 exact version 尚未实测,projector 以空版本构造——按各
+/// 实现合同 fail-closed 拒绝投影(不伪造版本);真实启动的投影由 adapter
+/// 侧在 validated 启动时以实测版本构造同款 projector 产出。注册失败
+/// fail-fast(expect 带语境),绝不带着半注册三件套继续启动。
+fn real_provider_registry(provider_gate: Arc<ProviderAvailabilityGate>) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register_gated(
+            ProviderName::ClaudeCode,
+            Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
+            Arc::new(ClaudePolicyProjector::new(String::new())),
+            provider_gate.clone(),
+        )
+        .expect("register gated claude code provider trio");
+    registry
+        .register_gated(
+            ProviderName::Codex,
+            Arc::new(CodexProvider::new(PathBuf::from("codex"))),
+            Arc::new(CodexPolicyProjector::new(String::new())),
+            provider_gate.clone(),
+        )
+        .expect("register gated codex provider trio");
+    registry
+        .register_gated(
+            ProviderName::Pi,
+            Arc::new(PiProvider::new(PathBuf::from("pi"))),
+            Arc::new(PiPolicyProjector::new(String::new())),
+            provider_gate.clone(),
+        )
+        .expect("register gated pi provider trio");
+    registry
+        .register_gated(
+            ProviderName::KimiCode,
+            Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
+            Arc::new(KimiPolicyProjector::new(String::new())),
+            provider_gate,
+        )
+        .expect("register gated kimi code provider trio");
+    registry
+}
+
+/// fake 模式 registry:保持所有 provider 名称由
+/// `TestControlledFakeStreamingProvider` 承接。
+fn fake_mode_provider_registry(test_controls: TestControls) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
     registry.register(
         ProviderName::Fake,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Codex,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::Pi,
+        Arc::new(TestControlledFakeStreamingProvider::new(
+            test_controls.clone(),
+        )),
+    );
+    registry.register(
+        ProviderName::KimiCode,
         Arc::new(TestControlledFakeStreamingProvider::new(test_controls)),
     );
-    registry.register_gated(
-        ProviderName::ClaudeCode,
-        Arc::new(ClaudeCodeProvider::new(PathBuf::from("claude"))),
-        provider_gate.clone(),
-    );
-    registry.register_gated(
-        ProviderName::Codex,
-        Arc::new(CodexProvider::new(PathBuf::from("codex"))),
-        provider_gate.clone(),
-    );
-    registry.register_gated(
-        ProviderName::Pi,
-        Arc::new(PiProvider::new(PathBuf::from("pi"))),
-        provider_gate.clone(),
-    );
-    registry.register_gated(
-        ProviderName::KimiCode,
-        Arc::new(KimiCodeProvider::new(PathBuf::from("kimi"))),
-        provider_gate,
-    );
-    Arc::new(registry)
+    registry
 }
 
 #[cfg(test)]
@@ -527,14 +727,198 @@ mod tests {
     }
 
     #[test]
-    fn production_default_provider_registry_registers_pi() {
+    fn default_provider_registry_real_mode_excludes_fake_and_registers_all_real_providers() {
         let root = tempdir().expect("root");
         let runner = Arc::new(ScriptedRunner::new(Vec::new()));
         let health = provider_health(root.path(), runner);
         let gate = Arc::new(ProviderAvailabilityGate::new(health));
         let registry = default_provider_registry(TestControls::default(), gate, false);
 
+        assert!(registry.get(&ProviderName::ClaudeCode).is_some());
+        assert!(registry.get(&ProviderName::Codex).is_some());
         assert!(registry.get(&ProviderName::Pi).is_some());
+        assert!(registry.get(&ProviderName::KimiCode).is_some());
+        assert!(registry.get(&ProviderName::Fake).is_none());
+    }
+
+    #[test]
+    fn default_provider_registry_real_registry_holds_all_gated_real_providers() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+        let registry = real_provider_registry(gate);
+
+        assert!(registry.get(&ProviderName::ClaudeCode).is_some());
+        assert!(registry.get(&ProviderName::Codex).is_some());
+        assert!(registry.get(&ProviderName::Pi).is_some());
+        assert!(registry.get(&ProviderName::KimiCode).is_some());
+        assert!(registry.get(&ProviderName::Fake).is_none());
+    }
+
+    #[test]
+    fn default_provider_registry_fake_mode_registry_keeps_all_provider_names() {
+        let registry = fake_mode_provider_registry(TestControls::default());
+
+        assert!(registry.get(&ProviderName::Fake).is_some());
+        assert!(registry.get(&ProviderName::ClaudeCode).is_some());
+        assert!(registry.get(&ProviderName::Codex).is_some());
+        assert!(registry.get(&ProviderName::Pi).is_some());
+        assert!(registry.get(&ProviderName::KimiCode).is_some());
+    }
+
+    #[test]
+    fn default_provider_registry_dispatches_on_test_provider_enabled() {
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+
+        let real = default_provider_registry(TestControls::default(), gate.clone(), false);
+        assert!(real.get(&ProviderName::Fake).is_none());
+        assert!(real.get(&ProviderName::Pi).is_some());
+        assert!(real.get(&ProviderName::KimiCode).is_some());
+
+        let fake = default_provider_registry(TestControls::default(), gate, true);
+        assert!(fake.get(&ProviderName::Fake).is_some());
+        assert!(fake.get(&ProviderName::Pi).is_some());
+        assert!(fake.get(&ProviderName::KimiCode).is_some());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 1c-factory(lcg_t01):生产 registry 四家真实 projector 原子装配。
+    // ---------------------------------------------------------------------------
+
+    /// 1c:`real_provider_registry` 的四家 projector 是各 provider 的真实实现——
+    /// projector getter 对四家全部可见,且装配期 exact version 未实测(不伪造
+    /// 版本)时 `project` 按各实现合同 fail-closed 拒绝(version-unknown 语义),
+    /// 而非 1a 的 Unprovisioned 占位错误。
+    #[test]
+    fn lcg_t01_real_registry_assembles_four_real_policy_projectors() {
+        use crate::product::logical_codebase::policy::{
+            PolicyTarget, ProviderDialect, SessionPolicyAction, SessionPolicyEnvelope,
+        };
+        use crate::product::logical_codebase::provider_gateway::ProviderRef;
+        use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
+
+        let root = tempdir().expect("root");
+        let runner = Arc::new(ScriptedRunner::new(Vec::new()));
+        let health = provider_health(root.path(), runner);
+        let gate = Arc::new(ProviderAvailabilityGate::new(health));
+        let registry = real_provider_registry(gate);
+
+        let aggregate_root = root.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).expect("aggregate root");
+        let cases = [
+            (
+                ProviderName::ClaudeCode,
+                ProviderRef::claude_code("cap_registry_assembly"),
+                ProviderDialect::ClaudeCodeCliV1,
+                "claude exact version is unknown",
+            ),
+            (
+                ProviderName::Codex,
+                ProviderRef::codex("cap_registry_assembly"),
+                ProviderDialect::CodexCliV1,
+                "codex exact version is unknown",
+            ),
+            (
+                ProviderName::Pi,
+                ProviderRef::pi("cap_registry_assembly"),
+                ProviderDialect::PiRpcV1,
+                "pi exact version is unknown",
+            ),
+            (
+                ProviderName::KimiCode,
+                ProviderRef::kimi_code("cap_registry_assembly"),
+                ProviderDialect::KimiAcpV1,
+                "kimi exact version is unknown",
+            ),
+        ];
+        for (name, provider_ref, dialect, unknown_version_fragment) in cases {
+            let projector = registry
+                .projector(&name)
+                .unwrap_or_else(|| panic!("{name:?} projector must be atomically registered"));
+            let envelope = SessionPolicyEnvelope {
+                policy_id: "policy_registry_assembly".to_string(),
+                policy_revision: 1,
+                policy_digest: format!("sha256:{}", "a".repeat(64)),
+                action: SessionPolicyAction::PlanningReadOnly,
+                target: PolicyTarget::aggregate_root(aggregate_root.clone()),
+                working_directory: aggregate_root.clone(),
+                readable_roots: vec![aggregate_root.clone()],
+                writable_roots: Vec::new(),
+                provider_dialect: dialect,
+                config_artifact_ref: "sha256:registry-assembly-config".to_string(),
+                config_digest: format!("sha256:{}", "b".repeat(64)),
+                created_at: "2026-10-04T00:00:00Z".to_string(),
+                authority_root: aggregate_root.clone(),
+            };
+            let input = ProviderProjectionInput::new(
+                envelope,
+                provider_ref,
+                SessionPolicyAction::PlanningReadOnly,
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Auto,
+                None,
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+            );
+            let error = projector.project(&input).err().unwrap_or_else(|| {
+                panic!("{name:?} projector must fail closed without a measured exact version")
+            });
+            assert!(
+                error.to_string().contains(unknown_version_fragment),
+                "{name:?} must assemble its real projector (version-unknown fail-closed), got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_app_state_single_candidate_rollout_defaults_to_disabled_and_can_be_enabled_at_creation()
+    {
+        let root = tempdir().expect("root");
+        let disabled = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        let enabled = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        )
+        .with_work_item_plan_single_candidate(true);
+
+        assert!(!disabled.work_item_plan_single_candidate());
+        assert!(enabled.work_item_plan_single_candidate());
+    }
+
+    #[test]
+    fn web_app_state_fake_runtime_registers_fake_provider_without_env_flag() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _provider_mode = ProviderModeGuard::disabled();
+        let root = tempdir().expect("root");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+
+        assert!(state.provider_registry.get(&ProviderName::Fake).is_some());
+    }
+
+    #[test]
+    fn web_app_state_real_runtime_excludes_fake_provider() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _provider_mode = ProviderModeGuard::disabled();
+        let root = tempdir().expect("root");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_real(root.path().to_path_buf()).expect("real runtime"),
+        );
+
+        assert!(state.provider_registry.get(&ProviderName::Fake).is_none());
     }
 
     #[test]
@@ -589,6 +973,10 @@ mod tests {
         let mut session = provider
             .start(
                 StreamingProviderInput {
+                    working_directory: None,
+                    baseline_tree: None,
+                    tool_policy: None,
+                    audit_sink: None,
                     provider_type: ProviderType::Codex,
                     role: AdapterRole::Reviewer,
                     prompt: "Workspace 类型: Story Spec\nIssue: E2E\n[user]: 开始生成".to_string(),
@@ -631,7 +1019,7 @@ mod tests {
             let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
             let state = WebAppState::new(
                 root.path().to_path_buf(),
-                WebRuntime::new_fake(root.path().to_path_buf()),
+                WebRuntime::new_real(root.path().to_path_buf()).expect("real runtime"),
             )
             .with_provider_health(health.clone(), gate, runner);
             assert!(!(state.provider_availability)(&ProviderName::Codex));
@@ -665,5 +1053,30 @@ mod tests {
         assert!(state.test_provider_enabled);
         assert!((state.provider_availability)(&ProviderName::Fake));
         assert!((state.provider_availability)(&ProviderName::Codex));
+    }
+
+    #[test]
+    fn workspace_run_registry_provider_drive_depth_tracks_begin_and_guard_drop() {
+        let runs = WorkspaceRunRegistry::default();
+        assert_eq!(runs.provider_drive_depth("session_a"), 0);
+
+        let drive = runs.begin_provider_drive("session_a");
+        assert_eq!(runs.provider_drive_depth("session_a"), 1);
+
+        let second_drive = runs.begin_provider_drive("session_a");
+        assert_eq!(runs.provider_drive_depth("session_a"), 2);
+        drop(drive);
+        assert_eq!(runs.provider_drive_depth("session_a"), 1);
+
+        drop(second_drive);
+        assert_eq!(runs.provider_drive_depth("session_a"), 0);
+    }
+
+    #[test]
+    fn workspace_run_registry_provider_drive_depth_is_per_session() {
+        let runs = WorkspaceRunRegistry::default();
+        let _drive = runs.begin_provider_drive("session_a");
+        assert_eq!(runs.provider_drive_depth("session_a"), 1);
+        assert_eq!(runs.provider_drive_depth("session_b"), 0);
     }
 }

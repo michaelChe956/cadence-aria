@@ -1,0 +1,42 @@
+{
+  "_note": "驱动器进程被外层 bash 300s 超时杀死，result.json 未由驱动器写出；本文件为事后分析产物（原始依据=ws.jsonl+durable 落盘），非驱动器输出。",
+  "session_id": "workspace_session_0486",
+  "issue_id": "issue_0295",
+  "plan_id": "issue_work_item_plan_0001",
+  "outcome": "confirmed_after_browser_choice_answer",
+  "timeline_utc": {
+    "10:12:55.693": "driver WS open；session_state stage=prepare_context",
+    "10:12:55.828": "驱动器发送 start_generation（author=pi, reviewer=pi, auto）",
+    "10:12:56.229": "execution_event：pi 作者 run 启动",
+    "10:13:04.285": "choice_request 广播（id=893aac75…，source=provider_choice，pi 调 ask_user）——驱动器显式不应答",
+    "10:13:20-25": "浏览器第二连接 attach cockpit 页（choice 已 pending）→ 卡渲染",
+    "~10:14:05": "用户在浏览器勾选 hello → 提交选择（choice_response 出自浏览器连接）",
+    "10:14:07.585": "execution_event：provider 流恢复（应答送达 pi）",
+    "10:14:07-10:17:50": "作者腿 1064×stream_chunk 写全计划 + artifact_update + stage_change cross_review + 评审腿流",
+    "10:17:53.8": "compile/确认（子会话 workspace_session_0487）"
+  },
+  "durable_terminal_state": {
+    "single_candidate_phase": "completed",
+    "timeline_nodes": [
+      ["timeline_node_001", "start_generation", "completed"],
+      ["timeline_node_002", "author_run（Work Item Plan 生成）", "completed"],
+      ["timeline_node_003", "reviewer_run（Review Round 1）", "completed"],
+      ["timeline_node_004", "work_item_plan_compile", "completed"],
+      ["timeline_node_005", "WorkItemPlan 已确认", "completed"]
+    ]
+  },
+  "user_choice_reflected_in_plan": "source-3700018515f5affa.json：WI-001 标题「最小 Greet API（问候文案 hello）」、capability「GET /api/greet 返回 200 且 body 恰为 {\"message\":\"hello\"}」——作者按用户裁定文案落实",
+  "broadcast_gap_proof": {
+    "claim": "浏览器在 choice pending 期间 attach 且无新广播，卡只能来自 F-24 attach 路径挂起帧补发",
+    "evidence": "ws.jsonl 中 10:13:04.285(choice_request)→10:14:07.585(execution_event) 之间驱动器连接收到 0 帧（广播扇出对所有连接可见，故该窗口无任何 choice 重广播）；浏览器 DOM 在该窗口内已呈现 data-testid=choice-request-entry"
+  },
+  "frame_stats_after_answer": {
+    "execution_event": 6,
+    "stream_chunk": 1064,
+    "provider_status": 3,
+    "artifact_update": 1,
+    "stage_change": 1,
+    "timeline_node_created": 1,
+    "timeline_node_updated": 1
+  }
+}

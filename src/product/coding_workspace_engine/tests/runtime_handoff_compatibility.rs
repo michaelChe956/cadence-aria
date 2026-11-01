@@ -22,7 +22,9 @@ async fn coding_runtime_handoff_without_amendment_keeps_normal_group_path_unchan
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &attempt, true, true);

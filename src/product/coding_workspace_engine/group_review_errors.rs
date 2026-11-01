@@ -10,6 +10,21 @@ pub(crate) enum GroupReviewExecutionError {
     ProviderProtocol(String),
     #[error("user_cancelled")]
     UserCancelled,
+    /// P4-b（REQ-PTR-IDLE）：internal reviewer 零活动挂起——P4-a 共享 idle
+    /// 看门狗在 group review stream 上触发（引擎侧
+    /// `CodingWorkspaceEngineError::ProviderIdleStall` 经
+    /// `map_group_review_engine_error` 映射而来）。与 Transport 预算分离：
+    /// 首次挂起同 provider fresh 重试恰一次，两次挂起即耗尽，由
+    /// `create_failure_gate` 落 `code_review_provider_stalled` 门（按 stage
+    /// 恢复），不占 transport 3 次预算。
+    #[error(
+        "provider_idle_stall: phase={phase} idle_secs={idle_secs} idle_limit_secs={idle_limit_secs}"
+    )]
+    IdleStall {
+        phase: String,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    },
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -88,7 +103,8 @@ pub(crate) enum GroupReviewOrchestrationError {
     ReductionStale,
     #[error("identity_missing")]
     // Legacy group review executor retained for regression coverage
-    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+    //  Task 12 删除)
     // and legacy artifact reader support. No production callers remain after the
     // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
     // no longer need regression coverage.

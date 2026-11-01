@@ -16,9 +16,11 @@ import type {
   NodeDetail,
   PrepareWorkItemPlanRequest,
   PrepareWorkItemPlanResponse,
+  ProviderConfigSnapshot,
   RepositoryInitializationOperationSnapshot,
   TimelineNodeType,
   WorkItemExecutionPlan,
+  WorkItemPlanHumanGateSnapshot,
   WsInMessage,
   WsOutMessage,
 } from "./types";
@@ -85,15 +87,20 @@ describe("workspace websocket protocol types", () => {
       provider_config: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
       reviewer_enabled: true,
     };
-    const human: WsInMessage = {
-      type: "human_confirm",
-      decision: "request-change",
-      payload: { description: "补充验收标准" },
+    const abandonGate: WsInMessage = {
+      type: "abandon_human_gate",
+      command_id: "cmd_abandon_0001",
+    };
+    const hello: WsInMessage = {
+      type: "hello",
+      session_id: "session_001",
+      role: "driver",
+      after_event_seq: 42,
     };
 
     expect(note.type).toBe("context_note");
     expect(start.type).toBe("start_generation");
-    expect(human.decision).toBe("request-change");
+    expect(abandonGate.type).toBe("abandon_human_gate");
   });
 
   it("accepts protocol v2 outbound messages", () => {
@@ -108,9 +115,11 @@ describe("workspace websocket protocol types", () => {
       snapshot: { author: "claude_code", reviewer: "codex", review_rounds: 1 },
       locked_at: "2026-05-20T00:00:00Z",
     };
+    const resync: WsOutMessage = { type: "resync_required", event_seq: 99 };
 
     expect(error.code).toBe("INVALID_MESSAGE_FOR_STAGE");
     expect(locked.snapshot.author).toBe("claude_code");
+    expect(resync.event_seq).toBe(99);
   });
 
   it("describes node details used by session snapshots", () => {
@@ -200,6 +209,7 @@ describe("workspace websocket protocol types", () => {
       ],
       workspace_sessions: [],
       coding_attempts: [attempt],
+      work_item_repository_groups: [],
     } satisfies IssueLifecycleResponse;
 
     expect(lifecycle.work_items[0].latest_attempt?.attempt_id).toBe("coding_attempt_0001");
@@ -236,6 +246,7 @@ describe("workspace websocket protocol types", () => {
       work_items: [],
       workspace_sessions: [],
       coding_attempts: [],
+      work_item_repository_groups: [],
     } satisfies IssueLifecycleResponse;
 
     expect(response.work_item_plans[0].work_item_ids).toEqual([
@@ -473,6 +484,7 @@ describe("workspace websocket protocol types", () => {
         review_rounds: 1,
         superpowers_enabled: true,
         openspec_enabled: true,
+        automation: { owner: "client", enrollment_id: null, policy_revision: null, enabled: false },
         messages: [],
       },
     };
@@ -713,5 +725,125 @@ describe("work item split lifecycle types", () => {
 
     expect(workItem.kind).toBe("backend");
     expect(request.include_integration_tests).toBe(true);
+  });
+});
+
+describe("human gate protocol variants", () => {
+  it("covers the seven outbound gate/advance events with backend field names", () => {
+    const events: WsOutMessage[] = [
+      {
+        type: "human_gate_turn_open",
+        turn_id: "gate_turn_1",
+        command_id: "cmd_1",
+        remaining_budget: 2,
+      },
+      { type: "human_gate_turn_completed", turn_id: "gate_turn_1", artifact_ref: "artifact_9" },
+      {
+        type: "human_gate_turn_failed",
+        turn_id: "gate_turn_1",
+        failure_class: "compile_failed",
+        message: "compile failed",
+      },
+      { type: "human_gate_busy", turn_id: "gate_turn_1" },
+      { type: "human_gate_closed", decision: "confirm", stage: "human_confirm" },
+      {
+        type: "advance_completed",
+        command_id: "cmd_2",
+        attempt_id: "coding_attempt_1",
+        workspace_entry: "coding",
+      },
+      {
+        type: "advance_rejected",
+        command_id: "cmd_2",
+        code: "ADVANCE_REPLAY_NOT_READY",
+        reason: "advance record is in durable status Pending",
+      },
+    ];
+
+    expect(events.map((event) => event.type)).toEqual([
+      "human_gate_turn_open",
+      "human_gate_turn_completed",
+      "human_gate_turn_failed",
+      "human_gate_busy",
+      "human_gate_closed",
+      "advance_completed",
+      "advance_rejected",
+    ]);
+  });
+
+  it("accepts the two inbound gate/advance commands", () => {
+    const messages: WsInMessage[] = [
+      { type: "human_gate_feedback", command_id: "cmd_1", feedback: "验收命令缺失" },
+      { type: "advance", command_id: "cmd_2" },
+    ];
+
+    expect(messages.map((message) => message.type)).toEqual(["human_gate_feedback", "advance"]);
+  });
+
+  it("widens the gate trigger union to the four engine variants", () => {
+    const triggers: WorkItemPlanHumanGateSnapshot["trigger"][] = [
+      "native_human_required",
+      "repeated_fingerprint",
+      "verification_new_findings",
+      "repair_budget_exhausted",
+    ];
+
+    expect(triggers).toHaveLength(4);
+  });
+});
+
+// C2（Task 6.2 / anchor_t20）：LC 恢复显式 fresh 的 wire 合同——出站 typed
+// 结果帧 snake_case 逐字段镜像后端 out.rs；普通 WsInMessage::
+// start_generation 不携带 resume_recovery（显式 fresh 意图只经 hooks 层
+// sendLcResumeFresh 的加宽发送联合发送，普通 literal None）。
+describe("anchor_t20 lc resume recovery wire contract", () => {
+  it("describes the typed operation result frame with durable operation states", () => {
+    const frame: WsOutMessage = {
+      type: "lc_resume_recovery_operation_result",
+      recovery_id: "rec-1",
+      operation_id: "op-1",
+      delivery: "replayed",
+      operation_state: "running",
+      fresh_node_id: "node-2",
+      reason_code: null,
+    };
+
+    expect(JSON.parse(JSON.stringify(frame))).toEqual({
+      type: "lc_resume_recovery_operation_result",
+      recovery_id: "rec-1",
+      operation_id: "op-1",
+      delivery: "replayed",
+      operation_state: "running",
+      fresh_node_id: "node-2",
+      reason_code: null,
+    });
+  });
+
+  it("keeps the plain start_generation inbound wire free of the fresh intent", () => {
+    const providerConfig: ProviderConfigSnapshot = {
+      author: "codex",
+      reviewer: null,
+      review_rounds: 1,
+    };
+    const plain: WsInMessage = {
+      type: "start_generation",
+      provider_config: providerConfig,
+      reviewer_enabled: true,
+    };
+    expect(JSON.parse(JSON.stringify(plain))).toEqual({
+      type: "start_generation",
+      provider_config: providerConfig,
+      reviewer_enabled: true,
+    });
+
+    const rejected: WsInMessage = {
+      type: "start_generation",
+      provider_config: providerConfig,
+      reviewer_enabled: true,
+      // @ts-expect-error 普通出生 wire 不携带 resume_recovery——显式 fresh
+      // 意图只经 hooks 层 sendLcResumeFresh 的发送联合（C2 接口字典）。
+      resume_recovery: { recovery_id: "rec-1", intent: "fresh", operation_id: "op-1" },
+    };
+    expect(rejected.type).toBe("start_generation");
   });
 });

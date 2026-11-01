@@ -1,18 +1,27 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::cross_cutting::provider_boundary::ProviderBoundaryPlan;
+use crate::cross_cutting::tool_policy_audit::{
+    DurableToolPolicyEvent, ProviderStartAudit, ToolPolicyAuditSink,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::approval_bridge::ApprovalBridge;
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::local_usage::read_default_kimi_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
-    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderStatus, ProviderToolCall,
-    ProviderToolResult, RiskLevel, StreamingProviderInput,
+    ProviderCommand, ProviderCompletion, ProviderEvent, ProviderExecutionEvent,
+    ProviderExecutionEventKind, ProviderExecutionEventStatus, ProviderStatus, ProviderToolCall,
+    ProviderToolResult, RiskLevel, StreamingProviderInput, UsageReportData,
 };
 
+use super::client_services::KimiClientServiceDispatcher;
+use super::mcp_bundle::{KimiMcpInjection, SessionMethodDecision, resolve_session_method};
 use super::parse::{
     KimiPermissionOption, KimiPromptResult, KimiSessionUpdate, Parsed, parse_message,
 };
@@ -24,6 +33,16 @@ const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const KIMI_RESUME_STALL_TIMEOUT: Duration = Duration::from_millis(100);
 pub(crate) const KIMI_SESSION_ABORTED: &str = "Kimi provider session aborted";
+const KIMI_EMPTY_OUTPUT_ERROR: &str = "provider_empty_output";
+/// 空输出后同会话重发的一次固定重试指令（对齐 pi 先例 `PI_EMPTY_OUTPUT_RETRY_PROMPT`）。
+const KIMI_EMPTY_OUTPUT_RETRY_PROMPT: &str =
+    "Your previous reply was empty. Please reply again with your complete output.";
+
+fn kimi_empty_output_error() -> ProviderAdapterError {
+    ProviderAdapterError::provider_empty_output(format!(
+        "{KIMI_EMPTY_OUTPUT_ERROR}: Kimi agent turn ended without assistant output after one bounded in-session retry"
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IncomingDisposition {
@@ -41,6 +60,28 @@ impl Drop for CommandRelayGuard {
     }
 }
 
+/// Task 4c:LC validated 会话上下文——不可伪造 target boundary plan 与统一
+/// launch audit 的会话内落盘(native session/handshake 之后)。
+/// `audit_template.provider_session_id` 在握手前留空,由 `session/new`/
+/// `session/load` 返回的原生会话 id 回填后经 `audit_sink` 落盘;落盘成功
+/// 才经 `native_id_tx` 向 `start_validated` 回传握手结果。
+pub(crate) struct LcValidatedSession {
+    pub(crate) boundary: ProviderBoundaryPlan,
+    pub(crate) audit_sink: Arc<dyn ToolPolicyAuditSink>,
+    pub(crate) audit_template: ProviderStartAudit,
+    /// 批2 Task 20：冻结执行合同的受信岗位授予（duty/承载/窗口引用）——
+    /// `start_validated` 从 validated launch 的 `frozen_execution` 提取；
+    /// 无合同 launch 为 `None`（行为=direct 承载角色矩阵）。
+    pub(crate) trusted_duty:
+        Option<crate::cross_cutting::kimi_code_provider::client_services::TrustedDutyGrant>,
+    pub(crate) native_id_tx: tokio::sync::oneshot::Sender<
+        Result<String, crate::cross_cutting::provider_adapter::ProviderAdapterError>,
+    >,
+}
+
+/// MCP 兼容入口（测试与既有调用方使用）：等价于不带 bundle 的
+/// `run_kimi_session_with_mcp`，保持 `mcpServers: []`。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_kimi_session<W>(
     peer: JsonRpcPeer<W>,
     command_rx: mpsc::Receiver<ProviderCommand>,
@@ -51,7 +92,60 @@ pub(crate) async fn run_kimi_session<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    run_kimi_session_inner(peer, command_rx, event_tx, input, cancel).await
+    run_kimi_session_inner(peer, command_rx, event_tx, input, None, None, cancel).await
+}
+
+/// 带 MCP 受控注入的会话入口：`mcpServers` 由经校验的 bundle 派生；
+/// resume 时 digest 漂移则拒绝 session/load、转 session/new 并记录 superseded 审计。
+pub(crate) async fn run_kimi_session_with_mcp<W>(
+    peer: JsonRpcPeer<W>,
+    command_rx: mpsc::Receiver<ProviderCommand>,
+    event_tx: mpsc::Sender<ProviderEvent>,
+    input: StreamingProviderInput,
+    mcp_injection: Option<KimiMcpInjection>,
+    cancel: CancellationToken,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    run_kimi_session_inner(
+        peer,
+        command_rx,
+        event_tx,
+        input,
+        mcp_injection,
+        None,
+        cancel,
+    )
+    .await
+}
+
+/// LC validated 会话入口(Task 4c):携带不可伪造 target boundary plan 与
+/// 统一 launch audit 上下文——native session/handshake 完成后回填原生会话
+/// id 落盘 `ProviderStartAudit.lc_projection`,成功后向调用方回传握手
+/// 结果;宿主 fs/terminal 消费同一 boundary plan(读写面分离)。
+pub(crate) async fn run_kimi_session_validated<W>(
+    peer: JsonRpcPeer<W>,
+    command_rx: mpsc::Receiver<ProviderCommand>,
+    event_tx: mpsc::Sender<ProviderEvent>,
+    input: StreamingProviderInput,
+    mcp_injection: Option<KimiMcpInjection>,
+    lc: LcValidatedSession,
+    cancel: CancellationToken,
+) -> Result<(), ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    run_kimi_session_inner(
+        peer,
+        command_rx,
+        event_tx,
+        input,
+        mcp_injection,
+        Some(lc),
+        cancel,
+    )
+    .await
 }
 
 async fn run_kimi_session_inner<W>(
@@ -59,12 +153,17 @@ async fn run_kimi_session_inner<W>(
     mut command_rx: mpsc::Receiver<ProviderCommand>,
     event_tx: mpsc::Sender<ProviderEvent>,
     input: StreamingProviderInput,
+    mcp_injection: Option<KimiMcpInjection>,
+    lc: Option<LcValidatedSession>,
     cancel: CancellationToken,
 ) -> Result<(), ProviderAdapterError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let bridge = ApprovalBridge::new(input.permission_mode.clone(), event_tx.clone());
+    let bridge = Arc::new(ApprovalBridge::new(
+        input.permission_mode.clone(),
+        event_tx.clone(),
+    ));
     let bridge_commands = bridge.command_sender();
     let command_abort = CancellationToken::new();
     let relay_abort = command_abort.clone();
@@ -99,6 +198,24 @@ where
     let timeout_secs = input.timeout_secs.max(1);
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
+    // 批2 Task 20b:受信岗位授予派生前移(早于 initialize)——广告面按
+    // 岗位合同协商(Author 不广告代码编辑 fs 写;Reviewer/其余全集;
+    // 无授予直连会话全集,行为不变);广告≠授权,请求仍逐条过 gate。
+    let trusted_duty = lc
+        .as_ref()
+        .and_then(|lc| lc.trusted_duty.clone())
+        .or_else(|| {
+            input.tool_policy.as_ref().and_then(|policy| {
+                match &policy.intent {
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                        window_id,
+                    } => Some(
+                        crate::cross_cutting::kimi_code_provider::client_services::TrustedDutyGrant::from_reviewer_wire_contract(window_id),
+                    ),
+                    _ => None,
+                }
+            })
+        });
     let initialize = match request_control(
         &peer,
         json!({
@@ -107,7 +224,7 @@ where
             "method": "initialize",
             "params": {
                 "protocolVersion": 1,
-                "clientCapabilities": {},
+                "clientCapabilities": super::client_services::advertised_client_capabilities(trusted_duty.as_ref().map(|grant| grant.duty_of_grant())),
                 "clientInfo": {"name": "cadence-aria", "version": env!("CARGO_PKG_VERSION")}
             }
         }),
@@ -121,7 +238,26 @@ where
         None => return Err(aborted_session_error()),
     };
     ensure_response_success(&initialize, "initialize")?;
-    validate_initialize(&initialize, input.resume_provider_session_id.is_some())?;
+    // Task 9c:LC 显式 resume 的能力协商(initialize)确认——LC 路径发现
+    // 不支持 resume 属于已启动 child 后的 runtime 失败,经 native_id_tx
+    // 显式回传「未恢复」(调用方沿既有 kill 链终止并回收子进程,不伪称
+    // 零 spawn);direct 路径错误形态零变化。
+    let lc_explicit_resume = lc.is_some() && input.resume_provider_session_id.is_some();
+    if let Err(error) = validate_initialize(&initialize, input.resume_provider_session_id.is_some())
+    {
+        let failure = if lc_explicit_resume {
+            provider_error(format!(
+                "kimi initialize capability negotiation did not confirm resume support for the requested session (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal): {}",
+                error.details
+            ))
+        } else {
+            error
+        };
+        if let Some(lc) = lc {
+            let _ = lc.native_id_tx.send(Err(failure.clone()));
+        }
+        return Err(failure);
+    }
     peer.send(json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized",
@@ -129,29 +265,69 @@ where
     }))
     .await?;
 
-    let permission_mode = match input.permission_mode {
-        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto => "auto",
-        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised => "default",
-    };
     let resume_id = input
         .resume_provider_session_id
         .clone()
         .filter(|id| !id.trim().is_empty());
-    let session_method = if resume_id.is_some() {
-        "session/load"
-    } else {
-        "session/new"
-    };
-    let session_request = if let Some(session_id) = resume_id.as_deref() {
-        json!({
-            "jsonrpc":"2.0", "id":2, "method":"session/load",
-            "params":{"sessionId":session_id,"cwd":input.working_dir,"mcpServers":[],"permissionMode":permission_mode}
-        })
-    } else {
-        json!({
-            "jsonrpc":"2.0", "id":2, "method":"session/new",
-            "params":{"cwd":input.working_dir,"mcpServers":[],"permissionMode":permission_mode}
-        })
+    // MCP 受控注入（tasks.md 6.1）：mcpServers 由经校验的 bundle 派生；
+    // direct resume 时 digest 漂移 → 拒绝 session/load、启动新会话并标记旧
+    // 会话 superseded（LC 显式 resume 不走 session/new,见下方 Task 9c）。
+    if let Some(bundle) = mcp_injection.as_ref().map(KimiMcpInjection::bundle) {
+        for line in bundle.argv_audit_lines() {
+            tracing::info!(target: "kimi_code_provider", audit = %line, "kimi MCP server injection");
+        }
+    }
+    let decision = resolve_session_method(resume_id.as_deref(), mcp_injection.as_ref());
+    let mut pending_superseded = None;
+    let (session_method, session_request) = match decision {
+        SessionMethodDecision::Load {
+            session_id,
+            mcp_servers,
+        } => (
+            "session/load",
+            json!({
+                "jsonrpc":"2.0", "id":2, "method":"session/load",
+                "params":{"sessionId":session_id,"cwd":input.working_dir,"mcpServers":mcp_servers}
+            }),
+        ),
+        SessionMethodDecision::New {
+            superseded,
+            mcp_servers,
+        } => {
+            // Task 9c(冻结决策):LC 显式 resume 的 MCP bundle 漂移不走
+            // session/new——drift 属于已启动 child 后的 runtime 失败:不发
+            // session/new、显式「未恢复」经 native_id_tx 回传(调用方沿
+            // 既有 kill 链终止并回收子进程,不伪称零 spawn),零新
+            // provider_start;direct 路径保持「拒绝 load + 新会话」原语义。
+            if let (Some(superseded), true) = (superseded.as_ref(), lc_explicit_resume) {
+                let failure = provider_error(format!(
+                    "kimi session/load rejected for explicit resume {} because the MCP bundle digest drifted (frozen_digest={}, actual_digest={}) (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)",
+                    superseded.session_id, superseded.frozen_digest, superseded.actual_digest
+                ));
+                if let Some(lc) = lc {
+                    let _ = lc.native_id_tx.send(Err(failure.clone()));
+                }
+                return Err(failure);
+            }
+            if let Some(superseded) = superseded.as_ref() {
+                tracing::warn!(
+                    target: "kimi_code_provider",
+                    old_session_id = %superseded.session_id,
+                    frozen_digest = %superseded.frozen_digest,
+                    actual_digest = %superseded.actual_digest,
+                    superseded = true,
+                    "kimi MCP bundle digest drifted on resume; rejecting session/load and starting a new session (REQ-ENV-04)"
+                );
+            }
+            pending_superseded = superseded;
+            (
+                "session/new",
+                json!({
+                    "jsonrpc":"2.0", "id":2, "method":"session/new",
+                    "params":{"cwd":input.working_dir,"mcpServers":mcp_servers}
+                }),
+            )
+        }
     };
     let session_response =
         match request_control(&peer, session_request, deadline, &cancel, &event_tx).await? {
@@ -159,17 +335,138 @@ where
             None => return Err(aborted_session_error()),
         };
     ensure_response_success(&session_response, session_method)?;
-    let session_id = session_response
+    let response_session_id = session_response
         .get("sessionId")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
-        .map(ToString::to_string)
-        .or_else(|| resume_id.clone())
-        .ok_or_else(|| {
-            provider_error(format!(
-                "Kimi ACP {session_method} response did not contain sessionId"
-            ))
-        })?;
+        .map(ToString::to_string);
+    // Task 9c(r62 kimi-6 story resume 现场修订):LC 显式 resume 的
+    // session/load 应答按 kimi ACP 实际协议形态确认——kimi 2.0.2 实测
+    // (现场 + 本地协议 probe 双证):成功应答**不回显 sessionId**(result
+    // 仅 configOptions 等字段,会话身份由后续 session/update 通知携带),
+    // 失败路径(Unknown sessionId / Invalid params)走 JSON-RPC error——已由
+    // 上方 ensure_response_success fail-closed 拦截(既有 Err+kill 链不变)。
+    // 因此:应答同 id → 采纳;应答 success 缺 sessionId → kimi 方言的正常
+    // 确认形态,采纳请求 id(不回填陌生值,恰是请求要恢复的会话);应答
+    // 错 id → 仍为已启动 child 后的 runtime 失败(显式「未恢复」+ kill 链);
+    // direct 路径保持既有回填语义,零变化。
+    let session_id = if lc_explicit_resume {
+        let requested = resume_id.clone().expect("explicit resume carries an id");
+        match response_session_id {
+            Some(confirmed) if Some(&confirmed) == resume_id.as_ref() => confirmed,
+            None => requested,
+            other => {
+                let failure = provider_error(format!(
+                    "kimi session/load response session id {} does not confirm the requested resume id {requested} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)",
+                    other.as_deref().unwrap_or("<missing>")
+                ));
+                if let Some(lc) = lc {
+                    let _ = lc.native_id_tx.send(Err(failure.clone()));
+                }
+                return Err(failure);
+            }
+        }
+    } else {
+        response_session_id
+            .or_else(|| resume_id.clone())
+            .ok_or_else(|| {
+                provider_error(format!(
+                    "Kimi ACP {session_method} response did not contain sessionId"
+                ))
+            })?
+    };
+
+    // digest 漂移 → 旧会话标记 superseded：在 ProviderEvent 通道发可消费的
+    // Execution 事件（gateway/审计层后续可订阅消费，REQ-ENV-04）。tracing 保留。
+    if let Some(superseded) = pending_superseded {
+        let _ = event_tx
+            .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                event_id: format!("kimi_session_superseded_{}", superseded.session_id),
+                kind: ProviderExecutionEventKind::Provider,
+                status: ProviderExecutionEventStatus::Aborted,
+                title: "Kimi session superseded on resume (MCP bundle digest drift)".to_string(),
+                detail: Some(format!(
+                    "session/load rejected for session {} (frozen_digest={}, actual_digest={}); a new session was started",
+                    superseded.session_id, superseded.frozen_digest, superseded.actual_digest
+                )),
+                command: None,
+                cwd: Some(input.working_dir.display().to_string()),
+                output: Some(
+                    json!({
+                        "superseded": true,
+                        "old_session_id": superseded.session_id,
+                        "frozen_digest": superseded.frozen_digest,
+                        "actual_digest": superseded.actual_digest,
+                        "new_session_id": session_id,
+                        "new_session_started": true,
+                    })
+                    .to_string(),
+                ),
+                exit_code: None,
+            }))
+            .await;
+    }
+
+    // Task 4c 统一 launch audit:native session/handshake 之后、prompt 之前
+    // 落盘 provider_start(回填握手原生会话 id);落盘成功才回传握手结果。
+    // 落盘失败 fail-closed(会话终止,由 mod.rs 会话任务的既有 kill 链
+    // 回收子进程)。
+    let target_boundary = lc.as_ref().map(|lc| lc.boundary.clone());
+    if let Some(lc) = lc {
+        let mut audit_event = lc.audit_template;
+        audit_event.provider_session_id = session_id.clone();
+        if let Err(error) = lc
+            .audit_sink
+            .append_bound(DurableToolPolicyEvent::ProviderStart(audit_event))
+        {
+            let failure = provider_error(format!(
+                "kimi lc validated session: provider_start audit append failed: {error}"
+            ));
+            let _ = lc.native_id_tx.send(Err(failure.clone()));
+            return Err(failure);
+        }
+        let _ = lc.native_id_tx.send(Ok(session_id.clone()));
+    }
+
+    // 批2 Task 7（Bug45）：terminal manager 会话内单例——dispatcher 消费
+    // 它执行 terminal/*；会话 stall 判定读同一真实活动 registry（同一
+    // terminal_id 的 Started→Running→Exited/Killed/Released 状态源）。
+    let terminal = super::client_services::SessionTerminalManager::new();
+    let dispatcher = KimiClientServiceDispatcher::new_with_trusted_duty(
+        peer.clone(),
+        session_id.clone(),
+        input.working_dir.clone(),
+        input.role.clone(),
+        input.permission_mode.clone(),
+        // 批2 Task 6/A1:dispatcher 与主会话绑定同一 env 覆盖合同——
+        // terminal 子进程继承宿主环境,`env_vars` 仅作显式覆盖层
+        // (A1 停掉全部生产注入后恒为空),不根据 ACP 参数另造环境。
+        input.env_vars.clone(),
+        Arc::clone(&bridge),
+        event_tx.clone(),
+        cancel.clone(),
+        terminal.clone(),
+        // REQ-PIB-02：基线会话锚点透传（fs 读路由基线树 / terminal 拒绝）。
+        input.baseline_tree.clone(),
+        // LC target 边界(Task 4c):fs read/write 与 terminal 消费同一
+        // 不可伪造 plan;direct 入口为 None,行为不变。
+        target_boundary,
+        // 批2 Task 20：受信岗位授予（LC 冻结合同/ReviewerVerify wire
+        // 合同;None=direct 承载角色矩阵,行为不变）。
+        trusted_duty,
+    );
+
+    // 批2 Task 7（Bug45）：向消费方投递真实终端活动快照——每会话一次、
+    // 经 awaited send 可靠投递（不依赖可能 try_send 丢失的 UI Execution
+    // 日志）；产品双层看门狗在触发点读快照，缺失/重复/乱序终态事件都
+    // 不会留下永久豁免（快照与 terminal manager 进程生命周期同源）。
+    let _ = event_tx
+        .send(ProviderEvent::TerminalActivity(
+            crate::cross_cutting::streaming_provider::TerminalActivityHandle(Arc::new(
+                terminal.clone(),
+            )),
+        ))
+        .await;
 
     let mut next_prompt_id = 4_u64;
     let prompt = peer.request_with_timeout(
@@ -178,6 +475,7 @@ where
     );
     tokio::pin!(prompt);
     let mut full_output = String::new();
+    let mut empty_output_retry_used = false;
     let mut tool_outputs = HashMap::<String, String>::new();
     let mut completed_tools = HashSet::<String>::new();
     let mut askuser_question_counts = HashMap::<String, usize>::new();
@@ -207,6 +505,16 @@ where
                 return Err(aborted_session_error());
             }
             _ = &mut idle_timer => {
+                // 批2 Task 7（Bug45）：真实在途 terminal 暂停「无工作 stall」
+                // 判定——静默长 CHECK（如 mvn）期间无 Progress 事件，但
+                // registry 是真实进程状态（非伪造心跳）；总 deadline 仍由
+                // 上方 `remaining` 收口，本暂停不延长它。terminal 退出后
+                // 无进展，下一轮 idle 即重新计 stall。
+                if terminal.has_active_terminals() {
+                    idle_deadline =
+                        Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                    continue;
+                }
                 abort_kimi_session(&peer, &session_id, &event_tx).await;
                 return Err(aborted_session_error());
             }
@@ -218,6 +526,7 @@ where
                         while let Some(incoming) = peer.try_next_incoming().await {
                             match handle_incoming(
                                 &peer,
+                                &dispatcher,
                                 incoming,
                                 &bridge,
                                 &event_tx,
@@ -257,6 +566,7 @@ where
                 while let Some(incoming) = peer.try_next_incoming().await {
                     match handle_incoming(
                         &peer,
+                        &dispatcher,
                         incoming,
                         &bridge,
                         &event_tx,
@@ -288,6 +598,56 @@ where
                 }
                 match parse_message(&json!({"jsonrpc":"2.0","id":3,"result":response})) {
                     Parsed::PromptResult(KimiPromptResult::StopReason(reason)) if reason == "end_turn" => {
+                        // F2-A 空输出兑底（对齐 pi 先例）：轮次以 end_turn 结束但无任何
+                        // assistant 输出时，同会话重发一次固定重试指令（每 run 恰一次，
+                        // 留审计 Execution 事件）；重试后仍空 → `provider_empty_output`
+                        // 分类错误。这是会话层输出兑底，不触碰 kimi client services
+                        // 角色策略（REQ-ENV-09 工具策略零改动语义不变）。
+                        if full_output.trim().is_empty() {
+                            if empty_output_retry_used {
+                                return Err(kimi_empty_output_error());
+                            }
+                            empty_output_retry_used = true;
+                            tracing::warn!(
+                                target: "kimi_code_provider",
+                                "Kimi agent turn ended with empty output; retrying once in-session"
+                            );
+                            let _ = event_tx
+                                .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                                    event_id: "kimi_empty_output_retry".to_string(),
+                                    kind: ProviderExecutionEventKind::Turn,
+                                    status: ProviderExecutionEventStatus::Running,
+                                    title: "Turn empty output retry".to_string(),
+                                    detail: Some(
+                                        "Kimi agent turn ended with empty output; retrying once"
+                                            .to_string(),
+                                    ),
+                                    command: None,
+                                    cwd: Some(input.working_dir.display().to_string()),
+                                    output: None,
+                                    exit_code: None,
+                                }))
+                                .await;
+                            full_output.clear();
+                            prompt.set(peer.request_with_timeout(
+                                session_prompt_request(
+                                    &session_id,
+                                    KIMI_EMPTY_OUTPUT_RETRY_PROMPT,
+                                    next_prompt_id,
+                                ),
+                                deadline.saturating_duration_since(Instant::now()),
+                            ));
+                            next_prompt_id += 1;
+                            idle_deadline =
+                                Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                            continue;
+                        }
+                        // Kimi ACP 当前不填 PromptResponse.usage；仅在正常 turn 终止后，
+                        // 汇总当前 session 的所有 agent wire.jsonl 记录。失败仅代表无数据。
+                        let usage_role = UsageReportData::role_text(&input.role);
+                        if let Some(report) = read_default_kimi_usage(&input.working_dir, &session_id, usage_role) {
+                            let _ = event_tx.send(ProviderEvent::UsageReport(report)).await;
+                        }
                         let completion = ProviderCompletion::from_output(full_output, input.structured_output_contract.as_ref(), Some(session_id));
                         let _ = event_tx.send(ProviderEvent::StatusChanged(ProviderStatus::Completed)).await;
                         let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
@@ -306,6 +666,7 @@ where
                 };
                 match handle_incoming(
                     &peer,
+                    &dispatcher,
                     incoming,
                     &bridge,
                     &event_tx,
@@ -341,8 +702,9 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn handle_incoming<W>(
     peer: &JsonRpcPeer<W>,
+    dispatcher: &KimiClientServiceDispatcher<W>,
     incoming: Value,
-    bridge: &ApprovalBridge,
+    bridge: &Arc<ApprovalBridge>,
     event_tx: &mpsc::Sender<ProviderEvent>,
     cancel: &CancellationToken,
     command_abort: &CancellationToken,
@@ -354,6 +716,19 @@ async fn handle_incoming<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Server→client client-service requests (terminal/*, fs/*) are dispatched
+    // to concurrent tasks and never processed inline, so wait_for_exit cannot
+    // block the read loop while kill/release arrive.
+    if let (Some(method), Some(id)) = (
+        incoming.get("method").and_then(Value::as_str),
+        incoming.get("id").cloned(),
+    ) {
+        let params = incoming.get("params").cloned().unwrap_or(Value::Null);
+        if dispatcher.dispatch(method, id, params) {
+            return Ok(IncomingDisposition::NotProgress);
+        }
+    }
+
     match parse_message(&incoming) {
         Parsed::SessionUpdate(update) => {
             match update {
@@ -415,6 +790,10 @@ where
                 KimiSessionUpdate::SessionInfoUpdate { title } => {
                     tracing::debug!(target: "kimi_code_provider", %title, "Kimi session info update")
                 }
+                // usage 数据源勘察（kimi ACP 0.38.0）：session/update 的 usage_update 仅携带
+                // `used`/`size`（上下文窗口占用字节数/条数计数），没有 per-turn 的
+                // input/output/cache token 计数，也无法映射到 UsageReportData 的字段——
+                // 如实记录为「不可用」，不构造 UsageReport 事件。
                 KimiSessionUpdate::UsageUpdate { used, size } => {
                     tracing::debug!(target: "kimi_code_provider", used, size, "Kimi usage update")
                 }

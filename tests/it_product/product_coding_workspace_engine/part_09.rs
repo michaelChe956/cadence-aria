@@ -18,6 +18,7 @@ fn coding_store_with_attempt(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -56,17 +57,11 @@ fn final_confirm_attempt(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_stage(
             &attempt.project_id,
@@ -113,17 +108,11 @@ fn failed_attempt(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_status(
             &attempt.project_id,
@@ -173,6 +162,9 @@ fn sample_review_request(attempt_id: &str) -> ReviewRequest {
         created_at: "2026-05-23T00:00:00Z".to_string(),
         updated_at: "2026-05-23T00:00:00Z".to_string(),
         push_error: None,
+        owner_kind: ReviewRequestOwnerKind::Attempt,
+        pointer_publication_id: None,
+        revoked: false,
     }
 }
 
@@ -306,6 +298,7 @@ impl StreamingProviderAdapter for SessionInputCapturingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })

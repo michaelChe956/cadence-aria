@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::product::planning_failure::PlanningFailureKind;
 use crate::product::work_item_contract::{
     ContractCompatibilityPolicy, DependencyContractGraph, DesignTraceabilityRef,
 };
@@ -301,13 +302,23 @@ pub(crate) fn design_traceability_refs(
 }
 
 fn validation_error<T>(code: &str, message: &str) -> Result<T, ProjectionCompileError> {
+    // F2c（REQ-SG-01/03、REQ-PLN-10）：stable_topological_order 的排序阻断
+    // 是 projection 内部错——Kahn 残余节点集合不是有向 witness，不编造
+    // DependencyCycle payload（真实 witness 由 canonical typed 族继承）；
+    // 拒绝结果经 typed report 携带 Operational（stable_code=code 常量），
+    // 消费面不得从 Display 文案重 parse。
+    let message = message.to_string();
     Err(ProjectionCompileError::Validation(
         ProjectionValidationReport {
             findings: vec![ProjectionValidationFinding {
                 code: code.to_string(),
                 projection: "plan".to_string(),
                 contract_ref: None,
-                message: message.to_string(),
+                kind: Some(PlanningFailureKind::Operational {
+                    stable_code: code.to_string(),
+                    cause: message.clone(),
+                }),
+                message,
             }],
         },
     ))

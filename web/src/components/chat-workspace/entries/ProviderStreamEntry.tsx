@@ -1,15 +1,25 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { lexer, type Token, type Tokens } from "marked";
 import type { ChatEntry } from "../../../state/chat-entries";
+import type { UsageReportPayload } from "../../../api/types/workspace";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 import { normalizeDisplayText } from "../text-display";
 
 export function ProviderStreamEntry({ entry }: { entry: ChatEntry }) {
   const content = normalizeProviderStreamEntryContent(entry);
+  const usage = entryUsage(entry);
   return (
     <ChatEntryContainer
       role={entry.role}
       title={entryTitle(entry)}
+      titleSuffix={usage ? (
+        <span
+          data-testid="provider-stream-usage"
+          className="ml-2 border-l border-gray-300 pl-2 text-[11px] font-normal text-amber-600"
+        >
+          {usage}
+        </span>
+      ) : null}
     >
       <MarkdownContent content={content} />
     </ChatEntryContainer>
@@ -44,10 +54,7 @@ const STRUCTURED_OUTPUT_PATTERN =
 const SEVERITY_RANK: Record<string, number> = {
   blocking: 0,
   must_fix: 1,
-  strong_recommend_fix: 2,
-  suggestion: 3,
-  minor: 4,
-  optional: 5,
+  suggestion: 2,
 };
 
 function entryTitle(entry: ChatEntry) {
@@ -65,6 +72,27 @@ const ROLE_LABELS: Record<string, string> = {
   internal_reviewer: "Internal Reviewer",
   system: "系统",
 };
+
+export function entryUsage(entry: ChatEntry): string | null {
+  const usage = entry.metadata?.usage as UsageReportPayload | undefined;
+  if (!usage) {
+    return null;
+  }
+  const segments: string[] = [];
+  if (typeof usage.input_tokens === "number" && usage.input_tokens > 0) {
+    segments.push(`输入 ${usage.input_tokens.toLocaleString("en-US")}`);
+  }
+  if (typeof usage.output_tokens === "number" && usage.output_tokens > 0) {
+    segments.push(`输出 ${usage.output_tokens.toLocaleString("en-US")}`);
+  }
+  if (typeof usage.cache_read_tokens === "number" && usage.cache_read_tokens > 0) {
+    segments.push(`缓存 ${usage.cache_read_tokens.toLocaleString("en-US")}`);
+  }
+  if (segments.length === 0) {
+    return null;
+  }
+  return `Tokens ${segments.join(" · ")}`;
+}
 
 function metadataProvider(metadata: ChatEntry["metadata"]) {
   const provider = metadata?.provider ?? metadata?.agent;

@@ -2,6 +2,7 @@ import { beforeEach, vi } from "vitest";
 import type { WorkItemExecutionPlan } from "../api/types";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useLinkedWorkspaceAmendmentStore } from "../state/linked-workspace-amendment-store";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
@@ -34,6 +35,7 @@ export function deferred<T>() {
 export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
   const api: CodingWsApi = {
     startCoding: vi.fn(),
+    restartCoding: vi.fn(),
     sendContextNote: vi.fn(),
     sendProviderSelect: vi.fn(),
     sendPermissionModeSelect: vi.fn(),
@@ -43,6 +45,7 @@ export function mockCodingWs(overrides: Partial<CodingWsApi> = {}) {
     respondChoice: vi.fn(),
     respondGate: vi.fn(),
     finalConfirm: vi.fn(),
+    retryPush: vi.fn(),
     abortAttempt: vi.fn(),
     requestManualPause: vi.fn(),
     sendHello: vi.fn(),
@@ -59,7 +62,7 @@ export function mockPlanRepairWs(
   const api = {
     confirmPlanAmendment: vi.fn(() => true),
     cancelPlanAmendment: vi.fn(() => true),
-    sendHumanConfirm: vi.fn(() => true),
+    sendRequestRevision: vi.fn(() => true),
     startLinkedWorkspaceAmendment: vi.fn(() => true),
     connectionStatus: "connected",
     sessionSnapshotGeneration: 1,
@@ -120,6 +123,7 @@ export function installCodingWorkspacePageTestHooks() {
     useCodingWorkspaceStore.getState().reset();
     useLinkedWorkspaceAmendmentStore.getState().reset(null);
     useWorkspaceStore.getState().reset();
+    useCodingLogStore.getState().reset();
     vi.clearAllMocks();
   });
 }

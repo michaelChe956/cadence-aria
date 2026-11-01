@@ -1,22 +1,49 @@
-import { PanelRightOpen } from "lucide-react";
+import { PanelRightOpen, Sparkles } from "lucide-react";
+import { useState } from "react";
 import type {
   CodingAttempt,
   CodingAttemptAddress,
+  IssueDeliverySummaryDto,
   IssueLifecycleResponse,
   LifecycleWorkItem,
+  PlanGroupProjectionDto,
   ProductIssue,
+  WorkItemRepositoryGroup,
   WorkspaceSessionSummary,
 } from "../../api/types";
 import type {
   LifecycleCard as LifecycleCardData,
   LifecycleColumns,
 } from "../../state/lifecycle-workbench-store";
+import { workItemWaitingReason } from "../../state/lifecycle-workbench-store";
+import type { StagePipState } from "./issue-queue-derivation";
+import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
 import { LifecycleCard } from "./LifecycleCard";
 import type { DrawerEntity } from "./LifecycleCardDrawer";
+import { SectionCollapseToggle } from "./SectionCollapseToggle";
+import {
+  StageStepper,
+  type StageStepperStage,
+  type WorkbenchStageKey,
+} from "./StageStepper";
 
 type ProviderWorkspaceLaunchTarget = "story" | "design" | "work_item";
 
 const DELETE_EXIT_ANIMATION_MS = 220;
+
+// Task 6：阶段步进器标签与空阶段主按钮文案（与 Plan 逐字一致）。
+const STAGE_LABEL: Record<WorkbenchStageKey, string> = {
+  story: "Story",
+  design: "Design",
+  work_item: "Work Item",
+};
+
+const STAGE_EMPTY_ACTION_LABEL: Record<WorkbenchStageKey, string> = {
+  story: "生成 Story Spec",
+  design: "生成 Design Spec",
+  work_item: "准备 Work Item Plan",
+};
+
 export function resolveGroupCodingAttempt(
   raw: unknown,
   codingAttempts: CodingAttempt[],
@@ -43,88 +70,63 @@ export function resolveGroupCodingAttempt(
   );
 }
 
-export function IssueCardList({
-  cards,
-  selectedKey,
-  deletingKey,
-  onSelect,
-  onGenerateStorySpec,
-  onDeleteIssue,
-}: {
-  cards: LifecycleCardData[];
-  selectedKey: string | null;
-  deletingKey: string | null;
-  onSelect: (card: LifecycleCardData) => void;
-  onGenerateStorySpec: (card: LifecycleCardData) => void;
-  onDeleteIssue: (issueId: string) => void;
-}) {
-  return (
-    <section
-      role="region"
-      aria-label="Issue 卡片列表"
-      className="min-h-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3"
-    >
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
-            Issues
-          </h2>
-          <p className="mt-0.5 text-xs text-[var(--aria-ink-muted)]">
-            选择 Issue 后查看它的 Story、Design 和 Work Item。
-          </p>
-        </div>
-        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-          {cards.length}
-        </span>
-      </div>
-      {cards.length === 0 ? (
-        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 text-sm text-[var(--aria-ink-muted)]">
-          当前 Project 还没有 Issue。
-        </div>
-      ) : (
-        <ul className="space-y-2">
-          {cards.map((card) => (
-            <li key={lifecycleCardKey(card)}>
-              <LifecycleCard
-                card={card}
-                selected={selectedKey === lifecycleCardKey(card)}
-                deleting={deletingKey === lifecycleCardKey(card)}
-                onSelect={() => onSelect(card)}
-                onGenerateStorySpec={() => onGenerateStorySpec(card)}
-                onDelete={() => onDeleteIssue(card.id)}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
 export function IssueLifecycleDetail({
   issue,
   storySpecs,
   designSpecs,
   workItems,
+  workItemRepositoryGroups = [],
   selectedKey,
   deletingKey,
+  deliverySummary,
   onSelect,
   onOpenFullIssue,
   onDelete,
+  onGenerateForStage,
 }: {
   issue: LifecycleCardData | null;
   storySpecs: LifecycleCardData[];
   designSpecs: LifecycleCardData[];
   workItems: LifecycleCardData[];
+  workItemRepositoryGroups?: WorkItemRepositoryGroup[];
   selectedKey: string | null;
   deletingKey: string | null;
+  // B1（用户裁决 A，2026-10-10）：选中 issue 的交付状态聚合——常驻渲染
+  // 在详情区，不依赖「查看完整 Issue」抽屉入口（长描述限定）。
+  deliverySummary?: IssueDeliverySummaryDto;
   onSelect: (card: LifecycleCardData) => void;
   onOpenFullIssue: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
+  onGenerateForStage: (stage: WorkbenchStageKey) => void;
 }) {
+  // Task 6：默认阶段 = 「需要动作的最早阶段」，在 Issue 成为当前 Issue 的那一刻锁定；
+  // 之后仅用户点击阶段标签或 issue.id 变化（重置为新 Issue 的默认阶段）会改变它。
+  // 不每次 render 重算默认值：否则在当前阶段生成产物后面板会自行跳转，用户看不到刚生成的内容。
+  const defaultStage = defaultWorkbenchStage(storySpecs, designSpecs);
+  const issueId = issue?.id ?? null;
+  const [stageSelection, setStageSelection] = useState<{
+    issueId: string | null;
+    stage: WorkbenchStageKey;
+  }>({ issueId, stage: defaultStage });
+  if (stageSelection.issueId !== issueId) {
+    // props 派生 state 的 render 阶段调整（React 推荐写法，无额外提交）。
+    setStageSelection({ issueId, stage: defaultStage });
+  }
+  // owner 直批（2026-10-14）：两段抽屉默认收起；用户展开后本次会话保持。
+  // 状态放在详情容器（跨阶段切换、跨 Issue 切换都不重置），按 owner 要求不落盘。
+  const [deliveryCollapsed, setDeliveryCollapsed] = useState(true);
+  const [workItemGroupsCollapsed, setWorkItemGroupsCollapsed] = useState(true);
+  const activeStage =
+    stageSelection.issueId === issueId ? stageSelection.stage : defaultStage;
+
   const allWorkItems = workItems.flatMap((card) =>
     card.kind === "work_item" ? [card.raw] : [],
   );
+  // 阻塞判定的候选集合：扁平 Work Item 卡 + 仓库分组内的 Work Item。
+  const stageWorkItems = [
+    ...allWorkItems,
+    ...workItemRepositoryGroups.flatMap((group) => group.items ?? []),
+  ];
   if (!issue) {
     return (
       <section
@@ -148,13 +150,39 @@ export function IssueLifecycleDetail({
     ? shouldShowFullIssueAction(issue.preview)
     : false;
 
+  const stages: StageStepperStage[] = [
+    {
+      key: "story",
+      label: STAGE_LABEL.story,
+      count: storySpecs.length,
+      state: stagePipState("story", storySpecs.length, defaultStage, false),
+    },
+    {
+      key: "design",
+      label: STAGE_LABEL.design,
+      count: designSpecs.length,
+      state: stagePipState("design", designSpecs.length, defaultStage, false),
+    },
+    {
+      key: "work_item",
+      label: STAGE_LABEL.work_item,
+      count: workItems.length,
+      state: stagePipState(
+        "work_item",
+        workItems.length,
+        defaultStage,
+        hasWaitingWorkItem(stageWorkItems),
+      ),
+    },
+  ];
+
   return (
     <section
       role="region"
       aria-label="Issue 生命周期详情"
-      className="min-h-0 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
+      className="flex min-h-0 min-w-0 w-full flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
     >
-      <div className="border-b border-[var(--aria-line)] px-4 py-3">
+      <div className="sticky top-0 z-10 shrink-0 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-3">
         <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs font-semibold uppercase text-[var(--aria-ink-muted)]">
@@ -199,43 +227,306 @@ export function IssueLifecycleDetail({
             {issue.status}
           </span>
         </div>
+        <div className="mt-3 overflow-x-auto">
+          <StageStepper
+            stages={stages}
+            activeStage={activeStage}
+            onSelect={(stage) => setStageSelection({ issueId, stage })}
+          />
+        </div>
       </div>
-      <div className="grid gap-3 p-3 xl:grid-cols-3">
-        <LifecycleContentSection
-          title="Story Spec"
-          ariaLabel="Story Spec 内容"
-          cards={storySpecs}
-          selectedKey={selectedKey}
-          deletingKey={deletingKey}
-          onSelect={onSelect}
-          onDelete={onDelete}
+      {/* B1（用户裁决 A，2026-10-10）：issue 级交付状态常驻面板——不随阶段
+          切换消失、不依赖「查看完整 Issue」抽屉入口；与抽屉内面板同组件
+          同数据（后端 delivery_summary 缺失时不渲染，向后兼容）。 */}
+      {deliverySummary ? (
+        <DeliveryStatusPanel
+          summary={deliverySummary}
+          collapsed={deliveryCollapsed}
+          onToggleCollapsed={() =>
+            setDeliveryCollapsed((existing) => !existing)
+          }
         />
-        <LifecycleContentSection
-          title="Design Spec"
-          ariaLabel="Design Spec 内容"
-          cards={designSpecs}
-          selectedKey={selectedKey}
-          deletingKey={deletingKey}
-          onSelect={onSelect}
-          onDelete={onDelete}
-        />
-        <LifecycleContentSection
-          title="Work Item"
-          ariaLabel="Work Item 内容"
-          cards={workItems}
-          selectedKey={selectedKey}
-          deletingKey={deletingKey}
-          onSelect={onSelect}
-          onDelete={onDelete}
-          allWorkItems={allWorkItems}
-        />
+      ) : null}
+      {/* Task 6：单阶段面板——同一时刻只渲染当前阶段区域，内容占满工作区宽度。 */}
+      <div id={`stage-panel-${activeStage}`} className="flex min-h-0 flex-1 flex-col p-3">
+        {activeStage === "story" ? (
+          <LifecycleContentSection
+            title="Story Spec"
+            ariaLabel="Story Spec 内容"
+            cards={storySpecs}
+            selectedKey={selectedKey}
+            deletingKey={deletingKey}
+            onSelect={onSelect}
+            onDelete={onDelete}
+            sectionTestId="onboarding-anchor-story-confirm"
+            emptyAction={{
+              label: STAGE_EMPTY_ACTION_LABEL.story,
+              onClick: () => onGenerateForStage("story"),
+            }}
+          />
+        ) : null}
+        {activeStage === "design" ? (
+          <LifecycleContentSection
+            title="Design Spec"
+            ariaLabel="Design Spec 内容"
+            cards={designSpecs}
+            selectedKey={selectedKey}
+            deletingKey={deletingKey}
+            onSelect={onSelect}
+            onDelete={onDelete}
+            sectionTestId="onboarding-anchor-design-confirm"
+            emptyAction={{
+              label: STAGE_EMPTY_ACTION_LABEL.design,
+              onClick: () => onGenerateForStage("design"),
+            }}
+          />
+        ) : null}
+        {activeStage === "work_item" ? (
+          workItemRepositoryGroups.length > 0 ? (
+            <WorkItemRepositoryGroupSection
+              planCard={workItems.find((card) => card.kind === "work_item_group")}
+              groups={workItemRepositoryGroups}
+              selectedKey={selectedKey}
+              deletingKey={deletingKey}
+              onSelect={onSelect}
+              onDelete={onDelete}
+              sectionTestId="onboarding-anchor-plan-review-gate"
+              bodyTestId="onboarding-anchor-plan-final-gate"
+              collapsed={workItemGroupsCollapsed}
+              onToggleCollapsed={() =>
+                setWorkItemGroupsCollapsed((existing) => !existing)
+              }
+            />
+          ) : (
+            <LifecycleContentSection
+              title="Work Item"
+              ariaLabel="Work Item 内容"
+              cards={workItems}
+              selectedKey={selectedKey}
+              deletingKey={deletingKey}
+              onSelect={onSelect}
+              onDelete={onDelete}
+              allWorkItems={allWorkItems}
+              sectionTestId="onboarding-anchor-plan-review-gate"
+              bodyTestId="onboarding-anchor-plan-final-gate"
+              emptyAction={{
+                label: STAGE_EMPTY_ACTION_LABEL.work_item,
+                onClick: () => onGenerateForStage("work_item"),
+              }}
+            />
+          )
+        ) : null}
       </div>
     </section>
   );
 }
 
+// Task 6 默认阶段规则：「需要动作的最早阶段」——无 Story -> story；
+// 有 Story 无 Design -> design；其余 -> work_item。
+function defaultWorkbenchStage(
+  storySpecs: LifecycleCardData[],
+  designSpecs: LifecycleCardData[],
+): WorkbenchStageKey {
+  if (storySpecs.length === 0) {
+    return "story";
+  }
+  if (designSpecs.length === 0) {
+    return "design";
+  }
+  return "work_item";
+}
+
+// Task 6 pip 状态规则：work_item 存在等待依赖 -> blocked（与 Task 1 派生层的
+// blocked 优先于 done 语义一致）；count > 0 -> done；需要动作的默认阶段 -> active；
+// 其余 -> pending。
+function stagePipState(
+  stage: WorkbenchStageKey,
+  count: number,
+  defaultStage: WorkbenchStageKey,
+  hasWaitingDependency: boolean,
+): StagePipState {
+  if (stage === "work_item" && hasWaitingDependency) {
+    return "blocked";
+  }
+  if (count > 0) {
+    return "done";
+  }
+  if (stage === defaultStage) {
+    return "active";
+  }
+  return "pending";
+}
+
+function hasWaitingWorkItem(items: LifecycleWorkItem[]) {
+  return items.some((item) => workItemWaitingReason(item, items) !== null);
+}
+
 function shouldShowFullIssueAction(preview: string) {
   return preview.split(/\r?\n/u).length > 6 || preview.length > 520;
+}
+
+// REQ-TGT-05：将 LifecycleWorkItem 转成扁平卡片数据，供分组视图内复用 LifecycleCard。
+export function lifecycleWorkItemCard(
+  item: LifecycleWorkItem,
+): LifecycleCardData {
+  return {
+    kind: "work_item",
+    id: item.work_item_id,
+    issueId: item.issue_id,
+    title: item.title,
+    status: item.plan_status,
+    version: null,
+    preview: null,
+    sourceIds: [...item.story_spec_ids],
+    artifactVersions: item.artifact_versions,
+    raw: item,
+  };
+}
+
+// REQ-TGT-05：按 target_repository_id 分组展示 Work Item（前端独立 TS 实现，
+// 语义对齐后端 group_work_items_by_target）：每组标注仓库名（alias）、聚合状态，
+// 遗留/未指定仓库组标注“兼容投影”。
+//
+// owner 直批（2026-10-14）：该区（4 个仓库分组面板）改为可折叠抽屉、默认收起。
+// 收起只折叠仓库分组明细：plan 分组卡（主要交互入口）与展开提示仍在，且
+// onboarding 的「计划最终确认」锚点（bodyTestId）保持在常驻元素上。
+function WorkItemRepositoryGroupSection({
+  planCard,
+  groups,
+  selectedKey,
+  deletingKey,
+  onSelect,
+  onDelete,
+  sectionTestId,
+  bodyTestId,
+  collapsed,
+  onToggleCollapsed,
+}: {
+  planCard: LifecycleCardData | undefined;
+  groups: WorkItemRepositoryGroup[];
+  selectedKey: string | null;
+  deletingKey: string | null;
+  onSelect: (card: LifecycleCardData) => void;
+  onDelete: (card: LifecycleCardData) => void;
+  // onboarding 引导锚点（仅新增属性）：容器代表计划审阅区，内容体代表计划最终确认区。
+  sectionTestId?: string;
+  bodyTestId?: string;
+  // 折叠受控值由 issue 详情页持有（会话内状态，不落盘）。
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+}) {
+  const groupedWorkItemCount = groups.reduce(
+    (total, group) => total + (group.items?.length ?? 0),
+    0,
+  );
+
+  return (
+    <section
+      role="region"
+      aria-label="Work Item 内容"
+      data-testid={sectionTestId}
+      className="flex min-h-72 flex-1 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+    >
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
+          Work Item
+        </h3>
+        <div className="flex items-center gap-2">
+          <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+            {groups.length} 个仓库分组
+          </span>
+          <SectionCollapseToggle
+            expanded={!collapsed}
+            expandLabel={`展开 ${groups.length} 个仓库分组的 Work Item 明细`}
+            collapseLabel="收起仓库分组明细"
+            onToggle={onToggleCollapsed}
+          />
+        </div>
+      </div>
+      {planCard ? (
+        <div className="mb-3 shrink-0">
+          <LifecycleCard
+            card={planCard}
+            selected={selectedKey === lifecycleCardKey(planCard)}
+            deleting={deletingKey === lifecycleCardKey(planCard)}
+            onSelect={() => onSelect(planCard)}
+          />
+        </div>
+      ) : null}
+      <div
+        data-testid={bodyTestId}
+        className={
+          collapsed
+            ? "rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]"
+            : "min-h-0 flex-1 space-y-3 overflow-y-auto"
+        }
+      >
+        {collapsed ? (
+          <span data-testid="work-item-groups-collapsed-hint">
+            已收起 {groups.length} 个仓库分组（{groupedWorkItemCount} 个 Work Item）·
+            展开查看各仓库明细
+          </span>
+        ) : groups.length === 0 ? (
+          <span>暂无内容</span>
+        ) : (
+          groups.map((group) => {
+            const groupKey =
+              group.target_repository_id ?? "unassigned";
+            const groupItems = group.items ?? [];
+            return (
+              <div
+                key={groupKey}
+                data-testid={`work-item-repository-group-${groupKey}`}
+                className="overflow-hidden rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)]"
+              >
+                <header className="flex flex-wrap items-center gap-2 border-b border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2">
+                  <span className="text-sm font-semibold text-[var(--aria-ink)]">
+                    {group.alias}
+                  </span>
+                  <span className="rounded border border-[var(--aria-primary)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--aria-primary)]">
+                    {group.status}
+                  </span>
+                  {group.compatibility_projection ? (
+                    <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-800">
+                      兼容投影
+                    </span>
+                  ) : null}
+                  <span className="font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                    {groupItems.length} 个 Work Item
+                  </span>
+                </header>
+                {groupItems.length === 0 ? (
+                  <div className="p-3 text-sm text-[var(--aria-ink-muted)]">
+                    该仓库暂无 Work Item
+                  </div>
+                ) : (
+                  <ul className="space-y-2 p-2">
+                    {groupItems.map((item) => {
+                      const card = lifecycleWorkItemCard(item);
+                      return (
+                        <li key={item.work_item_id}>
+                          <LifecycleCard
+                            card={card}
+                            selected={selectedKey === lifecycleCardKey(card)}
+                            deleting={deletingKey === lifecycleCardKey(card)}
+                            onSelect={() => onSelect(card)}
+                            onDelete={item.source_work_item_plan_id
+                              ? undefined
+                              : () => onDelete(card)}
+                            allWorkItems={groupItems}
+                          />
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            );
+          }))
+        }
+      </div>
+    </section>
+  );
 }
 
 function LifecycleContentSection({
@@ -247,6 +538,9 @@ function LifecycleContentSection({
   onSelect,
   onDelete,
   allWorkItems,
+  emptyAction,
+  sectionTestId,
+  bodyTestId,
 }: {
   title: string;
   ariaLabel: string;
@@ -256,12 +550,18 @@ function LifecycleContentSection({
   onSelect: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
   allWorkItems?: LifecycleWorkItem[];
+  // Task 6：空阶段面板的「触发下一阶段」主按钮；缺省不渲染（抽屉等复用场景）。
+  emptyAction?: { label: string; onClick: () => void };
+  // onboarding 引导锚点（仅新增属性）：容器与内容体分别承载不同引导步骤。
+  sectionTestId?: string;
+  bodyTestId?: string;
 }) {
   return (
     <section
       role="region"
       aria-label={ariaLabel}
-      className="min-h-72 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+      data-testid={sectionTestId}
+      className="flex min-h-72 flex-1 flex-col rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
     >
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
@@ -272,11 +572,24 @@ function LifecycleContentSection({
         </span>
       </div>
       {cards.length === 0 ? (
-        <div className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]">
-          暂无内容
+        <div
+          data-testid={bodyTestId}
+          className="flex flex-col items-start gap-3 rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]"
+        >
+          <span>暂无内容</span>
+          {emptyAction ? (
+            <button
+              type="button"
+              onClick={emptyAction.onClick}
+              className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white transition-colors duration-200 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] motion-reduce:transition-none"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              {emptyAction.label}
+            </button>
+          ) : null}
         </div>
       ) : (
-        <ul className="space-y-2">
+        <ul data-testid={bodyTestId} className="min-h-0 flex-1 space-y-2 overflow-y-auto">
           {cards.map((card) => (
             <li key={lifecycleCardKey(card)}>
               <LifecycleCard
@@ -285,7 +598,10 @@ function LifecycleContentSection({
                 deleting={deletingKey === lifecycleCardKey(card)}
                 onSelect={() => onSelect(card)}
                 onDelete={
-                  () => onDelete(card)
+                  card.kind === "work_item_group" ||
+                  (card.kind === "work_item" && card.raw.source_work_item_plan_id)
+                    ? undefined
+                    : () => onDelete(card)
                 }
                 allWorkItems={allWorkItems}
               />
@@ -342,7 +658,18 @@ export function normalizeLifecycleResponse(
     throw new Error("invalid lifecycle response");
   }
 
-  return lifecycle as IssueLifecycleResponse;
+  // REQ-TGT-05：work_item_repository_groups 为可选兼容字段——缺失（旧响应/单仓）时
+  // 归一为空数组，保持扁平展示；存在时按组渲染。
+  const workItemRepositoryGroups = Array.isArray(
+    lifecycle.work_item_repository_groups,
+  )
+    ? (lifecycle.work_item_repository_groups as WorkItemRepositoryGroup[])
+    : [];
+
+  return {
+    ...lifecycle,
+    work_item_repository_groups: workItemRepositoryGroups,
+  } as IssueLifecycleResponse;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -368,8 +695,30 @@ function isIssueWorkItemPlanDetail(value: unknown) {
       value.repository_profile_ref === null) &&
     isWorkItemSplitOptions(value.options) &&
     isWorkItemSplitFindings(value.validator_findings) &&
+    (value.group_projection === undefined ||
+      value.group_projection === null ||
+      isPlanGroupProjection(value.group_projection)) &&
     typeof value.created_at === "string" &&
     typeof value.updated_at === "string"
+  );
+}
+
+// REQ-MTG-04（WP3）：group_projection 为 additive 可选字段——在场时校验
+// plan_id/overall/entries 形状；缺席（旧响应）不构成拒绝。
+function isPlanGroupProjection(value: unknown): value is PlanGroupProjectionDto {
+  return (
+    isRecord(value) &&
+    typeof value.plan_id === "string" &&
+    (value.overall === "all_delivered" ||
+      value.overall === "partial" ||
+      value.overall === "not_started") &&
+    Array.isArray(value.entries) &&
+    value.entries.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.target_repository_id === "string" &&
+        typeof entry.repository_name === "string",
+    )
   );
 }
 
@@ -477,6 +826,11 @@ export function toDrawerEntity(
     title: card.title,
     status: card.status,
     version: card.version,
+    // F-26b：spec/plan 卡的 workspace review 证据随卡进入 drawer overview。
+    reviewStatus:
+      card.kind === "story_spec" || card.kind === "design_spec" || card.kind === "work_item_group"
+        ? (card.raw.review_status ?? null)
+        : null,
   };
 
   if (card.kind === "issue") {
@@ -486,6 +840,7 @@ export function toDrawerEntity(
       artifacts: card.raw.artifacts,
       phase: card.raw.phase,
       createdAt: card.raw.created_at,
+      baseBranch: card.raw.base_branch ?? null,
     };
   }
 
@@ -516,6 +871,7 @@ export function toDrawerEntity(
       workItemPlanSourceDesignSpecIds: card.raw.source_design_spec_ids,
       workItemPlanValidatorFindings: card.raw.validator_findings,
       workItemPlanDependencyGraph: card.raw.dependency_graph,
+      groupProjection: card.raw.group_projection ?? null,
     };
   }
 

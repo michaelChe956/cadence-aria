@@ -2,18 +2,86 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 use super::ProcessManager;
+use super::process_start_time_ticks;
+
+/// 批2 Task 3:spawn 不再隐式继承宿主环境——进程树 fixture 内部以裸名
+/// 调用 sh/sleep,测试须显式携带 PATH(与 boundary 用例同款注入)。
+fn unix_path_env() -> BTreeMap<String, String> {
+    BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])
+}
 
 struct ProcessTreeFixture {
     command: PathBuf,
     parent_pid: PathBuf,
     grandchild_pid: PathBuf,
     late_marker: PathBuf,
+    /// spawn 窗口内（pid 文件刚出现时）冻结的 (pid, starttime) 身份。
+    /// 退出后的 /proc 断言与安全网 SIGKILL 必须以此核对：只看 pid 会在
+    /// 高并发全量运行（大量短命子进程）下遇到 pid 复用——把无关进程
+    ///（例如别的测试的 terminal 子进程）判成「未退出」并误杀。
+    identities: Arc<Mutex<FixtureIdentities>>,
+}
+
+/// 进程真实身份：pid + `/proc/<pid>/stat` starttime（时钟 ticks）。
+/// starttime 不随回收变化，僵尸仍沿用同值——「未退出（含僵尸）」判定
+/// 不会因复用而失真。
+#[derive(Clone, Copy, Debug)]
+struct ProcessIdentity {
+    pid: i32,
+    start_time: u64,
+}
+
+#[derive(Default)]
+struct FixtureIdentities {
+    parent: Option<ProcessIdentity>,
+    grandchild: Option<ProcessIdentity>,
+}
+
+fn capture_identity(pid_file: &Path) -> Option<ProcessIdentity> {
+    let pid = fs::read_to_string(pid_file)
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()?;
+    if pid <= 0 {
+        return None;
+    }
+    let start_time = process_start_time_ticks(pid as u32)?;
+    Some(ProcessIdentity { pid, start_time })
+}
+
+fn identity_alive(identity: ProcessIdentity) -> bool {
+    process_start_time_ticks(identity.pid as u32) == Some(identity.start_time)
+}
+
+async fn identity_disappeared(identity: ProcessIdentity) -> bool {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while identity_alive(identity) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// 安全网清理：身份核对通过才发组信号。pid 已被复用为无关进程组时
+/// killpg 会误杀他人——那是被本修复封住的真实事故（全量并行下曾打掉
+/// 并行测试的 terminal 子进程）。
+fn kill_verified(identity: ProcessIdentity) {
+    if !identity_alive(identity) {
+        return;
+    }
+    unsafe {
+        let _ = libc::killpg(identity.pid, libc::SIGKILL);
+        let _ = libc::kill(identity.pid, libc::SIGKILL);
+    }
 }
 
 fn process_tree_fixture(root: &Path) -> ProcessTreeFixture {
@@ -32,11 +100,44 @@ fn process_tree_fixture(root: &Path) -> ProcessTreeFixture {
     )
     .expect("write fake ssh");
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod fake ssh");
+    let identities = Arc::new(Mutex::new(FixtureIdentities::default()));
+    // 身份必须在进程存活时冻结：pid 文件由子进程自己写出（先写后 sleep 1s），
+    // 监视线程在文件出现的毫秒级窗口内即可读到 starttime。
+    {
+        let identities = Arc::clone(&identities);
+        let parent_path = parent_pid.clone();
+        let grandchild_path = grandchild_pid.clone();
+        std::thread::Builder::new()
+            .name("aria-process-tree-identity".to_string())
+            .spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    {
+                        let mut guard = identities.lock().expect("fixture identities lock");
+                        if guard.parent.is_none() {
+                            guard.parent = capture_identity(&parent_path);
+                        }
+                        if guard.grandchild.is_none() {
+                            guard.grandchild = capture_identity(&grandchild_path);
+                        }
+                        if guard.parent.is_some() && guard.grandchild.is_some() {
+                            return;
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })
+            .expect("spawn fixture identity watcher");
+    }
     ProcessTreeFixture {
         command,
         parent_pid,
         grandchild_pid,
         late_marker,
+        identities,
     }
 }
 
@@ -50,43 +151,40 @@ async fn wait_for_path(path: &Path) {
     .expect("process fixture path");
 }
 
-fn read_pid(path: &Path) -> i32 {
-    fs::read_to_string(path)
-        .expect("read pid")
-        .trim()
-        .parse()
-        .expect("parse pid")
-}
-
 fn process_state(pid: i32) -> Option<char> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(") ")
         .and_then(|(_, tail)| tail.chars().next())
 }
 
-async fn process_disappeared(pid: i32) -> bool {
-    tokio::time::timeout(Duration::from_millis(500), async {
-        while process_state(pid).is_some() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+/// 等候监视线程冻结身份（pid 文件出现与下一轮 2ms 轮询之间可能有一个
+/// 极短窗口，直接 expect 会制造新的时序红）。
+async fn fixture_identities(fixture: &ProcessTreeFixture) -> (ProcessIdentity, ProcessIdentity) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        {
+            let guard = fixture.identities.lock().expect("fixture identities lock");
+            if let (Some(parent), Some(grandchild)) = (guard.parent, guard.grandchild) {
+                return (parent, grandchild);
+            }
         }
-    })
-    .await
-    .is_ok()
+        assert!(
+            Instant::now() < deadline,
+            "进程树 fixture 未在 5s 内冻结 (pid, starttime) 身份"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 async fn assert_process_tree_stopped(fixture: &ProcessTreeFixture) {
-    let parent_pid = read_pid(&fixture.parent_pid);
-    let grandchild_pid = read_pid(&fixture.grandchild_pid);
-    let parent_gone = process_disappeared(parent_pid).await;
-    let grandchild_gone = process_disappeared(grandchild_pid).await;
+    let (parent, grandchild) = fixture_identities(fixture).await;
+    let parent_gone = identity_disappeared(parent).await;
+    let grandchild_gone = identity_disappeared(grandchild).await;
     tokio::time::sleep(Duration::from_millis(700)).await;
     let late_marker = fixture.late_marker.exists();
     if !parent_gone || !grandchild_gone {
-        unsafe {
-            let _ = libc::killpg(parent_pid, libc::SIGKILL);
-            let _ = libc::kill(parent_pid, libc::SIGKILL);
-            let _ = libc::kill(grandchild_pid, libc::SIGKILL);
-        }
+        kill_verified(parent);
+        kill_verified(grandchild);
     }
     assert!(
         parent_gone,
@@ -105,7 +203,7 @@ async fn spawn_and_wait(fixture: &ProcessTreeFixture) {
         &command,
         &[],
         fixture.command.parent().expect("fixture root"),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -113,14 +211,98 @@ async fn spawn_and_wait(fixture: &ProcessTreeFixture) {
     process.child.wait().await.expect("wait process tree");
 }
 
-#[test]
-fn process_group_signal_target_rejects_reaped_or_reused_leader() {
-    assert_eq!(
-        super::unix_process_group_signal_target(Some(41), 41),
-        Some(41)
+/// PID 复用防护夹具:观察者自己 `setpgid(0,0)` 成为组长,它的 pid 就是
+/// 进程组 id——「pgid 被复用」等价于「该 pgid 位置换了主人」。
+#[cfg(unix)]
+fn spawn_bystander_group() -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "sleep 30"]);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    command.spawn().expect("spawn bystander group")
+}
+
+#[cfg(unix)]
+fn stop_bystander(mut bystander: std::process::Child) {
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    matches!(process_state(pid), Some(state) if state != 'Z')
+}
+
+/// PID 复用防护:组信号只在冻结的 (pid, starttime) 身份仍匹配时发射。
+/// 只看 pid(恒真的 `leader_pid == pgid`)会把复用后占位的新进程组打掉。
+#[cfg(unix)]
+#[tokio::test]
+async fn group_signal_requires_live_frozen_identity() {
+    use super::ProcessStartIdentity;
+    use crate::cross_cutting::process_manager::signal_group_if_live_identity;
+
+    // ① 身份匹配 → 信号送达(正常清理不得被关掉)。
+    let mut matched = spawn_bystander_group();
+    let matched_pid = matched.id() as i32;
+    let matched_identity =
+        ProcessStartIdentity::freeze(matched_pid as u32).expect("freeze live leader");
+    assert!(
+        signal_group_if_live_identity(Some(matched_identity), matched_pid, libc::SIGKILL),
+        "身份匹配时必须发射组信号"
     );
-    assert_eq!(super::unix_process_group_signal_target(None, 41), None);
-    assert_eq!(super::unix_process_group_signal_target(Some(42), 41), None);
+    let status = matched.wait().expect("wait matched bystander");
+    assert_eq!(status.code(), None, "身份匹配的旁观组应被组信号收口");
+
+    // ② 无冻结身份 → 拒绝发射(身份不可证不等于可以裸 killpg)。
+    let unproven = spawn_bystander_group();
+    let unproven_pid = unproven.id() as i32;
+    assert!(!signal_group_if_live_identity(
+        None,
+        unproven_pid,
+        libc::SIGKILL
+    ));
+    assert!(pid_alive(unproven_pid), "无身份不得发射组信号");
+    stop_bystander(unproven);
+
+    // ③ pid 已被复用(starttime 不同)→ 拒绝发射,占位者存活。
+    let reused = spawn_bystander_group();
+    let reused_pid = reused.id() as i32;
+    let live = ProcessStartIdentity::freeze(reused_pid as u32).expect("freeze live leader");
+    let stale =
+        ProcessStartIdentity::with_start_time_ticks(reused_pid as u32, live.start_time_ticks() + 1);
+    assert!(!signal_group_if_live_identity(
+        Some(stale),
+        reused_pid,
+        libc::SIGKILL
+    ));
+    assert!(pid_alive(reused_pid), "复用后的 pgid 占位者不得被误杀");
+    stop_bystander(reused);
+
+    // ④ 组长已回收(starttime 不可读)→ 拒绝发射。
+    let mut gone = spawn_bystander_group();
+    let gone_pid = gone.id() as i32;
+    let gone_identity = ProcessStartIdentity::freeze(gone_pid as u32).expect("freeze live leader");
+    stop_bystander_take(&mut gone);
+    assert!(!signal_group_if_live_identity(
+        Some(gone_identity),
+        gone_pid,
+        libc::SIGKILL
+    ));
+}
+
+#[cfg(unix)]
+fn stop_bystander_take(bystander: &mut std::process::Child) {
+    let _ = bystander.kill();
+    let _ = bystander.wait();
 }
 
 #[tokio::test]
@@ -132,7 +314,7 @@ async fn unix_managed_process_wait_uses_tokio_cancel_safe_child() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -151,7 +333,7 @@ async fn successful_wait_does_not_start_drop_reaper() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -176,7 +358,7 @@ async fn cancelled_wait_can_still_terminate_original_group() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -205,7 +387,7 @@ async fn dropping_managed_process_child_is_non_blocking() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -232,6 +414,7 @@ async fn task_abort_drops_and_kills_managed_process_group() {
             parent_pid: fixture.parent_pid.clone(),
             grandchild_pid: fixture.grandchild_pid.clone(),
             late_marker: fixture.late_marker.clone(),
+            identities: Arc::clone(&fixture.identities),
         };
         async move { spawn_and_wait(&fixture).await }
     });
@@ -258,7 +441,7 @@ async fn task_panic_drops_and_kills_managed_process_group() {
                 &command_text,
                 &[],
                 command.parent().expect("fixture root"),
-                &BTreeMap::new(),
+                &unix_path_env(),
                 CancellationToken::new(),
             )
             .await
@@ -283,6 +466,7 @@ fn current_thread_runtime_drop_kills_managed_process_group() {
         .expect("runtime");
     runtime.block_on(async {
         let command = fixture.command.clone();
+        let identities = Arc::clone(&fixture.identities);
         tokio::spawn(async move {
             let fixture = ProcessTreeFixture {
                 command: command.clone(),
@@ -292,6 +476,7 @@ fn current_thread_runtime_drop_kills_managed_process_group() {
                     .expect("fixture root")
                     .join("grandchild.pid"),
                 late_marker: command.parent().expect("fixture root").join("late-marker"),
+                identities: Arc::clone(&identities),
             };
             spawn_and_wait(&fixture).await;
         });
@@ -305,4 +490,201 @@ fn current_thread_runtime_drop_kills_managed_process_group() {
         .build()
         .expect("verification runtime")
         .block_on(assert_process_tree_stopped(&fixture));
+}
+
+/// 批2 Task 10(旧物理 launcher 退役):provider 进程统一受信 Host 启动
+///(`ProcessManager::spawn`,env_clear 白名单环境)。旧 bwrap 写边界的
+/// target-only/readonly/mount 物理拒写断言随 `spawn_with_boundary[_resolved]`
+/// 与 `ProviderBoundaryLauncher` 退役——逻辑交付边界(gateway 双阶段
+/// validate/spawn 复验同源拒绝 + write_boundary 分格仅当前语义 Confirmed
+/// 放行)与当前证据守卫由 `production_policy_resolvers`/`provider_gateway`
+/// 测试面持有,不在此重证。Host 启动的进程组回收语义保持:
+/// ManagedProcess drop 必须整组 kill,后代不得逃逸写 late marker。
+#[tokio::test]
+async fn lcg_t10_host_spawn_child_tree_is_killed_on_drop() {
+    let root = tempdir().expect("tempdir");
+    let target = root.path().join("target");
+    fs::create_dir_all(&target).expect("target worktree");
+    let fixture = process_tree_fixture(&target);
+    let command_text = fixture.command.to_string_lossy().to_string();
+
+    let process = ProcessManager::spawn(
+        &command_text,
+        &[],
+        fixture.command.parent().expect("fixture root"),
+        &unix_path_env(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("host spawn process tree (no bwrap prerequisite)");
+    wait_for_path(&fixture.parent_pid).await;
+    wait_for_path(&fixture.grandchild_pid).await;
+
+    drop(process);
+    assert_process_tree_stopped(&fixture).await;
+}
+
+/// T14:Coder code_delivery 资源窗进程面——经 `start_owned_process` 登记
+/// 的 run-owned 进程树在 quiesce 后以 /proc 证明真实静止(killpg 只是
+/// 其中一步);未登记的用户进程与文件不受影响;登记 scratch 清理、
+/// 未登记文件保留;`aria.worktree` 协调标签由 scope 注入(硬约束2)。
+#[tokio::test]
+async fn t14_code_delivery_scope_quiesce_stops_owned_process_tree_only() {
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, OwnedResourceSpec, PROVIDER_RESOURCE_LABEL_WORKTREE,
+        ProviderRunResourceScope, QuiesceOutcome, ResourceScopeKey, StartedResourceIdentity,
+    };
+
+    let base = tempdir().expect("tempdir");
+    let store_root = base.path().join("resource-store");
+    let private_root = base.path().join("private-root");
+    fs::create_dir_all(&private_root).expect("private root");
+    let key = ResourceScopeKey {
+        scope_id: "code-delivery-coding_attempt_0001".to_string(),
+        run_id: "coding_role_run_0001".to_string(),
+        boot_identity: "aria-engine-drop-test".to_string(),
+    };
+    let scope =
+        ProviderRunResourceScope::open_for_recovery(&key, None, &private_root, &store_root, None)
+            .expect("open code_delivery scope")
+            .with_worktree_key("/drop-test-worktree");
+
+    // 登记的 run-owned scratch + 未登记用户文件(同在私有根下)。
+    let scratch = private_root.join("scratch");
+    fs::create_dir_all(&scratch).expect("scratch");
+    fs::write(scratch.join("temp.txt"), "run-owned\n").expect("temp artifact");
+    let user_file = private_root.join("user-notes.txt");
+    fs::write(&user_file, "user file\n").expect("user file");
+    let canonical_scratch = scratch.canonicalize().expect("canonical scratch");
+    let scratch_reservation = scope
+        .reserve_owned_resource(
+            &OwnedResourceSpec::new(
+                "coder-run-scratch",
+                OwnedResourceKind::Directory,
+                "code_delivery run-owned scratch directory",
+            )
+            .with_private_path(canonical_scratch.clone()),
+        )
+        .expect("reserve scratch");
+    scope
+        .confirm_started_resource(
+            &scratch_reservation,
+            StartedResourceIdentity::directory(&canonical_scratch),
+        )
+        .expect("confirm scratch");
+
+    // 登记的 run-owned 进程树(真实 sh 孙进程)。
+    let fixture = process_tree_fixture(base.path());
+    let command = fixture.command.to_string_lossy().to_string();
+    let (reservation, mut managed) = scope
+        .start_owned_process(
+            OwnedResourceSpec::new(
+                "coder-worker",
+                OwnedResourceKind::Process,
+                "coder worker process tree",
+            ),
+            &command,
+            &[],
+            fixture.command.parent().expect("fixture root"),
+            &unix_path_env(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn owned process tree");
+    wait_for_path(&fixture.parent_pid).await;
+    wait_for_path(&fixture.grandchild_pid).await;
+
+    // 未登记的用户进程必须不受资源窗静止影响。
+    let mut outsider = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn unregistered user process");
+    let outsider_pid = outsider.id() as i32;
+
+    // 硬约束2:aria.worktree 协调标签由 scope 注入。
+    let labels = reservation.reserved_labels().clone();
+    assert_eq!(
+        labels
+            .get(PROVIDER_RESOURCE_LABEL_WORKTREE)
+            .map(String::as_str),
+        Some("/drop-test-worktree"),
+        "aria.worktree 协调标签必须由 scope 注入(T19 quiesce_targets 枚举依据)"
+    );
+
+    // 先 quiesce(静止证明)再清:
+    let proof = match scope.quiesce_scope().await.expect("quiesce delivery scope") {
+        QuiesceOutcome::Quiescent(proof) => proof,
+        QuiesceOutcome::RecoveryRequired(unknown) => {
+            panic!(
+                "owned process tree must quiesce: {} {}",
+                unknown.reason, unknown.detail
+            )
+        }
+    };
+    // 组长收割(quiesce 只发信号;不收割则僵尸态不代表存活但会污染
+    // /proc 断言——收割后以真实消亡断言)。
+    let _ = managed.child.wait().await;
+    assert_process_tree_stopped(&fixture).await;
+    assert!(
+        process_state(outsider_pid).is_some(),
+        "未登记用户进程不得被资源窗静止波及"
+    );
+    scope
+        .cleanup_owned_scope(&proof)
+        .expect("cleanup delivery scope");
+    assert!(!scratch.exists(), "登记 run-owned scratch 必须清理");
+    assert!(
+        user_file.exists(),
+        "私有根内未登记文件不得清理(保留≠忽略未知 resource)"
+    );
+
+    // 测试卫生:收尾未登记进程(owned 子进程已在上方收割)。
+    let _ = outsider.kill();
+    let _ = outsider.wait();
+}
+
+/// PID 复用防护(状态面):pgid 位置已被旁观组占用时,
+/// `ManagedProcessChild::start_kill` 与 `Drop` 都不得 killpg——否则会打掉
+/// 无关进程组(现场:并行测试的 fixture/terminal 子进程被 SIGKILL)。
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_process_signal_paths_refuse_recycled_pgid() {
+    use super::ProcessStartIdentity;
+
+    let root = tempdir().expect("tempdir");
+    let mut process = ProcessManager::spawn(
+        "/bin/sh",
+        &["-c", "exit 0"],
+        root.path(),
+        &unix_path_env(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn");
+    process.child.wait().await.expect("wait");
+
+    let bystander = spawn_bystander_group();
+    let bystander_pid = bystander.id() as i32;
+    let bystander_start =
+        process_start_time_ticks(bystander_pid as u32).expect("bystander starttime");
+    // 「复用」等价状态:记录的 pgid 指向该位置,但冻结身份的 starttime
+    // 不再匹配(同一 pid 位置已换了主人)。
+    process.child.pgid = Some(bystander_pid);
+    process.child.group_leader_pid = Some(bystander_pid as u32);
+    process.child.leader_identity = Some(ProcessStartIdentity::with_start_time_ticks(
+        bystander_pid as u32,
+        bystander_start + 1,
+    ));
+
+    let _ = process.child.start_kill();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        pid_alive(bystander_pid),
+        "start_kill 不得向被复用的 pgid 发信号"
+    );
+
+    drop(process);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(pid_alive(bystander_pid), "Drop 不得向被复用的 pgid 发信号");
+    stop_bystander(bystander);
 }

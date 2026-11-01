@@ -1,0 +1,1164 @@
+//! Provider capability probe/evidence 的 shape validator(Task 2c)与
+//! 三方一致性 durable 导入(Task 2d,REQ-LCG-01)。
+//!
+//! 冻结接口(计划 Task 2 Interfaces):
+//! - `ProviderCapabilityProbeService::validate_probe_shape(record, evidence,
+//!   projection)`(2c)对 2a 的 v2 `ProviderCapabilityRecord`、1a 纯 DTO
+//!   `ProviderBoundaryEvidence` 与 `ProviderPolicyProjection` 做**无副作用的
+//!   三方可比对性校验**:字段可比对(`evidence.exact_version ==
+//!   projection.exact_version == record.version` 等,provider 身份 type/
+//!   adapter/wire dialect 三方一致)、digest 形状(`sha256:` + 64 位小写
+//!   十六进制)、action/profile 类型(projection action 有对应 record 行,
+//!   evidence boundary 模式与 action 读写语义一致)、evidence 引用一致
+//!   (`record.probe_artifact_ref ↔ evidence.artifact_ref`,含 action 行
+//!   `evidence_ref` 与 probe 元数据 `probed_at`)。
+//! - `record_verified_probe(project_id, record, evidence, projection)`(2d,
+//!   后置 6c)先通过上述 shape 校验,再逐字段比对三方 version/provider/
+//!   digest/artifact_ref/probed_at,一致才把 action row 原子导入 durable
+//!   Confirmed;不一致返回错误且旧 durable 字节保持。
+//!
+//! 职责边界(§0 E2/E3/E4/E5/E9):本服务**不执行真实 probe**(那是 6c 的
+//! `ProviderBoundaryProbe::run`),导入也不重新 probe、不接受 record 自报;
+//! 任一维度不可比对即 fail-closed 返回稳定错误,调用方(2d 导入、4/5/6a
+//! 消费 shape)不得把校验失败解释为能力支持。
+
+use crate::cross_cutting::provider_boundary::{
+    PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN, ProviderBoundaryEvidence, ProviderBoundaryMode,
+};
+use crate::cross_cutting::provider_execution::TrustedProviderRole;
+use crate::product::json_store::ProductStoreError;
+use crate::product::logical_codebase::policy::SessionPolicyAction;
+use crate::product::logical_codebase::provider_capability_store::{
+    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderCapabilityRecord, ProviderCapabilityStore,
+};
+use crate::product::logical_codebase::provider_gateway::ProviderRef;
+use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
+
+/// shape 校验失败(稳定判别码 + 上下文;fail-closed)。
+///
+/// 变体集合即 2c 的稳定错误面:2d 导入、4/5/6a 消费方按变体/判别码诊断,
+/// 不得把任何失败静默当作「通过」或「支持」。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProviderCapabilityProbeError {
+    /// record 自身形状非法(如 schema 版本不是当前 v3、或未携带当前执行
+    /// 语义标识)。
+    #[error("provider_probe_shape_record_invalid: {0}")]
+    RecordShapeInvalid(String),
+    /// 执行语义/岗位/窗口维度非法(批2 Task 9):证据或 record 未携带
+    /// `host-open-v1` 语义、evidence 与 record 语义不一致、岗位与 action
+    /// 语义不符、或 Reviewer 证据缺窗口引用。
+    #[error("provider_probe_shape_semantics_invalid: {0}")]
+    SemanticsInvalid(String),
+    /// 三方 provider 身份不可比对(provider_type/adapter/wire dialect 不一致,
+    /// 或 evidence 的 provider 无法映射为真实 provider ref,如 Fake)。
+    #[error("provider_probe_shape_provider_mismatch: {0}")]
+    ProviderMismatch(String),
+    /// 三方 exact version 不一致(含空 version;CLI 版本漂移后旧证据不可导入)。
+    #[error("provider_probe_shape_version_mismatch: {0}")]
+    VersionMismatch(String),
+    /// `projection_digest` 形态非法(期望 `sha256:` + 64 位小写十六进制)。
+    #[error("provider_probe_shape_digest_invalid: {0}")]
+    DigestInvalid(String),
+    /// 三方 `projection_digest` 不一致(record action 行/evidence/projection)。
+    #[error("provider_probe_shape_digest_mismatch: {0}")]
+    DigestMismatch(String),
+    /// action 行缺失、或 evidence boundary 模式与 action 读写语义不一致。
+    #[error("provider_probe_shape_action_mismatch: {0}")]
+    ActionMismatch(String),
+    /// 探测证据引用不一致(`record.probe_artifact_ref`/action 行 `evidence_ref`
+    /// 与 `evidence.artifact_ref` 不一致或为空)。
+    #[error("provider_probe_shape_evidence_ref_mismatch: {0}")]
+    EvidenceRefMismatch(String),
+    /// 探测元数据不一致(`record.probed_at` 与 `evidence.probed_at` 不符或为空)。
+    #[error("provider_probe_shape_probe_metadata_mismatch: {0}")]
+    ProbeMetadataMismatch(String),
+}
+
+/// capability probe/evidence shape 校验服务(Task 2c)+ durable 导入
+/// (Task 2d `record_verified_probe`)。
+///
+/// `validate_probe_shape` 保持无状态、无副作用;2d 的 durable 导入经
+/// `with_durable_writer` 注入 `ProviderCapabilityStore`(与 gateway 消费的
+/// capability store 同一 LC 作用域),无通道即 fail-closed。本服务不执行
+/// 真实 probe(6c 的 `ProviderBoundaryProbe::run`)。
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCapabilityProbeService {
+    /// durable writer 通道(2d 注入;`None` = 无 durable 通道,导入 fail-closed)。
+    durable: Option<ProviderCapabilityStore>,
+}
+
+impl ProviderCapabilityProbeService {
+    pub fn new() -> Self {
+        Self { durable: None }
+    }
+
+    /// 2d:注入 durable writer。store 作用域必须与 gateway 消费的 capability
+    /// store 一致(由 `LogicalCodebaseGatewayFactory::durable_probe_writer_for_lc`
+    /// 统一装配),否则导入写入 gateway 读不到的子树。
+    pub fn with_durable_writer(store: ProviderCapabilityStore) -> Self {
+        Self {
+            durable: Some(store),
+        }
+    }
+
+    /// 冻结签名(Task 2d):先 2c `validate_probe_shape` 通过,再逐字段比对
+    /// evidence/projection/record 三方 version/provider/digest/artifact_ref/
+    /// probed_at,一致才把 action row 原子导入 durable Confirmed;不一致返回
+    /// 错误且旧 durable 字节保持。不重新 probe、不接受 record 自报。
+    pub fn record_verified_probe(
+        &self,
+        project_id: &str,
+        record: &ProviderCapabilityRecord,
+        evidence: &ProviderBoundaryEvidence,
+        projection: &ProviderPolicyProjection,
+    ) -> Result<(), ProductStoreError> {
+        // durable 通道缺失 fail-closed:无 store 即无导入,绝不无条件通过。
+        let Some(store) = &self.durable else {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "provider_capability_record",
+                reason: "provider_probe_import_unavailable: no durable writer injected".to_string(),
+            });
+        };
+        // 1) 2c shape 校验(字段可比对/digest 形状/action 类型/evidence 引用)。
+        if let Err(error) = self.validate_probe_shape(record, evidence, projection) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "provider_capability_record",
+                reason: format!("provider_probe_import_rejected: {error}"),
+            });
+        }
+        // 2) 三方逐字段比对(version/provider/digest/artifact_ref/probed_at)。
+        if let Err(field) = three_way_fields_match(record, evidence, projection) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "provider_capability_record",
+                reason: format!("provider_probe_import_rejected: {field}"),
+            });
+        }
+        // 3) 原子导入 durable Confirmed(merge 在 store 内完成后单次
+        //    temp+rename 落盘;任一前置失败不触达 durable 字节)。
+        store.import_verified_probe_row(project_id, record, projection.action())
+    }
+
+    /// 冻结签名:只验证三方可比对性(字段可比对/digest 形状/action 类型/
+    /// evidence 引用),不写 durable(2d)、不执行 probe(6c);不一致即
+    /// fail-closed。
+    pub fn validate_probe_shape(
+        &self,
+        record: &ProviderCapabilityRecord,
+        evidence: &ProviderBoundaryEvidence,
+        projection: &ProviderPolicyProjection,
+    ) -> Result<(), ProviderCapabilityProbeError> {
+        // 1) record 形状:probe 校验只接受当前 v3 schema(v1/v2 旧行仅解码
+        //    为全 Unknown,不得作为 probe 导入目标)。
+        if record.schema_version != PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION {
+            return Err(ProviderCapabilityProbeError::RecordShapeInvalid(format!(
+                "schema_version={:?},期望 {:?}",
+                record.schema_version, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION
+            )));
+        }
+
+        // 1.5) 执行语义/岗位/窗口(批2 Task 9):新证三方必须同语义——
+        //      record 与 evidence 都携带 `host-open-v1` 且一致;岗位与
+        //      action 语义相符(Coding=author,只读=reviewer);Reviewer
+        //      证据必须携带非空窗口引用。缺语义/未知语义/缺岗位/缺窗口
+        //      一律拒绝(旧 Confirmed 或 supported_actions 不得铸新证)。
+        if record.execution_semantics != PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN {
+            return Err(ProviderCapabilityProbeError::RecordShapeInvalid(format!(
+                "execution_semantics={:?},期望 {:?}(缺语义记录不得导入 Confirmed)",
+                record.execution_semantics, PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+            )));
+        }
+        if evidence.execution_semantics() != PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(format!(
+                "evidence.execution_semantics={:?},期望 {:?}",
+                evidence.execution_semantics(),
+                PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+            )));
+        }
+        if evidence.execution_semantics() != record.execution_semantics {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(format!(
+                "execution_semantics: evidence={:?} record={:?}",
+                evidence.execution_semantics(),
+                record.execution_semantics
+            )));
+        }
+        let expected_duty = duty_for_action(projection.action());
+        if evidence.duty() != expected_duty {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(format!(
+                "duty: evidence={:?} 期望 {expected_duty:?}(action={:?})",
+                evidence.duty(),
+                projection.action()
+            )));
+        }
+        if evidence.duty() == TrustedProviderRole::Reviewer.as_str()
+            && evidence.review_window_id().unwrap_or("").is_empty()
+        {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(
+                "reviewer 证据缺 review 窗口引用(岗位/窗口缺失拒签)".to_string(),
+            ));
+        }
+
+        // 2) provider 身份三方可比对:evidence 的 provider 名必须经 1a 冻结
+        //    映射解析为真实 provider ref(Fake/未来 provider fail-closed,
+        //    不回退),且 type/adapter/wire 与 record、projection 一致。
+        let evidence_ref = ProviderRef::from_provider_name(evidence.provider(), String::new())
+            .map_err(|err| {
+                ProviderCapabilityProbeError::ProviderMismatch(format!(
+                    "evidence provider {:?} 无法映射为真实 provider ref: {err}",
+                    evidence.provider()
+                ))
+            })?;
+        if evidence_ref.provider_type != record.provider_type {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "provider_type: evidence={:?} record={:?}",
+                evidence_ref.provider_type, record.provider_type
+            )));
+        }
+        if record.provider_type != projection.provider_type() {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "provider_type: record={:?} projection={:?}",
+                record.provider_type,
+                projection.provider_type()
+            )));
+        }
+        if record.adapter_dialect != projection.provider_dialect() {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "adapter_dialect: record={:?} projection={:?}",
+                record.adapter_dialect,
+                projection.provider_dialect()
+            )));
+        }
+        if record.wire_dialect != projection.wire_dialect() {
+            return Err(ProviderCapabilityProbeError::ProviderMismatch(format!(
+                "wire_dialect: record={:?} projection={:?}",
+                record.wire_dialect,
+                projection.wire_dialect()
+            )));
+        }
+
+        // 3) exact version 三方一致且非空(CLI 版本漂移后旧证据不可导入)。
+        let (record_version, evidence_version, projection_version) = (
+            record.version.as_str(),
+            evidence.exact_version(),
+            projection.exact_version(),
+        );
+        if record_version.is_empty() || evidence_version.is_empty() || projection_version.is_empty()
+        {
+            return Err(ProviderCapabilityProbeError::VersionMismatch(format!(
+                "exact version 为空: record={record_version:?} evidence={evidence_version:?} projection={projection_version:?}"
+            )));
+        }
+        if record_version != evidence_version || evidence_version != projection_version {
+            return Err(ProviderCapabilityProbeError::VersionMismatch(format!(
+                "exact version 不一致: record={record_version:?} evidence={evidence_version:?} projection={projection_version:?}"
+            )));
+        }
+
+        // 4) digest 形状(先形状后比对;三方锚点先校 projection 与 evidence)。
+        ensure_digest_shape(
+            projection.projection_digest(),
+            "projection.projection_digest",
+        )?;
+        ensure_digest_shape(evidence.projection_digest(), "evidence.projection_digest")?;
+
+        // 5) action/profile 类型:projection action 必须有对应 record 行(缺行
+        //    = 未探测,不可导入),行 digest 形状合法且三方相等;evidence
+        //    boundary 模式与 action 读写语义一致。
+        let action = projection.action();
+        let row = record
+            .action_matrix
+            .rows()
+            .iter()
+            .find(|row| row.action == action)
+            .ok_or_else(|| {
+                ProviderCapabilityProbeError::ActionMismatch(format!(
+                    "record action_matrix 缺少 action 行: {action:?}"
+                ))
+            })?;
+        ensure_digest_shape(
+            &row.projection_digest,
+            "record.action_row.projection_digest",
+        )?;
+        if projection.projection_digest() != evidence.projection_digest() {
+            return Err(ProviderCapabilityProbeError::DigestMismatch(format!(
+                "projection={:?} evidence={:?}",
+                projection.projection_digest(),
+                evidence.projection_digest()
+            )));
+        }
+        if projection.projection_digest() != row.projection_digest {
+            return Err(ProviderCapabilityProbeError::DigestMismatch(format!(
+                "projection={:?} record_row={:?}",
+                projection.projection_digest(),
+                row.projection_digest
+            )));
+        }
+        if evidence.boundary_mode() != boundary_mode_for_action(action) {
+            return Err(ProviderCapabilityProbeError::ActionMismatch(format!(
+                "action {action:?} 期望 boundary 模式 {:?},evidence 为 {:?}",
+                boundary_mode_for_action(action),
+                evidence.boundary_mode()
+            )));
+        }
+
+        // 6) evidence 引用一致:record 级 probe_artifact_ref 与行级
+        //    evidence_ref 都必须指向同一 probe 工件,且工件引用非空(不得自造)。
+        let artifact_ref = evidence.artifact_ref();
+        if artifact_ref.is_empty() {
+            return Err(ProviderCapabilityProbeError::EvidenceRefMismatch(
+                "evidence artifact_ref 为空".to_string(),
+            ));
+        }
+        if record.probe_artifact_ref.as_deref() != Some(artifact_ref) {
+            return Err(ProviderCapabilityProbeError::EvidenceRefMismatch(format!(
+                "record.probe_artifact_ref={:?} evidence.artifact_ref={artifact_ref:?}",
+                record.probe_artifact_ref
+            )));
+        }
+        if row.evidence_ref != artifact_ref {
+            return Err(ProviderCapabilityProbeError::EvidenceRefMismatch(format!(
+                "record action_row.evidence_ref={:?} evidence.artifact_ref={artifact_ref:?}",
+                row.evidence_ref
+            )));
+        }
+
+        // 7) probe 元数据:record.probed_at 必须与 evidence 描述同一探测时间。
+        if evidence.probed_at().is_empty() {
+            return Err(ProviderCapabilityProbeError::ProbeMetadataMismatch(
+                "evidence probed_at 为空".to_string(),
+            ));
+        }
+        if record.probed_at.as_deref() != Some(evidence.probed_at()) {
+            return Err(ProviderCapabilityProbeError::ProbeMetadataMismatch(
+                format!(
+                    "record.probed_at={:?} evidence.probed_at={:?}",
+                    record.probed_at,
+                    evidence.probed_at()
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// 2d 冻结语义的显式三方逐字段比对:导入前按字段核对 evidence/projection/
+/// record 的 version/provider/digest/artifact_ref/probed_at(与
+/// `validate_probe_shape` 的判别维度一致,导入路径再核对一次并给出字段名),
+/// 任何不一致返回 `Err(字段诊断)`。
+fn three_way_fields_match(
+    record: &ProviderCapabilityRecord,
+    evidence: &ProviderBoundaryEvidence,
+    projection: &ProviderPolicyProjection,
+) -> Result<(), String> {
+    // provider:evidence 的 provider 名经 1a 冻结映射解析,与 record/
+    // projection 的 provider_type 三方一致。
+    let evidence_provider = ProviderRef::from_provider_name(evidence.provider(), String::new())
+        .map_err(|error| format!("provider: {error}"))?;
+    if evidence_provider.provider_type != record.provider_type
+        || record.provider_type != projection.provider_type()
+    {
+        return Err(format!(
+            "provider: evidence={:?} record={:?} projection={:?}",
+            evidence_provider.provider_type,
+            record.provider_type,
+            projection.provider_type()
+        ));
+    }
+    // 执行语义:record 与 evidence 描述同一语义(批2 Task 9;host-open
+    // 单一来源,导入链不接受语义漂移的旧证)。
+    if record.execution_semantics != evidence.execution_semantics() {
+        return Err(format!(
+            "execution_semantics: record={:?} evidence={:?}",
+            record.execution_semantics,
+            evidence.execution_semantics()
+        ));
+    }
+    // exact version 三方一致(CLI 漂移后旧证据不可导入)。
+    if record.version != evidence.exact_version()
+        || evidence.exact_version() != projection.exact_version()
+    {
+        return Err(format!(
+            "exact_version: record={:?} evidence={:?} projection={:?}",
+            record.version,
+            evidence.exact_version(),
+            projection.exact_version()
+        ));
+    }
+    // projection digest 三方一致(record 行已由 shape 校验确认存在)。
+    let Some(row) = record
+        .action_matrix
+        .rows()
+        .iter()
+        .find(|row| row.action == projection.action())
+    else {
+        return Err(format!("action row missing: {:?}", projection.action()));
+    };
+    if projection.projection_digest() != evidence.projection_digest()
+        || projection.projection_digest() != row.projection_digest
+    {
+        return Err(format!(
+            "projection_digest: projection={:?} evidence={:?} record_row={:?}",
+            projection.projection_digest(),
+            evidence.projection_digest(),
+            row.projection_digest
+        ));
+    }
+    // artifact_ref/probed_at:record 与 evidence 描述同一探测。
+    if record.probe_artifact_ref.as_deref() != Some(evidence.artifact_ref()) {
+        return Err(format!(
+            "probe_artifact_ref: record={:?} evidence={:?}",
+            record.probe_artifact_ref,
+            evidence.artifact_ref()
+        ));
+    }
+    if record.probed_at.as_deref() != Some(evidence.probed_at()) {
+        return Err(format!(
+            "probed_at: record={:?} evidence={:?}",
+            record.probed_at,
+            evidence.probed_at()
+        ));
+    }
+    Ok(())
+}
+
+/// digest 形状:与 `SessionResumeFingerprint` 同构的 `sha256:` 前缀 + 64 位
+/// 小写十六进制(SHA-256 的规范 hex 形态)。evidence/record 行/projection
+/// 三方 digest 都必须满足该形态后才做相等比对。
+fn ensure_digest_shape(digest: &str, field: &str) -> Result<(), ProviderCapabilityProbeError> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(ProviderCapabilityProbeError::DigestInvalid(format!(
+            "{field}: 缺 `sha256:` 前缀: {digest:?}"
+        )));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(ProviderCapabilityProbeError::DigestInvalid(format!(
+            "{field}: 期望 `sha256:` + 64 位小写十六进制,实际 {digest:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// action 的读写语义 → 边界模式(Global Constraints 冻结映射):
+/// Planning/Review 只读,Coding 恰一个 canonical target 可写。
+fn boundary_mode_for_action(action: SessionPolicyAction) -> ProviderBoundaryMode {
+    match action {
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            ProviderBoundaryMode::ReadOnly
+        }
+        SessionPolicyAction::CodingTargetWrite => ProviderBoundaryMode::TargetWriteOnly,
+    }
+}
+
+/// action 的执行语义 → 受信岗位(批2 Task 9 冻结映射):Coding = Author
+/// 岗位(HostCoding),Planning/Review 只读 = Reviewer 窗口。文本收敛自
+/// T2 `TrustedProviderRole::as_str`(单一事实源,T10/RevB2T9 ⚠3)。
+fn duty_for_action(action: SessionPolicyAction) -> &'static str {
+    match action {
+        SessionPolicyAction::CodingTargetWrite => TrustedProviderRole::Author.as_str(),
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            TrustedProviderRole::Reviewer.as_str()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::logical_codebase::policy::{
+        PolicyTarget, ProviderDialect, ProviderWireDialect,
+    };
+    use crate::product::logical_codebase::provider_capability_store::{
+        CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, RootRecipeEvidence,
+    };
+    use crate::product::logical_codebase::provider_gateway::{
+        ProviderRefType, ResumeEvidenceState,
+    };
+    use crate::product::models::ProviderName;
+    use crate::protocol::contracts::AdapterRole;
+
+    const PROBE_VERSION: &str = "1.42.0";
+    const PROBE_ARTIFACT_REF: &str = "probe://boundary/kimi-code/0001";
+    const PROBE_PROBED_AT: &str = "2026-10-03T08:00:00Z";
+
+    /// 由 seed 生成形态合法且互不相同的 digest(`sha256:` + 64 位小写十六进制)。
+    fn digest64(seed: u8) -> String {
+        let hex: String = (0..64)
+            .map(|i| char::from_digit((u32::from(seed) + i) % 16, 16).expect("hex digit"))
+            .collect();
+        format!("sha256:{hex}")
+    }
+
+    fn projection_with(
+        provider_type: ProviderRefType,
+        adapter_dialect: ProviderDialect,
+        wire_dialect: ProviderWireDialect,
+        action: SessionPolicyAction,
+        digest: &str,
+    ) -> ProviderPolicyProjection {
+        ProviderPolicyProjection::new(
+            provider_type,
+            adapter_dialect,
+            wire_dialect,
+            PROBE_VERSION.to_string(),
+            action,
+            AdapterRole::Executor,
+            ProviderPermissionMode::Auto,
+            None,
+            "never".to_string(),
+            "client-service".to_string(),
+            PathBuf::from("/lc-root"),
+            PathBuf::from("/work/api/.worktrees/issue_1"),
+            PolicyTarget::checkout("logical_repo", "checkout_1", "/work/api/.worktrees/issue_1"),
+            vec![PathBuf::from("/aggregate")],
+            vec![PathBuf::from("/work/api/.worktrees/issue_1")],
+            "sha256:trust".to_string(),
+            "sha256:config".to_string(),
+            "sha256:mcp".to_string(),
+            "probe://boundary/plan/1".to_string(),
+            "sha256:capability-profile".to_string(),
+            digest.to_string(),
+        )
+    }
+
+    fn evidence_with(
+        provider: ProviderName,
+        exact_version: &str,
+        boundary_mode: ProviderBoundaryMode,
+        digest: &str,
+    ) -> ProviderBoundaryEvidence {
+        // host-open 语义 + 与边界模式相称的岗位/窗口(批2 Task 9 合法面)。
+        let (duty, window) = match boundary_mode {
+            ProviderBoundaryMode::ReadOnly => ("reviewer", Some("review-window-0001".to_string())),
+            ProviderBoundaryMode::TargetWriteOnly => ("author", None),
+        };
+        ProviderBoundaryEvidence::new(
+            provider,
+            exact_version.to_string(),
+            boundary_mode,
+            digest.to_string(),
+            PROBE_ARTIFACT_REF.to_string(),
+            PROBE_PROBED_AT.to_string(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            duty.to_string(),
+            window,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_with_row(
+        provider_type: ProviderRefType,
+        adapter_dialect: ProviderDialect,
+        wire_dialect: ProviderWireDialect,
+        action: SessionPolicyAction,
+        row_digest: &str,
+        row_evidence_ref: &str,
+    ) -> ProviderCapabilityRecord {
+        let row = ProviderActionCapability {
+            action,
+            launch: ProviderCapabilityEvidence::Confirmed,
+            resume: ProviderCapabilityEvidence::Unknown,
+            write_boundary: ProviderCapabilityEvidence::Confirmed,
+            projection_digest: row_digest.to_string(),
+            evidence_ref: row_evidence_ref.to_string(),
+        };
+        ProviderCapabilityRecord {
+            provider_type,
+            schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+            version: PROBE_VERSION.to_string(),
+            adapter_dialect,
+            wire_dialect,
+            capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+            evidence: CapabilityEvidence::FixtureVerified,
+            resume_evidence: ResumeEvidenceState::Confirmed,
+            supported_actions: Vec::new(),
+            action_matrix: ProviderActionMatrix::from_rows(vec![row]).expect("唯一 action 行"),
+            trust: ProviderCapabilityEvidence::Unknown,
+            probed_at: Some(PROBE_PROBED_AT.to_string()),
+            probe_artifact_ref: Some(PROBE_ARTIFACT_REF.to_string()),
+            root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+        }
+    }
+
+    /// 三方一致的 KimiCode 三元组(action 与边界模式由调用方显式指定)。
+    fn consistent_triple(
+        action: SessionPolicyAction,
+        mode: ProviderBoundaryMode,
+    ) -> (
+        ProviderCapabilityRecord,
+        ProviderBoundaryEvidence,
+        ProviderPolicyProjection,
+    ) {
+        let digest = digest64(7);
+        (
+            record_with_row(
+                ProviderRefType::KimiCode,
+                ProviderDialect::KimiAcpV1,
+                ProviderWireDialect::KimiAcp,
+                action,
+                &digest,
+                PROBE_ARTIFACT_REF,
+            ),
+            evidence_with(ProviderName::KimiCode, PROBE_VERSION, mode, &digest),
+            projection_with(
+                ProviderRefType::KimiCode,
+                ProviderDialect::KimiAcpV1,
+                ProviderWireDialect::KimiAcp,
+                action,
+                &digest,
+            ),
+        )
+    }
+
+    fn service() -> ProviderCapabilityProbeService {
+        ProviderCapabilityProbeService::new()
+    }
+
+    /// 断言 fail-closed 拒绝且稳定判别码(每变体的 Display 前缀唯一,钉住变体)。
+    fn expect_mismatch(result: Result<(), ProviderCapabilityProbeError>, code: &str) {
+        let err = result.expect_err("shape 校验必须 fail-closed 拒绝");
+        assert!(
+            err.to_string().starts_with(code),
+            "期望稳定判别码 {code},实际 {}",
+            err
+        );
+    }
+
+    /// 一致三元组逐 action × 边界模式通过 shape 校验:钉住
+    /// version/digest/action 行/evidence 引用四类可比对维度的合法面。
+    #[test]
+    fn lcg_t02_probe_shape_validates_version_digest_action_references() {
+        for (action, mode) in [
+            (
+                SessionPolicyAction::PlanningReadOnly,
+                ProviderBoundaryMode::ReadOnly,
+            ),
+            (
+                SessionPolicyAction::CodingTargetWrite,
+                ProviderBoundaryMode::TargetWriteOnly,
+            ),
+            (
+                SessionPolicyAction::ReviewReadOnly,
+                ProviderBoundaryMode::ReadOnly,
+            ),
+        ] {
+            let (record, evidence, projection) = consistent_triple(action, mode);
+            service()
+                .validate_probe_shape(&record, &evidence, &projection)
+                .unwrap_or_else(|err| panic!("{action:?} 一致三元组应通过: {err}"));
+        }
+    }
+
+    /// 逐维漂移(version/digest/evidence 引用)fail-closed 且判别码稳定。
+    #[test]
+    fn lcg_t02_probe_shape_mismatch_rejects_with_stable_error() {
+        let action = SessionPolicyAction::CodingTargetWrite;
+        let mode = ProviderBoundaryMode::TargetWriteOnly;
+
+        // record.version 漂移:CLI 版本漂移后旧证据不可导入。
+        let (mut record, evidence, projection) = consistent_triple(action, mode);
+        record.version = "9.9.9".to_string();
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_version_mismatch",
+        );
+
+        // evidence.exact_version 与 record/projection 漂移。
+        let (record, _, projection) = consistent_triple(action, mode);
+        let evidence = evidence_with(ProviderName::KimiCode, "1.43.0", mode, &digest64(7));
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_version_mismatch",
+        );
+
+        // evidence.projection_digest 漂移(形态合法但值不同)。
+        let evidence = evidence_with(ProviderName::KimiCode, PROBE_VERSION, mode, &digest64(9));
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_digest_mismatch",
+        );
+
+        // record action 行 projection_digest 漂移。
+        let record = record_with_row(
+            ProviderRefType::KimiCode,
+            ProviderDialect::KimiAcpV1,
+            ProviderWireDialect::KimiAcp,
+            action,
+            &digest64(11),
+            PROBE_ARTIFACT_REF,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_digest_mismatch",
+        );
+
+        // record.probe_artifact_ref 缺失。
+        let (mut record, evidence, projection) = consistent_triple(action, mode);
+        record.probe_artifact_ref = None;
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_evidence_ref_mismatch",
+        );
+
+        // record.probe_artifact_ref 漂移。
+        let (mut record, evidence, projection) = consistent_triple(action, mode);
+        record.probe_artifact_ref = Some("probe://other/0002".to_string());
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_evidence_ref_mismatch",
+        );
+
+        // 行级 evidence_ref 漂移(未指向同一 probe 工件)。
+        let record = record_with_row(
+            ProviderRefType::KimiCode,
+            ProviderDialect::KimiAcpV1,
+            ProviderWireDialect::KimiAcp,
+            action,
+            &digest64(7),
+            "probe://other/0002",
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_evidence_ref_mismatch",
+        );
+    }
+
+    /// digest 形态非法(缺前缀/长度错/大写 hex/空)拒绝。
+    #[test]
+    fn lcg_t02_probe_shape_rejects_invalid_digest_shape() {
+        let action = SessionPolicyAction::CodingTargetWrite;
+        let mode = ProviderBoundaryMode::TargetWriteOnly;
+
+        // projection digest 形态非法。
+        let bad_digests = [
+            "deadbeef".to_string(),
+            "sha256:short".to_string(),
+            format!("sha256:{}", "A".repeat(64)),
+        ];
+        for bad in &bad_digests {
+            let digest = digest64(7);
+            let record = record_with_row(
+                ProviderRefType::KimiCode,
+                ProviderDialect::KimiAcpV1,
+                ProviderWireDialect::KimiAcp,
+                action,
+                &digest,
+                PROBE_ARTIFACT_REF,
+            );
+            let evidence = evidence_with(ProviderName::KimiCode, PROBE_VERSION, mode, &digest);
+            let projection = projection_with(
+                ProviderRefType::KimiCode,
+                ProviderDialect::KimiAcpV1,
+                ProviderWireDialect::KimiAcp,
+                action,
+                bad,
+            );
+            expect_mismatch(
+                service().validate_probe_shape(&record, &evidence, &projection),
+                "provider_probe_shape_digest_invalid",
+            );
+        }
+
+        // evidence digest 为空。
+        let (record, _, projection) = consistent_triple(action, mode);
+        let evidence = evidence_with(ProviderName::KimiCode, PROBE_VERSION, mode, "");
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_digest_invalid",
+        );
+
+        // 行 digest 缺前缀。
+        let record = record_with_row(
+            ProviderRefType::KimiCode,
+            ProviderDialect::KimiAcpV1,
+            ProviderWireDialect::KimiAcp,
+            action,
+            "0123abcd",
+            PROBE_ARTIFACT_REF,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_digest_invalid",
+        );
+    }
+
+    /// provider 身份/action 类型/probe 元数据漂移拒绝(schema/Fake/
+    /// dialect 漂移/缺 action 行/边界模式不符/probed_at 不符)。
+    #[test]
+    fn lcg_t02_probe_shape_rejects_provider_action_and_metadata_mismatches() {
+        let action = SessionPolicyAction::CodingTargetWrite;
+        let mode = ProviderBoundaryMode::TargetWriteOnly;
+
+        // schema 版本非当前 v2。
+        let (mut record, evidence, projection) = consistent_triple(action, mode);
+        record.schema_version = 1;
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_record_invalid",
+        );
+
+        // evidence provider 为 Fake:无法映射真实 provider ref,fail-closed。
+        let (record, _, projection) = consistent_triple(action, mode);
+        let evidence = evidence_with(ProviderName::Fake, PROBE_VERSION, mode, &digest64(7));
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_provider_mismatch",
+        );
+
+        // record.provider_type 与 evidence/projection 漂移。
+        let record = record_with_row(
+            ProviderRefType::ClaudeCode,
+            ProviderDialect::KimiAcpV1,
+            ProviderWireDialect::KimiAcp,
+            action,
+            &digest64(7),
+            PROBE_ARTIFACT_REF,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_provider_mismatch",
+        );
+
+        // adapter dialect 漂移。
+        let record = record_with_row(
+            ProviderRefType::KimiCode,
+            ProviderDialect::ClaudeCodeCliV1,
+            ProviderWireDialect::KimiAcp,
+            action,
+            &digest64(7),
+            PROBE_ARTIFACT_REF,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_provider_mismatch",
+        );
+
+        // wire dialect 漂移。
+        let record = record_with_row(
+            ProviderRefType::KimiCode,
+            ProviderDialect::KimiAcpV1,
+            ProviderWireDialect::CodexAppServerRpc,
+            action,
+            &digest64(7),
+            PROBE_ARTIFACT_REF,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_provider_mismatch",
+        );
+
+        // projection.provider_type 漂移(与 record/evidence 不一致)。
+        let (record, evidence, _) = consistent_triple(action, mode);
+        let projection = projection_with(
+            ProviderRefType::Codex,
+            ProviderDialect::KimiAcpV1,
+            ProviderWireDialect::KimiAcp,
+            action,
+            &digest64(7),
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_provider_mismatch",
+        );
+
+        // 矩阵缺 projection action 行(未探测 action 不可导入;evidence 岗位
+        // 与 Planning 相符,钉住「缺行」维度本身)。
+        let (record, _, _) = consistent_triple(action, mode);
+        let evidence = evidence_with(
+            ProviderName::KimiCode,
+            PROBE_VERSION,
+            ProviderBoundaryMode::ReadOnly,
+            &digest64(7),
+        );
+        let projection = projection_with(
+            ProviderRefType::KimiCode,
+            ProviderDialect::KimiAcpV1,
+            ProviderWireDialect::KimiAcp,
+            SessionPolicyAction::PlanningReadOnly,
+            &digest64(7),
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_action_mismatch",
+        );
+
+        // 边界模式/岗位与 action 执行语义不一致(Coding 却持只读/reviewer
+        // 形证据):批2 Task 9 起由语义门先拒(duty 与 action 不符)。
+        let (record, _, projection) = consistent_triple(action, mode);
+        let evidence = evidence_with(
+            ProviderName::KimiCode,
+            PROBE_VERSION,
+            ProviderBoundaryMode::ReadOnly,
+            &digest64(7),
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_semantics_invalid",
+        );
+
+        // probed_at 缺失/漂移:record 未描述同一探测。
+        let (mut record, evidence, projection) = consistent_triple(action, mode);
+        record.probed_at = None;
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_probe_metadata_mismatch",
+        );
+        record.probed_at = Some("2020-01-01T00:00:00Z".to_string());
+        expect_mismatch(
+            service().validate_probe_shape(&record, &evidence, &projection),
+            "provider_probe_shape_probe_metadata_mismatch",
+        );
+    }
+
+    /// Task 2d(imports):三方逐字段一致的真实三元组经 `record_verified_probe`
+    /// 原子导入 durable Confirmed——被探测 action 行 launch/write_boundary
+    /// Confirmed、digest/evidence 引用/probe 元数据三方一致落盘;evidence
+    /// 未覆盖的格子(resume/其它 action)不自报;同版本重复导入幂等;
+    /// durable 旧版本 Confirmed 行随版本推进失效为 Unknown(旧证据不跨
+    /// CLI 版本 allow,等待各自真实 probe;旧 evidence 工件保留在盘)。
+    #[test]
+    fn lcg_t02_probe_evidence_projection_record_imports_confirmed_atomically() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path());
+        let store = ProviderCapabilityStore::new(paths);
+        let project_id = "project_0001";
+        let action = SessionPolicyAction::CodingTargetWrite;
+        let (record, evidence, projection) =
+            consistent_triple(action, ProviderBoundaryMode::TargetWriteOnly);
+
+        // 断言块(计划 Task 2 Step 1 逐字语义;`row(&action)` 为 2b 删除
+        // `Index<&SessionPolicyAction>` 后的等价读取):
+        assert_eq!(evidence.exact_version(), projection.exact_version());
+        assert_eq!(evidence.projection_digest(), projection.projection_digest());
+        assert_eq!(record.version, evidence.exact_version());
+        assert_eq!(
+            record.action_matrix.row(&action).projection_digest,
+            projection.projection_digest()
+        );
+        assert_eq!(
+            record.action_matrix.row(&action).launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_eq!(
+            record.action_matrix.row(&action).write_boundary,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_eq!(
+            record.probe_artifact_ref.as_deref(),
+            Some(evidence.artifact_ref())
+        );
+
+        let service = ProviderCapabilityProbeService::with_durable_writer(store.clone());
+        service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect("三方一致的真实三元组应导入 durable Confirmed");
+
+        // durable 侧:被探测 action 行 Confirmed,digest/evidence 引用与
+        // probe 元数据三方一致落盘。
+        let loaded = store
+            .get(project_id, ProviderRefType::KimiCode)
+            .expect("durable 读取")
+            .expect("导入后 durable 行存在");
+        assert_eq!(loaded.version, evidence.exact_version());
+        assert_eq!(loaded.probed_at.as_deref(), Some(evidence.probed_at()));
+        assert_eq!(
+            loaded.probe_artifact_ref.as_deref(),
+            Some(evidence.artifact_ref())
+        );
+        let row = loaded.action_matrix.row(&action);
+        assert_eq!(row.launch, ProviderCapabilityEvidence::Confirmed);
+        assert_eq!(row.write_boundary, ProviderCapabilityEvidence::Confirmed);
+        assert_eq!(row.projection_digest, projection.projection_digest());
+        assert_eq!(row.evidence_ref, evidence.artifact_ref());
+        // resume 分格与其它 action 行不被自报导入:evidence 只覆盖本次
+        // probe 的 action 行,其余保持未探测。
+        assert_eq!(row.resume, ProviderCapabilityEvidence::Unknown);
+        for other in [
+            SessionPolicyAction::PlanningReadOnly,
+            SessionPolicyAction::ReviewReadOnly,
+        ] {
+            let other_row = loaded.action_matrix.row(&other);
+            assert_eq!(other_row.launch, ProviderCapabilityEvidence::Unknown);
+            assert_eq!(
+                other_row.write_boundary,
+                ProviderCapabilityEvidence::Unknown
+            );
+        }
+
+        // 同版本重复导入:幂等,不漂移既有行。
+        service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect("同版本重复导入仍应成功");
+        assert_eq!(
+            store
+                .get(project_id, ProviderRefType::KimiCode)
+                .expect("durable 读取")
+                .expect("durable 行存在"),
+            loaded
+        );
+
+        // 旧版本 durable 行(Planning 曾 Confirmed@1.40.0)在新版本导入后
+        // 失效为 Unknown:旧 Confirmed 不跨 CLI 版本沿用(2b 过渡桥语义
+        // 衔接——旧行回到未探测,等待各自真实 probe)。
+        let mut stale = loaded.clone();
+        stale.version = "1.40.0".to_string();
+        let mut rows = stale.action_matrix.rows().to_vec();
+        rows.retain(|row| row.action != SessionPolicyAction::PlanningReadOnly);
+        rows.push(ProviderActionCapability {
+            action: SessionPolicyAction::PlanningReadOnly,
+            launch: ProviderCapabilityEvidence::Confirmed,
+            resume: ProviderCapabilityEvidence::Unknown,
+            write_boundary: ProviderCapabilityEvidence::Confirmed,
+            projection_digest: digest64(21),
+            evidence_ref: "probe://boundary/kimi-code/0000".to_string(),
+        });
+        stale.action_matrix = ProviderActionMatrix::from_rows(rows).expect("唯一 action 行");
+        store
+            .upsert(project_id, &stale)
+            .expect("seed 旧版本 durable 行");
+
+        service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect("新版本导入应成功");
+        let reloaded = store
+            .get(project_id, ProviderRefType::KimiCode)
+            .expect("durable 读取")
+            .expect("durable 行存在");
+        assert_eq!(reloaded.version, evidence.exact_version());
+        assert_eq!(
+            reloaded
+                .action_matrix
+                .row(&SessionPolicyAction::PlanningReadOnly)
+                .launch,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            reloaded
+                .action_matrix
+                .row(&SessionPolicyAction::PlanningReadOnly)
+                .write_boundary,
+            ProviderCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            reloaded.action_matrix.row(&action).launch,
+            ProviderCapabilityEvidence::Confirmed
+        );
+        assert_eq!(
+            reloaded.action_matrix.row(&action).write_boundary,
+            ProviderCapabilityEvidence::Confirmed
+        );
+    }
+
+    // ===== Task 9:执行语义/岗位/窗口导入门 =====
+
+    /// 缺语义(record 空语义 / evidence 旧语义)、语义漂移、岗位与 action
+    /// 不符、Reviewer 缺窗口——均 fail-closed 拒绝导入,稳定判别码。
+    #[test]
+    fn t9_probe_shape_rejects_missing_semantics_duty_or_window() {
+        let (record, _evidence, projection) = consistent_triple(
+            SessionPolicyAction::CodingTargetWrite,
+            ProviderBoundaryMode::TargetWriteOnly,
+        );
+
+        // 1) record 缺语义(空串 = v1/v2 历史形状)。
+        let mut no_semantics = record.clone();
+        no_semantics.execution_semantics = String::new();
+        expect_mismatch(
+            service().validate_probe_shape(&no_semantics, &_evidence, &projection),
+            "provider_probe_shape_record_invalid",
+        );
+
+        // 2) evidence 携带旧/未知语义。
+        let legacy_evidence = ProviderBoundaryEvidence::new(
+            _evidence.provider().clone(),
+            _evidence.exact_version().to_string(),
+            _evidence.boundary_mode(),
+            _evidence.projection_digest().to_string(),
+            _evidence.artifact_ref().to_string(),
+            _evidence.probed_at().to_string(),
+            "bwrap-phys-deny-v0".to_string(),
+            "author".to_string(),
+            None,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &legacy_evidence, &projection),
+            "provider_probe_shape_semantics_invalid",
+        );
+
+        // 3) 岗位与 action 语义不符(Coding 证据携带 reviewer 岗位)。
+        let wrong_duty = ProviderBoundaryEvidence::new(
+            _evidence.provider().clone(),
+            _evidence.exact_version().to_string(),
+            _evidence.boundary_mode(),
+            _evidence.projection_digest().to_string(),
+            _evidence.artifact_ref().to_string(),
+            _evidence.probed_at().to_string(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            "reviewer".to_string(),
+            Some("review-window-0001".to_string()),
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &wrong_duty, &projection),
+            "provider_probe_shape_semantics_invalid",
+        );
+
+        // 4) Reviewer 证据缺窗口引用(只读 action)。
+        let (ro_record, ro_evidence, ro_projection) = consistent_triple(
+            SessionPolicyAction::PlanningReadOnly,
+            ProviderBoundaryMode::ReadOnly,
+        );
+        let no_window = ProviderBoundaryEvidence::new(
+            ro_evidence.provider().clone(),
+            ro_evidence.exact_version().to_string(),
+            ro_evidence.boundary_mode(),
+            ro_evidence.projection_digest().to_string(),
+            ro_evidence.artifact_ref().to_string(),
+            ro_evidence.probed_at().to_string(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            "reviewer".to_string(),
+            None,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&ro_record, &no_window, &ro_projection),
+            "provider_probe_shape_semantics_invalid",
+        );
+    }
+
+    /// 缺语义的 record 即便三方其它字段一致也不得导入 durable;旧 durable
+    /// 字节保持不变(导入失败不触盘)。
+    #[test]
+    fn t9_import_rejects_missing_semantics_and_keeps_durable_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
+        let project_id = "project_0001";
+        store.ensure_bootstrap(project_id).unwrap();
+        let path = temp
+            .path()
+            .join("projects/project_0001/logical-codebase/capabilities.json");
+        let bytes_before = std::fs::read(&path).unwrap();
+
+        let (mut record, evidence, projection) = consistent_triple(
+            SessionPolicyAction::PlanningReadOnly,
+            ProviderBoundaryMode::ReadOnly,
+        );
+        record.execution_semantics = String::new();
+        let service = ProviderCapabilityProbeService::with_durable_writer(store.clone());
+        let error = service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect_err("缺语义记录不得导入 Confirmed");
+        assert!(
+            error.to_string().contains("provider_probe_import_rejected"),
+            "稳定错误面: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes_before,
+            "导入失败不得触达 durable 字节"
+        );
+    }
+}

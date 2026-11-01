@@ -1,10 +1,11 @@
 use super::*;
 
-#[test]
-fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
+#[tokio::test]
+async fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
     let root = tempdir().expect("root");
     let repo = tempdir().expect("repo");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -12,15 +13,18 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "work-item-plan-context-repository".to_string(),
         })
         .expect("repository");
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .expect("issue");
 
@@ -31,6 +35,7 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id.clone(),
             title: "爬楼梯问题 Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story");
     lifecycle
@@ -58,6 +63,7 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "爬楼梯问题 Design Spec".to_string(),
+            aggregate_codebase: None,
         })
         .expect("design");
     lifecycle
@@ -108,14 +114,17 @@ fn work_item_plan_context_message_includes_plan_brief_and_workspace_type() {
             entity_id: plan.id.clone(),
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("session");
 
     let session = ensure_workspace_context_message(&app_paths, &lifecycle, session)
+        .await
         .expect("workspace context");
     let context = &session.messages[0].content;
 

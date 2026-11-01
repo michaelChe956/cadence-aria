@@ -41,6 +41,7 @@ fn setup() -> (TempDir, CodingAttemptStore, String) {
                 review_rounds: 1,
                 permission_modes: Default::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("attempt");

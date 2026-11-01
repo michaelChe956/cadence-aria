@@ -1,4 +1,5 @@
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::streaming_provider::{ProviderCommand, ProviderEvent};
 
@@ -9,8 +10,20 @@ pub(super) async fn listen_for_permission_commands(
     pending: PendingPermissions,
     pending_choices: PendingChoices,
     event_tx: mpsc::Sender<ProviderEvent>,
+    cancel: CancellationToken,
 ) {
-    while let Some(command) = command_rx.recv().await {
+    loop {
+        let command = tokio::select! {
+            // r19 结构性根修:会话机构(ApprovalBridge)消亡后监听任务必须
+            // 退出并释放 event 通道发送端——否则消费者(同步桥 drive 循环)
+            // 持有 commands 期间事件流永不关闭,recv 空等到 stage 超时。
+            // 桥消亡后本任务已无 waiter 可服务,退出语义安全。
+            _ = cancel.cancelled() => return,
+            command = command_rx.recv() => match command {
+                Some(command) => command,
+                None => return,
+            },
+        };
         match command {
             ProviderCommand::PermissionResponse {
                 id,
@@ -37,32 +50,31 @@ pub(super) async fn listen_for_permission_commands(
                 selected_option_ids,
                 free_text,
                 answers,
+                receipt,
             } => {
                 tracing::info!(choice_id = %id, "bridge received choice response");
-                eprintln!(
-                    "[aria-choice-diag] bridge received choice_response id={} selected={:?} free_text_present={}",
-                    id,
-                    selected_option_ids,
-                    free_text
-                        .as_ref()
-                        .is_some_and(|text| !text.trim().is_empty())
-                );
+                // P0 1.3：mpsc 消费者已领取命令——回执先推进 Resolving；
+                // Delivered 只能由 request_choice waiter 解析后推进。
+                if let Some(receipt) = receipt.as_ref() {
+                    receipt.mark_resolving();
+                }
                 if let Some(decision_tx) = pending_choices.lock().await.remove(&id) {
-                    eprintln!(
-                        "[aria-choice-diag] bridge matched pending choice_response id={}",
-                        id
-                    );
-                    let _ = decision_tx.send(ChoiceDecision {
+                    // oneshot 关闭（waiter 取消）则值会返回——从中取回回执
+                    // 置 Rejected，不得悬置 Resolving。
+                    if let Err(undelivered) = decision_tx.send(ChoiceDecision {
                         selected_option_ids,
                         free_text,
                         answers,
-                    });
+                        receipt,
+                    }) && let Some(receipt) = undelivered.receipt.as_ref()
+                    {
+                        receipt.reject();
+                    }
                 } else {
                     tracing::warn!(choice_id = %id, "bridge: no pending choice entry for id");
-                    eprintln!(
-                        "[aria-choice-diag] bridge missing pending choice_response id={}",
-                        id
-                    );
+                    if let Some(receipt) = receipt.as_ref() {
+                        receipt.reject();
+                    }
                     let _ = event_tx
                         .send(ProviderEvent::ProtocolError {
                             code: "CHOICE_ID_UNMATCHED".to_string(),
@@ -86,6 +98,7 @@ pub(super) async fn listen_for_permission_commands(
                         selected_option_ids: Vec::new(),
                         free_text: Some("aborted".to_string()),
                         answers: Vec::new(),
+                        receipt: None,
                     });
                 }
             }

@@ -16,6 +16,8 @@ while IFS= read -r line; do
     continue
   fi
   if [[ "$line" == *'"user"'* ]]; then
+    echo '{"type":"system","subtype":"init","session_id":"claude_fixture_session"}'
+
     echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"'"${STORY_SPEC}"'"}]},"session_id":"claude_fixture_session"}'
     echo '{"type":"control_request","request_id":"perm_req_001","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cargo test","description":"Run cargo tests"},"tool_use_id":"toolu_fixture"}}'
   fi

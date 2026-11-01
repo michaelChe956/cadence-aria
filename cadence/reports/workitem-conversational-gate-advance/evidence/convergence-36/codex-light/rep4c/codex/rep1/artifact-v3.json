@@ -1,0 +1,33 @@
+{
+  "type": "artifact_update",
+  "version": 3,
+  "compile_report": {
+    "compile_id": "dc33dfffd9c277a4b3a84877ad34c082992d8fbbf41bdfb99982067c0da9de08",
+    "generation_round_id": "single_candidate_dc33dfffd9c277a4b3a84877ad34c082992d8fbbf41bdfb99982067c0da9de08",
+    "status": "committed",
+    "plan_commit_state": "committed",
+    "work_item_ids": [
+      "WI-001"
+    ],
+    "verification_plan_ids": [
+      "verification_plan_revision_a3ea8300f66e38d5fe4240c8"
+    ],
+    "child_session_ids": [
+      "workspace_session_0206"
+    ],
+    "validator_findings": [
+      {
+        "severity": "warning",
+        "code": "integration_or_e2e_skipped_risk",
+        "message": "integration tests are skipped; consider adding manual verification before acceptance",
+        "work_item_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "integration_or_e2e_skipped_risk",
+        "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+        "work_item_ids": []
+      }
+    ]
+  }
+}

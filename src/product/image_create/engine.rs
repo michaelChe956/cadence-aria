@@ -695,8 +695,8 @@ mod tests {
             let contract = input.structured_output_contract.as_ref().expect("contract");
             let full_output = match &self.suggested_prompt {
                 Some(prompt) => format!(
-                    "readable\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"suggested_prompt\":\"{}\"}}\n</ARIA_STRUCTURED_OUTPUT nonce=\"{}\">",
-                    contract.nonce, prompt, contract.nonce
+                    "readable\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"nonce\":\"{}\",\"suggested_prompt\":\"{}\"}}\n</ARIA_STRUCTURED_OUTPUT>",
+                    contract.nonce, contract.nonce, prompt
                 ),
                 None => "readable".to_string(),
             };
@@ -711,6 +711,7 @@ mod tests {
                 let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
             });
             Ok(ProviderSession {
+                native_session_id: None,
                 events: event_rx,
                 commands: command_tx,
             })

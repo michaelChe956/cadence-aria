@@ -1,17 +1,19 @@
 use std::fs;
-use std::path::Path;
 
 use chrono::Utc;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{IssuePhase, IssueRecord, IssueStatus};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateProductIssueInput {
     pub project_id: String,
     pub repo_id: Option<String>,
+    pub logical_codebase_id: Option<String>,
+    /// 基准分支（REQ-PIB-01）：由 REST 层解析锁定后传入（Some）；逻辑代码库
+    /// issue（多仓非目标）与测试缺省 None。
+    pub base_branch: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
@@ -21,6 +23,8 @@ pub struct CreateProductIssueInput {
 pub struct CreateProductIssueWithRepositoryInput {
     pub project_id: String,
     pub repo_id: String,
+    pub logical_codebase_id: Option<String>,
+    pub base_branch: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: Option<String>,
@@ -77,14 +81,40 @@ impl IssueStore {
         read_json(&issue_path)
     }
 
+    /// 更新 issue 状态并落盘。
+    ///
+    /// 幂等：若当前状态已是目标状态，直接返回内存记录而不重复写盘
+    /// （避免 completed 接线重复触发时反复改写 `updated_at`）。
+    pub fn update_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        status: IssueStatus,
+    ) -> Result<IssueRecord, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        let mut issue = self.get(project_id, issue_id)?;
+        if issue.status == status {
+            return Ok(issue);
+        }
+        issue.status = status;
+        issue.updated_at = Utc::now().to_rfc3339();
+        write_json(&self.issue_path(project_id, issue_id), &issue)?;
+        Ok(issue)
+    }
+
     pub fn create(&self, input: CreateProductIssueInput) -> Result<IssueRecord, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         if let Some(repo_id) = input.repo_id.as_deref() {
             validate_relative_id(repo_id)?;
         }
+        if let Some(lc_id) = input.logical_codebase_id.as_deref() {
+            validate_relative_id(lc_id)?;
+        }
         let issues_root = self.paths.project_root(&input.project_id).join("issues");
-        let existing_len = count_entries(&issues_root)?;
-        let id = next_sequential_id("issue", existing_len);
+        let id = next_sequential_id_in_directory("issue", &issues_root).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", issues_root.display()))
+        })?;
         let now = Utc::now().to_rfc3339();
         let change_id = input.change_id.unwrap_or_else(|| {
             let slug = slugify(&input.title);
@@ -98,6 +128,8 @@ impl IssueStore {
             id: id.clone(),
             project_id: input.project_id,
             repo_id: input.repo_id,
+            logical_codebase_id: input.logical_codebase_id,
+            base_branch: input.base_branch,
             title: input.title,
             description: input.description,
             change_id,
@@ -119,6 +151,8 @@ impl IssueStore {
         self.create(CreateProductIssueInput {
             project_id: input.project_id,
             repo_id: Some(input.repo_id),
+            logical_codebase_id: input.logical_codebase_id,
+            base_branch: input.base_branch,
             title: input.title,
             description: input.description,
             change_id: input.change_id,
@@ -147,20 +181,6 @@ impl IssueStore {
     }
 }
 
-fn count_entries(path: &Path) -> Result<usize, ProductStoreError> {
-    if !path.exists() {
-        return Ok(0);
-    }
-
-    fs::read_dir(path)
-        .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))?
-        .try_fold(0usize, |count, entry| {
-            entry.map(|_| count + 1).map_err(|error| {
-                ProductStoreError::Io(format!("read {} entry: {error}", path.display()))
-            })
-        })
-}
-
 fn slugify(value: &str) -> String {
     value
         .to_ascii_lowercase()
@@ -171,4 +191,161 @@ fn slugify(value: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const PROJECT_ID: &str = "project_0001";
+
+    fn setup_store() -> (TempDir, IssueStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = IssueStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        (tmp, store)
+    }
+
+    fn seed_issue(store: &IssueStore) -> IssueRecord {
+        store
+            .create(CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: None,
+                title: "issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn create_assigns_first_issue_id_in_empty_directory() {
+        let (_tmp, store) = setup_store();
+
+        assert_eq!(seed_issue(&store).id, "issue_0001");
+    }
+
+    #[test]
+    fn create_after_deleting_middle_issue_uses_id_above_existing_maximum() {
+        let (_tmp, store) = setup_store();
+        let first = seed_issue(&store);
+        let middle = seed_issue(&store);
+        let last = seed_issue(&store);
+        store.delete(PROJECT_ID, &middle.id).unwrap();
+
+        let created = seed_issue(&store);
+
+        assert_eq!(created.id, "issue_0004");
+        assert_eq!(store.get(PROJECT_ID, &first.id).unwrap().id, first.id);
+        assert_eq!(store.get(PROJECT_ID, &last.id).unwrap().id, last.id);
+    }
+
+    #[test]
+    fn create_with_non_contiguous_existing_ids_uses_id_above_maximum() {
+        let (_tmp, store) = setup_store();
+        let _first = seed_issue(&store);
+        let second = seed_issue(&store);
+        let _third = seed_issue(&store);
+        let _fourth = seed_issue(&store);
+        let fifth = seed_issue(&store);
+        store.delete(PROJECT_ID, &second.id).unwrap();
+        store.delete(PROJECT_ID, &fifth.id).unwrap();
+
+        assert_eq!(seed_issue(&store).id, "issue_0005");
+    }
+    #[test]
+    fn update_status_persists_new_status_and_is_idempotent() {
+        let (_tmp, store) = setup_store();
+        let created = seed_issue(&store);
+        assert_eq!(created.status, IssueStatus::Draft);
+
+        let updated = store
+            .update_status(PROJECT_ID, &created.id, IssueStatus::Completed)
+            .unwrap();
+        assert_eq!(updated.status, IssueStatus::Completed);
+
+        // 写后 get 读到新 status（验证真实落盘而非内存返回）。
+        let read = store.get(PROJECT_ID, &created.id).unwrap();
+        assert_eq!(read.status, IssueStatus::Completed);
+
+        // 幂等重复写：同 status 再写不报错，落盘 status 保持 Completed。
+        let again = store
+            .update_status(PROJECT_ID, &created.id, IssueStatus::Completed)
+            .unwrap();
+        assert_eq!(again.status, IssueStatus::Completed);
+        let read_again = store.get(PROJECT_ID, &created.id).unwrap();
+        assert_eq!(read_again.status, IssueStatus::Completed);
+    }
+    fn base_issue_input() -> CreateProductIssueInput {
+        CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
+            title: "issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        }
+    }
+
+    #[test]
+    fn legacy_issue_json_without_base_branch_parses_as_none() {
+        // 存量兼容（REQ-PIB-01 场景 6）：本功能之前的 issue.json 无 base_branch
+        // 字段——serde 缺省解析为 None（零迁移），读取不失败。
+        let (tmp, store) = setup_store();
+        let issue_root = tmp
+            .path()
+            .join(".aria")
+            .join("projects")
+            .join(PROJECT_ID)
+            .join("issues")
+            .join("issue_0001");
+        std::fs::create_dir_all(&issue_root).unwrap();
+        std::fs::write(
+            issue_root.join("issue.json"),
+            serde_json::json!({
+                "id": "issue_0001",
+                "project_id": PROJECT_ID,
+                "repo_id": "repository_0001",
+                "title": "legacy",
+                "description": null,
+                "change_id": "legacy-change",
+                "phase": "clarification",
+                "status": "draft",
+                "active_binding_id": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let issue = store.get(PROJECT_ID, "issue_0001").unwrap();
+        assert_eq!(issue.base_branch, None);
+    }
+
+    #[test]
+    fn update_status_keeps_base_branch_locked() {
+        // 锁定（REQ-PIB-01 场景 5）：issue 唯一修改通道 update_status 不触碰
+        // base_branch——改基线=新 issue，结构上无字段级修改路径。
+        let (_tmp, store) = setup_store();
+        let locked = store
+            .create(CreateProductIssueInput {
+                base_branch: Some("feature/x".to_string()),
+                ..base_issue_input()
+            })
+            .unwrap();
+        assert_eq!(locked.base_branch.as_deref(), Some("feature/x"));
+
+        let updated = store
+            .update_status(PROJECT_ID, &locked.id, IssueStatus::Completed)
+            .unwrap();
+        assert_eq!(updated.base_branch.as_deref(), Some("feature/x"));
+        assert_eq!(
+            store.get(PROJECT_ID, &locked.id).unwrap().base_branch,
+            Some("feature/x".to_string())
+        );
+    }
 }

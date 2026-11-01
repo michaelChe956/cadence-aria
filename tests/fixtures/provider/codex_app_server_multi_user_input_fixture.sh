@@ -8,14 +8,14 @@ fi
 
 while IFS= read -r line; do
   if [[ "$line" == *'"initialize"'* ]]; then
-    id="$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-1},\"result\":{\"userAgent\":\"cadence-aria-test\"}}"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-1}\",\"result\":{\"userAgent\":\"cadence-aria-test\"}}"
   elif [[ "$line" == *'"thread/start"'* ]]; then
-    id="$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-2},\"result\":{\"thread\":{\"id\":\"codex_multi_user_input_thread\"},\"approvalPolicy\":\"never\"}}"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-2}\",\"result\":{\"thread\":{\"id\":\"codex_multi_user_input_thread\"},\"approvalPolicy\":\"never\"}}"
   elif [[ "$line" == *'"turn/start"'* ]]; then
-    id="$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    echo "{\"jsonrpc\":\"2.0\",\"id\":${id:-3},\"result\":{\"turn\":{\"id\":\"codex_multi_user_input_turn\",\"status\":\"inProgress\"}}}"
+    id="$(printf '%s' "$line" | sed -n -e 's/.*"id":[[:space:]]*"\([0-9A-Za-z_-][0-9A-Za-z_-]*\)".*/\1/p' -e 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":\"${id:-3}\",\"result\":{\"turn\":{\"id\":\"codex_multi_user_input_turn\",\"status\":\"inProgress\"}}}"
     echo '{"jsonrpc":"2.0","id":91,"method":"item/tool/requestUserInput","params":{"threadId":"codex_multi_user_input_thread","turnId":"codex_multi_user_input_turn","itemId":"ask_multi","questions":[{"id":"startup","header":"启动","question":"启动自检策略？","options":[{"label":"每次启动都自检"},{"label":"仅失败后自检"}]},{"id":"scope","header":"范围","question":"影响范围？","options":[{"label":"仅 Story Spec"},{"label":"Story/Design/Work Item 共享链路"}]},{"id":"mcp_events","header":"事件","question":"MCP 事件输出？","options":[{"label":"输出 MCP 事件"},{"label":"仅记录日志"}]}]}}'
   elif [[ "$line" == *'"answers"'* ]]; then
     if [[ "$line" != *'"startup"'* || "$line" != *'"每次启动都自检"'* ]]; then

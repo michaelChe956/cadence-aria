@@ -12,14 +12,7 @@ async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -68,14 +61,7 @@ async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
             Some("code_review_blocked".to_string()),
         )
         .expect("block first run");
-    let resumed = store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("resume status");
+    let resumed = crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let retry_run = store
         .supersede_latest_role_run_and_create(
             &resumed,
@@ -84,6 +70,7 @@ async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
             CodingRoleRunTrigger::RetryReview,
             None,
             Some("code_review_blocked".to_string()),
+            None,
         )
         .expect("retry run");
     assert_eq!(
@@ -114,7 +101,7 @@ async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
 }
 
 #[tokio::test]
-async fn coding_code_reviewer_run_resumes_persisted_provider_session() {
+async fn coding_code_reviewer_run_records_session_without_resume() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -135,8 +122,8 @@ async fn coding_code_reviewer_run_resumes_persisted_provider_session() {
         .expect("create attempt");
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::Pi,
-        internal_reviewer: ProviderName::Pi,
+        code_reviewer: Some(ProviderName::Pi),
+        internal_reviewer: Some(ProviderName::Pi),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes {
             coder: CodingProviderPermissionMode::Supervised,
@@ -175,14 +162,7 @@ async fn coding_code_reviewer_run_resumes_persisted_provider_session() {
             ],
         )
         .expect("persist conversations");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let provider = SessionInputCapturingProvider::with_outputs(
@@ -201,10 +181,10 @@ async fn coding_code_reviewer_run_resumes_persisted_provider_session() {
     assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
     assert_eq!(inputs[0].provider_type, ProviderType::Pi);
     assert_eq!(inputs[0].timeout_secs, 10_800);
-    assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("reviewer-session-1")
-    );
+    // 契约(仅 Coder 可 resume):reviewer 每轮 fresh spawn,历史
+    // CodeReviewer 会话不进 resume 通道(窗口 id 进入 LC 全投影,
+    // 跨轮 resume 必然审计漂移)。
+    assert_eq!(inputs[0].resume_provider_session_id, None);
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");
@@ -237,8 +217,8 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
         .expect("create attempt");
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
-        code_reviewer: ProviderName::Pi,
-        internal_reviewer: ProviderName::Pi,
+        code_reviewer: Some(ProviderName::Pi),
+        internal_reviewer: Some(ProviderName::Pi),
         review_rounds: 1,
         permission_modes: CodingRolePermissionModes {
             coder: CodingProviderPermissionMode::Supervised,
@@ -261,14 +241,7 @@ async fn coding_internal_reviewer_uses_fresh_provider_session() {
             }],
         )
         .expect("persist internal reviewer conversation");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
             "project_0001",
@@ -315,14 +288,7 @@ async fn execute_coding_includes_work_item_context_in_provider_prompt() {
             ..create_input()
         })
         .expect("create attempt");
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
-        .expect("running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let captured_prompt = Arc::new(Mutex::new(None));
     let provider = PromptCapturingProvider {
         prompt: Arc::clone(&captured_prompt),

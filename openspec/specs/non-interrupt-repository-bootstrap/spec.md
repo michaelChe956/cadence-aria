@@ -4,26 +4,33 @@
 
 以无中断模式（`--no-interrupt`）执行 Cadence-skills 的四个 Claude Code 初始化命令，禁止初始化流程等待人工输入。
 ## Requirements
-### Requirement: 无中断 Claude Code 初始化命令
-系统 SHALL 使用 Claude Code 按固定顺序执行四个独立初始化命令，并为每条命令传递完整的 `--no-interrupt` token：`/pre-check --no-interrupt --upgrade 用大陆镜像`、`/rule-config --no-interrupt`、`/mcp-configuration --no-interrupt`、`/project-rules-examples --no-interrupt`。`pre_check` 命令 SHALL 附带 `--upgrade` 与 `用大陆镜像` 参数，其中 `--upgrade` 位于 `--no-interrupt` 之后、`用大陆镜像` 之前；`--upgrade` 的行为由 Cadence-skills 的 `/pre-check` 命令定义，本仓库不解释其语义。第六步 `git_finalize` 不是 Claude Code 命令，SHALL NOT 通过 Provider 执行。
+### Requirement: 无中断 Claude Code 初始化命令（REQ-BOOT-01）
+系统 SHALL 使逻辑代码库场景下四个无中断命令在聚合根执行一次（聚合模式），逐仓本地化由确定性程序完成，不逐成员仓库启动 Claude 会话；传统单仓登记保持原契约。
 
-#### Scenario: 执行预检查命令
-- **WHEN** `cadence_skills` 步骤已完成且系统开始第二步
-- **THEN** 系统 SHALL 以新的 Claude Code Provider turn、目标 Git 根作为工作目录和提示词 `/pre-check --no-interrupt --upgrade 用大陆镜像` 执行该步骤
+#### Scenario: 逻辑代码库聚合根执行一次
+- **WHEN** 逻辑代码库场景下执行聚合初始化
+- **THEN** 四个无中断命令 SHALL 在聚合根执行一次，逐仓本地化由确定性程序完成，不逐成员仓库启动 Claude 会话
 
-#### Scenario: 顺序执行其余命令
-- **WHEN** 前一个 Claude Code 初始化命令已完成
-- **THEN** 系统 SHALL 依次使用 `/rule-config --no-interrupt`、`/mcp-configuration --no-interrupt` 和 `/project-rules-examples --no-interrupt` 开始后续对应步骤，且这些命令 SHALL NOT 附带 `--upgrade`，SHALL NOT 附带 `用大陆镜像` 参数
+#### Scenario: 传统单仓登记保持不变
+- **WHEN** 非逻辑代码库的传统单仓登记
+- **THEN** 现有逐仓四命令与 git_finalize 行为保持原契约不变
 
-#### Scenario: git_finalize 不经 Provider
-- **WHEN** 四个 Claude Code 命令全部完成且 Repository 持久化成功
-- **THEN** 系统 SHALL 由协调器直接对目标仓库执行 git 操作完成 `git_finalize`，不得创建新的 Provider turn
+### Requirement: 聚合初始化的生产执行
 
-#### Scenario: 命令请求人工交互
-- **WHEN** 任一无中断 Claude Code 命令仍产生权限请求或选择请求
-- **THEN** 系统 SHALL 中止该 Provider session、将对应固定步骤标为 `failed`，并返回说明需要人工恢复的结构化错误
+聚合初始化端点创建的 operation 必须被真正执行，而非仅创建可轮询记录。
 
-#### Scenario: 最终摘要保留无中断命令
-- **WHEN** 四个 Claude Code 初始化命令全部完成
-- **THEN** 最终初始化摘要 SHALL 按实际执行顺序列出四条命令，其中 `pre_check` 条目为 `/pre-check --no-interrupt --upgrade 用大陆镜像`
+#### Scenario: 提交即执行
+- **WHEN** POST /api/projects/{pid}/logical-codebase/initializations 成功
+- **THEN** 服务端后台执行初始化流程（machine skills → 聚合预检 → provider turns → 完成），使用生产级依赖（真实 skills 准备与聚合根预检，非空实现）；operation 最终到达 Completed 或 Failed
 
+#### Scenario: 取消在步骤边界生效
+- **WHEN** 初始化执行中调用 cancel
+- **THEN** 正在执行的步骤完成后不再推进，operation 进入 Cancelled；取消触发不依赖轮询
+
+#### Scenario: 重启恢复语义
+- **WHEN** 服务重启后查询 Running 且无活跃执行租约的 operation
+- **THEN** 标记为 Failed 附 interrupted 原因；人工重触发创建新 operation（新幂等键），不复活旧记录
+
+#### Scenario: 执行租约共享
+- **WHEN** 任意 handler 查询或取消初始化
+- **THEN** 通过进程级共享的执行注册表（含取消令牌）判定活跃状态，不因 handler 实例隔离而误判中断

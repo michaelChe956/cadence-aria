@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderHealthResponse } from "../api/types";
@@ -8,7 +8,11 @@ import {
   fetchWorkspaceNodeDetail,
 } from "../api/workspace-content";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
+import { useWorkspaceSessionObservers } from "../hooks/useWorkspaceSessionObservers";
+import { CockpitShell } from "../components/cockpit/CockpitShell";
+import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { useWorkspaceWs } from "../hooks/useWorkspaceWs";
+import { MockWebSocket } from "../hooks/useWorkspaceWs.test-utils";
 import {
   emptyWorkspaceContentCache,
   workspaceContentCacheValues,
@@ -19,9 +23,11 @@ import {
   useWorkspaceStore,
 } from "../state/workspace-ws-store";
 import { useProviderAvailabilityStore } from "../state/provider-availability-store";
+import { WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY } from "../state/workspace-provider-defaults";
 import { ChatWorkspacePage } from "./ChatWorkspacePage";
 import {
   chatEntry,
+  currentMockWorkspaceWs,
   installChatWorkspacePageTestHooks,
   makeNodeDetail,
   mockWorkspaceWs,
@@ -33,12 +39,19 @@ import {
   workItemPlanOutlinePayload,
 } from "./ChatWorkspacePage.test-utils";
 
-vi.mock("../hooks/useWorkspaceWs", () => ({
+vi.mock("../hooks/useWorkspaceWs", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspaceWsModule>()),
   useWorkspaceWs: vi.fn(),
 }));
 
 vi.mock("../hooks/useUnloadGuard", () => ({
   useUnloadGuard: vi.fn(),
+}));
+
+// F-43 ③：只在本文件验证「legacy 页登记设置入口宿主」时渲染真实 CockpitShell，
+// 观察器（会走真实 HTTP 目录接口）用桩替换。
+vi.mock("../hooks/useWorkspaceSessionObservers", () => ({
+  useWorkspaceSessionObservers: vi.fn(),
 }));
 
 vi.mock("../api/workspace-content", () => ({
@@ -113,6 +126,7 @@ afterEach(() => {
 describe("ChatWorkspacePage shell and content loading", () => {
   installChatWorkspacePageTestHooks();
   beforeEach(() => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
     vi.mocked(fetchWorkspaceNodeDetail).mockResolvedValue(makeNodeDetail());
   });
 
@@ -127,7 +141,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Provider 配置" }));
 
@@ -159,7 +173,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     expect(
@@ -209,7 +223,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
 
@@ -233,6 +247,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
   });
 
   it("loads missing typed work item plan artifact versions before displaying history", async () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
     mockWorkspaceWs();
     const outlineArtifact = {
       type: "outline_candidate" as const,
@@ -302,7 +317,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
     await userEvent.selectOptions(screen.getByLabelText("Artifact phase"), "unknown");
@@ -351,7 +366,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Artifact" }));
     await waitFor(() =>
@@ -422,7 +437,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
     await userEvent.click(
       screen.getByRole("button", { name: /Execution Output/ }),
@@ -493,7 +508,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await waitFor(() => {
@@ -549,7 +564,7 @@ describe("ChatWorkspacePage shell and content loading", () => {
     });
 
     render(
-      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} />,
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
     );
 
     await waitFor(() => {
@@ -561,5 +576,360 @@ describe("ChatWorkspacePage shell and content loading", () => {
     expect(
       await screen.findByText("mcp__codegraph__codegraph_explore"),
     ).toBeInTheDocument();
+  });
+
+  // F-47 REQ-NDR-02：failed 节点此前不在水合集合内（只拉 completed+selected/active）
+  // → 刷新后 durable 里的 usage 永远读不到，token 行不显示。
+  it("hydrates a failed node detail so its token usage is reachable", async () => {
+    mockWorkspaceWs();
+    vi.mocked(fetchWorkspaceNodeDetail).mockResolvedValue(
+      makeNodeDetail({
+        node_id: "timeline_node_failed",
+        session_id: "workspace_session_0001",
+        node_type: "author_run",
+        agent_role: "author",
+        status: "failed",
+        streaming_content: "失败节点正文",
+        execution_events: [
+          {
+            event_id: "usage_author",
+            kind: "usage",
+            status: "completed",
+            title: "author token usage",
+            output: JSON.stringify({ role: "author", input_tokens: 7_597, output_tokens: 19_493 }),
+          },
+        ],
+      }),
+    );
+    useWorkspaceStore.setState({
+      sessionId: "workspace_session_0001",
+      workspaceType: "design",
+      stage: "running",
+      providers: { author: "pi", reviewer: "kimi_code" },
+      selectedNodeId: null,
+      activeNodeId: null,
+      timelineNodes: [
+        timelineNode({
+          node_id: "timeline_node_failed",
+          node_type: "author_run",
+          agent: "pi",
+          round: null,
+          title: "Author Run",
+          status: "failed",
+          completed_at: "2026-09-23T16:16:44.926Z",
+        }),
+      ],
+      nodeDetails: {},
+      chatEntries: [],
+    });
+
+    render(
+      <ChatWorkspacePage sessionId="workspace_session_0001" onBack={vi.fn()} onOpenSession={vi.fn()} />,
+    );
+
+    await waitFor(() => {
+      expect(fetchWorkspaceNodeDetail).toHaveBeenCalledWith(
+        "workspace_session_0001",
+        "timeline_node_failed",
+      );
+    });
+    expect(await screen.findByText("失败节点正文")).toBeInTheDocument();
+    expect(await screen.findByTestId("provider-stream-usage")).toHaveTextContent(
+      "Tokens 输入 7,597 · 输出 19,493",
+    );
+  });
+  // 「uses the stable typed gate command after a session snapshot arrives」随 OQ2
+  // 只读化退役：Legacy 页门卡不再装配动作面（typed 反馈编辑器随之不渲染）；
+  // stable command 语义由 cockpit-action-routing.test.ts
+  // 「reuses the live turn command id instead of regenerating one」承接。
+
+});
+
+describe("ChatWorkspacePage dual track switch", () => {
+  installChatWorkspacePageTestHooks();
+
+  function setWorkspaceType(
+    workspaceType: "story" | "design" | "work_item_plan" | "work_item",
+    sessionStatus: "open" | "confirmed" | "terminated" = "open",
+  ) {
+    useWorkspaceStore.getState().setSessionState({
+      session_id: "session_switch",
+      workspace_type: workspaceType,
+      stage: "prepare_context",
+      session_status: sessionStatus,
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+    });
+  }
+
+  function renderWorkspace(mockWs = true) {
+    if (mockWs) {
+      mockWorkspaceWs();
+    }
+    return render(
+      <ChatWorkspacePage
+        sessionId="session_switch"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+      />,
+    );
+  }
+
+  it.each(["work_item_plan", "story", "design"] as const)(
+    "defaults %s sessions to the cockpit",
+    (workspaceType) => {
+      setWorkspaceType(workspaceType);
+
+      renderWorkspace();
+
+      expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
+      expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+    },
+  );
+
+  it("keeps a known session in the legacy form when legacy is explicitly set", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item_plan");
+
+    renderWorkspace();
+
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+  });
+
+  // F-43 ③：work_item 会话默认走 legacy 形态（chat-cockpit-mode 白名单不含
+  // work_item），而 legacy 页此前不登记设置入口宿主——CockpitShell 只能落
+  // fixed 兜底浮层。契约：顶栏登记 slot，兜底浮层不再出现。
+  it("registers the cockpit settings slot in the legacy workspace top bar", () => {
+    vi.mocked(useWorkspaceSessionObservers).mockReturnValue({
+      records: [],
+      inbox: [],
+      countedInbox: [],
+      watchedSessionIds: [],
+      watchSession: vi.fn(),
+        codingAttemptForSession: () => null,
+      displayItems: [],
+      actionableCount: 0,
+      notificationCandidates: [],
+    });
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item");
+    mockWorkspaceWs();
+
+    render(
+      <CockpitShell>
+        <ChatWorkspacePage sessionId="session_switch" onBack={vi.fn()} onOpenSession={vi.fn()} />
+      </CockpitShell>,
+    );
+
+    const slot = screen.getByTestId("cockpit-settings-slot");
+    expect(slot).toContainElement(screen.getByTestId("cockpit-settings-trigger"));
+    expect(slot.closest('[data-testid="workspace-top-bar"]')).not.toBeNull();
+    expect(screen.queryByTestId("cockpit-settings-fallback")).toBeNull();
+  });
+
+  it("keeps the legacy start-generation flow usable when legacy is explicitly set", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("story");
+
+    renderWorkspace();
+
+    expect(screen.getByTestId("workspace-status-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("start-generation")).toBeInTheDocument();
+  });
+
+  // v40 复验 #2：legacy 页根与 cockpit 页同族——h-screen 会与外壳
+  // 「待处理」告警条（52px）叠加产生文档级滚动条；高度改由外壳高度链
+  // 供给（h-full）。
+  it("keeps the legacy page height shell-owned (h-full, not h-screen)", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item_plan");
+
+    renderWorkspace();
+
+    const root = screen.getByTestId("legacy-chat-workspace-page");
+    expect(root.className).toContain("h-full");
+    expect(root.className).not.toContain("h-screen");
+  });
+
+  // F-30 P2（f30-review-k3）：legacy 面终态滞留 prepare_context（长开 tab /
+  // session_state 未达窗口）时「开始生成」与 cockpit 面同款禁用+如实提示。
+  it.each([
+    ["confirmed", /会话已确认（终态）——重新生成请走修订流程或新建会话/],
+    ["terminated", /会话已终止（终态）——请新建会话/],
+  ] as const)(
+    "disables legacy start generation with an honest hint when the session is terminal (%s) but stuck in prepare_context",
+    (sessionStatus, hintPattern) => {
+      window.localStorage.setItem("aria.chat.cockpit", "legacy");
+      setWorkspaceType("work_item_plan", sessionStatus);
+
+      renderWorkspace();
+
+      expect(screen.getByTestId("start-generation")).toBeDisabled();
+      expect(
+        screen.getByTestId("start-generation-blocked-hint"),
+      ).toHaveTextContent(hintPattern);
+    },
+  );
+
+  it("keeps legacy start generation enabled for an open session in prepare_context", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "legacy");
+    setWorkspaceType("work_item_plan", "open");
+
+    renderWorkspace();
+
+    expect(screen.getByTestId("start-generation")).toBeEnabled();
+    expect(
+      screen.queryByTestId("start-generation-blocked-hint"),
+    ).toBeNull();
+  });
+
+  // REQ-PPS-02：用户默认 provider 由共享 hook 覆盖 legacy 页（此前只有 Cockpit 会补发），
+  // 走既有 provider-select 通路，锁定态会话不被覆盖。
+  describe("legacy provider defaults application", () => {
+    // 该用例写入用户默认键：无论成败都清掉，不给同文件后续用例留隐式默认。
+    afterEach(() => {
+      window.localStorage.removeItem(WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY);
+    });
+
+    it("applies the stored provider defaults through the shared hook in the legacy page", async () => {
+      window.localStorage.setItem("aria.chat.cockpit", "legacy");
+      window.localStorage.setItem(
+        WORKSPACE_PROVIDER_DEFAULTS_STORAGE_KEY,
+        JSON.stringify({
+          author: "pi",
+          reviewer: "kimi_code",
+          reviewerEnabled: true,
+        }),
+      );
+      setWorkspaceType("story");
+
+      renderWorkspace();
+      const workspaceWs = currentMockWorkspaceWs();
+
+      await waitFor(() =>
+        expect(workspaceWs.selectProvider).toHaveBeenCalledWith("author", "pi"),
+      );
+      expect(workspaceWs.selectProvider).toHaveBeenCalledWith(
+        "reviewer",
+        "kimi_code",
+      );
+      expect(useWorkspaceStore.getState().reviewerEnabled).toBe(true);
+    });
+  });
+
+  it("renders a known session in the cockpit when cockpit is explicitly set", () => {
+    window.localStorage.setItem("aria.chat.cockpit", "cockpit");
+    setWorkspaceType("story");
+
+    renderWorkspace();
+
+    expect(screen.getByTestId("cockpit-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("keeps the connection shell for a stale session type", () => {
+    setWorkspaceType("work_item_plan");
+
+    render(
+      <ChatWorkspacePage sessionId="session_story" onBack={vi.fn()} onOpenSession={vi.fn()} />,
+    );
+
+    expect(screen.getByTestId("workspace-connection-shell")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("keeps the connection shell for a session following a cockpit-form session", () => {
+    setWorkspaceType("story");
+
+    render(
+      <ChatWorkspacePage sessionId="session_next" onBack={vi.fn()} onOpenSession={vi.fn()} />,
+    );
+
+    expect(screen.getByTestId("workspace-connection-shell")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("keeps the connection shell when workspace type is missing", () => {
+    renderWorkspace();
+
+    expect(screen.getByTestId("workspace-connection-shell")).toBeInTheDocument();
+    expect(screen.queryByTestId("cockpit-page")).toBeNull();
+    expect(screen.queryByTestId("workspace-status-bar")).toBeNull();
+  });
+
+  it("surfaces the workspace error inside the connection shell", () => {
+    // S6（2026-10-10 E2E）可观测性：store 未绑定 session（如服务端 create 失败
+    // 发 Error 帧后关闭连接）时，连接壳必须透出 store.error——否则用户只见
+    // 「正在连接工作区…」永远看不到路由失败原因（TargetAmbiguous 现场）。
+    renderWorkspace();
+
+    act(() => {
+      useWorkspaceStore.setState({
+        error:
+          "workspace repository unavailable: repository_routing_ambiguous: issue_work_item_plan_0001 has multiple logical repository targets",
+      });
+    });
+
+    const shell = screen.getByTestId("workspace-connection-shell");
+    expect(shell).toHaveTextContent("正在连接工作区");
+    expect(screen.getByTestId("workspace-connection-error")).toHaveTextContent(
+      "repository_routing_ambiguous",
+    );
+  });
+
+  it("uses one websocket while unknown becomes a known story", async () => {
+    const { useWorkspaceWs: realUseWorkspaceWs } =
+      await vi.importActual<typeof WorkspaceWsModule>("../hooks/useWorkspaceWs");
+    MockWebSocket.instances = [];
+    vi.mocked(useWorkspaceWs).mockImplementation(realUseWorkspaceWs);
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    renderWorkspace(false);
+
+    expect(screen.getByTestId("workspace-connection-shell")).toBeVisible();
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    act(() => {
+      setWorkspaceType("story");
+    });
+
+    expect(screen.getByTestId("cockpit-page")).toBeVisible();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0]?.closeCodes).not.toContain(1000);
+  });
+
+  it("keeps one socket and the cockpit form when a started generation moves to running", async () => {
+    const { useWorkspaceWs: realUseWorkspaceWs } =
+      await vi.importActual<typeof WorkspaceWsModule>("../hooks/useWorkspaceWs");
+    MockWebSocket.instances = [];
+    vi.mocked(useWorkspaceWs).mockImplementation(realUseWorkspaceWs);
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    setWorkspaceType("design");
+    renderWorkspace(false);
+
+    expect(screen.getByTestId("cockpit-page")).toBeVisible();
+    act(() => {
+      useWorkspaceStore.setState({ stage: "running", providerStatus: "running" });
+    });
+
+    expect(screen.getByTestId("cockpit-page")).toBeVisible();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0]?.closeCodes).not.toContain(1000);
   });
 });

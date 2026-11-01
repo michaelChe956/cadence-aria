@@ -1,0 +1,96 @@
+{
+  "type": "artifact_update",
+  "version": 7,
+  "plan_projection": {
+    "id": "plan_projection_bundle_507a0eacb4e3b764a17d461b",
+    "plan_revision_id": "plan_revision_507a0eacb4e3b764a17d461b",
+    "dependency_graph_revision_id": "dependency_graph_revision_507a0eacb4e3b764a17d461b",
+    "work_item_projection_bundle_refs": [
+      "work_item_projection_bundle_7f0d2acbab51432039200d4f"
+    ],
+    "human_group_projection": {
+      "plan_id": "issue_work_item_plan_0001",
+      "goal": "由已验证 PlanCandidateIr 确定性投影",
+      "split_reason": "由 canonical handoff schema 投影",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "title": "最小 Hello API 后端服务",
+          "goal": "WHEN naruto H5 需要联调冒烟用的最小后端问候接口 THE SYSTEM SHALL 按 CT-001 提供仅用 node:http 实现的 GET /api/hello 服务并通过唯一 node --test 完成验证。",
+          "depends_on": [],
+          "provides": [
+            "CT-001"
+          ],
+          "scope_summary": {
+            "owned_scopes": [
+              "server.js",
+              "test/hello.test.js"
+            ],
+            "forbidden_scopes": [
+              "除 server.js 与 test/hello.test.js 外的所有仓库路径"
+            ]
+          }
+        }
+      ],
+      "contract_flow": [],
+      "risks": [],
+      "source_refs": [
+        "design_spec_0001",
+        "story_spec_0001"
+      ],
+      "normative": false,
+      "used_by_provider": false
+    },
+    "coder_group_context": {
+      "plan_id": "issue_work_item_plan_0001",
+      "ordered_logical_work_item_ids": [
+        "WI-001"
+      ],
+      "dependency_edges": [],
+      "group_write_scopes": {
+        "WI-001": {
+          "exclusive_scopes": [
+            "server.js",
+            "test/hello.test.js"
+          ],
+          "forbidden_scopes": [
+            "除 server.js 与 test/hello.test.js 外的所有仓库路径"
+          ]
+        }
+      }
+    },
+    "reviewer_group_matrix": {
+      "plan_id": "issue_work_item_plan_0001",
+      "work_items": [
+        {
+          "logical_work_item_id": "WI-001",
+          "criterion_refs": [
+            "AC-001"
+          ],
+          "input_contract_refs": [],
+          "output_contract_refs": [
+            "CT-001"
+          ]
+        }
+      ],
+      "dependency_edges": [],
+      "design_traceability_refs": [
+        {
+          "source_type": "story_spec",
+          "source_id": "story_spec_0001",
+          "requirement_id": "REQ-001"
+        },
+        {
+          "source_type": "story_spec",
+          "source_id": "story_spec_0001",
+          "requirement_id": "REQ-002"
+        }
+      ]
+    },
+    "human_group_projection_hash": "9478c62c5406b57f78ae2d9463086b6d4e5bdd95167b2930ad376f4086d5d174",
+    "coder_group_context_hash": "e595d1224c411b274d30f79339f00d016cd48212348c1e2535433cedda546f95",
+    "reviewer_group_matrix_hash": "abc40fef30fa5a41ed59248b9ac4c118b4123e72db2e386a837eabaad1426534",
+    "compiler_version": "work-item-projection-v1",
+    "created_at": "2026-09-07T16:52:27.330321771+00:00"
+  }
+}

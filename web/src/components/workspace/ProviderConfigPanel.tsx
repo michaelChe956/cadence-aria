@@ -6,7 +6,7 @@ import type {
 } from "../../api/types";
 import {
   getProviderOptions,
-  type ProviderOption,
+  providerOptionsForValue,
 } from "../../state/provider-options";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 
@@ -272,11 +272,4 @@ function providerValue(
   fallback: WorkspaceProviderName,
 ) {
   return value ?? fallback;
-}
-
-function providerOptionsForValue(
-  options: ProviderOption[],
-  current: WorkspaceProviderName,
-) {
-  return options.filter((option) => option.visible || option.value === current);
 }

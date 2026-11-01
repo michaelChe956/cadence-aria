@@ -7,13 +7,16 @@ interface UseWorkspaceWsReconnectOptions {
 }
 
 const INITIAL_DELAY_MS = 1000;
+// 后台 tab 仍需重连(L2-L4 卡壳提醒正是为后台场景设计),仅降低频率。
+const HIDDEN_RECONNECT_BASE_MS = 60000;
 const MAX_DELAY_MS = 16000;
 const JITTER_PCT = 0.2;
 
 function nextDelay(previousDelay: number): number {
   const baseDelay = Math.min(previousDelay * 2, MAX_DELAY_MS);
   const jitter = baseDelay * JITTER_PCT * (Math.random() * 2 - 1);
-  return Math.max(INITIAL_DELAY_MS, Math.round(baseDelay + jitter));
+  const floor = document.hidden ? HIDDEN_RECONNECT_BASE_MS : INITIAL_DELAY_MS;
+  return Math.max(floor, Math.round(baseDelay + jitter));
 }
 
 export function useWorkspaceWsReconnect({
@@ -37,7 +40,7 @@ export function useWorkspaceWsReconnect({
   }, []);
 
   const shouldReconnect = useCallback(() => {
-    return enabled && closeCode !== 1000 && !document.hidden;
+    return enabled && closeCode !== 1000;
   }, [closeCode, enabled]);
 
   const scheduleReconnect = useCallback(() => {
@@ -72,6 +75,11 @@ export function useWorkspaceWsReconnect({
       return;
     }
 
+    if (document.hidden) {
+      // 后台断线抬到 60s 基准且不压低既有值;前台不重锚——退避跨 enabled
+      // 翻转持久推进(新周期归锚由连接成功路径的 reset 负责)。
+      delayRef.current = Math.max(HIDDEN_RECONNECT_BASE_MS, delayRef.current);
+    }
     scheduleReconnect();
     return () => clearReconnectTimeout();
   }, [clearReconnectTimeout, closeCode, enabled, scheduleReconnect]);
@@ -79,8 +87,7 @@ export function useWorkspaceWsReconnect({
   useEffect(() => {
     function handleVisibilityChange() {
       if (document.hidden) {
-        clearReconnectTimeout();
-        setIsReconnecting(false);
+        // 已挂起的重连不加速不打断,下次 tick 自然按后台间隔。
         return;
       }
       delayRef.current = INITIAL_DELAY_MS;
@@ -91,7 +98,7 @@ export function useWorkspaceWsReconnect({
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [clearReconnectTimeout]);
+  }, []);
 
   const reset = useCallback(() => {
     clearReconnectTimeout();

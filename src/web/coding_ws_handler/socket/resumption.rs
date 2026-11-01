@@ -1,0 +1,406 @@
+use tokio::sync::mpsc;
+
+use crate::product::advance_store::AdvanceStore;
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::CodingAttemptStore;
+use crate::product::coding_models::{
+    CodingAdmissionKind, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+};
+use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
+use crate::product::git_workspace_service::GitWorkspaceService;
+use crate::web::coding_ws_handler::CodingWsOutMessage;
+use crate::web::state::{CodingAttemptRunKey, WebAppState};
+
+use crate::web::coding_ws_handler::spawn_coding_runner;
+
+/// attach 时半启动 attempt（3b 第 2 死点）runner 恢复的结果。
+#[derive(Debug)]
+pub(crate) enum ResumedAttemptRunner {
+    /// 无需动作：attempt 非半启动态、注册表已有 runner 或恢复预约占用中
+    /// （幂等负向：纯快照，行为与既有 attach 完全一致）。
+    NotNeeded,
+    /// runner 已按 StartCoding 分支的既有 spawn 路径重启。
+    Restarted {
+        command_tx: mpsc::Sender<CodingRunnerCommand>,
+    },
+    /// 重启失败（重读失败/物化失败/sc_advance 未 durable-ready/spawn 被拒），
+    /// attempt 已转 AwaitingManualRecovery；reason 为稳定码，detail 携带细节。
+    ManualRecovery { reason: String, detail: String },
+}
+
+/// attach 快照后调用：Running + WorktreePrepare/Coding 且注册表无 runner 的
+/// 半启动 attempt（旧 runner 随旧 WS 断开已退出）自动重启 runner，避免
+/// 「服务端无 runner + 客户端在 Coding 态无法重发 StartCoding」的互等死寂。
+///
+/// 触发判定先于任何锁执行，保证普通 attach（含 Hello/Ping 快路径）零开销；
+/// 命中后与 `prepare_coding_message` 相同的串行化次序（attempt 锁 → 变更
+/// 租约）下重读 attempt 并复查触发条件，防止并发 attach / 消息处理交叠双启
+/// （双启最终由 `insert_cancellable` 拒绝兜底并转入人工恢复）。
+///
+/// 重启失败一律 fail-closed 转 AwaitingManualRecovery（B 兜底），事件可见，
+/// 不发静默快照让人等死。
+pub(crate) async fn ensure_runner_for_resumed_attempt(
+    state: &WebAppState,
+    coding_store: &CodingAttemptStore,
+    event_tx: &mpsc::Sender<CodingWsOutMessage>,
+    attempt_key: &CodingAttemptRunKey,
+    attempt: &CodingExecutionAttempt,
+) -> ResumedAttemptRunner {
+    if !resumed_attempt_needs_runner(&state.coding_runs, attempt_key, attempt) {
+        return ResumedAttemptRunner::NotNeeded;
+    }
+    // 锁绑定存活到函数末尾（`_` 前缀仅消除未读警告，不提前释放）。
+    let _attempt_guard = state.coding_runs.lock_attempt(attempt_key).await;
+    let _mutation_lease = state.coding_runs.lock_attempt_mutation(attempt_key).await;
+    let current =
+        match coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id) {
+            Ok(current) => current,
+            Err(error) => {
+                return fail_over_to_manual_recovery(
+                    coding_store,
+                    attempt,
+                    "runner_restart_attempt_reload_failed",
+                    &error.to_string(),
+                );
+            }
+        };
+    if !resumed_attempt_needs_runner(&state.coding_runs, attempt_key, &current) {
+        return ResumedAttemptRunner::NotNeeded;
+    }
+    if let Some((reason, detail)) = sc_advance_restart_blocked(state, &current) {
+        return fail_over_to_manual_recovery(coding_store, &current, &reason, &detail);
+    }
+    let engine = CodingWorkspaceEngine::new(
+        coding_store.clone(),
+        GitWorkspaceService::new(),
+        event_tx.clone(),
+    );
+    let prepared = match engine.prepare_resumed_attempt_for_runner(&current).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return fail_over_to_manual_recovery(
+                coding_store,
+                &current,
+                "runner_restart_materialization_failed",
+                &error.to_string(),
+            );
+        }
+    };
+    match spawn_coding_runner(
+        state.clone(),
+        coding_store.clone(),
+        event_tx.clone(),
+        prepared,
+    ) {
+        Some(command_tx) => ResumedAttemptRunner::Restarted { command_tx },
+        None => fail_over_to_manual_recovery(
+            coding_store,
+            &current,
+            "runner_restart_spawn_refused",
+            "coding run registry refused the registration (retired/reserved/exclusive)",
+        ),
+    }
+}
+
+/// 半启动判定：Running + stage∈{WorktreePrepare, Coding, ReviewRequest} +
+/// 注册表既无 runner 也无恢复预约（活跑中重连 / 恢复进行中均不动作）。
+/// P2 Task 5 把 WS StartCoding 迁到 typed 首启服务后，原直启路径隐式覆盖的
+/// Running+ReviewRequest 复活缺口由本谓词承接（review 已完成的 durable 事实
+/// 下恢复 runner 只续推进、不重跑 review）；Running+PrepareContext 为过渡/
+/// 异常态，保持人工分诊不自动复活。
+pub(crate) fn resumed_attempt_needs_runner(
+    coding_runs: &crate::web::state::CodingRunRegistry,
+    attempt_key: &CodingAttemptRunKey,
+    attempt: &CodingExecutionAttempt,
+) -> bool {
+    attempt.status == CodingAttemptStatus::Running
+        && matches!(
+            attempt.stage,
+            CodingExecutionStage::WorktreePrepare
+                | CodingExecutionStage::Coding
+                | CodingExecutionStage::ReviewRequest
+        )
+        && !coding_runs.attempt_is_reserved_or_running(attempt_key)
+}
+
+/// sc_advance 半启动重启的 durable-ready 门（StartCoding 分支同款语义）：
+/// 未绑定 group、advance 记录缺失/未 Ready/attempt 不匹配、读取失败均
+/// fail-closed 拒绝重启。
+fn sc_advance_restart_blocked(
+    state: &WebAppState,
+    attempt: &CodingExecutionAttempt,
+) -> Option<(String, String)> {
+    if attempt.admission_kind != CodingAdmissionKind::ScAdvance {
+        return None;
+    }
+    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        return Some((
+            "sc_advance_restart_binding_missing".to_string(),
+            "sc_advance attempt has no work item group binding".to_string(),
+        ));
+    };
+    let advance_store = AdvanceStore::new(ProductAppPaths::new(state.workspace_root.join(".aria")));
+    match advance_store.advance_is_ready_for_attempt(
+        &attempt.project_id,
+        &attempt.issue_id,
+        plan_id,
+        &attempt.id,
+    ) {
+        Ok(true) => None,
+        Ok(false) => Some((
+            "sc_advance_restart_not_durable_ready".to_string(),
+            format!("advance record for plan {plan_id} is not durable-ready for this attempt"),
+        )),
+        Err(error) => Some((
+            "sc_advance_restart_readiness_check_failed".to_string(),
+            error.to_string(),
+        )),
+    }
+}
+
+/// B 兜底：重启失败转 AwaitingManualRecovery（既有状态，socket.rs:852 起
+/// 的白名单随之生效——仅 AbortAttempt 可用），持久化稳定 reason 码；
+/// 转换本身失败时保留可见事件（fail-visible，不吞没）。
+fn fail_over_to_manual_recovery(
+    coding_store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    reason: &str,
+    detail: &str,
+) -> ResumedAttemptRunner {
+    if let Err(error) = coding_store.transition_to_awaiting_manual_recovery(&attempt.id, reason) {
+        tracing::warn!(
+            attempt_id = attempt.id.as_str(),
+            reason,
+            %error,
+            "semi-started runner restart manual-recovery transition failed"
+        );
+    } else if let Err(diagnostic_error) =
+        coding_store.append_manual_recovery_diagnostic(attempt, reason, detail)
+    {
+        // 死因可考（F-16/§3#5）：转换成功但诊断尾帧落盘失败——warn 不吞，
+        // 状态转换与 reason 已 durable，错误详情仅缺 chat-entry 面。
+        tracing::warn!(
+            attempt_id = attempt.id.as_str(),
+            reason,
+            error = %diagnostic_error,
+            "semi-started runner restart manual-recovery diagnostic entry failed"
+        );
+    }
+    ResumedAttemptRunner::ManualRecovery {
+        reason: reason.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::state::CodingRunRegistry;
+
+    fn resumed_attempt(
+        status: CodingAttemptStatus,
+        stage: CodingExecutionStage,
+    ) -> CodingExecutionAttempt {
+        CodingExecutionAttempt {
+            id: "coding_attempt_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            attempt_no: 1,
+            scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
+            status,
+            version: 1,
+            manual_recovery_reason: None,
+            admission_ticket_consumed_at: None,
+            admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
+            stage,
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: crate::web::workspace_ws_types::ProviderConfigSnapshot {
+                author: crate::product::models::ProviderName::Fake,
+                reviewer: Some(crate::product::models::ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+            provider_conversations: Vec::new(),
+            rework_count: 0,
+            max_auto_rework: 2,
+            work_item_group_id: None,
+            current_work_item_id: None,
+            active_unit_id: None,
+            head_commit: None,
+            pushed_remote: None,
+            review_request_id: None,
+            target_snapshot: None,
+            created_at: "2026-09-03T00:00:00Z".to_string(),
+            updated_at: "2026-09-03T00:00:00Z".to_string(),
+            completed_at: None,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            start_claim: None,
+        }
+    }
+
+    fn attempt_key() -> CodingAttemptRunKey {
+        CodingAttemptRunKey::new("project_0001", "issue_0001", "coding_attempt_0001")
+    }
+
+    #[test]
+    fn running_coding_and_worktree_prepare_without_runner_need_recovery() {
+        let registry = CodingRunRegistry::default();
+        assert!(resumed_attempt_needs_runner(
+            &registry,
+            &attempt_key(),
+            &resumed_attempt(CodingAttemptStatus::Running, CodingExecutionStage::Coding)
+        ));
+        assert!(resumed_attempt_needs_runner(
+            &registry,
+            &attempt_key(),
+            &resumed_attempt(
+                CodingAttemptStatus::Running,
+                CodingExecutionStage::WorktreePrepare
+            )
+        ));
+    }
+
+    #[test]
+    fn other_statuses_stages_or_live_runners_stay_snapshot_only() {
+        let registry = CodingRunRegistry::default();
+        let key = attempt_key();
+        // 非半启动 stage / 非执行态 status：不动作。
+        assert!(!resumed_attempt_needs_runner(
+            &registry,
+            &key,
+            &resumed_attempt(
+                CodingAttemptStatus::Running,
+                CodingExecutionStage::PrepareContext
+            )
+        ));
+        assert!(!resumed_attempt_needs_runner(
+            &registry,
+            &key,
+            &resumed_attempt(
+                CodingAttemptStatus::Running,
+                CodingExecutionStage::CodeReview
+            )
+        ));
+        assert!(!resumed_attempt_needs_runner(
+            &registry,
+            &key,
+            &resumed_attempt(CodingAttemptStatus::Blocked, CodingExecutionStage::Coding)
+        ));
+        // 未启动（Created）：恢复/重放路径不隐式启动 runner（REQ-ADV-05 句②锚）。
+        assert!(!resumed_attempt_needs_runner(
+            &registry,
+            &key,
+            &resumed_attempt(
+                CodingAttemptStatus::Created,
+                CodingExecutionStage::PrepareContext
+            )
+        ));
+        assert!(!resumed_attempt_needs_runner(
+            &registry,
+            &key,
+            &resumed_attempt(
+                CodingAttemptStatus::AwaitingManualRecovery,
+                CodingExecutionStage::Coding
+            )
+        ));
+        // 活 runner 或恢复预约占用：幂等负向，不动作。
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(1);
+        registry
+            .insert_cancellable(&key, command_tx)
+            .expect("live runner registration");
+        assert!(!resumed_attempt_needs_runner(
+            &registry,
+            &key,
+            &resumed_attempt(CodingAttemptStatus::Running, CodingExecutionStage::Coding)
+        ));
+    }
+
+    #[test]
+    fn sc_advance_gate_only_applies_to_sc_admission_with_binding() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        // LegacyGroup：不受 advance 门约束。
+        let legacy = resumed_attempt(CodingAttemptStatus::Running, CodingExecutionStage::Coding);
+        assert!(sc_advance_restart_blocked(&state, &legacy).is_none());
+        // ScAdvance 但无 group 绑定：fail-closed。
+        let mut unbound = legacy.clone();
+        unbound.admission_kind = CodingAdmissionKind::ScAdvance;
+        unbound.work_item_group_id = None;
+        let (reason, _detail) =
+            sc_advance_restart_blocked(&state, &unbound).expect("unbound sc_advance blocked");
+        assert_eq!(reason, "sc_advance_restart_binding_missing");
+        // ScAdvance + 绑定但无 durable 记录：fail-closed。
+        let mut unready = unbound.clone();
+        unready.work_item_group_id = Some("work_item_plan_0001".to_string());
+        let (reason, _detail) =
+            sc_advance_restart_blocked(&state, &unready).expect("unready sc_advance blocked");
+        assert_eq!(reason, "sc_advance_restart_not_durable_ready");
+    }
+
+    /// WP5 恢复矩阵（REQ-MTG-05 断连重连格）：多 target 分流的 Ready record 以
+    /// `target_attempts` 集绑定时，attach 重启门对集内每个 target-attempt 放行
+    /// （per-attempt 判定=精确匹配或集合包含）；集外 attempt 仍 fail-closed。
+    #[test]
+    fn sc_advance_restart_gate_accepts_split_target_attempt_set_membership() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let state = WebAppState::new(
+            root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(root.path().to_path_buf()),
+        );
+        let advance_store = crate::product::advance_store::AdvanceStore::new(
+            crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria")),
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        advance_store
+            .put_record(&crate::product::advance_store::AdvanceRecord {
+                id: "advance_record_0001".to_string(),
+                command_id: "command_split_attach".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                plan_revision_id: "work_item_revision_0001".to_string(),
+                attempt_id: Some("coding_attempt_split_api".to_string()),
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+                target_attempts: vec![
+                    crate::product::advance_store::AdvanceTargetAttemptBinding {
+                        target_repository_id: "logical_repo_api".to_string(),
+                        attempt_id: "coding_attempt_split_api".to_string(),
+                    },
+                    crate::product::advance_store::AdvanceTargetAttemptBinding {
+                        target_repository_id: "logical_repo_web".to_string(),
+                        attempt_id: "coding_attempt_split_web".to_string(),
+                    },
+                ],
+                status: crate::product::advance_store::AdvanceStatus::Ready,
+                workspace_entry: Some("workspace://coding_attempt_split_api".to_string()),
+                error: None,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+            .expect("seed split ready record");
+
+        let mut split_api =
+            resumed_attempt(CodingAttemptStatus::Running, CodingExecutionStage::Coding);
+        split_api.admission_kind = CodingAdmissionKind::ScAdvance;
+        split_api.work_item_group_id = Some("work_item_plan_0001".to_string());
+        split_api.id = "coding_attempt_split_api".to_string();
+        let mut split_web = split_api.clone();
+        split_web.id = "coding_attempt_split_web".to_string();
+
+        assert!(sc_advance_restart_blocked(&state, &split_api).is_none());
+        assert!(sc_advance_restart_blocked(&state, &split_web).is_none());
+
+        let mut foreign = split_api.clone();
+        foreign.id = "coding_attempt_foreign".to_string();
+        let (reason, _) = sc_advance_restart_blocked(&state, &foreign)
+            .expect("attempt outside the split set stays blocked");
+        assert_eq!(reason, "sc_advance_restart_not_durable_ready");
+    }
+}

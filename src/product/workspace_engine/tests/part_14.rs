@@ -38,7 +38,6 @@ fn work_item_plan_outline_revise_json() -> &'static str {
             "severity": "must_fix",
             "message": "Outline 写入范围重叠",
             "evidence": "outline_a 与 outline_b 共享写入范围",
-            "impact": "并行实现会产生冲突",
             "required_action": "拆分 exclusive_write_scopes"
         }]
     }"#
@@ -48,14 +47,14 @@ fn work_item_plan_outline_revise_json() -> &'static str {
 async fn work_item_plan_outline_review_repair_preserves_scope_and_business_payload() {
     let review_json = work_item_plan_outline_revise_json();
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(review_json),
+        missing_json_nonce_output(review_json),
         valid_structured_output(review_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_success").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -94,7 +93,7 @@ async fn work_item_plan_outline_review_repair_preserves_scope_and_business_paylo
         .structured_output_diagnostic
         .as_ref()
         .expect("repair success diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(diagnostic.repair_attempted);
     assert!(diagnostic.repair_succeeded);
     assert_eq!(
@@ -122,7 +121,7 @@ async fn work_item_plan_outline_repair_provider_failure_safely_degrades() {
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_terminal").await;
 
     engine
-        .drive_review_session(Arc::new(provider), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider), empty_provider_commands())
         .await;
 
     assert_eq!(engine.session.stage, WorkspaceStage::HumanConfirm);
@@ -136,7 +135,7 @@ async fn work_item_plan_outline_repair_provider_failure_safely_degrades() {
         .structured_output_diagnostic
         .as_ref()
         .expect("work item plan repair diagnostic");
-    assert_eq!(diagnostic.code, "missing_end_nonce");
+    assert_eq!(diagnostic.code, "missing_json_nonce");
     assert!(diagnostic.repair_attempted);
     assert!(!diagnostic.repair_succeeded);
     assert_eq!(
@@ -161,14 +160,14 @@ async fn work_item_plan_outline_review_repair_rejects_payload_change() {
         "findings": []
     }"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(work_item_plan_outline_revise_json()),
+        missing_json_nonce_output(work_item_plan_outline_revise_json()),
         valid_structured_output(changed_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_changed").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -207,14 +206,14 @@ async fn work_item_plan_outline_review_repair_keeps_active_scope_schema_strict()
         "findings": []
     }"#;
     let provider = QueuedReviewProvider::new(vec![
-        missing_end_nonce_output(mismatched_scope_json),
+        missing_json_nonce_output(mismatched_scope_json),
         valid_structured_output(mismatched_scope_json),
     ]);
     let (_tmp, mut engine, mut rx, review_node_id) =
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_scope_mismatch").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);

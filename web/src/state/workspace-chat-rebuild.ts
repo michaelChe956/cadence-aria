@@ -2,8 +2,11 @@ import type {
   ChatEntry,
   ChatEntryRole,
   ChoiceResponsePayload,
+  GateEntryMetadata,
 } from "./chat-entries";
+import { actionFacadeForFlowKind } from "./cockpit-action-routing";
 import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
+import { selectGateProjection } from "./workspace-cockpit-projection";
 import { chatRoleForTimelineNode } from "./workspace-ws-store-helpers";
 import { structuredOutputDiagnosticFromUnknown } from "./structured-output-diagnostic";
 import { trustedReviewComments } from "./workspace-review-trust";
@@ -33,6 +36,12 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
 
     const detail = state.nodeDetails[node.node_id];
     if (!detail) {
+      // F-39：detail 整块缺失（快照未内联 + REST 水合缺位）时，completed reviewer_run
+      // 仍须成卡——否则对话流里只剩门卡的压缩文案。
+      const verdictEntry = reviewVerdictEntryForNode(node, null);
+      if (verdictEntry) {
+        entries.push(verdictEntry);
+      }
       continue;
     }
 
@@ -73,6 +82,11 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     );
     if (!hasPersistedDetailContent && summary) {
       entries.push(...providerSummaryEntries(node, summary, role));
+      // F-39：快照只发 summaries 的会话走这条早退分支——review 结论卡必须同样落地。
+      const verdictEntry = reviewVerdictEntryForNode(node, detail);
+      if (verdictEntry) {
+        entries.push(verdictEntry);
+      }
       continue;
     }
 
@@ -118,6 +132,8 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     ]);
     if (streamContent) {
       const provider = providerNameForNode(node, detail);
+      // 历史回放：从节点 timeline 的 usage 事件恢复 token 用量（与实时链路对齐）
+      const replayUsage = lastUsageEvent(detail.execution_events);
       entries.push({
         id: chatEntryId(node.node_id, "stream"),
         type: "provider_stream",
@@ -125,7 +141,10 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
         content: streamContent,
         timestamp: detail.started_at || node.started_at,
         node_id: node.node_id,
-        metadata: providerEntryMetadata(node, provider),
+        metadata: {
+          ...providerEntryMetadata(node, provider),
+          ...(replayUsage ? { usage: replayUsage } : {}),
+        },
       });
     }
 
@@ -252,33 +271,9 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
       });
     }
 
-    if (detail.verdict) {
-      const verdictSummary = getStringField(detail.verdict, "summary") ?? "审核结论";
-      const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
-      const verdictComments = getStringField(detail.verdict, "comments") ?? "";
-      const verdictFindings = getArrayField(detail.verdict, "findings");
-      const reviewGate = getStringField(detail.verdict, "review_gate");
-      const structuredOutputDiagnostic = structuredOutputDiagnosticFromUnknown(
-        detail.verdict.structured_output_diagnostic,
-      );
-      entries.push({
-        id: chatEntryId(node.node_id, "review-verdict"),
-        type: "review_verdict",
-        role: "reviewer",
-        content: verdictSummary,
-        timestamp: detail.ended_at ?? detail.started_at,
-        node_id: node.node_id,
-        metadata: {
-          verdict: verdictValue,
-          comments: verdictComments,
-          summary: verdictSummary,
-          findings: verdictFindings,
-          ...(reviewGate ? { review_gate: reviewGate } : {}),
-          ...(structuredOutputDiagnostic
-            ? { structured_output_diagnostic: structuredOutputDiagnostic }
-            : {}),
-        },
-      });
+    const verdictEntry = reviewVerdictEntryForNode(node, detail);
+    if (verdictEntry) {
+      entries.push(verdictEntry);
     }
   }
 
@@ -295,6 +290,73 @@ interface PreparedProviderPrompt {
   nodeTitle: string;
   provider: string | null;
   content: string;
+}
+
+/**
+ * F-39（review 结论卡常显）：review 结论卡此前只在「节点 detail 带 verdict」时生成。
+ * story/design 的 WS 快照只发 timeline_node_summaries（session_state.rs 的
+ * should_inline_work_item_plan_detail 只内联 plan 系 reviewer detail），REST 水合缺位时
+ * 对话流里只剩门卡的压缩文案。completed reviewer_run 一律成卡：
+ * - 有 detail.verdict → 完整版（round 与 live 路径的 review_complete 对齐）；
+ * - 无可用 detail/verdict → 以 node.summary + node.round 兜底（同 id，不叠双）。
+ * 兜底卡不捏造 verdict/findings——没有事实来源就没有那些字段。
+ */
+function reviewVerdictEntryForNode(
+  node: TimelineNode,
+  detail: TimelineNodeDetail | null,
+): ChatEntry | null {
+  if (detail?.verdict) {
+    const verdictSummary = getStringField(detail.verdict, "summary") ?? "审核结论";
+    const verdictValue = getStringField(detail.verdict, "verdict") ?? "revise";
+    const verdictComments = getStringField(detail.verdict, "comments") ?? "";
+    const verdictFindings = getArrayField(detail.verdict, "findings");
+    const reviewGate = getStringField(detail.verdict, "review_gate");
+    const structuredOutputDiagnostic = structuredOutputDiagnosticFromUnknown(
+      detail.verdict.structured_output_diagnostic,
+    );
+    return {
+      id: chatEntryId(node.node_id, "review-verdict"),
+      type: "review_verdict",
+      role: "reviewer",
+      content: verdictSummary,
+      timestamp: detail.ended_at ?? detail.started_at,
+      node_id: node.node_id,
+      metadata: {
+        verdict: verdictValue,
+        comments: verdictComments,
+        summary: verdictSummary,
+        round: node.round ?? null,
+        findings: verdictFindings,
+        ...(reviewGate ? { review_gate: reviewGate } : {}),
+        ...(structuredOutputDiagnostic
+          ? { structured_output_diagnostic: structuredOutputDiagnostic }
+          : {}),
+      },
+    };
+  }
+
+  // 兜底仅限「已完成的一轮评审」：未完成没有结论，非 reviewer 节点没有结论语义。
+  // 后端 complete_review 恒以 verdict.summary 收口节点（review/routing.rs），故
+  // node.summary 就是该轮结论原文；summary 缺失时不出空卡（不猜、不造）。
+  if (chatRoleForTimelineNode(node) !== "reviewer" || node.status !== "completed") {
+    return null;
+  }
+  const summary = node.summary?.trim();
+  if (!summary) {
+    return null;
+  }
+  return {
+    id: chatEntryId(node.node_id, "review-verdict"),
+    type: "review_verdict",
+    role: "reviewer",
+    content: summary,
+    timestamp: node.completed_at ?? node.started_at,
+    node_id: node.node_id,
+    metadata: {
+      summary,
+      round: node.round ?? null,
+    },
+  };
 }
 
 function preparedWorkspaceContextEntries(
@@ -519,8 +581,42 @@ export function buildGatePromptEntry(
   state: WorkspaceWsState,
   entries = state.chatEntries,
 ): ChatEntry | null {
-  if (state.stage !== "human_confirm") {
+  // H5：存在条件从「stage === "human_confirm"」放宽到「存在 store gate 投影」——
+  // legacy human_confirm 与 SC typed turn（human_gate_turn_open）两形态共用同一投影入口。
+  const projection = selectGateProjection(state);
+  if (!projection) {
     return null;
+  }
+  // REQ-PCG-01/02（plan-compile-gate-visibility）→ C2 改写登记（REQ-HGC-02
+  // 场景 1/F-54）：批次确认门现在获得**专属发布确认卡**（标题「确认发布整组
+  // Work Items」+发布含义 why，动作面 confirmBatch+terminate）——仍不得铸成
+  // typed 决策卡（无 feedback 编辑器/三命令面，action_facade=legacy），REQ-RET-02/
+  // REQ-CG-02 的命令边界不变。compile recovery 门维持无卡（动作面在收件箱）。
+  if (projection.kind === "compile_recovery") {
+    return null;
+  }
+  if (projection.kind === "batch_confirm") {
+    const batchNode = state.timelineNodes.find(
+      (node) =>
+        node.node_type === "work_item_batch_confirm" && node.status === "active",
+    );
+    return {
+      id: chatEntryId(projection.key, "gate-prompt"),
+      type: "gate_prompt",
+      role: "system",
+      content: "Final Compile 已通过，等待发布确认",
+      timestamp: batchNode?.started_at ?? new Date().toISOString(),
+      node_id: batchNode?.node_id,
+      metadata: {
+        gate_identity: projection.key,
+        action_facade: "legacy",
+        gate_kind: "batch_confirm",
+        gate_status: projection.closed ?? projection.status,
+        action_block_reason: projection.action_block_reason,
+        terminate_block_reason: projection.terminate_block_reason,
+      },
+      ...(projection.closed ? { resolved: true, resolution: projection.closed } : {}),
+    };
   }
 
   const gatePromptNode =
@@ -531,17 +627,54 @@ export function buildGatePromptEntry(
   const comments = trustedReviewComments(
     latestReview?.metadata as Record<string, unknown> | undefined,
   );
-  const findings = Array.isArray(latestReview?.metadata?.findings)
+  const reviewFindings = Array.isArray(latestReview?.metadata?.findings)
     ? latestReview.metadata.findings
     : [];
+  const findings = (reviewFindings.length > 0 ? reviewFindings : projection.findings).map(
+    withFindingViewAliases,
+  );
   const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const contextBlockerGate = isWorkItemPlanContextBlockerGate(state);
-  const metadata = {
+  const metadata: GateEntryMetadata = {
     ...(summary ? { summary } : {}),
     ...(verdict ? { verdict } : {}),
     ...(comments ? { comments } : {}),
     ...(findings.length > 0 ? { findings } : {}),
     ...(reviewGate ? { review_gate: reviewGate } : {}),
+    ...(projection.turn_id ? { turn_id: projection.turn_id } : {}),
+    ...(projection.turn?.command_id ? { command_id: projection.turn.command_id } : {}),
+    gate_identity: projection.key,
+    action_facade: actionFacadeForFlowKind(projection.flow_kind),
+    ...(projection.trigger ? { gate_trigger: projection.trigger } : {}),
+    ...(projection.remaining_budget !== null
+      ? { remaining_budget: projection.remaining_budget }
+      : {}),
+    ...(projection.turn?.failure_class ? { failure_class: projection.turn.failure_class } : {}),
+    ...(projection.turn?.failure_message
+      ? { failure_message: projection.turn.failure_message }
+      : {}),
+    ...(projection.turn?.inlineError ? { inline_error: projection.turn.inlineError } : {}),
+    // REQ-WSC-14（owner 2026-10-30 反馈「用户不知道如何往下继续了」）：终态
+    // validation_reject 的可操作事实——门卡据此说清「发生了什么 + 下一步」。
+    ...(projection.turn?.rejection
+      ? {
+          rejectedFeedback: projection.turn.rejection.rejected_feedback,
+          rejectionReason: projection.turn.rejection.rejection_reason,
+          rejectionNextActions: projection.turn.rejection.rejection_next_actions,
+          rejectionDiagnostics: projection.turn.rejection.rejection_diagnostics,
+        }
+      : {}),
+    // REQ-WSC-18（owner 2026-10-31 意见 1/2）：当前候选编译失败事实——门卡
+    // 据此呈现「候选无效需重新生成」红框（醒目、不折叠）并把「确认当前
+    // 版本」判为不可用（fail-closed）；与 author 教学重驱同源的 rewrite
+    // 要点/owner 提醒一并投影。缺席=候选可编译，零行为变化。
+    ...(projection.candidate_compile_failure
+      ? { candidate_compile_failure: projection.candidate_compile_failure }
+      : {}),
+    gate_status: projection.closed ?? projection.status,
+    action_block_reason: projection.action_block_reason,
+    // F-21：终止专属阻断持久化（null=允许终止）——门卡离场兜底分支读取。
+    terminate_block_reason: projection.terminate_block_reason,
     ...(contextBlockerGate
       ? {
           gate_kind: WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND,
@@ -551,13 +684,39 @@ export function buildGatePromptEntry(
   };
   const fallbackContent = verdict === "needs_human" ? "需要人工确认" : "等待人工确认";
   return {
-    id: chatEntryId(gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
+    // legacy 路径 id 与改动前逐字相同（最新 human_confirm 节点 node_id）；
+    // typed 门以 turn_id 为 id，同 turn_id 重放 upsert 同一张门卡。
+    id: chatEntryId(projection.turn_id ?? gatePromptNode?.node_id ?? "human_confirm", "gate-prompt"),
     type: "gate_prompt",
     role: "system",
     content: workItemPlanContextBlockerGatePromptContent(state) ?? fallbackContent,
-    timestamp: gatePromptNode?.completed_at ?? gatePromptNode?.started_at ?? new Date().toISOString(),
+    timestamp:
+      gatePromptNode?.completed_at ??
+      gatePromptNode?.started_at ??
+      (projection.opened_at || new Date().toISOString()),
     node_id: gatePromptNode?.node_id,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+    ...(projection.closed ? { resolved: true, resolution: projection.closed } : {}),
+  };
+}
+
+/**
+ * REQ-WSC-12/13：findings 的 UI 读取契约——wire 原样字段（snake_case）之外，
+ * 追加 camelCase 别名（`findingKey`/`targetWorkItemId`；`disposition` 两处同名），
+ * 让门卡与「排除此项」用同一身份，不需要前端自己算 key。
+ */
+function withFindingViewAliases(finding: unknown): Record<string, unknown> {
+  if (!finding || typeof finding !== "object") {
+    return {};
+  }
+  const record = finding as Record<string, unknown>;
+  const findingKey = typeof record.finding_key === "string" ? record.finding_key : undefined;
+  const targetWorkItemId =
+    typeof record.target_work_item_id === "string" ? record.target_work_item_id : undefined;
+  return {
+    ...record,
+    ...(findingKey ? { findingKey } : {}),
+    ...(targetWorkItemId ? { targetWorkItemId } : {}),
   };
 }
 
@@ -798,4 +957,27 @@ function getArrayField(value: unknown, key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+// 从节点 execution_events 中提取最后一个 usage 事件的负载（历史回放用）。
+// 与实时链路的 parseUsagePayload 字段契约一致；无 usage 事件或负载非法时返回 null。
+function lastUsageEvent(events: Array<{ kind?: string; output?: string | null }>): unknown | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.kind !== "usage") {
+      continue;
+    }
+    if (typeof event.output !== "string" || event.output.length === 0) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(event.output);
+      if (parsed && typeof parsed === "object" && ("input_tokens" in parsed || "output_tokens" in parsed)) {
+        return parsed;
+      }
+    } catch {
+      // 非法 JSON 忽略，继续向前找
+    }
+  }
+  return null;
 }

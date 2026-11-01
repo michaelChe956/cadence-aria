@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use chrono::{DateTime, FixedOffset};
 
-use crate::product::id::next_sequential_id;
+use crate::product::id::next_sequential_id_from_existing;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id};
 use crate::product::models::{HumanPresentationRevision, WorkItemPlanLineage};
 
@@ -70,7 +70,12 @@ impl WorkItemRevisionStore {
                     &plan.issue_id,
                     &plan.id,
                 ))?;
-                value.id = next_sequential_id("human_presentation_revision", existing.len());
+                value.id = next_sequential_id_from_existing(
+                    "human_presentation_revision",
+                    existing
+                        .iter()
+                        .filter_map(|path| path.file_stem()?.to_str()),
+                );
             }
             self.put_human_presentation_revision(plan, &value)?;
             Ok(value.clone())

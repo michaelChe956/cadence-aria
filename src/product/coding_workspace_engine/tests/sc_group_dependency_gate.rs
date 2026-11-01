@@ -1,0 +1,644 @@
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateGroupCodingAttemptInput};
+    use crate::product::coding_models::{
+        CodingAdmissionKind, CodingExecutionAttempt, CodingExecutionStage,
+        CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
+    };
+    use crate::product::coding_workspace_engine::group_dependency_gate::GroupUnitSelectionOutcome as SelectionOutcome;
+    use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, group_dependency_gate};
+    use crate::product::git_workspace_service::GitWorkspaceService;
+    use crate::product::models::{HandoffRevision, ProviderName};
+    use crate::product::work_item_revision_store::WorkItemRevisionStore;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+    use tokio::sync::mpsc;
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        store: CodingAttemptStore,
+        engine: CodingWorkspaceEngine,
+        attempt: CodingExecutionAttempt,
+    }
+
+    fn fixture() -> Fixture {
+        let root = tempfile::tempdir().expect("root");
+        let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+        let attempt = store
+            .create_group_attempt(CreateGroupCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                current_work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: Some(ProviderName::Fake),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            })
+            .expect("group attempt");
+        super::super::seed_group_attempt_fixture(&store, &attempt, true, true);
+        let mut attempt = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("persisted attempt");
+        attempt.admission_kind = CodingAdmissionKind::ScAdvance;
+        store
+            .write_coding_attempt_for_test(&attempt)
+            .expect("SC admission kind");
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let engine =
+            CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+        Fixture {
+            _root: root,
+            store,
+            engine,
+            attempt,
+        }
+    }
+
+    fn unit(
+        fixture: &Fixture,
+        logical_work_item_id: &str,
+    ) -> crate::product::coding_models::CodingExecutionUnit {
+        fixture
+            .store
+            .list_coding_units(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("units")
+            .into_iter()
+            .find(|unit| unit.logical_work_item_id == logical_work_item_id)
+            .expect("unit")
+    }
+
+    fn completed_run(fixture: &Fixture, logical_work_item_id: &str, completion_commit: &str) {
+        let unit = unit(fixture, logical_work_item_id);
+        let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &unit.plan_id,
+            )
+            .expect("lineage");
+        let revision = revision_store
+            .get_work_item_revision(
+                &lineage,
+                &unit.logical_work_item_id,
+                &unit.work_item_revision_id,
+            )
+            .expect("work item revision");
+        let bundle = revision_store
+            .get_work_item_projection_bundle(&lineage, &revision.work_item_projection_bundle_id)
+            .expect("projection bundle");
+        let run = CodingUnitRun {
+            id: format!("{}_run_0001", unit.id),
+            unit_id: unit.id.clone(),
+            execution_no: 1,
+            work_item_revision_id: unit.work_item_revision_id.clone(),
+            resolved_handoff_revision_ids: Vec::new(),
+            canonical_contract_hash: bundle.canonical_contract_hash,
+            projection_bundle_id: bundle.id,
+            projection_compiler_version: bundle.compiler_version,
+            coder_provider_renderer_version: "test-renderer-v1".to_string(),
+            reviewer_provider_renderer_version: "test-renderer-v1".to_string(),
+            internal_reviewer_provider_renderer_version: None,
+            coder_projection_hash: bundle.coder_projection_hash,
+            reviewer_projection_hash: bundle.reviewer_projection_hash,
+            coder_execution_context_hash: None,
+            reviewer_execution_context_hash: None,
+            internal_reviewer_execution_context_hash: None,
+            status: CodingUnitRunStatus::Completed,
+            unit_rework_count: 0,
+            verification_retry_count: 0,
+            operational_retry_count: 0,
+            plan_repair_count: 0,
+            start_commit: Some("start_commit_0001".to_string()),
+            completion_commit: Some(completion_commit.to_string()),
+            created_at: "2026-08-31T00:00:00Z".to_string(),
+            updated_at: "2026-08-31T00:00:00Z".to_string(),
+        };
+        fixture
+            .store
+            .create_coding_unit_run(&fixture.attempt, &run)
+            .expect("completed run");
+        fixture
+            .store
+            .update_coding_unit_completion_commit(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                Some(completion_commit.to_string()),
+            )
+            .expect("completion commit");
+        let handoff = HandoffRevision {
+            id: format!("handoff_revision_{}", run.id),
+            logical_work_item_id: unit.logical_work_item_id.clone(),
+            work_item_revision_id: unit.work_item_revision_id.clone(),
+            coding_unit_run_id: run.id,
+            provided_contracts: Vec::new(),
+            provided_capabilities: BTreeMap::new(),
+            contract_hash: "contract_hash_0001".to_string(),
+            commit_sha: completion_commit.to_string(),
+            created_at: "2026-08-31T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_handoff_revision(&lineage, &handoff)
+            .expect("handoff");
+        fixture
+            .store
+            .update_coding_unit_latest_handoff_revision_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                Some(handoff.id),
+            )
+            .expect("handoff pointer");
+        fixture
+            .store
+            .update_coding_unit_status(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                CodingExecutionUnitStatus::Completed,
+                Some("completed fixture dependency".to_string()),
+            )
+            .expect("completed unit");
+    }
+
+    fn complete_unit_without_handoff(fixture: &Fixture, logical_work_item_id: &str) {
+        let unit = unit(fixture, logical_work_item_id);
+        fixture
+            .store
+            .update_coding_unit_status(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit.id,
+                CodingExecutionUnitStatus::Completed,
+                Some("completed unrelated fixture unit".to_string()),
+            )
+            .expect("completed unrelated unit");
+    }
+
+    fn provider_ledger_count(fixture: &Fixture) -> usize {
+        fixture
+            .store
+            .list_role_runs(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("provider ledger")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn sc_group_dependency_waiting_clears_active_unit_and_writes_no_provider_ledger() {
+        let fixture = fixture();
+        complete_unit_without_handoff(&fixture, "work_item_0003");
+        // 空断言修复(S2 切片C):seed 停在 PrepareContext 时下方 stage 断言
+        // 恒真。生产完成链进入 advance 时 stage 已在 ReviewRequest
+        // (ContinueAfterApprove/完成链前置),先落生产形状再断言。
+        let seeded = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt before stage seed");
+        assert_eq!(
+            seeded.stage,
+            CodingExecutionStage::PrepareContext,
+            "fixture seed starts at PrepareContext (vacuous-assertion premise)"
+        );
+        fixture
+            .store
+            .update_attempt_stage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                CodingExecutionStage::ReviewRequest,
+            )
+            .expect("seed completion-chain entry stage");
+        let current = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt");
+        assert!(current.active_unit_id.is_some());
+        let before = provider_ledger_count(&fixture);
+        let updated = fixture
+            .engine
+            .advance_to_next_group_unit(&current)
+            .await
+            .expect("waiting advance");
+
+        assert!(updated.active_unit_id.is_none());
+        // Waiting park 不推进 stage:保持完成链进入时的 ReviewRequest(执行
+        // 权威由 active_unit_id 表达;stage 推进属 Ready/Complete 分支)。
+        assert_eq!(updated.stage, CodingExecutionStage::ReviewRequest);
+        // This fallback deliberately pins caller-view continuity, not byte-for-byte preservation
+        // of the prior durable pointer: completion-side store synchronization may clear it first.
+        assert_eq!(
+            updated.current_work_item_id.as_deref(),
+            Some("work_item_0001")
+        );
+        assert!(
+            fixture
+                .store
+                .list_coding_unit_runs(&updated, &unit(&fixture, "work_item_0002").id)
+                .expect("consumer runs")
+                .is_empty()
+        );
+        let snapshot = fixture
+            .store
+            .get_group_dependency_gate_snapshot(&updated)
+            .expect("gate snapshot")
+            .expect("waiting snapshot");
+        assert_eq!(
+            snapshot.status,
+            crate::product::coding_models::GroupDependencyGateStatus::Waiting
+        );
+        assert_eq!(snapshot.pending_unit_ids.len(), 1);
+        assert_eq!(provider_ledger_count(&fixture), before);
+    }
+
+    #[test]
+    fn sc_group_dependency_gate_blocks_consumer_until_dependency_completed_and_handoff_published() {
+        let fixture = fixture();
+        complete_unit_without_handoff(&fixture, "work_item_0003");
+        let waiting = fixture
+            .engine
+            .select_next_sc_group_unit(&fixture.attempt)
+            .expect("selector");
+        assert!(matches!(waiting, SelectionOutcome::Waiting { .. }));
+
+        completed_run(&fixture, "work_item_0001", "commit_0001");
+        let ready = fixture
+            .engine
+            .select_next_sc_group_unit(&fixture.attempt)
+            .expect("selector");
+        let SelectionOutcome::Ready { unit_id, .. } = ready else {
+            panic!("consumer should be ready after dependency handoff");
+        };
+        assert_eq!(unit_id, unit(&fixture, "work_item_0002").id);
+    }
+
+    #[test]
+    fn sc_group_dependency_gate_waits_when_all_pending_units_are_unready() {
+        let cases = [
+            ("not_completed", false, false),
+            ("handoff_not_published", true, false),
+            ("handoff_pointer_missing", true, true),
+        ];
+        for (name, complete, clear_handoff) in cases {
+            let fixture = fixture();
+            complete_unit_without_handoff(&fixture, "work_item_0003");
+            if complete && clear_handoff {
+                completed_run(&fixture, "work_item_0001", "commit_0001");
+                let dependency = unit(&fixture, "work_item_0001");
+                fixture
+                    .store
+                    .update_coding_unit_latest_handoff_revision_id(
+                        &fixture.attempt.project_id,
+                        &fixture.attempt.issue_id,
+                        &fixture.attempt.id,
+                        &dependency.id,
+                        Some("missing_handoff_revision".to_string()),
+                    )
+                    .expect("missing handoff pointer");
+            } else if complete {
+                complete_unit_without_handoff(&fixture, "work_item_0001");
+            }
+            let outcome = fixture
+                .engine
+                .select_next_sc_group_unit(&fixture.attempt)
+                .unwrap_or_else(|error| panic!("{name}: selector failed: {error}"));
+            let SelectionOutcome::Waiting {
+                pending_unit_ids,
+                message,
+                ..
+            } = outcome
+            else {
+                panic!("{name}: expected waiting outcome");
+            };
+            assert!(pending_unit_ids.contains(&unit(&fixture, "work_item_0002").id));
+            assert!(!message.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn sc_group_dependency_gate_fails_closed_on_mismatched_handoff_without_start_or_provider_ledger()
+     {
+        let fixture = fixture();
+        complete_unit_without_handoff(&fixture, "work_item_0003");
+        completed_run(&fixture, "work_item_0001", "commit_0001");
+        let dependency = unit(&fixture, "work_item_0001");
+        let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &dependency.plan_id,
+            )
+            .expect("lineage");
+        let mismatched_handoff = HandoffRevision {
+            id: "handoff_mismatch_0001".to_string(),
+            logical_work_item_id: dependency.logical_work_item_id.clone(),
+            work_item_revision_id: "work_item_revision_0002".to_string(),
+            coding_unit_run_id: format!("{}_run_0001", dependency.id),
+            provided_contracts: Vec::new(),
+            provided_capabilities: BTreeMap::new(),
+            contract_hash: "contract_hash_0001".to_string(),
+            commit_sha: "commit_0001".to_string(),
+            created_at: "2026-08-31T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_handoff_revision(&lineage, &mismatched_handoff)
+            .expect("mismatched handoff");
+        fixture
+            .store
+            .update_coding_unit_latest_handoff_revision_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &dependency.id,
+                Some(mismatched_handoff.id.clone()),
+            )
+            .expect("mismatched pointer");
+        let current = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt");
+        let before = provider_ledger_count(&fixture);
+
+        let updated = fixture
+            .engine
+            .advance_to_next_group_unit(&current)
+            .await
+            .expect("mismatch advance");
+
+        assert!(updated.active_unit_id.is_none());
+        assert_ne!(updated.stage, CodingExecutionStage::ReviewRequest);
+        // FailedClosed keeps the caller-facing pointer continuous for the same reason as Waiting.
+        assert_eq!(
+            updated.current_work_item_id.as_deref(),
+            Some("work_item_0001")
+        );
+        assert!(
+            fixture
+                .store
+                .list_coding_unit_runs(&updated, &unit(&fixture, "work_item_0002").id)
+                .expect("consumer runs")
+                .is_empty()
+        );
+        let snapshot = fixture
+            .store
+            .get_group_dependency_gate_snapshot(&updated)
+            .expect("gate snapshot")
+            .expect("failed-closed snapshot");
+        assert_eq!(
+            snapshot.status,
+            crate::product::coding_models::GroupDependencyGateStatus::FailedClosed
+        );
+        assert_eq!(
+            snapshot.reason_code.as_deref(),
+            Some("SC_GROUP_HANDOFF_PLAN_BINDING_MISMATCH")
+        );
+        assert_eq!(
+            snapshot.handoff_id.as_deref(),
+            Some("handoff_mismatch_0001")
+        );
+        assert_eq!(
+            snapshot.dependency_work_item_revision_id.as_deref(),
+            Some("work_item_revision_0001")
+        );
+        assert_eq!(
+            snapshot.handoff_work_item_revision_id.as_deref(),
+            Some("work_item_revision_0002")
+        );
+        assert_eq!(provider_ledger_count(&fixture), before);
+        assert!(
+            fixture
+                .store
+                .list_coding_unit_runs(&updated, &unit(&fixture, "work_item_0002").id)
+                .expect("consumer runs")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sc_group_dependency_gate_fails_closed_on_handoff_binding_mismatch() {
+        let fixture = fixture();
+        complete_unit_without_handoff(&fixture, "work_item_0003");
+        completed_run(&fixture, "work_item_0001", "commit_0001");
+        let dependency = unit(&fixture, "work_item_0001");
+        let outcome = fixture
+            .engine
+            .select_next_sc_group_unit(&fixture.attempt)
+            .expect("selector");
+        assert!(matches!(outcome, SelectionOutcome::Ready { .. }));
+        fixture
+            .store
+            .update_coding_unit_latest_handoff_revision_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &dependency.id,
+                Some("missing_handoff_revision".to_string()),
+            )
+            .expect("mismatched pointer");
+        let outcome = fixture
+            .engine
+            .select_next_sc_group_unit(&fixture.attempt)
+            .expect("selector");
+        let SelectionOutcome::Waiting { message, .. } = outcome else {
+            panic!("missing handoff should wait");
+        };
+        assert!(message.contains("missing_handoff_revision"));
+    }
+
+    #[test]
+    fn sc_group_dependency_gate_fails_closed_on_unknown_self_or_cycle() {
+        let (_, cycle) = group_dependency_gate::topological_layers(&BTreeMap::from([
+            ("A".to_string(), ["B".to_string()].into_iter().collect()),
+            ("B".to_string(), ["A".to_string()].into_iter().collect()),
+        ]));
+        assert!(cycle);
+        assert!(matches!(
+            group_dependency_gate::failed_unknown("unknown", "bad"),
+            SelectionOutcome::FailedClosed { reason_code, .. }
+                if reason_code == "SC_GROUP_DEPENDENCY_UNKNOWN"
+        ));
+        assert!(matches!(
+            group_dependency_gate::failed_self("self"),
+            SelectionOutcome::FailedClosed { reason_code, .. }
+                if reason_code == "SC_GROUP_DEPENDENCY_SELF"
+        ));
+    }
+
+    #[test]
+    fn sc_group_dependency_gate_returns_complete_when_no_pending_units_remain() {
+        let fixture = fixture();
+        for logical_id in ["work_item_0001", "work_item_0002", "work_item_0003"] {
+            let unit = unit(&fixture, logical_id);
+            fixture
+                .store
+                .update_coding_unit_status(
+                    &fixture.attempt.project_id,
+                    &fixture.attempt.issue_id,
+                    &fixture.attempt.id,
+                    &unit.id,
+                    CodingExecutionUnitStatus::Completed,
+                    Some("complete fixture".to_string()),
+                )
+                .expect("completed unit");
+        }
+        assert!(matches!(
+            fixture
+                .engine
+                .select_next_sc_group_unit(&fixture.attempt)
+                .expect("selector"),
+            SelectionOutcome::Complete
+        ));
+    }
+
+    #[test]
+    fn plan_coding_n1_external_dependency_waits_without_unknown_or_ready() {
+        // N1 依赖同源（REQ-CS-03/08）：A1→B1→A2 全图中本 attempt 只是 target A
+        // 桶 {A1,A2}，A2 依赖桶外 B1（合法跨仓依赖）。运行 selector 对合法桶外
+        // 上游必须 Waiting（携带依赖证据），不得误报 SC_GROUP_DEPENDENCY_UNKNOWN，
+        // 也不得把「查不到本桶上游」当 Ready（完整跨 attempt handoff 解析属 S1）。
+        let fixture = fixture();
+        // 前置态 seed（campaign 纪律：只改 unit/依赖图 JSON 事实，Waiting 终态
+        // 由真实 select_next_sc_group_unit 产生）：全图边 A1→B1→A2；本桶物化
+        // {A1,A2}（A2 声明对 B1 的依赖），B1 留在桶外（删除其 unit）。
+        let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+            )
+            .expect("lineage");
+        let plan_revision = revision_store
+            .get_plan_revision(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+                "plan_revision_0001",
+            )
+            .expect("plan revision");
+        let mut graph = revision_store
+            .get_dependency_graph_revision(&lineage, &plan_revision.dependency_graph_revision_id)
+            .expect("dependency graph");
+        graph.edges = vec![
+            crate::product::work_item_contract::DependencyContractEdge {
+                from: "work_item_0001".to_string(),
+                to: "work_item_0002".to_string(),
+                required_contracts: Vec::new(),
+            },
+            crate::product::work_item_contract::DependencyContractEdge {
+                from: "work_item_0002".to_string(),
+                to: "work_item_0003".to_string(),
+                required_contracts: Vec::new(),
+            },
+        ];
+        let plan_root = fixture
+            .store
+            .paths()
+            .issue_root(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+            .join("work-item-revisions")
+            .join("work_item_plan_0001");
+        std::fs::write(
+            plan_root
+                .join("dependency-graph-revisions")
+                .join(format!("{}.json", graph.id)),
+            serde_json::to_vec(&graph).expect("graph json"),
+        )
+        .expect("rewrite full-graph edges");
+        let mut projection = revision_store
+            .get_plan_projection_bundle(&lineage, &plan_revision.plan_projection_bundle_id)
+            .expect("plan projection bundle");
+        projection.coder_group_context.dependency_edges = graph.edges.clone();
+        projection.reviewer_group_matrix.dependency_edges = graph.edges.clone();
+        std::fs::write(
+            plan_root
+                .join("plan-projection-bundles")
+                .join(format!("{}.json", projection.id)),
+            serde_json::to_vec(&projection).expect("projection json"),
+        )
+        .expect("keep projection edges consistent");
+
+        let unit_b = unit(&fixture, "work_item_0002");
+        std::fs::remove_file(fixture.store.coding_unit_path(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+            &unit_b.id,
+        ))
+        .expect("B1 stays out of the target A bucket");
+        let mut unit_a2 = unit(&fixture, "work_item_0003");
+        unit_a2.dependency_logical_work_item_ids = vec!["work_item_0002".to_string()];
+        std::fs::write(
+            fixture.store.coding_unit_path(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &unit_a2.id,
+            ),
+            serde_json::to_vec(&unit_a2).expect("unit json"),
+        )
+        .expect("A2 keeps its external depends declaration");
+
+        let outcome = fixture
+            .engine
+            .select_next_sc_group_unit(&fixture.attempt)
+            .expect("selector");
+        let SelectionOutcome::Waiting {
+            pending_unit_ids,
+            reason_code,
+            message,
+            audit,
+        } = outcome
+        else {
+            panic!("external legal dependency must wait without unknown or ready");
+        };
+        assert_eq!(pending_unit_ids, vec![unit_a2.id]);
+        assert_eq!(reason_code, "SC_GROUP_DEPENDENCY_HANDOFF_PENDING");
+        assert!(
+            message.contains("work_item_0002"),
+            "waiting message names the external dependency: {message}"
+        );
+        let audit = audit.expect("waiting audit carries dependency evidence");
+        assert_eq!(audit.dependency_unit_id, None);
+        assert_eq!(
+            audit.dependency_work_item_revision_id.as_deref(),
+            Some("work_item_revision_0002")
+        );
+        assert_eq!(audit.handoff_id, None);
+    }
+}

@@ -1,12 +1,13 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type {
   ProviderHealthResponse,
   RepositoryInitializationOperationSnapshot,
 } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { cascadeDeleteConfirmationFetch } from "./IssueLifecycleWorkbench.test-data";
 import {
   defaultLaunchTitle,
   IssueLifecycleWorkbench,
@@ -162,6 +163,32 @@ function repositoryOperationFetch({
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+    if (
+      requestUrl === "/api/projects/project_0001/codebases" &&
+      init?.method !== "POST"
+    ) {
+      if (completed) {
+        return new Response(
+          JSON.stringify({
+            codebases: [
+              {
+                id: repository.repository_id,
+                name: repository.name,
+                kind: "single_repo",
+                repository_id: repository.repository_id,
+                logical_codebase_id: null,
+                member_count: null,
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ codebases: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     return baseFetch(input, init);
   });
 }
@@ -242,6 +269,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await vi.runAllTimersAsync();
     });
     fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续添加单仓库" }));
     const dialog = screen.getByRole("dialog", { name: "添加代码库" });
     fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
       target: { value: "New Repo" },
@@ -249,7 +277,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     fireEvent.change(within(dialog).getByLabelText("本地路径"), {
       target: { value: "/tmp/new-repo" },
     });
-    fireEvent.submit(dialog);
+    fireEvent.submit(within(dialog).getByLabelText("代码库名称").closest("form")!);
     await flushAsyncWork();
 
     expect(screen.getByText("还没有代码库")).toBeInTheDocument();
@@ -322,6 +350,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await vi.runAllTimersAsync();
     });
     fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续添加单仓库" }));
     const dialog = screen.getByRole("dialog", { name: "添加代码库" });
     fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
       target: { value: "New Repo" },
@@ -329,7 +358,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     fireEvent.change(within(dialog).getByLabelText("本地路径"), {
       target: { value: "/tmp/new-repo" },
     });
-    fireEvent.submit(dialog);
+    fireEvent.submit(within(dialog).getByLabelText("代码库名称").closest("form")!);
     await flushAsyncWork();
     expect(
       fetchMock.mock.calls.filter(
@@ -362,8 +391,9 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     render(<IssueLifecycleWorkbench />);
 
+    // Task 7：队列改为 IssueQueue，行选择按钮名为「选择 Issue <标题>」。
     expect(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     ).toBeInTheDocument();
 
     await user.click(
@@ -386,7 +416,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     );
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "登录会话过期" }),
+        screen.queryByRole("button", { name: "选择 Issue 登录会话过期" }),
       ).not.toBeInTheDocument(),
     );
 
@@ -403,13 +433,16 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     const fetchMock = lifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "登录会话过期" }),
+      await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
+    // Task 6：单阶段面板——每个阶段的删除入口在对应阶段页内。
+    await user.click(screen.getByTestId("stage-tab-story"));
     await user.click(
       within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
         "button",
@@ -426,6 +459,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       ).not.toHaveTextContent("会话过期提示"),
     );
 
+    await user.click(screen.getByTestId("stage-tab-design"));
     await user.click(
       within(
         screen.getByRole("region", { name: "Design Spec 内容" }),
@@ -441,12 +475,22 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       ).not.toHaveTextContent("前端提示设计"),
     );
 
+    await user.click(screen.getByTestId("stage-tab-work_item"));
     await user.click(
       within(screen.getByRole("region", { name: "Work Item 内容" })).getByRole(
         "button",
-        { name: /删除 Work Item Group/u },
+        { name: "Work Item Group" },
       ),
     );
+    await user.click(
+      within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+        name: "删除计划及工作项",
+      }),
+    );
+    // D2.3 机械迁移：group drawer 旧无条件确认移除——确认语义由服务端三分类
+    // 权威给出（本夹具 200=Draft 语义，confirm 0 次；确认流见
+    // cascade_d2_3_single_confirmation）。
+    expect(confirmSpy).toHaveBeenCalledTimes(0);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
       expect.objectContaining({ method: "DELETE" }),
@@ -456,6 +500,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
         screen.getByRole("region", { name: "Work Item 内容" }),
       ).not.toHaveTextContent("Work Item Group"),
     );
+    confirmSpy.mockRestore();
   });
 
   it("requires repository when creating issue", async () => {
@@ -476,6 +521,145 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     );
 
     expect(within(dialog).getByText("请选择代码库")).toBeInTheDocument();
+  });
+
+  it("keeps a durably created issue searchable while the list index is stale", async () => {
+    const baseFetch = lifecycleFetch();
+    const createdIssue = {
+      issue_id: "issue_0277",
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title: "P1 补丁批",
+      description: "索引延迟期间仍应可见",
+      change_id: "p1-patch",
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-09-17T10:00:00Z",
+      updated_at: "2026-09-17T10:00:00Z",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/projects/project_0001/issues" && init?.method === "POST") {
+        return jsonResponseValue(createdIssue);
+      }
+      if (url === "/api/issues/issue_0277/lifecycle?project_id=project_0001") {
+        return jsonResponseValue({
+          issue: createdIssue,
+          story_specs: [], design_specs: [], work_item_plans: [], work_items: [],
+          work_item_repository_groups: [], workspace_sessions: [], coding_attempts: [],
+        });
+      }
+      return baseFetch(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+    await user.click(await screen.findByRole("button", { name: "新建 Issue" }));
+    const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
+    await user.type(within(dialog).getByLabelText("Issue 标题"), "P1 补丁批");
+    await user.selectOptions(within(dialog).getByLabelText("代码库"), "repo:repository_0001");
+    await user.click(within(dialog).getByRole("button", { name: "创建 Issue" }));
+
+    expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+    const filter = screen.getByRole("textbox", { name: "过滤 Issues" });
+    await user.type(filter, "0277");
+    expect(screen.getByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+  });
+
+  it("keeps a durably created issue visible across later stale refreshes", async () => {
+    const baseFetch = lifecycleFetch();
+    const createdIssue = {
+      issue_id: "issue_0277",
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title: "P1 补丁批",
+      description: "索引延迟期间仍应可见",
+      change_id: "p1-patch",
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-09-17T10:00:00Z",
+      updated_at: "2026-09-17T10:00:00Z",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/projects/project_0001/issues" && init?.method === "POST") {
+        return jsonResponseValue(createdIssue);
+      }
+      if (url === "/api/issues/issue_0277/lifecycle?project_id=project_0001") {
+        return jsonResponseValue({
+          issue: createdIssue,
+          story_specs: [], design_specs: [], work_item_plans: [], work_items: [],
+          work_item_repository_groups: [], workspace_sessions: [], coding_attempts: [],
+        });
+      }
+      return baseFetch(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+    await user.click(await screen.findByRole("button", { name: "新建 Issue" }));
+    const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
+    await user.type(within(dialog).getByLabelText("Issue 标题"), "P1 补丁批");
+    await user.selectOptions(within(dialog).getByLabelText("代码库"), "repo:repository_0001");
+    await user.click(within(dialog).getByRole("button", { name: "创建 Issue" }));
+
+    expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
+  });
+
+  it("preserves the service issue order when no created issue remains pending", async () => {
+    const olderIssue = {
+      issue_id: "issue_0001",
+      project_id: "project_0001",
+      repo_id: "repository_0001",
+      workspace_id: null,
+      task_id: null,
+      session_id: null,
+      title: "服务端第一项",
+      description: "描述",
+      change_id: "first",
+      phase: "clarification",
+      status: "draft",
+      active_binding_id: null,
+      artifacts: [],
+      created_at: "2026-09-16T10:00:00Z",
+      updated_at: "2026-09-16T10:00:00Z",
+    };
+    const newerIssue = {
+      ...olderIssue,
+      issue_id: "issue_0002",
+      title: "服务端第二项",
+      change_id: "second",
+      created_at: "2026-09-17T10:00:00Z",
+      updated_at: "2026-09-17T10:00:00Z",
+    };
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        issuesByProject: { project_0001: [olderIssue, newerIssue] },
+      }),
+    );
+
+    render(<IssueLifecycleWorkbench />);
+
+    const rows = await screen.findAllByTestId("issue-queue-row");
+    expect(rows.map((row) => row.getAttribute("data-issue-id"))).toEqual([
+      "issue_0001",
+      "issue_0002",
+    ]);
   });
 
   it("shows an alert for invalid lifecycle responses", async () => {
@@ -528,13 +712,13 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     secondProjects.resolve(jsonResponseValue(projectsBody()));
     expect(
-      await screen.findByRole("button", { name: "最新 Issue" }),
+      await screen.findByRole("button", { name: "选择 Issue 最新 Issue" }),
     ).toBeInTheDocument();
 
     firstProjects.resolve(jsonResponseValue(projectsBody()));
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(
-      screen.queryByRole("button", { name: "旧 Issue" }),
+      screen.queryByRole("button", { name: "选择 Issue 旧 Issue" }),
     ).not.toBeInTheDocument();
   });
 
@@ -545,16 +729,286 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     render(<IssueLifecycleWorkbench />);
 
     await user.click(
-      await screen.findByRole("button", { name: "重复 ID Issue" }),
+      await screen.findByRole("button", { name: "选择 Issue 重复 ID Issue" }),
     );
 
+    // Task 7：Issue 焦点高亮载体为 IssueQueueRow（aria-current），
+    // 契约不变——同名 id 的派生卡片不得被标记为选中。
     expect(
-      screen.getByRole("button", { name: "重复 ID Issue" }),
-    ).toHaveAttribute("aria-pressed", "true");
+      screen
+        .getAllByTestId("issue-queue-row")
+        .find((row) => row.getAttribute("data-issue-id") === "shared_id"),
+    ).toHaveAttribute("aria-current", "true");
+    // Task 6：Story 卡片在 Story 阶段页内。
+    await user.click(screen.getByTestId("stage-tab-story"));
     expect(
       screen.getByRole("button", { name: "重复 ID Story" }),
     ).toHaveAttribute("aria-pressed", "false");
   });
+
+  it("cascade_d2_3_single_confirmation", async () => {
+    // 级联删除 D2.3（REQ-DEL-04/05）：Draft 零弹窗；required 409 恰一次确认、
+    // 同意后第二 delete 带 confirmed=true；取消只发第一非破坏请求、无刷新/
+    // 退场；旧未知 reason 同一次确认流；drawer group 不双弹；coding/
+    // reference/busy 零确认、提示先删后置。
+    const user = userEvent.setup();
+    // 三类实体 DELETE 的出站请求（story-specs/design-specs/work-item-plans）。
+    const entityDeleteCalls = (fetchMock: Mock) =>
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          init?.method === "DELETE" &&
+          /\/(?:story-specs|design-specs|work-item-plans)\//.test(String(input)),
+      );
+
+    // —— 场景 A：三类 Draft 200 → confirm 0 次 / delete 各 1 次、URL 无 query ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(
+          lifecycleFetch({ storyDraftInitially: true, designDraftInitially: true }),
+        ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-story"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Story Spec 会话过期提示" },
+        ),
+      );
+      await user.click(screen.getByTestId("stage-tab-design"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Design Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Design Spec 前端提示设计" },
+        ),
+      );
+      await waitFor(() =>
+        expect(entityDeleteCalls(fetchMock)).toHaveLength(2),
+      );
+      await user.click(screen.getByTestId("stage-tab-work_item"));
+      await user.click(screen.getByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+          name: "删除计划及工作项",
+        }),
+      );
+      await waitFor(() =>
+        expect(entityDeleteCalls(fetchMock)).toHaveLength(3),
+      );
+
+      expect(confirmSpy).toHaveBeenCalledTimes(0);
+      expect(
+        entityDeleteCalls(fetchMock).every(([input]) => !String(input).includes("?")),
+      ).toBe(true);
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 B：required(previously_confirmed) 409 → confirm 恰 1 次，同意后
+    //    第二 delete 带 confirmed=true，成功后沿原刷新模式收口 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          requiredReasonByEntityId: { story_spec_0001: "previously_confirmed" },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-story"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Story Spec 会话过期提示" },
+        ),
+      );
+
+      await waitFor(() =>
+        expect(
+          entityDeleteCalls(fetchMock).map(([input]) => String(input)),
+        ).toEqual([
+          "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
+          "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001?confirmed=true",
+        ]),
+      );
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.stringContaining("永久清除内容、工作项、会话和 review"),
+      );
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.stringContaining("不可恢复"),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole("region", { name: "Story Spec 内容" }),
+        ).not.toHaveTextContent("会话过期提示"),
+      );
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 C：取消 → 只发第一非破坏请求、无刷新/退场，卡片保留 ——
+    // —— 场景 C 同时覆盖旧未知 reason（legacy_history_unknown）恰一次确认 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          requiredReasonByEntityId: {
+            design_spec_0001: "legacy_history_unknown",
+          },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-design"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Design Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Design Spec 前端提示设计" },
+        ),
+      );
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        // 退场动画窗口（220ms）过后复核：无第二请求、无刷新清卡。
+        // tsconfig lib 低于 es2024（Promise.withResolvers 不可用），executor
+        // 形式为目标库约束下的例外。
+        await new Promise((resolve) => {
+          setTimeout(resolve, 320);
+        });
+      });
+      expect(entityDeleteCalls(fetchMock)).toHaveLength(1);
+      expect(entityDeleteCalls(fetchMock)[0]?.[0]).toBe(
+        "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
+      );
+      expect(
+        screen.getByRole("region", { name: "Design Spec 内容" }),
+      ).toHaveTextContent("前端提示设计");
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 D：drawer group 不双弹——服务端 required 恰一次确认 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          requiredReasonByEntityId: {
+            issue_plan_0001: "previously_confirmed",
+          },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-work_item"));
+      await user.click(screen.getByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+          name: "删除计划及工作项",
+        }),
+      );
+
+      await waitFor(() =>
+        expect(
+          entityDeleteCalls(fetchMock).map(([input]) => String(input)),
+        ).toEqual([
+          "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
+          "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001?confirmed=true",
+        ]),
+      );
+      // 旧 drawer 无条件预确认会叠加本地+服务端两次弹窗；新契约恰一次。
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(
+          screen.queryByTestId("lifecycle-card-drawer"),
+        ).not.toBeInTheDocument(),
+      );
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 E：coding/reference/busy 错误 confirm 0 次、提示先删后置 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          rejectedCodeByEntityId: {
+            story_spec_0001: "entity_referenced",
+            design_spec_0001: "entity_busy",
+            issue_plan_0001: "coding_workspace_exists",
+          },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-story"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Story Spec 会话过期提示" },
+        ),
+      );
+      expect(
+        await screen.findByText(
+          "实体仍被存活后置对象引用，请先删除引用它的对象",
+        ),
+      ).toBeInTheDocument();
+      expect(entityDeleteCalls(fetchMock)).toHaveLength(1);
+
+      await user.click(screen.getByTestId("stage-tab-design"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Design Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Design Spec 前端提示设计" },
+        ),
+      );
+      expect(
+        await screen.findByText(
+          "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+        ),
+      ).toBeInTheDocument();
+
+      await user.click(screen.getByTestId("stage-tab-work_item"));
+      await user.click(screen.getByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+          name: "删除计划及工作项",
+        }),
+      );
+      expect(
+        await screen.findByText(
+          "存在 coding workspace，请先删除 coding workspace 再删除 work item group",
+        ),
+      ).toBeInTheDocument();
+
+      expect(confirmSpy).toHaveBeenCalledTimes(0);
+      expect(entityDeleteCalls(fetchMock)).toHaveLength(3);
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+  }, 30_000);
 
   it("opens drawer from derived lifecycle cards and opens full screen workspace from drawer CTA", async () => {
     const fetchMock = lifecycleFetch();
@@ -564,7 +1018,8 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await screen.findByRole("button", { name: "会话过期提示" });
+    // Task 6：Story 卡片在 Story 阶段页内。
+    await user.click(await screen.findByTestId("stage-tab-story"));
     await user.click(screen.getByRole("button", { name: "会话过期提示" }));
 
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
@@ -592,9 +1047,9 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(
-      await screen.findByRole("button", { name: "会话过期提示" }),
-    );
+    // Task 6：Story 卡片在 Story 阶段页内。
+    await user.click(await screen.findByTestId("stage-tab-story"));
+    await user.click(screen.getByRole("button", { name: "会话过期提示" }));
 
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
       "会话过期提示",
@@ -604,4 +1059,20 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       screen.getByRole("button", { name: "生成 Design Spec" }),
     ).toBeInTheDocument();
   });
+
+  it("does not show the aggregate initialization entry for single repo projects", async () => {
+    vi.stubGlobal("fetch", lifecycleFetch({ logicalCodebaseMembers: [] }));
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await screen.findByRole("navigation", { name: "Project 切换" });
+    expect(
+      screen.queryByTestId("aggregate-initialization-card"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "启动聚合初始化" }),
+    ).not.toBeInTheDocument();
+  });
+
 });

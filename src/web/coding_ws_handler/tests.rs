@@ -10,9 +10,10 @@ use crate::product::coding_attempt_store::{
 use crate::product::coding_models::{
     CodeReviewReport, CodingAgentRole, CodingAttemptScope, CodingAttemptStatus,
     CodingExecutionStage, CodingGateAction, CodingGateActionType, CodingProviderPermissionMode,
-    CodingRolePermissionModes, CodingRoleProviderConfigSnapshot, CodingTimelineNode,
-    CodingTimelineNodeStatus, FindingSeverity, GroupFinalReadinessSnapshot,
-    GroupFinalReadinessStatus, GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
+    CodingProviderRole, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunEventType, CodingRoleRunTrigger, CodingTimelineNode, CodingTimelineNodeStatus,
+    FindingSeverity, GroupFinalReadinessSnapshot, GroupFinalReadinessStatus,
+    GroupFinalReadinessUnit, ReviewFinding, ReviewVerdict,
 };
 use crate::product::coding_work_item_context::select_work_item_markdown;
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
@@ -48,9 +49,13 @@ use super::{
 };
 
 mod code_review_router;
+mod event_hub;
 mod failed_review_recovery;
 mod plan_repair;
+mod restart;
 mod runner_cleanup;
+mod runner_recovery;
+mod sc_start_guard;
 
 #[tokio::test]
 async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() {
@@ -72,16 +77,12 @@ async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() 
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
         })
         .expect("create attempt");
     let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Running,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
     let attempt = store
         .update_attempt_stage(
@@ -98,8 +99,8 @@ async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() 
             &attempt.id,
             CodingRoleProviderConfigSnapshot {
                 coder: ProviderName::Pi,
-                code_reviewer: ProviderName::ClaudeCode,
-                internal_reviewer: ProviderName::ClaudeCode,
+                code_reviewer: Some(ProviderName::ClaudeCode),
+                internal_reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: CodingRolePermissionModes {
                     coder: CodingProviderPermissionMode::Supervised,
@@ -221,7 +222,8 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         workspace_type: WorkspaceType::WorkItem,
         status: WorkspaceSessionStatus::Confirmed,
         author_provider: ProviderName::Codex,
-        reviewer_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
         review_rounds: 1,
         permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
         provisional_reviewer_provider: None,
@@ -229,15 +231,49 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         superpowers_enabled: true,
         openspec_enabled: true,
         work_item_runtime_binding: None,
+        work_item_child_binding: None,
         provider_conversations: Vec::new(),
         messages: vec![WorkspaceMessageRecord {
             role: "assistant".to_string(),
-            content: "```artifact\n# Work Item\n\n## 验证命令\n\n```bash\nuv run python -m unittest discover -s tests -v\n```\n```"
+            content: "```artifact\n\
+                # Work Item\n\n\
+                ## 目标\n补齐 coding 上下文验证命令回退。\n\n\
+                ## 范围\n仅覆盖当前单个可执行任务。\n\n\
+                ## 实现步骤\n- 完成当前任务实现。\n- 补充当前任务验证。\n\n\
+                ## 依赖\n依赖已确认 Story Spec 与 Design Spec。\n\n\
+                ## 验证命令\n```bash\nuv run python -m unittest discover -s tests -v\n```\n\n\
+                ## 风险\n无。\n\n\
+                ## 追踪关系\n- source ids: Story Spec story_spec_0001, Design Spec design_spec_0001。\n\
+                - [REQ-001]\n\
+                ```"
                 .to_string(),
             created_at: "2026-05-28T00:00:00Z".to_string(),
         }],
         created_at: "2026-05-28T00:00:00Z".to_string(),
         updated_at: "2026-05-28T00:00:00Z".to_string(),
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        human_gate_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
+        sc_recovery_claim: None,
+        logical_launch_fingerprints: Vec::new(),
+        superseded_native_sessions: Vec::new(),
+        lc_resume_recovery: None,
+        structural_governance_state: None,
+        review_identity_id: String::new(),
     };
 
     let selected = select_work_item_markdown(
@@ -277,6 +313,23 @@ fn coding_execution_context_uses_final_compile_work_item_when_workspace_artifact
         context.verification_commands,
         vec!["cargo test --locked --lib coding_execution_context".to_string()]
     );
+}
+
+#[test]
+fn coding_execution_context_markdown_carries_write_scope_section() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+
+    let context = coding_execution_context(&app_paths, &attempt).expect("coding context");
+
+    // ① 写入范围只有一个载体：已确认 Work Item markdown（coder / reviewer /
+    // evaluation context 三方同源），context 上不再另带范围字段。
+    let markdown = context.work_item_markdown.expect("work item markdown");
+    assert!(markdown.contains("## 写入范围（硬边界）"));
+    assert_eq!(markdown.matches("## 写入范围（硬边界）").count(), 1);
+    assert!(markdown.contains("### 允许修改范围（exclusive_write_scopes）"));
+    assert!(markdown.contains("### 禁止修改范围（forbidden_write_scopes）"));
+    assert!(markdown.contains("- src/web/coding_ws_handler/context.rs"));
+    assert!(markdown.contains("- forbidden/path"));
 }
 
 #[test]
@@ -333,6 +386,8 @@ fn code_review_report_with(
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 
@@ -387,6 +442,7 @@ fn coding_execution_context_supplements_source_draft_when_final_compile_context_
                 contract.write_policy.forbidden_scopes = vec!["forbidden/draft/path".to_string()];
                 contract.verification_checks[0].command = Some("cargo check --locked".to_string());
                 WorkItemDraftCandidate {
+                    target_repository_id: None,
                     outline_id: "outline_sparse_backend".to_string(),
                     logical_work_item_id: "wi_sparse_backend".to_string(),
                     verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
@@ -436,10 +492,12 @@ fn coding_execution_context_prefers_final_compile_over_workspace_artifact() {
             entity_id: "work_item_compile_20260702063721302_001".to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("create workspace session");
 
@@ -492,10 +550,12 @@ fn coding_execution_context_uses_workspace_artifact_when_final_compile_is_missin
             entity_id: legacy_work_item_id.to_string(),
             workspace_type: WorkspaceType::WorkItem,
             author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("create workspace session");
 
@@ -534,7 +594,7 @@ fn coding_session_state_includes_group_final_readiness_snapshot() {
     let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     let readiness = GroupFinalReadinessSnapshot {
         attempt_id: attempt.id.clone(),
@@ -589,7 +649,7 @@ fn coding_session_state_omits_stale_blocked_gate_for_inactive_stage() {
 
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     coding_store
         .create_blocked_gate(
@@ -634,7 +694,7 @@ fn coding_session_state_keeps_final_confirm_blocked_gate_for_current_stage() {
 
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     coding_store
         .create_blocked_gate(
@@ -674,7 +734,7 @@ fn coding_session_state_does_not_reactivate_historical_blocked_node() {
     let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
     let coding_store = CodingAttemptStore::new(app_paths);
     coding_store
-        .save_coding_attempt(&attempt)
+        .write_coding_attempt_for_test(&attempt)
         .expect("save coding attempt");
     coding_store
         .save_timeline_node(
@@ -720,93 +780,113 @@ fn coding_session_state_does_not_reactivate_historical_blocked_node() {
 }
 
 #[test]
-fn blocked_attempt_allows_gate_response_messages() {
-    assert!(is_coding_ws_message_allowed(
-        &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::CodeReview,
-        &CodingWsInMessage::GateResponse {
-            gate_id: "coding_blocked_gate_0001".to_string(),
-            action_id: "retry_review".to_string(),
-            extra_context: None,
-        },
-    ));
-    assert!(is_coding_ws_message_allowed(
-        &CodingAttemptStatus::Blocked,
-        &CodingExecutionStage::CodeReview,
-        &CodingWsInMessage::AbortAttempt,
-    ));
-}
+fn coding_session_state_replays_execution_event_history_from_role_run_journal() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+    let coding_store = CodingAttemptStore::new(app_paths);
+    coding_store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("save coding attempt");
+    let run = coding_store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            Some("coding_node_0001".to_string()),
+        )
+        .expect("create coder role run");
 
-#[test]
-fn manual_continue_gate_response_does_not_auto_resume_runner() {
-    let mut attempt = CodingExecutionAttempt {
-        id: "coding_attempt_0001".to_string(),
-        project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        work_item_id: "work_item_0001".to_string(),
-        attempt_no: 1,
-        scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
-        status: CodingAttemptStatus::Blocked,
-        stage: CodingExecutionStage::CodeReview,
-        base_branch: "HEAD".to_string(),
-        branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
-        worktree_path: None,
-        provider_config_snapshot: ProviderConfigSnapshot {
-            author: ProviderName::Fake,
-            reviewer: Some(ProviderName::Fake),
-            review_rounds: 1,
-            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
-        },
-        provider_conversations: Vec::new(),
-        rework_count: 2,
-        max_auto_rework: 2,
-        work_item_group_id: None,
-        current_work_item_id: Some("work_item_0001".to_string()),
-        active_unit_id: None,
-        head_commit: None,
-        pushed_remote: None,
-        review_request_id: None,
-        created_at: "2026-06-12T00:00:00Z".to_string(),
-        updated_at: "2026-06-12T00:00:00Z".to_string(),
-        completed_at: None,
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ProviderPrompt,
+            serde_json::json!({
+                "provider": "pi",
+                "role": "Coder",
+                "prompt": "实现 work item 001"
+            }),
+        )
+        .expect("append provider prompt journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::StatusChanged,
+            serde_json::json!({"status": "Starting"}),
+        )
+        .expect("append status changed journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "provider",
+                "kind": "Provider",
+                "status": "Started",
+                "title": "Pi provider started"
+            }),
+        )
+        .expect("append provider started journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "cmd_0001",
+                "kind": "Command",
+                "status": "Completed",
+                "title": "Run tests",
+                "command": "pnpm vitest run src/state",
+                "output": "tests passed",
+                "exit_code": 0
+            }),
+        )
+        .expect("append command journal event");
+    coding_store
+        .append_role_run_event(
+            &attempt,
+            &run,
+            CodingRoleRunEventType::TextDelta,
+            serde_json::json!({"content": "stream delta"}),
+        )
+        .expect("append text delta journal event");
+
+    let state = build_coding_session_state(&coding_store, attempt).expect("coding session state");
+    let CodingWsOutMessage::CodingSessionState {
+        execution_events, ..
+    } = state
+    else {
+        panic!("expected coding session state");
     };
 
-    assert!(!should_resume_runner_after_gate_response(
-        "manual_continue",
-        &attempt
-    ));
-    assert!(!should_resume_runner_after_gate_response(
-        "accept_risk",
-        &attempt
-    ));
-    assert!(!should_resume_runner_after_gate_response(
-        "retry_test_plan",
-        &attempt
-    ));
-    assert!(should_resume_runner_after_gate_response(
-        "retry_internal_review",
-        &attempt
-    ));
-    assert!(should_resume_runner_after_gate_response(
-        "send_to_coder",
-        &attempt
-    ));
-    assert!(!should_resume_runner_after_gate_response(
-        "accept_testing_result",
-        &attempt
-    ));
-    assert!(should_resume_runner_after_gate_response(
-        "retry_coding",
-        &attempt
-    ));
-
-    attempt.status = CodingAttemptStatus::Running;
-    assert!(!should_resume_runner_after_gate_response(
-        "retry_test_plan",
-        &attempt
-    ));
+    let titles: Vec<&str> = execution_events
+        .iter()
+        .map(|replay| replay.event.title.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Provider Prompt",
+            "Provider starting",
+            "Pi provider started",
+            "Run tests",
+        ],
+        "刷新回放必须包含 prompt、provider 生命周期与命令执行历史；TextDelta 仍仅走实时流"
+    );
+    assert_eq!(
+        execution_events[0].event.output.as_deref(),
+        Some("实现 work item 001")
+    );
+    assert_eq!(
+        execution_events[3].event.command.as_deref(),
+        Some("pnpm vitest run src/state")
+    );
 }
 
+include!("tests_parts/manual_recovery.inc.rs");
 #[test]
 fn recoverable_attempt_status_suppresses_coding_start_failed() {
     assert!(!should_emit_coding_runner_protocol_error(
@@ -836,6 +916,12 @@ fn waiting_attempt_allows_gate_response_for_coder_feedback() {
 fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecutionAttempt) {
     let tmp = TempDir::new().expect("temp dir");
     let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "compiled work item fixture".to_string(),
+            description: None,
+        })
+        .expect("create project");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let work_item_id = "work_item_compile_20260702063721302_001";
     let verification_plan_id = "verification_plan_compile_20260702063721302_001";
@@ -903,6 +989,10 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         attempt_no: 1,
         scope: CodingAttemptScope::WorkItemGroup,
         status: CodingAttemptStatus::Running,
+        version: 0,
+        manual_recovery_reason: None,
+        admission_ticket_consumed_at: None,
+        admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/issues/issue_0001".to_string(),
@@ -924,7 +1014,10 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         review_request_id: None,
         created_at: "2026-07-02T00:00:00Z".to_string(),
         updated_at: "2026-07-02T00:00:00Z".to_string(),
+        target_snapshot: None,
         completed_at: None,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        start_claim: None,
     };
 
     (tmp, app_paths, attempt)

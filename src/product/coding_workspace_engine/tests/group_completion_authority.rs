@@ -101,9 +101,10 @@ fn create_authoritative_active_run_with_handoffs(
         coder_provider_renderer_version: renderer_for(&providers.coder)
             .renderer_version()
             .to_string(),
-        reviewer_provider_renderer_version: renderer_for(&providers.code_reviewer)
-            .renderer_version()
-            .to_string(),
+        reviewer_provider_renderer_version: renderer_version_for_optional_provider(
+            providers.code_reviewer.as_ref(),
+        )
+        .to_string(),
         internal_reviewer_provider_renderer_version: None,
         coder_projection_hash: bundle.coder_projection_hash,
         reviewer_projection_hash: bundle.reviewer_projection_hash,
@@ -292,8 +293,11 @@ async fn group_completion_records_existing_coder_head_without_staging_or_commit(
     );
 }
 
+/// C2 Task 6（决策 6/#13）：execution 完成时无已记录 start_commit：
+/// MUST NOT 按 base_branch HEAD 回填——attempt 转人工恢复停等并持久化
+/// 起点缺失诊断（稳定码 unit_run_start_commit_missing），run 保持未完成。
 #[tokio::test]
-async fn group_unit_completion_backfills_first_unit_start_commit_from_base_head() {
+async fn group_unit_completion_missing_start_commit_stops_with_diagnostic_without_backfill() {
     let fixture = group_completion_fixture(false, false);
     fs::write(fixture.worktree.join("unit1.txt"), "coder-owned change\n").expect("coder change");
     run_test_git(&fixture.worktree, &["add", "unit1.txt"]);
@@ -314,23 +318,62 @@ async fn group_unit_completion_backfills_first_unit_start_commit_from_base_head(
         },
     );
 
-    let updated = fixture
+    let error = fixture
         .engine
         .complete_group_unit_after_code_review(&fixture.attempt)
         .await
-        .expect("complete first group unit");
+        .expect_err("missing start_commit must stop completion");
+    assert!(
+        error.to_string().contains("unit_run_start_commit_missing"),
+        "{error}"
+    );
+    let persisted_attempt = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("attempt after stop");
+    assert_eq!(
+        persisted_attempt.status,
+        CodingAttemptStatus::AwaitingManualRecovery
+    );
+    assert_eq!(
+        persisted_attempt.manual_recovery_reason.as_deref(),
+        Some("unit_run_start_commit_missing")
+    );
     let persisted_run = fixture
         .store
-        .list_coding_unit_runs(&updated, &source_run.unit_id)
+        .list_coding_unit_runs(&persisted_attempt, &source_run.unit_id)
         .expect("source runs")
         .into_iter()
         .find(|run| run.id == source_run.id)
         .expect("source run");
-
-    assert_eq!(
-        persisted_run.start_commit.as_deref(),
-        Some(fixture.original_head.as_str())
+    assert!(
+        persisted_run.start_commit.is_none(),
+        "MUST NOT 按 base HEAD 回填：{:?}",
+        persisted_run.start_commit
     );
+    assert_eq!(persisted_run.status, CodingUnitRunStatus::Running);
+    let diagnostics = fixture
+        .store
+        .list_chat_entries(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("chat entries");
+    assert!(diagnostics.iter().any(|entry| {
+        matches!(
+            &entry.entry_type,
+            crate::product::coding_models::CodingEntryType::SystemEvent {
+                event_type,
+                message
+            } if event_type == "manual_recovery_transition"
+                && message.contains("unit_run_start_commit_missing")
+        )
+    }));
 }
 
 #[tokio::test]
@@ -560,7 +603,7 @@ async fn coding_plan_repair_group_completion_publishes_dependency_handoff_for_ne
         .expect("canonical handoff pointer");
     let rendered = fixture
         .engine
-        .render_coder_unit_run_context(&updated, &ProviderName::Codex, None)
+        .render_coder_unit_run_context(&updated, &ProviderName::Codex)
         .expect("next unit context")
         .expect("group context");
     let next_run = fixture
@@ -845,5 +888,320 @@ async fn coding_plan_repair_group_completion_recovers_completed_run_without_new_
     assert_eq!(handoff, existing_handoff);
 }
 
+/// C2 Task 6（决策 6/#13）：重试 execution 的 start_commit 不继承旧值；
+/// 认领前以当时 worktree 真实 HEAD（含用户人工 WIP 提交）冻结为自身
+/// 起点；零提交完成＝空区间（start==completion），人工提交不归属当前
+/// Work Item；同 execution 重复冻结不改写起点。
+#[tokio::test]
+async fn retry_execution_freezes_real_head_and_empty_range_excludes_manual_wip() {
+    let fixture = group_completion_fixture(false, false);
+    let prior = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    // 前一 execution 失败后，用户在工作树留下人工提交（不属于本 Work Item）。
+    fs::write(fixture.worktree.join("manual-wip.txt"), "human wip\n").expect("manual wip");
+    run_test_git(&fixture.worktree, &["add", "manual-wip.txt"]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "manual wip outside coding"],
+    );
+    let manual_head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    let retry = fixture
+        .store
+        .create_retry_coding_unit_run(&fixture.attempt, &prior.unit_id, &prior.id)
+        .expect("retry execution");
+    assert_eq!(retry.execution_no, 2);
+    assert!(
+        retry.start_commit.is_none(),
+        "重试 execution 不继承旧 start_commit"
+    );
+
+    // 认领前冻结真实 HEAD（包含人工 WIP 提交）。
+    fixture
+        .engine
+        .freeze_active_unit_run_start_commit(&fixture.attempt, &fixture.worktree)
+        .await
+        .expect("freeze real head before claim");
+    let frozen = fixture
+        .store
+        .list_coding_unit_runs(&fixture.attempt, &retry.unit_id)
+        .expect("unit runs")
+        .into_iter()
+        .find(|run| run.id == retry.id)
+        .expect("retry run");
+    assert_eq!(frozen.start_commit.as_deref(), Some(manual_head.as_str()));
+
+    // 重连／恢复同一 execution：起点保持不变（不覆盖为新含义）。
+    fixture
+        .engine
+        .freeze_active_unit_run_start_commit(&fixture.attempt, &fixture.worktree)
+        .await
+        .expect("re-freeze keeps the recorded start");
+    let refrozen = fixture
+        .store
+        .list_coding_unit_runs(&fixture.attempt, &retry.unit_id)
+        .expect("unit runs")
+        .into_iter()
+        .find(|run| run.id == retry.id)
+        .expect("retry run");
+    assert_eq!(refrozen.start_commit.as_deref(), Some(manual_head.as_str()));
+
+    // 零提交完成：区间为空（start==completion），人工提交不进入当前 Work Item。
+    let completed = fixture
+        .store
+        .complete_coding_unit_run(&fixture.attempt, &retry.id, &manual_head)
+        .expect("zero-commit completion");
+    let changed_files = fixture
+        .engine
+        .changed_files_for_unit_completion_range(&fixture.attempt, &completed)
+        .await
+        .expect("empty completion range");
+    assert!(
+        changed_files.is_empty(),
+        "人工 WIP 提交不归属当前 Work Item：{changed_files:?}"
+    );
+}
+
+/// C2 Task 7（#18／BYPASS-18）：渲染失败不消费——rework 路径在完整 prompt
+/// 渲染失败（组 attempt 投影绑定损坏）时，指令必须保持未消费、可被用户
+/// 重试读取；消费标记 MUST NOT 早于渲染完成。
+#[tokio::test]
+async fn rework_render_failure_keeps_instruction_unconsumed() {
+    let fixture = group_completion_fixture_at_stage(false, false, CodingExecutionStage::CodeReview);
+    // 预置一个 canonical_contract_hash 不匹配的活跃 run，令渲染 fail-closed。
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        Some("wrong_contract_hash"),
+    );
+    let provider = super::provider_driven::ReviewerDrivenReworkProvider::default();
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = fixture
+        .engine
+        .execute_coder_fix_from_review(
+            &fixture.attempt,
+            &super::provider_driven::review_report_requesting_changes(&fixture.attempt),
+            &CodingExecutionContext::default(),
+            &provider,
+            &mut command_rx,
+        )
+        .await
+        .expect_err("render failure must stop the rework path");
+    assert!(
+        error
+            .to_string()
+            .contains("unit_run_projection_binding_mismatch"),
+        "{error}"
+    );
+
+    // 指令已落地但保持未消费，用户重试仍能读取。
+    let instructions = fixture
+        .store
+        .list_rework_instructions(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("rework instructions");
+    assert_eq!(instructions.len(), 1);
+    assert!(
+        instructions[0].consumed_at.is_none(),
+        "渲染失败时指令必须保持未消费"
+    );
+    assert!(instructions[0].consumed_by_node_id.is_none());
+    assert!(
+        fixture
+            .store
+            .list_rework_instruction_claims(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id
+            )
+            .expect("claims")
+            .is_empty(),
+        "渲染失败禁认领"
+    );
+}
+
+#[tokio::test]
+async fn group_unit_completion_appends_platform_delivery_facts_chat_entry() {
+    let fixture = group_completion_fixture(false, false);
+    fs::write(fixture.worktree.join("unit1.txt"), "coder-owned change\n").expect("coder change");
+    run_test_git(&fixture.worktree, &["add", "unit1.txt"]);
+    run_test_git(&fixture.worktree, &["commit", "-m", "coder completes unit"]);
+    let coder_head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let source_run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    fixture
+        .store
+        .save_code_review_report(
+            &fixture.attempt,
+            &CodeReviewReport {
+                id: "code_review_report_0001".to_string(),
+                attempt_id: fixture.attempt.id.clone(),
+                round: 1,
+                verdict: ReviewVerdict::Approve,
+                findings: Vec::new(),
+                tested_evidence_refs: vec!["evidence://tests/cargo-test".to_string()],
+                diff_refs: Vec::new(),
+                summary: "code review 通过".to_string(),
+                created_at: "2026-10-14T00:00:00Z".to_string(),
+                raw_provider_output_ref: None,
+                role_run_id: None,
+                run_no: None,
+                unit_run_id: Some(source_run.id.clone()),
+                acceptance: None,
+                review_window_id: None,
+            },
+        )
+        .expect("seed review report");
+
+    let updated = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("complete group unit");
+
+    let entries = fixture
+        .store
+        .list_chat_entries(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("chat entries");
+    let frame = entries
+        .iter()
+        .find(|entry| entry.id == format!("{}_delivery_facts", source_run.id))
+        .expect("platform delivery facts frame");
+    assert_eq!(frame.attempt_id, updated.id);
+    assert_eq!(frame.role, CodingAgentRole::System);
+    assert!(frame.node_id.is_none());
+    assert!(matches!(
+        &frame.entry_type,
+        CodingEntryType::SystemEvent { event_type, .. } if event_type == "delivery_facts"
+    ));
+    let metadata = frame.metadata.as_ref().expect("frame metadata");
+    assert_eq!(metadata["source"], json!("platform_delivery_facts"));
+    assert_eq!(metadata["unit_id"], json!(source_run.unit_id));
+    assert_eq!(metadata["unit_run_id"], json!(source_run.id));
+    assert_eq!(metadata["logical_work_item_id"], json!("work_item_0001"));
+    assert_eq!(metadata["start_commit"], json!(fixture.original_head));
+    assert_eq!(metadata["completion_commit"], json!(coder_head));
+    assert_eq!(metadata["changed_files"], json!(["unit1.txt"]));
+    assert_eq!(
+        metadata["verification"]["review_report_id"],
+        json!("code_review_report_0001")
+    );
+    assert_eq!(metadata["verification"]["verdict"], json!("approve"));
+    assert_eq!(
+        metadata["verification"]["tested_evidence_refs"],
+        json!(["evidence://tests/cargo-test"])
+    );
+    let units = fixture
+        .store
+        .list_coding_units(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("units");
+    let completed_unit = units
+        .iter()
+        .find(|unit| unit.id == source_run.unit_id)
+        .expect("completed unit");
+    assert_eq!(
+        metadata["handoff_revision_id"],
+        json!(
+            completed_unit
+                .latest_handoff_revision_id
+                .clone()
+                .expect("handoff pointer")
+        )
+    );
+    // 尾帧:完成时点平台事实帧位于 chat 末尾,且内容只由平台字段拼装。
+    assert_eq!(
+        entries.last().map(|entry| entry.id.as_str()),
+        Some(frame.id.as_str())
+    );
+    let content = frame.content.as_deref().expect("platform content");
+    assert!(content.contains(&coder_head));
+    assert!(content.contains("unit1.txt"));
+    assert!(content.contains("handoff_revision_coding_unit_run_0001"));
+}
+
+#[tokio::test]
+async fn completed_retry_recovery_appends_platform_delivery_facts_frame() {
+    let fixture = group_completion_fixture(true, true);
+    run_test_git(&fixture.worktree, &["add", "."]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "feat: complete work_item_0001"],
+    );
+    let completion_commit = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let source_run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Completed,
+        Some(completion_commit.clone()),
+        None,
+    );
+    let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            "work_item_plan_0001",
+        )
+        .expect("lineage");
+    let existing_handoff =
+        expected_handoff_revision(&source_run, &completion_commit, "2026-07-19T00:00:00Z");
+    revision_store
+        .put_handoff_revision(&lineage, &existing_handoff)
+        .expect("partial canonical handoff");
+
+    let updated = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("recover partial completion");
+
+    let entries = fixture
+        .store
+        .list_chat_entries(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("chat entries");
+    let matching: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.id == format!("{}_delivery_facts", source_run.id))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "deterministic frame id keeps re-entry idempotent"
+    );
+    let frame = matching[0];
+    let metadata = frame.metadata.as_ref().expect("frame metadata");
+    assert_eq!(metadata["source"], json!("platform_delivery_facts"));
+    assert_eq!(metadata["completion_commit"], json!(completion_commit));
+    assert_eq!(metadata["changed_files"], json!(["unit1.txt"]));
+    assert_eq!(metadata["handoff_revision_id"], json!(existing_handoff.id));
+}
+
 include!("group_completion_recovery.rs");
 include!("runtime_handoff_group_completion.rs");
+include!("runner_fallback_commit.rs");

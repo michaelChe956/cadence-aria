@@ -1,0 +1,689 @@
+{
+  "provider": "codex",
+  "repetition": 1,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/wic-campaign/codex/rep1",
+  "startedAt": "2026-08-25T16:32:22.525Z",
+  "finishedAt": "2026-08-25T17:07:22.525Z",
+  "elapsedSec": 2100,
+  "issue_id": "issue_0003",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0003",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "06091a5c8aaca4efb5841911a8d0ffdd520a0fde5cf8401cca6dd622e764db3e",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "93ea57d19c13bf873c5dc05b09e103185385bd3770cf51fb2c6838138c707f76"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.069,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.114,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 127.512,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 127.583,
+      "source": "stage_change"
+    },
+    {
+      "stage": "review_decision",
+      "elapsedSec": 249.903,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 249.979,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 250.047,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 518.433,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 518.511,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 651.034,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 651.111,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 775.93,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 776.011,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 951.306,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 951.387,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 1148.633,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1148.715,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 1235.462,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1235.547,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 1406.712,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1406.807,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 1620.725,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1620.811,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 1784.283,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1784.371,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 1862.76,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 1862.847,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 2045.548,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 2045.643,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [
+    {
+      "node_id": "timeline_node_005",
+      "round": 1,
+      "elapsedSec": 249.903,
+      "verdict": "pass",
+      "options": [
+        "apply_optional_findings",
+        "skip_optional_findings"
+      ],
+      "selected_option": "skip_optional_findings",
+      "strategy": "skip_optional_findings_keyword"
+    }
+  ],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 249.903,
+      "findings": [
+        {
+          "severity": "suggestion",
+          "message": "后端验证意图已覆盖数量和字段类型，但未明确提及 Design 中要求的 id 非空及文件内唯一性校验。",
+          "evidence": "Design API-001 与数据模型要求 id 非空且唯一；backend 的 TDD-1/TDD-3 仅描述字段类型和数据损坏场景。",
+          "required_action": "在后端验证意图中补充 id 非空、唯一性断言，或明确将其归入数据结构校验。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "集成项通过 HTTP 获取页面源代码，无法单独证明动态 JavaScript 渲染后的可见名称与难度。",
+          "evidence": "AC-002 要求页面可见关卡名称与难度；integration 仅断言页面源/可观测结构，动态渲染由 frontend 测试覆盖。",
+          "required_action": "在交接说明中明确动态渲染由 frontend 测试负责，integration 仅验证同源入口与 API 契约，避免对页面源代码作过强验收表述。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 651.034,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "集成验收要求观察运行时渲染结果，但既定验证方式无法执行前端脚本。",
+          "evidence": "draft_003 的 ac_integration_same_origin 要求在联调响应中观察到关卡名称与难度结构；其 non_goals 禁止 Playwright、浏览器驱动，任务仅使用 node:http 客户端请求页面和 API。实际名称/难度由 draft_002 的前端 fetch/render 运行时产生。",
+          "required_action": "批量调整集成任务与验收，使其只断言 HTTP 可观测的页面骨架、相对 API 引用及 API 数据；名称/难度运行时渲染由 frontend draft 的 mock/vm 测试负责，或明确加入可执行前端运行时的验证方式。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "后端工作项要求验证页面入口，但其写入范围明确排除页面目录，形成未声明的反向依赖。",
+          "evidence": "draft_001 的 ac_static_security 要求 GET / 返回页面资源；其 write_policy exclusive_scopes 仅含 server/**、data/levels.json、tests/backend/**，forbidden_scopes 含 web/**。页面实际由 draft_002 创建，而 draft_002 依赖后端契约。",
+          "required_action": "批量消除该依赖：将实际页面入口断言移至 integration，或声明可用的既有静态 fixture/输入契约；后端自身验收必须能在其独占范围内完成。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "三项工作项均使用未限定范围的 node --test，非零测试证据可能被其他工作项测试满足。",
+          "evidence": "draft_001、draft_002、draft_003 的 required verification command 均为 node --test，未指定各自 tests/backend、tests/frontend 或 tests/integration 范围。",
+          "required_action": "按工作项限定测试命令或补充测试发现/数量断言，确保每项证据来自自身测试集合。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 775.93,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "集成 Work Item 声称验证页面消费 API 的同源闭环，但当前验证仅使用 node:http 请求 HTML 和 API，且明确排除浏览器自动化，无法证明前端 JavaScript 实际发起请求、渲染名称/难度或保持页面降级行为。",
+          "evidence": "outline_integration_levels_flow 的 non_goals 排除 Playwright/浏览器驱动；task_integration_contract_tests 与 task_integration_service_lifecycle 只描述 node:test、Node 内置 HTTP 客户端和响应断言；ac_integration_same_origin 却要求观察页面可消费结构。",
+          "required_action": "批量修订集成目标与验收：要么将其收窄为静态源码/HTTP 契约验证，要么补充可执行前端运行时的测试方案并同步调整 non_goals、任务和验证命令。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "集成页面验收使用“加载、列表或错误容器”这一或条件，允许缺少两个必需区域的页面通过；这与前端契约及交接字段要求的 loading、list、error 三类稳定标记不一致。",
+          "evidence": "ac_integration_page 要求页面包含“加载、列表或错误容器结构”；oc_frontend_page_entry 明确要求加载、列表和错误提示区域；frontend handoff_contract.required_fields 同时列出三个 marker。",
+          "required_action": "将页面验收和集成断言改为同时要求三个明确标记，并在任务与 handoff 字段中统一其名称。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "backend/frontend/integration 之间没有形成可执行的静态入口和服务交接：默认端口、启动/停止入口、静态根目录及页面路径均未给出具体值，导致后端静态入口测试和集成同源地址断言无法确定目标。",
+          "evidence": "oc_backend_service_entry 仅写“默认页面入口与端口约定”；backend write_policy 禁止 web/**，而 frontend exclusive_scopes 只允许 web/**；oc_frontend_page_entry 未提供具体 entry path；integration handoff_contract.provided_contract_refs 为空。",
+          "required_action": "在整组契约中定义唯一静态根目录、页面路径、启动/停止命令或模块、默认端口，并把具体值写入 handoff_contract 与集成测试断言；同时明确后端静态入口测试所需的前端依赖或夹具。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 951.306,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "三个 Work Item 的 verification command 均为无路径的 `node --test`，无法保证会发现各自位于 `tests/backend/**`、`tests/frontend/**`、`tests/integration/**` 的测试；当前仓库执行该命令实际得到 `tests 0`、退出码 0，因而可能在零测试时错误满足全部 `non_zero_test_execution` 证据要求。",
+          "evidence": "draft_001、draft_002、draft_003 的 verification_checks 均写为 `node --test`，各自任务又明确将测试写入对应的 `tests/**` 目录；本仓库根目录实测输出 `ℹ tests 0`、`ℹ pass 0`、`exit=0`。",
+          "required_action": "由 batch author 统一修订三项验证检查及对应测试通过任务，改为显式指向各自测试目录/文件（或提供可证明非零执行的根级 runner），并明确零测试时验证失败；完成后重新生成并验证整组 Draft。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 1148.633,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "整组验证命令均为无范围的 node --test，而后端与集成测试都依赖服务启动、默认端口和生命周期；未定义并发测试的端口隔离或串行策略，Node 测试文件并行执行时可能出现端口占用和非确定性失败。",
+          "evidence": "draft_001 与 draft_003 均要求服务启动/停止及端口约定，三项 verification_plan 均执行 node --test，但没有动态端口、串行执行或跨测试资源隔离规则。",
+          "required_action": "批次统一补充动态/临时端口并传递实际服务地址，或明确串行执行策略；同时把 stop/cleanup 约束落实到 backend 与 integration 测试任务及交接字段。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "集成页面验收使用“加载、列表或错误容器”三选一，可能在页面骨架不完整时通过，无法可靠证明 frontend 页面契约已接入同源联调。",
+          "evidence": "draft_003 的 ac_integration_page 要求页面包含加载、列表或错误容器结构；draft_002 的 oc_frontend_page_entry 明确要求加载、列表和错误提示区域同时存在。",
+          "required_action": "将集成页面断言与前端入口契约对齐，至少断言三个稳定容器标记及相对 /api/levels 引用，并同步 task、done_when 和 handoff 字段。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "前端响应校验只规定“元素最低结构”，没有明确恰好 5 项及字段类型校验；返回数量错误或 unlocked 类型错误的数据可能被当作成功渲染。",
+          "evidence": "draft_002 的 task_frontend_fetch_render 仅要求数组和元素最低结构校验，而 backend 的 oc_levels_api_contract 与相关验收明确要求顶层恰好 5 项及 id/name/difficulty/unlocked 类型。",
+          "required_action": "在 frontend 校验任务和 ac_frontend_success/ac_frontend_error 中明确恰好 5 项、字段非空及类型约束，异常时进入统一错误提示状态。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 1235.461,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "后端服务交接契约只描述能力，未定义下游可执行的服务入口、静态根目录、默认页面路径和端口解析方式；集成项被禁止修改实现，却要求接入该入口并验证同源闭环，执行时只能自行猜测。",
+          "evidence": "`oc_backend_service_entry` 仅列出“可启动和停止”“提供默认页面入口与端口约定”等能力；`handoff_contract.required_fields` 仅列字段名，未形成可消费的接口约定。`task_integration_service_lifecycle` 明确依赖该交接。",
+          "required_action": "在 backend 输出契约中补充稳定的服务启动/停止导出方式、动态端口获取方式、静态根目录与默认页面路径；同步收紧 frontend 和 integration 的输入契约与交接字段。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "三个 Work Item 均以全仓 `node --test` 作为唯一自动检查，无法证明对应目录的测试实际存在或执行；上游已有测试通过时，frontend 或 integration 自身缺失用例仍可能满足“非零测试且全部通过”。",
+          "evidence": "`check_backend_node_tests`、`check_frontend_node_tests`、`check_integration_node_tests` 的 command 全部为 `node --test`，而各自验收标准分别声称验证 backend、frontend、integration 的专属测试套件。",
+          "required_action": "将每个验证命令或等效测试发现规则限定到对应的 `tests/backend/**`、`tests/frontend/**`、`tests/integration/**`，并要求该范围内实际执行非零测试。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "集成项的验收声称确认页面可消费关卡名称和难度，但当前方案只允许 Node HTTP 客户端请求静态 HTML，未执行前端脚本，不能证明动态加载和渲染发生。",
+          "evidence": "`task_integration_service_lifecycle` 指定“使用 Node 内置 HTTP 客户端在同一服务生命周期内请求页面与 API”；同时 `ac_integration_same_origin` 要求观察到关卡名称与难度所需结构，且 non_goals 排除浏览器驱动。",
+          "required_action": "明确集成验收仅验证静态入口与相对 API 引用，或在 `tests/integration/**` 增加可执行前端脚本的 Node 内置运行时/DOM 替身方案，并将对应可观测结果写入验收标准。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 1406.712,
+      "findings": [
+        {
+          "severity": "blocking",
+          "message": "集成 Draft 声称验证页面可消费性及名称/难度结构，但其非目标禁止浏览器自动化，任务仅使用 Node HTTP 客户端；该方式无法执行前端 JavaScript 或观测实际渲染结果。",
+          "evidence": "outline_integration_levels_flow 的 goal/ac_integration_same_origin 要求确认页面可消费性和名称难度结构；non_goals 明确不引入 Playwright、浏览器驱动或 e2e；task_integration_service_lifecycle 仅请求页面与 API。",
+          "required_action": "批量修订集成契约：要么将目标和验收收窄为静态页面/API 同源传输证据，要么明确允许可执行前端逻辑的确定性测试方案并补充对应断言。"
+        },
+        {
+          "severity": "blocking",
+          "message": "Backend 自身验收要求 GET / 返回页面资源并托管静态页面，但没有前端输入依赖，且写入范围禁止 web/**；frontend 又反向依赖 backend，导致页面资源所有权和执行顺序未闭合。",
+          "evidence": "outline_backend_levels_service 的 input_contracts 为空，ac_static_security/task_backend_contract_tests 要求 GET / 返回页面资源，write_policy forbidden_scopes 包含 web/**；outline_frontend_level_select 才拥有 web/** 并声明依赖 backend。",
+          "required_action": "批量明确边界：由 backend 测试拥有并使用独立静态夹具，或把真实页面可达性移至 integration 验收，并同步调整依赖、任务和 blocker 规则，避免隐式反向依赖。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "跨 Work Item 的页面入口、端口和可观测标记只有泛化能力描述，没有可执行的具体值或动态端口返回约定，集成测试无法稳定构造断言。",
+          "evidence": "oc_backend_service_entry 仅写“默认页面入口与端口约定”；oc_frontend_page_entry 仅写“提供关卡选择页 HTML 入口”；handoff_contract 只有 page_entry_path/loading_container_marker 等字段名，没有具体路径、端口策略或 marker 值。",
+          "required_action": "批量补充并统一具体交接值/规则（页面路径、端口或启动返回值、加载/列表/错误标记、Content-Type 与错误 JSON 形状），使 frontend 和 integration 的输入契约及测试断言可直接执行。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 1620.725,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "三项验证均使用裸 `node --test`，无法稳定证明对应目录中的测试被发现并执行。",
+          "evidence": "测试任务分别写入 `tests/backend/**`、`tests/frontend/**`、`tests/integration/**`，但 `check_backend_node_tests`、`check_frontend_node_tests`、`check_integration_node_tests` 都只执行 `node --test`，且未约束测试文件命名；Node 默认发现规则可能导致 0 tests 或执行到其他项测试。",
+          "required_action": "批量将各 verification check 改为显式目录/文件测试命令，并约束可发现的测试文件命名，使每个 Work Item 都能提供自身非零测试执行证据。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "集成项声称验证页面与 API 的同源联调闭环及页面可消费性，但验收只检查 HTML、API 响应和源码中的路径文本，没有执行前端脚本或渲染断言。",
+          "evidence": "`goal.summary` 使用“联调闭环”“页面可消费性一致”；`ac_integration_same_origin` 仅要求页面内容引用 `/api/levels` 并观察结构，任务也只断言页面入口和 API payload，无法发现 fetch、解析或渲染回归。",
+          "required_action": "批量调整集成目标/验收为明确的传输层同源可达性，或增加不引入浏览器依赖的可执行前端消费 smoke 测试，断言实际加载并渲染关卡字段。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "前端“响应结构无效”错误边界未定义到字段和类型粒度，可能漏测非法 `unlocked` 等数据。",
+          "evidence": "`task_frontend_fetch_render` 仅写“元素最低结构校验”，而 `ac_frontend_error` 泛指“响应结构无效”；未明确要求校验 `id/name/difficulty/unlocked` 及其类型并覆盖非法样例。",
+          "required_action": "在批量修订中明确前端输入 schema、字段类型和非法响应测试断言。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 1784.283,
+      "findings": [
+        {
+          "severity": "blocking",
+          "message": "Backend Draft 将默认页面入口和静态资源返回纳入自身验收，但其 write_policy 禁止修改 web/**，且 input_contracts 为空，未声明依赖 Frontend 页面产物或测试替身，导致该 Work Item 的独立验收顺序和可通过性不明确。",
+          "evidence": "draft_001 的 oc_backend_service_entry 要求“提供默认页面入口”，ac_static_security 要求 GET / 返回页面资源；同时 exclusive_scopes 仅含 server/**、data/levels.json、tests/backend/**，forbidden_scopes 含 web/**，input_contracts 为 []。",
+          "required_action": "由 batch author 统一补充明确的跨项依赖与执行顺序，或将默认页面验收移至 integration，并为 backend 明确可独立验证的静态根目录/fixture 契约。"
+        },
+        {
+          "severity": "blocking",
+          "message": "Integration Draft 的验收要求观察到页面消费 API 后的关卡名称与难度结构，但所有任务和验证只使用 Node HTTP 客户端/node:test，且 non_goals 明确禁止浏览器或 e2e，无法实际执行前端 JavaScript 来证明该行为。",
+          "evidence": "draft_003 的 ac_integration_same_origin 要求联调响应中观察到关卡名称与难度所需结构，task_integration_payload_assertions 也要求该断言；但 non_goals 禁止 Playwright、浏览器驱动和测试框架，verification_plan 仅为 node --test。",
+          "required_action": "批量统一验收边界：要么将 integration 断言限定为 HTML 静态标记、相对 API 路径和 API payload，要么解除浏览器验证限制并增加能够执行页面脚本的验证检查。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "三项 Draft 的 handoff_contract 主要是抽象字段名和 capability 描述，缺少可直接消费的具体入口、端口、JSON envelope/error schema、页面 marker 与锁定状态标识；integration 的 provided_contract_refs 为空，跨项交接难以机械核验。",
+          "evidence": "draft_001/002/003 的 required_fields 如 service_start_stop_entry、page_entry_path、same_origin_service_address 均未绑定具体值或字段定义；draft_003 的 output_contracts 和 provided_contract_refs 均为空。",
+          "required_action": "batch author 应补齐统一的具体交接字段与引用：服务启动/停止入口、默认 URL/端口、成功/错误 JSON 结构、页面加载/列表/错误 marker、锁定行为，并让 integration 明确引用上游契约或声明其为终端证据。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "三个 Work Item 都使用不带路径的 node --test，验证时会运行整套测试，无法清晰归因到单项范围。",
+          "evidence": "draft_001、draft_002、draft_003 的 verification_plan 均将 command 固定为 node --test。",
+          "required_action": "可选地为各项增加按 tests/backend、tests/frontend、tests/integration 的 scoped command，同时保留一次全量回归检查。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 1862.76,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "服务入口、静态根目录和页面入口仅以“约定”或“提供”描述，未给出可供下游独立实现和联调的确定映射，导致 frontend 与 integration 无法可靠地对齐页面路径、静态资源路径及服务启动地址。",
+          "evidence": "backend 的 oc_backend_service_entry 仅声明“提供默认页面入口与端口约定”，task_backend_http_service 仅称从“约定静态根目录”读取；frontend 的 oc_frontend_page_entry 仅称“提供关卡选择页 HTML 入口”；integration 依赖上述能力并要求验证同一服务地址。三者 handoff_contract 也只有字段名，没有具体交接值或格式。",
+          "required_action": "整组返修时为共享服务补充确定的启动/停止 API、端口获取方式、URL、静态根目录到页面文件的映射及允许资源规则，并让 frontend 和 integration 的输入契约、任务及验收断言引用这些相同值。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "集成 Work Item 承诺验证页面实际可消费 API 和名称/难度呈现，但限定仅使用 Node 内置 HTTP 客户端且不使用浏览器或 DOM；HTTP 请求只能取得静态 HTML，不能执行页面 JavaScript，因此验收无法证明该联调闭环。",
+          "evidence": "integration 的 task_integration_service_lifecycle 明确“使用 Node 内置 HTTP 客户端在同一服务生命周期内请求页面与 API”，task_integration_payload_assertions 却要求确认“能观测到关卡名称与难度所需页面结构”，ac_integration_same_origin 又要求页面可观察到相对 /api/levels 与名称/难度结构。前端运行时渲染需要执行 JavaScript。",
+          "required_action": "整组返修时定义可执行的无浏览器联调机制，例如明确前端可由 node:vm 加载的模块入口、最小 DOM 替身及将请求接到实际服务的方式；或者将集成验收收缩为静态页面入口和 API 的同源契约验证，并把运行时渲染验证明确保留在 frontend 测试中。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 2045.548,
+      "findings": [
+        {
+          "severity": "blocking",
+          "message": "三项 Work Item 的 verification_checks 都使用无范围的 `node --test`，无法保证当前项实际执行了非零数量的目标测试，并会把其他 Work Item 的测试混入结果，导致顺序执行时误判或零测试通过。",
+          "evidence": "`check_backend_node_tests`、`check_frontend_node_tests`、`check_integration_node_tests` 的 command 均为 `node --test`，且三个 Draft 都将 `non_zero_test_execution_required` 设为 true。",
+          "required_action": "将每项检查改为显式选取对应目录或测试文件的命令，并规定可被命令发现的测试命名/范围；集成检查需明确其服务生命周期与上游测试隔离。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "集成项目标描述同源联调闭环，但验收只通过 HTTP 检查静态 HTML 和 API，未执行页面脚本或验证实际渲染消费，因此无法发现 `/api/levels` 请求、数据映射或锁定状态实现不兼容。",
+          "evidence": "`ac_integration_same_origin` 仅要求页面内容引用相对路径并观察到页面结构；同时 `non_goals` 明确不引入浏览器自动化，所有集成任务也没有 DOM/脚本执行断言。",
+          "required_action": "在整组计划中统一收窄集成目标为协议级同源检查，或增加无外部依赖的脚本/渲染消费验证，并相应更新任务、验收标准和验证检查。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "跨 Work Item 的 handoff/API/UI 契约仍是能力描述和字段名清单，缺少可执行的具体值，批次作者与集成测试无法据此固定断言。",
+          "evidence": "后端仅列出 `api_levels_error_schema`、`service_start_stop_entry` 等 required_fields，未定义具体 JSON 错误形状、启动/停止入口或端口；前端仅列出 `loading_container_marker`、`level_list_marker`、`error_message_marker`，未给出稳定选择器/文本；集成 Draft 的 `provided_contract_refs` 为空。",
+          "required_action": "补充具体服务入口/端口、成功与错误 JSON 字段结构、页面入口和稳定 DOM 标记，并让集成验收引用这些明确契约。"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "suggestion",
+      "message": "后端验证意图已覆盖数量和字段类型，但未明确提及 Design 中要求的 id 非空及文件内唯一性校验。",
+      "evidence": "Design API-001 与数据模型要求 id 非空且唯一；backend 的 TDD-1/TDD-3 仅描述字段类型和数据损坏场景。",
+      "required_action": "在后端验证意图中补充 id 非空、唯一性断言，或明确将其归入数据结构校验。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "集成项通过 HTTP 获取页面源代码，无法单独证明动态 JavaScript 渲染后的可见名称与难度。",
+      "evidence": "AC-002 要求页面可见关卡名称与难度；integration 仅断言页面源/可观测结构，动态渲染由 frontend 测试覆盖。",
+      "required_action": "在交接说明中明确动态渲染由 frontend 测试负责，integration 仅验证同源入口与 API 契约，避免对页面源代码作过强验收表述。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成验收要求观察运行时渲染结果，但既定验证方式无法执行前端脚本。",
+      "evidence": "draft_003 的 ac_integration_same_origin 要求在联调响应中观察到关卡名称与难度结构；其 non_goals 禁止 Playwright、浏览器驱动，任务仅使用 node:http 客户端请求页面和 API。实际名称/难度由 draft_002 的前端 fetch/render 运行时产生。",
+      "required_action": "批量调整集成任务与验收，使其只断言 HTTP 可观测的页面骨架、相对 API 引用及 API 数据；名称/难度运行时渲染由 frontend draft 的 mock/vm 测试负责，或明确加入可执行前端运行时的验证方式。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "后端工作项要求验证页面入口，但其写入范围明确排除页面目录，形成未声明的反向依赖。",
+      "evidence": "draft_001 的 ac_static_security 要求 GET / 返回页面资源；其 write_policy exclusive_scopes 仅含 server/**、data/levels.json、tests/backend/**，forbidden_scopes 含 web/**。页面实际由 draft_002 创建，而 draft_002 依赖后端契约。",
+      "required_action": "批量消除该依赖：将实际页面入口断言移至 integration，或声明可用的既有静态 fixture/输入契约；后端自身验收必须能在其独占范围内完成。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "三项工作项均使用未限定范围的 node --test，非零测试证据可能被其他工作项测试满足。",
+      "evidence": "draft_001、draft_002、draft_003 的 required verification command 均为 node --test，未指定各自 tests/backend、tests/frontend 或 tests/integration 范围。",
+      "required_action": "按工作项限定测试命令或补充测试发现/数量断言，确保每项证据来自自身测试集合。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成 Work Item 声称验证页面消费 API 的同源闭环，但当前验证仅使用 node:http 请求 HTML 和 API，且明确排除浏览器自动化，无法证明前端 JavaScript 实际发起请求、渲染名称/难度或保持页面降级行为。",
+      "evidence": "outline_integration_levels_flow 的 non_goals 排除 Playwright/浏览器驱动；task_integration_contract_tests 与 task_integration_service_lifecycle 只描述 node:test、Node 内置 HTTP 客户端和响应断言；ac_integration_same_origin 却要求观察页面可消费结构。",
+      "required_action": "批量修订集成目标与验收：要么将其收窄为静态源码/HTTP 契约验证，要么补充可执行前端运行时的测试方案并同步调整 non_goals、任务和验证命令。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成页面验收使用“加载、列表或错误容器”这一或条件，允许缺少两个必需区域的页面通过；这与前端契约及交接字段要求的 loading、list、error 三类稳定标记不一致。",
+      "evidence": "ac_integration_page 要求页面包含“加载、列表或错误容器结构”；oc_frontend_page_entry 明确要求加载、列表和错误提示区域；frontend handoff_contract.required_fields 同时列出三个 marker。",
+      "required_action": "将页面验收和集成断言改为同时要求三个明确标记，并在任务与 handoff 字段中统一其名称。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "backend/frontend/integration 之间没有形成可执行的静态入口和服务交接：默认端口、启动/停止入口、静态根目录及页面路径均未给出具体值，导致后端静态入口测试和集成同源地址断言无法确定目标。",
+      "evidence": "oc_backend_service_entry 仅写“默认页面入口与端口约定”；backend write_policy 禁止 web/**，而 frontend exclusive_scopes 只允许 web/**；oc_frontend_page_entry 未提供具体 entry path；integration handoff_contract.provided_contract_refs 为空。",
+      "required_action": "在整组契约中定义唯一静态根目录、页面路径、启动/停止命令或模块、默认端口，并把具体值写入 handoff_contract 与集成测试断言；同时明确后端静态入口测试所需的前端依赖或夹具。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "三个 Work Item 的 verification command 均为无路径的 `node --test`，无法保证会发现各自位于 `tests/backend/**`、`tests/frontend/**`、`tests/integration/**` 的测试；当前仓库执行该命令实际得到 `tests 0`、退出码 0，因而可能在零测试时错误满足全部 `non_zero_test_execution` 证据要求。",
+      "evidence": "draft_001、draft_002、draft_003 的 verification_checks 均写为 `node --test`，各自任务又明确将测试写入对应的 `tests/**` 目录；本仓库根目录实测输出 `ℹ tests 0`、`ℹ pass 0`、`exit=0`。",
+      "required_action": "由 batch author 统一修订三项验证检查及对应测试通过任务，改为显式指向各自测试目录/文件（或提供可证明非零执行的根级 runner），并明确零测试时验证失败；完成后重新生成并验证整组 Draft。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "整组验证命令均为无范围的 node --test，而后端与集成测试都依赖服务启动、默认端口和生命周期；未定义并发测试的端口隔离或串行策略，Node 测试文件并行执行时可能出现端口占用和非确定性失败。",
+      "evidence": "draft_001 与 draft_003 均要求服务启动/停止及端口约定，三项 verification_plan 均执行 node --test，但没有动态端口、串行执行或跨测试资源隔离规则。",
+      "required_action": "批次统一补充动态/临时端口并传递实际服务地址，或明确串行执行策略；同时把 stop/cleanup 约束落实到 backend 与 integration 测试任务及交接字段。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成页面验收使用“加载、列表或错误容器”三选一，可能在页面骨架不完整时通过，无法可靠证明 frontend 页面契约已接入同源联调。",
+      "evidence": "draft_003 的 ac_integration_page 要求页面包含加载、列表或错误容器结构；draft_002 的 oc_frontend_page_entry 明确要求加载、列表和错误提示区域同时存在。",
+      "required_action": "将集成页面断言与前端入口契约对齐，至少断言三个稳定容器标记及相对 /api/levels 引用，并同步 task、done_when 和 handoff 字段。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "前端响应校验只规定“元素最低结构”，没有明确恰好 5 项及字段类型校验；返回数量错误或 unlocked 类型错误的数据可能被当作成功渲染。",
+      "evidence": "draft_002 的 task_frontend_fetch_render 仅要求数组和元素最低结构校验，而 backend 的 oc_levels_api_contract 与相关验收明确要求顶层恰好 5 项及 id/name/difficulty/unlocked 类型。",
+      "required_action": "在 frontend 校验任务和 ac_frontend_success/ac_frontend_error 中明确恰好 5 项、字段非空及类型约束，异常时进入统一错误提示状态。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "后端服务交接契约只描述能力，未定义下游可执行的服务入口、静态根目录、默认页面路径和端口解析方式；集成项被禁止修改实现，却要求接入该入口并验证同源闭环，执行时只能自行猜测。",
+      "evidence": "`oc_backend_service_entry` 仅列出“可启动和停止”“提供默认页面入口与端口约定”等能力；`handoff_contract.required_fields` 仅列字段名，未形成可消费的接口约定。`task_integration_service_lifecycle` 明确依赖该交接。",
+      "required_action": "在 backend 输出契约中补充稳定的服务启动/停止导出方式、动态端口获取方式、静态根目录与默认页面路径；同步收紧 frontend 和 integration 的输入契约与交接字段。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "三个 Work Item 均以全仓 `node --test` 作为唯一自动检查，无法证明对应目录的测试实际存在或执行；上游已有测试通过时，frontend 或 integration 自身缺失用例仍可能满足“非零测试且全部通过”。",
+      "evidence": "`check_backend_node_tests`、`check_frontend_node_tests`、`check_integration_node_tests` 的 command 全部为 `node --test`，而各自验收标准分别声称验证 backend、frontend、integration 的专属测试套件。",
+      "required_action": "将每个验证命令或等效测试发现规则限定到对应的 `tests/backend/**`、`tests/frontend/**`、`tests/integration/**`，并要求该范围内实际执行非零测试。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成项的验收声称确认页面可消费关卡名称和难度，但当前方案只允许 Node HTTP 客户端请求静态 HTML，未执行前端脚本，不能证明动态加载和渲染发生。",
+      "evidence": "`task_integration_service_lifecycle` 指定“使用 Node 内置 HTTP 客户端在同一服务生命周期内请求页面与 API”；同时 `ac_integration_same_origin` 要求观察到关卡名称与难度所需结构，且 non_goals 排除浏览器驱动。",
+      "required_action": "明确集成验收仅验证静态入口与相对 API 引用，或在 `tests/integration/**` 增加可执行前端脚本的 Node 内置运行时/DOM 替身方案，并将对应可观测结果写入验收标准。"
+    },
+    {
+      "severity": "blocking",
+      "message": "集成 Draft 声称验证页面可消费性及名称/难度结构，但其非目标禁止浏览器自动化，任务仅使用 Node HTTP 客户端；该方式无法执行前端 JavaScript 或观测实际渲染结果。",
+      "evidence": "outline_integration_levels_flow 的 goal/ac_integration_same_origin 要求确认页面可消费性和名称难度结构；non_goals 明确不引入 Playwright、浏览器驱动或 e2e；task_integration_service_lifecycle 仅请求页面与 API。",
+      "required_action": "批量修订集成契约：要么将目标和验收收窄为静态页面/API 同源传输证据，要么明确允许可执行前端逻辑的确定性测试方案并补充对应断言。"
+    },
+    {
+      "severity": "blocking",
+      "message": "Backend 自身验收要求 GET / 返回页面资源并托管静态页面，但没有前端输入依赖，且写入范围禁止 web/**；frontend 又反向依赖 backend，导致页面资源所有权和执行顺序未闭合。",
+      "evidence": "outline_backend_levels_service 的 input_contracts 为空，ac_static_security/task_backend_contract_tests 要求 GET / 返回页面资源，write_policy forbidden_scopes 包含 web/**；outline_frontend_level_select 才拥有 web/** 并声明依赖 backend。",
+      "required_action": "批量明确边界：由 backend 测试拥有并使用独立静态夹具，或把真实页面可达性移至 integration 验收，并同步调整依赖、任务和 blocker 规则，避免隐式反向依赖。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "跨 Work Item 的页面入口、端口和可观测标记只有泛化能力描述，没有可执行的具体值或动态端口返回约定，集成测试无法稳定构造断言。",
+      "evidence": "oc_backend_service_entry 仅写“默认页面入口与端口约定”；oc_frontend_page_entry 仅写“提供关卡选择页 HTML 入口”；handoff_contract 只有 page_entry_path/loading_container_marker 等字段名，没有具体路径、端口策略或 marker 值。",
+      "required_action": "批量补充并统一具体交接值/规则（页面路径、端口或启动返回值、加载/列表/错误标记、Content-Type 与错误 JSON 形状），使 frontend 和 integration 的输入契约及测试断言可直接执行。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "三项验证均使用裸 `node --test`，无法稳定证明对应目录中的测试被发现并执行。",
+      "evidence": "测试任务分别写入 `tests/backend/**`、`tests/frontend/**`、`tests/integration/**`，但 `check_backend_node_tests`、`check_frontend_node_tests`、`check_integration_node_tests` 都只执行 `node --test`，且未约束测试文件命名；Node 默认发现规则可能导致 0 tests 或执行到其他项测试。",
+      "required_action": "批量将各 verification check 改为显式目录/文件测试命令，并约束可发现的测试文件命名，使每个 Work Item 都能提供自身非零测试执行证据。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成项声称验证页面与 API 的同源联调闭环及页面可消费性，但验收只检查 HTML、API 响应和源码中的路径文本，没有执行前端脚本或渲染断言。",
+      "evidence": "`goal.summary` 使用“联调闭环”“页面可消费性一致”；`ac_integration_same_origin` 仅要求页面内容引用 `/api/levels` 并观察结构，任务也只断言页面入口和 API payload，无法发现 fetch、解析或渲染回归。",
+      "required_action": "批量调整集成目标/验收为明确的传输层同源可达性，或增加不引入浏览器依赖的可执行前端消费 smoke 测试，断言实际加载并渲染关卡字段。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "前端“响应结构无效”错误边界未定义到字段和类型粒度，可能漏测非法 `unlocked` 等数据。",
+      "evidence": "`task_frontend_fetch_render` 仅写“元素最低结构校验”，而 `ac_frontend_error` 泛指“响应结构无效”；未明确要求校验 `id/name/difficulty/unlocked` 及其类型并覆盖非法样例。",
+      "required_action": "在批量修订中明确前端输入 schema、字段类型和非法响应测试断言。"
+    },
+    {
+      "severity": "blocking",
+      "message": "Backend Draft 将默认页面入口和静态资源返回纳入自身验收，但其 write_policy 禁止修改 web/**，且 input_contracts 为空，未声明依赖 Frontend 页面产物或测试替身，导致该 Work Item 的独立验收顺序和可通过性不明确。",
+      "evidence": "draft_001 的 oc_backend_service_entry 要求“提供默认页面入口”，ac_static_security 要求 GET / 返回页面资源；同时 exclusive_scopes 仅含 server/**、data/levels.json、tests/backend/**，forbidden_scopes 含 web/**，input_contracts 为 []。",
+      "required_action": "由 batch author 统一补充明确的跨项依赖与执行顺序，或将默认页面验收移至 integration，并为 backend 明确可独立验证的静态根目录/fixture 契约。"
+    },
+    {
+      "severity": "blocking",
+      "message": "Integration Draft 的验收要求观察到页面消费 API 后的关卡名称与难度结构，但所有任务和验证只使用 Node HTTP 客户端/node:test，且 non_goals 明确禁止浏览器或 e2e，无法实际执行前端 JavaScript 来证明该行为。",
+      "evidence": "draft_003 的 ac_integration_same_origin 要求联调响应中观察到关卡名称与难度所需结构，task_integration_payload_assertions 也要求该断言；但 non_goals 禁止 Playwright、浏览器驱动和测试框架，verification_plan 仅为 node --test。",
+      "required_action": "批量统一验收边界：要么将 integration 断言限定为 HTML 静态标记、相对 API 路径和 API payload，要么解除浏览器验证限制并增加能够执行页面脚本的验证检查。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "三项 Draft 的 handoff_contract 主要是抽象字段名和 capability 描述，缺少可直接消费的具体入口、端口、JSON envelope/error schema、页面 marker 与锁定状态标识；integration 的 provided_contract_refs 为空，跨项交接难以机械核验。",
+      "evidence": "draft_001/002/003 的 required_fields 如 service_start_stop_entry、page_entry_path、same_origin_service_address 均未绑定具体值或字段定义；draft_003 的 output_contracts 和 provided_contract_refs 均为空。",
+      "required_action": "batch author 应补齐统一的具体交接字段与引用：服务启动/停止入口、默认 URL/端口、成功/错误 JSON 结构、页面加载/列表/错误 marker、锁定行为，并让 integration 明确引用上游契约或声明其为终端证据。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "三个 Work Item 都使用不带路径的 node --test，验证时会运行整套测试，无法清晰归因到单项范围。",
+      "evidence": "draft_001、draft_002、draft_003 的 verification_plan 均将 command 固定为 node --test。",
+      "required_action": "可选地为各项增加按 tests/backend、tests/frontend、tests/integration 的 scoped command，同时保留一次全量回归检查。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "服务入口、静态根目录和页面入口仅以“约定”或“提供”描述，未给出可供下游独立实现和联调的确定映射，导致 frontend 与 integration 无法可靠地对齐页面路径、静态资源路径及服务启动地址。",
+      "evidence": "backend 的 oc_backend_service_entry 仅声明“提供默认页面入口与端口约定”，task_backend_http_service 仅称从“约定静态根目录”读取；frontend 的 oc_frontend_page_entry 仅称“提供关卡选择页 HTML 入口”；integration 依赖上述能力并要求验证同一服务地址。三者 handoff_contract 也只有字段名，没有具体交接值或格式。",
+      "required_action": "整组返修时为共享服务补充确定的启动/停止 API、端口获取方式、URL、静态根目录到页面文件的映射及允许资源规则，并让 frontend 和 integration 的输入契约、任务及验收断言引用这些相同值。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成 Work Item 承诺验证页面实际可消费 API 和名称/难度呈现，但限定仅使用 Node 内置 HTTP 客户端且不使用浏览器或 DOM；HTTP 请求只能取得静态 HTML，不能执行页面 JavaScript，因此验收无法证明该联调闭环。",
+      "evidence": "integration 的 task_integration_service_lifecycle 明确“使用 Node 内置 HTTP 客户端在同一服务生命周期内请求页面与 API”，task_integration_payload_assertions 却要求确认“能观测到关卡名称与难度所需页面结构”，ac_integration_same_origin 又要求页面可观察到相对 /api/levels 与名称/难度结构。前端运行时渲染需要执行 JavaScript。",
+      "required_action": "整组返修时定义可执行的无浏览器联调机制，例如明确前端可由 node:vm 加载的模块入口、最小 DOM 替身及将请求接到实际服务的方式；或者将集成验收收缩为静态页面入口和 API 的同源契约验证，并把运行时渲染验证明确保留在 frontend 测试中。"
+    },
+    {
+      "severity": "blocking",
+      "message": "三项 Work Item 的 verification_checks 都使用无范围的 `node --test`，无法保证当前项实际执行了非零数量的目标测试，并会把其他 Work Item 的测试混入结果，导致顺序执行时误判或零测试通过。",
+      "evidence": "`check_backend_node_tests`、`check_frontend_node_tests`、`check_integration_node_tests` 的 command 均为 `node --test`，且三个 Draft 都将 `non_zero_test_execution_required` 设为 true。",
+      "required_action": "将每项检查改为显式选取对应目录或测试文件的命令，并规定可被命令发现的测试命名/范围；集成检查需明确其服务生命周期与上游测试隔离。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "集成项目标描述同源联调闭环，但验收只通过 HTTP 检查静态 HTML 和 API，未执行页面脚本或验证实际渲染消费，因此无法发现 `/api/levels` 请求、数据映射或锁定状态实现不兼容。",
+      "evidence": "`ac_integration_same_origin` 仅要求页面内容引用相对路径并观察到页面结构；同时 `non_goals` 明确不引入浏览器自动化，所有集成任务也没有 DOM/脚本执行断言。",
+      "required_action": "在整组计划中统一收窄集成目标为协议级同源检查，或增加无外部依赖的脚本/渲染消费验证，并相应更新任务、验收标准和验证检查。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "跨 Work Item 的 handoff/API/UI 契约仍是能力描述和字段名清单，缺少可执行的具体值，批次作者与集成测试无法据此固定断言。",
+      "evidence": "后端仅列出 `api_levels_error_schema`、`service_start_stop_entry` 等 required_fields，未定义具体 JSON 错误形状、启动/停止入口或端口；前端仅列出 `loading_container_marker`、`level_list_marker`、`error_message_marker`，未给出稳定选择器/文本；集成 Draft 的 `provided_contract_refs` 为空。",
+      "required_action": "补充具体服务入口/端口、成功与错误 JSON 字段结构、页面入口和稳定 DOM 标记，并让集成验收引用这些明确契约。"
+    }
+  ],
+  "work_item_ids": [],
+  "usage": {
+    "usage_unavailable": true
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "hard_timeout",
+  "error": "硬超时 2100000ms",
+  "completed": false,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.045,
+    "1:running": 127.398,
+    "2:author_confirm": 0.071,
+    "3:cross_review": 122.32,
+    "4:review_decision": 0.076,
+    "5:author_confirm": 0.068,
+    "6:running": 268.386,
+    "7:author_confirm": 0.078,
+    "8:cross_review": 132.523,
+    "9:author_confirm": 0.077,
+    "10:cross_review": 124.819,
+    "11:author_confirm": 0.081,
+    "12:cross_review": 175.295,
+    "13:author_confirm": 0.081,
+    "14:cross_review": 197.246,
+    "15:author_confirm": 0.082,
+    "16:cross_review": 86.747,
+    "17:author_confirm": 0.085,
+    "18:cross_review": 171.165,
+    "19:author_confirm": 0.095,
+    "20:cross_review": 213.918,
+    "21:author_confirm": 0.086,
+    "22:cross_review": 163.472,
+    "23:author_confirm": 0.088,
+    "24:cross_review": 78.389,
+    "25:author_confirm": 0.087,
+    "26:cross_review": 182.701,
+    "27:author_confirm": 0.095,
+    "28:cross_review": 54.357
+  }
+}

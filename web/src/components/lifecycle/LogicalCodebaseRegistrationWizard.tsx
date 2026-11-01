@@ -1,0 +1,409 @@
+import { ApiRequestError } from "../../api/client";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  preflightLogicalCodebaseRegistration,
+  resumeLogicalCodebaseRegistration,
+  submitLogicalCodebaseRegistration,
+} from "../../api/logical-codebase-registration";
+import type {
+  RegistrationBatchDto,
+  RegistrationPreflightItemDto,
+  RegistrationPreflightResponse,
+} from "../../api/types";
+import { DialogShell } from "../shared/DialogShell";
+
+const PREFLIGHT_CLASSES = [
+  "eligible",
+  "non_git",
+  "duplicate",
+  "nested",
+  "needs_attention",
+  "missing",
+  "outside_root",
+] as const;
+
+function formatError(reason: unknown, fallback: string): string {
+  if (reason instanceof ApiRequestError) {
+    // 服务端把预检被拒的具体原因放在 details.reason（如 ownership_conflict 的处置指引），
+    // 优先展示它，避免用户只看到笼统的 "aggregate root preflight rejected"。
+    const detailReason = reason.details?.reason;
+    if (typeof detailReason === "string" && detailReason.trim() !== "") {
+      return `${fallback}：${detailReason}`;
+    }
+    if (reason.message) {
+      return `${reason.code}: ${reason.message}`;
+    }
+    return fallback;
+  }
+  return reason instanceof Error ? reason.message : fallback;
+}
+
+function displayReason(item: RegistrationPreflightItemDto): string {
+  return item.reason ? `（${item.reason}）` : "";
+}
+
+export function LogicalCodebaseRegistrationWizard({
+  projectId,
+  logicalCodebaseId,
+  onCompleted,
+  onClose,
+  embedded = false,
+  initialAggregateRoot,
+  autoStart = false,
+}: {
+  projectId: string;
+  logicalCodebaseId: string;
+  onCompleted?: (logicalCodebaseId: string) => Promise<void> | void;
+  onClose?: () => void;
+  /** 内嵌模式：不渲染遮罩/对话框壳，由宿主弹窗提供 chrome（添加代码库弹窗合并登记流）。 */
+  embedded?: boolean;
+  /** 预填聚合根：创建 LC 后复用同一根，不再要求用户重填。 */
+  initialAggregateRoot?: string;
+  /** 挂载后立即以 initialAggregateRoot 触发自动发现预检。 */
+  autoStart?: boolean;
+}) {
+  const [aggregateRoot, setAggregateRoot] = useState(initialAggregateRoot ?? "");
+  const [candidatePaths, setCandidatePaths] = useState("");
+  const [preflight, setPreflight] = useState<RegistrationPreflightResponse | null>(null);
+  const [manualMode, setManualMode] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
+  const [batch, setBatch] = useState<RegistrationBatchDto | null>(null);
+  const [busyAction, setBusyAction] = useState<"preflight" | "submit" | "resume" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const autoStartRef = useRef(false);
+
+  const paths = useMemo(
+    () => candidatePaths.split(/\r?\n/).map((path) => path.trim()).filter(Boolean),
+    [candidatePaths],
+  );
+  const confirmedPaths = useMemo(() => {
+    if (!preflight) return [];
+    return preflight.items
+      .filter(
+        (item) =>
+          (item.class === "eligible" || item.class === "needs_attention") &&
+          selectedPaths.has(item.path),
+      )
+      .map((item) => item.path);
+  }, [preflight, selectedPaths]);
+
+  const candidateItems = preflight?.items ?? [];
+
+  async function runPreflight(root: string) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusyAction("preflight");
+    setError(null);
+    setBatch(null);
+    try {
+      const result = await preflightLogicalCodebaseRegistration(projectId, logicalCodebaseId, {
+        aggregate_root: root,
+        candidate_paths: manualMode ? paths : [],
+        auto_discover: !manualMode,
+      });
+      setPreflight(result);
+      setSelectedPaths(
+        new Set(result.items.filter((item) => item.class === "eligible").map((item) => item.path)),
+      );
+    } catch (reason) {
+      setError(formatError(reason, "预检失败"));
+      if (!manualMode) setManualMode(true);
+    } finally {
+      busyRef.current = false;
+      setBusyAction(null);
+    }
+  }
+
+  async function handlePreflight(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const root = aggregateRoot.trim();
+    if (!root) {
+      setError("请输入聚合根目录");
+      return;
+    }
+    await runPreflight(root);
+  }
+
+  useEffect(() => {
+    if (!autoStart || autoStartRef.current) return;
+    const root = (initialAggregateRoot ?? "").trim();
+    if (!root) return;
+    autoStartRef.current = true;
+    void runPreflight(root);
+    // 仅需在挂载时执行一次；runPreflight 闭包读取的初态即为目标初态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, initialAggregateRoot]);
+
+  function handleManualPreflight() {
+    setManualMode(true);
+    setPreflight(null);
+    setSelectedPaths(new Set());
+    setError(null);
+  }
+
+  async function handleSubmit() {
+    if (busyRef.current || !preflight) return;
+    if (confirmedPaths.length === 0) {
+      setError("没有可提交的成员");
+      return;
+    }
+    busyRef.current = true;
+    setBusyAction("submit");
+    setError(null);
+    try {
+      const result = await submitLogicalCodebaseRegistration(projectId, logicalCodebaseId, {
+        aggregate_root: aggregateRoot.trim(),
+        preflight_id: preflight.preflight_id,
+        confirmed_paths: confirmedPaths,
+      });
+      setBatch(result);
+      if (result.status === "completed") {
+        await onCompleted?.(logicalCodebaseId);
+      }
+    } catch (reason) {
+      setError(formatError(reason, "提交登记失败"));
+    } finally {
+      busyRef.current = false;
+      setBusyAction(null);
+    }
+  }
+
+  async function handleResume() {
+    if (busyRef.current || !batch) return;
+    busyRef.current = true;
+    setBusyAction("resume");
+    setError(null);
+    try {
+      const result = await resumeLogicalCodebaseRegistration(projectId, logicalCodebaseId, batch.batch_id);
+      setBatch(result);
+      if (result.status === "completed") {
+        await onCompleted?.(logicalCodebaseId);
+      }
+    } catch (reason) {
+      setError(formatError(reason, "恢复登记失败"));
+    } finally {
+      busyRef.current = false;
+      setBusyAction(null);
+    }
+  }
+
+  const submitting = busyAction === "submit";
+  const canSubmit = Boolean(preflight) && !batch && !busyAction;
+
+  const body = (
+    <>
+        <form onSubmit={handlePreflight} className="space-y-3">
+          <label className="block text-sm font-semibold text-[var(--aria-ink)]">
+            聚合根目录
+            <input
+              aria-label="聚合根目录"
+              value={aggregateRoot}
+              onChange={(event) => setAggregateRoot(event.target.value)}
+              disabled={Boolean(busyAction) || Boolean(preflight)}
+              className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)] disabled:opacity-60"
+            />
+          </label>
+          {manualMode ? (
+            <label className="block text-sm font-semibold text-[var(--aria-ink)]">
+              候选成员路径
+              <textarea
+                aria-label="候选成员路径"
+                value={candidatePaths}
+                onChange={(event) => setCandidatePaths(event.target.value)}
+                disabled={Boolean(busyAction) || Boolean(preflight)}
+                placeholder="每行一个路径（可选）"
+                className="mt-1 block min-h-20 w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 font-mono text-sm font-normal text-[var(--aria-ink)] disabled:opacity-60"
+              />
+            </label>
+          ) : null}
+          {!preflight ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="submit"
+                disabled={Boolean(busyAction)}
+                className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {busyAction === "preflight" ? "预检中…" : manualMode ? "执行手工预检" : "确认聚合根并自动发现"}
+              </button>
+              {!manualMode ? (
+                <button
+                  type="button"
+                  onClick={handleManualPreflight}
+                  disabled={Boolean(busyAction)}
+                  className="rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)] disabled:opacity-60"
+                >
+                  改为手工预检
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </form>
+
+        {preflight ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-[var(--aria-ink)]">预检分类</h3>
+              <button
+                type="button"
+                disabled={Boolean(busyAction) || Boolean(batch)}
+                onClick={() => {
+                  setPreflight(null);
+                  setSelectedPaths(new Set());
+                  setManualMode(false);
+                  setError(null);
+                }}
+                className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)] disabled:opacity-60"
+              >
+                重新预检
+              </button>
+            </div>
+            {candidateItems.length === 0 && !manualMode ? (
+              <div className="rounded-md border border-dashed border-[var(--aria-line)] p-3 text-sm text-[var(--aria-ink-muted)]">
+                <p>未发现候选成员，可改为手工预检</p>
+                <button
+                  type="button"
+                  onClick={handleManualPreflight}
+                  disabled={Boolean(busyAction) || Boolean(batch)}
+                  className="mt-2 rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink)] disabled:opacity-60"
+                >
+                  切换手工预检
+                </button>
+              </div>
+            ) : null}
+            <div className="space-y-2">
+              {PREFLIGHT_CLASSES.map((classification) => {
+                const items = preflight.items.filter((item) => item.class === classification);
+                return (
+                  <section
+                    key={classification}
+                    aria-label={`分类 ${classification}`}
+                    className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+                  >
+                    <h4 className="text-xs font-semibold text-[var(--aria-ink)]">
+                      <span className="rounded border border-[var(--aria-line)] bg-white px-1.5 py-0.5">
+                        {classification}
+                      </span>
+                    </h4>
+                    {items.length > 0 ? (
+                      <ul className="mt-1 space-y-1">
+                        {items.map((item) => (
+                          <li key={item.path} className="text-xs text-[var(--aria-ink-muted)]">
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                aria-label={
+                                  item.class === "needs_attention"
+                                    ? `确认 ${item.path}${displayReason(item)}`
+                                    : item.class === "eligible"
+                                      ? `选择 ${item.path}${displayReason(item)}（eligible）`
+                                      : `不可登记 ${item.path}${displayReason(item)}`
+                                }
+                                checked={selectedPaths.has(item.path)}
+                                disabled={
+                                  Boolean(busyAction) ||
+                                  Boolean(batch) ||
+                                  (item.class !== "eligible" && item.class !== "needs_attention")
+                                }
+                                onChange={(event) => {
+                                  setSelectedPaths((current) => {
+                                    const next = new Set(current);
+                                    if (event.target.checked) next.add(item.path);
+                                    else next.delete(item.path);
+                                    return next;
+                                  });
+                                }}
+                              />
+                              {item.class === "needs_attention"
+                                ? "确认"
+                                : item.class === "eligible"
+                                  ? "选择"
+                                  : "不可登记"} {item.path}{displayReason(item)}
+                            </label>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">无</p>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
+            {!batch ? (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={!canSubmit || submitting}
+                  onClick={() => void handleSubmit()}
+                  aria-label="提交登记"
+                  aria-busy={submitting}
+                  className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  {submitting ? "⏳ " : ""}提交登记
+                </button>
+                {embedded && !manualMode ? (
+                  <button
+                    type="button"
+                    onClick={handleManualPreflight}
+                    disabled={Boolean(busyAction)}
+                    className="rounded-md border border-[var(--aria-line)] px-3 py-2 text-sm font-semibold text-[var(--aria-ink)] disabled:opacity-60"
+                  >
+                    改为手工预检
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {batch ? (
+          <section aria-label="登记结果" className="mt-4 space-y-3">
+            <h3 className="text-sm font-semibold text-[var(--aria-ink)]">登记结果</h3>
+            <p className="font-mono text-sm text-[var(--aria-ink)]">{batch.status}</p>
+            <ul className="space-y-1 text-xs text-[var(--aria-ink-muted)]">
+              {batch.items.map((item) => (
+                <li key={item.path}>
+                  {item.path}: {item.status}{item.failure_reason ? `（${item.failure_reason}）` : ""}
+                </li>
+              ))}
+            </ul>
+            {batch.status === "partial_failed" ? (
+              <button
+                type="button"
+                disabled={busyAction === "resume"}
+                onClick={() => void handleResume()}
+                aria-label="恢复未完成项"
+                aria-busy={busyAction === "resume"}
+                className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {busyAction === "resume" ? "⏳ " : ""}恢复未完成项
+              </button>
+            ) : null}
+          </section>
+        ) : null}
+
+        {error ? (
+          <p role="alert" className="mt-3 text-sm font-semibold text-[var(--aria-danger)]">
+            {error}
+          </p>
+        ) : null}
+    </>
+  );
+
+  if (embedded) {
+    return <div>{body}</div>;
+  }
+
+  return (
+    <DialogShell
+      label="登记成员"
+      onClose={onClose ?? null}
+      closeLabel="关闭"
+      closeDisabled={Boolean(busyAction)}
+      widthClass="max-w-2xl"
+    >
+      {body}
+    </DialogShell>
+  );
+}

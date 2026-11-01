@@ -4,6 +4,7 @@ use crate::product::coding_models::{
     CodingExecutionAttempt, CodingExecutionUnit, CodingProviderRole, CodingUnitRun,
     CodingUnitRunStatus,
 };
+use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::work_item_projection::RenderedExecutionContext;
 
@@ -25,6 +26,7 @@ impl super::CodingAttemptStore {
             .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .join("unit-runs-index.json");
         with_exclusive_lock(&lock_target, || {
+            let runs = self.list_coding_unit_runs(attempt, &run.unit_id)?;
             if let Some((_, existing)) = self.find_unit_run_by_id(attempt, &run.id)? {
                 if existing == *run {
                     return Ok(());
@@ -32,7 +34,13 @@ impl super::CodingAttemptStore {
                 return Err(identity_mismatch("coding_unit_run", &run.id));
             }
             if self
-                .list_coding_unit_runs(attempt, &run.unit_id)?
+                .list_all_coding_unit_runs(attempt)?
+                .iter()
+                .any(|existing| existing.id == run.id)
+            {
+                return Err(identity_mismatch("coding_unit_run", &run.id));
+            }
+            if runs
                 .iter()
                 .any(|existing| existing.execution_no == run.execution_no)
             {
@@ -77,6 +85,13 @@ impl super::CodingAttemptStore {
                 return Err(identity_mismatch("coding_unit_run", &requested.id));
             }
             if self.find_unit_run_by_id(attempt, &requested.id)?.is_some() {
+                return Err(identity_mismatch("coding_unit_run", &requested.id));
+            }
+            if self
+                .list_all_coding_unit_runs(attempt)?
+                .iter()
+                .any(|run| run.id == requested.id)
+            {
                 return Err(identity_mismatch("coding_unit_run", &requested.id));
             }
             let now = Utc::now().to_rfc3339();
@@ -180,6 +195,128 @@ impl super::CodingAttemptStore {
         Ok(run)
     }
 
+    pub fn create_retry_coding_unit_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit_id: &str,
+        prior_run_id: &str,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        validate_relative_id(unit_id)?;
+        validate_relative_id(prior_run_id)?;
+        let unit = self.authoritative_unit(&current, unit_id)?;
+        let lock_target = self
+            .attempt_dir(&current.project_id, &current.issue_id, &current.id)
+            .join("unit-runs-index.json");
+        with_exclusive_lock(&lock_target, || {
+            let runs = self.list_coding_unit_runs(&current, unit_id)?;
+            let prior = runs
+                .iter()
+                .find(|run| run.id == prior_run_id)
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "coding_unit_run",
+                    id: prior_run_id.to_string(),
+                })?;
+            if prior.unit_id != unit.id
+                || prior.status != CodingUnitRunStatus::Running
+                || prior.completion_commit.is_some()
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_unit_run_retry",
+                    id: prior_run_id.to_string(),
+                });
+            }
+            let prior_path = self.coding_unit_run_path(
+                &current.project_id,
+                &current.issue_id,
+                &current.id,
+                unit_id,
+                prior_run_id,
+            );
+            let mut failed = prior.clone();
+            failed.status = CodingUnitRunStatus::Failed;
+            failed.updated_at = Utc::now().to_rfc3339();
+            write_json(&prior_path, &failed)?;
+
+            let now = Utc::now().to_rfc3339();
+            let all_runs = self.list_all_coding_unit_runs(&current)?;
+            let mut retry = prior.clone();
+            let mut next_id = all_runs.len();
+            loop {
+                retry.id = next_sequential_id("coding_unit_run", next_id);
+                if all_runs.iter().all(|existing| existing.id != retry.id) {
+                    break;
+                }
+                next_id = next_id.saturating_add(1);
+            }
+            retry.execution_no = prior.execution_no.saturating_add(1);
+            retry.status = CodingUnitRunStatus::Running;
+            retry.completion_commit = None;
+            // C2 Task 6（决策 6/#13）：重试 execution 的起点由下一次认领前
+            // 冻结的当时真实 HEAD 派生，不继承旧值——两次 execution 之间
+            // 用户在工作树留下的人工提交不得归属当前 Work Item 区间。
+            retry.start_commit = None;
+            retry.operational_retry_count = prior.operational_retry_count.saturating_add(1);
+            retry.created_at = now.clone();
+            retry.updated_at = now;
+            write_json(
+                &self.coding_unit_run_path(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                    unit_id,
+                    &retry.id,
+                ),
+                &retry,
+            )?;
+            Ok(retry)
+        })
+    }
+
+    pub fn fail_coding_unit_run(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        unit_id: &str,
+        run_id: &str,
+    ) -> Result<CodingUnitRun, ProductStoreError> {
+        let current = self.validate_attempt_lineage(attempt)?;
+        validate_relative_id(unit_id)?;
+        validate_relative_id(run_id)?;
+        let (path, found) = self.find_unit_run_by_id(&current, run_id)?.ok_or_else(|| {
+            ProductStoreError::NotFound {
+                kind: "coding_unit_run",
+                id: run_id.to_string(),
+            }
+        })?;
+        if found.unit_id != unit_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_unit_run",
+                id: run_id.to_string(),
+            });
+        }
+        with_exclusive_lock(&path, || {
+            let mut run: CodingUnitRun = read_json(&path)?;
+            if run.id != run_id || run.unit_id != unit_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_unit_run",
+                    id: run_id.to_string(),
+                });
+            }
+            if run.status == CodingUnitRunStatus::Failed {
+                return Ok(run);
+            }
+            if run.status != CodingUnitRunStatus::Running || run.completion_commit.is_some() {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_unit_run",
+                    id: run_id.to_string(),
+                });
+            }
+            run.status = CodingUnitRunStatus::Failed;
+            run.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &run)?;
+            Ok(run)
+        })
+    }
     pub fn bind_unit_run_execution_context(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -336,6 +473,22 @@ impl super::CodingAttemptStore {
             write_json(&path, &run)?;
             Ok(run)
         })
+    }
+
+    /// Lists every durable unit run in an attempt, across all units.
+    ///
+    /// This is intentionally attempt-scoped: unit-run IDs are durable attempt records and must
+    /// remain unique even when separate units each start at execution number one.
+    pub(crate) fn list_all_coding_unit_runs(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<CodingUnitRun>, ProductStoreError> {
+        self.list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+            .into_iter()
+            .try_fold(Vec::new(), |mut all_runs, unit| {
+                all_runs.extend(self.list_coding_unit_runs(attempt, &unit.id)?);
+                Ok(all_runs)
+            })
     }
 
     pub(super) fn authoritative_unit(

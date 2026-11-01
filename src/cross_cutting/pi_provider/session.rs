@@ -6,20 +6,120 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::json_rpc_peer::JsonRpcPeer;
+use crate::cross_cutting::local_usage::read_pi_usage;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand, ProviderCompletion,
-    ProviderEvent, ProviderStatus, ProviderToolCall, ProviderToolResult, StreamingProviderInput,
+    ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEventStatus, ProviderStatus, ProviderToolCall, ProviderToolResult,
+    StreamingProviderInput, UsageReportData,
 };
 
 use super::{
     PiSelectRequest, is_pi_terminal, parse_pi_failure, parse_pi_select_request,
-    parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end, parse_pi_tool_start,
+    parse_pi_session_file, parse_pi_session_id, parse_pi_text_delta, parse_pi_tool_end,
+    parse_pi_tool_start, parse_pi_usage,
 };
 
 const PI_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const PI_EMPTY_OUTPUT_ERROR: &str = "provider_empty_output";
+const PI_EMPTY_OUTPUT_RETRY_PROMPT: &str =
+    "Your previous reply was empty. Please reply again with your complete output.";
 
 type PendingResponses = HashMap<String, oneshot::Sender<Value>>;
+
+enum PiEmptyOutputAction {
+    Complete,
+    Retry,
+    Fail,
+}
+
+fn empty_output_terminal_action(
+    full_output: &str,
+    empty_output_retry_used: &mut bool,
+) -> PiEmptyOutputAction {
+    if !full_output.trim().is_empty() {
+        return PiEmptyOutputAction::Complete;
+    }
+    if *empty_output_retry_used {
+        return PiEmptyOutputAction::Fail;
+    }
+    *empty_output_retry_used = true;
+    PiEmptyOutputAction::Retry
+}
+
+fn pi_empty_output_error() -> ProviderAdapterError {
+    ProviderAdapterError::provider_empty_output(format!(
+        "{PI_EMPTY_OUTPUT_ERROR}: Pi agent settled without assistant output after one bounded retry"
+    ))
+}
+
+/// 空输出后的有界重试：在同一会话内重发一次 prompt。
+/// 与 Codex 对称，重试前发送一条稳定的 retry ProviderExecutionEvent 审计事件。
+/// 返回 `None` 表示会话被中止；`Some(settled)` 表示重试 prompt 的响应已收到，
+/// `settled` 指示等待响应期间 agent 是否已再次 settle。
+#[allow(clippy::too_many_arguments)]
+async fn retry_pi_prompt_after_empty_output<W>(
+    peer: &JsonRpcPeer<W>,
+    pending_by_id: &mut PendingResponses,
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    working_dir: &std::path::Path,
+    full_output: &mut String,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    next_id: &mut u64,
+    cancel: &CancellationToken,
+) -> Result<Option<bool>, ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tracing::warn!(
+        target: "pi_provider",
+        "Pi agent settled with empty output; retrying once in-session"
+    );
+    send_event(
+        event_tx,
+        ProviderEvent::Execution(ProviderExecutionEvent {
+            event_id: "pi_empty_output_retry".to_string(),
+            kind: ProviderExecutionEventKind::Turn,
+            status: ProviderExecutionEventStatus::Running,
+            title: "Turn empty output retry".to_string(),
+            detail: Some("Pi agent settled with empty output; retrying once".to_string()),
+            command: None,
+            cwd: Some(working_dir.display().to_string()),
+            output: None,
+            exit_code: None,
+        }),
+    )
+    .await?;
+    full_output.clear();
+    let retry_prompt = send_pi_command(
+        peer,
+        pending_by_id,
+        next_id,
+        json!({ "type": "prompt", "message": PI_EMPTY_OUTPUT_RETRY_PROMPT }),
+    )
+    .await?;
+    match await_pi_response(
+        retry_prompt,
+        PiResponseWaitContext {
+            peer,
+            pending_by_id,
+            event_tx,
+            full_output,
+            command_rx,
+            next_id,
+            cancel,
+        },
+    )
+    .await?
+    {
+        PiResponseWait::Response(response, settled_while_waiting) => {
+            ensure_pi_success(&response)?;
+            Ok(Some(settled_while_waiting))
+        }
+        PiResponseWait::Aborted => Ok(None),
+    }
+}
 
 pub(crate) async fn run_pi_session<W>(
     peer: JsonRpcPeer<W>,
@@ -43,6 +143,72 @@ where
             .await;
     }
     result
+}
+
+/// Task 9c:LC 显式 resume 的原生 get_state 确认(spawn 后、start 返回前)。
+///
+/// pi 的 resume 语义由 `--session-id` 传入,但「已恢复」只能由真实 RPC
+/// `get_state` 应答证明:应答 `data.sessionId` 必须与请求 id 逐字相等。
+/// 缺 id(应答无 sessionId)或错 id(应答不同会话)属于已启动 child 后的
+/// runtime 失败,返回显式「未恢复」错误(调用方沿 kill 链终止并回收子进
+/// 程,不伪称零 spawn);绝不回填请求 id、绝不清 id 转 fresh。
+pub(crate) async fn confirm_pi_native_resume_id<W>(
+    peer: &JsonRpcPeer<W>,
+    cancel: &CancellationToken,
+    requested_native_id: &str,
+) -> Result<String, ProviderAdapterError>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    // 预会话命名空间沿用 `pi-<N>`(F3);run_pi_session 的 next_id 独立从 1
+    // 计数,两阶段顺序执行,响应按 id 匹配不冲突。
+    let request_id = "pi-1".to_string();
+    peer.send(json!({ "id": request_id, "type": "get_state" }))
+        .await?;
+    let timeout = tokio::time::sleep(PI_RPC_REQUEST_TIMEOUT);
+    tokio::pin!(timeout);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(provider_error(
+                    "pi native resume confirmation cancelled before get_state answered (session NOT resumed)",
+                ));
+            }
+            _ = &mut timeout => {
+                return Err(ProviderAdapterError::timeout_with_details(
+                    "pi native resume confirmation timed out waiting for get_state (session NOT resumed)",
+                    String::new(),
+                    String::new(),
+                    u64::try_from(PI_RPC_REQUEST_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                ));
+            }
+            incoming = peer.next_incoming() => {
+                let Some(incoming) = incoming else {
+                    return Err(provider_error(
+                        "pi rpc stream ended before get_state confirmed the resume (session NOT resumed)",
+                    ));
+                };
+                if incoming.get("type").and_then(Value::as_str) != Some("response")
+                    || incoming.get("id").and_then(pi_id_key).as_deref()
+                        != Some(request_id.as_str())
+                {
+                    // 确认阶段只等 get_state 应答;其余事件/应答留给会话任务。
+                    continue;
+                }
+                ensure_pi_success(&incoming)?;
+                return match parse_pi_session_id(&incoming) {
+                    Some(confirmed) if confirmed == requested_native_id => Ok(confirmed),
+                    Some(other) => Err(provider_error(format!(
+                        "pi get_state session id {other} does not confirm the requested resume id {requested_native_id} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)"
+                    ))),
+                    None => Err(provider_error(format!(
+                        "pi get_state response did not contain a session id confirming the requested resume id {requested_native_id} (session NOT resumed; the started child was killed and reaped, not a zero-spawn refusal)"
+                    ))),
+                };
+            }
+        }
+    }
 }
 
 async fn run_pi_session_inner<W>(
@@ -86,12 +252,27 @@ where
         PiResponseWait::Aborted => return Ok(()),
     };
     ensure_pi_success(&get_state_response)?;
-    let session_id = parse_pi_session_id(&get_state_response).or_else(|| {
-        input
-            .resume_provider_session_id
-            .clone()
-            .filter(|id| !id.trim().is_empty())
-    });
+    // Task 9c:resume 请求下不回填请求 id——完成事件的原生 id 必须来自
+    // get_state 应答且与请求逐字相等;缺 id(应答无 sessionId)或错 id
+    // (应答不同会话)都是「未恢复」runtime 失败,不伪称续接。fresh 会话
+    // (无 resume id)照常采纳应答 id。
+    let session_id = match input
+        .resume_provider_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(requested) => match parse_pi_session_id(&get_state_response) {
+            Some(confirmed) if confirmed == requested => Some(confirmed),
+            other => {
+                return Err(provider_error(format!(
+                    "pi get_state session id {} does not confirm the requested resume id {requested} (session NOT resumed)",
+                    other.as_deref().unwrap_or("<missing>")
+                )));
+            }
+        },
+        None => parse_pi_session_id(&get_state_response),
+    };
 
     let prompt = send_pi_command(
         &peer,
@@ -125,15 +306,52 @@ where
         ProviderEvent::StatusChanged(ProviderStatus::Running),
     )
     .await?;
+    let mut empty_output_retry_used = false;
     if settled_while_waiting {
-        complete_pi_session(
-            &event_tx,
-            full_output,
-            input.structured_output_contract.as_ref(),
-            session_id.clone(),
-        )
-        .await?;
-        return Ok(());
+        loop {
+            match empty_output_terminal_action(&full_output, &mut empty_output_retry_used) {
+                PiEmptyOutputAction::Complete => {
+                    emit_pi_usage(
+                        &peer,
+                        &mut pending_by_id,
+                        &event_tx,
+                        &mut full_output,
+                        &mut command_rx,
+                        &mut next_id,
+                        &cancel,
+                        UsageReportData::role_text(&input.role),
+                    )
+                    .await;
+                    complete_pi_session(
+                        &event_tx,
+                        full_output,
+                        input.structured_output_contract.as_ref(),
+                        session_id.clone(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                PiEmptyOutputAction::Fail => return Err(pi_empty_output_error()),
+                PiEmptyOutputAction::Retry => {
+                    match retry_pi_prompt_after_empty_output(
+                        &peer,
+                        &mut pending_by_id,
+                        &event_tx,
+                        &input.working_dir,
+                        &mut full_output,
+                        &mut command_rx,
+                        &mut next_id,
+                        &cancel,
+                    )
+                    .await?
+                    {
+                        None => return Ok(()),
+                        Some(true) => continue,
+                        Some(false) => break,
+                    }
+                }
+            }
+        }
     }
 
     let timeout_secs = input.timeout_secs.max(1);
@@ -176,14 +394,54 @@ where
                     return Err(provider_error(error));
                 }
                 if is_pi_terminal(&incoming) {
-                    complete_pi_session(
-                        &event_tx,
-                        full_output,
-                        input.structured_output_contract.as_ref(),
-                        session_id.clone(),
-                    )
-                    .await?;
-                    return Ok(());
+                    loop {
+                        match empty_output_terminal_action(
+                            &full_output,
+                            &mut empty_output_retry_used,
+                        ) {
+                            PiEmptyOutputAction::Complete => {
+                                emit_pi_usage(
+                                    &peer,
+                                    &mut pending_by_id,
+                                    &event_tx,
+                                    &mut full_output,
+                                    &mut command_rx,
+                                    &mut next_id,
+                                    &cancel,
+                                    UsageReportData::role_text(&input.role),
+                                )
+                                .await;
+                                complete_pi_session(
+                                    &event_tx,
+                                    full_output,
+                                    input.structured_output_contract.as_ref(),
+                                    session_id.clone(),
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                            PiEmptyOutputAction::Fail => return Err(pi_empty_output_error()),
+                            PiEmptyOutputAction::Retry => {
+                                match retry_pi_prompt_after_empty_output(
+                                    &peer,
+                                    &mut pending_by_id,
+                                    &event_tx,
+                                    &input.working_dir,
+                                    &mut full_output,
+                                    &mut command_rx,
+                                    &mut next_id,
+                                    &cancel,
+                                )
+                                .await?
+                                {
+                                    None => return Ok(()),
+                                    Some(true) => continue,
+                                    Some(false) => break,
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 }
                 handle_pi_event(&incoming, &event_tx, &mut full_output).await?;
             }
@@ -197,6 +455,13 @@ enum PiCommand {
         id: String,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        // P0 1.3：answers/receipt 逐字段透传；pi extension_ui 协议只有单值
+        // 槽位（多问题为 pi 已知限制，REST 层不做 provider 分支拒绝），
+        // receipt 仍按两层语义在 pi 等待者接收时推进。pi 单值槽位不消费
+        // 多题 answers（已透传至等待点）。
+        #[allow(dead_code)]
+        answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
+        receipt: Option<crate::cross_cutting::choice_delivery::ChoiceDeliverySignal>,
     },
 }
 
@@ -210,8 +475,23 @@ async fn await_pi_command(
             _ = cancel.cancelled() => return PiCommand::Abort,
             command = command_rx.recv() => match command {
                 Some(ProviderCommand::Abort) | None => return PiCommand::Abort,
-                Some(ProviderCommand::ChoiceResponse { id, selected_option_ids, free_text, .. }) => {
-                    return PiCommand::ChoiceResponse { id, selected_option_ids, free_text };
+                Some(ProviderCommand::ChoiceResponse {
+                    id,
+                    selected_option_ids,
+                    free_text,
+                    answers,
+                    receipt,
+                }) => {
+                    if let Some(receipt) = receipt.as_ref() {
+                        receipt.mark_resolving();
+                    }
+                    return PiCommand::ChoiceResponse {
+                        id,
+                        selected_option_ids,
+                        free_text,
+                        answers,
+                        receipt,
+                    };
                 }
                 Some(ProviderCommand::PermissionResponse { .. } | ProviderCommand::ToolResult(_)) => {}
             }
@@ -262,11 +542,22 @@ where
                 id,
                 selected_option_ids,
                 free_text,
+                answers: _,
+                receipt,
             } if id == request_id => {
                 send_pi_choice_response(peer, &request_id, selected_option_ids, free_text).await?;
+                // P0 1.3：pi 命令等待者真正接收并回写 peer 后才 Delivered。
+                if let Some(receipt) = receipt.as_ref() {
+                    receipt.deliver();
+                }
                 return Ok(false);
             }
-            PiCommand::ChoiceResponse { id, .. } => send_choice_id_unmatched(event_tx, id).await?,
+            PiCommand::ChoiceResponse { id, receipt, .. } => {
+                if let Some(receipt) = receipt.as_ref() {
+                    receipt.reject();
+                }
+                send_choice_id_unmatched(event_tx, id).await?
+            }
         }
     }
 }
@@ -467,6 +758,134 @@ async fn handle_pi_event(
         .await?;
     }
     Ok(())
+}
+
+/// 会话结束后刷新一次 get_state，提取累计 token 用量并上报（best-effort）。
+///
+/// pi 没有逐 turn 的 usage 事件，`data.cost` 只能在 get_state 响应中观察；任何失败
+/// （超时/中断/响应缺 cost）都仅记录 warning，不影响会话完成路径。
+#[allow(clippy::too_many_arguments)]
+async fn emit_pi_usage<W>(
+    peer: &JsonRpcPeer<W>,
+    pending_by_id: &mut HashMap<String, oneshot::Sender<Value>>,
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    full_output: &mut String,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    next_id: &mut u64,
+    cancel: &CancellationToken,
+    role: &'static str,
+) where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let get_state =
+        match send_pi_command(peer, pending_by_id, next_id, json!({ "type": "get_state" })).await {
+            Ok(get_state) => get_state,
+            Err(error) => {
+                warn_pi_usage_unavailable(
+                    PiUsageStage::RpcSend,
+                    Some(&format!("get_state send failed: {error}")),
+                );
+                return;
+            }
+        };
+    let response = match await_pi_response(
+        get_state,
+        PiResponseWaitContext {
+            peer,
+            pending_by_id,
+            event_tx,
+            full_output,
+            command_rx,
+            next_id,
+            cancel,
+        },
+    )
+    .await
+    {
+        Ok(PiResponseWait::Response(response, _)) => response,
+        _ => {
+            warn_pi_usage_unavailable(PiUsageStage::RpcResponse, None);
+            return;
+        }
+    };
+    // 优先使用 Pi 协议层 cost；当前版本通常为 null，才读 get_state 明示的
+    // sessionFile 尾部。任何本地读取失败均降级为无 usage，不影响完成路径；
+    // 失败环节按 rpc/parse/file 结构化留痕（REQ-NDR-05）。
+    let report = match parse_pi_usage(&response, role) {
+        Some(report) => Some(report),
+        None => match parse_pi_session_file(&response) {
+            Some(session_file) => match read_pi_usage(&session_file, role) {
+                Some(report) => Some(report),
+                None => {
+                    warn_pi_usage_unavailable(
+                        PiUsageStage::File,
+                        Some(&format!(
+                            "local session usage unavailable: {}",
+                            session_file.display()
+                        )),
+                    );
+                    None
+                }
+            },
+            None => {
+                warn_pi_usage_unavailable(
+                    PiUsageStage::Parse,
+                    Some("no cost and no absolute session_file"),
+                );
+                None
+            }
+        },
+    };
+    if let Some(report) = report
+        && send_event(event_tx, ProviderEvent::UsageReport(report))
+            .await
+            .is_err()
+    {
+        warn_pi_usage_unavailable(PiUsageStage::Emit, None);
+    }
+}
+
+/// REQ-NDR-05：pi usage 兜底链路的失败环节（结构化 warn 的稳定标签）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PiUsageStage {
+    /// `get_state` 请求写入失败（对端已关闭）。
+    RpcSend,
+    /// `get_state` 响应未到达（流提前结束/被中断）。
+    RpcResponse,
+    /// 响应既无 `data.cost`，也无可用的绝对 `data.sessionFile`。
+    Parse,
+    /// 会话文件可定位，但本地记录读不到该轮 usage。
+    File,
+    /// usage 事件接收端已关闭。
+    Emit,
+}
+
+impl PiUsageStage {
+    /// 稳定环节标签（诊断检索键，勿改名）。
+    fn label(self) -> &'static str {
+        match self {
+            Self::RpcSend => "rpc_send",
+            Self::RpcResponse => "rpc_response",
+            Self::Parse => "parse",
+            Self::File => "file",
+            Self::Emit => "emit",
+        }
+    }
+}
+
+/// REQ-NDR-05：usage 兜底失败的结构化留痕（`stage` 稳定标签 + detail）。
+///
+/// 只写结构化 warn，不改会话与 gate 行为；节点「无 usage」因此可定责到环节
+/// （rpc 获取 / parse 解析 / file 本地读取 / emit 上报）。服务器 stderr 无落盘
+/// 文件时，durable 可检索性由 usage durable 落盘侧（节点 detail 诊断事件 /
+/// `usage-diagnostics.jsonl`）承担。
+pub(crate) fn warn_pi_usage_unavailable(stage: PiUsageStage, detail: Option<&str>) {
+    tracing::warn!(
+        target: "pi_provider",
+        stage = stage.label(),
+        detail = detail.unwrap_or(""),
+        "pi usage unavailable"
+    );
 }
 
 async fn complete_pi_session(

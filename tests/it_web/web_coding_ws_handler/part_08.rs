@@ -35,16 +35,19 @@ fn app_with_group_full_chain_attempt_fixture(
             path: repo.clone(),
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part08-attempt-repository".to_string(),
         })
         .expect("create repository");
     let issue = IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "coding ws group fixture".to_string(),
             description: None,
             change_id: None,
-        })
+                   base_branch: None,
+ })
         .expect("create issue");
     assert_eq!(issue.id, "issue_0001");
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -74,17 +77,15 @@ fn app_with_group_full_chain_attempt_fixture(
         })
         .expect("create schema v2 plan metadata");
     let plan_session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::Fake,
-            reviewer_provider: ProviderName::Fake,
-            review_rounds: 1,
-            superpowers_enabled: true,
-            openspec_enabled: true,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        entity_id: "work_item_plan_0001".to_string(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::Fake,
+        reviewer_provider: Some(ProviderName::Fake),
+
+        review_rounds: 1,
+        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
         .expect("create work item plan session");
     seed_group_revision_history_fixture(&lifecycle, &plan_session.id);
 
@@ -105,7 +106,9 @@ fn app_with_group_full_chain_attempt_fixture(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
+            target_snapshot: None,
             max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         },
     );
     seed_authoritative_group_plan_fixture(&store, &attempt, false);
@@ -343,6 +346,22 @@ fn materialize_running_unit_run_for_logical(store: &CodingAttemptStore, logical_
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
+    // C2 Task 6（决策 6/#13）：认领前冻结的 start_commit 是 Running run 的
+    // 必备事实——完成路径对真缺失停等（unit_run_start_commit_missing，
+    // 绝不按 base HEAD 回填）。fixture 从 worktree 真实 HEAD 物化起点，
+    // run.start_commit 经 attempt.head_commit 携带落盘。
+    let start_head = attempt
+        .worktree_path
+        .as_ref()
+        .map(|worktree| git_stdout(worktree, &["rev-parse", "HEAD"]).trim().to_string());
+    let attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            start_head,
+        )
+        .expect("freeze fixture head commit");
     let unit = store
         .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("units")
@@ -644,14 +663,7 @@ async fn coding_ws_group_attempt_recovers_review_request_running_unit_without_re
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let app = app_with_group_full_chain_attempt(root.path());
-    store
-        .update_attempt_status(
-            "project_0001",
-            "issue_0001",
-            "coding_attempt_0001",
-            CodingAttemptStatus::Running,
-        )
-        .expect("set running");
+    crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", "coding_attempt_0001");
     store
         .update_attempt_stage(
             "project_0001",
@@ -670,7 +682,9 @@ async fn coding_ws_group_attempt_recovers_review_request_running_unit_without_re
     let url = format!("ws://{addr}/ws/coding-attempts/coding_attempt_0001");
     let (mut ws, _) = connect_async(url).await.expect("connect ws");
     let _initial = recv_json(&mut ws).await;
-    send_json(&mut ws, &CodingWsInMessage::StartCoding).await;
+    // P2 Task 5 后 WS StartCoding 只剩首启（Running→AlreadyStarted）；
+    // Running+ReviewRequest 的死 runner 由 attach 半启动恢复路径复活，
+    // 恢复只续推进——不允许重跑 review。
 
     let mut saw_second_unit = false;
     for _ in 0..80 {

@@ -1,0 +1,32 @@
+{
+  "started_at": "2026-09-20T01:31:12.172Z",
+  "provider": "pi",
+  "issue_id": "issue_0292",
+  "story_spec_id": "story_spec_0001",
+  "workspace_session_id": "workspace_session_0472",
+  "session_flow_kind": "legacy",
+  "session_run_policy": "interactive",
+  "t_start_generation": "2026-09-20T01:31:13.878Z",
+  "t_gate_reached": null,
+  "gate_stage_seen": null,
+  "gate_active_node": null,
+  "abandon": {
+    "command_id": null,
+    "sent_at": null,
+    "responses": [],
+    "session_status_after": null,
+    "session_stage_after": null,
+    "outcome": null
+  },
+  "confirm_followup": {
+    "sent_at": null,
+    "responses": [],
+    "session_status_after": null,
+    "outcome": null
+  },
+  "stage_timeline": [
+    "prepare_context"
+  ],
+  "outcome": "gate_unreachable_timeout",
+  "completed_at": "2026-09-20T01:48:12.644Z"
+}

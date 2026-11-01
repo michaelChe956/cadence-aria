@@ -61,7 +61,9 @@ fn initial_author_reuses_system_routing_reference_for_every_workspace_type() {
             role: "system".to_string(),
             content: format!(
                 "[workflow_discipline]\n{}\n[output_schema]\n来自正常 generation brief 的合同。",
-                crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference()
+                crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference(
+                    &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy
+                )
             ),
             checkpoint_id: None,
             created_at: "2026-07-23T00:00:00Z".to_string(),
@@ -161,9 +163,73 @@ fn review_input_keeps_generation_context_without_author_workflow_directives() {
     assert!(!input.prompt.contains("作者完成条件。"));
 }
 
+/// 改造前 `reviewer_boundary_rules_for` 输出的逐字快照（单仓口径）。
+/// 每条 must-fix 规则一行，前缀/后缀由渲染器固定。
+fn single_repo_boundary_rules_snapshot(workspace_type: &WorkspaceType) -> String {
+    let rule = match workspace_type {
+        WorkspaceType::Story => {
+            "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix."
+        }
+        WorkspaceType::Design => {
+            "Design artifact: Work Item Plan、开发任务列表、任务拆分、测试计划、测试范围或场景、测试文件或模块、测试框架或夹具、测试命令、构建命令、执行 checklist 或将测试或验证职责分配给组件或文件必须报告为 must_fix；仅把 [DEC-*] 关联到 [REQ-*]/[AC-*] 且不描述如何测试的抽象验收可追踪性不得报告为 must_fix。"
+        }
+        WorkspaceType::WorkItem => {
+            "Work Item artifact: sibling tasks, issue-level full plans, or cross-task content must be reported as must_fix."
+        }
+        WorkspaceType::WorkItemPlan => {
+            "Work Item Plan artifact: code implementation or rewritten full Story/Design content must be reported as must_fix."
+        }
+    };
+    format!("\n[artifact_boundary_must_fix_rules]\n- {rule}\n")
+}
+
+/// REQ-PLN-15：单仓（`logical=false`）must-fix 规则段必须与改造前逐字相同。
+#[test]
+fn reviewer_boundary_rules_single_repo_byte_identical() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        assert_eq!(
+            reviewer_boundary_rules_for(&workspace_type, false),
+            single_repo_boundary_rules_snapshot(&workspace_type),
+            "{workspace_type:?} 单仓 must-fix 规则段必须与改造前逐字相同"
+        );
+    }
+}
+
+/// REQ-PLN-15：多仓（`logical=true`）在既有规则之后追加四类必查。
+#[test]
+fn reviewer_boundary_rules_logical_appends_four_categories() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        let rules = reviewer_boundary_rules_for(&workspace_type, true);
+        for category in [
+            "需求漏项",
+            "仓库选择不合理",
+            "验收不可判定",
+            "跨仓影响缺失",
+        ] {
+            assert!(rules.contains(category), "missing `{category}`: {rules}");
+        }
+        let single_repo = single_repo_boundary_rules_snapshot(&workspace_type);
+        assert!(
+            rules.starts_with(&single_repo),
+            "{workspace_type:?} 多仓规则段必须在既有单仓规则之后追加: {rules}"
+        );
+        assert_ne!(rules, single_repo, "{workspace_type:?}");
+    }
+}
+
 #[test]
 fn design_reviewer_boundary_distinguishes_traceability_from_executable_testing() {
-    let rules = reviewer_boundary_rules_for(&WorkspaceType::Design);
+    let rules = reviewer_boundary_rules_for(&WorkspaceType::Design, false);
 
     assert!(rules.contains("抽象验收可追踪性"), "{rules}");
     assert!(rules.contains("不得报告为 must_fix"), "{rules}");
@@ -273,26 +339,37 @@ fn story_schema_contract_exposes_open_item_resolution_protocol() {
     let schema = author_artifact_schema_contract_for(&WorkspaceType::Story)
         .expect("Story must have a schema contract");
     assert!(
-        schema.contains("已通过 AskUserQuestion 确认"),
-        "Story schema contract must teach the resolved-cue protocol for 待确认项: {schema}"
+        schema.contains("已通过 <工具名> 确认")
+            && schema.contains("AskUserQuestion")
+            && schema.contains("requestUserInput"),
+        "Story schema contract must teach the provider-aware resolved-cue protocol for 待确认项: {schema}"
     );
     assert!(
         schema.contains("无待确认项"),
         "Story schema contract must teach the empty marker for 待确认项: {schema}"
     );
+    assert!(
+        schema.contains("不得附加解释"),
+        "Story schema contract must require the bare empty marker without explanation: {schema}"
+    );
 }
 
+/// F-46 回归 + F-60 P0：retry 与 reviewer delta/full 修订的 StreamingProviderInput
+/// 末端都渲染 parser 派生 schema（经 build_revision_input_with_resume 出口装配，
+/// 不再直查 builder 字符串）。
 #[test]
 fn retry_and_revision_prompts_render_parser_derived_schema() {
-    let review = ReviewVerdict {
-        verdict: ReviewVerdictType::Revise,
-        comments: "请补全结构。".to_string(),
-        summary: "缺少 artifact schema".to_string(),
-        findings: Vec::new(),
-        review_gate: ReviewGate::RequiresRevision,
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    };
+    fn schema_revise_verdict() -> ReviewVerdict {
+        ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "请补全结构。".to_string(),
+            summary: "缺少 artifact schema".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        }
+    }
 
     for workspace_type in [
         WorkspaceType::Story,
@@ -300,12 +377,38 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
         WorkspaceType::WorkItem,
         WorkspaceType::WorkItemPlan,
     ] {
+        let spec = artifact_constraint_spec_for(&workspace_type);
+
+        // delta：有 author provider 会话 → resume 增量返修。
         let (_tmp, store) = setup();
         let (event_tx, _event_rx) = mpsc::channel(8);
-        let mut session = make_session(&format!("sess_schema_revision_{workspace_type:?}"));
+        let mut session = make_session(&format!("sess_schema_revision_delta_{workspace_type:?}"));
         session.workspace_type = workspace_type.clone();
-        let engine = WorkspaceEngine::new(store, event_tx, session);
-        let spec = artifact_constraint_spec_for(&workspace_type);
+        session.provider_conversations = vec![ProviderConversationRef {
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::ClaudeCode,
+            provider_session_id: "author-session-1".to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_node_id: None,
+        }];
+        let mut engine = WorkspaceEngine::new(store, event_tx, session);
+        engine.latest_review_verdict = Some(schema_revise_verdict());
+        let delta_prompt = engine
+            .build_revision_input()
+            .expect("delta revision input")
+            .prompt;
+
+        // full：无 author provider 会话 → fresh 全量返修。
+        let (_tmp, store) = setup();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(&format!("sess_schema_revision_full_{workspace_type:?}"));
+        session.workspace_type = workspace_type.clone();
+        let mut engine = WorkspaceEngine::new(store, event_tx, session);
+        engine.latest_review_verdict = Some(schema_revise_verdict());
+        let full_prompt = engine
+            .build_revision_input()
+            .expect("full revision input")
+            .prompt;
 
         for (kind, prompt) in [
             (
@@ -316,11 +419,8 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     &["缺少 heading".to_string()],
                 ),
             ),
-            ("delta revision", engine.build_revision_delta_prompt(&review)),
-            (
-                "full revision",
-                engine.build_revision_full_prompt("# 上一版 artifact", &review),
-            ),
+            ("delta revision", delta_prompt),
+            ("full revision", full_prompt),
         ] {
             assert!(
                 prompt.contains("[artifact_schema_contract]"),
@@ -338,6 +438,18 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
                     "{workspace_type:?} {kind} prompt must include parser label `{label}`: {prompt}"
                 );
             }
+            // F-60 P0 分层：骨架仅 retry 与 fresh full revision 携带；delta 轮
+            // 出口为短引用（无骨架、无负面清单，见 f60_exit_contract_matrix）。
+            if matches!(kind, "retry" | "full revision") {
+                assert!(
+                    prompt.contains("最小结构骨架示例"),
+                    "{workspace_type:?} {kind} must include the artifact few-shot skeleton: {prompt}"
+                );
+                assert!(
+                    prompt.contains("不能照抄"),
+                    "{workspace_type:?} {kind} must say the skeleton cannot pass the artifact gate: {prompt}"
+                );
+            }
             if workspace_type == WorkspaceType::WorkItemPlan {
                 assert!(prompt.contains("[TASK-001]"), "{workspace_type:?} {kind}: {prompt}");
                 for heading in &spec.required_headings {
@@ -351,8 +463,12 @@ fn retry_and_revision_prompts_render_parser_derived_schema() {
     }
 }
 
+/// F-60 P0（因素三）：full revision 的末端最后可信合同必须始终是当前类型的完整
+/// 渲染——历史 system 消息携带旧 marker 不再省略 schema。原「marker 只出现一次」
+/// 断言按方案改造为「末端最新合同正确」，避免修复被旧测试误拦；路由引用的
+/// 去重语义保持不变。
 #[test]
-fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
+fn full_revision_prompt_terminal_contract_stays_current_despite_stale_generation_context_marker() {
     let review = ReviewVerdict {
         verdict: ReviewVerdictType::Revise,
         comments: "请补全结构。".to_string(),
@@ -370,21 +486,37 @@ fn full_revision_prompt_does_not_repeat_schema_from_generation_context() {
         id: "msg_generation_context".to_string(),
         role: "system".to_string(),
         content: format!(
-            "[workflow_discipline]\n{}\n[output_schema]\n[artifact_schema_contract]\n来自正常 generation brief 的合同。",
-            crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference()
+            "[workflow_discipline]\n{}\n[output_schema]\n[artifact_schema_contract]\n来自正常 generation brief 的旧合同（不含当前 gate 全条款）。",
+            crate::product::cadence_skills::routing_reference::direct_cadence_routing_rules_reference(
+                &crate::product::cadence_skills::routing_reference::RoutingReferenceContext::Legacy
+            )
         ),
         checkpoint_id: None,
         created_at: "2026-07-23T00:00:00Z".to_string(),
     });
-    let engine = WorkspaceEngine::new(store, event_tx, session);
+    let mut engine = WorkspaceEngine::new(store, event_tx, session);
+    engine.latest_review_verdict = Some(review);
 
-    let prompt = engine.build_revision_full_prompt("# 上一版 artifact", &review);
+    let prompt = engine
+        .build_revision_input()
+        .expect("full revision input")
+        .prompt;
 
-    assert_eq!(
-        prompt.matches("[artifact_schema_contract]").count(),
-        1,
-        "full revision must reuse, not repeat, the schema already present in generation context: {prompt}"
+    // 末端最新合同正确：最后一个 marker 之后逐字节是当前类型的同源完整渲染。
+    let schema = author_artifact_schema_contract_for(&WorkspaceType::Story)
+        .expect("Story schema contract");
+    let expected_schema = schema.trim_start_matches('\n');
+    let tail = &prompt[prompt.rfind("[artifact_schema_contract]").expect("marker")..];
+    assert!(
+        tail.starts_with(expected_schema),
+        "terminal contract must be the current full render: {prompt}"
     );
+    // 历史 marker 保留（≥2），但不得抑制末端合同。
+    assert!(
+        prompt.matches("[artifact_schema_contract]").count() >= 2,
+        "stale generation-context marker must not suppress the terminal contract: {prompt}"
+    );
+    // 路由引用去重语义不变：直接引用仍只出现一次。
     assert_eq!(
         prompt.matches("[cadence_project_rules]").count(),
         1,
@@ -470,17 +602,15 @@ async fn start_generation_locks_selected_modes_into_store() {
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(paths.clone());
     let record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "p1".to_string(),
-            issue_id: "i1".to_string(),
-            entity_id: "e1".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "p1".to_string(),
+        issue_id: "i1".to_string(),
+        entity_id: "e1".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::ClaudeCode,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create session");
     let session_id = record.id.clone();
     let checkpoint_store = Arc::new(CheckpointStore::new(
@@ -516,17 +646,15 @@ async fn start_generation_normalizes_pi_role_to_auto_and_keeps_disabled_reviewer
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(paths.clone());
     let record = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: "p1".to_string(),
-            issue_id: "i1".to_string(),
-            entity_id: "e1".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::Pi,
-            reviewer_provider: ProviderName::Codex,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "p1".to_string(),
+        issue_id: "i1".to_string(),
+        entity_id: "e1".to_string(),
+        workspace_type: WorkspaceType::Story,
+        author_provider: ProviderName::Pi,
+        reviewer_provider: Some(ProviderName::Codex),
+
+        review_rounds: 1,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .expect("create session");
     let session_id = record.id.clone();
     let checkpoint_store = Arc::new(CheckpointStore::new(
@@ -605,6 +733,7 @@ impl StreamingProviderAdapter for CountingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -741,6 +870,7 @@ impl StreamingProviderAdapter for KimiIncompleteArtifactProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -770,4 +900,334 @@ async fn pi_start_failure_does_not_retry_selected_provider() {
 
     assert_eq!(pi_starts.load(Ordering::SeqCst), 1, "Pi 只启动一次，不重试");
     assert_eq!(engine.session().stage, WorkspaceStage::PrepareContext);
+}
+
+#[test]
+fn aggregate_story_author_input_sets_structured_output_contract_with_nonce() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_aggregate_story_contract");
+    session.workspace_type = WorkspaceType::Story;
+    // 模拟 web ensure_workspace_context_message 注入的聚合视野 context message。
+    session.messages.push(SessionMessage {
+        id: "msg_generation_context".to_string(),
+        role: "system".to_string(),
+        content: crate::product::workspace_engine::aggregate_scope_material_prompt(
+            "inventory-rendered",
+        ),
+        checkpoint_id: None,
+        created_at: "2026-08-11T00:00:00Z".to_string(),
+    });
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    let contract = input
+        .structured_output_contract
+        .expect("aggregate Story author input must carry a structured output contract");
+    assert_eq!(contract.schema_name, "story_aggregate");
+    assert_eq!(contract.nonce.len(), 8, "nonce must be 8 chars");
+    assert!(
+        contract.nonce.chars().all(|ch| ch.is_ascii_alphanumeric()),
+        "nonce must be ascii alphanumeric: {}",
+        contract.nonce
+    );
+    assert!(
+        input
+            .prompt
+            .contains(&format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce)),
+        "prompt must instruct the AI with the matching nonce sentinel: {}",
+        input.prompt
+    );
+    assert!(
+        input.prompt.contains("involved_repository_ids")
+            && input.prompt.contains("focus_repository_id"),
+        "Story aggregate schema must expose involved_repository_ids + focus_repository_id: {}",
+        input.prompt
+    );
+}
+
+#[test]
+fn aggregate_design_author_input_sets_structured_output_contract_with_change_order() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_aggregate_design_contract");
+    session.workspace_type = WorkspaceType::Design;
+    session.messages.push(SessionMessage {
+        id: "msg_generation_context".to_string(),
+        role: "system".to_string(),
+        content: crate::product::workspace_engine::aggregate_scope_material_prompt(
+            "inventory-rendered",
+        ),
+        checkpoint_id: None,
+        created_at: "2026-08-11T00:00:00Z".to_string(),
+    });
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    let contract = input
+        .structured_output_contract
+        .expect("aggregate Design author input must carry a structured output contract");
+    assert_eq!(contract.schema_name, "design_aggregate");
+    assert_eq!(contract.nonce.len(), 8);
+    assert!(
+        input
+            .prompt
+            .contains(&format!("<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">", contract.nonce)),
+        "prompt must instruct the AI with the matching nonce sentinel: {}",
+        input.prompt
+    );
+    assert!(
+        input.prompt.contains("involved_repository_ids")
+            && input.prompt.contains("change_order"),
+        "Design aggregate schema must expose involved_repository_ids + change_order: {}",
+        input.prompt
+    );
+}
+
+#[test]
+fn single_repo_story_author_input_keeps_structured_output_contract_none() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_single_repo_story_contract");
+    session.workspace_type = WorkspaceType::Story;
+    // 单仓：无聚合视野 context message（与既有 make_session 一致）。
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    assert!(
+        input.structured_output_contract.is_none(),
+        "single-repo Story author input must keep structured_output_contract None"
+    );
+    assert!(
+        !input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"),
+        "single-repo Story author prompt must not contain a nonce sentinel instruction: {}",
+        input.prompt
+    );
+}
+
+#[test]
+fn single_repo_design_author_input_keeps_structured_output_contract_none() {
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_single_repo_design_contract");
+    session.workspace_type = WorkspaceType::Design;
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    assert!(input.structured_output_contract.is_none());
+    assert!(!input.prompt.contains("<ARIA_STRUCTURED_OUTPUT"));
+}
+
+#[test]
+fn aggregate_work_item_plan_author_input_keeps_structured_output_contract_none() {
+    // 红线：WorkItemPlan 聚合 prompt 存在，但 structured output 协议只对 Story/Design 生效。
+    let (_tmp, store) = setup();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let mut session = make_session("sess_aggregate_plan_contract");
+    session.workspace_type = WorkspaceType::WorkItemPlan;
+    session.messages.push(SessionMessage {
+        id: "msg_generation_context".to_string(),
+        role: "system".to_string(),
+        content: crate::product::workspace_engine::aggregate_scope_material_prompt(
+            "inventory-rendered",
+        ),
+        checkpoint_id: None,
+        created_at: "2026-08-11T00:00:00Z".to_string(),
+    });
+    let engine = WorkspaceEngine::new(store, event_tx, session);
+
+    let input = engine
+        .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+        .expect("author input");
+
+    assert!(
+        input.structured_output_contract.is_none(),
+        "WorkItemPlan aggregate author input must NOT carry a structured output contract"
+    );
+}
+
+/// F3 restrict-role-write-tools（F2 修复）：author 家族入口的策略断言，与上文
+/// part_31 既有 author 路由/契约测试同构（同款 session fixture + 聚合视野
+/// context message + `build_streaming_input`），逐一覆盖聚合 Story/Design、
+/// 单仓 Story/Design、聚合 WorkItemPlan 五个入口，断言 D2 矩阵：SC author
+/// = Orchestrator 必带 `DenyFileWriteBuiltins`（黑名单，非 allowlist）。
+#[test]
+fn author_family_streaming_inputs_pair_orchestrator_with_deny_file_write_policy() {
+    use crate::cross_cutting::streaming_provider::{
+        ProviderToolPolicy, ToolPolicyIntent as PolicyIntent,
+    };
+
+    fn author_input_for_case(
+        session_id: &str,
+        workspace_type: WorkspaceType,
+        aggregate_context: Option<String>,
+    ) -> StreamingProviderInput {
+        let (_tmp, store) = setup();
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut session = make_session(session_id);
+        session.workspace_type = workspace_type;
+        if let Some(content) = aggregate_context {
+            // 与既有聚合 author 测试同构：模拟 web ensure_workspace_context_message
+            // 注入的聚合视野 context message。
+            session.messages.push(SessionMessage {
+                id: "msg_generation_context".to_string(),
+                role: "system".to_string(),
+                content,
+                checkpoint_id: None,
+                created_at: "2026-08-11T00:00:00Z".to_string(),
+            });
+        }
+        let engine = WorkspaceEngine::new(store, event_tx, session);
+        engine
+            .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
+            .expect("author input")
+    }
+
+    let cases = [
+        (
+            "aggregate_story",
+            WorkspaceType::Story,
+            Some(crate::product::workspace_engine::aggregate_scope_material_prompt(
+                "inventory-rendered",
+            )),
+        ),
+        (
+            "aggregate_design",
+            WorkspaceType::Design,
+            Some(crate::product::workspace_engine::aggregate_scope_material_prompt(
+                "inventory-rendered",
+            )),
+        ),
+        ("single_repo_story", WorkspaceType::Story, None),
+        ("single_repo_design", WorkspaceType::Design, None),
+        (
+            "aggregate_work_item_plan",
+            WorkspaceType::WorkItemPlan,
+            Some(
+                crate::product::workspace_engine::aggregate_scope_material_prompt(
+                    "inventory-rendered",
+                ),
+            ),
+        ),
+    ];
+
+    for (entry, workspace_type, aggregate_context) in cases {
+        let input = author_input_for_case(
+            &format!("sess_author_policy_{entry}"),
+            workspace_type,
+            aggregate_context,
+        );
+        assert_eq!(input.role, AdapterRole::Orchestrator, "{entry}");
+        assert!(
+            matches!(
+                input.tool_policy,
+                Some(ProviderToolPolicy {
+                    intent: PolicyIntent::DenyFileWriteBuiltins
+                })
+            ),
+            "{entry}: SC author 入口必带 DenyFileWriteBuiltins"
+        );
+    }
+}
+
+// ---- Task 3.2（REQ-ENV-09/D7）：author 策略会话的 durable sink 接线 ----
+
+/// 记录 start input 是否携带 run-bound durable sink 的探针 provider。
+struct AuditSinkProbeProvider {
+    saw_audit_sink: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    saw_policy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for AuditSinkProbeProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+    {
+        self.saw_policy.store(input.tool_policy.is_some(), Ordering::SeqCst);
+        self.saw_audit_sink
+            .store(input.audit_sink.is_some(), Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (command_tx, _command_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(crate::cross_cutting::streaming_provider::ProviderEvent::Failed {
+                    message: "audit sink probe done".to_string(),
+                })
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[tokio::test]
+async fn workspace_author_policy_run_receives_run_bound_durable_audit_sink() {
+    let root = tempfile::tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    let record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "p1".to_string(),
+            issue_id: "i1".to_string(),
+            entity_id: "e1".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("create session");
+    let checkpoint_store = Arc::new(CheckpointStore::new(paths.issue_lifecycle_root("p1", "i1")));
+    let (tx, _rx) = mpsc::channel(64);
+    let mut engine = WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        tx,
+        WorkspaceSession::from_record(record),
+    );
+
+    let saw_audit_sink = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_policy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = AuditSinkProbeProvider {
+        saw_audit_sink: Arc::clone(&saw_audit_sink),
+        saw_policy: Arc::clone(&saw_policy),
+    };
+    engine
+        .handle_user_message(
+            "开始生成".to_string(),
+            Arc::new(probe),
+            empty_provider_commands(),
+        )
+        .await;
+
+    // author 是策略角色（D2 矩阵）：engine 必须为其绑定 run-bound durable sink。
+    assert!(
+        saw_policy.load(Ordering::SeqCst),
+        "author input must carry the deny policy"
+    );
+    assert!(
+        saw_audit_sink.load(Ordering::SeqCst),
+        "author policy input must carry the run-bound durable audit sink"
+    );
 }

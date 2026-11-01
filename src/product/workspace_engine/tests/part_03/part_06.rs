@@ -36,6 +36,7 @@ impl RepairTerminalProvider {
         }
         drop(event_tx);
         ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         }
@@ -55,8 +56,8 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
             .unwrap()
             .push(input.resume_provider_session_id.clone());
         if start == 1 {
-            let output = missing_end_nonce_output(
-                r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","impact":"无法验收","required_action":"补充失败路径"}]}"#,
+            let output = missing_json_nonce_output(
+                r#"{"verdict":"revise","summary":"必须修复","findings":[{"severity":"must_fix","message":"缺少失败路径","evidence":"当前产物遗漏","required_action":"补充失败路径"}]}"#,
             );
             let output = input
                 .structured_output_contract
@@ -112,6 +113,7 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
                     .unwrap();
                 drop(event_tx);
                 Ok(ProviderSession {
+                    native_session_id: None,
                     events: event_rx,
                     commands: command_tx,
                 })
@@ -122,6 +124,7 @@ impl StreamingProviderAdapter for RepairTerminalProvider {
                 let (command_tx, _command_rx) = mpsc::channel(4);
                 self.held_event_senders.lock().unwrap().push(event_tx);
                 Ok(ProviderSession {
+                    native_session_id: None,
                     events: event_rx,
                     commands: command_tx,
                 })
@@ -170,10 +173,12 @@ async fn persistent_queued_review_engine_for(
             entity_id: entity_id.to_string(),
             workspace_type,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 2,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .expect("persistent review session");
     let mut session = WorkspaceSession::from_record(session_record);
@@ -209,7 +214,6 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
             "severity": "must_fix",
             "message": "缺少失败路径",
             "evidence": "Artifact 未覆盖失败路径",
-            "impact": "下一阶段无法验收异常流程",
             "required_action": "补充失败路径说明"
         }]
     }"#;
@@ -234,14 +238,14 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
     for (workspace_type, artifact) in cases {
         let session_id = format!("sess_review_repair_success_{workspace_type:?}");
         let provider = QueuedReviewProvider::new(vec![
-            missing_end_nonce_output(review_json),
+            missing_json_nonce_output(review_json),
             valid_structured_output(review_json),
         ]);
         let (_tmp, mut engine, mut rx, review_node_id) =
             queued_review_engine_for(&session_id, workspace_type, artifact).await;
 
         engine
-            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
             .await;
 
         assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -255,7 +259,7 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
         assert_eq!(review_nodes[0].round, Some(1));
         let prompts = provider.prompts.lock().unwrap();
         assert_eq!(prompts.len(), 2);
-        assert!(prompts[1].contains("missing_end_nonce"));
+        assert!(prompts[1].contains("missing_json_nonce"));
         assert!(prompts[1].contains("Artifact 未覆盖失败路径"));
         assert!(prompts[1].contains("不得改变 verdict、summary、findings"));
         drop(prompts);
@@ -337,7 +341,7 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
                 .await;
 
             engine
-                .drive_review_session(Arc::new(provider), empty_provider_commands())
+                .drive_review_session_with_window(Arc::new(provider), empty_provider_commands())
                 .await;
 
             // spec-design-dialog-revision T5：Story/Design repair 终态 review 完成统一回 AuthorConfirm
@@ -378,7 +382,7 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
                 .unwrap_or_else(|| {
                     panic!("{workspace_type:?} repair terminal mode {mode:?} diagnostic")
                 });
-            assert_eq!(diagnostic.code, "missing_end_nonce");
+            assert_eq!(diagnostic.code, "missing_json_nonce");
             assert!(diagnostic.repair_attempted);
             assert!(!diagnostic.repair_succeeded);
 
@@ -478,7 +482,7 @@ async fn repair_permission_timeout_resolves_persisted_request_before_fallback_re
         .await;
 
     engine
-        .drive_review_session(Arc::new(provider), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider), empty_provider_commands())
         .await;
 
     // spec-design-dialog-revision T5：Story repair permission timeout 终态 review 完成回 AuthorConfirm（报告进对话流）。
@@ -580,7 +584,7 @@ async fn repair_abort_closes_started_event_as_failed() {
     });
 
     engine
-        .drive_review_session(Arc::new(provider), command_rx)
+        .drive_review_session_with_window(Arc::new(provider), command_rx)
         .await;
     abort.await.unwrap();
 
@@ -609,7 +613,7 @@ async fn missing_or_blank_first_provider_session_id_starts_one_fresh_session_rep
             queued_review_engine("sess_repair_missing_provider_session").await;
 
         engine
-            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
             .await;
 
         assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -622,7 +626,7 @@ async fn missing_or_blank_first_provider_session_id_starts_one_fresh_session_rep
             .as_ref()
             .and_then(|verdict| verdict.structured_output_diagnostic.as_ref())
             .expect("missing provider session diagnostic");
-        assert_eq!(diagnostic.code, "missing_end_nonce");
+        assert_eq!(diagnostic.code, "missing_json_nonce");
         assert!(diagnostic.repair_attempted);
         assert!(!diagnostic.repair_succeeded);
         assert_eq!(

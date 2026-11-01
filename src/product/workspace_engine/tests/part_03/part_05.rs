@@ -26,7 +26,7 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
     engine.active_node_id = Some(review_node_id);
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 draft 需要返修。
 
@@ -40,10 +40,9 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
   "summary": "运行时方案存在阻塞问题",
   "findings": [
 {
-  "severity": "strong_recommend_fix",
+  "severity": "must_fix",
   "message": "sync 方法在 tokio runtime 内 block_on 会 panic",
   "evidence": "snapshot 被 tokio::spawn 调用",
-  "impact": "后续实现会在运行时崩溃",
   "required_action": "当前 draft 需明确 spawn_blocking 或改为 async 方案"
 }
   ]
@@ -65,321 +64,257 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
     assert_eq!(active_node.node_type, TimelineNodeType::WorkItemDraftRun);
 
     let input = engine
-        .build_current_work_item_draft_streaming_input(None)
+        .build_current_work_item_draft_streaming_input(None, &RoutingReferenceContext::Legacy)
         .expect("draft streaming input");
     assert!(input.prompt.contains("[review_findings]"));
-    assert!(input.prompt.contains("evidence: snapshot 被 tokio::spawn 调用"));
-    assert!(input.prompt.contains("impact: 后续实现会在运行时崩溃"));
-    assert!(input
-        .prompt
-        .contains("required_action: 当前 draft 需明确 spawn_blocking 或改为 async 方案"));
+    assert!(
+        input
+            .prompt
+            .contains("evidence: snapshot 被 tokio::spawn 调用")
+    );
+    assert!(
+        input
+            .prompt
+            .contains("message: sync 方法在 tokio runtime 内 block_on 会 panic")
+    );
+    assert!(
+        input
+            .prompt
+            .contains("required_action: 当前 draft 需明确 spawn_blocking 或改为 async 方案")
+    );
+}
+
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_item_plan_reopen_review_decision_restarts_outline_revision` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
+
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_outline_revision_entry_points_share_preparation_state` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
+
+// ============================================================================
+// B2b3（Task 5.4，tasks.md 5.4 / 设计 §5.3）：draft/batch builder 显式
+// fresh 模式（resume=None、durable 冻结 feedback、不动内存 pending）与
+// provider 运行节点重建（业务代/批次不重建、修复预算不重置）。
+// ============================================================================
+
+fn anchor_t16_author_conversation_ref() -> crate::product::models::ProviderConversationRef {
+    crate::product::models::ProviderConversationRef {
+        role: crate::product::models::ProviderConversationRole::Author,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "native-t16-old".to_string(),
+        updated_at: "2026-10-12T00:00:00Z".to_string(),
+        last_node_id: Some("timeline_node_001".to_string()),
+    }
 }
 
 #[tokio::test]
-async fn work_item_plan_item_plan_reopen_review_decision_restarts_outline_revision() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_item_plan_reopen");
+async fn anchor_t16_draft_fresh_builder_and_node_rebuild_keep_generation() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_anchor_t16_draft");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    engine
-        .update_artifact(work_item_draft_artifact_payload(
+    let store = engine.work_item_plan_store().expect("work item plan store");
+    store
+        .put_draft_record(&test_work_item_draft_record(
             &plan_id,
             "outline_a",
-            "draft_a",
+            "draft_outline_a",
             WorkItemDraftStatus::Accepted,
+            WorkItemGenerationMode::Serial,
+            None,
         ))
-        .await;
-    engine.session.stage = WorkspaceStage::ReviewDecision;
-    engine.latest_review_verdict = Some(ReviewVerdict {
-        verdict: ReviewVerdictType::NeedsHuman,
-        comments: "当前 item 暴露出 Outline 边界错误".to_string(),
-        summary: "需要重开 Outline".to_string(),
-        findings: vec![ReviewFinding {
-            severity: ReviewFindingSeverity::MustFix,
-            message: "item 写入范围漏掉共享 provider match".to_string(),
-            evidence: "src/product/work_item_split_engine/types.rs:86".to_string(),
-            impact: "只修当前 draft 会继续遗漏边界。".to_string(),
-            required_action: "回到 Outline，把 provider metadata 状态边界扩到所有 ProviderName match。"
-                .to_string(),
-        }],
-        review_gate: ReviewGate::UserTriageRequired,
-        work_item_plan_review: Some(WorkItemPlanReviewComplete {
-            verdict: WorkItemPlanReviewVerdict::PlanReopenRequired,
-            review_scope: WorkItemPlanReviewScope::Item,
-            target_outline_id: Some("outline_backend_metadata_state".to_string()),
-            generation_round_id: "round_0001".to_string(),
-            draft_id: Some("draft_001".to_string()),
-            batch_id: None,
-            review_action: WorkItemPlanReviewAction::ReviseOutline,
-            gates: vec![WorkItemPlanReviewGate::RequiresPlanReopen],
-            affects_items: vec![],
-            warnings: vec![],
-        }),
-        structured_output_diagnostic: None,
-    });
+        .expect("put accepted draft record");
+    // 旧 native 会话引用在场（fresh 必须不回捞）+ 内存 pending 残留
+    //（fresh 消费 durable 冻结值，不读不借内存反馈）。
+    engine.session.provider_conversations = vec![anchor_t16_author_conversation_ref()];
+    engine.pending_revision_context = Some("内存残留反馈（不得进入 fresh 输入）".to_string());
+    // 一次 RetryOnce 修复已发生过的形态：修复预算已占用，fresh 不得重置。
+    engine.remember_one_draft_repair("outline_a", Vec::new(), Some("原始用户反馈".to_string()));
+
+    let index_before = store
+        .load_active_index(
+            &engine.session.project_id,
+            &engine.session.issue_id,
+            &plan_id,
+        )
+        .expect("load index before")
+        .expect("index before");
+
+    // stale 收口后无活动 draft 节点：fresh 重建 provider 运行节点。
+    assert_ne!(
+        engine.active_node_type(),
+        Some(TimelineNodeType::WorkItemDraftRun)
+    );
     engine
-        .enter_review_decision(1, "需要重开 Outline".to_string())
-        .await;
-
-    let outcome = engine
-        .handle_review_decision("continue".to_string(), None)
+        .start_serial_work_item_draft_run_for("outline_a")
         .await
-        .expect("item plan reopen should restart outline revision");
+        .expect("fresh draft node rebuild");
+    assert_eq!(
+        engine.active_node_type(),
+        Some(TimelineNodeType::WorkItemDraftRun)
+    );
 
-    let ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback } = outcome else {
-        panic!("expected outline revision outcome");
-    };
-    let feedback = feedback.expect("outline feedback");
-    assert!(feedback.contains("[review_findings]"));
-    assert!(feedback.contains("required_action: 回到 Outline"));
-    assert_eq!(engine.session().stage, WorkspaceStage::Running);
-}
+    // 显式 fresh builder：resume=None、durable 冻结 feedback、不借内存 pending。
+    let frozen_feedback = "draft 冻结返修反馈（t16）";
+    let input = engine
+        .build_current_work_item_draft_streaming_input_explicit_fresh(
+            Some(frozen_feedback),
+            &RoutingReferenceContext::Legacy,
+        )
+        .expect("fresh draft streaming input");
+    assert_eq!(
+        input.resume_provider_session_id, None,
+        "fresh 不回捞旧 native 会话（conversation 引用在场）"
+    );
+    assert!(input.prompt.contains(frozen_feedback));
+    assert!(
+        !input.prompt.contains("内存残留反馈（不得进入 fresh 输入）"),
+        "fresh 的 feedback 源是 durable 冻结值，内存 pending 不得混入"
+    );
+    // pending_revision_context 未被 take（durable 冻结值直供）。
+    assert_eq!(
+        engine.pending_revision_context.as_deref(),
+        Some("内存残留反馈（不得进入 fresh 输入）")
+    );
 
-#[derive(Debug, Clone, Copy)]
-enum OutlineRevisionEntryCase {
-    AuthorConfirmReject,
-    RequestRevision,
-    RequestOutlineRevision,
-    ReviewDecision,
-    HumanConfirm,
+    // payload feedback=None：fresh 输出同样不回落内存 pending。
+    let input_none = engine
+        .build_current_work_item_draft_streaming_input_explicit_fresh(
+            None,
+            &RoutingReferenceContext::Legacy,
+        )
+        .expect("fresh draft streaming input without feedback");
+    assert_eq!(input_none.resume_provider_session_id, None);
+    assert!(
+        !input_none
+            .prompt
+            .contains("内存残留反馈（不得进入 fresh 输入）")
+    );
+
+    // 业务代同原：generation/outline/批次零变化；修复预算未重置。
+    let index_after = store
+        .load_active_index(
+            &engine.session.project_id,
+            &engine.session.issue_id,
+            &plan_id,
+        )
+        .expect("load index after")
+        .expect("index after");
+    assert_eq!(
+        index_after.current_generation_round_id,
+        index_before.current_generation_round_id
+    );
+    assert_eq!(
+        index_after.active_outline_id,
+        index_before.active_outline_id
+    );
+    assert_eq!(index_after.batches.len(), index_before.batches.len());
+    assert_eq!(index_after.draft_statuses, index_before.draft_statuses);
+    assert!(
+        engine
+            .work_item_draft_repair_states
+            .contains_key("outline_a"),
+        "fresh 重建不得重置 draft 修复预算"
+    );
+    drop(lifecycle);
 }
 
 #[tokio::test]
-async fn work_item_plan_outline_revision_entry_points_share_preparation_state() {
-    for case in [
-        OutlineRevisionEntryCase::AuthorConfirmReject,
-        OutlineRevisionEntryCase::RequestRevision,
-        OutlineRevisionEntryCase::RequestOutlineRevision,
-        OutlineRevisionEntryCase::ReviewDecision,
-        OutlineRevisionEntryCase::HumanConfirm,
-    ] {
-        let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
-            make_work_item_plan_engine_with_draft_candidate(&format!(
-                "sess_outline_revision_entry_{case:?}"
-            ));
-        let persisted_session = lifecycle
-            .list_workspace_sessions("project_0001", "issue_0001")
-            .expect("workspace sessions")
-            .into_iter()
-            .next()
-            .expect("persisted workspace session");
-        let session_id = persisted_session.id;
-        engine.session.session_id = session_id.clone();
-        prepare_work_item_plan_outline_artifact(&mut engine).await;
-        save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-        engine.complete_active_node(Some("进入 Outline revision 测试".to_string())).await;
-        engine.work_item_plan_author_retry_count = 2;
-        engine.work_item_plan_revision_retry_count = 2;
-        lifecycle
-            .update_workspace_session_status(
-                &session_id,
-                WorkspaceSessionStatus::WaitingForHuman,
-            )
-            .expect("set waiting status");
-
-        let (source_summary, source_node_id) = match case {
-            OutlineRevisionEntryCase::AuthorConfirmReject => {
-                engine.session.stage = WorkspaceStage::AuthorConfirm;
-                let node_id = engine
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::WorkItemPlanOutlineConfirm,
-                        agent: None,
-                        stage: WorkspaceStage::AuthorConfirm,
-                        round: None,
-                        title: "WorkItemPlan Outline 确认".to_string(),
-                        summary: None,
-                        status: TimelineNodeStatus::Active,
-                    })
-                    .await;
-                let outcome = engine
-                    .handle_author_decision(AuthorDecision::Reject)
-                    .await
-                    .expect("author confirm reject");
-                assert_eq!(
-                    outcome,
-                    AuthorDecisionOutcome::StartWorkItemPlanOutlineRevision { feedback: None }
-                );
-                ("Author Confirm 已请求返修 WorkItemPlan Outline", node_id)
-            }
-            OutlineRevisionEntryCase::RequestRevision => {
-                engine.session.stage = WorkspaceStage::AuthorConfirm;
-                let node_id = engine
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::WorkItemPlanOutlineConfirm,
-                        agent: None,
-                        stage: WorkspaceStage::AuthorConfirm,
-                        round: None,
-                        title: "WorkItemPlan Outline 确认".to_string(),
-                        summary: None,
-                        status: TimelineNodeStatus::Active,
-                    })
-                    .await;
-                let outcome = engine
-                    .request_work_item_plan_revision(Some("缩小 Outline scope".to_string()))
-                    .await
-                    .expect("request outline revision");
-                assert!(matches!(
-                    outcome,
-                    ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
-                ));
-                ("Author Confirm 已请求返修 WorkItemPlan Outline", node_id)
-            }
-            OutlineRevisionEntryCase::RequestOutlineRevision => {
-                engine.session.stage = WorkspaceStage::AuthorConfirm;
-                let node_id = engine
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::WorkItemPlanOutlineConfirm,
-                        agent: None,
-                        stage: WorkspaceStage::AuthorConfirm,
-                        round: None,
-                        title: "WorkItemPlan Outline 确认".to_string(),
-                        summary: None,
-                        status: TimelineNodeStatus::Active,
-                    })
-                    .await;
-                let feedback = engine
-                    .request_work_item_plan_outline_revision(Some(
-                        "保留用户 context 并补齐影响闭环".to_string(),
-                    ))
-                    .await
-                    .expect("dedicated request outline revision");
-                assert!(feedback
-                    .as_deref()
-                    .expect("persisted complete feedback")
-                    .contains("保留用户 context 并补齐影响闭环"));
-                ("Author Confirm 已请求返修 WorkItemPlan Outline", node_id)
-            }
-            OutlineRevisionEntryCase::ReviewDecision => {
-                engine.session.stage = WorkspaceStage::ReviewDecision;
-                let node_id = engine
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::ReviewDecision,
-                        agent: None,
-                        stage: WorkspaceStage::ReviewDecision,
-                        round: Some(1),
-                        title: "Review 决策".to_string(),
-                        summary: None,
-                        status: TimelineNodeStatus::Active,
-                    })
-                    .await;
-                let outcome = engine
-                    .handle_review_decision(
-                        "continue_with_context".to_string(),
-                        Some("覆盖共享状态影响面".to_string()),
-                    )
-                    .await
-                    .expect("review decision outline revision");
-                assert!(matches!(
-                    outcome,
-                    ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
-                ));
-                ("Review Decision 已请求返修 WorkItemPlan Outline", node_id)
-            }
-            OutlineRevisionEntryCase::HumanConfirm => {
-                let review_node_id = engine
-                    .create_timeline_node(TimelineNodeDraft {
-                        node_type: TimelineNodeType::WorkItemPlanOutlineReview,
-                        agent: Some(ProviderName::Codex),
-                        stage: WorkspaceStage::CrossReview,
-                        round: Some(1),
-                        title: "WorkItemPlan Outline Review Round 1".to_string(),
-                        summary: None,
-                        status: TimelineNodeStatus::Active,
-                    })
-                    .await;
-                engine
-                    .update_timeline_node(
-                        &review_node_id,
-                        TimelineNodeStatus::Completed,
-                        Some("转人工确认".to_string()),
-                    )
-                    .await;
-                engine
-                    .enter_human_confirm(Some("等待人工确认".to_string()))
-                    .await;
-                let node_id = engine.active_node_id.clone().expect("human confirm node id");
-                let outcome = engine
-                    .handle_human_confirm(
-                        HumanConfirmDecision::RequestChange,
-                        Some(serde_json::json!({"description": "修复 Outline"})),
-                    )
-                    .await
-                    .expect("human confirm outline revision");
-                assert!(matches!(
-                    outcome,
-                    ReviewDecisionOutcome::StartWorkItemPlanOutlineRevision { .. }
-                ));
-                ("Human Confirm 已请求返修 WorkItemPlan Outline", node_id)
-            }
-        };
-
-        assert_eq!(engine.session().stage, WorkspaceStage::Running, "{case:?}");
-        assert_eq!(engine.work_item_plan_author_retry_count, 0, "{case:?}");
-        assert_eq!(engine.work_item_plan_revision_retry_count, 0, "{case:?}");
-        assert!(
-            engine.artifact_versions.iter().all(|version| !version.is_current),
-            "{case:?} should reject the latest artifact"
-        );
-        assert!(
-            !engine.timeline_nodes.iter().any(|node| {
-                node.node_type == TimelineNodeType::Revision
-                    && matches!(
-                        node.status,
-                        TimelineNodeStatus::Active | TimelineNodeStatus::Paused
-                    )
-            }),
-            "{case:?} should not create a generic Revision node"
-        );
-        let active_outline_runs = engine
-            .timeline_nodes
-            .iter()
-            .filter(|node| {
-                node.node_type == TimelineNodeType::WorkItemPlanOutlineRun
-                    && node.status == TimelineNodeStatus::Active
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            active_outline_runs.len(),
-            1,
-            "{case:?} should create exactly one active outline revision run"
-        );
-        assert_eq!(
-            engine.active_node_id.as_deref(),
-            Some(active_outline_runs[0].node_id.as_str()),
-            "{case:?} active node should be the outline revision run"
-        );
-        let run_detail = lifecycle
-            .load_node_detail(&session_id, &active_outline_runs[0].node_id)
-            .expect("persisted outline revision run detail");
-        assert!(run_detail.is_revision, "{case:?}");
-        if matches!(case, OutlineRevisionEntryCase::RequestOutlineRevision) {
-            assert!(run_detail
-                .revision_feedback
-                .as_deref()
-                .expect("persisted request outline feedback")
-                .contains("保留用户 context 并补齐影响闭环"));
-        }
-        let source_node = engine
-            .timeline_nodes
-            .iter()
-            .find(|node| node.node_id == source_node_id)
-            .expect("source node");
-        assert_eq!(source_node.status, TimelineNodeStatus::Completed, "{case:?}");
-        assert_eq!(source_node.summary.as_deref(), Some(source_summary), "{case:?}");
-        let active_index = engine
-            .work_item_plan_store()
-            .expect("work item plan store")
-            .load_active_index("project_0001", "issue_0001", &plan_id)
-            .expect("load active index")
-            .expect("active index");
-        assert_eq!(active_index.outline_state, "revising", "{case:?}");
-        let persisted_session = lifecycle
-            .get_workspace_session(&session_id)
-            .expect("persisted workspace session");
-        assert_eq!(
-            persisted_session.status,
-            WorkspaceSessionStatus::Open,
-            "{case:?}"
-        );
+async fn anchor_t16_batch_fresh_builder_and_node_rebuild_keep_batch() {
+    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_anchor_t16_batch");
+    prepare_work_item_plan_outline_artifact(&mut engine).await;
+    let store = engine.work_item_plan_store().expect("work item plan store");
+    let mut outline_to_current_draft_id = BTreeMap::new();
+    let mut draft_statuses = BTreeMap::new();
+    let mut item_draft_ids = Vec::new();
+    for outline_id in ["outline_a", "outline_b", "outline_c"] {
+        let draft_id = format!("draft_{outline_id}");
+        store
+            .put_draft_record(&test_work_item_draft_record(
+                &plan_id,
+                outline_id,
+                &draft_id,
+                WorkItemDraftStatus::Accepted,
+                WorkItemGenerationMode::Batch,
+                Some("batch_0001"),
+            ))
+            .expect("put batch draft record");
+        outline_to_current_draft_id.insert(outline_id.to_string(), draft_id.clone());
+        draft_statuses.insert(draft_id.clone(), WorkItemDraftStatus::Accepted);
+        item_draft_ids.push(draft_id);
     }
+    store
+        .save_active_index(&WorkItemPlanDraftActiveIndex {
+            project_id: engine.session.project_id.clone(),
+            issue_id: engine.session.issue_id.clone(),
+            plan_id: plan_id.clone(),
+            current_generation_round_id: "round_0001".to_string(),
+            outline_state: "confirmed".to_string(),
+            active_outline_id: Some("outline_a".to_string()),
+            outline_to_current_draft_id,
+            draft_statuses,
+            batches: vec![WorkItemBatchRecord {
+                batch_id: "batch_0001".to_string(),
+                generation_round_id: "round_0001".to_string(),
+                mode: WorkItemGenerationMode::Batch,
+                item_draft_ids,
+                status: WorkItemBatchStatus::Generating,
+                validation_failed_ids: Vec::new(),
+                created_at: "2026-10-12T00:00:00Z".to_string(),
+            }],
+            updated_at: "2026-10-12T00:00:00Z".to_string(),
+        })
+        .expect("save batch active index");
+    engine.session.provider_conversations = vec![anchor_t16_author_conversation_ref()];
+    engine.pending_revision_context =
+        Some("内存残留 batch 反馈（不得进入 fresh 输入）".to_string());
+
+    // stale 收口后无活动 batch 节点：fresh 仅重建 provider 运行节点。
+    assert_ne!(
+        engine.active_node_type(),
+        Some(TimelineNodeType::WorkItemBatchRun)
+    );
+    engine.begin_work_item_batch_fresh_recovery_run().await;
+    assert_eq!(
+        engine.active_node_type(),
+        Some(TimelineNodeType::WorkItemBatchRun)
+    );
+
+    let frozen_feedback = "batch 冻结返修反馈（t16）";
+    let input = engine
+        .build_current_work_item_batch_draft_streaming_input_explicit_fresh(
+            Some(frozen_feedback),
+            &RoutingReferenceContext::Legacy,
+        )
+        .expect("fresh batch streaming input");
+    assert_eq!(input.resume_provider_session_id, None);
+    assert!(input.prompt.contains(frozen_feedback));
+    assert!(
+        !input
+            .prompt
+            .contains("内存残留 batch 反馈（不得进入 fresh 输入）"),
+        "fresh 的 feedback 源是 durable 冻结值"
+    );
+
+    // 同 batch：不另建 batch、generation 不重建、draft 状态同原。
+    let index_after = store
+        .load_active_index(
+            &engine.session.project_id,
+            &engine.session.issue_id,
+            &plan_id,
+        )
+        .expect("load index after")
+        .expect("index after");
+    assert_eq!(index_after.current_generation_round_id, "round_0001");
+    assert_eq!(index_after.batches.len(), 1, "batch fresh 不得另建 batch");
+    assert_eq!(index_after.batches[0].batch_id, "batch_0001");
+    assert_eq!(index_after.batches[0].item_draft_ids.len(), 3);
+    assert_eq!(
+        index_after.batches[0].status,
+        WorkItemBatchStatus::Generating
+    );
+    // 内存 pending 未被 take（fresh 直供 durable 冻结值）。
+    assert!(engine.pending_revision_context.is_some());
 }

@@ -65,6 +65,7 @@ fn plan_revision(id: &str, revision_no: u32) -> WorkItemPlanRevision {
         dependency_graph_revision_id: format!("dependency_graph_revision_{revision_no:04}"),
         validation_report_ref: format!("plan_validation_report_{revision_no:04}"),
         plan_projection_bundle_id: format!("plan_projection_bundle_{revision_no:04}"),
+        publication_provenance_ref: None,
         created_at: format!("2026-07-17T00:00:0{revision_no}Z"),
     }
 }

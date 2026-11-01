@@ -1,7 +1,7 @@
 # work-item-draft-validation-feedback Specification
 
 ## Purpose
-TBD - created by archiving change improve-work-item-draft-generation-reliability. Update Purpose after archive.
+为 Work Item Draft 校验失败提供可操作的确认区反馈：Draft 确认节点在 `can_accept=false` 时直接展示校验失败告警、失败总数、错误摘要与可展开的完整 findings，失败时接受动作不被静默隐藏；用户发起重写时将当前 validator findings 与用户附加反馈合并传入下一轮 Draft 生成上下文，暂停则保持失败 Draft 与 findings 可查看并进入人工处理状态。
 ## Requirements
 ### Requirement: Draft 校验失败确认区反馈
 系统 SHALL 在 Work Item Draft 确认节点的当前确认区直接展示校验失败状态。该反馈 MUST 显示失败总数、至少前三条错误摘要和可展开的完整 findings；提示 MUST 使用可访问的告警语义。

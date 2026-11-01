@@ -1,4 +1,5 @@
-import { KeyRound, LoaderCircle, Save, Settings, X } from "lucide-react";
+import { KeyRound, LoaderCircle, Save, Settings } from "lucide-react";
+import { DialogShell } from "../shared/DialogShell";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
@@ -163,38 +164,15 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const controlsDisabled = loading || submitting || !original || !defaults;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm">
-      <form
-        role="dialog"
-        aria-label="图片创作设置"
-        aria-modal="true"
-        onSubmit={handleSubmit}
-        className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/80 bg-[var(--aria-panel)] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.22)]"
-      >
-        <div className="mb-5 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--aria-primary-soft)] text-[var(--aria-primary)] shadow-sm">
-              <Settings aria-hidden="true" className="h-5 w-5" />
-            </span>
-            <div>
-              <h2 className="text-base font-semibold text-[var(--aria-ink)]">
-                图片创作设置
-              </h2>
-              <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
-                API Key 仅展示脱敏值；不修改时会安全保留原值。
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            aria-label="关闭"
-            onClick={onClose}
-            className="inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
-          >
-            <X aria-hidden="true" className="h-4 w-4" />
-          </button>
-        </div>
-
+    <DialogShell
+      label="图片创作设置"
+      onClose={onClose}
+      closeLabel="关闭"
+      widthClass="max-w-2xl"
+      icon={<Settings aria-hidden="true" className="h-4 w-4" />}
+      description="API Key 仅展示脱敏值；不修改时会安全保留原值。"
+    >
+      <form onSubmit={handleSubmit}>
         {loading ? (
           <div className="flex items-center justify-center gap-2 rounded-xl bg-[var(--aria-panel-muted)] py-10 text-sm text-[var(--aria-ink-muted)]">
             <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" />
@@ -335,7 +313,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </form>
-    </div>
+    </DialogShell>
   );
 }
 

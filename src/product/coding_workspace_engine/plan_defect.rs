@@ -1,7 +1,5 @@
 use super::*;
-use crate::product::coding_models::{
-    CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
-};
+use crate::product::coding_models::{CodingExecutionUnit, CodingUnitRun, CodingUnitRunStatus};
 use crate::product::models::{
     PlanDefectClass, PlanDefectRoute, RepairTargetKind, WorkItemPlanLineage,
     WorkItemProjectionBundle,
@@ -12,6 +10,7 @@ use crate::product::plan_repair::{
 use crate::product::work_item_projection::{
     CoderExecutionEnvelope, CompiledWorkItemProjections, RenderedExecutionContext,
     ReviewerExecutionEnvelope, ReviewerWorkItemProjection, projection_hashes, renderer_for,
+    renderer_version_for_optional_provider,
 };
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
@@ -370,11 +369,15 @@ impl CodingWorkspaceEngine {
         Ok(bundle.reviewer_projection)
     }
 
+    /// 绑定渲染上下文（render→bind）：envelope 的
+    /// `previous_actionable_review` 恒为 None——未消费 rework 指令摘要进
+    /// 入 envelope 会与 unit run 已冻结的 coder_execution_context_hash 恒
+    /// 失配（G7，#18 原族）；指令内容由调用方经增量段进入实际 prompt。
+    /// 渲染 section（PreviousReview=null）保持在场，维持既有绑定哈希稳定。
     pub(crate) fn render_coder_unit_run_context(
         &self,
         attempt: &CodingExecutionAttempt,
         provider: &ProviderName,
-        previous_actionable_review: Option<String>,
     ) -> Result<Option<RenderedExecutionContext>, CodingWorkspaceEngineError> {
         let Some((run, bundle)) = self.active_unit_run_projection(attempt)? else {
             return Ok(None);
@@ -390,7 +393,7 @@ impl CodingWorkspaceEngine {
                     repository_state_ref,
                     resolved_handoff_revision_ids: run.resolved_handoff_revision_ids.clone(),
                     unit_run_id: run.id.clone(),
-                    previous_actionable_review,
+                    previous_actionable_review: None,
                     start_commit: run.start_commit.clone(),
                 },
             )
@@ -445,6 +448,40 @@ impl CodingWorkspaceEngine {
         Ok(Some(rendered))
     }
 
+    /// group attempt 当前 unit 的写入范围规范段（与 legacy markdown 路径逐字
+    /// 同源、数据与机器门同源）。
+    ///
+    /// 数据取当前 unit 投影的写入范围事实：coder 角色取 coder projection 的
+    /// `write_policy`，reviewer 角色取 reviewer projection 的 `scope_policy`
+    /// ——两者都是 `canonical_contract.write_policy` 的克隆，与机器门
+    /// `gates/schema_v2.rs::validate_changed_files_for_runtime` 同一份取值。
+    /// 文案由 `coding_work_item_context::write_scope_section_text` 渲染（legacy
+    /// markdown 与 group prompt 共用同一渲染器，不漂移）。
+    ///
+    /// 非 group attempt 返回 `None`：legacy 路径的范围规范段由已确认 Work Item
+    /// markdown 承载，不在此重复渲染（同一 prompt 内两份范围会让 agent 读到
+    /// 两套口径）。
+    pub(crate) fn unit_run_write_scope_section(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+    ) -> Result<Option<String>, CodingWorkspaceEngineError> {
+        let Some((_run, bundle)) = self.active_unit_run_projection(attempt)? else {
+            return Ok(None);
+        };
+        let policy = match role {
+            CodingProviderRole::Coder => &bundle.coder_projection.write_policy,
+            CodingProviderRole::CodeReviewer => &bundle.reviewer_projection.scope_policy,
+            CodingProviderRole::InternalReviewer => return Ok(None),
+        };
+        Ok(Some(
+            crate::product::coding_work_item_context::write_scope_section_text(
+                &policy.exclusive_scopes,
+                &policy.forbidden_scopes,
+            ),
+        ))
+    }
+
     pub(crate) fn authoritative_resolved_handoff_revision_ids(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -454,54 +491,10 @@ impl CodingWorkspaceEngine {
         let units =
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let revision_store = WorkItemRevisionStore::new(self.store.paths());
         unit.dependency_logical_work_item_ids
             .iter()
             .map(|dependency_id| {
-                let mut matches = units
-                    .iter()
-                    .filter(|candidate| candidate.logical_work_item_id == *dependency_id);
-                let dependency = matches.next().ok_or_else(|| {
-                    CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
-                })?;
-                if matches.next().is_some() {
-                    return Err(ProductStoreError::Ambiguous {
-                        kind: "coding_execution_unit",
-                        id: dependency_id.clone(),
-                    }
-                    .into());
-                }
-                let handoff_id = dependency
-                    .latest_handoff_revision_id
-                    .as_deref()
-                    .ok_or_else(|| {
-                        CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
-                    })?;
-                let handoff =
-                    revision_store.get_handoff_revision(lineage, dependency_id, handoff_id)?;
-                let source_run = self
-                    .store
-                    .list_coding_unit_runs(attempt, &dependency.id)?
-                    .into_iter()
-                    .max_by_key(|run| run.execution_no);
-                if dependency.status != CodingExecutionUnitStatus::Completed
-                    || dependency.completion_commit.as_deref() != Some(handoff.commit_sha.as_str())
-                    || handoff.id != format!("handoff_revision_{}", handoff.coding_unit_run_id)
-                    || handoff.logical_work_item_id != dependency.logical_work_item_id
-                    || handoff.work_item_revision_id != dependency.work_item_revision_id
-                    || !source_run.is_some_and(|run| {
-                        run.id == handoff.coding_unit_run_id
-                            && run.unit_id == dependency.id
-                            && run.work_item_revision_id == dependency.work_item_revision_id
-                            && run.status == CodingUnitRunStatus::Completed
-                            && run.completion_commit.as_deref() == Some(handoff.commit_sha.as_str())
-                    })
-                {
-                    return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                        "unit_run_handoff_binding_mismatch: {handoff_id}"
-                    )));
-                }
-                Ok(handoff_id.to_string())
+                self.resolve_dependency_handoff_id(attempt, &units, dependency_id, lineage)
             })
             .collect()
     }
@@ -547,9 +540,8 @@ impl CodingWorkspaceEngine {
         let coder_renderer_version = renderer_for(&providers.coder)
             .renderer_version()
             .to_string();
-        let reviewer_renderer_version = renderer_for(&providers.code_reviewer)
-            .renderer_version()
-            .to_string();
+        let reviewer_renderer_version =
+            renderer_version_for_optional_provider(providers.code_reviewer.as_ref()).to_string();
         let run = match self.store.get_active_unit_run(attempt) {
             Ok(run) => run,
             Err(ProductStoreError::NotFound {

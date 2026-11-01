@@ -1,0 +1,1190 @@
+use super::policy_routing::{GateSnapshotContext, policy_route_record_values, route_outcome};
+use super::*;
+use std::collections::BTreeSet;
+
+use crate::product::work_item_plan_policy::classify::classify_finding;
+use crate::product::work_item_plan_policy::{
+    FatalReason, FindingClass, FindingFingerprint, PolicyDiagnostic, ReviewFindingCategory,
+    ReviewInvocationScope, ReviewPhase, RunHistory, WorkItemPlanFlowKind,
+};
+use crate::product::work_item_plan_source_store::{
+    SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
+};
+
+/// k3 P0 接力键碰撞修复：SingleCandidate 的 TriggerAggregateRepair 在 Generate
+/// 迁移的同一 CAS 内原子预领下一把 author provider-start ledger 键（对齐 human
+/// gate turn open 的既有模式）。`RepairReservation{Reserved}` 标记该键可被接力
+/// run 消费：store 层 `reserve_single_candidate_provider_start` 命中 Reserved 预领
+/// 时推进为 ProviderStarted 并放行真启动；接力 run 因此不再与 run1 的旧键碰撞
+/// （phase==Generate 启发式下 attempt=len-1 会复用已消费的 run1 键）。
+fn provider_start_ledger_for_action(
+    expected: &crate::product::models::WorkspaceSessionRecord,
+    action: &RoutingAction,
+    invoked_scope: Option<&ReviewInvocationScope>,
+) -> (
+    Option<crate::product::work_item_plan_policy::RepairReservation>,
+    Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
+) {
+    if expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        || !matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+    {
+        return (
+            expected.repair_reservation.clone(),
+            expected.provider_start_ledger.clone(),
+        );
+    }
+
+    let (reservation, entry) = preclaimed_repair_start(
+        &expected.id,
+        expected.provider_start_ledger.len(),
+        invoked_scope
+            .map(|scope| scope.scope_digest().to_string())
+            .unwrap_or_else(|| "review_unknown".to_string()),
+    );
+    let mut provider_start_ledger = expected.provider_start_ledger.clone();
+    provider_start_ledger.push(entry);
+    (Some(reservation), provider_start_ledger)
+}
+
+/// 预领的单次构造（持久化路径与内存路径共用，键形与字段口径不得漂移）。
+/// `owner_run_id` 绑定本次路由的新 invocation scope digest。
+fn preclaimed_repair_start(
+    session_id: &str,
+    provider_start_attempt: usize,
+    owner_run_id: String,
+) -> (
+    crate::product::work_item_plan_policy::RepairReservation,
+    crate::product::work_item_plan_policy::ProviderStartLedgerEntry,
+) {
+    let provider_start_idempotency_key = format!(
+        "single_candidate_author:{}:{provider_start_attempt}",
+        session_id
+    );
+    (
+        crate::product::work_item_plan_policy::RepairReservation {
+            token: format!("single_candidate_author_repair:{session_id}:{provider_start_attempt}"),
+            owner_session_id: session_id.to_string(),
+            owner_run_id,
+            provider_start_idempotency_key: provider_start_idempotency_key.clone(),
+            state: crate::product::work_item_plan_policy::RepairReservationState::Reserved,
+            commit_id: None,
+        },
+        crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+            provider_start_idempotency_key,
+            started: true,
+            provider: None,
+            started_at: None,
+        },
+    )
+}
+
+/// 计算 verdict 的非 advisory findings 指纹集合（F5-B 闸门口径）：复用 policy
+/// classify_finding 的 class/fingerprint 推导，剔除 class=Advisory 条目。与
+/// evaluate.rs 的 actionable_findings 语义一致：措辞变化在 category 存在时不改指纹。
+fn non_advisory_finding_fingerprints(verdict: &ReviewVerdict) -> BTreeSet<FindingFingerprint> {
+    verdict
+        .findings
+        .iter()
+        .map(|finding| classify_finding(verdict.verdict.clone(), finding))
+        .filter(|classified| classified.class != FindingClass::Advisory)
+        // F-52：unstable（无稳定 ID 措辞域）指纹不参与 F5-B 自动断言。
+        .filter(|classified| !classified.identity_unstable)
+        .map(|classified| classified.fingerprint)
+        .collect()
+}
+
+fn scope_for_action(
+    durable_scope: Option<&ReviewInvocationScope>,
+    invocation: &ReviewInvocationScope,
+    action: &RoutingAction,
+) -> Option<ReviewInvocationScope> {
+    if matches!(
+        action,
+        RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            ..
+        }
+    ) {
+        return durable_scope.cloned();
+    }
+    Some(invocation.clone())
+}
+
+/// REQ-TOP-04 场景 6（F-52）：从 durable candidate ref 提取候选身份段
+/// （canonical ref 尾段 `ir-<hash16>` 的 `<hash16>`，无 store 读、确定性）。
+fn candidate_revision_hash_segment(revision_ref: &str) -> &str {
+    revision_ref.rsplit('-').next().unwrap_or(revision_ref)
+}
+
+/// 终态 action 集合：这些路由结束后本 review cycle 关闭（durable scope 置
+/// None），人工修订后的新候选开全新 Initial cycle，不误入旧 cycle 的
+/// Verification 相位。TriggerAggregateRepair 保留 scope（同一 invocation
+/// 链继续复评）。REQ-TOP-04 场景 7。
+fn closes_single_candidate_cycle(action: &RoutingAction) -> bool {
+    matches!(
+        action,
+        RoutingAction::ContinueToCompleted
+            | RoutingAction::EnterHumanGate { .. }
+            | RoutingAction::StopNeedsHuman { .. }
+            | RoutingAction::AbortFatal { .. }
+    )
+}
+
+/// Returns the only durable review-cycle identity and phase for a SingleCandidate
+/// reviewer invocation. The cycle is anchored on the initial candidate's
+/// source-revision identity (`sc:candidate:<hash16>`), so a review chain
+/// (initial review → automatic repair → verification) shares one cycle across
+/// ReviewerRun node rotation, while a fresh candidate starts a fresh cycle.
+///
+/// `durable_scope=None` → key = hash segment of `current_ir_ref` (new cycle,
+/// Initial). Both missing → fail-closed `Err`.
+/// `Initial{R}` → key anchored on R; phase = Verification iff the anchored
+/// cycle already consumed its initial review (interrupted reruns stay Initial).
+/// `Verification{..}` → key anchored on `cycle_anchor_revision_id` (old
+/// durable records without the anchor fail-safe to the repaired revision).
+/// Legacy `review:<node>` cycle records are never migrated: their counts do
+/// not apply to the new identity keys (fresh Initial, fail-safe unknown).
+pub(super) fn single_candidate_review_cycle(
+    durable_scope: Option<&ReviewInvocationScope>,
+    current_ir_ref: Option<&str>,
+    run_history: &RunHistory,
+) -> Result<(String, ReviewPhase), String> {
+    match durable_scope {
+        Some(ReviewInvocationScope::Verification {
+            repaired_revision_id,
+            cycle_anchor_revision_id,
+            ..
+        }) => {
+            let anchor = cycle_anchor_revision_id
+                .as_deref()
+                .unwrap_or(repaired_revision_id);
+            Ok((
+                format!("sc:candidate:{}", candidate_revision_hash_segment(anchor)),
+                ReviewPhase::Verification,
+            ))
+        }
+        Some(ReviewInvocationScope::Initial {
+            initial_revision_id,
+            ..
+        }) => {
+            let cycle_key = format!(
+                "sc:candidate:{}",
+                candidate_revision_hash_segment(initial_revision_id)
+            );
+            let phase = if run_history
+                .review_cycles
+                .get(&cycle_key)
+                .is_some_and(|cycle| cycle.initial_count >= 1)
+            {
+                ReviewPhase::Verification
+            } else {
+                ReviewPhase::Initial
+            };
+            Ok((cycle_key, phase))
+        }
+        None => {
+            let ir_ref = current_ir_ref
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    "active plan candidate is unavailable for SingleCandidate review".to_string()
+                })?;
+            let cycle_key = format!("sc:candidate:{}", candidate_revision_hash_segment(ir_ref));
+            // r37 根修:终态 action(EnterHumanGate 等)已关闭 durable scope,
+            // 同一候选(人工修订原样复写→源哈希不变→同 key)再进评审时,与
+            // Some(Initial{R}) 臂同规——该 key cycle 的初评已计数则判
+            // Verification(复评)。此前无条件 Initial,对 initial=1 的同 key
+            // cycle 二次 +1 initial,merge_into 按 initial≤1 拒收,呈形
+            // StateCorruption「run history delta cannot be merged within
+            // policy limits」(r37 消耗账全在预算内却拒)。
+            let phase = if run_history
+                .review_cycles
+                .get(&cycle_key)
+                .is_some_and(|cycle| cycle.initial_count >= 1)
+            {
+                ReviewPhase::Verification
+            } else {
+                ReviewPhase::Initial
+            };
+            Ok((cycle_key, phase))
+        }
+    }
+}
+
+fn validate_single_candidate_scope(
+    scope: ReviewInvocationScope,
+    phase: ReviewPhase,
+) -> Result<ReviewInvocationScope, Box<RoutingAction>> {
+    let phase_matches = matches!(
+        (phase, &scope),
+        (ReviewPhase::Initial, ReviewInvocationScope::Initial { .. })
+            | (
+                ReviewPhase::Verification,
+                ReviewInvocationScope::Verification { .. }
+            )
+    );
+    if !phase_matches {
+        return Err(Box::new(RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            diagnostics: vec![PolicyDiagnostic {
+                code: "verification_scope_violation".to_string(),
+                message: "review invocation scope phase does not match review cycle phase"
+                    .to_string(),
+                field: Some("phase".to_string()),
+            }],
+        }));
+    }
+    if let Err(error) = scope.validate_digest() {
+        return Err(Box::new(RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            diagnostics: vec![PolicyDiagnostic {
+                code: "verification_scope_violation".to_string(),
+                message: format!("review invocation scope digest invalid: {error}"),
+                field: Some("scope_digest".to_string()),
+            }],
+        }));
+    }
+    Ok(scope)
+}
+
+impl WorkspaceEngine {
+    /// 当 worker 已持有本 invocation 的 scope 时，必须在 reload durable state
+    /// 之前拒绝坏 digest；否则 reload 会静默覆盖该 protocol violation。
+    pub(super) fn fail_invalid_single_candidate_scope(
+        &mut self,
+        expected: Option<&WorkspaceSessionRecord>,
+    ) -> Option<RoutingAction> {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return None;
+        }
+        let scope = self.session.review_invocation_scope.clone()?;
+        if scope.validate_digest().is_ok() {
+            return None;
+        }
+
+        let action = RoutingAction::AbortFatal {
+            reason: FatalReason::ProtocolViolation,
+            diagnostics: vec![PolicyDiagnostic {
+                code: "verification_scope_violation".to_string(),
+                message: "review invocation scope digest invalid".to_string(),
+                field: Some("scope_digest".to_string()),
+            }],
+        };
+        let history = expected
+            .map(|record| record.run_history.clone())
+            .unwrap_or_else(|| self.session.run_history.clone());
+        match self.persist_policy_route(expected, &scope, &action, &history) {
+            Ok(record) => {
+                if let Some(record) = record.as_ref() {
+                    self.refresh_policy_state(record);
+                } else {
+                    self.apply_policy_route_state(&scope, &action, history);
+                }
+                Some(action)
+            }
+            Err(error) => {
+                let action = RoutingAction::AbortFatal {
+                    reason: FatalReason::PersistenceFailure,
+                    diagnostics: vec![PolicyDiagnostic {
+                        code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                        message: error.to_string(),
+                        field: Some("workspace_session".to_owned()),
+                    }],
+                };
+                self.apply_policy_route_state(&scope, &action, history);
+                Some(action)
+            }
+        }
+    }
+
+    pub(super) fn policy_scope_for_action(
+        &self,
+        invocation: &ReviewInvocationScope,
+        action: &RoutingAction,
+        durable_scope: Option<&ReviewInvocationScope>,
+    ) -> Option<ReviewInvocationScope> {
+        // REQ-TOP-04 场景 7：SC 流的终态路由关闭本 review cycle——durable
+        // scope 置 None，人工修订后的新候选不再误入旧 cycle 的 Verification。
+        // TriggerAggregateRepair 保留 scope（同一 invocation 链继续复评）；
+        // legacy 流保持既有行为（free fn 的 ProtocolViolation 保序由既有
+        // 单测锚定）。
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && closes_single_candidate_cycle(action)
+        {
+            return None;
+        }
+        scope_for_action(
+            durable_scope.or(self.session.review_invocation_scope.as_ref()),
+            invocation,
+            action,
+        )
+    }
+
+    pub(super) fn policy_invocation(
+        &self,
+        phase: ReviewPhase,
+        cycle_key: &str,
+    ) -> Result<ReviewInvocationScope, Box<RoutingAction>> {
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+            return self.single_candidate_policy_invocation(phase, cycle_key);
+        }
+        Ok(match phase {
+            ReviewPhase::Initial => ReviewInvocationScope::initial(cycle_key.to_string()),
+            ReviewPhase::Verification => ReviewInvocationScope::verification(
+                self.session.run_history.seen_fingerprints.clone(),
+                cycle_key.to_string(),
+                "legacy_mechanical_report",
+                None,
+            ),
+        })
+    }
+
+    pub(super) fn single_candidate_policy_invocation(
+        &self,
+        phase: ReviewPhase,
+        // 锚定改造后 SC 分支不再消费 cycle_key（anchor 由 durable candidate
+        // ref 派生）；保留参数以维持与 legacy 分派同形的调用面。
+        _cycle_key: &str,
+    ) -> Result<ReviewInvocationScope, Box<RoutingAction>> {
+        let scope = match self.session.review_invocation_scope.clone() {
+            Some(scope) => scope,
+            // A direct policy invocation may be used by recovery code before
+            // the provider-drive hook has run. Construct the initial scope
+            // here; the CAS below makes it durable before routing continues.
+            // The anchor must be the durable candidate ref itself（不是
+            // cycle key）：Initial scope 的 initial_revision_id 是后续 cycle
+            // key 派生与 Verification anchor 的唯一来源。
+            None if phase == ReviewPhase::Initial => {
+                let anchor = self
+                    .session
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        Box::new(RoutingAction::AbortFatal {
+                            reason: FatalReason::ProtocolViolation,
+                            diagnostics: vec![PolicyDiagnostic {
+                                code: "verification_scope_violation".to_string(),
+                                message: "initial review requires a durable plan candidate IR"
+                                    .to_string(),
+                                field: Some("plan_candidate_ir_ref".to_string()),
+                            }],
+                        })
+                    })?;
+                ReviewInvocationScope::initial(anchor)
+            }
+            // r42 根修:同候选(人工修订原样复写→同 cycle key,r37 修复使
+            // None 臂判 Verification)再评审时,durable scope 已被 fresh 终态
+            // action 清空(closes_single_candidate_cycle)——此前该形态撞
+            // AbortFatal「scope is not durable」。从 durable refs 重建
+            // Verification scope(与 ensure_review_invocation_scope 的
+            // Verification 构造同构:anchor 缺省 None 由 cycle key 派生
+            // fail-safe,指纹取 cycle 初评集/seen 兜底)。
+            None => {
+                let repaired_revision_id = self
+                    .session
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        Box::new(RoutingAction::AbortFatal {
+                            reason: FatalReason::ProtocolViolation,
+                            diagnostics: vec![PolicyDiagnostic {
+                                code: "verification_scope_violation".to_string(),
+                                message: "verification review requires a durable plan candidate IR"
+                                    .to_string(),
+                                field: Some("plan_candidate_ir_ref".to_string()),
+                            }],
+                        })
+                    })?;
+                let mechanical_report_ref = self
+                    .session
+                    .mechanical_report_ref
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        Box::new(RoutingAction::AbortFatal {
+                            reason: FatalReason::ProtocolViolation,
+                            diagnostics: vec![PolicyDiagnostic {
+                                code: "verification_scope_violation".to_string(),
+                                message: "verification review requires a durable mechanical report"
+                                    .to_string(),
+                                field: Some("mechanical_report_ref".to_string()),
+                            }],
+                        })
+                    })?;
+                let original_fingerprints = self.session.run_history.seen_fingerprints.clone();
+                ReviewInvocationScope::verification(
+                    original_fingerprints,
+                    repaired_revision_id,
+                    mechanical_report_ref,
+                    None,
+                )
+            }
+        };
+        validate_single_candidate_scope(scope, phase)
+    }
+
+    /// 在 reviewer provider 启动前为 SingleCandidate 建立服务端 scope，并以
+    /// 与策略路由相同的 CAS 持久化。scope 仅由当前 ReviewerRun 节点在 durable
+    /// history 中的 cycle 与 durable candidate refs 物化，因而不会提前消费
+    /// review counter 或改变 stage/history。
+    pub(crate) async fn ensure_review_invocation_scope(&mut self) -> Result<(), String> {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return Ok(());
+        }
+
+        // Validate only the active-node identity from worker state. The authoritative
+        // phase remains derived below from the durable record's history.
+        let _ = single_candidate_review_cycle(
+            self.session.review_invocation_scope.as_ref(),
+            self.session.plan_candidate_ir_ref.as_deref(),
+            &self.session.run_history,
+        )?;
+        // A worker-held scope is protocol input too. Reject a bad digest before the
+        // durable reload so reconciliation cannot conceal the violation.
+        if let Some(scope) = self.session.review_invocation_scope.as_ref() {
+            scope
+                .validate_digest()
+                .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
+        }
+
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            return Err("lifecycle_store unavailable for review invocation scope".to_string());
+        };
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| format!("load workspace session for review scope failed: {error}"))?;
+        let (cycle_key, phase) = single_candidate_review_cycle(
+            expected.review_invocation_scope.as_ref(),
+            expected.plan_candidate_ir_ref.as_deref(),
+            &expected.run_history,
+        )?;
+        let scope = match phase {
+            ReviewPhase::Initial => {
+                let plan_candidate_ir_ref = expected
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .ok_or("initial review requires a durable plan candidate IR")?;
+                ReviewInvocationScope::initial(plan_candidate_ir_ref)
+            }
+            ReviewPhase::Verification => {
+                let repaired_revision_id = expected
+                    .plan_candidate_ir_ref
+                    .clone()
+                    .ok_or("verification review requires a durable plan candidate IR")?;
+                let mechanical_report_ref = expected
+                    .mechanical_report_ref
+                    .clone()
+                    .ok_or("verification review requires a durable mechanical report")?;
+                // REQ-TOP-04 场景 6：anchor 沿用 durable scope 声明的
+                // invocation 链头（Initial 的候选 ref；scope 已是 Verification
+                // 时沿用其 anchor），original_fingerprints 取锚定 cycle 的
+                // 初评集合，空集（旧 durable）fail-safe 回退 seen_fingerprints。
+                let cycle_anchor_revision_id = match expected.review_invocation_scope.as_ref() {
+                    Some(ReviewInvocationScope::Initial {
+                        initial_revision_id,
+                        ..
+                    }) => Some(initial_revision_id.clone()),
+                    Some(ReviewInvocationScope::Verification {
+                        cycle_anchor_revision_id,
+                        ..
+                    }) => cycle_anchor_revision_id.clone(),
+                    None => None,
+                };
+                let original_fingerprints = expected
+                    .run_history
+                    .review_cycles
+                    .get(&cycle_key)
+                    .map(|cycle| cycle.original_fingerprints.clone())
+                    .filter(|fingerprints| !fingerprints.is_empty())
+                    .unwrap_or_else(|| expected.run_history.seen_fingerprints.clone());
+                ReviewInvocationScope::verification(
+                    original_fingerprints,
+                    repaired_revision_id,
+                    mechanical_report_ref,
+                    cycle_anchor_revision_id,
+                )
+            }
+        };
+        scope
+            .validate_digest()
+            .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
+
+        if expected.review_invocation_scope.as_ref() == Some(&scope) {
+            self.refresh_policy_state(&expected);
+            return Ok(());
+        }
+        let updated = store
+            .compare_and_save_policy_route(
+                &expected,
+                PolicyRoutePersist {
+                    status: expected.status.clone(),
+                    single_candidate_phase: expected.single_candidate_phase.clone(),
+                    run_history: expected.run_history.clone(),
+                    scope: Some(scope),
+                    gate: expected.human_gate_snapshot.clone(),
+                    diagnostics: expected.policy_diagnostics.clone(),
+                    repair_reservation: expected.repair_reservation.clone(),
+                    provider_start_ledger: expected.provider_start_ledger.clone(),
+                },
+            )
+            .map_err(|error| format!("persist review invocation scope failed: {error}"))?;
+        self.refresh_policy_state(&updated);
+        Ok(())
+    }
+
+    /// 对 SingleCandidate 的复评，只接受本 invocation scope 精确指向的 immutable
+    /// mechanical report，且该 report 必须绑定 scope 所声明的 repaired IR。这里不做
+    /// changed-path/region 归因：finding 的身份边界由阶段 1 fingerprint classifier 保持。
+    pub(super) fn verified_mechanical_report_ref(
+        &self,
+        invocation: &ReviewInvocationScope,
+    ) -> Result<Option<String>, Box<RoutingAction>> {
+        let ReviewInvocationScope::Verification {
+            mechanical_report_ref,
+            repaired_revision_id,
+            ..
+        } = invocation
+        else {
+            return Ok(None);
+        };
+
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            // legacy 没有 source-store mechanical report；保持其既有评审路径，但让
+            // classifier 仍可确认 invocation 内的 ref 未被调用方替换。
+            return Ok(Some(mechanical_report_ref.clone()));
+        }
+
+        if self.session.plan_candidate_ir_ref.as_deref() != Some(repaired_revision_id)
+            || self.session.mechanical_report_ref.as_deref() != Some(mechanical_report_ref)
+        {
+            return Err(verification_scope_store_error(
+                "verification invocation scope does not match durable IR/report refs".to_string(),
+                false,
+            ));
+        }
+
+        let Some(lifecycle_store) = self.lifecycle_store.as_ref() else {
+            return Err(verification_scope_store_error(
+                "lifecycle_store unavailable for verification mechanical report".to_string(),
+                false,
+            ));
+        };
+        let scope = SourceStoreScope {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+        };
+        let source_store = WorkItemPlanSourceStore::new(lifecycle_store.app_paths());
+        let report = source_store
+            .get_mechanical_report(&scope, mechanical_report_ref)
+            .map_err(|error| {
+                verification_scope_source_store_error(error, "mechanical_report_ref")
+            })?;
+        let repaired_ir = source_store
+            .get_plan_candidate_ir(&scope, repaired_revision_id)
+            .map_err(|error| {
+                verification_scope_source_store_error(error, "repaired_revision_id")
+            })?;
+
+        if report.ir_id != repaired_ir.id
+            || report.source_revision_id != repaired_ir.source_revision_id
+            || report.report.source_revision_hash != repaired_ir.ir.source_revision_hash
+            || report.report.compiler_version != repaired_ir.ir.compiler_version
+        {
+            return Err(verification_scope_store_error(
+                "verification mechanical report does not match the repaired IR".to_string(),
+                false,
+            ));
+        }
+
+        Ok(Some(mechanical_report_ref.clone()))
+    }
+
+    pub(super) fn single_candidate_mechanical_findings(
+        &self,
+    ) -> Result<Vec<ClassifiedFinding>, Box<RoutingAction>> {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || self.session.single_candidate_phase.clone()
+                != Some(crate::product::models::SingleCandidatePhase::Evaluate)
+        {
+            return Ok(Vec::new());
+        }
+        let Some(report_ref) = self.session.mechanical_report_ref.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let lifecycle = self.lifecycle_store.as_ref().ok_or_else(|| {
+            Box::new(RoutingAction::AbortFatal {
+                reason: FatalReason::PersistenceFailure,
+                diagnostics: vec![PolicyDiagnostic {
+                    code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                    message: "lifecycle_store unavailable for mechanical report".to_string(),
+                    field: Some("mechanical_report_ref".to_string()),
+                }],
+            })
+        })?;
+        let scope = SourceStoreScope {
+            project_id: self.session.project_id.clone(),
+            issue_id: self.session.issue_id.clone(),
+            plan_id: self.session.entity_id.clone(),
+        };
+        let report = WorkItemPlanSourceStore::new(lifecycle.app_paths())
+            .get_mechanical_report(&scope, report_ref)
+            .map_err(|error| {
+                Box::new(RoutingAction::AbortFatal {
+                    reason: FatalReason::ProtocolViolation,
+                    diagnostics: vec![PolicyDiagnostic {
+                        code: "mechanical_report_invalid".to_string(),
+                        message: format!("mechanical report rejected: {}", error.code()),
+                        field: Some("mechanical_report_ref".to_string()),
+                    }],
+                })
+            })?;
+        Ok(report
+            .report
+            .findings
+            .into_iter()
+            .filter(|finding| {
+                finding.severity == crate::product::models::WorkItemSplitFindingSeverity::Error
+            })
+            .map(|finding| {
+                let (fingerprint, identity_unstable) = FindingFingerprint::identity_for_finding(
+                    Some(ReviewFindingCategory::Other),
+                    FindingClass::MechanicalError,
+                    &finding.message,
+                    Some(&format!("mechanical.{}", finding.code)),
+                );
+                ClassifiedFinding {
+                    class: FindingClass::MechanicalError,
+                    fingerprint,
+                    identity_unstable,
+                    category: Some(ReviewFindingCategory::Other),
+                    severity: "error".to_string(),
+                    message: finding.message,
+                    evidence: Some(report_ref.to_string()),
+                    required_action: Some(finding.code.clone()),
+                    contract_field: Some(format!("mechanical.{}", finding.code)),
+                }
+            })
+            .collect())
+    }
+
+    pub(super) fn persist_policy_route(
+        &self,
+        expected: Option<&WorkspaceSessionRecord>,
+        invocation: &ReviewInvocationScope,
+        action: &RoutingAction,
+        history: &RunHistory,
+    ) -> Result<Option<WorkspaceSessionRecord>, ProductStoreError> {
+        let (mut status, mut gate, diagnostics) = policy_route_record_values(action);
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && self.session.run_policy == RunPolicy::Interactive
+            && matches!(action, RoutingAction::ContinueToCompleted)
+        {
+            status = WorkspaceSessionStatus::WaitingForHuman;
+            // I-1 round2：amendment 判别命中而快照缺席时在此报 Err，
+            // 由调用方按 AbortFatal{PersistenceFailure} fail-closed，不落盘。
+            gate = Some(self.single_candidate_approval_gate(history)?);
+        }
+        // C2（REQ-HGC-01/F-52）：同一 logical gate 内的自动返修不清预算权威——
+        // durable 快照在场（门 episode 未关闭）时 TriggerAggregateRepair 期间
+        // 原样保留，复评重建（EnterHumanGate/审批门）再 carry-forward。现场
+        // issue_0002/session_0009 的 3 次修订均穿插自动返修，清快照会让预算
+        // 在每个 Repairable 轮后凭空恢复默认值。
+        if gate.is_none()
+            && matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+            && let Some(retained) = expected.and_then(|record| record.human_gate_snapshot.as_ref())
+        {
+            gate = Some(retained.clone());
+        }
+        let scope = self.policy_scope_for_action(
+            invocation,
+            action,
+            expected.and_then(|record| record.review_invocation_scope.as_ref()),
+        );
+        let Some(store) = &self.lifecycle_store else {
+            return Ok(None);
+        };
+        let Some(expected) = expected else {
+            return Ok(None);
+        };
+        let (repair_reservation, provider_start_ledger) =
+            provider_start_ledger_for_action(expected, action, scope.as_ref());
+        store
+            .compare_and_save_policy_route(
+                expected,
+                PolicyRoutePersist {
+                    status,
+                    single_candidate_phase: self.single_candidate_phase_for_action(action),
+                    run_history: history.clone(),
+                    scope,
+                    gate,
+                    diagnostics,
+                    repair_reservation,
+                    provider_start_ledger,
+                },
+            )
+            .map(Some)
+    }
+
+    pub(super) fn apply_policy_route_state(
+        &mut self,
+        invocation: &ReviewInvocationScope,
+        action: &RoutingAction,
+        history: RunHistory,
+    ) {
+        let (mut status, mut gate, mut diagnostics) = policy_route_record_values(action);
+        let mut fail_closed = false;
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && self.session.run_policy == RunPolicy::Interactive
+            && matches!(action, RoutingAction::ContinueToCompleted)
+        {
+            match self.single_candidate_approval_gate(&history) {
+                Ok(rebuilt) => {
+                    status = WorkspaceSessionStatus::WaitingForHuman;
+                    gate = Some(rebuilt);
+                }
+                Err(error) => {
+                    // I-1 round2 fail-closed：与 persist 失败同构——按
+                    // AbortFatal{PersistenceFailure} 落内存（phase→Failed），
+                    // 不得以重置公式绕过（本分支仅在 store/expected 缺席的
+                    // 降级内存路径可达；持久化引擎由 persist_policy_route 的
+                    // Err 分支先行拦截）。
+                    diagnostics = vec![PolicyDiagnostic {
+                        code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                        message: error.to_string(),
+                        field: Some("human_gate_snapshot".to_owned()),
+                    }];
+                    status = WorkspaceSessionStatus::Failed;
+                    gate = None;
+                    fail_closed = true;
+                }
+            }
+        }
+        // C2（REQ-HGC-01）：内存回退分支与持久化路径同源——TriggerAggregateRepair
+        // 不清在场门快照（预算权威跨自动返修轮保留）。
+        if gate.is_none()
+            && matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+            && self.session.human_gate_snapshot.is_some()
+        {
+            gate = self.session.human_gate_snapshot.clone();
+        }
+        self.session.run_history = history;
+        self.session.review_invocation_scope =
+            self.policy_scope_for_action(invocation, action, None);
+        self.session.human_gate_snapshot = gate;
+        self.session.policy_diagnostics = diagnostics;
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+            && matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+        {
+            // 与持久化路径（persist_policy_route）同源的原子预领：内存回退分支
+            // 不得与 CAS 落盘的键形/字段口径漂移。
+            let owner_run_id = self
+                .session
+                .review_invocation_scope
+                .as_ref()
+                .map(|scope| scope.scope_digest().to_string())
+                .unwrap_or_else(|| "review_unknown".to_string());
+            let (reservation, entry) = preclaimed_repair_start(
+                &self.session.session_id,
+                self.session.provider_start_ledger.len(),
+                owner_run_id,
+            );
+            self.session.repair_reservation = Some(reservation);
+            self.session.provider_start_ledger.push(entry);
+        }
+        self.session.session_status = status;
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+            self.session.single_candidate_phase = if fail_closed {
+                Some(crate::product::models::SingleCandidatePhase::Failed)
+            } else {
+                self.single_candidate_phase_for_action(action)
+            };
+        }
+    }
+
+    /// F5-B：SC legacy 修订循环防打转闸门。同一 SC 会话内，当前 verdict 与上一轮
+    /// ReviewerRun 持久化 verdict 的非 advisory findings 指纹集合完全相同且非空时，
+    /// 返回重复指纹数量；否则返回 None（首轮、指纹变化、advisory-only、无法读取
+    /// 上一轮均不触发）。复用 policy 的 classify_finding 指纹口径，不触碰 policy CAS 主链。
+    ///
+    /// REQ-WSC-12/14：两侧都先按 owner 已处置清单归一（`finding_key ∈ 清单` →
+    /// advisory）——durable 里存的是 provider 原始 verdict，不归一就会把 owner
+    /// 已裁定不归本 WI 的事实继续算进「同一问题再现」，重新卡住返修循环。
+    pub(super) fn single_candidate_consecutive_repeated_finding_count(
+        &self,
+        current: &ReviewVerdict,
+    ) -> Option<usize> {
+        let excluded = self.session_human_disposition_keys();
+        let mut current_normalized = current.clone();
+        super::super::normalize_review_verdict_for_dispositions(&mut current_normalized, &excluded);
+        let current_set = non_advisory_finding_fingerprints(&current_normalized);
+        if current_set.is_empty() {
+            return None;
+        }
+        let active_node_id = self.active_node_id.as_ref()?;
+        let lifecycle = self.lifecycle_store.as_ref()?;
+        let mut previous = self
+            .timeline_nodes
+            .iter()
+            .rev()
+            .filter(|node| matches!(node.node_type, TimelineNodeType::ReviewerRun))
+            .filter(|node| &node.node_id != active_node_id)
+            .find_map(|node| {
+                let detail = lifecycle
+                    .load_node_detail_for_issue_session(
+                        &self.session.project_id,
+                        &self.session.issue_id,
+                        &self.session.session_id,
+                        &node.node_id,
+                    )
+                    .ok()?;
+                let persisted = detail.verdict?;
+                deserialize_historical_review_verdict(persisted).ok()
+            })?;
+        super::super::normalize_review_verdict_for_dispositions(&mut previous, &excluded);
+        let previous_set = non_advisory_finding_fingerprints(&previous);
+        (previous_set == current_set).then_some(current_set.len())
+    }
+
+    pub(super) fn refresh_policy_state(&mut self, record: &WorkspaceSessionRecord) {
+        self.session.session_status = record.status.clone();
+        self.session.run_history = record.run_history.clone();
+        self.session.review_invocation_scope = record.review_invocation_scope.clone();
+        self.session.human_gate_snapshot = record.human_gate_snapshot.clone();
+        self.session.repair_reservation = record.repair_reservation.clone();
+        self.session.policy_diagnostics = record.policy_diagnostics.clone();
+        self.session.provider_start_ledger = record.provider_start_ledger.clone();
+        // stale worker CAS retry 重新评估前必须完整恢复 SingleCandidate immutable refs；
+        // 否则 durable scope 已更新而内存仍指向旧 IR/report，会被误判为 protocol violation。
+        self.session.work_item_plan_source_revision_ref =
+            record.work_item_plan_source_revision_ref.clone();
+        self.session.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
+        self.session.mechanical_report_ref = record.mechanical_report_ref.clone();
+        self.session.publication_provenance_ref = record.publication_provenance_ref.clone();
+        self.session.single_candidate_phase = record.single_candidate_phase.clone();
+    }
+
+    pub(super) fn single_candidate_approval_gate(
+        &self,
+        history: &RunHistory,
+    ) -> Result<HumanGateSnapshot, ProductStoreError> {
+        // I-1（REQ-CG-02 amendment 分叉，round2 判别加固、round3 F-A/F-B）+
+        // C2（REQ-CG-02 预算重置边界修订，F-52）：预算接续粒度 = logical gate。
+        // amendment 门（attempt AwaitingPlanAmendment 期间重开的原门）重建时
+        // MUST 接续现有 human_gate_snapshot——typed amendment turn 只扣快照、
+        // 不递增 run_history 计数，重置公式会凭空恢复已耗预算；普通 SC 修订门
+        // 在同一 logical gate 内的重建同样 MUST 接续 durable 快照剩余预算
+        // （现场 issue_0002/session_0009：3 次门内修订后 manual_repairs_used
+        // 恒 0，重置公式每轮回填默认 3，预算永不耗尽）。判别不只信
+        // SC+Completed+WaitingForHuman 三元组（通用状态写入可伪造，round2），
+        // 也不只看 context 状态（round3 F-B）：MUST 命中 probe 放行重开的同一
+        // 完整谓词（见 durable_reopened_amendment_record）；判别命中而快照缺席
+        // 时 fail-closed 报错；判别所需 durable 事实无法读取/校验时同样
+        // fail-closed 上抛（round3 F-A），不得回退重置公式。
+        let (manual_repairs_remaining, accepted_feedback_turns) =
+            match self.durable_reopened_amendment_record()? {
+                Some(record) => {
+                    let snapshot = record.human_gate_snapshot.as_ref().ok_or_else(|| {
+                        ProductStoreError::InvalidRecord {
+                            kind: "human_gate_amendment_snapshot_missing",
+                            reason: format!(
+                                "reopened amendment gate {} has no retained human_gate_snapshot; \
+                                 refusing to rebuild the approval gate with the reset formula",
+                                record.id
+                            ),
+                        }
+                    })?;
+                    (
+                        snapshot.manual_repairs_remaining,
+                        snapshot.accepted_feedback_turns,
+                    )
+                }
+                None => {
+                    // C2 普通门臂：同 logical gate（durable 快照在场 = 门episode
+                    // 未关闭）carry-forward；快照缺席（新 logical gate：新候选/
+                    // 新会话首开审批门）才取默认公式建立新预算。
+                    match self.session.human_gate_snapshot.as_ref() {
+                        Some(snapshot) => (
+                            snapshot.manual_repairs_remaining,
+                            snapshot.accepted_feedback_turns,
+                        ),
+                        None => (
+                            RunBudgets::default()
+                                .max_manual_repairs
+                                .saturating_sub(history.manual_repairs_used),
+                            Some(0),
+                        ),
+                    }
+                }
+            };
+        Ok(HumanGateSnapshot {
+            candidate_recovery: None,
+            findings: Vec::new(),
+            repeated_fingerprints: Vec::new(),
+            attempts_used: history
+                .repairs_used
+                .saturating_add(history.manual_repairs_used),
+            manual_repairs_remaining,
+            // 阶段 1 的 gate schema 是唯一的人工审批快照载体；有效候选无 finding，
+            // 仍用其既有 trigger 以避免新增决策协议。
+            trigger: HumanReason::NativeHumanRequired,
+            resumable: true,
+            accepted_feedback_turns,
+        })
+    }
+
+    /// durable amendment 重开证据：重开签名（SC + durable phase Completed +
+    /// durable WaitingForHuman）**叠加** probe 放行 `compare_and_reopen_amendment_gate`
+    /// 所用的同一完整谓词——指向本 session 的 Open/Applying
+    /// `PlanAmendmentContext`，且其 group attempt 处于 AwaitingPlanAmendment 并
+    /// 绑定本 plan session 的 entity（I-1 round3 F-B：只看 context 状态会在
+    /// context 先行 Open→Applying 而 attempt 已离开 Awaiting 的应用窗口内误判
+    /// amendment 门，而 probe 不放行——迟到 verdict 将绕终态守卫）。三元组
+    /// 本身并非重开唯一产物——通用 `update_workspace_session_status`（含
+    /// `enter_human_confirm` 与 `provider_workspace_runner` 同源调用）可直接
+    /// 对非 amendment 会话写 WaitingForHuman 而保留 phase 与快照，因此判别
+    /// 必须绑定 durable amendment 事实：该 context 只能由
+    /// `open_plan_amendment_context` 在完整 lineage 校验（attempt
+    /// AwaitingPlanAmendment + linked plan repair snapshot + canonical parent
+    /// session）后创建，通用 HTTP/内部路径无法伪造；重开授权与重建接续对称。
+    ///
+    /// 三态返回（I-1 round3 F-A）：`Ok(None)` = 明确无 amendment 事实（记录
+    /// 可读且签名不符 / 无 context / attempt 已离开 Awaiting），走普通门语义；
+    /// `Ok(Some)` = 判别命中；`Err` = 判别所需 durable 事实无法读取/校验
+    /// （session record 损坏、context 目录读失败、瞬态 I/O 等），MUST 以持久化
+    /// 失败 fail-closed 终止——读错误不得被当作「无 amendment 事实」进 reset
+    /// 公式，否则真 amendment 链在存储瞬断时会被凭空恢复预算。
+    fn durable_reopened_amendment_record(
+        &self,
+    ) -> Result<Option<WorkspaceSessionRecord>, ProductStoreError> {
+        // 廉价前置过滤：内存三元组不匹配时无需落盘。两处调用点
+        // （complete_review 守卫、single_candidate_approval_gate）求值前均有
+        // durable refresh，不会用到陈旧值；即便携带陈旧值，下方 durable 记录
+        // 校验仍是权威判据。
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || self.session.single_candidate_phase
+                != Some(crate::product::models::SingleCandidatePhase::Completed)
+            || self.session.session_status != WorkspaceSessionStatus::WaitingForHuman
+        {
+            return Ok(None);
+        }
+        // 无 lifecycle_store 即无从谈起 durable amendment 事实（也无从持久化
+        // fail-closed），保持普通门语义。
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            return Ok(None);
+        };
+        let record = store.get_workspace_session(&self.session.session_id)?;
+        if record.workspace_type != crate::product::models::WorkspaceType::WorkItemPlan
+            || record.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || record.status != WorkspaceSessionStatus::WaitingForHuman
+            || record.single_candidate_phase
+                != Some(crate::product::models::SingleCandidatePhase::Completed)
+        {
+            return Ok(None);
+        }
+        let coding_store =
+            crate::product::coding_attempt_store::CodingAttemptStore::new(store.app_paths());
+        let Some(_amendment_context) = coding_store
+            .find_awaiting_plan_amendment_context_for_plan_session(
+                &record.project_id,
+                &record.issue_id,
+                &record.entity_id,
+                &record.id,
+            )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    /// 重开中的 amendment 门判别：内存三元组前置过滤 + durable amendment 完整
+    /// 谓词绑定（见 `durable_reopened_amendment_record`）。首次审批门在重建时点
+    /// phase 只会在 Evaluate/Approval；伪造三元组（无 Open/Applying
+    /// PlanAmendmentContext）不会命中。
+    ///
+    /// I-1 round3（F-A）：`Err` = 判别所需 durable 事实无法读取/校验——调用方
+    /// （complete_review 终态守卫）MUST 以持久化失败 fail-closed 终止，不得把
+    /// 读错误当作「非 amendment 门」静默处理。
+    pub(super) fn is_reopened_amendment_gate(&self) -> Result<bool, ProductStoreError> {
+        Ok(self.durable_reopened_amendment_record()?.is_some())
+    }
+
+    pub(super) fn single_candidate_phase_for_action(
+        &self,
+        action: &RoutingAction,
+    ) -> Option<crate::product::models::SingleCandidatePhase> {
+        use crate::product::models::SingleCandidatePhase;
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return None;
+        }
+        // Interactive EnterHumanGate 是可确认门的唯一落盘投影：无论触发来自
+        // repeated_fingerprint、native human requirement 还是修订后的 Evaluate，
+        // 都必须原子回到 Approval，令 durable phase 与 HumanConfirm stage 一致。
+        // StopNeedsHuman 不是可确认门，保留原相位。
+        match action {
+            RoutingAction::ContinueToCompleted | RoutingAction::EnterHumanGate { .. } => {
+                Some(SingleCandidatePhase::Approval)
+            }
+            RoutingAction::AbortFatal { .. } => Some(SingleCandidatePhase::Failed),
+            RoutingAction::TriggerAggregateRepair { .. } => Some(SingleCandidatePhase::Generate),
+            RoutingAction::StopNeedsHuman { .. } => self.session.single_candidate_phase.clone(),
+        }
+    }
+
+    pub(crate) async fn route_single_candidate_evaluate_without_reviewer(&mut self) {
+        let verdict = ReviewVerdict {
+            verdict: ReviewVerdictType::Pass,
+            comments: "未启用 reviewer；仅执行 SingleCandidate mechanical Evaluate".to_string(),
+            summary: "SingleCandidate mechanical Evaluate 已完成，等待 Approval".to_string(),
+            findings: Vec::new(),
+            review_gate: ReviewGate::UserConfirmAllowed,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        };
+        let node_id = self
+            .active_node_id
+            .clone()
+            .unwrap_or_else(|| "single_candidate_evaluate".to_string());
+        let active_node_type = self.active_node_type();
+        let round = self.active_review_round().unwrap_or(1);
+        if let Some(action) = self.work_item_policy_action(&node_id, &verdict) {
+            self.apply_policy_route(action, verdict, active_node_type, round)
+                .await;
+            return;
+        }
+        let diagnostics = vec![PolicyDiagnostic {
+            code: FatalReason::StateCorruption.as_code().to_string(),
+            message: "SingleCandidate Evaluate did not produce a policy route".to_string(),
+            field: Some("single_candidate_phase".to_string()),
+        }];
+        self.persist_single_candidate_terminal_phase(
+            crate::product::models::SingleCandidatePhase::Failed,
+        );
+        self.finish_policy_failure(FatalReason::StateCorruption, diagnostics)
+            .await;
+    }
+
+    pub(super) async fn finish_policy_failure(
+        &mut self,
+        reason: FatalReason,
+        diagnostics: Vec<PolicyDiagnostic>,
+    ) {
+        let message = diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.message.clone())
+            .unwrap_or_else(|| reason.to_string());
+        let _ = self
+            .event_tx
+            .send(EngineEvent::Error {
+                message: message.clone(),
+            })
+            .await;
+        if let Some(node_id) = self.active_node_id.clone() {
+            self.update_timeline_node(&node_id, TimelineNodeStatus::Failed, Some(message))
+                .await;
+        }
+        self.session.session_status = WorkspaceSessionStatus::Failed;
+        // I-1 round3（F-C）：fail-closed 诊断 MUST 写回 durable session record
+        // （与 compare_and_save_policy_route 的 policy_diagnostics 落盘机制一致），
+        // 仅内存诊断在进程重启后无从复原。SC 会话内存 phase 同步进 Failed，
+        // 与 AbortFatal 经 apply_policy_route_state 的 fail-closed 语义同构。
+        if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
+            self.session.single_candidate_phase =
+                Some(crate::product::models::SingleCandidatePhase::Failed);
+        }
+        self.session.policy_diagnostics = diagnostics.clone();
+        self.transition_stage(WorkspaceStage::Completed).await;
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) =
+                store.fail_workspace_session_policy(&self.session.session_id, &diagnostics)
+        {
+            self.session.session_status = record.status;
+        }
+    }
+}
+
+pub(super) fn route_outcome_from_decision(
+    decision: EvaluationDecision,
+    policy: RunPolicy,
+    history: &RunHistory,
+    invocation: &ReviewInvocationScope,
+    findings: Vec<ClassifiedFinding>,
+) -> RoutingAction {
+    let (outcome, outcome_findings, repeated_fingerprints, trigger) = match &decision.outcome {
+        PlanOutcome::HumanRequired {
+            findings,
+            repeated_fingerprints,
+            reason,
+        } => (
+            decision.outcome.clone(),
+            findings.clone(),
+            repeated_fingerprints.clone(),
+            *reason,
+        ),
+        PlanOutcome::Repairable { findings } => (
+            decision.outcome.clone(),
+            findings.clone(),
+            Vec::new(),
+            HumanReason::RepairBudgetExhausted,
+        ),
+        _ => (
+            decision.outcome.clone(),
+            findings,
+            Vec::new(),
+            HumanReason::NativeHumanRequired,
+        ),
+    };
+    route_outcome(
+        outcome,
+        policy,
+        GateSnapshotContext {
+            history: history.clone(),
+            budgets: RunBudgets::default(),
+            invocation: invocation.clone(),
+            findings: outcome_findings,
+            repeated_fingerprints,
+            trigger,
+        },
+    )
+}
+
+fn verification_scope_source_store_error(
+    error: SourceStoreError,
+    field: &str,
+) -> Box<RoutingAction> {
+    let persistence_failure = matches!(
+        error,
+        SourceStoreError::Io(_) | SourceStoreError::Json(_) | SourceStoreError::Serialize(_)
+    );
+    verification_scope_store_error(
+        format!("verification {field} rejected: {}", error.code()),
+        persistence_failure,
+    )
+}
+
+fn verification_scope_store_error(
+    message: String,
+    persistence_failure: bool,
+) -> Box<RoutingAction> {
+    let reason = if persistence_failure {
+        FatalReason::PersistenceFailure
+    } else {
+        FatalReason::ProtocolViolation
+    };
+    Box::new(RoutingAction::AbortFatal {
+        reason,
+        diagnostics: vec![PolicyDiagnostic {
+            code: if persistence_failure {
+                FatalReason::PersistenceFailure.as_code().to_string()
+            } else {
+                "verification_scope_violation".to_string()
+            },
+            message,
+            field: Some("review_invocation_scope".to_string()),
+        }],
+    })
+}
+
+#[cfg(test)]
+mod routing_scope_cycle_tests;

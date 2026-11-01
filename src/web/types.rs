@@ -8,6 +8,10 @@ use crate::product::coding_models::{
     CodingTimelineNode, GroupFinalReadinessSnapshot, GroupReviewArtifactRef, InternalPrReview,
     ReviewRequest, WorkItemExecutionPlan,
 };
+use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::work_item_plan_policy::RunPolicy;
+use crate::web::coding_final_confirm_info::CodingFinalConfirmInfoDto;
+use crate::web::plan_confirmed_info::PlanConfirmedInfoDto;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,10 +321,89 @@ pub struct RepositoryListResponse {
     pub repositories: Vec<RepositoryDto>,
 }
 
+/// 仓库本地分支列表（REQ-PIB-01）：仅 refs/heads（不隐式 fetch）；
+/// default_branch 为服务端默认链 main→master→null（UI 不自行推导）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RepositoryBranchListResponse {
+    pub branches: Vec<String>,
+    pub default_branch: Option<String>,
+}
+
+/// Task R2（v1.3 §4）：统一 codebases 混合列表条目。单仓条目是 repos.json 的呈现层
+/// 投影（数据不动），逻辑条目来自 LogicalCodebaseStore。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodebaseSummaryDto {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub repository_id: Option<String>,
+    pub logical_codebase_id: Option<String>,
+    pub member_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CodebaseListResponse {
+    pub codebases: Vec<CodebaseSummaryDto>,
+}
+
 mod repository_initialization;
 pub use repository_initialization::{
     RepositoryInitializationOperationDto, RepositoryInitializationResultDto,
     RepositoryInitializationStepDto, RepositoryRegistrationInitializationDto,
+    ResumeRepositoryInitializationRequest,
+};
+
+mod aggregate_initialization;
+pub use aggregate_initialization::{
+    AggregateCancellationDto, AggregateInitializationOperationDto, AggregateInitializationStepDto,
+    AggregateMemberProjectionDto, CancelAggregateInitializationRequest,
+    CreateAggregateInitializationRequest,
+};
+
+mod logical_codebase;
+pub use logical_codebase::{
+    CreateLogicalCodebaseRequest, LogicalCodebaseDetailDto, LogicalCodebaseDto,
+    LogicalCodebaseListEntryDto, LogicalCodebaseListResponse, LogicalCodebaseMemberDto,
+};
+
+mod logical_codebase_registration;
+pub use logical_codebase_registration::{
+    RegistrationBatchDto, RegistrationBatchItemDto, RegistrationPreflightItemDto,
+    RegistrationPreflightRequest, RegistrationPreflightResponse, RegistrationSubmitRequest,
+};
+
+mod logical_codebase_bootstrap;
+pub use logical_codebase_bootstrap::{
+    BootstrapActionRequestDto, BootstrapActionResultDto, BootstrapAdvanceResultDto,
+    BootstrapCheckpointDto, BootstrapFailureDto, BootstrapPolicyReferenceDto,
+    BootstrapStepProjectionDto, LogicalCodebaseBootstrapNoticeDto,
+    LogicalCodebaseBootstrapProjectionDto,
+};
+
+mod identity_repair;
+pub use identity_repair::{
+    IdentityJournalDiagnosticDto, IdentityMappingSubmissionDto, IdentityRepairActionRequestDto,
+    RepositoryIdentityMappingDto,
+};
+
+mod human_action;
+pub use human_action::{
+    AutomationContinuePlanRequest, AutomationContinuePlanStatus, AutomationControlStatus,
+    CandidateRecoveryActionDto, CandidateRecoveryResult, HumanActionRequest, HumanActionState,
+    HumanActionStatus, RetryFailedScRunRequest, RetryFailedScRunStatus,
+    RevokeFindingExclusionsResult,
+};
+
+mod plan_coding;
+pub use plan_coding::{
+    CrossRepoReviewWarning, PlanCodingFinalConfirmBlockingDto, PlanCodingFinalConfirmDto,
+    PlanCodingFinalConfirmResultDto, PlanCodingFinalConfirmResultItemDto, PlanCodingProgressDto,
+    PlanCodingStartRequest, PlanCodingStartResultDto, PlanCodingTargetDto,
+    PlanCodingUnitProgressDto, PlanCodingWorkspaceDeletionQuery,
+    PlanCodingWorkspaceDeletionResultDto, PlanWorkspaceLifecycleDto,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -338,6 +421,8 @@ pub struct ProductIssueDto {
     pub issue_id: String,
     pub project_id: String,
     pub repo_id: Option<String>,
+    /// issue 基准分支（REQ-PIB-01）：创建时锁定；null=存量记录（默认链解析）。
+    pub base_branch: Option<String>,
     pub workspace_id: Option<String>,
     pub task_id: Option<String>,
     pub session_id: Option<String>,
@@ -376,6 +461,18 @@ pub struct CreateProductIssueRequest {
     pub description: Option<String>,
     pub change_id: Option<String>,
     pub repository_id: Option<String>,
+    /// 基准分支（REQ-PIB-01）：单仓 issue 创建时可选显式指定；缺省按默认链
+    /// main→master 解析，皆无且未指定即 422。逻辑代码库 issue 忽略本字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    /// v1.3：逻辑代码库归属；Some 时创建逻辑 issue（repository_id 须为其 active primary）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_codebase_id: Option<String>,
+    /// REQ-MRE-01：LC 成员勾选集（logical_repository_id 复数）。非空 → selection 以
+    /// Explicit 策略落盘（include=focus=勾选集，授权上界=勾选集原样）；缺省/空 →
+    /// 维持存量 AllMembers（存量兼容）。仅逻辑代码库 issue 消费本字段。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub focus_repository_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -386,8 +483,92 @@ pub struct IssueLifecycleResponse {
     pub design_specs: Vec<DesignSpecDto>,
     pub work_item_plans: Vec<IssueWorkItemPlanDetailDto>,
     pub work_items: Vec<LifecycleWorkItemDto>,
+    /// REQ-TGT-05：WorkItem 按 `target_repository_id` 分组的聚合视图（向后兼容，
+    /// 保留扁平 `work_items` 不变）。
+    pub work_item_repository_groups: Vec<WorkItemRepositoryGroupDto>,
     pub workspace_sessions: Vec<WorkspaceSessionSummaryDto>,
     pub coding_attempts: Vec<CodingAttemptDto>,
+    /// Issue 级交付状态聚合（`all_pushed` | `partial` | `none`）。向后兼容：
+    /// 旧客户端/旧响应不携带该字段时反序列化为空聚合。
+    #[serde(default)]
+    pub delivery_summary: IssueDeliverySummaryDto,
+    /// P1（REQ-WIGA-07）：durable publication/compile + Confirmed 派生的只读
+    /// 确认信息（0 或 1 条）。additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub plan_confirmed_info: Vec<PlanConfirmedInfoDto>,
+    /// P2（REQ-WIGA-07/R5）：enrolled 已认领 group attempt 的 FinalConfirm
+    /// 等待/已确认只读信息。additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub coding_final_confirm_info: Vec<CodingFinalConfirmInfoDto>,
+    /// P3（REQ-WIGA-07）：issue 级有界近期完成目录（默认空；仅在请求携带
+    /// recent_since 时计算）。additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub recent_completion_info: Vec<crate::web::recent_completion_info::RecentCompletionInfoDto>,
+    /// C1（enrollment-recovery-surface Task 9）：durable 恢复等待项投影
+    /// （孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）。
+    /// additive：旧客户端反序列化缺省为空。
+    #[serde(default)]
+    pub c1_waiting_items: Vec<crate::web::plan_confirmed_info::C1WaitingItemDto>,
+    /// P4-c（REQ-CRO-12 / 契约 A1）：durable 事实派生的 coding 待处理事项
+    /// 投影（无 watched/recent 过滤，全局 cockpit 消费）。additive：旧
+    /// 客户端反序列化缺省为空。
+    #[serde(default)]
+    pub coding_attention_items: Vec<crate::web::coding_attention_info::CodingAttentionItemDto>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DeliveryEntryDto {
+    pub repository_name: String,
+    pub work_item_id: String,
+    /// `None` 表示该 Work Item 没有任何 attempt。
+    pub attempt_status: Option<String>,
+    pub branch_name: Option<String>,
+    pub commit_sha: Option<String>,
+    /// `None` 表示无 ReviewRequest。
+    pub push_status: Option<String>,
+    pub push_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IssueDeliverySummaryDto {
+    pub project_id: String,
+    pub issue_id: String,
+    pub entries: Vec<DeliveryEntryDto>,
+    /// "all_pushed" | "partial" | "none"
+    pub overall: String,
+}
+
+/// REQ-MTG-04（WP3）：plan 级 group 聚合只读投影的单 target 条目（serde
+/// snake_case）。`None` 字段表示该 target 无对应事实（无 attempt 字段值/
+/// 无 ReviewRequest）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanTargetEntryDto {
+    pub target_repository_id: String,
+    pub repository_name: String,
+    pub attempt_id: Option<String>,
+    pub attempt_status: Option<String>,
+    pub stage: Option<String>,
+    pub branch_name: Option<String>,
+    pub head_commit: Option<String>,
+    pub push_status: Option<String>,
+    pub review_request_id: Option<String>,
+    /// 失败/阻塞原因（只呈现不判定）：manual_recovery_reason → push_error →
+    /// 失败态 status 文本。
+    pub blocked_reason: Option<String>,
+}
+
+/// REQ-MTG-04（WP3）：plan 级三值聚合终态投影。`overall` 取值
+/// `"all_delivered" | "partial" | "not_started"`——不复用 issue 级 `"none"`
+/// （plan 级未启=无 target-attempt 或全部未达 provider 启动，k3 §2.3 口径差异）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanGroupProjectionDto {
+    pub plan_id: String,
+    pub entries: Vec<PlanTargetEntryDto>,
+    pub overall: String,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -414,6 +595,10 @@ pub struct StorySpecDto {
     pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
     pub artifact_versions: Vec<ArtifactVersionDto>,
+    /// F-26b（additive）：workspace timeline reviewer 节点证据投影
+    /// （"running"/"completed"），零证据缺省 None 兼容旧响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -427,6 +612,10 @@ pub struct DesignSpecDto {
     pub current_markdown_preview: Option<String>,
     pub confirmation_status: String,
     pub artifact_versions: Vec<ArtifactVersionDto>,
+    /// F-26b（additive）：workspace timeline reviewer 节点证据投影
+    /// （"running"/"completed"），零证据缺省 None 兼容旧响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -458,6 +647,18 @@ pub struct LifecycleWorkItemDto {
     pub execution_plan_status: String,
     pub completion_commit: Option<String>,
     pub completion_diff_summary_ref: Option<String>,
+}
+
+/// REQ-TGT-05：单个仓库分组。`target_repository_id == None` 表示遗留/未指定仓库，
+/// `compatibility_projection` 置 true。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemRepositoryGroupDto {
+    pub target_repository_id: Option<LogicalRepositoryId>,
+    pub alias: String,
+    pub status: String,
+    pub compatibility_projection: bool,
+    pub items: Vec<LifecycleWorkItemDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -496,6 +697,7 @@ pub struct CodingAttemptDto {
     pub attempt_no: u32,
     pub status: String,
     pub stage: String,
+    pub manual_recovery_reason: Option<String>,
     pub branch_name: String,
     pub base_branch: String,
     pub worktree_path: Option<String>,
@@ -505,6 +707,9 @@ pub struct CodingAttemptDto {
     pub review_request_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// 终态回填时刻（Completed/Failed/Aborted 转换处落盘）。非终态与
+    /// 缺失该字段的旧记录（历史只读，不回写）投影为 None。
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -519,6 +724,31 @@ pub struct CodingExecutionUnitDto {
     pub summary: Option<String>,
     pub latest_handoff_revision_id: Option<String>,
     pub completion_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkItemCodingProgressDto {
+    pub logical_work_item_id: String,
+    pub unit_id: String,
+    pub status: String,
+    pub stage: Option<String>,
+    pub current_commit: Option<String>,
+    pub final_commit: Option<String>,
+    pub code_review: Option<CodeReviewReport>,
+    pub handoff_revision_id: Option<String>,
+    pub failure_or_blocked_reason: Option<String>,
+    pub plan_revision_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GroupCodingProgressDto {
+    pub total: usize,
+    pub pending: usize,
+    pub active: usize,
+    pub completed: usize,
+    pub failed_or_blocked: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -551,6 +781,10 @@ pub struct CodingAttemptSnapshotResponse {
     pub review_request: Option<ReviewRequest>,
     pub internal_pr_review: Option<InternalPrReview>,
     #[serde(default)]
+    pub group_coding_progress: Option<Vec<WorkItemCodingProgressDto>>,
+    #[serde(default)]
+    pub group_progress: Option<GroupCodingProgressDto>,
+    #[serde(default)]
     pub group_review_artifacts: Option<GroupReviewArtifactProjection>,
     #[serde(default)]
     pub group_final_readiness: Option<GroupFinalReadinessSnapshot>,
@@ -566,6 +800,11 @@ pub struct CodingAttemptSnapshotResponse {
 #[serde(rename_all = "snake_case")]
 pub struct GenerateStorySpecsRequest {
     pub title: String,
+    /// Optional logical-codebase scope emitted by a provider/gateway. Omission
+    /// preserves the existing draft behavior where involved targets are not yet
+    /// determined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub involved_repository_ids: Option<Vec<LogicalRepositoryId>>,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
@@ -585,6 +824,12 @@ pub struct GenerateStorySpecsResponse {
 pub struct GenerateDesignSpecsRequest {
     pub title: String,
     pub story_spec_ids: Vec<String>,
+    /// Optional logical-codebase targets emitted by a provider/gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub involved_repository_ids: Option<Vec<LogicalRepositoryId>>,
+    /// Optional execution order for the supplied logical-codebase targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_order: Option<Vec<LogicalRepositoryId>>,
     pub author_provider: Option<String>,
     pub reviewer_provider: Option<String>,
     pub review_rounds: Option<u32>,
@@ -648,10 +893,90 @@ pub struct PrepareWorkItemPlanRequest {
     pub review_rounds: Option<u32>,
     pub superpowers_enabled: Option<bool>,
     pub openspec_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_policy: Option<RunPolicy>,
     pub include_integration_tests: Option<bool>,
     pub include_e2e_tests: Option<bool>,
     pub force_frontend_backend_split: Option<bool>,
     pub require_execution_plan_confirm: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentPutRequest {
+    pub expected_revision: Option<u64>,
+    pub command: crate::product::models::automation::EnrollmentWriteCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentBindRequest {
+    pub expected_revision: u64,
+    pub plan_id: String,
+    pub session_id: String,
+}
+/// 批 2 T3（REQ-WIGA-09，块 3 §4）：统一「终止自动化」REST 请求体。
+/// `confirmed=true` 表示统一二次确认已接受；未带确认零副作用（返回
+/// `automation_plan_termination_required`＋身份 details）。`expected_binding`
+/// 为提示性绑定互证（与 enrollment 当前代全等，不符 → 409，零副作用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationEnrollmentTerminateRequest {
+    pub command_id: String,
+    pub expected_enrollment_id: String,
+    pub expected_policy_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_binding: Option<crate::product::models::automation::EnrollmentBindingIdentity>,
+    #[serde(default)]
+    pub confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// 批 2 T3：统一终止逐 attempt 收口结果（透传引擎侧专用收口状态）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationEnrollmentTerminateAttemptResult {
+    pub attempt_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// 批 2 T3：统一终止响应。`outcome=terminated|cleanup_required`
+/// （cleanup_required 仍不可继续，重试只重做收口，同 command 重放）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationEnrollmentTerminateResponse {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub enrollment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub terminated_at: String,
+    pub outcome: String,
+    pub results: Vec<AutomationEnrollmentTerminateAttemptResult>,
+}
+
+/// 批 2 T3（块 3 §4）：advance/coding_start 停点的第三种显式继续请求
+/// （不是 plan 对话继续也不是 coder 门，不携带说明文本）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationContinueChainRequest {
+    pub command_id: String,
+    pub expected_binding: crate::product::models::automation::EnrollmentBindingIdentity,
+    pub expected_stop_key: String,
+    #[serde(default)]
+    pub confirm_unknown_side_effect: bool,
+}
+
+/// 批 2 T3：continue-chain 结果。`resolved=true` 表示原停点事实已解除并
+/// 已发 autopilot 唤醒（auto 保留）；NeedsHuman/失败保留原事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationContinueChainResponse {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub stop_key: String,
+    pub stage: String,
+    pub resolved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -673,6 +998,14 @@ pub struct IssueWorkItemPlanDetailDto {
     pub work_item_ids: Vec<String>,
     pub verification_plan_ids: Vec<String>,
     pub dependency_graph: Vec<IssueWorkItemPlanDependencyEdgeDto>,
+    /// REQ-MTG-04（WP3，additive）：plan 级 group 聚合只读投影——旧响应/
+    /// 旧客户端缺省 None 兼容（serde default）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_projection: Option<PlanGroupProjectionDto>,
+    /// F-26b（additive）：plan 会话 workspace timeline reviewer 节点证据投影
+    /// （"running"/"completed"），零证据缺省 None 兼容旧响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_status: Option<String>,
     pub repository_profile_ref: Option<String>,
     pub options: WorkItemSplitOptions,
     pub validator_findings: Vec<WorkItemSplitFinding>,
@@ -704,6 +1037,11 @@ pub struct WorkspaceSessionRunNextRequest {
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSessionConfirmRequest {
     pub confirmed_by: String,
+    /// F-31 纠正轮：用户是否选择「确认并送审」。缺省 false=直接定稿（F-31 v36 前的
+    /// 既有行为）；true=进入 Review（begin_review_after_author_confirm 路径）。review
+    /// 未启用的会话携带 true 时端点如实 4xx，不得静默按定稿。
+    #[serde(default)]
+    pub with_review: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -727,6 +1065,10 @@ pub struct WorkspaceSessionSummaryDto {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    /// P0 1.2（REQ-WIGA-08）：同源 durable automation 归属投影——不复制进
+    /// 持久 JSON，由 HTTP 出口按 enrollment 事实计算注入；读取失败在
+    /// handler 层显式报错，不伪 client。
+    pub automation: crate::product::models::automation::AutomationOwnership,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -742,7 +1084,19 @@ pub struct WorkspaceSessionDto {
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    pub automation: crate::product::models::automation::AutomationOwnership,
     pub messages: Vec<WorkspaceMessageDto>,
+}
+
+/// 显式人工接管结果。`workspace_session` 是新建的交互式子 session；其余字段保留
+/// 与不可变 stopped 父 session 及审计事件的持久关联。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceSessionTakeoverDto {
+    #[serde(flatten)]
+    pub workspace_session: WorkspaceSessionDto,
+    pub parent_session_id: String,
+    pub takeover_event_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

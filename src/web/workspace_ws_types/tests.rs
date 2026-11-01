@@ -1,18 +1,20 @@
 use crate::product::models::{ProviderName, WorkspaceType};
+use crate::web::workspace_session::ConnectionRole;
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, AuthorDecision, ChoiceAnswer, ChoiceOption, ChoiceQuestion,
-    ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate, ReviewVerdict, ReviewVerdictType,
-    TimelineNode, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
-    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
-    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemGenerationModeDto,
-    WorkItemPlanCandidateDto, WorkItemPlanDto, WorkItemPlanReviewAction,
-    WorkItemPlanReviewComplete, WorkItemPlanReviewGate, WorkItemPlanReviewScope,
-    WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage, WsExecutionEvent,
-    WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage, WsPermissionRiskLevel,
-    WsProviderStatus,
+    ArtifactPayload, ArtifactVersion, ChoiceAnswer, ChoiceOption, ChoiceQuestion, HelloRole,
+    ProviderConfigSnapshot, RepositoryProfileDto, ReviewGate, ReviewVerdictType, TimelineNode,
+    TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto, VerificationCommandDto,
+    VerificationManualCheckDto, VerificationPlanDto, WorkItemCandidateDto,
+    WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemPlanCandidateDto, WorkItemPlanDto,
+    WorkItemPlanReviewAction, WorkItemPlanReviewComplete, WorkItemPlanReviewGate,
+    WorkItemPlanReviewScope, WorkItemPlanReviewVerdict, WorkItemSplitOptionsDto, WorkspaceStage,
+    WsExecutionEvent, WsExecutionEventKind, WsExecutionEventStatus, WsInMessage, WsOutMessage,
+    WsPermissionRiskLevel, WsProviderStatus,
 };
 
 mod artifact_version_roundtrip;
+#[path = "tests/conversational_gate_events.rs"]
+mod conversational_gate_events;
 mod interrupted_run_recovery;
 mod review_structured_output;
 
@@ -47,6 +49,15 @@ fn permission_messages_use_snake_case_type_tags() {
         input,
         WsInMessage::PermissionResponse { approved: true, .. }
     ));
+}
+
+#[test]
+fn resync_required_message_serializes_current_event_sequence() {
+    let value = serde_json::to_value(WsOutMessage::ResyncRequired { event_seq: 42 })
+        .expect("resync required serializes");
+
+    assert_eq!(value["type"], "resync_required");
+    assert_eq!(value["event_seq"], 42);
 }
 
 #[test]
@@ -154,92 +165,9 @@ fn timeline_messages_include_node_identity() {
     assert_eq!(complete["node_id"], "node_review_001");
 }
 
-#[test]
-fn review_messages_and_session_state_serialize_as_contract() {
-    let verdict = ReviewVerdict {
-        verdict: ReviewVerdictType::Revise,
-        comments: "需要补充验收标准".to_string(),
-        summary: "补充验收标准后返修".to_string(),
-        findings: vec![crate::web::workspace_ws_types::ReviewFinding {
-            severity: crate::web::workspace_ws_types::ReviewFindingSeverity::MustFix,
-            message: "缺少验收标准".to_string(),
-            evidence: "Artifact 未列出验收标准".to_string(),
-            impact: "无法进入下一阶段".to_string(),
-            required_action: "补充验收标准".to_string(),
-        }],
-        review_gate: ReviewGate::UserTriageRequired,
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    };
-
-    let review_complete = serde_json::to_value(WsOutMessage::ReviewComplete {
-        node_id: "node_review_001".to_string(),
-        round: 1,
-        verdict: verdict.verdict.clone(),
-        comments: verdict.comments.clone(),
-        summary: verdict.summary.clone(),
-        findings: verdict.findings.clone(),
-        review_gate: verdict.review_gate.clone(),
-        work_item_plan_review: None,
-        structured_output_diagnostic: None,
-    })
-    .unwrap();
-    assert_eq!(review_complete["type"], "review_complete");
-    assert_eq!(review_complete["verdict"], "revise");
-    assert_eq!(review_complete["review_gate"], "user_triage_required");
-    assert_eq!(review_complete["findings"][0]["severity"], "must_fix");
-    assert!(review_complete.get("work_item_plan_review").is_none());
-
-    let input: WsInMessage = serde_json::from_value(serde_json::json!({
-        "type": "review_decision_response",
-        "decision": "continue_with_context",
-        "extra_context": "请补充边界条件"
-    }))
-    .unwrap();
-    assert!(matches!(
-        input,
-        WsInMessage::ReviewDecisionResponse {
-            decision,
-            extra_context: Some(_),
-        } if decision == "continue_with_context"
-    ));
-
-    let state = serde_json::to_value(WsOutMessage::SessionState {
-        session_id: "workspace_session_0001".to_string(),
-        workspace_type: WorkspaceType::Story,
-        stage: "review_decision".to_string(),
-        superpowers_enabled: true,
-        openspec_enabled: true,
-        messages: Vec::new(),
-        checkpoints: Vec::new(),
-        artifact: Some(ArtifactPayload::Markdown {
-            markdown: "# Story".to_string(),
-            diff: None,
-        }),
-        providers: crate::web::workspace_ws_types::WsProviderConfig {
-            author: ProviderName::ClaudeCode,
-            reviewer: Some(ProviderName::Codex),
-        },
-        timeline_nodes: Vec::new(),
-        active_node_id: Some("node_review_decision_001".to_string()),
-        artifact_versions: Vec::new(),
-        artifact_version_summaries: Vec::new(),
-        timeline_node_details: std::collections::HashMap::new(),
-        timeline_node_summaries: std::collections::HashMap::new(),
-        active_run_id: None,
-        human_presentation_revisions: Vec::new(),
-        reviewer_enabled_at_start: None,
-        recoverable_interrupted_run: None,
-        plan_repair: None,
-    })
-    .unwrap();
-    assert_eq!(state["type"], "session_state");
-    assert_eq!(state["active_node_id"], "node_review_decision_001");
-    assert_eq!(state["superpowers_enabled"], true);
-    assert_eq!(state["openspec_enabled"], true);
-    assert_eq!(state["timeline_nodes"].as_array().unwrap().len(), 0);
-    assert_eq!(state["artifact_versions"].as_array().unwrap().len(), 0);
-}
+// 退役留档（T5/REQ-RET-02）：`review_messages_and_session_state_serialize_as_contract` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn work_item_plan_review_complete_roundtrips() {
@@ -326,6 +254,34 @@ fn work_item_plan_review_complete_roundtrips() {
 }
 
 #[test]
+fn conversational_gate_inbound_wire_contract_roundtrips() {
+    let feedback = WsInMessage::HumanGateFeedback {
+        command_id: "cmd-001".to_string(),
+        feedback: "原文保留，不在协议层剪裁".to_string(),
+        excluded_finding_ids: vec![],
+    };
+    let feedback_json = serde_json::to_string(&feedback).unwrap();
+    assert_eq!(
+        feedback_json,
+        r#"{"type":"human_gate_feedback","command_id":"cmd-001","feedback":"原文保留，不在协议层剪裁"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<WsInMessage>(&feedback_json).unwrap(),
+        feedback
+    );
+
+    let advance = WsInMessage::Advance {
+        command_id: "cmd-002".to_string(),
+    };
+    let advance_json = serde_json::to_string(&advance).unwrap();
+    assert_eq!(advance_json, r#"{"type":"advance","command_id":"cmd-002"}"#);
+    assert_eq!(
+        serde_json::from_str::<WsInMessage>(&advance_json).unwrap(),
+        advance
+    );
+}
+
+#[test]
 fn context_note_roundtrip() {
     let msg = WsInMessage::ContextNote {
         content: "需要支持空查询参数兜底".to_string(),
@@ -350,6 +306,7 @@ fn start_generation_roundtrip() {
     let msg = WsInMessage::StartGeneration {
         provider_config: snapshot,
         reviewer_enabled: true,
+        resume_recovery: None,
     };
 
     let json = serde_json::to_value(&msg).unwrap();
@@ -360,48 +317,102 @@ fn start_generation_roundtrip() {
     assert_eq!(back, msg);
 }
 
+/// B1b（Task 4.2，接口字典）：`StartGeneration.resume_recovery` wire 合同
+/// ——旧载荷缺省读 None（既有客户端兼容）；显式 fresh 意图 snake_case 往返；
+/// 未知 intent 种类 serde 拒收（不猜测回落）。
 #[test]
-fn work_item_plan_mode_messages_roundtrip() {
-    assert_eq!(
-        serde_json::to_value(TimelineNodeType::WorkItemPlanOutlineReview).unwrap(),
-        "work_item_plan_outline_review"
-    );
-    assert_eq!(
-        serde_json::to_value(TimelineNodeType::WorkItemGenerationMode).unwrap(),
-        "work_item_generation_mode"
-    );
+fn anchor_t12_wire_resume_recovery_intent_serde() {
+    use super::{LcResumeRecoveryIntent, LcResumeRecoveryIntentKind};
 
-    let select = WsInMessage::SelectWorkItemGenerationMode {
-        mode: WorkItemGenerationModeDto::Serial,
+    let base_json = serde_json::json!({
+        "type": "start_generation",
+        "provider_config": {
+            "author": "claude_code",
+            "reviewer": "codex",
+            "review_rounds": 1,
+        },
+        "reviewer_enabled": true,
+    });
+    let legacy: WsInMessage = serde_json::from_value(base_json.clone()).unwrap();
+    let WsInMessage::StartGeneration {
+        resume_recovery, ..
+    } = legacy
+    else {
+        panic!("expected start_generation");
     };
-    let json = serde_json::to_value(&select).unwrap();
-    assert_eq!(json["type"], "select_work_item_generation_mode");
-    assert_eq!(json["mode"], "serial");
-    let back: WsInMessage = serde_json::from_value(json).unwrap();
-    assert_eq!(back, select);
+    assert_eq!(
+        resume_recovery, None,
+        "旧载荷缺省 resume_recovery 必须读 None"
+    );
 
-    let batch: WsInMessage = serde_json::from_value(serde_json::json!({
-        "type": "select_work_item_generation_mode",
-        "mode": "batch"
-    }))
+    let mut fresh_json = base_json.clone();
+    fresh_json["resume_recovery"] = serde_json::json!({
+        "recovery_id": "recovery_anchor_t12",
+        "intent": "fresh",
+        "operation_id": "op-1",
+    });
+    let fresh: WsInMessage = serde_json::from_value(fresh_json).unwrap();
+    let WsInMessage::StartGeneration {
+        resume_recovery, ..
+    } = fresh
+    else {
+        panic!("expected start_generation");
+    };
+    assert_eq!(
+        resume_recovery,
+        Some(LcResumeRecoveryIntent {
+            recovery_id: "recovery_anchor_t12".to_string(),
+            intent: LcResumeRecoveryIntentKind::Fresh,
+            operation_id: "op-1".to_string(),
+        })
+    );
+
+    // 序列化面：显式意图回写为 snake_case wire；缺省 None 省略字段。
+    let wire = serde_json::to_value(&WsInMessage::StartGeneration {
+        provider_config: ProviderConfigSnapshot {
+            author: ProviderName::ClaudeCode,
+            reviewer: None,
+            review_rounds: 0,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        },
+        reviewer_enabled: false,
+        resume_recovery: Some(LcResumeRecoveryIntent {
+            recovery_id: "recovery_anchor_t12".to_string(),
+            intent: LcResumeRecoveryIntentKind::Fresh,
+            operation_id: "op-1".to_string(),
+        }),
+    })
     .unwrap();
-    assert_eq!(
-        batch,
-        WsInMessage::SelectWorkItemGenerationMode {
-            mode: WorkItemGenerationModeDto::Batch
-        }
-    );
+    assert_eq!(wire["resume_recovery"]["intent"], "fresh");
+    assert_eq!(wire["resume_recovery"]["operation_id"], "op-1");
 
-    let revise = WsInMessage::RequestOutlineRevision {
-        feedback: Some("拆分粒度再细一点".to_string()),
-    };
-    let json = serde_json::to_value(&revise).unwrap();
-    assert_eq!(json["type"], "request_outline_revision");
-    assert_eq!(json["feedback"], "拆分粒度再细一点");
-    let back: WsInMessage = serde_json::from_value(json).unwrap();
-    assert_eq!(back, revise);
+    let mut unknown_json = base_json;
+    unknown_json["resume_recovery"] = serde_json::json!({
+        "recovery_id": "recovery_anchor_t12",
+        "intent": "resume",
+        "operation_id": "op-1",
+    });
+    assert!(
+        serde_json::from_value::<WsInMessage>(unknown_json).is_err(),
+        "未知 intent 种类必须被拒收"
+    );
 }
 
+// 退役留档（T5/REQ-RET-02）：`work_item_plan_mode_messages_roundtrip` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
+
+#[test]
+fn outbound_conversational_gate_event_type_is_stable() {
+    let message = WsOutMessage::HumanGateClosed {
+        decision: "confirm".to_string(),
+        stage: "completed".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(message).unwrap()["type"],
+        "human_gate_closed"
+    );
+}
 #[test]
 fn protocol_error_outbound_roundtrip() {
     let msg = WsOutMessage::ProtocolError {
@@ -487,6 +498,8 @@ fn choice_request_and_response_roundtrip() {
             selected_option_ids: vec!["continue".to_string()],
             free_text: Some("补充说明".to_string()),
         }],
+        command_id: None,
+        expected_run_id: None,
     };
     let json = serde_json::to_value(&input).unwrap();
     assert_eq!(json["type"], "choice_response");
@@ -501,6 +514,8 @@ fn hello_ping_roundtrip() {
     let hello = WsInMessage::Hello {
         session_id: "sess-1".to_string(),
         last_seen_node_id: Some("node-1".to_string()),
+        role: None,
+        after_event_seq: None,
     };
 
     let json = serde_json::to_value(&hello).unwrap();
@@ -512,6 +527,69 @@ fn hello_ping_roundtrip() {
     let ping = WsInMessage::Ping;
     let json = serde_json::to_value(&ping).unwrap();
     assert_eq!(json["type"], "ping");
+}
+
+#[test]
+fn hello_without_optional_fields_parses_with_defaults() {
+    let json = r#"{"type":"hello","session_id":"s1","last_seen_node_id":null}"#;
+    let msg: WsInMessage = serde_json::from_str(json).expect("legacy hello parses");
+
+    match msg {
+        WsInMessage::Hello {
+            role,
+            after_event_seq,
+            ..
+        } => {
+            assert_eq!(role, None);
+            assert_eq!(after_event_seq, None);
+        }
+        other => panic!("expected hello, got {other:?}"),
+    }
+}
+
+#[test]
+fn hello_with_role_and_cursor_round_trips() {
+    let msg = WsInMessage::Hello {
+        session_id: "s1".into(),
+        last_seen_node_id: None,
+        role: Some(HelloRole::Observer),
+        after_event_seq: Some(42),
+    };
+    let json = serde_json::to_string(&msg).expect("serialize");
+
+    assert!(json.contains(r#""role":"observer""#));
+    assert!(json.contains(r#""after_event_seq":42"#));
+    match serde_json::from_str::<WsInMessage>(&json).expect("parse") {
+        WsInMessage::Hello {
+            role,
+            after_event_seq,
+            ..
+        } => {
+            assert_eq!(role, Some(HelloRole::Observer));
+            assert_eq!(after_event_seq, Some(42));
+        }
+        other => panic!("expected hello, got {other:?}"),
+    }
+}
+
+#[test]
+fn hello_tolerates_unknown_extra_fields() {
+    let json = r#"{"type":"hello","session_id":"s1","last_seen_node_id":null,"future_field":"x"}"#;
+
+    assert!(serde_json::from_str::<WsInMessage>(json).is_ok());
+}
+
+#[test]
+fn connection_role_normalize_maps_absent_to_driver() {
+    assert_eq!(ConnectionRole::normalize(None), ConnectionRole::Driver);
+    assert_eq!(
+        ConnectionRole::normalize(Some(HelloRole::Driver)),
+        ConnectionRole::Driver
+    );
+    assert_eq!(
+        ConnectionRole::normalize(Some(HelloRole::Observer)),
+        ConnectionRole::Observer
+    );
 }
 
 #[test]
@@ -620,25 +698,9 @@ fn work_item_plan_candidate_dto_roundtrips_through_serde() {
     assert!(json["validator_findings"][0]["code"] == "W001");
 }
 
-#[test]
-fn revert_work_item_message_deserializes() {
-    let input: WsInMessage = serde_json::from_value(serde_json::json!({
-        "type": "revert_work_item",
-        "work_item_id": "wi_001",
-        "feedback": "需要回退",
-        "clear": false
-    }))
-    .unwrap();
-
-    assert!(matches!(
-        input,
-        WsInMessage::RevertWorkItem {
-            work_item_id,
-            feedback,
-            clear,
-        } if work_item_id == "wi_001" && feedback.as_deref() == Some("需要回退") && !clear
-    ));
-}
+// 退役留档（T5/REQ-RET-02）：`revert_work_item_message_deserializes` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[test]
 fn artifact_payload_markdown_variant_serializes_to_flat_json() {
@@ -772,6 +834,7 @@ fn artifact_update_with_markdown_payload_serializes_flat() {
 #[test]
 fn session_state_artifact_accepts_markdown_payload() {
     let state = WsOutMessage::SessionState {
+        connection_id: None,
         session_id: "workspace_session_0001".to_string(),
         workspace_type: WorkspaceType::Story,
         stage: "author_confirm".to_string(),
@@ -798,38 +861,292 @@ fn session_state_artifact_accepts_markdown_payload() {
         reviewer_enabled_at_start: None,
         recoverable_interrupted_run: None,
         plan_repair: None,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        human_gate_turn_rejection: None,
+        candidate_compile_failure: None,
+        repair_reservation: None,
+        policy_diagnostics: Vec::new(),
+        provider_start_ledger: Vec::new(),
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        pending_choice_requests: Vec::new(),
+        automation: None,
+        // A1c（Task 2.2）：无恢复时 wire 省略该字段（旧客户端零变化）。
+        lc_resume_recovery: None,
+        structural_governance: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");
     assert!(json["artifact"]["diff"].is_null());
 }
 
-#[test]
-fn author_decision_new_variants_roundtrip() {
-    let revise = serde_json::json!({"revise": {"feedback": "补充异常场景"}});
-    let parsed: AuthorDecision = serde_json::from_value(revise.clone()).unwrap();
-    assert_eq!(
-        parsed,
-        AuthorDecision::Revise {
-            feedback: "补充异常场景".to_string()
-        }
-    );
-    assert_eq!(serde_json::to_value(&parsed).unwrap(), revise);
+// === A1c（Task 2.2）：typed 恢复 snapshot 与 operation 结果 wire ===
 
-    for (raw, expected) in [
-        (
-            serde_json::json!("accept_with_review"),
-            AuthorDecision::AcceptWithReview,
-        ),
-        (
-            serde_json::json!("accept_finalize"),
-            AuthorDecision::AcceptFinalize,
-        ),
-        (serde_json::json!("accept"), AuthorDecision::Accept),
-        (serde_json::json!("reject"), AuthorDecision::Reject),
-    ] {
-        let parsed: AuthorDecision = serde_json::from_value(raw.clone()).unwrap();
-        assert_eq!(parsed, expected);
-        assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+#[test]
+fn anchor_t03_recovery_snapshot_and_operation_result_wire() {
+    use crate::product::models::{
+        LcFreshOperationResult, LcFreshOperationState, LcRecoveryBusinessContext,
+        LcRecoveryDraftRef, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
+        ProviderConversationRole, WorkItemDraftStatus, WorkspaceSessionStatus,
+    };
+    use crate::web::workspace_ws_types::{
+        LcFreshOperationDto, LcResumeRecoveryDelivery, LcResumeRecoveryDto,
+    };
+
+    fn anchor_t03_business() -> LcRecoveryBusinessContext {
+        LcRecoveryBusinessContext {
+            entity_id: "wi_core".to_string(),
+            plan_id: Some("work_item_plan_0001".to_string()),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            business_repository_physical_id: Some("repo_phys_0001".to_string()),
+            business_repository_logical_id: Some("repo_logical_0001".to_string()),
+            business_checkout_id: Some("checkout_0001".to_string()),
+            business_repository_path: Some("/repos/business".to_string()),
+            source_story_ids: vec!["story_0001".to_string()],
+            source_design_ids: vec!["design_0001".to_string()],
+            plan_options_ref: Some("plan_options_0001".to_string()),
+            artifact_refs: Vec::new(),
+            review_refs: Vec::new(),
+            author_provider: ProviderName::Codex,
+            effective_reviewer_provider: Some(ProviderName::ClaudeCode),
+            original_node_id: Some("node-1".to_string()),
+            original_role_run_seq: Some(7),
+        }
     }
+
+    fn anchor_t03_recovery_record(
+        state: LcResumeRecoveryState,
+        operation_state: LcFreshOperationState,
+    ) -> LcResumeRecoveryRecord {
+        LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: "rec-1".to_string(),
+            failed_provider_node_id: "node-1".to_string(),
+            reason_code: "resume_fingerprint_mismatch".to_string(),
+            role: ProviderConversationRole::Author,
+            provider: ProviderName::Codex,
+            superseded_native_session_id: Some("native-secret-session".to_string()),
+            previous_fingerprint_digest: Some("sha256:secret-full".to_string()),
+            previous_session_status: WorkspaceSessionStatus::Running,
+            previous_stage: "running".to_string(),
+            run_context: LcRecoveryRunContext::LegacyDraft {
+                business: anchor_t03_business(),
+                generation_round_id: "round-1".to_string(),
+                active_outline_id: "outline-1".to_string(),
+                draft_refs: vec![LcRecoveryDraftRef {
+                    draft_id: "draft-1".to_string(),
+                    status: WorkItemDraftStatus::Draft,
+                    version: Some(1),
+                    hash: Some("sha256:draft".to_string()),
+                }],
+                pending_feedback: Some("take 前固化的反馈".to_string()),
+                outline_ref: None,
+                candidate_ref: None,
+            },
+            state,
+            operation_id: Some("op-1".to_string()),
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: vec![LcFreshOperationResult {
+                operation_id: "op-1".to_string(),
+                state: operation_state,
+                fresh_node_id: None,
+                reason_code: None,
+                role_run_seq: None,
+                accepted_at: "2026-10-11T00:03:00Z".to_string(),
+                updated_at: "2026-10-11T00:04:00Z".to_string(),
+            }],
+            detected_at: "2026-10-11T00:02:00Z".to_string(),
+            updated_at: "2026-10-11T00:04:00Z".to_string(),
+        }
+    }
+
+    fn anchor_t03_session_state_frame(dto: LcResumeRecoveryDto) -> WsOutMessage {
+        WsOutMessage::SessionState {
+            connection_id: None,
+            session_id: "workspace_session_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            stage: "author_confirm".to_string(),
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            messages: Vec::new(),
+            checkpoints: Vec::new(),
+            artifact: None,
+            providers: crate::web::workspace_ws_types::WsProviderConfig {
+                author: ProviderName::ClaudeCode,
+                reviewer: None,
+            },
+            timeline_nodes: Vec::new(),
+            active_node_id: None,
+            artifact_versions: Vec::new(),
+            artifact_version_summaries: Vec::new(),
+            timeline_node_details: std::collections::HashMap::new(),
+            timeline_node_summaries: std::collections::HashMap::new(),
+            active_run_id: None,
+            human_presentation_revisions: Vec::new(),
+            reviewer_enabled_at_start: None,
+            recoverable_interrupted_run: None,
+            plan_repair: None,
+            session_status: crate::product::models::WorkspaceSessionStatus::Running,
+            flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+            run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+            run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            human_gate_turn_rejection: None,
+            candidate_compile_failure: None,
+            repair_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
+            single_candidate_phase: None,
+            work_item_plan_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            pending_choice_requests: Vec::new(),
+            automation: None,
+            lc_resume_recovery: Some(dto),
+            structural_governance: None,
+        }
+    }
+
+    // waiting/reserved/running/resolved 四态 snapshot：必要字段序列化、
+    // last_operation 随行、native/digest 秘密不下发。
+    let cases = [
+        (
+            LcResumeRecoveryState::Waiting,
+            LcFreshOperationState::Failed,
+            "waiting",
+            "failed",
+        ),
+        (
+            LcResumeRecoveryState::FreshReserved,
+            LcFreshOperationState::Reserved,
+            "fresh_reserved",
+            "reserved",
+        ),
+        (
+            LcResumeRecoveryState::FreshRunning,
+            LcFreshOperationState::Running,
+            "fresh_running",
+            "running",
+        ),
+        (
+            LcResumeRecoveryState::Resolved,
+            LcFreshOperationState::Completed,
+            "resolved",
+            "completed",
+        ),
+    ];
+    for (recovery_state, operation_state, recovery_wire, operation_wire) in cases {
+        let record = anchor_t03_recovery_record(recovery_state, operation_state);
+        let frame = anchor_t03_session_state_frame(LcResumeRecoveryDto::from_record(&record));
+        let wire = serde_json::to_value(&frame).unwrap();
+        let serialized = serde_json::to_string(&frame).unwrap();
+
+        assert_eq!(wire["lc_resume_recovery"]["recovery_id"], "rec-1");
+        assert_eq!(wire["lc_resume_recovery"]["state"], recovery_wire);
+        assert_eq!(
+            wire["lc_resume_recovery"]["reason_code"],
+            "resume_fingerprint_mismatch"
+        );
+        assert_eq!(wire["lc_resume_recovery"]["provider"], "codex");
+        assert_eq!(wire["lc_resume_recovery"]["failed_node_id"], "node-1");
+        assert_eq!(wire["lc_resume_recovery"]["run_kind"], "legacy_draft");
+        assert_eq!(
+            wire["lc_resume_recovery"]["detected_at"],
+            "2026-10-11T00:02:00Z"
+        );
+        assert_eq!(
+            wire["lc_resume_recovery"]["updated_at"],
+            "2026-10-11T00:04:00Z"
+        );
+        assert_eq!(
+            wire["lc_resume_recovery"]["last_operation"]["operation_id"],
+            "op-1"
+        );
+        assert_eq!(
+            wire["lc_resume_recovery"]["last_operation"]["state"],
+            operation_wire
+        );
+        // A/B 发布纪律：B 波接齐前不投可启动动作（resolved 证据保留但空集）。
+        assert_eq!(
+            wire["lc_resume_recovery"]["allowed_actions"],
+            serde_json::json!([])
+        );
+
+        // snapshot 必要字段不含 native/digest 秘密。
+        assert!(wire.get("native_session_id").is_none());
+        assert!(!serialized.contains("native-secret-session"));
+        assert!(!serialized.contains("sha256:secret-full"));
+
+        // resolved：证据（时间/last_operation）保留但 allowed 为空。
+        if recovery_state == LcResumeRecoveryState::Resolved {
+            assert!(!wire["lc_resume_recovery"]["detected_at"].is_null());
+            assert!(!wire["lc_resume_recovery"]["last_operation"].is_null());
+            assert_eq!(
+                wire["lc_resume_recovery"]["allowed_actions"],
+                serde_json::json!([])
+            );
+        }
+    }
+
+    // 内部 RecoveryChanged 不是 wire delta（BP1：mapping 最小 None 忽略臂）。
+    use crate::product::workspace_engine::EngineEvent;
+    use crate::web::workspace_ws_handler::map_engine_event;
+    assert!(map_engine_event(EngineEvent::LcResumeRecoveryChanged).is_none());
+
+    // typed operation 结果帧：受理/回放同形态、state 取 durable、无 native 字段。
+    let replayed = WsOutMessage::LcResumeRecoveryOperationResult {
+        recovery_id: "rec-1".to_string(),
+        operation_id: "op-1".to_string(),
+        delivery: LcResumeRecoveryDelivery::Replayed,
+        operation_state: LcFreshOperationState::Running,
+        fresh_node_id: None,
+        reason_code: None,
+    };
+    let value = serde_json::to_value(&replayed).unwrap();
+    assert_eq!(value["type"], "lc_resume_recovery_operation_result");
+    assert_eq!(value["recovery_id"], "rec-1");
+    assert_eq!(value["operation_id"], "op-1");
+    assert_eq!(value["delivery"], "replayed");
+    assert_eq!(value["operation_state"], "running");
+    let parsed: WsOutMessage = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        parsed,
+        WsOutMessage::LcResumeRecoveryOperationResult {
+            delivery: LcResumeRecoveryDelivery::Replayed,
+            ..
+        }
+    ));
+    assert_eq!(
+        serde_json::to_value(LcResumeRecoveryDelivery::Accepted).unwrap(),
+        "accepted"
+    );
+
+    // last_operation DTO：reason?/fresh_node? 缺省省略。
+    let dto = LcFreshOperationDto {
+        operation_id: "op-2".to_string(),
+        state: LcFreshOperationState::NotStarted,
+        reason: None,
+        fresh_node: None,
+    };
+    let dto_value = serde_json::to_value(&dto).unwrap();
+    assert_eq!(dto_value["operation_id"], "op-2");
+    assert_eq!(dto_value["state"], "not_started");
+    assert!(dto_value.get("reason").is_none());
+    assert!(dto_value.get("fresh_node").is_none());
 }
+
+// 退役留档（T5/REQ-RET-02）：`author_decision_new_variants_roundtrip` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。

@@ -2,6 +2,15 @@ use super::ClaudeCodeProvider;
 use super::*;
 use crate::cross_cutting::structured_output::StructuredOutputContract;
 
+/// 策略会话有界握手超时（等待首个 `system/init` 事件）。测试环境缩短以便
+/// fixture 能以挂起脚本验证超时 fail-closed。
+#[cfg(not(test))]
+pub(crate) const CLAUDE_POLICY_HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+#[cfg(test)]
+pub(crate) const CLAUDE_POLICY_HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
 pub(crate) async fn terminate_aborted_child(child: &mut ManagedProcessChild) {
     child.terminate().await;
 }
@@ -23,14 +32,18 @@ pub(crate) async fn emit_ask_user_question_protocol_error(
         .await;
 }
 
-pub(crate) async fn read_claude_stream(
-    stdout: tokio::process::ChildStdout,
+pub(crate) async fn read_claude_stream<R>(
+    stdout: R,
     stdin: Arc<Mutex<ChildStdin>>,
     bridge: ApprovalBridge,
     event_tx: mpsc::Sender<ProviderEvent>,
     cancel: CancellationToken,
     structured_output_contract: Option<StructuredOutputContract>,
-) -> Result<ClaudeStreamOutcome, ProviderAdapterError> {
+    usage_role: &'static str,
+) -> Result<ClaudeStreamOutcome, ProviderAdapterError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut lines = BufReader::new(stdout).lines();
     let mut pending_tool_uses: HashMap<String, ToolUseBlock> = HashMap::new();
     let mut resolved_ask_user_questions: HashMap<String, ResolvedAskUserQuestion> = HashMap::new();
@@ -49,6 +62,24 @@ pub(crate) async fn read_claude_stream(
             })?,
         };
         let Some(line) = line else {
+            if let Some((tool_use_id, _)) = pending_tool_uses
+                .iter()
+                .find(|(_, tool_use)| tool_use.name == "AskUserQuestion")
+            {
+                emit_ask_user_question_protocol_error(
+                    &event_tx,
+                    "tool_use",
+                    json!({ "tool_use_id": tool_use_id }),
+                    "stream ended without a control_request",
+                )
+                .await;
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    "AskUserQuestion stream ended without a control_request",
+                    0,
+                ));
+            }
             return Ok(ClaudeStreamOutcome::EofWithoutResult);
         };
         if line.trim().is_empty() {
@@ -79,21 +110,11 @@ pub(crate) async fn read_claude_stream(
 
         if let Some(request) = ClaudeCodeProvider::parse_control_request(&value) {
             if request.tool_name == "AskUserQuestion" {
-                eprintln!(
-                    "[aria-choice-diag] claude received control_request AskUserQuestion request_id={} tool_use_id={}",
-                    request.request_id,
-                    request.tool_use_id.as_deref().unwrap_or("<none>")
-                );
                 if let Some(resolved) = request
                     .tool_use_id
                     .as_deref()
                     .and_then(|tool_use_id| resolved_ask_user_questions.get(tool_use_id))
                 {
-                    eprintln!(
-                        "[aria-choice-diag] claude reusing AskUserQuestion decision for control_request request_id={} tool_use_id={}",
-                        request.request_id,
-                        request.tool_use_id.as_deref().unwrap_or("<none>")
-                    );
                     ClaudeCodeProvider::write_choice_control_response(
                         &stdin,
                         &request.request_id,
@@ -124,15 +145,6 @@ pub(crate) async fn read_claude_stream(
                             return Err(error);
                         }
                     };
-                eprintln!(
-                    "[aria-choice-diag] claude got choice decision for control_request request_id={} selected={:?} free_text_present={}",
-                    request.request_id,
-                    choice_decision.selected_option_ids,
-                    choice_decision
-                        .free_text
-                        .as_ref()
-                        .is_some_and(|text| !text.trim().is_empty())
-                );
                 let answers = ask_user_question::ask_user_question_answers_from_decision(
                     &request.input,
                     &choice_decision,
@@ -145,13 +157,8 @@ pub(crate) async fn read_claude_stream(
                 )
                 .await?;
                 if let Some(tool_use_id) = request.tool_use_id {
-                    resolved_ask_user_questions.insert(
-                        tool_use_id,
-                        ResolvedAskUserQuestion {
-                            input: request.input,
-                            answers,
-                        },
-                    );
+                    resolved_ask_user_questions
+                        .insert(tool_use_id, ResolvedAskUserQuestion { answers });
                 }
             } else {
                 let decision = bridge
@@ -176,59 +183,7 @@ pub(crate) async fn read_claude_stream(
         if let Some(tool_uses) = ClaudeCodeProvider::parse_tool_use_from_assistant(&value) {
             for tool_use in tool_uses {
                 if tool_use.name == "AskUserQuestion" {
-                    eprintln!(
-                        "[aria-choice-diag] claude received assistant tool_use AskUserQuestion tool_use_id={}",
-                        tool_use.id
-                    );
-                    let resolved = match resolved_ask_user_questions.remove(&tool_use.id) {
-                        Some(resolved) => resolved,
-                        None => {
-                            let choice_request =
-                                ask_user_question::parse_ask_user_question_from_input(
-                                    &tool_use.input,
-                                    &tool_use.id,
-                                );
-                            let choice_decision =
-                                match bridge.request_choice(choice_request, cancel.clone()).await {
-                                    Ok(decision) => decision,
-                                    Err(error) => {
-                                        emit_ask_user_question_protocol_error(
-                                            &event_tx,
-                                            "tool_use",
-                                            json!({ "tool_use_id": tool_use.id }),
-                                            &error.details,
-                                        )
-                                        .await;
-                                        return Err(error);
-                                    }
-                                };
-                            eprintln!(
-                                "[aria-choice-diag] claude got choice decision for assistant tool_use tool_use_id={} selected={:?} free_text_present={}",
-                                tool_use.id,
-                                choice_decision.selected_option_ids,
-                                choice_decision
-                                    .free_text
-                                    .as_ref()
-                                    .is_some_and(|text| !text.trim().is_empty())
-                            );
-                            ResolvedAskUserQuestion {
-                                input: tool_use.input.clone(),
-                                answers: ask_user_question::ask_user_question_answers_from_decision(
-                                    &tool_use.input,
-                                    &choice_decision,
-                                ),
-                            }
-                        }
-                    };
-                    resolved_ask_user_questions.insert(tool_use.id.clone(), resolved.clone());
-                    ClaudeCodeProvider::write_tool_result(
-                        &stdin,
-                        &tool_use.id,
-                        &resolved.input,
-                        &resolved.answers,
-                    )
-                    .await?;
-                    continue;
+                    pending_tool_uses.insert(tool_use.id.clone(), tool_use);
                 } else {
                     let description = tool::tool_use_description(&tool_use);
                     send_provider_event(
@@ -255,8 +210,12 @@ pub(crate) async fn read_claude_stream(
 
         if let Some(results) = ClaudeCodeProvider::parse_tool_result(&value) {
             for result in results {
-                if result.is_error && resolved_ask_user_questions.contains_key(&result.tool_use_id)
-                {
+                let is_ask_user_question = pending_tool_uses
+                    .get(&result.tool_use_id)
+                    .is_some_and(|tool_use| tool_use.name == "AskUserQuestion");
+                let has_resolved_ask_user_question =
+                    resolved_ask_user_questions.contains_key(&result.tool_use_id);
+                if has_resolved_ask_user_question && result.is_error {
                     emit_ask_user_question_protocol_error(
                         &event_tx,
                         "tool_result",
@@ -271,6 +230,23 @@ pub(crate) async fn read_claude_stream(
                         None,
                         result.output,
                         "AskUserQuestion tool_result reported error",
+                        0,
+                    ));
+                }
+                if has_resolved_ask_user_question {
+                    resolved_ask_user_questions.remove(&result.tool_use_id);
+                } else if is_ask_user_question {
+                    emit_ask_user_question_protocol_error(
+                        &event_tx,
+                        "tool_use",
+                        json!({ "tool_use_id": result.tool_use_id }),
+                        "native tool_result arrived without a control_request",
+                    )
+                    .await;
+                    return Err(ProviderAdapterError::execution_failed(
+                        None,
+                        String::new(),
+                        "AskUserQuestion tool_result arrived without a control_request",
                         0,
                     ));
                 }
@@ -300,6 +276,24 @@ pub(crate) async fn read_claude_stream(
         }
 
         if value.get("type").and_then(Value::as_str) == Some("result") {
+            if let Some((tool_use_id, _)) = pending_tool_uses
+                .iter()
+                .find(|(_, tool_use)| tool_use.name == "AskUserQuestion")
+            {
+                emit_ask_user_question_protocol_error(
+                    &event_tx,
+                    "tool_use",
+                    json!({ "tool_use_id": tool_use_id }),
+                    "result arrived without a control_request",
+                )
+                .await;
+                return Err(ProviderAdapterError::execution_failed(
+                    None,
+                    String::new(),
+                    "AskUserQuestion result arrived without a control_request",
+                    0,
+                ));
+            }
             let is_error = value
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -335,6 +329,11 @@ pub(crate) async fn read_claude_stream(
                 .get("session_id")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            // stream-json result 自带 usage（input/output/cache 计数）——best-effort 采集：
+            // 字段缺失记 None，整体缺失则不上报。
+            if let Some(report) = parse_claude_result_usage(&value, usage_role) {
+                send_provider_event(&event_tx, ProviderEvent::UsageReport(report), &cancel).await?;
+            }
             send_provider_event(
                 &event_tx,
                 ProviderEvent::Execution(ProviderExecutionEvent {
@@ -368,6 +367,127 @@ pub(crate) async fn read_claude_stream(
         }
     }
 }
+/// 解析 claude stream-json 首个 `system/init` 事件的原生 session id。
+/// F2（最终审）：session id 必须是非空白字符串——空串/全空白不是有效原生
+/// 会话 id，返回 `None`（与「非 init 事件」的区分见 `is_claude_init_event`，
+/// 握手层据此把「init 但 id 非法」立即判为握手失败而非继续等待）。
+pub(crate) fn parse_claude_init_session_id(value: &Value) -> Option<String> {
+    if !is_claude_init_event(value) {
+        return None;
+    }
+    value
+        .get("session_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+        .map(ToString::to_string)
+}
+
+/// 判定是否为 `system/init` 事件（F2：与 session id 解析分离，供握手区分
+/// 「非 init 行继续等待」与「init 行但 id 缺失/空白/非字符串」）。
+fn is_claude_init_event(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("system")
+        && value.get("subtype").and_then(Value::as_str) == Some("init")
+}
+
+/// 策略会话有界握手（Task 3.2）：读取首个 `system/init` 事件取原生 session id，
+/// 超时/EOF 为握手失败；非 JSON 行（含 `[claude-code:...]` 日志行）跳过继续
+/// 等待直到 deadline（D②）。返回消耗部分输入后的 reader（缓冲区保留，
+/// 后续交由 `read_claude_stream` 续读）。
+pub(crate) async fn wait_for_claude_init<R>(
+    stdout: R,
+    cancel: &CancellationToken,
+) -> Result<(BufReader<R>, String), ProviderAdapterError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = BufReader::new(stdout);
+    let deadline = tokio::time::Instant::now() + CLAUDE_POLICY_HANDSHAKE_TIMEOUT;
+    loop {
+        let mut line = String::new();
+        let read = tokio::select! {
+            _ = cancel.cancelled() => {
+                return Err(ProviderAdapterError::parse_error(
+                    "claude policy handshake cancelled",
+                    String::new(),
+                    String::new(),
+                ));
+            }
+            read = tokio::time::timeout_at(deadline, reader.read_line(&mut line)) => read,
+        };
+        let bytes = read
+            .map_err(|_| {
+                ProviderAdapterError::parse_error(
+                    "claude policy handshake timed out waiting for init event",
+                    String::new(),
+                    String::new(),
+                )
+            })?
+            .map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("claude policy handshake read failed: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+        if bytes == 0 {
+            return Err(ProviderAdapterError::parse_error(
+                "claude stream ended before init event",
+                String::new(),
+                String::new(),
+            ));
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        // D②（latent bug 修复）：非 JSON 行不再立即判 invalid Claude init JSON，
+        // 而是与「非 init 事件行」同样跳过继续等待直到 deadline。claude 2.1.247
+        // 实测 stdout 首行会吐非 JSON 日志行（如 `[claude-code:unrecognized_model]`
+        // 前缀行），system/init 在第二行；若在此 fail-closed，任何一次 claude
+        // 先吐日志行都会以另一种方式挂掉握手。deadline/EOF 仍按既有文案失败，
+        // 行为语义仅放宽「非 JSON 行」这一档。
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(session_id) = parse_claude_init_session_id(&value) {
+            return Ok((reader, session_id));
+        }
+        // init 事件本身携带非法 session id（缺失/空/全空白/非字符串）：立即握手
+        // 失败（F2），不得当作「非 init 行」继续等待，也不得接受空白 id。
+        if is_claude_init_event(&value) {
+            return Err(ProviderAdapterError::parse_error(
+                "claude init event session_id is missing, blank, or not a string",
+                line.clone(),
+                String::new(),
+            ));
+        }
+        // init 之前的非 init 行：忽略并继续等待（保留在 reader 缓冲内的语义不变）。
+    }
+}
+
+/// 解析 stream-json 终态 result 行的 `usage` 字段。
+///
+/// Claude Code CLI 的 result 事件（`--output-format stream-json`）附带：
+/// `usage.input_tokens` / `usage.output_tokens` /
+/// `usage.cache_creation_input_tokens` / `usage.cache_read_input_tokens`。
+/// 任一字段缺失记 `None`；整个 `usage` 对象缺失返回 `None`（best-effort）。
+pub(crate) fn parse_claude_result_usage(
+    value: &Value,
+    role: &'static str,
+) -> Option<UsageReportData> {
+    let usage = value.get("usage")?;
+    let report = UsageReportData {
+        role: role.to_string(),
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        cache_read_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_creation_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64),
+    };
+    report.has_any_tokens().then_some(report)
+}
+
 pub(crate) async fn send_provider_event(
     event_tx: &mpsc::Sender<ProviderEvent>,
     event: ProviderEvent,

@@ -1,0 +1,292 @@
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { IssueLifecycleWorkbenchHeader } from "../components/lifecycle/IssueLifecycleWorkbenchHeader";
+import { IssueLifecycleDetail } from "../components/lifecycle/IssueLifecycleWorkbenchParts";
+import { ProjectSidebar } from "../components/lifecycle/ProjectSidebar";
+import { StageStepper, type StageStepperStage } from "../components/lifecycle/StageStepper";
+import { ActionButtons } from "../pages/CodingWorkspaceControls";
+import { CodingWorkspaceGroupProgress } from "../pages/CodingWorkspaceGroupProgress";
+import type { LifecycleCard as LifecycleCardData } from "../state/lifecycle-workbench-store";
+import {
+  AUTOMATION_MODE_ANCHOR,
+  ONBOARDING_STEPS,
+  getEnabledOnboardingSteps,
+} from "./steps";
+
+const stageFixtures: StageStepperStage[] = [
+  { key: "story", label: "Story", count: 0, state: "active" },
+  { key: "design", label: "Design", count: 0, state: "pending" },
+  { key: "work_item", label: "Work Item", count: 0, state: "pending" },
+];
+
+describe("onboarding 锚点契约（宿主组件渲染）", () => {
+  it("ProjectSidebar 暴露新建 Project 与添加代码库锚点", () => {
+    render(
+      <ProjectSidebar
+        projects={[]}
+        codebases={[]}
+        deletedLogicalCodebases={[]}
+        repositories={[]}
+        selectedProjectId={null}
+        issueCount={0}
+        busy={false}
+        onSelectProject={() => {}}
+        onCreateProject={() => {}}
+        onAddCodebase={() => {}}
+        onDeleteProject={() => {}}
+        onDeleteRepository={() => {}}
+        onDeleteLogicalCodebase={() => {}}
+        onRestoreLogicalCodebase={() => {}}
+        onPurgeLogicalCodebase={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("onboarding-anchor-project-create")).toHaveTextContent("新建 Project");
+    expect(screen.getByTestId("onboarding-anchor-codebase-add")).toHaveTextContent("添加代码库");
+  });
+
+  it("工作台头部暴露新建 Issue 锚点", () => {
+    render(
+      <IssueLifecycleWorkbenchHeader
+        projectName="演示项目"
+        focusedIssueId={null}
+        canCreateIssue
+        onShowAll={() => {}}
+        onRefresh={() => {}}
+        onCreateIssue={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("onboarding-anchor-issue-create")).toHaveTextContent("新建 Issue");
+  });
+
+  it("工作台头部右侧设置入口旁暴露引导重开入口（44×44 命中区）", async () => {
+    const user = userEvent.setup();
+    const onReopenOnboarding = vi.fn();
+    render(
+      <IssueLifecycleWorkbenchHeader
+        projectName="演示项目"
+        focusedIssueId={null}
+        canCreateIssue
+        onShowAll={() => {}}
+        onRefresh={() => {}}
+        onCreateIssue={() => {}}
+        onReopenOnboarding={onReopenOnboarding}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "重新打开操作引导" });
+    expect(trigger).toHaveAttribute("data-testid", "onboarding-help-trigger");
+    // tooltip 补足可发现性（原生 title 先例）。
+    expect(trigger).toHaveAttribute("title", "重新打开操作引导");
+    // 44×44 命中区（h-11/w-11 = 44px），非 fixed 定位。
+    expect(trigger.className).toContain("h-11");
+    expect(trigger.className).toContain("w-11");
+    expect(trigger.className).not.toContain("fixed");
+    // 位于右上角设置入口旁：与设置槽同一操作容器相邻。
+    const settingsSlot = screen.getByTestId("cockpit-settings-slot");
+    expect(trigger.parentElement).toBe(settingsSlot.parentElement);
+    await user.click(trigger);
+    expect(onReopenOnboarding).toHaveBeenCalledTimes(1);
+  });
+
+  it("阶段步进器暴露三个阶段入口锚点", () => {
+    render(<StageStepper stages={stageFixtures} activeStage="story" onSelect={() => {}} />);
+    expect(screen.getByTestId("onboarding-anchor-stage-story")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-anchor-stage-design")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-anchor-stage-work-item-plan")).toBeInTheDocument();
+  });
+
+  it("Coding 控件暴露启动 Coding 锚点", () => {
+    render(
+      <ActionButtons
+        api={{ startCoding: vi.fn(), restartCoding: vi.fn(), abortAttempt: vi.fn(), finalConfirm: vi.fn() } as never}
+        stage="prepare_context"
+        status={null}
+      />,
+    );
+    expect(screen.getByTestId("onboarding-anchor-coding-start")).toHaveTextContent("开始 Coding");
+  });
+
+  it("Coding 组进度区暴露进度/完成确认锚点", () => {
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="plan_0001"
+        currentWorkItemId="wi_0001"
+        units={[{ logical_work_item_id: "wi_0001", status: "completed" } as never]}
+      />,
+    );
+    expect(screen.getByTestId("onboarding-anchor-coding-progress")).toBeInTheDocument();
+  });
+
+  it("Coding 组进度区在聚合分支同样暴露进度锚点（第 13 步契约）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            plan_id: "plan_0001",
+            bound_plan_revision_id: "plan_revision_0002",
+            command_id: null,
+            mode: null,
+            phase: "started",
+            primary_attempt_id: "coding_attempt_0001",
+            selected_unit_id: null,
+            selected_attempt_id: null,
+            target_attempts: [],
+            units: [
+              {
+                unit_id: "coding_unit_0001",
+                logical_work_item_id: "wi_0001",
+                target_repository_id: "repo_busi",
+                attempt_id: "coding_attempt_0001",
+                unit_status: "running",
+                execution_state: "running",
+                unsatisfied_dependency_ids: [],
+                waiting_reason: null,
+              },
+            ],
+            plan_complete: false,
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="plan_0001"
+        currentWorkItemId="wi_0001"
+        units={[{ logical_work_item_id: "wi_0001", status: "running" } as never]}
+        projectId="project_0001"
+        issueId="issue_0001"
+        selectedAttemptId="coding_attempt_0001"
+      />,
+    );
+
+    // 先等聚合分支真正渲染，再同步查锚点——不允许 legacy 初渲染蒙混过关。
+    expect(await screen.findByTestId("plan-coding-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-anchor-coding-progress")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("配置引用的锚点全部为稳定非空字符串，且手动 13 步互不重复（复用的 Coding 入口除外）", () => {
+    const steps = getEnabledOnboardingSteps();
+    const anchors = steps.map((step) => step.anchorTestId);
+    expect(anchors.every((anchor) => typeof anchor === "string" && anchor.length > 0)).toBe(true);
+    const duplicated = anchors.filter((anchor, index) => anchors.indexOf(anchor) !== index);
+    expect(duplicated).toEqual([]);
+    expect(ONBOARDING_STEPS.length).toBeGreaterThanOrEqual(14);
+    expect(AUTOMATION_MODE_ANCHOR.length).toBeGreaterThan(0);
+  });
+
+  it("Coding 启动锚点在 compact 与非 compact 两个挂载点不重名（唯一性契约）", () => {
+    const api = {
+      startCoding: vi.fn(),
+      restartCoding: vi.fn(),
+      abortAttempt: vi.fn(),
+      finalConfirm: vi.fn(),
+    } as never;
+    render(
+      <>
+        <ActionButtons api={api} stage="prepare_context" status={null} />
+        <ActionButtons api={api} stage="prepare_context" status={null} compact />
+      </>,
+    );
+    expect(screen.getAllByTestId("onboarding-anchor-coding-start")).toHaveLength(1);
+    expect(screen.getByTestId("onboarding-anchor-coding-start-compact")).toHaveTextContent(
+      "开始 Coding",
+    );
+  });
+
+  it("IssueLifecycleDetail 暴露 Story/Design 确认与计划双门锚点，容器与内容体为不同嵌套元素", async () => {
+    const user = userEvent.setup();
+    const issue = {
+      kind: "issue",
+      issueId: "issue_0001",
+      id: "issue_0001",
+      title: "Issue 0001",
+      status: "draft",
+      version: null,
+      preview: "Issue 描述",
+      sourceIds: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+    const story = {
+      kind: "story_spec",
+      issueId: "issue_0001",
+      id: "story_spec_0001",
+      title: "会话过期提示",
+      status: "confirmed",
+      version: 1,
+      preview: null,
+      sourceIds: [],
+      artifactVersions: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+    const design = {
+      kind: "design_spec",
+      issueId: "issue_0001",
+      id: "design_spec_0001",
+      title: "前端提示设计",
+      status: "confirmed",
+      version: 1,
+      preview: null,
+      sourceIds: [],
+      artifactVersions: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+    const workItem = {
+      kind: "work_item_group",
+      issueId: "issue_0001",
+      id: "work_item_group_0001",
+      title: "Work Item Group",
+      status: "confirmed",
+      version: null,
+      preview: null,
+      sourceIds: [],
+      artifactVersions: [],
+      raw: {},
+    } as unknown as LifecycleCardData;
+
+    render(
+      <IssueLifecycleDetail
+        issue={issue}
+        storySpecs={[story]}
+        designSpecs={[design]}
+        workItems={[workItem]}
+        selectedKey={null}
+        deletingKey={null}
+        onSelect={() => {}}
+        onOpenFullIssue={() => {}}
+        onDelete={() => {}}
+        onGenerateForStage={() => {}}
+      />,
+    );
+
+    // story 与 design 均有产物 -> 默认激活 work_item 阶段，计划双门锚点同时在场。
+    const reviewGate = screen.getByTestId("onboarding-anchor-plan-review-gate");
+    const finalGate = screen.getByTestId("onboarding-anchor-plan-final-gate");
+    expect(reviewGate).not.toBe(finalGate);
+    // 内容体嵌套在容器内（同一区域两个不同元素，避免单元素承载两步）。
+    expect(within(reviewGate).getByTestId("onboarding-anchor-plan-final-gate")).toBe(finalGate);
+
+    // 切到 Story 阶段：确认锚点落在 Story 内容区容器。
+    await user.click(screen.getByTestId("stage-tab-story"));
+    const storyConfirm = screen.getByTestId("onboarding-anchor-story-confirm");
+    expect(storyConfirm).toHaveTextContent("会话过期提示");
+
+    // 切到 Design 阶段：确认锚点落在 Design 内容区容器。
+    await user.click(screen.getByTestId("stage-tab-design"));
+    const designConfirm = screen.getByTestId("onboarding-anchor-design-confirm");
+    expect(designConfirm).toHaveTextContent("前端提示设计");
+
+    // 四个锚点互不相同。
+    const distinct = new Set([
+      reviewGate.getAttribute("data-testid"),
+      finalGate.getAttribute("data-testid"),
+      storyConfirm.getAttribute("data-testid"),
+      designConfirm.getAttribute("data-testid"),
+    ]);
+    expect(distinct.size).toBe(4);
+  });
+});

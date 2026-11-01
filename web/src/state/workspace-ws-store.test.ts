@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "./chat-entries";
 import {
   emptyWorkspaceContentCache,
   workspaceContentCacheValues,
 } from "./workspace-content-cache";
-import { selectPrepareContextNotes, useWorkspaceStore } from "./workspace-ws-store";
+import {
+  selectPrepareContextNotes,
+  useWorkspaceStore,
+  type TimelineNode,
+} from "./workspace-ws-store";
+import type { WorkspaceSessionStatePayload } from "./workspace-ws-store-types";
 import {
   installWorkspaceStoreTestHooks,
   makeCompileArtifactPayload,
@@ -411,12 +416,11 @@ describe("workspace ws store base state", () => {
           summary: "返修意图需要人工判断",
           findings: [
             {
-              severity: "optional",
-              message: "建议补充说明",
+              severity: "suggestion",
+              message: "建议补充说明；不影响下一阶段",
               evidence: "当前版本可用",
-              impact: "不影响下一阶段",
               required_action: "补充说明段落",
-            },
+            }
           ],
           review_gate: "user_triage_required",
         },
@@ -431,7 +435,7 @@ describe("workspace ws store base state", () => {
       metadata: expect.objectContaining({
         comments: "请补齐异常路径说明。",
         review_gate: "user_triage_required",
-        findings: [expect.objectContaining({ message: "建议补充说明" })],
+        findings: [expect.objectContaining({ message: "建议补充说明；不影响下一阶段" })],
       }),
     });
   });
@@ -475,5 +479,141 @@ describe("workspace ws store base state", () => {
         exit_code: 0,
       },
     ]);
+  });
+});
+
+// REQ-UI37-18：静默判据取“最近一次引擎事件”而非节点起点，因此 store 必须在
+// timeline_node_updated 与 stream_chunk 两类事件上刷新节点的 last_event_at。
+describe("workspace ws timeline node event clock", () => {
+  installWorkspaceStoreTestHooks();
+
+  const timelineNode = (overrides: Partial<TimelineNode> = {}): TimelineNode => ({
+    node_id: "node_1",
+    node_type: "author_run",
+    agent: "claude_code",
+    stage: "running",
+    round: null,
+    status: "active",
+    title: "Author 运行",
+    summary: null,
+    started_at: "2026-09-13T00:00:00Z",
+    completed_at: null,
+    duration_ms: null,
+    artifact_ref: null,
+    provider_config_snapshot: { author: "claude_code", reviewer: null, review_rounds: 1 },
+    ...overrides,
+  });
+
+  it("refreshes a node last-event clock on stream chunks and status updates", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-13T01:00:00Z"));
+      const store = useWorkspaceStore.getState();
+      store.setTimelineNodesForTest([timelineNode({ node_id: "n1" })]);
+
+      store.appendStreamChunk("chunk", "n1");
+
+      expect(useWorkspaceStore.getState().timelineNodes[0]?.last_event_at).toBe(
+        "2026-09-13T01:00:00.000Z",
+      );
+
+      vi.setSystemTime(new Date("2026-09-13T01:04:00Z"));
+      store.updateTimelineNode("n1", "active", "仍在运行", null);
+
+      expect(useWorkspaceStore.getState().timelineNodes[0]?.last_event_at).toBe(
+        "2026-09-13T01:04:00.000Z",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+
+// v38 复验 #1（重复「Review Round 1」卡）：活跃 run 期间重连/初帧 attach，服务端把
+// snapshot 基线压到补发窗口首事件之前并重发窗口帧（src/web/workspace_session/
+// attachment.rs activate_attachment_with_initial_frames + journal.rs active_run_window），
+// 窗口内含客户端已消化的 timeline_node_created 重叠帧；前端对 session_state 无条件
+// 拉低 event_seq 基线（useWorkspaceWs.ts），重叠 created 帧必然通过 seq 去重。此时
+// addTimelineNode 若盲 push，同一 node_id 双写 → timeline 左栏渲染两张相同卡片。
+describe("workspace ws timeline node replay idempotency", () => {
+  installWorkspaceStoreTestHooks();
+
+  const reviewerRunNode: TimelineNode = {
+    node_id: "timeline_node_004",
+    node_type: "reviewer_run",
+    agent: "codex",
+    stage: "cross_review",
+    round: 1,
+    status: "active",
+    title: "Review Round 1",
+    summary: null,
+    started_at: "2026-09-05T21:30:00Z",
+    completed_at: null,
+    duration_ms: null,
+    artifact_ref: "artifact_current",
+    provider_config_snapshot: {
+      author: "claude_code",
+      reviewer: "codex",
+      review_rounds: 1,
+    },
+  };
+
+  function sessionSnapshot(timelineNodes: TimelineNode[]): WorkspaceSessionStatePayload {
+    return {
+      session_id: "session_replay_created",
+      workspace_type: "story",
+      stage: "cross_review",
+      session_status: "open",
+      flow_kind: "legacy",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: "codex" },
+      timeline_nodes: timelineNodes,
+      active_node_id: timelineNodes.at(-1)?.node_id ?? null,
+      artifact_versions: [],
+      timeline_node_details: {},
+      timeline_node_summaries: {},
+    };
+  }
+
+  it("ignores a replayed timeline_node_created for a node already in the snapshot", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionState(sessionSnapshot([reviewerRunNode]));
+
+    // 补发窗口的重叠 created 帧（session_state 分支与 timeline_node_created 分支的
+    // 全部 store 副作用即 setSessionState + addTimelineNode）
+    store.addTimelineNode(reviewerRunNode);
+
+    const nodes = useWorkspaceStore.getState().timelineNodes;
+    expect(nodes.filter((node) => node.node_id === "timeline_node_004")).toHaveLength(1);
+    expect(nodes).toHaveLength(1);
+  });
+
+  it("does not regress an already-completed node when its initial created frame replays", () => {
+    const store = useWorkspaceStore.getState();
+    const completedNode = {
+      ...reviewerRunNode,
+      status: "completed",
+      completed_at: "2026-09-05T21:31:00Z",
+      duration_ms: 60_000,
+    } as const;
+    store.setSessionState(sessionSnapshot([completedNode]));
+
+    // 重放帧是创建时刻的初态（active）；已存在的终态节点不得被回退
+    store.addTimelineNode(reviewerRunNode);
+
+    expect(useWorkspaceStore.getState().timelineNodes).toEqual([completedNode]);
+    expect(useWorkspaceStore.getState().activeNodeId).toBe("timeline_node_004");
   });
 });

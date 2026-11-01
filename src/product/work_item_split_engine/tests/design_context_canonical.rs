@@ -4,7 +4,6 @@
 // 架构概览/模块划分/技术选型/测试策略/关键路径 类标题，导致任何规范 design spec
 // 都被误判为 5 项上下文全缺失，并把误导性 gaps 注入 outline prompt。
 
-
 /// 精简自 .aria/projects/project_0001/issues/issue_0001/versions/design_spec_0001/
 /// version_0002.json 的规范 Design Spec 结构（保留 parser 强制的全部标题）。
 const CANONICAL_DESIGN_SPEC_MARKDOWN: &str = r#"# 设计 Spec：紧凑时长格式化库函数与演示页面（design_spec_0001）
@@ -327,6 +326,29 @@ Rust + TypeScript。
 }
 
 #[test]
+fn design_context_extracts_only_explicit_requirement_ids_in_stable_order() {
+    let context = vec![
+        "Design Spec: x\n[REQ-003] and [NFR-001], then REQ-003 again".to_string(),
+        "## Traceability\n[REQ-002] -> DEC-001; unrelated requirement text".to_string(),
+    ];
+
+    assert_eq!(
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(&context),
+        vec!["NFR-001", "REQ-002", "REQ-003"]
+    );
+}
+
+#[test]
+fn design_context_does_not_invent_requirement_ids_when_none_are_present() {
+    assert!(
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(&[
+            "Design Spec: no explicit requirement references".to_string(),
+        ])
+        .is_empty()
+    );
+}
+
+#[test]
 fn empty_design_spec_has_no_capabilities() {
     let capabilities = extract_design_context_capabilities("");
     assert!(!capabilities.has_architecture);
@@ -338,4 +360,35 @@ fn empty_design_spec_has_no_capabilities() {
 
     let merged = crate::product::work_item_split_engine::merge_design_context_capabilities(&[]);
     assert_eq!(design_context_gaps(&merged).len(), 5);
+}
+
+#[test]
+fn extract_registered_requirement_ids_merges_story_and_design_sources() {
+    // r41 A1:story+design 双源——design 正文缺 NFR token 时,story 正文的
+    // NFR- 编号仍是登记域(修「白名单缺员逼 AI 编造」结构陷阱)。
+    let contexts = vec![
+        "Story Spec: alpha 会话过期 (story_spec_0001)\n需求 REQ-ENV-01: 签发。验收 AC-001: 签发返回 id。".to_string(),
+        "Design Spec: 后端设计 (design_spec_0001)\nNFR-PERF-02: P99<50ms。".to_string(),
+    ];
+    let ids = crate::product::work_item_split_engine::context::extract_registered_requirement_ids(
+        &contexts,
+    );
+    // r45 扩 AC:story 的验收标准 AC- 同属登记域(第五变体 done_when 编造
+    // AC-002/AC-003 的漏口)。
+    assert_eq!(
+        ids,
+        vec![
+            "AC-001".to_string(),
+            "NFR-PERF-02".to_string(),
+            "REQ-ENV-01".to_string()
+        ]
+    );
+    // 单源退化(design-only)保持既有语义。
+    let design_only = vec!["Design: REQ-A-1 x".to_string()];
+    assert_eq!(
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(
+            &design_only
+        ),
+        vec!["REQ-A-1".to_string()]
+    );
 }

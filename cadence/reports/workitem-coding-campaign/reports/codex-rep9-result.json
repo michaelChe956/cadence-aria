@@ -1,0 +1,326 @@
+{
+  "provider": "codex",
+  "repetition": 9,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/tmp/wic-phase1/codex/rep9",
+  "startedAt": "2026-08-27T01:14:14.939Z",
+  "finishedAt": "2026-08-27T01:28:47.465Z",
+  "elapsedSec": 872.526,
+  "issue_id": "issue_0015",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0018",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "codex",
+    "reviewer_provider": "codex",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "92cd2ef9d70bf14b3a46dff9ec34406e91fef4237d49a954ea49afd199d47655"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 0.144,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 0.204,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 136.381,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 136.461,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 229.04,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 229.113,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 402.378,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 402.457,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 592.652,
+      "source": "stage_change"
+    },
+    {
+      "stage": "author_confirm",
+      "elapsedSec": 721.425,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 721.509,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 872.526,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 229.04,
+      "findings": []
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 592.652,
+      "findings": [
+        {
+          "severity": "must_fix",
+          "message": "createServer(options) 与 start({ port }) 的组合契约不完整，集成项无法按声明的生命周期 API 稳定启动带坏数据夹具的服务。",
+          "evidence": "后端仅声明 createServer 支持 dataPath、start 仅接收 port；集成项同时要求 port: 0 启动服务并通过 dataPath 注入坏数据，但未定义 start 如何接收 dataPath、如何绑定 createServer 返回值，或 createServer 的返回类型与监听方式。",
+          "required_action": "明确 start 与 createServer 的组合方式，例如扩展为 start({ port, dataPath, staticRoot })，或定义 start({ server, port })；同步更新后端、集成任务及 handoff/test 用法。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "stop() 的完成语义未定义，无法保证测试结束时监听器已关闭。",
+          "evidence": "后端验收仅写“stop() 可完成关闭”，集成任务写“等待已交付 stop() 完成关闭”，但未声明 stop 返回 Promise、回调或幂等行为；集成测试存在端口释放竞态和残留监听器风险。",
+          "required_action": "将 stop 明确为可等待的关闭接口（建议 stop(): Promise<void>，并说明重复调用行为），在 backend 与 integration 验收中使用 await 并断言关闭完成。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "“静态五关卡数据”的内容没有进入可验收契约，任意五条合法记录都可能通过当前测试。",
+          "evidence": "goal 要求基于静态五关卡数据并写入 data/levels.json，但 ac_backend_api_success 与 ac_integration_api_success 只约束顶层数组恰有五项及 EXE-006 字段合法性，没有规定 canonical 的 id、name、difficulty、unlocked 值或对应 fixture。",
+          "required_action": "在契约或引用的明确规格中固定五关卡的完整期望数据，并让 backend、frontend、integration 测试至少校验这些稳定值或等价的 canonical fixture。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "浏览器入口与 Node 可注入测试接口的模块暴露方式未约定，可能出现测试可导入但浏览器无法加载，或反之。",
+          "evidence": "前端要求 web/level-select.js 提供 initLevelSelect({ document, fetchImpl }) 且页面入口引入调用，但未说明使用 ESM、CommonJS 还是浏览器全局；测试又要求 Node 内置替身直接调用。",
+          "required_action": "补充模块/加载约定及入口调用方式，并在前端测试中按同一加载方式验证。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "“相对路径引用 /api/levels”的表述不准确，容易造成路径实现分歧。",
+          "evidence": "候选多处同时写“相对路径”与带前导斜杠的 `/api/levels`；后者是同源根相对路径，不是文档通常所称的相对路径。",
+          "required_action": "统一表述为“同源根相对路径 `/api/levels`”，或改为真正的相对路径并明确部署基路径语义。"
+        }
+      ]
+    },
+    {
+      "verdict": "needs_human",
+      "round": 2,
+      "elapsedSec": 872.526,
+      "findings": [
+        {
+          "severity": "blocking",
+          "message": "后端注入能力与集成生命周期契约未闭合，坏数据集成测试无法仅依据声明接口确定如何启动自定义 dataPath 服务。",
+          "evidence": "后端仅声明 createServer(options) 支持 dataPath/staticRoot，以及 start({ port }) 返回 origin、port、stop；未声明 createServer 的返回类型、listen/close 方式，也未说明 start 如何与 dataPath 组合。集成项却要求通过 dataPath 夹具启动实际 HTTP 服务并验证 500。",
+          "required_action": "整批同步补齐生命周期契约：明确 start 是否接受 dataPath/staticRoot，或明确 createServer(options) 返回可 listen/close 的 HTTP Server 及其关闭等待方式，并同步更新集成任务、验收和 handoff。"
+        },
+        {
+          "severity": "must_fix",
+          "message": "前端可注入接口没有定义浏览器真实入口在未传入 fetchImpl 时的行为，可能出现替身测试通过但页面运行时请求失败。",
+          "evidence": "输出契约要求 initLevelSelect({ document, fetchImpl })，同时要求页面入口引入并调用该接口，但未规定 fetchImpl 缺省时使用 globalThis.fetch，或入口显式传入浏览器 fetch。",
+          "required_action": "整批补充并测试真实入口约束：明确 fetchImpl 的默认实现或由 web/index.html 的入口显式注入 window.fetch，并在前端验收中覆盖该路径。"
+        },
+        {
+          "severity": "suggestion",
+          "message": "“以相对路径引用 /api/levels”的表述存在术语歧义，/api/levels 实际是根相对 URL。",
+          "evidence": "前端与集成验收同时要求引用 /api/levels，但将其称为相对路径，可能导致测试作者在 /api/levels 与 api/levels 之间产生不同实现。",
+          "required_action": "批量统一为“同源根路径 /api/levels”或明确允许的 URL 形式。"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "severity": "must_fix",
+      "message": "createServer(options) 与 start({ port }) 的组合契约不完整，集成项无法按声明的生命周期 API 稳定启动带坏数据夹具的服务。",
+      "evidence": "后端仅声明 createServer 支持 dataPath、start 仅接收 port；集成项同时要求 port: 0 启动服务并通过 dataPath 注入坏数据，但未定义 start 如何接收 dataPath、如何绑定 createServer 返回值，或 createServer 的返回类型与监听方式。",
+      "required_action": "明确 start 与 createServer 的组合方式，例如扩展为 start({ port, dataPath, staticRoot })，或定义 start({ server, port })；同步更新后端、集成任务及 handoff/test 用法。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "stop() 的完成语义未定义，无法保证测试结束时监听器已关闭。",
+      "evidence": "后端验收仅写“stop() 可完成关闭”，集成任务写“等待已交付 stop() 完成关闭”，但未声明 stop 返回 Promise、回调或幂等行为；集成测试存在端口释放竞态和残留监听器风险。",
+      "required_action": "将 stop 明确为可等待的关闭接口（建议 stop(): Promise<void>，并说明重复调用行为），在 backend 与 integration 验收中使用 await 并断言关闭完成。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "“静态五关卡数据”的内容没有进入可验收契约，任意五条合法记录都可能通过当前测试。",
+      "evidence": "goal 要求基于静态五关卡数据并写入 data/levels.json，但 ac_backend_api_success 与 ac_integration_api_success 只约束顶层数组恰有五项及 EXE-006 字段合法性，没有规定 canonical 的 id、name、difficulty、unlocked 值或对应 fixture。",
+      "required_action": "在契约或引用的明确规格中固定五关卡的完整期望数据，并让 backend、frontend、integration 测试至少校验这些稳定值或等价的 canonical fixture。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "浏览器入口与 Node 可注入测试接口的模块暴露方式未约定，可能出现测试可导入但浏览器无法加载，或反之。",
+      "evidence": "前端要求 web/level-select.js 提供 initLevelSelect({ document, fetchImpl }) 且页面入口引入调用，但未说明使用 ESM、CommonJS 还是浏览器全局；测试又要求 Node 内置替身直接调用。",
+      "required_action": "补充模块/加载约定及入口调用方式，并在前端测试中按同一加载方式验证。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "“相对路径引用 /api/levels”的表述不准确，容易造成路径实现分歧。",
+      "evidence": "候选多处同时写“相对路径”与带前导斜杠的 `/api/levels`；后者是同源根相对路径，不是文档通常所称的相对路径。",
+      "required_action": "统一表述为“同源根相对路径 `/api/levels`”，或改为真正的相对路径并明确部署基路径语义。"
+    },
+    {
+      "severity": "blocking",
+      "message": "后端注入能力与集成生命周期契约未闭合，坏数据集成测试无法仅依据声明接口确定如何启动自定义 dataPath 服务。",
+      "evidence": "后端仅声明 createServer(options) 支持 dataPath/staticRoot，以及 start({ port }) 返回 origin、port、stop；未声明 createServer 的返回类型、listen/close 方式，也未说明 start 如何与 dataPath 组合。集成项却要求通过 dataPath 夹具启动实际 HTTP 服务并验证 500。",
+      "required_action": "整批同步补齐生命周期契约：明确 start 是否接受 dataPath/staticRoot，或明确 createServer(options) 返回可 listen/close 的 HTTP Server 及其关闭等待方式，并同步更新集成任务、验收和 handoff。"
+    },
+    {
+      "severity": "must_fix",
+      "message": "前端可注入接口没有定义浏览器真实入口在未传入 fetchImpl 时的行为，可能出现替身测试通过但页面运行时请求失败。",
+      "evidence": "输出契约要求 initLevelSelect({ document, fetchImpl })，同时要求页面入口引入并调用该接口，但未规定 fetchImpl 缺省时使用 globalThis.fetch，或入口显式传入浏览器 fetch。",
+      "required_action": "整批补充并测试真实入口约束：明确 fetchImpl 的默认实现或由 web/index.html 的入口显式注入 window.fetch，并在前端验收中覆盖该路径。"
+    },
+    {
+      "severity": "suggestion",
+      "message": "“以相对路径引用 /api/levels”的表述存在术语歧义，/api/levels 实际是根相对 URL。",
+      "evidence": "前端与集成验收同时要求引用 /api/levels，但将其称为相对路径，可能导致测试作者在 /api/levels 与 api/levels 之间产生不同实现。",
+      "required_action": "批量统一为“同源根路径 /api/levels”或明确允许的 URL 形式。"
+    }
+  ],
+  "work_item_ids": [],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 34520,
+      "output_tokens": 2557,
+      "cache_read_tokens": 32512,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json",
+    "artifact-v9.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": "stopped_needs_human",
+  "error": null,
+  "completed": false,
+  "session_status": "stopped_needs_human",
+  "flow_kind": "legacy",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 1,
+    "manual_repairs_used": 0,
+    "transitions_used": 3,
+    "initial_review_count": 2,
+    "verification_review_count": 1,
+    "review_cycles": {
+      "batch:round_001": {
+        "repairs_used": 1,
+        "initial_count": 1,
+        "verification_count": 1
+      },
+      "outline:outline_workitem_campaign_codex_9": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": {
+    "findings": [
+      {
+        "class": "human_required",
+        "fingerprint": "27f6d1e7df45672d399f3fed578b8e80da4bfd20f11c2cfadf780dd50f7ad61b",
+        "category": null,
+        "severity": "blocking",
+        "message": "后端注入能力与集成生命周期契约未闭合，坏数据集成测试无法仅依据声明接口确定如何启动自定义 dataPath 服务。",
+        "evidence": "后端仅声明 createServer(options) 支持 dataPath/staticRoot，以及 start({ port }) 返回 origin、port、stop；未声明 createServer 的返回类型、listen/close 方式，也未说明 start 如何与 dataPath 组合。集成项却要求通过 dataPath 夹具启动实际 HTTP 服务并验证 500。",
+        "required_action": "整批同步补齐生命周期契约：明确 start 是否接受 dataPath/staticRoot，或明确 createServer(options) 返回可 listen/close 的 HTTP Server 及其关闭等待方式，并同步更新集成任务、验收和 handoff。",
+        "contract_field": null
+      },
+      {
+        "class": "human_required",
+        "fingerprint": "677a9834119f4e4b2f42d03c9ffbfaf1fc37afab561d3dd6f0a60c57986e890a",
+        "category": null,
+        "severity": "must_fix",
+        "message": "前端可注入接口没有定义浏览器真实入口在未传入 fetchImpl 时的行为，可能出现替身测试通过但页面运行时请求失败。",
+        "evidence": "输出契约要求 initLevelSelect({ document, fetchImpl })，同时要求页面入口引入并调用该接口，但未规定 fetchImpl 缺省时使用 globalThis.fetch，或入口显式传入浏览器 fetch。",
+        "required_action": "整批补充并测试真实入口约束：明确 fetchImpl 的默认实现或由 web/index.html 的入口显式注入 window.fetch，并在前端验收中覆盖该路径。",
+        "contract_field": null
+      },
+      {
+        "class": "human_required",
+        "fingerprint": "042aedab7db07021c406d390631c1fa3e2fb1268436ceca834b4139c28ac826b",
+        "category": null,
+        "severity": "suggestion",
+        "message": "“以相对路径引用 /api/levels”的表述存在术语歧义，/api/levels 实际是根相对 URL。",
+        "evidence": "前端与集成验收同时要求引用 /api/levels，但将其称为相对路径，可能导致测试作者在 /api/levels 与 api/levels 之间产生不同实现。",
+        "required_action": "批量统一为“同源根路径 /api/levels”或明确允许的 URL 形式。",
+        "contract_field": null
+      }
+    ],
+    "repeated_fingerprints": [],
+    "attempts_used": 1,
+    "manual_repairs_remaining": 3,
+    "trigger": "verification_new_findings",
+    "resumable": true
+  },
+  "provider_start_count": 0,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.06,
+    "1:running": 136.177,
+    "2:author_confirm": 0.08,
+    "3:cross_review": 92.579,
+    "4:author_confirm": 0.073,
+    "5:running": 173.265,
+    "6:author_confirm": 0.079,
+    "7:cross_review": 190.195,
+    "8:running": 128.773,
+    "9:author_confirm": 0.084,
+    "10:cross_review": 151.017,
+    "11:completed": 0
+  }
+}

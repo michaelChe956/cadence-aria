@@ -1,3 +1,6 @@
+use crate::product::cadence_skills::routing_reference::{
+    RoutingReferenceContext, direct_cadence_routing_rules_reference,
+};
 use crate::protocol::contracts::{
     AdapterInput, ProviderContextPackage, execution_contract_for_node, workflow_discipline_for_node,
 };
@@ -20,6 +23,7 @@ pub struct ProviderContextBuilderInput {
     pub constraint_summary: String,
     pub context_files: Vec<String>,
     pub worktree_path: Option<String>,
+    pub routing_reference_context: RoutingReferenceContext,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +106,8 @@ pub fn build_provider_context(
     };
 
     let adapter_input = AdapterInput {
+        env_vars: Default::default(),
+        working_directory: None,
         provider_type: context_package.provider_type.clone(),
         role: context_package.adapter_role.clone(),
         worktree_path: context_package.worktree_path.clone(),
@@ -255,6 +261,12 @@ fn prompt_variables(
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
     let canonical_inputs_json = serde_json::to_string(&input.canonical_inputs)
         .map_err(|error| ProviderContextBuildError::Serialization(error.to_string()))?;
+    let structured_output_nonce = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(8)
+        .collect::<String>();
 
     Ok(BTreeMap::from([
         ("node_id".to_string(), input.node_id.clone()),
@@ -284,8 +296,20 @@ fn prompt_variables(
             workflow.superpowers_required.join(", "),
         ),
         (
+            "routing_reference".to_string(),
+            direct_cadence_routing_rules_reference(&input.routing_reference_context),
+        ),
+        (
             "output_schema_summary".to_string(),
-            output_schema_summary(&input.node_id, &contract.output_schema_ref),
+            output_schema_summary(
+                &input.node_id,
+                &contract.output_schema_ref,
+                &structured_output_nonce,
+            ),
+        ),
+        (
+            "structured_output_nonce".to_string(),
+            structured_output_nonce,
         ),
         (
             "artifact_kind".to_string(),
@@ -321,7 +345,7 @@ fn artifact_kind_for_node(node_id: &str) -> &'static str {
     }
 }
 
-fn output_schema_summary(node_id: &str, output_schema_ref: &str) -> String {
+fn output_schema_summary(node_id: &str, output_schema_ref: &str, nonce: &str) -> String {
     let fields = match artifact_kind_for_node(node_id) {
         "clarification_record" => {
             r#"{"artifact_kind":"clarification_record","goal_summary":"...","constraints":[],"assumptions":[],"open_questions":[],"suggested_scope":"..."}"#
@@ -356,7 +380,79 @@ fn output_schema_summary(node_id: &str, output_schema_ref: &str) -> String {
         }
         _ => r#"{"artifact_kind":"..."}"#,
     };
+    let fields = fields
+        .strip_prefix('{')
+        .expect("output schema examples must be JSON objects");
     format!(
-        "{output_schema_ref}\n最终 sentinel 内只能放一个 JSON 对象，不要放 Markdown code fence。不要省略任何 key；没有内容的数组字段必须输出 []。JSON 对象必须至少符合：\n{fields}"
+        "{output_schema_ref}\n最终 sentinel 内只能放一个 JSON 对象，不要放 Markdown code fence。不要省略任何 key；没有内容的数组字段必须输出 []。JSON 对象必须至少符合：\n{{\"nonce\":\"{nonce}\",{fields}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderContextBuilderInput, build_provider_context};
+    use crate::product::cadence_skills::routing_reference::{
+        LogicalPolicyReference, RoutingReferenceContext, direct_cadence_routing_rules_reference,
+    };
+    use serde_json::json;
+
+    fn builder_input(
+        node_id: &str,
+        routing_reference_context: RoutingReferenceContext,
+    ) -> ProviderContextBuilderInput {
+        ProviderContextBuilderInput {
+            session_id: "session_001".to_string(),
+            task_id: "task_001".to_string(),
+            node_id: node_id.to_string(),
+            canonical_inputs: json!({
+                "artifact_refs": ["art_ref_spec_0001"],
+                "risk_registry_ref": "risk_registry_001"
+            }),
+            canonical_input_summary: "canonical summary for test".to_string(),
+            projection_refs: vec!["proj_spec_projection_art_spec_001_0001".to_string()],
+            projection_summary: "projection summary for test".to_string(),
+            constraint_bundle_ref: "constraint_bundle_openspec_sample-change_0001".to_string(),
+            constraint_summary: "constraint summary for test".to_string(),
+            context_files: vec!["tests/fixtures/artifacts/spec.md".to_string()],
+            worktree_path: None,
+            routing_reference_context,
+        }
+    }
+
+    fn logical_policy() -> RoutingReferenceContext {
+        RoutingReferenceContext::Logical(LogicalPolicyReference {
+            policy_id: "pol_1".into(),
+            policy_revision: 3,
+            policy_digest: "abc123".into(),
+            authority_root: "/data/aria/aggregate/policy".into(),
+        })
+    }
+
+    #[test]
+    fn node_template_renders_routing_reference_from_context() {
+        let legacy = build_provider_context(builder_input("N04", RoutingReferenceContext::Legacy))
+            .expect("legacy context package")
+            .adapter_input
+            .prompt;
+        assert!(
+            legacy.contains("[cadence_project_rules]\n当前目标仓库根目录的 AGENTS.md"),
+            "legacy prompt must carry the original routing reference: {legacy}"
+        );
+        assert!(!legacy.contains("authority_root:"));
+
+        let logical = build_provider_context(builder_input("N04", logical_policy()))
+            .expect("logical context package")
+            .adapter_input
+            .prompt;
+        assert!(logical.contains("authority_root:"), "{logical}");
+        assert!(logical.contains("不作为政策正文"), "{logical}");
+    }
+
+    #[test]
+    fn coding_path_still_uses_direct_reference() {
+        // coding 路径的 routing_reference 槽位必须仍是 direct 版（完整读取 + 失败关闭）
+        let value = direct_cadence_routing_rules_reference(&RoutingReferenceContext::Legacy);
+        assert!(value.contains("完整读取"));
+        assert!(value.contains("只报告阻塞"));
+    }
 }

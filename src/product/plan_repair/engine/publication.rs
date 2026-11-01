@@ -100,14 +100,27 @@ impl PlanRepairEngine {
         )?;
         let final_manifest =
             final_plan_amendment_manifest(&prepared.manifest, &known_units, &accepted);
-        if plan.active_revision_id.as_deref() == Some(prepared.next_plan_revision.id.as_str()) {
-            let existing = self
-                .store
-                .find_plan_amendment_publication_journal(&plan, &prepared.manifest.id)
-                .map_err(PlanRepairError::Store)?
-                .ok_or_else(|| {
-                    invalid_publication("published revision has no publication journal")
-                })?;
+        // 同 command 恢复（既有 publication journal 优先重放）：崩溃可能停在任
+        // 何 checkpoint，既有 journal 是出版权威，其内嵌 snapshot 锁定崩溃前的
+        // logical work item 形态。中窗 checkpoint（work item revision 已出版、
+        // plan revision 尚未切换）下，从当前盘面重建的 expected snapshot 会把
+        // 已被部分出版推进的 logical active revision 带进来，与既有 journal 不
+        // 再相等（same_publication_identity 拒绝），把可恢复的崩溃误报为
+        // identity 冲突。因此发现既有 journal 即优先重放；重放校验与既有语义
+        // 一致：confirmation 与最终 manifest 必须逐字相等，否则是不同出版的
+        // 冲突（AmendmentConflict）。
+        let existing = self
+            .store
+            .find_plan_amendment_publication_journal(&plan, &prepared.manifest.id)
+            .map_err(PlanRepairError::Store)?;
+        if plan.active_revision_id.as_deref() == Some(prepared.next_plan_revision.id.as_str())
+            && existing.is_none()
+        {
+            return Err(invalid_publication(
+                "published revision has no publication journal",
+            ));
+        }
+        if let Some(existing) = existing {
             if existing.confirmation.as_ref() != Some(&confirmation)
                 || existing
                     .snapshot

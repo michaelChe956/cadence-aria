@@ -25,7 +25,13 @@ pub enum CodingRunnerCommand {
         id: String,
         selected_option_ids: Vec<String>,
         free_text: Option<String>,
+        /// P0 1.3：完整多题答案原样透传 provider，禁止扁平化。
+        answers: Vec<crate::cross_cutting::streaming_provider::ChoiceAnswerData>,
+        /// P0 1.3：两层回执；`#[serde(skip)]` 保持命令 JSON 兼容。
+        #[serde(skip)]
+        receipt: Option<crate::cross_cutting::choice_delivery::ChoiceDeliverySignal>,
     },
+    RetryPush,
     AbortAttempt,
 }
 
@@ -37,7 +43,9 @@ pub fn coding_provider_role_for_stage(stage: &CodingExecutionStage) -> Option<Co
         CodingExecutionStage::PrepareContext
         | CodingExecutionStage::WorktreePrepare
         | CodingExecutionStage::ReviewRequest
-        | CodingExecutionStage::FinalConfirm => None,
+        | CodingExecutionStage::FinalConfirm
+        // 跨仓评审角色固定为 InternalReviewer，不走 attempt 阶段选 provider。
+        | CodingExecutionStage::IssueCrossRepoReview => None,
     }
 }
 
@@ -64,8 +72,8 @@ pub fn apply_provider_selection_to_snapshots(
         }
         "reviewer" => {
             legacy_snapshot.reviewer = Some(provider.clone());
-            role_snapshot.code_reviewer = provider.clone();
-            role_snapshot.internal_reviewer = provider;
+            role_snapshot.code_reviewer = Some(provider.clone());
+            role_snapshot.internal_reviewer = Some(provider);
             Ok(CodingProviderRole::CodeReviewer)
         }
         "coder" => {
@@ -75,11 +83,11 @@ pub fn apply_provider_selection_to_snapshots(
         }
         "code_reviewer" => {
             legacy_snapshot.reviewer = Some(provider.clone());
-            role_snapshot.code_reviewer = provider;
+            role_snapshot.code_reviewer = Some(provider);
             Ok(CodingProviderRole::CodeReviewer)
         }
         "internal_reviewer" => {
-            role_snapshot.internal_reviewer = provider;
+            role_snapshot.internal_reviewer = Some(provider);
             Ok(CodingProviderRole::InternalReviewer)
         }
         _ => Err(format!("unsupported_coding_provider_role: {role}")),

@@ -12,11 +12,16 @@ fn retry_interrupted_run_is_only_valid_in_prepare_context() {
         failed_node_id: "timeline_node_054".to_string(),
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::PrepareContext
     ));
-    assert!(!is_message_valid_for_stage(&msg, &WorkspaceStage::Running));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &msg,
+        &WorkspaceStage::Running
+    ));
     assert_eq!(message_type(&msg), "retry_interrupted_run");
 }
 
@@ -56,7 +61,29 @@ async fn interrupted_recovery_provider_start_failure_returns_to_prepare_context(
         reviewer_enabled_at_start: None,
         superpowers_enabled: false,
         openspec_enabled: false,
+        session_status: crate::product::models::WorkspaceSessionStatus::Running,
+        flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+        run_history: crate::product::work_item_plan_policy::RunHistory::default(),
+        review_invocation_scope: None,
+        human_gate_snapshot: None,
+        repair_reservation: None,
+        policy_diagnostics: vec![],
+        provider_start_ledger: vec![],
+        single_candidate_phase: None,
+        work_item_plan_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        publication_provenance_ref: None,
+        approval_attempt_id: None,
+        approved_at: None,
+        compile_reservation: None,
         provider_conversations: vec![],
+        logical_launch_fingerprints: vec![],
+        superseded_native_sessions: vec![],
+        lc_resume_recovery: None,
+        structural_governance_state: None,
+        review_identity_id: String::new(),
         repository_path: None,
     };
     let mut workspace_engine = WorkspaceEngine::new(checkpoint_store, tx, session);
@@ -85,31 +112,52 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
     let root = tempfile::tempdir().expect("app root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    // W0-3 N5-3:repository_path 注入后 issue 基线解析真实读取——补
+    // issue 记录(store 生成 id,story/session 与 issue 链一致)。
+    let issue = crate::product::issue_store::IssueStore::new(app_paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            title: "Interrupted review issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("issue record");
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
             project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
+            issue_id: issue.id.clone(),
             repository_id: "repository_0001".to_string(),
             title: "Interrupted review".to_string(),
+            aggregate_codebase: None,
         })
         .expect("story spec");
     let session_record: WorkspaceSessionRecord = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
+            issue_id: issue.id.clone(),
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::Codex),
+
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .expect("workspace session");
     let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));
     let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
     let mut session = WorkspaceSession::from_record(session_record.clone());
     session.stage = WorkspaceStage::PrepareContext;
+    // W0-3 N5-3(T20b 规划面接窗):review 重试经 drive_review_session
+    // 无条件开窗,repository_path=None 时窗口目标回落测试进程 CWD
+    //(包根,含 target/ 数 GB)→ baseline 超限 → provider 零启动、
+    // channel 关闭 recv None。锚定小体积真实 git 仓(生产形态=业务仓)。
+    session.repository_path = Some(interrupted_review_git_repository(root.path()));
     let payload = ArtifactPayload::Markdown {
         markdown: "# Story Spec\n".to_string(),
         diff: None,
@@ -155,18 +203,14 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
         ProviderName::Codex,
         Arc::new(PromptRecordingProvider { input_tx }),
     );
-    let current_run = Arc::new(Mutex::new(None));
-    let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        WorkspaceRunRegistry::default(),
+        session_record.id.clone(),
         app_paths,
-        session_record: session_record.clone(),
-    };
+        session_record.clone(),
+    );
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
 
     handle_workspace_inbound_message(
@@ -178,8 +222,6 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
             engine,
             run_context,
             outbound_tx,
-            current_run,
-            workspace_runs,
             session_id: session_record.id,
         },
         WsInMessage::RetryInterruptedRun {
@@ -196,6 +238,46 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
         input.role,
         crate::protocol::contracts::AdapterRole::Reviewer
     );
+}
+
+/// W0-3 N5-3:小体积真实 git 仓(init+一次 commit)——规划审查窗口
+/// 目标锚点,与生产形态(评审目标=业务仓)一致,baseline 快照秒级。
+fn interrupted_review_git_repository(root: &std::path::Path) -> std::path::PathBuf {
+    let repo = root.join("review-repository");
+    std::fs::create_dir_all(&repo).expect("review repo dir");
+    std::fs::write(repo.join("README.md"), "review fixture\n").expect("review repo readme");
+    for arguments in [
+        vec![
+            "init".to_string(),
+            "-q".to_string(),
+            "--initial-branch=main".to_string(),
+        ],
+        vec!["add".to_string(), "-A".to_string()],
+        vec![
+            "commit".to_string(),
+            "-q".to_string(),
+            "-m".to_string(),
+            "review fixture baseline".to_string(),
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.email=review-fixture@example.invalid",
+                "-c",
+                "user.name=review fixture",
+            ])
+            .args(&arguments)
+            .status()
+            .expect("review repo git command spawns");
+        assert!(
+            status.success(),
+            "review repo git {arguments:?} must succeed"
+        );
+    }
+    repo
 }
 
 fn handler_interrupted_timeline_node(
@@ -225,4 +307,203 @@ fn handler_interrupted_timeline_node(
         },
         retry: None,
     }
+}
+
+/// A2b（Task 2.6 / tasks.md 2.6，设计 §4.3/§4.5）：LC 等待占用旧 provider
+/// 失败节点时，普通旁路一律后端真实入口拒收——`start_generation` 普通参数
+/// 与 `retry_interrupted_run` 均 typed 拒；`recoverable_interrupted_run` 不
+/// 投影被等待占用的节点（权威在后端入口，非 UI disabled）。
+#[tokio::test]
+async fn anchor_t07_waiting_blocks_plain_generation_and_interrupted_retry() {
+    use crate::product::models::{
+        LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord,
+        LcResumeRecoveryState, ProviderConversationRole,
+    };
+
+    let root = tempfile::tempdir().expect("app root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Waiting blocks bypass".to_string(),
+            aggregate_codebase: None,
+        })
+        .expect("story spec");
+    let session_record: WorkspaceSessionRecord = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: story.id,
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("workspace session");
+
+    // 与 live mismatch 同源落 waiting recovery：占用失败的 reviewer 节点
+    // （timeline_node_004，下方 timeline 为既有断连恢复形态）。
+    let expected = lifecycle
+        .get_workspace_session(&session_record.id)
+        .expect("expected record");
+    let waiting = LcResumeRecoveryRecord {
+        schema_version: 1,
+        recovery_id: "recovery_anchor_t07".to_string(),
+        failed_provider_node_id: "timeline_node_004".to_string(),
+        reason_code: "resume_fingerprint_mismatch".to_string(),
+        role: ProviderConversationRole::Reviewer,
+        provider: ProviderName::Codex,
+        superseded_native_session_id: Some("native-t07".to_string()),
+        previous_fingerprint_digest: Some("sha256:t07".to_string()),
+        previous_session_status: expected.status.clone(),
+        previous_stage: "cross_review".to_string(),
+        run_context: LcRecoveryRunContext::ReviewerRevision {
+            business: LcRecoveryBusinessContext {
+                entity_id: session_record.entity_id.clone(),
+                plan_id: None,
+                workspace_type: WorkspaceType::Story,
+                business_repository_physical_id: None,
+                business_repository_logical_id: None,
+                business_checkout_id: None,
+                business_repository_path: None,
+                source_story_ids: Vec::new(),
+                source_design_ids: Vec::new(),
+                plan_options_ref: None,
+                artifact_refs: Vec::new(),
+                review_refs: Vec::new(),
+                author_provider: ProviderName::ClaudeCode,
+                effective_reviewer_provider: Some(ProviderName::Codex),
+                original_node_id: Some("timeline_node_004".to_string()),
+                original_role_run_seq: None,
+            },
+            original_feedback: Some("reviewer 修订反馈".to_string()),
+        },
+        state: LcResumeRecoveryState::Waiting,
+        operation_id: None,
+        fresh_node_id: None,
+        fresh_native_session_id: None,
+        fresh_role_run_seq: None,
+        fresh_operations: Vec::new(),
+        detected_at: "2026-10-11T00:00:00Z".to_string(),
+        updated_at: "2026-10-11T00:00:00Z".to_string(),
+    };
+    lifecycle
+        .compare_and_save_lc_resume_state(&expected, waiting)
+        .expect("seed waiting recovery");
+
+    // manager 重建路径：from_record 携带 waiting recovery 重建 engine。
+    let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));
+    let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
+    let updated = lifecycle
+        .get_workspace_session(&session_record.id)
+        .expect("updated record");
+    let mut session = WorkspaceSession::from_record(updated);
+    session.stage = WorkspaceStage::PrepareContext;
+    let payload = ArtifactPayload::Markdown {
+        markdown: "# Story Spec\n".to_string(),
+        diff: None,
+    };
+    session.artifact = Some(payload.clone());
+    let mut workspace_engine =
+        WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), engine_tx, session);
+    workspace_engine.artifact_versions = vec![ArtifactVersion {
+        version: 1,
+        payload,
+        generated_by: ProviderName::ClaudeCode,
+        reviewed_by: None,
+        review_verdict: None,
+        confirmed_by: None,
+        is_current: true,
+        created_at: "2026-10-11T17:00:00Z".to_string(),
+        source_node_id: "timeline_node_002".to_string(),
+    }];
+    workspace_engine.timeline_nodes = vec![
+        handler_interrupted_timeline_node(
+            "timeline_node_002",
+            TimelineNodeType::AuthorRun,
+            TimelineNodeStatus::Completed,
+            WsWorkspaceStage::Running,
+        ),
+        handler_interrupted_timeline_node(
+            "timeline_node_004",
+            TimelineNodeType::ReviewerRun,
+            TimelineNodeStatus::Failed,
+            WsWorkspaceStage::CrossReview,
+        ),
+        handler_interrupted_timeline_node(
+            "timeline_node_005",
+            TimelineNodeType::AbortedByDisconnect,
+            TimelineNodeStatus::Failed,
+            WsWorkspaceStage::PrepareContext,
+        ),
+    ];
+
+    // 被等待占用的旧失败节点不投影（SessionState.recoverable_interrupted_run
+    // 为 None）。
+    assert!(
+        workspace_engine.recoverable_interrupted_run().is_none(),
+        "LC 等待占用的失败节点不得投影为可恢复"
+    );
+    let crate::web::workspace_ws_types::WsOutMessage::SessionState {
+        recoverable_interrupted_run,
+        lc_resume_recovery,
+        ..
+    } = workspace_engine.build_session_state()
+    else {
+        panic!("expected SessionState");
+    };
+    assert!(
+        recoverable_interrupted_run.is_none(),
+        "SessionState 不得投影被 LC 等待占用的恢复入口"
+    );
+    let recovery_dto = lc_resume_recovery.expect("waiting recovery must project");
+    assert_eq!(recovery_dto.state, LcResumeRecoveryState::Waiting);
+    assert!(
+        recovery_dto.allowed_actions.is_empty(),
+        "B 齐前 waiting allowed_actions 必须为空"
+    );
+
+    // 普通参数 generation：后端真实入口拒收（A/B 未齐无可启动路径）。
+    let plain_generation = workspace_engine
+        .start_generation(
+            ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            true,
+        )
+        .await;
+    let error = plain_generation.expect_err("waiting 期间普通 generation 必须被拒收");
+    assert!(
+        error.contains("LC_RESUME_RECOVERY_ACTIVE"),
+        "拒收错误必须携带稳定码 LC_RESUME_RECOVERY_ACTIVE: {error}"
+    );
+
+    // interrupted retry：typed 拒收（不受理被等待占用的旧 provider 失败节点）。
+    let interrupted_retry = workspace_engine
+        .retry_interrupted_run("timeline_node_004")
+        .await;
+    assert!(
+        matches!(
+            interrupted_retry,
+            Err(crate::product::workspace_engine::InterruptedRunRecoveryError::LcResumeWaiting)
+        ),
+        "waiting 期间 interrupted retry 必须 typed 拒收: {interrupted_retry:?}"
+    );
+
+    // 事实不变：durable record 仍是 waiting，未出生新节点/未改状态。
+    let after = lifecycle
+        .get_workspace_session(&session_record.id)
+        .expect("record after rejections");
+    let recovery = after.lc_resume_recovery.expect("recovery intact");
+    assert_eq!(recovery.state, LcResumeRecoveryState::Waiting);
+    assert_eq!(recovery.recovery_id, "recovery_anchor_t07");
 }

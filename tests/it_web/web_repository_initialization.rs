@@ -191,6 +191,7 @@ impl StreamingProviderAdapter for ScriptedClaude {
                 .expect("interaction event"),
         }
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -316,6 +317,7 @@ fn command_step_id(command_index: usize) -> &'static str {
 }
 
 include!("web_repository_initialization/operation_http.rs");
+include!("web_repository_initialization/resume_http.rs");
 include!("web_repository_initialization/cadence.rs");
 
 fn command_summaries() -> Vec<RepositoryInitializationCommandSummary> {

@@ -4,11 +4,25 @@ use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, StreamChunk, StreamingProviderInput,
 };
 use crate::product::models::ProviderName;
-use crate::web::workspace_ws_types::{
-    AuthorDecision, HumanConfirmDecision, ProviderConfigSnapshot, RevisionPath, StructuredFeedback,
-};
+use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "tests/author_revision_fresh.rs"]
+mod author_revision_fresh;
+#[path = "tests/c1_recovery_surface.rs"]
+mod c1_recovery_surface;
+mod campaign_stage3_advance;
+mod campaign_stage3_interactive;
+mod campaign_stage3_recovery_matrix;
+#[path = "tests/conversational_gate_protocol.rs"]
+mod conversational_gate_protocol;
+#[path = "tests/conversational_gate_stage.rs"]
+mod conversational_gate_stage;
+#[path = "tests/gateway_start.rs"]
+mod gateway_start;
+#[path = "tests/human_gate_revision_cancel.rs"]
+mod human_gate_revision_cancel;
 #[path = "tests/human_presentation.rs"]
 mod human_presentation;
 #[path = "tests/interrupted_run_recovery.rs"]
@@ -17,8 +31,19 @@ mod interrupted_run_recovery;
 mod linked_amendment;
 #[path = "tests/plan_repair_activation.rs"]
 mod plan_repair_activation;
+#[path = "tests/planning_resume.rs"]
+mod planning_resume;
 #[path = "tests/projection_artifact_batch.rs"]
 mod projection_artifact_batch;
+#[path = "tests/provider_run_events.rs"]
+mod provider_run_events;
+#[path = "tests/register_trust_entry.rs"]
+mod register_trust_entry;
+mod single_candidate_ir_reredrive;
+mod single_candidate_lc_admission;
+mod single_candidate_provider_run;
+mod single_candidate_scope_rejection;
+mod single_candidate_structure_reredrive;
 
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {
@@ -37,17 +62,50 @@ fn workflow_discipline_section(content: &str) -> &str {
         .expect("workflow_discipline section")
 }
 
+fn seed_legacy_project(app_paths: &ProductAppPaths) {
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "workspace websocket fixture".to_string(),
+            description: None,
+        })
+        .expect("create project");
+}
+
+/// REQ-PIB-02 测试夹具 git 仓库：`main` 分支+初始空提交（与 it_core/it_web
+/// 夹具同构）。裸目录无 git 仓库会令 author/门内修订/运行期预校验的基线解析
+/// fail-closed，run 在起步即以可观测错误终止。
+pub(crate) fn init_ws_test_git_repo(repo: &std::path::Path) {
+    for args in [
+        vec!["init", "--initial-branch", "main"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Test User"],
+        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(repo)
+            .status()
+            .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
+        assert!(status.success(), "git {} failed", args.join(" "));
+    }
+}
+
 #[test]
 fn context_note_is_only_valid_in_prepare_context() {
     let msg = WsInMessage::ContextNote {
         content: "补充上下文".to_string(),
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::PrepareContext
     ));
-    assert!(!is_message_valid_for_stage(&msg, &WorkspaceStage::Running));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &msg,
+        &WorkspaceStage::Running
+    ));
 }
 
 #[test]
@@ -55,13 +113,19 @@ fn start_generation_is_only_valid_in_prepare_context() {
     let msg = WsInMessage::StartGeneration {
         provider_config: provider_config(),
         reviewer_enabled: false,
+        resume_recovery: None,
     };
 
-    assert!(is_message_valid_for_stage(
+    assert!(is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
         &msg,
         &WorkspaceStage::PrepareContext
     ));
-    assert!(!is_message_valid_for_stage(&msg, &WorkspaceStage::Running));
+    assert!(!is_message_valid_for_stage_with_flow(
+        WorkItemPlanFlowKind::Legacy,
+        &msg,
+        &WorkspaceStage::Running
+    ));
 }
 
 #[test]
@@ -69,6 +133,8 @@ fn hello_and_ping_are_valid_for_every_stage() {
     let hello = WsInMessage::Hello {
         session_id: "session-1".to_string(),
         last_seen_node_id: Some("node-1".to_string()),
+        role: None,
+        after_event_seq: None,
     };
     let ping = WsInMessage::Ping;
 
@@ -82,18 +148,27 @@ fn hello_and_ping_are_valid_for_every_stage() {
         WorkspaceStage::HumanConfirm,
         WorkspaceStage::Completed,
     ] {
-        assert!(is_message_valid_for_stage(&hello, &stage));
-        assert!(is_message_valid_for_stage(&ping, &stage));
+        assert!(is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::Legacy,
+            &hello,
+            &stage
+        ));
+        assert!(is_message_valid_for_stage_with_flow(
+            WorkItemPlanFlowKind::Legacy,
+            &ping,
+            &stage
+        ));
     }
 }
 
 #[tokio::test]
 async fn idle_timeout_sends_close_control_after_client_quiet() {
-    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let (tx, mut rx) = mpsc::channel(1);
 
     let task = spawn_idle_timeout_task(
-        last_client_message_at,
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(AtomicBool::new(false)),
         tx,
         Arc::new(|| false),
         std::time::Duration::from_millis(5),
@@ -111,13 +186,14 @@ async fn idle_timeout_sends_close_control_after_client_quiet() {
 
 #[tokio::test]
 async fn idle_timeout_waits_while_provider_run_is_active() {
-    let last_client_message_at = Arc::new(Mutex::new(tokio::time::Instant::now()));
     let (tx, mut rx) = mpsc::channel(1);
     let active = Arc::new(AtomicBool::new(true));
     let active_for_task = active.clone();
 
     let task = spawn_idle_timeout_task(
-        last_client_message_at,
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(Mutex::new(ActivityTimestamp::now())),
+        Arc::new(AtomicBool::new(false)),
         tx,
         Arc::new(move || active_for_task.load(Ordering::SeqCst)),
         std::time::Duration::from_millis(5),
@@ -140,237 +216,14 @@ async fn idle_timeout_waits_while_provider_run_is_active() {
     task.abort();
 }
 
-#[test]
-fn revision_path_messages_are_only_valid_in_review_decision() {
-    let select_path = WsInMessage::SelectRevisionPath {
-        path: RevisionPath::ReviseWithContext,
-        extra_context: Some("补充修改约束".to_string()),
-    };
-    let legacy_decision = WsInMessage::ReviewDecisionResponse {
-        decision: "continue".to_string(),
-        extra_context: None,
-    };
+#[path = "tests/outbound_writer_liveness.rs"]
+mod outbound_writer_liveness;
 
-    assert!(is_message_valid_for_stage(
-        &select_path,
-        &WorkspaceStage::ReviewDecision
-    ));
-    assert!(is_message_valid_for_stage(
-        &legacy_decision,
-        &WorkspaceStage::ReviewDecision
-    ));
-    assert!(!is_message_valid_for_stage(
-        &select_path,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(!is_message_valid_for_stage(
-        &legacy_decision,
-        &WorkspaceStage::HumanConfirm
-    ));
-}
+include!("tests/legacy_stage_matrix.inc.rs");
 
-#[test]
-fn author_decision_is_only_valid_in_author_confirm() {
-    let msg = WsInMessage::AuthorDecision {
-        decision: AuthorDecision::Accept,
-    };
-
-    assert!(is_message_valid_for_stage(
-        &msg,
-        &WorkspaceStage::AuthorConfirm
-    ));
-    assert!(!is_message_valid_for_stage(
-        &msg,
-        &WorkspaceStage::PrepareContext
-    ));
-    assert!(!is_message_valid_for_stage(
-        &msg,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(requires_stage_validation(&msg));
-    assert_eq!(message_type(&msg), "author_decision");
-}
-
-#[test]
-fn human_confirm_messages_are_only_valid_in_human_confirm() {
-    let human_confirm = WsInMessage::HumanConfirm {
-        decision: HumanConfirmDecision::RequestChange,
-        payload: Some(serde_json::json!({"description": "补充验收条件"})),
-    };
-    let legacy_request_revision = WsInMessage::RequestRevision {
-        feedback: StructuredFeedback {
-            feedback_types: vec!["clarity".to_string()],
-            description: "补充验收条件".to_string(),
-            target_artifact_version: Some(1),
-        },
-    };
-    let legacy_confirm = WsInMessage::Confirm;
-
-    assert!(is_message_valid_for_stage(
-        &human_confirm,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(is_message_valid_for_stage(
-        &legacy_request_revision,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(is_message_valid_for_stage(
-        &legacy_confirm,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(!is_message_valid_for_stage(
-        &human_confirm,
-        &WorkspaceStage::ReviewDecision
-    ));
-    assert!(!is_message_valid_for_stage(
-        &legacy_request_revision,
-        &WorkspaceStage::ReviewDecision
-    ));
-}
-
-#[test]
-fn plan_repair_ws_commands_are_only_valid_in_human_confirm() {
-    let confirm = WsInMessage::ConfirmPlanAmendment {
-        amendment_id: "plan_amendment_0001".to_string(),
-    };
-    let cancel = WsInMessage::CancelPlanAmendment {
-        amendment_id: "plan_amendment_0001".to_string(),
-        reason: Some("用户取消".to_string()),
-    };
-
-    assert_eq!(message_type(&confirm), "confirm_plan_amendment");
-    assert_eq!(message_type(&cancel), "cancel_plan_amendment");
-    assert!(is_message_valid_for_stage(
-        &confirm,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(is_message_valid_for_stage(
-        &cancel,
-        &WorkspaceStage::HumanConfirm
-    ));
-    assert!(!is_message_valid_for_stage(
-        &confirm,
-        &WorkspaceStage::Running
-    ));
-    assert!(!is_message_valid_for_stage(
-        &cancel,
-        &WorkspaceStage::Completed
-    ));
-    assert!(requires_stage_validation(&cancel));
-    assert_eq!(
-        serde_json::from_value::<WsInMessage>(serde_json::to_value(&confirm).unwrap()).unwrap(),
-        confirm
-    );
-    assert_eq!(
-        serde_json::from_value::<WsInMessage>(serde_json::to_value(&cancel).unwrap()).unwrap(),
-        cancel
-    );
-}
-
-#[test]
-fn completed_stage_rejects_business_messages() {
-    assert!(!is_message_valid_for_stage(
-        &WsInMessage::Abort,
-        &WorkspaceStage::Completed
-    ));
-    assert!(!is_message_valid_for_stage(
-        &WsInMessage::ContextNote {
-            content: "late note".to_string()
-        },
-        &WorkspaceStage::Completed
-    ));
-}
-
-#[test]
-fn control_and_legacy_messages_do_not_require_stage_lock_validation() {
-    assert!(!requires_stage_validation(&WsInMessage::Abort));
-    assert!(!requires_stage_validation(
-        &WsInMessage::PermissionResponse {
-            id: "permission-1".to_string(),
-            approved: true,
-            reason: None,
-        }
-    ));
-    assert!(!requires_stage_validation(&WsInMessage::ChoiceResponse {
-        id: "choice-1".to_string(),
-        selected_option_ids: vec!["continue".to_string()],
-        free_text: None,
-        answers: vec![],
-    }));
-    assert!(!requires_stage_validation(&WsInMessage::UserMessage {
-        content: "legacy generation request".to_string(),
-    }));
-    assert!(!requires_stage_validation(&WsInMessage::Rollback {
-        checkpoint_id: "cp_001".to_string(),
-    }));
-    assert!(!requires_stage_validation(&WsInMessage::Hello {
-        session_id: "session-1".to_string(),
-        last_seen_node_id: None,
-    }));
-    assert!(!requires_stage_validation(&WsInMessage::Ping));
-    assert!(requires_stage_validation(&WsInMessage::ContextNote {
-        content: "new protocol action".to_string(),
-    }));
-}
-
-#[test]
-fn choice_response_message_type_is_reported_for_protocol_errors() {
-    assert_eq!(
-        message_type(&WsInMessage::ChoiceResponse {
-            id: "choice-1".to_string(),
-            selected_option_ids: vec!["continue".to_string()],
-            free_text: None,
-            answers: vec![],
-        }),
-        "choice_response"
-    );
-}
-
-#[test]
-fn missing_active_run_error_uses_protocol_error() {
-    let error = missing_active_run_error("choice_response", "choice-1");
-
-    match error {
-        WsOutMessage::ProtocolError {
-            code,
-            message,
-            context,
-        } => {
-            assert_eq!(code, "ACTIVE_RUN_NOT_FOUND");
-            assert!(message.contains("choice_response"));
-            assert_eq!(
-                context
-                    .as_ref()
-                    .and_then(|value| value.get("id"))
-                    .and_then(|value| value.as_str()),
-                Some("choice-1")
-            );
-        }
-        other => panic!("expected protocol error, got {other:?}"),
-    }
-}
-
-#[test]
-fn revision_path_maps_to_existing_review_decision_contract() {
-    assert_eq!(
-        map_revision_path(RevisionPath::Revise, Some("ignored".to_string())),
-        ("continue".to_string(), None)
-    );
-    assert_eq!(
-        map_revision_path(
-            RevisionPath::ReviseWithContext,
-            Some("补充约束".to_string())
-        ),
-        (
-            "continue_with_context".to_string(),
-            Some("补充约束".to_string())
-        )
-    );
-    assert_eq!(
-        map_revision_path(RevisionPath::SkipToHuman, Some("ignored".to_string())),
-        ("human_intervene".to_string(), None)
-    );
-}
+// 退役留档（T5/REQ-RET-02）：`revision_path_maps_to_existing_review_decision_contract` 直接驱动已删除的 legacy 决策面，
+// 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
+// （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
 #[tokio::test]
 async fn start_generation_refreshes_stale_provider_guidance_before_prompting_author() {
@@ -381,7 +234,10 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
 
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交）。
+    init_ws_test_git_repo(repo.path());
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -389,15 +245,18 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-ws-guidance-refresh-repository".to_string(),
         })
         .unwrap();
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Provider guidance refresh".to_string(),
             description: Some("旧 context 不能把 Codex 交互纪律注入 Claude Code run".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -407,6 +266,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id.clone(),
             title: "Provider guidance Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -416,13 +276,16 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .await
         .expect("initial context");
     assert!(
         session_record.messages[0]
@@ -447,18 +310,15 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         Arc::new(PromptRecordingProvider { input_tx }),
     );
 
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
-        app_paths: app_paths.clone(),
-        session_record: session_record.clone(),
-    };
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
+        app_paths.clone(),
+        session_record.clone(),
+    );
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -468,8 +328,6 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         engine,
         run_context,
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: session_record.id,
     };
 
@@ -483,6 +341,7 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
             reviewer_enabled: true,
+            resume_recovery: None,
         },
     )
     .await;
@@ -508,6 +367,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -515,17 +375,20 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-ws-provider-select-repository".to_string(),
         })
         .unwrap();
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Provider guidance select refresh".to_string(),
             description: Some(
                 "prepare context should reflect selected author provider".to_string(),
             ),
             change_id: None,
+            base_branch: None,
         })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -535,6 +398,7 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "Provider guidance Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -544,13 +408,16 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .await
         .expect("initial context");
     assert!(
         session_record.messages[0]
@@ -568,18 +435,15 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
         engine_tx,
         session,
     )));
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(ProviderRegistry::new()),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(ProviderRegistry::new()),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
         app_paths,
-        session_record: session_record.clone(),
-    };
+        session_record.clone(),
+    );
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -589,8 +453,6 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
         engine,
         run_context,
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: session_record.id,
     };
 
@@ -637,7 +499,10 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
 
     let root = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
+    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交）。
+    init_ws_test_git_repo(repo.path());
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
@@ -645,15 +510,18 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             path: repo.path().to_path_buf(),
             default_policy_preset: None,
             default_provider_mode: None,
+            idempotency_key: "workspace-ws-pi-permission-repository".to_string(),
         })
         .unwrap();
     IssueStore::new(app_paths.clone())
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
+            logical_codebase_id: None,
             title: "Pi permission bypass".to_string(),
             description: Some("stale Supervised mode must not reach Pi".to_string()),
             change_id: None,
+            base_branch: None,
         })
         .unwrap();
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -663,6 +531,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             issue_id: "issue_0001".to_string(),
             repository_id: repository.id,
             title: "Pi permission Story Spec".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -672,10 +541,12 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 1,
             superpowers_enabled: true,
             openspec_enabled: true,
+            work_item_plan_options: None,
         })
         .unwrap();
     let session_record = lifecycle
@@ -689,6 +560,7 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         )
         .unwrap();
     let session_record = ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
+        .await
         .expect("initial context");
 
     let checkpoint_store = Arc::new(CheckpointStore::new(root.path().join("checkpoints")));
@@ -707,18 +579,15 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         ProviderName::Pi,
         Arc::new(PromptRecordingProvider { input_tx }),
     );
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: session_record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
         app_paths,
-        session_record: session_record.clone(),
-    };
+        session_record.clone(),
+    );
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
     let inbound_context = WorkspaceInboundContext {
         app_state: WebAppState::new(
@@ -728,8 +597,6 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         engine,
         run_context,
         outbound_tx,
-        current_run,
-        workspace_runs,
         session_id: session_record.id,
     };
 
@@ -804,6 +671,7 @@ impl StreamingProviderAdapter for PromptRecordingProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -863,6 +731,7 @@ impl StreamingProviderAdapter for PiFailureProvider {
                 .await;
         });
         Ok(ProviderSession {
+            native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
@@ -918,10 +787,12 @@ async fn assert_pi_failure_does_not_start_alternate(mode: PiFailureMode) {
             entity_id: "story_0001".to_string(),
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::Pi,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .unwrap();
     let mut session = WorkspaceSession::from_record(record.clone());
@@ -950,18 +821,15 @@ async fn assert_pi_failure_does_not_start_alternate(mode: PiFailureMode) {
             starts: alternate_starts.clone(),
         }),
     );
-    let current_run = Arc::new(Mutex::new(None));
     let workspace_runs = WorkspaceRunRegistry::default();
-    let run_context = ProviderRunContext {
-        provider_registry: Arc::new(registry),
-        engine: engine.clone(),
-        current_run: current_run.clone(),
-        workspace_runs: workspace_runs.clone(),
-        session_id: record.id.clone(),
-        next_run_id: Arc::new(Mutex::new(0)),
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        record.id.clone(),
         app_paths,
-        session_record: record,
-    };
+        record,
+    );
     let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(8);
 
     spawn_provider_run_from_handler(
@@ -1016,6 +884,7 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
             issue_id: "issue_0001".to_string(),
             repository_id: "repo_0001".to_string(),
             title: "Story".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle
@@ -1024,6 +893,7 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
             issue_id: "issue_0001".to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+            aggregate_codebase: None,
         })
         .unwrap();
 
@@ -1032,6 +902,8 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
         code: "write_scope_required".to_string(),
         message: "work item must have at least one exclusive_write_scope".to_string(),
         work_item_ids: vec!["wi_001".to_string()],
+        // F1.2：fixture 沿旧 record 形态（kind=None）。
+        kind: None,
     };
     let plan = lifecycle
         .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
@@ -1063,10 +935,12 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
             entity_id: plan.id,
             workspace_type: WorkspaceType::WorkItemPlan,
             author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
+            work_item_plan_options: None,
         })
         .unwrap();
 
@@ -1082,4 +956,181 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
         .expect("revision_feedback should be set when plan has findings");
     assert!(feedback.contains("write_scope_required"));
     assert!(feedback.contains("work item must have at least one exclusive_write_scope"));
+}
+
+#[tokio::test]
+async fn hello_without_cursor_baseline_keeps_durable_automation_ownership() {
+    // 真实链 2026-10-24（workspace_session_auto_261ab5db 现场）：enabled
+    // enrollment 精确绑定的 stopped_needs_human 会话，驾驶舱观察/驾驶连接
+    // 无 cursor Hello 会收到一条未经 `project_automation_ownership` 覆盖的
+    // `engine.build_session_state()` 基线帧——automation 落引擎缺省
+    // client/off（伪 client），前端 automationManaged 判 false、收件箱
+    // 呈现「接管/确认接管」；服务端 takeover 却按 durable 精确绑定拒 409
+    // `workspace_session_takeover_not_allowed`，形成「要人工接管又不许
+    // 接管」死路。契约（P0 1.2 / manager `project_automation_ownership`
+    // 文档）要求对外 SessionState 帧一律以 durable enrollment 覆盖归属——
+    // 本测试钉死该出口：Hello 无 cursor 基线帧必须携带 server/enabled。
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::json_store::write_json;
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, WorkItemPlanSessionOptions,
+    };
+    use crate::product::models::IssueWorkItemPlanOptions;
+    use crate::product::models::WorkspaceSessionStatus;
+    use crate::product::models::automation::{
+        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, PlanApprovalPolicy,
+    };
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunPolicy};
+
+    let inner = crate::web::handlers::automation_enrollment_test_support::seed_fixture(1, true);
+    let root_path = inner._root.path().to_path_buf();
+    let app_paths = inner.paths.clone();
+    let lifecycle = inner.lifecycle.clone();
+    const PROJECT: &str = "project_0001";
+    const ISSUE: &str = "issue_0001";
+    let store = IssueAutomationStore::new(app_paths.clone());
+
+    store
+        .compare_and_set(
+            PROJECT,
+            ISSUE,
+            None,
+            EnrollmentWriteCommand::Enable {
+                command_id: None,
+                selection_key: "hello-baseline-ownership".to_string(),
+                source: EnrollmentSource {
+                    stories: Vec::new(),
+                    designs: Vec::new(),
+                },
+                options: EnrollmentOptions {
+                    author_provider: ProviderName::Fake,
+                    reviewer_provider: ProviderName::Fake,
+                    review_rounds: 0,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    plan_approval: PlanApprovalPolicy::Auto,
+                    plan_options: IssueWorkItemPlanOptions {
+                        include_integration_tests: false,
+                        include_e2e_tests: false,
+                        force_frontend_backend_split: false,
+                        require_execution_plan_confirm: false,
+                    },
+                },
+                target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                    repository_id: "repo-1".to_string(),
+                },
+            },
+        )
+        .expect("enable enrollment");
+
+    let mut record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: PROJECT.to_string(),
+            issue_id: ISSUE.to_string(),
+            entity_id: "plan_bound_hello".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: None,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::AutoIfValid,
+                rollout_snapshot: false,
+            }),
+        })
+        .expect("create session");
+    record.status = WorkspaceSessionStatus::StoppedNeedsHuman;
+    record.single_candidate_phase = Some(crate::product::models::SingleCandidatePhase::Approval);
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: Some(0),
+    });
+    write_json(
+        &app_paths
+            .issue_lifecycle_root(PROJECT, ISSUE)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist stopped record");
+    store
+        .bind_plan(PROJECT, ISSUE, 1, "plan_bound_hello", &record.id)
+        .expect("bind managed plan");
+
+    let checkpoint_store = Arc::new(CheckpointStore::new(root_path.join("checkpoints")));
+    let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
+    let session = WorkspaceSession::from_record(record.clone());
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        engine_tx,
+        session,
+    )));
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(ProviderRegistry::new()),
+        engine.clone(),
+        WorkspaceRunRegistry::default(),
+        record.id.clone(),
+        app_paths.clone(),
+        record.clone(),
+    );
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let inbound_context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root_path.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+        ),
+        engine,
+        run_context,
+        outbound_tx,
+        session_id: record.id.clone(),
+    };
+
+    handle_workspace_inbound_message(
+        inbound_context,
+        WsInMessage::Hello {
+            session_id: record.id.clone(),
+            last_seen_node_id: None,
+            role: Some(crate::web::workspace_ws_types::HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+
+    let mut saw_session_state = false;
+    for _ in 0..8 {
+        let Ok(Some(outbound)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv()).await
+        else {
+            break;
+        };
+        let OutboundControl::Text(json) = outbound else {
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&json).expect("frame json");
+        if frame["type"] != "session_state" {
+            continue;
+        }
+        saw_session_state = true;
+        assert_eq!(
+            frame["automation"]["owner"], "server",
+            "hello baseline must project durable ownership: {frame}"
+        );
+        assert_eq!(
+            frame["automation"]["enabled"], true,
+            "hello baseline must project durable ownership: {frame}"
+        );
+    }
+    assert!(
+        saw_session_state,
+        "hello without cursor must send a session_state baseline"
+    );
 }

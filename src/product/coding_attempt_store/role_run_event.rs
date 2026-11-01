@@ -251,3 +251,584 @@ impl super::CodingAttemptStore {
         Ok(artifact_ref)
     }
 }
+
+// ─── C2 Task 9（#2/#9，REQ-CVT-01/02/05）：计划命令与实际命令并列证据 ───
+
+/// 计划命令与实际命令并列证据（DTO）。actual_* 全部来自 role-run JSONL 的
+/// ExecutionEvent；缺失字段保持 None（前端显示"未记录"），不推断补写。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerificationCommandEvidence {
+    pub check_id: String,
+    /// 计划合同字面命令。
+    pub planned_command: Option<String>,
+    /// 无命令 check 的人工说明。
+    pub planned_manual_instruction: Option<String>,
+    /// role-run JSONL 派生的实际执行命令；None → 前端显示"未记录"。
+    pub actual_command: Option<String>,
+    pub actual_cwd: Option<String>,
+    pub exit_code: Option<i32>,
+    pub test_execution_count: Option<u64>,
+    pub environment_summary: Option<String>,
+    /// 批2 Task 15（REQ-ENV-CHECK-01）：匹配事件原始输出的有界尾摘
+    /// （原始输出引用）。始终保留失败/通过的可观测片段，供人工对账；
+    /// 无输出字段 → None（"未记录"），不推断补写。
+    pub raw_output_excerpt: Option<String>,
+    /// 批2 Task 15：CHECK 失败四分类（仅非零退出码时呈现）。分类只是
+    /// 呈现辅助：不存在"沙箱失败"类——去沙箱后失败是真实失败，按事实
+    /// 归类供 Coder 返修与人工判断，原始输出引用始终保留可纠偏。
+    pub failure_class: Option<VerificationFailureClass>,
+    /// "实际执行命令与计划不一致"（同一可执行族下参数差异也算）。
+    pub mismatch: bool,
+}
+
+/// 批2 Task 15（D §7）：CHECK 失败呈现分类。缺依赖／认证失败／权限失败／
+/// 断言失败分别呈现，未命中已知模式归 Unclassified（明确"未分类"，
+/// 不冒充任何已知类）。枚举刻意不含"沙箱"类：HostCoding 全开语义下
+/// 失败不得笼统归「沙箱失败」，也不得借分类假绿。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationFailureClass {
+    MissingDependency,
+    AuthFailure,
+    PermissionFailure,
+    AssertionFailure,
+    Unclassified,
+}
+
+impl VerificationFailureClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingDependency => "missing_dependency",
+            Self::AuthFailure => "auth_failure",
+            Self::PermissionFailure => "permission_failure",
+            Self::AssertionFailure => "assertion_failure",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+/// 批2 Task 15：四分类＋未分类的呈现文案。主路径一律指向 Coder 重跑
+/// 原计划命令（唤回原 Coder，平台不代跑）；A′（验证处理）只在文案中
+/// 作为外部硬件／人工／临时缺项的补充出现。文案不得建议忽略 finding、
+/// 自动改计划或泛化重试。
+pub fn verification_failure_class_copy(class: VerificationFailureClass) -> &'static str {
+    match class {
+        VerificationFailureClass::MissingDependency => {
+            "缺依赖：命令因依赖缺失而失败。由 Coder 在返修中安装或补齐依赖后重跑原计划命令；平台不代跑，也不归为沙箱失败。"
+        }
+        VerificationFailureClass::AuthFailure => {
+            "认证失败：命令因凭据、令牌或登录态缺失被拒。若缺外部账号或登录态，属外部／临时缺项，可经人工转入验证处理补充；Coder 自可执行的认证前置修复后重跑原计划命令。"
+        }
+        VerificationFailureClass::PermissionFailure => {
+            "权限失败：命令因文件系统或系统权限被拒。由 Coder 核对路径与权限事实后重跑原计划命令；权限事实保留在原始输出中，不归为沙箱失败。"
+        }
+        VerificationFailureClass::AssertionFailure => {
+            "断言失败：命令真实执行且测试或断言未通过，这是可观测的失败结果，不是环境问题。由 Coder 修复实现或测试后重跑原计划命令。"
+        }
+        VerificationFailureClass::Unclassified => {
+            "未分类失败：退出码非零且原始输出未命中已知分类。保留原始输出引用供人工判断；不得归为沙箱失败，也不得视为通过，可由 Coder 重跑原计划命令复核。"
+        }
+    }
+}
+
+/// C2 Task 9：三类文案 reason code（验证类等待面与前端共用）。
+pub const VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH: &str = "actual_command_mismatch";
+pub const VERIFICATION_EVIDENCE_PLAN_UNDECLARED: &str = "plan_undeclared_path_or_command";
+pub const VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE: &str = "plan_path_unexecutable";
+
+/// 三类文案（全新中文口径）：不一致→指向重跑原计划命令；计划未声明→
+/// 指向计划反馈；计划路径不可执行→指向计划修订或验证处理。文案不建议
+/// 升级运行时版本、泛化重试或"忽略 finding"。
+pub fn verification_evidence_copy(reason_code: &str) -> Option<&'static str> {
+    match reason_code {
+        VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH => Some(
+            "实际执行命令与计划不一致：coder 未按计划命令执行。可在并列证据下方点击\"重跑原计划命令\"，以计划合同字面命令发起返修。",
+        ),
+        VERIFICATION_EVIDENCE_PLAN_UNDECLARED => Some(
+            "计划未声明该路径或命令：coder 执行了计划合同之外的路径或命令。请通过计划反馈修订计划，使合同声明与实际执行面一致。",
+        ),
+        VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE => Some(
+            "计划路径不可执行：计划命令引用的路径在仓库中不存在或不可执行。请发起计划修订，或转入验证处理记录受限豁免。",
+        ),
+        _ => None,
+    }
+}
+
+impl super::CodingAttemptStore {
+    /// 派生并列证据：planned 来自计划合同 VerificationCheck；actual 取
+    /// attempt 全部 role-run JSONL 中与计划命令同可执行族（首 token 相同）
+    /// 的最新一条 ExecutionEvent；无匹配 → actual 为 None（"未记录"），
+    /// 不推断补写、不归类计划缺陷。
+    pub fn verification_command_evidence(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        check: &crate::product::work_item_contract::VerificationCheck,
+    ) -> Result<VerificationCommandEvidence, ProductStoreError> {
+        let mut evidence = VerificationCommandEvidence {
+            check_id: check.check_id.clone(),
+            planned_command: check.command.clone(),
+            planned_manual_instruction: check.manual_instruction.clone(),
+            actual_command: None,
+            actual_cwd: None,
+            exit_code: None,
+            test_execution_count: None,
+            environment_summary: None,
+            raw_output_excerpt: None,
+            failure_class: None,
+            mismatch: false,
+        };
+        let Some(planned_command) = check.command.as_deref() else {
+            return Ok(evidence);
+        };
+        let planned_head = first_command_token(planned_command);
+        let mut matched: Option<(String, serde_json::Value, String)> = None;
+        for role_run in self.list_role_runs(project_id, issue_id, attempt_id)? {
+            for event in
+                self.list_role_run_events(project_id, issue_id, attempt_id, &role_run.id)?
+            {
+                if event.event_type != CodingRoleRunEventType::ExecutionEvent {
+                    continue;
+                }
+                let Some(command) = event
+                    .payload
+                    .get("command")
+                    .and_then(|value| value.as_str())
+                else {
+                    continue;
+                };
+                if first_command_token(command) != planned_head {
+                    continue;
+                }
+                // list_role_run_events 按 sequence 升序，role_runs 按 id 升序：
+                // 后写者覆盖，最终保留同族最新一条；携带 role_run_id 供
+                // 超限规范化输出的 artifact 取值（审查修复轮1 F1）。
+                matched = Some((
+                    command.to_string(),
+                    event.payload.clone(),
+                    role_run.id.clone(),
+                ));
+            }
+        }
+        if let Some((command, payload, role_run_id)) = matched {
+            evidence.actual_command = Some(command.clone());
+            evidence.actual_cwd = payload
+                .get("cwd")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            evidence.exit_code = payload
+                .get("exit_code")
+                .and_then(|value| value.as_i64())
+                .map(|code| code as i32);
+            // T15：原始输出引用（有界尾摘）＋测试数量（显式字段优先，
+            // 否则从输出解析；0 条测试执行呈现 Some(0) 而非 None——
+            // non_zero 要求下的假绿必须可对账发现）。取值接受字符串与
+            // 超限规范化对象两种形态（审查修复轮1 F1）：对象时读
+            // artifact_ref 指向的完整落盘文本（失败回退 preview），同一
+            // 文本供 excerpt／数量／分类。
+            let output = self.role_run_event_output_text(
+                project_id,
+                issue_id,
+                attempt_id,
+                &role_run_id,
+                payload.get("output"),
+            );
+            if let Some(output) = output.as_deref() {
+                evidence.raw_output_excerpt = Some(bounded_output_excerpt(output));
+            }
+            evidence.test_execution_count = payload
+                .get("test_execution_count")
+                .and_then(|value| value.as_u64())
+                .or_else(|| output.as_deref().and_then(parse_test_execution_count));
+            // T15：非零退出码才产生失败分类（通过无分类）；分类只做呈现
+            // 区分，不存在「沙箱失败」类。
+            if evidence.exit_code.is_some_and(|code| code != 0) {
+                evidence.failure_class = Some(classify_verification_failure(
+                    output.as_deref().unwrap_or(""),
+                ));
+            }
+            evidence.mismatch = command != planned_command;
+        }
+        Ok(evidence)
+    }
+
+    /// 审查修复轮1 F1：ExecutionEvent `output` 取值辅助——字符串原样；
+    /// append 期超限（>ROLE_RUN_EVENT_INLINE_STRING_LIMIT）规范化对象
+    /// {preview, artifact_ref, truncated} 时读 artifact_ref 指向的完整
+    /// 落盘文本，读取失败回退 preview（有界）；两种形态都取不到 → None。
+    fn role_run_event_output_text(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        value: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        let value = value?;
+        if let Some(text) = value.as_str() {
+            return Some(text.to_string());
+        }
+        let object = value.as_object()?;
+        let preview = object
+            .get("preview")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let artifact_ref = object
+            .get("artifact_ref")
+            .and_then(|value| value.as_str())?;
+        self.read_role_run_event_artifact_text(
+            project_id,
+            issue_id,
+            attempt_id,
+            role_run_id,
+            artifact_ref,
+        )
+        .ok()
+        .or(preview)
+    }
+
+    /// 审查修复轮1 F1：读取 role-run 事件 artifact 全文。artifact_ref 形如
+    /// `artifacts/role-run-events/<role_run_id>/<seq>_<field>.txt`（相对
+    /// attempt 目录）；先验证 ref 归属该 role run 再拼路径读文件。
+    fn read_role_run_event_artifact_text(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        artifact_ref: &str,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_artifact_ref(artifact_ref)?;
+        let expected_prefix = format!("artifacts/role-run-events/{role_run_id}/");
+        if !artifact_ref.starts_with(&expected_prefix) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "coding_role_run_event_artifact",
+                reason: format!(
+                    "artifact ref mismatch: expected prefix {expected_prefix}, got {artifact_ref}"
+                ),
+            });
+        }
+        let path = self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join(artifact_ref);
+        fs::read_to_string(&path)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))
+    }
+}
+
+/// 原始输出引用的尾摘上界（保留失败摘要行——测试结果/错误通常在尾部）。
+const RAW_OUTPUT_EXCERPT_LIMIT: usize = 1200;
+
+/// 有界尾摘：超限时保留尾部并显式标注前文截断；UTF-8 字符边界安全。
+fn bounded_output_excerpt(output: &str) -> String {
+    if output.len() <= RAW_OUTPUT_EXCERPT_LIMIT {
+        return output.to_string();
+    }
+    let mut start = output.len() - RAW_OUTPUT_EXCERPT_LIMIT;
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…（前文截断）{}", &output[start..])
+}
+
+/// 从原始输出解析测试执行数量（批2 Bug45 F21）：只取本调用原始输出中
+/// **最后一条**可识别的 runner 汇总行，而不是跨行全局累加——父子/嵌套
+/// runner 的多条摘要不得叠加成伪总数。每条汇总行内部先做
+/// `<n> passed` ＋ `<n> failed` 合计。
+///
+/// 识别口径（行首锚定，避免把日志里的 `3 passed` 误当测试数）：
+/// - cargo：`test result: ...`（每个 test binary 一条，取最后一条）；
+/// - jest：`Tests: ...`；vitest：`Tests  ...`；
+/// - pytest：`... N passed[, M failed] in Xs`（含 `====` 装饰行）。
+///   jest/vitest 的 `Test Files`／`Test Suites`／`Snapshots` 行是
+///   suite/file/snapshot 计数，显式忽略。
+///
+/// 无汇总行时回退 `running N tests`（如 cargo `running 0 tests`），仍取
+/// 最后一条；再无命中 → None（“未记录”，不推断补写）。
+fn parse_test_execution_count(output: &str) -> Option<u64> {
+    let mut last_summary: Option<u64> = None;
+    for line in output.lines() {
+        if let Some(count) = runner_summary_line_count(line) {
+            last_summary = Some(count);
+        }
+    }
+    if last_summary.is_some() {
+        return last_summary;
+    }
+    let mut last_declared: Option<u64> = None;
+    for line in output.lines() {
+        if let Some(count) = declared_test_count(line) {
+            last_declared = Some(count);
+        }
+    }
+    last_declared
+}
+
+/// 单行 runner 汇总的测试数（`passed`+`failed` 合计）；非汇总行 None。
+/// pytest 的 `no tests ran in ...` 呈现为 `Some(0)`（0 条执行是事实）。
+fn runner_summary_line_count(line: &str) -> Option<u64> {
+    if is_runner_summary_header_line(line) {
+        return None;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    let is_cargo = lowered.starts_with("test result:");
+    let is_jest = lowered.starts_with("tests:");
+    let is_vitest = lowered.starts_with("tests ") || lowered.starts_with("tests\t");
+    let is_pytest = is_pytest_summary_line(trimmed);
+    if !(is_cargo || is_jest || is_vitest || is_pytest) {
+        return None;
+    }
+    if let Some(total) = passed_failed_total(trimmed) {
+        return Some(total);
+    }
+    if is_pytest && lowered.contains("no tests ran") {
+        return Some(0);
+    }
+    None
+}
+
+/// pytest 汇总行：去掉 `=`/`-`/空白装饰后以数字开头（或 `no tests ran`），
+/// 且携带 pytest 的 `in <duration>` 标记。
+fn is_pytest_summary_line(trimmed: &str) -> bool {
+    let stripped =
+        trimmed.trim_start_matches(|c: char| c == '=' || c == '-' || c == '_' || c.is_whitespace());
+    let lowered = stripped.to_ascii_lowercase();
+    let mentions_outcome = lowered.contains(" passed")
+        || lowered.contains(" failed")
+        || lowered.starts_with("no tests ran");
+    let starts_with_count = stripped
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_digit());
+    mentions_outcome
+        && lowered.contains(" in ")
+        && (starts_with_count || lowered.starts_with("no tests ran"))
+}
+
+/// 行内 `<n> passed` / `<n> failed` 求和；无命中 None。
+fn passed_failed_total(line: &str) -> Option<u64> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let mut total = 0u64;
+    let mut matched = false;
+    for pair in tokens.windows(2) {
+        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+        let Ok(count) = count.parse::<u64>() else {
+            continue;
+        };
+        let normalized = pair[1]
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase();
+        if normalized == "passed" || normalized == "failed" {
+            total = total.saturating_add(count);
+            matched = true;
+        }
+    }
+    matched.then_some(total)
+}
+
+/// 回退口径：`running N tests`／`collected N tests`（如 cargo
+/// `running 0 tests`）；其它行（含普通日志数字）不误收。
+fn declared_test_count(line: &str) -> Option<u64> {
+    if is_runner_summary_header_line(line) {
+        return None;
+    }
+    let trimmed = line.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !(lowered.starts_with("running ") || lowered.starts_with("collected ")) {
+        return None;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    for pair in tokens.windows(2) {
+        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+        let Ok(count) = count.parse::<u64>() else {
+            continue;
+        };
+        let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
+        if normalized == "tests" || normalized == "test" {
+            return Some(count);
+        }
+    }
+    None
+}
+
+/// 汇总标题行判定：jest/vitest 的 `Test Suites:`／`Test Files`／
+/// `Snapshots:` 行携带的是 suite/file/snapshot 计数,不是测试数量。
+fn is_runner_summary_header_line(line: &str) -> bool {
+    let lowered = line.trim().to_lowercase();
+    lowered.starts_with("test files")
+        || lowered.starts_with("test suites")
+        || lowered.starts_with("snapshots")
+}
+
+/// CHECK 失败四分类（呈现辅助）：按固定优先级做大小写不敏感子串匹配——
+/// 认证失败 → 权限失败 → 缺依赖 → 断言失败 → 未分类。分类不改变返修
+/// 主路径，原始输出引用始终保留供人工纠偏。
+fn classify_verification_failure(output: &str) -> VerificationFailureClass {
+    let lowered = output.to_lowercase();
+    let auth_markers = [
+        "unauthorized",
+        "unauthenticated",
+        "authentication",
+        "authenticated",
+        "eneedauth",
+        "could not read username",
+        "login required",
+        "invalid token",
+        "invalid api key",
+        "credentials",
+        "认证失败",
+        "鉴权失败",
+    ];
+    let permission_markers = [
+        "permission denied",
+        "access denied",
+        "operation not permitted",
+        "eacces",
+        "eperm",
+        "权限不足",
+        "权限拒绝",
+    ];
+    let dependency_markers = [
+        "command not found",
+        "no such file",
+        "not found",
+        "enoent",
+        "module not found",
+        "no module named",
+        "unresolved",
+        "package not found",
+        "dependency missing",
+        "依赖缺失",
+        "缺依赖",
+        "未安装",
+    ];
+    let assertion_markers = [
+        "panicked",
+        "assertion",
+        "assert",
+        "断言失败",
+        "测试失败",
+        "test failed",
+        "tests failed",
+    ];
+    if auth_markers.iter().any(|marker| lowered.contains(marker)) {
+        return VerificationFailureClass::AuthFailure;
+    }
+    if permission_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return VerificationFailureClass::PermissionFailure;
+    }
+    if dependency_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return VerificationFailureClass::MissingDependency;
+    }
+    if assertion_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+        || contains_digit_prefixed_word(&lowered, "failed")
+    {
+        return VerificationFailureClass::AssertionFailure;
+    }
+    VerificationFailureClass::Unclassified
+}
+
+/// `<n> failed`（数字后紧跟 failed 词）扫描——cargo/jest/vitest 的失败
+/// 计数口径。
+fn contains_digit_prefixed_word(output: &str, word: &str) -> bool {
+    let tokens: Vec<&str> = output.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        pair[0]
+            .trim_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u64>()
+            .is_ok()
+            && pair[1].trim_matches(|c: char| !c.is_alphanumeric()) == word
+    })
+}
+
+fn first_command_token(command: &str) -> &str {
+    command.split_whitespace().next().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_test_execution_count;
+
+    #[test]
+    fn parse_test_execution_count_takes_last_runner_summary_per_runner() {
+        let cargo =
+            "running 12 tests\ntest result: ok. 12 passed; 0 failed; 2 ignored; finished in 0.5s";
+        assert_eq!(parse_test_execution_count(cargo), Some(12));
+
+        let vitest =
+            " Test Files  1 passed (1)\n      Tests  5 passed | 1 failed (6)\n   Duration  1.2s";
+        assert_eq!(parse_test_execution_count(vitest), Some(6));
+
+        let jest = "Test Suites: 2 passed, 2 total\nTests:       4 passed, 2 failed, 6 total\nSnapshots:   0 total";
+        assert_eq!(parse_test_execution_count(jest), Some(6));
+
+        let pytest = "============ 3 passed, 1 failed in 0.12s ============";
+        assert_eq!(parse_test_execution_count(pytest), Some(4));
+    }
+
+    #[test]
+    fn parse_test_execution_count_ignores_file_suite_and_snapshot_counts() {
+        let only_headers =
+            "Test Files  3 passed (3)\nTest Suites: 2 passed, 2 total\nSnapshots: 0 passed";
+        assert_eq!(
+            parse_test_execution_count(only_headers),
+            None,
+            "suite/file/snapshot 计数不是测试数量"
+        );
+    }
+
+    #[test]
+    fn parse_test_execution_count_uses_last_summary_for_nested_duplicates() {
+        let nested = "Tests  2 passed (2)\nTests  7 passed, 1 failed (8)";
+        assert_eq!(
+            parse_test_execution_count(nested),
+            Some(8),
+            "嵌套/重复摘要只取最后一条，不得累加成伪总数"
+        );
+        // jest 逐条 verbose 行不是汇总行。
+        let verbose = "PASS src/a.test.ts\n  ✓ adds (3 ms)\nTests: 2 passed, 2 total";
+        assert_eq!(parse_test_execution_count(verbose), Some(2));
+    }
+
+    #[test]
+    fn parse_test_execution_count_handles_zero_tests_and_avoids_non_test_numbers() {
+        let zero =
+            "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; finished in 0.00s";
+        assert_eq!(
+            parse_test_execution_count(zero),
+            Some(0),
+            "0 条执行呈现 Some(0)，不是未记录"
+        );
+
+        let pytest_zero = "no tests ran in 0.01s";
+        assert_eq!(parse_test_execution_count(pytest_zero), Some(0));
+
+        let unrelated = "deployed 5 passed checks\nworker 3 failed to connect";
+        assert_eq!(
+            parse_test_execution_count(unrelated),
+            None,
+            "普通日志里的数字不得误收为测试数"
+        );
+
+        assert_eq!(parse_test_execution_count(""), None);
+    }
+
+    #[test]
+    fn parse_test_execution_count_prefers_summary_over_declared_running_count() {
+        let mixed = "running 40 tests\ntest result: ok. 12 passed; 4 failed; finished in 0.5s";
+        assert_eq!(parse_test_execution_count(mixed), Some(16));
+    }
+}

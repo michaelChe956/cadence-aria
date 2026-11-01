@@ -1,28 +1,181 @@
-import { useRef, useState, type FormEvent } from "react";
-import type { Repository } from "../../api/types";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ApiRequestError } from "../../api/client";
+import type {
+  CodebaseSummaryDto,
+  LogicalCodebaseMemberDto,
+  Repository,
+  RepositoryBranchListResponse,
+} from "../../api/types";
+import { errorMessage } from "./IssueLifecycleWorkbenchParts";
+import { DialogShell } from "../shared/DialogShell";
 
 export type CreateLifecycleIssuePayload = {
   title: string;
   description: string | null;
   repository_id: string;
+  /// v1.3：逻辑 issue 归属；单仓为 null。
+  logical_codebase_id: string | null;
+  /// REQ-PIB-01：基准分支（单仓）。null=交服务端按默认链解析；仓库无
+  /// main/master 时必须显式选择（本对话框前置校验，服务端仍 fail-closed 复核）。
+  base_branch: string | null;
+  /// REQ-MRE-01：LC 成员勾选集（成员列表序）。单仓为 null（不进入请求体）；
+  /// 列表序首个勾选成员承载 primary repository_id（勾 1 = 旧单选等价）。
+  focus_repository_ids: string[] | null;
+};
+
+type PrimaryMemberOption = {
+  logical_repository_id: string;
+  physical_repository_id: string | null;
+  alias: string;
 };
 
 export function CreateLifecycleIssueDialog({
+  projectId,
   repositories,
+  codebases,
+  listMembers,
+  listBranches,
   onCreate,
   onClose,
 }: {
+  projectId: string | null;
   repositories: Repository[];
+  /// R8：混合列表（单仓 + 逻辑代码库）。
+  codebases: CodebaseSummaryDto[];
+  /// R8：选中逻辑代码库时拉取 active 成员供 primary 选择。
+  listMembers: (
+    logicalCodebaseId: string,
+  ) => Promise<LogicalCodebaseMemberDto[]>;
+  /// REQ-PIB-01：选中单仓时拉取本地分支列表 + 服务端默认值。
+  listBranches: (
+    projectId: string,
+    repositoryId: string,
+  ) => Promise<RepositoryBranchListResponse>;
   onCreate: (payload: CreateLifecycleIssuePayload) => Promise<void> | void;
   onClose: () => void;
 }) {
   const [title, setTitle] = useState("");
+  const [baseBranch, setBaseBranch] = useState<string | null>(null);
+  const [branches, setBranches] = useState<string[]>([]);
+  const [branchDefault, setBranchDefault] = useState<string | null>(null);
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [branchesError, setBranchesError] = useState<string | null>(null);
   const [description, setDescription] = useState("");
-  const [repositoryId, setRepositoryId] = useState("");
+  // 代码库选择值："" | `repo:{repository_id}` | `lc:{logical_codebase_id}`。
+  const [codebaseValue, setCodebaseValue] = useState("");
+  const [checkedLogicalIds, setCheckedLogicalIds] = useState<string[]>([]);
+  const [members, setMembers] = useState<PrimaryMemberOption[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
+
+  const selectedLogicalCodebaseId = codebaseValue.startsWith("lc:")
+    ? codebaseValue.slice("lc:".length)
+    : null;
+
+  useEffect(() => {
+    if (!selectedLogicalCodebaseId) {
+      setMembers([]);
+      setMembersError(null);
+      return;
+    }
+    let disposed = false;
+    setMembersLoading(true);
+    setMembersError(null);
+    listMembers(selectedLogicalCodebaseId)
+      .then((items) => {
+        if (!disposed) {
+          setMembers(
+            (items ?? [])
+              .filter((member) => member.status === "active")
+              .map((member) => ({
+                logical_repository_id: member.logical_repository_id,
+                physical_repository_id:
+                  typeof member.physical_repository_id === "string" &&
+                  member.physical_repository_id.length > 0
+                    ? member.physical_repository_id
+                    : null,
+                alias: member.alias,
+              })),
+          );
+        }
+      })
+      .catch((reason: unknown) => {
+        if (!disposed) {
+          // M3：成员拉取失败不静默吞，展示错误信息（复用 ApiRequestError.message 模式）。
+          setMembers([]);
+          setMembersError(
+            reason instanceof ApiRequestError
+              ? reason.message
+              : errorMessage(reason, "加载逻辑代码库成员失败"),
+          );
+        }
+      })
+      .finally(() => {
+        if (!disposed) {
+          setMembersLoading(false);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLogicalCodebaseId]);
+
+  const selectedRepositoryId = codebaseValue.startsWith("repo:")
+    ? codebaseValue.slice("repo:".length)
+    : null;
+
+  // REQ-PIB-01：选中单仓时拉取本地分支列表 + 服务端默认值（预选 default_branch）。
+  useEffect(() => {
+    if (!projectId || !selectedRepositoryId) {
+      setBranches([]);
+      setBranchDefault(null);
+      setBaseBranch(null);
+      setBranchesError(null);
+      return;
+    }
+    let disposed = false;
+    setBranchesLoading(true);
+    setBranchesError(null);
+    listBranches(projectId, selectedRepositoryId)
+      .then((response) => {
+        if (!disposed) {
+          setBranches(response.branches ?? []);
+          setBranchDefault(response.default_branch);
+          setBaseBranch(response.default_branch);
+        }
+      })
+      .catch((reason: unknown) => {
+        if (!disposed) {
+          setBranches([]);
+          setBranchDefault(null);
+          setBaseBranch(null);
+          setBranchesError(
+            reason instanceof ApiRequestError
+              ? reason.message
+              : errorMessage(reason, "加载仓库分支失败"),
+          );
+        }
+      })
+      .finally(() => {
+        if (!disposed) {
+          setBranchesLoading(false);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, selectedRepositoryId]);
+
+  function resetSelectionErrors() {
+    setRepositoryError(null);
+    setSubmitError(null);
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -30,10 +183,38 @@ export function CreateLifecycleIssueDialog({
       return;
     }
 
-    if (!repositoryId) {
+    if (!codebaseValue) {
       setRepositoryError("请选择代码库");
       setSubmitError(null);
       return;
+    }
+
+    let repositoryId = "";
+    let logicalCodebaseId: string | null = null;
+    let focusRepositoryIds: string[] | null = null;
+    if (selectedLogicalCodebaseId) {
+      // REQ-MRE-01：成员复选——勾选集（成员列表序）即 focus_repository_ids；
+      // 列表序首个勾选成员承载 primary repository_id（勾 1 = 旧单选等价）。
+      const checked = members.filter((member) =>
+        checkedLogicalIds.includes(member.logical_repository_id),
+      );
+      if (checked.length === 0) {
+        setRepositoryError("请选择成员");
+        setSubmitError(null);
+        return;
+      }
+      logicalCodebaseId = selectedLogicalCodebaseId;
+      repositoryId = checked[0].physical_repository_id ?? "";
+      focusRepositoryIds = checked.map((member) => member.logical_repository_id);
+    } else {
+      repositoryId = codebaseValue.slice("repo:".length);
+      // REQ-PIB-01：单仓必须具备基准分支——仓库无 main/master 时（服务端
+      // default_branch=null）强制显式选择，未选不提交（服务端仍 fail-closed 复核）。
+      if (branchDefault === null && !baseBranch) {
+        setRepositoryError("仓库无 main/master 默认分支，请显式选择基准分支");
+        setSubmitError(null);
+        return;
+      }
     }
 
     submittingRef.current = true;
@@ -45,6 +226,9 @@ export function CreateLifecycleIssueDialog({
         title: title.trim(),
         description: description.trim() ? description.trim() : null,
         repository_id: repositoryId,
+        logical_codebase_id: logicalCodebaseId,
+        base_branch: logicalCodebaseId ? null : (baseBranch ?? branchDefault),
+        focus_repository_ids: focusRepositoryIds,
       });
     } catch (reason) {
       setSubmitError(reason instanceof Error ? reason.message : "创建 Issue 失败");
@@ -55,24 +239,8 @@ export function CreateLifecycleIssueDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-      <form
-        role="dialog"
-        aria-label="新建 Issue"
-        aria-modal="true"
-        onSubmit={handleSubmit}
-        className="w-full max-w-lg rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-4 shadow-xl"
-      >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-[var(--aria-ink)]">新建 Issue</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
-          >
-            关闭
-          </button>
-        </div>
+    <DialogShell label="新建 Issue" onClose={onClose}>
+      <form onSubmit={handleSubmit}>
         <div className="space-y-3">
           <label className="block text-sm font-semibold text-[var(--aria-ink)]">
             Issue 标题
@@ -99,23 +267,119 @@ export function CreateLifecycleIssueDialog({
           <label className="block text-sm font-semibold text-[var(--aria-ink)]">
             代码库
             <select
-              value={repositoryId}
+              value={codebaseValue}
               aria-invalid={repositoryError ? "true" : undefined}
               onChange={(event) => {
-                setRepositoryId(event.target.value);
-                setRepositoryError(null);
-                setSubmitError(null);
+                setCodebaseValue(event.target.value);
+                setCheckedLogicalIds([]);
+                resetSelectionErrors();
               }}
               className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
             >
               <option value="">请选择</option>
               {repositories.map((repository) => (
-                <option key={repository.repository_id} value={repository.repository_id}>
-                  {repository.name} · {repository.repository_id}
+                <option
+                  key={repository.repository_id}
+                  value={`repo:${repository.repository_id}`}
+                >
+                  {repository.name} · 单仓
                 </option>
               ))}
+              {codebases
+                .filter((codebase) => codebase.kind === "logical")
+                .map((codebase) => (
+                  <option
+                    key={codebase.id}
+                    value={`lc:${codebase.logical_codebase_id ?? codebase.id}`}
+                  >
+                    {codebase.name} · 逻辑
+                  </option>
+                ))}
             </select>
           </label>
+          {selectedRepositoryId ? (
+            <label className="block text-sm font-semibold text-[var(--aria-ink)]">
+              基准分支
+              <select
+                value={baseBranch ?? ""}
+                disabled={branchesLoading}
+                aria-invalid={branchDefault === null && !baseBranch ? "true" : undefined}
+                onChange={(event) => {
+                  setBaseBranch(event.target.value || null);
+                  resetSelectionErrors();
+                }}
+                className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)] disabled:opacity-60"
+              >
+                <option value="">
+                  {branchesLoading
+                    ? "加载分支中"
+                    : branchDefault === null
+                      ? "请选择基准分支"
+                      : `默认（${branchDefault}）`}
+                </option>
+                {branches.map((branch) => (
+                  <option key={branch} value={branch}>
+                    {branch}
+                    {branch === branchDefault ? " · 默认" : ""}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-xs font-normal text-[var(--aria-ink-muted)]">
+                创建后锁定（改基线需新建 Issue）；issue 全链（生成上下文 / coding / 核对）锚定该分支。
+              </span>
+            </label>
+          ) : null}
+          {branchesError ? (
+            <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
+              分支加载失败：{branchesError}
+            </p>
+          ) : null}
+          {selectedLogicalCodebaseId ? (
+            <fieldset className="mt-1 rounded-md border border-[var(--aria-line)] px-3 py-2">
+              <legend className="px-1 text-sm font-semibold text-[var(--aria-ink)]">成员</legend>
+              <span className="block text-xs font-normal text-[var(--aria-ink-muted)]">
+                勾选参与本 Issue 的成员（勾选集=授权上界）；列表序首个勾选成员为 Primary。
+              </span>
+              <div className="mt-2 space-y-1">
+                {membersLoading ? (
+                  <span className="block text-sm font-normal text-[var(--aria-ink-muted)]">
+                    加载成员中
+                  </span>
+                ) : null}
+                {members.map((member) => {
+                  const label = member.physical_repository_id
+                    ? `${member.alias} · ${member.physical_repository_id}`
+                    : `${member.alias} · 缺少物理仓库映射`;
+                  return (
+                    <label
+                      key={member.logical_repository_id}
+                      className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checkedLogicalIds.includes(member.logical_repository_id)}
+                        disabled={!member.physical_repository_id}
+                        onChange={() => {
+                          setCheckedLogicalIds((previous) =>
+                            previous.includes(member.logical_repository_id)
+                              ? previous.filter((id) => id !== member.logical_repository_id)
+                              : [...previous, member.logical_repository_id],
+                          );
+                          resetSelectionErrors();
+                        }}
+                      />
+                      {label}
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
+          ) : null}
+          {membersError ? (
+            <p role="alert" className="text-sm font-semibold text-[var(--aria-danger)]">
+              成员加载失败：{membersError}
+            </p>
+          ) : null}
           {repositoryError ? (
             <p className="text-sm font-semibold text-[var(--aria-danger)]">{repositoryError}</p>
           ) : null}
@@ -142,6 +406,6 @@ export function CreateLifecycleIssueDialog({
           </button>
         </div>
       </form>
-    </div>
+    </DialogShell>
   );
 }

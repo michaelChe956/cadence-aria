@@ -43,6 +43,15 @@ export type RepositoryListResponse = {
   repositories: Repository[];
 };
 
+export type RepositoryDeletionReceipt = {
+  physical_repository_id: string;
+  logical_repository_id: string | null;
+  checkout_id: string | null;
+  tombstone_operation_id: string | null;
+  deleted_at: string;
+  legacy_delete: boolean;
+};
+
 export type CreateRepositoryRequest = {
   name: string;
   path: string;
@@ -119,6 +128,8 @@ export type ProductIssue = {
   issue_id: string;
   project_id: string;
   repo_id: string | null;
+  /// REQ-PIB-01：issue 基准分支（创建时锁定；null=存量记录按默认链解析）。
+  base_branch: string | null;
   workspace_id: string | null;
   task_id: string | null;
   session_id: string | null;
@@ -151,8 +162,22 @@ export type CreateProductIssueRequest = {
   description?: string | null;
   change_id?: string | null;
   repository_id: string;
+  /// REQ-PIB-01：基准分支显式选择；缺省由服务端按默认链 main→master 解析
+  ///（皆无且未选择即 422）。逻辑代码库 issue 忽略本字段。
+  base_branch?: string | null;
+  /// v1.3：逻辑代码库归属；逻辑 issue 时必填，repository_id 为其 active primary 成员。
+  logical_codebase_id?: string | null;
+  /// REQ-MRE-01：LC 成员勾选集（logical_repository_id 复数）。非空 → 服务端以
+  /// Explicit selection 落盘（授权上界=勾选集原样）；缺省/空 → 维持存量 AllMembers。
+  /// 单仓路径忽略本字段；null/undefined 不进入请求体。
+  focus_repository_ids?: string[] | null;
 };
 
+
+export type RepositoryBranchListResponse = {
+  branches: string[];
+  default_branch: string | null;
+};
 export type LifecycleConfirmationStatus =
   | "draft"
   | "in_review"
@@ -241,8 +266,6 @@ export type StructuredFeedback = {
   target_artifact_version?: number | null;
 };
 
-export type RevisionPath = "revise" | "revise-with-context" | "skip-to-human";
-export type HumanConfirmDecision = "confirm" | "request-change" | "terminate";
 
 /**
  * author_decision 可发送的决策形式（spec-design-dialog-revision T1/T8）。
@@ -263,13 +286,7 @@ export type AuthorDecision =
   | { revise: { feedback: string } };
 
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
-export type WorkspaceReviewFindingSeverity =
-  | "blocking"
-  | "must_fix"
-  | "strong_recommend_fix"
-  | "suggestion"
-  | "minor"
-  | "optional";
+export type WorkspaceReviewFindingSeverity = "blocking" | "must_fix" | "suggestion";
 export type ReviewGate =
   | "requires_revision"
   | "user_confirm_allowed"

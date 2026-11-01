@@ -99,6 +99,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
             title: "Story".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
     let design = lifecycle_store
@@ -107,6 +108,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
             issue_id: issue_id.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
+        aggregate_codebase: None,
         })
         .unwrap();
 
@@ -134,17 +136,15 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
         .unwrap();
 
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput {
-            project_id: project_id.to_string(),
-            issue_id: issue_id.to_string(),
-            entity_id: plan.id.clone(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::Codex,
-            reviewer_provider: ProviderName::ClaudeCode,
-            review_rounds: 0,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-        })
+        .create_workspace_session(CreateWorkspaceSessionInput { project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        entity_id: plan.id.clone(),
+        workspace_type: WorkspaceType::WorkItemPlan,
+        author_provider: ProviderName::Codex,
+        reviewer_provider: Some(ProviderName::ClaudeCode),
+
+        review_rounds: 0,
+        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
         .unwrap();
 
     let session = WorkspaceSession::from_record(session_record);
@@ -158,6 +158,8 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
         project_id: project_id.to_string(),
         issue_id: issue_id.to_string(),
         repository_id: repository_id.to_string(),
+        logical_repository_id: None,
+        membership_revision: 0,
         provider_run_ref: None,
         languages: vec!["rust".to_string()],
         frameworks: vec![],
@@ -179,6 +181,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
             project_id: project_id.to_string(),
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
+            target_repository_id: None,
             story_spec_ids: vec![story.id.clone()],
             design_spec_ids: vec![design.id.clone()],
             title: "Backend work item".to_string(),
@@ -209,6 +212,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
             project_id: project_id.to_string(),
             issue_id: issue_id.to_string(),
             repository_id: repository_id.to_string(),
+            target_repository_id: None,
             story_spec_ids: vec![story.id.clone()],
             design_spec_ids: vec![design.id.clone()],
             title: "Frontend work item".to_string(),
@@ -321,6 +325,7 @@ async fn complete_work_item_plan_author_pushes_candidate_and_enters_author_confi
         created_from_provider_run: None,
         validator_findings: vec![],
         review_summary: None,
+        ever_confirmed: None,
         created_at: now.clone(),
         updated_at: now.clone(),
     };
@@ -554,9 +559,17 @@ fn assert_review_contract(input: &StreamingProviderInput, expected_schema_name: 
             .prompt
             .matches(&format!("nonce=\"{}\"", contract.nonce))
             .count(),
-        2,
-        "review prompt should use the same nonce in both sentinel tags"
+        1,
+        "only the opening sentinel tag carries the request nonce"
     );
+    assert!(
+        input
+            .prompt
+            .contains(&format!("\"nonce\":\"{}\"", contract.nonce)),
+        "the JSON envelope must carry the request nonce"
+    );
+    assert!(input.prompt.contains("</ARIA_STRUCTURED_OUTPUT>"));
+    assert!(!input.prompt.contains(&["</ARIA_STRUCTURED_OUTPUT", " nonce="].concat()));
 }
 
 fn assert_work_item_plan_boundary_rules(prompt: &str) {
@@ -606,6 +619,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
         source_design_spec_ids: vec!["design_spec_0001".to_string()],
         strategy_summary: "serial backend split".to_string(),
         work_item_outlines: vec![WorkItemOutline {
+            target_repository_id: None,
             outline_id: outline_id.to_string(),
             logical_work_item_id: "wi_backend".to_string(),
             title: "Backend".to_string(),
@@ -676,6 +690,7 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
                 contract.write_policy.exclusive_scopes = vec!["src/backend.rs".to_string()];
                 contract.write_policy.forbidden_scopes.clear();
                 WorkItemDraftCandidate {
+                    target_repository_id: None,
                     outline_id: outline_id.to_string(),
                     logical_work_item_id: "wi_backend".to_string(),
                     verification_plan:
@@ -706,12 +721,12 @@ fn build_work_item_draft_review_input_requires_verdict_and_severity_consistency(
         .build_work_item_draft_review_input(&draft_payload)
         .expect("draft review input");
 
-    assert!(input.prompt.contains("blocking|must_fix|strong_recommend_fix"));
-    assert!(input.prompt.contains("suggestion|minor|optional"));
+    assert!(input.prompt.contains("blocking|must_fix|suggestion"));
+    assert!(input.prompt.contains("suggestion"));
     assert!(
         input
             .prompt
-            .contains("不要输出 `verdict=pass` 同时给出 blocking/must_fix/strong_recommend_fix finding")
+            .contains("不要输出 `verdict=pass` 同时给出 blocking/must_fix finding")
     );
     assert!(
         input

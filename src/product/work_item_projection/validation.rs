@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::product::planning_failure::PlanningFailureKind;
 use crate::product::work_item_contract::{
     CanonicalWorkItemContract, ContractFindingSeverity, DependencyContractGraph,
     validate_dependency_contract_graph,
@@ -228,6 +229,11 @@ fn dependency_graph_projection_findings(
             code: finding.code,
             projection: "plan.dependency_graph".to_string(),
             contract_ref: finding.contract_ref,
+            // F2c（REQ-SG-01）：canonical 依赖失败（F2a typed 族：cycle
+            // witness、供需三元/四元 ID）原样继承 kind 与 IDs，投影层不
+            // 重新判型、不从 message 拆码；canonical 未 typed 的分支保持
+            // None（旧记录按 Unknown 折影，缺事实不猜）。
+            kind: finding.kind,
             message: format!(
                 "logical_work_item_id={:?}; capability_ref={:?}; {}",
                 finding.logical_work_item_id, finding.capability_ref, finding.message
@@ -633,11 +639,21 @@ fn push(
     contract_ref: Option<String>,
     message: impl Into<String>,
 ) {
+    let message = message.into();
     findings.push(ProjectionValidationFinding {
         code: code.to_string(),
         projection: projection.to_string(),
         contract_ref,
-        message: message.into(),
+        // F2c（REQ-SG-01/03）：projection 内部 invariant 违反（逻辑/物理
+        // 投影不一致、revision/source/矩阵漂移）是编译器对 canonical 输入
+        // 的确定性投影漂移——系统/工程内部错，一律显式 Operational，不驱
+        // author；stable_code 取分支 code 常量（单源，不从 Display/文案
+        // 拆码），cause 仅诊断，classification 不读。
+        kind: Some(PlanningFailureKind::Operational {
+            stable_code: code.to_string(),
+            cause: message.clone(),
+        }),
+        message,
     });
 }
 

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +119,12 @@ pub struct RepositoryRecord {
     pub default_policy_preset: String,
     pub default_provider_mode: String,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_repository_id: Option<crate::product::logical_codebase::LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_checkout_id: Option<crate::product::logical_codebase::RepositoryCheckoutId>,
+    #[serde(default)]
+    pub identity_schema_version: u16,
     pub updated_at: String,
 }
 
@@ -126,6 +134,13 @@ pub struct IssueRecord {
     pub id: String,
     pub project_id: String,
     pub repo_id: Option<String>,
+    /// issue 基准分支（REQ-PIB-01）：Some=创建时解析并锁定的本地分支名；
+    /// None=存量记录（零迁移），消费时按默认链 main→master 解析、皆无 fail-closed。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    /// Issue 唯一归属的代码库（v1.3）：Some 表示逻辑代码库 lc_id；None 表示单仓代码库。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_codebase_id: Option<String>,
     pub title: String,
     pub description: Option<String>,
     pub change_id: String,
@@ -149,6 +164,10 @@ pub struct IssueRuntimeBindingRecord {
     pub task_root: Option<PathBuf>,
     pub status: RuntimeBindingStatus,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_repository_id: Option<LogicalRepositoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_id: Option<RepositoryCheckoutId>,
     pub updated_at: String,
 }
 

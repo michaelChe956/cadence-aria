@@ -1,0 +1,34 @@
+{
+  "run_id": "stage35:pretrial:pi:rep1",
+  "provider": "pi",
+  "rep": 1,
+  "fixture_set": "minimal",
+  "script": "request-change:请在契约定义中补充错误响应的示例;confirm",
+  "attempt_id": "workspace_session_0114",
+  "same_attempt_throughout": true,
+  "gate_turns": 1,
+  "budget_deductions": [
+    {
+      "turn_id": "human_gate_turn_cb0b1f45-4feb-46c5-940e-6a84c84cc5b8",
+      "command_id": "cmd-human_gate_feedback-0-5d428dbcd3",
+      "remaining_before": 2,
+      "remaining_after": null,
+      "exactly_once": true
+    }
+  ],
+  "advance": null,
+  "provider_ledger_delta_after_advance": null,
+  "failure_class": "workspace_error",
+  "output_defects": [
+    "confirm 后服务端 single-candidate approval compile failed(门保持 open,confirmed_count=0);request-change 门回合本身完成并产出 artifact_version_002",
+    "review_complete verdict=pass:0 error/2 warning(integration_or_e2e_skipped_risk);validator_findings=1 条 suggestion(advisory,completeness)",
+    "provider 输出 sha256=11ad2a7ae89fe9cbec4433e69947594924e6e3b9a63e2882598abdbeffa8e22c(len=4744)"
+  ],
+  "elapsed_sec": 590,
+  "verdict": "fail",
+  "verdict_reason": "session_status=open(非终态),completed=false;人工门链路通(human_gate_turn_open/completed 成对同 turn_id,request-change 消费成功),但 confirm 编译失败未达 durable Confirmed,无 advance",
+  "source_refs": {
+    "result_json": "/tmp/aria-stage35-20260903/pretrial/pi/rep1/result.json",
+    "ws_jsonl": "/tmp/aria-stage35-20260903/pretrial/pi/rep1/ws.jsonl"
+  }
+}

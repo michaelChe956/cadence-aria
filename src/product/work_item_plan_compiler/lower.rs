@@ -1,0 +1,1132 @@
+use std::collections::HashSet;
+
+use sha2::{Digest, Sha256};
+
+use super::{
+    grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
+    types::{CompilerDiagnostic, WorkItemPlanAst, WorkItemPlanFieldAst, WorkItemPlanItemAst},
+};
+use crate::product::models::{TrustedDraftVerificationCommand, WorkItemDraftVerificationPlan};
+use crate::product::work_item_contract::{
+    AcceptanceCriterion, BlockerRoute, BlockerRule, CanonicalWorkItemContract,
+    ContractCompatibilityPolicy, DesignTraceabilityRef, EvidenceKind, HandoffContract,
+    PromisedOutputContract, RequiredInputContract, VerificationCheck, WorkItemContractIdentity,
+    WorkItemGoal, WorkItemTask, WorkItemWritePolicy,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanCandidateIr {
+    pub source_revision_hash: String,
+    pub compiler_version: String,
+    pub items: Vec<PlanCandidateItemIr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanCandidateItemIr {
+    pub target_repository_id: String,
+    pub contract: CanonicalWorkItemContract,
+    pub verification_plan: WorkItemDraftVerificationPlan,
+    pub trusted_commands: Vec<TrustedDraftVerificationCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkItemPlanSourceContext {
+    pub target_repository_id: String,
+    /// B1 铁律（多仓 plan 聚合视图缺口）：聚合根视图 ID 不得流入 IR target。
+    /// `Some` 时（LC 多仓 plan 会话）每 WI 按 Plan Intent 成员归属落成员
+    /// 物理仓 ID，无归属 WI 按 `fallback_physical_id` 回落（既有规则：
+    /// 成员锚定会话=会话成员物理仓；聚合会话=confirmed design change_order
+    /// 首仓），回落缺失即语义错 fail-closed；`None` 时（legacy 单仓）全部
+    /// WI 沿用 `target_repository_id`（既有语义零变化）。
+    pub member_targets: Option<PlanMemberTargets>,
+}
+
+/// 多仓 plan 会话的 per-WI 成员归属目标表（与 Final Compile 的
+/// logical_targets 同源构建：逻辑成员 → 物理成员仓 ID）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanMemberTargets {
+    /// 逻辑成员 ID → 物理成员仓 ID。
+    pub physical_by_logical:
+        std::collections::BTreeMap<crate::product::logical_codebase::LogicalRepositoryId, String>,
+    /// 无 Plan Intent 归属声明的 WI 的确定性回落物理仓 ID。
+    pub fallback_physical_id: Option<String>,
+}
+
+type TaskState = (String, String, Vec<String>, Vec<String>, usize);
+type VerificationState = (
+    String,
+    Option<String>,
+    Option<usize>,
+    Option<String>,
+    Option<bool>,
+    Option<bool>,
+    usize,
+);
+
+struct LoweredVerificationCheck {
+    check: VerificationCheck,
+    command_line: usize,
+}
+type InputState = (
+    String,
+    Option<String>,
+    Vec<String>,
+    Option<ContractCompatibilityPolicy>,
+    usize,
+);
+
+pub fn lower_work_item_plan(
+    source: &str,
+    ast: WorkItemPlanAst,
+    context: &WorkItemPlanSourceContext,
+) -> Result<PlanCandidateIr, Vec<CompilerDiagnostic>> {
+    let mut diagnostics = Vec::new();
+    if context.target_repository_id.trim().is_empty() {
+        diagnostics.push(diagnostic(
+            "target_repository_id",
+            "session context 缺少 target repository。",
+            1,
+            "target_repository_id: repo-001",
+        ));
+    }
+
+    let source_revision_hash = hex::encode(Sha256::digest(source.as_bytes()));
+    let mut items = Vec::with_capacity(ast.items.len());
+    for item in &ast.items {
+        if let Some(item) = lower_item(item, context, &source_revision_hash, &mut diagnostics) {
+            items.push(item);
+        }
+    }
+    if !diagnostics.is_empty() {
+        diagnostics.sort_by_key(|diagnostic| {
+            (
+                diagnostic.line,
+                diagnostic.field.clone(),
+                diagnostic.code.clone(),
+            )
+        });
+        return Err(diagnostics);
+    }
+
+    Ok(PlanCandidateIr {
+        source_revision_hash,
+        compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+        items,
+    })
+}
+
+pub fn compile_work_item_plan(
+    source: &str,
+    context: &WorkItemPlanSourceContext,
+) -> Result<PlanCandidateIr, Vec<CompilerDiagnostic>> {
+    let ast = super::parse_work_item_plan(source)?;
+    lower_work_item_plan(source, ast, context)
+}
+
+fn lower_item(
+    item: &WorkItemPlanItemAst,
+    context: &WorkItemPlanSourceContext,
+    source_revision_hash: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<PlanCandidateItemIr> {
+    let mut fields = Vec::new();
+    for section in &item.sections {
+        for field in &section.fields {
+            if !super::grammar::STRUCTURED_KEYS.contains(&field.key.value.as_str()) {
+                diagnostics.push(diagnostic(
+                    &field.key.value,
+                    "未知结构化 key 必须拒绝。",
+                    field.key.line,
+                    "- kind: backend",
+                ));
+            } else {
+                fields.push((section.name.value.as_str(), field));
+            }
+        }
+    }
+    let value = |section: &str, key: &str| {
+        fields.iter().find_map(|(name, field)| {
+            (*name == section && field.key.value == key).then_some(field.value.value.as_str())
+        })
+    };
+    let values = |section: &str, key: &str| {
+        fields
+            .iter()
+            .filter_map(|(name, field)| {
+                (*name == section && field.key.value == key).then_some(field.value.value.as_str())
+            })
+            .collect::<Vec<_>>()
+    };
+    let line = |section: &str, key: &str| {
+        fields
+            .iter()
+            .find_map(|(name, field)| {
+                (*name == section && field.key.value == key).then_some(field.value.line)
+            })
+            .unwrap_or(item.id.line)
+    };
+    let required = |section: &str, key: &str, diagnostics: &mut Vec<CompilerDiagnostic>| {
+        let result = value(section, key);
+        if result.is_none_or(str::is_empty) {
+            diagnostics.push(diagnostic(
+                &format!("contract.{key}"),
+                "必填 markdown 字段缺失。",
+                line(section, key),
+                &format!("- {key}: value"),
+            ));
+        }
+        result
+    };
+    let string = |section: &str, key: &str, diagnostics: &mut Vec<CompilerDiagnostic>| {
+        required(section, key, diagnostics).map(str::to_string)
+    };
+
+    let schema_version = required("Identity", "schema_version", diagnostics)
+        .and_then(|value| value.parse::<u32>().ok());
+    if schema_version.is_none() && value("Identity", "schema_version").is_some() {
+        diagnostics.push(diagnostic(
+            "contract.schema_version",
+            "schema_version 必须是无符号整数。",
+            line("Identity", "schema_version"),
+            "- schema_version: 1",
+        ));
+    }
+    let logical_id = string("Identity", "logical_work_item_id", diagnostics);
+    let title = string("Identity", "title", diagnostics);
+    let kind = string("Identity", "kind", diagnostics);
+    let summary = string("Goal", "summary", diagnostics);
+    let tasks = lower_tasks(&fields, diagnostics);
+    let acceptance_criteria = lower_acceptance_criteria(&fields, diagnostics);
+    let verification_checks = lower_verification_checks(&fields, diagnostics);
+    let blocker_rules = lower_blocker_rules(&fields, diagnostics);
+    let design_traceability = lower_traceability(&fields, diagnostics);
+    let input_contracts = lower_inputs(&fields, diagnostics);
+    let output_contracts = lower_outputs(&fields, diagnostics);
+
+    // C1 Task 5（REQ-C1-PLAN-01）：意图合同的 scope/依赖快照取自本 item 的
+    // 单一 markdown 来源（Dependencies/Write Policy），不在 Plan Intent 重复。
+    let depends_on_snapshot = split_values(values("Dependencies", "depends_on"));
+    let exclusive_scopes_snapshot = split_values(values("Write Policy", "exclusive_scopes"));
+    let forbidden_scopes_snapshot = split_values(values("Write Policy", "forbidden_scopes"));
+    let intent_contract = lower_plan_intent(
+        &fields,
+        depends_on_snapshot,
+        exclusive_scopes_snapshot,
+        forbidden_scopes_snapshot,
+        diagnostics,
+    );
+
+    let contract = match (schema_version, logical_id, title, kind, summary) {
+        (Some(schema_version), Some(logical_id), Some(title), Some(kind), Some(summary)) => {
+            CanonicalWorkItemContract {
+                schema_version,
+                identity: WorkItemContractIdentity {
+                    logical_work_item_id: logical_id,
+                    title,
+                    kind,
+                },
+                goal: WorkItemGoal { summary },
+                non_goals: split_values(values("Non Goals", "non_goals")),
+                depends_on: split_values(values("Dependencies", "depends_on")),
+                input_contracts,
+                output_contracts,
+                tasks,
+                write_policy: WorkItemWritePolicy {
+                    exclusive_scopes: split_values(values("Write Policy", "exclusive_scopes")),
+                    forbidden_scopes: split_values(values("Write Policy", "forbidden_scopes")),
+                },
+                acceptance_criteria,
+                verification_checks: verification_checks
+                    .iter()
+                    .map(|entry| entry.check.clone())
+                    .collect(),
+                handoff_contract: HandoffContract {
+                    required_fields: split_values(values("Handoff Schema", "required_fields")),
+                    provided_contract_refs: split_values(values(
+                        "Handoff Schema",
+                        "provided_contract_refs",
+                    )),
+                    reviewer_check_refs: split_values(values(
+                        "Handoff Schema",
+                        "reviewer_check_refs",
+                    )),
+                },
+                blocker_rules,
+                design_traceability,
+                intent_contract,
+            }
+        }
+        _ => return None,
+    };
+
+    let target_repository_id = resolve_item_target_repository_id(
+        context,
+        contract.intent_contract.as_ref(),
+        &contract.identity.logical_work_item_id,
+        item.id.line,
+        diagnostics,
+    )?;
+    let trusted_commands =
+        trusted_commands_for_checks(&verification_checks, source_revision_hash, diagnostics);
+    Some(PlanCandidateItemIr {
+        target_repository_id,
+        verification_plan: WorkItemDraftVerificationPlan {
+            checks: contract.verification_checks.clone(),
+        },
+        contract,
+        trusted_commands,
+    })
+}
+
+/// B1 铁律（多仓 plan 聚合视图缺口）：解析单个 WI 的 IR target。
+///
+/// - `member_targets=None`（legacy 单仓）：沿用会话级 `target_repository_id`
+///   （既有语义零变化）；但聚合根视图 ID 恒拒绝——漏传成员表的调用方在
+///   写入点 fail-closed，绝不把聚合视图 ID 写进 IR target（否则 Final
+///   Compile 以 work_item_target_missing 卡死 owner 验收）。
+/// - `member_targets=Some`（LC 多仓）：按 Plan Intent 成员归属落成员物理仓
+///   ID——logical_codebase 归属查成员表；single_repository 归属必须命中
+///   成员物理仓；无归属 WI 落确定性回落（focus/首仓）；归属失效/非成员
+///   仓/回落缺失 → `work_item_target_missing` 语义错 fail-closed。
+fn resolve_item_target_repository_id(
+    context: &WorkItemPlanSourceContext,
+    intent: Option<&crate::product::work_item_contract::WorkItemIntentContract>,
+    work_item_id: &str,
+    line: usize,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<String> {
+    use crate::product::logical_codebase::EnrollmentTarget;
+
+    let reject = |diagnostics: &mut Vec<CompilerDiagnostic>, message: String| {
+        diagnostics.push(CompilerDiagnostic {
+            code: "work_item_target_missing".to_string(),
+            line,
+            field: work_item_id.to_string(),
+            message,
+            repair_example: "### Plan Intent\n- intent: create\n- provider_work_item_id: WI-001\n- intent_target_kind: logical_codebase\n- intent_target_codebase: <logical codebase id>\n- intent_target_logical_repo: <成员逻辑仓 UUID>".to_string(),
+            // F1.2：语义错 fail-closed 诊断未 typed（target 归属 typed
+            // producer 归 F2a/SG1），不猜 kind。
+            kind: None,
+        });
+    };
+
+    // 批 2 R1（REQ-WIGA-01）：集合 intent（logical_codebase_members）不能
+    // 作为单 WI 归属——任一 WI 必须落恰一成员物理仓；无成员表时同样拒绝
+    // （不以会话级/聚合视图 ID 兜底），语义错 fail-closed。
+    if let Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) =
+        intent.map(|intent| &intent.target)
+    {
+        reject(
+            diagnostics,
+            format!(
+                "work_item_target_missing: `{work_item_id}` 声明了集合 target \
+                 （logical_codebase_members）；单个 work item 的归属必须声明恰一成员"
+            ),
+        );
+        return None;
+    }
+    let Some(members) = context.member_targets.as_ref() else {
+        if context
+            .target_repository_id
+            .starts_with(crate::product::workspace_repository::AGGREGATE_ROOT_VIEW_ID_PREFIX)
+        {
+            reject(
+                diagnostics,
+                format!(
+                    "work_item_target_missing: `{work_item_id}` 的会话级 target `{}` 是聚合根视图（多仓 plan），成员归属表缺失；聚合视图 ID 不得作 IR target",
+                    context.target_repository_id
+                ),
+            );
+            return None;
+        }
+        return Some(context.target_repository_id.clone());
+    };
+    match intent.map(|intent| &intent.target) {
+        Some(EnrollmentTarget::LogicalCodebase {
+            logical_repository_id,
+            ..
+        }) => match members.physical_by_logical.get(logical_repository_id) {
+            Some(physical) => Some(physical.clone()),
+            None => {
+                reject(
+                    diagnostics,
+                    format!(
+                        "work_item_target_missing: `{work_item_id}` 声明的逻辑成员 {logical_repository_id:?} 不在有效成员集（成员归属失效或未登记）"
+                    ),
+                );
+                None
+            }
+        },
+        // 批 2 R1：集合 intent 已在成员表分支前拒绝（无成员表同样拒）。
+        Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) => {
+            unreachable!("集合 intent 已在 resolve_item_target_repository_id 入口拒绝")
+        }
+        Some(EnrollmentTarget::SingleRepository { repository_id }) => {
+            let effective = members
+                .physical_by_logical
+                .values()
+                .any(|physical| physical == repository_id);
+            if effective {
+                Some(repository_id.clone())
+            } else {
+                reject(
+                    diagnostics,
+                    format!(
+                        "work_item_target_missing: `{work_item_id}` 声明的物理仓 {repository_id} 不是有效成员仓（多仓 plan 的 IR/WI 目标必须落成员物理 ID）"
+                    ),
+                );
+                None
+            }
+        }
+        None => match members.fallback_physical_id.clone() {
+            Some(fallback) => Some(fallback),
+            None => {
+                reject(
+                    diagnostics,
+                    format!(
+                        "work_item_target_missing: `{work_item_id}` 未声明 Plan Intent 成员归属且无确定性回落（focus/首仓）；多仓 plan 每 WI 必须落成员物理仓 ID"
+                    ),
+                );
+                None
+            }
+        },
+    }
+}
+
+/// C1 Task 5（REQ-C1-PLAN-01）：`Plan Intent` section → `WorkItemIntentContract`。
+/// section 缺席 → None（未声明意图，校验期按基线外写面判 intent_undeclared）；
+/// 在场但字段不完整/取值非法 → fail-closed lowering 诊断（逻辑 target 缺任
+/// 一级拒绝，不猜默认）。
+fn lower_plan_intent(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    depends_on: Vec<String>,
+    exclusive_scopes: Vec<String>,
+    forbidden_scopes: Vec<String>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<crate::product::work_item_contract::WorkItemIntentContract> {
+    use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+    use crate::product::work_item_contract::{WorkItemIntent, WorkItemIntentContract};
+
+    if !fields.iter().any(|(name, _)| *name == "Plan Intent") {
+        return None;
+    }
+    let value = |key: &str| {
+        fields.iter().find_map(|(name, field)| {
+            (*name == "Plan Intent" && field.key.value == key).then_some(field.value.value.as_str())
+        })
+    };
+    let line = |key: &str| {
+        fields
+            .iter()
+            .find_map(|(name, field)| {
+                (*name == "Plan Intent" && field.key.value == key).then_some(field.value.line)
+            })
+            .unwrap_or_default()
+    };
+    let mut required = |key: &str| -> Option<String> {
+        let result = value(key);
+        if result.is_none_or(str::is_empty) {
+            diagnostics.push(diagnostic(
+                &format!("contract.intent.{key}"),
+                "Plan Intent 声明在场时该字段必填。",
+                line(key),
+                &format!("- {key}: value"),
+            ));
+        }
+        result.map(str::to_string)
+    };
+
+    let intent = match value("intent") {
+        Some("create") => WorkItemIntent::Create,
+        Some("existing") => WorkItemIntent::Existing,
+        _ => {
+            diagnostics.push(diagnostic(
+                "contract.intent",
+                "intent 必须是 create 或 existing。",
+                line("intent"),
+                "- intent: create",
+            ));
+            return None;
+        }
+    };
+    let provider_work_item_id = required("provider_work_item_id")?;
+    let target = match value("intent_target_kind") {
+        Some("single_repository") => EnrollmentTarget::SingleRepository {
+            repository_id: required("intent_target_repo")?,
+        },
+        Some("logical_codebase") => {
+            let logical_codebase_id = required("intent_target_codebase")?;
+            let logical_repository_uuid = required("intent_target_logical_repo")?;
+            let Ok(uuid) = uuid::Uuid::parse_str(&logical_repository_uuid) else {
+                diagnostics.push(diagnostic(
+                    "contract.intent.intent_target_logical_repo",
+                    "逻辑 target 的 logical repository 必须是 UUID。",
+                    line("intent_target_logical_repo"),
+                    "- intent_target_logical_repo: 00000000-0000-0000-0000-000000000000",
+                ));
+                return None;
+            };
+            EnrollmentTarget::LogicalCodebase {
+                logical_codebase_id,
+                logical_repository_id: LogicalRepositoryId(uuid),
+            }
+        }
+        _ => {
+            diagnostics.push(diagnostic(
+                "contract.intent.intent_target_kind",
+                "intent_target_kind 必须是 single_repository 或 logical_codebase。",
+                line("intent_target_kind"),
+                "- intent_target_kind: single_repository",
+            ));
+            return None;
+        }
+    };
+    Some(WorkItemIntentContract {
+        intent,
+        provider_work_item_id,
+        depends_on,
+        exclusive_scopes,
+        forbidden_scopes,
+        target,
+    })
+}
+
+fn lower_tasks(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<WorkItemTask> {
+    let mut entries = Vec::new();
+    let mut current: Option<TaskState> = None;
+    for field in section_fields(fields, "Tasks") {
+        match field.key.value.as_str() {
+            "task_id" => {
+                flush_task(&mut current, &mut entries, diagnostics);
+                current = Some((
+                    field.value.value.clone(),
+                    String::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    field.value.line,
+                ));
+            }
+            "statement" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.1 = field.value.value.clone();
+                }
+            }
+            "requirement_refs" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.2 = split_value(&field.value.value);
+                }
+            }
+            "done_when_refs" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.3 = split_value(&field.value.value);
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_task(&mut current, &mut entries, diagnostics);
+    entries
+}
+
+fn flush_task(
+    current: &mut Option<TaskState>,
+    entries: &mut Vec<WorkItemTask>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    let Some((task_id, statement, requirement_refs, done_when_refs, line)) = current.take() else {
+        return;
+    };
+    if task_id.is_empty() || statement.is_empty() {
+        diagnostics.push(diagnostic(
+            "Tasks",
+            "任务条目必须包含 task_id 与 statement。",
+            line,
+            "- task_id: TASK-001",
+        ));
+    } else {
+        entries.push(WorkItemTask {
+            task_id,
+            statement,
+            requirement_refs,
+            done_when_refs,
+        });
+    }
+}
+
+fn lower_acceptance_criteria(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<AcceptanceCriterion> {
+    let mut entries = Vec::new();
+    let mut current: Option<(String, String, Vec<EvidenceKind>, usize)> = None;
+    for field in section_fields(fields, "Acceptance Criteria") {
+        match field.key.value.as_str() {
+            "criterion_id" => {
+                flush_acceptance(&mut current, &mut entries, diagnostics);
+                current = Some((
+                    field.value.value.clone(),
+                    String::new(),
+                    Vec::new(),
+                    field.value.line,
+                ));
+            }
+            "statement" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.1 = field.value.value.clone();
+                }
+            }
+            "required_evidence" => {
+                if let Some(entry) = current.as_mut() {
+                    entry
+                        .2
+                        .extend(field.value.value.split(',').filter_map(|value| {
+                            parse_evidence_kind(value.trim(), diagnostics, field.value.line)
+                        }));
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_acceptance(&mut current, &mut entries, diagnostics);
+    entries
+}
+
+fn flush_acceptance(
+    current: &mut Option<(String, String, Vec<EvidenceKind>, usize)>,
+    entries: &mut Vec<AcceptanceCriterion>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    let Some((criterion_id, statement, required_evidence, line)) = current.take() else {
+        return;
+    };
+    if criterion_id.is_empty() || statement.is_empty() {
+        diagnostics.push(diagnostic(
+            "Acceptance Criteria",
+            "验收条目必须包含 criterion_id 与 statement。",
+            line,
+            "- criterion_id: AC-001",
+        ));
+    } else {
+        entries.push(AcceptanceCriterion {
+            criterion_id,
+            statement,
+            required_evidence,
+        });
+    }
+}
+
+fn lower_verification_checks(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<LoweredVerificationCheck> {
+    let mut entries = Vec::new();
+    let mut current: Option<VerificationState> = None;
+    for field in section_fields(fields, "Verification") {
+        match field.key.value.as_str() {
+            "check_id" => {
+                flush_verification(&mut current, &mut entries, diagnostics);
+                current = Some((
+                    field.value.value.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    field.value.line,
+                ));
+            }
+            "command" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.1 = non_placeholder(field.value.value.as_str());
+                    entry.2 = Some(field.value.line);
+                }
+            }
+            "manual_instruction" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.3 = non_placeholder(field.value.value.as_str());
+                }
+            }
+            "required" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.4 = parse_bool_value(field, diagnostics);
+                }
+            }
+            "non_zero_test_execution_required" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.5 = parse_bool_value(field, diagnostics);
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_verification(&mut current, &mut entries, diagnostics);
+    entries
+}
+
+fn flush_verification(
+    current: &mut Option<VerificationState>,
+    entries: &mut Vec<LoweredVerificationCheck>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    let Some((check_id, command, command_line, manual_instruction, required, non_zero, line)) =
+        current.take()
+    else {
+        return;
+    };
+    let Some(required) = required else {
+        diagnostics.push(diagnostic(
+            "Verification.required",
+            "Verification check 缺少 required。",
+            line,
+            "- required: true",
+        ));
+        return;
+    };
+    let Some(non_zero_test_execution_required) = non_zero else {
+        diagnostics.push(diagnostic(
+            "Verification.non_zero_test_execution_required",
+            "Verification check 缺少 non_zero_test_execution_required。",
+            line,
+            "- non_zero_test_execution_required: true",
+        ));
+        return;
+    };
+    if check_id.is_empty() || (command.is_none() && manual_instruction.is_none()) {
+        diagnostics.push(diagnostic(
+            "Verification",
+            "Verification check 必须包含 check_id，并至少包含 command 或 manual_instruction。",
+            line,
+            "- check_id: CHECK-001",
+        ));
+        return;
+    }
+    entries.push(LoweredVerificationCheck {
+        command_line: command_line.unwrap_or(line),
+        check: VerificationCheck {
+            check_id,
+            command,
+            manual_instruction,
+            required,
+            non_zero_test_execution_required,
+        },
+    });
+}
+
+fn parse_bool_value(
+    field: &WorkItemPlanFieldAst,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Option<bool> {
+    match field.value.value.parse() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            diagnostics.push(diagnostic(
+                field.key.value.as_str(),
+                "字段必须是 true 或 false。",
+                field.value.line,
+                &format!("- {}: true", field.key.value),
+            ));
+            None
+        }
+    }
+}
+
+fn lower_inputs(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<RequiredInputContract> {
+    let mut entries = Vec::new();
+    let mut current: Option<InputState> = None;
+    for field in section_fields(fields, "Inputs") {
+        match field.key.value.as_str() {
+            "contract_id" => {
+                flush_input(&mut current, &mut entries, diagnostics);
+                current = Some((
+                    field.value.value.clone(),
+                    None,
+                    Vec::new(),
+                    None,
+                    field.value.line,
+                ));
+            }
+            "provider_logical_work_item_id" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.1 = Some(field.value.value.clone());
+                }
+            }
+            "required_capabilities" => {
+                if let Some(entry) = current.as_mut() {
+                    append_first_seen(&mut entry.2, split_value(&field.value.value));
+                }
+            }
+            "compatibility_policy" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.3 = parse_compatibility_policy(
+                        &field.value.value,
+                        diagnostics,
+                        field.value.line,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_input(&mut current, &mut entries, diagnostics);
+    entries
+}
+
+fn flush_input(
+    current: &mut Option<InputState>,
+    entries: &mut Vec<RequiredInputContract>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    let Some((contract_id, provider, required_capabilities, compatibility_policy, line)) =
+        current.take()
+    else {
+        return;
+    };
+    let Some(provider_logical_work_item_id) = provider else {
+        diagnostics.push(diagnostic(
+            "Inputs.provider_logical_work_item_id",
+            "输入契约缺少 provider_logical_work_item_id。",
+            line,
+            "- provider_logical_work_item_id: WI-001",
+        ));
+        return;
+    };
+    let Some(compatibility_policy) = compatibility_policy else {
+        diagnostics.push(diagnostic(
+            "Inputs.compatibility_policy",
+            "输入契约缺少 compatibility_policy。",
+            line,
+            "- compatibility_policy: require_all",
+        ));
+        return;
+    };
+    entries.push(RequiredInputContract {
+        contract_id,
+        provider_logical_work_item_id,
+        required_capabilities,
+        compatibility_policy,
+    });
+}
+
+fn lower_outputs(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<PromisedOutputContract> {
+    let mut entries = Vec::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+    for field in section_fields(fields, "Outputs") {
+        if field.key.value == "contract_id" {
+            if let Some((contract_id, capabilities)) = current.take() {
+                entries.push(PromisedOutputContract {
+                    contract_id,
+                    capabilities,
+                });
+            }
+            current = Some((field.value.value.clone(), Vec::new()));
+        } else if field.key.value == "capabilities"
+            && let Some((_, capabilities)) = current.as_mut()
+        {
+            append_first_seen(capabilities, split_value(&field.value.value));
+        }
+    }
+    if let Some((contract_id, capabilities)) = current {
+        entries.push(PromisedOutputContract {
+            contract_id,
+            capabilities,
+        });
+    }
+    let _ = diagnostics;
+    entries
+}
+
+fn lower_blocker_rules(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<BlockerRule> {
+    let mut entries = Vec::new();
+    let mut current: Option<(String, Option<BlockerRoute>, Vec<String>, usize)> = None;
+    let blocker_fields = section_fields(fields, "Blockers");
+    // Parser 将唯一允许为空的 Blockers section 解释为“无 blocker”；这里保持
+    // 空字段集合到空 Vec 的投影，不触发 blocker rule 的 lowering 诊断。
+    if blocker_fields.is_empty() {
+        return entries;
+    }
+    for field in blocker_fields {
+        match field.key.value.as_str() {
+            "reason_code" => {
+                flush_blocker(&mut current, &mut entries, diagnostics);
+                current = Some((
+                    field.value.value.clone(),
+                    None,
+                    Vec::new(),
+                    field.value.line,
+                ));
+            }
+            "route" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.1 =
+                        parse_blocker_route(&field.value.value, diagnostics, field.value.line);
+                }
+            }
+            "target_contract_refs" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.2 = split_value(&field.value.value);
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_blocker(&mut current, &mut entries, diagnostics);
+    entries
+}
+
+fn flush_blocker(
+    current: &mut Option<(String, Option<BlockerRoute>, Vec<String>, usize)>,
+    entries: &mut Vec<BlockerRule>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    let Some((reason_code, route, target_contract_refs, line)) = current.take() else {
+        return;
+    };
+    let Some(route) = route else {
+        diagnostics.push(diagnostic(
+            "Blockers.route",
+            "blocker rule 缺少 route。",
+            line,
+            "- route: operational_gate",
+        ));
+        return;
+    };
+    entries.push(BlockerRule {
+        reason_code,
+        route,
+        target_contract_refs,
+    });
+}
+
+fn lower_traceability(
+    fields: &[(&str, &WorkItemPlanFieldAst)],
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<DesignTraceabilityRef> {
+    let mut entries = Vec::new();
+    let mut current: Option<(String, Option<String>, Option<String>, usize)> = None;
+    for field in section_fields(fields, "Traceability") {
+        match field.key.value.as_str() {
+            "source_type" => {
+                flush_traceability(&mut current, &mut entries, diagnostics);
+                current = Some((field.value.value.clone(), None, None, field.value.line));
+            }
+            "source_id" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.1 = Some(field.value.value.clone());
+                }
+            }
+            "requirement_id" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.2 = Some(field.value.value.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_traceability(&mut current, &mut entries, diagnostics);
+    entries
+}
+
+fn flush_traceability(
+    current: &mut Option<(String, Option<String>, Option<String>, usize)>,
+    entries: &mut Vec<DesignTraceabilityRef>,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) {
+    let Some((source_type, source_id, requirement_id, line)) = current.take() else {
+        return;
+    };
+    let Some(source_id) = source_id else {
+        diagnostics.push(diagnostic(
+            "Traceability.source_id",
+            "traceability 缺少 source_id。",
+            line,
+            "- source_id: design_spec_0001",
+        ));
+        return;
+    };
+    let Some(requirement_id) = requirement_id else {
+        diagnostics.push(diagnostic(
+            "Traceability.requirement_id",
+            "traceability 缺少 requirement_id。",
+            line,
+            "- requirement_id: REQ-001",
+        ));
+        return;
+    };
+    entries.push(DesignTraceabilityRef {
+        source_type,
+        source_id,
+        requirement_id,
+    });
+}
+
+fn trusted_commands_for_checks(
+    checks: &[LoweredVerificationCheck],
+    source_revision_hash: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+) -> Vec<TrustedDraftVerificationCommand> {
+    let mut trusted_commands = Vec::new();
+    let mut commands = HashSet::new();
+    for entry in checks {
+        let Some(command) = entry.check.command.as_deref() else {
+            continue;
+        };
+        if !commands.insert(command) {
+            diagnostics.push(diagnostic(
+                "trusted_commands",
+                "同一 Work Item 不得重复引用 trusted command。",
+                entry.command_line,
+                "- command: cargo test --locked --lib target",
+            ));
+            continue;
+        }
+        let purpose = entry
+            .check
+            .manual_instruction
+            .as_deref()
+            .unwrap_or(entry.check.check_id.as_str())
+            .chars()
+            .take(crate::product::models::MAX_TRUSTED_DRAFT_VERIFICATION_PURPOSE_LENGTH)
+            .collect();
+        let source_ref_hash = hex::encode(Sha256::digest(source_revision_hash.as_bytes()));
+        trusted_commands.push(TrustedDraftVerificationCommand {
+            command: command.to_string(),
+            cwd: ".".to_string(),
+            purpose,
+            source_ref: format!("plan-{}", &source_ref_hash[..24]),
+        });
+    }
+    trusted_commands
+}
+
+fn section_fields<'a>(
+    fields: &'a [(&str, &'a WorkItemPlanFieldAst)],
+    section: &str,
+) -> Vec<&'a WorkItemPlanFieldAst> {
+    fields
+        .iter()
+        .filter_map(|(name, field)| (*name == section).then_some(*field))
+        .collect()
+}
+/// Verification 文本字段占位归一：空值与字面量 null/none（trim + 大小写不敏感）视为未声明，
+/// 防止 `- command: null` 注册成名为 null 的 trusted command。
+fn non_placeholder(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let is_placeholder = matches!(trimmed.to_ascii_lowercase().as_str(), "null" | "none");
+    (!trimmed.is_empty() && !is_placeholder).then(|| trimmed.to_string())
+}
+fn split_values(values: Vec<&str>) -> Vec<String> {
+    values.into_iter().flat_map(split_value).collect()
+}
+fn split_value(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "[]")
+        .map(str::to_string)
+        .collect()
+}
+
+/// 重复字段累积语义（REQ-WSC-02 / F-52）：同一 contract 的重复
+/// `capabilities`/`required_capabilities` 行按出现顺序 append，完全相同
+/// （字节级）的值仅保留首次出现。不排序、不改写值形态——去重只消除完全
+/// 相同的重复元素，不制造能力。
+fn append_first_seen(target: &mut Vec<String>, incoming: Vec<String>) {
+    for value in incoming {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+fn parse_compatibility_policy(
+    value: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    line: usize,
+) -> Option<ContractCompatibilityPolicy> {
+    match value {
+        "require_all" => Some(ContractCompatibilityPolicy::RequireAll),
+        "require_any" => Some(ContractCompatibilityPolicy::RequireAny),
+        _ => {
+            diagnostics.push(diagnostic(
+                "compatibility_policy",
+                "字段值不符合 canonical enum。",
+                line,
+                "- compatibility_policy: require_all",
+            ));
+            None
+        }
+    }
+}
+
+fn parse_blocker_route(
+    value: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    line: usize,
+) -> Option<BlockerRoute> {
+    let route = match value {
+        "coder_rework" => BlockerRoute::CoderRework,
+        "verification_retry" => BlockerRoute::VerificationRetry,
+        "plan_repair_current" => BlockerRoute::PlanRepairCurrent,
+        "plan_repair_upstream" => BlockerRoute::PlanRepairUpstream,
+        "subgraph_replan" => BlockerRoute::SubgraphReplan,
+        "story_amendment" => BlockerRoute::StoryAmendment,
+        "design_amendment" => BlockerRoute::DesignAmendment,
+        "operational_gate" => BlockerRoute::OperationalGate,
+        _ => {
+            diagnostics.push(diagnostic(
+                "route",
+                "字段值不符合 canonical enum。",
+                line,
+                "- route: operational_gate",
+            ));
+            return None;
+        }
+    };
+    Some(route)
+}
+
+fn parse_evidence_kind(
+    value: &str,
+    diagnostics: &mut Vec<CompilerDiagnostic>,
+    line: usize,
+) -> Option<EvidenceKind> {
+    let evidence = match value {
+        "source_diff" => EvidenceKind::SourceDiff,
+        "non_zero_test_execution" => EvidenceKind::NonZeroTestExecution,
+        "manual_check" => EvidenceKind::ManualCheck,
+        "handoff_field" => EvidenceKind::HandoffField,
+        _ => {
+            diagnostics.push(diagnostic(
+                "required_evidence",
+                "字段值不符合 canonical enum。",
+                line,
+                "- required_evidence: source_diff",
+            ));
+            return None;
+        }
+    };
+    Some(evidence)
+}
+fn diagnostic(field: &str, message: &str, line: usize, repair_example: &str) -> CompilerDiagnostic {
+    CompilerDiagnostic {
+        code: "lowering_error".to_string(),
+        line,
+        field: field.to_string(),
+        message: message.to_string(),
+        repair_example: repair_example.to_string(),
+        // F1.2：lowering 分支尚未 typed（enum 缺事实不猜、line=0 不伪行）；
+        // 显式 typed 工厂归后续 SG 包按事实接入，不从 code/message 推导。
+        kind: None,
+    }
+}

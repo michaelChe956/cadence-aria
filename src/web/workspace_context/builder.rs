@@ -5,14 +5,25 @@ use super::prompts::{
     workspace_type_label,
 };
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::cadence_skills::routing_reference::{
+    LogicalPolicyReference, RoutingReferenceContext,
+};
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::logical_codebase::{
+    AggregatePolicyArtifactStore, LogicalCodebaseStore, PlanningContextResolver,
+    RepositoryAuthorityResolver, RepositoryRouting, RepositoryRoutingErrorCode,
+};
 use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
+use crate::product::workspace_engine::{
+    aggregate_design_scope_instruction_prompt, aggregate_scope_material_prompt,
+    aggregate_story_scope_instruction_prompt, aggregate_work_item_target_scope_instruction_prompt,
+};
 use chrono::Utc;
 
-pub fn ensure_workspace_context_message(
+pub async fn ensure_workspace_context_message(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: WorkspaceSessionRecord,
@@ -22,7 +33,7 @@ pub fn ensure_workspace_context_message(
     let has_legacy_brief = session.messages.iter().any(is_legacy_context_message);
 
     if has_generation_brief {
-        let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
+        let content = build_workspace_context_message(app_paths, lifecycle, &session).await?;
         if !has_legacy_brief
             && session
                 .messages
@@ -58,7 +69,7 @@ pub fn ensure_workspace_context_message(
     }
 
     if has_runtime_context {
-        let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
+        let content = build_workspace_context_message(app_paths, lifecycle, &session).await?;
         if !has_legacy_brief
             && session
                 .messages
@@ -83,7 +94,7 @@ pub fn ensure_workspace_context_message(
         return lifecycle.replace_workspace_messages(&session.id, messages);
     }
 
-    let content = build_workspace_context_message(app_paths, lifecycle, &session)?;
+    let content = build_workspace_context_message(app_paths, lifecycle, &session).await?;
     let mut messages: Vec<WorkspaceMessageRecord> = session
         .messages
         .into_iter()
@@ -100,7 +111,7 @@ pub fn ensure_workspace_context_message(
     lifecycle.replace_workspace_messages(&session.id, messages)
 }
 
-fn build_workspace_context_message(
+async fn build_workspace_context_message(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
@@ -109,8 +120,102 @@ fn build_workspace_context_message(
         WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
     }
     let issue = IssueStore::new(app_paths.clone()).get(&session.project_id, &session.issue_id)?;
-    let entity = workspace_entity_context(app_paths, lifecycle, session, &issue)?;
-    let repository = repository_for(app_paths, &session.project_id, &entity.repository_id)?;
+    // 方案 X 阶段1：按 RepositoryRouting 分流。Logical（聚合代码库）Story/Design 无单一
+    // 物理仓库，以聚合根 cwd 为仓库上下文并注入聚合视野 prompt；Legacy（单仓）保持原
+    // 物理仓库解析，向后兼容；FailClosed 提前拦截报稳定错误码 repository_routing_*。
+    // C1 修复：routing 判定在 workspace_entity_context 之前，Logical Story/Design 传
+    // logical_aggregate 标志（Design 分支不再依赖 issue.repo_id，多仓 issue 可达）。
+    // Task 7 扩展：WorkItemPlan 同样走聚合视野（无单一物理仓库，entity 用空串占位，
+    // prompt 注入 target 集合），解决“WorkItemPlan+Logical 仍依赖 issue.repo_id”遗留。
+    // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy 布局
+    // 冲突 fail-closed）；无归属且无 legacy 别名 record 的旧数据回退 Legacy 兼容
+    // 分支，判定仍复用 `RepositoryRouting::classify`（单元语义不变）。
+    let routing = match RepositoryAuthorityResolver::new(app_paths.clone())
+        .resolve_for_issue(&session.project_id, &session.issue_id)?
+    {
+        None => RepositoryRouting::Legacy {
+            repository_id: String::new(),
+        },
+        Some(resolution) => RepositoryRouting::classify(resolution.manifest, resolution.selection),
+    };
+    let aggregate_planning = match &routing {
+        RepositoryRouting::FailClosed { code, reason } => {
+            return Err(routing_error_for_builder(*code, reason.clone()));
+        }
+        RepositoryRouting::Logical { .. }
+            if matches!(
+                session.workspace_type,
+                WorkspaceType::Story | WorkspaceType::Design | WorkspaceType::WorkItemPlan
+            ) =>
+        {
+            // targets 空 → AI 自决 involved；snapshot 为权威 effective_member_ids。
+            Some(
+                PlanningContextResolver::new(app_paths.clone())
+                    .build_with_fresh_index(&session.project_id, &session.issue_id, &[])
+                    .await?,
+            )
+        }
+        _ => None,
+    };
+    let entity = workspace_entity_context(
+        app_paths,
+        lifecycle,
+        session,
+        &issue,
+        aggregate_planning.is_some(),
+    )?;
+    let (repository_name, repository_id_label, repository_path) =
+        if let Some(resolved) = aggregate_planning.as_ref() {
+            (
+                "聚合代码库".to_string(),
+                "<logical>".to_string(),
+                resolved.cwd.display().to_string(),
+            )
+        } else {
+            let repository = repository_for(
+                app_paths,
+                &session.project_id,
+                &session.issue_id,
+                &entity.repository_id,
+            )?;
+            (
+                repository.name,
+                repository.id,
+                repository.path.display().to_string(),
+            )
+        };
+    // add-multi-repo-issue-entry（组2 2.1）：resolved 上界 = selection.focus 非空取
+    // 原集 / 空取 resolved 有效成员（与 generate 出生值/write-back/preflight 四面
+    // 同源，`resolved_upper_bound` 唯一口径）。Design 钉定块注入上界（允许界内
+    // 子集收敛、界外即拒）；Story/WorkItemPlan 指令面不变；Legacy 单仓无聚合
+    // prompt，零回归。
+    let aggregate_design_bound = match (&routing, aggregate_planning.as_ref()) {
+        (RepositoryRouting::Logical { selection, .. }, Some(resolved)) => {
+            Some(selection.resolved_upper_bound(&resolved.snapshot.effective_member_ids))
+        }
+        _ => None,
+    };
+    // 多仓材料块（成员清单）进 `[canonical_inputs]` 稳定注入面（REQ-PLN-13）：历史压缩后
+    // 仍被完整重放，评审材料不因会话轮次增加而丢失。
+    let aggregate_material = aggregate_planning
+        .as_ref()
+        .map(|resolved| aggregate_scope_material_prompt(&resolved.inventory_injection.rendered));
+    // 指令块留消息尾部。
+    let aggregate_instruction =
+        aggregate_planning
+            .as_ref()
+            .map(|resolved| match session.workspace_type {
+                WorkspaceType::Story => aggregate_story_scope_instruction_prompt(
+                    &resolved.snapshot.effective_member_ids,
+                ),
+                WorkspaceType::WorkItemPlan => aggregate_work_item_target_scope_instruction_prompt(
+                    &resolved.snapshot.effective_member_ids,
+                ),
+                _ => aggregate_design_scope_instruction_prompt(
+                    &resolved.snapshot.effective_member_ids,
+                    aggregate_design_bound.as_deref().unwrap_or(&[]),
+                ),
+            });
     let issue_description = issue
         .description
         .as_deref()
@@ -129,8 +234,9 @@ fn build_workspace_context_message(
         format!("\n\n[work_item_context]\n{work_item_context}")
     };
     let runtime_contract = runtime_contract_for(session);
+    let routing_context = routing_reference_context_for_project(app_paths, &session.project_id)?;
 
-    Ok(format!(
+    let mut message = format!(
         "Workspace 生成任务已准备\n\n\
          [system]\n\
          {}\n\n\
@@ -146,7 +252,7 @@ fn build_workspace_context_message(
          Issue 描述: {}\n\
          Repository: {} ({})\n\
          Repository 路径: {}\n\
-         关联上下文:\n{}{}\n\n\
+         {}关联上下文:\n{}{}\n\n\
          [constraint_summary]\n\
          {}\n\n\
          [runtime_contract]\n\
@@ -166,17 +272,77 @@ fn build_workspace_context_message(
         issue.title,
         issue.id,
         issue_description,
-        repository.name,
-        repository.id,
-        repository.path.display(),
+        repository_name,
+        repository_id_label,
+        repository_path,
+        aggregate_material.as_deref().unwrap_or(""),
         linked_context,
         work_item_context_block,
         constraint_summary_for(session),
         runtime_contract,
-        workflow_discipline_for(session),
+        workflow_discipline_for(session, &routing_context),
         output_schema_for(&session.workspace_type),
         completion_or_failure_for(session),
-    ))
+    );
+    if let Some(aggregate_instruction) = aggregate_instruction {
+        message.push_str("\n\n");
+        message.push_str(&aggregate_instruction);
+    }
+    Ok(message)
+}
+
+/// workspace 上下文 prompt 注入用的路由引用上下文(store-backed 受控 artifact 引用)。
+///
+/// 逻辑代码库(有 manifest + 已 bootstrap 的 `AggregatePolicyArtifact`)时派生
+/// `Logical`:`policy_id`/`policy_revision`/`policy_digest` 来自 persisted artifact,
+/// `authority_root` 取 `LogicalCodebaseManifest.provider_context_root` 的
+/// canonicalize 后形态(与 gateway envelope 表示一致)。
+///
+/// 裁决①(链接不可达则停下报告):
+/// - `load_manifest`/`get` 的 `Ok(None)`(store 不存在)→ `Legacy`;
+/// - `Err(e)`(文件损坏、IO 失败)→ 经 `build_workspace_context_message` 既有
+///   `Result` fail-closed 传播,不允许逻辑代码库项目静默退回 Legacy;
+/// - `provider_context_root` 不可达(`fs::canonicalize` 探测失败)同 `Err` 处理。
+pub(super) fn routing_reference_context_for_project(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+) -> Result<RoutingReferenceContext, ProductStoreError> {
+    let Some(manifest) = LogicalCodebaseStore::new(app_paths.clone()).load_manifest(project_id)?
+    else {
+        return Ok(RoutingReferenceContext::Legacy);
+    };
+    // 裁决①:provider_context_root 必须可达(canonicalize 探测),不可达与 store
+    // 读取错误同等 fail-closed 传播;成功则用 canonicalize 后形态作 authority_root,
+    // 与 gateway_factory/envelope 表示一致(M1)。
+    let authority_root =
+        std::fs::canonicalize(&manifest.provider_context_root).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "provider_context_root unreachable {}: {error}",
+                manifest.provider_context_root.display()
+            ))
+        })?;
+    let Some(artifact) = AggregatePolicyArtifactStore::new(app_paths.clone()).get(project_id)?
+    else {
+        return Ok(RoutingReferenceContext::Legacy);
+    };
+    Ok(RoutingReferenceContext::Logical(LogicalPolicyReference {
+        policy_id: artifact.policy_id,
+        policy_revision: artifact.revision,
+        policy_digest: artifact.digest,
+        authority_root: authority_root.to_string_lossy().to_string(),
+    }))
+}
+
+/// FailClosed 稳定错误码映射（B3）：ProductStoreError 经 product_store_api_error 的
+/// routing_error_code_from_reason 映射回 repository_routing_* HTTP 稳定错误码。
+fn routing_error_for_builder(
+    code: RepositoryRoutingErrorCode,
+    reason: impl Into<String>,
+) -> ProductStoreError {
+    ProductStoreError::InvalidRecord {
+        kind: "repository_routing",
+        reason: format!("{}: {}", code.stable_code(), reason.into()),
+    }
 }
 
 fn is_workspace_generation_brief(content: &str) -> bool {

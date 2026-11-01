@@ -1,11 +1,31 @@
 use std::path::PathBuf;
 
+use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
-    IssueWorkItemDependencyEdge, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName,
-    RepositoryProfileConfidence, VerificationCommand, VerificationFallbackPolicy,
-    VerificationManualCheck, VerificationScope, WorkItemContextBudget, WorkItemKind,
-    WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceType,
+    ChildBindingIdentity, IssueWorkItemDependencyEdge, IssueWorkItemPlanOptions,
+    IssueWorkItemPlanStatus, ProviderName, RepositoryProfileConfidence, VerificationCommand,
+    VerificationFallbackPolicy, VerificationManualCheck, VerificationScope, WorkItemContextBudget,
+    WorkItemKind, WorkItemPlanStatus, WorkItemSplitFinding, WorkspaceType,
 };
+use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+
+/// 聚合代码库 Story 视野范围。由 Story 生成/修订入口在逻辑代码库分支构造：
+/// `logical_codebase_ref` 取 manifest.logical_codebase_id；`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威）；`involved_repository_ids` 来自 AI
+/// 输出且必须 ⊆ effective_member_ids；`focus_repository_id` 可空，若给出必须 ∈ involved。
+///
+/// AI 未明确涉及仓库（空 involved）或涉及不在有效集合的仓库 → 非 Draft 态 blocker，不塞
+/// primary（REQ-PLN-07）；Draft 态允许空 involved（AI 尚未产出，Task 1）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateStorySpecScope {
+    pub logical_codebase_ref: uuid::Uuid,
+    pub effective_member_ids: Vec<LogicalRepositoryId>,
+    /// AI 明确声明的涉及仓库；空表示未确定 → 非 Draft 态 blocker（不回落 primary，
+    /// Draft 态允许空 involved 待 AI 产出）。
+    pub involved_repository_ids: Vec<LogicalRepositoryId>,
+    /// 迁移期 focus/primary 投影；可空，若给出必须 ∈ involved_repository_ids。
+    pub focus_repository_id: Option<LogicalRepositoryId>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateStorySpecInput {
@@ -13,6 +33,32 @@ pub struct CreateStorySpecInput {
     pub issue_id: String,
     pub repository_id: String,
     pub title: String,
+    /// 聚合代码库视野。`None` 表示传统单仓 issue，走原 `repository_id` 单值路径；
+    /// `Some` 表示逻辑代码库分支，以 `involved_repository_ids` 等聚合字段为权威，
+    /// 并按 effective_member_ids 校验。
+    pub aggregate_codebase: Option<AggregateStorySpecScope>,
+}
+
+/// 聚合代码库 Design 视野范围。由 Design 生成/修订入口在逻辑代码库分支构造：
+/// `logical_codebase_ref` 取 manifest.logical_codebase_id；`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威）；`involved_repository_ids` 来自 AI
+/// 输出且必须 ⊆ effective_member_ids；`change_order` 为 AI 显式给出的改动顺序图（执行顺序，
+/// 非服务调用图，REQ-TGT-04）。**多仓 Design（involved > 1）必须提供 change_order**，缺失即
+/// blocker `change_order_required_for_logical_codebase`（REQ-PLN-05 收紧）；单仓 Design 可空。
+///
+/// AI 未明确涉及仓库（空 involved）或涉及不在有效集合的仓库 → blocker；Design 不再读取
+/// `issue.repo_id` 填充任何字段（REQ-PLN-08）。`change_order` 若给出，其全部 id 必须 ∈
+/// involved_repository_ids 且不得重复（执行顺序图不得重复顶点）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateDesignSpecScope {
+    pub logical_codebase_ref: uuid::Uuid,
+    pub effective_member_ids: Vec<LogicalRepositoryId>,
+    /// AI 明确声明的涉及仓库；空表示未确定 → blocker（不回落 issue.repo_id）。
+    pub involved_repository_ids: Vec<LogicalRepositoryId>,
+    /// AI 显式给出的改动顺序图（执行顺序）。当 `involved_repository_ids.len() > 1`（多仓）时
+    /// **必须**提供（缺失即 blocker `change_order_required_for_logical_codebase`，REQ-PLN-05）；
+    /// 单仓 Design（involved ≤ 1）可空。若给出则全部 id 必须 ∈ involved 且不重复。
+    pub change_order: Vec<LogicalRepositoryId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +67,9 @@ pub struct CreateDesignSpecInput {
     pub issue_id: String,
     pub story_spec_ids: Vec<String>,
     pub title: String,
+    /// 聚合代码库视野。`None` 表示传统单仓 issue；`Some` 进入逻辑代码库分支以聚合字段为权威，
+    /// 并按 effective_member_ids 校验。Design 不再读取 issue.repo_id 填充任何字段。
+    pub aggregate_codebase: Option<AggregateDesignSpecScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,9 +214,30 @@ pub struct AppendProviderReviewRoundInput {
     pub session_id: String,
     pub round_index: u32,
     pub author_provider: ProviderName,
-    pub reviewer_provider: ProviderName,
+    /// C2 Task 5：reviewer 三值——缺失传 None。
+    pub reviewer_provider: Option<ProviderName>,
     pub review_result: String,
     pub revision_result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkItemPlanSessionOptions {
+    pub flow_kind: WorkItemPlanFlowKind,
+    pub run_policy: RunPolicy,
+    pub rollout_snapshot: bool,
+}
+
+impl Default for WorkItemPlanSessionOptions {
+    fn default() -> Self {
+        Self {
+            // L2 退役（T5/REQ-WSC-08）：Default 保持 Legacy——该值仅服务存量夹具
+            // 与缺字段读侧；生产创建路径唯一（prepare_work_item_plan）已显式
+            // 恒 SingleCandidate，新会话不存在 legacy 选项。
+            flow_kind: WorkItemPlanFlowKind::Legacy,
+            run_policy: RunPolicy::Interactive,
+            rollout_snapshot: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,10 +247,21 @@ pub struct CreateWorkspaceSessionInput {
     pub entity_id: String,
     pub workspace_type: WorkspaceType,
     pub author_provider: ProviderName,
-    pub reviewer_provider: ProviderName,
+    /// C2 Task 5：reviewer 三值——缺失传 None，持久化空 effective。
+    pub reviewer_provider: Option<ProviderName>,
     pub review_rounds: u32,
     pub superpowers_enabled: bool,
     pub openspec_enabled: bool,
+    pub work_item_plan_options: Option<WorkItemPlanSessionOptions>,
+}
+
+/// C1 Task 8（REQ-C1-CHILD-01）：compile child 创建的 additive binding
+/// identity 输入——`create_workspace_child_session` 在 session 的同一原子
+/// 写入里持久化 child binding 身份，crash 后同代 replay 不建第二 child。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateWorkItemChildSessionInput {
+    pub session: CreateWorkspaceSessionInput,
+    pub child_binding: ChildBindingIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +279,19 @@ pub struct UpsertIssueSharedWorktreeInput {
     pub project_id: String,
     pub issue_id: String,
     pub repository_id: String,
+    pub branch_name: String,
+    pub worktree_path: PathBuf,
+    pub base_branch: String,
+}
+
+/// 多仓 shared worktree upsert 输入：键域 (project, issue, logical repository)。
+/// `repository_id` 为 `LogicalRepositoryId`（三元键之一），写入文件名
+/// `shared-worktrees/{repository_id}.json` 并作为记录的 `target_repository_id`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertRepoSharedWorktreeInput {
+    pub project_id: String,
+    pub issue_id: String,
+    pub repository_id: LogicalRepositoryId,
     pub branch_name: String,
     pub worktree_path: PathBuf,
     pub base_branch: String,

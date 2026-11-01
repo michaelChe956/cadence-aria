@@ -1,0 +1,210 @@
+{
+  "provider": "kimi_code",
+  "repetition": 10,
+  "project_id": "project_0001",
+  "repository_id": "repository_0001",
+  "outDir": "/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/reports/provider-validation-round/kimi-coding/kimi_code/rep10",
+  "startedAt": "2026-09-20T12:22:08.259Z",
+  "finishedAt": "2026-09-20T12:32:54.303Z",
+  "elapsedSec": 646.042,
+  "issue_id": "issue_0299",
+  "plan_id": "issue_work_item_plan_0001",
+  "workspace_session_id": "workspace_session_0490",
+  "prepare_options": {
+    "story_spec_ids": [
+      "story_spec_0001"
+    ],
+    "design_spec_ids": [
+      "design_spec_0001"
+    ],
+    "author_provider": "kimi_code",
+    "reviewer_provider": "kimi_code",
+    "review_rounds": 1,
+    "superpowers_enabled": true,
+    "openspec_enabled": true,
+    "run_policy": "auto_if_valid",
+    "include_integration_tests": true,
+    "include_e2e_tests": false,
+    "force_frontend_backend_split": true,
+    "require_execution_plan_confirm": false
+  },
+  "fixture_digests": {
+    "story_spec_0001.json": "52512ba5392805768a397e534ef5552dde32233f46418a4b8bab03232ea6542d",
+    "story_version_0001.json": "d166437ba6013c213851bfb155c58316ee08fd0c64e25bc5be4b91ef50a6870d",
+    "design_spec_0001.json": "459bbaf1a08dae69bdc3ca0599a3839ef4a5559e10e6adfe3f99566d562c9564",
+    "design_version_0001.json": "5a61c923e9bc8866e9aaaa7514b9805d497c462ff8e36f272cfc8cc0a641a204"
+  },
+  "description_digest": "116d4a15ac87a585ba662081c0adcb22982d8d37303930076428bd7deec8ede4",
+  "stageTimeline": [
+    {
+      "stage": "prepare_context",
+      "elapsedSec": 2.593,
+      "source": "session_state"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 2.686,
+      "source": "stage_change"
+    },
+    {
+      "stage": "cross_review",
+      "elapsedSec": 534.629,
+      "source": "stage_change"
+    },
+    {
+      "stage": "running",
+      "elapsedSec": 645.935,
+      "source": "stage_change"
+    },
+    {
+      "stage": "completed",
+      "elapsedSec": 645.937,
+      "source": "stage_change"
+    }
+  ],
+  "choices": [],
+  "provider_selections": [],
+  "review_decisions": [],
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "round": 1,
+      "elapsedSec": 645.934,
+      "findings": [
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "Projection Validation Report warning integration_or_e2e_skipped_risk：e2e tests are skipped; consider adding manual verification before acceptance；WI-002 AC-009 明确前端测试全程替身运行不启动浏览器。",
+          "message": "机械校验唯一 warning 提示未纳入浏览器 e2e；候选已以 tests/integration 的 node --test 真实服务验证覆盖同源可达、页面三容器与错误形状，属既定设计而非缺口，建议人工验收前辅以一次浏览器手动走查（CHECK-001~003 的 manual_instruction 均为字符串 null）。",
+          "required_action": "",
+          "severity": "suggestion"
+        },
+        {
+          "category": "other",
+          "class_hint": "advisory",
+          "contract_field": "output_contracts.capabilities",
+          "evidence": "WI-001 output_contracts CT-003、WI-003 input_contracts CT-003 及 capability_coverage 中 CT-003 的 required_capabilities 与 provided_capabilities 均为同批三段碎片，missing_capabilities 为空。",
+          "message": "CT-003 的能力文本在序列化时被逗号切分为三个碎片（port 与 stop } 后半句成为独立 capability 字符串）；因供需两侧碎片完全一致，coverage 匹配通过、不构成 contract_gap，建议后续以结构化字段承载 { origin, port, stop }，避免未来按单条 capability 粒度匹配时误判。",
+          "required_action": "",
+          "severity": "suggestion"
+        },
+        {
+          "category": "completeness",
+          "class_hint": "advisory",
+          "evidence": "WI-001 仅 TASK-001/002→AC-004、TASK-003→AC-005；WI-002 仅 TASK-004/005→AC-008、TASK-006→AC-007、TASK-007→AC-009；WI-003 仅 TASK-008→AC-012、TASK-009→AC-013。",
+          "message": "部分验收标准未被任何 task 的 done_when_refs 直接引用（AC-001~AC-003、AC-006、AC-010~AC-011）；对应 task 的 statement 已覆盖其场景，且各 AC 的 non_zero_test_execution 证据可经所在工作项的 verification_check 归属，建议补齐引用以便自动化完成归因。",
+          "required_action": "",
+          "severity": "suggestion"
+        }
+      ]
+    }
+  ],
+  "validator_findings": [
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "Projection Validation Report warning integration_or_e2e_skipped_risk：e2e tests are skipped; consider adding manual verification before acceptance；WI-002 AC-009 明确前端测试全程替身运行不启动浏览器。",
+      "message": "机械校验唯一 warning 提示未纳入浏览器 e2e；候选已以 tests/integration 的 node --test 真实服务验证覆盖同源可达、页面三容器与错误形状，属既定设计而非缺口，建议人工验收前辅以一次浏览器手动走查（CHECK-001~003 的 manual_instruction 均为字符串 null）。",
+      "required_action": "",
+      "severity": "suggestion"
+    },
+    {
+      "category": "other",
+      "class_hint": "advisory",
+      "contract_field": "output_contracts.capabilities",
+      "evidence": "WI-001 output_contracts CT-003、WI-003 input_contracts CT-003 及 capability_coverage 中 CT-003 的 required_capabilities 与 provided_capabilities 均为同批三段碎片，missing_capabilities 为空。",
+      "message": "CT-003 的能力文本在序列化时被逗号切分为三个碎片（port 与 stop } 后半句成为独立 capability 字符串）；因供需两侧碎片完全一致，coverage 匹配通过、不构成 contract_gap，建议后续以结构化字段承载 { origin, port, stop }，避免未来按单条 capability 粒度匹配时误判。",
+      "required_action": "",
+      "severity": "suggestion"
+    },
+    {
+      "category": "completeness",
+      "class_hint": "advisory",
+      "evidence": "WI-001 仅 TASK-001/002→AC-004、TASK-003→AC-005；WI-002 仅 TASK-004/005→AC-008、TASK-006→AC-007、TASK-007→AC-009；WI-003 仅 TASK-008→AC-012、TASK-009→AC-013。",
+      "message": "部分验收标准未被任何 task 的 done_when_refs 直接引用（AC-001~AC-003、AC-006、AC-010~AC-011）；对应 task 的 statement 已覆盖其场景，且各 AC 的 non_zero_test_execution 证据可经所在工作项的 verification_check 归属，建议补齐引用以便自动化完成归因。",
+      "required_action": "",
+      "severity": "suggestion"
+    },
+    {
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "severity": "warning",
+      "work_item_ids": []
+    },
+    {
+      "code": "integration_or_e2e_skipped_risk",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "severity": "warning",
+      "work_item_ids": []
+    },
+    {
+      "finding_id": "integration_or_e2e_skipped_risk",
+      "level": "warning",
+      "message": "e2e tests are skipped; consider adding manual verification before acceptance",
+      "affected_scopes": []
+    }
+  ],
+  "work_item_ids": [
+    "WI-001",
+    "WI-002",
+    "WI-003"
+  ],
+  "usage_by_role": {
+    "reviewer": {
+      "input_tokens": 14327,
+      "output_tokens": 5939,
+      "cache_read_tokens": 25408,
+      "cache_creation_tokens": 0
+    }
+  },
+  "artifacts": [
+    "artifact-v1.json",
+    "artifact-v2.json",
+    "artifact-v3.json",
+    "artifact-v4.json",
+    "artifact-v5.json",
+    "artifact-v6.json",
+    "artifact-v7.json",
+    "artifact-v8.json"
+  ],
+  "permission_approvals": 0,
+  "failureClass": null,
+  "error": null,
+  "completed": true,
+  "session_status": "confirmed",
+  "flow_kind": "single_candidate",
+  "run_policy": "auto_if_valid",
+  "run_history": {
+    "repairs_used": 0,
+    "manual_repairs_used": 0,
+    "transitions_used": 1,
+    "initial_review_count": 1,
+    "verification_review_count": 0,
+    "review_cycles": {
+      "review:timeline_node_003": {
+        "repairs_used": 0,
+        "initial_count": 1,
+        "verification_count": 0
+      }
+    }
+  },
+  "policy_diagnostics": [],
+  "human_gate_snapshot": null,
+  "provider_start_count": 1,
+  "provider_start_ledger": [
+    {
+      "provider_start_idempotency_key": "single_candidate_author:workspace_session_0490:0",
+      "started": true
+    }
+  ],
+  "legacy_decision_messages": [],
+  "confirmed_count": 1,
+  "duration_ms": 646042,
+  "stage_durations_sec": {
+    "0:prepare_context": 0.093,
+    "1:running": 531.943,
+    "2:cross_review": 111.306,
+    "3:running": 0.002,
+    "4:completed": 0.105
+  }
+}

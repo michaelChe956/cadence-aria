@@ -16,6 +16,17 @@ use crate::product::work_item_split_engine::{
 };
 use crate::web::types::GenerateWorkItemsRequest;
 
+/// F-51 夹具纪律：SC author prompt 教学基线 fixture 不携带 options 意图，
+/// 全 false 且不依赖默认值丢意图（与 weak_model validator 夹具同口径）。
+/// 四个 prompt_contract 子模块经 `use super::*` 共享本定义。
+static TEST_ALL_FALSE_PLAN_OPTIONS: crate::product::models::IssueWorkItemPlanOptions =
+    crate::product::models::IssueWorkItemPlanOptions {
+        include_integration_tests: false,
+        include_e2e_tests: false,
+        force_frontend_backend_split: false,
+        require_execution_plan_confirm: false,
+    };
+
 fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryRecord) {
     let request = GenerateWorkItemsRequest {
         title: "test plan".to_string(),
@@ -36,6 +47,7 @@ fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryR
         id: "issue_0001".to_string(),
         project_id: "project_0001".to_string(),
         repo_id: None,
+        logical_codebase_id: None,
         title: "Test Issue".to_string(),
         description: None,
         change_id: "change_0001".to_string(),
@@ -44,6 +56,7 @@ fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryR
         active_binding_id: None,
         created_at: String::new(),
         updated_at: String::new(),
+    base_branch: None,
     };
     let repository = RepositoryRecord {
         id: "repo_0001".to_string(),
@@ -56,6 +69,9 @@ fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryR
         default_provider_mode: "default".to_string(),
         created_at: String::new(),
         updated_at: String::new(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 0,
     };
     (request, issue, repository)
 }
@@ -81,6 +97,7 @@ fn build_split_prompt_includes_revision_feedback() {
         id: "issue_0001".to_string(),
         project_id: "project_0001".to_string(),
         repo_id: None,
+        logical_codebase_id: None,
         title: "Test Issue".to_string(),
         description: None,
         change_id: "change_0001".to_string(),
@@ -89,6 +106,7 @@ fn build_split_prompt_includes_revision_feedback() {
         active_binding_id: None,
         created_at: String::new(),
         updated_at: String::new(),
+    base_branch: None,
     };
     let repository = RepositoryRecord {
         id: "repo_0001".to_string(),
@@ -101,9 +119,12 @@ fn build_split_prompt_includes_revision_feedback() {
         default_provider_mode: "default".to_string(),
         created_at: String::new(),
         updated_at: String::new(),
+        logical_repository_id: None,
+        primary_checkout_id: None,
+        identity_schema_version: 0,
     };
 
-    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)");
+    let prompt = build_split_prompt(&request, &issue, &repository, &[], &[], "(empty)", &RoutingReferenceContext::Legacy);
 
     assert!(
         prompt.contains("[revision_feedback]"),
@@ -128,10 +149,11 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
         "src/product\nweb/src",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("[openspec_contract]"));
-    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(!prompt.contains("[superpowers_contract]"));
     assert!(prompt.contains("[cadence_project_rules]"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
@@ -141,12 +163,12 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
     assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(prompt.contains("[forbidden_outputs]"));
     assert!(prompt.contains("代码实现、Story/Design 重写"));
-    assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
-    assert!(prompt.contains("Claude Code"));
-    assert!(prompt.contains("Codex"));
-    for required in [
+    for removed in [
+        "必调 Skill：using-superpowers → writing-plans。",
+        "using-superpowers",
+        "TDD",
         "40k",
         "50k",
         "最大内聚",
@@ -158,8 +180,8 @@ fn work_item_plan_outline_prompt_includes_runtime_contracts() {
         "上下文代理指标",
     ] {
         assert!(
-            prompt.contains(required),
-            "outline prompt must include `{required}`: {prompt}"
+            !prompt.contains(removed),
+            "outline prompt must not include B-layer text `{removed}`: {prompt}"
         );
     }
     assert!(!prompt.contains("1..19999"));
@@ -172,20 +194,20 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
     let (request, issue, _repository) = split_prompt_fixture();
 
     let (prompt, _nonce) =
-        build_outline_revision_prompt(&request, &issue, "补齐 forbidden_write_scopes");
+        build_outline_revision_prompt(&request, &issue, "补齐 forbidden_write_scopes", &RoutingReferenceContext::Legacy);
 
     assert!(prompt.contains("[openspec_contract]"));
-    assert!(prompt.contains("[superpowers_contract]"));
+    assert!(!prompt.contains("[superpowers_contract]"));
     assert!(prompt.contains("[allowed_outputs]"));
     assert!(prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(prompt.contains("[forbidden_outputs]"));
     assert!(prompt.contains("代码实现、Story/Design 重写"));
-    assert!(prompt.contains("writing-plans"));
     assert!(prompt.contains("任务拆分"));
     assert!(prompt.contains("追踪关系"));
-    assert!(prompt.contains("Claude Code"));
-    assert!(prompt.contains("Codex"));
-    for required in [
+    for removed in [
+        "必调 Skill：using-superpowers → writing-plans。",
+        "using-superpowers",
+        "TDD",
         "40k",
         "50k",
         "最大内聚",
@@ -197,8 +219,8 @@ fn work_item_plan_outline_revision_prompt_includes_runtime_contracts() {
         "上下文代理指标",
     ] {
         assert!(
-            prompt.contains(required),
-            "outline prompt must include `{required}`: {prompt}"
+            !prompt.contains(removed),
+            "outline revision prompt must not include B-layer text `{removed}`: {prompt}"
         );
     }
     assert!(!prompt.contains("1..19999"));
@@ -227,6 +249,7 @@ fn build_outline_revision_prompt_is_delta_only() {
         id: "issue_0001".to_string(),
         project_id: "project_0001".to_string(),
         repo_id: None,
+        logical_codebase_id: None,
         title: "Test Issue".to_string(),
         description: None,
         change_id: "change_0001".to_string(),
@@ -235,12 +258,14 @@ fn build_outline_revision_prompt_is_delta_only() {
         active_binding_id: None,
         created_at: String::new(),
         updated_at: String::new(),
+    base_branch: None,
     };
 
     let (prompt, nonce) = build_outline_revision_prompt(
         &request,
         &issue,
         "add dependency edge between backend and frontend",
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(
@@ -343,6 +368,7 @@ fn outline_author_prompt_forbids_full_work_items_and_repository_profile() {
         "(empty)",
         &["missing_test_strategy".to_string()],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
 
     assert!(prompt.contains("只能输出 WorkItemPlan Outline"));
@@ -384,8 +410,9 @@ fn outline_author_prompts_make_context_blockers_outline_alternative() {
         "(empty)",
         &["missing_test_strategy".to_string()],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
-    let (revision_prompt, _) = build_outline_revision_prompt(&request, &issue, "补充前后端依赖边");
+    let (revision_prompt, _) = build_outline_revision_prompt(&request, &issue, "补充前后端依赖边", &RoutingReferenceContext::Legacy);
 
     for prompt in [prompt, revision_prompt] {
         assert!(
@@ -415,9 +442,10 @@ fn outline_author_prompts_require_dependency_write_scope_partitioning() {
         "(empty)",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
     let (revision_prompt, _) =
-        build_outline_revision_prompt(&request, &issue, "修复 exclusive_write_scopes 重叠");
+        build_outline_revision_prompt(&request, &issue, "修复 exclusive_write_scopes 重叠", &RoutingReferenceContext::Legacy);
 
     for prompt in [prompt, revision_prompt] {
         assert!(
@@ -455,9 +483,10 @@ fn work_item_plan_prompts_require_current_scope_verification_closure() {
         "(empty)",
         &[],
         &[],
+        &RoutingReferenceContext::Legacy,
     );
     let (revision_outline_prompt, _) =
-        build_outline_revision_prompt(&request, &issue, "修复验证可达性");
+        build_outline_revision_prompt(&request, &issue, "修复验证可达性", &RoutingReferenceContext::Legacy);
     let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
         .expect("outline output")
         .outline
@@ -468,20 +497,31 @@ fn work_item_plan_prompts_require_current_scope_verification_closure() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation")
     .prompt;
 
-    for prompt in [initial_outline_prompt, revision_outline_prompt, draft_prompt] {
-        // C 去重后 draft 段写作“当前项 exclusive_write_scopes”（无“的”）；
-        // 三种 prompt 共有的保留语义子串如下。
+    assert!(initial_outline_prompt.contains("[openspec_contract]"));
+    assert!(initial_outline_prompt.contains("[allowed_outputs]"));
+    assert!(initial_outline_prompt.contains("[forbidden_outputs]"));
+    assert!(initial_outline_prompt.contains("追踪关系"));
+    assert!(revision_outline_prompt.contains("[openspec_contract]"));
+    assert!(revision_outline_prompt.contains("[allowed_outputs]"));
+    assert!(revision_outline_prompt.contains("[forbidden_outputs]"));
+    assert!(revision_outline_prompt.contains("追踪关系"));
+    for retained in [
+        "[openspec_contract]",
+        "[allowed_outputs]",
+        "[forbidden_outputs]",
+        "exclusive_scopes",
+        "verification_checks",
+        "handoff_contract",
+        "不得提前执行 writing-plans 的落盘步骤",
+    ] {
         assert!(
-            prompt.contains("exclusive_write_scopes 和已完成 depends_on handoff 下实际可执行"),
-            "Work Item Plan author prompt must require a verification closure executable at the current dependency point: {prompt}"
-        );
-        assert!(
-            prompt.contains("后续 Work Item 才会提供的注册、接线、生成或部署"),
-            "Work Item Plan author prompt must reject verification that relies on later wiring: {prompt}"
+            draft_prompt.contains(retained),
+            "Draft prompt must retain the C-layer output contract `{retained}`: {draft_prompt}"
         );
     }
 }
@@ -639,6 +679,7 @@ fn single_item_prompt_projects_direct_dependency_within_provider_budget() {
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some("补充错误态"),
+        &RoutingReferenceContext::Legacy,
     )
     .expect("direct dependency context must stay within the provider budget");
 
@@ -756,7 +797,7 @@ fn realistic_chinese_outline_author_output() -> serde_json::Value {
 fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
     // fixture 对齐 session_0003 实测锚点：current outline JSON 实测 1,891 B（目标 ~1.7KB）、
     // 直接依赖投影实测 1,119 B（目标 ~1.1KB）。
-    // 阈值 = 实测 post-slim prompt 10,941 B + 800 余量 = 11,741（< 质量预算 12,000）；
+    // 阈值 = 实测 post-slim prompt 10,941 B + 800 余量 = 11,741（< 质量预算，现 12,600）；
     // A–E 瘦身分段实测合计节省 980 B（fixture 规模无关的模板固定开销）。
     let outline = parse_work_item_plan_outline_output(realistic_chinese_outline_author_output())
         .expect("outline output")
@@ -796,15 +837,20 @@ fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
         WorkItemGenerationMode::Serial,
         &[accepted_module_draft],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("realistic serial prompt must stay invocable");
     // Slimmed margin target, raised twice for canonical field contract clarity:
     // 11_741 -> 11_800 spelled out `required_evidence` as an array (+45 bytes);
     // 11_800 -> 11_900 named both verification check owners (+104 bytes) after Pi
     // emitted only `verification_plan.checks` and omitted the contract copy.
-    // Runtime limits are untouched (hard backstop 65_536, quality budget 12_000).
+    // 11_900 -> 12_500 aligned the draft prompt with the current validator hard
+    // rules (+516 bytes: mandatory operational_gate blocker when the trusted
+    // catalog is empty; non-empty verbatim target_contract_refs for plan_repair
+    // routes), under the raised quality budget 12_600.
+    // Runtime limits are untouched (hard backstop 262_144, quality budget 12_600).
     assert!(
-        invocation.prompt.len() < 11_900,
+        invocation.prompt.len() < 12_500,
         "realistic Chinese serial prompt must stay within the slimmed margin target: {} bytes",
         invocation.prompt.len()
     );
@@ -869,6 +915,7 @@ fn serial_prompt_above_legacy_11000_limit_remains_invocable_below_hard_backstop(
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some(&feedback),
+        &RoutingReferenceContext::Legacy,
     )
     .expect("prompt above the legacy 11000-byte limit must remain invocable below the 64KB hard backstop");
     assert!(
@@ -914,21 +961,84 @@ fn serial_prompt_above_hard_backstop_is_rejected() {
         accepted_candidate,
     );
 
-    let feedback = "f".repeat(70_000);
+    let feedback = "f".repeat(300_000);
     let error = build_work_item_draft_invocation(
         &outline,
         "outline_frontend",
         WorkItemGenerationMode::Serial,
         &[accepted_backend],
         Some(&feedback),
+        &RoutingReferenceContext::Legacy,
     )
-    .expect_err("prompt above the 64KB hard backstop must fail closed");
+    .expect_err("prompt above the 256KiB hard backstop must fail closed");
     assert_eq!(error.code, "work_item_draft_prompt_too_large");
-    assert_eq!(error.details["max_prompt_bytes"], 65_536);
+    assert_eq!(error.details["max_prompt_bytes"], 262_144);
     assert!(
-        error.details["prompt_bytes"].as_u64().expect("prompt_bytes") >= 65_536,
+        error.details["prompt_bytes"].as_u64().expect("prompt_bytes") >= 262_144,
         "details must report the actual prompt size: {}",
         error.details
+    );
+}
+
+/// 硬兜底抬到 256 KiB（262_144）：真实机器的 model 上下文窗口远大于旧的
+/// 64 KiB 兜底，旧值曾把 70 KB 级（仍然健康的）draft prompt 误判为病态
+/// 序列化回归而 fail closed。这里锁住两点：超过旧 64 KiB 的 prompt 必须放行，
+/// 且上限常量同步抬到 262_144（病态回归拦截能力不丢）。
+#[test]
+fn serial_prompt_at_seventy_kilobytes_remains_invocable_under_256kib_backstop() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let mut accepted_candidate =
+        parse_work_item_draft_output(canonical_author_output("outline_backend", "wi_backend"))
+            .expect("canonical backend draft");
+    accepted_candidate
+        .canonical_contract_candidate
+        .output_contracts[0]
+        .contract_id = "SessionStatusDto".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .required_fields = vec!["handoff-required-field-sentinel".to_string()];
+    accepted_candidate
+        .canonical_contract_candidate
+        .tasks[0]
+        .statement = "task-must-not-leak-into-direct-dependency-sentinel".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .acceptance_criteria[0]
+        .statement = "acceptance-must-not-leak-into-direct-dependency-sentinel".to_string();
+    let accepted_backend = sample_draft_record(
+        "draft_backend",
+        "outline_backend",
+        accepted_candidate,
+    );
+
+    assert_eq!(
+        WORK_ITEM_DRAFT_PROMPT_MAX_BYTES, 262_144,
+        "draft hard backstop must be 256 KiB"
+    );
+    // 70,000 字节 feedback：总 prompt 必然超过旧 64 KiB 兜底，但远低于新 256 KiB 兜底。
+    let feedback = "f".repeat(70_000);
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_frontend",
+        WorkItemGenerationMode::Serial,
+        &[accepted_backend],
+        Some(&feedback),
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("prompt above the legacy 64KiB backstop must stay invocable under 256KiB");
+    assert!(
+        invocation.prompt.len() > 65_536,
+        "fixture must actually exceed the legacy 64KiB limit: {} bytes",
+        invocation.prompt.len()
+    );
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+        "fixture must stay below the raised 256KiB backstop: {} bytes",
+        invocation.prompt.len()
     );
 }
 
@@ -945,6 +1055,7 @@ fn single_item_prompt_forbids_work_item_id_and_outline_changes() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
@@ -972,25 +1083,24 @@ fn single_item_prompt_requires_executable_plan_runtime_contracts() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
     assert!(invocation.prompt.contains("[openspec_contract]"));
-    assert!(invocation.prompt.contains("[superpowers_contract]"));
+    assert!(!invocation.prompt.contains("[superpowers_contract]"));
     assert!(invocation.prompt.contains("[allowed_outputs]"));
     assert!(invocation.prompt.contains("多任务拆解、任务追踪关系、依赖图、验收与验证建议"));
     assert!(invocation.prompt.contains("[forbidden_outputs]"));
     assert!(invocation.prompt.contains("代码实现、Story/Design 重写"));
-    assert!(invocation.prompt.contains("writing-plans"));
-    assert!(invocation.prompt.contains("TDD"));
-    assert!(invocation.prompt.contains("implementation_context"));
+    assert!(!invocation.prompt.contains("using-superpowers"));
+    assert!(!invocation.prompt.contains("TDD 与验证纪律"));
     assert!(invocation.prompt.contains("canonical_contract"));
     assert!(invocation.prompt.contains("handoff_contract"));
     // verification_plan 字段契约改由 [canonical_field_contract] 简写记号承载（语义保留）。
     assert!(invocation.prompt.contains("verification_plan: obj{checks:"));
-    assert!(invocation.prompt.contains("estimated_context_tokens"));
-    assert!(invocation.prompt.contains("单个 Claude Code/Codex 会话"));
-    assert!(invocation.prompt.contains("50k"));
+    assert!(!invocation.prompt.contains("单个 Claude Code/Codex 会话"));
+    assert!(!invocation.prompt.contains("estimated_context_tokens 不得超过 50k"));
     assert!(!invocation.prompt.contains("小于 20k"));
 }
 
@@ -1007,6 +1117,7 @@ fn single_item_prompt_requires_verification_checks_as_exact_execution_view() {
         WorkItemGenerationMode::Serial,
         &[],
         None,
+        &RoutingReferenceContext::Legacy,
     )
     .expect("draft invocation");
 
