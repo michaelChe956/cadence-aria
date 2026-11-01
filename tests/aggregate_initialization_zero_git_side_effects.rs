@@ -321,7 +321,10 @@ fn two_member_repositories() -> AggregateInitializationGitFixture {
         Arc::new(RecordingSkillsPreparation::new(command_log.clone()));
     // 使用真实 DeterministicAggregatePreflightService,使其 canonicalize 真实聚合根。
     let preflight: Arc<dyn AggregatePreflightService> = Arc::new(
-        cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::DeterministicAggregatePreflightService::new(paths.clone()),
+        cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::DeterministicAggregatePreflightService::new(paths.clone())
+            .for_lc(cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                "project_0001",
+            )),
     );
     let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(recording_provider);
     let clock: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| CREATED_AT.to_string());

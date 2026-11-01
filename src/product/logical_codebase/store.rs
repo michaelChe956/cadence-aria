@@ -1092,7 +1092,13 @@ impl LogicalCodebaseStore {
     }
 }
 
-pub(crate) fn legacy_logical_codebase_id(project_id: &str) -> String {
+/// 无显式 LC 的 legacy 形态下，project 对应的逻辑代码库 id
+/// (`logical_codebase_<sha256(project_id) 前 32 位>`）。
+///
+/// 公开：调用方（含集成测试与生产链路）需要按同一口径 rescope 到本 LC
+/// —— `DeterministicAggregatePreflightService::for_lc(..)` 的聚合根唯一性
+/// 判定要求带上自己的 LC 身份，否则会把自己的根当"他人占用"拦掉。
+pub fn legacy_logical_codebase_id(project_id: &str) -> String {
     let digest = format!("{:x}", Sha256::digest(project_id.as_bytes()));
     format!("logical_codebase_{}", &digest[..32])
 }

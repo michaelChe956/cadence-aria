@@ -410,6 +410,13 @@ fn assert_same_origin(
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn codex_owned_raw_start_backfills_real_identity_and_deregisters_after_tail() {
+    // 环境门：CI 无交互式 provider CLI（真机 codex 进程在 CI 上起得来但不响应；
+    // 见 cross_cutting::real_provider_e2e）；跳过时显式打印。
+    if crate::cross_cutting::real_provider_e2e::skip_when_ci_lacks_provider(
+        "codex_owned_raw_start_backfills_real_identity_and_deregisters_after_tail",
+    ) {
+        return;
+    }
     let fixture = b1_fixture();
     let (scope, tree_key) = b1_scope(&fixture, "code-delivery-b1-raw", "role-run-b1-raw");
     let ownership = TrustedLaunchOwnership::mint(Arc::new(scope), "code_delivery provider process");
