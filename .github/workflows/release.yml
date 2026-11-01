@@ -22,7 +22,11 @@ jobs:
           - os: macos-15-intel
             target_key: darwin-x64
             rust_target: x86_64-apple-darwin
-          - os: macos-14
+          # arm64 目标改在 Intel runner 上**交叉编译**（同一套 Xcode SDK，Rust 交叉编到
+          # aarch64-apple-darwin 无需额外 SDK）：macOS arm64 runner 容量不足时会被
+          # GitHub 在启动后直接取消（实测 2026-11-01 连续三次 1 秒内 cancelled），
+          # 连带 publish 作业被 needs 跳过 → 整个发版出不去。
+          - os: macos-15-intel
             target_key: darwin-arm64
             rust_target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
