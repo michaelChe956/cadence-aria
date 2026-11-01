@@ -61,6 +61,8 @@ pub(crate) use parse::*;
 pub const PI_COMMAND: &str = "pi";
 const ARIA_ASK_EXTENSION: &str = include_str!("aria-ask.ts");
 const MIN_PI_VERSION: &str = "0.83.0";
+/// 扩展临时文件名后缀的进程内序号：同进程并发调用不得撞名。
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const PI_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,24 +152,46 @@ fn ensure_ask_extension_in(cache: &Path) -> Result<PathBuf, ProviderAdapterError
         return Ok(path);
     }
 
+    // 原子发布（并发缺陷修复，2026-11-01）：先在**同目录**写临时文件，再
+    // `rename` 到目标名。原因：原实现 `create_new` 先建空文件、再 `write_all`，
+    // 并发调用者会命中 `AlreadyExists` 分支去 `validate`，读到**空文件或写了
+    // 一半的内容** → 报 "existing extension content does not match"。
+    // 该竞态在 CI 并行测试与**真实 daemon 多会话同时起 pi** 时都会触发。
+    // `rename` 在同一文件系统内是原子的：读者只会看到「不存在」或「完整文件」。
+    // `create_new` + `0o600` + `O_NOFOLLOW` 的防篡改语义保留在临时文件上，
+    // `rename` 保留其权限与内容。
+    let tmp = cache.join(format!(
+        ".aria-ask-{}.{}.{}.tmp",
+        &hash[..8],
+        std::process::id(),
+        // 同进程内并发调用也要互不撞名：用一次原子计数做后缀。
+        TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    match options.open(&path) {
-        Ok(mut file) => {
-            file.write_all(ARIA_ASK_EXTENSION.as_bytes())
-                .map_err(|error| ask_extension_error(format!("write extension: {error}")))?;
-            file.sync_all()
-                .map_err(|error| ask_extension_error(format!("sync extension: {error}")))?;
-            Ok(path)
-        }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            validate_ask_extension(&path)?;
-            Ok(path)
-        }
-        Err(error) => Err(ask_extension_error(format!("create extension: {error}"))),
+    let published = (|| -> Result<(), ProviderAdapterError> {
+        let mut file = options
+            .open(&tmp)
+            .map_err(|error| ask_extension_error(format!("create extension: {error}")))?;
+        file.write_all(ARIA_ASK_EXTENSION.as_bytes())
+            .map_err(|error| ask_extension_error(format!("write extension: {error}")))?;
+        file.sync_all()
+            .map_err(|error| ask_extension_error(format!("sync extension: {error}")))?;
+        drop(file);
+        std::fs::rename(&tmp, &path)
+            .map_err(|error| ask_extension_error(format!("publish extension: {error}")))
+    })();
+    if published.is_err() {
+        // 失败即清理临时文件（best-effort，不掩盖原错误）。
+        let _ = std::fs::remove_file(&tmp);
     }
+    published?;
+    // 收口复验：并发下另一方可能已先 publish（内容相同，覆盖无害）；此处只做
+    // 最终一致性断言，不改变 fail-closed 语义（目标已被替换为正确内容）。
+    validate_ask_extension(&path)?;
+    Ok(path)
 }
 
 fn ensure_ask_extension() -> Result<PathBuf, ProviderAdapterError> {

@@ -22,6 +22,7 @@ use crate::protocol::contracts::{AdapterRole, ProviderType};
 use super::session::run_pi_session;
 use super::*;
 
+mod ask_extension_atomic;
 mod b1_resources;
 mod empty_output;
 mod policy_session;

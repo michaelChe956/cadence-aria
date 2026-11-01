@@ -52,7 +52,10 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/cross_cutting/kimi_code_provider/tests/tool_policy_zero_change.rs",
         1264,
     ),
-    ("src/cross_cutting/pi_provider/mod.rs", 1617),
+    // 2026-11-01：1617→1641 —— `ensure_ask_extension_in` 改为**原子发布**
+    // （临时文件 + rename），修复并发读到半文件的缺陷（CI 并行实测 + 真实
+    // daemon 多会话同时起 pi 会踩）；净增为修复本身与并发回归注释，无新功能。
+    ("src/cross_cutting/pi_provider/mod.rs", 1641),
     // 2026-11-01：+13 / +4 行 —— 真机 provider e2e 与 unix 进程组用例加
     // 「CI 环境门」（`cross_cutting::real_provider_e2e`）：CI runner 无交互式
     // provider CLI（实测 60s 硬超时）与本地 shell exec 语义，用例在 CI 显式

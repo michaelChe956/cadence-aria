@@ -51,3 +51,6 @@ cadence/reports/provider-validation-round/wave2-2c/*.jsonl
 cadence/reports/provider-validation-round/wave2-f18/*.cjs
 cadence/reports/legacy-protocol-retirement/smoke/*.jsonl
 cadence/reports/lc-gateway-multi-provider/
+
+# 发版打包产物（make-release-assets.mjs 输出；不进仓库，由 CI 生成后上传 Release）
+/dist-release/
