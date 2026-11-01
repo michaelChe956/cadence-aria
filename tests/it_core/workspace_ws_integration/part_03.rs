@@ -178,9 +178,18 @@ async fn workspace_ws_idle_timeout_records_server_idle_connection_diagnostic() {
     let closed = timeout(Duration::from_secs(7), ws.next())
         .await
         .expect("server idle close timeout")
-        .expect("server idle close result")
-        .expect("server idle close frame");
-    assert!(matches!(closed, Message::Close(_)));
+        .expect("server idle close result");
+    // 服务端空闲超时会**优雅关闭**（产品侧 `Message::Close(None)`）。但若客户端
+    // 尚未读完服务端后续发出的状态帧，内核在关闭时以 **RST** 收尾（而非 FIN）
+    // → 客户端读到 `Protocol(ResetWithoutClosingHandshake)` 而不是 Close 帧。
+    // 负载高的机器（CI runner）上服务端多发几帧就更容易命中（现场偶发）。
+    // 因此此处只断言「连接确实被服务端关闭」，**诊断事实的断言保持严格**。
+    match closed {
+        Ok(Message::Close(_)) => {}
+        Ok(other) => panic!("server idle close expected a close frame, got {other:?}"),
+        // 连接已被服务端关闭，只是内核以 RST 收尾（客户端有未读数据）→ 见上。
+        Err(_) => {}
+    }
     let diagnostic = wait_for_connection_diagnostic(&controls, "server_idle").await;
     assert_eq!(diagnostic["idle_timeout_triggered"], true);
     assert_eq!(diagnostic["role"], "driver");

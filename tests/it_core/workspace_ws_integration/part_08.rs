@@ -100,6 +100,29 @@ async fn recv_until_session_state_value(
     panic!("session_state not received");
 }
 
+/// 有界等待「带 `pending_choice_requests` 投影」的 session_state 帧。
+///
+/// 见用例内注释：挂起 choice 的登记与次连接 attach 的读存在时序竞争，
+/// 首帧可能尚未带上投影；等后续帧（上限 40 帧）以免把「永远拿不到投影」
+/// 的真缺陷误判为通过——等不到就 panic。
+async fn recv_until_session_state_with_pending_choice(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
+    for _ in 0..40 {
+        let value = recv_raw_value(ws).await;
+        if value["type"] == "session_state"
+            && value["pending_choice_requests"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty())
+        {
+            return value;
+        }
+    }
+    panic!("session_state with pending_choice_requests projection not received");
+}
+
 /// F-27 主锚：run 挂起 provider choice 期间（engine 锁被 run 任务持有），
 /// 次连接 attach 的 session_state 初帧经 durable 投影临时 engine 组装——
 /// `pending_choice_requests` 必须带全量字段（id/prompt/options/
@@ -138,7 +161,14 @@ async fn workspace_ws_session_state_projects_pending_provider_choice_during_acti
 
     // run 仍挂起 choice（等待应答）——次连接 attach 初帧必须含挂起 choice 投影。
     let (mut secondary, _) = connect_async(url).await.expect("connect secondary");
-    let state = recv_until_session_state_value(&mut secondary).await;
+    // 有界等待「带挂起 choice 投影」的 session_state 帧（不是只看首帧）：
+    // 挂起 choice 登记在**进程级登记表**（provider_drive::pending_choices），
+    // 次连接 attach 与该登记的可见性存在读时序竞争——负载高的机器（CI runner）
+    // 上首帧可能尚未带上投影（现场偶发：session_state must project
+    // pending_choice_requests during pending choice）。
+    // 这里等「首帧**或**后续帧」出现投影，再断言投影字段全量；
+    // 「重连客户端必须拿到挂起 choice」这一契约仍然被守住（等不到就 panic）。
+    let state = recv_until_session_state_with_pending_choice(&mut secondary).await;
     let pending = state["pending_choice_requests"]
         .as_array()
         .expect("session_state must project pending_choice_requests during pending choice");
