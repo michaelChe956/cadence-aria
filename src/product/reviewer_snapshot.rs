@@ -1797,8 +1797,15 @@ impl RestoreCtx<'_> {
         match entry.kind {
             BaselineEntryKind::Directory => {
                 match &current {
-                    Ok(stat) if classify(stat.st_mode) == Some(BaselineEntryKind::Directory) => {
-                        if stat.st_mode & 0o7777 != entry.mode {
+                    Ok(stat)
+                        if classify(crate::product::reviewer_snapshot_domain::mode_bits(
+                            stat.st_mode,
+                        )) == Some(BaselineEntryKind::Directory) =>
+                    {
+                        if crate::product::reviewer_snapshot_domain::mode_bits(stat.st_mode)
+                            & 0o7777
+                            != entry.mode
+                        {
                             // F1 修复:chmod 作用于条目自身,不是父目录 fd
                             // (父目录可能是不在 manifest 内的 worktree 根)。
                             let opened = openat_dir(&parent, &name)
@@ -1827,15 +1834,21 @@ impl RestoreCtx<'_> {
             BaselineEntryKind::File | BaselineEntryKind::Gitfile => {
                 // 当前态为目录(含 root `.git` 被换成目录)→ 先整删再写
                 if let Ok(stat) = &current
-                    && classify(stat.st_mode) == Some(BaselineEntryKind::Directory)
+                    && classify(crate::product::reviewer_snapshot_domain::mode_bits(
+                        stat.st_mode,
+                    )) == Some(BaselineEntryKind::Directory)
                 {
                     std::fs::remove_dir_all(self.worktree.join(&entry.rel_path))
                         .map_err(|error| io_error_string("移除占位目录", error))?;
                 }
                 let needs_write = match &current {
                     Ok(stat) => {
-                        classify(stat.st_mode) != Some(BaselineEntryKind::File)
-                            || stat.st_mode & 0o7777 != entry.mode
+                        classify(crate::product::reviewer_snapshot_domain::mode_bits(
+                            stat.st_mode,
+                        )) != Some(BaselineEntryKind::File)
+                            || crate::product::reviewer_snapshot_domain::mode_bits(stat.st_mode)
+                                & 0o7777
+                                != entry.mode
                             || sha256_of_at(&parent, &name).as_deref()
                                 != entry.content_sha256.as_deref()
                     }
@@ -1853,7 +1866,9 @@ impl RestoreCtx<'_> {
                 let target = entry.symlink_target.clone().expect("validated");
                 let needs_relink = match &current {
                     Ok(stat) => {
-                        classify(stat.st_mode) != Some(BaselineEntryKind::Symlink)
+                        classify(crate::product::reviewer_snapshot_domain::mode_bits(
+                            stat.st_mode,
+                        )) != Some(BaselineEntryKind::Symlink)
                             || readlinkat_target(&parent, &name)
                                 .ok()
                                 .and_then(|value| value.to_str().map(str::to_string))
@@ -1866,7 +1881,10 @@ impl RestoreCtx<'_> {
                     return Ok(false);
                 }
                 if let Ok(stat) = &current {
-                    if classify(stat.st_mode) == Some(BaselineEntryKind::Directory) {
+                    if classify(crate::product::reviewer_snapshot_domain::mode_bits(
+                        stat.st_mode,
+                    )) == Some(BaselineEntryKind::Directory)
+                    {
                         // F2 修复:被非空目录替换时 unlinkat 双双失败
                         // (EISDIR/ENOTEMPTY)会中断且不可续接——与 File 分支
                         // 同形,先整删占位目录再重建 symlink。

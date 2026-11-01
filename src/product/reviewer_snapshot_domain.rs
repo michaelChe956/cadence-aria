@@ -506,11 +506,25 @@ pub(crate) enum WalkPurpose<'a> {
     },
 }
 
+/// `libc::mode_t` 的宽度**随平台而变**（Linux `u32` / macOS `u16`）。
+/// 统一收敛到 `u32` 后再比较，避免各处按 Linux 宽度假设 → macOS 编译不过
+/// （现场 2026-11-01：release workflow 在 darwin-arm64 上编译失败）。
+#[inline]
+pub(crate) fn mode_bits(stat_mode: libc::mode_t) -> u32 {
+    stat_mode as u32
+}
+
 pub(crate) fn classify(stat_mode: u32) -> Option<BaselineEntryKind> {
-    match stat_mode & libc::S_IFMT {
-        libc::S_IFREG => Some(BaselineEntryKind::File),
-        libc::S_IFDIR => Some(BaselineEntryKind::Directory),
-        libc::S_IFLNK => Some(BaselineEntryKind::Symlink),
+    // 常量的宽度随平台而变（macOS 为 u16）→ 统一转成 u32 后再当 pattern 用
+    // （Rust 不允许在 pattern 里写 `as` 表达式，故取局部 const）。
+    const S_IFMT: u32 = libc::S_IFMT as u32;
+    const S_IFREG: u32 = libc::S_IFREG as u32;
+    const S_IFDIR: u32 = libc::S_IFDIR as u32;
+    const S_IFLNK: u32 = libc::S_IFLNK as u32;
+    match stat_mode & S_IFMT {
+        S_IFREG => Some(BaselineEntryKind::File),
+        S_IFDIR => Some(BaselineEntryKind::Directory),
+        S_IFLNK => Some(BaselineEntryKind::Symlink),
         _ => None,
     }
 }
@@ -581,9 +595,9 @@ fn walk_dir(
                 name.to_string_lossy()
             ))
         })?;
-        let mode = stat.st_mode & 0o7777;
+        let mode = mode_bits(stat.st_mode) & 0o7777;
         let size = stat.st_size.max(0) as u64;
-        let classified = classify(stat.st_mode);
+        let classified = classify(mode_bits(stat.st_mode));
 
         // root `.git`:目录=Git 观察域另行冻结,不入 worktree 清单(恢复
         // 也永不触碰);gitfile=身份锚点条目;symlink/特殊文件=不支持。
@@ -737,7 +751,7 @@ fn walk_dir(
                     }
                     value
                 };
-                if open_stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+                if mode_bits(open_stat.st_mode) & (libc::S_IFMT as u32) != libc::S_IFREG as u32 {
                     return Err(ReviewerSnapshotError::ReadFailure(format!(
                         "{rel}: 打开后类型漂移"
                     )));
@@ -760,7 +774,7 @@ fn walk_dir(
                 out.push(WalkedEntry {
                     rel_path: rel,
                     kind,
-                    mode: open_stat.st_mode & 0o7777,
+                    mode: mode_bits(open_stat.st_mode) & 0o7777,
                     size: bytes.len() as u64,
                     content_sha256: Some(sha),
                     symlink_target: None,

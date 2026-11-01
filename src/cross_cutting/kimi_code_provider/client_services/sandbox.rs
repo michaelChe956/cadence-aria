@@ -91,7 +91,10 @@ fn open_fd_no_follow_flags(
                     current.as_raw_fd(),
                     cstr(component).as_ptr(),
                     flags,
-                    libc::S_IRUSR | libc::S_IWUSR,
+                    // `libc::S_IRUSR`/`S_IWUSR` 的类型随平台而变（macOS 为
+                    // u16），而 `openat` 的模式位是可变参数（`c_uint`）→ 显式
+                    // 转宽，macOS 编译通过（Linux 上等价）。
+                    libc::S_IRUSR as libc::c_uint | libc::S_IWUSR as libc::c_uint,
                 )
             } else {
                 libc::openat(current.as_raw_fd(), cstr(component).as_ptr(), flags)
