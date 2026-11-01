@@ -5,10 +5,33 @@ export interface ChangelogEntry {
   highlights: string[];
 }
 
-export const CURRENT_VERSION = "0.0.9";
+export const CURRENT_VERSION = "0.1.1";
 
 // 发布升版本时请裁剪数组，仅保留最新 4 条。
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.1.1",
+    date: "2026-11-01",
+    title: "版本更新说明面板接入产品内 changelog 数据源",
+    highlights: [
+      "「版本更新说明」面板此前读的是旧数据源，0.1.0 的更新内容在面板里看不到；本次接入产品内 changelog 数据源，0.1.0 的多仓全链路说明现已可见",
+      "面板按既有约定只保留最近 4 个版本；仓库根目录 CHANGELOG.md 为长版全文（发版时两处需同步）",
+    ],
+  },
+  {
+    version: "0.1.0",
+    date: "2026-11-01",
+    title: "多仓全链路对齐：判定一致、失败可执行、通过率可查",
+    highlights: [
+      "多仓（逻辑代码库）全链路对齐：同一份候选在候选结构门与最终编译现在判定一致（此前一个说无环、一个说成环，导致「写 plan 成功但 review 后报依赖环」）",
+      "依赖环不再让你去改 design：给出环上真实链、各 Work Item 所在仓的仓序位次、逆仓序那一跳，并给 2 个各带后果的合法修法，附保护项（不得为消环删除真实数据流、不得改动仓序）",
+      "结构门拒收不再直接「生成失败」：改为落到人工门并带上可执行修法；模型另有一次自动重驱机会（带环的事实与修法回去，常能自己改对，owner 零点击）",
+      "通过率可查：每次候选尝试都进 append-only 流水（落 issue 级，重跑不会擦掉历史），并提供 issue 级 / 项目级两个只读读数出口：首次通过率、同 issue 连续失败次数 P50/P90、失败码 Top N、lowering 类终态失败计数",
+      "过期门卡不再误导：计划已确认完成后，对话流里残留的旧卡改为「这一版已确认完成，此卡是历史记录，无需处理」，不再让你去终止此门重新发起",
+      "缺陷修复：pi ask 扩展并发时读到写了一半的文件（改为临时文件 + rename 原子发布）；macOS 编译修复（libc::mode_t 宽度随平台而变）",
+      "构建与 CI：Rust 1.99 新 lint 对齐、真机 e2e 在 CI 显式跳过并打印、故障注入改为按注入根分槽、WS 集成用例时序假设修正、证据检索用例的真实 codegraph CLI 依赖（CI 安装 + 缺工具兜底跳过）",
+    ],
+  },
   {
     version: "0.0.9",
     date: "2026-08-26",
@@ -30,27 +53,6 @@ export const CHANGELOG: ChangelogEntry[] = [
       "对照编辑：≥1440px 聚焦输入框不收起面板，可对照 artifact 撰写反馈；<1440px 自动收起避免遮挡",
       "断线恢复与存量兼容：修订中断重连后保留产物并可重试本轮修订；升级前停在旧确认阶段的会话自动迁移到新确认页",
       "视觉升级：全站蓝紫主色 + 橙强调 + 奶油底（其他工作台色系随之联动）；spec 工作台 Claymorphism 形态，新增全站设计规范 MASTER.md",
-    ],
-  },
-  {
-    version: "0.0.7",
-    date: "2026-08-13",
-    title: "v0.0.7 更新",
-    highlights: [
-      "新增 Kimi Code Provider：工作台可选 Kimi Code 作为作者/审核者，支持提问与 Supervised 审批",
-      "图片创建支持选择 Kimi Code 提供方",
-      "Kimi 会话稳定性修复：断线恢复、会话续接、超时跟随工作区总超时",
-      "修复 Work Item Plan 生成链路：outline 校验契约、设计上下文识别、阻塞状态操作引导",
-    ],
-  },
-  {
-    version: "0.0.6",
-    date: "2026-08-08",
-    title: "v0.0.6 更新",
-    highlights: [
-      "新增版本更新弹窗：每次发版后打开工作台会展示本次更新内容",
-      "Coder 提交与 Provider 自动重试，提升执行稳定性",
-      "新增人工组级最终确认：Work Item 完成后由用户手动确认组级完成",
     ],
   },
 ];
