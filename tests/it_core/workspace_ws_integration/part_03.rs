@@ -158,8 +158,12 @@ async fn workspace_ws_idle_timeout_records_server_idle_connection_diagnostic() {
         WebRuntime::new_fake(root.path().to_path_buf()),
     );
     let controls = state.test_controls.clone();
+    // 空闲超时取 300ms：30ms 太短，负载高的机器（CI runner）上服务端可能在
+    // 客户端读到首帧**之前**就判空闲并关闭连接 → 客户端收到 Close 而非文本帧
+    // → `recv_json` panic（现场偶发：全量并行下偶挂，单独跑必过）。
+    // 300ms 仍足以证明「服务端关闭空闲连接并留诊断」，且不与握手抢跑。
     controls
-        .set_server_idle_timeout(Duration::from_millis(30))
+        .set_server_idle_timeout(Duration::from_millis(300))
         .await;
     let app = build_web_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
