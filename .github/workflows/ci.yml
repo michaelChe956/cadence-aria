@@ -31,6 +31,14 @@ jobs:
       # build.rs 会在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
       - name: Build frontend
         run: pnpm -C web install --frozen-lockfile && pnpm -C web build
+      # 证据检索链路的验收用例（tests/it_web/evidence_query）依赖真实
+      # `codegraph` CLI 建索引与查询（npm 包 @colbymchenry/codegraph）。
+      # 该批用例自 2026-08-17 引入后从未在 CI 跑过（main 上没有该目录），
+      # 而 runner 上没有该工具 → 12 个用例一起失败。钉版本安装（与本地一致）；
+      # 装不上时用例侧有显式跳过兜底，不会拖垮整个 CI。
+      - name: Install codegraph (evidence-query fixtures need the real CLI)
+        run: npm install -g @colbymchenry/codegraph@1.6.2
+
       - name: Check formatting
         run: cargo fmt --check
       - name: Run clippy

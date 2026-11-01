@@ -12,6 +12,11 @@ const TRUNCATION_MARKER: &str = "（结果已截断，请缩小查询范围）";
 // ---- ⑤ 单次 12k 截断：超长符号命中渲染 > 12k → truncated + 尾部标记 ----
 #[tokio::test]
 async fn single_query_over_12k_chars_is_truncated_with_marker() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("single_query_over_12k_chars_is_truncated_with_marker") {
+        return;
+    }
     let fx = seed_evidence_fixture_with_options(EvidenceSourceSeed::HugeSymbol, true);
     let app = fx.app();
 
@@ -39,6 +44,11 @@ async fn single_query_over_12k_chars_is_truncated_with_marker() {
 // ---- ⑥ 累计配额超限 → 429 evidence_budget_exhausted ----
 #[tokio::test]
 async fn cumulative_budget_exhausted_returns_429() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("cumulative_budget_exhausted_returns_429") {
+        return;
+    }
     let fx = seed_evidence_fixture();
     let ledger = EvidenceBudgetLedger::new(fx.paths.clone());
     assert_eq!(
@@ -58,6 +68,11 @@ async fn cumulative_budget_exhausted_returns_429() {
 // ---- ⑦ Reviewer 可查且审计区分角色 ----
 #[tokio::test]
 async fn reviewer_query_succeeds_and_audit_distinguishes_role() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("reviewer_query_succeeds_and_audit_distinguishes_role") {
+        return;
+    }
     let fx = seed_evidence_fixture();
     let app = fx.app();
 
@@ -77,6 +92,11 @@ async fn reviewer_query_succeeds_and_audit_distinguishes_role() {
 // ---- ⑧ Legacy 单仓 attempt（target_snapshot=None）→ 404 evidence_not_available ----
 #[tokio::test]
 async fn legacy_single_repo_attempt_returns_404_evidence_not_available() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("legacy_single_repo_attempt_returns_404_evidence_not_available") {
+        return;
+    }
     let fx = seed_evidence_fixture();
     let mut legacy = fx.attempt.clone();
     legacy.target_snapshot = None;

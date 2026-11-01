@@ -295,6 +295,11 @@ fn append_synthetic_members_to_evidence_fixture(fx: &EvidenceFixture) {
 
 #[tokio::test]
 async fn fifty_member_planning_query_returns_all_unique_member_ids_and_aliases() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("fifty_member_planning_query_returns_all_unique_member_ids_and_aliases") {
+        return;
+    }
     let fx = FiftyMemberFixture::new();
     let logical = LogicalCodebaseStore::new(fx.app_paths.clone());
     let manifest = logical
@@ -380,6 +385,11 @@ async fn fifty_member_planning_query_returns_all_unique_member_ids_and_aliases()
 
 #[tokio::test]
 async fn fifty_member_http_evidence_query_filters_directory_scope_under_five_seconds() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("fifty_member_http_evidence_query_filters_directory_scope_under_five_seconds") {
+        return;
+    }
     let fx = seed_evidence_fixture();
     append_synthetic_members_to_evidence_fixture(&fx);
     let logical = LogicalCodebaseStore::new(fx.paths.clone());
@@ -410,6 +420,11 @@ async fn fifty_member_http_evidence_query_filters_directory_scope_under_five_sec
 
 #[tokio::test]
 async fn fifty_member_planning_injection_renders_all_members_without_truncation() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("fifty_member_planning_injection_renders_all_members_without_truncation") {
+        return;
+    }
     // REQ-PLN-12（Task 5）：仓库清单 MUST 全量注入，MUST NOT 按 soft/hard 预算裁剪，
     // MUST NOT 出现 omitted/truncated 缺员标记；只有渲染超过 500 KiB 绝对上限才显式阻断。
     // 本用例走生产 PlanningContextResolver 路径，不重建 inventory，不需要真实 checkout 仓

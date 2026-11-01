@@ -4,6 +4,11 @@
 // ---- ⑨ index stale：目标成员 revision 漂移 → index_stale=true ----
 #[tokio::test]
 async fn index_stale_is_reported_in_response_field() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("index_stale_is_reported_in_response_field") {
+        return;
+    }
     let fx = seed_evidence_fixture();
     // 覆盖钉住索引 record 的目标成员 revision，模拟索引漂移。
     let drifted = index_record(
@@ -36,6 +41,11 @@ async fn index_stale_is_reported_in_response_field() {
 // ---- ⑩ 422 evidence_invalid_query 与 503 evidence_query_failed ----
 #[tokio::test]
 async fn invalid_query_returns_422_and_uninitialized_index_returns_503() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("invalid_query_returns_422_and_uninitialized_index_returns_503") {
+        return;
+    }
     // 422：空查询词。
     let fx = seed_evidence_fixture();
     let app = fx.app();
@@ -61,6 +71,11 @@ async fn invalid_query_returns_422_and_uninitialized_index_returns_503() {
 // → 401；新令牌命中 Running attempt → 200。
 #[tokio::test]
 async fn token_rewrite_old_token_401_new_token_200() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("token_rewrite_old_token_401_new_token_200") {
+        return;
+    }
     let fx = seed_evidence_fixture();
     let old_token = fx.token.clone();
 
@@ -93,6 +108,11 @@ async fn token_rewrite_old_token_401_new_token_200() {
 // ---- ⑫ 注入文件不进 commit：git add -A 后 .aria/evidence-token 不在 index ----
 #[test]
 fn injected_token_file_not_staged_by_git_add() {
+    // 环境门：证据检索链路依赖真实 codegraph 索引工具（CI 已尝试安装，
+    // 装不上时显式跳过并打印，不拖垮整个 CI）。
+    if skip_without_codegraph("injected_token_file_not_staged_by_git_add") {
+        return;
+    }
     let fx = seed_evidence_fixture();
 
     // 令牌文件确实注入到 worktree .aria/。
