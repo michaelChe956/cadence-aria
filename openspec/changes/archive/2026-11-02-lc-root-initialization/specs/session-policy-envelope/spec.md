@@ -49,17 +49,23 @@
 
 ### Requirement: resume 一致性（REQ-ENV-04）
 
-系统 SHALL 仅当 policy digest、target identity、canonical working directory、provider version/dialect、capability snapshot 全部一致时允许 resume；任一维度变更时新建会话并使旧会话 superseded；对 planning/coding/review/initialization 均适用。
+系统 SHALL 仅当 policy digest、target/git identity、canonical working directory、provider exact version/dialect、capability snapshot与适用的完整LC projection/trust/tool/MCP冻结事实一致时允许LC resume；任一失配或冻结材料不可验证 SHALL 拒绝旧native、标记superseded并等待明确新会话，只有用户显式fresh后重新完整admission。Planning/Coding/Review/initialization继续原action门，direct单仓语义不变。
 
 #### Scenario: 续接旧 provider session
-
-- **WHEN** 尝试续接旧 provider session 且 policy digest、target identity、canonical working directory、provider version/dialect 或 capability snapshot 指纹不一致
-- **THEN** 系统 SHALL 拒绝 resume 并启动新会话，旧会话标记 superseded
+- **WHEN** 尝试续接LC旧provider session且任一冻结指纹不一致
+- **THEN** 系统 SHALL 拒绝旧native并保存superseded waiting，不能静默fresh；fingerprint判定本身无provider会话进程，显式fresh后才重新validate/revalidate
 
 #### Scenario: cwd 或 target 改变时拒绝 resume
+- **WHEN** LC canonical root cwd、native target/git identity、policy或capability变化
+- **THEN** 系统 SHALL 拒绝旧会话且零adapter session-start/协议child，不以cwd/member fallback放行；PlanningReadOnly的native target按REQ-PLN-08固定aggregate-root，业务材料target独立保持
 
-- **WHEN** 尝试续接旧 provider session 且 canonical root working directory、target、政策或 capability 指纹任一不一致
-- **THEN** 系统 SHALL 拒绝 resume 并启动新会话，旧会话标记 superseded
+#### Scenario: 版本观测与会话 spawn 口径
+- **WHEN** LC candidate准备或spawn前复验需要当前exact version
+- **THEN** 系统 SHALL 允许有界只读CLI --version及60秒非滑动TTL、同键single-flight；版本probe与adapter start/session child SHALL 分别计数，有效缓存age小于60秒、到期再观测，失败/超时/取消不缓存且不使用过期成功，不缓存其它admission事实
+
+#### Scenario: 原生握手后失败如实收口
+- **WHEN** 已创建会话child后发现原生恢复ID缺失/错ID或runtime协议失败
+- **THEN** 系统 SHALL kill/reap并记录未恢复，不冒称零child或伪回填请求ID；不得自动清旧ID转fresh
 
 ### Requirement: 配置来源隔离（REQ-ENV-06）
 

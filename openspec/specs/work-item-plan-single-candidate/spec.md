@@ -206,27 +206,42 @@ reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每�
 
 ### Requirement: 旧协议退役与单路径收敛（REQ-WSC-08）
 
-REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重测解锁后（2026-09-19 用户终裁 B：pi 全子项达标=协议质量实证；codex Confirmed 子项登记已知例外——系统性 provider 内容缺陷与协议无关，门文本据此显式修订，属 1c 裁决预留的「后续专项裁决」路径显式行使；**后续义务：codex/claude_code/kimi_code 全部 provider 最终 SHALL 全测通过（defer-ledger DEF-PVR-ALL），在义前不得视为 provider 面收官**），旧协议（generation-mode 决策、逐段确认消息、review_decision 双选项语法、`HumanConfirmDecision` 旧枚举及其消息族、SelectRevisionPath 族及其专属 DTO）SHALL 删除。删除后：新会话 SHALL 一律走单候选流，不存在 legacy 入口；收到已删除消息类型系统 SHALL 返回 stage-specific protocol error 且零副作用；多仓 Issue 的确定性 preflight 失败 SHALL 收敛为新路径 durable fatal/recoverable 终态（含失败原因），系统 MUST NOT 存在 legacy fallback 路径，MUST NOT 静默切换 `flow_kind`（本句修订并取代 REQ-WSC-07 原「legacy fallback 只允许在确定性 preflight 失败且新路径尚未产生副作用时发生」条款）；历史 legacy session 的 durable 记录与事件前缀 SHALL 只读保留（处置细则以 `legacy-protocol-retirement` REQ-RET-03 为唯一来源）；SC 门消息面（`human_gate_feedback`/approve/abandon）以 `work-item-plan-conversational-gate` 为唯一来源。
+REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重测解锁后(2026-09-19 用户终裁 B:pi 全子项达标=协议质量实证;codex Confirmed 子项登记已知例外——系统性 provider 内容缺陷与协议无关,门文本据此显式修订,属 1c 裁决预留的「后续专项裁决」路径显式行使;**后续义务:codex/claude_code/kimi_code 全部 provider 最终 SHALL 全测通过(DEF-PVR-ALL),在义前不得视为 provider 面收官**),旧协议(generation-mode 决策、逐段确认消息、review_decision 双选项语法、`HumanConfirmDecision` 旧枚举及其消息族、SelectRevisionPath 族及其专属 DTO)SHALL 删除。删除后:新会话 SHALL 一律走单候选流(prepare → generate → evaluate → approval → completed,另加吸收态 failed);多仓 Issue 的确定性 preflight SHALL 按 selection **resolved 上界**放行——上界=focus_repository_ids 非空时取该集,为空(存量 AllMembers)时取 resolve_effective_members 有效成员集;design involved 为上界的子集且(非空,或空且上界恰一仓的回退口径成立)时通过,其余情形确定性失败;失败以新路径 durable fatal/recoverable 终态记录并含原因,系统不存在任何 legacy fallback 或 `flow_kind` 切换路径。plan items 的 `target_repository_id` SHALL ⊆ design involved(下游按 target 分流为 MTG 已验收现状)。
 
 #### Scenario: 已删除消息协议错误拒绝
 
-- **WHEN** 退役完成后客户端发送任一已删除的 legacy 决策消息（generation-mode 决策、逐段确认、review_decision 双选项、human_confirm）
-- **THEN** 系统返回 stage-specific protocol error 且零副作用，会话状态与事件流不变
+- **WHEN** 退役完成后客户端发送任一已删除的 legacy 决策消息(generation-mode 决策、逐段确认、review_decision 双选项、human_confirm)
+- **THEN** 系统返回 stage-specific protocol error 且零副作用,会话状态与事件流不变
+
+#### Scenario: 多仓 preflight 按勾选上界放行
+
+- **WHEN** 多仓 Issue 的 selection.focus_repository_ids 非空(≥2 或 =1),design involved 为 focus 集的非空子集(含全集)
+- **THEN** 确定性 preflight 通过,plan 事务按单候选流继续
 
 #### Scenario: 多仓 preflight 失败收敛新路径终态
 
-- **WHEN** 多仓 Issue 的确定性 preflight 失败（无论新路径是否已产生副作用）
-- **THEN** 失败以新路径 durable fatal/recoverable 终态记录并含原因，系统不存在任何 legacy fallback 或 `flow_kind` 切换路径
+- **WHEN** 多仓 Issue 的确定性 preflight 失败(无论新路径是否已产生副作用)
+- **THEN** 失败以新路径 durable fatal/recoverable 终态记录并含原因,系统不存在任何 legacy fallback 或 `flow_kind` 切换路径
+
+#### Scenario: 多仓 preflight 界外/空集确定性失败收敛终态
+
+- **WHEN** design involved 为空集,或含 focus 界外成员(preflight 无论新路径是否已产生副作用)
+- **THEN** 失败以新路径 durable fatal/recoverable 终态记录并含原因,系统不存在任何 legacy fallback 或 `flow_kind` 切换路径
 
 #### Scenario: 新会话一律单候选流
 
 - **WHEN** 退役完成后创建任意 workitem workspace 会话
-- **THEN** 会话走单候选流（prepare → generate → evaluate → approval → completed），不存在 legacy 逐段路径选项
+- **THEN** 会话走单候选流(prepare → generate → evaluate → approval → completed),不存在 legacy 逐段路径选项
 
 #### Scenario: 历史 legacy 记录只读保留
 
 - **WHEN** 退役完成后读取历史 legacy session 的 durable 记录
-- **THEN** 记录与事件前缀原样保留可读，未被迁移或清洗
+- **THEN** 记录与事件前缀原样保留可读,未被迁移或清洗
+
+#### Scenario: design involved 界内收敛(钉定上界)
+
+- **WHEN** issue 勾选 N 个成员,AI 生成的 design involved 实际只含其中 M 个(1 ≤ M ≤ N)
+- **THEN** sentinel 输出的 involved/change_order 均 ⊆ 勾选集且 involved 非空;界外仓出现在 sentinel 时系统 SHALL 拒绝该回写并以可见诊断提示走修订反馈
 
 ### Requirement: generate 段编译语法失败的教学重驱（REQ-WSC-09）
 
@@ -567,30 +582,6 @@ SC Final Compile 的失败 MUST 以**完整**诊断 durable 落盘（不截断�
 
 - **WHEN** 当前候选编译不过，owner 选择终止
 - **THEN** 终止 MUST 照常执行（fail-closed 只作用于放行确认，不阻断退出）
-
-### Requirement: 候选编译失败必须给 owner 出路与 author 重写要点（REQ-WSC-20）
-
-候选编译类失败时，owner 面 MUST 醒目声明「该候选无效、不是待确认版本」，MUST 讲清是 design 的什么原因导致成环并无法推进、MUST 明确「需要 owner 修改 design」，MUST NOT 表述为「系统会自动去改 design」。同一组技术要点 MUST 进入给 author 的教学面，但 MUST NOT 要求 author 去改 design（design 只由 owner 决定是否修改）。
-
-#### Scenario: 门卡醒目提示候选无效并点明 design 根因
-
-- **WHEN** 门卡呈现 `candidate_compile_failure`
-- **THEN** `owner_hint` MUST 说明该候选无效（非待确认）、讲清 design 的仓序/依赖声明与候选依赖方向矛盾导致成环、并要求 owner 修改 design（MUST NOT 写成平台自动改 design）；`rewrite_guidance` MUST 至少给出四条要点（provider 只能指向仓序在前者、同仓顺序只能靠 `depends_on`、依赖图必须无环、根因可能在 design 需 owner 决定）
-
-#### Scenario: author 收到具体重写要点且不被要求改 design
-
-- **WHEN** 当前候选编译不过，owner 在门内提交反馈触发 author 修订
-- **THEN** 修订提示词 MUST 含 `[candidate_compile_failure]` 段：稳定码 + 人话原因 + 逐条技术要点，并明确「再犯同样的错仍会失败」；该段 MUST NOT 要求 author 去修改 design
-
-#### Scenario: 无编译失败时既有提示词逐字不变
-
-- **WHEN** 当前候选没有编译失败
-- **THEN** 门内修订提示词 MUST NOT 出现该段，既有内容逐字保持不变
-
-#### Scenario: 依赖环人话只写真实事实
-
-- **WHEN** 环诊断由 change_order 与既有依赖合成
-- **THEN** 人话 MUST 基于真实环 witness（有向链、各 Work Item 所在仓的 change_order 位次、逆仓序的那条依赖）；找不到 witness 时 MUST 给通用可行动文案，MUST NOT 虚构环形状
 
 ### Requirement: 候选编译类失败首次即提示 owner 并继续自动重写（REQ-WSC-21）
 

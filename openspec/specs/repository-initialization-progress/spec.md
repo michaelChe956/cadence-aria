@@ -3,7 +3,9 @@
 ## Purpose
 
 为代码库初始化提供可轮询的异步操作状态：固定五步真实进度、失败诊断与最终结果，服务端是步骤状态的唯一事实来源。
+
 ## Requirements
+
 ### Requirement: 可轮询的代码库初始化操作（REQ-INIT-01）
 系统 SHALL 在逻辑代码库场景提供可轮询、可恢复的聚合初始化操作（manifest revision、成员状态机、幂等 key、取消语义），并暴露与单仓 operation 一致的状态查询；不得复用固定六步单仓 operation 伪装为聚合。
 
@@ -109,23 +111,22 @@
 
 ### Requirement: git_finalize 命令环境包含用户身份解析所需变量
 
-`git_finalize` 步骤执行的所有 git 命令 SHALL 在进程隔离（`env_clear`）语义下注入 `LC_ALL=C`、已验证的用户主目录 `HOME`，以及进程环境中存在时的 `SSH_AUTH_SOCK`；其余环境变量 MUST 保持隔离。注入的 `HOME` SHALL 来自 Web 层 `resolve_user_home` 验证结果或等效注入点，不得硬编码主机绝对路径。
+`git_finalize` 步骤执行的所有 git 命令 SHALL 继承宿主进程环境，并由平台以显式覆盖层叠加 `LC_ALL=C`、已验证的用户主目录 `HOME`，以及进程环境中存在时的 `SSH_AUTH_SOCK`；其余宿主变量随继承到达子进程，平台不构造、不清空、不额外覆盖隔离环境。覆盖层 `HOME` SHALL 来自 Web 层 `resolve_user_home` 验证结果或等效注入点，不得硬编码主机绝对路径。
 
 #### Scenario: commit 使用宿主 git 身份
 
-- **WHEN** 目标仓库无仓库级 `user.name`/`user.email` 配置，而注入 HOME 下的 `.gitconfig` 含有完整身份
+- **WHEN** 目标仓库无仓库级 `user.name`/`user.email` 配置，而覆盖层 `HOME` 下的 `.gitconfig` 含有完整身份
 - **THEN** `git_finalize` 的 `git commit` SHALL 成功，且提交作者身份来自该 `.gitconfig`
 
 #### Scenario: push 可使用宿主 ssh 凭证
 
 - **WHEN** 进程环境存在 `SSH_AUTH_SOCK` 且目标仓库配置了 upstream
-- **THEN** `git_finalize` 的 `git push` 子进程 SHALL 携带该 `SSH_AUTH_SOCK` 与注入的 `HOME`
+- **THEN** `git_finalize` 的 `git push` 子进程 SHALL 携带该 `SSH_AUTH_SOCK` 与覆盖层 `HOME`
 
 #### Scenario: 其余变量保持隔离
 
 - **WHEN** `git_finalize` 执行任意 git 命令
-- **THEN** 子进程环境 SHALL NOT 包含除 `LC_ALL`、`HOME`、`SSH_AUTH_SOCK` 之外的继承变量
-
+- **THEN** 子进程环境 SHALL 继承全部宿主变量并叠加 `LC_ALL`、`HOME`、`SSH_AUTH_SOCK` 显式覆盖层；平台 SHALL NOT 构造隔离环境、清空或剔除其余宿主变量（原 `env_clear`「其余变量保持隔离」语义已退役，其余变量随继承到达子进程）
 
 ### Requirement: 聚合初始化真实状态机（REQ-REG-05）
 系统 SHALL 使聚合初始化步骤状态机表达聚合级步骤（CadenceSkills/全局工具一次、聚合规则/MCP/OpenSpec/示例生成、成员预检），而非逐成员重复固定步骤;聚合模式步骤数由 design.md §7.2 spike 定值的 5 个稳定 step ID 表达。
@@ -133,6 +134,7 @@
 #### Scenario: 逻辑代码库聚合步骤
 - **WHEN** 逻辑代码库场景下执行聚合初始化
 - **THEN** 步骤状态机 SHALL 表达聚合级步骤，而非逐成员重复五步
+
 ### Requirement: 聚合初始化不向成员仓提交推送（REQ-REG-06）
 系统 SHALL NOT 在逻辑代码库聚合初始化完成时对任何成员仓执行 `git add -A`/commit/push；逐仓提交推送的 GitFinalize 仅保留给传统单仓登记路径。
 

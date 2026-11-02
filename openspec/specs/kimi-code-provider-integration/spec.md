@@ -29,41 +29,31 @@
 
 ### Requirement: Kimi 以 ACP 流式会话执行并支持控制操作
 
-系统 SHALL 让 Kimi 在普通 Workspace、Coding Workspace 与 image-create 中以 ACP（`kimi acp`，JSON-RPC over stdio）流式会话执行，向既有前端协议发送文本、工具调用、完成、失败与会话标识事件。系统 MUST 支持取消活动 Kimi 会话。系统 SHALL 复用现有 `JsonRpcPeer` 传输层。终态由 ACP `session/prompt` 响应的 `stopReason` 判定。
+系统 SHALL 在普通 Workspace、Coding 与 image-create 复用既有 JSON-RPC over stdio ACP 流式会话、文本/工具/完成/失败/会话 ID 事件及取消能力，终态仍由 session/prompt stopReason 判定。Kimi 所有角色的 ACP terminal/fs 子执行 SHALL 消费与主会话一致的受信宿主执行合同，不遗留 planning/reviewer 沙箱或角色恒拒旁路；author 岗位规则及 Reviewer B 档采信独立生效。
 
 #### Scenario: Kimi 执行生成角色产物
-
-- **WHEN** 用户启动一个已选择 Kimi 的 Author、Reviewer、Coder、Code Reviewer、Internal Reviewer 或 image-create 运行
-- **THEN** 系统将 Kimi 输出流转发到现有 Workspace、Coding Workspace 或 image-create 会话
-- **AND THEN** 系统以与其他 Provider 一致的方式保存运行结果与 Provider 会话标识（Kimi `sessionId`）
+- **WHEN** 用户启动 Kimi Author、Reviewer、Coder、Code Reviewer、适用历史 Internal Reviewer 或 image-create
+- **THEN** 系统 SHALL 转发输出流并按既有格式保存结果与原生 sessionId；ACP 子执行采用同一冻结执行基线，不把该能力要求用于重新启用已取消的 Group Reviewer
 
 #### Scenario: 用户取消 Kimi 运行
-
-- **WHEN** Kimi 会话正在执行且用户请求取消
-- **THEN** 系统终止该 Kimi 子进程（含子孙进程清理）
-- **AND THEN** Workspace 或 Coding Workspace 显示既有的已取消状态而不继续处理后续输出
-- **AND THEN** 系统不重复发送 Completed 或 Failed 终态事件
+- **WHEN** 用户取消活动 Kimi 会话
+- **THEN** 系统 SHALL 终止 Kimi 与本轮登记的子执行资源，显示既有取消状态、不继续处理迟到输出、不重复 Completed/Failed；Reviewer 先收口窗口恢复与对账再释放写通道
 
 #### Scenario: Kimi 进程异常退出时报失败
-
-- **WHEN** Kimi 子进程在未发送 `session/prompt` 终态响应前异常退出
-- **THEN** 系统发送一次 Failed 事件并附进程退出信息
+- **WHEN** session/prompt 终态响应前 Kimi 异常退出
+- **THEN** 系统 SHALL 发送一次含真实退出信息的 Failed，保留现场证据与适用恢复，不用 fallback 或假成功掩盖失败
 
 ### Requirement: Kimi 权限模式默认 Auto 且支持 Supervised
 
-普通 Workspace 的 Author 与 Reviewer、以及 Coding Workspace 的每个 Provider 角色 SHALL 默认使用 `Auto` 权限模式（对应 ACP `session/new` 的 `permissionMode="auto"`），与 Claude Code、Codex 一致。Kimi 额外支持 `Supervised`（对应 ACP `permissionMode="default"`），用户可为每个适用角色独立切换。Auto 模式下工具调用直接执行；Supervised 模式下经 ApprovalBridge 逐工具审批。该默认值与权限能力与 Pi 区分（Pi 仅 Auto）。
+普通 Workspace 的 Author/Reviewer 与 Coding 各角色 SHALL 默认 Auto，对应 ACP auto；仍支持独立切换 Supervised，对应 default。Auto 直接执行普通工具，Supervised 经 ApprovalBridge；二者仅决定审批，不选择 OS 隔离/只读 grammar，不扩张 author 岗位禁用。Kimi 与其它三家采用相同宿主能力下限，Pi 仍仅 Auto，AskUserQuestion 始终等待用户。
 
 #### Scenario: 默认 Auto 运行 Kimi
-
-- **WHEN** 用户启动一个已选择 Kimi 的角色运行
-- **THEN** 该角色以 `Auto` 模式执行（ACP `permissionMode="auto"`）
-- **AND THEN** Kimi 工具调用不要求用户逐项确认
+- **WHEN** 用户启动已选择 Kimi 的角色
+- **THEN** 该角色 SHALL 默认以 Auto 执行普通工具，不逐项确认、不探测 bwrap 作为必要前提；author 编辑代码文件工具仍不可用，Reviewer 必须满足窗口合同
 
 #### Scenario: Kimi 可切换 Supervised
-
-- **WHEN** 用户为已选择 Kimi 的角色切换权限模式
-- **THEN** 系统提供 `Auto` 与 `Supervised` 两种选项
-- **AND THEN** `Supervised` 模式下逐工具审批（见「逐工具审批」Requirement）
+- **WHEN** 用户切换 Kimi 角色权限模式
+- **THEN** 系统 SHALL 提供 Auto/Supervised，后者逐工具审批；不得要求切 Supervised 才能绕过旧 sandbox unavailable，也不得自动换权限模式
 
 ### Requirement: Kimi 支持逐工具审批（Supervised 模式）
 
@@ -81,6 +71,10 @@
 - **WHEN** 用户对某次 `session/request_permission` 选择拒绝
 - **THEN** 工具不执行
 - **AND THEN** Kimi 会话继续，可能发起新的工具调用或新的审批请求
+
+#### Scenario: 全开不是越过岗位与采信合同
+- **WHEN** author 请求代码编辑工具，或 Reviewer 输出已因违规作废
+- **THEN** 用户普通工具审批 SHALL 不解除作者岗位限制、不洗白已作废报告；其它读取、terminal、MCP 与 skills 不因 author 身份统一禁用
 
 ### Requirement: Kimi 支持会话恢复（resume）
 

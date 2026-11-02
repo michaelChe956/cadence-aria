@@ -77,6 +77,14 @@ terminal 状态机 SHALL 为：created→running→(exited|killed)→released；
 - **WHEN** 确定性改造完成后的全量回归运行
 - **THEN** 本 requirement 的全部行为约束（上限常量、合计口径、截断标记语义、并发预算原子性、幂等清理）与改造前一致，无断言放宽或用例删除导致的保护面缩水
 
+#### Scenario: 长 CHECK 在总预算内执行
+- **WHEN** 已登记 terminal 的真实构建/测试超过 120 秒但仍在 invocation 总 deadline 内
+- **THEN** 系统 SHALL 允许继续，不被独立 120 秒 timer、resume stall 或外层 provider idle 误杀；总 deadline 到达或用户取消仍终止，无活动工作且无进展时既有 stall 判定继续生效
+
+#### Scenario: 资源边界与预算前置
+- **WHEN** 请求第 5 个并发 terminal，或声明的 CHECK 超过 invocation 可用总预算
+- **THEN** 系统 SHALL 分别拒绝超并发和在运行前暴露预算配置问题，不改默认并发/输出护栏，不静默将 CHECK 截为 120 秒
+
 ### Requirement: 终端执行策略与每命令封闭 grammar（SHALL）
 
 系统 SHALL 满足本 requirement 的全部场景约束。
@@ -106,6 +114,14 @@ git 配置隔离：SHALL 使用经验证的只读、净化 gitdir/config 视图�
 - **WHEN** 仓库 `.git/config` 配置 `core.fsmonitor=<程序>` 且执行 `git status`
 - **THEN** 本地配置执行型项被禁用或忽略，探针程序不启动（子进程 clearenv + 环境 allowlist）
 
+#### Scenario: 全角色命令形态一致
+- **WHEN** Author/Orchestrator、Splitter/Handoff、Reviewer 或 Coder 发起合法 ACP command+args 或 legacy shell
+- **THEN** 系统 SHALL 不因角色套只读 grammar 或仅支持 bash -c；author 仍不配编辑代码文件内建工具，Reviewer 的执行受 B 档窗口采信，不等于撤销 terminal 能力
+
+#### Scenario: 宿主环境可用但不冒充隔离
+- **WHEN** 构造 terminal 环境
+- **THEN** 系统 SHALL 继承宿主环境保留工具链、网络/容器与 owner 配置发现，不强制 HOME=worktree 或全局 Git 配置 /dev/null；凭据随宿主可达、安全由用户自管，平台不泄露凭据值，不声称同 UID 不可读取 owner 文件
+
 ### Requirement: 终端 OS 级隔离（auto 模式）（SHALL）
 
 系统 SHALL 满足本 requirement 的全部场景约束。
@@ -126,6 +142,10 @@ auto 权限模式下，terminal 执行 SHALL 在 OS 级隔离中运行（优先 
 
 - **WHEN** auto 模式且 bwrap 探测失败
 - **THEN** terminal 请求被拒绝；supervised 模式经 ApprovalBridge 执行合规模板内命令并记录非隔离模式
+
+#### Scenario: 规划层同步放开
+- **WHEN** Kimi 用于 Planning/Author/Splitter/Handoff
+- **THEN** terminal SHALL 同样宿主直跑，不能保留规划 bwrap 双路径或整体拒绝；author 编辑代码文件工具的岗位规则独立保留
 
 ### Requirement: 权限与路径沙箱（角色与 fs）（SHALL）
 
@@ -149,11 +169,17 @@ auto 权限模式下，terminal 执行 SHALL 在 OS 级隔离中运行（优先 
 - **WHEN** planning/author（Orchestrator）会话的 kimi 发起 fs/write
 - **THEN** 拒绝并返回错误
 
+#### Scenario: Splitter/Handoff 不得整体拒绝
+- **WHEN** Kimi 的 Splitter/Handoff 发起读取、普通 terminal 或适用 fs 操作
+- **THEN** 系统 SHALL 按实际岗位职责和权限决定，不按角色全拒；承担 author 职责的运行仅保留该岗位代码编辑工具限制
+
 ### Requirement: MCP 受控注入（SHALL）
 
 系统 SHALL 满足本 requirement 的全部场景约束。
 
-`session/new` 与 `session/load` 的 `mcpServers` SHALL 来自经 session policy envelope 校验的 Aria-owned 受控 bundle（allowlist、配置 digest、凭据引用脱敏、argv 审计），不从普通 provider 配置透传任意 JSON；未配置时保持 `[]`。resume（session/load）时 SHALL 校验配置 digest：不一致则拒绝加载并报告，随后启动新会话（`session/new`）且旧会话标记 superseded（对齐 `session-policy-envelope` REQ-ENV-04），不静默沿用。
+`session/new` 与 `session/load` 的 `mcpServers` SHALL 来自经 session policy envelope 校验的 Aria-owned 受控 bundle（allowlist、配置 digest、凭据引用脱敏、argv 审计），不从普通 provider 配置透传任意 JSON；未配置时保持 `[]`。resume（session/load）时 SHALL 校验配置 digest：不一致则拒绝加载并报告差异，旧会话标记 superseded；随后只能由用户显式选择新会话（不静默 fresh），对齐 `session-policy-envelope` REQ-ENV-04。
+
+本 digest 校验只约束 Aria 注入 bundle 的来源与冻结值；无注入时（生产 `KimiCodeProvider::new`，MCP 来源恒 `native-project-config`）该校验不构成 resume 授权。provider resume 的完整冻结指纹（policy、authority、canonical cwd、target/git identity、exact version/dialect、capability、语义 tool policy、projection、trust、适用 MCP bundle）统一归 `lc-gateway-multi-provider`「Provider resume 与冻结指纹」；kimi 与其余三家同样 SHALL 在 spawn 前比对 durable `provider_start.lc_projection` 审计记录，缺失/漂移即 superseded + 零 child 拒绝。
 
 #### Scenario: 受控注入
 - **WHEN** envelope 提供 CodeGraph bundle 且 `.codegraph` 存在、路径/命令/版本通过校验
@@ -161,4 +187,19 @@ auto 权限模式下，terminal 执行 SHALL 在 OS 级隔离中运行（优先 
 
 #### Scenario: resume 配置漂移
 - **WHEN** session/load 时 bundle digest 与冻结值不一致
-- **THEN** 拒绝加载并报告差异，启动新会话且旧会话标记 superseded
+- **THEN** 拒绝加载并报告差异，旧会话标记 superseded；随后只能由用户显式选择新会话（不静默 fresh）
+
+### Requirement: 终端沙箱只读上游挂载顺序（REQ-KACS-IDLE-RO）
+
+Kimi Auto terminal（含 LC）经 bwrap 构造沙箱时，系统 SHALL 按「host 只读 → proc/dev/tmpfs `/tmp` → authority 只读（`readable_root`）→ target 绑定（唯一可写）→ git binds → cwd fd」的顺序生成 argv，使被 tmpfs 遮蔽的 authority/上游根恢复只读可见。`readable_root` SHALL 仅取可信 boundary 的 authority root；direct（无沙箱）模式传 None，但同样 MUST NOT 把 target 之外的路径变为可写。native fs 读面（authority 读、target 写）保持既有行为。
+
+#### Scenario: 上游只读且 target 唯一可写
+
+- **WHEN** Auto terminal 在含上游依赖的聚合 fixture 中启动并执行读取与写入
+- **THEN** terminal 与 native Read 均能读到真实上游代码；对上游路径写入失败；对本仓 target 写入成功
+- **AND** bwrap argv 顺序断言为 host ro → proc/dev/tmpfs → authority ro → target bind（纯 argv 单测，无需真跑沙箱）
+
+#### Scenario: direct 模式不扩写面
+
+- **WHEN** Kimi direct 模式（无 Bubblewrap）在聚合 fixture 中运行
+- **THEN** `readable_root` 为 None，角色读/写判定与 cwd fd 行为与既有一致，不新增可写根

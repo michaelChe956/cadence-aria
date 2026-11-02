@@ -8,9 +8,9 @@
 
 ### Requirement: Coder 与 Work Item Code Reviewer 的技术失败自动重试有固定上限
 
-Coder 与 Work Item Code Reviewer 的一次 Provider 执行 MUST 在首次调用之外最多自动重试 2 次，因此同一用户或流程触发最多发起 3 次调用。可自动重试的失败仅限于非用户意图的 Provider 技术失败，包括启动错误、流提前关闭、连接或进程中断、Provider 执行超时与可识别的上游临时 5xx 错误。
+Coder 与 Work Item Code Reviewer 的一次 Provider 执行周期 MUST 在首次调用之外最多自动重试2次，因此该cycle最多3次调用；本上限不重排已存在的恰一次coder教学窗口或group-review一次repair窗口最大组合。可自动transport重试的失败仅限非用户意图的Provider技术失败，包括启动错误、流提前关闭、连接或进程中断、Provider执行超时与可识别上游临时5xx错误；L1消费既有剩余机会而不扩池。
 
-用户主动取消、权限或选择请求等待（包括等待该交互而超时）、Provider 正常完成后的结构化输出无效、正常 Reviewer finding、验证失败与 Plan Defect MUST NOT 自动重试。
+用户主动取消、权限或选择请求等待（包括等待该交互而超时）、正常 Reviewer finding、开放验证失败与 Plan Defect MUST NOT 作为transport技术失败自动重试。Provider正常完成后的结构化输出无效 MUST NOT 伪记技术失败；但服务端证实的L1确定性结构拒收 SHALL 按 workspace-structural-governance 沿原角色授权、teaching/repair/cycle剩余机会机器指令自动修复与全量复验，不要求用户写技术prompt。coder既有一次teaching窗口、每cycle最多3及group-review既有一次repair窗口均不增机会、不叠新池，共用耐久parent identity；权限/业务判断不自动放宽。
 
 #### Scenario: Coder 因临时 503 自动恢复
 
@@ -25,12 +25,17 @@ Coder 与 Work Item Code Reviewer 的一次 Provider 执行 MUST 在首次调用
 #### Scenario: 正常完成但结构化输出无效不自动重试
 
 - **WHEN** Reviewer 已正常完成调用，但其输出不符合结构化审查契约
-- **THEN** 系统 MUST 按既有输出无效或人工分诊语义处理，MUST NOT 将该结果计为技术失败自动重试
+- **THEN** 系统 MUST 保留真实结构拒收原因，服务端证实L1且有原授权剩余机会时携机器指令自动修复；无授权/机会或未知诊断则工程故障/原协议恢复，MUST NOT 将结果计为transport失败或新增独立池
 
 #### Scenario: 用户取消不自动重试
 
 - **WHEN** 用户在 Coder 或 Work Item Code Reviewer 运行中取消 attempt
 - **THEN** 系统 MUST 停止当前调用，MUST NOT 发起自动重试
+
+#### Scenario: coding教学与review修复不叠新池
+
+- **WHEN** coder一次teaching机会或group-review一次repair机会已消费后又出现同类L1
+- **THEN** 不另建L1调用池，不自动新run授权，不重置cycle/teaching/repair耐久身份；保既有最大组合，不改为统一三次总限，业务结论与自动rework仍按原合同
 
 ### Requirement: 每次自动重试必须保留独立可审计运行记录
 
@@ -81,6 +86,10 @@ Coder 的自动重试 MUST 在同一 worktree 上以新的完整执行上下文�
 - **WHEN** 某个 Provider 需要以新会话替代失效恢复会话
 - **THEN** 该新会话调用 MUST 占用自动重试预算，且同一触发最多仍为首次调用加两次自动重试
 
+#### Scenario: Reviewer 重试不能重用污染基线
+- **WHEN** Reviewer 技术失败符合自动重试条件
+- **THEN** 系统 MUST 先收口前轮窗口；无违规且恢复完整才可按原预算建新窗口、新基线和材料，任何违规事实保留并转人工，不沿用旧报告或把污染态作为下一轮基线
+
 ### Requirement: 人工重试在自动预算耗尽后重新取得有限自动恢复机会
 
 当自动重试耗尽后，用户通过既有 Coder 或 Reviewer 人工重试动作发起新的调用周期时，该新的用户授权周期 MUST 再次适用“首次调用之外最多自动重试 2 次”的限制。系统 MUST 保留该人工触发与先前耗尽周期之间的审计关联；Coder 人工重试也必须建立该关联，不得仅以新的 `initial` role run 覆盖其来源。
@@ -89,3 +98,27 @@ Coder 的自动重试 MUST 在同一 worktree 上以新的完整执行上下文�
 
 - **WHEN** Reviewer 的自动重试耗尽并进入人工门禁，用户选择重试代码审查
 - **THEN** 系统 MUST 启动一个新的用户授权调用周期；该周期最多包含首次调用和两次自动重试，并 MUST 保留与上一个耗尽周期的关联
+
+### Requirement: provider idle 挂起检测与一次自动重试（REQ-PTR-IDLE）
+
+共享 provider stream SHALL 增加可重置的 idle watchdog：CodeReviewer/InternalReviewer 默认 300 秒、Coder 默认 600 秒、工具未返回期间取 `max(角色阈值, 1800 秒)`，阈值经环境变量配置且每次调用只读取一次；真实活动（含 Pi adapter 的 `pi_empty_output_retry`）重置计时，等待用户 choice/permission 时暂停。首次挂起 SHALL 同 provider fresh prompt 自动重试恰一次；再次挂起 SHALL 转 Blocked 并落 stalled 门（coder 门三动作、review 门 `[retry_review, abort]`）。MUST NOT 切换 provider、新增 Stalled 状态/last_event_at 字段，MUST NOT 挤占既有纯 transport 3 次预算。
+
+#### Scenario: 首次挂起自动重试后继续
+
+- **WHEN** coder 流静默达到 idle 阈值（默认 600 秒，`ARIA_CODING_CODER_IDLE_SECS` 可覆写）
+- **THEN** 系统记录 reason=`provider_idle_stall` 的既有 Timeout 事件与空闲诊断，取消当前 provider，role-run 记 Failed，同 provider 以 fresh prompt 自动重试恰一次；重试成功则原流程继续
+
+#### Scenario: 再次挂起转 Blocked 并通知
+
+- **WHEN** 重试后的流再次静默达到阈值
+- **THEN** attempt 转 Blocked，落对应 stalled 门（`coder_provider_stalled`/`code_review_provider_stalled`，review 门按 stage 恢复对应审查）并进入平台通知（kind=stalled），不存在第三次自动重试，provider 未被切换
+
+#### Scenario: 活动重置与人工等待暂停
+
+- **WHEN** 流处于工具执行中（阈值取 max(角色, `ARIA_CODING_TOOL_INFLIGHT_IDLE_SECS=1800`)）或持续产生真实事件（TextDelta/Execution/ToolCall/Result/StatusChanged），或 attempt 正等待用户 choice/permission
+- **THEN** idle 计时分别按更长阈值判定、被活动重置、或暂停不计时；应用心跳/倒计时/snapshot/PersistenceWarning 不算活动，不产生误报挂起
+
+#### Scenario: 不挤占 transport 预算
+
+- **WHEN** 同一 run 内既发生纯 transport 失败又发生 idle 挂起
+- **THEN** 两类预算独立计数（transport 仍最多 3 次、纯 idle 最多 2 次），互不折算

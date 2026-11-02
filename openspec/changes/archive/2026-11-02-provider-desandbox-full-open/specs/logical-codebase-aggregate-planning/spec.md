@@ -18,11 +18,11 @@
 
 ### Requirement: 规划只读边界（REQ-PLN-06）
 
-规划 provider SHALL 使用四家全角色宿主基线，不再要求 best_effort_configured/production_verified_readonly，不宣称 OS 不可写。author 保留代码编辑岗位纪律和平台文档通道；Codex danger 下按 REQ-ENV-09 检测型 fileChange 纪律验收，不承诺工具不可达。Kimi 规划 Terminal/其余工具与其它 provider 一致，不因 Orchestrator/Splitter/Handoff 整体拒绝；规划 Reviewer 另受 B 档采信约束。
+规划 provider 会话 SHALL 为只读语义的 best-effort（`best_effort_configured`：Aria-owned 配置 + cwd + pre/post 检测）；仅在固定 provider/OS 越界写 fixture 通过后才可升级为 `production_verified_readonly`；未达到该级别时不得宣称「物理上无法写入」；疑似越权写入需被检测并标记。
 
 #### Scenario: 规划运行
-- **WHEN** 任一家 provider 完成规划 run
-- **THEN** 系统 SHALL 如实记录宿主非隔离执行和岗位规则，不要求“成员 checkout 与聚合根物理不可写”或 Codex read-only 证明，不把正常 terminal 能力判为越权失败
+- **WHEN** 规划 run 完成
+- **THEN** 系统 SHALL 报告 best-effort 只读状态（配置目标 + 前后检测），成员主 checkout 与聚合根无规划产生的已知写入；硬只读需 PreToolUse deny（Write/Edit when plan）或路由 Codex `:read-only`，Claude plan 模式仅为 prompt 层
 
 #### Scenario: Kimi 规划 Terminal 可执行
 - **WHEN** Kimi 的 Orchestrator、WorkItemSplitter 或 Handoff 请求普通 argv 或 shell terminal，并满足当前权限审批

@@ -36,7 +36,7 @@
 
 ### Requirement: 独立验证处理入口（REQ-CVT-03）
 
-当计划字面验证命令在当前环境不可满足时，系统 SHALL 从原门提供受控转入独立“验证处理”面的入口；该入口 MUST NOT 改变原门动作集合：`coding_output_human_triage` 门 SHALL 仍恰好提供 `retry_coding` 与 `abort`，三个 Code Review 分诊门 SHALL 仍恰好提供 `send_to_coder`、`retry_review`、`manual_continue` 与 `abort`。验证处理记录 SHALL 绑定 finding、check、plan revision、原命令、替代命令（如有）、cwd、执行结果、测试执行数量、环境与适用 scope。同一 finding／check／plan revision 在已有未决验证处理时 SHALL 拒绝重复转入。
+当计划字面验证命令在当前环境不可满足时，系统 SHALL 从原门提供受控转入独立“验证处理”面的入口；该入口 MUST NOT 改变原门动作集合：`coding_output_human_triage` 门 SHALL 仍恰好提供 `retry_coding` 与 `abort`，三个 Code Review 分诊门 SHALL 保持转入前由最新一次 Code Review 结论 verdict 派生的动作集合（`retry_review`、`manual_continue`、`abort` 恒在，`send_to_coder` 是否在集合内 MUST 与转入前一致，派生规则见 `coding-code-review-triage`）。验证处理记录 SHALL 绑定 finding、check、plan revision、原命令、替代命令（如有）、cwd、执行结果、测试执行数量、环境与适用 scope。同一 finding／check／plan revision 在已有未决验证处理时 SHALL 拒绝重复转入。
 
 #### Scenario: 从 coder 输出门转入
 
@@ -46,7 +46,7 @@
 #### Scenario: 从 Code Review 门转入
 
 - **WHEN** Code Review 验证不完整门打开，用户点击“进入验证处理”
-- **THEN** 系统创建或返回同一验证处理记录，原门四动作集合不变
+- **THEN** 系统创建或返回同一验证处理记录，原门动作集合与转入前逐项相同（含是否包含 `send_to_coder`），门仍保持 open 且 finding 不变
 
 #### Scenario: 重复转入被拒
 
@@ -85,3 +85,17 @@ coding 与验证相关的错误与等待文案 SHALL 区分以下情形并给出
 
 - **WHEN** coding 因计划未声明所需路径而停等
 - **THEN** 文案显示“计划未声明”并提供计划反馈／修订入口，不建议泛化重试
+
+### Requirement: coder 输出门的验证处理入口可用（REQ-CVT-06）
+
+对 reason_code 属于 `{coding_output_human_triage, coding_operational_blocker}` 的门，点击「转入验证处理」时前端 SHALL 在 gate 的 `evidence_refs` 无非空项的情况下回退使用 `gate_id` 作为 finding 绑定（`finding_id="<gate_id>#0"`）并发起既有验证处理 REST；`coding_operational_blocker` SHALL 同步加入前后端验证处理资格白名单。code_review_* 三门的既有行为（evidence_refs 非空才可进）MUST 保持不变；后端对 coder 门分支的判定仍只看 reason_code。回退值 MUST NOT 使用含 `/` 的 `raw_provider_output_ref`（会被 store 的相对 id 校验拒绝）。
+
+#### Scenario: 空证据门可进验证处理
+
+- **WHEN** 夹具为 `coding_output_human_triage` 门且 `evidence_refs: []`，用户点击「转入验证处理」
+- **THEN** 前端发起验证处理请求且 `finding_id` 为 `<gate_id>#0`，不再提前报「门缺少 finding 绑定证据」而无请求
+
+#### Scenario: 新环境门具备验证处理资格且 CR 门零回归
+
+- **WHEN** `coding_operational_blocker` 门进入验证处理，或既有 code_review_* 三门进入验证处理
+- **THEN** 前者被前后端白名单放行；后者行为与断言（含 evidence_refs 非空前置）与改前一致

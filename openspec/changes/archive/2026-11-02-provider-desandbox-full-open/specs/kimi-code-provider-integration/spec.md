@@ -34,15 +34,21 @@
 
 ### Requirement: Kimi 支持逐工具审批（Supervised 模式）
 
-Supervised 的 ACP permissionMode SHALL 为 default；普通 session/request_permission 经既有 PermissionRequest 与 ApprovalBridge 映射，用户批准/拒绝回送原生响应。AskUserQuestion SHALL 继续走结构化提问而非普通审批。审批不得代替统一宿主执行合同、解除 author 岗位代码编辑限制或使已作废 Reviewer 报告恢复有效。
+
+系统 SHALL 在用户为 Kimi 选择 `Supervised` 权限模式时，将 ACP `session/new` 的 `permissionMode` 设为 `default`，并在收到 Kimi 的 `session/request_permission`（`toolCall.title != "AskUserQuestion"`）时映射为既有 `PermissionRequest` 事件，经现有授权桥接（ApprovalBridge）向用户请求批准；用户响应后映射回 ACP `session/request_permission` 响应。用户拒绝时工具不执行且会话继续。AskUserQuestion 的 request_permission 走「结构化提问」Requirement，不走本审批路径。
 
 #### Scenario: Supervised 模式下工具调用触发审批
-- **WHEN** Supervised Kimi 发起非 AskUserQuestion 的普通工具调用
-- **THEN** 系统 SHALL 映射 PermissionRequest 并展示既有二元批准选项，批准回 allow_once、拒绝回 reject_once，不新增会话级全批选项；批准的 terminal 使用宿主全开语义，不回到只读 grammar
+
+- **WHEN** Kimi 以 Supervised 模式运行且 Agent 发起非 AskUserQuestion 的工具调用
+- **THEN** Kimi 发送 `session/request_permission`
+- **AND THEN** 适配器将其映射为既有 `PermissionRequest`，授权桥接向用户展示二元批准选项（第一阶段不提供「允许本次会话」）
+- **AND THEN** 用户批准后适配器回送 ACP `allow_once`，工具执行；拒绝则回 `reject_once`
 
 #### Scenario: 用户拒绝审批后会话继续
-- **WHEN** 用户拒绝某次权限请求
-- **THEN** 系统 SHALL 不执行该工具但继续会话，允许后续工具/提问，不以全开基线自动越过该拒绝
+
+- **WHEN** 用户对某次 `session/request_permission` 选择拒绝
+- **THEN** 工具不执行
+- **AND THEN** Kimi 会话继续，可能发起新的工具调用或新的审批请求
 
 #### Scenario: 全开不是越过岗位与采信合同
 - **WHEN** author 请求代码编辑工具，或 Reviewer 输出已因违规作废
