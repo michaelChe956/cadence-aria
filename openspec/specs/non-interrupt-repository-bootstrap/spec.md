@@ -41,7 +41,7 @@
 
 ### Requirement: 聚合初始化的生产执行
 
-聚合初始化端点创建的 operation 必须被真正执行，而非仅创建可轮询记录。
+聚合初始化端点创建的 operation MUST 被真正执行，MUST NOT 仅创建可轮询记录。
 
 #### Scenario: 提交即执行
 - **WHEN** POST /api/projects/{pid}/logical-codebase/initializations 成功

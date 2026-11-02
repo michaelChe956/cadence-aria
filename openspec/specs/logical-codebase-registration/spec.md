@@ -111,7 +111,7 @@ preflight MUST NOT 因聚合根已存在 `AGENTS.md` / `CLAUDE.md` / `.claude/ru
 
 ### Requirement: 登记生产 HTTP 入口
 
-登记批次能力通过生产 HTTP 端点可用：预检、提交、查询、恢复、取消，全部为同步短操作（请求内完成并返回最终或部分结果）。
+登记批次能力 SHALL 通过生产 HTTP 端点可用：预检、提交、查询、恢复、取消，全部 SHALL 为同步短操作（请求内完成并返回最终或部分结果）。
 
 #### Scenario: 预检冻结快照
 - **WHEN** 调用登记预检端点提交聚合根与候选路径
@@ -141,7 +141,7 @@ preflight MUST NOT 因聚合根已存在 `AGENTS.md` / `CLAUDE.md` / `.claude/ru
 
 ### Requirement: 登记端点的前端入口
 
-多仓 project 的逻辑代码库页必须提供登记向导入口，覆盖预检分类展示、确认与同步提交。
+多仓 project 的逻辑代码库页 MUST 提供登记向导入口，覆盖预检分类展示、确认与同步提交。
 
 #### Scenario: 登记向导
 - **WHEN** 用户在多仓 project 的逻辑代码库页发起成员登记
@@ -149,7 +149,7 @@ preflight MUST NOT 因聚合根已存在 `AGENTS.md` / `CLAUDE.md` / `.claude/ru
 
 ### Requirement: 预检候选自动发现
 
-登记预检必须支持以聚合根自动发现候选：当请求携带 auto_discover=true 时，服务端以聚合根下直接子目录中的 git 仓库为候选执行预检分类，无需调用方逐一提供候选路径；auto_discover 缺省或 false 时行为不变。
+登记预检 MUST 支持以聚合根自动发现候选：当请求携带 auto_discover=true 时，服务端 SHALL 以聚合根下直接子目录中的 git 仓库为候选执行预检分类，MUST NOT 要求调用方逐一提供候选路径；auto_discover 缺省或 false 时行为不变。
 
 #### Scenario: 自动发现候选
 - **WHEN** 调用预检端点携带 aggregate_root 与 auto_discover=true
@@ -161,7 +161,7 @@ preflight MUST NOT 因聚合根已存在 `AGENTS.md` / `CLAUDE.md` / `.claude/ru
 
 ### Requirement: 登记向导候选自动发现交互
 
-登记向导在用户填入聚合根后必须自动拉取候选并以勾选列表展示，不要求用户手工输入候选路径。
+登记向导在用户填入聚合根后 MUST 自动拉取候选并以勾选列表展示，MUST NOT 要求用户手工输入候选路径。
 
 #### Scenario: 向导自动展示候选
 - **WHEN** 用户在向导中填入聚合根并进入预检步骤

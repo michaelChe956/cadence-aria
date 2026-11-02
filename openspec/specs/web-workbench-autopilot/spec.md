@@ -362,7 +362,7 @@ L2 全局警示条与 L3 标题 / favicon 的待处理计数 SHALL 来自**跨�
 
 ### Requirement: 引擎零改动与外部边界（REQ-UI37-13）
 
-本 capability 的全部 Phase SHALL 只动 `web/src/`，MUST NOT 修改任何后端代码，MUST NOT 新增后端接口 / 事件 / 持久化，MUST NOT 新增前端依赖，MUST NOT 新增 Provider / CI / 持久化评估语料。编码侧 MUST NOT 新增插话入口（coding WS 无插话入口，且 single-candidate Running 阶段拒绝 `UserMessage`，为 fail-closed 约束）。`ImageCreatePage` 的**页面内容** MUST NOT 被修改（仅 L2 警示条与 toast 在其上同样可见）。运行中接管（运行中插话 / 改门禁语义）MUST NOT 在本 capability 内实现；`auto_start_coding` 显式语义 / 多仓 coding / 旧协议退役门 MUST NOT 在本 capability 内实现。长会话渲染 SHALL 虚拟化（只渲染视口内轮次），流式更新 SHALL 按帧合并。
+本 capability 的全部 Phase SHALL 只动 `web/src/`，MUST NOT 修改任何后端代码，MUST NOT 新增后端接口 / 事件 / 持久化，MUST NOT 新增前端依赖，MUST NOT 新增 Provider / CI / 持久化评估语料。编码侧 MUST NOT 新增插话入口（coding WS 无插话入口，且 single-candidate Running 阶段拒绝 `UserMessage`，为 fail-closed 约束）。`ImageCreatePage` 的**页面内容** MUST NOT 被修改（仅 L2 警示条与 toast 在其上同样可见）。运行中接管（运行中插话 / 改门禁语义）MUST NOT 在本 capability 内实现；`auto_start_once` 显式语义 / 多仓 coding / 旧协议退役门 MUST NOT 在本 capability 内实现。长会话渲染 SHALL 虚拟化（只渲染视口内轮次），流式更新 SHALL 按帧合并。
 
 #### Scenario: 后端零改动
 

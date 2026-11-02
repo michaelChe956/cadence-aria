@@ -32,7 +32,7 @@
 
 ### Requirement: 逻辑代码库 CRUD
 
-逻辑代码库的创建、查询与删除必须通过生产 HTTP 端点可用。
+逻辑代码库的创建、查询与删除 MUST 通过生产 HTTP 端点可用。
 
 #### Scenario: 创建
 - **WHEN** POST /api/projects/{pid}/logical-codebases 携带 name（必填）与 aggregate_root
@@ -44,7 +44,7 @@
 
 ### Requirement: 逻辑专属端点按逻辑代码库寻址
 
-登记/初始化/索引/成员/指针等逻辑专属端点必须按逻辑代码库 id 寻址，不存在时返回稳定 404。
+登记/初始化/索引/成员/指针等逻辑专属端点 MUST 按逻辑代码库 id 寻址；不存在时返回稳定 404。
 
 #### Scenario: 端点换形
 - **WHEN** 调用登记/初始化/索引/成员/指针端点
@@ -52,7 +52,7 @@
 
 ### Requirement: issue 唯一归属代码库
 
-每个 issue 必须且只能归属一个代码库（单仓或逻辑）。
+每个 issue MUST 且只能归属一个代码库（单仓或逻辑）。
 
 #### Scenario: 归属
 - **WHEN** 创建 issue

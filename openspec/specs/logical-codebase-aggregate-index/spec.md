@@ -88,7 +88,7 @@
 
 ### Requirement: 构建写入的 single-writer 与快照
 
-全部索引写入路径必须经统一 single-writer 互斥，并保留命令前后成员快照证据。
+全部索引写入路径 MUST 经统一 single-writer 互斥，并 SHALL 保留命令前后成员快照证据。
 
 #### Scenario: 首建与重建共用互斥
 - **WHEN** 首次构建、重建或同步并发执行
