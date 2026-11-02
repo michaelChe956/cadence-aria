@@ -2,7 +2,9 @@
 
 > 触发：owner「整理下所有失败的 changes，看看有没有都完成」。
 
-> 背景：2026-11-02 归档 19 个 change 后，`openspec validate --all --strict` = **43 passed / 33 failed**。
+> 背景：2026-11-02 归档 **18** 个 change 后，`openspec validate --all --strict` = **43 passed / 33 failed**。
+> （归档前未归档共 **19** 个；归档 18 个，保留 `mechanicalize-plan-compile-repair` 1 个未归档 —— owner 裁定。
+> 提交 `5faa802` 的 message 里写的「19 个」是笔误，实际 18 个。）
 
 > 归档前基线 = 49 passed / 37 failed（失败项集合与现在同构，归档未引入新失败）。
 
