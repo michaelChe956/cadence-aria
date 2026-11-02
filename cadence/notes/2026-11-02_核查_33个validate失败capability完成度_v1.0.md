@@ -67,9 +67,16 @@
 |---|---|
 | `durable_tool_policy_audit` | `src/cross_cutting/tool_policy_audit.rs`（`resume_with_audit_record` / `append_superseded_policy_drift`）|
 | `auto_start_coding` | `auto_start_once`（attempt 上的冻结 policy）|
-| `resume_available` | `can_resume_audited_final_command`（且它本就是验收指标名，非代码符号）|
+| `resume_available` | **误判，实为真字段**：campaign sample manifest 的 `resume_available(bool)`
+（定义见 `cadence/plans/2026-08-22_计划文档_单仓Design弱模型加固_v1.0.md` 的 sample 必填字段与对应 task-4-report；
+测量工具 `validate_manifest.py` / `gate-loop.sh` 在仓外）→ **保持原样，不改名**|
 
-→ **建议后续对齐这 3 处规格符号名与代码一致**（不是功能缺口，是契约文本里的名字漂移）。
+→ 前两处已对齐（见提交 `0b5d54c`）；第三处经复核是**误判**，保持原样。
+
+> 补充（2026-11-02 复核）：`resume_available` 出现在「Design corpus/golden/campaign 实测验收」要求里，
+> 语义是 **campaign sample manifest 的字段**，不是生产代码符号。计划文档与 task-4-report 都把它列为
+> sample 必填字段，测量工具在仓外（`validate_manifest.py` / `gate-loop.sh`）。
+> 因此**不改名**；上一版把它当成「命名漂移」是判断错误。
 
 
 ## 留下的欠账（只影响 validate 观感，不影响功能）
