@@ -8,9 +8,37 @@
 
 ### Requirement: Coder 与 Work Item Code Reviewer 的技术失败自动重试有固定上限
 
-Coder 与 Work Item Code Reviewer 的一次 Provider 执行周期 MUST 在首次调用之外最多自动重试2次，因此该cycle最多3次调用；本上限不重排已存在的恰一次coder教学窗口或group-review一次repair窗口最大组合。可自动transport重试的失败仅限非用户意图的Provider技术失败，包括启动错误、流提前关闭、连接或进程中断、Provider执行超时与可识别上游临时5xx错误；L1消费既有剩余机会而不扩池。
+Coder 与 Work Item Code Reviewer 的一次 Provider 执行周期 MUST 在首次调用之外最多自动重试2次，因此该cycle最多3次调用
 
-用户主动取消、权限或选择请求等待（包括等待该交互而超时）、正常 Reviewer finding、开放验证失败与 Plan Defect MUST NOT 作为transport技术失败自动重试。Provider正常完成后的结构化输出无效 MUST NOT 伪记技术失败；但服务端证实的L1确定性结构拒收 SHALL 按 workspace-structural-governance 沿原角色授权、teaching/repair/cycle剩余机会机器指令自动修复与全量复验，不要求用户写技术prompt。coder既有一次teaching窗口、每cycle最多3及group-review既有一次repair窗口均不增机会、不叠新池，共用耐久parent identity；权限/业务判断不自动放宽。
+#### Scenario: 上限不重排既有窗口组合
+
+- **WHEN** 设定本自动重试上限与既有教学/repair 窗口组合
+- **THEN** 本上限不重排已存在的恰一次coder教学窗口或group-review一次repair窗口最大组合
+
+#### Scenario: 可自动重试的失败范围
+
+- **WHEN** 判定失败类型是否可作 transport 技术失败自动重试
+- **THEN** 可自动transport重试的失败仅限非用户意图的Provider技术失败，包括启动错误、流提前关闭、连接或进程中断、Provider执行超时与可识别上游临时5xx错误；L1消费既有剩余机会而不扩池
+
+#### Scenario: 业务结论类失败不自动重试
+
+- **WHEN** 出现用户主动取消、权限或选择请求等待、正常 Reviewer finding、开放验证失败或 Plan Defect
+- **THEN** 用户主动取消、权限或选择请求等待（包括等待该交互而超时）、正常 Reviewer finding、开放验证失败与 Plan Defect MUST NOT 作为transport技术失败自动重试
+
+#### Scenario: 结构化输出无效不伪记技术失败
+
+- **WHEN** Provider 正常完成后的结构化输出无效
+- **THEN** Provider正常完成后的结构化输出无效 MUST NOT 伪记技术失败
+
+#### Scenario: L1 确定性结构拒收沿原授权修复
+
+- **WHEN** 服务端证实的L1确定性结构拒收出现
+- **THEN** 但服务端证实的L1确定性结构拒收 SHALL 按 workspace-structural-governance 沿原角色授权、teaching/repair/cycle剩余机会机器指令自动修复与全量复验，不要求用户写技术prompt
+
+#### Scenario: 机会池不扩张
+
+- **WHEN** coder 教学窗口、每cycle 上限与 group-review repair 窗口共同作用
+- **THEN** coder既有一次teaching窗口、每cycle最多3及group-review既有一次repair窗口均不增机会、不叠新池，共用耐久parent identity；权限/业务判断不自动放宽
 
 #### Scenario: Coder 因临时 503 自动恢复
 

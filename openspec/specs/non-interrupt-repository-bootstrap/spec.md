@@ -157,8 +157,32 @@ readiness SHALL 仅以当前权威 artifact 正文等于已知固定自举桩（
 - **THEN** 两者 MUST 遵循同一套通道/幂等/并发仲裁语义，不得出现并行双跑
 
 ### Requirement: 聚合根 recipe 与 readiness 事实闭环（REQ-BOOT-03）
+逻辑代码库的 root-cwd recipe SHALL 复用四条无中断命令的取消、超时、输出摘要与步骤恢复语义，并将其映射到既有五步聚合初始化 operation。
 
-逻辑代码库的 root-cwd recipe SHALL 复用四条无中断命令的取消、超时、输出摘要与步骤恢复语义，并将其映射到既有五步聚合初始化 operation；recipe provider SHALL 固定为 Claude Code。LC 根准入冻结 canonical root 后、Claude Code recipe operation 启动前 SHALL 完成所选 Codex/Kimi trust 的独立前置登记与核验。该登记不属于五步 operation、不插入步骤之间且不新增第六步；它是五步 recipe 的硬前置门，任一 trust 未 Ready 时五步 operation 不创建/不启动并进入可重试 fail-closed waiting。全部 trust Ready 后才启动五步 recipe。命令成功、根级产物 receipt、根 policy/rule 摘要和 bootstrap 投影 SHALL 独立记录。recipe 完成本身 MUST NOT 被视为 `planning_ready`，直到规则/policy、成员索引和聚合索引 active 等投影事实均完成。
+#### Scenario: 配方提供者固定
+
+- **WHEN** 逻辑代码库根 recipe 选择 provider
+- **THEN** recipe provider SHALL 固定为 Claude Code。
+
+#### Scenario: 信任登记不入步骤
+
+- **WHEN** LC 根准入冻结 canonical root 后、Claude Code recipe operation 启动前完成 trust 前置登记
+- **THEN** LC 根准入冻结 canonical root 后、Claude Code recipe operation 启动前 SHALL 完成所选 Codex/Kimi trust 的独立前置登记与核验。该登记不属于五步 operation、不插入步骤之间且不新增第六步。
+
+#### Scenario: 信任未就绪阻断五步
+
+- **WHEN** 任一 trust 未 Ready，或全部 trust Ready
+- **THEN** 它是五步 recipe 的硬前置门，任一 trust 未 Ready 时五步 operation 不创建/不启动并进入可重试 fail-closed waiting。全部 trust Ready 后才启动五步 recipe。
+
+#### Scenario: 根级事实独立记录
+
+- **WHEN** 命令成功并产出根级产物 receipt 与投影
+- **THEN** 命令成功、根级产物 receipt、根 policy/rule 摘要和 bootstrap 投影 SHALL 独立记录。
+
+#### Scenario: 投影齐备才算就绪
+
+- **WHEN** 判定 recipe 完成是否达到 `planning_ready`
+- **THEN** recipe 完成本身 MUST NOT 被视为 `planning_ready`，直到规则/policy、成员索引和聚合索引 active 等投影事实均完成。
 
 #### Scenario: 四命令按根顺序执行
 

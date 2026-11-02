@@ -93,7 +93,37 @@
 
 ### Requirement: Kimi 复用既有授权与失败边界
 
-系统 SHALL 在 Kimi 启动或运行失败时直接报告失败，不在运行期自动切换到其他 Provider，且不实现 artifact retry 或 resume-stall fresh retry。对于 reviewer，系统仅在首轮结构化输出包含 recoverable JSON、且错误仅为结束标签/nonce 包装缺陷时，允许 Kimi 在同一会话进行最多一次 structured-output repair；repair 后 JSON 必须与首轮 recoverable JSON 逐值相等并重新通过原始 nonce 严格校验。Pi SHALL 继续排除 review repair。任何不满足该条件、repair provider 启动/运行失败、JSON 变化或仍然格式错误的情况 SHALL fail-closed，进入人工确认，且不得将未可信的可读文本作为 author 自动返修依据。用户主动 Abort SHALL 保持既有 aborted 取消语义，不 retry、不 fallback、也不转人工 triage。系统 SHALL 在 task-run 所有入口（HTTP 调度、RoutingProviderAdapter、节点契约、step runner）显式拒绝 Kimi，返回稳定错误，不使用 `unreachable!`。
+系统 SHALL 在 Kimi 启动或运行失败时直接报告失败，不在运行期自动切换到其他 Provider，且不实现 artifact retry 或 resume-stall fresh retry。
+
+#### Scenario: 受限结构修复
+
+- **WHEN** reviewer 首轮结构化输出包含 recoverable JSON 且错误仅为结束标签/nonce 包装缺陷
+- **THEN** 对于 reviewer，系统仅在首轮结构化输出包含 recoverable JSON、且错误仅为结束标签/nonce 包装缺陷时，允许 Kimi 在同一会话进行最多一次 structured-output repair；
+
+#### Scenario: 修复结果逐值比对
+
+- **WHEN** repair 后比对 JSON
+- **THEN** repair 后 JSON 必须与首轮 recoverable JSON 逐值相等并重新通过原始 nonce 严格校验。
+
+#### Scenario: Pi 排除 repair
+
+- **WHEN** Pi 参与 review
+- **THEN** Pi SHALL 继续排除 review repair。
+
+#### Scenario: 不满足条件即关闭
+
+- **WHEN** 不满足 repair 条件、repair provider 启动/运行失败、JSON 变化或仍然格式错误
+- **THEN** 任何不满足该条件、repair provider 启动/运行失败、JSON 变化或仍然格式错误的情况 SHALL fail-closed，进入人工确认，且不得将未可信的可读文本作为 author 自动返修依据。
+
+#### Scenario: 中止保持取消语义
+
+- **WHEN** 用户主动 Abort
+- **THEN** 用户主动 Abort SHALL 保持既有 aborted 取消语义，不 retry、不 fallback、也不转人工 triage。
+
+#### Scenario: 任务运行入口拒绝
+
+- **WHEN** Kimi 进入 task-run 入口
+- **THEN** 系统 SHALL 在 task-run 所有入口（HTTP 调度、RoutingProviderAdapter、节点契约、step runner）显式拒绝 Kimi，返回稳定错误，不使用 `unreachable!`。
 
 #### Scenario: Kimi 启动或运行失败直接报告
 
@@ -160,7 +190,27 @@
 
 ### Requirement: Kimi 支持 AskUserQuestion 结构化提问
 
-Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude Code 同名同 schema），并把提问选项统一收敛到 ACP `session/request_permission`。系统 SHALL 识别 `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` 并映射为既有 `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`，`allow_multiple=false`）；其他 title 映射为 `PermissionRequest`。系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 扩展。**Auto 与 Supervised 模式下 AskUserQuestion 均产生 ChoiceRequest**（提问是用户输入请求，Auto 不藏提问）；Auto 仅对普通工具不产生 PermissionRequest。
+Phase 0 Spike 实证：Kimi 有 `AskUserQuestion` 工具（与 Claude Code 同名同 schema），并把提问选项统一收敛到 ACP `session/request_permission`。系统 SHALL 识别 `session/request_permission` 中 `toolCall.title == "AskUserQuestion"` 并映射为既有 `ProviderEvent::ChoiceRequest`（source=`AskUserQuestion`，options 来自 request_permission.options，`allow_free_text=true`，`allow_multiple=false`）；
+
+#### Scenario: 其他标题映射审批
+
+- **WHEN** `session/request_permission` 的 title 为其他取值
+- **THEN** 其他 title 映射为 `PermissionRequest`。
+
+#### Scenario: 不复用 Pi 扩展
+
+- **WHEN** Kimi 接入提问能力
+- **THEN** 系统 SHALL 不为 Kimi 复用 Pi 的 `aria-ask.ts` 扩展。
+
+#### Scenario: 两种模式均产提问
+
+- **WHEN** Auto 或 Supervised 模式下出现 AskUserQuestion
+- **THEN** **Auto 与 Supervised 模式下 AskUserQuestion 均产生 ChoiceRequest**（提问是用户输入请求，Auto 不藏提问）；
+
+#### Scenario: 普通工具不产生审批
+
+- **WHEN** Auto 模式处理普通工具
+- **THEN** Auto 仅对普通工具不产生 PermissionRequest。
 
 #### Scenario: 用户选择提问选项
 

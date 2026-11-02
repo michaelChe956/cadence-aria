@@ -1,9 +1,7 @@
 # codebase-kinds Specification
 
 ## Purpose
-
-代码库实体与两种同级形式（单仓代码库/逻辑代码库），以及 issue 对代码库的唯一归属。
-
+定义代码库实体与它的两种同级形式：单仓代码库（一个物理 git 仓库）与逻辑代码库（多个成员仓的聚合），两者在 issue 归属、寻址与端点语义上同级；每个 issue 必须且只能归属其中一个代码库。
 ## Requirements
 
 ### Requirement: 代码库实体与统一列表

@@ -7,8 +7,57 @@
 ## Requirements
 
 ### Requirement: 人工 design 确认后的显式授权与范围（REQ-WIGA-01）
+系统 SHALL 保持 story/design 的生成和确认由人完成，并仅在 design 经人工确认后提供自动化模式选择。
 
-系统 SHALL 保持 story/design 的生成和确认由人完成，并仅在 design 经人工确认后提供自动化模式选择；默认 SHALL 为不自动化。自动化 enrollment SHALL 将 target、plan、session、source、provider 和绑定版本作为同一条精确身份合同持久化；target SHALL 是 enrollment 载体身份的唯一权威，并 SHALL 区分三类：单仓（携带与 issue 记录所属物理仓一致的真实 repository 身份，MUST NOT 携带或生成任何 logical repository 替身身份）、逻辑代码库单成员、逻辑代码库成员集合（`logical_codebase_members`：logical codebase 身份＋logical repository 成员集合）。集合 target SHALL 经统一反序列化规范化入口处理原始 REST JSON 与磁盘读取：非 UUID 或空集 SHALL 拒绝，乱序及重复输入 SHALL 规范化为升序唯一集合，单元素 SHALL 折叠为既有单成员 kind，旧合法 JSON/history 不迁移；digest、selection_key 与 bound.target 比较一律在规范化之后。自动化授权 SHALL 覆盖 issue explicit selection 的全部有效成员（manifest∩(included−excluded)，排序去重），MUST NOT 要求逐仓勾选，MUST NOT 提供逐仓授权/启动 API；集合用于 enrollment 及其 binding/generation intent/child 授权身份，单 WI intent 仍单仓、MUST NOT 把任一集合成员当作全部 WI 归属。plan 实际桶集合 P SHALL 满足 ∅≠P⊆A（A＝授权成员集合）且无未归属 WI；attempt 只按 P 创建，A−P 的授权仓 MUST NOT 造空 attempt/空组。用户执行"重新绑定／换代"时 MUST 明确提供目标 plan/session、source、target 和 provider，并携带当前 expected binding/policy version；新旧 logical 走同一路径、规范化后全等，rebind MUST NOT 借道扩权，current/previous 保留全集，旧单成员 MUST NOT 随 selection 扩仓。成功操作 SHALL 写入新的绑定版本并使后续动作只接受当前版本；旧绑定、旧 child 与旧代事件 SHALL 保持只读可追溯。系统 MUST NOT 按最新 session、旧 issue 扫描或后台失败发现猜测接管，也 MUST NOT 将 Manual 已认领 attempt 升级为自动。未选自动化、旧数据缺少 enrollment 或单成员身份不明确时 SHALL 保持既有手动流程；零 target、空集、非法 UUID、错 LC、跨载体或身份不一致 SHALL fail-closed 拒绝自动授权。
+#### Scenario: 未选自动化默认关闭
+
+- **WHEN** design 经人工确认后用户未选择自动化模式
+- **THEN** 默认 SHALL 为不自动化。
+
+#### Scenario: 身份合同精确持久化
+
+- **WHEN** 创建自动化 enrollment
+- **THEN** 自动化 enrollment SHALL 将 target、plan、session、source、provider 和绑定版本作为同一条精确身份合同持久化。
+
+#### Scenario: target 三类身份区分
+
+- **WHEN** 解析并持久化 enrollment 的 target
+- **THEN** target SHALL 是 enrollment 载体身份的唯一权威，并 SHALL 区分三类：单仓（携带与 issue 记录所属物理仓一致的真实 repository 身份，MUST NOT 携带或生成任何 logical repository 替身身份）、逻辑代码库单成员、逻辑代码库成员集合（`logical_codebase_members`：logical codebase 身份＋logical repository 成员集合）。
+
+#### Scenario: 集合 target 规范化
+
+- **WHEN** 反序列化原始 REST JSON 或读取磁盘中的集合 target 并比较身份
+- **THEN** 集合 target SHALL 经统一反序列化规范化入口处理原始 REST JSON 与磁盘读取：非 UUID 或空集 SHALL 拒绝，乱序及重复输入 SHALL 规范化为升序唯一集合，单元素 SHALL 折叠为既有单成员 kind，旧合法 JSON/history 不迁移；digest、selection_key 与 bound.target 比较一律在规范化之后。
+
+#### Scenario: 授权覆盖有效成员
+
+- **WHEN** 为 issue explicit selection 建立自动化授权
+- **THEN** 自动化授权 SHALL 覆盖 issue explicit selection 的全部有效成员（manifest∩(included−excluded)，排序去重），MUST NOT 要求逐仓勾选，MUST NOT 提供逐仓授权/启动 API；集合用于 enrollment 及其 binding/generation intent/child 授权身份，单 WI intent 仍单仓、MUST NOT 把任一集合成员当作全部 WI 归属。
+
+#### Scenario: 实际桶与 attempt
+
+- **WHEN** 生成 plan 实际桶集合 P 并创建 attempt
+- **THEN** plan 实际桶集合 P SHALL 满足 ∅≠P⊆A（A＝授权成员集合）且无未归属 WI；attempt 只按 P 创建，A−P 的授权仓 MUST NOT 造空 attempt/空组。
+
+#### Scenario: 重绑显式且不扩权
+
+- **WHEN** 用户执行重新绑定／换代
+- **THEN** 用户执行"重新绑定／换代"时 MUST 明确提供目标 plan/session、source、target 和 provider，并携带当前 expected binding/policy version；新旧 logical 走同一路径、规范化后全等，rebind MUST NOT 借道扩权，current/previous 保留全集，旧单成员 MUST NOT 随 selection 扩仓。
+
+#### Scenario: 新绑定生效旧版只读
+
+- **WHEN** 重新绑定操作成功
+- **THEN** 成功操作 SHALL 写入新的绑定版本并使后续动作只接受当前版本；旧绑定、旧 child 与旧代事件 SHALL 保持只读可追溯。
+
+#### Scenario: 禁止猜测接管
+
+- **WHEN** 系统处理既有 session、issue 与 attempt 归属时
+- **THEN** 系统 MUST NOT 按最新 session、旧 issue 扫描或后台失败发现猜测接管，也 MUST NOT 将 Manual 已认领 attempt 升级为自动。
+
+#### Scenario: 手动缺省与非法拒绝
+
+- **WHEN** 未选自动化、旧数据缺少 enrollment、单成员身份不明确或 target 非法
+- **THEN** 未选自动化、旧数据缺少 enrollment 或单成员身份不明确时 SHALL 保持既有手动流程；零 target、空集、非法 UUID、错 LC、跨载体或身份不一致 SHALL fail-closed 拒绝自动授权。
 
 #### Scenario: design 确认前不出现自动授权
 
@@ -76,8 +125,57 @@
 - **THEN** 系统返回首次操作结果，不创建第二绑定版本、不重复触发后续编排；同一命令异负载被拒绝
 
 ### Requirement: durable 策略与可撤销的未消费执行许可（REQ-WIGA-02）
+单一 issue 的 enrollment SHALL 是自动化授权唯一来源。
 
-单一 issue 的 enrollment SHALL 是自动化授权唯一来源；`policy_revision` 的并发更新 SHALL 线性化。enrollment SHALL 冻结 `plan_approval: manual|auto`（缺省 manual，旧记录无字段按 manual 读；新自动化授权一律取 auto，并把 `require_execution_plan_confirm` 压为 false——仅在该 auto 授权物化的 WI 内归一化，MUST NOT 修改手动旧 WI 字段）。绑定的 plan session `run_policy` SHALL 可为 `AutoIfValid` 仅当当前 enabled enrollment 精确绑定该 plan/session/source/target 且其冻结策略为 auto；创建、binding/rebind、生成准入、确认投影各接缝 SHALL 执行同一校验，仅客户端传 AutoIfValid MUST NOT 获得自动执行权，错绑或不一致 SHALL 拒绝。AutoIfValid SHALL 只省略正常人工批准（outline、draft、batch 及最终批准自动通过），MUST NOT 跳过 AI choice、人工门（HumanRequired）、机械校验或 trust 准备：自动 compile 前 SHALL 复用既有 trust 准备，非 Ready 时落 typed waiting 停点并通知（REQ-WIGA-12），零 compile 副作用；trust Ready 后自动 Confirmed。coding attempt SHALL 物化 `CodingStartRunPolicy = Manual | AutoStartOnce{enrollment_id, policy_revision, source_plan_revision}`，缺省为 Manual；split SHALL 把冻结 start policy clone 到每仓桶，advance record SHALL 连同 `start_run_policy` 一次写定且 update/replay MUST NOT 改（旧 record 默认 Manual、MUST NOT 升格；existing journal 策略不符即停，不给旧 Manual 原地补授权）。自动许可只准该绑定 target/attempt 使用且须在消费前再核对当前授权。关闭自动化 SHALL 拦住线性化关闭后尚未认领的动作并撤销未消费的启动许可；已被认领/运行的动作不因关闭而自动 Abort。重新开启 SHALL NOT 清除已消费的单发记录或隐式重试 Failed/Aborted attempt；已终止 enrollment MUST NOT Enable/rebind/继续（REQ-WIGA-09）。
+#### Scenario: 策略版本线性化
+
+- **WHEN** 并发更新 `policy_revision`
+- **THEN** `policy_revision` 的并发更新 SHALL 线性化。
+
+#### Scenario: 批准策略冻结
+
+- **WHEN** enrollment 冻结 `plan_approval` 并物化新自动化授权
+- **THEN** enrollment SHALL 冻结 `plan_approval: manual|auto`（缺省 manual，旧记录无字段按 manual 读；新自动化授权一律取 auto，并把 `require_execution_plan_confirm` 压为 false——仅在该 auto 授权物化的 WI 内归一化，MUST NOT 修改手动旧 WI 字段）。
+
+#### Scenario: 自动策略绑定校验
+
+- **WHEN** 设置或校验 plan session 的 `AutoIfValid` 策略
+- **THEN** 绑定的 plan session `run_policy` SHALL 可为 `AutoIfValid` 仅当当前 enabled enrollment 精确绑定该 plan/session/source/target 且其冻结策略为 auto；创建、binding/rebind、生成准入、确认投影各接缝 SHALL 执行同一校验，仅客户端传 AutoIfValid MUST NOT 获得自动执行权，错绑或不一致 SHALL 拒绝。
+
+#### Scenario: 自动批准范围与停点
+
+- **WHEN** `AutoIfValid` 自动批准并准备 compile
+- **THEN** AutoIfValid SHALL 只省略正常人工批准（outline、draft、batch 及最终批准自动通过），MUST NOT 跳过 AI choice、人工门（HumanRequired）、机械校验或 trust 准备：自动 compile 前 SHALL 复用既有 trust 准备，非 Ready 时落 typed waiting 停点并通知（REQ-WIGA-12），零 compile 副作用；trust Ready 后自动 Confirmed。
+
+#### Scenario: 启动策略物化
+
+- **WHEN** coding attempt 物化启动策略
+- **THEN** coding attempt SHALL 物化 `CodingStartRunPolicy = Manual | AutoStartOnce{enrollment_id, policy_revision, source_plan_revision}`，缺省为 Manual。
+
+#### Scenario: 拆分冻结策略写定
+
+- **WHEN** split 复制 start policy 并写定 advance record
+- **THEN** split SHALL 把冻结 start policy clone 到每仓桶，advance record SHALL 连同 `start_run_policy` 一次写定且 update/replay MUST NOT 改（旧 record 默认 Manual、MUST NOT 升格；existing journal 策略不符即停，不给旧 Manual 原地补授权）。
+
+#### Scenario: 自动许可限目标使用
+
+- **WHEN** 消费自动启动许可前
+- **THEN** 自动许可只准该绑定 target/attempt 使用且须在消费前再核对当前授权。
+
+#### Scenario: 关闭撤销未消费许可
+
+- **WHEN** 关闭自动化时存在尚未认领或已运行的动作
+- **THEN** 关闭自动化 SHALL 拦住线性化关闭后尚未认领的动作并撤销未消费的启动许可；已被认领/运行的动作不因关闭而自动 Abort。
+
+#### Scenario: 重开不清已消费记录
+
+- **WHEN** 重新开启自动化
+- **THEN** 重新开启 SHALL NOT 清除已消费的单发记录或隐式重试 Failed/Aborted attempt。
+
+#### Scenario: 终止后禁止启用
+
+- **WHEN** enrollment 已终止后请求 Enable、rebind 或继续
+- **THEN** 已终止 enrollment MUST NOT Enable/rebind/继续（REQ-WIGA-09）。
 
 #### Scenario: Interactive 保留唯一人工门
 
@@ -125,8 +223,57 @@
 - **THEN** rebind 与继续一律拒绝且零副作用；Enable 仅当由人工入口携带稳定 command_id、payload 与终止记录逐字段相等且收口已完成时，以同 id 新 revision 取代并清空 terminated_at（REQ-WIGA-09）；任何自动路径不得重新开启，不降级为手动轮
 
 ### Requirement: 无页面的确定性后端推进与人工停点（REQ-WIGA-03）
+对仍有效且精确绑定的 enrollment（单仓、单成员或成员集合授权），服务端 SHALL 从 durable 状态重建下一动作：至多幂等准备一次 plan/session、至多启动一次对应生成、正常批准自动通过（REQ-WIGA-02）、仅在 AI choice 与人工门停等并通知、等待既有 compile/publication 成功、以独立 advance 把全部实际桶推进到 Ready，再经共用 StartCoding 命令启动各桶 attempt。
 
-对仍有效且精确绑定的 enrollment（单仓、单成员或成员集合授权），服务端 SHALL 从 durable 状态重建下一动作：至多幂等准备一次 plan/session、至多启动一次对应生成、正常批准自动通过（REQ-WIGA-02）、仅在 AI choice 与人工门停等并通知、等待既有 compile/publication 成功、以独立 advance 把全部实际桶推进到 Ready，再经共用 StartCoding 命令启动各桶 attempt。LC 自动编排 SHALL 经 plan_start 提取的 crate 内共享服务推进（prepare→Enrolled advance→bind_ready→mark_start_requested→Enrolled start→真实 outcome）；首启与续驱 SHALL 沿 `CodingPlanSelection::deterministic_start_command_id` 稳定命令身份；首项真实 outcome 落盘后 SHALL 立即以既有全图就绪桶驱动启动其余桶，后续 tick 与完成挂点复用同一驱动与 claim。全部自动桶（尤其非首桶）SHALL 以 Enrolled origin 启动并逐桶核对 policy/enrollment/binding；Created 分支按 attempt 冻结 policy 选 origin（AutoStartOnce→当前 binding 的 Enrolled，失效即停，MUST NOT 降级 Manual）；Running parked 续跑 SHALL 在物化/拉 runner 前复核同一自动授权；撤销、篡改或绑定不符 SHALL 零 provider。服务端 SHALL 在每次 restart、recover 或 new advance 前重新读取当前绑定与租约/attempt claim；编排器每 tick SHALL 先读当前 binding 未解除的自动化失败事实（advance/coding_start），存在时 SHALL 停在该点，MUST NOT 自动 retry。编排事件仅作为唤醒；无页面或没有任何 WS 连接时也 SHALL 继续安全动作及恢复。门关闭、approve 点击、compile 节点结束或 advance_completed 均不得被误判为 Confirmed、coding 完成或 provider 启动。租约冲突时，活跃持有者 SHALL 使系统通知用户等待；已死亡持有者仅 SHALL 展示"确认接管"操作，用户确认后才可继续；活性未知 SHALL 保持等待，不得自动抢占。所有恢复动作 SHALL 通过既有 advance/runner/初始化链继续，不能以通知投递成功冒充业务成功。
+#### Scenario: 共享服务编排推进
+
+- **WHEN** LC 自动编排推进
+- **THEN** LC 自动编排 SHALL 经 plan_start 提取的 crate 内共享服务推进（prepare→Enrolled advance→bind_ready→mark_start_requested→Enrolled start→真实 outcome）。
+
+#### Scenario: 稳定命令身份与首启
+
+- **WHEN** 首启与续驱，或首项真实 outcome 落盘后
+- **THEN** 首启与续驱 SHALL 沿 `CodingPlanSelection::deterministic_start_command_id` 稳定命令身份；首项真实 outcome 落盘后 SHALL 立即以既有全图就绪桶驱动启动其余桶，后续 tick 与完成挂点复用同一驱动与 claim。
+
+#### Scenario: 自动桶起点与策略
+
+- **WHEN** 启动全部自动桶（尤其非首桶）或处理 Created 分支
+- **THEN** 全部自动桶（尤其非首桶）SHALL 以 Enrolled origin 启动并逐桶核对 policy/enrollment/binding；Created 分支按 attempt 冻结 policy 选 origin（AutoStartOnce→当前 binding 的 Enrolled，失效即停，MUST NOT 降级 Manual）。
+
+#### Scenario: 续跑复核与零启动
+
+- **WHEN** Running parked 续跑，或授权撤销、篡改、绑定不符
+- **THEN** Running parked 续跑 SHALL 在物化/拉 runner 前复核同一自动授权；撤销、篡改或绑定不符 SHALL 零 provider。
+
+#### Scenario: 重读绑定与租约
+
+- **WHEN** 每次 restart、recover 或 new advance 前
+- **THEN** 服务端 SHALL 在每次 restart、recover 或 new advance 前重新读取当前绑定与租约/attempt claim。
+
+#### Scenario: 失败事实先读停点
+
+- **WHEN** 编排器每 tick 读到当前 binding 未解除的自动化失败事实
+- **THEN** 编排器每 tick SHALL 先读当前 binding 未解除的自动化失败事实（advance/coding_start），存在时 SHALL 停在该点，MUST NOT 自动 retry。
+
+#### Scenario: 唤醒语义与无页面推进
+
+- **WHEN** 无页面或没有任何 WS 连接，编排事件到达时
+- **THEN** 编排事件仅作为唤醒；无页面或没有任何 WS 连接时也 SHALL 继续安全动作及恢复。
+
+#### Scenario: 不误判完成
+
+- **WHEN** 门关闭、approve 点击、compile 节点结束或 advance_completed 发生
+- **THEN** 门关闭、approve 点击、compile 节点结束或 advance_completed 均不得被误判为 Confirmed、coding 完成或 provider 启动。
+
+#### Scenario: 租约冲突分级处置
+
+- **WHEN** 租约冲突且持有者活跃、已死亡或活性未知
+- **THEN** 租约冲突时，活跃持有者 SHALL 使系统通知用户等待；已死亡持有者仅 SHALL 展示"确认接管"操作，用户确认后才可继续；活性未知 SHALL 保持等待，不得自动抢占。
+
+#### Scenario: 恢复走既有链路
+
+- **WHEN** 执行恢复动作
+- **THEN** 所有恢复动作 SHALL 通过既有 advance/runner/初始化链继续，不能以通知投递成功冒充业务成功。
 
 #### Scenario: 从 design 确认自动生成且停在人工门
 
@@ -198,8 +345,37 @@
 - **THEN** 系统拒绝该回执且不改变当前代绑定、attempt 或 provider 状态
 
 ### Requirement: 驾驶舱 choice 与人工门无 driver 操作（REQ-WIGA-05）
+驾驶舱 SHALL 对 workspace plan 的 choice 提供 REST `POST /api/workspace-sessions/{session_id}/choices/{choice_id}/response`，请求携带稳定 `command_id`、`expected_run_id` 与完整 `answers[{question_id,selected_option_ids,free_text}]`。
 
-驾驶舱 SHALL 对 workspace plan 的 choice 提供 REST `POST /api/workspace-sessions/{session_id}/choices/{choice_id}/response`，请求携带稳定 `command_id`、`expected_run_id` 与完整 `answers[{question_id,selected_option_ids,free_text}]`；coding 阶段 choice SHALL 有与对应 attempt 绑定的可操作入口。REST 与既有 WS 回复 SHALL 共享同一 run/choice 的原子认领、解析和真实等待者交付回执，observer WS 继续只读。HTTP `200` SHALL 仅表示当前 run 等待者实际收到该答复，不承诺后续 provider 成功；回执在 HTTP 等待期限内未知 SHALL 返回 `202` 和可读取的命令状态，相同 `command_id` 同负载重试返回同一结果；未知 choice `404`、同键异负载或竞争 loser `409`、旧 run/超时 choice `410`，不得用 mpsc 入队成功假冒交付成功。pending 卡在提交/回执期间 SHALL 保留处理中状态；失效或失败显式可见。既有人工 plan 门的确认/反馈/终止与 compile recovery 继续可从驾驶舱无 driver 操作，未经人操作不得自动解门。
+#### Scenario: 编码阶段选择入口
+
+- **WHEN** coding 阶段产生 choice
+- **THEN** coding 阶段 choice SHALL 有与对应 attempt 绑定的可操作入口。
+
+#### Scenario: 双通道共享认领
+
+- **WHEN** REST 与既有 WS 同时回复同一 run/choice
+- **THEN** REST 与既有 WS 回复 SHALL 共享同一 run/choice 的原子认领、解析和真实等待者交付回执，observer WS 继续只读。
+
+#### Scenario: 回执语义与等待
+
+- **WHEN** REST choice 回复返回 HTTP 状态
+- **THEN** HTTP `200` SHALL 仅表示当前 run 等待者实际收到该答复，不承诺后续 provider 成功；回执在 HTTP 等待期限内未知 SHALL 返回 `202` 和可读取的命令状态，相同 `command_id` 同负载重试返回同一结果。
+
+#### Scenario: 错误码与真实交付
+
+- **WHEN** choice 未知、同键异负载或竞争 loser、旧 run 或超时
+- **THEN** 未知 choice `404`、同键异负载或竞争 loser `409`、旧 run/超时 choice `410`，不得用 mpsc 入队成功假冒交付成功。
+
+#### Scenario: 处理中与失败可见
+
+- **WHEN** pending 卡在提交/回执期间或失效、失败
+- **THEN** pending 卡在提交/回执期间 SHALL 保留处理中状态；失效或失败显式可见。
+
+#### Scenario: 人工门免驱动操作
+
+- **WHEN** 从驾驶舱操作既有人工 plan 门或 compile recovery
+- **THEN** 既有人工 plan 门的确认/反馈/终止与 compile recovery 继续可从驾驶舱无 driver 操作，未经人操作不得自动解门。
 
 #### Scenario: HTTP/WS 并发只接收一个回答
 
@@ -236,8 +412,37 @@
 - **THEN** observer 从 durable 状态获取相同 amendment/执行结果；投递标记反映实际交付，不重复应用 amendment、不因观察端反压改写业务终态
 
 ### Requirement: 计划确认及编码执行结束的信息通知（REQ-WIGA-07）
+驾驶舱 SHALL 从 durable 成功出版/compile 且 session Confirmed 的事实派生一次「plan 已确认」信息。
 
-驾驶舱 SHALL 从 durable 成功出版/compile 且 session Confirmed 的事实派生一次「plan 已确认」信息；人点击 approve、人工门关闭、compile 失败/恢复态或任意 compile 节点 Completed 均不足以发通知。coding 执行结束的通知 SHALL 在绑定 attempt durable `status=WaitingForHuman ∧ stage=FinalConfirm` 且最终 readiness 快照完整时发出，文案明确「编码执行完成，待最终确认」并引导人进入 Coding Workspace；`status=Completed` 是之后由人工 Final Confirm 造成的实际终态，不把等待态冒称「整组已交付」。两种信息 SHALL 有稳定事实 key 和 durable occurred_at，TTL 不因读取/刷新续期；不计入待处理数、批量确认或危险操作。系统 SHALL 提供有界近期完成读取，能补回前端 observer 最近 K 个会话以外的完成事实；首次加载仅展示近期历史、不得批量弹 toast/系统通知，新观察到的事实按 key 去重提醒，浏览器完全关闭期间不承诺 OS 推送。
+#### Scenario: 不足发通知的事实
+
+- **WHEN** 仅出现 approve 点击、人工门关闭、compile 失败/恢复态或 compile 节点 Completed
+- **THEN** 人点击 approve、人工门关闭、compile 失败/恢复态或任意 compile 节点 Completed 均不足以发通知。
+
+#### Scenario: 执行结束通知与终态
+
+- **WHEN** 绑定 attempt 到达 `WaitingForHuman ∧ FinalConfirm` 且 readiness 快照完整
+- **THEN** coding 执行结束的通知 SHALL 在绑定 attempt durable `status=WaitingForHuman ∧ stage=FinalConfirm` 且最终 readiness 快照完整时发出，文案明确「编码执行完成，待最终确认」并引导人进入 Coding Workspace；`status=Completed` 是之后由人工 Final Confirm 造成的实际终态，不把等待态冒称「整组已交付」。
+
+#### Scenario: 稳定事实键与期限
+
+- **WHEN** 发出两种信息
+- **THEN** 两种信息 SHALL 有稳定事实 key 和 durable occurred_at，TTL 不因读取/刷新续期。
+
+#### Scenario: 不计入待处理与危险
+
+- **WHEN** 两种信息产生后统计待处理数、批量确认或危险操作
+- **THEN** 不计入待处理数、批量确认或危险操作。
+
+#### Scenario: 有界近期完成读取
+
+- **WHEN** 前端 observer 需要补回最近 K 个会话以外的完成事实
+- **THEN** 系统 SHALL 提供有界近期完成读取，能补回前端 observer 最近 K 个会话以外的完成事实。
+
+#### Scenario: 首次加载与去重提醒
+
+- **WHEN** 首次加载或新观察到完成事实
+- **THEN** 首次加载仅展示近期历史、不得批量弹 toast/系统通知，新观察到的事实按 key 去重提醒，浏览器完全关闭期间不承诺 OS 推送。
 
 #### Scenario: compile 失败不报成功
 
@@ -260,8 +465,47 @@
 - **THEN** 历史信息可见但首次不集中弹通知；同一稳定事实只提醒一次，TTL 从原 occurred_at 计算且不续期，待处理计数仍仅统计可操作卡壳
 
 ### Requirement: 单一归属、进度下钻与非 enrolled 零回归（REQ-WIGA-08）
+会话及 observer 投影 SHALL 从 durable enrollment 的精确绑定派生同源管理投影 `automation:{managed, enrollment_id?, policy_revision?, plan_id?, terminated_at?}`，REST 与 WS SHALL 由同一 manager 派生。
 
-会话及 observer 投影 SHALL 从 durable enrollment 的精确绑定派生同源管理投影 `automation:{managed, enrollment_id?, policy_revision?, plan_id?, terminated_at?}`，REST 与 WS SHALL 由同一 manager 派生；terminated 后 SHALL 仍报 managed。仅仍绑定且授权的会话 owner=server，前端 `useCockpitAutopilot` SHALL 在归属未知时先停等、owner=server 时不再发送 advance，非 enrolled 会话继续既有 client 行为。对精确绑定当前 enabled enrollment 的 plan session，服务端 SHALL 一律拒绝 takeover（沿用既有错误码 `workspace_session_takeover_not_allowed`，不创建 Interactive 子 session、不变更绑定），驾驶舱收件箱 SHALL 隐藏该会话的接管入口；非该绑定范围的既有 takeover SHALL 保持原样，MUST NOT 仅按 AutoIfValid 猜测是否托管。plan 阶段停点与失败 SHALL 经持久自动化事实同源通知（REQ-WIGA-12）。WIG 入口 SHALL 显示既有编码仪表盘进度并可点入 Coding Workspace 实时查看；后台运行不要求页面持续流式渲染。非 enrolled 的手工业务、门禁、错误与恢复语义 SHALL 不变；源 story/design 人工流程及 Final Confirm SHALL 保持人工，自动化只改变已授权流程的执行发起者。
+#### Scenario: 终止后仍报托管
+
+- **WHEN** enrollment 已 terminated 后读取管理投影
+- **THEN** terminated 后 SHALL 仍报 managed。
+
+#### Scenario: 归属派生与前端退位
+
+- **WHEN** 会话仍绑定且授权，前端 `useCockpitAutopilot` 遇到归属未知或 owner=server
+- **THEN** 仅仍绑定且授权的会话 owner=server，前端 `useCockpitAutopilot` SHALL 在归属未知时先停等、owner=server 时不再发送 advance，非 enrolled 会话继续既有 client 行为。
+
+#### Scenario: 已绑定会话禁接管
+
+- **WHEN** 对精确绑定当前 enabled enrollment 的 plan session 请求 takeover
+- **THEN** 对精确绑定当前 enabled enrollment 的 plan session，服务端 SHALL 一律拒绝 takeover（沿用既有错误码 `workspace_session_takeover_not_allowed`，不创建 Interactive 子 session、不变更绑定），驾驶舱收件箱 SHALL 隐藏该会话的接管入口。
+
+#### Scenario: 非绑定范围接管原样
+
+- **WHEN** 对非该绑定范围的会话执行既有 takeover
+- **THEN** 非该绑定范围的既有 takeover SHALL 保持原样，MUST NOT 仅按 AutoIfValid 猜测是否托管。
+
+#### Scenario: 停点失败同源通知
+
+- **WHEN** plan 阶段出现停点或失败
+- **THEN** plan 阶段停点与失败 SHALL 经持久自动化事实同源通知（REQ-WIGA-12）。
+
+#### Scenario: 进度入口与后台渲染
+
+- **WHEN** 用户从 WIG 入口查看编码仪表盘进度并进入 Coding Workspace
+- **THEN** WIG 入口 SHALL 显示既有编码仪表盘进度并可点入 Coding Workspace 实时查看；后台运行不要求页面持续流式渲染。
+
+#### Scenario: 非托管路径零回归
+
+- **WHEN** 非 enrolled 的手工业务、门禁、错误与恢复路径执行
+- **THEN** 非 enrolled 的手工业务、门禁、错误与恢复语义 SHALL 不变。
+
+#### Scenario: 源流程保持人工
+
+- **WHEN** 源 story/design 人工流程及 Final Confirm 执行
+- **THEN** 源 story/design 人工流程及 Final Confirm SHALL 保持人工，自动化只改变已授权流程的执行发起者。
 
 #### Scenario: server 归属前端退位
 
@@ -294,8 +538,32 @@
 - **THEN** 手动链既有操作、门禁/错误/恢复与 Final Confirm 不变；自动链只在 AI 选择/人工门/choice/recovery/Final Confirm 停等，所有其他阶段无需保持页面打开
 
 ### Requirement: Enable 前完整角色链预检（REQ-WIGA-C5-PREFLIGHT）
+自动化 target 投影与 Enable SHALL 在写入 enrollment 前，按该 enrollment 在真实链上将启动的角色逐一核验：plan author、plan reviewer、coder、code reviewer 与 internal reviewer，每个角色的 provider SHALL 按真实启动路径的同一派生规则确定，而非另设独立配置。
 
-自动化 target 投影与 Enable SHALL 在写入 enrollment 前，按该 enrollment 在真实链上将启动的角色逐一核验：plan author、plan reviewer、coder、code reviewer 与 internal reviewer，每个角色的 provider SHALL 按真实启动路径的同一派生规则确定，而非另设独立配置。逻辑代码库载体下，任一角色的 provider 属于 provider gateway 确定性不支持的组合（无 gateway 启动能力，或该 provider 被 gateway 路由策略静态阻断）时，系统 SHALL 以 HTTP 422 与稳定错误码 `automation_role_chain_unsupported` 拒绝，错误 SHALL 列出每个不支持的角色、provider 与原因，并提示用户更换 provider 配置或更换目标；拒绝 MUST NOT 写入或修改 enrollment、MUST NOT 启动任何 provider。单仓载体 MUST NOT 施加逻辑代码库 gateway 约束：provider 可用性校验通过的合法组合 SHALL 被授权。预检只判定确定性静态不支持，MUST NOT 探活或把账号池/网关的动态不可用判为静态不支持；Enable 之后运行期的动态不可用（503）SHALL 进入既有通知停等，系统 MUST NOT 自动切换 provider 或盲目重试。GET 投影与 Enable SHALL 对同一输入给出同一判定。
+#### Scenario: 不支持角色链拒绝
+
+- **WHEN** 逻辑代码库载体下，任一角色的 provider 属于 provider gateway 确定性不支持的组合
+- **THEN** 逻辑代码库载体下，任一角色的 provider 属于 provider gateway 确定性不支持的组合（无 gateway 启动能力，或该 provider 被 gateway 路由策略静态阻断）时，系统 SHALL 以 HTTP 422 与稳定错误码 `automation_role_chain_unsupported` 拒绝，错误 SHALL 列出每个不支持的角色、provider 与原因，并提示用户更换 provider 配置或更换目标；拒绝 MUST NOT 写入或修改 enrollment、MUST NOT 启动任何 provider。
+
+#### Scenario: 单仓不施加网关约束
+
+- **WHEN** 单仓载体的 provider 组合通过可用性校验
+- **THEN** 单仓载体 MUST NOT 施加逻辑代码库 gateway 约束：provider 可用性校验通过的合法组合 SHALL 被授权。
+
+#### Scenario: 预检仅判静态不支持
+
+- **WHEN** 执行 Enable 前预检
+- **THEN** 预检只判定确定性静态不支持，MUST NOT 探活或把账号池/网关的动态不可用判为静态不支持。
+
+#### Scenario: 运行期不可用停等
+
+- **WHEN** Enable 之后运行期出现 provider 动态不可用（503）
+- **THEN** Enable 之后运行期的动态不可用（503）SHALL 进入既有通知停等，系统 MUST NOT 自动切换 provider 或盲目重试。
+
+#### Scenario: 投影与启用同判定
+
+- **WHEN** 对同一输入调用 GET 投影与 Enable
+- **THEN** GET 投影与 Enable SHALL 对同一输入给出同一判定。
 
 #### Scenario: 逻辑代码库不支持的 coder 在授权前被拒
 
@@ -318,8 +586,42 @@
 - **THEN** 系统保留该失败事实并通过既有通知停等，展示恢复后重试操作；不自动切换 provider、不盲重、不回滚 enrollment
 
 ### Requirement: 单仓载体的无页面自动全链（REQ-WIGA-C5-CHAIN）
+对单仓 target 或逻辑代码库成员集合的有效 enrollment，服务端 SHALL 沿既有路径完成自动链：幂等准备唯一 plan/session、启动一次生成、正常 outline/draft/batch/最终批准自动通过（REQ-WIGA-02）、仅在 AI choice 与人工门停等、trust/compile 恢复停点停等、确认后独立 advance 到全部实际桶 Ready、经共用 typed StartCoding 与共享 plan-run 驱动全部桶首启与续驱，coding 运行至各桶 `WaitingForHuman ∧ FinalConfirm`。
 
-对单仓 target 或逻辑代码库成员集合的有效 enrollment，服务端 SHALL 沿既有路径完成自动链：幂等准备唯一 plan/session、启动一次生成、正常 outline/draft/batch/最终批准自动通过（REQ-WIGA-02）、仅在 AI choice 与人工门停等、trust/compile 恢复停点停等、确认后独立 advance 到全部实际桶 Ready、经共用 typed StartCoding 与共享 plan-run 驱动全部桶首启与续驱，coding 运行至各桶 `WaitingForHuman ∧ FinalConfirm`；最终收口 SHALL 只用批 1 既有 plan 级唯一人工最终确认，MUST NOT 自动代点。关闭所有页面与 coding socket 不影响推进。单仓链 MUST NOT 注入逻辑代码库 gateway、MUST NOT 创建逻辑代码库 manifest/selection/snapshot。prepare、Enrolled advance 与 StartCoding SHALL 各自复核 enrollment target 与当前权威载体一致：单仓 target 的 repository 身份 MUST 等于 issue 所属物理仓、plan 的全部工作项 MUST 无 logical target 归属、attempt MUST 无逻辑代码库 target 快照；单成员/集合 target 的成员 MUST ∈ 授权集合且实际桶满足 ∅≠P⊆A、无未归属 WI。任一不符 SHALL fail-closed 零副作用，并以既有等待项呈现需重新绑定。会话 owner 投影、驾驶舱等待项、plan 已确认与待最终确认信息 SHALL 对各载体使用同一派生与展示，并显示当前 target 身份。已终止 plan MUST NOT 出现可点最终确认。
+#### Scenario: 最终收口唯一确认
+
+- **WHEN** 自动链运行到最终收口
+- **THEN** 最终收口 SHALL 只用批 1 既有 plan 级唯一人工最终确认，MUST NOT 自动代点。
+
+#### Scenario: 关闭页面不影响推进
+
+- **WHEN** 关闭所有页面与 coding socket
+- **THEN** 关闭所有页面与 coding socket 不影响推进。
+
+#### Scenario: 单仓链不注入网关
+
+- **WHEN** 执行单仓链
+- **THEN** 单仓链 MUST NOT 注入逻辑代码库 gateway、MUST NOT 创建逻辑代码库 manifest/selection/snapshot。
+
+#### Scenario: 接缝复核目标一致
+
+- **WHEN** prepare、Enrolled advance 与 StartCoding 执行前，或单成员/集合 target 生成实际桶
+- **THEN** prepare、Enrolled advance 与 StartCoding SHALL 各自复核 enrollment target 与当前权威载体一致：单仓 target 的 repository 身份 MUST 等于 issue 所属物理仓、plan 的全部工作项 MUST 无 logical target 归属、attempt MUST 无逻辑代码库 target 快照；单成员/集合 target 的成员 MUST ∈ 授权集合且实际桶满足 ∅≠P⊆A、无未归属 WI。
+
+#### Scenario: 不符即失败关闭
+
+- **WHEN** 任一 target 或成员校验不符
+- **THEN** 任一不符 SHALL fail-closed 零副作用，并以既有等待项呈现需重新绑定。
+
+#### Scenario: 跨载体统一派生展示
+
+- **WHEN** 各载体派生会话 owner 投影、驾驶舱等待项与确认信息
+- **THEN** 会话 owner 投影、驾驶舱等待项、plan 已确认与待最终确认信息 SHALL 对各载体使用同一派生与展示，并显示当前 target 身份。
+
+#### Scenario: 终止计划无最终确认
+
+- **WHEN** plan 已终止
+- **THEN** 已终止 plan MUST NOT 出现可点最终确认。
 
 #### Scenario: 单仓关闭页面后自动跑到最终确认
 

@@ -7,9 +7,7 @@
 
 ### Requirement: Coding Workspace completion gate 不依赖 TestingReport
 
-在 Testing 阶段未纳入产品流程期间，Coding Workspace completion gate 的判定 SHALL 以适用的 review 流程通过及全部非 testing gate 满足为准。系统 MUST NOT 仅因 required verification check 缺少 Passed testing report 而阻塞 completion gate，也 MUST NOT 伪造 testing report 或 testing 成功状态。
-
-对于新的 schema v2 group attempt，适用的最终 review 流程为全部 Work Item 的独立 Code Review、基于每个 UnitRun `start_commit..completion_commit` 完整证据区间的组就绪检查和明确的人工 Final Confirm；系统 MUST NOT 要求或启动 internal PR review、Group Reviewer、shard 或 reduction Provider 调用。Final Confirm 仍执行已有的非 testing terminal gate，包括 completion binding、提交区间的文件范围与 shared worktree 清洁性。legacy group terminal status 继续受既有 authoritative plan binding 完整性规则约束。
+在 Testing 阶段未纳入产品流程期间，Coding Workspace completion gate 的判定 SHALL 以适用的 review 流程通过及全部非 testing gate 满足为准。
 
 #### Scenario: schema v2 group 缺少 testing report
 
@@ -31,6 +29,31 @@
 
 - **WHEN** attempt 存在历史 testing report，其状态不是 Passed 或 PassedWithWarnings，但适用的 review 流程和全部非 testing gate 均满足
 - **THEN** 系统 SHALL 忽略该 report 对 completion gate 判定的影响，且 MUST 保留原 report 数据不变
+
+#### Scenario: 不阻塞亦不伪造
+
+- **WHEN** required verification check 缺少 Passed testing report
+- **THEN** 系统 MUST NOT 仅因 required verification check 缺少 Passed testing report 而阻塞 completion gate，也 MUST NOT 伪造 testing report 或 testing 成功状态。
+
+#### Scenario: 界定 v2 终审流程
+
+- **WHEN** schema v2 group attempt 进入最终 review 流程
+- **THEN** 对于新的 schema v2 group attempt，适用的最终 review 流程为全部 Work Item 的独立 Code Review、基于每个 UnitRun `start_commit..completion_commit` 完整证据区间的组就绪检查和明确的人工 Final Confirm。
+
+#### Scenario: 不启动内部评审
+
+- **WHEN** schema v2 group attempt 的评审执行
+- **THEN** 系统 MUST NOT 要求或启动 internal PR review、Group Reviewer、shard 或 reduction Provider 调用。
+
+#### Scenario: 终确认仍过终门
+
+- **WHEN** schema v2 group attempt 执行 Final Confirm
+- **THEN** Final Confirm 仍执行已有的非 testing terminal gate，包括 completion binding、提交区间的文件范围与 shared worktree 清洁性。
+
+#### Scenario: legacy 仍受绑定约束
+
+- **WHEN** legacy group attempt 进入 terminal status
+- **THEN** legacy group terminal status 继续受既有 authoritative plan binding 完整性规则约束。
 
 ### Requirement: 非 testing completion gate 与 terminal 完整性继续生效
 
@@ -72,9 +95,7 @@
 
 ### Requirement: Group Work Item completion 只记录 Coder 已创建的提交
 
-Group Work Item 在通过其单项 Code Review 后，编排服务 MUST NOT 对共享 worktree 执行自动暂存或自动创建 Git commit。服务 MUST 仅读取该 worktree 当前 `HEAD` 并将其记录为该 Work Item 的 terminal completion commit；该 Work Item 的完整 Git 证据为其各 UnitRun execution 的 `start_commit..completion_commit` 区间，不能以该末尾 commit 的单次父提交 diff 代替。每个 execution 的 `start_commit` MUST 取自该 execution 在 provider 认领前记录的真实 `HEAD`；completion 阶段 MUST NOT 以基线分支 `HEAD` 或首次 execution 起点回填缺失的起点，缺失时 MUST 持久化可诊断的不一致并停等，而不是猜测区间。
-
-该行为 MUST NOT 依据文件或目录名称额外拒绝 Coder 的提交；提交范围责任由 Coder 使用当前 Work Item 的 `write_policy` 决定。该行为也 MUST NOT 新增服务端文件范围门禁或由服务端替 Coder 补做提交。
+Group Work Item 在通过其单项 Code Review 后，编排服务 MUST NOT 对共享 worktree 执行自动暂存或自动创建 Git commit。
 
 #### Scenario: Coder 已提交当前 Work Item
 
@@ -95,6 +116,31 @@ Group Work Item 在通过其单项 Code Review 后，编排服务 MUST NOT 对�
 
 - **WHEN** 某 execution 完成时没有已记录的 `start_commit`
 - **THEN** 编排服务 MUST NOT 以基线分支 `HEAD` 回填，MUST 持久化起点缺失诊断并停等用户处理
+
+#### Scenario: 读取并记录 HEAD
+
+- **WHEN** Work Item 通过其单项 Code Review 后
+- **THEN** 服务 MUST 仅读取该 worktree 当前 `HEAD` 并将其记录为该 Work Item 的 terminal completion commit；该 Work Item 的完整 Git 证据为其各 UnitRun execution 的 `start_commit..completion_commit` 区间，不能以该末尾 commit 的单次父提交 diff 代替。
+
+#### Scenario: 认领前记录起点
+
+- **WHEN** 每个 execution 启动（provider 认领前）
+- **THEN** 每个 execution 的 `start_commit` MUST 取自该 execution 在 provider 认领前记录的真实 `HEAD`。
+
+#### Scenario: 缺失停等并诊断
+
+- **WHEN** completion 阶段发现起点缺失
+- **THEN** completion 阶段 MUST NOT 以基线分支 `HEAD` 或首次 execution 起点回填缺失的起点，缺失时 MUST 持久化可诊断的不一致并停等，而不是猜测区间。
+
+#### Scenario: 不按名称拒提交
+
+- **WHEN** 编排服务处理 Coder 创建的提交
+- **THEN** 该行为 MUST NOT 依据文件或目录名称额外拒绝 Coder 的提交；提交范围责任由 Coder 使用当前 Work Item 的 `write_policy` 决定。
+
+#### Scenario: 不新增服务端门禁
+
+- **WHEN** 编排服务处理该行为
+- **THEN** 该行为也 MUST NOT 新增服务端文件范围门禁或由服务端替 Coder 补做提交。
 
 ### Requirement: 工作树本地产物写入仓库本地 exclude 且不改 .gitignore（REQ-CWS-01）
 

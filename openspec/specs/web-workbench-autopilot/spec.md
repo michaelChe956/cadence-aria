@@ -37,7 +37,7 @@
 
 ### Requirement: typed 门禁与推进事件面的完整消费（REQ-UI37-02）
 
-前端 SHALL 消费阶段 3 已锁定的 typed 门禁与推进事件面，共 **6 条新增 + 1 条既有修复**：`human_gate_turn_open`（字段 `turn_id` / `command_id` / `remaining_budget`）、`human_gate_turn_completed`（`turn_id` / `artifact_ref`）、`human_gate_turn_failed`（`turn_id` / `failure_class` / `message`）、`human_gate_busy`（`turn_id`）、`human_gate_closed`（`decision` / `stage`）、`advance_completed`（`command_id` / `attempt_id` / `workspace_entry`）、`advance_rejected`（`command_id` / `code` / `reason`）。每条事件 MUST 映射到收件箱 / 执行流 / 对话流投影与门禁三态（**门开** warning / **待确认** primary / **已过** success）。`human_gate_closed` MUST NOT 再被静默丢弃（现状为已 typed 但无处理分支）。事件分发的兜底分支 MUST 宽容：未识别的事件类型 MUST NOT 抛错中断，但 MUST 写入诊断记录。前端 SHALL NOT 要求后端新增事件或字段。
+前端 SHALL 消费阶段 3 已锁定的 typed 门禁与推进事件面，共 **6 条新增 + 1 条既有修复**：`human_gate_turn_open`（字段 `turn_id` / `command_id` / `remaining_budget`）、`human_gate_turn_completed`（`turn_id` / `artifact_ref`）、`human_gate_turn_failed`（`turn_id` / `failure_class` / `message`）、`human_gate_busy`（`turn_id`）、`human_gate_closed`（`decision` / `stage`）、`advance_completed`（`command_id` / `attempt_id` / `workspace_entry`）、`advance_rejected`（`command_id` / `code` / `reason`）。
 
 #### Scenario: 6 条新增事件逐条生效
 
@@ -64,14 +64,29 @@
 - **WHEN** 会话处于 SC typed 门（`human_gate_turn_open` 形态）时断线重连并完成重建
 - **THEN** 该门的收件箱条目与门卡仍然存在（重建条件不以 legacy `human_confirm` 阶段为唯一判据），且四种门开原因全集（含 `verification_new_findings`）均可正确呈现
 
+#### Scenario: 映射三投影与三态
+
+- **WHEN** 前端收到任一 typed 门禁或推进事件
+- **THEN** 每条事件 MUST 映射到收件箱 / 执行流 / 对话流投影与门禁三态（**门开** warning / **待确认** primary / **已过** success）。
+
+#### Scenario: closed 事件必须处理
+
+- **WHEN** 前端收到 `human_gate_closed`
+- **THEN** `human_gate_closed` MUST NOT 再被静默丢弃（现状为已 typed 但无处理分支）。
+
+#### Scenario: 兜底宽容并留痕
+
+- **WHEN** 事件分发进入兜底分支（未识别的事件类型）
+- **THEN** 事件分发的兜底分支 MUST 宽容：未识别的事件类型 MUST NOT 抛错中断，但 MUST 写入诊断记录。
+
+#### Scenario: 不新增后端事件
+
+- **WHEN** 前端消费 typed 门禁与推进事件面
+- **THEN** 前端 SHALL NOT 要求后端新增事件或字段。
+
 ### Requirement: 双向命令面与门面分流（REQ-UI37-03）
 
-前端 SHALL 支持发送 `human_gate_feedback` 与 `advance` 两条入向命令（后端已有、前端此前缺失）。门禁动作 MUST 按引擎的**两套门面分流**，MUST NOT 混用：
-
-- **SC typed 门（`flowKind = single_candidate`）**：反馈 MUST 走 `HumanGateFeedback { command_id, feedback }`（每次提交消耗一次 manual-repair 预算）；确认 / 终止 MUST 走 `HumanConfirm` 关闭（`decision = Confirm` / `Terminate`）。
-- **legacy `human_confirm` 门（flowKind 非 single_candidate）**：确认 / `RequestChange` / 终止三取值 SHALL 均走 `HumanConfirm`。
-
-对 typed 门发起 `RequestChange` 形态的反馈 MUST NOT 存在可达入口（引擎会明确拒绝该动作）。模式切换 MUST 有明确标签，MUST NOT 用同一输入框隐式推断意图。危险动作 SHALL 具备二次确认态（点击后进入「再点一次确认」，超时自动回落）。门禁动作旁 MUST 常显来自引擎的剩余修复预算。
+前端 SHALL 支持发送 `human_gate_feedback` 与 `advance` 两条入向命令（后端已有、前端此前缺失）。
 
 #### Scenario: SC typed 门提交反馈
 
@@ -98,6 +113,31 @@
 - **WHEN** 某门处于门开状态且引擎发布了剩余修复预算
 - **THEN** 门禁动作旁常显该预算余量，且在每次消耗后同步更新
 
+#### Scenario: 按门面分流动作
+
+- **WHEN** 用户在门禁条目上执行门禁动作
+- **THEN** 门禁动作 MUST 按引擎的**两套门面分流**，MUST NOT 混用：- **SC typed 门（`flowKind = single_candidate`）**：反馈 MUST 走 `HumanGateFeedback { command_id, feedback }`（每次提交消耗一次 manual-repair 预算）；确认 / 终止 MUST 走 `HumanConfirm` 关闭（`decision = Confirm` / `Terminate`）。- **legacy `human_confirm` 门（flowKind 非 single_candidate）**：确认 / `RequestChange` / 终止三取值 SHALL 均走 `HumanConfirm`。
+
+#### Scenario: 杜绝改请求入口
+
+- **WHEN** 呈现 SC typed 门（`flowKind = single_candidate`）
+- **THEN** 对 typed 门发起 `RequestChange` 形态的反馈 MUST NOT 存在可达入口（引擎会明确拒绝该动作）。
+
+#### Scenario: 切换模式显式标签
+
+- **WHEN** 用户在反馈 / 确认 / 终止等模式之间切换
+- **THEN** 模式切换 MUST 有明确标签，MUST NOT 用同一输入框隐式推断意图。
+
+#### Scenario: 危险动作二次确认态
+
+- **WHEN** 用户点击终止等危险动作
+- **THEN** 危险动作 SHALL 具备二次确认态（点击后进入「再点一次确认」，超时自动回落）。
+
+#### Scenario: 常显修复预算余量
+
+- **WHEN** 呈现门禁动作
+- **THEN** 门禁动作旁 MUST 常显来自引擎的剩余修复预算。
+
 ### Requirement: 命令幂等与去重键（REQ-UI37-04）
 
 门禁侧去重键 SHALL 为 `turn_id`；推进侧去重键 SHALL 为 `command_id`。前端生成的门禁 / 推进命令 `command_id` MUST 使用 `crypto.randomUUID()`，**每会话每命令只生成一次**——同一用户动作在动作发起时生成，重试 / 重连重放 MUST 复用同一 `command_id`，MUST NOT 重新生成。同一 `turn_id` 或 `command_id` 的重放 SHALL 被视为同一事件幂等消费：MUST NOT 新建条目、MUST NOT 重复提醒、MUST NOT 重复扣预算。断线重连后的重建 SHALL 从持久化会话状态重放恢复去重集（MUST NOT 丢弃），确保已处理的门与已终结的推进不会在重连后被当作新事件重复提醒。
@@ -119,15 +159,7 @@
 
 ### Requirement: autopilot 自动推进（REQ-UI37-05）
 
-autopilot SHALL 每会话默认开启，**唯一自动推进锚点是观测到 durable 的 `Confirmed`**（门的 close 完成事件，或会话状态投影显示该门已 Confirmed）。约束：
-
-- **`HumanGateFeedback` 之后**：只等修复轮结果（下一次门开或 Confirmed 事件），**MUST NOT 自动发 `Advance`**。
-- **compile 失败导致门重开**：MUST 在收件箱呈现、**MUST NOT 自动重试**（不自动重发 compile 命令、不自动 advance）。
-- **推进被拒**（`advance_rejected`）：MUST 回落收件箱并**停止该会话的自动推进**。
-- **组内单元推进**：引擎已自动，前端 MUST NOT 代发。
-- **去抖**：以「观测到 Confirmed」为唯一锚点并对同一会话同一 entry 去抖——在未观测到该 entry 的 `advance_completed` / `advance_rejected` 前只发一次，同 `command_id` 复用（重连不重发）。
-- **`human_gate_busy`**：MUST 立即放弃本次自动推进，不清空、不重试、不排队，等该 turn 的下一次门开 / 终态事件再重新判定。
-- **停点**：默认每次人工门前必停；停点集合可配，且停点只影响「是否自动发 `Advance`」，MUST NOT 改变引擎门禁语义。MUST NOT 提供「无停点全自动」默认。
+autopilot SHALL 每会话默认开启，**唯一自动推进锚点是观测到 durable 的 `Confirmed`**（门的 close 完成事件，或会话状态投影显示该门已 Confirmed）。
 
 #### Scenario: 观测到 Confirmed 自动推进
 
@@ -164,16 +196,46 @@ autopilot SHALL 每会话默认开启，**唯一自动推进锚点是观测到 d
 - **WHEN** 用户在设置中将停点集合调整为「仅硬错停」或「仅 stopped 停」
 - **THEN** autopilot 仅在这些停点处不自动推进，其余锚点行为不变，且引擎门禁语义不受影响
 
+#### Scenario: 反馈后只等修复轮
+
+- **WHEN** 用户提交 `HumanGateFeedback` 之后
+- **THEN** 约束：- **`HumanGateFeedback` 之后**：只等修复轮结果（下一次门开或 Confirmed 事件），**MUST NOT 自动发 `Advance`**。
+
+#### Scenario: 门重开呈现不重试
+
+- **WHEN** compile 失败导致门重开
+- **THEN** - **compile 失败导致门重开**：MUST 在收件箱呈现、**MUST NOT 自动重试**（不自动重发 compile 命令、不自动 advance）。
+
+#### Scenario: 被拒回落并停止
+
+- **WHEN** 收到 `advance_rejected`
+- **THEN** - **推进被拒**（`advance_rejected`）：MUST 回落收件箱并**停止该会话的自动推进**。
+
+#### Scenario: 不代发组内推进
+
+- **WHEN** 组内单元推进
+- **THEN** - **组内单元推进**：引擎已自动，前端 MUST NOT 代发。
+
+#### Scenario: 去抖只发一次
+
+- **WHEN** 以「观测到 Confirmed」为唯一锚点自动推进
+- **THEN** - **去抖**：以「观测到 Confirmed」为唯一锚点并对同一会话同一 entry 去抖——在未观测到该 entry 的 `advance_completed` / `advance_rejected` 前只发一次，同 `command_id` 复用（重连不重发）。
+
+#### Scenario: busy 即放弃推进
+
+- **WHEN** 收到 `human_gate_busy`
+- **THEN** - **`human_gate_busy`**：MUST 立即放弃本次自动推进，不清空、不重试、不排队，等该 turn 的下一次门开 / 终态事件再重新判定。
+
+#### Scenario: 停点默认必停
+
+- **WHEN** autopilot 判定停点
+- **THEN** - **停点**：默认每次人工门前必停；停点集合可配，且停点只影响「是否自动发 `Advance`」，MUST NOT 改变引擎门禁语义。MUST NOT 提供「无停点全自动」默认。
+
 ### Requirement: 四层递进卡壳提醒（REQ-UI37-06）
 
 卡壳提醒 SHALL 为四层递进、层层叠加，且**任一层 MUST NOT 依赖用户主动查看**：
 
 - **L1 页面内**：收件箱条目置顶 + 脉冲动画（直到被查看）+ 新卡壳到达弹 toast（toast 为本 capability 从零新建，不替代 L2 常驻警示条）。
-- **L2 全局常驻**：顶部 sticky 红底白字警示条，摘要 + 「去处理」入口；**任何页面可见**（含 `/image-create`）；存续由「未处理卡壳计数 > 0」驱动，MUST NOT 定时自动隐藏、MUST NOT 可手动关闭。
-- **L3 浏览器级**：浏览器标题呈现 `🔴待处理×N`（该 emoji 是全仓「图标一律 SVG、零 emoji」硬规则的唯一例外，纯文本标记，且 MUST 可经设置关闭）+ favicon 数量角标 + 系统通知（Web Notifications，需授权、可授权关闭，**卡壳 30s 未处理才触发**）；权限被拒 MUST 降级为 L1 + L2 且**不因权限被拒而丢提醒**。
-- **L4 升级（双触发）**：**触发①** 剩余修复轮次进入 `≤ 1` 即转橙（warning 语义）并按次数梯度提升重复提醒频率；**触发②** 门开时长前端自计时，默认 **10min** 无人处理即升级一级、阈值可配。L4 MUST NOT 使用「超时前 5min / 预算 < 20%」口径。升级只是**提醒升级**，MUST NOT 改变任何引擎语义（不自动终止、不自动代做决策）。
-
-L2 / L3 的计数 SHALL 为跨会话聚合量（见 REQ-UI37-07），MUST NOT 是单会话投影。多门同时打开时收件箱按严重度排序、标题/角标只显示计数、L4 重复通知按设置的节流间隔限流。
 
 #### Scenario: L1 置顶与脉冲
 
@@ -215,9 +277,29 @@ L2 / L3 的计数 SHALL 为跨会话聚合量（见 REQ-UI37-07），MUST NOT �
 - **WHEN** 多个门同时打开
 - **THEN** 收件箱按严重度排序，标题与角标只显示计数，L4 重复通知按设置页节流间隔限流
 
+#### Scenario: 常显全局警示条
+
+- **WHEN** 未处理卡壳计数 > 0
+- **THEN** - **L2 全局常驻**：顶部 sticky 红底白字警示条，摘要 + 「去处理」入口；**任何页面可见**（含 `/image-create`）；存续由「未处理卡壳计数 > 0」驱动，MUST NOT 定时自动隐藏、MUST NOT 可手动关闭。
+
+#### Scenario: 呈现浏览器级提醒
+
+- **WHEN** 待处理卡壳进入浏览器级呈现
+- **THEN** - **L3 浏览器级**：浏览器标题呈现 `🔴待处理×N`（该 emoji 是全仓「图标一律 SVG、零 emoji」硬规则的唯一例外，纯文本标记，且 MUST 可经设置关闭）+ favicon 数量角标 + 系统通知（Web Notifications，需授权、可授权关闭，**卡壳 30s 未处理才触发**）；权限被拒 MUST 降级为 L1 + L2 且**不因权限被拒而丢提醒**。
+
+#### Scenario: 按双触发升级
+
+- **WHEN** 剩余修复轮次进入 `≤ 1`，或门开时长达到阈值仍无人处理
+- **THEN** - **L4 升级（双触发）**：**触发①** 剩余修复轮次进入 `≤ 1` 即转橙（warning 语义）并按次数梯度提升重复提醒频率；**触发②** 门开时长前端自计时，默认 **10min** 无人处理即升级一级、阈值可配。L4 MUST NOT 使用「超时前 5min / 预算 < 20%」口径。升级只是**提醒升级**，MUST NOT 改变任何引擎语义（不自动终止、不自动代做决策）。
+
+#### Scenario: 聚合跨会话计数
+
+- **WHEN** L2 / L3 呈现待处理计数（含多门同时打开）
+- **THEN** L2 / L3 的计数 SHALL 为跨会话聚合量（见 REQ-UI37-07），MUST NOT 是单会话投影。多门同时打开时收件箱按严重度排序、标题/角标只显示计数、L4 重复通知按设置的节流间隔限流。
+
 ### Requirement: 跨会话聚合与降级语义（REQ-UI37-07）
 
-L2 全局警示条与 L3 标题 / favicon 的待处理计数 SHALL 来自**跨会话聚合**，实现路径固定为**前端多 WS 订阅 watch 集合**（引擎零改动）。会话清单 MUST 经既有 REST 获取（`/api/projects` → 逐项目 `/api/projects/{project_id}/issues` 或全局 `/api/issues` → 逐 issue `GET /api/issues/{issue_id}/lifecycle?project_id=...` → 取 `workspace_sessions[]`）。**watch 集合** SHALL 由活跃会话（`status` 非终态，如 `running` / `stopped_needs_human`，按最近活动排序）构成，watch 前 **K 个，K = 8（可配）**。**全局 sticky / L3 计数源 SHALL = watch 集合的并集，MUST NOT 是全量会话**：K 内的计数精确；**K 外的会话在会话列表中仍可见，但其实时卡壳不进入全局计数**（这是明确的降级语义，MUST NOT 呈现为精确计数）。连接生命周期：已在集合内的会话 MUST 保持连接不重建（避免重连抖动），新入集合的建连、出集合的断开；设置中修改 K MUST 立即重算。MUST NOT 新增后端接口或事件。
+L2 全局警示条与 L3 标题 / favicon 的待处理计数 SHALL 来自**跨会话聚合**，实现路径固定为**前端多 WS 订阅 watch 集合**（引擎零改动）。
 
 #### Scenario: K 内计数精确
 
@@ -243,6 +325,31 @@ L2 全局警示条与 L3 标题 / favicon 的待处理计数 SHALL 来自**跨�
 
 - **WHEN** 检查本 capability 的跨会话聚合实现
 - **THEN** 仅使用既有 REST 与既有 workspace WS 事件面，未新增任何后端接口或事件
+
+#### Scenario: 经既有 REST 取清单
+
+- **WHEN** 前端获取会话清单
+- **THEN** 会话清单 MUST 经既有 REST 获取（`/api/projects` → 逐项目 `/api/projects/{project_id}/issues` 或全局 `/api/issues` → 逐 issue `GET /api/issues/{issue_id}/lifecycle?project_id=...` → 取 `workspace_sessions[]`）。
+
+#### Scenario: watch 取前 K 个
+
+- **WHEN** 活跃会话（`status` 非终态）按最近活动排序构成候选
+- **THEN** **watch 集合** SHALL 由活跃会话（`status` 非终态，如 `running` / `stopped_needs_human`，按最近活动排序）构成，watch 前 **K 个，K = 8（可配）**。
+
+#### Scenario: 计数源限并集
+
+- **WHEN** watch 集合内外的会话出现卡壳
+- **THEN** **全局 sticky / L3 计数源 SHALL = watch 集合的并集，MUST NOT 是全量会话**：K 内的计数精确；**K 外的会话在会话列表中仍可见，但其实时卡壳不进入全局计数**（这是明确的降级语义，MUST NOT 呈现为精确计数）。
+
+#### Scenario: 连接随集合伸缩
+
+- **WHEN** 会话清单刷新后集合成员变化，或设置中修改 K
+- **THEN** 连接生命周期：已在集合内的会话 MUST 保持连接不重建（避免重连抖动），新入集合的建连、出集合的断开；设置中修改 K MUST 立即重算。
+
+#### Scenario: 不新增后端接口
+
+- **WHEN** 实现跨会话聚合
+- **THEN** MUST NOT 新增后端接口或事件。
 
 ### Requirement: 停点接管接线与 409 呈现（REQ-UI37-08）
 
@@ -334,11 +441,7 @@ L2 全局警示条与 L3 标题 / favicon 的待处理计数 SHALL 来自**跨�
 
 交付 SHALL 按 Phase 1a / 1b / 2 / 3 / 4 分阶段推进，**每段可独立验收**，MUST NOT 合并为一次性大验收：
 
-- **Phase 1a**：双向 typed 协议补齐 + **单会话**三区只读 + 事实底座；**不含**全局 shell 与跨会话聚合。
-- **Phase 1b**：全局 shell 骨架 + 跨会话聚合（方案 a）+ 就地动作 + autopilot + 四层提醒 + 设置 + takeover 接线。
-- **Phase 2**：编码仪表盘。**Phase 3**：计划审批深度（含 DEF-3 吸收）。**Phase 4**：advance / 接管操作收口。
-
-验收 SHALL 分两层且 MUST NOT 混用：**人工验收**只认真实链（轻语料 + `pi` provider，在界面上完成「建会话 → 看计划 → request-change / confirm / advance → 看编码进度 → 看 push」，全程不开命令行），证据形态为人工走查记录（步骤 + 截图）；**自动化替身**（`ARIA_PROVIDER_MODE=fake` + 测试端点注入 `verdict: needs_human` 驱动门开 + 前端单测覆盖三投影与门禁三态）只用于单测与回归，**MUST NOT 代替人工验收**。每 Phase SHALL 产出两份清单：自动化证据清单（三投影期望态、本 Phase 新增事件分支用例、去重键与重连重放幂等、门禁三态迁移）与人工证据清单（真实链走查步骤记录、卡壳提醒层级逐层可观察、全程无命令行）。
+- **Phase 1a**：双向 typed 协议补齐 + **单会话**三区只读 + 事实底座。
 
 #### Scenario: 1a 独立验收「看得到真事实」
 
@@ -359,6 +462,36 @@ L2 全局警示条与 L3 标题 / favicon 的待处理计数 SHALL 来自**跨�
 
 - **WHEN** 某 Phase 关闸评审
 - **THEN** 自动化证据清单与人工证据清单同时齐备；人工清单含真实链步骤记录与「全程无命令行」的确认
+
+#### Scenario: 排除全局聚合
+
+- **WHEN** 界定 Phase 1a 的交付范围
+- **THEN** **不含**全局 shell 与跨会话聚合。
+
+#### Scenario: 交付全局接线
+
+- **WHEN** 推进到 Phase 1b
+- **THEN** - **Phase 1b**：全局 shell 骨架 + 跨会话聚合（方案 a）+ 就地动作 + autopilot + 四层提醒 + 设置 + takeover 接线。
+
+#### Scenario: 界定后续阶段
+
+- **WHEN** 规划 Phase 2 / 3 / 4 的交付内容
+- **THEN** - **Phase 2**：编码仪表盘。**Phase 3**：计划审批深度（含 DEF-3 吸收）。**Phase 4**：advance / 接管操作收口。
+
+#### Scenario: 只认真实链验收
+
+- **WHEN** 执行人工验收
+- **THEN** 验收 SHALL 分两层且 MUST NOT 混用：**人工验收**只认真实链（轻语料 + `pi` provider，在界面上完成「建会话 → 看计划 → request-change / confirm / advance → 看编码进度 → 看 push」，全程不开命令行），证据形态为人工走查记录（步骤 + 截图）。
+
+#### Scenario: 限定替身用途
+
+- **WHEN** 使用自动化替身执行单测与回归
+- **THEN** **自动化替身**（`ARIA_PROVIDER_MODE=fake` + 测试端点注入 `verdict: needs_human` 驱动门开 + 前端单测覆盖三投影与门禁三态）只用于单测与回归，**MUST NOT 代替人工验收**。
+
+#### Scenario: 产出双证据清单
+
+- **WHEN** 任一 Phase 收尾
+- **THEN** 每 Phase SHALL 产出两份清单：自动化证据清单（三投影期望态、本 Phase 新增事件分支用例、去重键与重连重放幂等、门禁三态迁移）与人工证据清单（真实链走查步骤记录、卡壳提醒层级逐层可观察、全程无命令行）。
 
 ### Requirement: 引擎零改动与外部边界（REQ-UI37-13）
 
@@ -391,7 +524,7 @@ L2 全局警示条与 L3 标题 / favicon 的待处理计数 SHALL 来自**跨�
 
 ### Requirement: 设计系统硬规则（REQ-UI37-14）
 
-UI MUST 采用**增量不换血**：沿用既有 `--aria-*` token、组件类与 `prefers-reduced-motion` 兜底，MUST NOT 引入第二套 token 体系或第二个组件库。新增 token SHALL 只做三组——**对话流**、**拓扑六态**（`running` / `pending` / `blocked` / `done` / `failed` / `awaiting_triage`）、**门禁三态**（门开 warning / 待确认 primary / 已过 success）——且 MUST 从现有语义色系派生、MUST NOT 新增色相（沿用靛主色、橙 CTA、绿/黄/红语义色）。字体与数字：等宽统一 `ui-monospace`，适用于 commit hash / 命令 / 耗时 / 预算计时 / 节点 id / session id；数字统一 `tabular-nums`。硬规则 MUST 全量遵守：**R1** 图标一律 SVG（Lucide）、零 emoji（唯一例外为 L3 标题标记且可关）；**R2** 触达目标 ≥ 44px（含图标按钮）；**R3** 所有可交互元素具备 `focus-visible` 焦点环；**R4** 过渡 150–300ms、不做布局抖动动画；**R5** 新增动画（脉冲 / 闪烁 / 流式光标）在 `prefers-reduced-motion` 下全降级为静态、MUST NOT 用 `!important` 绕过；**R6** 正文与图标对比度 ≥ 4.5:1（警示条红底白字按此校验）。`awaiting_triage` SHALL 是由引擎 `needs_human` 判定投影而来的 **UI 投影态**，MUST NOT 作为独立引擎状态持久化，且同会话同门只投影一条。
+UI MUST 采用**增量不换血**：沿用既有 `--aria-*` token、组件类与 `prefers-reduced-motion` 兜底，MUST NOT 引入第二套 token 体系或第二个组件库。
 
 #### Scenario: 沿用既有 token
 
@@ -417,6 +550,51 @@ UI MUST 采用**增量不换血**：沿用既有 `--aria-*` token、组件类与
 
 - **WHEN** 校验正文、图标与警示条（红底白字）
 - **THEN** 对比度不低于 4.5:1
+
+#### Scenario: token 限三组派生
+
+- **WHEN** 新增设计 token
+- **THEN** 新增 token SHALL 只做三组——**对话流**、**拓扑六态**（`running` / `pending` / `blocked` / `done` / `failed` / `awaiting_triage`）、**门禁三态**（门开 warning / 待确认 primary / 已过 success）——且 MUST 从现有语义色系派生、MUST NOT 新增色相（沿用靛主色、橙 CTA、绿/黄/红语义色）。
+
+#### Scenario: 统一等宽与数字
+
+- **WHEN** 呈现 commit hash / 命令 / 耗时 / 预算计时 / 节点 id / session id 等文本
+- **THEN** 字体与数字：等宽统一 `ui-monospace`，适用于 commit hash / 命令 / 耗时 / 预算计时 / 节点 id / session id；数字统一 `tabular-nums`。
+
+#### Scenario: 图标一律用 SVG
+
+- **WHEN** 呈现图标
+- **THEN** 硬规则 MUST 全量遵守：**R1** 图标一律 SVG（Lucide）、零 emoji（唯一例外为 L3 标题标记且可关）。
+
+#### Scenario: 触达不小于 44px
+
+- **WHEN** 布置含图标按钮的触控目标
+- **THEN** **R2** 触达目标 ≥ 44px（含图标按钮）。
+
+#### Scenario: 可交互具焦点环
+
+- **WHEN** 呈现可交互元素
+- **THEN** **R3** 所有可交互元素具备 `focus-visible` 焦点环。
+
+#### Scenario: 过渡区间受限
+
+- **WHEN** 定义过渡动效
+- **THEN** **R4** 过渡 150–300ms、不做布局抖动动画。
+
+#### Scenario: 降级不许绕过
+
+- **WHEN** 新增动画（脉冲 / 闪烁 / 流式光标）且系统启用 `prefers-reduced-motion`
+- **THEN** **R5** 新增动画（脉冲 / 闪烁 / 流式光标）在 `prefers-reduced-motion` 下全降级为静态、MUST NOT 用 `!important` 绕过。
+
+#### Scenario: 校验对比度阈值
+
+- **WHEN** 校验正文、图标与警示条（红底白字）
+- **THEN** **R6** 正文与图标对比度 ≥ 4.5:1（警示条红底白字按此校验）。
+
+#### Scenario: triage 只作投影
+
+- **WHEN** 呈现 `awaiting_triage` 节点态
+- **THEN** `awaiting_triage` SHALL 是由引擎 `needs_human` 判定投影而来的 **UI 投影态**，MUST NOT 作为独立引擎状态持久化，且同会话同门只投影一条。
 
 ### Requirement: Phase 2 编码仪表盘（REQ-UI37-15）
 

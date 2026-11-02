@@ -17,14 +17,39 @@ Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared work
 - **THEN** 系统 SHALL 通过 pre/post 越界检测与配置约束（best-effort）标记并阻断；不宣称 OS 级不可达；硬隔离需 provider/OS sandbox（后置）
 
 ### Requirement: attempt 冻结 target 快照（REQ-COD-02）
-系统 SHALL 使 `CodingExecutionAttempt` 持久化不可变 `target_repository_id`/checkout/revision 与 policy digest；创建、恢复、重放一律使用冻结快照；旧 attempt 缺快照时 display-only 或人工恢复，不得从活 Work Item/`Issue.repo_id` 重新猜测。attempt 冻结快照含三层身份映射(`target_repository_id` 语义类型为 `LogicalRepositoryId`、`RepositoryCheckoutId`、`RepositoryRecord.id` + canonical_path + git_dir_identity + revision + policy_digest);旧 `issue-shared-worktree.json` 经 journal 迁移:验证 record.repository_id 一致性 → 原子写新 record `issues/{issue}/shared-worktrees/{repository_id}.json` → 保留 legacy tombstone/redirect → 仅在无活动引用时清除旧文件;锁 API 增加 repository 参数。
+系统 SHALL 使 `CodingExecutionAttempt` 持久化不可变 `target_repository_id`/checkout/revision 与 policy digest
 
 #### Scenario: 创建与恢复 coding attempt
 - **WHEN** 创建、恢复或重放 coding attempt
 - **THEN** 系统 SHALL 使用 attempt 内冻结的 target 快照；快照缺失时 fail-closed 拒绝启动或进入人工恢复
 
+#### Scenario: 恢复与重放沿用冻结快照
+
+- **WHEN** 创建、恢复或重放 coding attempt
+- **THEN** 创建、恢复、重放一律使用冻结快照
+
+#### Scenario: 缺快照的旧 attempt 不反推
+
+- **WHEN** 旧 attempt 缺冻结快照
+- **THEN** 旧 attempt 缺快照时 display-only 或人工恢复，不得从活 Work Item/`Issue.repo_id` 重新猜测
+
+#### Scenario: 冻结快照含三层身份映射
+
+- **WHEN** 冻结 attempt 的 target 快照
+- **THEN** attempt 冻结快照含三层身份映射(`target_repository_id` 语义类型为 `LogicalRepositoryId`、`RepositoryCheckoutId`、`RepositoryRecord.id` + canonical_path + git_dir_identity + revision + policy_digest)
+
+#### Scenario: 旧 shared-worktree 文件按 journal 迁移
+
+- **WHEN** 迁移旧 `issue-shared-worktree.json`
+- **THEN** 旧 `issue-shared-worktree.json` 经 journal 迁移:验证 record.repository_id 一致性 → 原子写新 record `issues/{issue}/shared-worktrees/{repository_id}.json` → 保留 legacy tombstone/redirect → 仅在无活动引用时清除旧文件
+
+#### Scenario: 锁 API 带 repository 参数
+
+- **WHEN** 调用 shared worktree 锁 API
+- **THEN** 锁 API 增加 repository 参数
+
 ### Requirement: shared worktree 按三元键（REQ-COD-03）
-系统 SHALL 使 Issue shared worktree 的存储、锁、获取/释放/迁移/删除接口全部升级为 `(project, issue, repository)` 键；新路径为 `issues/{issue}/shared-worktrees/{repository_id}.json`，其中 `repository_id` 的 ID 域为 `LogicalRepositoryId`（与 `target_repository_id` 语义类型一致；迁移时旧物理 `RepositoryRecord.id` SHALL 经 migration journal 唯一解析为 logical ID，不混用 ID 域）；锁文件随该 JSON 同址（如 `issues/{issue}/shared-worktrees/{repository_id}.json.lock`）。**锁迁移协议（二审 worker F-6 闭合）**：迁移者 SHALL 先持有 legacy 锁（`.issue-shared-worktree.json.lock`），再按固定全局顺序（如 repository_id 字典序）取得仓维新锁，避免并发迁移死锁；迁移期间通过 journal/redirect 对旧 API 提供可见性；活动 attempt 阻塞迁移直至释放；崩溃恢复与旧锁清理仅在「无活动引用 + redirect 已持久化」双条件满足时执行。旧 `issue-shared-worktree.json` 经 journal 迁移（验证 record.repository_id 一致性→原子写新 record→legacy tombstone/redirect→无活动引用时清除旧文件与旧锁）；同一仓库多个 Work Item 可共享同一仓库级 worktree 并串行，不同仓库可并行。
+系统 SHALL 使 Issue shared worktree 的存储、锁、获取/释放/迁移/删除接口全部升级为 `(project, issue, repository)` 键
 
 #### Scenario: 异仓并行
 - **WHEN** 同一 Issue 的两个 Work Item 分属不同仓库
@@ -34,9 +59,49 @@ Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared work
 - **WHEN** 同一 Issue 同一仓库的多个 Work Item
 - **THEN** 复用同一仓库级 shared worktree，由该仓库锁串行化
 
+#### Scenario: 新路径与 logical ID 域
+
+- **WHEN** 定位 Issue shared worktree 的存储与锁路径
+- **THEN** 新路径为 `issues/{issue}/shared-worktrees/{repository_id}.json`，其中 `repository_id` 的 ID 域为 `LogicalRepositoryId`（与 `target_repository_id` 语义类型一致；迁移时旧物理 `RepositoryRecord.id` SHALL 经 migration journal 唯一解析为 logical ID，不混用 ID 域）
+
+#### Scenario: 锁文件随 JSON 同址
+
+- **WHEN** 定位 shared worktree 的锁文件
+- **THEN** 锁文件随该 JSON 同址（如 `issues/{issue}/shared-worktrees/{repository_id}.json.lock`）
+
+#### Scenario: 锁迁移取锁顺序固定
+
+- **WHEN** 迁移 shared worktree 锁
+- **THEN** **锁迁移协议（二审 worker F-6 闭合）**：迁移者 SHALL 先持有 legacy 锁（`.issue-shared-worktree.json.lock`），再按固定全局顺序（如 repository_id 字典序）取得仓维新锁，避免并发迁移死锁
+
+#### Scenario: 迁移期间旧 API 可见
+
+- **WHEN** shared worktree 迁移进行中
+- **THEN** 迁移期间通过 journal/redirect 对旧 API 提供可见性
+
+#### Scenario: 活动 attempt 阻塞迁移
+
+- **WHEN** 迁移 shared worktree 时存在活动 attempt
+- **THEN** 活动 attempt 阻塞迁移直至释放
+
+#### Scenario: 崩溃恢复与旧锁清理需双条件
+
+- **WHEN** 做崩溃恢复或清理旧锁
+- **THEN** 崩溃恢复与旧锁清理仅在「无活动引用 + redirect 已持久化」双条件满足时执行
+
+#### Scenario: 旧 shared-worktree 文件按 journal 迁移
+
+- **WHEN** 迁移旧 `issue-shared-worktree.json`
+- **THEN** 旧 `issue-shared-worktree.json` 经 journal 迁移（验证 record.repository_id 一致性→原子写新 record→legacy tombstone/redirect→无活动引用时清除旧文件与旧锁）
+
+#### Scenario: 同仓串行异仓并行
+
+- **WHEN** 同一仓库多个 Work Item 与不同仓库的 Work Item 并存
+- **THEN** 同一仓库多个 Work Item 可共享同一仓库级 worktree 并串行，不同仓库可并行
+
 ### Requirement: mixed-target group 按 target 分流（REQ-COD-04）
 
-系统 SHALL 使多成员 Issue 下创建 mixed-target WorkItemGroup 时按 target 分流：为每个目标仓库建立独立的 target-attempt（每 `(plan, target)` 至多一个），MUST NOT 以单一 attempt 承载多 target；「group 内存在多 target」本身 SHALL NOT 构成拒绝理由。分流 SHALL 在创建、恢复、replay 三处及全部路由消费面一致适用。无唯一 target 归属（units 无 `target_repository_id` 且 issue codebase selection focus 不唯一）SHALL 保持 fail-closed 拒绝并返回稳定错误码（TargetMissing 语义）；「group 内多 target」不再返回多目标歧义拒绝（TargetAmbiguous 在 group attempt 路由面退役，selection focus 面等其他消费点语义不变）。同 target 的 group 行为 SHALL 与分流引入前完全一致。分流的完整契约（per-`(plan, target)` 唯一性、单 target 零变化、per-target 冻结快照、手动推进、聚合视图、增殖审计）以 `multi-target-group-coding` capability 为唯一来源，本 requirement 只锁 per-repo-coding-execution 侧的分流义务与拒绝语义变更。
+系统 SHALL 使多成员 Issue 下创建 mixed-target WorkItemGroup 时按 target 分流：为每个目标仓库建立独立的 target-attempt（每 `(plan, target)` 至多一个），MUST NOT 以单一 attempt 承载多 target
 
 #### Scenario: 尝试 mixed-target group
 
@@ -53,6 +118,36 @@ Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared work
 - **WHEN** group 全部 units 属同一目标仓库
 - **THEN** 建组、路由与执行行为与分流引入前完全一致：单 attempt、单快照、既有收敛路径不变
 
+#### Scenario: 多 target 不构成拒绝理由
+
+- **WHEN** group 内存在多 target
+- **THEN** 「group 内存在多 target」本身 SHALL NOT 构成拒绝理由
+
+#### Scenario: 分流覆盖创建恢复重放
+
+- **WHEN** 在创建、恢复或 replay 阶段处理 mixed-target group
+- **THEN** 分流 SHALL 在创建、恢复、replay 三处及全部路由消费面一致适用
+
+#### Scenario: 无唯一 target 归属保持拒绝
+
+- **WHEN** group 的 units 无 `target_repository_id` 且 issue codebase selection focus 不唯一
+- **THEN** 无唯一 target 归属（units 无 `target_repository_id` 且 issue codebase selection focus 不唯一）SHALL 保持 fail-closed 拒绝并返回稳定错误码（TargetMissing 语义）
+
+#### Scenario: 多目标歧义拒绝退役
+
+- **WHEN** group 内存在多 target
+- **THEN** 「group 内多 target」不再返回多目标歧义拒绝（TargetAmbiguous 在 group attempt 路由面退役，selection focus 面等其他消费点语义不变）
+
+#### Scenario: 同 target 行为零变化
+
+- **WHEN** group 全部 units 属同一目标仓库
+- **THEN** 同 target 的 group 行为 SHALL 与分流引入前完全一致
+
+#### Scenario: 分流契约以 multi-target-group-coding 为准
+
+- **WHEN** 查证 mixed-target group 分流的完整契约
+- **THEN** 分流的完整契约（per-`(plan, target)` 唯一性、单 target 零变化、per-target 冻结快照、手动推进、聚合视图、增殖审计）以 `multi-target-group-coding` capability 为唯一来源，本 requirement 只锁 per-repo-coding-execution 侧的分流义务与拒绝语义变更
+
 ### Requirement: 跨仓只读证据检索（REQ-COD-05）
 系统 SHALL 使 Coder 可经受控检索接口获取其他成员仓的只读证据（改 A 的接口时查 B 的调用点），证据带 ACL/snapshot/token 预算/审计；Coder 不持有聚合根；跨仓调用点检索为启发式符号/字符串近似（CodeGraph 非 Java 语义级），非精确调用图；「无法写入其他仓」为 best-effort 表述，不宣称 OS 级强制。
 
@@ -61,9 +156,7 @@ Coding 在目标仓独立 worktree 执行（主 checkout 不动），shared work
 - **THEN** 通过受控检索接口获取只读证据注入上下文；证据记录来源 snapshot 与预算；Coder 的写入配置目标仅为目标 worktree
 
 ### Requirement: 每仓独立交付（推分支 + 人工评审）（REQ-COD-06）
-系统 SHALL 使每仓独立 branch/commit 并持久化 `ReviewRequest`（GitBranchOnly，含分支/推送状态，无外部 PR URL）。目标仓库已配置交付远端时 SHALL 推送该分支；目标仓库**未配置**交付远端时，系统 SHALL 跳过推送并以本地交付收口，推送状态记为 `skipped_not_configured`。「未配置」的唯一判据是该仓库不存在名为交付远端的远端配置，MUST NOT 以远端不可达、鉴权失败、被拒或无法判定远端状态代替；这些情形 SHALL 保持既有语义（推送被拒记为失败，无法判定则停等人工恢复），MUST NOT 降级为本地交付。
-
-Issue 完成 = 所有必需 Work Item 完成，完成级别为「目标仓分支已推送，或目标仓未配置远端而本地交付，且 ReviewRequest 已生成」；partial failure 显式呈现，不伪装全局成功；自动创建 GitHub/GitLab PR 不在本 change 范围。本地交付 SHALL 在 API 与界面上与「已推送」可区分，MUST NOT 呈现为已推送。Issue 级交付聚合的既有取值 `all_pushed` 名称保持不变，语义为全部必需 Work Item 已交付（含本地交付），不新增取值。
+系统 SHALL 使每仓独立 branch/commit 并持久化 `ReviewRequest`（GitBranchOnly，含分支/推送状态，无外部 PR URL）
 
 #### Scenario: 多仓 Issue 各仓交付
 - **WHEN** 多仓 Issue 各仓 coding 完成
@@ -92,6 +185,51 @@ Issue 完成 = 所有必需 Work Item 完成，完成级别为「目标仓分支
 #### Scenario: 本地交付计入 Issue 完成
 - **WHEN** Issue 下所有必需 Work Item 均为 Completed，且各自最新 ReviewRequest 的推送状态为 `pushed` 或 `skipped_not_configured`
 - **THEN** 交付聚合 SHALL 为全部已交付（`all_pushed`），Issue 可标记完成；其中本地交付的 Work Item 在交付面板中 SHALL 以「本地交付(无远端)」区别于「已推送」
+
+#### Scenario: 已配置远端时推送分支
+
+- **WHEN** 目标仓库已配置交付远端
+- **THEN** 目标仓库已配置交付远端时 SHALL 推送该分支
+
+#### Scenario: 未配置远端时本地交付收口
+
+- **WHEN** 目标仓库未配置交付远端
+- **THEN** 目标仓库**未配置**交付远端时，系统 SHALL 跳过推送并以本地交付收口，推送状态记为 `skipped_not_configured`
+
+#### Scenario: 未配置的唯一判据
+
+- **WHEN** 判定目标仓库是否未配置交付远端
+- **THEN** 「未配置」的唯一判据是该仓库不存在名为交付远端的远端配置，MUST NOT 以远端不可达、鉴权失败、被拒或无法判定远端状态代替
+
+#### Scenario: 远端异常保持既有语义
+
+- **WHEN** 远端不可达、鉴权失败、被拒或无法判定远端状态
+- **THEN** 这些情形 SHALL 保持既有语义（推送被拒记为失败，无法判定则停等人工恢复），MUST NOT 降级为本地交付
+
+#### Scenario: Issue 完成判定级别
+
+- **WHEN** 判定 Issue 是否完成
+- **THEN** Issue 完成 = 所有必需 Work Item 完成，完成级别为「目标仓分支已推送，或目标仓未配置远端而本地交付，且 ReviewRequest 已生成」
+
+#### Scenario: partial failure 显式呈现
+
+- **WHEN** 部分 Work Item 交付失败
+- **THEN** partial failure 显式呈现，不伪装全局成功
+
+#### Scenario: 自动 PR 不在本 change 范围
+
+- **WHEN** 交付阶段收口
+- **THEN** 自动创建 GitHub/GitLab PR 不在本 change 范围
+
+#### Scenario: 本地交付与已推送可区分
+
+- **WHEN** 以本地交付收口
+- **THEN** 本地交付 SHALL 在 API 与界面上与「已推送」可区分，MUST NOT 呈现为已推送
+
+#### Scenario: all_pushed 取值与语义
+
+- **WHEN** 聚合 Issue 级交付状态
+- **THEN** Issue 级交付聚合的既有取值 `all_pushed` 名称保持不变，语义为全部必需 Work Item 已交付（含本地交付），不新增取值
 
 ### Requirement: 上游交付注入 coder prompt（REQ-COD-07）
 

@@ -42,7 +42,7 @@ issue 级基准分支的设置、锁定与全链锚定：author 生成上下文�
 
 ### Requirement: author 上下文基线限定（REQ-PIB-02）
 
-story/design/plan 生成期间的仓库文件浏览与读取 SHALL 以 issue.base_branch 的树内容为基线语义，按通道分级落地：**host-served 文件通道**（如 provider 桥接的 fs 服务）SHALL 路由为 `git show <base>:<path>` / `git ls-tree <base>` 形态（不 checkout、不触工作区）并对其 terminal 通道维持基线拒绝——该通道层为硬安全边界，工作区与兄弟 worktree 路径不可达；**provider 原生文件通道**（host 无法在通道层转码/收束者，如 claude/codex/pi）SHALL 在 author prompt 注入基线限制教学块（仅以 base_branch 树内容为「既有事实」来源、不得访问 `.worktrees/` 及仓库工作区外路径的指引）——该限制为软约束，不构成安全边界，其 AC 路径引用形态的后果由 REQ-PIB-03 的核对 fail-closed 拦截，其余形态为用户明示接受的残余风险。工具策略层仅维持既有写拒绝与 spawn 守卫纵深，SHALL NOT 承载基线语义；prompt 教学块不因注入而获得边界地位。host-served 通道的 author 文件访问 SHALL NOT 到达仓库工作区、其他分支检出或兄弟 issue worktree 路径。基线分支在生成时不可解析（被删/改名）SHALL fail-closed 终止生成并给出明确诊断（两种通道同此语义）。
+story/design/plan 生成期间的仓库文件浏览与读取 SHALL 以 issue.base_branch 的树内容为基线语义，按通道分级落地：**host-served 文件通道**（如 provider 桥接的 fs 服务）SHALL 路由为 `git show <base>:<path>` / `git ls-tree <base>` 形态（不 checkout、不触工作区）并对其 terminal 通道维持基线拒绝——该通道层为硬安全边界，工作区与兄弟 worktree 路径不可达。
 
 #### Scenario: host-served 通道看不到兄弟 worktree
 
@@ -68,6 +68,26 @@ story/design/plan 生成期间的仓库文件浏览与读取 SHALL 以 issue.bas
 
 - **WHEN** provider 原生通道的 author 绕过 prompt 软约束，将基线外路径写入 plan 的 AC/验证计划
 - **THEN** C1 的 AC×基线机械核对以 fail-closed 拦截该候选（acceptance_path_not_in_baseline，MustFix），不放行
+
+#### Scenario: 注入基线教学块
+
+- **WHEN** provider 原生文件通道（host 无法在通道层转码/收束者）的 author 会话启动
+- **THEN** **provider 原生文件通道**（host 无法在通道层转码/收束者，如 claude/codex/pi）SHALL 在 author prompt 注入基线限制教学块（仅以 base_branch 树内容为「既有事实」来源、不得访问 `.worktrees/` 及仓库工作区外路径的指引）——该限制为软约束，不构成安全边界，其 AC 路径引用形态的后果由 REQ-PIB-03 的核对 fail-closed 拦截，其余形态为用户明示接受的残余风险。
+
+#### Scenario: 工具层不载基线
+
+- **WHEN** 工具策略层处理 author 会话
+- **THEN** 工具策略层仅维持既有写拒绝与 spawn 守卫纵深，SHALL NOT 承载基线语义；prompt 教学块不因注入而获得边界地位。
+
+#### Scenario: 不达工作区路径
+
+- **WHEN** host-served 通道的 author 文件访问
+- **THEN** host-served 通道的 author 文件访问 SHALL NOT 到达仓库工作区、其他分支检出或兄弟 issue worktree 路径。
+
+#### Scenario: 不可解析即终止
+
+- **WHEN** 生成时基线分支不可解析（被删/改名）
+- **THEN** 基线分支在生成时不可解析（被删/改名）SHALL fail-closed 终止生成并给出明确诊断（两种通道同此语义）。
 
 ### Requirement: coding fork 与核对同源（REQ-PIB-03）
 

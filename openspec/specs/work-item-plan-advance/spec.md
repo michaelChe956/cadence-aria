@@ -8,7 +8,27 @@
 
 ### Requirement: advance 幂等编排（REQ-ADV-01）
 
-系统 SHALL 提供 typed `advance` 入站命令（含客户端生成的 `command_id`）。前置校验（plan durable status 为 Confirmed、子 WorkItem session 已存在、无 active compile/revision）SHALL 仅适用于**首次** advance；幂等命中（同 `command_id` 或同 `plan_id`，见 REQ-ADV-02）SHALL 优先于前置校验。首次 advance 前置任一不满足 SHALL 返回 `advance_rejected` 且不产生任何副作用。前置满足后 SHALL 依序执行：持久化 `AdvanceRecord`（`command_id`、`plan_id`、不可变 `plan_revision_id`、状态；每 plan 恰一条，与 target-attempt 的绑定关系按 additive 方式承载——单 target 场景 `attempt_id` 单值承载语义不变）→ 执行 group 初始化 durable journal → 创建或恢复该 plan 的 coding attempt 集：单一 target（含无 target 且 selection focus 唯一）SHALL 建立唯一 WorkItemGroup coding attempt（行为与本变更前完全一致）；多 target SHALL 按 target 分流为每 `(plan, target)` 恰一个 target-attempt，各 attempt 的持久化字段 `admission_kind` SHALL 置为 `sc_advance`（作为依赖门适用范围与隔离测试的唯一判据；SHALL NOT 从 `flow_kind`、ID 命名或 `work_item_group_id` 是否存在推断），各自建立 plan binding、worktree lock 与按依赖拓扑序生成的该 target coding units → 置 `Ready` 并发出 `advance_completed`（含 target-attempt 引用——单 target 为单 `attempt_id`，多 target 为 target-attempt 引用集，与 workspace 入口引用）。`advance` SHALL NOT 启动 coding provider；coding 启动保持既有 `StartCoding` 语义（per-attempt 适用）。
+系统 SHALL 提供 typed `advance` 入站命令（含客户端生成的 `command_id`）。
+
+#### Scenario: 首次前置校验范围
+
+- **WHEN** 判断 advance 前置校验的适用范围时
+- **THEN** 前置校验（plan durable status 为 Confirmed、子 WorkItem session 已存在、无 active compile/revision）SHALL 仅适用于**首次** advance；幂等命中（同 `command_id` 或同 `plan_id`，见 REQ-ADV-02）SHALL 优先于前置校验。
+
+#### Scenario: 前置不满足零副作用
+
+- **WHEN** 首次 advance 的前置任一不满足时
+- **THEN** 首次 advance 前置任一不满足 SHALL 返回 `advance_rejected` 且不产生任何副作用。
+
+#### Scenario: 前置满足后的执行序列
+
+- **WHEN** 首次 advance 的前置全部满足时
+- **THEN** 前置满足后 SHALL 依序执行：持久化 `AdvanceRecord`（`command_id`、`plan_id`、不可变 `plan_revision_id`、状态；每 plan 恰一条，与 target-attempt 的绑定关系按 additive 方式承载——单 target 场景 `attempt_id` 单值承载语义不变）→ 执行 group 初始化 durable journal → 创建或恢复该 plan 的 coding attempt 集：单一 target（含无 target 且 selection focus 唯一）SHALL 建立唯一 WorkItemGroup coding attempt（行为与本变更前完全一致）；多 target SHALL 按 target 分流为每 `(plan, target)` 恰一个 target-attempt，各 attempt 的持久化字段 `admission_kind` SHALL 置为 `sc_advance`（作为依赖门适用范围与隔离测试的唯一判据；SHALL NOT 从 `flow_kind`、ID 命名或 `work_item_group_id` 是否存在推断），各自建立 plan binding、worktree lock 与按依赖拓扑序生成的该 target coding units → 置 `Ready` 并发出 `advance_completed`（含 target-attempt 引用——单 target 为单 `attempt_id`，多 target 为 target-attempt 引用集，与 workspace 入口引用）。
+
+#### Scenario: advance 不启动 provider
+
+- **WHEN** advance 执行到完成态时
+- **THEN** `advance` SHALL NOT 启动 coding provider；coding 启动保持既有 `StartCoding` 语义（per-attempt 适用）。
 
 #### Scenario: Confirmed plan 推进到 coding 就绪
 
@@ -27,7 +47,27 @@
 
 ### Requirement: advance 幂等与 attempt 唯一性（REQ-ADV-02）
 
-同一 `command_id` 的重复 `advance` SHALL 返回同一 `AdvanceRecord` 与同一 target-attempt 集（单 target 场景为同一 `attempt_id`）；同一 `plan_id` 以不同 `command_id` 重复 advance SHALL 命中唯一性约束并返回同一 target-attempt 集，SHALL NOT 为任何 `(plan, target)` 创建第二个 attempt。attempt 唯一性语义为 per-`(plan, target)`：对每 `(plan, target)`，已存在 target-attempt 的状态矩阵 `Initializing`/`Ready`/`Running`/`AwaitingPlanAmendment`/`Completed` SHALL 返回该 target-attempt 的 durable 状态；`Failed`/`Aborted` SHALL 返回原 target-attempt 及其失败/中止原因，SHALL NOT 隐式创建第二个 attempt；显式 restart/retry 语义另行定义。初始化中断 SHALL 由 durable journal 恢复，恢复 SHALL NOT 重新分配另一套 attempt/unit（每 `(plan, target)` 的 target-attempt 与中断前为同一套）。`advance_completed` 仅表示 group workspace 就绪，SHALL NOT 被解释为 coding 已完成。
+同一 `command_id` 的重复 `advance` SHALL 返回同一 `AdvanceRecord` 与同一 target-attempt 集（单 target 场景为同一 `attempt_id`）。
+
+#### Scenario: plan 级唯一性约束
+
+- **WHEN** 同一 `plan_id` 以不同 `command_id` 重复 advance 时
+- **THEN** 同一 `plan_id` 以不同 `command_id` 重复 advance SHALL 命中唯一性约束并返回同一 target-attempt 集，SHALL NOT 为任何 `(plan, target)` 创建第二个 attempt。
+
+#### Scenario: attempt 状态矩阵
+
+- **WHEN** 读取已存在 target-attempt 的状态时
+- **THEN** attempt 唯一性语义为 per-`(plan, target)`：对每 `(plan, target)`，已存在 target-attempt 的状态矩阵 `Initializing`/`Ready`/`Running`/`AwaitingPlanAmendment`/`Completed` SHALL 返回该 target-attempt 的 durable 状态；`Failed`/`Aborted` SHALL 返回原 target-attempt 及其失败/中止原因，SHALL NOT 隐式创建第二个 attempt；显式 restart/retry 语义另行定义。
+
+#### Scenario: 中断恢复不重分配
+
+- **WHEN** 初始化中断后由 durable journal 恢复时
+- **THEN** 初始化中断 SHALL 由 durable journal 恢复，恢复 SHALL NOT 重新分配另一套 attempt/unit（每 `(plan, target)` 的 target-attempt 与中断前为同一套）。
+
+#### Scenario: advance_completed 语义边界
+
+- **WHEN** 收到 `advance_completed` 时
+- **THEN** `advance_completed` 仅表示 group workspace 就绪，SHALL NOT 被解释为 coding 已完成。
 
 #### Scenario: 同一命令键重发
 
@@ -89,7 +129,37 @@ SC 初始计划编译 SHALL 在任何 work item revision 可见之前，将编�
 
 ### Requirement: advance 到 Ready 即止与 coding 启动唯一入口（REQ-ADV-05）
 
-`advance` 的完成态 SHALL 为 `Ready`（group workspace 就绪），advance 本身及 `advance_completed` 事件 SHALL NOT 启动任何 coding provider。coding provider **首次启动**的唯一入口 SHALL 为显式 typed `StartCoding` 入站应用命令，发起者 SHALL 为人工 WS 命令，或本 change 中经 issue enrollment 与该 attempt 的有效 opt-in 授权的服务端编排器；已认领启动的恢复只续接原启动，不构成另一条首启通道。SC admission 的 coding attempt 在经 advance 置 `Ready` 之前收到 `StartCoding` SHALL fail-closed 拒绝并返回错误码 `SC_CODING_REQUIRES_ADVANCE`，attempt 与 session 状态不变；状态/绑定读取失败亦 SHALL fail-closed。此处把原条件 defer 的显式 opt-in auto 启动通道在 `work-item-group-autopilot` 中定义，不允许把自动首启实现为 advance 随附副作用，也不得绕过原 runner 的准入校验。新通道 MUST 满足以下全部五条红线：**opt-in 持久化 run_policy、默认 off、per-attempt 单发、绝不批量、不动唯一人工门**。其中 opt-in 持久化 run_policy SHALL 为 issue 级 durable enrollment 与绑定 attempt 的 `CodingStartRunPolicy=Manual|AutoStartOnce`，并非 plan session 的 `RunPolicy::AutoIfValid`；plan session SHALL 保持 Interactive。授权关闭后尚未消费的启动许可可撤销；仅恰一精确 target（一个单仓物理仓，或一个 logical repository）且与 enrollment target 一致的 enrolled plan 可自动首启，多 target 的逐 target 人工 StartCoding 与 `multi-target-group-coding` REQ-MTG-03 不变。
+`advance` 的完成态 SHALL 为 `Ready`（group workspace 就绪），advance 本身及 `advance_completed` 事件 SHALL NOT 启动任何 coding provider。
+
+#### Scenario: StartCoding 唯一首启入口
+
+- **WHEN** coding provider 首次启动时
+- **THEN** coding provider **首次启动**的唯一入口 SHALL 为显式 typed `StartCoding` 入站应用命令，发起者 SHALL 为人工 WS 命令，或本 change 中经 issue enrollment 与该 attempt 的有效 opt-in 授权的服务端编排器；已认领启动的恢复只续接原启动，不构成另一条首启通道。
+
+#### Scenario: Ready 前启动 fail-closed
+
+- **WHEN** SC admission 的 attempt 尚未置 `Ready` 时收到 `StartCoding`
+- **THEN** SC admission 的 coding attempt 在经 advance 置 `Ready` 之前收到 `StartCoding` SHALL fail-closed 拒绝并返回错误码 `SC_CODING_REQUIRES_ADVANCE`，attempt 与 session 状态不变；状态/绑定读取失败亦 SHALL fail-closed。
+
+#### Scenario: opt-in 通道归属
+
+- **WHEN** 定义显式 opt-in auto 启动通道时
+- **THEN** 此处把原条件 defer 的显式 opt-in auto 启动通道在 `work-item-group-autopilot` 中定义，不允许把自动首启实现为 advance 随附副作用，也不得绕过原 runner 的准入校验。
+
+#### Scenario: 新通道五条红线
+
+- **WHEN** 新通道启用自动首启时
+- **THEN** 新通道 MUST 满足以下全部五条红线：**opt-in 持久化 run_policy、默认 off、per-attempt 单发、绝不批量、不动唯一人工门**。
+
+#### Scenario: run_policy 持久化口径
+
+- **WHEN** 确定绑定 attempt 的 run_policy 与 plan session 模式时
+- **THEN** 其中 opt-in 持久化 run_policy SHALL 为 issue 级 durable enrollment 与绑定 attempt 的 `CodingStartRunPolicy=Manual|AutoStartOnce`，并非 plan session 的 `RunPolicy::AutoIfValid`；plan session SHALL 保持 Interactive。
+
+#### Scenario: 授权撤销与自动首启边界
+
+- **WHEN** enrolled plan 评估自动首启时
+- **THEN** 授权关闭后尚未消费的启动许可可撤销；仅恰一精确 target（一个单仓物理仓，或一个 logical repository）且与 enrollment target 一致的 enrolled plan 可自动首启，多 target 的逐 target 人工 StartCoding 与 `multi-target-group-coding` REQ-MTG-03 不变。
 
 #### Scenario: advance 完成不启动 provider
 

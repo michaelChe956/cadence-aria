@@ -7,7 +7,23 @@ Web 层所有 runtime repository 解析统一经 `(manifest, selection)` 成对�
 ## Requirements
 
 ### Requirement: 统一分流状态机（REQ-ROUTE-01）
-系统 SHALL 使 Web 层 runtime repository 解析统一基于 `(manifest, selection)` 成对状态分流：`(None, None)` → legacy（物理 `RepositoryRecord.id` 解析）；`(Some, Some)` → logical（依据 WorkItem target / attempt snapshot 解析具体成员）；`(Some, None)`、`(None, Some)`、selection 失效、member 删除/停用、target 不在有效 selection、snapshot 与 manifest/checkout 不一致 → fail-closed（稳定错误码 + 明确错误，绝不回退物理仓库或猜测成员）。逻辑状态（manifest/member/target 相关）解析 SHALL 经 authority-only 路径（读 manifest + member + checkout 权威），不一致即 fail-closed，不得进入 legacy projection fallback（`resolve_legacy_projection_if_dual`）。
+
+系统 SHALL 使 Web 层 runtime repository 解析统一基于 `(manifest, selection)` 成对状态分流：`(None, None)` → legacy（物理 `RepositoryRecord.id` 解析）；
+
+#### Scenario: 双有状态映射逻辑
+
+- **WHEN** 状态为 `(Some, Some)`
+- **THEN** `(Some, Some)` → logical（依据 WorkItem target / attempt snapshot 解析具体成员）；
+
+#### Scenario: 不一致即失败关闭
+
+- **WHEN** 状态为 `(Some, None)`、`(None, Some)`、selection 失效、member 删除/停用、target 不在有效 selection 或 snapshot 与 manifest/checkout 不一致
+- **THEN** `(Some, None)`、`(None, Some)`、selection 失效、member 删除/停用、target 不在有效 selection、snapshot 与 manifest/checkout 不一致 → fail-closed（稳定错误码 + 明确错误，绝不回退物理仓库或猜测成员）。
+
+#### Scenario: 逻辑解析仅读权威
+
+- **WHEN** 解析逻辑状态（manifest/member/target 相关）
+- **THEN** 逻辑状态（manifest/member/target 相关）解析 SHALL 经 authority-only 路径（读 manifest + member + checkout 权威），不一致即 fail-closed，不得进入 legacy projection fallback（`resolve_legacy_projection_if_dual`）。
 
 #### Scenario: 单仓 legacy 分流
 - **WHEN** 单仓（无 manifest、无 selection）执行 runtime repository 解析
@@ -26,7 +42,28 @@ Web 层所有 runtime repository 解析统一经 `(manifest, selection)` 成对�
 - **THEN** 系统 SHALL fail-closed（返回稳定错误码 + 明确错误），不得静默降级为物理仓库
 
 ### Requirement: 全入口对齐（REQ-ROUTE-02）
-系统 SHALL 使以下 Web runtime repository 解析入口全部经统一分流：`workspace_repository_for_session`、group coding 创建（`coding/group.rs`）、group/attempt 删除（`coding.rs`）、coding WebSocket context（`coding_ws_handler/context.rs`）、`resolve_work_item_repository`、`coding_evaluation_context/builder.rs`、planning resume（`socket.rs`）；compile（`compile_support.rs`）保持既有成对判断并抽取共享判定。各入口对同一 `(manifest, selection)` 状态 SHALL 产生一致结果。lifecycle 涉及 repository 解析的路径（经 `workspace_repository_for_session` 与聚合视图的 `resolve_logical_repository`）随上述入口纳入统一分流；issue 创建时对单仓 `repo_id` 的物理存在性校验保持 legacy 语义，不作为分流入口。
+
+系统 SHALL 使以下 Web runtime repository 解析入口全部经统一分流：`workspace_repository_for_session`、group coding 创建（`coding/group.rs`）、group/attempt 删除（`coding.rs`）、coding WebSocket context（`coding_ws_handler/context.rs`）、`resolve_work_item_repository`、`coding_evaluation_context/builder.rs`、planning resume（`socket.rs`）；
+
+#### Scenario: 编译入口抽取判定
+
+- **WHEN** 解析入口为 compile（`compile_support.rs`）
+- **THEN** compile（`compile_support.rs`）保持既有成对判断并抽取共享判定。
+
+#### Scenario: 各入口结果一致
+
+- **WHEN** 各入口处理同一 `(manifest, selection)` 状态
+- **THEN** 各入口对同一 `(manifest, selection)` 状态 SHALL 产生一致结果。
+
+#### Scenario: 生命周期纳入分流
+
+- **WHEN** lifecycle 路径解析 repository
+- **THEN** lifecycle 涉及 repository 解析的路径（经 `workspace_repository_for_session` 与聚合视图的 `resolve_logical_repository`）随上述入口纳入统一分流；
+
+#### Scenario: 问题校验保持兼容
+
+- **WHEN** issue 创建时校验单仓 `repo_id` 的物理存在性
+- **THEN** issue 创建时对单仓 `repo_id` 的物理存在性校验保持 legacy 语义，不作为分流入口。
 
 #### Scenario: group coding 创建
 - **WHEN** 无 manifest、无 selection 的单仓创建 group coding attempt
@@ -107,7 +144,37 @@ enrollment、plan/session 绑定、advance、compile child 及驾驶舱通知 SH
 
 ### Requirement: 自动化 target 的载体判定与单仓语义（REQ-ROUTE-C5-TARGET）
 
-自动化 target 投影、Enable、prepare、Enrolled advance 与自动 StartCoding SHALL 以唯一 authority 解析 issue 的载体归属：issue 无逻辑代码库归属且无 legacy 别名逻辑代码库时为单仓（Single-Repository）载体，否则为逻辑代码库载体；authority 冲突 SHALL fail-closed 并沿用既有 `repository_routing_*` 稳定错误码与 4xx 映射。单仓载体的 target SHALL 为 issue 记录所属物理仓的真实 `RepositoryRecord.id`：issue 无所属物理仓、该物理仓未登记、同一 git 根存在别名记录或与 legacy 逻辑代码库成员来源冲突时 SHALL 拒绝，不得猜测或回退其他仓。单仓 target 的 wire 表示 MUST NOT 包含 logical codebase、logical repository 或 checkout 身份，自动化 target 投影对单仓 MUST NOT 返回 logical repository 身份。单仓载体的后续解析 SHALL 沿物理仓与单仓 shared worktree 路径，MUST NOT 经逻辑代码库 provider gateway 启动；逻辑代码库载体保持既有 gateway、authority-only 与单 target 约束不变。代码中的 `RepositoryRouting::Legacy` 分支名保持不变，其语义 SHALL 被理解为单仓载体而非待淘汰路径。
+自动化 target 投影、Enable、prepare、Enrolled advance 与自动 StartCoding SHALL 以唯一 authority 解析 issue 的载体归属：issue 无逻辑代码库归属且无 legacy 别名逻辑代码库时为单仓（Single-Repository）载体，否则为逻辑代码库载体；
+
+#### Scenario: 权威冲突失败关闭
+
+- **WHEN** 出现 authority 冲突
+- **THEN** authority 冲突 SHALL fail-closed 并沿用既有 `repository_routing_*` 稳定错误码与 4xx 映射。
+
+#### Scenario: 单仓取真实记录标识
+
+- **WHEN** 确定单仓载体的 target
+- **THEN** 单仓载体的 target SHALL 为 issue 记录所属物理仓的真实 `RepositoryRecord.id`：issue 无所属物理仓、该物理仓未登记、同一 git 根存在别名记录或与 legacy 逻辑代码库成员来源冲突时 SHALL 拒绝，不得猜测或回退其他仓。
+
+#### Scenario: 表示不含逻辑身份
+
+- **WHEN** 序列化单仓 target 的 wire 表示
+- **THEN** 单仓 target 的 wire 表示 MUST NOT 包含 logical codebase、logical repository 或 checkout 身份，自动化 target 投影对单仓 MUST NOT 返回 logical repository 身份。
+
+#### Scenario: 单仓走物理路径
+
+- **WHEN** 解析单仓载体的后续路径
+- **THEN** 单仓载体的后续解析 SHALL 沿物理仓与单仓 shared worktree 路径，MUST NOT 经逻辑代码库 provider gateway 启动；
+
+#### Scenario: 逻辑载体约束不变
+
+- **WHEN** 处理逻辑代码库载体
+- **THEN** 逻辑代码库载体保持既有 gateway、authority-only 与单 target 约束不变。
+
+#### Scenario: 历史分支名保留
+
+- **WHEN** 代码保留 `RepositoryRouting::Legacy` 分支名
+- **THEN** 代码中的 `RepositoryRouting::Legacy` 分支名保持不变，其语义 SHALL 被理解为单仓载体而非待淘汰路径。
 
 #### Scenario: 单仓投影返回真实物理仓 target
 

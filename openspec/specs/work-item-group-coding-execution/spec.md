@@ -8,9 +8,7 @@ WorkItemGroup coding attempt 的执行编排：以依赖图为权威顺序来源
 
 ### Requirement: 依赖就绪门（REQ-GCE-01）
 
-**适用范围**：仅适用于 `admission_kind = sc_advance`（经 `advance` 创建）的 WorkItemGroup coding attempt；该字段为 attempt 创建时写入的持久化辨识字段，依赖门与隔离测试仅以此为准，SHALL NOT 从 `flow_kind`、ID 命名或 `work_item_group_id` 是否存在推断。`admission_kind = legacy_group`（legacy 入口创建）的 attempt SHALL 保持既有 order_index 选择行为，并有隔离回归测试锁死。
-
-在适用范围内，unit 启动 SHALL 以依赖图为权威顺序来源，`order_index` SHALL 仅作确定性排序与拓扑序 tie-breaker。一个 unit 仅当其全部直接依赖满足以下条件后才允许启动：依赖 unit 已 Completed、对应 handoff 已发布、handoff revision 与当前 plan binding 匹配。依赖未就绪的 unit SHALL 保持 Pending，SHALL NOT 被跳过执行；存在 pending unit 但全部未就绪时 attempt SHALL 进入等待态而非失败。未知依赖、环、自依赖、handoff 与 binding 不匹配 SHALL fail-closed。共享 worktree 下同一时间 SHALL 至多一个 active unit。
+**适用范围**：仅适用于 `admission_kind = sc_advance`（经 `advance` 创建）的 WorkItemGroup coding attempt；该字段为 attempt 创建时写入的持久化辨识字段，依赖门与隔离测试仅以此为准，SHALL NOT 从 `flow_kind`、ID 命名或 `work_item_group_id` 是否存在推断
 
 #### Scenario: 依赖未就绪不跳过
 
@@ -37,6 +35,41 @@ WorkItemGroup coding attempt 的执行编排：以依赖图为权威顺序来源
 - **WHEN** legacy 入口创建的 group attempt 推进 unit
 - **THEN** 其 unit 选择行为与本 change 前完全一致（order_index 顺序），依赖就绪门不介入
 
+#### Scenario: legacy attempt 保持既有选择行为
+
+- **WHEN** `admission_kind = legacy_group`（legacy 入口创建）的 attempt 推进 unit
+- **THEN** `admission_kind = legacy_group`（legacy 入口创建）的 attempt SHALL 保持既有 order_index 选择行为，并有隔离回归测试锁死
+
+#### Scenario: 依赖图为权威顺序来源
+
+- **WHEN** 在适用范围内启动 unit
+- **THEN** 在适用范围内，unit 启动 SHALL 以依赖图为权威顺序来源，`order_index` SHALL 仅作确定性排序与拓扑序 tie-breaker
+
+#### Scenario: 依赖全部满足方可启动
+
+- **WHEN** 判断某 unit 的全部直接依赖是否满足
+- **THEN** 一个 unit 仅当其全部直接依赖满足以下条件后才允许启动：依赖 unit 已 Completed、对应 handoff 已发布、handoff revision 与当前 plan binding 匹配
+
+#### Scenario: 依赖未就绪保持 Pending
+
+- **WHEN** 存在依赖未就绪的 unit
+- **THEN** 依赖未就绪的 unit SHALL 保持 Pending，SHALL NOT 被跳过执行
+
+#### Scenario: 全部未就绪进入等待态
+
+- **WHEN** 存在 pending unit 但全部未就绪
+- **THEN** 存在 pending unit 但全部未就绪时 attempt SHALL 进入等待态而非失败
+
+#### Scenario: 依赖图异常条件 fail-closed
+
+- **WHEN** 依赖图存在未知依赖、环、自依赖或 handoff 与 binding 不匹配
+- **THEN** 未知依赖、环、自依赖、handoff 与 binding 不匹配 SHALL fail-closed
+
+#### Scenario: 共享 worktree 单 active unit
+
+- **WHEN** 共享 worktree 下多个 unit 就绪
+- **THEN** 共享 worktree 下同一时间 SHALL 至多一个 active unit
+
 ### Requirement: 失败留在同一 attempt 内（REQ-GCE-02）
 
 coding 失败 SHALL 在同一 group attempt 内处理：provider 暂时失败 SHALL 沿用既有有界重试重试同一 unit；需要人工处理 SHALL 进入既有 blocked/人工门状态并在同一 group workspace 呈现；用户主动中止 SHALL 将 attempt 置 Aborted 并保留全部 units、日志、commit 与 durable 事件。任何失败路径 SHALL NOT 创建第二个 group attempt，SHALL NOT 从 SC 子 session 猜测执行位置。
@@ -48,7 +81,7 @@ coding 失败 SHALL 在同一 group attempt 内处理：provider 暂时失败 SH
 
 ### Requirement: plan 缺陷走 amendment 链（REQ-GCE-03）
 
-coding 阶段发现 plan 缺陷时，系统 SHALL 将当前 unit 标记 `BlockedByPlanDefect`、attempt 进入 `AwaitingPlanAmendment`（复用现有 `CodingAttemptStatus`，不新建状态），并写入 `PlanAmendmentContext` durable 关联记录（`plan_session_id`、`group_attempt_id`、触发 `unit_id`、触发 `finding_id`、`previous_plan_revision_id`、`resume_target`）；原 plan session 保持唯一人工门宿主，不创建第二个人工门。amendment 期间的人工反馈回合以 amendment 上下文重开原 SC plan session 的对话式人工门，预算接续该 session 快照的 `manual_repairs_remaining`，`HumanGateTurn` 归属该 plan session。人工反馈触发 SC revision provider（REQ-CG-03 同源），新候选经 SC compiler 与 canonical validator 形成新 plan revision 后，系统 SHALL 更新 group attempt 的 plan binding 并按既有 resume target（Reexecute/Revalidate/AwaitHandoff）从原 attempt 恢复 Coding；amendment approve 沿用「修订校验通过→新 plan revision→binding 更新」链，不复用首次 approve 的 compile 入口。新 plan revision 与当前 attempt 无法安全兼容时 SHALL durable fail-closed，SHALL NOT 静默切换到另一 plan 或 legacy coding 路径。amendment 期间断线恢复由原 plan session 负责。
+coding 阶段发现 plan 缺陷时，系统 SHALL 将当前 unit 标记 `BlockedByPlanDefect`、attempt 进入 `AwaitingPlanAmendment`（复用现有 `CodingAttemptStatus`，不新建状态），并写入 `PlanAmendmentContext` durable 关联记录（`plan_session_id`、`group_attempt_id`、触发 `unit_id`、触发 `finding_id`、`previous_plan_revision_id`、`resume_target`）
 
 #### Scenario: plan 缺陷修订后回到 coding
 
@@ -64,6 +97,36 @@ coding 阶段发现 plan 缺陷时，系统 SHALL 将当前 unit 标记 `Blocked
 
 - **WHEN** amendment 修订产出通过校验的新 plan revision 且人 approve
 - **THEN** attempt 的 plan binding 更新为新 `plan_revision_id`（原 `previous_plan_revision_id` 保留在 `PlanAmendmentContext`），coding attempt 保持同一实例并按 `resume_target` 恢复，不新建 attempt、不重新进入首次 approve 的 compile 链；新 revision 与原 attempt 不兼容时持久化失败并进入人工处置，不静默切换路径
+
+#### Scenario: 原 plan session 保持唯一人工门
+
+- **WHEN** plan 缺陷进入 amendment 流程
+- **THEN** 原 plan session 保持唯一人工门宿主，不创建第二个人工门
+
+#### Scenario: amendment 回合重开原 plan session 人工门
+
+- **WHEN** amendment 期间产生人工反馈回合
+- **THEN** amendment 期间的人工反馈回合以 amendment 上下文重开原 SC plan session 的对话式人工门，预算接续该 session 快照的 `manual_repairs_remaining`，`HumanGateTurn` 归属该 plan session
+
+#### Scenario: 修订通过后更新 binding 并恢复
+
+- **WHEN** 人工反馈触发 SC revision provider 并产出新 plan revision
+- **THEN** 人工反馈触发 SC revision provider（REQ-CG-03 同源），新候选经 SC compiler 与 canonical validator 形成新 plan revision 后，系统 SHALL 更新 group attempt 的 plan binding 并按既有 resume target（Reexecute/Revalidate/AwaitHandoff）从原 attempt 恢复 Coding
+
+#### Scenario: approve 沿用修订校验链
+
+- **WHEN** amendment 修订通过后 approve
+- **THEN** amendment approve 沿用「修订校验通过→新 plan revision→binding 更新」链，不复用首次 approve 的 compile 入口
+
+#### Scenario: 新 revision 不兼容时 fail-closed
+
+- **WHEN** 新 plan revision 与当前 attempt 无法安全兼容
+- **THEN** 新 plan revision 与当前 attempt 无法安全兼容时 SHALL durable fail-closed，SHALL NOT 静默切换到另一 plan 或 legacy coding 路径
+
+#### Scenario: 断线恢复由原 plan session 负责
+
+- **WHEN** amendment 期间发生断线恢复
+- **THEN** amendment 期间断线恢复由原 plan session 负责
 
 ### Requirement: Work Item 进展与成果只读投影（REQ-GCE-04）
 

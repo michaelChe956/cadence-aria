@@ -8,7 +8,37 @@
 
 ### Requirement: 顶层候选枚举与唯一选择（REQ-ACS-01）
 
-artifact 提取 SHALL 枚举 provider 输出中的**顶层完整** fenced artifact 候选（含既有 `<artifact>` XML marker 优先级与 fallback 兼容），SHALL NOT 再以「首个 opening 至最后 closing」的跨块区间作为候选。对每个完整候选，系统 SHALL 以当前 workspace type 的既有 artifact gate 逐个校验；**恰好一个候选通过时** SHALL 选中该候选作为 author 产物。通过数为零或大于一时 SHALL fail-closed 失败：零通过保留全部既有阻断原因并附候选位置上下文；多个通过代表语义歧义，MUST NOT 静默选择「最后一个」或「最长一个」。存在完整候选但全部失败时 SHALL NOT 回落 heading fallback 猜测产物。嵌套 fence 边界不可判定（同长度 fence 歧义、未闭合 inner fence）时 SHALL fail-closed，不猜测候选边界。既有 gate 对所选正文的禁止 token（nested artifact fence、`<thinking>` 等）SHALL 保持硬拒绝零放宽。session reload 与 coding 上下文的产物恢复同样以唯一通过候选为准：未通过 gate 的存量 assistant artifact 不再提供无条件文本回退，收紧为不恢复（对产物必经 gate 的正常链路无影响）。
+artifact 提取 SHALL 枚举 provider 输出中的**顶层完整** fenced artifact 候选（含既有 `<artifact>` XML marker 优先级与 fallback 兼容），SHALL NOT 再以「首个 opening 至最后 closing」的跨块区间作为候选
+
+#### Scenario: 逐候选 gate 校验与唯一选中
+
+- **WHEN** 对每个完整候选执行当前 workspace type 的既有 artifact gate 校验
+- **THEN** 对每个完整候选，系统 SHALL 以当前 workspace type 的既有 artifact gate 逐个校验；**恰好一个候选通过时** SHALL 选中该候选作为 author 产物
+
+#### Scenario: 零通过或多通过失败关闭
+
+- **WHEN** 通过候选数为零或大于一
+- **THEN** 通过数为零或大于一时 SHALL fail-closed 失败：零通过保留全部既有阻断原因并附候选位置上下文；多个通过代表语义歧义，MUST NOT 静默选择「最后一个」或「最长一个」
+
+#### Scenario: 全部失败不回落 heading 猜测
+
+- **WHEN** 存在完整候选但全部失败
+- **THEN** 存在完整候选但全部失败时 SHALL NOT 回落 heading fallback 猜测产物
+
+#### Scenario: 嵌套 fence 边界不可判定
+
+- **WHEN** 嵌套 fence 边界不可判定（同长度 fence 歧义、未闭合 inner fence）
+- **THEN** 嵌套 fence 边界不可判定（同长度 fence 歧义、未闭合 inner fence）时 SHALL fail-closed，不猜测候选边界
+
+#### Scenario: 禁止 token 硬拒绝零放宽
+
+- **WHEN** 既有 gate 校验所选正文的禁止 token
+- **THEN** 既有 gate 对所选正文的禁止 token（nested artifact fence、`<thinking>` 等）SHALL 保持硬拒绝零放宽
+
+#### Scenario: reload 恢复以唯一候选为准
+
+- **WHEN** session reload 或 coding 上下文恢复产物
+- **THEN** session reload 与 coding 上下文的产物恢复同样以唯一通过候选为准：未通过 gate 的存量 assistant artifact 不再提供无条件文本回退，收紧为不恢复（对产物必经 gate 的正常链路无影响）
 
 #### Scenario: 前置示意 block 加唯一有效候选可恢复
 
@@ -56,7 +86,22 @@ artifact 候选选择发生或失败时，系统 SHALL 在当前 timeline node �
 
 ### Requirement: 弱模型输出负面清单教学（REQ-ACS-03）
 
-Story/Design/Work Item/legacy Work Item Plan 的 author prompt（初次 brief 的 output schema、author 输出合同在最终构造 provider 输入时的出口统一装配、非 kimi 的 artifact retry contract）SHALL 注入一致的负面清单教学：最终响应只生成一个顶层完整 artifact block；过程说明与思考必须在最终 fence 之外且不输出 `<thinking>` 标签；正文内代码块用四反引号外层；prompt 中的骨架/示例不得作为候选回显。该教学为预防层，SHALL NOT 改变 REQ-ACS-01 的 gate 判定语义。Work Item Plan 的 split JSON 流 SHALL NOT 注入该 Markdown 教学。注入点枚举语义随 F-60 P0 出口统一而升级：原「共享 author output contract」的分散注入点收敛为 `StreamingProviderInput` 构造出口的统一装配，choice 回答续跑、用户反馈修订、reviewer 返修等增量路径经同一出口获得当前负面清单，不依赖各业务分支自行追加；聚合会话的 nonce sentinel block 不计入「一个顶层完整 artifact block」约束。
+Story/Design/Work Item/legacy Work Item Plan 的 author prompt（初次 brief 的 output schema、author 输出合同在最终构造 provider 输入时的出口统一装配、非 kimi 的 artifact retry contract）SHALL 注入一致的负面清单教学：最终响应只生成一个顶层完整 artifact block
+
+#### Scenario: 负面清单的三项硬约束
+
+- **WHEN** author prompt 注入一致的负面清单教学
+- **THEN** 过程说明与思考必须在最终 fence 之外且不输出 `<thinking>` 标签；正文内代码块用四反引号外层；prompt 中的骨架/示例不得作为候选回显
+
+#### Scenario: 预防层不改 gate 且 split 流不注入
+
+- **WHEN** 注入该教学或构建 Work Item Plan 的 split JSON 流
+- **THEN** 该教学为预防层，SHALL NOT 改变 REQ-ACS-01 的 gate 判定语义。Work Item Plan 的 split JSON 流 SHALL NOT 注入该 Markdown 教学
+
+#### Scenario: 注入点出口统一升级
+
+- **WHEN** 注入点枚举语义随 F-60 P0 出口统一而升级
+- **THEN** 注入点枚举语义随 F-60 P0 出口统一而升级：原「共享 author output contract」的分散注入点收敛为 `StreamingProviderInput` 构造出口的统一装配，choice 回答续跑、用户反馈修订、reviewer 返修等增量路径经同一出口获得当前负面清单，不依赖各业务分支自行追加；聚合会话的 nonce sentinel block 不计入「一个顶层完整 artifact block」约束
 
 #### Scenario: 负面清单覆盖初次与返修
 

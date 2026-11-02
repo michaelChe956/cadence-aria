@@ -22,13 +22,137 @@
 
 ### Requirement: 单飞与预算纪律（REQ-CG-02）
 
-同一人工门同时 SHALL 至多存在一个非终态 turn；已有 in-flight turn 时收到新反馈或 approve/abandon SHALL 均返回 `gate_busy`，不隐式排队、不关门；终止决定仅在 turn 进入终态后处理。`manual_repairs_remaining` SHALL 表达当前可用预算：同 logical gate 总额沿现默认最多3，等于总额减已计费额（delivered_charge＋nonstructural_failure_charge）减活动 hold。接受真实反馈时以 durable hold 立即占用一轮可用预算，不标为已交付；结构合法、对应原业务请求的新 source/IR/report 与 current refs 成功提交后同 turn settle 一次为 delivered_charge。仅 typed structural_exhausted_before_delivery SHALL 释放本轮 hold（released_structural），不实扣用户轮次；已 deliver 后复评未闭合不退款。provider 错误、超时、取消及其他非结构终态 SHALL 维持原预约扣次不退，将 held 结转 nonstructural_failure_charge 并记精确 reason，不能假标已交付或遗留永久 hold。旧记录已扣预算不追溯重算退款；REQ-CG-01 所述扣减在新记录中指预留 hold 降低可用预算，不改变仅真实用户命令建立 turn 的规则。**预算重置边界**：普通 SC 修订门的快照预算仅在**新 logical gate**（新候选/新会话）建立时取默认值；同一 logical gate 内的修订轮次 SHALL 从 durable 快照 carry-forward（修订成功重建快照时接续剩余值，不得重置回默认）——原「普通 SC 修订门内的人工修订 turn 成功完成并经 Evaluate policy route 重建门快照时，快照预算 SHALL 重置为默认值」修订为本句语义。**amendment 人工门**的接续语义不变（REQ-GCE-03 场景二重开的原门，预算接续原 `human_gate_snapshot`）。amendment 门的接续/守卫判别 SHALL 绑定 durable amendment 事实，且 MUST 复用重开授权（`probe_amendment_gate_context`）所用的同一完整谓词。
+同一人工门同时 SHALL 至多存在一个非终态 turn；
 
-**SC 门消息面边界**：SC interactive 与 amendment 门 SHALL 仅接受 `human_gate_feedback`、approve（`Confirm` 语义）与 abandon（显式 typed 入站命令）三类消息；关门决策 SHALL 以门专属 typed 决策承载，MUST NOT 依赖 legacy `HumanConfirmDecision`；收到错误消息类型时系统 SHALL 返回 stage-specific protocol error 且零副作用。
+#### Scenario: 并发反馈返回门忙
 
-在门状态明确为可恢复 Final Compile 且阶段/flow/durable recovery 事实匹配时，现有 `WorkItemPlanCompileRecoveryAction` MAY 作为独立的 compile recovery 操作经 Cockpit WS 放行；该操作不是人工门反馈或关门决定，不改变三类人工门消息边界。其他阶段、错误 flow、缺少 recovery 事实或已终态时 SHALL 返回 stage-specific protocol error 且零副作用。
+- **WHEN** 已有 in-flight turn 时收到新反馈或 approve/abandon
+- **THEN** 已有 in-flight turn 时收到新反馈或 approve/abandon SHALL 均返回 `gate_busy`，不隐式排队、不关门；
 
-**门内修订轮次的 accepted 计数**：每次接受的真实反馈 SHALL 计入gate-local accepted_feedback_turns，与hold可用预算同session CAS；它表示用户动作而非计费轮次。系统 SHALL 分别投影已提交X轮、已交付Y轮、原合同非结构失败扣次F、可用Z轮。用户turn及其L1结构attempt SHALL NOT 增加run_history repairs_used/manual_repairs_used，L1只记独立结构事件；只有原policy技术返修沿其既有计数。结构attempt不得增加accepted，也不重置同logical gate预算。
+#### Scenario: 终止决定延后处理
+
+- **WHEN** 人工门收到终止决定而当前 turn 尚未进入终态
+- **THEN** 终止决定仅在 turn 进入终态后处理。
+
+#### Scenario: 投影当前可用预算
+
+- **WHEN** 系统计算 `manual_repairs_remaining`
+- **THEN** `manual_repairs_remaining` SHALL 表达当前可用预算：同 logical gate 总额沿现默认最多3，等于总额减已计费额（delivered_charge＋nonstructural_failure_charge）减活动 hold。
+
+#### Scenario: 反馈即占预算预留
+
+- **WHEN** 接受真实反馈
+- **THEN** 接受真实反馈时以 durable hold 立即占用一轮可用预算，不标为已交付；
+
+#### Scenario: 交付时同回合结算
+
+- **WHEN** 结构合法且对应原业务请求的新 source/IR/report 与 current refs 成功提交
+- **THEN** 结构合法、对应原业务请求的新 source/IR/report 与 current refs 成功提交后同 turn settle 一次为 delivered_charge。
+
+#### Scenario: 结构耗尽释放预留
+
+- **WHEN** 收到 typed structural_exhausted_before_delivery
+- **THEN** 仅 typed structural_exhausted_before_delivery SHALL 释放本轮 hold（released_structural），不实扣用户轮次；
+
+#### Scenario: 已交付后不退款
+
+- **WHEN** 已 deliver 后复评未闭合
+- **THEN** 已 deliver 后复评未闭合不退款。
+
+#### Scenario: 非结构终态结转扣次
+
+- **WHEN** provider 错误、超时、取消或出现其他非结构终态
+- **THEN** provider 错误、超时、取消及其他非结构终态 SHALL 维持原预约扣次不退，将 held 结转 nonstructural_failure_charge 并记精确 reason，不能假标已交付或遗留永久 hold。
+
+#### Scenario: 旧记录不追溯重算
+
+- **WHEN** 存在旧记录且其预算已扣
+- **THEN** 旧记录已扣预算不追溯重算退款；
+
+#### Scenario: 预留降低可用预算
+
+- **WHEN** 新记录发生 REQ-CG-01 所述扣减
+- **THEN** REQ-CG-01 所述扣减在新记录中指预留 hold 降低可用预算，不改变仅真实用户命令建立 turn 的规则。
+
+#### Scenario: 仅新门重置预算
+
+- **WHEN** 建立新 logical gate（新候选/新会话）
+- **THEN** **预算重置边界**：普通 SC 修订门的快照预算仅在**新 logical gate**（新候选/新会话）建立时取默认值；
+
+#### Scenario: 同门预算结转续用
+
+- **WHEN** 同一 logical gate 内的修订轮次重建快照
+- **THEN** 同一 logical gate 内的修订轮次 SHALL 从 durable 快照 carry-forward（修订成功重建快照时接续剩余值，不得重置回默认）——原「普通 SC 修订门内的人工修订 turn 成功完成并经 Evaluate policy route 重建门快照时，快照预算 SHALL 重置为默认值」修订为本句语义。
+
+#### Scenario: 修订门预算接续
+
+- **WHEN** amendment 人工门按 REQ-GCE-03 场景二重开
+- **THEN** **amendment 人工门**的接续语义不变（REQ-GCE-03 场景二重开的原门，预算接续原 `human_gate_snapshot`）。
+
+#### Scenario: 判别复用重开谓词
+
+- **WHEN** 判别 amendment 门的接续或守卫
+- **THEN** amendment 门的接续/守卫判别 SHALL 绑定 durable amendment 事实，且 MUST 复用重开授权（`probe_amendment_gate_context`）所用的同一完整谓词。
+
+#### Scenario: 门消息面仅收三类
+
+- **WHEN** SC interactive 或 amendment 门收到消息
+- **THEN** **SC 门消息面边界**：SC interactive 与 amendment 门 SHALL 仅接受 `human_gate_feedback`、approve（`Confirm` 语义）与 abandon（显式 typed 入站命令）三类消息；
+
+#### Scenario: 关门用门专属决策
+
+- **WHEN** 承载关门决策
+- **THEN** 关门决策 SHALL 以门专属 typed 决策承载，MUST NOT 依赖 legacy `HumanConfirmDecision`；
+
+#### Scenario: 错误类型零副作用
+
+- **WHEN** 收到错误消息类型
+- **THEN** 收到错误消息类型时系统 SHALL 返回 stage-specific protocol error 且零副作用。
+
+#### Scenario: 合法恢复操作放行
+
+- **WHEN** 门状态为可恢复 Final Compile 且阶段/flow/durable recovery 事实匹配
+- **THEN** 在门状态明确为可恢复 Final Compile 且阶段/flow/durable recovery 事实匹配时，现有 `WorkItemPlanCompileRecoveryAction` MAY 作为独立的 compile recovery 操作经 Cockpit WS 放行；
+
+#### Scenario: 恢复操作不越边界
+
+- **WHEN** 经 Cockpit WS 放行 `WorkItemPlanCompileRecoveryAction`
+- **THEN** 该操作不是人工门反馈或关门决定，不改变三类人工门消息边界。
+
+#### Scenario: 非法状态拒绝恢复
+
+- **WHEN** 处于其他阶段、错误 flow、缺少 recovery 事实或已终态
+- **THEN** 其他阶段、错误 flow、缺少 recovery 事实或已终态时 SHALL 返回 stage-specific protocol error 且零副作用。
+
+#### Scenario: 计入用户动作计数
+
+- **WHEN** 接受真实反馈
+- **THEN** **门内修订轮次的 accepted 计数**：每次接受的真实反馈 SHALL 计入gate-local accepted_feedback_turns，与hold可用预算同session CAS；
+
+#### Scenario: 计数标注用户动作
+
+- **WHEN** 投影 accepted_feedback_turns
+- **THEN** 它表示用户动作而非计费轮次。
+
+#### Scenario: 分账投影四类轮次
+
+- **WHEN** 系统投影已提交、已交付、非结构失败扣次与可用轮次
+- **THEN** 系统 SHALL 分别投影已提交X轮、已交付Y轮、原合同非结构失败扣次F、可用Z轮。
+
+#### Scenario: 不污染策略计数
+
+- **WHEN** 发生用户 turn 及其 L1 结构 attempt
+- **THEN** 用户turn及其L1结构attempt SHALL NOT 增加run_history repairs_used/manual_repairs_used，L1只记独立结构事件；
+
+#### Scenario: 技术返修沿原计数
+
+- **WHEN** 发生原 policy 技术返修
+- **THEN** 只有原policy技术返修沿其既有计数。
+
+#### Scenario: 结构尝试不计入计数
+
+- **WHEN** 发生结构 attempt
+- **THEN** 结构attempt不得增加accepted，也不重置同logical gate预算。
 
 #### Scenario: 门内并发反馈被拒绝
 
@@ -82,9 +206,137 @@
 
 ### Requirement: SC manual revision 专属路径（REQ-CG-03）
 
-人工反馈触发的单候选修订 SHALL 走 SC 专属路径：以反馈文本、当前候选 markdown 全文与必要 grammar 边界构造独立预算的 revision prompt；provider SHALL 输出完整修订版 markdown（非 diff/patch），输出经已有交付规范化后进入 SC compiler、canonical/split/preflight、target/成员归属、Inputs×change_order有效图及scope/intent/trusted commands全量同源结构门；坏source不得提升为可审核current候选。该路径 SHALL NOT 经过 legacy 中文标题 artifact 约束链；SHALL NOT 复用或扩张 SC author prompt 的 19,000 字节预算；修订 prompt SHALL 注入 `.claude/rules/language.md` 全文与结构字面量优先规则句以维持中文 plan 与 grammar 字面量纪律，SHALL NOT 注入 code-usage/code-reading 摘要。
+人工反馈触发的单候选修订 SHALL 走 SC 专属路径：以反馈文本、当前候选 markdown 全文与必要 grammar 边界构造独立预算的 revision prompt；
 
-反馈文本 SHALL 受确定性 bounded-field 长度限制；超限 SHALL 在创建 turn 前拒绝，零预算消耗、零 provider 启动。创建 turn 与扣减回合预算之前，系统 SHALL 以 UTF-8 字节计算完整组装输入（当前候选全文＋固定合同＋feedback＋上下文）并与所选 provider 的真实输入预算比较：不超过 inline 预算时整体内联发送；超过 inline 预算但在 provider 硬限内时 SHALL 通过既有 artifact 读取能力或完整有序分块传输完整候选原文，并记录组装 digest；候选 SHALL NOT 被截断、摘要替代或以“模型可自行读取本地路径”为前提，SHALL NOT 新增第二个候选权威。artifact 不可读、分块缺失或超过 provider 硬限时，系统 SHALL 在 turn CAS 之前拒绝并通知用户，门状态与预算不变；用户点击“分段返修／重试”后才开启新回合。每个 `turn_id` 的物理 `attempt_no` SHALL 含原调用最多2；attempt1结构拒收在原 turn 未终态、活动 grant、事实齐全、无 unknown 调用及 anchor waiting 时 SHALL 携机器指令以同turn ResumeSameTurn 进入attempt2。L0恢复若已消费attempt2，L1不得新增第三次；不得额外嵌套原+2 author循环或按finding重置。用户交付预算最多3与结构attempt上限2 SHALL 分立，不互抵、不借贷；每次真实 provider start SHALL 写入 provider-start ledger，reservation与actual launch分账，预算每turn按REQ-CG-02互斥receipt恰一次，SHALL NOT 以WebSocket事件或旧started布尔推断启动次数。修订教学 SHALL 写死「只改反馈点名的内容，其余逐字保留」及反面清单（禁止删字段、清空 Outputs、省略 Handoff Schema 三字段）。修订后结构finding SHALL 优先同授权L1机器指令闭环；新内容即使唯一解也经author，指令不得伪造typed human feedback或删除AC/真实Inputs。原业务反馈、同源grammar/完整合法模板、成员/仓序事实和resolved predicates SHALL 完整保留于prompt及digest。只有合法候选提交才交付结算并grant进入Reviewing，原turn仍Running；复评同refs/scope分流先于旧policy/reservation，禁止TriggerAggregateRepair旁路新开author；收口后回原门不自动confirm。非L1重复findings仍按原阶段1合同回同门，不重置预算。
+#### Scenario: 完整输出过结构门
+
+- **WHEN** provider 产出修订结果
+- **THEN** provider SHALL 输出完整修订版 markdown（非 diff/patch），输出经已有交付规范化后进入 SC compiler、canonical/split/preflight、target/成员归属、Inputs×change_order有效图及scope/intent/trusted commands全量同源结构门；
+
+#### Scenario: 坏来源不提升候选
+
+- **WHEN** 修订产物为坏 source
+- **THEN** 坏source不得提升为可审核current候选。
+
+#### Scenario: 不走历史约束链
+
+- **WHEN** 走 SC 专属修订路径
+- **THEN** 该路径 SHALL NOT 经过 legacy 中文标题 artifact 约束链；
+
+#### Scenario: 不复用作者预算
+
+- **WHEN** 构造 revision prompt
+- **THEN** SHALL NOT 复用或扩张 SC author prompt 的 19,000 字节预算；
+
+#### Scenario: 注入语言与字面量规则
+
+- **WHEN** 构造 revision prompt 注入规则
+- **THEN** 修订 prompt SHALL 注入 `.claude/rules/language.md` 全文与结构字面量优先规则句以维持中文 plan 与 grammar 字面量纪律，SHALL NOT 注入 code-usage/code-reading 摘要。
+
+#### Scenario: 反馈受长度限制
+
+- **WHEN** 反馈文本进入修订门
+- **THEN** 反馈文本 SHALL 受确定性 bounded-field 长度限制；
+
+#### Scenario: 超限零副作用拒绝
+
+- **WHEN** 反馈文本超过 bounded-field 上限
+- **THEN** 超限 SHALL 在创建 turn 前拒绝，零预算消耗、零 provider 启动。
+
+#### Scenario: 内联预算内整体发送
+
+- **WHEN** 完整组装输入不超过 inline 预算
+- **THEN** 创建 turn 与扣减回合预算之前，系统 SHALL 以 UTF-8 字节计算完整组装输入（当前候选全文＋固定合同＋feedback＋上下文）并与所选 provider 的真实输入预算比较：不超过 inline 预算时整体内联发送；
+
+#### Scenario: 超预算完整分块传输
+
+- **WHEN** 超过 inline 预算但在 provider 硬限内
+- **THEN** 超过 inline 预算但在 provider 硬限内时 SHALL 通过既有 artifact 读取能力或完整有序分块传输完整候选原文，并记录组装 digest；
+
+#### Scenario: 候选不得截断替代
+
+- **WHEN** 传输完整候选原文
+- **THEN** 候选 SHALL NOT 被截断、摘要替代或以“模型可自行读取本地路径”为前提，SHALL NOT 新增第二个候选权威。
+
+#### Scenario: 不可读时提前停止
+
+- **WHEN** artifact 不可读、分块缺失或超过 provider 硬限
+- **THEN** artifact 不可读、分块缺失或超过 provider 硬限时，系统 SHALL 在 turn CAS 之前拒绝并通知用户，门状态与预算不变；
+
+#### Scenario: 点击后才开新回合
+
+- **WHEN** 用户点击“分段返修／重试”
+- **THEN** 用户点击“分段返修／重试”后才开启新回合。
+
+#### Scenario: 尝试次数带上限
+
+- **WHEN** 统计每个 `turn_id` 的物理 `attempt_no`
+- **THEN** 每个 `turn_id` 的物理 `attempt_no` SHALL 含原调用最多2；
+
+#### Scenario: 同回合进入重试
+
+- **WHEN** attempt1 结构拒收且原 turn 未终态、活动 grant、事实齐全、无 unknown 调用及 anchor waiting
+- **THEN** attempt1结构拒收在原 turn 未终态、活动 grant、事实齐全、无 unknown 调用及 anchor waiting 时 SHALL 携机器指令以同turn ResumeSameTurn 进入attempt2。
+
+#### Scenario: 恢复不新增第三次
+
+- **WHEN** L0 恢复已消费 attempt2
+- **THEN** L0恢复若已消费attempt2，L1不得新增第三次；
+
+#### Scenario: 不嵌套作者循环
+
+- **WHEN** 处理结构 finding
+- **THEN** 不得额外嵌套原+2 author循环或按finding重置。
+
+#### Scenario: 预算与尝试次数分立
+
+- **WHEN** 计算用户交付预算与结构 attempt 上限
+- **THEN** 用户交付预算最多3与结构attempt上限2 SHALL 分立，不互抵、不借贷；
+
+#### Scenario: 启动次数独立记账
+
+- **WHEN** 发生真实 provider start
+- **THEN** 每次真实 provider start SHALL 写入 provider-start ledger，reservation与actual launch分账，预算每turn按REQ-CG-02互斥receipt恰一次，SHALL NOT 以WebSocket事件或旧started布尔推断启动次数。
+
+#### Scenario: 修订教学写死保留规则
+
+- **WHEN** 构造修订教学
+- **THEN** 修订教学 SHALL 写死「只改反馈点名的内容，其余逐字保留」及反面清单（禁止删字段、清空 Outputs、省略 Handoff Schema 三字段）。
+
+#### Scenario: 优先同授权闭环
+
+- **WHEN** 修订后出现结构 finding
+- **THEN** 修订后结构finding SHALL 优先同授权L1机器指令闭环；
+
+#### Scenario: 新内容仍经作者
+
+- **WHEN** 修订产生新内容
+- **THEN** 新内容即使唯一解也经author，指令不得伪造typed human feedback或删除AC/真实Inputs。
+
+#### Scenario: 上下文事实完整保留
+
+- **WHEN** 构造 prompt 及 digest
+- **THEN** 原业务反馈、同源grammar/完整合法模板、成员/仓序事实和resolved predicates SHALL 完整保留于prompt及digest。
+
+#### Scenario: 合法提交才结算
+
+- **WHEN** 修订产物为合法候选并提交
+- **THEN** 只有合法候选提交才交付结算并grant进入Reviewing，原turn仍Running；
+
+#### Scenario: 复评分流优先
+
+- **WHEN** 复评同一 refs/scope
+- **THEN** 复评同refs/scope分流先于旧policy/reservation，禁止TriggerAggregateRepair旁路新开author；
+
+#### Scenario: 收口回门不自动确认
+
+- **WHEN** 回合收口
+- **THEN** 收口后回原门不自动confirm。
+
+#### Scenario: 重复发现回同门
+
+- **WHEN** 出现非 L1 重复 findings
+- **THEN** 非L1重复findings仍按原阶段1合同回同门，不重置预算。
 
 #### Scenario: 修订成功回呈
 
@@ -123,7 +375,67 @@
 
 ### Requirement: 门关闭决定（REQ-CG-04）
 
-人工门 SHALL 仅由两类决定关闭：`approve`（以 `Confirm` 语义承载，关门并启动既有确定性 compile，compile 成功后 Plan 进入 durable Confirmed）与 `abandon`（以显式 typed 入站命令承载，关门进入终态）——两类关门决定均以门专属 typed 决策承载，MUST NOT 映射或依赖 legacy `HumanConfirmDecision` 枚举。**人工权威升级语义（显式化补句）**：approve / abandon 关门 SHALL 携带显式的人工权威升级语义——close CAS 的授权判据为 `status ∈ WaitingForHuman ∧ phase ∈ {Approval, Evaluate} ∧ 门快照在场` 三 conjunct；approve 关门在锁内将 phase 升级为 Approval 并 SHALL 同步内存相位（后续 compile 以同步后相位判定 auto_confirm，compile 成功落 Confirmed、SHALL NOT 回退 enter_human_confirm）；abandon 关门 SHALL NOT 提升 phase。该补句为既有死锁修复（4f34ba58）行为的契约化显式表达，SHALL NOT 改变任何既有行为。用户已计费预算（delivered_charge＋nonstructural_failure_charge）耗尽时系统 SHALL 拒绝新 human_gate_feedback，返回用户预算耗尽原因，原门保持开启且仅剩approve/abandon；结构attempt耗尽 SHALL NOT 冒充用户预算耗尽。任何结构合法性未过的产物 SHALL 禁止approve，保留最近合法候选/原安全恢复，不能以预算耗尽假通过；L1修复成功仍须原人工confirm，不自动关门/推进。门关闭 SHALL NOT 自动触发 `advance`：未 enrolled plan 的 advance 仍由客户端在 durable Confirmed 后显式调用；仅当 plan 已成功 compile/publication 进入 durable Confirmed 且 issue 仍对该精确 plan/session/target 保持有效单 target enrollment，服务端编排器方可**独立**请求 advance。门关闭、approve 点击或 compile/recovery 未成功 SHALL NOT 等同 Confirmed，不得成为服务端推进的依据；人工门仍只有原宿主，编排器不代点。
+人工门 SHALL 仅由两类决定关闭：`approve`（以 `Confirm` 语义承载，关门并启动既有确定性 compile，compile 成功后 Plan 进入 durable Confirmed）与 `abandon`（以显式 typed 入站命令承载，关门进入终态）——两类关门决定均以门专属 typed 决策承载，MUST NOT 映射或依赖 legacy `HumanConfirmDecision` 枚举。
+
+#### Scenario: 人工权威升级语义
+
+- **WHEN** approve / abandon 关门
+- **THEN** **人工权威升级语义（显式化补句）**：approve / abandon 关门 SHALL 携带显式的人工权威升级语义——close CAS 的授权判据为 `status ∈ WaitingForHuman ∧ phase ∈ {Approval, Evaluate} ∧ 门快照在场` 三 conjunct；
+
+#### Scenario: 批准同步内存相位
+
+- **WHEN** approve 关门在锁内升级 phase
+- **THEN** approve 关门在锁内将 phase 升级为 Approval 并 SHALL 同步内存相位（后续 compile 以同步后相位判定 auto_confirm，compile 成功落 Confirmed、SHALL NOT 回退 enter_human_confirm）；
+
+#### Scenario: 放弃不提升相位
+
+- **WHEN** abandon 关门
+- **THEN** abandon 关门 SHALL NOT 提升 phase。
+
+#### Scenario: 补句不改既有行为
+
+- **WHEN** 该补句作为契约化显式表达
+- **THEN** 该补句为既有死锁修复（4f34ba58）行为的契约化显式表达，SHALL NOT 改变任何既有行为。
+
+#### Scenario: 预算耗尽拒绝反馈
+
+- **WHEN** 用户已计费预算耗尽
+- **THEN** 用户已计费预算（delivered_charge＋nonstructural_failure_charge）耗尽时系统 SHALL 拒绝新 human_gate_feedback，返回用户预算耗尽原因，原门保持开启且仅剩approve/abandon；
+
+#### Scenario: 结构耗尽不冒充预算
+
+- **WHEN** 结构 attempt 耗尽
+- **THEN** 结构attempt耗尽 SHALL NOT 冒充用户预算耗尽。
+
+#### Scenario: 坏产物禁止批准
+
+- **WHEN** 产物结构合法性未过
+- **THEN** 任何结构合法性未过的产物 SHALL 禁止approve，保留最近合法候选/原安全恢复，不能以预算耗尽假通过；
+
+#### Scenario: 修复后仍需确认
+
+- **WHEN** L1 修复成功
+- **THEN** L1修复成功仍须原人工confirm，不自动关门/推进。
+
+#### Scenario: 关门不自动推进
+
+- **WHEN** 人工门关闭
+- **THEN** 门关闭 SHALL NOT 自动触发 `advance`：未 enrolled plan 的 advance 仍由客户端在 durable Confirmed 后显式调用；
+
+#### Scenario: 已登记计划可推进
+
+- **WHEN** plan 已成功 compile/publication 进入 durable Confirmed 且 issue 仍保持有效单 target enrollment
+- **THEN** 仅当 plan 已成功 compile/publication 进入 durable Confirmed 且 issue 仍对该精确 plan/session/target 保持有效单 target enrollment，服务端编排器方可**独立**请求 advance。
+
+#### Scenario: 未成功不等同确认
+
+- **WHEN** 门关闭、approve 点击或 compile/recovery 未成功
+- **THEN** 门关闭、approve 点击或 compile/recovery 未成功 SHALL NOT 等同 Confirmed，不得成为服务端推进的依据；
+
+#### Scenario: 编排器不代点门
+
+- **WHEN** 人工门需要关闭或推进
+- **THEN** 人工门仍只有原宿主，编排器不代点。
 
 #### Scenario: approve 不绕过 compile
 
@@ -187,7 +499,72 @@
 
 ### Requirement: 门与回合的 durable 恢复（REQ-CG-05）
 
-人工门快照与用户hold、accepted反馈计数、HumanGateTurn预留、provider幂等键 SHALL 以session锁/整记录CAS作为同一耐久reservation权威提交（在 session record 上以 CAS 写入，复用阶段 1 快照原子写入契约）；恢复时按 reservation 状态决定释放、等待或继续，保证每turn held→delivered_charge/nonstructural_failure_charge/released_structural三类终态receipt幂等互斥、恰一次claim且真实start有独立ledger；不承诺多JSON文件原子性或未知外部调用恰一次。预算receipt、attempt reason与source/IR/report/context/机器instruction/prompt digest及grant phase SHALL 同session CAS绑定；跨turn文件按durable证据恢复，CAS失败不得伪结算。`HumanGateTurn` SHALL 为独立 durable 记录（`turn_id`、`command_id`、`feedback_text`、状态、`attempt_no`、预算预留记账、结果引用、失败分类），其 `Reserved` 状态只在与上述原子事务同提交时生效。断线重连后系统 SHALL 从 durable 状态重建门与 in-flight turn：provider 仍在运行则等待其完成；provider已终止且可安全继续才同turn恢复；有output只assess/commit，Reviewing仅恢复绑定review，不见新artifact即Completed，不将原授权hash与已绑定中间candidate差异误认外来漂移；Attempt2Claimed续同key不递增，unknown调用等待，anchor BlockedByLcRecovery优先且显式fresh核recovery×turn×grant×attempt×prompt join、不重置预算。旧turn/旧record不追溯补授权或退款。**phase 回门节点**：approval compile 失败与修订中止（含断连中止）后，系统 SHALL 将 phase / active_node 回滚到门节点——快照门呈现与 human_confirm 消息判定重新一致，confirm / feedback SHALL 可达且 MUST NOT 被以 `WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID` 拒绝（消除「stage=human_confirm 却拒 human_confirm」的相位死锁，0429 形态）；该回滚 SHALL 以新的状态写实现，MUST NOT 改写已持久化事件前缀。门相关事件 SHALL 保持事件前缀不可变，恢复不得删除或改写已持久化事件。
+人工门快照与用户hold、accepted反馈计数、HumanGateTurn预留、provider幂等键 SHALL 以session锁/整记录CAS作为同一耐久reservation权威提交（在 session record 上以 CAS 写入，复用阶段 1 快照原子写入契约）；
+
+#### Scenario: 恢复按预留状态处理
+
+- **WHEN** 恢复时处理 reservation 状态
+- **THEN** 恢复时按 reservation 状态决定释放、等待或继续，保证每turn held→delivered_charge/nonstructural_failure_charge/released_structural三类终态receipt幂等互斥、恰一次claim且真实start有独立ledger；
+
+#### Scenario: 不承诺跨文件原子
+
+- **WHEN** 承诺 durability 范围
+- **THEN** 不承诺多JSON文件原子性或未知外部调用恰一次。
+
+#### Scenario: 同会话原子绑定
+
+- **WHEN** 写入预算 receipt、attempt reason 与各类引用
+- **THEN** 预算receipt、attempt reason与source/IR/report/context/机器instruction/prompt digest及grant phase SHALL 同session CAS绑定；
+
+#### Scenario: 按持久证据恢复
+
+- **WHEN** 恢复跨 turn 文件
+- **THEN** 跨turn文件按durable证据恢复，CAS失败不得伪结算。
+
+#### Scenario: 回合独立持久记录
+
+- **WHEN** 定义 `HumanGateTurn`
+- **THEN** `HumanGateTurn` SHALL 为独立 durable 记录（`turn_id`、`command_id`、`feedback_text`、状态、`attempt_no`、预算预留记账、结果引用、失败分类），其 `Reserved` 状态只在与上述原子事务同提交时生效。
+
+#### Scenario: 重连等待运行完成
+
+- **WHEN** 断线重连后重建门与 in-flight turn 且 provider 仍在运行
+- **THEN** 断线重连后系统 SHALL 从 durable 状态重建门与 in-flight turn：provider 仍在运行则等待其完成；
+
+#### Scenario: 安全才同回合恢复
+
+- **WHEN** provider 已终止
+- **THEN** provider已终止且可安全继续才同turn恢复；
+
+#### Scenario: 只评估或恢复评审
+
+- **WHEN** 已有 output 或处于 Reviewing
+- **THEN** 有output只assess/commit，Reviewing仅恢复绑定review，不见新artifact即Completed，不将原授权hash与已绑定中间candidate差异误认外来漂移；
+
+#### Scenario: 恢复不重置预算
+
+- **WHEN** 处理 Attempt2Claimed 续同 key 与 unknown 调用
+- **THEN** Attempt2Claimed续同key不递增，unknown调用等待，anchor BlockedByLcRecovery优先且显式fresh核recovery×turn×grant×attempt×prompt join、不重置预算。
+
+#### Scenario: 旧记录不补授权退款
+
+- **WHEN** 面对旧 turn 或旧 record
+- **THEN** 旧turn/旧record不追溯补授权或退款。
+
+#### Scenario: 相位回门节点
+
+- **WHEN** approval compile 失败或修订中止（含断连中止）
+- **THEN** **phase 回门节点**：approval compile 失败与修订中止（含断连中止）后，系统 SHALL 将 phase / active_node 回滚到门节点——快照门呈现与 human_confirm 消息判定重新一致，confirm / feedback SHALL 可达且 MUST NOT 被以 `WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID` 拒绝（消除「stage=human_confirm 却拒 human_confirm」的相位死锁，0429 形态）；
+
+#### Scenario: 回滚用新状态写
+
+- **WHEN** 执行 phase / active_node 回滚
+- **THEN** 该回滚 SHALL 以新的状态写实现，MUST NOT 改写已持久化事件前缀。
+
+#### Scenario: 事件前缀不可变
+
+- **WHEN** 恢复门相关事件
+- **THEN** 门相关事件 SHALL 保持事件前缀不可变，恢复不得删除或改写已持久化事件。
 
 #### Scenario: turn 预留原子性
 

@@ -113,13 +113,45 @@ live provider payload 的 findings severity 只接受 `blocking`/`must_fix`/`sug
 
 系统 SHALL 满足本 requirement 的全部场景约束。
 
-author 增量 prompt（`build_prompt` 与 `build_revision_full_prompt`）与 reviewer prompt 的历史重放为滑动窗口：最近 2 轮原文保留；更早轮次压缩为确定性（非 LLM）结构化摘要，摘要至少含：round 标识、artifact 版本引用、review verdict、finding ID/severity/required_action、未关闭强返修项全文、choice 审计 ID 与答案及影响的 REQ/AC、retry 失败原因一行。当前最新版 artifact 与 choice 审计记录永不压缩；reviewer prompt 保留 `canonical_inputs` 全文与全部未关闭 blocking/must_fix finding 全文，中间版本 artifact 以相邻版本 diff 摘要呈现（diff 生成失败时保留全文，不静默丢弃）。摘要生成失败时 fail closed（退回全量重放）。
+#### Scenario: 滑动窗口与压缩摘要
 
-对 provider 原生 resume：先实测各 provider resume 的 input-token usage；若证实服务端重放历史导致窗口收益无效，则在窗口边界切换 fresh session 并携带确定性压缩上下文（最新 artifact、canonical inputs、全部未关闭强 finding、choice 审计、版本引用）。
+- **WHEN** 构造 author 或 reviewer prompt 的历史重放时
+- **THEN** author 增量 prompt（`build_prompt` 与 `build_revision_full_prompt`）与 reviewer prompt 的历史重放为滑动窗口：最近 2 轮原文保留；更早轮次压缩为确定性（非 LLM）结构化摘要，摘要至少含：round 标识、artifact 版本引用、review verdict、finding ID/severity/required_action、未关闭强返修项全文、choice 审计 ID 与答案及影响的 REQ/AC、retry 失败原因一行。
 
-验收指标：同一需求语料、相同轮数、相同 provider/model 与 resume 策略下，修订轮 provider 返回的 input-token usage 较基线下降 ≥40%（fresh 与 resume 分列报告）；prompt 字符数仅作单测代理指标并单独标注。
+#### Scenario: 最新版与 reviewer 保留
 
-唯一判定公式：对每个 provider×strategy（fresh、resume 分列），取基线 campaign 与 gate campaign 的**一一配对**样本，计算每样本 `revised_input_tokens / baseline_input_tokens`，对均值判定 ≤0.60 为达成。配对键为 `case_id=(shape_id, repetition_id, round, strategy)`：同一 case_id 在基线（`run_kind=baseline`）与改后（`run_kind=revised`）各跑一次且各有一个非 retry 样本；每个受支持的 provider×strategy 必须采集等量配对的 baseline/revised 样本（不支持 resume 的 provider 该 strategy 不参与并在报告声明原因）；baseline 样本可复用于多个 gate 样本时，聚合规则为「同一 case_id 只计一次均值贡献」，不得混算重复贡献。`cache_read` 与 completion 不计入分子分母，cache 命中分列报告；触发 retry 的样本不进入 token 分母但必须在 manifest 中记录。
+- **WHEN** 生成滑动窗口摘要或 reviewer prompt 时
+- **THEN** 当前最新版 artifact 与 choice 审计记录永不压缩；reviewer prompt 保留 `canonical_inputs` 全文与全部未关闭 blocking/must_fix finding 全文，中间版本 artifact 以相邻版本 diff 摘要呈现（diff 生成失败时保留全文，不静默丢弃）。
+
+#### Scenario: 摘要失败 fail closed
+
+- **WHEN** 摘要生成失败时
+- **THEN** 摘要生成失败时 fail closed（退回全量重放）。
+
+#### Scenario: resume 实测与 fresh 切换
+
+- **WHEN** 对 provider 原生 resume 评估窗口收益时
+- **THEN** 对 provider 原生 resume：先实测各 provider resume 的 input-token usage；若证实服务端重放历史导致窗口收益无效，则在窗口边界切换 fresh session 并携带确定性压缩上下文（最新 artifact、canonical inputs、全部未关闭强 finding、choice 审计、版本引用）。
+
+#### Scenario: token 验收指标口径
+
+- **WHEN** 验收滑动窗口的 token 收益时
+- **THEN** 验收指标：同一需求语料、相同轮数、相同 provider/model 与 resume 策略下，修订轮 provider 返回的 input-token usage 较基线下降 ≥40%（fresh 与 resume 分列报告）；prompt 字符数仅作单测代理指标并单独标注。
+
+#### Scenario: 唯一判定公式
+
+- **WHEN** 判定每个 provider×strategy 是否达成时
+- **THEN** 唯一判定公式：对每个 provider×strategy（fresh、resume 分列），取基线 campaign 与 gate campaign 的**一一配对**样本，计算每样本 `revised_input_tokens / baseline_input_tokens`，对均值判定 ≤0.60 为达成。
+
+#### Scenario: 配对键与样本聚合
+
+- **WHEN** 采集并聚合 baseline/revised 配对样本时
+- **THEN** 配对键为 `case_id=(shape_id, repetition_id, round, strategy)`：同一 case_id 在基线（`run_kind=baseline`）与改后（`run_kind=revised`）各跑一次且各有一个非 retry 样本；每个受支持的 provider×strategy 必须采集等量配对的 baseline/revised 样本（不支持 resume 的 provider 该 strategy 不参与并在报告声明原因）；baseline 样本可复用于多个 gate 样本时，聚合规则为「同一 case_id 只计一次均值贡献」，不得混算重复贡献。
+
+#### Scenario: token 分子分母口径
+
+- **WHEN** 统计 token 分子分母时
+- **THEN** `cache_read` 与 completion 不计入分子分母，cache 命中分列报告；触发 retry 的样本不进入 token 分母但必须在 manifest 中记录。
 
 #### Scenario: 修订轮压缩
 - **WHEN** 会话已有 ≥3 轮历史并触发修订 prompt
@@ -147,11 +179,20 @@ golden 以规范化 schema 比对：必需 heading 集合、REQ/AC/NFR 稳定 ID
 
 系统 SHALL 满足本 requirement 的全部场景约束。
 
-campaign 运行以 machine-readable manifest/schema 冻结：每个样本必含 `case_id=(shape_id, repetition_id, round, strategy)`、`run_kind=baseline|revised`、provider、model/version、provider version、issue/session id、语料形态 id、round 数、三口径结果、retry 分布、失败分类、token usage（input 与 cache_read 分列）、时间戳；golden 只读带 digest。
+#### Scenario: manifest schema 冻结
 
-固定语料 ≥5 需求形态（含待确认项、含返修轮、含用户 choice），三组合 {claude code+glm-5.3, kimi+deepseek-v4-flash, pi+deepseek-v4-flash}；开发迭代期每组合 ≥5 样本；最终验收每组合 20 样本，语料配比均衡（5 形态 × 4 样本，每形态 ≥3），每次独立 issue/session。
+- **WHEN** 运行 campaign 并记录样本时
+- **THEN** campaign 运行以 machine-readable manifest/schema 冻结：每个样本必含 `case_id=(shape_id, repetition_id, round, strategy)`、`run_kind=baseline|revised`、provider、model/version、provider version、issue/session id、语料形态 id、round 数、三口径结果、retry 分布、失败分类、token usage（input 与 cache_read 分列）、时间戳；golden 只读带 digest。
 
-分口径报告：author 首次通过率、reviewer 首次 syntax+schema 通过率、full-chain 一次成功率（author 与 reviewer 均未触发自动 retry），及 retry 分布与失败分类。full-chain 一次成功率 ≥95% 为 release gate（20 样本下至少 19/20），未达标时验收任务不得勾选。
+#### Scenario: 固定语料与三组合
+
+- **WHEN** 准备 campaign 语料与样本规模时
+- **THEN** 固定语料 ≥5 需求形态（含待确认项、含返修轮、含用户 choice），三组合 {claude code+glm-5.3, kimi+deepseek-v4-flash, pi+deepseek-v4-flash}；开发迭代期每组合 ≥5 样本；最终验收每组合 20 样本，语料配比均衡（5 形态 × 4 样本，每形态 ≥3），每次独立 issue/session。
+
+#### Scenario: 分口径报告与 gate
+
+- **WHEN** 汇总 campaign 分口径结果时
+- **THEN** 分口径报告：author 首次通过率、reviewer 首次 syntax+schema 通过率、full-chain 一次成功率（author 与 reviewer 均未触发自动 retry），及 retry 分布与失败分类。full-chain 一次成功率 ≥95% 为 release gate（20 样本下至少 19/20），未达标时验收任务不得勾选。
 
 #### Scenario: gate 判定
 - **WHEN** 某组合 20 样本 full-chain 一次成功 <19 次

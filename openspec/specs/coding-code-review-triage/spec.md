@@ -39,11 +39,57 @@
 
 ### Requirement: 分诊门禁动作集合必须按最新审查结论派生
 
-上述三个 Code Review 分诊门禁落地时，系统 MUST 按该 attempt 最新一次 Code Review 结论的 verdict 派生可执行动作集合：基础集合 MUST 恰好包含 `retry_review`、`manual_continue` 与 `abort`；当且仅当该 verdict ∈ {`request_changes`, `blocked`} 时，集合 MUST 额外包含 `send_to_coder`，其余 verdict（含 `approve`）下 MUST NOT 包含 `send_to_coder`。最新 verdict 读不到（该 attempt 无 Code Review 结论、结论不可解析或读取失败）时，系统 MUST 按不含 `send_to_coder` 派生，MUST NOT 以默认包含该动作兜底，且 MUST 仍落地该门禁而不是因缺少事实拒绝开门。系统 MUST NOT 在这些门禁上提供触发 plan repair 的动作，MUST NOT 在动作集合之外（例如门呈现面）自行构造 `send_to_coder`。
+上述三个 Code Review 分诊门禁落地时，系统 MUST 按该 attempt 最新一次 Code Review 结论的 verdict 派生可执行动作集合：基础集合 MUST 恰好包含 `retry_review`、`manual_continue` 与 `abort`
 
-「最新一次结论」的口径 MUST 与送回 Coder 动作的既有读取口径一致（同一 attempt 结论集合中的最后一条）。派生所用事实 MUST 可观察：门 payload 的 `available_actions` 是权威动作集合，客户端 MUST NOT 自行增删动作；该 attempt 的 Code Review 结论集合（含每条结论的 verdict）随会话状态下发，客户端 MUST 以其中最新一条作为说明文案依据。系统 MAY 在门 payload 上额外携带派生成因（如最新 verdict 字段）；携带时其值 MUST 与派生所用 verdict 一致，且 MUST NOT 改变 `available_actions` 的权威性。
+#### Scenario: 可返修结论追加动作
 
-对升级前已落地且仍 open 的门禁，系统 MUST NOT 回写其动作集合，也 MUST NOT 在读取路径上重新派生；服务端 MUST 继续对该门实例的 `send_to_coder` 提交做前置校验拒绝，呈现层 MAY 依据服务端返回的可观察码或门记录中的派生事实给出替代动作指引，但 MUST NOT 自行增删（含禁用或隐藏）`available_actions` 中的动作——动作集合只由服务端在门落地时决定，存量门的动作集合清理见本 change 的存量门处置工作包。
+- **WHEN** 最新 verdict 为 request_changes 或 blocked 时
+- **THEN** 当且仅当该 verdict ∈ {`request_changes`, `blocked`} 时，集合 MUST 额外包含 `send_to_coder`，其余 verdict（含 `approve`）下 MUST NOT 包含 `send_to_coder`
+
+#### Scenario: 读不到结论按三项派生
+
+- **WHEN** 门禁落地时读不到该 attempt 的最新 Code Review 结论时
+- **THEN** 最新 verdict 读不到（该 attempt 无 Code Review 结论、结论不可解析或读取失败）时，系统 MUST 按不含 `send_to_coder` 派生，MUST NOT 以默认包含该动作兜底，且 MUST 仍落地该门禁而不是因缺少事实拒绝开门
+
+#### Scenario: 门禁不提供计划返修
+
+- **WHEN** 这些 Code Review 分诊门禁落地时
+- **THEN** 系统 MUST NOT 在这些门禁上提供触发 plan repair 的动作，MUST NOT 在动作集合之外（例如门呈现面）自行构造 `send_to_coder`
+
+#### Scenario: 最新结论口径一致
+
+- **WHEN** 读取「最新一次结论」时
+- **THEN** 「最新一次结论」的口径 MUST 与送回 Coder 动作的既有读取口径一致（同一 attempt 结论集合中的最后一条）
+
+#### Scenario: 动作集合以载荷为准
+
+- **WHEN** 客户端消费门 payload 的 available_actions 时
+- **THEN** 派生所用事实 MUST 可观察：门 payload 的 `available_actions` 是权威动作集合，客户端 MUST NOT 自行增删动作
+
+#### Scenario: 结论集合随状态下发
+
+- **WHEN** 客户端渲染该 attempt 的结论说明文案时
+- **THEN** 该 attempt 的 Code Review 结论集合（含每条结论的 verdict）随会话状态下发，客户端 MUST 以其中最新一条作为说明文案依据
+
+#### Scenario: 可携带派生成因
+
+- **WHEN** 门 payload 额外携带派生成因时
+- **THEN** 系统 MAY 在门 payload 上额外携带派生成因（如最新 verdict 字段）
+
+#### Scenario: 派生成因不改动作权威
+
+- **WHEN** 携带派生成因时
+- **THEN** 携带时其值 MUST 与派生所用 verdict 一致，且 MUST NOT 改变 `available_actions` 的权威性
+
+#### Scenario: 存量在途门不回写
+
+- **WHEN** 升级前已落地且仍 open 的门禁被读取或应答时
+- **THEN** 对升级前已落地且仍 open 的门禁，系统 MUST NOT 回写其动作集合，也 MUST NOT 在读取路径上重新派生
+
+#### Scenario: 存量门提交继续拒绝
+
+- **WHEN** 对存量在途门实例提交 send_to_coder 时
+- **THEN** 服务端 MUST 继续对该门实例的 `send_to_coder` 提交做前置校验拒绝，呈现层 MAY 依据服务端返回的可观察码或门记录中的派生事实给出替代动作指引，但 MUST NOT 自行增删（含禁用或隐藏）`available_actions` 中的动作——动作集合只由服务端在门落地时决定，存量门的动作集合清理见本 change 的存量门处置工作包
 
 #### Scenario: 门禁动作集合完整
 
@@ -82,9 +128,22 @@
 
 ### Requirement: 分诊门禁的送回 Coder 动作必须可用
 
-当 Code Review 分诊门禁的动作集合包含「送回 Coder 返修」时，用户在门上执行该动作 MUST 走代码审查反馈返修路径，落地 rework instruction、把 stage 置为 `Coding` 并递增返修计数。最近一次审查结论的 verdict 为 `request_changes` 或 `blocked` 时该动作 MUST 可用，MUST NOT 因 verdict 为 `request_changes` 而拒绝执行，且 MUST NOT 走审查轮次超限反馈路径。
+当 Code Review 分诊门禁的动作集合包含「送回 Coder 返修」时，用户在门上执行该动作 MUST 走代码审查反馈返修路径，落地 rework instruction、把 stage 置为 `Coding` 并递增返修计数
 
-verdict 不属于 {`request_changes`, `blocked`} 时，动作集合 MUST NOT 包含该动作（见「分诊门禁动作集合必须按最新审查结论派生」）；服务端 MUST 同时拒绝对该门实例的任何 `send_to_coder` 提交（含存量在途门、陈旧快照与脚本直发），返回可识别的不可执行原因，现有错误码 `send_to_coder_latest_review_not_actionable` MUST 保持可观察，且 MUST NOT 落地 rework instruction、MUST NOT 改变 attempt 状态。
+#### Scenario: 可返修结论动作可用
+
+- **WHEN** 最近一次审查结论 verdict 为 request_changes 或 blocked 时
+- **THEN** 最近一次审查结论的 verdict 为 `request_changes` 或 `blocked` 时该动作 MUST 可用，MUST NOT 因 verdict 为 `request_changes` 而拒绝执行，且 MUST NOT 走审查轮次超限反馈路径
+
+#### Scenario: 不可返修不含该动作
+
+- **WHEN** verdict 不属于 request_changes 或 blocked 时
+- **THEN** verdict 不属于 {`request_changes`, `blocked`} 时，动作集合 MUST NOT 包含该动作（见「分诊门禁动作集合必须按最新审查结论派生」）
+
+#### Scenario: 不可执行提交一律拒绝
+
+- **WHEN** 用户提交 send_to_coder 时
+- **THEN** 服务端 MUST 同时拒绝对该门实例的任何 `send_to_coder` 提交（含存量在途门、陈旧快照与脚本直发），返回可识别的不可执行原因，现有错误码 `send_to_coder_latest_review_not_actionable` MUST 保持可观察，且 MUST NOT 落地 rework instruction、MUST NOT 改变 attempt 状态
 
 #### Scenario: verdict 为 request_changes 时送回 Coder
 

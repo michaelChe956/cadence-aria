@@ -8,9 +8,42 @@
 
 ### Requirement: 逻辑代码库成员登记（REQ-REG-01）
 
-系统 SHALL 支持将同一非 git 公共父目录下的多个真实 git 仓库登记为 Project（逻辑代码库）成员；每个成员对应一个 `RepositoryRecord`（物理 git 仓，兼容投影）与一个 `CodebaseMemberRecord`（稳定 UUID 逻辑身份 `LogicalRepositoryId`）与一个 `RepositoryCheckoutRecord`（可用 checkout）；聚合根绝不注册为 RepositoryRecord。三层身份映射：`LogicalRepositoryId` →（member 解析）→ `RepositoryCheckoutId` →（物理定位）→ `RepositoryRecord.id` + canonical_path + git_dir_identity。
+系统 SHALL 支持将同一非 git 公共父目录下的多个真实 git 仓库登记为 Project（逻辑代码库）成员
 
-系统 SHALL 为逻辑代码库建立唯一、可审计的 authority 路由：明确逻辑代码库身份时，成员、checkout、manifest、selection、policy 与 index 只能从该逻辑代码库的权威子树解析；单仓代码库只能从其合法物理仓布局解析。系统 SHALL 禁止按路径猜测、跨逻辑代码库回退或把旧项目级布局静默当作当前 authority。发现旧布局、authority 冲突、路径越界、来源身份不一致或无法唯一解析时，系统 SHALL fail-closed，返回可操作的迁移/核验等待项且不得产生成员或仓库写入。
+#### Scenario: 成员对应三类记录
+
+- **WHEN** 登记每个成员为 Project 成员时
+- **THEN** 每个成员对应一个 `RepositoryRecord`（物理 git 仓，兼容投影）与一个 `CodebaseMemberRecord`（稳定 UUID 逻辑身份 `LogicalRepositoryId`）与一个 `RepositoryCheckoutRecord`（可用 checkout）
+
+#### Scenario: 聚合根不注册为成员
+
+- **WHEN** 聚合根出现在待登记成员中时
+- **THEN** 聚合根绝不注册为 RepositoryRecord
+
+#### Scenario: 三层身份映射固定
+
+- **WHEN** 由逻辑成员解析到物理仓库定位时
+- **THEN** 三层身份映射：`LogicalRepositoryId` →（member 解析）→ `RepositoryCheckoutId` →（物理定位）→ `RepositoryRecord.id` + canonical_path + git_dir_identity
+
+#### Scenario: 权威子树唯一解析
+
+- **WHEN** 明确逻辑代码库身份后解析成员、checkout、manifest、selection、policy 与 index 时
+- **THEN** 系统 SHALL 为逻辑代码库建立唯一、可审计的 authority 路由：明确逻辑代码库身份时，成员、checkout、manifest、selection、policy 与 index 只能从该逻辑代码库的权威子树解析
+
+#### Scenario: 单仓按物理布局解析
+
+- **WHEN** 单仓代码库解析成员、checkout、manifest、selection、policy 与 index 时
+- **THEN** 单仓代码库只能从其合法物理仓布局解析
+
+#### Scenario: 禁止路径猜测回退
+
+- **WHEN** 解析成员与相关引用时
+- **THEN** 系统 SHALL 禁止按路径猜测、跨逻辑代码库回退或把旧项目级布局静默当作当前 authority
+
+#### Scenario: 冲突时关闭并等待
+
+- **WHEN** 发现旧布局、authority 冲突、路径越界、来源身份不一致或无法唯一解析时
+- **THEN** 发现旧布局、authority 冲突、路径越界、来源身份不一致或无法唯一解析时，系统 SHALL fail-closed，返回可操作的迁移/核验等待项且不得产生成员或仓库写入
 
 #### Scenario: 扫描公共父目录登记成员
 
@@ -418,7 +451,37 @@ preflight MUST NOT 因聚合根已存在 `AGENTS.md` / `CLAUDE.md` / `.claude/ru
 
 ### Requirement: LC provider 信任登记生命周期（REQ-REG-14）
 
-系统 SHALL 为需要 workspace trust 的后续 LC provider 提供按 canonical `provider_context_root` 绑定的登记与撤销。LC 根准入（REQ-REG-09）确定并冻结 root identity 后、Claude Code recipe 启动前 SHALL 完成所需 trust 的独立硬前置登记；该登记不属于五步 recipe、不插入步骤之间，普通 Codex/Kimi LC session 启动前 SHALL 再次核验；任一所需 trust 未 Ready 时五步 recipe 不创建/不启动，初始化进入可重试 fail-closed waiting。Codex SHALL 使用用户级 projects trust 配置，Kimi SHALL 使用由 basename 与 canonical root SHA-256 前缀确定的 workspace-trust 记录；登记 SHALL 幂等、只影响当前 LC 根、有归属证明时在 LC 删除或解绑撤销本 LC 管理且未被外部修改的条目，不得覆盖或撤销已有的用户自建 trust，并生成不含敏感凭据的审计事实。Codex/Pi/KimiCode 的实际 LC gateway launch 由后续 `lc-gateway-multi-provider` change 交付。
+系统 SHALL 为需要 workspace trust 的后续 LC provider 提供按 canonical `provider_context_root` 绑定的登记与撤销
+
+#### Scenario: 信任登记为硬前置
+
+- **WHEN** LC 根准入冻结 root identity 后、Claude Code recipe 启动前
+- **THEN** LC 根准入（REQ-REG-09）确定并冻结 root identity 后、Claude Code recipe 启动前 SHALL 完成所需 trust 的独立硬前置登记
+
+#### Scenario: 登记独立于五步流程
+
+- **WHEN** 普通 Codex/Kimi LC session 启动前
+- **THEN** 该登记不属于五步 recipe、不插入步骤之间，普通 Codex/Kimi LC session 启动前 SHALL 再次核验
+
+#### Scenario: 信任未就绪则停等
+
+- **WHEN** 任一所需 trust 未 Ready 时
+- **THEN** 任一所需 trust 未 Ready 时五步 recipe 不创建/不启动，初始化进入可重试 fail-closed waiting
+
+#### Scenario: 各 provider 信任载体
+
+- **WHEN** 为 Codex 或 Kimi 登记 workspace trust 时
+- **THEN** Codex SHALL 使用用户级 projects trust 配置，Kimi SHALL 使用由 basename 与 canonical root SHA-256 前缀确定的 workspace-trust 记录
+
+#### Scenario: 登记幂等只影响本根
+
+- **WHEN** 重复登记同一 LC 根或在 LC 删除或解绑时撤销时
+- **THEN** 登记 SHALL 幂等、只影响当前 LC 根、有归属证明时在 LC 删除或解绑撤销本 LC 管理且未被外部修改的条目，不得覆盖或撤销已有的用户自建 trust，并生成不含敏感凭据的审计事实
+
+#### Scenario: 网关启动由后续交付
+
+- **WHEN** 交付 Codex/Pi/KimiCode 的实际 LC gateway launch 时
+- **THEN** Codex/Pi/KimiCode 的实际 LC gateway launch 由后续 `lc-gateway-multi-provider` change 交付
 
 #### Scenario: Codex trust 登记
 

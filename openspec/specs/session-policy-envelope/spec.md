@@ -8,9 +8,47 @@
 
 ### Requirement: 两层政策结构（REQ-ENV-01）
 
-系统 SHALL 持久化 `AggregatePolicyArtifact`（集中政策正文 + digest + revision）作为事实来源；每次 provider run 生成不可变 `SessionPolicyEnvelope`（policy_id/revision/digest、action、target、read/write roots、provider dialect、config artifact 引用、canonical `working_directory`）。本契约覆盖逻辑代码库流程的**全部真实 provider 启动入口**：同步栈 `ProviderAdapter::run(AdapterInput)`（含 work-item split 引擎直接调用）与流式栈 `StreamingProviderAdapter::start(StreamingProviderInput)`（含聚合初始化、聚合规划 provider_drive、coding provider_stream、review）。**例外（显式过渡例外；范围=流式栈）**：既有 legacy 直连入口——流式栈 workspace/coding 引擎的 author/revision/review 直连 `provider.start`（Story/Design/SingleCandidate(SC) 首轮与修订、WorkItemPlan legacy、coding reviewer 直连）**与 coding Coder(Executor) 直连**——允许保留现状拓扑；此类启动必须满足：（a）输入由 engine builder 工厂构造并按角色携带 REQ-ENV-09 工具策略（Reviewer 角色带策略，Executor/Coder 不带）；（b）受 adapter 层双向角色守卫保护；（c）接受按角色适用的启动审计——**策略角色（作者/评审）的 pi/claude/codex 启动接 REQ-ENV-09 的 durable_tool_policy_audit 分区；Executor/Coder 与非策略路径、kimi（全部角色）以既有 execution_event_audit 通道为等价审计（role/provider-specific 既有形态豁免，kimi 零改动为用户裁决）**。**同步栈（AdapterInput 直连）不适用本例外**，维持本 requirement 原文要求（逻辑仓既有 gateway guard fail-closed；非逻辑仓保留 API 无生产调用方，重激活前置=REQ-ENV-09 策略绑定）。全量 gateway 迁移为后续独立 change 的路线项，完成前本例外持续有效。
+系统 SHALL 持久化 `AggregatePolicyArtifact`（集中政策正文 + digest + revision）作为事实来源
 
-逻辑代码库任一真实 provider run（规划、编码、评审或初始化）使用的 policy/target 引用 SHALL 由唯一 LC authority resolver 解析并校验，且 SessionPolicyEnvelope SHALL 冻结 policy_id、revision、digest、target identity、canonical `working_directory` 与 provider capability 快照。逻辑代码库的 `working_directory` SHALL 等于唯一 authority 的 canonical `provider_context_root`；`target`/`worktree` 继续表示本次会话被授权操作的成员、checkout 或 worktree，允许 cwd 与 target 不同；单仓 legacy 入口保留原有 cwd/target 映射。resolver 无法唯一解析、policy 材料缺失、digest/revision 不一致、root identity 漂移或目标跨 kind 时，启动 SHALL 在 provider spawn 前 fail-closed，返回可诊断、可操作的核验/准备/重试等待项；不得回落到成员仓路径、项目级历史布局、旧 pointer 或裸 provider input。用户完成允许操作后，系统 SHALL 复用原始登记/编排链继续，不创建第二套 durable operation 状态机。
+#### Scenario: 生成不可变 SessionPolicyEnvelope
+
+- **WHEN** provider run 构造启动 envelope 时
+- **THEN** 每次 provider run 生成不可变 `SessionPolicyEnvelope`（policy_id/revision/digest、action、target、read/write roots、provider dialect、config artifact 引用、canonical `working_directory`）
+
+#### Scenario: 契约覆盖全部真实启动入口
+
+- **WHEN** 逻辑代码库流程发起真实 provider 启动入口
+- **THEN** 本契约覆盖逻辑代码库流程的**全部真实 provider 启动入口**：同步栈 `ProviderAdapter::run(AdapterInput)`（含 work-item split 引擎直接调用）与流式栈 `StreamingProviderAdapter::start(StreamingProviderInput)`（含聚合初始化、聚合规划 provider_drive、coding provider_stream、review）。**例外（显式过渡例外；范围=流式栈）**：既有 legacy 直连入口——流式栈 workspace/coding 引擎的 author/revision/review 直连 `provider.start`（Story/Design/SingleCandidate(SC) 首轮与修订、WorkItemPlan legacy、coding reviewer 直连）**与 coding Coder(Executor) 直连**——允许保留现状拓扑
+
+#### Scenario: 过渡例外启动的三项条件
+
+- **WHEN** 上述 legacy 直连例外入口启动 provider
+- **THEN** 此类启动必须满足：（a）输入由 engine builder 工厂构造并按角色携带 REQ-ENV-09 工具策略（Reviewer 角色带策略，Executor/Coder 不带）；（b）受 adapter 层双向角色守卫保护；（c）接受按角色适用的启动审计——**策略角色（作者/评审）的 pi/claude/codex 启动接 REQ-ENV-09 的 durable_tool_policy_audit 分区；Executor/Coder 与非策略路径、kimi（全部角色）以既有 execution_event_audit 通道为等价审计（role/provider-specific 既有形态豁免，kimi 零改动为用户裁决）**
+
+#### Scenario: 同步栈不适用过渡例外
+
+- **WHEN** 同步栈 AdapterInput 直连入口或 gateway 全量迁移路线评估
+- **THEN** **同步栈（AdapterInput 直连）不适用本例外**，维持本 requirement 原文要求（逻辑仓既有 gateway guard fail-closed；非逻辑仓保留 API 无生产调用方，重激活前置=REQ-ENV-09 策略绑定）。全量 gateway 迁移为后续独立 change 的路线项，完成前本例外持续有效。
+
+#### Scenario: resolver 解析并冻结引用
+
+- **WHEN** 逻辑代码库任一真实 provider run 使用 policy/target 引用
+- **THEN** 逻辑代码库任一真实 provider run（规划、编码、评审或初始化）使用的 policy/target 引用 SHALL 由唯一 LC authority resolver 解析并校验，且 SessionPolicyEnvelope SHALL 冻结 policy_id、revision、digest、target identity、canonical `working_directory` 与 provider capability 快照
+
+#### Scenario: cwd 与 target 的映射
+
+- **WHEN** 逻辑代码库会话确定 cwd 与 target 映射
+- **THEN** 逻辑代码库的 `working_directory` SHALL 等于唯一 authority 的 canonical `provider_context_root`；`target`/`worktree` 继续表示本次会话被授权操作的成员、checkout 或 worktree，允许 cwd 与 target 不同；单仓 legacy 入口保留原有 cwd/target 映射
+
+#### Scenario: 材料不一致时启动失败关闭
+
+- **WHEN** resolver 无法唯一解析、policy 材料缺失、digest/revision 不一致、root identity 漂移或目标跨 kind 时启动
+- **THEN** resolver 无法唯一解析、policy 材料缺失、digest/revision 不一致、root identity 漂移或目标跨 kind 时，启动 SHALL 在 provider spawn 前 fail-closed，返回可诊断、可操作的核验/准备/重试等待项；不得回落到成员仓路径、项目级历史布局、旧 pointer 或裸 provider input
+
+#### Scenario: 允许操作后复用原编排链
+
+- **WHEN** 用户完成允许操作后流程继续
+- **THEN** 用户完成允许操作后，系统 SHALL 复用原始登记/编排链继续，不创建第二套 durable operation 状态机
 
 #### Scenario: 启动逻辑代码库 provider run
 
@@ -101,7 +139,37 @@ LC 真实 adapter SHALL 仅接受经 gateway 校验的 launch policy，禁止裸
 
 ### Requirement: 配置来源隔离（REQ-ENV-06）
 
-系统 SHALL 使逻辑代码库流程的真实 provider 使用 Aria-owned、权限受控的 settings/MCP bundle；审计 user/project/local/env/子仓 MCP 合并优先级，隔离未批准的配置与凭据；记录最终 argv 与配置 digest 到 run 审计；托管 settings（managed-settings）优先级高于 Cadence 注入时列为已知 gap。**例外（用户裁决 2026-09-04）**：provider **自发现通道**——provider CLI 原生读取的项目级/用户级配置（项目 `.mcp.json`、`.kimi-code/mcp.json`、`.codex/config.toml` 等）——为受信任通道，**不受 Aria bundle 管控与配置来源隔离约束**；该通道的配置内容由用户负责，其带来的配置来源审计弱化为显式接受的边界。Aria 主动注入场景（注入 settings/MCP bundle 时）的管控、脱敏与审计要求维持不变。LC root-cwd 的根原生配置不被复制、改写或强制纳入 Aria bundle 审计；但 Codex/Kimi 为可用而执行的 root-specific trust 登记 SHALL 记录其 root、动作与结果，失败 SHALL fail-closed。
+系统 SHALL 使逻辑代码库流程的真实 provider 使用 Aria-owned、权限受控的 settings/MCP bundle
+
+#### Scenario: 审计配置来源与合并优先级
+
+- **WHEN** 审计逻辑代码库流程真实 provider 的配置来源
+- **THEN** 审计 user/project/local/env/子仓 MCP 合并优先级，隔离未批准的配置与凭据
+
+#### Scenario: 记录最终 argv 与配置 digest
+
+- **WHEN** 逻辑代码库流程的真实 provider 以受控 bundle 启动
+- **THEN** 记录最终 argv 与配置 digest 到 run 审计
+
+#### Scenario: managed-settings 列为已知 gap
+
+- **WHEN** 托管 settings（managed-settings）优先级高于 Cadence 注入
+- **THEN** 托管 settings（managed-settings）优先级高于 Cadence 注入时列为已知 gap
+
+#### Scenario: provider 自发现通道为受信任通道
+
+- **WHEN** provider CLI 原生读取项目级/用户级配置（项目 `.mcp.json`、`.kimi-code/mcp.json`、`.codex/config.toml` 等）
+- **THEN** **例外（用户裁决 2026-09-04）**：provider **自发现通道**——provider CLI 原生读取的项目级/用户级配置（项目 `.mcp.json`、`.kimi-code/mcp.json`、`.codex/config.toml` 等）——为受信任通道，**不受 Aria bundle 管控与配置来源隔离约束**；该通道的配置内容由用户负责，其带来的配置来源审计弱化为显式接受的边界
+
+#### Scenario: Aria 主动注入维持管控
+
+- **WHEN** Aria 主动注入 settings/MCP bundle
+- **THEN** Aria 主动注入场景（注入 settings/MCP bundle 时）的管控、脱敏与审计要求维持不变
+
+#### Scenario: 根原生配置与 root-specific trust 登记
+
+- **WHEN** LC root-cwd 的根原生配置出现或执行 Codex/Kimi root-specific trust 登记
+- **THEN** LC root-cwd 的根原生配置不被复制、改写或强制纳入 Aria bundle 审计；但 Codex/Kimi 为可用而执行的 root-specific trust 登记 SHALL 记录其 root、动作与结果，失败 SHALL fail-closed
 
 #### Scenario: 真实 provider 启动
 
@@ -149,7 +217,27 @@ LC 真实 adapter SHALL 仅接受经 gateway 校验的 launch policy，禁止裸
 
 ### Requirement: kimi ACP mcpServers 走 envelope 受控注入（REQ-ENV-08）
 
-系统 SHALL 使逻辑代码库流程的 kimi provider 真实会话（`session/new` 与 `session/load`）的 `mcpServers` 参数来自 Aria-owned、权限受控的 settings/MCP bundle：allowlist 校验、配置 digest 记录、凭据脱敏、argv 审计；无 bundle 时为空数组（argv 与 digest 记入既有 run 审计通道=execution_event_audit 体系，非 tool-policy 分区）。resume 时（Aria 注入的）bundle digest 不一致 SHALL 拒绝。**例外**：kimi CLI 原生自发现（项目级 `mcp.json`，经用户一次性交互 Trust 后自动加载）属 REQ-ENV-06 例外条款定义的受信任自发现通道，不受本 requirement 管控；本 requirement 的 digest 漂移拒绝仅适用于 Aria 注入的 `mcpServers`。Kimi CLI 从 canonical LC root 经 root-specific workspace trust 自发现的通道不被 root-cwd change 拦截；workspace trust 登记与 Aria 注入 bundle 是两条独立事实和审计通道。
+系统 SHALL 使逻辑代码库流程的 kimi provider 真实会话（`session/new` 与 `session/load`）的 `mcpServers` 参数来自 Aria-owned、权限受控的 settings/MCP bundle：allowlist 校验、配置 digest 记录、凭据脱敏、argv 审计
+
+#### Scenario: 无 bundle 时为空数组
+
+- **WHEN** kimi 真实会话初始化且 envelope 未提供 bundle
+- **THEN** 无 bundle 时为空数组（argv 与 digest 记入既有 run 审计通道=execution_event_audit 体系，非 tool-policy 分区）
+
+#### Scenario: resume digest 漂移拒绝
+
+- **WHEN** resume 时（Aria 注入的）bundle digest 与冻结值不一致
+- **THEN** resume 时（Aria 注入的）bundle digest 不一致 SHALL 拒绝
+
+#### Scenario: kimi 原生自发现为受信任通道
+
+- **WHEN** kimi CLI 原生自发现项目级 `mcp.json`（经用户一次性交互 Trust 后自动加载）
+- **THEN** **例外**：kimi CLI 原生自发现（项目级 `mcp.json`，经用户一次性交互 Trust 后自动加载）属 REQ-ENV-06 例外条款定义的受信任自发现通道，不受本 requirement 管控；本 requirement 的 digest 漂移拒绝仅适用于 Aria 注入的 `mcpServers`
+
+#### Scenario: root-specific workspace trust 自发现不被拦截
+
+- **WHEN** Kimi CLI 从 canonical LC root 经 root-specific workspace trust 自发现
+- **THEN** Kimi CLI 从 canonical LC root 经 root-specific workspace trust 自发现的通道不被 root-cwd change 拦截；workspace trust 登记与 Aria 注入 bundle 是两条独立事实和审计通道
 
 #### Scenario: kimi 注入受控 bundle
 
@@ -178,7 +266,37 @@ LC 真实 adapter SHALL 仅接受经 gateway 校验的 launch policy，禁止裸
 
 ### Requirement: 非编码角色的 built-in 文件写工具拒绝（REQ-ENV-09）
 
-系统 SHALL 按角色施加经校验的工具黑名单策略（本期矩阵：作者家族与评审家族=拒绝 built-in 文件写工具；编码 Coder=无黑名单；聚合初始化 provider turns=Executor 无黑名单）：计划作者家族会话（Story/Design/SingleCandidate(SC) 首轮 author、author feedback revision、WorkItemPlan author 普通/fresh/resume/serial/batch）与评审家族会话（Story/Design reviewer、SC reviewer、review repair、coding CodeReviewer/InternalReviewer、group review）的 **built-in 文件写工具与 built-in 文件写升级审批** SHALL 不可达/被拒绝；Coder 与聚合初始化 SHALL 维持既有全工具面。**保护范围声明**：本 requirement 保护的是 built-in 工具面；bash/terminal 与 provider 自发现 MCP 工具为**显式信任逃逸面**（MCP 工具可能具备写能力，经 REQ-ENV-06 例外条款由用户裁决信任），不在本 requirement 保护范围内。策略以语义意图表达、经各 provider translator 翻译为 canonical 物理片段在启动时过滤；对 pi/claude/codex，黑名单之外的既有非写工具面 SHALL NOT 因本策略被禁用（读取、bash/terminal 只读命令、自发现 MCP/extension 工具、`ask_user`）。各 provider permission 映射、ApprovalBridge 语义与 driver choice 兜底不变。**术语**：本 requirement 中「审计」区分 `tool_policy_audit`（策略会话 JSONL 分区）与 `execution_event_audit`（既有非 durable 通道，用于 Coder/非策略路径与 kimi）；未注明种类时指 durable_tool_policy_audit。
+系统 SHALL 按角色施加经校验的工具黑名单策略（本期矩阵：作者家族与评审家族=拒绝 built-in 文件写工具；编码 Coder=无黑名单；聚合初始化 provider turns=Executor 无黑名单）：计划作者家族会话（Story/Design/SingleCandidate(SC) 首轮 author、author feedback revision、WorkItemPlan author 普通/fresh/resume/serial/batch）与评审家族会话（Story/Design reviewer、SC reviewer、review repair、coding CodeReviewer/InternalReviewer、group review）的 **built-in 文件写工具与 built-in 文件写升级审批** SHALL 不可达/被拒绝
+
+#### Scenario: Coder 与聚合初始化维持全工具面
+
+- **WHEN** 编码 Coder 或聚合初始化角色会话启动
+- **THEN** Coder 与聚合初始化 SHALL 维持既有全工具面
+
+#### Scenario: 保护范围限于 built-in 工具面
+
+- **WHEN** 会话使用 bash/terminal 或 provider 自发现 MCP 工具
+- **THEN** **保护范围声明**：本 requirement 保护的是 built-in 工具面；bash/terminal 与 provider 自发现 MCP 工具为**显式信任逃逸面**（MCP 工具可能具备写能力，经 REQ-ENV-06 例外条款由用户裁决信任），不在本 requirement 保护范围内
+
+#### Scenario: 语义意图经 translator 过滤
+
+- **WHEN** 工具黑名单策略在 provider 启动时落地
+- **THEN** 策略以语义意图表达、经各 provider translator 翻译为 canonical 物理片段在启动时过滤
+
+#### Scenario: 非写工具面不被禁用
+
+- **WHEN** pi/claude/codex 会话按本策略过滤工具面
+- **THEN** 对 pi/claude/codex，黑名单之外的既有非写工具面 SHALL NOT 因本策略被禁用（读取、bash/terminal 只读命令、自发现 MCP/extension 工具、`ask_user`）
+
+#### Scenario: provider 映射与 ApprovalBridge 不变
+
+- **WHEN** 各 provider permission 映射与 ApprovalBridge 语义生效
+- **THEN** 各 provider permission 映射、ApprovalBridge 语义与 driver choice 兜底不变
+
+#### Scenario: 审计术语的两种通道
+
+- **WHEN** 本 requirement 提及「审计」的种类
+- **THEN** **术语**：本 requirement 中「审计」区分 `tool_policy_audit`（策略会话 JSONL 分区）与 `execution_event_audit`（既有非 durable 通道，用于 Coder/非策略路径与 kimi）；未注明种类时指 durable_tool_policy_audit
 
 #### Scenario: 非编码角色启动时 built-in 写工具不可用
 - **WHEN** 任一 provider 的作者或评审会话启动（含首轮、修订、fresh、resume；含 legacy 直连例外与经 gateway 传递到 adapter 的启动）
@@ -221,7 +339,32 @@ LC 真实 adapter SHALL 仅接受经 gateway 校验的 launch policy，禁止裸
 
 ### Requirement: blocked／rework 下的受限政策读取与重新授权（REQ-ENV-C2-POLICY）
 
-当逻辑代码库 coding attempt 处于 blocked 或 rework 等待面时，产品面 SHALL 提供“读取政策”与“重新授权”操作。读取政策 SHALL 仅通过唯一 LC authority resolver 解析该 attempt 当前 SessionPolicyEnvelope 冻结的 policy_id、revision 与 digest，返回与 digest 一致的政策正文；resolver 无法唯一解析、digest 不一致或材料缺失时 SHALL fail-closed 并返回可诊断等待项，MUST NOT 回落到成员仓路径、项目级历史布局或绝对路径猜测。重新授权 SHALL 仅在用户确认后为该 attempt 的下一次 Coder／Reviewer 返修 run 签发 evidence 授权，授权 SHALL 绑定 attempt、role 与 policy digest，并仅在该 run 处于运行态期间有效。错误 role、过期或已替换的授权、错 attempt、digest 不匹配或越出 manifest 成员范围的读取 SHALL 继续被拒绝。系统 MUST NOT 把政策绝对路径或正文写入 context note 作为授权手段。
+当逻辑代码库 coding attempt 处于 blocked 或 rework 等待面时，产品面 SHALL 提供“读取政策”与“重新授权”操作
+
+#### Scenario: 读取政策仅经 authority resolver
+
+- **WHEN** blocked 或 rework 等待面执行读取政策
+- **THEN** 读取政策 SHALL 仅通过唯一 LC authority resolver 解析该 attempt 当前 SessionPolicyEnvelope 冻结的 policy_id、revision 与 digest，返回与 digest 一致的政策正文
+
+#### Scenario: resolver 失败时 fail-closed
+
+- **WHEN** resolver 无法唯一解析、digest 不一致或材料缺失
+- **THEN** resolver 无法唯一解析、digest 不一致或材料缺失时 SHALL fail-closed 并返回可诊断等待项，MUST NOT 回落到成员仓路径、项目级历史布局或绝对路径猜测
+
+#### Scenario: 重新授权签发并绑定
+
+- **WHEN** 用户确认后为该 attempt 的下一次 Coder／Reviewer 返修 run 签发 evidence 授权
+- **THEN** 重新授权 SHALL 仅在用户确认后为该 attempt 的下一次 Coder／Reviewer 返修 run 签发 evidence 授权，授权 SHALL 绑定 attempt、role 与 policy digest，并仅在该 run 处于运行态期间有效
+
+#### Scenario: 越权或错绑读取被拒
+
+- **WHEN** 以错误 role、过期或已替换的授权、错 attempt、digest 不匹配或越出 manifest 成员范围发起读取
+- **THEN** 错误 role、过期或已替换的授权、错 attempt、digest 不匹配或越出 manifest 成员范围的读取 SHALL 继续被拒绝
+
+#### Scenario: 不得以 context note 授权
+
+- **WHEN** 系统尝试把政策绝对路径或正文写入 context note 作为授权手段
+- **THEN** 系统 MUST NOT 把政策绝对路径或正文写入 context note 作为授权手段
 
 #### Scenario: 返修 coder 读取同 digest 政策
 

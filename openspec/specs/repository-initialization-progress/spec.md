@@ -144,7 +144,32 @@
 
 ### Requirement: 单仓初始化失败的通知与恢复后继续（REQ-INIT-C5-RESUME）
 
-单仓代码库登记 SHALL 继续使用现有 Claude 初始化流程（固定步骤与 `git_finalize` 语义不变）。operation 以 `failed` 终态结束时（含 provider 不可用、命令失败、要求交互与执行中断），系统 SHALL 在驾驶舱以稳定事实 key 呈现一次失败等待项，内容至少包括失败步骤、已完成步骤、结构化诊断（失败原因码、provider、可能的 changed paths、是否可重试与建议动作）以及“网关恢复后继续”操作的效果说明。该操作 SHALL 以失败 operation 冻结的登记输入重新提交一个新的初始化 operation，MUST NOT 复活、改写或删除原失败 operation 及其证据；同一 command_id 重放 SHALL 返回同一个新 operation，同一路径已有登记或正在初始化时 SHALL 按既有互斥规则拒绝。provider/网关仍不可用时新 operation SHALL 再次以失败终态停等并保留诊断，MUST NOT 伪造成功、MUST NOT 直写仓库登记数据或绕过初始化步骤；本需求 MUST NOT 引入 Claude 以外的初始化 recipe。
+单仓代码库登记 SHALL 继续使用现有 Claude 初始化流程（固定步骤与 `git_finalize` 语义不变）
+
+#### Scenario: 失败终态呈现等待项
+
+- **WHEN** operation 以 failed 终态结束时
+- **THEN** operation 以 `failed` 终态结束时（含 provider 不可用、命令失败、要求交互与执行中断），系统 SHALL 在驾驶舱以稳定事实 key 呈现一次失败等待项，内容至少包括失败步骤、已完成步骤、结构化诊断（失败原因码、provider、可能的 changed paths、是否可重试与建议动作）以及“网关恢复后继续”操作的效果说明
+
+#### Scenario: 重提新操作保留证据
+
+- **WHEN** 执行「网关恢复后继续」操作时
+- **THEN** 该操作 SHALL 以失败 operation 冻结的登记输入重新提交一个新的初始化 operation，MUST NOT 复活、改写或删除原失败 operation 及其证据
+
+#### Scenario: 同键重放返回同操作
+
+- **WHEN** 同一 command_id 重放或该路径已有登记或正在初始化时
+- **THEN** 同一 command_id 重放 SHALL 返回同一个新 operation，同一路径已有登记或正在初始化时 SHALL 按既有互斥规则拒绝
+
+#### Scenario: 网关仍不可用再停等
+
+- **WHEN** provider/网关仍不可用时新 operation 执行
+- **THEN** provider/网关仍不可用时新 operation SHALL 再次以失败终态停等并保留诊断，MUST NOT 伪造成功、MUST NOT 直写仓库登记数据或绕过初始化步骤
+
+#### Scenario: 不引入其他初始化配方
+
+- **WHEN** 定义本需求的初始化 recipe 时
+- **THEN** 本需求 MUST NOT 引入 Claude 以外的初始化 recipe
 
 #### Scenario: 网关不可用时停等并通知
 

@@ -8,7 +8,7 @@
 
 ### Requirement: session-owned run 管理器（REQ-WCR-01）
 
-run SHALL 由 session 级 manager 唯一持有：manager 持有单一 `WorkspaceEngine` 实例、`ActiveRun`（run token、cancellation、command 通道、状态、lease epoch）与完成/取消原因；连接只持有 attachment（connection id 与订阅），MUST NOT 拥有 run——run 所有权 MUST NOT 再由 socket-local `current_run` 代表。run 的开始/取消/命令/完成/lease 释放 SHALL 进入 manager 内单一原子临界区，以 token + lease epoch 比较后生效。engine 实例 SHALL 在会话运行期创建一次、MUST NOT 随连接销毁或重建；manager SHALL 是唯一能构建 session 快照与驱动 provider 的位置。内存回收点 SHALL 为「run 终态且无订阅者」。进程重启后系统 SHALL 从 durable 重建 manager 状态，MUST NOT 虚称 in-flight provider run 跨进程连续运行（不可恢复运行与可恢复状态分开处置，按恢复链处理）。
+run SHALL 由 session 级 manager 唯一持有：manager 持有单一 `WorkspaceEngine` 实例、`ActiveRun`（run token、cancellation、command 通道、状态、lease epoch）与完成/取消原因
 
 #### Scenario: 连接关闭 run 持续
 
@@ -34,6 +34,36 @@ run SHALL 由 session 级 manager 唯一持有：manager 持有单一 `Workspace
 
 - **WHEN** 某 session 的 run 进入终态且无任何订阅者
 - **THEN** manager 的该 session 运行态可被安全回收，再次访问时从 durable 重建
+
+#### Scenario: 连接只持有 attachment
+
+- **WHEN** 连接接入正在运行的 session
+- **THEN** 连接只持有 attachment（connection id 与订阅），MUST NOT 拥有 run——run 所有权 MUST NOT 再由 socket-local `current_run` 代表
+
+#### Scenario: 生命周期事件进入单一临界区
+
+- **WHEN** 并发发生「开始新 run」「旧 run 完成」「连接关闭清理」等生命周期事件交错
+- **THEN** run 的开始/取消/命令/完成/lease 释放 SHALL 进入 manager 内单一原子临界区，以 token + lease epoch 比较后生效
+
+#### Scenario: engine 实例会话期唯一
+
+- **WHEN** run 运行期间连接销毁或重建
+- **THEN** engine 实例 SHALL 在会话运行期创建一次、MUST NOT 随连接销毁或重建
+
+#### Scenario: manager 是快照与 provider 唯一入口
+
+- **WHEN** 构建 session 快照或驱动 provider
+- **THEN** manager SHALL 是唯一能构建 session 快照与驱动 provider 的位置
+
+#### Scenario: 内存回收点限定
+
+- **WHEN** 判定 session 运行态可否回收
+- **THEN** 内存回收点 SHALL 为「run 终态且无订阅者」
+
+#### Scenario: 进程重启从 durable 重建
+
+- **WHEN** 进程重启后恢复 session 状态
+- **THEN** 进程重启后系统 SHALL 从 durable 重建 manager 状态，MUST NOT 虚称 in-flight provider run 跨进程连续运行（不可恢复运行与可恢复状态分开处置，按恢复链处理）
 ### Requirement: driver/observer 角色与会话级 lease（REQ-WCR-02）
 
 Hello SHALL 增可选 `role` 字段（`driver` / `observer`），并按**双字段容忍**落地：旧客户端（无 role，含全部既有 driver 脚本）→ 新服务端时缺席字段被容忍并归一；新客户端 → 旧服务端时未知字段被忽略。缺席 role SHALL 在服务端入口处归一为内部显式常量（语义 = legacy driver 等价），命令仲裁 SHALL 只认内部角色——legacy 容忍分支 MUST NOT 外溢到仲裁逻辑。observer MUST NOT 能发送改变 run 的消息：服务端 SHALL 拒绝并返回可诊断错误（MUST NOT 只依赖前端隐藏入口）。lease SHALL 为会话级、至多一个活性 driver 授权：由连接持有，连接关闭只撤销 lease / 记录状态，MUST NOT 取消或改写 run；新连接 SHALL 可显式接管 lease（epoch 递增，旧 epoch 的迟到写命令 MUST 被拒）。旧枚举/既有客户端行为在阶段 4 退役门满足前 SHALL NOT 被删除或破坏。
@@ -87,7 +117,7 @@ Hello SHALL 增可选 `role` 字段（`driver` / `observer`），并按**双字�
 - **THEN** durable 只有一个真实 terminal reason，无双重终态写入
 ### Requirement: 重连 cursor 重订阅与 session 级广播（REQ-WCR-04）
 
-事件流 SHALL 以 session-scoped 单调 `event_seq` 为序（MUST NOT 复用 node id 作为 cursor）。Hello SHALL 支持可选 `after_event_seq` 字段（与 `role` 同批、同双字段容忍纪律）；重连 SHALL 经 cursor 重新订阅：manager 保存有界事件 journal，cursor 过旧或存在缺口时 SHALL 先发送带 cursor 的完整 snapshot 建立基线，再续发后续事件；客户端 SHALL 按 seq 去重。流式内容的回放口径：journal 保留至 run 完成，或 snapshot 携带当前累计文本——二者取一实现，但断线重连后流式呈现 MUST NOT 丢字或重复，MUST NOT「承诺可回放却只回放 timeline」。慢订阅者 SHALL 使用有界通道：溢出后标记需要 snapshot 降级重取，MUST NOT 反压 provider 或阻塞其他订阅者。每连接 SHALL 只管理自己的出站泵：关闭任一连接 MUST NOT 影响 run、engine 或其他 attachment。广播范围 SHALL 为 workspace WS；coding WS 广播为条件扩展项（P2 主体滑窗则 defer 并显式登记 backlog，MUST NOT 以「顺带」名义混入本 requirement 验收）。
+事件流 SHALL 以 session-scoped 单调 `event_seq` 为序（MUST NOT 复用 node id 作为 cursor）
 
 #### Scenario: 断线重连回放不丢不重
 
@@ -113,9 +143,49 @@ Hello SHALL 增可选 `role` 字段（`driver` / `observer`），并按**双字�
 
 - **WHEN** 多连接订阅同一 session，其中任一连接关闭
 - **THEN** 其余连接订阅与 run 运行不受影响
+
+#### Scenario: Hello 支持 after_event_seq
+
+- **WHEN** 客户端在 Hello 中携带可选 `after_event_seq` 字段
+- **THEN** Hello SHALL 支持可选 `after_event_seq` 字段（与 `role` 同批、同双字段容忍纪律）
+
+#### Scenario: 重连经 cursor 重新订阅
+
+- **WHEN** 客户端带 cursor 重连
+- **THEN** 重连 SHALL 经 cursor 重新订阅：manager 保存有界事件 journal，cursor 过旧或存在缺口时 SHALL 先发送带 cursor 的完整 snapshot 建立基线，再续发后续事件
+
+#### Scenario: 客户端按 seq 去重
+
+- **WHEN** 客户端收到事件流
+- **THEN** 客户端 SHALL 按 seq 去重
+
+#### Scenario: 流式回放口径取一实现
+
+- **WHEN** 断线重连后恢复流式内容
+- **THEN** 流式内容的回放口径：journal 保留至 run 完成，或 snapshot 携带当前累计文本——二者取一实现，但断线重连后流式呈现 MUST NOT 丢字或重复，MUST NOT「承诺可回放却只回放 timeline」
+
+#### Scenario: 慢订阅者使用有界通道
+
+- **WHEN** 某订阅者消费过慢导致通道溢出
+- **THEN** 慢订阅者 SHALL 使用有界通道：溢出后标记需要 snapshot 降级重取，MUST NOT 反压 provider 或阻塞其他订阅者
+
+#### Scenario: 每连接独立出站泵
+
+- **WHEN** 关闭任一连接
+- **THEN** 每连接 SHALL 只管理自己的出站泵：关闭任一连接 MUST NOT 影响 run、engine 或其他 attachment
+
+#### Scenario: 广播范围为 workspace WS
+
+- **WHEN** 判定事件广播范围
+- **THEN** 广播范围 SHALL 为 workspace WS
+
+#### Scenario: coding WS 广播为条件扩展项
+
+- **WHEN** P2 主体滑窗导致 coding WS 广播暂缓
+- **THEN** coding WS 广播为条件扩展项（P2 主体滑窗则 defer 并显式登记 backlog，MUST NOT 以「顺带」名义混入本 requirement 验收）
 ### Requirement: 连接级中性归因日志（REQ-WCR-05）
 
-系统 SHALL 提供连接级归因日志：服务端为每个 WS 连接生成 `connection_id`，并记录 receiver 退出类型（close frame 的 code/reason、EOF、error）、是否由 idle 超时触发、session、当前 run/token、drive depth、最后双向 activity 时间；前端 SHALL 记录 `onclose` 的 code/reason/wasClean、`document.visibilityState`、最后 pong/server-message 与最后 ping 时间。归因记录 SHALL 为**中性连接诊断事实**，与业务 timeline terminal reason 分离——MUST NOT 把断连事实重新编码为「运行已中止」。过渡期（本能力落地 → REQ-WCR-03 落地前）断连清理仍写 `aborted_by_disconnect` 时，同一 `connection_id` SHALL 写入其 detail 供关联归因；REQ-WCR-03 落地后该写入随架构消失，中性记录成为唯一连接级事实源。归因能力 SHALL 满足闭环判据：**一次复现即可唯一判定 close 起点**（server-idle / 前端 4000 自关 / 页面卸载 1000 / 代理或 TCP 断开 / 浏览器 discard）。
+系统 SHALL 提供连接级归因日志：服务端为每个 WS 连接生成 `connection_id`，并记录 receiver 退出类型（close frame 的 code/reason、EOF、error）、是否由 idle 超时触发、session、当前 run/token、drive depth、最后双向 activity 时间
 
 #### Scenario: 四种人为 close 唯一归因
 
@@ -136,6 +206,31 @@ Hello SHALL 增可选 `role` 字段（`driver` / `observer`），并按**双字�
 
 - **WHEN** 归因日志落地并经一次真实复现完成归因定案
 - **THEN** 此后方可按证据表述断连根因；此前任何文案 MUST NOT 宣称「断连主嫌已根治」（热修表述限「消除已证实的前端断连源」）
+
+#### Scenario: 前端记录 onclose 事实
+
+- **WHEN** 前端侧连接触发 onclose
+- **THEN** 前端 SHALL 记录 `onclose` 的 code/reason/wasClean、`document.visibilityState`、最后 pong/server-message 与最后 ping 时间
+
+#### Scenario: 归因记录保持中性
+
+- **WHEN** 记录连接级归因事实
+- **THEN** 归因记录 SHALL 为**中性连接诊断事实**，与业务 timeline terminal reason 分离——MUST NOT 把断连事实重新编码为「运行已中止」
+
+#### Scenario: 过渡期 detail 关联归因
+
+- **WHEN** 过渡期内断连清理仍写 `aborted_by_disconnect`
+- **THEN** 过渡期（本能力落地 → REQ-WCR-03 落地前）断连清理仍写 `aborted_by_disconnect` 时，同一 `connection_id` SHALL 写入其 detail 供关联归因
+
+#### Scenario: WCR-03 落地后中性记录唯一
+
+- **WHEN** REQ-WCR-03 落地后查看连接级事实源
+- **THEN** REQ-WCR-03 落地后该写入随架构消失，中性记录成为唯一连接级事实源
+
+#### Scenario: 一次复现唯一判定 close 起点
+
+- **WHEN** 用归因能力判定断连根因
+- **THEN** 归因能力 SHALL 满足闭环判据：**一次复现即可唯一判定 close 起点**（server-idle / 前端 4000 自关 / 页面卸载 1000 / 代理或 TCP 断开 / 浏览器 discard）
 ### Requirement: 存量数据与降级回滚兼容（REQ-WCR-06）
 
 本 capability 的 durable 变更 SHALL 只改写入行为、MUST NOT 改 durable schema 结构；存量 `aborted_by_disconnect` 标记 SHALL 保留为历史事实（事件前缀不可变），新代码 MUST NOT 因其存在误判。卡死 session（0166/0167/0168/0199/0277 及 0429）的处置 SHALL 为**复活验证**：修复落地后以新二进制对每个存量 session 验证快照门 confirm 可达（复活续链）或获得明确可诊断拒绝（真实缺口则以可诊断终态化关闭），结果逐个登记；MUST NOT 回写或修复历史 durable，MUST NOT 承诺全部复活。降级回滚 SHALL 安全：回退旧二进制读新 durable 数据 MUST 无 schema 断裂（回退后恢复旧写入行为，即重新引入误标，属行为面代价而非数据损坏）；wire 双字段容忍 SHALL 保证新旧二进制与客户端脚本任意组合不炸。P2 关闸证据 SHALL 含一次回退读验证。
@@ -157,11 +252,7 @@ Hello SHALL 增可选 `role` 字段（`driver` / `observer`），并按**双字�
 ### Requirement: 断连验收矩阵（RCA §6 全量，P2 done 定义）（REQ-WCR-07）
 
 RCA §6 四条断连验收矩阵 SHALL 全量作为 P2 部分的 done 定义，MUST NOT 因预估压力裁剪（排期滑窗时 SHALL 整体 defer 该部分，MUST NOT 以裁剪矩阵换取部分通过）：
-
-1. **后台节流存活**：Chrome 官方 intensive-throttling 测试 flag 下 tab 隐藏运行超过阈值——断言每个 25 秒应用 ping 的实际间隔、服务端是否发 idle close、run 持续且无 `aborted_by_disconnect`。
-2. **门等待静默存活**：human-gate revision 期间 provider 静默超过 60 秒——断言前端不自行发送 close 4000、服务端不 idle close、完成后状态为业务结果而非断连覆盖。
-3. **四种 close 唯一归因**：人为 server idle、浏览器 `ws.close(4000)`、页面卸载 1000、TCP drop 各一次——断言归因日志唯一归因，且 durable terminal reason 各自正确。
-4. **多连接零影响**：driver + cockpit observer 多连接——关闭 observer 对 driver run 零影响；driver close 只影响订阅/lease，run 持续。
+1. **后台节流存活**：Chrome 官方 intensive-throttling 测试 flag 下 tab 隐藏运行超过阈值——断言每个 25 秒应用 ping 的实际间隔、服务端是否发 idle close、run 持续且无 `aborted_by_disconnect`
 
 #### Scenario: 矩阵① 后台节流下 run 存活
 
@@ -187,3 +278,18 @@ RCA §6 四条断连验收矩阵 SHALL 全量作为 P2 部分的 done 定义，M
 
 - **WHEN** P2 排期出现压力
 - **THEN** 处置为整体 defer 该部分，任何一条矩阵 MUST NOT 被裁剪或降级为部分通过
+
+#### Scenario: 矩阵条目② 门等待静默存活
+
+- **WHEN** human-gate revision 期间 provider 静默超过 60 秒
+- **THEN** 2. **门等待静默存活**：human-gate revision 期间 provider 静默超过 60 秒——断言前端不自行发送 close 4000、服务端不 idle close、完成后状态为业务结果而非断连覆盖
+
+#### Scenario: 矩阵条目③ 四种 close 唯一归因
+
+- **WHEN** 人为制造 server idle、浏览器 `ws.close(4000)`、页面卸载 1000、TCP drop 各一次
+- **THEN** 3. **四种 close 唯一归因**：人为 server idle、浏览器 `ws.close(4000)`、页面卸载 1000、TCP drop 各一次——断言归因日志唯一归因，且 durable terminal reason 各自正确
+
+#### Scenario: 矩阵条目④ 多连接零影响
+
+- **WHEN** driver + cockpit observer 多连接下关闭 observer
+- **THEN** 4. **多连接零影响**：driver + cockpit observer 多连接——关闭 observer 对 driver run 零影响；driver close 只影响订阅/lease，run 持续

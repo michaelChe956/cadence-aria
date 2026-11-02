@@ -7,7 +7,7 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 
 ### Requirement: 按 target 分流创建与 per-(plan,target) 唯一性（REQ-MTG-01）
 
-建组与 advance 初始化 SHALL 按 target 显式分流：解析 authoritative plan binding 后按 unit 的 `target_repository_id` 分组——单一 target（含无 target 且 selection focus 唯一）SHALL 走既有建组路径且行为与本 change 前完全一致（单 attempt、收敛路由、零变化）；多 target SHALL 为每个目标仓库分别建立独立的 target-attempt（scope 为 WorkItemGroup、绑定同一 plan），MUST NOT 以单一 attempt 承载多 target。target-attempt 唯一性 SHALL 为 per-`(plan, target)`：同一 `(plan, target)` 至多一个 target-attempt，重复建组/advance/重放 SHALL 命中既有 target-attempt 而非新建。units SHALL 按 target 归属分入各自 target-attempt 的 coding units；无 target 归属且 selection focus 不唯一 SHALL 保持 fail-closed 拒绝并返回稳定错误码。创建、恢复、replay 三处校验与全部路由消费面 SHALL 一致适用本分流规则；「group 内存在多 target」本身 SHALL NOT 构成拒绝理由。
+建组与 advance 初始化 SHALL 按 target 显式分流：解析 authoritative plan binding 后按 unit 的 `target_repository_id` 分组——单一 target（含无 target 且 selection focus 唯一）SHALL 走既有建组路径且行为与本 change 前完全一致（单 attempt、收敛路由、零变化）
 
 #### Scenario: mixed-target group 按 target 分流创建
 
@@ -29,9 +29,39 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 - **WHEN** units 均无 `target_repository_id` 且 issue codebase selection focus 不唯一
 - **THEN** 建组被拒绝并返回稳定错误码（TargetMissing 语义），不静默选择任一 target
 
+#### Scenario: 多仓各建独立 attempt
+
+- **WHEN** 建组或 advance 初始化解析得到多 target
+- **THEN** 多 target SHALL 为每个目标仓库分别建立独立的 target-attempt（scope 为 WorkItemGroup、绑定同一 plan），MUST NOT 以单一 attempt 承载多 target
+
+#### Scenario: 逐仓至多一个 attempt
+
+- **WHEN** 同一 `(plan, target)` 发生重复建组、advance 或重放
+- **THEN** target-attempt 唯一性 SHALL 为 per-`(plan, target)`：同一 `(plan, target)` 至多一个 target-attempt，重复建组/advance/重放 SHALL 命中既有 target-attempt 而非新建
+
+#### Scenario: units 按 target 归组
+
+- **WHEN** 按 target 归属划分 group 的 units
+- **THEN** units SHALL 按 target 归属分入各自 target-attempt 的 coding units
+
+#### Scenario: 无归属拒绝建组
+
+- **WHEN** units 无 target 归属且 selection focus 不唯一而尝试建组
+- **THEN** 无 target 归属且 selection focus 不唯一 SHALL 保持 fail-closed 拒绝并返回稳定错误码
+
+#### Scenario: 三处校验一致适用
+
+- **WHEN** 创建、恢复、replay 校验或任一路由消费面应用本分流规则
+- **THEN** 创建、恢复、replay 三处校验与全部路由消费面 SHALL 一致适用本分流规则
+
+#### Scenario: 多 target 非拒绝理由
+
+- **WHEN** 校验或路由面对 group 内存在多 target 的组
+- **THEN** 「group 内存在多 target」本身 SHALL NOT 构成拒绝理由
+
 ### Requirement: per-target 冻结快照与单 worktree 不变式（REQ-MTG-02）
 
-每个 target-attempt SHALL 各自冻结其目标仓库的 `AttemptTargetSnapshot`（三层身份映射、revision、policy digest、membership revision），REQ-COD-02 的「创建、恢复、重放一律使用冻结快照、不得从活 Work Item 重新猜测」语义 SHALL per-attempt 原样适用。`CodingExecutionAttempt` 的单值持久化字段（worktree_path、head_commit、stage、target_snapshot）SHALL 保持单值语义：每 attempt 恰对应一个 worktree、一个 head、一个 target 快照，MUST NOT 数组化或以集合字段承载多 target。target-attempt 的路由权威 SHALL 为其自身冻结快照（恢复、重放、半启动恢复按各自快照与 worktree 独立运转），MUST NOT 从 plan binding 的 units 重新收敛单一 target。同 target 的串行（REQ-COD-03 同仓串行与三元键 worktree lock）与 attempt 内 unit 级约束（REQ-GCE-01 共享 worktree 单 active unit）SHALL 原样适用；异 target 的 target-attempts SHALL 可并行存在与执行（各自 worktree lock 隔离）。
+每个 target-attempt SHALL 各自冻结其目标仓库的 `AttemptTargetSnapshot`（三层身份映射、revision、policy digest、membership revision），REQ-COD-02 的「创建、恢复、重放一律使用冻结快照、不得从活 Work Item 重新猜测」语义 SHALL per-attempt 原样适用
 
 #### Scenario: 每 target-attempt 各持冻结快照
 
@@ -48,11 +78,29 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 - **WHEN** 同一 plan 的两个 target-attempt 分别处于执行中
 - **THEN** 两者各自经 `(project, issue, repository)` 三元键 worktree lock 隔离，可并行推进；同 target 的第二个 active attempt 仍被拒绝（per-(issue,target) 单 active）
 
+#### Scenario: 单值字段禁数组化
+
+- **WHEN** 持久化 `CodingExecutionAttempt` 的 worktree_path、head_commit、stage、target_snapshot 字段
+- **THEN** `CodingExecutionAttempt` 的单值持久化字段（worktree_path、head_commit、stage、target_snapshot）SHALL 保持单值语义：每 attempt 恰对应一个 worktree、一个 head、一个 target 快照，MUST NOT 数组化或以集合字段承载多 target
+
+#### Scenario: 路由权威取自身快照
+
+- **WHEN** 恢复、重放或半启动恢复中判定某 target-attempt 的路由 target
+- **THEN** target-attempt 的路由权威 SHALL 为其自身冻结快照（恢复、重放、半启动恢复按各自快照与 worktree 独立运转），MUST NOT 从 plan binding 的 units 重新收敛单一 target
+
+#### Scenario: 同仓串行约束原样适用
+
+- **WHEN** 同 target 的多个 attempt 之间与 attempt 内 unit 执行适用约束
+- **THEN** 同 target 的串行（REQ-COD-03 同仓串行与三元键 worktree lock）与 attempt 内 unit 级约束（REQ-GCE-01 共享 worktree 单 active unit）SHALL 原样适用
+
+#### Scenario: 异 target 可并行
+
+- **WHEN** 同一 plan 下不同 target 的 target-attempts 同时存在
+- **THEN** 异 target 的 target-attempts SHALL 可并行存在与执行（各自 worktree lock 隔离）
+
 ### Requirement: 手动推进与启动门（REQ-MTG-03）
 
-**多 target** 推进 SHALL 以人工显式为默认：每个 target-attempt 的 coding provider 首启唯一入口 SHALL 保持显式 `StartCoding` 入站应用命令，SC admission 的 target-attempt 在经 advance 置 Ready 之前收到 StartCoding SHALL fail-closed 拒绝并返回 `SC_CODING_REQUIRES_ADVANCE`（per-attempt 适用，判定=advance record 与该 attempt 的绑定关系，未绑定或未 Ready 一律拒绝）。advance durable record SHALL 保持每 plan 恰一条（幂等不变）；其与 target-attempt 的绑定 SHALL 以 additive 方式扩展承载多 target-attempt 集（既有单 target 记录的 `attempt_id` 承载语义不变、零迁移）。在无精确自动化授权（无 enrollment、enrollment 关闭或不匹配）时，系统 MUST NOT 自动顺序拉起、依赖驱动拉起或以任何编排动作隐式启动跨 target 的 target-attempts——多 target 的推进顺序 SHALL 由人决定（可串行或并行对各自 Ready 的 target-attempt 发 StartCoding），不能以「循环中一次仅启动一个」规避禁止批量编排。
-
-仅 `work-item-group-autopilot` 显式 opt-in enrollment 精确绑定授权 target（一个单仓物理仓——plan 全部工作项无 logical target 归属、attempt 无逻辑代码库 target 快照；一个逻辑代码库单成员；或 logical codebase 成员集合）且 plan 实际桶满足 ∅≠P⊆A、无未归属 WI 时，服务端方可经共享 plan-run 驱动自动推进：以独立共用 StartCoding 命令与 Enrolled advance（`AutoStartOnce` 单发许可）首启与续驱全部实际桶，首启与续驱 SHALL 沿 `CodingPlanSelection::deterministic_start_command_id` 稳定命令身份；全部自动桶（尤其非首桶）SHALL 以 Enrolled origin 启动并逐桶核对 policy/enrollment/binding；上游完成挂点 SHALL 自动启动下游就绪桶。撤销、绑定不符、越权成员、同一 plan 出现授权外 attempt 或 terminated SHALL 零 provider、禁止降级 Manual。这不构成手动顺序的变更：手动与无授权场景的推进语义保持本 requirement 第一段不变；无授权集合的跨 target-attempt 依赖就绪门自动编排仍为 defer 项，本红线不被任何「简化版编排」变体突破。
+**多 target** 推进 SHALL 以人工显式为默认：每个 target-attempt 的 coding provider 首启唯一入口 SHALL 保持显式 `StartCoding` 入站应用命令，SC admission 的 target-attempt 在经 advance 置 Ready 之前收到 StartCoding SHALL fail-closed 拒绝并返回 `SC_CODING_REQUIRES_ADVANCE`（per-attempt 适用，判定=advance record 与该 attempt 的绑定关系，未绑定或未 Ready 一律拒绝）
 
 #### Scenario: per-attempt 守卫零变化
 
@@ -99,13 +147,54 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 - **WHEN** 同一 plan 出现授权集合外的 target-attempt、集合 enrollment 的 plan 混入手动仓 attempt，或 enrollment 范围与冻结 attempt 不符
 - **THEN** 所有对该 attempt 的自动首启均拒绝，不因单次只有一个 attempt 就突破授权边界
 
+#### Scenario: advance 记录单条幂等
+
+- **WHEN** 为任一 plan 写入 advance durable record
+- **THEN** advance durable record SHALL 保持每 plan 恰一条（幂等不变）
+
+#### Scenario: 绑定 additive 扩展
+
+- **WHEN** advance durable record 需承载多 target-attempt 绑定关系
+- **THEN** 其与 target-attempt 的绑定 SHALL 以 additive 方式扩展承载多 target-attempt 集（既有单 target 记录的 `attempt_id` 承载语义不变、零迁移）
+
+#### Scenario: 无授权禁自动拉起
+
+- **WHEN** 无精确自动化授权（无 enrollment、enrollment 关闭或不匹配）而存在待推进的 target-attempt
+- **THEN** 在无精确自动化授权（无 enrollment、enrollment 关闭或不匹配）时，系统 MUST NOT 自动顺序拉起、依赖驱动拉起或以任何编排动作隐式启动跨 target 的 target-attempts——多 target 的推进顺序 SHALL 由人决定（可串行或并行对各自 Ready 的 target-attempt 发 StartCoding），不能以「循环中一次仅启动一个」规避禁止批量编排
+
+#### Scenario: 精确授权方可自动推进
+
+- **WHEN** `work-item-group-autopilot` 显式 opt-in enrollment 绑定授权 target 且 plan 实际桶满足授权条件
+- **THEN** 仅 `work-item-group-autopilot` 显式 opt-in enrollment 精确绑定授权 target（一个单仓物理仓——plan 全部工作项无 logical target 归属、attempt 无逻辑代码库 target 快照；一个逻辑代码库单成员；或 logical codebase 成员集合）且 plan 实际桶满足 ∅≠P⊆A、无未归属 WI 时，服务端方可经共享 plan-run 驱动自动推进：以独立共用 StartCoding 命令与 Enrolled advance（`AutoStartOnce` 单发许可）首启与续驱全部实际桶，首启与续驱 SHALL 沿 `CodingPlanSelection::deterministic_start_command_id` 稳定命令身份
+
+#### Scenario: 自动桶核对来源
+
+- **WHEN** 自动推进启动各实际桶（尤其非首桶）
+- **THEN** 全部自动桶（尤其非首桶）SHALL 以 Enrolled origin 启动并逐桶核对 policy/enrollment/binding
+
+#### Scenario: 上游完成启下游
+
+- **WHEN** 自动推进中某上游桶完成且下游桶就绪
+- **THEN** 上游完成挂点 SHALL 自动启动下游就绪桶
+
+#### Scenario: 撤销越权零启动
+
+- **WHEN** 自动驱动中出现 enrollment 撤销、绑定不符、越权成员、同一 plan 授权外 attempt 或 terminated
+- **THEN** 撤销、绑定不符、越权成员、同一 plan 出现授权外 attempt 或 terminated SHALL 零 provider、禁止降级 Manual
+
+#### Scenario: 手动语义不变
+
+- **WHEN** 精确自动化授权存在时对照手动与无授权场景的推进语义
+- **THEN** 这不构成手动顺序的变更：手动与无授权场景的推进语义保持本 requirement 第一段不变
+
+#### Scenario: 依赖编排仍 defer
+
+- **WHEN** 无授权集合下提议跨 target-attempt 依赖就绪门自动编排
+- **THEN** 无授权集合的跨 target-attempt 依赖就绪门自动编排仍为 defer 项，本红线不被任何「简化版编排」变体突破
+
 ### Requirement: group 级聚合只读视图与终态（REQ-MTG-04）
 
-系统 SHALL 为每个 plan 提供 group 级聚合只读视图，与拆分能力同批交付：内容至少包括 per-target 投影（目标仓库身份、该 target-attempt 的状态与当前 stage、分支、head commit、推送状态、ReviewRequest 状态、失败/阻塞原因）与聚合终态。聚合终态 SHALL 三值：全部交付（每个 target-attempt 均达 REQ-COD-06 完成级别——Completed、目标仓分支已推送或未配置远端而本地交付、且 ReviewRequest 已生成）、部分（任一 target 未满足，SHALL 显式呈现 partial failure 与未满足项，MUST NOT 伪装全局成功）、未启（无 target-attempt，或全部 target-attempt 均未达 provider 启动——判定优先于「部分」：仅当存在任一 target-attempt 已达 provider 启动且非全部交付时方落「部分」）。
-
-「已交付」谓词 SHALL 单一定义：最新 ReviewRequest 的推送状态为 `pushed` 或 `skipped_not_configured`。plan 级聚合、issue 级交付聚合与前端交付徽标 SHALL 共用该谓词，MUST NOT 各自直接比较 `pushed`。推送状态为 `skipped_not_configured` 的 target SHALL 在 per-target 投影中与 `pushed` 区分呈现，聚合终态为全部交付时仍须能看出哪些 target 为本地交付。
-
-判定口径 SHALL 与 `per-repo-coding-execution` 的每仓交付聚合（每 target 取最新 attempt、Completed 且满足已交付谓词才算交付）一致。该视图 SHALL 从 target-attempt/unit durable 事实确定性派生，SHALL NOT 形成第二套状态机；各 target-attempt 的 group coding workspace 仍是其执行观察面（REQ-GCE-04 语义 per-attempt 适用），聚合视图 SHALL NOT 承载任何决策、启动或中止操作面。
+系统 SHALL 为每个 plan 提供 group 级聚合只读视图，与拆分能力同批交付：内容至少包括 per-target 投影（目标仓库身份、该 target-attempt 的状态与当前 stage、分支、head commit、推送状态、ReviewRequest 状态、失败/阻塞原因）与聚合终态
 
 #### Scenario: 聚合视图呈现 per-target 与终态
 
@@ -136,6 +225,41 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 
 - **WHEN** 按 target 分流创建能力验收
 - **THEN** 聚合只读视图（含前端呈现）已同批交付可用，不存在「拆分已交付而聚合视图缺席」的中间交付态
+
+#### Scenario: 聚合终态三值
+
+- **WHEN** 判定某 plan 的聚合终态
+- **THEN** 聚合终态 SHALL 三值：全部交付（每个 target-attempt 均达 REQ-COD-06 完成级别——Completed、目标仓分支已推送或未配置远端而本地交付、且 ReviewRequest 已生成）、部分（任一 target 未满足，SHALL 显式呈现 partial failure 与未满足项，MUST NOT 伪装全局成功）、未启（无 target-attempt，或全部 target-attempt 均未达 provider 启动——判定优先于「部分」：仅当存在任一 target-attempt 已达 provider 启动且非全部交付时方落「部分」）
+
+#### Scenario: 已交付谓词单一定义
+
+- **WHEN** 判定任一 target 是否已交付
+- **THEN** 「已交付」谓词 SHALL 单一定义：最新 ReviewRequest 的推送状态为 `pushed` 或 `skipped_not_configured`
+
+#### Scenario: 交付聚合共用谓词
+
+- **WHEN** plan 级聚合、issue 级交付聚合与前端交付徽标各自判定交付
+- **THEN** plan 级聚合、issue 级交付聚合与前端交付徽标 SHALL 共用该谓词，MUST NOT 各自直接比较 `pushed`
+
+#### Scenario: 本地交付区分呈现
+
+- **WHEN** 某 target 推送状态为 `skipped_not_configured` 且聚合终态为全部交付
+- **THEN** 推送状态为 `skipped_not_configured` 的 target SHALL 在 per-target 投影中与 `pushed` 区分呈现，聚合终态为全部交付时仍须能看出哪些 target 为本地交付
+
+#### Scenario: 判定口径对齐每仓聚合
+
+- **WHEN** 聚合视图与 `per-repo-coding-execution` 的每仓交付聚合并存
+- **THEN** 判定口径 SHALL 与 `per-repo-coding-execution` 的每仓交付聚合（每 target 取最新 attempt、Completed 且满足已交付谓词才算交付）一致
+
+#### Scenario: 派生无第二状态机
+
+- **WHEN** 聚合视图生成或刷新内容
+- **THEN** 该视图 SHALL 从 target-attempt/unit durable 事实确定性派生，SHALL NOT 形成第二套状态机
+
+#### Scenario: 聚合视图无操作面
+
+- **WHEN** 各 target-attempt 的 group coding workspace 与聚合视图分别被使用
+- **THEN** 各 target-attempt 的 group coding workspace 仍是其执行观察面（REQ-GCE-04 语义 per-attempt 适用），聚合视图 SHALL NOT 承载任何决策、启动或中止操作面
 
 ### Requirement: attempt 增殖审计与恢复一致性（REQ-MTG-05）
 

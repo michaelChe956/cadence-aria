@@ -103,9 +103,32 @@ internal PR review 与 group final review 阶段，当评审结论推出需要�
 
 ### Requirement: 组就绪检查必须提供客观的人工审查证据
 
-组就绪检查 MUST 从权威执行记录生成每个 Work Item 的 UnitRun `start_commit`、terminal completion commit、完整提交区间及有序提交引用、最新独立 Code Review 的结论/发现/摘要与原始输出证据引用、resolved handoff 和绑定的 Work Item Plan revision。所有文件与 diff 引用 MUST 由各 execution 真实的 `start_commit..completion_commit` 区间聚合派生，MUST NOT 只使用末尾 commit 的父提交 diff，MUST NOT 把两个 execution 区间之间由人工产生的提交归属给当前 Work Item。检查 MUST 验证全部 Unit 已完成、必需 completion commit 与独立审查记录存在、handoff 与依赖解析一致，以及 attempt 的计划 binding 与活跃 revision 一致。若检查存在经用户批准的验证处理记录，检查 MUST 将其与对应 check 一并展示。
+组就绪检查 MUST 从权威执行记录生成每个 Work Item 的 UnitRun `start_commit`、terminal completion commit、完整提交区间及有序提交引用、最新独立 Code Review 的结论/发现/摘要与原始输出证据引用、resolved handoff 和绑定的 Work Item Plan revision。
 
-该检查 MUST NOT 生成代码语义 finding、重新解释 Code Review 结论、执行新的文件写入范围判断或自动启动 Coder rework 与 Plan Repair。`start_commit` 与 completion commit 相同 MUST 表示空观察区间，而非把该起始提交相对父提交的改动归属给当前 Work Item。
+#### Scenario: 按提交区间派生
+
+- **WHEN** 生成文件与 diff 引用
+- **THEN** 所有文件与 diff 引用 MUST 由各 execution 真实的 `start_commit..completion_commit` 区间聚合派生，MUST NOT 只使用末尾 commit 的父提交 diff，MUST NOT 把两个 execution 区间之间由人工产生的提交归属给当前 Work Item。
+
+#### Scenario: 核验完成与绑定一致
+
+- **WHEN** 检查核验执行事实
+- **THEN** 检查 MUST 验证全部 Unit 已完成、必需 completion commit 与独立审查记录存在、handoff 与依赖解析一致，以及 attempt 的计划 binding 与活跃 revision 一致。
+
+#### Scenario: 展示批准处理记录
+
+- **WHEN** 检查存在经用户批准的验证处理记录
+- **THEN** 若检查存在经用户批准的验证处理记录，检查 MUST 将其与对应 check 一并展示。
+
+#### Scenario: 检查不产语义发现
+
+- **WHEN** 生成组就绪检查
+- **THEN** 该检查 MUST NOT 生成代码语义 finding、重新解释 Code Review 结论、执行新的文件写入范围判断或自动启动 Coder rework 与 Plan Repair。
+
+#### Scenario: 相同提交示空区间
+
+- **WHEN** `start_commit` 与 completion commit 相同
+- **THEN** `start_commit` 与 completion commit 相同 MUST 表示空观察区间，而非把该起始提交相对父提交的改动归属给当前 Work Item。
 
 #### Scenario: 组就绪检查完整
 

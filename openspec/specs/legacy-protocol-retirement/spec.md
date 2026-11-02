@@ -6,8 +6,27 @@
 ## Requirements
 
 ### Requirement: 退役门全口径重测与判据零改（REQ-RET-01）
+系统 SHALL 在删除旧协议前，按 REQ-WSC-07 判据原文的全部子项在重测执行时的现行 build 上重出完整证据矩阵：codex 与 pi 各 1 案例到达 Confirmed（2/2）、单案例时长 ≤12 分钟、初评 ≤1 次且复评 ≤1 次（总 ≤2）、自动返修 ≤1 次（均从服务端持久计数读取）、14 条 classifier golden（rep2/3/4 的 9 条、rep1 round-1 的 2 条 Advisory、3 条人工标注 class_hint 变体） 全部归入预期 finding 分类、仅明确属 grammar/lowering 的 reviewer finding 通过 compiler diagnostic golden（其余明确仅为 prompt few-shot 素材）、断线重连/恢复测试通过、legacy 路径回归全绿、多仓 preflight 不静默回落。
 
-系统 SHALL 在删除旧协议前，按 REQ-WSC-07 判据原文的全部子项在重测执行时的现行 build 上重出完整证据矩阵：codex 与 pi 各 1 案例到达 Confirmed（2/2）、单案例时长 ≤12 分钟、初评 ≤1 次且复评 ≤1 次（总 ≤2）、自动返修 ≤1 次（均从服务端持久计数读取）、14 条 classifier golden（rep2/3/4 的 9 条、rep1 round-1 的 2 条 Advisory、3 条人工标注 class_hint 变体） 全部归入预期 finding 分类、仅明确属 grammar/lowering 的 reviewer finding 通过 compiler diagnostic golden（其余明确仅为 prompt few-shot 素材）、断线重连/恢复测试通过、legacy 路径回归全绿、多仓 preflight 不静默回落。判据 SHALL 零改：MUST NOT 放宽阈值、MUST NOT 改计数口径、MUST NOT 删减子项。重测 SHALL 前置设定单案例超时上限与总预算并留档。证据矩阵逐子项留档证据锚后删除面方可解锁；任一关键子项重测仍超标时本 change SHALL 挂起等用户终裁（问法三选：A=维持门不删 legacy、B=授权登记例外并修订 REQ-WSC-07 门文本放行、C=限定 N 次重测取最佳），三方 MUST NOT 自行放宽或静默行使任一选项。
+#### Scenario: 判据原文不可放宽
+
+- **WHEN** 重测执行与证据矩阵出具
+- **THEN** 判据 SHALL 零改：MUST NOT 放宽阈值、MUST NOT 改计数口径、MUST NOT 删减子项。
+
+#### Scenario: 重测预算前置留档
+
+- **WHEN** 重测 campaign 启动前
+- **THEN** 重测 SHALL 前置设定单案例超时上限与总预算并留档。
+
+#### Scenario: 证据锚解锁删除面
+
+- **WHEN** 删除面工作包待解锁
+- **THEN** 证据矩阵逐子项留档证据锚后删除面方可解锁。
+
+#### Scenario: 超标挂起待终裁
+
+- **WHEN** 任一关键子项重测仍超标
+- **THEN** 任一关键子项重测仍超标时本 change SHALL 挂起等用户终裁（问法三选：A=维持门不删 legacy、B=授权登记例外并修订 REQ-WSC-07 门文本放行、C=限定 N 次重测取最佳），三方 MUST NOT 自行放宽或静默行使任一选项。
 
 #### Scenario: 全绿解锁删除
 
@@ -30,10 +49,37 @@
 - **THEN** 单案例超时上限与总预算已设定并留档，provider 挂死不拖垮矩阵出具
 
 ### Requirement: 删除面分层与残留归零（REQ-RET-02）
+旧协议删除 SHALL 按「SC 门关门决策 typed 重承载 → 前端 legacy 消费面迁移 → 后端删除跨端原子收口」的分层推进，每层独立可验收。
 
-旧协议删除 SHALL 按「SC 门关门决策 typed 重承载 → 前端 legacy 消费面迁移 → 后端删除跨端原子收口」的分层推进，每层独立可验收。必删集 SHALL 至少覆盖：WS 入站协议的 legacy 逐段确认族（generation-mode 决策、逐段确认消息、review_decision 双选项语法、SelectRevisionPath 族及其专属 DTO）与 `HumanConfirmDecision` 旧枚举及其消息族；引擎侧 legacy 决策路由分支与逐段确认引擎面；`flow_kind` 单路径收敛（新会话一律单候选流）。SC 门关门决策 SHALL 以门专属 typed 决策承载：approve 保持 `Confirm` 语义，abandon 以显式 typed 入站命令承载，MUST NOT 复用 legacy `human_confirm` 通道或其枚举。删除完成后全仓残留 SHALL 归零：必删集符号在全仓产码与测试不可检索（历史归档文档与 durable 数据除外），收到已删除消息类型系统 SHALL 返回 protocol error 且零副作用，全量门禁（后端+前端）双绿。
+#### Scenario: 必删集分层覆盖
 
-Cockpit 为已保留且有明确 durable 状态的 Final Compile recovery action 提供 typed 消费入口，属于现有协议能力的可达性修复，不构成旧逐段确认协议的恢复；旧 generation-mode、逐段确认、review_decision 双选项和旧枚举消息族仍不得重新暴露。收到不匹配阶段的 recovery action 或已删除 legacy 消息时，系统 SHALL 返回 stage-specific protocol error 且零副作用。
+- **WHEN** 执行旧协议删除并确定必删集
+- **THEN** 必删集 SHALL 至少覆盖：WS 入站协议的 legacy 逐段确认族（generation-mode 决策、逐段确认消息、review_decision 双选项语法、SelectRevisionPath 族及其专属 DTO）与 `HumanConfirmDecision` 旧枚举及其消息族；引擎侧 legacy 决策路由分支与逐段确认引擎面；`flow_kind` 单路径收敛（新会话一律单候选流）。
+
+#### Scenario: 门决策 typed 承载
+
+- **WHEN** SC 门关门决策需要承载 approve 与 abandon
+- **THEN** SC 门关门决策 SHALL 以门专属 typed 决策承载：approve 保持 `Confirm` 语义，abandon 以显式 typed 入站命令承载，MUST NOT 复用 legacy `human_confirm` 通道或其枚举。
+
+#### Scenario: 删除后残留归零
+
+- **WHEN** 删除完成判定执行
+- **THEN** 删除完成后全仓残留 SHALL 归零：必删集符号在全仓产码与测试不可检索（历史归档文档与 durable 数据除外），收到已删除消息类型系统 SHALL 返回 protocol error 且零副作用，全量门禁（后端+前端）双绿。
+
+#### Scenario: 驾驶舱 typed 入口
+
+- **WHEN** Cockpit 用户在可恢复 Final Compile 状态选择 recovery action
+- **THEN** Cockpit 为已保留且有明确 durable 状态的 Final Compile recovery action 提供 typed 消费入口，属于现有协议能力的可达性修复，不构成旧逐段确认协议的恢复。
+
+#### Scenario: 旧协议不得重暴露
+
+- **WHEN** 退役后检查对外暴露的协议能力
+- **THEN** 旧 generation-mode、逐段确认、review_decision 双选项和旧枚举消息族仍不得重新暴露。
+
+#### Scenario: 非法恢复与退役拒绝
+
+- **WHEN** 收到不匹配阶段的 recovery action 或已删除 legacy 消息
+- **THEN** 收到不匹配阶段的 recovery action 或已删除 legacy 消息时，系统 SHALL 返回 stage-specific protocol error 且零副作用。
 
 #### Scenario: SC 门关门决策 typed 重承载先行
 

@@ -19,9 +19,22 @@ RuntimeBinding SHALL 仅保存定位和完整性校验凭据；它 MUST NOT 保�
 - **AND THEN** 系统 MUST NOT 回退读取旧 Work Item 数据或生成空的语义上下文
 
 ### Requirement: Work Item 运行期读取只使用 Revision Store
-Schema v2 Work Item Workspace、Group Coding、Coding Provider Context、Evaluation、Tester、Completion Gate、Handoff 和生命周期派生视图 SHALL 通过 Revision Store Runtime Reader 读取 Work Item 语义。Reader MUST 根据 RuntimeBinding 与绑定的 Revision 解析角色所需数据。
+Schema v2 Work Item Workspace、Group Coding、Coding Provider Context、Evaluation、Tester、Completion Gate、Handoff 和生命周期派生视图 SHALL 通过 Revision Store Runtime Reader 读取 Work Item 语义。
 
-Human Workspace SHALL 读取 Human Projection、Presentation Revision 与真实 Revision History；Coder SHALL 读取绑定的 Coder Projection；Reviewer SHALL 读取绑定的 Reviewer Projection。Tester、Evaluation、Gate 和 Handoff SHALL 读取 Canonical Contract、VerificationPlanRevision、DependencyGraphRevision 与 HandoffRevision 中的规范性数据，不得把 Human Projection 当作执行事实。
+#### Scenario: Reader 按 Binding 解析
+
+- **WHEN** Reader 读取角色所需数据时
+- **THEN** Reader MUST 根据 RuntimeBinding 与绑定的 Revision 解析角色所需数据。
+
+#### Scenario: Human 与 Coder/Reviewer 投影
+
+- **WHEN** Human Workspace、Coder 或 Reviewer 读取角色数据时
+- **THEN** Human Workspace SHALL 读取 Human Projection、Presentation Revision 与真实 Revision History；Coder SHALL 读取绑定的 Coder Projection；Reviewer SHALL 读取绑定的 Reviewer Projection。
+
+#### Scenario: Tester 与 Gate 规范数据
+
+- **WHEN** Tester、Evaluation、Gate 或 Handoff 读取执行事实时
+- **THEN** Tester、Evaluation、Gate 和 Handoff SHALL 读取 Canonical Contract、VerificationPlanRevision、DependencyGraphRevision 与 HandoffRevision 中的规范性数据，不得把 Human Projection 当作执行事实。
 
 #### Scenario: 新 Group 在旧 Work Item 目录为空时初始化子 Workspace
 - **WHEN** Schema v2 Group 的旧 `work-items/` 目录不存在且用户确认 Final Compile

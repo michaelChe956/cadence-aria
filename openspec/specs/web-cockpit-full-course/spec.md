@@ -77,7 +77,7 @@ cockpit SHALL 在会话创建/发起入口处提供 Provider 选择（含默认 
 - **THEN** 流式与进度呈现只消费既有 WS 事件，未新增后端事件或字段
 ### Requirement: 形态路由终态化与默认表演化（REQ-CFC-04）
 
-形态路由 SHALL 以类型感知路由机制为终态，判定优先级固定为：①显式设置 `aria.chat.cockpit = legacy` → legacy（C4 回滚通道）；②显式设置 `= cockpit` → cockpit；③未设置 + 已知类型（story / design / plan，**含未开始态**）→ **cockpit**（默认表演化——本条是对 2026-09-16 用户裁决行为面的变更，MUST 作为明示点呈报用户）；④未设置 + 未知/缺失 `workspaceType` → legacy（安全兜底）。以下守卫 MUST 全部保留：「空 plan 必须 legacy」的前提删除但其安全性守卫不删；跨会话归属守卫（仅当 store 的 `sessionId === 路由 sessionId` 时读取 `workspaceType`/timeline，前一会话首帧不得把当前会话错入另一形态）；未设置会话 MUST 首帧即定形态，MUST NOT 出现「先以 legacy 建立连接、收到状态后 unmount 并 close(1000) 重连」的中途形态切换。legacy 页面 MUST NOT 删除（legacy 退役属阶段 4 退役门）。按默认 legacy 编写的既有测试 MUST 随默认表演化同步迁移断言，MUST NOT 靠删除用例过关。
+形态路由 SHALL 以类型感知路由机制为终态，判定优先级固定为：①显式设置 `aria.chat.cockpit = legacy` → legacy（C4 回滚通道）
 
 #### Scenario: 未设置 story 默认进 cockpit
 
@@ -108,9 +108,40 @@ cockpit SHALL 在会话创建/发起入口处提供 Provider 选择（含默认 
 
 - **WHEN** 未设置用户打开未开始的 plan 会话并随后开始生成
 - **THEN** 页面首帧即进入 cockpit，开始生成不触发页面形态切换导致的连接 unmount/close(1000)/重连
+
+#### Scenario: 优先级后续分支
+
+- **WHEN** 形态路由沿判定优先级继续求值后续分支
+- **THEN** ②显式设置 `= cockpit` → cockpit；③未设置 + 已知类型（story / design / plan，**含未开始态**）→ **cockpit**（默认表演化——本条是对 2026-09-16 用户裁决行为面的变更，MUST 作为明示点呈报用户）；④未设置 + 未知/缺失 `workspaceType` → legacy（安全兜底）
+
+#### Scenario: 安全守卫全保留
+
+- **WHEN** 「空 plan 必须 legacy」前提删除后执行形态路由守卫
+- **THEN** 以下守卫 MUST 全部保留：「空 plan 必须 legacy」的前提删除但其安全性守卫不删
+
+#### Scenario: 跨会话归属守卫
+
+- **WHEN** 读取 store 的 `workspaceType`/timeline 判定会话归属
+- **THEN** 跨会话归属守卫（仅当 store 的 `sessionId === 路由 sessionId` 时读取 `workspaceType`/timeline，前一会话首帧不得把当前会话错入另一形态）
+
+#### Scenario: 首帧即定形态
+
+- **WHEN** 未设置会话建立首帧连接
+- **THEN** 未设置会话 MUST 首帧即定形态，MUST NOT 出现「先以 legacy 建立连接、收到状态后 unmount 并 close(1000) 重连」的中途形态切换
+
+#### Scenario: legacy 页面保留
+
+- **WHEN** 默认表演化交付后清点 legacy 页面
+- **THEN** legacy 页面 MUST NOT 删除（legacy 退役属阶段 4 退役门）
+
+#### Scenario: 既有测试随迁
+
+- **WHEN** 按默认 legacy 编写的既有测试在默认表演化后运行
+- **THEN** 按默认 legacy 编写的既有测试 MUST 随默认表演化同步迁移断言，MUST NOT 靠删除用例过关
+
 ### Requirement: 快照门投影终态守卫（REQ-CFC-05）
 
-投影层 SHALL 对引擎 stage/相位做终态守卫，且守卫 MUST 为 amendment-aware：只锁「前端可无歧义判定为陈旧」的门形态——引擎 stage 已处于终态且该会话不构成 REQ-GCE-03 amendment 重开的合法载体形态（`work_item_plan` + `single_candidate` 流 + 相位 completed + 门快照仍在场），或门相位与快照投影失配。锁定时快照门控件 MUST 呈现为不可操作（锁定呈现 + 原因说明），MUST NOT 提供 confirm/反馈的可达发送路径。「completed+snapshot」是 REQ-GCE-03 amendment 重开的合法载体形态，验收化保留：本守卫 MUST NOT 要求前端锁死该形态——amendment 上下文事实不在 wire 面（`session_state` 未暴露该判别，引擎 `probe_amendment_gate_context` 能判而前端不可见），前端无法无歧义判定其陈旧；真实陈旧由引擎既有 stage 拒绝（`INVALID_MESSAGE_FOR_STAGE` 系）兜底。该守卫是前端投影行为：MUST NOT 改变引擎拒绝语义（引擎照旧拒绝）。引擎真实门开（stage 为门等待态且相位一致）MUST NOT 被守卫误伤。
+投影层 SHALL 对引擎 stage/相位做终态守卫，且守卫 MUST 为 amendment-aware：只锁「前端可无歧义判定为陈旧」的门形态——引擎 stage 已处于终态且该会话不构成 REQ-GCE-03 amendment 重开的合法载体形态（`work_item_plan` + `single_candidate` 流 + 相位 completed + 门快照仍在场），或门相位与快照投影失配
 
 #### Scenario: 陈旧快照门锁定（0017 形态·可无歧义判定）
 
@@ -131,6 +162,32 @@ cockpit SHALL 在会话创建/发起入口处提供 Provider 选择（含默认 
 
 - **WHEN** 引擎真实处于门等待（stage=human_confirm 且相位一致）
 - **THEN** 门控件正常可操作，守卫不拦截
+
+#### Scenario: 锁定控件不可操作
+
+- **WHEN** 守卫锁定某快照门形态
+- **THEN** 锁定时快照门控件 MUST 呈现为不可操作（锁定呈现 + 原因说明），MUST NOT 提供 confirm/反馈的可达发送路径
+
+#### Scenario: 载体形态不锁死
+
+- **WHEN** 门形态为「completed+snapshot」（REQ-GCE-03 amendment 重开合法载体）
+- **THEN** 「completed+snapshot」是 REQ-GCE-03 amendment 重开的合法载体形态，验收化保留：本守卫 MUST NOT 要求前端锁死该形态——amendment 上下文事实不在 wire 面（`session_state` 未暴露该判别，引擎 `probe_amendment_gate_context` 能判而前端不可见），前端无法无歧义判定其陈旧
+
+#### Scenario: 真实陈旧引擎兜底
+
+- **WHEN** 陈旧的 confirm/反馈消息越过前端投影到达引擎
+- **THEN** 真实陈旧由引擎既有 stage 拒绝（`INVALID_MESSAGE_FOR_STAGE` 系）兜底
+
+#### Scenario: 不改引擎语义
+
+- **WHEN** 前端守卫与引擎 stage 拒绝并存
+- **THEN** 该守卫是前端投影行为：MUST NOT 改变引擎拒绝语义（引擎照旧拒绝）
+
+#### Scenario: 真实门开不误伤
+
+- **WHEN** 引擎 stage 为门等待态且相位一致
+- **THEN** 引擎真实门开（stage 为门等待态且相位一致）MUST NOT 被守卫误伤
+
 ### Requirement: 跨会话批量确认（P2 条件项）（REQ-CFC-06）
 
 收件箱跨会话多选批量确认 SHALL 作为**条件交付项**：仅当 `workspace-session-connection-resilience` 的角色仲裁与 session 级广播两机制落地后才在本 change 内交付；若 P2 主体滑出 3.8 窗口，本 requirement SHALL 整体 defer 至阶段 4 前夜并登记 defer-ledger（呈报用户可见），不构成 3.8 关闸前置。交付时：收件箱 SHALL 支持跨会话多选批量确认；其安全性 MUST 依赖服务端显式角色仲裁（批量连接不得与用户已开连接形成无差别可命令竞态）与 session 级广播（批量结果对其他连接可见）；每会话批量动作 MUST 恰好生效一次（幂等）。危险动作 MUST NOT 参与批量（沿用 3.7 Phase 4 批量语义）。
