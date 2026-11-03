@@ -1,7 +1,7 @@
 # 问题记录：计划生成停在人工分诊点（`plan_generation_needs_human`）
 
 日期：2026-11-03
-状态：**owner 裁定「先记录，不解决」** —— 本文件只做留痕，不开 OpenSpec change、不实施
+状态：**owner 裁定「先记录，不解决」** —— 本文件只做问题留痕 + 认定修法，不开 OpenSpec change、不实施、不向 owner 索取现场取证数据
 触发来源：owner 真机跑自动化，红卡「自动化执行失败，需要处理」+ 机器码 `plan_generation_needs_human`，同时页面内出现黄卡「计划生成停在人工分诊点」
 
 > **元信息 1**：本记录的行号均基于 **main 分支**（commit 827a990，`.worktrees/main/`）；bugfix-b-11-02 分支同域代码行号可能偏移，引用时请按符号名定位。
@@ -109,32 +109,34 @@
 4. 绿卡 ⇒ `binding_history.previous.len() == 1` 且当前绑定的 plan/session 都还在（live 分支 `src/web/plan_confirmed_info.rs:551-563`）⇒ **确实发生过恰好一次换代**。
 5. 换代入口判定（推断）：`supersede_terminated_enrollment` 会轮换 `prepare_intent_id`（`cas_internals.inc.rs:694`），而 `plan_id = issue_work_item_plan_auto_{prepare_intent_id}`（`src/product/models/automation.rs:432-447`）；现场 plan id 后缀 = `34310029-dac5-…` ⇒ **prepare_intent_id 未被轮换 ⇒ 换代走 `rebind`**，而非 terminated 取代。
 
-## 假设（需现场数据确认，按可能性排序）
+## 假设（未验证，按可能性排序）
 
 | # | 假设 | 支持 | 反证/风险 |
 |---|---|---|---|
-| H1 | 分支 5（越过派发无活 run）先发生，`plan_generation_dispatch_unproven` 被下一 tick 覆写 | 唯一能产生 needs_human 的路径；「一个节点都没产出」与「派发后中断」吻合；`:265` 覆盖原 phase | 需 provider_start_ledger 为空 + single_candidate_phase 非 Generate 才能确认「外部 provider 从未被触达」 |
+| H1 | 分支 5（越过派发无活 run）先发生，`plan_generation_dispatch_unproven` 被下一 tick 覆写 | 唯一能产生 needs_human 的路径；「一个节点都没产出」与「派发后中断」吻合；`:265` 覆盖原 phase | provider_start_ledger 为空 + single_candidate_phase 非 Generate ⇒ 可确认「外部 provider 从未被触达」 |
 | H2 | 分支 6（SC ledger 已 Generate 而 checkpoint 仍 Claimed） | 该分支存在且不写事实，首次停点不留红卡、红卡是下一 tick 才写 | **代码证明该分支不可达**（F7） |
 | H3 | 换代（rebind）后新一代继承旧代 needs_human 检查点 | same_identity 不含 binding_version；rebind 不删 intent；绿卡证明换代过 | 换代若改了 plan_id/session_id ⇒ same_identity 假 ⇒ Conflict ⇒ **换代后新链根本起不来**（更隐蔽的失败形态，无红卡） |
-| H4 | 事实跨代残留：红卡属于旧代，新一代只是继承了「旧代事实仍挂在 enrollment 上」 | rebind **不清 attention_facts**（`command_writes_impl.inc.rs:84-186`），对比 `supersede_terminated_enrollment` 明确 `attention_facts = Vec::new()`（`cas_internals.inc.rs:700`） | 现场 plan/session 是同一 uuid 派生对，倾向同代；需事实里的 plan_id/session_id/key 实值 |
+| H4 | 事实跨代残留：红卡属于旧代，新一代只是继承了「旧代事实仍挂在 enrollment 上」 | rebind **不清 attention_facts**（`command_writes_impl.inc.rs:84-186`），对比 `supersede_terminated_enrollment` 明确 `attention_facts = Vec::new()`（`cas_internals.inc.rs:700`） | 现场 plan/session 是同一 uuid 派生对，倾向同代；事实里的 plan_id/session_id/key 实值可佐证是否同代 |
 
 H1 与 H3 可并存：旧代在分支 5 停下 → 换代 → 新一代继承 needs_human → tick 覆写 reason → 红卡 + 黄卡同时出现。
 
-## 还缺的现场证据（owner 可自行定分支）
+## 分支对照与可判读字段（备查，非本次交付前置）
+
+> 本节只记录「哪些 durable 字段能区分哪条分支」，供后续追查时对照；**本次不要求现场取证**。
 
 路径形状：`<workspace_root>/.aria/projects/<project_id>/issues/<issue_id>/…`（`src/product/app_paths.rs:46-56`；`src/product/lifecycle_store/paths.rs:60-64`）。
 
 **A. `automation-enrollment.json`**（`src/product/models/automation.rs:91-127`）
-需要字段：`binding_history.previous` 长度；`attention_facts[]` 中 `kind=="automation_failed"` 那条的 `key`/`plan_id`/`session_id`/`reason_code`/`occurred_at`；`prepare_intent_id`；`policy_revision`；`options.plan_approval`；`session_id`/`plan_id`/`source`。
+可判读字段：`binding_history.previous` 长度；`attention_facts[]` 中 `kind=="automation_failed"` 那条的 `key`/`plan_id`/`session_id`/`reason_code`/`occurred_at`；`prepare_intent_id`；`policy_revision`；`options.plan_approval`；`session_id`/`plan_id`/`source`。
 
 **B. `automation-generation-intent.json`**（`src/product/models/automation.rs:456-467`）
-需要字段：`phase`（**决定性**）、`enrollment_id`/`plan_id`/`session_id`/`action_key`/`source`/`options`/`target`（用于与 A 的 current 逐字段比对是否跨代；`action_key` 是否等于 `"{enrollment_id}:{current.plan_id}:start_generation"`）。
+可判读字段：`phase`（**决定性**）、`enrollment_id`/`plan_id`/`session_id`/`action_key`/`source`/`options`/`target`（用于与 A 的 current 逐字段比对是否跨代；`action_key` 是否等于 `"{enrollment_id}:{current.plan_id}:start_generation"`）。
 
 **C. `automation-plan-intent.json`**（`src/product/models/automation.rs:426-447`）
-需要字段：`prepare_intent_id`/`plan_id`/`session_id`（换代后是否残留；rebind 不清它）。
+可判读字段：`prepare_intent_id`/`plan_id`/`session_id`（换代后是否残留；rebind 不清它）。
 
 **D. `workspace-sessions/<session_id>.json`**（`src/product/models/workspace.rs:807-895`）
-需要字段：`status`、`single_candidate_phase`、`provider_start_ledger`（长度与条目）、`repair_reservation.state`、`human_gate_snapshot.resumable`、`run_policy`、`workspace_type`。
+可判读字段：`status`、`single_candidate_phase`、`provider_start_ledger`（长度与条目）、`repair_reservation.state`、`human_gate_snapshot.resumable`、`run_policy`、`workspace_type`。
 
 **E. 进程日志**：`wiga autopilot reconcile failed for <project>/<issue>: plan generation claim failed: automation_enrollment_conflict: current_revision=Some(N)`（`src/web/autopilot_orchestrator.rs:232-236` + `src/web/plan_generation.rs:243-249`）⇒ **换代后新链被 Conflict 卡死**（H3 强证据）；无此日志 ⇒ 未走到 Conflict。
 
@@ -153,31 +155,68 @@ H1 与 H3 可并存：旧代在分支 5 停下 → 换代 → 新一代继承 ne
 | G5 | 成功不清红卡：生成事实的 resolve 只挂在 continue_plan | `src/web/handlers/workspace_sc_recovery.rs:558`、`:728-733`；`src/web/workspace_session/router.rs:95-116`、`:341-345` |
 | G6 | 契约缺口：REQ-WIGA-12 未规定 reason_code 覆盖/保留语义与「换代后 checkpoint 归属」 | `openspec/specs/work-item-group-autopilot/spec.md:800-812` |
 
-## 修法候选（不实施）
+## 七、认定的修法（一条主线）
 
-### 治本类
+### 主线
 
-| # | 建议 | 落点 | 影响面 | 风险 |
-|---|---|---|---|---|
-| T1 | 换代即重置 generation intent（与 supersede_terminated_enrollment 对齐）：rebind 时删 `automation-generation-intent.json` + `automation-plan-intent.json` 并清旧代 attention_facts；或在 claim 里把「身份漂移」在「当前 binding 已换代且 binding_version 更大」时降级为重置为 Claimed | `src/product/issue_automation_store_parts/command_writes_impl.inc.rs:84-186`；`src/product/issue_automation_store.rs:509-517` | 自动链认领语义 + 旧代 checkpoint 追溯 | **高**：durable 语义 + 存量数据处置 → 建议升级 design-task-sol 出方案 |
-| T2 | 保留原始病因：同 key upsert 冻结首次 reason_code；或 intent 增 stop_reason 字段，红卡 summary 给「原因 + 码」 | `command_writes_impl.inc.rs:320-329`；`src/product/models/automation.rs:456-467`；`src/web/plan_generation.rs:250-277` | 全 fact 族 upsert 语义 | 中：契约未规定覆盖语义 → 需 openspec delta；改 upsert 影响其它 fact 族断言 |
-| T3 | 红卡 kind 与文案对齐契约（按 stage/reason_code 分标题，或生成停点单列 kind） | `src/web/automation_attention_info.rs:30`、`:71-79`、`:125-126` | A1 DTO kind 枚举（前后端契约） | 中：跨端契约变更，需同步 `web/src/api/types/*` + openspec delta |
-| T4 | 编排器在 NeedsHuman 真正退避（满足 `spec.md:299-301`「tick 停在该点不自动 retry」） | `src/web/autopilot_orchestrator.rs:172-186`、`:230-238` | 编排器节奏、失败可见性 | 中：不可改成 Err（污染错误诊断）；应加独立退避通道 |
-| T5 | 修死分支：删 `:282-290` 并入 `admission_outcome`，或提前判定 | `src/web/plan_generation.rs:282-290`、`:338-367` | 准入顺序 | 低-中：改顺序会移动 WaitingForHuman/NeedsHuman 分界，需回归单测 |
+把「plan 生成停在人工分诊点」从「泛化失败码 + 两张语义冲突的卡」变成**说得清、跨代干净、失败面可行动**的状态。四步按序做，前两步是治本，后两步是可行动化与配套。
 
-### 可行动化类
+### 第 1 步：停点原因不再被覆盖（治本，收益最大、改动最小）
 
-| # | 建议 | 落点 | 风险 |
-|---|---|---|---|
-| A1 | 红卡补「继续自动化」动作（复用现成 continue_plan REST），不再只有「去处理」导航 | `web/src/components/chat-workspace/cockpit/CockpitInbox.tsx:268-304`；A1 DTO 增 allowed_actions | 中：需 A1 DTO 增字段 + 跨端同步 |
-| A2 | summary 不再直出机器码（至少映射 plan 侧 3 码），机器码移入 details | `src/web/automation_attention_info.rs:125-126` | 低-中：现有注释「reason_code 只读不翻译」表明是有意设计 → 需 owner 裁定 |
-| A3 | 黄卡文案分场景（现固定写「派发前…副作用不明」，而 dispatch_unproven 恰是「已越过派发、不可证明」）：reason_code 透到 control 投影，前端按码区分 | `src/web/handlers/workspace_sc_recovery.rs:816-822`；`web/src/components/chat-workspace/ChatInputBar.tsx:509-517` | 低-中：narrative 表是前端静态映射 |
-| A4 | 诊断面补齐：control GET 增 stop_reason（intent 原始停点原因）+ intent_generation（是否同代）；owner 一捞现场即知分支 | `src/web/handlers/workspace_sc_recovery.rs:780-850`；`src/web/types.rs`；须一并给 `generation_intent()`（`src/web/plan_generation.rs:394-406`）加 same_identity 校验（否则旧代 checkpoint 报给新代，见 G3） | 低：additive 字段 |
-| A5 | 生成成功（`PlanGenerationOutcome::Running`）时 resolve 同 key 事实，避免非 continue_plan 路径恢复后红卡残留 | `src/web/plan_generation.rs:293-333` | 低：resolve 幂等，但需确认不与 continue_plan 收尾重复 |
+**现状**：事实 upsert 同 key 整条替换、只冻结 `occurred_at`（`src/product/issue_automation_store_parts/command_writes_impl.inc.rs:320-329`），两个 reason 共用一把 key（`src/web/plan_generation.rs:26-33`）；编排器每 tick 重入（`src/web/autopilot_orchestrator.rs:172`）且 NeedsHuman 走 `Ok` 不退避（`:230-238`）⇒ 更具体的 `plan_generation_dispatch_unproven` 必被下一 tick 覆盖成 `plan_generation_needs_human`；intent 的 `phase` 也被 `mark_plan_generation_phase(NeedsHuman)` 抹平（`src/web/plan_generation.rs:265`）⇒ 病因事后不可复原（缺口 G1）。
 
-## 升级建议
+**改法**：
 
-T1（换代是否/如何重置 generation intent + 存量 issue 的 intent 文件处置）同时触及公共 durable 语义、跨代数据归属与可能的存量数据迁移 → **建议升级 `design-task-sol` 出方案**再实施。T2/A1/A2/A3/A4/A5 可留常规链；T3/T4/T5 需先补 openspec delta。
+1. 事实 upsert 同 key 时**一并冻结首次 `reason_code`**（与 `occurred_at` 同待遇），落 `command_writes_impl.inc.rs:320-329`；
+2. `PlanGenerationIntent` 增 `stop_reason` 字段承载**原始停点原因**，落 `src/product/models/automation.rs:456-467` 与 `src/web/plan_generation.rs:250-277`；`phase` 归一为 needs_human 时不再抹掉原因。
+
+**效果**：红卡上显示的就是病因码；事后能判「越过派发」还是「派发前」，不再只剩一句泛化英文。
+
+### 第 2 步：换代必须清旧代检查点与事实（治本）
+
+**现状**：`rebind` 不删 `automation-generation-intent.json` / `automation-plan-intent.json`、也不清旧代 `attention_facts`（`src/product/issue_automation_store_parts/command_writes_impl.inc.rs:84-186`）⇒ 新一代被 `Conflict` 卡死（`src/product/issue_automation_store.rs:509-517`，无红卡、更隐蔽）或在身份恰好全等时**继承旧代停点**；旧代事实残留并继续投影。对照组：「终止后取代」已做清理（`src/product/issue_automation_store_parts/cas_internals.inc.rs:700`、`:733-748`，注释明写「避免身份比对 fail-closed 卡死」）。
+
+**改法**：
+
+1. rebind 换代时按「终止后取代」同款清理（删两个 intent 文件 + 清旧代 facts）；或在 `claim_plan_generation` 里把「当前 binding 已换代且 binding_version 更大」的 identity 漂移从 `Conflict` 降级为重置为 `Claimed`。
+2. **约束**：必须只对「确已换代」生效，不得打开「旧代 checkpoint 被新代继承」的口子；存量 issue 的 intent 文件处置口径需在方案里定死。
+
+**效果**：换代后新一代干净起跑；红卡不再跨代泄漏（缺口 G2）。
+
+### 第 3 步：失败面按契约分层 + 补齐可执行动作（可行动化）
+
+**现状**：契约 REQ-WIGA-12（`openspec/specs/work-item-group-autopilot/spec.md:800-812`）**要求**写 `automation_failed` 事实并通知 ⇒ 红卡存在是对的、不是缺陷；但契约把「provider 失败/链停/清理失败」合并进一个 kind，前端只能给固定标题「自动化执行失败，需要处理」（`src/web/automation_attention_info.rs:30`、`:71-79`）且 summary 直出机器码（`:123-126`，注释「reason_code 只读不翻译」）；红卡只有「去处理」导航，没有「继续自动化」；黄卡文案固定写「派发前…副作用不明」，而 `dispatch_unproven` 恰恰是「**已越过派发**、外部 provider 是否被触达不可证明」。
+
+**改法**：
+
+1. 红卡标题按 `stage`/`reason_code` 分层（生成停点 ≠ provider 失败），summary 给中文原因、机器码移入 details（落 `src/web/automation_attention_info.rs:30`、`:71-79`、`:123-126`）；
+2. 红卡补「继续自动化」动作，复用现成 `continue_plan` REST（前端 `web/src/components/chat-workspace/cockpit/CockpitInbox.tsx:268-304` + A1 DTO 增 `allowed_actions`）；
+3. 黄卡文案按码分场景：reason_code 透到 control 投影，前端按码区分（落 `src/web/handlers/workspace_sc_recovery.rs:816-822` + `web/src/components/chat-workspace/ChatInputBar.tsx:509-517`）。
+
+**效果**：owner 看到的失败面说清「是什么问题 + 下一步点哪里」，且卡片本身可解（不必先跳转）。
+
+### 第 4 步：编排器真停住 + 诊断出口与清理（配套）
+
+**现状**：NeedsHuman 走 `Ok` → 清退避 → 每 tick 重入并重写同 key（`src/web/autopilot_orchestrator.rs:172`、`:230-238`），与契约「编排器 tick 停在该点，不自动 retry；用户显式链继续成功后才恢复」（`openspec/specs/work-item-group-autopilot/spec.md:299-301`）不符；黄卡读 intent **不做身份校验**（`src/web/plan_generation.rs:394-406`、`src/web/handlers/workspace_sc_recovery.rs:100-126`，缺口 G3）；生成成功的 resolve 只挂在 `continue_plan`（`src/web/handlers/workspace_sc_recovery.rs:558`、`:728-733`，缺口 G5）；`:282-290` 是不可达死分支（缺口 G4）。
+
+**改法**：
+
+1. 给 NeedsHuman 增设独立退避通道（**不要**改成 `Err`，避免污染错误诊断与日志），落 `src/web/autopilot_orchestrator.rs:172-186`、`:230-238`；
+2. control GET 增 `stop_reason` 与 `intent_generation`（是否同代），并给 `generation_intent()` 加 `same_identity` 校验，落 `src/web/handlers/workspace_sc_recovery.rs:780-850`、`src/web/types.rs`、`src/web/plan_generation.rs:394-406`；
+3. 生成成功（`PlanGenerationOutcome::Running`）时 resolve 同 key 事实，落 `src/web/plan_generation.rs:293-333`；
+4. 删除死分支 `:282-290` 或并入 `admission_outcome`（`:338-367`），落 `src/web/plan_generation.rs`。
+
+**效果**：停点真的停住、不反复重写；owner 能一眼看出是否同代；恢复后红卡自动消失。
+
+### 落地顺序与门禁
+
+| 批次 | 内容 | 门禁 |
+|---|---|---|
+| 批 1 | 第 1 步 + 第 2 步 | 触及 durable 语义、跨代数据归属与存量数据处置 → **先走 OpenSpec**（建议由 design-task-sol 出方案，owner 拍板存量处置口径） |
+| 批 2 | 第 3 步 | owner 可见行为变更（标题/文案/动作）→ 走 OpenSpec |
+| 批 3 | 第 4 步 | 除「独立退避通道」需同批进 OpenSpec 外，其余为只读投影与幂等清理，可随后批 |
+
+**不在本次范围**：任何代码实施、任何现场取证、存量数据处置的具体执行（只定口径，不动数据）。
 
 ## 关联
 
