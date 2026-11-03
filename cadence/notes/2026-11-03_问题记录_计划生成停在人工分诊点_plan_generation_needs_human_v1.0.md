@@ -155,7 +155,7 @@ H1 与 H3 可并存：旧代在分支 5 停下 → 换代 → 新一代继承 ne
 | G5 | 成功不清红卡：生成事实的 resolve 只挂在 continue_plan | `src/web/handlers/workspace_sc_recovery.rs:558`、`:728-733`；`src/web/workspace_session/router.rs:95-116`、`:341-345` |
 | G6 | 契约缺口：REQ-WIGA-12 未规定 reason_code 覆盖/保留语义与「换代后 checkpoint 归属」 | `openspec/specs/work-item-group-autopilot/spec.md:800-812` |
 
-## 七、认定的修法（一条主线）
+## 认定的修法（一条主线）
 
 ### 主线
 
