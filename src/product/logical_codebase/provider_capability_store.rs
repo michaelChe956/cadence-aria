@@ -731,7 +731,7 @@ fn resume_evidence_from_string(value: &str) -> Option<ResumeEvidenceState> {
 }
 
 const BOOTSTRAP_VERSION: &str = "0.0.0-managed";
-const MANAGED_CAPABILITY_SNAPSHOT_REF: &str = "cap_managed_snapshot";
+pub(crate) const MANAGED_CAPABILITY_SNAPSHOT_REF: &str = "cap_managed_snapshot";
 
 /// provider capability 的持久化 store。
 #[derive(Debug, Clone)]

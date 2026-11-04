@@ -121,7 +121,7 @@ pub(super) fn cross_repo_fixture(
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0000".to_string()),
-            logical_codebase_id: Some(CROSS_REPO_LC_ID.to_string()),
+            logical_codebase_id: CROSS_REPO_LC_ID.to_string(),
             title: "issue".to_string(),
             description: None,
             change_id: None,
@@ -317,7 +317,10 @@ fn cross_repo_trigger_fixture_inner(
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: issue_lc_id.map(str::to_string),
+            logical_codebase_id: issue_lc_id.map_or_else(
+                || crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+                str::to_string,
+            ),
             title: "issue".to_string(),
             description: None,
             change_id: None,

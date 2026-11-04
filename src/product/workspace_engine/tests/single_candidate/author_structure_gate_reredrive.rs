@@ -46,8 +46,8 @@ mod author_structure_gate_reredrive {
         let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 cycle_candidate(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 true,
             )
             .await
@@ -149,8 +149,8 @@ mod author_structure_gate_reredrive {
         let first = engine
             .complete_single_candidate_work_item_plan_author(
                 cycle_candidate(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 true,
             )
             .await
@@ -166,8 +166,8 @@ mod author_structure_gate_reredrive {
         let second = engine
             .complete_single_candidate_work_item_plan_author(
                 cycle_candidate().replace("Backend levels API", "Backend levels API round-2"),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -244,8 +244,8 @@ mod author_structure_gate_reredrive {
         let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 unknown_provider_candidate(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 true,
             )
             .await
@@ -277,8 +277,8 @@ mod author_structure_gate_reredrive {
         let clean = engine
             .complete_single_candidate_work_item_plan_author(
                 clean_candidate(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 true,
             )
             .await

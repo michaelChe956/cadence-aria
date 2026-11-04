@@ -510,22 +510,23 @@ pub(crate) enum WalkPurpose<'a> {
 /// 统一收敛到 `u32` 后再比较，避免各处按 Linux 宽度假设 → macOS 编译不过
 /// （现场 2026-11-01：release workflow 在 darwin-arm64 上编译失败）。
 #[inline]
-pub(crate) fn mode_bits(stat_mode: libc::mode_t) -> u32 {
-    stat_mode as u32
+pub(crate) fn mode_bits(stat_mode: impl Into<u32>) -> u32 {
+    stat_mode.into()
 }
 
 pub(crate) fn classify(stat_mode: u32) -> Option<BaselineEntryKind> {
-    // 常量的宽度随平台而变（macOS 为 u16）→ 统一转成 u32 后再当 pattern 用
-    // （Rust 不允许在 pattern 里写 `as` 表达式，故取局部 const）。
-    const S_IFMT: u32 = libc::S_IFMT as u32;
-    const S_IFREG: u32 = libc::S_IFREG as u32;
-    const S_IFDIR: u32 = libc::S_IFDIR as u32;
-    const S_IFLNK: u32 = libc::S_IFLNK as u32;
-    match stat_mode & S_IFMT {
-        S_IFREG => Some(BaselineEntryKind::File),
-        S_IFDIR => Some(BaselineEntryKind::Directory),
-        S_IFLNK => Some(BaselineEntryKind::Symlink),
-        _ => None,
+    // 常量的宽度随平台而变（macOS 为 u16）→ 经 mode_bits 统一转成 u32 后
+    // 再比较（Rust 不允许在 pattern 里写 `as` 表达式，const 初始化里也
+    // 绕不开 `as`，故比较链用 if-else）。
+    let kind = stat_mode & mode_bits(libc::S_IFMT);
+    if kind == mode_bits(libc::S_IFREG) {
+        Some(BaselineEntryKind::File)
+    } else if kind == mode_bits(libc::S_IFDIR) {
+        Some(BaselineEntryKind::Directory)
+    } else if kind == mode_bits(libc::S_IFLNK) {
+        Some(BaselineEntryKind::Symlink)
+    } else {
+        None
     }
 }
 
@@ -751,7 +752,9 @@ fn walk_dir(
                     }
                     value
                 };
-                if mode_bits(open_stat.st_mode) & (libc::S_IFMT as u32) != libc::S_IFREG as u32 {
+                if mode_bits(open_stat.st_mode) & mode_bits(libc::S_IFMT)
+                    != mode_bits(libc::S_IFREG)
+                {
                     return Err(ReviewerSnapshotError::ReadFailure(format!(
                         "{rel}: 打开后类型漂移"
                     )));

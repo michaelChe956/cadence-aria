@@ -12,7 +12,7 @@ import {
 
 const EXPECTED_IDS = [
   "create-project",
-  "add-single-repository",
+  "add-logical-codebase",
   "create-issue",
   "generate-story",
   "confirm-story",
@@ -59,6 +59,20 @@ describe("onboarding 步骤配置", () => {
       expect(step.visual.alt.length).toBeGreaterThan(0);
       expect(step.anchorTestId.length).toBeGreaterThan(0);
     }
+  });
+
+  it("引导文案描述多仓流程：不再出现「单仓」路径，含「建逻辑代码库」步骤", () => {
+    const steps = getEnabledOnboardingSteps();
+    const codebaseStep = steps.find((step) => step.id === "add-logical-codebase");
+    expect(codebaseStep).toBeDefined();
+    expect(codebaseStep?.title).toContain("逻辑代码库");
+    expect(codebaseStep?.description).toContain("聚合根");
+    expect(codebaseStep?.description).toContain("登记成员");
+    expect(codebaseStep?.visual.alt).not.toContain("单仓");
+    const allCopy = steps
+      .map((step) => `${step.title}\n${step.description}\n${step.visual.alt}`)
+      .join("\n");
+    expect(allCopy).not.toContain("单仓");
   });
 
   it("锚点映射与设计表一致，且计划两道门为不同锚点", () => {

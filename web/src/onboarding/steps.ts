@@ -71,21 +71,21 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     anchorTestId: "onboarding-anchor-project-create",
   },
   {
-    id: "add-single-repository",
+    id: "add-logical-codebase",
     order: 2,
-    title: "添加代码库（仅单库）",
+    title: "建逻辑代码库（多仓）",
     description:
-      "选中 Project 后点击「添加代码库」，绑定一个物理代码库。本期引导只覆盖单库（单仓）路径；逻辑代码库可稍后按需组合。",
-    visual: { kind: "diagram", alt: "代码库添加按钮与单仓路径示意" },
+      "选中 Project 后点击「添加代码库」建逻辑代码库：先选聚合根目录，再登记成员仓（自动发现）。新建项目流程固定为：创建项目 → 建逻辑代码库（选聚合根 + 登记成员仓）→ 创建 issue。",
+    visual: { kind: "diagram", alt: "代码库添加按钮与多仓路径示意" },
     anchorTestId: "onboarding-anchor-codebase-add",
   },
   {
     id: "create-issue",
     order: 3,
-    title: "创建 Issue（含基准分支）",
+    title: "创建 Issue（绑定逻辑代码库）",
     description:
-      "点击头部「新建 Issue」，填写标题、绑定代码库，并选择基准分支。基准分支在创建时锁定，之后修改基线需要新建 Issue。",
-    visual: { kind: "diagram", alt: "新建 Issue 与基准分支选择示意" },
+      "点击头部「新建 Issue」，填写标题、选择该项目的逻辑代码库，并勾选参与本 Issue 的成员。Issue 必须落在某个逻辑代码库上。",
+    visual: { kind: "diagram", alt: "新建 Issue 与成员勾选示意" },
     anchorTestId: "onboarding-anchor-issue-create",
   },
   {

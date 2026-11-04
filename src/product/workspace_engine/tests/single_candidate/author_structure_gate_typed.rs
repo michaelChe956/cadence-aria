@@ -42,8 +42,8 @@ mod author_structure_gate_typed {
         let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 candidate,
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -241,8 +241,8 @@ mod author_structure_gate_typed {
         let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 clean_candidate(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -285,8 +285,8 @@ mod author_structure_gate_typed {
         let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 cycle_candidate(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await

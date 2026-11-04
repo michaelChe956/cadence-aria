@@ -73,8 +73,8 @@ mod contract_autorepair {
         engine
             .complete_single_candidate_work_item_plan_author(
                 capability_gap_candidate(1),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -134,8 +134,8 @@ mod contract_autorepair {
         engine
             .complete_single_candidate_work_item_plan_author(
                 REP4_FIXTURE.to_string(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -183,8 +183,8 @@ mod contract_autorepair {
         engine
             .complete_single_candidate_work_item_plan_author(
                 missing_contract_candidate(1),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -223,8 +223,8 @@ mod contract_autorepair {
         engine
             .complete_single_candidate_work_item_plan_author(
                 mixed_gap_candidate(1),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await

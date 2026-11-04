@@ -153,7 +153,12 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: None,
-                logical_codebase_id: None,
+                // 夹具数据全在项目级（repos.json 手写于 project root），无 per-LC
+                // 权威记录 ⇒ issue 归属 project 默认作用域（legacy 别名 id）。
+                logical_codebase_id:
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                        "project_0001",
+                    ),
                 title: "choice http fixture issue".to_string(),
                 description: None,
                 change_id: None,
@@ -180,6 +185,14 @@ mod tests {
             }],
         )
         .unwrap();
+        // REQ-ROUTE-01 两态化夹具前置：issue 归属的 legacy 别名 LC 必须落成
+        // 可解析权威（manifest/member/checkout/selection + 聚合索引 + policy），
+        // 否则 authority resolver 报 `NotFound { kind: "logical_codebase" }`，
+        // manager create 直接失败（workspace context unavailable）。
+        crate::web::handlers::automation_enrollment_test_support::seed_single_member_logical_codebase(
+            &paths,
+            "checkout-choice-http",
+        );
         let lifecycle = LifecycleStore::new(paths.clone());
         let story = lifecycle
             .create_story_spec(crate::product::lifecycle_store::CreateStorySpecInput {

@@ -331,20 +331,6 @@ impl CodingWorkspaceEngine {
             // 后续 retry/completion 的 owner 校验 fail-closed；Legacy 单仓保持
             // 原路径零变化。
             match self.route_issue_shared_worktree(attempt)? {
-                IssueSharedWorktreeRoute::Legacy => {
-                    if lifecycle
-                        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
-                        .is_some()
-                    {
-                        lifecycle.transfer_issue_worktree_lock(
-                            &attempt.project_id,
-                            &attempt.issue_id,
-                            &current_work_item_id,
-                            &next.logical_work_item_id,
-                            &attempt.id,
-                        )?;
-                    }
-                }
                 IssueSharedWorktreeRoute::Repository { repository_id } => {
                     lifecycle.transfer_repo_worktree_lock(
                         &attempt.project_id,

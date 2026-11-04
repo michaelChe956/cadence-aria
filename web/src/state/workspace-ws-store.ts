@@ -175,6 +175,8 @@ const initialState: WorkspaceWsState = {
   planRepair: null,
   // P0 1.2：durable automation 归属；reset/首帧前保持 null（未知）。
   automation: null,
+  // REQ-HGC-04：「继续自动化」入口事实；reset/首帧前保持 null（未知）。
+  planContinueAvailable: null,
   humanGateClosure: null,
   advanceCommands: {},
   protocolDiagnostics: [],
@@ -356,6 +358,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         workspaceType: state.workspace_type,
         // P0 1.2（REQ-WIGA-08）：服务端省略（读取失败/未知）保持 null，不猜 client。
         automation: state.automation ?? null,
+        // REQ-HGC-04：服务端省略（读取失败/非 plan 会话）保持 null（未知），
+        // 前端按「无真实续跑入口」处理，不得给假指引。
+        planContinueAvailable: state.plan_continue_available ?? null,
         planRepair: state.plan_repair ?? null,
         stage: state.stage,
         superpowersEnabled: state.superpowers_enabled ?? false,

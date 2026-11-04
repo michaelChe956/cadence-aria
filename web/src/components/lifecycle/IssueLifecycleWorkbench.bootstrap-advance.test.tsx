@@ -124,7 +124,6 @@ function installWorkbenchFetch(advanceStatus: number) {
 
 async function completeRegistration(user: UserEvent) {
   await user.click(await screen.findByRole("button", { name: "添加代码库" }));
-  await user.click(screen.getByRole("radio", { name: /多仓库逻辑代码库/ }));
   await user.type(screen.getByLabelText("聚合根目录"), "/root");
   await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
   expect(

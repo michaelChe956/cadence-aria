@@ -51,6 +51,7 @@ use super::{
 mod code_review_router;
 mod event_hub;
 mod failed_review_recovery;
+mod gateway;
 mod plan_repair;
 mod restart;
 mod runner_cleanup;
@@ -62,7 +63,17 @@ async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() 
     let root = tempfile::tempdir().expect("root");
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：带冻结快照的 coding attempt 只能经 LC gateway 启动
+    // provider（legacy 直连被强制关闭），且租约只按仓维分类（快照 attempt 的
+    // 唯一凭证）。故播种完整 LC 权威 + 冻结快照 + 仓维锁。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -70,14 +81,14 @@ async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() 
             work_item_id: "work_item_0001".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
-            worktree_path: Some(worktree),
+            worktree_path: Some(worktree.clone()),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Pi,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&paths)),
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -132,9 +143,40 @@ async fn coding_pi_start_failure_does_not_start_registered_alternate_provider() 
         registry,
     );
     state.test_provider_enabled = true;
+    // 仓维 worktree 记录 + 仓维锁绑到本 attempt：快照 attempt 的租约只按
+    // 仓维分类（issue 维记录会被判 `legacy_shared_worktree_present`
+    // fail-closed），自持活跃租约放行。
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        &worktree,
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        "work_item_0001",
+        &attempt.id,
+    );
     let (event_tx, _event_rx) = mpsc::channel(16);
+    // LC gateway：带冻结快照的 attempt 只能经 gateway 启动 provider（legacy
+    // 直连被强制关闭）。fake adapter 经可换挡替身装入 gateway 的 registry。
+    let swappable = gateway::SwappableProvider::default();
+    swappable.install(Arc::new(FailingCodingProvider {
+        starts: Arc::clone(&pi_starts),
+    }));
+    let mut gateway_registry = ProviderRegistry::new();
+    gateway_registry.register(ProviderName::Pi, Arc::new(swappable));
     let engine =
-        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx.clone());
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx.clone())
+            .with_logical_provider_gateway(Arc::new(gateway::build_test_gateway(
+                &paths,
+                Arc::new(gateway_registry),
+            )));
     let (command_tx, command_rx) = mpsc::channel(1);
     command_tx
         .send(CodingRunnerCommand::StageGateConfirm {
@@ -916,12 +958,20 @@ fn waiting_attempt_allows_gate_response_for_coder_feedback() {
 fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecutionAttempt) {
     let tmp = TempDir::new().expect("temp dir");
     let app_paths = ProductAppPaths::new(tmp.path().join(".aria"));
-    crate::product::project_store::ProjectStore::new(app_paths.clone())
-        .create(crate::product::project_store::CreateProjectInput {
-            name: "compiled work item fixture".to_string(),
-            description: None,
-        })
-        .expect("create project");
+    // REQ-ROUTE-01 两态化（去单仓入口）：coding attempt 的唯一准入凭证是
+    // 「LC 权威 + 冻结 target_snapshot + 仓维锁」。
+    // - 缺 issue 记录 ⇒ 路由加载直接失败（`repository routing load failed:
+    //   product_store_not_found: issue issue_0001`）。
+    // - attempt 无 target_snapshot ⇒ 租约三态判为未知 ⇒ provider run 停等
+    //   （`coding_run_lease_unknown`）。
+    // 故此处播种完整 LC 权威（manifest/member/checkout/selection/policy/
+    // repos.json + 归属 issue），快照与权威同源。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &app_paths,
+        tmp.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let work_item_id = "work_item_compile_20260702063721302_001";
     let verification_plan_id = "verification_plan_compile_20260702063721302_001";
@@ -981,6 +1031,7 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         })
         .expect("create verification plan");
 
+    let coding_worktree_path = tmp.path().join("coding-worktree");
     let attempt = CodingExecutionAttempt {
         id: "coding_attempt_0001".to_string(),
         project_id: "project_0001".to_string(),
@@ -991,12 +1042,14 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         status: CodingAttemptStatus::Running,
         version: 0,
         manual_recovery_reason: None,
-        admission_ticket_consumed_at: None,
+        // Running 必须带 admission 会话标记，否则过不了
+        // `ensure_provider_run_allowed` 的第二道防线。
+        admission_ticket_consumed_at: Some("2026-07-02T00:00:00Z".to_string()),
         admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
         stage: CodingExecutionStage::Coding,
         base_branch: "main".to_string(),
         branch_name: "aria/issues/issue_0001".to_string(),
-        worktree_path: Some(tmp.path().join("coding-worktree")),
+        worktree_path: Some(coding_worktree_path.clone()),
         provider_config_snapshot: ProviderConfigSnapshot {
             author: ProviderName::Fake,
             reviewer: Some(ProviderName::Fake),
@@ -1014,11 +1067,36 @@ fn seed_compiled_work_item_fixture() -> (TempDir, ProductAppPaths, CodingExecuti
         review_request_id: None,
         created_at: "2026-07-02T00:00:00Z".to_string(),
         updated_at: "2026-07-02T00:00:00Z".to_string(),
-        target_snapshot: None,
+        // 冻结快照必须与 LC 权威逐字一致（logical/checkout id、canonical
+        // path、git identity、policy digest、membership revision）。
+        target_snapshot: Some(logical.snapshot(&app_paths)),
         completed_at: None,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         start_claim: None,
     };
+
+    // 仓维 worktree 记录 + 仓维锁绑到本 attempt：带快照的 attempt 只按仓维
+    // 分类租约（issue 维记录会被判 `legacy_shared_worktree_present`
+    // fail-closed），自持活跃租约（owner == 本 attempt）放行。
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        &coding_worktree_path,
+    );
+    // attempt 必须落盘：租约分类按 lock owner 读回 attempt 判定其是否活跃。
+    CodingAttemptStore::new(app_paths.clone())
+        .write_coding_attempt_for_test(&attempt)
+        .expect("persist compiled work item attempt");
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        work_item_id,
+        &attempt.id,
+    );
 
     (tmp, app_paths, attempt)
 }

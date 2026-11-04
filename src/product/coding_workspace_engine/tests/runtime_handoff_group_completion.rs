@@ -403,7 +403,10 @@ fn create_group_authority_other_attempt_run(
             branch_name: "aria/issues/issue_other".to_string(),
             worktree_path: None,
             provider_config_snapshot: fixture.attempt.provider_config_snapshot.clone(),
-            target_snapshot: None,
+            // 非权威 attempt 只是「另一条 group 记录」：复用具名同 LC 的冻结快照，
+            // 使它在新的两态语义下仍是合法记录（无快照 attempt 一律 fail-closed，
+            // 会把「非权威」与「无归属」两件事混在一起，测不到本体）。
+            target_snapshot: fixture.attempt.target_snapshot.clone(),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })

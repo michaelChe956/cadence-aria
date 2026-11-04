@@ -32,7 +32,6 @@ import type {
   RepositoryRegistrationErrorDetails,
   RepositoryDeletionReceipt,
   RepositoryInitializationOperationSnapshot,
-  RepositoryBranchListResponse,
   RepositoryListResponse,
   RetryFailedScRunStatus,
   TakeoverResponse,
@@ -407,14 +406,9 @@ export function createProductIssue(
 }
 
 /// REQ-PIB-01：仓库本地分支列表（服务端默认链；UI 不自行推导默认值）。
-export function listRepositoryBranches(
-  projectId: string,
-  repositoryId: string,
-): Promise<RepositoryBranchListResponse> {
-  return requestJson<RepositoryBranchListResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repositoryId)}/branches`,
-  );
-}
+/// 前端已无调用方（唯一调用方 CreateLifecycleIssueDialog 的单仓入口随
+/// 「去单仓入口」下线）⇒ 死导出已删除；后端端点 `list_repository_branches`
+/// （src/web/app.rs → handlers/product_resources.rs）保留不动。
 
 export function deleteProductIssue(
   projectId: string,

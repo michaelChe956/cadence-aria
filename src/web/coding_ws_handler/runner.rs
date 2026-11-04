@@ -493,21 +493,24 @@ async fn handle_internal_review_flow_decision(
 
 /// REQ-GFR-CR-01/02：多仓库逻辑代码库形态判定（唯一入口）。
 ///
-/// 只有 issue 记录明确持久归属逻辑代码库（`logical_codebase_id == Some(_)`）才为真。
-/// `NotFound → Ok(None)` 与读错 → `Err` 都按单仓处理（不吞错也不新增失败面）：
-/// 单仓库代码库的判定恒为 `false`，`internal_pr_review` 分支既有步骤逐字不变。
+/// 只有 issue 归属非 legacy 别名逻辑代码库（真多仓 LC——REQ-ROUTE-01 归属
+/// 必填后以 `lc_id != legacy_logical_codebase_id(project)` 判定，同
+/// `issue_is_cross_repo_shape` 口径）才为真。`NotFound` 与读错（含老记录
+/// 缺归属）→ `Err` 都按单仓处理（不吞错也不新增失败面）：单仓库代码库的
+/// 判定恒为 `false`，`internal_pr_review` 分支既有步骤逐字不变。
 fn skips_per_repository_internal_review(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> bool {
-    matches!(
-        crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            app_paths,
-            &attempt.project_id,
-            &attempt.issue_id,
-        ),
-        Ok(Some(_))
+    crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths,
+        &attempt.project_id,
+        &attempt.issue_id,
     )
+    .map(|lc_id| {
+        lc_id != crate::product::logical_codebase::legacy_logical_codebase_id(&attempt.project_id)
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) async fn execute_start_coding_flow(
@@ -1196,6 +1199,7 @@ mod tests {
     use crate::product::git_workspace_service::GitWorkspaceService;
     use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
     use crate::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
+    use crate::product::logical_codebase::logical_test_fixture;
     use crate::product::models::ProviderName;
     use crate::product::models::{
         DependencyGraphRevision, LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason,
@@ -1324,6 +1328,12 @@ mod tests {
         run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
         let original_head = git_head(&worktree);
 
+        // REQ-ROUTE-01 两态化：coding attempt 的路由凭证是「issue 归属 + LC
+        // 权威 + 冻结 `target_snapshot`」——无 issue 记录的 attempt 读权威即
+        // `NotFound{issue}` fail-closed（推进链根本进不到 ReviewRequest 收口）。
+        // 故夹具播种 issue + LC 权威（legacy 别名布局），快照与权威同源。
+        let logical =
+            logical_test_fixture::seed_complete(&paths, root.path(), "project_0001", "issue_0001");
         let store = CodingAttemptStore::new(paths.clone());
         let attempt = store
             .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -1341,11 +1351,30 @@ mod tests {
                     permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
                     ),
                 },
-                target_snapshot: None,
+                target_snapshot: Some(logical.snapshot(&paths)),
                 max_auto_rework: 2,
                 start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             })
             .expect("group attempt");
+        // 仓维 worktree 记录 + 仓维锁绑到本 attempt：带快照的 attempt 只按仓维
+        // 分类租约（issue 维记录会被判 `legacy_shared_worktree_present`
+        // fail-closed），自持活跃租约放行。
+        let lifecycle = LifecycleStore::new(paths.clone());
+        logical_test_fixture::upsert_repo_worktree(
+            &lifecycle,
+            "project_0001",
+            "issue_0001",
+            logical.member_id,
+            &worktree,
+        );
+        logical_test_fixture::bind_repo_lock_to_attempt(
+            &lifecycle,
+            "project_0001",
+            "issue_0001",
+            logical.member_id,
+            "wi_current",
+            &attempt.id,
+        );
 
         let revision_store = WorkItemRevisionStore::new(paths.clone());
         let plan = WorkItemPlanLineage {
@@ -1850,6 +1879,11 @@ mod tests {
         run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
         let original_head = git_head(&worktree);
 
+        // 同 n5 单 unit 夹具：REQ-ROUTE-01 两态化后推进链的路由凭证是
+        // 「issue 归属 + LC 权威 + 冻结 `target_snapshot`」，缺 issue 记录即
+        // `NotFound{issue}` fail-closed（parked 收口链根本进不去）。
+        let logical =
+            logical_test_fixture::seed_complete(&paths, root.path(), "project_0001", "issue_0001");
         let store = CodingAttemptStore::new(paths.clone());
         let attempt = store
             .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -1867,11 +1901,30 @@ mod tests {
                     permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
                     ),
                 },
-                target_snapshot: None,
+                target_snapshot: Some(logical.snapshot(&paths)),
                 max_auto_rework: 2,
                 start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             })
             .expect("group attempt");
+        // 仓维 worktree 记录 + 仓维锁绑到本 attempt：带快照的 attempt 只按仓维
+        // 分类租约（issue 维记录会被判 `legacy_shared_worktree_present`
+        // fail-closed），自持活跃租约放行。
+        let lifecycle = LifecycleStore::new(paths.clone());
+        logical_test_fixture::upsert_repo_worktree(
+            &lifecycle,
+            "project_0001",
+            "issue_0001",
+            logical.member_id,
+            &worktree,
+        );
+        logical_test_fixture::bind_repo_lock_to_attempt(
+            &lifecycle,
+            "project_0001",
+            "issue_0001",
+            logical.member_id,
+            "wi_a",
+            &attempt.id,
+        );
 
         let revision_store = WorkItemRevisionStore::new(paths.clone());
         let plan = WorkItemPlanLineage {
@@ -2486,8 +2539,9 @@ mod tests {
     /// T13 夹具（REQ-GFR-CR-01/02）：WorkItem scope attempt 已停在
     /// `internal_pr_review`，`head_commit` 与 lifecycle work item 齐备（单 WI
     /// 收口门可过）；issue 记录按形态参数落 `logical_codebase_id`
-    /// （`Some` = 多仓逻辑代码库、`None` = 单仓）。`code_reviewer` 恒配置，
-    /// `internal_reviewer` 由参数决定是否配置。
+    ///（非 legacy 别名 lc_id = 多仓逻辑代码库、`None` = 单仓项目默认
+    /// 作用域——REQ-ROUTE-01 后单仓以 legacy 别名 id 表达）。`code_reviewer`
+    /// 恒配置，`internal_reviewer` 由参数决定是否配置。
     fn internal_pr_review_form_fixture(
         logical_codebase_id: Option<&str>,
         internal_reviewer: Option<ProviderName>,
@@ -2505,17 +2559,44 @@ mod tests {
         let head = git_head(&worktree);
 
         let paths = ProductAppPaths::new(root_path.join(".aria"));
+        let issue_lc_id = logical_codebase_id.map(str::to_string).unwrap_or_else(|| {
+            crate::product::logical_codebase::legacy_logical_codebase_id("project_0001")
+        });
         IssueStore::new(paths.clone())
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: logical_codebase_id.map(str::to_string),
+                logical_codebase_id: issue_lc_id,
                 title: "issue".to_string(),
                 description: None,
                 change_id: None,
                 base_branch: None,
             })
             .expect("issue");
+        // 真多仓形态（issue 归属非 legacy 别名 LC）的推进链读 issue 持久归属的
+        // per-LC 子树权威（`RepositoryRouting::load_for_issue` 只认 for_lc 子树；
+        // project 级布局不构成路由事实）——补齐子树权威，否则 routing 链
+        // fail-closed，测到的不是本用例的 internal review 分流不变量。
+        // REQ-ROUTE-01 两态化：带冻结 `target_snapshot` 的 attempt 才走仓维
+        // 分流（无快照 + Logical 路由 → `target_snapshot_missing_for_logical`
+        // fail-closed），故快照与子树权威同源。单仓（legacy 别名）形态零播种。
+        let logical_target = logical_codebase_id.map(|lc_id| {
+            let (logical_id, checkout_id) = logical_test_fixture::seed_logical_authority_for_lc(
+                &paths,
+                "project_0001",
+                "issue_0001",
+                &root_path,
+                lc_id,
+            );
+            let snapshot = logical_test_fixture::snapshot_for_in_scope(
+                &paths,
+                "project_0001",
+                logical_id,
+                checkout_id,
+                Some(lc_id),
+            );
+            (logical_id, snapshot)
+        });
         LifecycleStore::new(paths.clone())
             .create_work_item(CreateWorkItemInput {
                 id: Some("work_item_0001".to_string()),
@@ -2528,7 +2609,7 @@ mod tests {
                 ..Default::default()
             })
             .expect("work item");
-        let store = CodingAttemptStore::new(paths);
+        let store = CodingAttemptStore::new(paths.clone());
         let attempt = store
             .create_attempt(CreateCodingAttemptInput {
                 project_id: "project_0001".to_string(),
@@ -2536,17 +2617,40 @@ mod tests {
                 work_item_id: "work_item_0001".to_string(),
                 base_branch: head.clone(),
                 branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
-                worktree_path: Some(worktree),
+                worktree_path: Some(worktree.clone()),
                 provider_config_snapshot: ProviderConfigSnapshot {
                     author: ProviderName::Codex,
                     reviewer: Some(ProviderName::ClaudeCode),
                     review_rounds: 1,
                     permission_modes: Default::default(),
                 },
-                target_snapshot: None,
+                target_snapshot: logical_target
+                    .as_ref()
+                    .map(|(_, snapshot)| snapshot.clone()),
                 max_auto_rework: 2,
             })
             .expect("attempt");
+        // 仓维 worktree 记录 + 仓维锁绑到本 attempt：带快照的 attempt 只按仓维
+        // 分类租约（issue 维记录会被判 `legacy_shared_worktree_present`
+        // fail-closed），自持活跃租约放行。
+        if let Some((logical_id, _)) = logical_target.as_ref() {
+            let lifecycle = LifecycleStore::new(paths.clone());
+            logical_test_fixture::upsert_repo_worktree(
+                &lifecycle,
+                "project_0001",
+                "issue_0001",
+                *logical_id,
+                &worktree,
+            );
+            logical_test_fixture::bind_repo_lock_to_attempt(
+                &lifecycle,
+                "project_0001",
+                "issue_0001",
+                *logical_id,
+                "work_item_0001",
+                &attempt.id,
+            );
+        }
         store
             .update_role_provider_config_snapshot(
                 &attempt.project_id,

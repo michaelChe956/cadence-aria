@@ -56,6 +56,27 @@ fn implementation_finding_with_plan_defect_fields() -> serde_json::Value {
     })
 }
 
+/// 逻辑 target 的 engine 夹具：注入以已播种 LC 权威为基座的 gateway，并把
+/// `provider` 注册为其 registry 的真实 adapter。
+///
+/// REQ-ROUTE-01 两态化后 `target_snapshot.is_some()` 的 provider run 只能经
+/// `LogicalCodebaseProviderGateway::start_streaming` 启动（否则
+/// `logical_provider_gateway_required` fail-closed），而 gateway 从自己的
+/// registry 取 adapter——故测试 adapter 必须同时交给引擎方法（断言捕获面）与
+/// registry（真实 spawn 面），两处指向同一实例。
+fn triage_engine(
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+    tx: tokio::sync::mpsc::Sender<CodingWsOutMessage>,
+    provider: std::sync::Arc<dyn StreamingProviderAdapter>,
+) -> CodingWorkspaceEngine {
+    super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        store,
+        tx,
+        "project_0001",
+        provider,
+    )
+}
+
 /// 用给定 provider 输出跑一次 `execute_code_review_with_commands`，返回 store 与
 /// 持久化后的 attempt。
 ///
@@ -76,16 +97,13 @@ async fn run_code_review_with_provider_output(
     let (root, store, attempt) = running_attempt_with_worktree();
     init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        crate::product::git_workspace_service::GitWorkspaceService::new(),
-        tx,
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(output.to_string()),
     );
-    let provider =
-        super::provider_execution_context::CapturingProjectionProvider::new(output.to_string());
+    let engine = triage_engine(&store, tx, provider.clone());
     let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
     engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut cmd_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut cmd_rx)
         .await
         .unwrap();
     let persisted = store
@@ -99,20 +117,17 @@ async fn code_review_accepts_routing_receipt_and_sentinel_payload() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        crate::product::git_workspace_service::GitWorkspaceService::new(),
-        tx,
-    );
-    let provider =
+    let provider = std::sync::Arc::new(
         super::provider_execution_context::CapturingProjectionProvider::new_sentinel_payload(
             "工作流路由：阶段=只读代码审查；Change=本次改动；Plan=work_item_0001；必调 Skill=requesting-code-review。\n\
          {\"verdict\":\"approve\",\"summary\":\"sentinel review complete\",\"findings\":[]}",
-        );
+        ),
+    );
+    let engine = triage_engine(&store, tx, provider.clone());
     let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut cmd_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut cmd_rx)
         .await
         .expect("sentinel payload should produce report");
 
@@ -210,15 +225,13 @@ async fn retry_verification_lands_blocked_gate_with_review_actions() {
     })
     .to_string();
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        crate::product::git_workspace_service::GitWorkspaceService::new(),
-        tx,
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(output),
     );
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(output);
+    let engine = triage_engine(&store, tx, provider.clone());
     let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
     engine
-        .execute_code_review_with_commands(&coded, &provider, &mut cmd_rx)
+        .execute_code_review_with_commands(&coded, provider.as_ref(), &mut cmd_rx)
         .await
         .unwrap();
 
@@ -281,6 +294,14 @@ async fn run_group_attempt_through_coding() -> (
     let store = crate::product::coding_attempt_store::CodingAttemptStore::new(
         crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria")),
     );
+    // REQ-ROUTE-01 两态化：编码/完成链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且 issue 记录必须在场（issue 聚合/路由解析）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -296,7 +317,7 @@ async fn run_group_attempt_through_coding() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -309,20 +330,18 @@ async fn run_group_attempt_through_coding() -> (
     attempt.stage = CodingExecutionStage::Coding;
     store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        crate::product::git_workspace_service::GitWorkspaceService::new(),
-        tx,
-    );
     let coder_output = serde_json::json!({
         "plan_defect_findings": [
             super::provider_execution_context::current_plan_defect_finding()
         ]
     })
     .to_string();
-    let coder = super::provider_execution_context::CapturingProjectionProvider::new(coder_output);
+    let coder = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(coder_output),
+    );
+    let engine = triage_engine(&store, tx, coder.clone());
     let coded = engine
-        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .execute_coding(&attempt, coder.as_ref(), &CodingExecutionContext::default())
         .await
         .unwrap();
     (root, store, coded)
@@ -357,15 +376,13 @@ async fn open_operational_gate_lands_blocked_gate_with_review_actions() {
     })
     .to_string();
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        crate::product::git_workspace_service::GitWorkspaceService::new(),
-        tx,
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(output),
     );
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(output);
+    let engine = triage_engine(&store, tx, provider.clone());
     let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
     engine
-        .execute_code_review_with_commands(&coded, &provider, &mut cmd_rx)
+        .execute_code_review_with_commands(&coded, provider.as_ref(), &mut cmd_rx)
         .await
         .unwrap();
 
@@ -533,19 +550,17 @@ async fn code_review_complete_persists_facts_before_emitting_events() {
     let (root, store, attempt) = running_attempt_with_worktree();
     init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    let engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        crate::product::git_workspace_service::GitWorkspaceService::new(),
-        tx,
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            serde_json::json!({
+                "verdict": "approve",
+                "summary": "断连窗口补读",
+                "findings": []
+            })
+            .to_string(),
+        ),
     );
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        serde_json::json!({
-            "verdict": "approve",
-            "summary": "断连窗口补读",
-            "findings": []
-        })
-        .to_string(),
-    );
+    let engine = triage_engine(&store, tx, provider.clone());
     let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
 
     let store_for_observer = store.clone();
@@ -556,7 +571,7 @@ async fn code_review_complete_persists_facts_before_emitting_events() {
     );
     let handle = tokio::spawn(async move {
         engine
-            .execute_code_review_with_commands(&attempt, &provider, &mut cmd_rx)
+            .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut cmd_rx)
             .await
             .expect("review completes while observer drains slowly")
     });
@@ -643,23 +658,21 @@ async fn code_review_completion_survives_disconnected_observers() {
     init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     drop(rx);
-    let engine = CodingWorkspaceEngine::new(
-        store.clone(),
-        crate::product::git_workspace_service::GitWorkspaceService::new(),
-        tx,
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            serde_json::json!({
+                "verdict": "approve",
+                "summary": "无订阅者补读",
+                "findings": []
+            })
+            .to_string(),
+        ),
     );
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        serde_json::json!({
-            "verdict": "approve",
-            "summary": "无订阅者补读",
-            "findings": []
-        })
-        .to_string(),
-    );
+    let engine = triage_engine(&store, tx, provider.clone());
     let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut cmd_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut cmd_rx)
         .await
         .expect("business result must not depend on observers");
 
@@ -1049,142 +1062,8 @@ async fn triage_gate_dedupe_path_rederives_actions_and_verdict() {
     );
 }
 
-/// 集合不含 `send_to_coder` 时，脚本/陈旧快照直发该动作仍必须被服务端拒绝：
-/// 可观察码 `send_to_coder_latest_review_not_actionable` 保留，不落 rework
-/// instruction、不改 attempt 状态、不关门。
-#[tokio::test]
-async fn verdict_derived_triage_gate_rejects_direct_send_to_coder() {
-    let (_root, store, attempt) = running_attempt_with_worktree();
-    let attempt = attempt_at_code_review(&store, &attempt);
-    seed_review_conclusion(
-        &store,
-        &attempt,
-        "code_review_report_0001",
-        ReviewVerdict::Approve,
-    );
-    let engine = triage_test_engine(&store);
-    let gated = create_triage_gate(
-        &engine,
-        &attempt,
-        "code_review_output_human_triage",
-        "coding_node_0001",
-    )
-    .await;
-    let gate = open_triage_gate(&store, &gated);
-    assert!(!gate_action_ids(&gate).contains(&"send_to_coder".to_string()));
-
-    let error = engine
-        .handle_blocked_gate_response(
-            &gated.project_id,
-            &gated.issue_id,
-            &gated.id,
-            &gate.gate_id,
-            "send_to_coder",
-            Some("请按审查结论返修".to_string()),
-        )
-        .await
-        .expect_err("集合不含该动作时必须拒绝");
-    assert_eq!(
-        provider_stream_code(&error),
-        "send_to_coder_latest_review_not_actionable",
-    );
-
-    assert!(
-        store
-            .list_rework_instructions(&gated.project_id, &gated.issue_id, &gated.id)
-            .expect("rework instructions")
-            .is_empty(),
-        "被拒绝的提交不得落地 rework instruction",
-    );
-    let persisted = store
-        .get_attempt(&gated.project_id, &gated.issue_id, &gated.id)
-        .expect("attempt");
-    assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
-    assert_eq!(persisted.stage, CodingExecutionStage::CodeReview);
-    assert_eq!(
-        open_triage_gate(&store, &gated).gate_id,
-        gate.gate_id,
-        "拒绝不得关闭该门",
-    );
-}
-
-/// 存量在途门（升级前落了四动作、不回写）：最新 verdict 不可返修时，直发
-/// `send_to_coder` 仍被既有前置拒绝，语义与派生门一致。
-#[tokio::test]
-async fn legacy_four_action_triage_gate_still_rejects_send_to_coder() {
-    let (_root, store, attempt) = running_attempt_with_worktree();
-    let attempt = attempt_at_code_review(&store, &attempt);
-    seed_review_conclusion(
-        &store,
-        &attempt,
-        "code_review_report_0001",
-        ReviewVerdict::Approve,
-    );
-    let blocked = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Blocked,
-        )
-        .expect("blocked");
-    let gate = store
-        .create_blocked_gate(
-            &blocked,
-            CreateBlockedGateInput {
-                attempt_id: blocked.id.clone(),
-                stage: CodingExecutionStage::CodeReview,
-                node_id: Some("coding_node_0001".to_string()),
-                role: Some(CodingProviderRole::CodeReviewer),
-                title: "Code Review 结论需人工分诊".to_string(),
-                description: "升级前落地的四动作门".to_string(),
-                reason_code: Some("code_review_output_human_triage".to_string()),
-                evidence_refs: Vec::new(),
-                raw_provider_output_ref: None,
-                available_actions: vec![
-                    coding_gate_action_for_id("retry_review").expect("retry review action"),
-                    coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
-                    coding_gate_action_for_id("manual_continue").expect("manual continue action"),
-                    coding_gate_action_for_id("abort").expect("abort action"),
-                ],
-            },
-        )
-        .expect("legacy four action gate");
-    // 不回写：存量门没有派生事实字段，动作集合保持落地时的样子。
-    assert_eq!(gate.latest_review_verdict, None);
-
-    let engine = triage_test_engine(&store);
-    let error = engine
-        .handle_blocked_gate_response(
-            &blocked.project_id,
-            &blocked.issue_id,
-            &blocked.id,
-            &gate.gate_id,
-            "send_to_coder",
-            Some("请按审查结论返修".to_string()),
-        )
-        .await
-        .expect_err("verdict 不可返修时存量门也必须拒绝");
-    assert_eq!(
-        provider_stream_code(&error),
-        "send_to_coder_latest_review_not_actionable",
-    );
-    assert!(
-        store
-            .list_rework_instructions(&blocked.project_id, &blocked.issue_id, &blocked.id)
-            .expect("rework instructions")
-            .is_empty(),
-    );
-    let persisted = store
-        .get_attempt(&blocked.project_id, &blocked.issue_id, &blocked.id)
-        .expect("attempt");
-    assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
-    assert_eq!(
-        open_triage_gate(&store, &blocked),
-        gate,
-        "存量门保持原样（不回写、不关闭）",
-    );
-}
+// code_review_triage 拆分（large_file_guard 1200 行上限）：两个 send_to_coder 拒调用例族经 include! 挂载，与本文档同一模块作用域，测试路径与行为零变化（纯移动）。
+include!("code_review_triage_gate_actions.rs");
 
 include!("verification_triage_entry.inc.rs");
 

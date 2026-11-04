@@ -223,7 +223,7 @@ pub(crate) fn workspace_idle_activity_guard(
 /// 逻辑代码库分支的规划会话 resume 校验入口（Task 11 / REQ-PLN-03）。
 ///
 /// 在 provider 启动前校验 planning snapshot 指纹：
-/// - 传统单仓路径（无 logical manifest 且 issue 无 selection）→ `Ok(None)`，不受影响。
+/// - 无归属旧数据（无 manifest 且无 selection）→ routing 层即 FailClosed，拒绝恢复。
 /// - 逻辑代码库路径（manifest 与 selection 成对）→ 校验 planning snapshot 指纹。
 /// - manifest 与 selection 不成对 → fail-closed，拒绝恢复。
 /// - 指纹一致 → `SameContext`：沿用现有 session 审计与 prompt 上下文。
@@ -237,7 +237,6 @@ pub(crate) async fn planning_resume_decision_with_fresh_index(
     let routing = RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(|error| format!("load repository routing failed: {error}"))?;
     match routing {
-        RepositoryRouting::Legacy { .. } => Ok(None),
         RepositoryRouting::Logical { .. } => {
             #[cfg(test)]
             let resolver = PlanningContextResolver::new_without_freshness(app_paths.clone());

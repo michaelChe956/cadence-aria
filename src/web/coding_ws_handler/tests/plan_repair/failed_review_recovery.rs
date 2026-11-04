@@ -18,8 +18,7 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::web::coding_ws_handler::spawn_coding_runner_reserved;
-use crate::web::runtime::WebRuntime;
-use crate::web::state::{CodingAttemptRunKey, WebAppState};
+use crate::web::state::CodingAttemptRunKey;
 
 struct RecoveredReviewerPlanDefectProvider;
 
@@ -76,6 +75,19 @@ impl StreamingProviderAdapter for RecoveredReviewerPlanDefectProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+    /// REQ-ROUTE-01 两态化后，带冻结快照的 attempt 的 provider **只能**经
+    /// LC gateway 启动 ⇒ 启动面是 `start_validated`（裸 `start` 与 legacy
+    /// `run_streaming` 回退对逻辑 target 已被强制关闭）。validated 面拆出
+    /// input 后与裸 `start` 同路径（输出语义不变）。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
     }
 }
 
@@ -146,12 +158,9 @@ async fn coding_plan_repair_recovered_reviewer_retry_can_start_plan_repair() {
         ProviderName::ClaudeCode,
         Arc::new(RecoveredReviewerPlanDefectProvider),
     );
-    let mut state = WebAppState::new(
-        fixture._tmp.path().to_path_buf(),
-        WebRuntime::new_fake(fixture._tmp.path().to_path_buf()),
-    );
-    state.provider_registry = Arc::new(registry);
-    state.test_provider_enabled = true;
+    // runner 路径的 provider 只能经 LC gateway 启动 ⇒ registry 与 gateway
+    // factory 必须同源（见 `support::runner_state_with_provider`）。
+    let state = super::support::runner_state_with_provider(fixture._tmp.path(), registry);
     let attempt_key = CodingAttemptRunKey::from_attempt(&recovered);
     let reservation = state
         .coding_runs

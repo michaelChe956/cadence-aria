@@ -63,6 +63,7 @@ impl AggregatePreflightService for NoopPreflight {
             members: Vec::new(),
             manifest_revision: manifest.membership_revision,
             manifest_digest: "sha256:test-manifest".to_string(),
+            ..Default::default()
         })
     }
 }

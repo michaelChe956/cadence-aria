@@ -35,15 +35,16 @@ async fn group_initialization_recovers_all_journaled_restart_boundaries() {
 
         let app_paths = ProductAppPaths::new(root.path().join(".aria"));
         let interrupted_store = CodingAttemptStore::new(app_paths.clone());
+        // 仓维路由（REQ-MTG-02 D2.1 A1 唯一性细化）：attempt 按 target 桶
+        // 寻址，不再以 None 桶盲查；经 journal 冻结的 attempt 身份读取。
         let interrupted_attempt = interrupted_store
-            .get_attempt_for_work_item_group(
+            .get_group_initialization(
                 "project_0001",
                 "issue_0001",
                 "work_item_plan_0001",
-                None,
             )
-            .expect("interrupted group attempt lookup")
-            .expect("interrupted group attempt");
+            .expect("interrupted group initialization journal")
+            .attempt;
 
         let restarted_app = build_web_router(WebAppState::new(
             root.path().to_path_buf(),
@@ -80,8 +81,14 @@ async fn group_initialization_recovers_all_journaled_restart_boundaries() {
                 .len(),
             2
         );
+        // 仓维路由（REQ-COD-03）：恢复后的租约事实在 shared-worktrees/{repository}。
+        let recovered_repo = interrupted_attempt
+            .target_snapshot
+            .as_ref()
+            .expect("interrupted attempt target snapshot")
+            .logical_repository_id;
         let shared = LifecycleStore::new(app_paths)
-            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .get_repo_shared_worktree("project_0001", "issue_0001", recovered_repo)
             .expect("recovered shared worktree")
             .expect("recovered shared worktree");
         assert_eq!(
@@ -158,8 +165,15 @@ async fn group_initialization_rejects_authoritative_plan_drift_without_writes() 
         .expect("activate drifted plan revision");
 
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    // 仓维路由（REQ-COD-03）：中断组租约在 shared-worktrees/{repository} 记录。
+    let drift_repo = journal
+        .attempt
+        .target_snapshot
+        .as_ref()
+        .expect("journal target snapshot")
+        .logical_repository_id;
     let shared_before = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", drift_repo)
         .expect("shared worktree before retry")
         .expect("shared worktree before retry");
     let tree_before = snapshot_directory_tree(&aria_root);
@@ -176,7 +190,7 @@ async fn group_initialization_rejects_authoritative_plan_drift_without_writes() 
     assert_eq!(snapshot_directory_tree(&aria_root), tree_before);
     assert_eq!(
         lifecycle
-            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .get_repo_shared_worktree("project_0001", "issue_0001", drift_repo)
             .expect("shared worktree after retry")
             .expect("shared worktree after retry"),
         shared_before
@@ -328,8 +342,15 @@ async fn retry_reconciles_attempt_persisted_before_lease_bind_after_restart() {
         .expect("active orphan lookup")
         .expect("active orphan");
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    // 仓维路由（REQ-COD-03）：persist-before-bind 中断时租约在
+    // shared-worktrees/{repository} 三元键记录，owner 为 repo_worktree_lease_*。
+    let orphan_repo = orphan
+        .target_snapshot
+        .as_ref()
+        .expect("orphan target snapshot")
+        .logical_repository_id;
     let orphan_lease = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", orphan_repo)
         .expect("orphan lease")
         .expect("orphan lease");
     assert_eq!(
@@ -340,7 +361,7 @@ async fn retry_reconciles_attempt_persisted_before_lease_bind_after_restart() {
         orphan_lease
             .current_lock_owner_id
             .as_deref()
-            .is_some_and(|owner| owner.starts_with("issue_worktree_lease_"))
+            .is_some_and(|owner| owner.starts_with("repo_worktree_lease_"))
     );
 
     let restarted_app = build_web_router(WebAppState::new(
@@ -355,7 +376,8 @@ async fn retry_reconciles_attempt_persisted_before_lease_bind_after_restart() {
     )
     .await;
     assert_eq!(blocked_status, StatusCode::CONFLICT);
-    assert_eq!(blocked["code"], "issue_worktree_active");
+    // 仓维路由稳定码（REQ-COD-03 同仓串行）。
+    assert_eq!(blocked["code"], "repo_worktree_active");
 
     let (retry_status, retry) =
         request_json(restarted_app.clone(), Method::POST, create_path, json!({})).await;
@@ -371,7 +393,7 @@ async fn retry_reconciles_attempt_persisted_before_lease_bind_after_restart() {
         .collect::<Vec<_>>();
     assert_eq!(active_attempts, vec![orphan.clone()]);
     let reconciled = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", orphan_repo)
         .expect("reconciled lease")
         .expect("reconciled lease");
     assert_eq!(
@@ -392,7 +414,7 @@ async fn retry_reconciles_attempt_persisted_before_lease_bind_after_restart() {
     .await;
     assert_eq!(abort_status, StatusCode::OK);
     let released = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", orphan_repo)
         .expect("released lease")
         .expect("released lease");
     assert_eq!(released.current_active_work_item_id, None);
@@ -455,8 +477,14 @@ async fn retry_does_not_reconcile_ambiguous_active_attempts() {
     // 歧义：受控写 API 保留存储 status，无法表达该初始状态，直接播种。
     crate::seed_coding_attempt_record(&store, &first);
     let lifecycle = LifecycleStore::new(app_paths);
+    // 仓维路由（REQ-COD-03）：中断租约在 shared-worktrees/{repository} 记录。
+    let first_repo = first
+        .target_snapshot
+        .as_ref()
+        .expect("first attempt target snapshot")
+        .logical_repository_id;
     let lease_before = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", first_repo)
         .expect("lease before")
         .expect("lease before");
 
@@ -471,7 +499,7 @@ async fn retry_does_not_reconcile_ambiguous_active_attempts() {
     assert_eq!(retry["code"], "coding_attempt_ambiguous");
     assert_eq!(
         lifecycle
-            .get_issue_shared_worktree("project_0001", "issue_0001")
+            .get_repo_shared_worktree("project_0001", "issue_0001", first_repo)
             .expect("lease after")
             .expect("lease after"),
         lease_before

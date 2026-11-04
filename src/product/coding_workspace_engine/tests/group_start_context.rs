@@ -7,6 +7,13 @@ use super::*;
 fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：group attempt 的凭证是「LC 权威 + 冻结快照」。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -22,12 +29,13 @@ fn group_final_review_evaluation_context_omits_projection_body_but_keeps_hash() 
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
+    super::group_terminal::bind_group_drafts_to_snapshot_target(&store, &attempt);
 
     let revision_store = WorkItemRevisionStore::new(store.paths());
     let lineage = revision_store
@@ -116,6 +124,13 @@ async fn group_attempt_records_base_head_as_first_unit_start_commit() {
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：StartCoding 的 admission 需要 LC 权威 + 冻结快照。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -131,12 +146,13 @@ async fn group_attempt_records_base_head_as_first_unit_start_commit() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
+    super::group_terminal::bind_group_drafts_to_snapshot_target(&store, &attempt);
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 

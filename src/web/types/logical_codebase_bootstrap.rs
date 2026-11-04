@@ -19,6 +19,32 @@ pub struct BootstrapCheckpointDto {
     pub completed_at: Option<String>,
 }
 
+/// 失败面三段成品（REQ-BOOT-08 / REQ-LAYOUT-02）的 HTTP 形态。
+///
+/// 五字段与 `product::logical_codebase::failure_copy::FailureCopy` 一一对应，
+/// **全部必填非 null**：`reason_zh` 不是 `Option`，前端不得把缺失当降级路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FailureCopyDto {
+    pub title_zh: String,
+    pub reason_zh: String,
+    pub action_zh: String,
+    pub triage: String,
+    pub machine_line: String,
+}
+
+impl From<&crate::product::logical_codebase::failure_copy::FailureCopy> for FailureCopyDto {
+    fn from(copy: &crate::product::logical_codebase::failure_copy::FailureCopy) -> Self {
+        Self {
+            title_zh: copy.title_zh.clone(),
+            reason_zh: copy.reason_zh.clone(),
+            action_zh: copy.action_zh.clone(),
+            triage: copy.triage.as_str().to_string(),
+            machine_line: copy.machine_line.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BootstrapFailureDto {
@@ -26,6 +52,10 @@ pub struct BootstrapFailureDto {
     pub detail: String,
     pub retryable: bool,
     pub external_side_effect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<FailureCopyDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +149,9 @@ impl From<&Projection> for LogicalCodebaseBootstrapProjectionDto {
                         detail: failure.detail.clone(),
                         retryable: failure.retryable,
                         external_side_effect: failure.external_side_effect.clone(),
+                        triage: failure.triage.clone(),
+                        // 纯搬运：后端已渲染好，前端不再自拼文案。
+                        copy: failure.copy.as_ref().map(FailureCopyDto::from),
                     }),
                     allowed_actions: step
                         .allowed_actions

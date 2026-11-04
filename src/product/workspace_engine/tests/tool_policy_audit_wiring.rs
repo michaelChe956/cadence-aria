@@ -229,7 +229,8 @@ async fn workspace_policy_review_run_keeps_engine_audit_allocation_via_real_prov
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "p1".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id:
+                crate::product::logical_codebase::legacy_logical_codebase_id("p1"),
             base_branch: None,
             title: "t20b audit chain fixture".to_string(),
             description: None,

@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::audit_snapshot_budget::{
+    AuditSnapshotBudgetFailure, BudgetGroup, MemberBudgetSummary,
+};
 use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id};
 
@@ -44,13 +47,18 @@ use super::aggregate_initialization_store::root_recipe_command_index;
 // - root_recipe_receipt_gitignore.inc.rs：快照 gitignore 感知过滤——
 //   `.gitignore`（含嵌套）与 `.git/info/exclude` 的解析/匹配（Bug2
 //   2026-10-16：被忽略路径不计预算、不进快照）。
+// - root_recipe_snapshot.inc.rs：快照扫描与预算计费——元数据差分（两遍
+//   全仓扫描只记元数据、只对变更文件读内容）、`.git` 子树整棵跳过、流式
+//   读取（边读边计费、越限立刻停）、大项分组与成员仓贡献统计
+//   （REQ-AUD-01/02/03/04）。
 // - root_recipe_receipt_auditor.inc.rs：RootRecipeFilesystemAuditor——命令前后
-//   全量快照与 diff 的只读审计器。
+//   全量扫描与 diff 的只读审计器。
 // - root_recipe_receipt_store.inc.rs：RootRecipeReceiptStore 与命令/receipt 校验、
-//   allowlist/classify/snapshot/digest 及 durable 原子写入辅助函数。
+//   allowlist/classify/digest 及 durable 原子写入辅助函数。
 // - root_recipe_receipt_tests.inc.rs：tests 模块。
 include!("root_recipe_receipt_types.inc.rs");
 include!("root_recipe_receipt_gitignore.inc.rs");
+include!("root_recipe_snapshot.inc.rs");
 include!("root_recipe_receipt_auditor.inc.rs");
 include!("root_recipe_receipt_store.inc.rs");
 include!("root_recipe_receipt_tests.inc.rs");

@@ -1069,6 +1069,14 @@ async fn rendered_coding_prompt_carries_platform_directives() {
     init_test_git_repo(&worktree);
     let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：快照 attempt 的 provider run 只能经 LC gateway 分发，
+    // 且准入/身份校验以 LC 权威为基座——故夹具必须播种完整 LC 权威。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -1084,7 +1092,7 @@ async fn rendered_coding_prompt_carries_platform_directives() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -1097,13 +1105,20 @@ async fn rendered_coding_prompt_carries_platform_directives() {
     attempt.stage = CodingExecutionStage::Coding;
     store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let coder = super::provider_execution_context::CapturingProjectionProvider::new(
-        super::provider_execution_context::current_plan_defect_output(),
+    let coder = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            super::provider_execution_context::current_plan_defect_output(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        coder.clone(),
     );
 
     let coded = engine
-        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .execute_coding(&attempt, coder.as_ref(), &CodingExecutionContext::default())
         .await
         .unwrap();
 
@@ -1125,13 +1140,21 @@ async fn fallback_coding_prompt_carries_platform_directives() {
     // 必须在场（S6 注入不设 LC/group 门槛）。
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let coder = super::provider_execution_context::CapturingProjectionProvider::new(
-        super::provider_execution_context::current_plan_defect_output(),
+    // 父级夹具已带冻结快照，provider run 只能经 LC gateway 分发。
+    let coder = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            super::provider_execution_context::current_plan_defect_output(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        coder.clone(),
     );
 
     let coded = engine
-        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .execute_coding(&attempt, coder.as_ref(), &CodingExecutionContext::default())
         .await
         .unwrap();
 

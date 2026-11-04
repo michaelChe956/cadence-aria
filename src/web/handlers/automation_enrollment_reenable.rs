@@ -167,11 +167,13 @@ pub(crate) fn enrollment_source_dangling(
             .any(|reference| !designs.iter().any(|design| design.id == reference.id))
 }
 
-/// terminated 人工重新开启的 CAS 编排（悬空源重授权）：取代删除旧 plan 代际
-/// 后，按「终止记录的原 source 是否悬空」路由 store CAS——悬空走
-/// `compare_and_set_reenable`（仅放行 source 漂移，binding 换代留痕），
-/// 否则走普通 `compare_and_set`（source/options/target 逐字段相等，异即 409）。
-/// 非 terminated 记录维持既有 `compare_and_set` 语义不变。
+/// terminated 人工重新开启的 CAS 编排（换代 + 悬空源重授权）：取代删除旧
+/// plan 代际后，terminated 记录**一律**走 store 的 `compare_and_set_reenable`
+/// （由「终止记录的原 source 是否悬空」推出的 `original_source_dangling`
+/// 在 store 内按路径分治）：非悬空源时 options 漂移按换代放行、source/target
+/// 漂移仍拒；悬空源时仅放行 source 漂移，options/target 仍逐字段相等
+/// （REQ-DRG-18）。
+/// 非 terminated 记录走普通 `compare_and_set`（enabled 状态异 payload 仍 409）。
 pub(crate) async fn supersede_terminated_generation_and_cas(
     state: &WebAppState,
     project_id: &str,

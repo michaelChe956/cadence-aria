@@ -38,6 +38,26 @@ export type AggregateCancellationDto = {
   cancelled_at: string;
   detail?: string | null;
 };
+/// 冻结的 provider 选择候选行（对应后端 `AggregateProviderCandidate`）。
+export type AggregateProviderCandidateDto = {
+  provider: string;
+  display_name: string;
+  cli_available: boolean;
+  cli_reason_code?: string | null;
+  capability_state: string;
+  skipped_reason?: string | null;
+  action_hint: string;
+  warning?: string | null;
+};
+
+/// 创建期冻结的 provider 选择结果（REQ-BOOT-07：selected 恒等于 input.provider）。
+export type AggregateProviderSelectionDto = {
+  selected: string;
+  candidates: AggregateProviderCandidateDto[];
+  rule_version: string;
+  decided_at: string;
+};
+
 
 export type AggregateInitializationOperationSnapshot = {
   operation_id: string;
@@ -50,6 +70,7 @@ export type AggregateInitializationOperationSnapshot = {
   member_projections: AggregateMemberProjectionDto[];
   cancellation: AggregateCancellationDto | null;
   error: ApiError | null;
+  provider_selection?: AggregateProviderSelectionDto | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;

@@ -103,15 +103,13 @@ impl super::CodingAttemptStore {
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         let routing =
             // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（conflict
-            // fail-closed）；旧数据无归属/无别名 record 时回退 Legacy。
+            // fail-closed）；无 LC 归属的旧数据一律 unbound_issue()（fail-closed）。
             match crate::product::logical_codebase::RepositoryAuthorityResolver::new(
                 self.paths.clone(),
             )
             .resolve_for_issue(&input.project_id, &input.issue_id)?
             {
-                None => RepositoryRouting::Legacy {
-                    repository_id: String::new(),
-                },
+                None => RepositoryRouting::unbound_issue(),
                 Some(resolution) => RepositoryRouting::classify(
                     resolution.manifest,
                     resolution.selection,

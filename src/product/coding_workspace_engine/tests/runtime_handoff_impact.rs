@@ -63,6 +63,14 @@ fn runtime_handoff_fixture(
 ) -> RuntimeHandoffFixture {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：group 完成/就绪链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且 issue 记录必须在场（issue 聚合/路由解析）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -78,11 +86,32 @@ fn runtime_handoff_fixture(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
+    // 完成/advance 链(`mark_repo_worktree_completed_item`)要求仓维
+    // shared-worktree 记录在场,且租约分类对「记录在场但无人持锁」判
+    // `coding_lease_state_unknown` 停等——故预置仓维记录 + 以本 attempt
+    // 为 owner 的活跃锁(自持租约 ⇒ Allowed;advance 的锁转移由引擎在
+    // 完成链内自取)。本夹具不物化 worktree,记录指向规划占位路径。
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(store.paths());
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        &root.path().join("shared-worktree"),
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        "wi_core",
+        &attempt.id,
+    );
     let revision_store = WorkItemRevisionStore::new(store.paths());
     let lineage = WorkItemPlanLineage {
         id: "work_item_plan_0001".to_string(),

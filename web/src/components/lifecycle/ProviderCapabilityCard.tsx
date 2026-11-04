@@ -6,14 +6,17 @@
 // 同一 GET 面刷新状态（不乐观改 durable 事实）。
 import { useCallback, useEffect, useState } from "react";
 import { ApiRequestError } from "../../api/client";
+import { getInstallTargets } from "../../api/provider-install";
 import {
   getLogicalCodebaseCapabilities,
   postLogicalCodebaseCapabilityRevalidate,
 } from "../../api/provider-capability";
 import type {
+  InstallTargetView,
   ProviderCapabilityProviderSnapshotDto,
   ProviderCapabilitiesResponse,
 } from "../../api/types";
+import { ProviderInstallActionButton } from "./ProviderInstallActionButton";
 
 const PROVIDER_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
@@ -70,6 +73,12 @@ export function ProviderCapabilityCard({
     null,
   );
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [installTargets, setInstallTargets] = useState<
+    Record<string, InstallTargetView>
+  >({});
+  const [installTargetsError, setInstallTargetsError] = useState<string | null>(
+    null,
+  );
   const [busyProvider, setBusyProvider] = useState<string | null>(null);
   const [feedbackByProvider, setFeedbackByProvider] = useState<
     Record<string, RevalidateFeedback>
@@ -98,14 +107,38 @@ export function ProviderCapabilityCard({
     }
   }, [projectId, logicalCodebaseId]);
 
+  /** 安装目标面（本地可用性 / 版本 / 安装源）：与能力投影并行读取。
+   *  读取失败只降级为「不提供安装入口 + 提示」，不影响能力三行的展示。 */
+  const reloadInstallTargets = useCallback(async (): Promise<void> => {
+    if (projectId === null || logicalCodebaseId === null) {
+      return;
+    }
+    try {
+      const views = await getInstallTargets();
+      const byTarget: Record<string, InstallTargetView> = {};
+      for (const view of views) {
+        byTarget[view.target] = view;
+      }
+      setInstallTargets(byTarget);
+      setInstallTargetsError(null);
+    } catch (error) {
+      setInstallTargets({});
+      setInstallTargetsError(
+        error instanceof Error ? error.message : "安装状态读取失败",
+      );
+    }
+  }, [projectId, logicalCodebaseId]);
+
   useEffect(() => {
     if (projectId === null || logicalCodebaseId === null) {
       return;
     }
     setProjection(null);
+    setInstallTargets({});
     setFeedbackByProvider({});
     void reload();
-  }, [projectId, logicalCodebaseId, reload]);
+    void reloadInstallTargets();
+  }, [projectId, logicalCodebaseId, reload, reloadInstallTargets]);
 
   if (projectId === null || logicalCodebaseId === null) {
     return null;
@@ -136,6 +169,7 @@ export function ProviderCapabilityCard({
       }));
       // 成功后重读同一 GET 面：三行状态以 durable 事实刷新，不乐观改。
       await reload();
+      await reloadInstallTargets();
     } catch (error) {
       if (error instanceof ApiRequestError) {
         const rawDetail = (error.details as Record<string, unknown> | undefined)
@@ -185,6 +219,14 @@ export function ProviderCapabilityCard({
           {loadError}
         </p>
       ) : null}
+      {installTargetsError ? (
+        <p
+          data-testid="provider-install-targets-error"
+          className="mt-1 text-xs text-[var(--aria-danger)]"
+        >
+          安装状态读取失败：{installTargetsError}
+        </p>
+      ) : null}
       {projection === null && loadError === null ? (
         <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">载入中…</p>
       ) : null}
@@ -192,6 +234,11 @@ export function ProviderCapabilityCard({
         <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
           {projection.providers.map((provider) => {
             const feedback = feedbackByProvider[provider.provider_type] ?? null;
+            const installView = installTargets[provider.provider_type] ?? null;
+            // 三行聚合全 Confirmed 才算已核验（与 admission fail-closed 同口径）。
+            const providerConfirmed = CAPABILITY_ASPECTS.every(
+              (aspect) => aspectStatus(provider, aspect) === "confirmed",
+            );
             return (
               <li
                 key={provider.provider_type}
@@ -246,6 +293,23 @@ export function ProviderCapabilityCard({
                     </li>
                   ))}
                 </ul>
+                {/* 安装 / 更新入口（REQ-PCI-02）：未安装 → 【安装】+ 手动命令；
+                    已安装且已核验但版本落后 → 【更新】。已安装但未核验时由本行
+                    既有「核验」按钮负责（不显示安装，也不重复渲染一个核验）。 */}
+                {installView &&
+                (!installView.cli_available || providerConfirmed) ? (
+                  <ProviderInstallActionButton
+                    target={installView.target}
+                    cliAvailable={installView.cli_available}
+                    localVersion={installView.local_version ?? provider.version}
+                    latestVersion={installView.latest_version}
+                    capabilityConfirmed={providerConfirmed}
+                    onSettled={() => {
+                      void reload();
+                      void reloadInstallTargets();
+                    }}
+                  />
+                ) : null}
                 {feedback ? (
                   <p
                     data-testid={`provider-capability-result-${provider.provider_type}`}
@@ -268,6 +332,34 @@ export function ProviderCapabilityCard({
             );
           })}
         </ul>
+      ) : null}
+      {/* codegraph 纳入同一安装机制（11.10）：它没有 capability 探针，只按
+          本地是否可用给【安装】（+ 手动命令）或【更新】。 */}
+      {installTargets.codegraph ? (
+        <div
+          data-testid="provider-install-target-codegraph"
+          className="mt-2 rounded border border-[var(--aria-line)] px-2 py-1.5"
+        >
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+            <span className="text-xs font-semibold text-[var(--aria-ink)]">
+              codegraph
+            </span>
+            <span className="text-xs text-[var(--aria-ink-muted)]">
+              {installTargets.codegraph.local_version ?? "未探测"}
+            </span>
+          </div>
+          <ProviderInstallActionButton
+            target="codegraph"
+            cliAvailable={installTargets.codegraph.cli_available}
+            localVersion={installTargets.codegraph.local_version}
+            latestVersion={installTargets.codegraph.latest_version}
+            capabilityConfirmed
+            onSettled={() => {
+              void reload();
+              void reloadInstallTargets();
+            }}
+          />
+        </div>
       ) : null}
     </div>
   );

@@ -2,11 +2,20 @@
 mod tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
+    use crate::product::audit_snapshot_budget::{
+        AuditSnapshotBudgetFailure, BudgetGroup, MemberBudgetSummary,
+    };
     use crate::product::json_store::ProductStoreError;
     use crate::product::logical_codebase::aggregate_initialization::{
-        AggregateInitializationIdempotencyIdentity, AggregateInitializationOperationInput,
-        AggregateInitializationStepKind,
+        AggregateInitializationErrorRecord, AggregateInitializationIdempotencyIdentity,
+        AggregateInitializationOperationInput, AggregateInitializationStepKind,
+        AggregateProviderCandidate, AggregateProviderSelection,
     };
+    use crate::product::logical_codebase::aggregate_initialization_coordinator::{
+        AggregateInitializationError, TurnDiagnostic,
+    };
+    use crate::product::logical_codebase::provider_trust::ProviderTrustWaiting;
+    use crate::product::models::provider::ProviderName;
     use crate::product::repository_store::{
         RepositoryInitializationOperationStore, RepositoryInitializationStepKind,
     };
@@ -624,5 +633,361 @@ mod tests {
         );
         assert!(!fixture.staging_root().exists());
         assert_eq!(fixture.provider().turn_count(), 0);
+    }
+
+    // ── 片1（块2 片1·契据形状与错误词表）：记录形状 + error_record 映射 ──
+
+    fn error_record(error: AggregateInitializationError) -> AggregateInitializationErrorRecord {
+        error.error_record()
+    }
+
+    fn trust_waiting() -> ProviderTrustWaiting {
+        ProviderTrustWaiting {
+            provider: ProviderName::ClaudeCode,
+            canonical_root: std::path::PathBuf::from("/tmp/aggregate-root"),
+            trust_key: "trust_key".to_string(),
+            reason_code: "provider_trust_missing".to_string(),
+            message: "trust missing".to_string(),
+            retry_action: "complete the provider authorization and retry".to_string(),
+            manual_guidance: "manual guidance".to_string(),
+            command_markdown: None,
+            recorded_at: "2026-11-03T00:00:00Z".to_string(),
+        }
+    }
+
+    fn candidate(
+        provider: &str,
+        display_name: &str,
+        cli_available: bool,
+        capability_state: &str,
+        skipped_reason: Option<&str>,
+    ) -> AggregateProviderCandidate {
+        AggregateProviderCandidate {
+            provider: provider.to_string(),
+            display_name: display_name.to_string(),
+            cli_available,
+            cli_reason_code: if cli_available {
+                None
+            } else {
+                Some("command_missing".to_string())
+            },
+            capability_state: capability_state.to_string(),
+            skipped_reason: skipped_reason.map(str::to_string),
+            action_hint: "run the capability probe for this provider".to_string(),
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn legacy_operation_json_without_provider_selection_deserializes_with_none() {
+        let fixture = aggregate_init_fixture();
+        let operation = fixture.new_operation("request-a");
+        let mut value = serde_json::to_value(&operation).unwrap();
+        value.as_object_mut().unwrap().remove("provider_selection");
+        let legacy = serde_json::to_string(&value).unwrap();
+
+        let parsed: AggregateInitializationOperation = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(parsed.provider_selection, None);
+        assert_eq!(parsed.operation_id, operation.operation_id);
+    }
+
+    #[test]
+    fn legacy_error_record_json_without_cause_and_provider_deserializes_with_none() {
+        let legacy = r#"{
+            "stage": "pre_check",
+            "reason_code": "root_recipe_probe_failed",
+            "stderr_summary": "provider probe failed",
+            "retryable": true,
+            "action": "retry_provider_turn"
+        }"#;
+        let record: AggregateInitializationErrorRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(record.cause, None);
+        assert_eq!(record.provider, None);
+        assert_eq!(record.reason_code, "root_recipe_probe_failed");
+    }
+
+    #[test]
+    fn provider_selection_roundtrips_four_candidates_in_owner_order() {
+        let fixture = aggregate_init_fixture();
+        let selection = AggregateProviderSelection {
+            selected: "pi".to_string(),
+            candidates: vec![
+                candidate("pi", "Pi", true, "confirmed", None),
+                candidate(
+                    "kimi_code",
+                    "Kimi Code",
+                    true,
+                    "unverified",
+                    Some("needs_verification"),
+                ),
+                candidate(
+                    "claude_code",
+                    "Claude Code",
+                    false,
+                    "not_installed",
+                    Some("cli_unavailable"),
+                ),
+                candidate("codex", "Codex", true, "denied", Some("denied")),
+            ],
+            rule_version: "v1".to_string(),
+            decided_at: "2026-11-03T00:00:00Z".to_string(),
+        };
+        let operation = fixture
+            .new_operation("request-a")
+            .with_provider_selection(selection.clone());
+
+        let encoded = serde_json::to_string(&operation).unwrap();
+        assert!(encoded.contains("\"provider_selection\""));
+        assert!(encoded.contains("\"rule_version\":\"v1\""));
+        assert!(encoded.contains("\"capability_state\""));
+        assert!(encoded.contains("\"cli_reason_code\""));
+        assert!(encoded.contains("\"skipped_reason\""));
+        assert!(encoded.contains("\"action_hint\""));
+
+        let parsed: AggregateInitializationOperation = serde_json::from_str(&encoded).unwrap();
+        let parsed_selection = parsed
+            .provider_selection
+            .expect("provider_selection is persisted");
+        assert_eq!(parsed_selection, selection);
+        assert_eq!(
+            parsed_selection
+                .candidates
+                .iter()
+                .map(|candidate| candidate.provider.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "pi".to_string(),
+                "kimi_code".to_string(),
+                "claude_code".to_string(),
+                "codex".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn error_record_keeps_existing_reason_codes_and_actions() {
+        let store_action = "The aggregate initialization state could not be persisted; query the operation after recovery.";
+
+        let not_found = error_record(AggregateInitializationError::NotFound {
+            id: "op".to_string(),
+        });
+        assert_eq!(
+            not_found.reason_code,
+            "aggregate_initialization_store_failed"
+        );
+        assert_eq!(not_found.action, store_action);
+
+        let store = error_record(AggregateInitializationError::Store(ProductStoreError::Io(
+            "boom".to_string(),
+        )));
+        assert_eq!(store.reason_code, "aggregate_initialization_store_failed");
+        assert_eq!(store.action, store_action);
+
+        let rejected = error_record(AggregateInitializationError::StateRejected {
+            id: "op".to_string(),
+            detail: "jump".to_string(),
+            retryable: true,
+        });
+        assert_eq!(
+            rejected.reason_code,
+            "aggregate_initialization_state_rejected"
+        );
+        assert_eq!(
+            rejected.action,
+            "The aggregate initialization state machine rejected the transition; review the operation and resubmit."
+        );
+
+        let skills = error_record(AggregateInitializationError::SkillsPreparation {
+            reason: "skills clone failed".to_string(),
+            retryable: true,
+        });
+        assert_eq!(skills.reason_code, "aggregate_machine_skills_failed");
+        assert_eq!(skills.action, "skills clone failed");
+
+        let preflight = error_record(AggregateInitializationError::Preflight {
+            reason: "preflight failed".to_string(),
+            retryable: true,
+        });
+        assert_eq!(preflight.reason_code, "aggregate_preflight_failed");
+        assert_eq!(preflight.action, "preflight failed");
+
+        let publication = error_record(AggregateInitializationError::PolicyPublication {
+            reason: "publication failed".to_string(),
+            retryable: true,
+        });
+        assert_eq!(
+            publication.reason_code,
+            "aggregate_policy_publication_failed"
+        );
+        assert_eq!(publication.action, "publication failed");
+
+        let provider_turn = error_record(AggregateInitializationError::ProviderTurn {
+            step: AggregateInitializationStepKind::PreCheck,
+            reason: "provider turn failed".to_string(),
+            retryable: true,
+        });
+        assert_eq!(provider_turn.reason_code, "aggregate_pre_check_failed");
+        assert_eq!(provider_turn.action, "provider turn failed");
+
+        let trust = error_record(AggregateInitializationError::TrustWaiting {
+            waiting: Box::new(trust_waiting()),
+        });
+        assert_eq!(trust.reason_code, "aggregate_initialization_trust_waiting");
+        assert_eq!(
+            trust.action,
+            "complete the provider authorization and retry"
+        );
+
+        let cancelled = error_record(AggregateInitializationError::Cancelled);
+        assert_eq!(cancelled.reason_code, "aggregate_initialization_cancelled");
+        assert_eq!(
+            cancelled.action,
+            "The aggregate initialization was cancelled."
+        );
+    }
+
+    #[test]
+    fn environment_precondition_reason_code_is_the_code_itself() {
+        let record = error_record(AggregateInitializationError::EnvironmentPrecondition {
+            code: "codegraph_missing".to_string(),
+            reason: "codegraph CLI not found".to_string(),
+            retryable: false,
+        });
+        assert_eq!(record.reason_code, "codegraph_missing");
+        assert_eq!(record.action, "codegraph CLI not found");
+        assert_eq!(record.cause, None);
+    }
+
+    #[test]
+    fn audit_snapshot_budget_store_error_has_its_own_reason_code() {
+        let failure = AuditSnapshotBudgetFailure {
+            max_bytes: 100,
+            cumulative_bytes: 120,
+            over_line_path: "pms/target/lib.rs".to_string(),
+            max_entries: 10,
+            cumulative_entries: 12,
+            top_groups: vec![BudgetGroup {
+                key: "pms/target".to_string(),
+                bytes: 90,
+            }],
+            member_summaries: vec![MemberBudgetSummary {
+                member: "pms".to_string(),
+                bytes: 90,
+                entries: 3,
+            }],
+        };
+        let record = error_record(AggregateInitializationError::Store(
+            ProductStoreError::AuditSnapshotBudgetExceeded(failure),
+        ));
+        assert_eq!(record.reason_code, "aggregate_audit_budget_exceeded");
+        assert_ne!(record.reason_code, "aggregate_initialization_store_failed");
+        assert_eq!(
+            record.cause,
+            Some("aggregate_audit_budget_exceeded".to_string())
+        );
+        // 结构化载荷必须随记录落进 stderr_summary：码表说「大项排行与成员仓
+        // 见下方诊断」，不落就等于下方什么都没有（controller 2026-11-03 批准的
+        // Plan §2.2 偏离）。
+        let stderr_summary = record
+            .stderr_summary
+            .as_deref()
+            .expect("budget failure carries its diagnostic");
+        assert!(stderr_summary.contains("top_groups:"), "{stderr_summary}");
+        assert!(
+            stderr_summary.contains("member_summaries:"),
+            "{stderr_summary}"
+        );
+        assert!(
+            stderr_summary.contains("pms/target=90 bytes"),
+            "{stderr_summary}"
+        );
+        assert!(
+            stderr_summary.contains("pms=90 bytes/3 entries"),
+            "{stderr_summary}"
+        );
+        assert!(
+            stderr_summary.contains("audit_snapshot_budget_exceeded"),
+            "{stderr_summary}"
+        );
+    }
+
+    #[test]
+    fn provider_turn_diagnosed_shares_reason_code_with_provider_turn() {
+        let reason =
+            "provider_capability_launch_not_confirmed: PlanningReadOnly launch cell is unknown"
+                .to_string();
+        let plain = error_record(AggregateInitializationError::ProviderTurn {
+            step: AggregateInitializationStepKind::PreCheck,
+            reason: reason.clone(),
+            retryable: true,
+        });
+        let diagnosed = error_record(AggregateInitializationError::ProviderTurnDiagnosed {
+            step: AggregateInitializationStepKind::PreCheck,
+            reason: reason.clone(),
+            retryable: true,
+            provider: Some("pi".to_string()),
+            diagnostic: TurnDiagnostic {
+                cause: Some("capability_unverified".to_string()),
+                output: Some("provider stderr".to_string()),
+            },
+        });
+
+        assert_eq!(
+            plain.reason_code,
+            "aggregate_provider_capability_unverified"
+        );
+        assert_eq!(diagnosed.reason_code, plain.reason_code);
+        assert_eq!(diagnosed.action, plain.action);
+        assert_eq!(plain.cause, None);
+        assert_eq!(plain.provider, None);
+        assert_eq!(plain.stderr_summary, None);
+        assert_eq!(diagnosed.cause, Some("capability_unverified".to_string()));
+        assert_eq!(diagnosed.provider, Some("pi".to_string()));
+        assert_eq!(
+            diagnosed.stderr_summary,
+            Some("provider stderr".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_turn_denial_and_stale_evidence_get_their_own_reason_codes() {
+        let denied = error_record(AggregateInitializationError::ProviderTurn {
+            step: AggregateInitializationStepKind::PreCheck,
+            reason: "provider_capability_launch_not_confirmed: PlanningReadOnly launch cell is denied; reason: no resume channel".to_string(),
+            retryable: false,
+        });
+        assert_eq!(denied.reason_code, "aggregate_provider_capability_denied");
+
+        let stale = error_record(AggregateInitializationError::ProviderTurn {
+            step: AggregateInitializationStepKind::PreCheck,
+            reason: "capability snapshot mismatch".to_string(),
+            retryable: false,
+        });
+        assert_eq!(
+            stale.reason_code,
+            "aggregate_provider_capability_evidence_stale"
+        );
+    }
+
+    #[test]
+    fn skills_preparation_diagnosed_keeps_reason_code_and_adds_cause() {
+        let plain = error_record(AggregateInitializationError::SkillsPreparation {
+            reason: "skills preparation failed".to_string(),
+            retryable: true,
+        });
+        assert_eq!(plain.reason_code, "aggregate_machine_skills_failed");
+        assert_eq!(plain.cause, None);
+
+        let diagnosed = error_record(AggregateInitializationError::SkillsPreparationDiagnosed {
+            reason: "skills preparation failed".to_string(),
+            retryable: true,
+            cause: "skills_unavailable_clone".to_string(),
+        });
+        assert_eq!(diagnosed.reason_code, "aggregate_machine_skills_failed");
+        assert_eq!(diagnosed.action, plain.action);
+        assert_eq!(
+            diagnosed.cause,
+            Some("skills_unavailable_clone".to_string())
+        );
     }
 }

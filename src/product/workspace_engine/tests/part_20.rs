@@ -4,7 +4,7 @@
 fn build_work_item_plan_outline_review_input_includes_boundary_rules() {
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_review_boundary");
-    let outline_payload = work_item_plan_outline_artifact();
+    let outline_payload = work_item_plan_outline_artifact(None);
     let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } = outline_payload else {
         panic!("expected outline candidate artifact");
     };

@@ -23,6 +23,18 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         .route("/api/health", get(handlers::health))
         .route("/api/providers/status", get(handlers::providers_status))
         .route("/api/providers/recheck", post(handlers::providers_recheck))
+        .route(
+            "/api/providers/install-targets",
+            get(handlers::get_install_targets),
+        )
+        .route(
+            "/api/providers/{target}/install",
+            post(handlers::post_provider_install),
+        )
+        .route(
+            "/api/providers/install/{job_id}",
+            get(handlers::get_install_job),
+        )
         .route("/api/runtime-info", get(handlers::runtime_info))
         .route(
             "/api/image-create/sessions",
@@ -175,6 +187,15 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         .route(
             "/api/projects/{project_id}/logical-codebases/{lc_id}/capability-revalidate",
             post(handlers::post_lc_capability_revalidate),
+        )
+        // 票3：「一键核验全部」异步作业（四家并发；POST 立即返回 job_id，GET 轮询）。
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/capabilities/revalidate-all",
+            post(handlers::post_lc_capability_revalidate_all),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/capabilities/revalidate-all/{job_id}",
+            get(handlers::get_lc_capability_revalidate_all_job),
         )
         .route(
             "/api/projects/{project_id}/logical-codebase/bootstrap",

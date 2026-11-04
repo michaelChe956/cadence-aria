@@ -1969,7 +1969,7 @@ mod confirmation_trust {
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: None,
-                logical_codebase_id: Some(lc_id.clone()),
+                logical_codebase_id: lc_id.clone(),
                 base_branch: None,
                 title: "confirm trust fixture".to_string(),
                 description: None,
@@ -2357,7 +2357,7 @@ mod confirmation_trust {
                     let mut issue = IssueStore::new(facts.app_paths.clone())
                         .get("project_0001", &facts.issue_id)
                         .expect("issue");
-                    issue.logical_codebase_id = Some("lc_drifted_elsewhere".to_string());
+                    issue.logical_codebase_id = "lc_drifted_elsewhere".to_string();
                     crate::product::json_store::write_json(
                         &facts
                             .app_paths

@@ -44,7 +44,9 @@ mod tests {
         git(path, &["commit", "-m", "init"]);
     }
 
-    pub(super) fn aria_inventory(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    pub(super) fn aria_inventory(
+        root: &std::path::Path,
+    ) -> std::collections::BTreeMap<String, Vec<u8>> {
         let mut inventory = std::collections::BTreeMap::new();
         let mut stack = vec![root.join(".aria")];
         while let Some(dir) = stack.pop() {
@@ -88,6 +90,171 @@ mod tests {
             )
             .unwrap()
             .id
+    }
+
+    /// 片5 的 `EnvironmentPrecondition` 形态：manifest/成员齐备（identity 与
+    /// manifest 步已完成）、无 policy（rules_policy 未开始），operation 以
+    /// `codegraph_missing` / `codegraph_version_mismatch` 失败且所有 step 仍
+    /// Pending。
+    fn codegraph_blocked_fixture(
+        reason_code: &str,
+    ) -> (tempfile::TempDir, ProductAppPaths, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let aggregate_root = temp.path().join("aggregate-root");
+        let lc_id = create_project_and_lc(&paths, &aggregate_root);
+        let repo = aggregate_root.join("repo");
+        init_git_repository_with_commit(&repo);
+        let canonical = std::fs::canonicalize(&repo).unwrap();
+        let source =
+            crate::product::repository_store::resolve_repository_source(&canonical).unwrap();
+        let member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+        let lc_store = LogicalCodebaseStore::for_lc(paths.clone(), &lc_id);
+        let mut manifest =
+            LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new());
+        manifest.member_ids = vec![member_id];
+        lc_store.save_manifest("project_0001", &manifest).unwrap();
+        lc_store
+            .save_member(
+                "project_0001",
+                &CodebaseMemberRecord {
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_member".to_string(),
+                    alias: "repo".to_string(),
+                    role: "member".to_string(),
+                    ordinal: 1,
+                    source_identity: source.clone(),
+                    repo_type: RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: MemberStatus::Active,
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        lc_store
+            .save_checkout(
+                "project_0001",
+                &RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: member_id,
+                    physical_repository_id: "repository_member".to_string(),
+                    kind: CheckoutKind::Main,
+                    canonical_path: canonical.clone(),
+                    checkout_path_hash: crate::product::id::repo_hash_for_path(
+                        canonical.to_string_lossy().as_ref(),
+                    ),
+                    git_dir_identity: source.git_dir_identity(),
+                    revision: None,
+                    availability: CheckoutAvailability::Available,
+                    observed_at: "2026-09-29T00:00:00Z".to_string(),
+                    created_at: "2026-09-29T00:00:00Z".to_string(),
+                    updated_at: "2026-09-29T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+
+        let operation_id = "aggregate_initialization_codegraph".to_string();
+        let init_store = AggregateInitializationOperationStore::for_lc(paths.clone(), &lc_id);
+        init_store
+            .create_idempotent(AggregateInitializationOperation::new(
+                operation_id.clone(),
+                "project_0001".to_string(),
+                AggregateInitializationOperationInput {
+                    idempotency_key: format!("codegraph-{reason_code}"),
+                    manifest_revision: manifest.membership_revision,
+                    policy_digest: "sha256:policy".to_string(),
+                    profile_evidence_digest: Some("sha256:profile".to_string()),
+                    provider_context_root: aggregate_root.clone(),
+                    provider: "claude_code".to_string(),
+                },
+                "2026-10-01T00:01:00Z".to_string(),
+            ))
+            .unwrap();
+        init_store
+            .mark_running(
+                "project_0001",
+                &operation_id,
+                "2026-10-01T00:02:00Z".to_string(),
+            )
+            .unwrap();
+        init_store
+            .finish_failed(
+                "project_0001",
+                &operation_id,
+                None,
+                AggregateInitializationErrorRecord {
+                    stage: "aggregate_preflight".to_string(),
+                    reason_code: reason_code.to_string(),
+                    stderr_summary: Some("codegraph executable not found".to_string()),
+                    retryable: true,
+                    action: "install codegraph and retry".to_string(),
+                    cause: None,
+                    provider: None,
+                },
+                "2026-10-01T00:02:30Z".to_string(),
+            )
+            .unwrap();
+        (temp, paths, lc_id)
+    }
+
+    /// 测试点 #9（REQ-BOOT-08 投影侧 codegraph 兜底）：codegraph 缺位/版本不符
+    /// 时索引相关步骤是**被阻断未开始**（不是失败），并且**恰好合成一条**
+    /// 阻断引导通知，文案与 `failure_copy` 码表逐字一致（不另抄中文）。
+    #[test]
+    fn codegraph_environment_precondition_blocks_index_steps_with_one_notice() {
+        for reason_code in ["codegraph_missing", "codegraph_version_mismatch"] {
+            let (_temp, paths, lc_id) = codegraph_blocked_fixture(reason_code);
+            let projection = LogicalCodebaseBootstrapProjector::new(paths)
+                .project("project_0001", &lc_id)
+                .unwrap();
+            for step_name in [
+                LogicalCodebaseBootstrapStep::MemberIndex,
+                LogicalCodebaseBootstrapStep::AggregateIndexActive,
+            ] {
+                let step = projection
+                    .steps
+                    .iter()
+                    .find(|step| step.step == step_name)
+                    .unwrap();
+                assert_eq!(
+                    step.status,
+                    LogicalCodebaseBootstrapStepStatus::NotStarted,
+                    "{reason_code}/{step_name:?} 必须是「未开始」而不是失败"
+                );
+                assert!(
+                    step.allowed_actions.is_empty(),
+                    "{reason_code}/{step_name:?} 不能给空转按钮"
+                );
+                assert!(
+                    step.failure.is_none(),
+                    "{reason_code}/{step_name:?} 不是失败，不能伪造 failure"
+                );
+            }
+            assert_eq!(
+                projection.notices.len(),
+                1,
+                "{reason_code} 必须恰好一条阻断引导通知"
+            );
+            let notice = &projection.notices[0];
+            assert_eq!(notice.reason_code, reason_code);
+            assert!(notice.allowed_actions.is_empty());
+            let copy = crate::product::logical_codebase::failure_copy::describe_code(
+                reason_code, None,
+            );
+            assert_eq!(
+                notice.summary,
+                crate::product::logical_codebase::failure_copy::render_detail(&copy, None),
+                "通知文案必须来自 failure_copy，不得另抄一份中文"
+            );
+            assert!(notice.summary.contains(&copy.title_zh));
+            assert!(notice.summary.contains(&copy.action_zh));
+        }
     }
 
     #[test]
@@ -620,6 +787,8 @@ mod tests {
                             stderr_summary: Some("provider probe failed".to_string()),
                             retryable: true,
                             action: "retry_provider_turn".to_string(),
+                            cause: None,
+                            provider: None,
                         },
                         "2026-10-01T00:02:30Z".to_string(),
                     )

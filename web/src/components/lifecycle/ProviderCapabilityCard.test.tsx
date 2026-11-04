@@ -35,10 +35,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 type RevalidateResponder = () => Promise<Response>;
 
-/** GET 投影 + 可配置 POST 应答的 fetch 路由（真实发送器路径）。 */
+/** GET 投影 + 安装目标面 + 可配置 POST 应答的 fetch 路由（真实发送器路径）。 */
 function installFetchRouter(
   getResponse: () => ProviderCapabilitiesResponse,
   postResponse?: RevalidateResponder,
+  installTargets: unknown = { targets: [] },
 ): void {
   captured = [];
   const router = async (
@@ -58,6 +59,9 @@ function installFetchRouter(
       url === `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities`
     ) {
       return jsonResponse(getResponse());
+    }
+    if (method === "GET" && url === "/api/providers/install-targets") {
+      return jsonResponse(installTargets);
     }
     if (
       method === "POST" &&
@@ -198,14 +202,21 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     );
 
     await screen.findByTestId("provider-capability-card");
-    // 只读 GET（零写入、零探针触发）。
-    expect(captured).toEqual([
-      {
-        url: `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities`,
-        method: "GET",
-        body: null,
-      },
-    ]);
+    // 只读 GET（零写入、零探针触发）：首请求即 capability 投影，全程无 POST。
+    expect(captured[0]).toEqual({
+      url: `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities`,
+      method: "GET",
+      body: null,
+    });
+    expect(captured.filter((request) => request.method === "POST")).toEqual([]);
+    // 安装目标面（本地可用性 / 版本）同样是只读 GET。
+    expect(
+      captured.filter(
+        (request) =>
+          request.method === "GET" &&
+          request.url === "/api/providers/install-targets",
+      ),
+    ).toHaveLength(1);
 
     // 四家 provider 全渲染。
     expect(
@@ -292,7 +303,9 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     );
 
     await waitFor(() => {
-      expect(captured[1]).toEqual({
+      expect(
+        captured.find((request) => request.method === "POST"),
+      ).toEqual({
         url: `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
         method: "POST",
         body: { provider_type: "codex" },
@@ -316,7 +329,16 @@ describe("ProviderCapabilityCard revalidate surface", () => {
         screen.getByTestId("provider-capability-codex-resume").textContent,
       ).toBe("已核验");
     });
-    expect(captured[2]?.method).toBe("GET");
+    // 核验成功后 capability 投影被重新读取（POST 之后仍有该面 GET）。
+    expect(
+      captured.filter(
+        (request, index) =>
+          request.method === "GET" &&
+          request.url ===
+            `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities` &&
+          index > captured.findIndex((item) => item.method === "POST"),
+      ).length,
+    ).toBeGreaterThan(0);
   });
 
   it("echoes revalidated with imported actions and version", async () => {
@@ -464,5 +486,103 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       "provider-capability-revalidate-codex",
     ) as HTMLButtonElement;
     expect(button.disabled).toBe(false);
+  });
+
+  it("renders the install entry with its manual command for a provider without a CLI", async () => {
+    installFetchRouter(unknownProjection, undefined, {
+      targets: [
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: false,
+          local_version: null,
+          latest_version: "1.0.1",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "install",
+        },
+      ],
+    });
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const installButton = await screen.findByTestId(
+      "provider-install-start-codex",
+    );
+    expect(installButton).toHaveTextContent("安装");
+    expect(
+      screen.getByTestId("provider-install-manual-command-codex"),
+    ).toHaveTextContent("@openai/codex");
+  });
+
+  it("offers the update entry when the verified local version is behind latest", async () => {
+    installFetchRouter(() => confirmedCodexProjection(), undefined, {
+      targets: [
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: true,
+          local_version: "0.44.0",
+          latest_version: "1.0.1",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "update",
+        },
+      ],
+    });
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const updateButton = await screen.findByTestId(
+      "provider-install-start-codex",
+    );
+    expect(updateButton).toHaveTextContent("更新");
+    expect(
+      screen.getByTestId("provider-install-versions-codex"),
+    ).toHaveTextContent("1.0.1");
+  });
+
+  it("gives codegraph its own install entry on the same card", async () => {
+    installFetchRouter(unknownProjection, undefined, {
+      targets: [
+        {
+          target: "codegraph",
+          display_name: "codegraph",
+          cli_available: false,
+          local_version: null,
+          latest_version: "0.85.0",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @colbymchenry/codegraph",
+          action: "install",
+        },
+      ],
+    });
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    expect(
+      await screen.findByTestId("provider-install-target-codegraph"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("provider-install-start-codegraph"),
+    ).toHaveTextContent("安装");
+    expect(
+      screen.getByTestId("provider-install-manual-command-codegraph"),
+    ).toHaveTextContent("@colbymchenry/codegraph");
   });
 });

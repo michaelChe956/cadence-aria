@@ -7,6 +7,7 @@ fn command_ledger_error(error: ProductStoreError) -> EnrollmentError {
             ..
         } => EnrollmentError::Conflict {
             current_revision: None,
+            kind: ConflictKind::CommandLedgerPayloadMismatch,
         },
         ProductStoreError::NotFound {
             kind: "automation_enrollment",
@@ -19,9 +20,13 @@ fn command_ledger_error(error: ProductStoreError) -> EnrollmentError {
 fn resolve(resolution: CasResolution) -> Result<IssueAutomationEnrollment, EnrollmentError> {
     match resolution {
         CasResolution::Unchanged(saved) | CasResolution::Applied(saved) => Ok(saved),
-        CasResolution::Conflict { current_revision } => {
-            Err(EnrollmentError::Conflict { current_revision })
-        }
+        CasResolution::Conflict {
+            current_revision,
+            kind,
+        } => Err(EnrollmentError::Conflict {
+            current_revision,
+            kind,
+        }),
         CasResolution::Missing => Err(EnrollmentError::NotFound),
         CasResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
     }
@@ -41,13 +46,16 @@ fn bind_plan_ids_locked(
         }
         (Some(_), _) | (_, Some(_)) => Ok(CasResolution::Conflict {
             current_revision: Some(saved.policy_revision),
+            kind: ConflictKind::BindingIdentityMismatch,
         }),
         (None, None) => {
             let mut next = saved;
             next.plan_id = Some(plan_id.to_string());
             next.session_id = Some(session_id.to_string());
             // C1 Task 1：绑定补全 durable binding current 的 plan/session
-            // 身份（enable 时以空串占位；版本不递增——绑定不是换代）。
+            // 身份（enable 时以空串占位）。绑定补全会把 policy_revision
+            // += 1（下方落盘）——「绑定不是换代」指不新建 binding 代、
+            // 不轮换 prepare_intent_id（binding_version 沿当前代）。
             if let Some(history) = next.binding_history.as_mut() {
                 history.current.plan_id = plan_id.to_string();
                 history.current.session_id = session_id.to_string();
@@ -67,6 +75,7 @@ enum EnsurePlanResolution {
     Applied(IssueAutomationEnrollment),
     Conflict {
         current_revision: Option<u64>,
+        kind: ConflictKind,
     },
     Missing,
     /// C5 Task 1：旧代 enrollment（无显式 target）不能驱动自动链。
@@ -78,9 +87,13 @@ fn ensure_resolution_from_cas(resolution: CasResolution) -> EnsurePlanResolution
     match resolution {
         CasResolution::Unchanged(saved) => EnsurePlanResolution::Unchanged(saved),
         CasResolution::Applied(saved) => EnsurePlanResolution::Applied(saved),
-        CasResolution::Conflict { current_revision } => {
-            EnsurePlanResolution::Conflict { current_revision }
-        }
+        CasResolution::Conflict {
+            current_revision,
+            kind,
+        } => EnsurePlanResolution::Conflict {
+            current_revision,
+            kind,
+        },
         CasResolution::Missing => EnsurePlanResolution::Missing,
         // bind_plan_ids_locked 不产生 InvalidScope；此处仅保持穷尽映射。
         CasResolution::InvalidScope(reason) => EnsurePlanResolution::InvalidScope(reason),
@@ -92,9 +105,13 @@ fn resolve_ensure(
 ) -> Result<IssueAutomationEnrollment, EnrollmentError> {
     match resolution {
         EnsurePlanResolution::Unchanged(saved) | EnsurePlanResolution::Applied(saved) => Ok(saved),
-        EnsurePlanResolution::Conflict { current_revision } => {
-            Err(EnrollmentError::Conflict { current_revision })
-        }
+        EnsurePlanResolution::Conflict {
+            current_revision,
+            kind,
+        } => Err(EnrollmentError::Conflict {
+            current_revision,
+            kind,
+        }),
         EnsurePlanResolution::Missing => Err(EnrollmentError::NotFound),
         EnsurePlanResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
         EnsurePlanResolution::Failed(error) => Err(error),
@@ -104,7 +121,10 @@ fn resolve_ensure(
 /// `claim_plan_generation`/`mark_plan_generation_phase` 的锁内判定。
 enum GenerationResolution {
     Ready(PlanGenerationIntent),
-    Conflict { current_revision: Option<u64> },
+    Conflict {
+        current_revision: Option<u64>,
+        kind: ConflictKind,
+    },
     Missing,
     InvalidScope(String),
 }
@@ -114,9 +134,13 @@ fn resolve_generation(
 ) -> Result<PlanGenerationIntent, EnrollmentError> {
     match resolution {
         GenerationResolution::Ready(intent) => Ok(intent),
-        GenerationResolution::Conflict { current_revision } => {
-            Err(EnrollmentError::Conflict { current_revision })
-        }
+        GenerationResolution::Conflict {
+            current_revision,
+            kind,
+        } => Err(EnrollmentError::Conflict {
+            current_revision,
+            kind,
+        }),
         GenerationResolution::Missing => Err(EnrollmentError::NotFound),
         GenerationResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
     }
@@ -125,7 +149,10 @@ fn resolve_generation(
 /// 批 2 N0：`upsert/resolve_automation_attention_fact` 的锁内判定。
 enum AttentionWriteResolution {
     Applied,
-    Conflict { current_revision: Option<u64> },
+    Conflict {
+        current_revision: Option<u64>,
+        kind: ConflictKind,
+    },
     Missing,
     InvalidScope(String),
 }
@@ -133,9 +160,13 @@ enum AttentionWriteResolution {
 fn resolve_attention_write(resolution: AttentionWriteResolution) -> Result<(), EnrollmentError> {
     match resolution {
         AttentionWriteResolution::Applied => Ok(()),
-        AttentionWriteResolution::Conflict { current_revision } => {
-            Err(EnrollmentError::Conflict { current_revision })
-        }
+        AttentionWriteResolution::Conflict {
+            current_revision,
+            kind,
+        } => Err(EnrollmentError::Conflict {
+            current_revision,
+            kind,
+        }),
         AttentionWriteResolution::Missing => Err(EnrollmentError::NotFound),
         AttentionWriteResolution::InvalidScope(reason) => {
             Err(EnrollmentError::InvalidScope(reason))
@@ -156,6 +187,7 @@ fn attest_attention_binding_locked(
     if saved.enrollment_id != expected_binding.enrollment_id {
         return Err(AttentionWriteResolution::Conflict {
             current_revision: Some(saved.policy_revision),
+            kind: ConflictKind::AttentionFactConflict,
         });
     }
     let Some(history) = saved.binding_history.as_ref() else {
@@ -168,11 +200,13 @@ fn attest_attention_binding_locked(
     if &history.current != expected_binding {
         return Err(AttentionWriteResolution::Conflict {
             current_revision: Some(saved.policy_revision),
+            kind: ConflictKind::AttentionFactConflict,
         });
     }
     if !saved.enabled && saved.terminated_at.is_none() {
         return Err(AttentionWriteResolution::Conflict {
             current_revision: Some(saved.policy_revision),
+            kind: ConflictKind::AttentionFactConflict,
         });
     }
     Ok(())
@@ -278,6 +312,7 @@ enum TerminationResolution {
     },
     Conflict {
         current_revision: Option<u64>,
+        kind: ConflictKind,
     },
     Missing,
 }
@@ -306,9 +341,13 @@ fn resolve_termination(
             terminated_at,
             enrollment,
         }),
-        TerminationResolution::Conflict { current_revision } => {
-            Err(EnrollmentError::Conflict { current_revision })
-        }
+        TerminationResolution::Conflict {
+            current_revision,
+            kind,
+        } => Err(EnrollmentError::Conflict {
+            current_revision,
+            kind,
+        }),
         TerminationResolution::Missing => Err(EnrollmentError::NotFound),
     }
 }
@@ -325,6 +364,7 @@ enum RebindResolution {
     },
     Conflict {
         current_revision: Option<u64>,
+        kind: ConflictKind,
     },
     InvalidScope(String),
     Missing,
@@ -348,9 +388,13 @@ fn resolve_rebind(resolution: RebindResolution) -> Result<EnrollmentRebindResult
             state: OperationState::Replayed,
             enrollment,
         }),
-        RebindResolution::Conflict { current_revision } => {
-            Err(EnrollmentError::Conflict { current_revision })
-        }
+        RebindResolution::Conflict {
+            current_revision,
+            kind,
+        } => Err(EnrollmentError::Conflict {
+            current_revision,
+            kind,
+        }),
         RebindResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
         RebindResolution::Missing => Err(EnrollmentError::NotFound),
     }
@@ -462,6 +506,7 @@ fn apply_revision_and_write(
             if target_drifted {
                 return Ok(CasResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::SourceTargetDrift,
                 });
             }
             // 旧 enrollment（无声明）重开时显式升级 target → 初始化 v1。
@@ -654,29 +699,47 @@ fn supersede_terminated_enrollment(
         } else {
             CasResolution::Conflict {
                 current_revision: Some(saved.policy_revision),
+                kind: ConflictKind::CommandLedgerPayloadMismatch,
             }
         });
     }
     if expected_revision != Some(saved.policy_revision) {
         return Ok(CasResolution::Conflict {
             current_revision: Some(saved.policy_revision),
+            kind: ConflictKind::RevisionStale,
         });
     }
-    // 授权不改写：options/target 与终止记录逐字段相等；source 漂移仅在
-    // 调用方已核实原 source 悬空（级联删除后引用实体已不存在、原授权
-    // 失效）时放行——悬空源重授权＝人工显式按当前已确认 source 重新授权，
-    // 留痕由取代落盘的 binding 换代承担（旧代 current 连同悬空 source
-    // 只读进 previous、binding_version+1）。旧代无声明（legacy）按本次
-    // 提交显式升级（与既有"旧 enrollment 重开时显式升级 target"语义连续）。
-    let options_or_target_drifted = &saved.options != options
-        || saved
-            .target
-            .as_ref()
-            .is_some_and(|declared| *declared != *target);
+    // 授权漂移按路径分治（块1 片2，REQ-WIGA-SWAP-01）：
+    // - 正常重开（original_source_dangling=false）：options 漂移按换代放行
+    //  （换 provider/调参数不再要求先同 payload 取代再 Disable→Enable——
+    //   取代本身即留痕：旧代 current 进 previous、binding_version+1）；
+    //   target 漂移与 source 漂移仍拒（防误改载体/授权范围）。
+    // - 悬空源重授权（original_source_dangling=true）：source 漂移放行
+    //  （级联删除后原授权失效，＝人工显式按当前已确认 source 重新授权，
+    //   留痕由取代落盘的 binding 换代承担——旧代 current 连同悬空 source
+    //   只读进 previous、binding_version+1）；options/target 仍逐字段相等
+    //  （REQ-DRG-18）。
+    // 旧代无声明（legacy）按本次提交显式升级（与既有"旧 enrollment
+    // 重开时显式升级 target"语义连续）。
+    let options_drifted = &saved.options != options;
+    let target_drifted = saved
+        .target
+        .as_ref()
+        .is_some_and(|declared| *declared != *target);
     let source_drifted = &saved.source != source;
-    if options_or_target_drifted || (source_drifted && !original_source_dangling) {
+    // options 漂移仅在悬空源重授权路径构成拒绝条件（正常重开按换代放行）。
+    if options_drifted && original_source_dangling {
         return Ok(CasResolution::Conflict {
             current_revision: Some(saved.policy_revision),
+            kind: ConflictKind::DefensiveStateMismatch,
+        });
+    }
+    // target 漂移在两条路径上都构成拒绝条件；source 漂移仅在正常重开
+    // 路径构成拒绝条件。
+    if target_drifted || (source_drifted && !original_source_dangling) {
+        return Ok(CasResolution::Conflict {
+            current_revision: Some(saved.policy_revision),
+            kind: ConflictKind::SourceTargetDrift,
         });
     }
 

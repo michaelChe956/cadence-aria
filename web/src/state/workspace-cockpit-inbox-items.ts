@@ -51,6 +51,8 @@ export function c1TargetLabel(target: C1WaitingItem["target"]): string {
     return "target 未知";
   }
   switch (target.kind) {
+    // legacy 只读：老单仓 enrollment 记录仍要显示（不退化为「target 未知」）；
+    // 新投影不再产出单仓载体（REQ-ROUTE-C5-TARGET），命令侧也不接受它。
     case "single_repository":
       return `单仓 ${enrollmentTargetPlaceholder(target.repository_id)}`;
     case "logical_codebase":

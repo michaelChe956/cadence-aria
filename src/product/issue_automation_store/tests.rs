@@ -90,7 +90,7 @@ fn assert_conflict(error: crate::product::models::automation::EnrollmentError, e
         matches!(
             error,
             crate::product::models::automation::EnrollmentError::Conflict {
-                current_revision: Some(revision)
+                current_revision: Some(revision), ..
             } if revision == expected
         ),
         "expected Conflict at revision {expected}, got {error:?}"
@@ -912,3 +912,4 @@ fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
 //（large_file_guard 1200 行红线；include! 后与本文件同模块域）。
 include!("attention_termination_tests.inc.rs");
 include!("target_union_rebind_tests.inc.rs");
+include!("attention_termination_supersede_tests.inc.rs");

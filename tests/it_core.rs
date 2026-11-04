@@ -41,6 +41,10 @@ mod runtime_prompt_routing;
 mod runtime_snapshot_schema;
 #[path = "it_core/runtime_units.rs"]
 mod runtime_units;
+#[path = "it_core/single_member_lc_lifecycle.rs"]
+mod single_member_lc_lifecycle;
+#[path = "it_core/single_member_path_guard.rs"]
+mod single_member_path_guard;
 #[path = "it_core/spec_projection.rs"]
 mod spec_projection;
 #[path = "it_core/superseded_artifact_refs.rs"]

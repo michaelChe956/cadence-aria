@@ -17,7 +17,7 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, group_dependency_gate};
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
+use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{HandoffRevision, ProviderName};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -40,7 +40,16 @@ fn group_dependency_fixture(
     admission_kind: CodingAdmissionKind,
 ) -> DependencyFixture {
     let root = tempfile::tempdir().expect("root");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：group 完成/租约链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且 issue 记录必须在场（issue 聚合/依赖门路由解析）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
+    let store = CodingAttemptStore::new(paths);
     let worktree = root.path().join("shared-worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
     super::init_test_git_repo(&worktree);
@@ -59,7 +68,7 @@ fn group_dependency_fixture(
                 review_rounds: 1,
                 permission_modes: Default::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -73,20 +82,25 @@ fn group_dependency_fixture(
         .write_coding_attempt_for_test(&persisted)
         .expect("admission kind");
     let lifecycle = LifecycleStore::new(store.paths());
+    // 有快照的 attempt 只按**仓维**分类租约：issue 维记录会被判
+    // `legacy_shared_worktree_present` 而 fail-closed。
+    let logical_id = persisted
+        .target_snapshot
+        .as_ref()
+        .expect("group attempt carries a target snapshot")
+        .logical_repository_id;
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        &persisted.project_id,
+        &persisted.issue_id,
+        logical_id,
+        &worktree,
+    );
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: persisted.project_id.clone(),
-            issue_id: persisted.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: persisted.branch_name.clone(),
-            worktree_path: worktree.clone(),
-            base_branch: persisted.base_branch.clone(),
-        })
-        .expect("shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             &persisted.project_id,
             &persisted.issue_id,
+            logical_id,
             "work_item_0001",
             &persisted.id,
         )
@@ -432,7 +446,16 @@ async fn campaign_stage3_dependency_gate_never_skips_unready_unit() {
     assert_eq!(running_units, 1, "并发推进后 Running unit 恰一个");
     let worktree = fixture
         .lifecycle
-        .get_issue_shared_worktree(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+        .get_repo_shared_worktree(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            fixture
+                .attempt
+                .target_snapshot
+                .as_ref()
+                .expect("group attempt carries a target snapshot")
+                .logical_repository_id,
+        )
         .expect("worktree")
         .expect("worktree record");
     assert_eq!(

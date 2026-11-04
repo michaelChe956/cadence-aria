@@ -74,6 +74,14 @@ impl super::CodingAttemptStore {
     ///   返回（「取最早」歧义由 per-(plan,target) 检索+增殖审计面取代）。
     /// - `None`：无快照桶（legacy 语义保持——单 target/legacy 场景行为零变化；
     ///   routing 为 Legacy 时所有 attempt 均无快照）。
+    ///
+    /// ⚠️ **`target` 是【桶键】，不是「按 plan 取唯一 attempt」的便捷参数**：
+    ///    桶键 = `attempt_target_bucket(attempt)` = 有 `target_snapshot` ⇒
+    ///    `Some(logical_repository_id)`，无 ⇒ `None`。
+    ///    ⇒ **给 attempt 补 `target_snapshot` 会改变它的桶**，
+    ///      此后用旧桶键（`None`）检索会落空（返回 `Ok(None)`）。
+    ///    ⇒ 取「按 plan 取 group attempt」请用 `list_attempts_for_work_item_group`
+    ///      （只看 `work_item_group_id`，不看桶）。
     pub fn get_attempt_for_work_item_group(
         &self,
         project_id: &str,

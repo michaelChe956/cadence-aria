@@ -5,7 +5,7 @@ fn terminal_attempt_restarts_through_explicit_restart_channel() {
     // F-44：Aborted/Failed 经显式 restart 通道（wire 动作 restart_coding）重走
     // admission CAS 回到 Running；终态时间戳在同一锁内清除。
     for terminal in [CodingAttemptStatus::Aborted, CodingAttemptStatus::Failed] {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let mut seeded = seed_attempt_status(&fixture, terminal.clone());
         seeded.completed_at = Some("2026-09-23T00:00:00Z".to_string());
         fixture
@@ -38,7 +38,7 @@ fn restart_channel_rejects_non_terminal_sources() {
         CodingAttemptStatus::Blocked,
         CodingAttemptStatus::AwaitingManualRecovery,
     ] {
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         seed_attempt_status(&fixture, status.clone());
         let error = fixture
             .store
@@ -67,7 +67,7 @@ fn general_admission_still_rejects_terminal_attempts() {
     // 一般 admission（半启动重启 / sc_advance 等自动路径共用入口）对
     // Aborted/Failed 保持 fail-closed 拒绝。
     for terminal in [CodingAttemptStatus::Aborted, CodingAttemptStatus::Failed] {
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         seed_attempt_status(&fixture, terminal.clone());
         let error = fixture
             .store
@@ -98,7 +98,7 @@ fn recovery_channel_rejects_terminal_sources() {
     // F-16 与 F-44 两条显式通道互不越界：restart 不接受人工恢复态，
     // recover 也不接受终态（各自由 store 入口的状态门保证）。
     for terminal in [CodingAttemptStatus::Aborted, CodingAttemptStatus::Failed] {
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         seed_attempt_status(&fixture, terminal.clone());
         let error = fixture
             .store

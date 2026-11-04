@@ -6,7 +6,8 @@ pub(crate) fn resolve_work_item_repository(
     project_id: &str,
     work_item: &LifecycleWorkItemRecord,
 ) -> ApiResult<RepositoryRecord> {
-    let project = ProjectStore::new(app_paths.clone())
+    // project 存在性门（404）保留；绑定值不再被单仓回退路径消费。
+    ProjectStore::new(app_paths.clone())
         .get(project_id)
         .map_err(product_store_api_error)?;
     // C4 Task 2：kind 由 work item target 形状显式决定，身份经唯一 authority
@@ -14,8 +15,9 @@ pub(crate) fn resolve_work_item_repository(
     // 且在任何 target lookup 之前）。
     // - `target_repository_id` 存在 → LogicalCodebase 形状：resolver 确认 LC
     //   authority 后按 manifest 成员严格解析。
-    // - 否则 → SingleRepo 形状：显式 SingleRepo 请求先经 resolver 拒绝
-    //   “单仓请求命中 LC 归属 issue”的 kind_mismatch，再走既有 legacy 兼容解析。
+    // - 否则 → SingleRepo 形状：显式 SingleRepo 请求经 resolver 拒绝
+    //   “单仓请求命中 LC 归属 issue”的 kind_mismatch（fail-closed，不再
+    //   回退 legacy 物理仓——REQ-ROUTE-02）。
     let resolver =
         crate::product::logical_codebase::RepositoryAuthorityResolver::new(app_paths.clone());
     if let Some(logical_repository_id) = work_item.target_repository_id {
@@ -59,34 +61,21 @@ pub(crate) fn resolve_work_item_repository(
             .map(|(_, _, repository)| repository)
             .map_err(product_store_api_error);
     }
-    // SingleRepo 形状：物理 repository_id 显式请求。issue 已归属 LC 时 resolver
-    // 在读取任何仓库记录前返回 kind_mismatch（fail-closed）。
-    let attributed = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-        app_paths,
-        project_id,
-        &work_item.issue_id,
-    )
-    .map_err(product_store_api_error)?;
-    if attributed.is_some() {
-        // resolver 在 issue 归属校验点（任何仓库记录读取之前）fail-closed。
-        return resolver
-            .resolve(crate::product::logical_codebase::RepositoryRoutingRequest {
-                project_id: project_id.to_string(),
-                issue_id: Some(work_item.issue_id.clone()),
-                kind: crate::product::logical_codebase::RepositoryTargetKind::SingleRepo,
-                repository_id: Some(work_item.repository_id.clone()),
-                logical_codebase_id: None,
-                logical_repository_id: None,
-                checkout_id: None,
-            })
-            .map(|_| unreachable!("resolver must reject single-repo request for LC issue"))
-            .map_err(product_store_api_error);
-    }
-    let store = RepositoryStore::for_project(app_paths.clone(), &project);
-    store
-        .resolve_legacy_physical_repository_if_dual(project_id, &work_item.repository_id)
-        .map(|(_, _, repository)| repository)
-        .or_else(|_| legacy_physical_repository(&store, project_id, &work_item.repository_id))
+    // SingleRepo 形状：物理 repository_id 显式请求。REQ-ROUTE-01/02：issue
+    // 归属必填（老记录缺归属由读取层显式报 issue_not_bound_to_logical_codebase
+    // 而非 Ok(None)），resolver 在 issue 归属校验点（任何仓库记录读取之前）
+    // fail-closed 返回 kind_mismatch——统一分流不再回退物理仓。
+    resolver
+        .resolve(crate::product::logical_codebase::RepositoryRoutingRequest {
+            project_id: project_id.to_string(),
+            issue_id: Some(work_item.issue_id.clone()),
+            kind: crate::product::logical_codebase::RepositoryTargetKind::SingleRepo,
+            repository_id: Some(work_item.repository_id.clone()),
+            logical_codebase_id: None,
+            logical_repository_id: None,
+            checkout_id: None,
+        })
+        .map(|_| unreachable!("resolver must reject single-repo request for LC issue"))
         .map_err(product_store_api_error)
 }
 
@@ -99,19 +88,4 @@ pub(crate) fn routing_error(
         kind: "repository_routing",
         reason: format!("{stable_code}: {}", reason.into()),
     }
-}
-
-pub(crate) fn legacy_physical_repository(
-    store: &RepositoryStore,
-    project_id: &str,
-    physical_repository_id: &str,
-) -> Result<RepositoryRecord, ProductStoreError> {
-    store
-        .list(project_id)?
-        .into_iter()
-        .find(|repository| repository.id == physical_repository_id)
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "repository",
-            id: physical_repository_id.to_string(),
-        })
 }

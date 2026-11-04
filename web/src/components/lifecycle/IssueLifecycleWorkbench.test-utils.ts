@@ -784,6 +784,8 @@ export function lifecycleFetch(
     if (codebasesMatch) {
       const projectId = codebasesMatch[1];
       const codebases = [
+        // 存量物理仓仍按 single_repo 徽标呈现（既有呈现不变，见 §2.2.3 禁碰）；
+        // 但单仓**创建**入口已下线——新建路径只有「建逻辑代码库」。
         ...(repositoriesByProject.get(projectId) ?? []).map((repository) => ({
           id: repository.repository_id,
           name: repository.name,

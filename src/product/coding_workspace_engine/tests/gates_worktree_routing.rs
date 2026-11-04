@@ -3,8 +3,9 @@
 //! 覆盖 REQ-COD-03（§4.2.3）与迁移契约化（§4.2.6）：
 //! - 多仓 attempt（`target_snapshot = Some`）的 get/release 都作用在
 //!   `shared-worktrees/{repository_id}.json`（三元键仓维路径）。
-//! - 单仓 attempt（`target_snapshot = None` + Legacy routing）继续走老
-//!   `issue-shared-worktree.json` 路径，行为不变（红线）。
+//! - 无快照 attempt（`target_snapshot = None`）一律 fail-closed：相对
+//!   issue 归属 LC 时 `target_snapshot_missing_for_logical`，不读老
+//!   `issue-shared-worktree.json`（单仓 legacy 分流已删除）。
 //! - preflight 断言：多仓 issue 下存在旧 `issue-shared-worktree.json` →
 //!   fail-closed `legacy_shared_worktree_present`；不存在 → 正常放行。
 //! - 防御性分流：Logical routing 但 `target_snapshot = None` →
@@ -15,36 +16,26 @@ use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::lifecycle_store::{
     UpsertIssueSharedWorktreeInput, UpsertRepoSharedWorktreeInput,
 };
-use crate::product::logical_codebase::{
-    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
-    LogicalCodebaseStore, LogicalRepositoryId, RepositoryCheckoutId,
-};
+use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
 use uuid::Uuid;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
 
-/// 构造一个「有 manifest + selection」的 Logical routing 状态（仅 routing 判定所需，
-/// 不落地 member/checkout 等注册细节）。
+/// 构造「issue 归属 LC + manifest + selection」的 Logical routing 现场。
+///
+/// REQ-ROUTE-01 两态化后分流只读 issue 持久归属的 LC 子树（`for_lc`），
+/// 因此 issue 记录必须先在位；`seed_complete` 保证 issue 先于 selection 落盘。
 fn logical_routing_fixture() -> (tempfile::TempDir, ProductAppPaths, LogicalRepositoryId) {
     let root = tempdir().expect("tempdir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let logical_id = LogicalRepositoryId(Uuid::new_v4());
-    let authority = LogicalCodebaseStore::new(paths.clone());
-    let manifest = LogicalCodebaseManifest::new(
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
         PROJECT_ID,
-        root.path().join("aggregate-root"),
-        vec![logical_id],
+        ISSUE_ID,
     );
-    authority
-        .save_manifest(PROJECT_ID, &manifest)
-        .expect("save manifest");
-    IssueCodebaseSelectionStore::new(paths.clone())
-        .save(&IssueCodebaseSelection::all_members(
-            PROJECT_ID, ISSUE_ID, None,
-        ))
-        .expect("save selection");
-    (root, paths, logical_id)
+    (root, paths, logical.member_id)
 }
 
 fn snapshot(logical_id: LogicalRepositoryId) -> AttemptTargetSnapshot {
@@ -182,9 +173,10 @@ fn release_issue_shared_worktree_lock_for_attempt_releases_repo_worktree_for_sna
 }
 
 #[tokio::test]
-async fn attempt_worktree_path_keeps_legacy_behavior_for_none_attempt() {
-    let root = tempdir().expect("tempdir");
-    let paths = ProductAppPaths::new(root.path().join(".aria"));
+async fn attempt_worktree_path_fails_closed_for_none_attempt_and_ignores_legacy_worktree() {
+    // REQ-ROUTE-01 两态化：单仓 legacy 分流已删除，老 issue-shared-worktree.json
+    // 不得被静默读取；无快照 attempt 即使存在旧记录也必须 fail-closed。
+    let (root, paths, _logical_id) = logical_routing_fixture();
     let store = CodingAttemptStore::new(paths.clone());
     let attempt = create_attempt(&store, None);
     let lifecycle = LifecycleStore::new(paths.clone());
@@ -202,13 +194,22 @@ async fn attempt_worktree_path_keeps_legacy_behavior_for_none_attempt() {
         })
         .expect("legacy shared worktree");
 
-    let path = engine(&store)
+    let error = engine(&store)
         .attempt_worktree_path(&attempt)
         .await
-        .expect("legacy worktree path");
-    assert_eq!(
-        path, worktree,
-        "单仓 attempt 必须继续读 issue-shared-worktree.json"
+        .expect_err("旧 issue-shared-worktree.json 不得被静默消费");
+    assert!(
+        error
+            .to_string()
+            .contains("target_snapshot_missing_for_logical"),
+        "unexpected error: {error}"
+    );
+    // 旧文件保持原样，未被读取/改写。
+    assert!(
+        lifecycle
+            .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+            .expect("legacy read")
+            .is_some()
     );
 }
 

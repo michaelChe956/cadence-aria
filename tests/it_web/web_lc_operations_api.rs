@@ -86,6 +86,7 @@ impl AggregatePreflightService for NoopPreflight {
             members: Vec::new(),
             manifest_revision: manifest.membership_revision,
             manifest_digest: "sha256:test-manifest".to_string(),
+            ..Default::default()
         })
     }
 }
@@ -306,10 +307,13 @@ impl LcOperationsFixture {
             InitializationRunRegistry::default(),
         );
 
-        let state = WebAppState::with_events(
-            root.path().to_path_buf(),
-            WebRuntime::new_fake(root.path().to_path_buf()),
-            EventHub::new(),
+        let state = crate::provider_capability_fixture::with_available_provider_health(
+            WebAppState::with_events(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+                EventHub::new(),
+            ),
+            root.path(),
         )
         .with_aggregate_initialization_dependencies(dependencies.clone());
 
@@ -384,6 +388,10 @@ impl LcOperationsFixture {
         assert_eq!(status, StatusCode::OK, "{batch}");
         assert_eq!(batch["status"], "completed");
 
+        // 片4（REQ-BOOT-07）：选择器前置——LC 子树（canonical 创建面）与
+        // project 级 legacy 子树（旧路径别名解析）都种 Confirmed。
+        crate::provider_capability_fixture::seed_confirmed_claude(&paths, PROJECT_ID, Some(&lc_id));
+        crate::provider_capability_fixture::seed_confirmed_claude(&paths, PROJECT_ID, None);
         let app = app.clone();
         // 把 blocked provider 的释放信号保留在 fixture 外由测试驱动（用 app 无关的
         // Notify 已经在 coordinator 中共享）。此处仅返回构造结果。

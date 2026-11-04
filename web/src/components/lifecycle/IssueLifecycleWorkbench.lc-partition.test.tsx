@@ -317,7 +317,7 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     );
   });
 
-  it("单仓 project（仅 kind=single_repo）：不渲染「逻辑代码库」管理面板", async () => {
+  it("存量单仓 project（kind=single_repo 仍在列表）：不渲染「逻辑代码库」管理面板，且无单仓创建入口", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
@@ -327,6 +327,7 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
         })(input, init),
       ),
     );
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
@@ -337,6 +338,19 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     expect(
       screen.queryByRole("heading", { name: "逻辑代码库" }),
     ).not.toBeInTheDocument();
+
+    // 存量单仓条目仍按「单仓」徽标呈现（既有呈现不变）……
+    expect(screen.getByTestId("codebase-kind-Aria Repo")).toHaveTextContent(
+      "单仓",
+    );
+    // ……但单仓创建入口已下线：对话框直接是建逻辑代码库（选聚合根 + 登记成员）。
+    await user.click(screen.getByRole("button", { name: "添加代码库" }));
+    expect(screen.getByRole("dialog", { name: "添加代码库" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: /单仓库/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "继续添加单仓库" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("聚合根目录")).toBeInTheDocument();
   });
 
   it("issue 创建：选逻辑代码库时提交 logical_codebase_id + primary repository_id", async () => {
@@ -372,7 +386,7 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     await user.type(within(dialog).getByLabelText("Issue 标题"), "跨仓需求");
     await user.selectOptions(
       within(dialog).getByLabelText("代码库"),
-      "lc:lc_0001",
+      "lc_0001",
     );
     const memberGroup = await within(dialog).findByRole("group", { name: "成员" });
     await user.click(
@@ -425,7 +439,7 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     const dialog = await screen.findByRole("dialog", { name: "新建 Issue" });
     await user.selectOptions(
       within(dialog).getByLabelText("代码库"),
-      "lc:lc_0001",
+      "lc_0001",
     );
     const memberGroup = await within(dialog).findByRole("group", {
       name: "成员",
@@ -457,7 +471,7 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
     ).toBeDisabled();
   });
 
-  it("有单仓项目：新建 Issue 可用（仓库路径零变化钉）", async () => {
+  it("有单仓但无含 active 成员的 LC：新建 Issue 明确禁用并给出原因（C5）", async () => {
     vi.stubGlobal(
       "fetch",
       lifecycleFetch({
@@ -465,12 +479,24 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
         repositoriesByProject: { project_0001: [repositoryRecord()] },
       }),
     );
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
 
+    // 既有呈现不变：单仓条目照旧渲染（仓库路径零变化）。
     await screen.findByTestId("codebase-kind-Aria Repo");
+    // 但 issue 只能挂在 LC 上 ⇒ 存量单仓不再是可用条件，且不静默禁用。
     expect(
       screen.getByRole("button", { name: "新建 Issue" }),
-    ).toBeEnabled();
+    ).toBeDisabled();
+    expect(
+      screen.getByTestId("issue-create-disabled-reason"),
+    ).toHaveTextContent("逻辑代码库");
+
+    // 禁用态点击不会打开对话框（不再出现「点开才发现是死路」）。
+    await user.click(screen.getByRole("button", { name: "新建 Issue" }));
+    expect(
+      screen.queryByRole("dialog", { name: "新建 Issue" }),
+    ).not.toBeInTheDocument();
   });
 });

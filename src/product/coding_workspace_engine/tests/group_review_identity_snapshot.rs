@@ -151,19 +151,24 @@ async fn code_review_snapshot_write_failure_rolls_back_report() {
     )
     .expect("poison snapshot path");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = CapturingProjectionProvider::new(
+    let provider = std::sync::Arc::new(CapturingProjectionProvider::new(
         serde_json::json!({
             "verdict": "approve",
             "summary": "review approved",
             "findings": []
         })
         .to_string(),
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("snapshot failure must fail review persistence");
 
@@ -191,19 +196,24 @@ async fn code_review_persists_report_and_snapshot_on_normal_path() {
         )
         .expect("code review stage");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = CapturingProjectionProvider::new(
+    let provider = std::sync::Arc::new(CapturingProjectionProvider::new(
         serde_json::json!({
             "verdict": "approve",
             "summary": "review approved",
             "findings": []
         })
         .to_string(),
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect("review succeeds");
 
@@ -256,6 +266,14 @@ fn group_attempt_with_completed_unit_run() -> (
         }
     }
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：code review provider run 只能经 LC provider gateway
+    // 启动，凭证是「LC 权威 + 冻结 target_snapshot」。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -266,12 +284,12 @@ fn group_attempt_with_completed_unit_run() -> (
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: Some(worktree),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -308,10 +326,10 @@ fn group_attempt_with_completed_unit_run() -> (
         canonical_contract_hash: bundle.canonical_contract_hash,
         projection_bundle_id: bundle.id,
         projection_compiler_version: bundle.compiler_version,
-        coder_provider_renderer_version: renderer_for(&ProviderName::Fake)
+        coder_provider_renderer_version: renderer_for(&ProviderName::Codex)
             .renderer_version()
             .to_string(),
-        reviewer_provider_renderer_version: renderer_for(&ProviderName::Fake)
+        reviewer_provider_renderer_version: renderer_for(&ProviderName::ClaudeCode)
             .renderer_version()
             .to_string(),
         internal_reviewer_provider_renderer_version: None,
@@ -375,7 +393,6 @@ use crate::cross_cutting::provider_availability_gate::{
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::ProviderCompletion;
-use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::coding_workspace_engine::group_review_orchestrator::{
     GroupReviewExecutor, RealGroupReviewExecutor,
 };
@@ -547,11 +564,19 @@ fn build_gateway_with_registry(
     registry: Arc<ProviderRegistry>,
     audit: Arc<GatewayRunAudit>,
 ) -> LogicalCodebaseProviderGateway {
-    let manifest = LogicalCodebaseManifest::new(
-        project_id,
-        paths.root().parent().expect("workspace root").to_path_buf(),
-        vec![],
-    );
+    // REQ-ROUTE-01：`seed_complete` 已占用 manifest/policy 身份，此处必须复用
+    // 已播种的 manifest；另造随机 lc_id 的 manifest 会被 `ensure_bootstrap` 以
+    // `IdentityMismatch` 拒绝。
+    let manifest = LogicalCodebaseStore::new(paths.clone())
+        .load_manifest(project_id)
+        .expect("load manifest")
+        .unwrap_or_else(|| {
+            LogicalCodebaseManifest::new(
+                project_id,
+                paths.root().parent().expect("workspace root").to_path_buf(),
+                vec![],
+            )
+        });
     let policies = AggregatePolicyArtifactStore::new(paths.clone());
     policies
         .ensure_bootstrap(&manifest)
@@ -568,147 +593,76 @@ fn build_gateway_with_registry(
     )
 }
 
-/// 覆写 attempt 的 `target_snapshot` 为逻辑代码库 target 并落盘。
-fn with_target_snapshot(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-) -> CodingExecutionAttempt {
-    let worktree = attempt
-        .worktree_path
-        .clone()
-        .expect("running attempt must have a worktree");
-    let mut logical = attempt.clone();
-    logical.target_snapshot = Some(AttemptTargetSnapshot {
-        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
-        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
-        physical_repository_id: "repository_0001".to_string(),
-        canonical_path: worktree,
-        git_dir_identity: "git-dir-identity".to_string(),
-        revision: None,
-        policy_digest: String::new(),
-        membership_revision: 1,
-        captured_at: "2026-08-09T00:00:00Z".to_string(),
-        capture_source: "test".to_string(),
-    });
-    let attempt_path = store
-        .paths()
-        .issue_lifecycle_root(&logical.project_id, &logical.issue_id)
-        .join("coding-attempts")
-        .join(format!("{}.json", logical.id));
-    crate::product::json_store::write_json(&attempt_path, &logical)
-        .expect("write attempt with target snapshot");
-    logical
-}
-
-/// 播种 logical manifest 与成员记录：target 成员=attempt worktree（nil 身份，
-/// 与 `with_target_snapshot` 对齐）；`with_non_target_member` 时追加一个 active
-/// 非 target 成员（自带 git repo，供 D4 baseline/漂移观测），返回其主 checkout。
-fn seed_reviewer_member_codebase(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-    with_non_target_member: bool,
-) -> Option<std::path::PathBuf> {
-    let logical_store = LogicalCodebaseStore::new(store.paths());
-    let repository_id = LogicalRepositoryId(uuid::Uuid::nil());
-    let worktree = attempt.worktree_path.clone().expect("worktree");
-    let mut member_ids = vec![repository_id];
-    let extra_member = with_non_target_member.then(|| {
-        let id = LogicalRepositoryId(uuid::Uuid::new_v4());
-        member_ids.push(id);
-        id
-    });
+/// 在已播种的 LC 权威上追加一个 active 非 target 成员（真实 git 主 checkout），
+/// 供 D4 baseline/漂移观测。必须在派生 `target_snapshot` **之前**追加——快照的
+/// `membership_revision` 必须与追加后的 manifest 一致。
+fn append_non_target_member(paths: &ProductAppPaths, project_id: &str) -> std::path::PathBuf {
+    let logical_store = LogicalCodebaseStore::new(paths.clone());
+    let mut manifest = logical_store
+        .load_manifest(project_id)
+        .expect("load manifest")
+        .expect("seeded manifest");
+    let member_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+    let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+    let checkout_path = paths
+        .root()
+        .parent()
+        .expect("workspace root")
+        .join("non_target_member");
+    std::fs::create_dir_all(&checkout_path).expect("non-target member dir");
+    init_test_git_repo(&checkout_path);
+    let now = "2026-10-02T00:00:00Z".to_string();
     logical_store
-        .save_manifest(
-            &attempt.project_id,
-            &LogicalCodebaseManifest::new(
-                &attempt.project_id,
-                store.paths().root().to_path_buf(),
-                member_ids,
-            ),
+        .save_member(
+            project_id,
+            &CodebaseMemberRecord {
+                logical_repository_id: member_id,
+                physical_repository_id: "repository_0001".to_string(),
+                alias: "non_target_member".to_string(),
+                role: "repository".to_string(),
+                ordinal: 2,
+                source_identity: RepositorySourceIdentity::from_git_parts(
+                    &checkout_path,
+                    checkout_path.join(".git"),
+                    None,
+                ),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_id],
+                status: MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now,
+            },
         )
-        .expect("save manifest");
-
-    fn seed_member_checkout(
-        logical_store: &LogicalCodebaseStore,
-        project_id: &str,
-        member_id: LogicalRepositoryId,
-        alias: &str,
-        checkout_path: &std::path::Path,
-    ) {
-        let now = "2026-10-02T00:00:00Z".to_string();
-        let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
-        logical_store
-            .save_member(
-                project_id,
-                &CodebaseMemberRecord {
-                    logical_repository_id: member_id,
-                    physical_repository_id: "repository_0001".to_string(),
-                    alias: alias.to_string(),
-                    role: "repository".to_string(),
-                    ordinal: 1,
-                    source_identity: RepositorySourceIdentity::from_git_parts(
-                        checkout_path,
-                        checkout_path.join(".git"),
-                        None,
-                    ),
-                    repo_type: RepositoryType::Unknown,
-                    tech_stack: Vec::new(),
-                    owner: None,
-                    tags: Vec::new(),
-                    default_ref: None,
-                    checkout_ids: vec![checkout_id],
-                    status: MemberStatus::Active,
-                    created_at: now.clone(),
-                    updated_at: now,
-                },
-            )
-            .expect("save member");
-        logical_store
-            .save_checkout(
-                project_id,
-                &RepositoryCheckoutRecord {
-                    checkout_id,
-                    logical_repository_id: member_id,
-                    physical_repository_id: "repository_0001".to_string(),
-                    kind: CheckoutKind::Main,
-                    canonical_path: checkout_path.to_path_buf(),
-                    checkout_path_hash: "sha256:checkout".to_string(),
-                    git_dir_identity: "sha256:git-dir".to_string(),
-                    revision: None,
-                    availability: CheckoutAvailability::Available,
-                    observed_at: "2026-10-02T00:00:00Z".to_string(),
-                    created_at: "2026-10-02T00:00:00Z".to_string(),
-                    updated_at: "2026-10-02T00:00:00Z".to_string(),
-                },
-            )
-            .expect("save checkout");
-    }
-
-    seed_member_checkout(
-        &logical_store,
-        &attempt.project_id,
-        repository_id,
-        "target_member",
-        &worktree,
-    );
-    extra_member.map(|member_id| {
-        let checkout_path = store
-            .paths()
-            .root()
-            .parent()
-            .expect("workspace root")
-            .join("non_target_member");
-        std::fs::create_dir_all(&checkout_path).expect("non-target member dir");
-        init_test_git_repo(&checkout_path);
-        seed_member_checkout(
-            &logical_store,
-            &attempt.project_id,
-            member_id,
-            "non_target_member",
-            &checkout_path,
-        );
-        checkout_path
-    })
+        .expect("save non-target member");
+    logical_store
+        .save_checkout(
+            project_id,
+            &RepositoryCheckoutRecord {
+                checkout_id,
+                logical_repository_id: member_id,
+                physical_repository_id: "repository_0001".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: checkout_path.clone(),
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: "sha256:git-dir".to_string(),
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: "2026-10-02T00:00:00Z".to_string(),
+                created_at: "2026-10-02T00:00:00Z".to_string(),
+                updated_at: "2026-10-02T00:00:00Z".to_string(),
+            },
+        )
+        .expect("save non-target checkout");
+    manifest.member_ids.push(member_id);
+    manifest.membership_revision += 1;
+    logical_store
+        .save_manifest(project_id, &manifest)
+        .expect("advance membership revision");
+    checkout_path
 }
 
 /// Task 2.7 探针：记录 spawn 时点 effective cwd、spawn 计数、baseline 目录在
@@ -814,11 +768,44 @@ async fn drive_reviewer_root_launch(
     with_non_target_member: bool,
     drift: bool,
 ) -> ReviewerRootLaunchObservation {
-    let (root, store, attempt) = running_attempt_with_worktree();
-    init_test_git_repo(attempt.worktree_path.as_ref().expect("worktree"));
-    let mut logical = with_target_snapshot(&store, &attempt);
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：reviewer 启动的唯一凭证是「LC 权威 + 冻结快照」。
+    // `seed_complete` 建出完整 LC（manifest/member/checkout/selection/policy）与
+    // issue 记录；target 成员主 checkout（真实 git 仓）即 attempt worktree。
+    let seeded = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
+    // 非 target 成员必须在派生快照**之前**追加：快照的 membership_revision 必须
+    // 与追加后的 manifest 一致（否则 `validate_snapshot_fields` 判漂移）。
     let non_target_member_checkout =
-        seed_reviewer_member_codebase(&store, &logical, with_non_target_member);
+        with_non_target_member.then(|| append_non_target_member(&paths, &seeded.project_id));
+    let store = CodingAttemptStore::new(paths);
+    let worktree = seeded.member_path.clone();
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: Some(seeded.snapshot(&store.paths())),
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    let mut logical = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("running attempt");
     let probe = Arc::new(ReviewerRootCwdProbeAdapter {
         output: serde_json::json!({
             "verdict": "approve",

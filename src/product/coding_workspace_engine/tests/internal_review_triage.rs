@@ -118,30 +118,40 @@ async fn execute_group_final_review_run_coder_fix() -> (
     mpsc::Receiver<CodingWsOutMessage>,
     InternalPrReview,
 ) {
-    let (root, store, attempt, engine, event_rx) =
+    let (root, store, attempt, _engine, _event_rx) =
         super::plan_defect_entrypoints::prepared_group_review_fixture();
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        serde_json::json!({
-            "verdict": "blocked",
-            "summary": "implementation needs rework",
-            "findings": [{
-                "source_stage": "group_final_review",
-                "severity": "error",
-                "file_path": "src/lib.rs",
-                "line": 1,
-                "message": "required error handling is missing",
-                "required_action": "add the missing error handling",
-                "defect_class": "implementation_defect",
-                "recommended_route": "coder_rework"
-            }],
-            "impact_scope": ["src/lib.rs"],
-            "pr_description": "",
-            "commit_message_suggestion": ""
-        })
-        .to_string(),
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            serde_json::json!({
+                "verdict": "blocked",
+                "summary": "implementation needs rework",
+                "findings": [{
+                    "source_stage": "group_final_review",
+                    "severity": "error",
+                    "file_path": "src/lib.rs",
+                    "line": 1,
+                    "message": "required error handling is missing",
+                    "required_action": "add the missing error handling",
+                    "defect_class": "implementation_defect",
+                    "recommended_route": "coder_rework"
+                }],
+                "impact_scope": ["src/lib.rs"],
+                "pr_description": "",
+                "commit_message_suggestion": ""
+            })
+            .to_string(),
+        ),
+    );
+    // 快照 attempt 的 provider 只能经 LogicalCodebaseProviderGateway 启动。
+    let (tx, event_rx) = mpsc::channel(64);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
     let review = engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .expect("blocked group review with actionable implementation finding");
     (root, store, attempt, engine, event_rx, review)
@@ -196,34 +206,44 @@ fn assert_no_plan_repair_or_lifecycle_child(
 
 #[tokio::test]
 async fn group_final_review_operational_decision_lands_one_blocked_gate() {
-    let (_root, store, attempt, engine, _event_rx) =
+    let (_root, store, attempt, _engine, _event_rx) =
         super::plan_defect_entrypoints::prepared_group_review_fixture();
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        serde_json::json!({
-            "verdict": "request_changes",
-            "summary": "provider environment is unavailable",
-            "findings": [{
-                "source_stage": "group_final_review",
-                "severity": "error",
-                "defect_class": "operational_blocker",
-                "reason_code": "operational_blocker",
-                "message": "required provider is unavailable",
-                "contract_refs": [],
-                "capability_refs": [],
-                "repair_target": null,
-                "recommended_route": "operational_gate",
-                "confidence": "high",
-                "evidence": []
-            }],
-            "impact_scope": [],
-            "pr_description": "",
-            "commit_message_suggestion": ""
-        })
-        .to_string(),
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            serde_json::json!({
+                "verdict": "request_changes",
+                "summary": "provider environment is unavailable",
+                "findings": [{
+                    "source_stage": "group_final_review",
+                    "severity": "error",
+                    "defect_class": "operational_blocker",
+                    "reason_code": "operational_blocker",
+                    "message": "required provider is unavailable",
+                    "contract_refs": [],
+                    "capability_refs": [],
+                    "repair_target": null,
+                    "recommended_route": "operational_gate",
+                    "confidence": "high",
+                    "evidence": []
+                }],
+                "impact_scope": [],
+                "pr_description": "",
+                "commit_message_suggestion": ""
+            })
+            .to_string(),
+        ),
+    );
+    // 快照 attempt 的 provider 只能经 LogicalCodebaseProviderGateway 启动。
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
 
     let review = engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .expect("group review operational blocker");
 

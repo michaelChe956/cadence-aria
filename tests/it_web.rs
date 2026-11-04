@@ -3,6 +3,14 @@ use tower::ServiceExt;
 
 static TEST_CONTROLS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// 块3 夹具的 codegraph 串行化：迁移/rebuild/generate 都会触发 codegraph
+/// sync，而 codegraph 的数据库锁是进程外全局文件（/tmp/.codegraph/
+/// codegraph.lock）；并行测试同时触碰 ⇒ codegraph_sync_failed 422
+/// （aggregate_index_unavailable）。夹具经此 crate 级互斥串行化（it_core
+/// workspace_ws_integration 同款先例）。
+pub(crate) static CODEGRAPH_FIXTURE_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 pub(crate) struct TestControlsEnvGuard {
     _guard: tokio::sync::MutexGuard<'static, ()>,
 }

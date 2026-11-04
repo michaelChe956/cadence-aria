@@ -420,12 +420,11 @@ impl LogicalCodebaseRegistrationCoordinator {
         aggregate_root: &Path,
         item: &RegistrationBatchItem,
     ) -> Result<RegistrationCandidate, ProductStoreError> {
-        let canonical_path = fs::canonicalize(&item.submitted_path).map_err(|_| {
-            ProductStoreError::Conflict {
+        let canonical_path =
+            fs::canonicalize(&item.submitted_path).map_err(|_| ProductStoreError::Conflict {
                 kind: "registration_batch_candidate_identity_changed",
                 id: item.source_digest.clone(),
-            }
-        })?;
+            })?;
         if !canonical_path.starts_with(aggregate_root) {
             return Err(ProductStoreError::Conflict {
                 kind: "registration_batch_candidate_identity_changed",
@@ -664,11 +663,9 @@ impl LogicalCodebaseRegistrationCoordinator {
     ) -> Result<CodebaseMemberRecord, ProductStoreError> {
         let store = self.authority_store();
         let project_id = input.project_id.clone();
-        store.with_registration_manifest_writer(
-            &project_id,
-            aggregate_root,
-            || self.attach_member_inner(input),
-        )
+        store.with_registration_manifest_writer(&project_id, aggregate_root, || {
+            self.attach_member_inner(input)
+        })
     }
 
     /// Attaches one confirmed member directly through the LC-scoped authority
@@ -699,88 +696,91 @@ impl LogicalCodebaseRegistrationCoordinator {
         // write (and the member/checkout allocation that depends on it) on
         // the project-scoped identity migration lock, which also serializes
         // against the lazy identity migration executor.
-        with_exact_exclusive_lock(&self.paths.identity_migration_lock_path(&project_id), || {
-            let mut member = match registry.find_by_source(&project_id, &source_identity)? {
-                Some(entry) if entry.state == IdentityRegistryState::Active => {
-                    if entry.created_by_key != input.idempotency_key {
+        with_exact_exclusive_lock(
+            &self.paths.identity_migration_lock_path(&project_id),
+            || {
+                let mut member = match registry.find_by_source(&project_id, &source_identity)? {
+                    Some(entry) if entry.state == IdentityRegistryState::Active => {
+                        if entry.created_by_key != input.idempotency_key {
+                            return Err(ProductStoreError::Conflict {
+                                kind: "repository_already_registered",
+                                id: entry.physical_repository_id,
+                            });
+                        }
+                        store
+                            .load_member(&project_id, entry.logical_repository_id)?
+                            .ok_or_else(|| ProductStoreError::IdentityMismatch {
+                                kind: "logical_codebase_member",
+                                id: entry.logical_repository_id.0.to_string(),
+                            })?
+                    }
+                    // Bug3 症状2：Tombstoned（repo 级硬删）仍拒绝，需显式复活通道；
+                    // Released（所属 LC 已软删释放）不再落此臂——与 None 同走下方
+                    // crash-window 恢复/新分配路径，upsert_active 以新身份覆盖之。
+                    Some(entry) if entry.state == IdentityRegistryState::Tombstoned => {
                         return Err(ProductStoreError::Conflict {
-                            kind: "repository_already_registered",
+                            kind: "repository_source_tombstoned",
                             id: entry.physical_repository_id,
                         });
                     }
-                    store
-                        .load_member(&project_id, entry.logical_repository_id)?
-                        .ok_or_else(|| ProductStoreError::IdentityMismatch {
-                            kind: "logical_codebase_member",
-                            id: entry.logical_repository_id.0.to_string(),
-                        })?
-                }
-                // Bug3 症状2：Tombstoned（repo 级硬删）仍拒绝，需显式复活通道；
-                // Released（所属 LC 已软删释放）不再落此臂——与 None 同走下方
-                // crash-window 恢复/新分配路径，upsert_active 以新身份覆盖之。
-                Some(entry) if entry.state == IdentityRegistryState::Tombstoned => {
-                    return Err(ProductStoreError::Conflict {
-                        kind: "repository_source_tombstoned",
-                        id: entry.physical_repository_id,
-                    });
-                }
-                _ => {
-                    // Crash-window recovery: a member may exist without a registry
-                    // entry. Reuse its identity instead of allocating a second one.
-                    let matching = store
-                        .list_members(&project_id)?
-                        .into_iter()
-                        .filter(|member| member.source_identity == source_identity)
-                        .collect::<Vec<_>>();
-                    if matching.len() > 1 {
-                        return Err(ProductStoreError::IdentityMismatch {
-                            kind: "logical_codebase_member",
-                            id: source_identity.key_digest.clone(),
-                        });
-                    }
-                    match matching.into_iter().next() {
-                        Some(member) => {
-                            // Heal the crash window: the durable member exists
-                            // without a registry entry; complete the authority
-                            // records with the caller's idempotency key.
-                            let [primary_checkout_id] = member.checkout_ids.as_slice() else {
-                                return Err(ProductStoreError::IdentityMismatch {
-                                    kind: "logical_codebase_member",
-                                    id: member.logical_repository_id.0.to_string(),
-                                });
-                            };
-                            registry.upsert_active(
-                                &project_id,
-                                IdentityRegistryEntry::active(
-                                    source_identity.clone(),
-                                    member.logical_repository_id,
-                                    member.physical_repository_id.clone(),
-                                    *primary_checkout_id,
-                                    input.idempotency_key.clone(),
-                                ),
-                            )?;
-                            member
+                    _ => {
+                        // Crash-window recovery: a member may exist without a registry
+                        // entry. Reuse its identity instead of allocating a second one.
+                        let matching = store
+                            .list_members(&project_id)?
+                            .into_iter()
+                            .filter(|member| member.source_identity == source_identity)
+                            .collect::<Vec<_>>();
+                        if matching.len() > 1 {
+                            return Err(ProductStoreError::IdentityMismatch {
+                                kind: "logical_codebase_member",
+                                id: source_identity.key_digest.clone(),
+                            });
                         }
-                        None => self.allocate_and_attach_member(
-                            &store,
-                            &project_id,
-                            &input,
-                            &canonical_path,
-                            &source_identity,
-                        )?,
+                        match matching.into_iter().next() {
+                            Some(member) => {
+                                // Heal the crash window: the durable member exists
+                                // without a registry entry; complete the authority
+                                // records with the caller's idempotency key.
+                                let [primary_checkout_id] = member.checkout_ids.as_slice() else {
+                                    return Err(ProductStoreError::IdentityMismatch {
+                                        kind: "logical_codebase_member",
+                                        id: member.logical_repository_id.0.to_string(),
+                                    });
+                                };
+                                registry.upsert_active(
+                                    &project_id,
+                                    IdentityRegistryEntry::active(
+                                        source_identity.clone(),
+                                        member.logical_repository_id,
+                                        member.physical_repository_id.clone(),
+                                        *primary_checkout_id,
+                                        input.idempotency_key.clone(),
+                                    ),
+                                )?;
+                                member
+                            }
+                            None => self.allocate_and_attach_member(
+                                &store,
+                                &project_id,
+                                &input,
+                                &canonical_path,
+                                &source_identity,
+                            )?,
+                        }
                     }
-                }
-            };
+                };
 
-            member.alias = input.alias;
-            member.role = input.role;
-            member.repo_type = input.repo_type;
-            member.tech_stack = input.tech_stack;
-            member.updated_at = Utc::now().to_rfc3339();
-            store.save_member(&project_id, &member)?;
-            self.ensure_manifest_membership(&store, &project_id, member.logical_repository_id)?;
-            Ok(member)
-        })
+                member.alias = input.alias;
+                member.role = input.role;
+                member.repo_type = input.repo_type;
+                member.tech_stack = input.tech_stack;
+                member.updated_at = Utc::now().to_rfc3339();
+                store.save_member(&project_id, &member)?;
+                self.ensure_manifest_membership(&store, &project_id, member.logical_repository_id)?;
+                Ok(member)
+            },
+        )
     }
 
     fn allocate_and_attach_member(
@@ -862,22 +862,23 @@ impl LogicalCodebaseRegistrationCoordinator {
         project_id: &str,
         member_id: LogicalRepositoryId,
     ) -> Result<(), ProductStoreError> {
-        let mut manifest = store
-            .load_manifest(project_id)?
-            .ok_or_else(|| ProductStoreError::NotFound {
-                kind: "logical_codebase_manifest",
-                id: project_id.to_string(),
-            })?;
+        let mut manifest =
+            store
+                .load_manifest(project_id)?
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "logical_codebase_manifest",
+                    id: project_id.to_string(),
+                })?;
         if manifest.member_ids.contains(&member_id) {
             return Ok(());
         }
         manifest.member_ids.push(member_id);
-        manifest.membership_revision = manifest
-            .membership_revision
-            .checked_add(1)
-            .ok_or_else(|| ProductStoreError::InvalidRecord {
-                kind: "logical_codebase_manifest",
-                reason: "membership_revision overflow".to_string(),
+        manifest.membership_revision =
+            manifest.membership_revision.checked_add(1).ok_or_else(|| {
+                ProductStoreError::InvalidRecord {
+                    kind: "logical_codebase_manifest",
+                    reason: "membership_revision overflow".to_string(),
+                }
             })?;
         manifest.updated_at = Utc::now().to_rfc3339();
         store.save_manifest(project_id, &manifest)
@@ -986,6 +987,9 @@ fn batch_failure_reason(error: &ProductStoreError) -> String {
         ProductStoreError::Io(_) => "product_store_io".to_string(),
         ProductStoreError::Json(_) => "product_store_json".to_string(),
         ProductStoreError::PathEscape(_) => "product_store_path_escape".to_string(),
+        ProductStoreError::AuditSnapshotBudgetExceeded(_) => {
+            "product_store_audit_snapshot_budget_exceeded".to_string()
+        }
     }
 }
 
@@ -1006,4 +1010,3 @@ fn replace_batch_item(
     *item = replacement;
     Ok(())
 }
-

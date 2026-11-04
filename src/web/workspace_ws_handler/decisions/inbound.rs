@@ -261,6 +261,10 @@ async fn handle_workspace_inbound_message_inner(
                 run_context
                     .manager
                     .project_automation_ownership(&mut state_msg);
+                // REQ-HGC-04：入站消息后的补帧同样携带「继续自动化」入口事实。
+                run_context
+                    .manager
+                    .project_plan_continue_available(&mut state_msg);
                 let _ = send_json_outbound(&outbound_tx, &state_msg).await;
             }
         }
@@ -304,6 +308,10 @@ async fn handle_workspace_inbound_message_inner(
                 run_context
                     .manager
                     .project_automation_ownership(&mut state_msg);
+                // REQ-HGC-04：入站消息后的补帧同样携带「继续自动化」入口事实。
+                run_context
+                    .manager
+                    .project_plan_continue_available(&mut state_msg);
                 let _ = send_json_outbound(&outbound_tx, &state_msg).await;
             }
         }
@@ -557,6 +565,9 @@ async fn handle_workspace_inbound_message_inner(
                         engine.build_session_state()
                     };
                     manager_for_hello.project_automation_ownership(&mut state_msg);
+                    // REQ-HGC-04：Hello 基线帧（重连路径）同样携带「继续自动化」
+                    // 入口事实——否则重连后门卡变假指引。
+                    manager_for_hello.project_plan_continue_available(&mut state_msg);
                     let _ = send_json_outbound(&outbound_for_hello, &state_msg).await;
                 });
             }

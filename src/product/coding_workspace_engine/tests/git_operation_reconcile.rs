@@ -573,6 +573,17 @@ async fn abort_reconciles_unjournaled_worktree_side_effect_before_aborted_status
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // handle_abort 的终止链要解析 issue 归属,且 `ensure_issue_shared_worktree_clean`
+    // 内部按 route 对无快照 attempt fail-closed——本用例验证的是「abort 前先
+    // 清理未入账 worktree 副作用」,须补齐「issue 记录 + LC 权威 + 冻结快照」
+    // 让 abort 语义真正被执行(不建仓维 worktree 记录:本现场没有共享
+    // worktree 锁,clean 检查按无记录放行)。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -587,7 +598,7 @@ async fn abort_reconciles_unjournaled_worktree_side_effect_before_aborted_status
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("attempt");

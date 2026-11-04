@@ -49,13 +49,20 @@ async fn logical_work_item_without_target_repository_is_blocked_over_http() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert_eq!(body["code"], "repository_routing_target_missing");
+    // 统一分流后（REQ-ROUTE-02 + C4 Task 2 kind 门）：无 target 的 WorkItem 在
+    // resolve_work_item_repository 被归类为「物理仓显式 SingleRepo 请求」
+    // （repository_id=repository_0002），对 LC 归属 issue 构成跨 kind 访问 →
+    // 409 repository_routing_kind_mismatch（在任何 target lookup 之前
+    // fail-closed，不回退 primary/legacy 物理仓）。诊断 id 点名被拒绝回落的
+    // 物理仓——与旧断言（target_missing + "has no target repository"）同钉
+    // 「缺 target 不得回落」的红线，仅随统一 kind 门换码。
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "repository_routing_kind_mismatch");
     assert!(
-        body["details"]["reason"]
+        body["details"]["id"]
             .as_str()
-            .is_some_and(|reason| reason.contains("has no target repository")),
-        "blocker must explain missing target: {body}"
+            .is_some_and(|id| id.contains("repository_0002")),
+        "blocker must name the refused physical repository: {body}"
     );
 }
 

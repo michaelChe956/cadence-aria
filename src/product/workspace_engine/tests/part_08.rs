@@ -467,7 +467,7 @@ async fn build_work_item_plan_outline_review_input_fails_closed_for_corrupt_acti
         make_work_item_plan_engine_with_draft_candidate(
             "sess_wip_outline_review_corrupt_active_index",
         );
-    engine.session.artifact = Some(work_item_plan_outline_artifact());
+    engine.session.artifact = Some(work_item_plan_outline_artifact(None));
     engine.begin_work_item_plan_outline_review_run().await;
 
     let active_index_path = lifecycle
@@ -515,12 +515,17 @@ fn build_review_input_carries_workspace_review_contract_for_general_artifacts() 
 
 #[tokio::test]
 async fn build_work_item_draft_review_input_includes_boundary_rules() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_draft_review_boundary");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    let draft_payload =
-        work_item_draft_artifact_payload(&plan_id, "outline_a", "draft_a", WorkItemDraftStatus::Draft);
+    let draft_payload = work_item_draft_artifact_payload(
+        &lifecycle,
+        &plan_id,
+        "outline_a",
+        "draft_a",
+        WorkItemDraftStatus::Draft,
+    );
     let ArtifactPayload::WorkItemDraftCandidate { draft_candidate } = draft_payload else {
         panic!("expected draft candidate artifact");
     };

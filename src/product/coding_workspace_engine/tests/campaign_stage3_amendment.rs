@@ -184,6 +184,37 @@ async fn campaign_confirmed_plan_session(budget: u32) -> (TempDir, LifecycleStor
 pub(crate) async fn campaign_amendment_fixture() -> CampaignAmendmentFixture {
     let (root, lifecycle, plan_id, plan_session_id) = campaign_confirmed_plan_session(2).await;
     let app_paths = lifecycle.app_paths();
+    // REQ-ROUTE-01 两态化：group 完成/启动链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」。campaign_confirmed_plan_session 的建仓链
+    // (`with_logical_codebase_feature`)已落 manifest + 本仓 member + 主
+    // checkout——LC 身份全局唯一，二次播种（`seed_logical_authority` 的新
+    // manifest）会被 `save_manifest` 以 `IdentityMismatch` 拒绝。这里复用
+    // 该权威，取其唯一成员的主 checkout 派生一致性快照。
+    let logical_store =
+        crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone());
+    let manifest = logical_store
+        .load_manifest("project_0001")
+        .expect("load campaign manifest")
+        .expect("campaign chain seeds the logical codebase");
+    // 基座建仓链只落 manifest/member/checkout/selection 权威，**不**落聚合
+    // policy artifact 与聚合索引；而冻结快照的 `policy_digest` 取自聚合
+    // policy artifact、规划链以 active 聚合索引为 fail-closed 前置——缺失
+    // 即 `snapshot_for` 读不到 policy（快照构造 panic）。此处只补这两段
+    // 规划链前置（index 标 Degraded 短路 freshness 探测），不重写权威与投影。
+    crate::product::logical_codebase::logical_test_fixture::ensure_planning_prerequisites(
+        &app_paths,
+        "project_0001",
+        None,
+    );
+    let logical_id = *manifest
+        .member_ids
+        .first()
+        .expect("campaign manifest member");
+    let member = logical_store
+        .load_member("project_0001", logical_id)
+        .expect("campaign member record")
+        .expect("campaign member present");
+    let checkout_id = *member.checkout_ids.first().expect("member main checkout");
     let store = CodingAttemptStore::new(app_paths.clone());
     let worktree = root.path().join("shared-worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
@@ -203,11 +234,39 @@ pub(crate) async fn campaign_amendment_fixture() -> CampaignAmendmentFixture {
                 review_rounds: 1,
                 permission_modes: Default::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(
+                crate::product::logical_codebase::logical_test_fixture::snapshot_for(
+                    &app_paths,
+                    "project_0001",
+                    logical_id,
+                    checkout_id,
+                ),
+            ),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
+    // amendment 恢复链进入 Running 必经 admission:租约分类对「有快照 +
+    // 仓维记录缺失/无锁」分别按 fail-closed/`coding_lease_state_unknown`
+    // 停等处理——预置仓维记录 + 以本 attempt 为 owner 的活跃锁(自持
+    // 租约 ⇒ Allowed),与生产 acquire+bind 语义一致。
+    let campaign_lifecycle =
+        crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &campaign_lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical_id,
+        &worktree,
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &campaign_lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical_id,
+        "wi_a",
+        &initial.id,
+    );
     let mut persisted = store
         .get_attempt(&initial.project_id, &initial.issue_id, &initial.id)
         .expect("persisted attempt");

@@ -369,14 +369,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use chrono::Utc;
     use tempfile::tempdir;
 
     use crate::cross_cutting::provider_adapter::ProviderAdapter;
-    use crate::cross_cutting::provider_availability_gate::{
-        ProviderAvailabilityGate, ProviderHealthSource,
-    };
-    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
     use crate::cross_cutting::provider_registry::ProviderRegistry;
     use crate::cross_cutting::streaming_provider::{
         ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
@@ -451,42 +446,6 @@ mod tests {
         Arc::new(registry)
     }
 
-    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
-        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
-
-        impl ProviderHealthSource for AlwaysHealthy {
-            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
-                self.0.clone()
-            }
-
-            fn degraded(&self) -> bool {
-                false
-            }
-        }
-
-        let checked_at = Utc::now();
-        let snapshot = Arc::new(ProviderHealthSnapshot {
-            schema_version: 1,
-            generation: 1,
-            checked_at,
-            providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-                .into_iter()
-                .map(|provider| ProviderHealthEntry {
-                    provider,
-                    command: "stub".to_string(),
-                    available: true,
-                    version: Some("1.0".to_string()),
-                    reason_code: None,
-                    reason: None,
-                    checked_at,
-                })
-                .collect(),
-        });
-        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
-            snapshot,
-        ))))
-    }
-
     fn factory_fixture() -> (
         tempfile::TempDir,
         ProductAppPaths,
@@ -498,7 +457,7 @@ mod tests {
             paths.clone(),
             fake_registry(),
             Arc::new(StubSyncAdapter),
-            always_available_gate(),
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
         ));
         (root, paths, factory)
     }
@@ -676,7 +635,7 @@ mod tests {
         let factory = LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
             paths.clone(),
             fake_registry(),
-            always_available_gate(),
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
         );
         register_manifest(&paths, "project_0001");
         let gateway = factory.build("project_0001").expect("build gateway");
@@ -737,7 +696,7 @@ mod tests {
             ProductAppPaths::new(root.path().join(".aria")),
             fake_registry(),
             Arc::new(StubSyncAdapter),
-            always_available_gate(),
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
         ));
         let state = state.with_gateway_factory(injected.clone());
         assert!(Arc::ptr_eq(
@@ -924,7 +883,7 @@ mod tests {
                 paths.clone(),
                 fake_registry(),
                 Arc::new(StubSyncAdapter),
-                always_available_gate(),
+                crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
             );
             let home_before = t7_factory_snapshot_tree(home.path());
             let aria_before = t7_factory_snapshot_tree(&workspace.path().join(".aria"));

@@ -4,7 +4,7 @@
 
 #[tokio::test]
 async fn drafting_with_process_evidence_warning_keeps_candidate_acceptable_and_visible() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_process_evidence_warning");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
@@ -33,6 +33,7 @@ async fn drafting_with_process_evidence_warning_keeps_candidate_acceptable_and_v
         .await;
     engine.active_node_id = Some(run_node_id);
     let mut candidate = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_a",
         "draft_process_evidence",

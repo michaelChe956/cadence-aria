@@ -17,7 +17,7 @@ export const GATE_TRIGGER_LABELS: Record<WorkItemPlanHumanGateSnapshot["trigger"
   native_human_required: "引擎判定需人工",
   repeated_fingerprint: "同一问题重复出现",
   verification_new_findings: "复验发现新问题",
-  repair_budget_exhausted: "修复轮次已用尽",
+  repair_budget_exhausted: "本轮评审自动返修已停止，需要你决定下一步。",
 };
 
 const ADVANCE_REPLAY_CODES = new Set([

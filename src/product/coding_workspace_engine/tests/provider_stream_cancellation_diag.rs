@@ -34,17 +34,18 @@ async fn coding_provider_stream_engine_cancellation_logs_cancellation_site() {
 
     let fixture = provider_start_persistence_fixture().await;
     let cancellation = CancellationToken::new();
-    let (event_tx, _event_rx) = mpsc::channel(64);
-    let engine =
-        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx)
-            .with_cancellation(cancellation.clone());
     let entered = Arc::new(tokio::sync::Notify::new());
-    let provider = HangingStartProvider {
+    let provider = Arc::new(HangingStartProvider {
         entered: entered.clone(),
-    };
+    });
+    // REQ-ROUTE-01：快照 attempt 的 provider run 只经 gateway 启动；取消沿用
+    // 同一 engine 取消位点（provider_start 窗口）。
+    let engine = fixture
+        .engine_with(provider.clone())
+        .with_cancellation(cancellation.clone());
     let capture = SharedTracingCapture::global();
 
-    let execute = engine.execute_code_review(&fixture.attempt, &provider);
+    let execute = engine.execute_code_review(&fixture.attempt, provider.as_ref());
     let cancel_parent = async {
         tokio::time::timeout(Duration::from_millis(250), entered.notified())
             .await

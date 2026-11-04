@@ -4,6 +4,7 @@ use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::lifecycle_store::{
     CreateStorySpecInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::models::{ProviderName, WorkspaceSessionStatus, WorkspaceType};
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::product::provider_workspace_runner::{
@@ -39,7 +40,7 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id(&project.id),
             title: "会话过期".to_string(),
             description: Some("描述".to_string()),
             change_id: None,

@@ -88,15 +88,23 @@ async fn choice_delivery_coding_gate_stays_open_until_receipt_delivered() {
         )
         .expect("role run");
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let forwarded_answers: std::sync::Arc<std::sync::Mutex<Option<Vec<ChoiceAnswerData>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
-    let provider = ReceiptGatedChoiceProvider {
+    let provider = std::sync::Arc::new(ReceiptGatedChoiceProvider {
         release: std::sync::Arc::clone(&release),
         forwarded_answers: std::sync::Arc::clone(&forwarded_answers),
-    };
+    });
+    // REQ-ROUTE-01：快照 attempt 的 provider run 只经 gateway 启动。
+    let engine = super::super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        event_tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let (input, validated_input) =
+        super::prepare_coder_validated_launch(&engine, &store, &attempt, input);
     let provider_name = ProviderName::Codex;
     let (command_tx, mut command_rx) = mpsc::channel(4);
 
@@ -104,7 +112,7 @@ async fn choice_delivery_coding_gate_stays_open_until_receipt_delivered() {
         attempt: &attempt,
         node_id: "coding_invocation_choice_receipt",
         role_run: Some(&role_run),
-        provider: &provider,
+        provider: provider.as_ref(),
         legacy_input: &legacy_input,
         input,
         provider_name: &provider_name,
@@ -114,7 +122,7 @@ async fn choice_delivery_coding_gate_stays_open_until_receipt_delivered() {
         timeout: Some(Duration::from_secs(8)),
         timeout_reason_code: None,
         suppress_failure_side_effects: false,
-        validated_input: None,
+        validated_input: Some(validated_input),
     });
     tokio::pin!(invocation);
     tokio::select! {

@@ -11,6 +11,14 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：完成链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且 issue 记录必须在场（issue 聚合/路由解析）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -26,7 +34,7 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })

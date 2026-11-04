@@ -305,10 +305,13 @@ async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
             seen_inputs: seen_inputs.clone(),
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -409,16 +412,20 @@ async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
 #[tokio::test]
 async fn workspace_ws_abort_after_choice_response_returns_prepare_context() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceThenHangingStreamingProvider),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -478,10 +485,13 @@ async fn workspace_ws_abort_after_choice_response_returns_prepare_context() {
 #[tokio::test]
 async fn workspace_ws_test_permission_fixture_emits_permission_request_for_fake_provider() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
-    let state = WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    let state = with_available_provider_health(
+        WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
+        root.path(),
     );
     state
         .test_controls
@@ -532,10 +542,13 @@ async fn workspace_ws_unmatched_permission_response_returns_protocol_error() {
         ))),
     );
 
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -612,14 +625,11 @@ struct WorkingDirRecordingStreamingProvider {
     observed_working_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        _cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
-        *self.observed_working_dir.lock().unwrap() = Some(input.working_dir);
+impl WorkingDirRecordingStreamingProvider {
+    /// 裸 `start`（单仓 direct 历史路径）与 `start_validated`（LC
+    /// gateway 路径）共用的会话构造。
+    fn recording_session(&self, working_dir: PathBuf) -> ProviderSession {
+        *self.observed_working_dir.lock().unwrap() = Some(working_dir);
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
         tokio::spawn(async move {
@@ -632,11 +642,35 @@ impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
                 .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(VALID_STORY_SPEC.to_string(), None)))
                 .await;
         });
-        Ok(ProviderSession {
+        ProviderSession {
             native_session_id: None,
             events: event_rx,
             commands: command_tx,
-        })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for WorkingDirRecordingStreamingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Ok(self.recording_session(input.working_dir))
+    }
+
+    /// LC 会话经 gateway validated 启动：观察点从 adapter 侧的裸 input
+    /// 迁到 validated 启动事实的只读投影（`launch_view().working_dir`）——
+    /// 投影借出的正是本次 launch 的实际 spawn cwd，语义不减；按 trait
+    /// 契约不回调裸 start。
+    async fn start_validated(
+        &self,
+        validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let working_dir = validated.launch_view().working_dir.to_path_buf();
+        Ok(self.recording_session(working_dir))
     }
 
     async fn run_streaming(
@@ -675,25 +709,30 @@ struct ChoiceThenArtifactProviderState {
     calls: Mutex<u32>,
     resume_ids: Mutex<Vec<Option<String>>>,
     prompts: Mutex<Vec<String>>,
+    /// 替身自己发出的原生会话 id（completion 的 provider_session_id）——
+    /// validated 启动面不外借 resume_provider_session_id，续接事实只能由
+    /// 替身自身的上一轮会话 id 派生。
+    last_native_session_id: Mutex<Option<String>>,
 }
 
 struct ChoiceThenArtifactProvider {
     state: Arc<ChoiceThenArtifactProviderState>,
 }
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
-    async fn start(
+impl ChoiceThenArtifactProvider {
+    /// 裸 `start`（单仓 direct 历史路径）与 `start_validated`（LC
+    /// gateway 路径）共用的会话构造。
+    fn choice_then_artifact_session(
         &self,
-        input: StreamingProviderInput,
-        _cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
+        resume_provider_session_id: Option<String>,
+        prompt: String,
+    ) -> ProviderSession {
         self.state
             .resume_ids
             .lock()
             .unwrap()
-            .push(input.resume_provider_session_id.clone());
-        self.state.prompts.lock().unwrap().push(input.prompt);
+            .push(resume_provider_session_id);
+        self.state.prompts.lock().unwrap().push(prompt);
         let mut calls = self.state.calls.lock().unwrap();
         *calls += 1;
         let call_no = *calls;
@@ -722,6 +761,8 @@ impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
         };
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
+        let native_session_id = "author-provider-session-1".to_string();
+        let emitted_session_id = native_session_id.clone();
         tokio::spawn(async move {
             let output = output.to_string();
             let _ = event_tx
@@ -730,14 +771,45 @@ impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
                 })
                 .await;
             let _ = event_tx
-                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some("author-provider-session-1".to_string()))))
+                .send(ProviderEvent::Completed(cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(output, Some(emitted_session_id))))
                 .await;
         });
-        Ok(ProviderSession {
+        *self.state.last_native_session_id.lock().unwrap() = Some(native_session_id);
+        ProviderSession {
             native_session_id: None,
             events: event_rx,
             commands: command_tx,
-        })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceThenArtifactProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Ok(self.choice_then_artifact_session(
+            input.resume_provider_session_id.clone(),
+            input.prompt,
+        ))
+    }
+
+    /// LC 会话经 gateway validated 启动：观察点从 adapter 侧的裸 input
+    /// 迁到 validated 启动事实的只读投影（`launch_view().prompt`）——投影
+    /// 借出的正是本次 launch 的实际 prompt，语义不减；resume 事实由替身
+    /// 自身上一轮发出的原生会话 id 派生（validated 面不外借该字段）。
+    /// 按 trait 契约不回调裸 start。
+    async fn start_validated(
+        &self,
+        validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let resume_provider_session_id =
+            self.state.last_native_session_id.lock().unwrap().clone();
+        let prompt = validated.launch_view().prompt.to_string();
+        Ok(self.choice_then_artifact_session(resume_provider_session_id, prompt))
     }
 
     async fn run_streaming(

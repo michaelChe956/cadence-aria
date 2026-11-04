@@ -2068,7 +2068,9 @@ mod b1_plan_launch_ownership_tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project.id.clone(),
                 repo_id: None,
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    &project.id,
+                ),
                 base_branch: None,
                 title: "b1 plan".to_string(),
                 description: None,
@@ -2179,7 +2181,9 @@ mod f11_close_attention_tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project.id.clone(),
                 repo_id: None,
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    &project.id,
+                ),
                 base_branch: None,
                 title: "f11 plan".to_string(),
                 description: None,
@@ -2378,7 +2382,9 @@ mod plan_window_id_tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project.id.clone(),
                 repo_id: None,
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    &project.id,
+                ),
                 base_branch: None,
                 title: "plan window id".to_string(),
                 description: None,

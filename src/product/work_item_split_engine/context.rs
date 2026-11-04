@@ -154,6 +154,12 @@ fn latest_markdown(
         .unwrap_or_else(|| "(no version)".to_string()))
 }
 
+/// issue 是否归属已登记（非 legacy 别名）逻辑代码库——多仓 prompt 形态判据。
+pub(crate) fn is_lc_issue(issue: &IssueRecord) -> bool {
+    issue.logical_codebase_id
+        != crate::product::logical_codebase::legacy_logical_codebase_id(&issue.project_id)
+}
+
 /// 目录摘要（单仓 / 多仓分派）。
 ///
 /// - `logical == false`（单仓）：原实现逐字保留（单层 `truncate(30)` +
@@ -481,7 +487,9 @@ mod tests {
             project_id: "project_0001".to_string(),
             repo_id: None,
             base_branch: None,
-            logical_codebase_id: None,
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                "project_0001",
+            ),
             title: "Test Issue".to_string(),
             description: None,
             change_id: "change_0001".to_string(),

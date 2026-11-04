@@ -135,7 +135,11 @@ fn f_a_waiting_fixture(
             id: ISSUE_ID.to_string(),
             project_id: PROJECT_ID.to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: "f-a waiting fixture".to_string(),
             description: None,
             change_id: "f_a_waiting".to_string(),

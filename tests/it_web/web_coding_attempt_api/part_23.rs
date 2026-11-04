@@ -87,12 +87,6 @@ fn seed_advance_group_initialization(
         .resolve_authoritative_group_plan_binding("project_0001", "issue_0001", "work_item_plan_0001")
         .expect("authoritative group plan binding");
     let current_unit = &authoritative.units[0];
-    let repository = RepositoryStore::new(app_paths.to_owned())
-        .list("project_0001")
-        .expect("list repositories")
-        .into_iter()
-        .next()
-        .expect("fixture repository");
     let creation_guard = coding_store
         .acquire_work_item_attempt_creation(
             "project_0001",
@@ -100,6 +94,30 @@ fn seed_advance_group_initialization(
             &current_unit.logical_work_item_id,
         )
         .expect("attempt creation guard");
+    // 与生产 advance 同构（initialize_advance_inner → advance_target_snapshot）：
+    // Logical 路由的 ScAdvance journal 必须冻结首个 unit target 的
+    // target_snapshot（validate_group_single_target：Logical 下 None 即
+    // mixed_target_group_rejected），worktree 落目标仓 canonical_path 之下。
+    let target_logical_id = authoritative
+        .units
+        .iter()
+        .filter_map(|unit| unit.target_repository_id)
+        .next()
+        .expect("advance fixture unit target");
+    let lc_id = cadence_aria::product::logical_codebase::resolve_issue_logical_codebase_id(
+        app_paths,
+        "project_0001",
+        "issue_0001",
+    )
+    .expect("resolve issue logical codebase");
+    let advance_snapshot =
+        cadence_aria::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+            app_paths,
+            "project_0001",
+            target_logical_id,
+            Some(lc_id.as_str()),
+        )
+        .expect("advance target snapshot");
     let input = CreateGroupCodingAttemptInput {
         project_id: "project_0001".to_string(),
         issue_id: "issue_0001".to_string(),
@@ -108,13 +126,14 @@ fn seed_advance_group_initialization(
         base_branch: current_branch_of(repo_path),
         branch_name: "aria/issues/issue_0001".to_string(),
         worktree_path: Some(
-            repo_path
+            advance_snapshot
+                .canonical_path
                 .join(".worktrees")
                 .join("aria-issues")
                 .join("issue_0001"),
         ),
         provider_config_snapshot,
-        target_snapshot: None,
+        target_snapshot: Some(advance_snapshot),
         max_auto_rework: 2,
         start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
     };
@@ -142,33 +161,40 @@ fn seed_advance_group_initialization(
         return journal;
     }
 
+    // 仓维路由（REQ-COD-03）：ScAdvance 的 worktree 记录/租约/绑定走
+    // shared-worktrees/{repository} 三元键；issue 维 legacy 布局在该路由被
+    // 组入口 preflight 以 legacy_shared_worktree_present 422 拒绝。
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
-            branch_name: journal.attempt.branch_name.clone(),
-            worktree_path: journal.attempt.worktree_path.clone().expect("frozen worktree"),
-            base_branch: journal.attempt.base_branch.clone(),
-        })
-        .expect("persist shared worktree");
+        .upsert_repo_shared_worktree(
+            cadence_aria::product::lifecycle_store::UpsertRepoSharedWorktreeInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: target_logical_id,
+                branch_name: journal.attempt.branch_name.clone(),
+                worktree_path: journal.attempt.worktree_path.clone().expect("frozen worktree"),
+                base_branch: journal.attempt.base_branch.clone(),
+            },
+        )
+        .expect("persist repo shared worktree");
     let lease = lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             "project_0001",
             "issue_0001",
+            target_logical_id,
             &journal.lock_work_item_id,
             &journal.worktree_lease_id,
         )
-        .expect("acquire shared worktree lease");
-    assert!(lease.acquired, "advance must own the shared worktree lease");
+        .expect("acquire repo shared worktree lease");
+    assert!(lease.acquired, "advance must own the repo shared worktree lease");
     lifecycle
-        .bind_issue_worktree_lock_to_attempt(
+        .bind_repo_worktree_lock_to_attempt(
             "project_0001",
             "issue_0001",
+            target_logical_id,
             &journal.lock_work_item_id,
             &attempt.id,
         )
-        .expect("bind shared worktree lease");
+        .expect("bind repo shared worktree lease");
     journal = coding_store
         .advance_group_initialization_phase(
             &journal,
@@ -295,10 +321,17 @@ async fn create_group_coding_attempt_adopts_interrupted_advance_journal() {
         .expect("materialized units");
     assert_eq!(units.len(), completed.units.len());
     assert_eq!(units.len(), 2);
+    // 仓维路由（REQ-COD-03）：收养后的租约事实在 shared-worktrees/{repository}。
+    let advance_repo = journal
+        .attempt
+        .target_snapshot
+        .as_ref()
+        .expect("advance target snapshot")
+        .logical_repository_id;
     let shared_worktree = LifecycleStore::new(app_paths)
-        .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("shared worktree")
-        .expect("shared worktree");
+        .get_repo_shared_worktree("project_0001", "issue_0001", advance_repo)
+        .expect("repo shared worktree")
+        .expect("repo shared worktree");
     assert_eq!(
         shared_worktree.current_lock_owner_id.as_deref(),
         Some(journal.attempt.id.as_str()),

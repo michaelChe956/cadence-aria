@@ -40,6 +40,12 @@ async fn run_group_coder_with_scope() -> (
     super::init_test_git_repo(&worktree);
     let head = super::git_stdout(&worktree, &["rev-parse", "HEAD"]);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -55,7 +61,7 @@ async fn run_group_coder_with_scope() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -74,12 +80,22 @@ async fn run_group_coder_with_scope() -> (
     attempt.stage = CodingExecutionStage::Coding;
     store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let coder = super::provider_execution_context::CapturingProjectionProvider::new(
-        super::provider_execution_context::current_plan_defect_output(),
+    let coder = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            super::provider_execution_context::current_plan_defect_output(),
+        ),
+    );
+    // 快照 attempt 的 provider run 只能经 `LogicalCodebaseProviderGateway`；
+    // 直接 `CodingWorkspaceEngine::new` 会以
+    // `logical_provider_gateway_required` fail-closed。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        coder.clone(),
     );
     let coded = engine
-        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .execute_coding(&attempt, coder.as_ref(), &CodingExecutionContext::default())
         .await
         .unwrap();
     let prompt = coder.input().prompt.clone();
@@ -169,25 +185,32 @@ async fn group_reviewer_prompt_carries_verbatim_write_scope_section() {
     let worktree = root.path().join("worktree");
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let reviewer = super::provider_execution_context::CapturingProjectionProvider::new(
-        serde_json::json!({
-            "verdict": "request_changes",
-            "summary": "缺少范围合规说明",
-            "findings": [{
-                "severity": "warning",
-                "file_path": "src/lib.rs",
-                "line": 1,
-                "message": "请说明写入范围合规性",
-                "required_action": "补充范围核对说明",
-                "source_stage": "code_review"
-            }]
-        })
-        .to_string(),
+    let reviewer = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            serde_json::json!({
+                "verdict": "request_changes",
+                "summary": "缺少范围合规说明",
+                "findings": [{
+                    "severity": "warning",
+                    "file_path": "src/lib.rs",
+                    "line": 1,
+                    "message": "请说明写入范围合规性",
+                    "required_action": "补充范围核对说明",
+                    "source_stage": "code_review"
+                }]
+            })
+            .to_string(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        reviewer.clone(),
     );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
-        .execute_code_review_with_commands(&coded, &reviewer, &mut cmd_rx)
+        .execute_code_review_with_commands(&coded, reviewer.as_ref(), &mut cmd_rx)
         .await
         .unwrap();
 

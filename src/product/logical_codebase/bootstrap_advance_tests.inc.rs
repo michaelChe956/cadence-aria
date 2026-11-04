@@ -116,9 +116,8 @@ mod advance_tests {
 
         // 根规则入口 + 真正文政策（与根配方发布同构，非自举桩）。
         std::fs::write(
-            aggregate_root.join(
-                crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE,
-            ),
+            aggregate_root
+                .join(crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE),
             "# aggregate root rules\n",
         )
         .unwrap();
@@ -276,6 +275,8 @@ mod advance_tests {
                     stderr_summary: Some("provider probe failed".to_string()),
                     retryable: true,
                     action: "retry_provider_turn".to_string(),
+                    cause: None,
+                    provider: None,
                 },
                 "2026-10-03T00:02:30Z".to_string(),
             )
@@ -297,23 +298,21 @@ mod advance_tests {
         let rule_digest = fixture.rule_digest.clone();
         let index_store = AggregateIndexStore::for_lc(fixture.paths.clone(), fixture.lc_id.clone());
         LogicalCodebaseBootstrapService::new(paths.clone())
-            .with_root_recipe_prepare(Arc::new(
-                move |_request: &BootstrapPrepareRequest| {
-                    prepare_calls.fetch_add(1, Ordering::SeqCst);
-                    if let Some(delay) = prepare_delay {
-                        std::thread::sleep(delay);
-                    }
-                    materialize_root_recipe(
-                        &paths,
-                        &lc_id,
-                        &aggregate_root,
-                        &manifest,
-                        &policy,
-                        &rule_digest,
-                    );
-                    BootstrapPrepareOutcome::Started
-                },
-            ))
+            .with_root_recipe_prepare(Arc::new(move |_request: &BootstrapPrepareRequest| {
+                prepare_calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(delay) = prepare_delay {
+                    std::thread::sleep(delay);
+                }
+                materialize_root_recipe(
+                    &paths,
+                    &lc_id,
+                    &aggregate_root,
+                    &manifest,
+                    &policy,
+                    &rule_digest,
+                );
+                BootstrapPrepareOutcome::Started
+            }))
             .with_aggregate_index_rebuild(Arc::new(
                 move |project_id: &str, command_id: &str, expected_revision: u64| {
                     let mut record = AggregateIndexRecord::building(

@@ -359,4 +359,49 @@ describe("AggregateInitializationCard", () => {
       expect(hint.getAttribute("title")).toContain("跳过");
     }
   });
+
+  it("renders the frozen provider selection summary when provider_selection exists", () => {
+    render(
+      <AggregateInitializationCard
+        operation={operation("completed", {
+          provider_selection: {
+            selected: "pi",
+            candidates: [
+              { provider: "pi", display_name: "Pi", cli_available: true, cli_reason_code: null, capability_state: "confirmed", skipped_reason: null, action_hint: "直接使用" },
+              { provider: "kimi_code", display_name: "Kimi", cli_available: true, cli_reason_code: null, capability_state: "unverified", skipped_reason: "needs_verification", action_hint: "核验 Kimi" },
+              { provider: "claude_code", display_name: "Claude Code", cli_available: false, cli_reason_code: "command_missing", capability_state: "not_installed", skipped_reason: "cli_unavailable", action_hint: "安装 Claude Code" },
+              { provider: "codex", display_name: "Codex", cli_available: true, cli_reason_code: null, capability_state: "confirmed", skipped_reason: null, action_hint: "直接使用" },
+            ],
+            rule_version: "v1",
+            decided_at: "2026-11-03T00:00:00Z",
+          },
+        })}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByTestId("aggregate-initialization-provider-selection");
+    expect(summary.textContent).toContain("本次使用 Pi");
+    expect(summary.textContent).toContain("跳过：Kimi（未核验）、Claude Code（未安装）");
+    // 未被跳过的候选（codex）不进入跳过清单。
+    expect(summary.textContent).not.toContain("Codex");
+  });
+
+  it("does not render the provider selection summary when provider_selection is null", () => {
+    render(
+      <AggregateInitializationCard
+        operation={operation("completed", { provider_selection: null })}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByTestId("aggregate-initialization-provider-selection"),
+    ).not.toBeInTheDocument();
+  });
 });

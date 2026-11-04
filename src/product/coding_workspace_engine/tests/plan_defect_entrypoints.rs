@@ -99,13 +99,21 @@ async fn coding_plan_repair_entrypoints_internal_review_execution_persists_safe_
     };
     store.save_review_request(&attempt, &request).unwrap();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        super::provider_execution_context::review_plan_defect_output(),
+    // 父级夹具已带冻结快照，provider run 只能经 LC gateway 分发。
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            super::provider_execution_context::review_plan_defect_output(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
 
     let review = engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .unwrap();
 
@@ -373,7 +381,7 @@ fn coding_plan_repair_internal_review_gate_reasons_follow_one_decision_mapping()
 
 #[tokio::test]
 async fn coding_plan_repair_group_review_non_gate_routes_and_verification_gate_stay_distinct() {
-    let (_root, store, attempt, engine, _event_rx) = prepared_group_review_fixture();
+    let (_root, store, attempt, _engine, _event_rx) = prepared_group_review_fixture();
 
     for (
         defect_class,
@@ -425,32 +433,41 @@ async fn coding_plan_repair_group_review_non_gate_routes_and_verification_gate_s
             Some("GroupFinalReview verification incomplete"),
         ),
     ] {
-        let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-            serde_json::json!({
-                "verdict": "blocked",
-                "summary": "safe stop",
-                "findings": [{
-                    "source_stage": "group_final_review",
-                    "severity": "error",
-                    "defect_class": defect_class,
-                    "reason_code": reason_code,
-                    "message": "repair outside coding",
-                    "contract_refs": [],
-                    "capability_refs": [],
-                    "repair_target": repair_target,
-                    "recommended_route": route,
-                    "confidence": "high",
-                    "evidence": []
-                }],
-                "impact_scope": [],
-                "pr_description": "",
-                "commit_message_suggestion": ""
-            })
-            .to_string(),
+        let provider = std::sync::Arc::new(
+            super::provider_execution_context::CapturingProjectionProvider::new(
+                serde_json::json!({
+                    "verdict": "blocked",
+                    "summary": "safe stop",
+                    "findings": [{
+                        "source_stage": "group_final_review",
+                        "severity": "error",
+                        "defect_class": defect_class,
+                        "reason_code": reason_code,
+                        "message": "repair outside coding",
+                        "contract_refs": [],
+                        "capability_refs": [],
+                        "repair_target": repair_target,
+                        "recommended_route": route,
+                        "confidence": "high",
+                        "evidence": []
+                    }],
+                    "impact_scope": [],
+                    "pr_description": "",
+                    "commit_message_suggestion": ""
+                })
+                .to_string(),
+            ),
+        );
+        let (tx, _rx) = mpsc::channel(8);
+        let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+            &store,
+            tx,
+            "project_0001",
+            provider.clone(),
         );
 
         let review = engine
-            .execute_internal_pr_review(&attempt, &provider)
+            .execute_internal_pr_review(&attempt, provider.as_ref())
             .await
             .expect("group review route");
 
@@ -507,6 +524,15 @@ pub(super) fn prepared_group_review_fixture() -> (
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：准入/租约/provider 分发的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」；无快照 attempt 的租约分类会 fail-closed。`seed_complete`
+    // 先建 issue 再建 LC 权威（顺序不可颠倒：issue id 按 `issues/` 目录数分配）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let mut attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -522,7 +548,7 @@ pub(super) fn prepared_group_review_fixture() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -530,7 +556,7 @@ pub(super) fn prepared_group_review_fixture() -> (
     seed_group_attempt_fixture(&store, &attempt, true, false);
     complete_group_units_with_authoritative_runs(&store, &attempt);
     attempt.status = CodingAttemptStatus::Running;
-    // 播种合法可执行态：Running 必须带 admission 会话标记（同 prepared_group_review_fixture）。
+    // 播种合法可执行态：Running 必须带 admission 会话标记（否则 provider run 被第二道防线拒）。
     attempt.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
     attempt.stage = CodingExecutionStage::InternalPrReview;
     attempt.head_commit = Some(head.clone());
@@ -566,7 +592,9 @@ pub(super) fn prepared_group_review_fixture() -> (
     (root, store, attempt, engine, _rx)
 }
 
-fn complete_group_units_with_authoritative_runs(
+/// 为已播种的 group attempt 写入「每 unit 最新 run = Completed」的权威事实
+/// （group 终审 binding 的唯一依据）。暴露给同模块测试自建夹具使用。
+pub(super) fn complete_group_units_with_authoritative_runs(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
 ) {

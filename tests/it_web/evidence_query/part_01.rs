@@ -27,13 +27,17 @@ use cadence_aria::product::json_store::write_json;
 use cadence_aria::product::logical_codebase::aggregate_index::{
     AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
 };
+use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::logical_codebase::evidence_budget::EVIDENCE_ATTEMPT_CHAR_QUOTA;
 use cadence_aria::product::logical_codebase::evidence_token::issue_evidence_token;
+use cadence_aria::product::logical_codebase::policy::AggregatePolicyArtifactStore;
 use cadence_aria::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseLayout,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, LogicalCodebaseLayout,
     LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId, MemberStatus,
     RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
 };
+use cadence_aria::product::models::ProjectRecord;
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router_with_evidence;
 use cadence_aria::web::runtime::WebRuntime;
@@ -230,13 +234,52 @@ pub(crate) fn seed_evidence_fixture_with_options(
         )
         .expect("create aggregate index record");
 
-    // 4. attempt record（Running + target_snapshot 锚定 api 成员）。
+    // 3b. project record + issue 归属 + selection + bootstrap policy（对齐
+    // fifty_member 通过用例的播种形态）：证据链经 RepositoryAuthorityResolver
+    // ::resolve_for_issue 读 issue.json，缺失即 product_store_not_found: issue。
+    // issue 归属取 legacy 别名 LC id——ProjectStore.get 的幂等 migrate_legacy
+    // 会把上方 project 级 LC 布局物化成别名 LC 子树，寻址与归属同源。
+    write_json(
+        &paths.project_root(PROJECT_ID).join("project.json"),
+        &ProjectRecord {
+            id: PROJECT_ID.to_string(),
+            name: "evidence query fixture".to_string(),
+            description: None,
+            created_at: NOW.to_string(),
+            updated_at: NOW.to_string(),
+            last_opened_at: None,
+        },
+    )
+    .expect("seed project record");
+    IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: None,
+            logical_codebase_id: legacy_logical_codebase_id(PROJECT_ID),
+            title: "evidence query fixture issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create fixture issue");
+    IssueCodebaseSelectionStore::new(paths.clone())
+        .save(&IssueCodebaseSelection::all_members(
+            PROJECT_ID, ISSUE_ID, None,
+        ))
+        .expect("save all-member selection");
+    let bootstrap_policy = AggregatePolicyArtifactStore::new(paths.clone())
+        .ensure_bootstrap(&manifest)
+        .expect("bootstrap aggregate policy");
+
+    // 4. attempt record（Running + target_snapshot 锚定 api 成员；
+    //    policy_digest 与 bootstrap 产物同源，冻结政策读取的 digest 复核不漂移）。
     let snapshot = target_snapshot(
         api_id,
         api_checkout_id,
         &aggregate_root.join("api"),
         "rev-api",
         1,
+        bootstrap_policy.digest.clone(),
     );
     let attempt = attempt_fixture(CodingAttemptStatus::Running, Some(snapshot));
     write_json(&attempt_record_path(&paths, ATTEMPT_ID), &attempt).expect("write attempt record");
@@ -346,12 +389,14 @@ pub(crate) fn index_record(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn target_snapshot(
     logical_id: LogicalRepositoryId,
     checkout_id: RepositoryCheckoutId,
     canonical_path: &Path,
     revision: &str,
     membership_revision: u64,
+    policy_digest: String,
 ) -> AttemptTargetSnapshot {
     AttemptTargetSnapshot {
         logical_repository_id: logical_id,
@@ -360,7 +405,7 @@ fn target_snapshot(
         canonical_path: canonical_path.to_path_buf(),
         git_dir_identity: "git-dir-id".to_string(),
         revision: Some(revision.to_string()),
-        policy_digest: "policy-digest".to_string(),
+        policy_digest,
         membership_revision,
         captured_at: NOW.to_string(),
         capture_source: "test".to_string(),

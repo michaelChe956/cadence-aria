@@ -374,7 +374,7 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: None,
-                logical_codebase_id: Some(lc_a.clone()),
+                logical_codebase_id: lc_a.clone(),
                 title: "alpha issue".to_string(),
                 description: None,
                 change_id: None,
@@ -386,7 +386,7 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: None,
-                logical_codebase_id: Some(lc_b.clone()),
+                logical_codebase_id: lc_b.clone(),
                 title: "beta issue".to_string(),
                 description: None,
                 change_id: None,
@@ -509,7 +509,7 @@ mod tests {
         let issues = issue_store.list(&project_id).unwrap();
         let issue_b = issues
             .iter()
-            .find(|issue| issue.logical_codebase_id.as_deref() == Some(lc_b.as_str()))
+            .find(|issue| issue.logical_codebase_id == lc_b)
             .expect("beta issue exists")
             .id
             .clone();

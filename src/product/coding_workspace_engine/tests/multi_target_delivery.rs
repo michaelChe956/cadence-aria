@@ -122,7 +122,9 @@ async fn multi_target_delivery_chains_are_independent_per_repo() {
         .create(CreateProductIssueInput {
             project_id: DELIVERY_PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                DELIVERY_PROJECT_ID,
+            ),
             title: "multi-target delivery".to_string(),
             description: None,
             change_id: None,

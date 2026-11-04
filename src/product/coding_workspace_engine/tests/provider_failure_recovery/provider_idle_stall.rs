@@ -424,6 +424,24 @@ fn invocation_inputs(attempt: &CodingExecutionAttempt) -> (AdapterInput, Streami
     (legacy_input, input)
 }
 
+/// 逻辑 target 的直调 harness：REQ-ROUTE-01 后 `target_snapshot.is_some()`
+/// 的 run 必须携带 gateway 产出的 validated input（`validated_input` 非空），
+/// 且 spawn 经 gateway registry 分发。生产 cycle 在捆绑前把 envelope 冻结
+/// cwd 回填进 input，这里同步该接线。
+fn validated_coder_input(
+    engine: &CodingWorkspaceEngine,
+    attempt: &CodingExecutionAttempt,
+    mut input: StreamingProviderInput,
+) -> Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput> {
+    let worktree = attempt.worktree_path.clone().expect("worktree path");
+    let policy = engine
+        .resolve_launch_policy_for_role(attempt, CodingProviderRole::Coder, &worktree)
+        .expect("launch policy resolves")
+        .expect("logical attempt + gateway must produce a policy");
+    input.working_directory = Some(policy.envelope().working_directory.clone());
+    Some(crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(input, policy))
+}
+
 async fn run_coder_invocation(
     engine: &CodingWorkspaceEngine,
     attempt: &CodingExecutionAttempt,
@@ -433,6 +451,7 @@ async fn run_coder_invocation(
 ) -> ProviderInvocationOutcome {
     let (legacy_input, input) = invocation_inputs(attempt);
     let provider_name = ProviderName::Codex;
+    let validated_input = validated_coder_input(engine, attempt, input.clone());
     engine
         .run_provider_stream_invocation(CodingProviderStreamRun {
             attempt,
@@ -448,7 +467,7 @@ async fn run_coder_invocation(
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: true,
-            validated_input: None,
+            validated_input,
         })
         .await
 }
@@ -559,8 +578,16 @@ async fn idle_stall_writes_timeout_event_fails_role_run_and_retries_same_provide
     let (_root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = IdleStallThenCompleteProvider::new(1, "coder output after idle retry");
+    let provider = std::sync::Arc::new(IdleStallThenCompleteProvider::new(
+        1,
+        "coder output after idle retry",
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     // 红测先行的有界等待：看门狗缺失时静默 provider 会永久挂起。
@@ -568,7 +595,7 @@ async fn idle_stall_writes_timeout_event_fails_role_run_and_retries_same_provide
         Duration::from_secs(15),
         engine.execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext {
                 work_item_markdown: Some("# Idle retry work item\n\nFull context.".to_string()),
                 verification_commands: vec!["cargo test --locked --lib idle".to_string()],
@@ -638,15 +665,23 @@ async fn second_idle_stall_blocks_attempt_with_coder_provider_stalled_gate() {
     let _env = IdleSecsEnvironment::set(&[(ARIA_CODING_CODER_IDLE_SECS_ENV, "1")]);
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = IdleStallThenCompleteProvider::new(usize::MAX, "never reached");
+    let provider = std::sync::Arc::new(IdleStallThenCompleteProvider::new(
+        usize::MAX,
+        "never reached",
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = tokio::time::timeout(
         Duration::from_secs(15),
         engine.execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext {
                 work_item_markdown: Some("# Idle stall work item".to_string()),
                 verification_commands: vec![],
@@ -715,13 +750,21 @@ async fn reviewer_second_idle_stall_blocks_with_code_review_provider_stalled_gat
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = IdleStallThenCompleteProvider::new(usize::MAX, "never reached");
+    let provider = std::sync::Arc::new(IdleStallThenCompleteProvider::new(
+        usize::MAX,
+        "never reached",
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = tokio::time::timeout(
         Duration::from_secs(15),
-        engine.execute_code_review_with_commands(&attempt, &provider, &mut command_rx),
+        engine.execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx),
     )
     .await
     .expect("bounded wait for reviewer idle stalls")
@@ -768,16 +811,27 @@ async fn stream_events_and_pi_empty_output_retry_reset_idle_timer() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = coder_role_run(&store, &attempt);
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = PeriodicActivityProvider {
+    let provider = std::sync::Arc::new(PeriodicActivityProvider {
         rounds: 5,
         interval_ms: 300,
-    };
+    });
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let outcome = tokio::time::timeout(
         Duration::from_secs(15),
-        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx),
+        run_coder_invocation(
+            &engine,
+            &attempt,
+            &role_run,
+            provider.as_ref(),
+            &mut command_rx,
+        ),
     )
     .await
     .expect("bounded wait for periodic activity run");
@@ -798,11 +852,22 @@ async fn choice_wait_suspends_idle_watchdog_until_answered() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = coder_role_run(&store, &attempt);
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ChoiceGateSilentProvider;
+    let provider = std::sync::Arc::new(ChoiceGateSilentProvider);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (command_tx, mut command_rx) = mpsc::channel(4);
 
-    let invocation = run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx);
+    let invocation = run_coder_invocation(
+        &engine,
+        &attempt,
+        &role_run,
+        provider.as_ref(),
+        &mut command_rx,
+    );
     tokio::pin!(invocation);
 
     // 单线程测试：等待 durable choice gate 落盘必须与 invocation 并发驱动。
@@ -851,11 +916,22 @@ async fn permission_wait_suspends_idle_watchdog_until_answered() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = coder_role_run(&store, &attempt);
     let (tx, mut rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = PermissionGateSilentProvider;
+    let provider = std::sync::Arc::new(PermissionGateSilentProvider);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (command_tx, mut command_rx) = mpsc::channel(4);
 
-    let invocation = run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx);
+    let invocation = run_coder_invocation(
+        &engine,
+        &attempt,
+        &role_run,
+        provider.as_ref(),
+        &mut command_rx,
+    );
     tokio::pin!(invocation);
 
     // 等 PermissionRequest 帧送达（悬置开始）；单线程测试下必须与
@@ -918,14 +994,25 @@ async fn tool_call_without_result_widens_idle_limit_to_tool_inflight_max() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = coder_role_run(&store, &attempt);
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ToolCallThenSilentProvider;
+    let provider = std::sync::Arc::new(ToolCallThenSilentProvider);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let started = tokio::time::Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(15),
-        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx),
+        run_coder_invocation(
+            &engine,
+            &attempt,
+            &role_run,
+            provider.as_ref(),
+            &mut command_rx,
+        ),
     )
     .await
     .expect("bounded wait for tool inflight stall");
@@ -1088,14 +1175,25 @@ async fn active_terminal_pauses_idle_stall_and_run_completes() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = coder_role_run(&store, &attempt);
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TerminalActiveSilentProvider::new(1700, true);
+    let provider = std::sync::Arc::new(TerminalActiveSilentProvider::new(1700, true));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let started = tokio::time::Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(15),
-        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx),
+        run_coder_invocation(
+            &engine,
+            &attempt,
+            &role_run,
+            provider.as_ref(),
+            &mut command_rx,
+        ),
     )
     .await
     .expect("bounded wait for active terminal run");
@@ -1120,13 +1218,24 @@ async fn terminal_exit_without_progress_retriggers_idle_stall() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = coder_role_run(&store, &attempt);
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TerminalActiveSilentProvider::new(0, false);
+    let provider = std::sync::Arc::new(TerminalActiveSilentProvider::new(0, false));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let outcome = tokio::time::timeout(
         Duration::from_secs(15),
-        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx),
+        run_coder_invocation(
+            &engine,
+            &attempt,
+            &role_run,
+            provider.as_ref(),
+            &mut command_rx,
+        ),
     )
     .await
     .expect("bounded wait for post-terminal stall");
@@ -1149,10 +1258,16 @@ async fn active_terminal_does_not_extend_total_deadline() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = coder_role_run(&store, &attempt);
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TerminalActiveSilentProvider::new(4000, false);
+    let provider = std::sync::Arc::new(TerminalActiveSilentProvider::new(4000, false));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let (legacy_input, input) = invocation_inputs(&attempt);
+    let validated_input = validated_coder_input(&engine, &attempt, input.clone());
     let provider_name = ProviderName::Codex;
 
     let started = tokio::time::Instant::now();
@@ -1162,7 +1277,7 @@ async fn active_terminal_does_not_extend_total_deadline() {
             attempt: &attempt,
             node_id: "coding_node_idle_watchdog",
             role_run: Some(&role_run),
-            provider: &provider,
+            provider: provider.as_ref(),
             legacy_input: &legacy_input,
             input,
             provider_name: &provider_name,
@@ -1172,7 +1287,7 @@ async fn active_terminal_does_not_extend_total_deadline() {
             timeout: Some(Duration::from_millis(1500)),
             timeout_reason_code: Some("provider_stream_timeout"),
             suppress_failure_side_effects: true,
-            validated_input: None,
+            validated_input,
         }),
     )
     .await

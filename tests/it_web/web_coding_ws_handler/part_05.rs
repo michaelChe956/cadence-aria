@@ -14,7 +14,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "coding ws internal review issue".to_string(),
             description: None,
             change_id: None,
@@ -36,7 +36,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
+            repository_id: repository.id.clone(),
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
@@ -51,6 +51,7 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths);
     create_legacy_coding_attempt_fixture(
         &store,
@@ -62,24 +63,26 @@ fn app_with_internal_review_rework_attempt(root_path: &Path) -> axum::Router {
             branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
             worktree_path: None,
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
 
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
-        Arc::new(InternalReviewReworkProvider::default()),
+        ProviderName::ClaudeCode,
+        GatewayDialectStreamingStub::wrapping(Arc::new(
+            InternalReviewReworkProvider::default(),
+        )),
     );
-    build_web_router(WebAppState::with_provider_registry(
-        root_path.to_path_buf(),
-        WebRuntime::new_fake(root_path.to_path_buf()),
+    build_web_router(coding_ws_state_with_gateway(
+        root_path,
+        &store.paths(),
         registry,
     ))
 }
@@ -103,7 +106,7 @@ fn app_with_code_review_rework_attempt(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "coding ws code review rework issue".to_string(),
             description: None,
             change_id: None,
@@ -125,7 +128,7 @@ fn app_with_code_review_rework_attempt(
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
+            repository_id: repository.id.clone(),
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
@@ -140,6 +143,7 @@ fn app_with_code_review_rework_attempt(
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths);
     create_legacy_coding_attempt_fixture(
         &store,
@@ -151,21 +155,24 @@ fn app_with_code_review_rework_attempt(
             branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
             worktree_path: None,
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
 
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, provider);
-    build_web_router(WebAppState::with_provider_registry(
-        root_path.to_path_buf(),
-        WebRuntime::new_fake(root_path.to_path_buf()),
+    registry.register(
+        ProviderName::ClaudeCode,
+        GatewayDialectStreamingStub::wrapping(provider),
+    );
+    build_web_router(coding_ws_state_with_gateway(
+        root_path,
+        &store.paths(),
         registry,
     ))
 }
@@ -185,12 +192,13 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
             idempotency_key: "coding-ws-part05-attempt-repository".to_string(),
         })
         .expect("create repository");
+    ensure_legacy_issue_before_lifecycle_writes(&app_paths, &repository.id);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
+            repository_id: repository.id.clone(),
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
@@ -205,6 +213,7 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths);
     create_legacy_coding_attempt_fixture(
         &store,
@@ -216,21 +225,24 @@ fn app_with_hanging_coding_attempt(root_path: &Path) -> axum::Router {
             branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
             worktree_path: None,
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
 
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(HangingCodingProvider));
-    build_web_router(WebAppState::with_provider_registry(
-        root_path.to_path_buf(),
-        WebRuntime::new_fake(root_path.to_path_buf()),
+    registry.register(
+        ProviderName::ClaudeCode,
+        GatewayDialectStreamingStub::wrapping(Arc::new(HangingCodingProvider)),
+    );
+    build_web_router(coding_ws_state_with_gateway(
+        root_path,
+        &store.paths(),
         registry,
     ))
 }
@@ -242,7 +254,35 @@ fn app_with_running_code_review_attempt(root_path: &std::path::Path) -> axum::Ro
 fn app_with_running_code_review_attempt_and_state(
     root_path: &std::path::Path,
 ) -> (axum::Router, WebAppState) {
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root_path.join(".aria")));
+    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    // 夹具补料：abort 完成链读 issue 与权威路由，需 git 仓 / repository /
+    // work item 齐备（对齐 app_with_attempt 形态）再迁移 + 冻结快照。
+    let repo = root_path.join("repo");
+    init_simple_git_repo(&repo);
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-running-code-review-repository".to_string(),
+        })
+        .expect("create repository");
+    ensure_legacy_issue_before_lifecycle_writes(&app_paths, &repository.id);
+    LifecycleStore::new(app_paths.clone())
+        .create_work_item(CreateWorkItemInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: repository.id.clone(),
+            story_spec_ids: Vec::new(),
+            design_spec_ids: Vec::new(),
+            title: "实现爬楼梯".to_string(),
+            ..Default::default()
+        })
+        .expect("create work item");
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
+    let store = CodingAttemptStore::new(app_paths);
     let attempt = create_legacy_coding_attempt_fixture(
         &store,
         CreateCodingAttemptInput {
@@ -258,7 +298,7 @@ fn app_with_running_code_review_attempt_and_state(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
@@ -294,6 +334,22 @@ fn app_with_running_code_review_attempt_and_state(
 
 fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
+    // 夹具补料：final confirm 完成链读 issue 与权威路由，需真实 git 仓与
+    // repository 记录（work item 引用的 repository_0001）；issue 必须先于
+    // work item 的 lifecycle 写入创建（id 漂移防护，见 fixtures.rs 助手）。
+    let repo = root_path.join("repo");
+    init_simple_git_repo(&repo);
+    let repository = RepositoryStore::new(app_paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "repo".to_string(),
+            path: repo,
+            default_policy_preset: Some("manual-write".to_string()),
+            default_provider_mode: Some("fake".to_string()),
+            idempotency_key: "coding-ws-part05-final-confirm-repository".to_string(),
+        })
+        .expect("create repository");
+    ensure_legacy_issue_before_lifecycle_writes(&app_paths, &repository.id);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
@@ -314,6 +370,7 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
             WorkItemStatus::Coding,
         )
         .expect("coding work item");
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths);
     let attempt = create_legacy_coding_attempt_fixture(
         &store,
@@ -330,7 +387,7 @@ fn app_with_final_confirm_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );

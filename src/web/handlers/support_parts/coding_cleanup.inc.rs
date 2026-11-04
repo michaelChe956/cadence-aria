@@ -154,10 +154,10 @@ fn cleanup_repo_shared_worktree_if_no_active_attempts(
 
 /// issue/group plan 删除路径的 shared worktree 清理（REQ-COD-03 §4.2.4 issue 删除）。
 ///
-/// 按 routing 分流：多仓（Logical）枚举 `shared-worktrees/` 下所有
+/// 按 routing 分流（两态）：Logical 枚举 `shared-worktrees/` 下所有
 /// `{repository_id}.json` 逐个清（含锁文件，经 `list_repo_shared_worktrees` +
-/// `delete_repo_shared_worktree`）；单仓（Legacy）走老逻辑清 `issue-shared-worktree.json`
-/// （不变，红线）。FailClosed 稳定码上抛，绝不静默回退物理仓库。
+/// `delete_repo_shared_worktree`）；无归属旧数据在 routing 层即 FailClosed，
+/// 稳定码上抛，绝不静默回退物理仓库。
 #[cfg(test)] // 生产删除路径走 issue/group 专用清理;宽 helper 仅 T11 单测覆盖。
 pub(crate) fn cleanup_shared_worktree_by_routing(
     app_paths: &ProductAppPaths,
@@ -168,9 +168,6 @@ pub(crate) fn cleanup_shared_worktree_by_routing(
     match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?
     {
-        RepositoryRouting::Legacy { .. } => lifecycle
-            .delete_issue_shared_worktree(project_id, issue_id)
-            .map_err(product_store_api_error)?,
         RepositoryRouting::Logical { .. } => {
             for repository_id in lifecycle
                 .list_repo_shared_worktrees(project_id, issue_id)
@@ -212,34 +209,24 @@ pub(crate) async fn sweep_issue_worktree_residue(
         )
     })?;
 
-    // 候选仓根:routing 枚举(Logical=manifest 成员;Legacy=issue 物理仓)。
+    // 候选仓根:routing 枚举(Logical=manifest 成员);无归属旧数据即 FailClosed。
     let routing = RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?;
     let repositories = crate::product::repository_store::RepositoryStore::new(app_paths.clone())
         .list(project_id)
         .map_err(product_store_api_error)?;
     let mut repo_roots: Vec<std::path::PathBuf> = match &routing {
-        RepositoryRouting::Legacy { repository_id } => repositories
-            .iter()
-            .filter(|record| {
-                !repository_id.is_empty() && record.id.as_str() == repository_id.as_str()
-            })
-            .map(|record| record.path.clone())
-            .collect(),
         // Bug1 fix-loop r2(v1.3):物理仓根优先取 LC 子树 checkouts/*.json 的
         // canonical_path(原生项目无 repos.json);checkouts 解析不到成员时
-        // 退回 repos.json 原路径(混布夹具)。Legacy 分支保持逐字不变。
+        // 退回 repos.json 原路径(混布夹具)。
         RepositoryRouting::Logical { manifest, .. } => {
-            // lc_id 与 `load_for_issue` 同源(issue 记录→None 走 legacy 根),
-            // 不依赖 manifest 自带 id(legacy 根 manifest 的 id 不等于子树名)。
+            // lc_id 与 `load_for_issue` 同源(issue 记录必填),不依赖 manifest
+            // 自带 id(legacy 根 manifest 的 id 不等于子树名)。
             let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
                 app_paths, project_id, issue_id,
             )
             .map_err(product_store_api_error)?;
-            let lc_store = match lc_id.as_deref() {
-                Some(lc_id) => LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id),
-                None => LogicalCodebaseStore::new(app_paths.clone()),
-            };
+            let lc_store = LogicalCodebaseStore::for_lc(app_paths.clone(), &lc_id);
             let mut roots: Vec<std::path::PathBuf> = lc_store
                 .list_checkouts(project_id)
                 .map_err(product_store_api_error)?

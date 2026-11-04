@@ -4,11 +4,12 @@
 
 #[tokio::test]
 async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_item_optional_review");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
     let draft_payload = work_item_draft_artifact_payload(
+        &lifecycle,
         &plan_id,
         "outline_a",
         "draft_a",
@@ -205,15 +206,24 @@ async fn finishing_work_item_draft_or_batch_run_clears_short_lived_repair_state(
 }
 
 async fn prepare_work_item_plan_outline_artifact(engine: &mut WorkspaceEngine) {
+    // REQ-PLN-02 draft_target 铁律：经本入口确认的 outline 会成为 draft
+    // 校验链的比对基准，target 必须与 draft 夹具同源（主逻辑成员）。
+    // lifecycle 缺席（非持久引擎直连形态）时退回 None（无 draft 链）。
+    let logical_target = engine
+        .lifecycle_store
+        .as_ref()
+        .map(fixture_logical_member_id);
     engine
-        .update_artifact(work_item_plan_outline_artifact())
+        .update_artifact(work_item_plan_outline_artifact(logical_target))
         .await;
 }
 
-fn work_item_plan_outline_artifact() -> ArtifactPayload {
+fn work_item_plan_outline_artifact(
+    logical_target: Option<crate::product::logical_codebase::LogicalRepositoryId>,
+) -> ArtifactPayload {
     ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(Vec::new()),
+            outline: test_work_item_plan_outline(Vec::new(), logical_target),
             design_context_gaps: vec![],
             validator_findings: vec![],
             context_blockers: vec![],
@@ -263,6 +273,10 @@ fn save_batch_work_item_plan_index_with_accepted_drafts(
     for outline_id in outline_ids {
         let draft_id = format!("draft_{outline_id}");
         let record = test_work_item_draft_record(
+            engine
+                .lifecycle_store
+                .as_ref()
+                .expect("engine fixture keeps a lifecycle store"),
             plan_id,
             outline_id,
             &draft_id,
@@ -305,6 +319,7 @@ fn save_batch_work_item_plan_index_with_accepted_drafts(
 }
 
 fn work_item_draft_artifact_payload(
+    lifecycle: &LifecycleStore,
     plan_id: &str,
     outline_id: &str,
     draft_id: &str,
@@ -313,6 +328,7 @@ fn work_item_draft_artifact_payload(
     ArtifactPayload::WorkItemDraftCandidate {
         draft_candidate: Box::new(WorkItemDraftCandidatePayload {
             draft_record: test_work_item_draft_record(
+                lifecycle,
                 plan_id,
                 outline_id,
                 draft_id,
@@ -326,7 +342,86 @@ fn work_item_draft_artifact_payload(
     }
 }
 
+/// 引擎夹具（`make_work_item_plan_engine_with_draft_candidate`）注册了两个
+/// 逻辑成员：主成员（物理投影 `repo-levels`，承接 rep4 WI-001/002 的
+/// single_repository 归属与 draft target）与 rep4 WI-003 钉死的固定 uuid
+/// 成员（物理投影 `repo-levels-integration`）。REQ-PLN-02：Logical 路由下
+/// Final Compile 对每个 accepted draft 校验 `candidate.target_repository_id`
+/// 必须落在有效成员集内且与 outline 同源——本助手把主成员（`repo-levels`）
+/// 的 logical id 交给 draft/outline 构造。⚠️ 必须按 repos.json 的
+/// `repo-levels` 记录精确解析：WI-003 成员 uuid 全零开头，BTree/字典序恒排
+/// 首位，`list_members(..).first()` 会选错成员。
+fn fixture_logical_member_id(
+    lifecycle: &LifecycleStore,
+) -> crate::product::logical_codebase::LogicalRepositoryId {
+    crate::product::repository_store::RepositoryStore::new(lifecycle.app_paths())
+        .list("project_0001")
+        .expect("fixture logical codebase projection")
+        .into_iter()
+        .find(|record| record.id == "repo-levels")
+        .and_then(|record| record.logical_repository_id)
+        .expect("fixture repo-levels member is registered")
+}
+
+/// SC（SingleCandidate）author 调用的**会话物理 target**（与 web runner
+/// `run/single_candidate.rs` 同源）：会话业务仓（`workspace_repository_for_session`）。
+///
+/// 夹具基座走 LC 路线 ⇒ 会话 target 可能是聚合根视图；它只在 legacy
+/// （成员表缺席）分支参与 IR target 回落，LC 分支下 per-WI target 一律落
+/// 成员物理仓（见 [`fixture_sc_member_targets`]）。
+pub(crate) fn fixture_sc_target(engine: &WorkspaceEngine) -> String {
+    fixture_sc_session_repository(engine).id.clone()
+}
+
+/// SC author 调用的**成员表**（与 web runner 同源）：live 权威解析
+/// （`plan_compile_member_targets` → logical→physical + 确定性回落仓）。
+///
+/// 候选结构门与 Final Compile 共用同一张成员表做归属反查
+/// （`work-item-group-structure` 契约：「物理成员仓 ID → 逻辑成员」的反查
+/// MUST 只有一个实现，两处共用）——候选 IR 的 per-WI target 必须落成员
+/// 物理仓，否则合法候选被判 `target_mismatch[WI-xxx]` 拒收。成员表缺席
+/// （legacy 单仓）时该门不核验归属，LC 夹具**不得**沿用 legacy 形态。
+pub(crate) fn fixture_sc_member_targets(
+    engine: &WorkspaceEngine,
+) -> Option<crate::product::work_item_plan_compiler::PlanMemberTargets> {
+    let lifecycle = engine
+        .lifecycle_store
+        .as_ref()
+        .expect("fixture engine carries the lifecycle store");
+    let session = engine.session();
+    let plan = lifecycle
+        .get_issue_work_item_plan(&session.project_id, &session.issue_id, &session.entity_id)
+        .expect("fixture plan record");
+    crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(
+        lifecycle,
+        &plan,
+        &fixture_sc_session_repository(engine),
+    )
+    .expect("fixture plan member targets")
+}
+
+/// 会话业务仓（durable 会话记录 → `workspace_repository_for_session`）——
+/// 与 web runner 解析会话 target 的入口同源。
+fn fixture_sc_session_repository(
+    engine: &WorkspaceEngine,
+) -> crate::product::models::RepositoryRecord {
+    let lifecycle = engine
+        .lifecycle_store
+        .as_ref()
+        .expect("fixture engine carries the lifecycle store");
+    let record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("fixture durable session record");
+    crate::product::workspace_repository::workspace_repository_for_session(
+        &lifecycle.app_paths(),
+        lifecycle,
+        &record,
+    )
+    .expect("fixture session business repository")
+}
+
 fn test_work_item_draft_record(
+    lifecycle: &LifecycleStore,
     plan_id: &str,
     outline_id: &str,
     draft_id: &str,
@@ -371,7 +466,7 @@ fn test_work_item_draft_record(
             contract.verification_checks[0].command =
                 Some(format!("cargo test --locked --lib {outline_id}"));
             WorkItemDraftCandidate {
-                target_repository_id: None,
+                target_repository_id: Some(fixture_logical_member_id(lifecycle)),
                 outline_id: outline_id.to_string(),
                 logical_work_item_id,
                 verification_plan: crate::product::models::WorkItemDraftVerificationPlan {

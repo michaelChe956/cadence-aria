@@ -299,7 +299,10 @@
             aggregate_root.clone(),
         ));
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(
-            GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_claude_code_1_4_0"),
+            GatewayBackedAggregateProviderTurnDriver::with_provider(
+                gateway,
+                crate::product::logical_codebase::ProviderRef::claude_code("cap_claude_code_1_4_0"),
+            ),
         );
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
             calls: Arc::new(Mutex::new(Vec::new())),

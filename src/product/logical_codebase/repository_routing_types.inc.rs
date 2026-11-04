@@ -35,71 +35,69 @@ impl RepositoryRoutingErrorCode {
 }
 
 /// Web 运行时统一 repository 分流判定（REQ-ROUTE-01）。
-/// 以 (manifest, selection) 成对状态为唯一权威信号，返回显式三态。
+/// 以 (manifest, selection) 成对状态为唯一权威信号，返回显式两态；
+/// 单仓 `Legacy` 变体已随去单仓入口整体移除——无归属/不成对一律
+/// `FailClosed`，绝不静默回退物理仓库。
 pub enum RepositoryRouting {
-    /// (None, None)：无 manifest 且无 selection → 物理 RepositoryRecord.id 解析（改动前行为）。
-    ///
-    /// C5（single-repository-automation-entry）口径澄清：`Legacy` 即
-    /// **单仓（single-repository）** 语义——issue 未持久归属逻辑代码库时，
-    /// 权威载体是其 `repo_id` 指向的真实物理仓。命名保留 `Legacy`
-    /// （不改名，见 Non-Goals）：它描述的是先于逻辑代码库分流存在的
-    /// 物理仓解析路径，而非 deprecated 分支。
-    Legacy { repository_id: String },
     /// (Some, Some)：有 manifest 且有有效 selection → 逻辑解析（由调用方按 target/snapshot 定具体成员）。
     Logical {
         manifest: LogicalCodebaseManifest,
         selection: Box<IssueCodebaseSelection>,
     },
-    /// 其余一切不一致状态 → 明确错误，稳定错误码 + 可诊断 reason，绝不静默回退物理仓库。
+    /// 其余一切状态（含 (None, None) 的无归属旧数据）→ 明确错误，
+    /// 稳定错误码 + 可诊断 reason，绝不静默回退物理仓库。
     FailClosed {
         code: RepositoryRoutingErrorCode,
         reason: String,
     },
 }
 
-/// 解析 issue 唯一归属的代码库（v1.3）：返回 issue 记录里持久化的
-/// `logical_codebase_id`（Some=逻辑代码库，None=单仓或旧数据）。issue 不存在时
-/// 返回 None（路由交由 manifest/selection 存在性继续判定，不静默伪造）。
+/// 解析 issue 唯一归属的代码库（REQ-ROUTE-01 两态中枢）：返回 issue 记录里
+/// 持久化的 `logical_codebase_id`（必填 String）；issue 不存在时返回
+/// `NotFound` 错误（不再以 `Ok(None)` 表达「无归属」——归属缺失是数据
+/// 错误，由读取层显式报 `issue_not_bound_to_logical_codebase`）。
 pub fn resolve_issue_logical_codebase_id(
     app_paths: &ProductAppPaths,
     project_id: &str,
     issue_id: &str,
-) -> Result<Option<String>, ProductStoreError> {
-    match crate::product::issue_store::IssueStore::new(app_paths.clone()).get(project_id, issue_id)
-    {
-        Ok(issue) => Ok(issue.logical_codebase_id),
-        Err(ProductStoreError::NotFound { .. }) => Ok(None),
-        Err(error) => Err(error),
-    }
+) -> Result<String, ProductStoreError> {
+    crate::product::issue_store::IssueStore::new(app_paths.clone())
+        .get(project_id, issue_id)
+        .map(|issue| issue.logical_codebase_id)
 }
 
-/// 据 lc_id 构造 manifest/selection 的权威 store 对；None 保持旧 project 级路径。
+/// 据 lc_id 构造 manifest/selection 的权威 store 对（只读 `for_lc` 子树；
+/// project 级 store 的 None 回退已随 Legacy 变体删除）。
 fn issue_codebase_stores(
     app_paths: &ProductAppPaths,
-    lc_id: Option<&str>,
+    lc_id: &str,
 ) -> (LogicalCodebaseStore, IssueCodebaseSelectionStore) {
-    match lc_id {
-        Some(lc_id) => (
-            LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id),
-            IssueCodebaseSelectionStore::for_lc(app_paths.clone(), lc_id),
-        ),
-        None => (
-            LogicalCodebaseStore::new(app_paths.clone()),
-            IssueCodebaseSelectionStore::new(app_paths.clone()),
-        ),
-    }
+    (
+        LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id),
+        IssueCodebaseSelectionStore::for_lc(app_paths.clone(), lc_id),
+    )
 }
 
 impl RepositoryRouting {
+    /// 无归属（issue 无 LC 归属且无 legacy 别名 record）的统一两态
+    /// fail-closed 形态：`FailClosed(TargetMissing)`，reason 语义与
+    /// `issue_not_bound_to_logical_codebase` 同源。
+    pub fn unbound_issue() -> Self {
+        RepositoryRouting::FailClosed {
+            code: RepositoryRoutingErrorCode::TargetMissing,
+            reason:
+                "issue_not_bound_to_logical_codebase: work item has no logical codebase attribution"
+                    .to_string(),
+        }
+    }
+
     /// 纯判定，不加载 store（便于单测）；加载在 `load_for_issue` 中完成。
     pub fn classify(
         manifest: Option<LogicalCodebaseManifest>,
         selection: Option<IssueCodebaseSelection>,
     ) -> Self {
         match (manifest, selection) {
-            (None, None) => RepositoryRouting::Legacy {
-                repository_id: String::new(),
-            }, // repository_id 由调用方从 entity 取
+            (None, None) => Self::unbound_issue(),
             (Some(manifest), Some(selection)) => RepositoryRouting::Logical {
                 manifest,
                 selection: Box::new(selection),
@@ -115,16 +113,16 @@ impl RepositoryRouting {
         }
     }
 
-    /// 加载辅助（B6）：按 issue 所属 codebase（v1.3）经 store 加载 manifest + selection
-    /// 后交 `classify`。逻辑 issue 的 manifest/selection 均取 lc_id 子树；单仓 issue
-    /// 与旧数据回退 project 级路径。
+    /// 加载辅助（B6）：按 issue 所属 codebase 经 `for_lc` 子树加载
+    /// manifest + selection 后交 `classify`（REQ-ROUTE-01：只读 lc_id
+    /// 权威子树，无 project 级回退）。
     pub fn load_for_issue(
         app_paths: &ProductAppPaths,
         project_id: &str,
         issue_id: &str,
     ) -> Result<Self, ProductStoreError> {
         let lc_id = resolve_issue_logical_codebase_id(app_paths, project_id, issue_id)?;
-        let (logical, selections) = issue_codebase_stores(app_paths, lc_id.as_deref());
+        let (logical, selections) = issue_codebase_stores(app_paths, &lc_id);
         let manifest = logical.load_manifest(project_id)?;
         let selection = selections.load(project_id, issue_id)?;
         Ok(Self::classify(manifest, selection))

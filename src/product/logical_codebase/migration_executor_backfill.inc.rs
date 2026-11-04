@@ -84,7 +84,7 @@ impl IdentityMigrationExecutor {
         &self,
         journal: &IdentityMigrationJournal,
         mappings: &BTreeMap<String, RepositoryIdentityMapping>,
-        issue: &IssueRecord,
+        issue: &LegacyIssueProjection,
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(&issue.id)?;
         if issue.project_id != journal.project_id {
@@ -538,12 +538,17 @@ impl IdentityMigrationExecutor {
             })
     }
 
-    fn legacy_issues(&self, project_id: &str) -> Result<Vec<IssueRecord>, ProductStoreError> {
+    fn legacy_issues(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<LegacyIssueProjection>, ProductStoreError> {
         validate_relative_id(project_id)?;
         let root = self.paths.project_root(project_id).join("issues");
         let mut issues = Vec::new();
         for path in child_json_paths(&root, Some("issue.json"))? {
-            let issue: IssueRecord = read_json(&path)?;
+            // 宽容投影：迁移要修的正是「尚无 logical_codebase_id」的存量记录，
+            // 用 IssueRecord 反序列化会在读之前就失败（见 LegacyIssueProjection）。
+            let issue: LegacyIssueProjection = read_json(&path)?;
             validate_relative_id(&issue.id)?;
             issues.push(issue);
         }

@@ -243,6 +243,24 @@ impl AggregateRootPreflightError {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// 登记预检失败的成品文案（链路 B）：只做输入适配并委派共享码表。
+    ///
+    /// **判定规则一字不改**（REQ-LAYOUT-01）：本方法不参与任何准入判断，
+    /// 只把既有 `code`/`message` 事实交给 `failure_copy::describe`，因此
+    /// 登记 HTTP 出口与冷启动投影拿到的是同一份中文三段。
+    pub fn copy(&self) -> crate::product::logical_codebase::failure_copy::FailureCopy {
+        use crate::product::logical_codebase::failure_copy::{
+            FailureInput, describe, subject_from_message,
+        };
+        // 先取对象名再借用（借用值必须活过 `input`，否则 describe 时已释放）。
+        let subject = subject_from_message(self.code, &self.message);
+        let mut input = FailureInput::new(self.code).with_detail(&self.message);
+        if let Some(subject) = subject.as_deref() {
+            input = input.with_subject(subject);
+        }
+        describe(input)
+    }
 }
 
 #[cfg(test)]

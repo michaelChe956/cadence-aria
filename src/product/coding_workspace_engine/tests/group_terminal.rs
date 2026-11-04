@@ -1,5 +1,95 @@
 use super::*;
-use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+
+/// 有 `target_snapshot` 的 attempt 只按**仓维**分类租约（`run_exclusion`）：
+/// issue 维 worktree 记录在场会被判 `legacy_shared_worktree_present` 而
+/// fail-closed，故夹具的 worktree record 与锁都必须落在仓维
+/// （REQ-ROUTE-01 §4.2.6）。
+fn seed_repo_worktree_lock_for_attempt(
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+    worktree_path: &std::path::Path,
+) {
+    let logical_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("group fixture attempt carries a target snapshot")
+        .logical_repository_id;
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        lifecycle,
+        &attempt.project_id,
+        &attempt.issue_id,
+        logical_id,
+        worktree_path,
+    );
+    let lease = lifecycle
+        .try_acquire_repo_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            logical_id,
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("acquire first unit repo lock");
+    assert!(lease.acquired, "fixture repo lock must acquire");
+    lifecycle
+        .transfer_repo_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            logical_id,
+            "work_item_0001",
+            "work_item_0002",
+            &attempt.id,
+        )
+        .expect("transfer repo lock to the second unit");
+}
+
+fn repo_worktree(
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+) -> crate::product::models::IssueSharedWorktree {
+    let logical_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("group fixture attempt carries a target snapshot")
+        .logical_repository_id;
+    lifecycle
+        .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, logical_id)
+        .expect("reload repo shared worktree")
+        .expect("repo shared worktree exists")
+}
+
+/// 共享 group 夹具写入的 draft 仍是「无归属」形态；LC 模型下的单仓语义就是
+/// 「全部 work item 归属唯一成员仓」。`validate_group_single_target` 对
+/// Logical 路由要求每个权威 unit 都带 `target_repository_id` 且与 attempt
+/// 快照一致，故按同一不变量补齐 draft 归属（不改变任何断言事实）。
+pub(super) fn bind_group_drafts_to_snapshot_target(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) {
+    let Some(logical_id) = attempt
+        .target_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.logical_repository_id)
+    else {
+        return;
+    };
+    let plan_id = attempt
+        .work_item_group_id
+        .as_deref()
+        .expect("group attempt carries a plan id");
+    let plan_store = crate::product::work_item_plan_store::WorkItemPlanStore::new(store.paths());
+    for mut draft in plan_store
+        .list_draft_records(&attempt.project_id, &attempt.issue_id, plan_id)
+        .expect("fixture draft records")
+    {
+        if draft.candidate.target_repository_id.is_none() {
+            draft.candidate.target_repository_id = Some(logical_id);
+            plan_store
+                .put_draft_record(&draft)
+                .expect("fixture draft target");
+        }
+    }
+}
 
 fn running_group_attempt() -> (
     tempfile::TempDir,
@@ -8,6 +98,14 @@ fn running_group_attempt() -> (
 ) {
     let root = tempdir().expect("tempdir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：准入/租约/完成链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且 issue 记录必须在场（issue 聚合/路由解析）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -23,12 +121,13 @@ fn running_group_attempt() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
+    bind_group_drafts_to_snapshot_target(&store, &attempt);
     let attempt = store
         .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running group attempt");
@@ -181,33 +280,7 @@ async fn group_review_material_failure_keeps_business_error_when_terminal_lock_w
     fs::create_dir_all(&shared_worktree).expect("create shared worktree");
     init_test_git_repo(&shared_worktree);
     fs::write(shared_worktree.join("dirty.txt"), "uncommitted\n").expect("dirty worktree");
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: attempt.branch_name.clone(),
-            worktree_path: shared_worktree,
-            base_branch: attempt.base_branch.clone(),
-        })
-        .expect("upsert shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            &attempt.project_id,
-            &attempt.issue_id,
-            "work_item_0001",
-            &attempt.id,
-        )
-        .expect("acquire first unit lock");
-    lifecycle
-        .transfer_issue_worktree_lock(
-            &attempt.project_id,
-            &attempt.issue_id,
-            "work_item_0001",
-            "work_item_0002",
-            &attempt.id,
-        )
-        .expect("transfer lock to the second unit");
+    seed_repo_worktree_lock_for_attempt(&lifecycle, &attempt, &shared_worktree);
     let node_id = "coding_node_0001";
     store
         .save_timeline_node(
@@ -255,10 +328,7 @@ async fn group_review_material_failure_keeps_business_error_when_terminal_lock_w
         error.to_string().contains("group_review_material_error"),
         "terminal lock cleanup must not replace the business error: {error}"
     );
-    let shared = lifecycle
-        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
-        .expect("reload shared worktree")
-        .expect("shared worktree exists");
+    let shared = repo_worktree(&lifecycle, &attempt);
     assert_eq!(
         shared.current_active_work_item_id.as_deref(),
         Some("work_item_0002")
@@ -292,33 +362,7 @@ async fn group_final_review_completion_uses_transferred_lock_owner_before_comple
             .expect("complete coding unit");
     }
     let lifecycle = LifecycleStore::new(store.paths());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: attempt.branch_name.clone(),
-            worktree_path: root.path().join("shared-worktree"),
-            base_branch: attempt.base_branch.clone(),
-        })
-        .expect("upsert shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            &attempt.project_id,
-            &attempt.issue_id,
-            "work_item_0001",
-            &attempt.id,
-        )
-        .expect("acquire first unit lock");
-    lifecycle
-        .transfer_issue_worktree_lock(
-            &attempt.project_id,
-            &attempt.issue_id,
-            "work_item_0001",
-            "work_item_0002",
-            &attempt.id,
-        )
-        .expect("transfer lock to the second unit");
+    seed_repo_worktree_lock_for_attempt(&lifecycle, &attempt, &root.path().join("shared-worktree"));
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 
@@ -590,33 +634,7 @@ async fn group_final_review_completion_releases_transferred_shared_worktree_lock
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("reload final-review attempt");
     let lifecycle = LifecycleStore::new(store.paths());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: attempt.branch_name.clone(),
-            worktree_path: worktree,
-            base_branch: attempt.base_branch.clone(),
-        })
-        .expect("upsert shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            &attempt.project_id,
-            &attempt.issue_id,
-            "work_item_0001",
-            &attempt.id,
-        )
-        .expect("acquire first unit lock");
-    lifecycle
-        .transfer_issue_worktree_lock(
-            &attempt.project_id,
-            &attempt.issue_id,
-            "work_item_0001",
-            "work_item_0002",
-            &attempt.id,
-        )
-        .expect("transfer lock to the second unit");
+    seed_repo_worktree_lock_for_attempt(&lifecycle, &attempt, &worktree);
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
 
@@ -626,10 +644,7 @@ async fn group_final_review_completion_releases_transferred_shared_worktree_lock
         .expect("complete group final review");
 
     assert_eq!(completed.status, CodingAttemptStatus::Completed);
-    let shared = lifecycle
-        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
-        .expect("reload shared worktree")
-        .expect("shared worktree exists");
+    let shared = repo_worktree(&lifecycle, &attempt);
     assert_eq!(shared.current_active_work_item_id, None);
     assert_eq!(shared.current_lock_owner_id, None);
     assert_eq!(

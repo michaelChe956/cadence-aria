@@ -197,6 +197,22 @@ impl ProductAppPaths {
         self.issue_root(project_id, issue_id)
             .join("planning-context-snapshot.json")
     }
+
+    /// v1.3/块2 片7A：provider / codegraph 安装能力的 durable 分区
+    ///（异步作业 JSON 与 24h 版本缓存；状态根下全局唯一，不随项目走）。
+    pub fn provider_installation_root(&self) -> PathBuf {
+        self.state_root().join("provider-installation")
+    }
+
+    pub fn provider_installation_job_path(&self, job_id: &str) -> PathBuf {
+        self.provider_installation_root()
+            .join("jobs")
+            .join(format!("{job_id}.json"))
+    }
+
+    pub fn provider_version_cache_path(&self) -> PathBuf {
+        self.provider_installation_root().join("version-cache.json")
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +299,24 @@ mod tests {
             std::path::PathBuf::from(
                 "/tmp/aria/projects/project_0001/logical-codebase/.provider-trust.lock"
             )
+        );
+    }
+
+    /// 块2 片7A：安装作业/版本缓存落在状态根下的全局分区。
+    #[test]
+    fn provider_installation_paths_are_state_scoped() {
+        let paths = ProductAppPaths::new("/tmp/aria");
+        assert_eq!(
+            paths.provider_installation_root(),
+            std::path::PathBuf::from("/tmp/aria/state/provider-installation")
+        );
+        assert_eq!(
+            paths.provider_installation_job_path("job-0001"),
+            std::path::PathBuf::from("/tmp/aria/state/provider-installation/jobs/job-0001.json")
+        );
+        assert_eq!(
+            paths.provider_version_cache_path(),
+            std::path::PathBuf::from("/tmp/aria/state/provider-installation/version-cache.json")
         );
     }
 }

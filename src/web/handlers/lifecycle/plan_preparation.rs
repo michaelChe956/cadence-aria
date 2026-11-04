@@ -18,8 +18,7 @@ use crate::web::state::WebAppState;
 use crate::web::types::PrepareWorkItemPlanRequest;
 
 use super::super::support::{
-    find_repository, product_app_paths, product_store_api_error, provider_workspace_config,
-    routing_api_error,
+    product_app_paths, product_store_api_error, provider_workspace_config, routing_api_error,
 };
 use super::preflight::{
     PlanRepositoryPreflightDecision, logical_repository_upper_bound_for_plan,
@@ -67,7 +66,7 @@ pub fn prepare_plan_records(
     // rollout flag 只在创建 session 前读取一次；之后所有分支仅消费这份快照。
     let rollout_snapshot = state.work_item_plan_single_candidate;
     let app_paths = product_app_paths(state);
-    let issue = IssueStore::new(app_paths.clone())
+    IssueStore::new(app_paths.clone())
         .get(project_id, issue_id)
         .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -79,18 +78,6 @@ pub fn prepare_plan_records(
     let routing = RepositoryRouting::load_for_issue(&app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?;
     let preflight_failure_reason = match routing {
-        RepositoryRouting::Legacy { .. } => {
-            let repository_id = issue.repo_id.clone().ok_or_else(|| {
-                ApiError::validation("repository_required", "repository_id is required")
-            })?;
-            let repository = find_repository(&app_paths, project_id, &repository_id)?;
-            // 单仓物理路由=单成员上界;involved 空回退恰一仓口径(等价旧
-            // 恰一仓判定,plan 面统一走子集判定入口)。
-            match preflight_plan_repository_candidates(&[repository.id], &[]) {
-                PlanRepositoryPreflightDecision::Eligible { .. } => None,
-                PlanRepositoryPreflightDecision::Ineligible { reason } => Some(reason),
-            }
-        }
         RepositoryRouting::Logical {
             manifest,
             selection,

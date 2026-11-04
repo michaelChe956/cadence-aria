@@ -33,19 +33,6 @@ fn validate_requested_aggregate_scope(
     Ok(())
 }
 
-fn reject_aggregate_scope_on_legacy_project(
-    has_involved_repository_ids: bool,
-    has_change_order: bool,
-) -> ApiResult<()> {
-    if has_involved_repository_ids || has_change_order {
-        return Err(ApiError::validation(
-            "aggregate_scope_requires_logical_codebase",
-            "aggregate scope fields are only supported for multi-repository logical codebases",
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_confirmed_story_specs(
     lifecycle: &LifecycleStore,
     project_id: &str,

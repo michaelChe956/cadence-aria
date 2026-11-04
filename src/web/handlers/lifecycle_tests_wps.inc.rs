@@ -6,7 +6,7 @@
 async fn reprepare_deletes_old_plan_and_keeps_single_live_plan() {
     let root = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let (lifecycle, story_spec_id, design_spec_id) = seed_single_physical_prepare_work_item_plan_fixture(&paths);
+    let (lifecycle, story_spec_id, design_spec_id) = seed_single_member_lc_prepare_work_item_plan_fixture(&paths);
     let state = WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
@@ -68,7 +68,7 @@ async fn reprepare_deletes_old_plan_and_keeps_single_live_plan() {
 async fn reprepare_removes_old_plan_workspace_session() {
     let root = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let (lifecycle, story_spec_id, design_spec_id) = seed_single_physical_prepare_work_item_plan_fixture(&paths);
+    let (lifecycle, story_spec_id, design_spec_id) = seed_single_member_lc_prepare_work_item_plan_fixture(&paths);
     let state = WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
@@ -108,7 +108,7 @@ async fn concurrent_prepare_keeps_single_live_plan() {
     let root = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let (lifecycle, story_spec_id, design_spec_id) =
-        seed_single_physical_prepare_work_item_plan_fixture(&paths);
+        seed_single_member_lc_prepare_work_item_plan_fixture(&paths);
     let state = WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),

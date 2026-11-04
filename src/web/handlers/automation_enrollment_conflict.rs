@@ -11,7 +11,7 @@
 
 use serde_json::{Value, json};
 
-use crate::product::models::automation::EnrollmentError;
+use crate::product::models::automation::{ConflictKind, EnrollmentError};
 use crate::web::error::ApiError;
 
 use super::automation_enrollment::{AutomationPlanTerminationIdentity, enrollment_api_error};
@@ -22,6 +22,35 @@ pub(crate) fn enrollment_conflict(current_revision: Option<u64>, message: &str) 
         "automation_enrollment_conflict",
         message,
         json!({ "current_revision": current_revision }),
+    )
+}
+
+/// 运行中改 payload（换 provider）的冲突（REQ-WIGA-SWAP-02 判别位类 1）：
+/// 409 + 新稳定码 `automation_enrollment_payload_immutable`。
+///
+/// details 沿用既有 `enrollment_conflict` 的形状（`current_revision`）并
+/// **追加** `kind` 判别位（旧字段不改名/不改型 ⇒ 老客户端零破坏）。
+pub(crate) fn enrollment_payload_immutable(
+    current_revision: Option<u64>,
+    kind: ConflictKind,
+) -> ApiError {
+    ApiError::validation_with_details(
+        "automation_enrollment_payload_immutable",
+        "automation enrollment payload is immutable while running",
+        json!({ "current_revision": current_revision, "kind": kind.as_str() }),
+    )
+}
+
+/// 版本号过期的冲突（REQ-WIGA-SWAP-02 判别位类 2）：409 + 新稳定码
+/// `automation_enrollment_revision_stale`（details 形状同上）。
+pub(crate) fn enrollment_revision_stale(
+    current_revision: Option<u64>,
+    kind: ConflictKind,
+) -> ApiError {
+    ApiError::validation_with_details(
+        "automation_enrollment_revision_stale",
+        "automation enrollment revision is stale",
+        json!({ "current_revision": current_revision, "kind": kind.as_str() }),
     )
 }
 
@@ -60,7 +89,9 @@ pub(crate) fn termination_api_error(
     identity: &AutomationPlanTerminationIdentity,
 ) -> ApiError {
     match error {
-        EnrollmentError::Conflict { current_revision } => {
+        EnrollmentError::Conflict {
+            current_revision, ..
+        } => {
             let revision = current_revision.unwrap_or(identity.policy_revision);
             ApiError::validation_with_details(
                 "automation_enrollment_conflict",
@@ -216,5 +247,181 @@ mod tests {
         assert_eq!(payload["details"]["plan_id"], plan_id.as_str());
         assert_eq!(payload["details"]["session_id"], session_id.as_str());
         assert_eq!(payload["details"]["current_revision"], bound_revision);
+    }
+
+    // ─── REQ-WIGA-SWAP-02：判别位 + HTTP 分流（块1 片3）────────
+
+    /// ⑦ 终止路径 mapper 的**码 / message / details 逐字不变**（回归锁）。
+    ///
+    /// 终止自愈逻辑（`automationTerminationConflict.tsx`）钉住旧码
+    /// `automation_enrollment_conflict`；终止路径**不按判别位分流**——
+    /// 即使判别位是 `RevisionStale`，对外仍是旧码 + 同一句 message +
+    /// 同一组 details。
+    #[test]
+    fn termination_api_error_keeps_legacy_code_message_and_details() {
+        use crate::product::models::automation::{ConflictKind, EnrollmentError};
+        use crate::web::handlers::automation_enrollment::AutomationPlanTerminationIdentity;
+
+        let identity = AutomationPlanTerminationIdentity {
+            enrollment_id: "enrollment-1".to_string(),
+            policy_revision: 7,
+            plan_id: Some("plan-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            binding_version: Some(1),
+            terminated_at: None,
+            enabled: true,
+        };
+        let api_error = super::termination_api_error(
+            EnrollmentError::Conflict {
+                current_revision: Some(9),
+                kind: ConflictKind::RevisionStale,
+            },
+            &identity,
+        );
+        assert_eq!(api_error.code, "automation_enrollment_conflict");
+        assert_eq!(
+            api_error.message,
+            "automation enrollment revision conflict (current revision 9)"
+        );
+        assert_eq!(
+            api_error.details,
+            serde_json::json!({
+                "current_revision": 9,
+                "enrollment_id": "enrollment-1",
+                "plan_id": "plan-1",
+                "session_id": "session-1",
+            })
+        );
+    }
+
+    /// ⑧ 命令写入侧**拆 if** 后两组语义可区分（判别位层面）：
+    /// 终止路径「身份不符」vs「revision 过期」、rebind 路径「未启用」
+    /// vs「revision 过期」必须落到不同判别位。
+    #[tokio::test]
+    async fn command_write_split_ifs_produce_distinguishable_conflict_kinds() {
+        use crate::product::issue_automation_store::IssueAutomationStore;
+        use crate::product::logical_codebase::EnrollmentTarget;
+        use crate::product::models::automation::{
+            ConflictKind, EnrollmentBindingIdentityInput, EnrollmentError, EnrollmentRebindRequest,
+            EnrollmentSource, EnrollmentTerminationRequest,
+        };
+        use crate::product::models::provider::ProviderName;
+
+        fn conflict_kind(error: EnrollmentError) -> ConflictKind {
+            match error {
+                EnrollmentError::Conflict { kind, .. } => kind,
+                other => panic!("expected enrollment conflict, got {other:?}"),
+            }
+        }
+
+        // ── 终止路径：身份不符 vs revision 过期 ──
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        let enrollment = response_json(enable).await;
+        let revision = enrollment["policy_revision"].as_u64().unwrap();
+        let enrollment_id = enrollment["enrollment_id"].as_str().unwrap().to_string();
+        let store = IssueAutomationStore::new(fixture.paths.clone());
+
+        let identity_mismatch = store
+            .terminate_plan(
+                PROJECT_ID,
+                ISSUE_ID,
+                EnrollmentTerminationRequest {
+                    command_id: "cmd-terminate-identity-mismatch".to_string(),
+                    expected_enrollment_id: "enrollment-not-current".to_string(),
+                    expected_policy_revision: revision,
+                    reason: "conflict kind probe".to_string(),
+                },
+            )
+            .unwrap_err();
+        let stale_revision = store
+            .terminate_plan(
+                PROJECT_ID,
+                ISSUE_ID,
+                EnrollmentTerminationRequest {
+                    command_id: "cmd-terminate-stale-revision".to_string(),
+                    expected_enrollment_id: enrollment_id.clone(),
+                    expected_policy_revision: revision + 1,
+                    reason: "conflict kind probe".to_string(),
+                },
+            )
+            .unwrap_err();
+
+        let identity_kind = conflict_kind(identity_mismatch);
+        let stale_kind = conflict_kind(stale_revision);
+        assert_ne!(
+            identity_kind, stale_kind,
+            "终止路径的「身份不符」与「revision 过期」必须落到不同判别位"
+        );
+        assert_eq!(stale_kind, ConflictKind::RevisionStale);
+
+        // ── rebind 路径：未启用 vs revision 过期 ──
+        let rebind_request =
+            |command_id: &str, expected_policy_revision: u64| EnrollmentRebindRequest {
+                command_id: command_id.to_string(),
+                expected_policy_revision,
+                expected_binding_version: 0,
+                binding: EnrollmentBindingIdentityInput {
+                    plan_id: "plan-kind-probe".to_string(),
+                    session_id: "session-kind-probe".to_string(),
+                    source: EnrollmentSource {
+                        stories: vec![],
+                        designs: vec![],
+                    },
+                    target: EnrollmentTarget::SingleRepository {
+                        repository_id: "repository-kind-probe".to_string(),
+                    },
+                    author_provider: ProviderName::Fake,
+                    reviewer_provider: ProviderName::Fake,
+                },
+                reason: "conflict kind probe".to_string(),
+            };
+
+        let rebind_stale = store
+            .rebind(
+                PROJECT_ID,
+                ISSUE_ID,
+                rebind_request("cmd-rebind-stale-revision", revision + 1),
+            )
+            .unwrap_err();
+        assert_eq!(conflict_kind(rebind_stale), ConflictKind::RevisionStale);
+
+        // 禁用态 enrollment：rebind 走「未启用」分支（不是版本过期）。
+        let disabled_fixture = seed_fixture(1, true);
+        let disabled_app = disabled_fixture.router();
+        let disabled_enable =
+            put_enrollment(&disabled_app, enrollment_body(&disabled_fixture, 1, 1)).await;
+        assert_eq!(disabled_enable.status(), StatusCode::OK);
+        let disabled_enrollment = response_json(disabled_enable).await;
+        let disabled_revision = disabled_enrollment["policy_revision"].as_u64().unwrap();
+        let disable = put_enrollment(
+            &disabled_app,
+            serde_json::json!({
+                "expected_revision": disabled_revision,
+                "command": {"type": "disable"},
+            }),
+        )
+        .await;
+        assert_eq!(disable.status(), StatusCode::OK);
+        let current_revision = IssueAutomationStore::new(disabled_fixture.paths.clone())
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap()
+            .policy_revision;
+        let not_enabled = IssueAutomationStore::new(disabled_fixture.paths.clone())
+            .rebind(
+                PROJECT_ID,
+                ISSUE_ID,
+                rebind_request("cmd-rebind-not-enabled", current_revision),
+            )
+            .unwrap_err();
+        let not_enabled_kind = conflict_kind(not_enabled);
+        assert_ne!(
+            not_enabled_kind,
+            ConflictKind::RevisionStale,
+            "rebind 的「未启用」与「revision 过期」必须落到不同判别位"
+        );
     }
 }

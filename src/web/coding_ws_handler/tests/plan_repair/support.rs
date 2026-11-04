@@ -1,4 +1,6 @@
 use super::*;
+use crate::web::runtime::WebRuntime;
+use crate::web::state::WebAppState;
 
 pub(super) fn plan_repair_fixture() -> PlanRepairFixture {
     plan_repair_fixture_with_dependency(true)
@@ -7,30 +9,38 @@ pub(super) fn plan_repair_fixture() -> PlanRepairFixture {
 pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> PlanRepairFixture {
     let tmp = TempDir::new().expect("temp dir");
     let paths = ProductAppPaths::new(tmp.path().join(".aria"));
-    let repository_path = tmp.path().join("worktree");
-    std::fs::create_dir_all(&repository_path).expect("repository directory");
-    let repository = RepositoryStore::new(paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: "project_0001".to_string(),
-            name: "plan repair fixture".to_string(),
-            path: repository_path,
-            default_policy_preset: None,
-            default_provider_mode: Some("fake".to_string()),
-            idempotency_key: "plan-repair-fixture-repository".to_string(),
-        })
-        .expect("repository");
-    let issue = IssueStore::new(paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some(repository.id),
-            logical_codebase_id: None,
-            title: "plan repair fixture".to_string(),
-            description: None,
-            change_id: None,
-            base_branch: None,
-        })
-        .expect("issue");
-    assert_eq!(issue.id, "issue_0001");
+    // REQ-ROUTE-01 两态化（去单仓入口）：group attempt 的路由凭证是
+    // 「LC 权威 + 冻结 target_snapshot」。夹具此前只建 issue 记录而无任何
+    // LC 权威 ⇒ 路由 fail-closed ⇒ 租约三态判为未知 ⇒ provider run 直接停等
+    // （`coding_run_lease_unknown: ... target_snapshot_identity_drifted`）。
+    // 故此处播种完整 LC 权威（manifest/member/checkout/selection/policy/
+    // repos.json + 归属 issue），快照与权威同源。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        tmp.path(),
+        "project_0001",
+        "issue_0001",
+    );
+    assert_eq!(logical.issue_id, "issue_0001");
+    // coding worktree 恒取 LC 成员主 checkout（生产形态是 checkout 之下的
+    // 嵌套 worktree，二者同一 git-dir 身份）：生产 target resolver 复验
+    // git-dir identity（worktree 的 `.git` 必须落在成员 checkout 的 `.git`
+    // 之下）⇒ 夹具的 worktree 必须与成员 checkout 同仓，否则
+    // `TargetMismatch { field: "git_dir" }` fail-closed（provider 零启动）。
+    let worktree_path = logical.member_path.clone();
+    // provider 准入事实（durable capability 记录）：带冻结快照的 attempt 的
+    // provider 只能经 LC gateway 启动，gateway 的能力源读 durable 记录
+    // （launch/resume/write_boundary 三格须 Confirmed）⇒ 缺记录即
+    // `provider_capability_launch_not_confirmed` fail-closed（provider 零启动）。
+    crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
+        &paths,
+        "project_0001",
+        None,
+        &[
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
+            crate::product::logical_codebase::provider_gateway::ProviderRefType::Codex,
+        ],
+    );
     let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -40,18 +50,37 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             current_work_item_id: "wi_current".to_string(),
             base_branch: "main".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: Some(tmp.path().join("worktree")),
+            worktree_path: Some(worktree_path.clone()),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Codex,
                 reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&paths)),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
+    // 仓维 worktree 记录 + 仓维锁绑到本 attempt：带快照的 attempt 只按仓维
+    // 分类租约（issue 维记录会被判 `legacy_shared_worktree_present`
+    // fail-closed），自持活跃租约（owner == 本 attempt）放行。
+    let lifecycle = LifecycleStore::new(paths.clone());
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        &worktree_path,
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        "wi_current",
+        &attempt.id,
+    );
     let revision_store = WorkItemRevisionStore::new(paths.clone());
     let plan = WorkItemPlanLineage {
         id: "work_item_plan_0001".to_string(),
@@ -396,7 +425,6 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
             },
         )
         .unwrap();
-    let lifecycle = LifecycleStore::new(paths.clone());
     let plan_session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: attempt.project_id.clone(),
@@ -453,7 +481,19 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         )
         .unwrap();
     let (event_tx, event_rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    // REQ-ROUTE-01 两态化：带冻结快照的 group attempt 只能经 LC gateway 启动
+    // provider（legacy 直连被强制关闭）。fake adapter 经可换挡替身装入 gateway
+    // 的 registry（`ProviderRegistry::register` 需 `&mut`，Arc 化后不可再注册）。
+    let provider = crate::web::coding_ws_handler::tests::gateway::SwappableProvider::default();
+    let mut gateway_registry = ProviderRegistry::new();
+    gateway_registry.register(ProviderName::Codex, Arc::new(provider.clone()));
+    gateway_registry.register(ProviderName::ClaudeCode, Arc::new(provider.clone()));
+    let gateway = crate::web::coding_ws_handler::tests::gateway::build_test_gateway(
+        &paths,
+        Arc::new(gateway_registry),
+    );
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
     PlanRepairFixture {
         _tmp: tmp,
         store,
@@ -463,7 +503,42 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
         projection,
         event_rx,
         engine,
+        provider,
     }
+}
+
+/// 夹具用 runner 状态：**provider registry 与 gateway factory 必须同源**。
+///
+/// REQ-ROUTE-01 两态化后，带冻结 `target_snapshot` 的 attempt 的 provider
+/// **只能**经 `LogicalCodebaseProviderGateway` 启动 ⇒ runner 路径从
+/// `state.gateway_factory()` 取 gateway。两处夹具接线缺口会让 gateway
+/// 解析不到夹具的 fake provider（provider 零启动）：
+/// - 直改 `state.provider_registry` **不会**重建 factory（factory 在构造期
+///   持 registry 快照）⇒ 改用 `with_provider_registry`（同款重建）。
+/// - 生产 availability gate 读真实 provider 健康快照 ⇒ 单测环境恒拒 ⇒ 改用
+///   恒健康门重建 factory（与 `src/web/gateway_factory.rs` 的既有夹具同款）。
+pub(super) fn runner_state_with_provider(
+    root: &std::path::Path,
+    registry: ProviderRegistry,
+) -> WebAppState {
+    let state = WebAppState::with_provider_registry(
+        root.to_path_buf(),
+        WebRuntime::new_fake(root.to_path_buf()),
+        registry,
+    );
+    let mut state = state;
+    state.test_provider_enabled = true;
+    let paths = ProductAppPaths::new(root.join(".aria"));
+    // 先把 registry 取出来再 move state —— `with_gateway_factory` 按值收 state，
+    // 实参再借 state 会触发 E0382（borrow of moved value）。
+    let provider_registry = state.provider_registry.clone();
+    state.with_gateway_factory(std::sync::Arc::new(
+        crate::web::gateway_factory::LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+            paths,
+            provider_registry,
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
+        ),
+    ))
 }
 
 pub(super) fn internal_plan_defect_review(

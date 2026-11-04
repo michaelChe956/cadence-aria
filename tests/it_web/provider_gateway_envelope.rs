@@ -102,8 +102,11 @@ async fn aggregate_initialization_provider_turns_validate_envelope_and_audit_thr
 
     let factory = fake_registry_gateway_factory(paths);
     let dependencies = aggregate_dependencies(root_path.clone(), Some(factory.clone()));
-    let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
-        .with_aggregate_initialization_dependencies(dependencies.clone());
+    let state = crate::provider_capability_fixture::with_available_provider_health(
+        WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone())),
+        &root_path,
+    )
+    .with_aggregate_initialization_dependencies(dependencies.clone());
     std::mem::forget(root); // 泄漏 tempdir:manifest 需在测试期间落盘
     let app = build_web_router(state);
 
@@ -564,6 +567,7 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
             preflight,
             lc_id,
             bootstrap,
+            provider,
             cancellation,
         } = request;
         let factory =
@@ -581,9 +585,13 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
                 retryable: true,
             }
         })?;
-        GatewayBackedAggregateProviderTurnDriver::claude_code(
+        GatewayBackedAggregateProviderTurnDriver::with_provider(
             Arc::new(gateway),
-            "cap_managed_snapshot",
+            cadence_aria::product::logical_codebase::ProviderRef::from_provider_name(
+                provider,
+                "cap_managed_snapshot",
+            )
+            .expect("aggregate recipe provider is launchable"),
         )
         .run_turn(AggregateProviderTurnRequest {
             project_id,
@@ -592,6 +600,7 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
             preflight,
             lc_id,
             bootstrap,
+            provider,
             cancellation,
         })
         .await
@@ -635,6 +644,7 @@ impl AggregatePreflightService for NoopPreflight {
             members: Vec::new(),
             manifest_revision: manifest.membership_revision,
             manifest_digest: "sha256:manifest".to_string(),
+            ..Default::default()
         })
     }
 }
@@ -944,6 +954,29 @@ impl StreamingProviderAdapter for ReviewStreamingAdapter {
 /// 构造一个 running + 逻辑 target 的 coding attempt（worktree 目录存在但非 git）。
 /// 供 ENV-01/02/05 的 fail-closed 断言使用：这些断言在 provider 启动前即失败，
 /// 不触达 `capture_cross_target_baseline` 的 git/manifest 需求。
+/// 播种 issue 归属记录（legacy 别名 LC）。Task 14 跨仓基线采集按 issue 的
+/// logical_codebase_id 寻址权威子树（resolve_issue_logical_codebase_id →
+/// IssueStore）；缺 issue 记录会让 capture_cross_target_baseline 直接以
+/// CrossTargetStoreFailure 失败（与 lib 侧 seed_complete 的「issue 必建」同构）。
+fn seed_fixture_issue(store: &CodingAttemptStore) {
+    cadence_aria::product::issue_store::IssueStore::new(store.paths())
+        .create(
+            cadence_aria::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id:
+                    cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                        "project_0001",
+                    ),
+                title: "provider gateway envelope fixture".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            },
+        )
+        .expect("seed fixture issue");
+}
+
 fn logical_coding_attempt_plain() -> (
     tempfile::TempDir,
     CodingAttemptStore,
@@ -953,6 +986,7 @@ fn logical_coding_attempt_plain() -> (
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    seed_fixture_issue(&store);
     let attempt = create_running_attempt(&store, worktree);
     let logical = with_target_snapshot(&store, &attempt);
     (root, store, logical)
@@ -970,6 +1004,7 @@ fn logical_coding_attempt_with_git_and_checkout() -> (
     std::fs::create_dir_all(&worktree).expect("worktree dir");
     init_git_repo(&worktree);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    seed_fixture_issue(&store);
     let attempt = create_running_attempt(&store, worktree);
     let logical = with_target_snapshot(&store, &attempt);
     seed_logical_codebase_checkout(&store, &logical);

@@ -347,6 +347,25 @@ impl WorkspaceSessionManager {
         self.stamp_pending_choice_run_ids(frame);
     }
 
+    /// REQ-HGC-04：本页底部「继续自动化」入口的服务端权威事实（WS
+    /// `SessionState.plan_continue_available`）——与 HTTP control 投影的
+    /// `allowed_actions` 含 `continue_plan` **同源**（同一
+    /// `crate::web::plan_stop` 判定），两面不可能互相矛盾。
+    ///
+    /// 读取失败（会话记录 / enrollment 读不到）→ `None`（**不猜**）：前端按
+    /// 「无真实续跑入口」处理，不得给假指引。
+    pub(crate) fn project_plan_continue_available(&self, frame: &mut WsOutMessage) {
+        let available =
+            crate::web::plan_stop::plan_continue_available(&self.app_paths, &self.session_id);
+        if let WsOutMessage::SessionState {
+            plan_continue_available,
+            ..
+        } = frame
+        {
+            *plan_continue_available = available;
+        }
+    }
+
     /// P0 1.3（REQ-WIGA-05）：pending choice 投影注入当前 run 化身（引擎/
     /// durable 投影都不知道 manager run；无活跃 run 保持 None——旧载荷兼容，
     /// 前端不猜 run）。真实链 2026-09-26 发现：provider run 长期持有 engine
@@ -454,7 +473,7 @@ impl WorkspaceSessionManager {
                 .gateway_factory()
                 .ok_or_else(|| "logical gateway factory unavailable".to_string())?;
             let gateway = factory
-                .build_readonly_for_lc(&session_record.project_id, lc_id.as_deref())
+                .build_readonly_for_lc(&session_record.project_id, Some(lc_id.as_str()))
                 .map_err(|error| format!("logical gateway build failed: {error}"))?;
             // T4.3（REQ-REG-15/D2）：在已解析 project/issue/LC 并构造只读
             // gateway 的现有段注入确认 trust 冻结上下文——复用同一
@@ -473,7 +492,7 @@ impl WorkspaceSessionManager {
                 engine_workspace =
                     engine_workspace.with_confirmation_trust_context(ConfirmationTrustContext {
                         precondition,
-                        issue_lc_id: lc_id.clone(),
+                        issue_lc_id: Some(lc_id.clone()),
                         frozen_root,
                     });
             }

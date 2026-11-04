@@ -224,10 +224,7 @@ async fn logical_issue_persists_lc_attribution_selection_and_reaches_story() {
     let stored = IssueStore::new(fixture.paths.clone())
         .get(PROJECT_ID, &issue_id)
         .expect("load issue");
-    assert_eq!(
-        stored.logical_codebase_id.as_deref(),
-        Some(fixture.lc_a.as_str())
-    );
+    assert_eq!(stored.logical_codebase_id.as_str(), fixture.lc_a.as_str());
 
     // selection 以 lc_id 键落盘在 LC 子树，且记录自述 lc_id 归属。
     let selection =
@@ -420,8 +417,7 @@ async fn non_default_lc_issue_gateway_resolves_lc_scoped_policy() {
     assert_eq!(status, StatusCode::OK, "create issue in LC B: {issue}");
     let issue_id = issue["issue_id"].as_str().expect("issue id").to_string();
     let resolved = resolve_issue_logical_codebase_id(&fixture.paths, PROJECT_ID, &issue_id)
-        .expect("resolve issue lc")
-        .expect("logical issue must resolve to an lc");
+        .expect("logical issue must resolve to a lc");
     assert_eq!(resolved, fixture.lc_b);
 
     // gateway 按该 lc_id 构建成功（policy/capability 解析到 lc_b 子树）；

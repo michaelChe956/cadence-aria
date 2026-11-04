@@ -79,13 +79,20 @@ async fn manager_creation_recovers_stale_running_session_after_process_restart()
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                &project.id,
+            ),
             title: "f23 zombie issue".to_string(),
             description: None,
             change_id: None,
                    base_branch: None,
  })
         .expect("issue");
+    // REQ-ROUTE-01 两态化夹具前置：issue 归属的 legacy 别名 LC 必须落成可解析
+    // 权威，否则 manager create / prepare 直接 fail-closed。
+    seed_single_member_logical_codebase(&app_paths, "checkout-zombie-recovery");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {

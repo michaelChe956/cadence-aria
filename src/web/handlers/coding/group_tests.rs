@@ -94,7 +94,10 @@ fn split_resolution_fixture() -> SplitResolutionFixture {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: None,
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：manifest/selection 均写 project 级根
+            //（legacy 布局）⇒ issue 归属 project 的 legacy 别名代码库。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(&project.id),
             title: "mixed-target group".to_string(),
             description: None,
             change_id: None,

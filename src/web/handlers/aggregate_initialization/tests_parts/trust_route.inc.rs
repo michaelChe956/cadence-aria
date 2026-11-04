@@ -315,8 +315,13 @@ fn trust_route_fixture_with(gate_fail: bool, options: RecipeFixtureOptions) -> T
         index,
     )
     .with_trust(gate.clone());
-    let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
-        .with_aggregate_initialization_dependencies(dependencies.clone());
+    let state = with_selector_defaulting_to_claude(
+        WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone())),
+        &root_path,
+        &paths,
+        Some(&lc_id),
+    )
+    .with_aggregate_initialization_dependencies(dependencies.clone());
     std::mem::forget(root);
     TrustRouteFixture {
         app: build_web_router(state),

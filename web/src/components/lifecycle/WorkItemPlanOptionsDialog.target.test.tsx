@@ -6,6 +6,7 @@ import {
   WorkItemPlanOptionsDialog,
   type WorkItemPlanOptionsFormValue,
 } from "./WorkItemPlanOptionsDialog";
+import { carrierTargetFromEnrollmentTarget } from "./automation-reenable";
 
 // C5 Task 7：automatic 模式的 target projection 生命周期——打开自动模式先取
 // automation-target 投影（展示 target.kind 与双级身份），loading/error 禁止
@@ -148,7 +149,7 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     await waitFor(() => expect(submit).toBeEnabled());
   });
 
-  it("shows a single-repository target with its physical repository identity", async () => {
+  it("legacy_single_repository_projection_renders_readonly", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn(async () =>
       jsonResponse(
@@ -166,8 +167,21 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     const projection = await within(dialog).findByTestId(
       "automation-target-projection",
     );
+    // legacy 只读渲染保留：老单仓记录仍显示物理仓身份，**不退化为「target
+    // 未知」**（存量数据不丢信息）。
     expect(projection).toHaveTextContent("single_repository");
     expect(projection).toHaveTextContent("repo_physical_c5");
+    expect(projection.textContent).not.toContain("undefined");
+
+    // 发起侧收窄：单仓载体不得再作为命令载体 ⇒ 提交禁用并给出提示。
+    const notice = await within(dialog).findByTestId(
+      "automation-legacy-carrier-notice",
+    );
+    expect(notice).toHaveTextContent("需重建为逻辑代码库授权");
+    const submit = within(dialog).getByRole("button", {
+      name: "启用自动化",
+    });
+    await waitFor(() => expect(submit).toBeDisabled());
   });
 
   it("keeps automatic submit disabled with a retryable error when the target GET fails", async () => {
@@ -319,6 +333,7 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
       kind: "single_repository",
       repository_id: "repo_physical_c5",
     });
+    // legacy 只读渲染保留：仍显示「单仓 <物理仓>」，不退化为「target 未知」。
     expect(projection).toHaveTextContent("single_repository repo_physical_c5");
     expect(projection.textContent).not.toContain("undefined");
   });
@@ -335,7 +350,7 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
     expect(projection.textContent).not.toContain("undefined");
   });
 
-  it("labels a multi-member logical-codebase target with its member count", async () => {
+  it("target_label_renders_logical_codebase_members", async () => {
     const projection = await renderProjection({
       kind: "logical_codebase_members",
       logical_codebase_id: LC_ID,
@@ -345,6 +360,7 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
         "00000000-0000-0000-0000-000000000003",
       ],
     });
+    // 多成员 LC 的展示身份：逻辑代码库 id + 成员数量（N 个成员）。
     expect(projection).toHaveTextContent(
       `logical_codebase ${LC_ID}[3 个成员]`,
     );
@@ -370,5 +386,52 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
     expect(projection.textContent).not.toContain("null");
     expect(projection.textContent).not.toContain("[object Object]");
     expect(projection).toHaveTextContent("—");
+  });
+});
+
+// 发起侧载体收窄（方案 A，REQ-ROUTE-C5-TARGET 前端侧）：命令侧（Enable /
+// Rebind payload）的 target 只有逻辑代码库两变体——投影侧第三变体
+// `single_repository` 仅 legacy 只读，守卫把它收敛为 null（不可作载体）。
+// 断言**限定在守卫与命令构造处**（不扫整个组件的字面量——注释与用例名里也
+// 会出现该字样）。
+describe("命令侧载体守卫（automation-reenable）", () => {
+  const LC_ID = "11111111-1111-1111-1111-111111111111";
+
+  it("no_single_repository_in_carrier_commands", () => {
+    // legacy 单仓载体 → null：不得作为命令载体（调用方禁用提交并提示）。
+    expect(
+      carrierTargetFromEnrollmentTarget({
+        kind: "single_repository",
+        repository_id: "repo_physical_c5",
+      }),
+    ).toBeNull();
+
+    // 逻辑代码库两变体原样透传，且**任何情况下都不产出单仓载体**。
+    const carriers = [
+      carrierTargetFromEnrollmentTarget({
+        kind: "logical_codebase",
+        logical_codebase_id: LC_ID,
+        logical_repository_id: "00000000-0000-0000-0000-000000000001",
+      }),
+      carrierTargetFromEnrollmentTarget({
+        kind: "logical_codebase_members",
+        logical_codebase_id: LC_ID,
+        logical_repository_ids: ["00000000-0000-0000-0000-000000000001"],
+      }),
+    ];
+    for (const carrier of carriers) {
+      expect(carrier).not.toBeNull();
+      expect(carrier?.kind).not.toBe("single_repository");
+    }
+    expect(carriers[0]).toEqual({
+      kind: "logical_codebase",
+      logical_codebase_id: LC_ID,
+      logical_repository_id: "00000000-0000-0000-0000-000000000001",
+    });
+    expect(carriers[1]).toEqual({
+      kind: "logical_codebase_members",
+      logical_codebase_id: LC_ID,
+      logical_repository_ids: ["00000000-0000-0000-0000-000000000001"],
+    });
   });
 });

@@ -336,18 +336,14 @@ impl ProviderRunFixture {
         engine_tx: mpsc::Sender<EngineEvent>,
     ) -> Self {
         let root = tempfile::tempdir().expect("temporary workspace root");
-        // LogicalAlias：成员 checkout 必须是聚合根的直接子目录（聚合索引布局
-        // 校验），故各成员 checkout 落在 root/aggregate-root/ 之下；成员 0 沿用
-        // `repository_root`（session.repository_path 锚）。
-        let repository_root = match &route {
-            FixtureRoute::Legacy => tempfile::tempdir().expect("temporary repository root"),
-            FixtureRoute::LogicalAlias(_) | FixtureRoute::LogicalAliasStory(..) => {
-                let aggregate_root = root.path().join("aggregate-root");
-                std::fs::create_dir_all(&aggregate_root).expect("create aggregate root directory");
-                tempfile::tempdir_in(&aggregate_root)
-                    .expect("temporary member checkout under aggregate root")
-            }
-        };
+        // 成员 checkout 必须是聚合根的直接子目录（聚合索引布局校验），故各
+        // 成员 checkout 落在 root/aggregate-root/ 之下；成员 0 沿用
+        // `repository_root`（session.repository_path 锚）。REQ-ROUTE-01 两态化
+        // 后 Legacy 路由同样登记 LC 权威 ⇒ 布局要求与 LogicalAlias 一致。
+        let aggregate_root = root.path().join("aggregate-root");
+        std::fs::create_dir_all(&aggregate_root).expect("create aggregate root directory");
+        let repository_root = tempfile::tempdir_in(&aggregate_root)
+            .expect("temporary member checkout under aggregate root");
         // Task 4（路 C）：逐成员按矩阵落 `.claude/rules/language.md` 材料；
         // Legacy 恒默认正文（与 C-1 夹具字节一致）。
         let member_materials: Vec<MemberRuleMaterial> = match &route {
@@ -419,15 +415,13 @@ impl ProviderRunFixture {
                     .expect("create extra member repository")
             })
             .collect::<Vec<_>>();
-        // C-1：LogicalAlias 路由的 issue 归属用确定性 legacy 别名 id（登记前后
-        // 同值）；LC 权威记录在 issue 之后登记——selection 写入
-        // issues/issue_0001/ 会占用顺序 id 目录名，必须让 issue 先落 issue_0001。
-        let alias_lc_id = match &route {
-            FixtureRoute::Legacy => None,
-            FixtureRoute::LogicalAlias(_) | FixtureRoute::LogicalAliasStory(..) => Some(
-                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
-            ),
-        };
+        // C-1：issue 归属用确定性 legacy 别名 id（登记前后同值）；LC 权威记录
+        // 在 issue 之后登记——selection 写入 issues/issue_0001/ 会占用顺序 id
+        // 目录名，必须让 issue 先落 issue_0001。归属字段必填（REQ-ROUTE-01）：
+        // Legacy 路由同样绑定 project 的 legacy 别名代码库（无 LC 权威记录时
+        // 路由仍 fail-closed，与归属必填前的「无归属」形态等价）。
+        let alias_lc_id =
+            crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
         IssueStore::new(app_paths.clone())
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
@@ -439,53 +433,44 @@ impl ProviderRunFixture {
                 base_branch: None,
             })
             .expect("create issue");
-        // C-1：LogicalAlias 路由在物理仓之上登记 LC 权威记录（record/manifest/
-        // member/checkout/selection/policy + gateway），并把兼容投影升级为已登记
-        // 形态（strict 三层身份解析要求 logical_repository_id/primary_checkout_id/
-        // identity_schema_version 对齐）。
-        let logical = match &route {
-            FixtureRoute::Legacy => None,
-            FixtureRoute::LogicalAlias(spec) | FixtureRoute::LogicalAliasStory(spec, _) => {
-                let member_roots = std::iter::once(repository_root.path().to_path_buf())
-                    .chain(
-                        extra_member_roots
-                            .iter()
-                            .map(|member_root| member_root.path().to_path_buf()),
-                    )
-                    .collect::<Vec<_>>();
-                let physical_repositories = std::iter::once(repository.clone())
-                    .chain(extra_repositories.iter().cloned())
-                    .collect::<Vec<_>>();
-                let registered = super::single_candidate_lc_admission::
-                    register_alias_logical_codebase_with_extras(
-                        &app_paths,
-                        &member_roots,
-                        &physical_repositories,
-                        &spec.focus,
-                        Arc::clone(&spec.gateway_author),
-                        spec.gateway_extras.clone(),
-                    );
-                let projections = physical_repositories
-                    .iter()
-                    .cloned()
-                    .zip(&registered.member_ids)
-                    .zip(&registered.checkout_ids)
-                    .map(|((mut record, member_id), checkout_id)| {
-                        record.logical_repository_id = Some(*member_id);
-                        record.primary_checkout_id = Some(*checkout_id);
-                        record.identity_schema_version = 1;
-                        record
-                    })
-                    .collect::<Vec<_>>();
-                let repos_json = app_paths.project_root("project_0001").join("repos.json");
-                std::fs::write(
-                    &repos_json,
-                    serde_json::to_vec_pretty(&projections)
-                        .expect("serialize registered repository projections"),
-                )
-                .expect("rewrite repos.json with registered projections");
-                Some(registered)
-            }
+        // REQ-ROUTE-01 两态化：所有路由都在物理仓之上登记 LC 权威记录
+        // （record/manifest/member/checkout/selection/policy/index）并把兼容
+        // 投影升级为已登记形态（strict 三层身份解析要求 logical_repository_id/
+        // primary_checkout_id/identity_schema_version 对齐）。Legacy 直连路由
+        // **不**把 gateway 注入 engine（`resolve_author_root_launch` 无 gateway
+        // 时返回 None ⇒ 保持 legacy 直连 provider 语义）；LogicalAlias/Story
+        // 注入 gateway 与确认 trust 上下文。
+        let (logical, inject_gateway) = match &route {
+            FixtureRoute::Legacy => (
+                super::lc_fixture_support::register_alias_authority_and_upgrade_projection(
+                    super::lc_fixture_support::AliasAuthorityRequest {
+                        app_paths: &app_paths,
+                        repository: &repository,
+                        repository_root: repository_root.path(),
+                        extra_member_roots: &extra_member_roots,
+                        extra_repositories: &extra_repositories,
+                        focus: &LogicalAliasFocus::FirstMember,
+                        gateway_author: super::lc_fixture_support::stub_gateway_author(),
+                        gateway_extras: AliasLcGatewayExtras::default(),
+                    },
+                ),
+                false,
+            ),
+            FixtureRoute::LogicalAlias(spec) | FixtureRoute::LogicalAliasStory(spec, _) => (
+                super::lc_fixture_support::register_alias_authority_and_upgrade_projection(
+                    super::lc_fixture_support::AliasAuthorityRequest {
+                        app_paths: &app_paths,
+                        repository: &repository,
+                        repository_root: repository_root.path(),
+                        extra_member_roots: &extra_member_roots,
+                        extra_repositories: &extra_repositories,
+                        focus: &spec.focus,
+                        gateway_author: Arc::clone(&spec.gateway_author),
+                        gateway_extras: spec.gateway_extras.clone(),
+                    },
+                ),
+                true,
+            ),
         };
         let lifecycle = LifecycleStore::new(app_paths.clone());
         let story = lifecycle
@@ -622,6 +607,10 @@ impl ProviderRunFixture {
         // 注入恒 Ready 的 precondition 对齐生产装配面（冻结 issue 原始
         // alias LC 归属＋聚合根）；trust 停等语义由 workspace_engine 侧
         // b2_p3_* 测试覆盖。
+        // Legacy 直连路由同样登记了 LC 权威（路由解析得 Logical），但不注入
+        // gateway ⇒ provider 保持 legacy 直连语义（`resolve_author_root_launch`
+        // 无 gateway 时返回 None）。故按 `inject_gateway` 决定是否消费 gateway。
+        let logical = if inject_gateway { Some(logical) } else { None };
         let engine = match logical {
             Some(registered) => {
                 let alias_lc_id =

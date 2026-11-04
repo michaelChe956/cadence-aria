@@ -28,9 +28,9 @@ pub(crate) fn for_validation(
 /// 成员 checkout 前缀表——物理成员仓 ID → 该成员 checkout 相对聚合根
 ///（manifest `provider_context_root`）的目录（如 `busi`；空串＝成员
 /// checkout 即聚合根本身）。
-/// - Legacy 单仓（无 manifest/路由 classify 无 LC）→ `Ok(None)`：无聚合根，
-///   归属核对不触发（零回归）；
-/// - 路由不成对（FailClosed）→ `Err`（与 target 解析同口径，绝不静默回退）；
+/// - 无 manifest → `Ok(None)`：无聚合根，归属核对不触发（零回归）；
+/// - 路由不成对（FailClosed，含无归属旧数据）→ `Err`（与 target 解析同口径，
+///   绝不静默回退）；
 /// - 仅 active 成员（Removed/Tombstoned 成员的原 checkout 目录按聚合根
 ///   非成员区处理——不在任何授权面内）；
 /// - 每成员 Main checkout 恰一（与 `cross_target_check` 的
@@ -65,7 +65,6 @@ pub(crate) fn plan_member_checkout_prefixes(
         .load(&plan.project_id, &plan.issue_id)
         .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
     let (manifest, _selection) = match RepositoryRouting::classify(Some(manifest), selection) {
-        RepositoryRouting::Legacy { .. } => return Ok(None),
         RepositoryRouting::Logical {
             manifest,
             selection,

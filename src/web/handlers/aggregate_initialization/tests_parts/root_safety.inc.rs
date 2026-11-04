@@ -263,8 +263,13 @@ fn root_safety_fixture(rogue: bool) -> RootSafetyFixture {
         index,
     )
     .with_trust(gate.clone());
-    let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
-        .with_aggregate_initialization_dependencies(dependencies.clone());
+    let state = with_selector_defaulting_to_claude(
+        WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone())),
+        &root_path,
+        &paths,
+        Some(&lc_id),
+    )
+    .with_aggregate_initialization_dependencies(dependencies.clone());
     std::mem::forget(root);
     RootSafetyFixture {
         app: build_web_router(state),
@@ -463,6 +468,20 @@ async fn root_receipt_rejects_member_git_and_unknown_changes() {
 async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() {
     let fixture = root_safety_fixture(false);
     let member_before = root_safety_member_fingerprint(&fixture.member_repo);
+    // 片4（REQ-BOOT-07）：选择器前置把 claude_code 的 PlanningReadOnly
+    // launch 种为 Confirmed（选择期 L2 事实，见 with_selector_defaulting_
+    // to_claude）。隔离契约的判定相应改为「跑完后 normal 矩阵与起跑时
+    // 逐格相同」——recipe 成功既不得铸造、也不得降级任何 normal 分格。
+    let pre_run_claude = crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
+        fixture.paths.clone(),
+        fixture.lc_id.clone(),
+    )
+    .get(
+        "project_0001",
+        crate::product::logical_codebase::ProviderRefType::ClaudeCode,
+    )
+    .expect("capability record readable")
+    .expect("selector precondition must seed the claude recipe provider record");
     let root_before = aggregate_root_inventory(&fixture.aggregate_root);
 
     let operation = root_safety_run_recipe_to_terminal(&fixture, "d3-isolation-1").await;
@@ -593,15 +612,12 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
             ),
         }
     }
-    // 5. lcg_t13:normal capability matrix Unknown 不改变 recipe 隔离。
-    //    fixture 起跑时 capability store 无任何 probe 行——gateway 组装
-    //    (material prep)以 ensure_bootstrap 种下 ClaudeCode 过渡记录
-    //    (normal 矩阵全 Unknown + legacy allowlist 过渡桥)。五步 recipe
-    //    完整 Completed(上方断言)证明 root-recipe 相位只消费固定
-    //    Claude recipe 事实,不被 normal Unknown 阻断;跑完后 normal
-    //    矩阵逐格仍 Unknown 证明 recipe 成功不铸造 normal Confirmed
-    //    (相位分流互不渗透的隔离契约)。
-    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+    // 5. lcg_t13:recipe 成功不铸造（也不降级）normal 分格（相位分流互
+    //    不渗透的隔离契约）。片4（REQ-BOOT-07）起 fixture 起跑前由选择器
+    //    前置种下 ClaudeCode 的 PlanningReadOnly Confirmed（选择期 L2
+    //    事实），故判定改为「跑完后 normal 矩阵与起跑快照逐格相同」：
+    //    五步 recipe 完整 Completed(上方断言)证明 root-recipe 相位只消费
+    //    固定 Claude recipe 事实,不被 normal 分格形态阻断。
     let capability_store = crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
         fixture.paths.clone(),
         fixture.lc_id.clone(),
@@ -612,24 +628,25 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
             crate::product::logical_codebase::ProviderRefType::ClaudeCode,
         )
         .expect("capability record readable")
-        .expect("bootstrap must seed the fixed Claude recipe provider record");
+        .expect("selector precondition must seed the claude recipe provider record");
     for action in [
         crate::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,
         crate::product::logical_codebase::SessionPolicyAction::CodingTargetWrite,
         crate::product::logical_codebase::SessionPolicyAction::ReviewReadOnly,
     ] {
+        let before = pre_run_claude.action_matrix.row(&action);
         let row = claude_record.action_matrix.row(&action);
-        assert!(
-            matches!(row.launch, ProviderCapabilityEvidence::Unknown),
-            "normal launch cell for {action:?} must stay Unknown: the root recipe must not mint normal Confirmed"
+        assert_eq!(
+            row.launch, before.launch,
+            "normal launch cell for {action:?} must be unchanged by the recipe run"
         );
-        assert!(
-            matches!(row.write_boundary, ProviderCapabilityEvidence::Unknown),
-            "normal write_boundary cell for {action:?} must stay Unknown"
+        assert_eq!(
+            row.write_boundary, before.write_boundary,
+            "normal write_boundary cell for {action:?} must be unchanged by the recipe run"
         );
-        assert!(
-            matches!(row.resume, ProviderCapabilityEvidence::Unknown),
-            "normal resume cell for {action:?} must stay Unknown"
+        assert_eq!(
+            row.resume, before.resume,
+            "normal resume cell for {action:?} must be unchanged by the recipe run"
         );
     }
     // 最终 receipt 冻结真正文 digest(Task 4 末命令收口)。

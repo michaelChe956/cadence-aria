@@ -222,7 +222,9 @@ mod baseline_teaching_fixture {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some(repository.id.clone()),
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
                 base_branch: base_branch.map(str::to_string),
                 title: "Baseline".to_string(),
                 description: None,
@@ -285,7 +287,9 @@ mod baseline_teaching_fixture {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: None,
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
                 base_branch: None,
                 title: "LC plan baseline".to_string(),
                 description: None,

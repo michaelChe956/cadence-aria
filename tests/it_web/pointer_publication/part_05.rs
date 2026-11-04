@@ -17,6 +17,7 @@ use cadence_aria::product::logical_codebase::aggregate_index::{
     AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
 };
 use cadence_aria::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 
 /// 单成员逻辑代码库 prompt fixture：manifest + member + checkout + selection + active
 /// aggregate index + policy bootstrap。Planning 读取会做 freshness assess，所以成员 main
@@ -168,7 +169,7 @@ async fn pointer_publication_scenario_f_logical_context_injects_authority_refere
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id(PROJECT_ID),
             title: "多仓聚合 Story".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
@@ -237,8 +238,20 @@ async fn pointer_publication_scenario_f_logical_context_injects_authority_refere
     );
 }
 
+/// 场景 F 的 Legacy 单仓形态已不可达（REQ-ROUTE-01/02/03 去单仓入口）：
+/// issue 创建必须携带逻辑代码库归属，「无 LC、仅带物理 `repo_id`」的创建
+/// 路径已删除 ⇒ 读取层对缺归属的 durable 记录报
+/// `issue_not_bound_to_logical_codebase`，**MUST NOT 补默认值或推导为单仓**。
+///
+/// 本用例改钉新不变量（不改「逻辑侧注入 authority_root」那一条——它由
+/// `pointer_publication_scenario_f_logical_context_injects_authority_reference`
+/// 继续钉住）：
+/// ① 缺归属的 issue 创建被稳定码 fail-closed（HTTP 400
+/// `issue_not_bound_to_logical_codebase`，不落 serde 通用 422）；
+/// ② 该 issue 从未落地 ⇒ 后续 `story-specs:generate` 不产出任何
+///    Legacy 规划上下文（原始路由引用形态整体不可达）。
 #[tokio::test]
-async fn pointer_publication_scenario_f_legacy_context_keeps_original_reference() {
+async fn pointer_publication_scenario_f_unbound_issue_creation_is_rejected() {
     let root = tempdir().expect("root");
     let repo = {
         let dir = tempdir().expect("repo");
@@ -280,13 +293,22 @@ async fn pointer_publication_scenario_f_legacy_context_keeps_original_reference(
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
-    request_json(
+    let (create_status, create_body) = request_json(
         app.clone(),
         Method::POST,
         &format!("/api/projects/{PROJECT_ID}/issues"),
         json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
     )
     .await;
+    assert_eq!(
+        create_status,
+        StatusCode::BAD_REQUEST,
+        "unbound issue creation must fail closed: {create_body}"
+    );
+    assert_eq!(
+        create_body["code"], "issue_not_bound_to_logical_codebase",
+        "unbound issue creation must carry the stable code: {create_body}"
+    );
 
     let (status, story_response) = request_json(
         app,
@@ -302,23 +324,13 @@ async fn pointer_publication_scenario_f_legacy_context_keeps_original_reference(
         }),
     )
     .await;
-    assert_eq!(
+    assert_ne!(
         status,
         StatusCode::OK,
-        "legacy story generate: {story_response}"
-    );
-
-    let content = find_generation_context_message(&story_response);
-    assert!(
-        content.contains("[cadence_project_rules]"),
-        "legacy prompt must carry original routing reference: {content}"
+        "unbound issue must not reach planning: {story_response}"
     );
     assert!(
-        content.contains("当前目标仓库根目录的 AGENTS.md 与 CLAUDE.md"),
-        "legacy prompt must reference target repo rule files: {content}"
-    );
-    assert!(
-        !content.contains("authority_root:"),
-        "legacy prompt must not inject authority_root: {content}"
+        story_response.get("workspace_session").is_none(),
+        "legacy planning context must stay unreachable without LC attribution: {story_response}"
     );
 }

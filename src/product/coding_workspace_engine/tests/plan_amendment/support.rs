@@ -54,6 +54,42 @@ pub(super) fn seed_unit_run(
         .unwrap();
 }
 
+/// 有冻结快照的 group attempt 的共享工作树事实只按**仓维**三元键存储：
+/// 完成/推进链按 `snapshot.logical_repository_id` 转移锁，缺记录即
+/// fail-closed。夹具补写「同一仓、同一 active work item、owner=本 attempt」
+/// 的既有仓维记录与锁（与旧 issue 维夹具表达同一组事实）。
+pub(super) fn seed_repo_worktree_lease(
+    fixture: &AmendmentFixture,
+    attempt: &CodingExecutionAttempt,
+    work_item_id: &str,
+) {
+    let lifecycle = LifecycleStore::new(fixture.store.paths());
+    let logical_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("logical target snapshot")
+        .logical_repository_id;
+    let worktree_path = attempt
+        .worktree_path
+        .as_deref()
+        .expect("attempt worktree path");
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        &attempt.project_id,
+        &attempt.issue_id,
+        logical_id,
+        worktree_path,
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        &attempt.project_id,
+        &attempt.issue_id,
+        logical_id,
+        work_item_id,
+        &attempt.id,
+    );
+}
+
 pub(super) fn prepare_application_phase(
     fixture: &AmendmentFixture,
     phase: CodingAmendmentApplicationPhase,

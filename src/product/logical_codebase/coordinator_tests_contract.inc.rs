@@ -14,8 +14,10 @@
             always_available_gate(),
             aggregate_root.clone(),
         ));
-        let driver =
-            GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_managed_snapshot");
+        let driver = GatewayBackedAggregateProviderTurnDriver::with_provider(
+            gateway,
+            crate::product::logical_codebase::ProviderRef::claude_code("cap_managed_snapshot"),
+        );
         let request = driver.launch_request("project_0001", &aggregate_root);
 
         // 聚合根 planning 只读 target:logical/checkout id 均为空。
@@ -43,7 +45,7 @@
     // 才是锁。替代锁（两条，均可观测调用图边界）：
     // 1. `aggregate_root_contract_does_not_reuse_repository_registration_
     //    or_git_finalize`（本文件下方）——coordinator 级行为锁：五步布局、
-    //    3 次 gateway 启动全部带 policy digest、每次启动 ClaudeCode、
+    //    3 次 gateway 启动全部带 policy digest、每次启动冻结 provider、
     //    cwd=canonical 聚合根。
     // 2. `web::handlers::aggregate_initialization::tests::
     //    shared_executor_cannot_reach_repository_registration_or_git_
@@ -98,16 +100,18 @@
         assert_eq!(fixture.gateway_audit().sync_launches(), 0);
         assert!(fixture.gateway_audit().all_have_policy_digest());
 
-        // 固定 Claude recipe:每次启动的 provider_type 都是 ClaudeCode,
-        // 不存在 Codex/Pi/KimiCode fallback 通道。
+        // 片4（REQ-BOOT-07）：每次启动的 provider 与 operation 冻结的
+        // input.provider 同源（重试不换人、无隐式 fallback 通道）。
         let inputs = fixture.streaming_inputs();
         assert_eq!(inputs.len(), 3);
+        let frozen = crate::product::logical_codebase::provider_selection::provider_from_wire(
+            &fixture.recipe_input.provider,
+        )
+        .expect("fixture provider wire name must decode");
         assert!(
-            inputs
-                .iter()
-                .all(|input| input.provider_type
-                    == crate::protocol::contracts::ProviderType::ClaudeCode),
-            "aggregate recipe provider must stay fixed to Claude Code"
+            inputs.iter().all(|input| input.provider_type
+                == crate::protocol::contracts::ProviderType::from(frozen.clone())),
+            "aggregate recipe provider must equal operation.input.provider"
         );
 
         // root-cwd 契约:每个 provider turn 的 cwd 都是 canonical 聚合根本身,
@@ -116,6 +120,62 @@
         assert!(
             inputs.iter().all(|input| input.working_dir == canonical_root),
             "every provider turn must run with cwd = canonical aggregate root"
+        );
+    }
+
+    /// 片4（REQ-BOOT-07）候选表冻结回归：`begin_with_selection` 落账的
+    /// 候选表在五步执行全程按 owner 顺序原样保留、逐家 action_hint 非空，
+    /// `selected` 恒等于 `operation.input.provider`；三个 turn 的启动
+    /// provider 与冻结 provider 同源。
+    #[tokio::test]
+    async fn frozen_provider_selection_table_survives_execution() {
+        let fixture = gateway_aggregate_fixture();
+        let input = AggregateInitializationOperationInput {
+            idempotency_key: "selection-0001".to_string(),
+            ..fixture.recipe_input.clone()
+        };
+        fixture
+            .coordinator
+            .begin_with_selection(
+                "aggregate_initialization_selection".to_string(),
+                "project_0001",
+                input,
+                frozen_selection_table("claude_code"),
+                false,
+            )
+            .unwrap();
+        let operation = fixture
+            .coordinator
+            .execute(
+                "project_0001",
+                "aggregate_initialization_selection",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let selection = operation
+            .provider_selection
+            .expect("selection stays frozen through execution");
+        assert_eq!(selection.selected, operation.input.provider);
+        assert_eq!(
+            selection
+                .candidates
+                .iter()
+                .map(|candidate| candidate.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pi", "kimi_code", "claude_code", "codex"],
+            "candidates keep the owner order (AGGREGATE_PROVIDER_CANDIDATE_ORDER)"
+        );
+        assert!(selection
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.action_hint.is_empty()));
+        let inputs = fixture.streaming_inputs();
+        assert_eq!(inputs.len(), 3);
+        assert!(
+            inputs.iter().all(|input| input.provider_type
+                == crate::protocol::contracts::ProviderType::ClaudeCode),
+            "every launch uses the frozen claude_code provider"
         );
     }
 

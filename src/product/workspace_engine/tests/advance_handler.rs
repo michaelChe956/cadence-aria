@@ -116,6 +116,17 @@ fn seed_advance_draft_records(app_paths: &ProductAppPaths) {
         .get_plan_lineage("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap();
     let plan_store = WorkItemPlanStore::new(app_paths.clone());
+    // REQ-PLN-02：unit 的归属 target 取自 source draft 的
+    // `candidate.target_repository_id`（`group_validation` 装载 authoritative
+    // binding 时逐 WI 回填）。plan_repair seed 已按项目级 legacy 布局注册恰一
+    // 个逻辑成员，这里按成员表解析补齐，advance 链才能派生冻结快照。
+    let member_target =
+        crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
+            .list_members("project_0001")
+            .unwrap()
+            .first()
+            .expect("plan repair seed registers one logical member")
+            .logical_repository_id;
     for (logical_id, revision_id) in [
         ("wi_core", "work_item_revision_wi_core_0001"),
         ("wi_registration", "work_item_revision_wi_registration_0001"),
@@ -138,7 +149,7 @@ fn seed_advance_draft_records(app_paths: &ProductAppPaths) {
                 generation_mode: WorkItemGenerationMode::Serial,
                 generation_diagnostics: None,
                 candidate: WorkItemDraftCandidate {
-                    target_repository_id: None,
+                    target_repository_id: Some(member_target),
                     outline_id: format!("outline_{logical_id}"),
                     logical_work_item_id: logical_id.to_string(),
                     canonical_contract_candidate: revision.canonical_contract,
@@ -201,13 +212,13 @@ async fn advance_fixture() -> (TempDir, ProductAppPaths, LifecycleStore, Workspa
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
+        // 基座 attempt 带冻结快照 ⇒ 桶键为 Some(logical_repository_id)，
+        // None 桶检索会落空；按 plan 取基座 attempt 用桶无关列表
+        // （见 group.rs `attempt_target_bucket` 注释）。
+        .list_attempts_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store
         .delete_attempt("project_0001", "issue_plan_0001", &seeded_attempt.id)
@@ -260,13 +271,10 @@ async fn advance_valid_path_persists_ready_group_and_emits_completion() {
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
+        .list_attempts_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store
         .delete_attempt("project_0001", "issue_plan_0001", &seeded_attempt.id)
@@ -621,10 +629,21 @@ async fn advance_initialization_forks_from_issue_base_branch() {
         .expect("advance group journal");
     assert_eq!(journal.attempt.base_branch, "feature/x");
 
+    // 断言迁移（LC 时代）：advance attempt 现冻结 target_snapshot ⇒ worktree
+    // 事实按生产不变量落仓维 shared-worktrees/{repository_id}.json（coding
+    // 引擎 §4.2.6 preflight 对带 snapshot 的 attempt 见 legacy issue 维文件
+    // 即 fail-closed），不再写 legacy issue-shared-worktree.json。fork 契约
+    // 不变量原样保留：登记基线 = issue 锁定基线（feature/x）。
+    let snapshot_logical = journal
+        .attempt
+        .target_snapshot
+        .as_ref()
+        .expect("advance attempt freezes target snapshot")
+        .logical_repository_id;
     let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_plan_0001")
-        .expect("read shared worktree")
-        .expect("shared worktree bound");
+        .get_repo_shared_worktree("project_0001", "issue_plan_0001", snapshot_logical)
+        .expect("read repo shared worktree")
+        .expect("repo shared worktree bound");
     assert_eq!(shared.base_branch, "feature/x");
 }
 

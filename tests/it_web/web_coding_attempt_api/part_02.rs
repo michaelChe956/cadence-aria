@@ -156,8 +156,10 @@ async fn bootstrap_confirmed_work_item_with_providers(
     work_item_author_provider: &str,
     work_item_reviewer_provider: &str,
 ) {
-    bootstrap_story_and_design(app.clone(), repo_path).await;
-    let app_paths = ProductAppPaths::new(workspace_root_from_app(app.clone()).await.join(".aria"));
+    // 块3 夹具顺序：work item 必须先于身份迁移创建（迁移回填只处理迁移前
+    // 已存在的 work item，写 target_repository_id）；story/design generate
+    // 依赖迁移后的 LC 权威与 active 聚合索引，故置于迁移之后。
+    let app_paths = bootstrap_project_repo_issue(app.clone(), repo_path).await;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_verification_plan(CreateVerificationPlanInput {
@@ -202,6 +204,8 @@ async fn bootstrap_confirmed_work_item_with_providers(
         })
         .expect("create work item");
 
+    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
     let author_provider = provider_name_from_str(work_item_author_provider);
     let reviewer_provider = provider_name_from_str(work_item_reviewer_provider);
     let session = lifecycle
@@ -220,8 +224,7 @@ async fn bootstrap_confirmed_work_item_with_providers(
 }
 
 async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::path::Path) {
-    bootstrap_story_and_design(app.clone(), repo_path).await;
-    let app_paths = ProductAppPaths::new(workspace_root_from_app(app.clone()).await.join(".aria"));
+    let app_paths = bootstrap_project_repo_issue(app.clone(), repo_path).await;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
@@ -236,6 +239,8 @@ async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::pat
             ..Default::default()
         })
         .expect("create work item");
+    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
 async fn bootstrap_confirmed_work_item_without_workspace_session(
@@ -261,16 +266,24 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
     )
     .await;
     assert_eq!(repository["repository_id"], "repository_0001");
-    request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues",
-        json!({"title":"爬楼梯","description":"实现 O(n) 算法","repository_id":"repository_0001"}),
-    )
-    .await;
-
+    // 块3 夹具顺序：issue 经 store 建（HTTP 创建要求 LC 权威先在），work item
+    // 先于身份迁移创建以获得 target_repository_id 回填，再迁移升 LC 权威。
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths);
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id:
+                cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
+            title: "爬楼梯".to_string(),
+            description: Some("实现 O(n) 算法".to_string()),
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create issue");
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
@@ -290,16 +303,18 @@ async fn bootstrap_confirmed_work_item_without_workspace_session(
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
+    IdentityMigrationExecutor::new(app_paths)
+        .ensure_identity_schema("project_0001")
+        .expect("migrate fixture repository into logical codebase authority");
 }
 
 async fn bootstrap_confirmed_split_work_items(
     app: axum::Router,
-    root_path: &std::path::Path,
+    _root_path: &std::path::Path,
     repo_path: &std::path::Path,
 ) {
-    bootstrap_story_and_design(app.clone(), repo_path).await;
-    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths);
+    let app_paths = bootstrap_project_repo_issue(app.clone(), repo_path).await;
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0001".to_string()),
@@ -330,16 +345,17 @@ async fn bootstrap_confirmed_split_work_items(
             ..Default::default()
         })
         .expect("create item2 with dependency");
+    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
 pub(crate) async fn bootstrap_two_ready_confirmed_work_items(
     app: axum::Router,
-    root_path: &std::path::Path,
+    _root_path: &std::path::Path,
     repo_path: &std::path::Path,
 ) {
-    bootstrap_story_and_design(app.clone(), repo_path).await;
-    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths);
+    let app_paths = bootstrap_project_repo_issue(app.clone(), repo_path).await;
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0001".to_string()),
@@ -369,16 +385,17 @@ pub(crate) async fn bootstrap_two_ready_confirmed_work_items(
             ..Default::default()
         })
         .expect("create item2");
+    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
 async fn bootstrap_completed_dependency_without_handoff(
     app: axum::Router,
-    root_path: &std::path::Path,
+    _root_path: &std::path::Path,
     repo_path: &std::path::Path,
 ) {
-    bootstrap_story_and_design(app.clone(), repo_path).await;
-    let app_paths = ProductAppPaths::new(root_path.join(".aria"));
-    let lifecycle = LifecycleStore::new(app_paths);
+    let app_paths = bootstrap_project_repo_issue(app.clone(), repo_path).await;
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0001".to_string()),
@@ -418,6 +435,8 @@ async fn bootstrap_completed_dependency_without_handoff(
             ..Default::default()
         })
         .expect("create item2 with handoff dependency");
+    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
 async fn bootstrap_confirmed_work_item_plan_group(app: axum::Router, repo_path: &std::path::Path) {
@@ -433,8 +452,7 @@ async fn bootstrap_work_item_plan_group(
     repo_path: &std::path::Path,
     plan_status: IssueWorkItemPlanStatus,
 ) {
-    bootstrap_story_and_design(app.clone(), repo_path).await;
-    let app_paths = ProductAppPaths::new(workspace_root_from_app(app).await.join(".aria"));
+    let app_paths = bootstrap_project_repo_issue(app.clone(), repo_path).await;
     let lifecycle = LifecycleStore::new(app_paths.clone());
 
     lifecycle
@@ -557,7 +575,14 @@ async fn bootstrap_work_item_plan_group(
         })
         .expect("create work item plan group");
 
+    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
     seed_group_plan_revision(&app_paths);
+    // 块3 收尾（Logical 路由对齐）：迁移后 routing=Logical，权威 draft target
+    // 必须全 Some(member)（validate_group_single_target，None 即
+    // mixed_target_group_rejected）；与 part_17/18/19 的显式播种同款收尾
+    //（幂等：迁移/selection/draft 覆写均重复安全）。
+    seed_group_logical_target_fixture(&app_paths, repo_path);
 }
 
 fn seed_group_plan_revision(app_paths: &ProductAppPaths) {

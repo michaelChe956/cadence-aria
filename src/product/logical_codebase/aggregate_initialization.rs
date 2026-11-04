@@ -196,6 +196,15 @@ pub struct AggregateInitializationErrorRecord {
     pub stderr_summary: Option<String>,
     pub retryable: bool,
     pub action: String,
+    /// 结构化成因子码（如 `skills_unavailable_clone` /
+    /// `aggregate_provider_capability_unverified`）。缺省表示「原因不可判定」。
+    /// `#[serde(default)]` 保持旧记录兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// 产生该失败的那家 provider（wire 名）。缺省表示失败与 provider 无关。
+    /// `#[serde(default)]` 保持旧记录兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl AggregateInitializationErrorRecord {
@@ -206,6 +215,8 @@ impl AggregateInitializationErrorRecord {
             stderr_summary: None,
             retryable: true,
             action: "服务在聚合初始化完成前中断；检查可能的部分修改后重新提交".to_string(),
+            cause: None,
+            provider: None,
         }
     }
 }
@@ -359,6 +370,52 @@ pub struct AggregateInitializationOperationInput {
     pub provider: String,
 }
 
+/// The provider selection frozen at operation-creation time.
+///
+/// `selected` is the wire name of the chosen provider and always equals
+/// `operation.input.provider`. `candidates` lists **all** candidate providers
+/// in owner order (never reordered by outcome), so the record alone explains
+/// why the chosen provider was chosen and which ones were skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateProviderSelection {
+    /// The chosen provider's wire name.
+    pub selected: String,
+    /// Every candidate provider, in owner order.
+    pub candidates: Vec<AggregateProviderCandidate>,
+    /// The rule version that produced this selection.
+    pub rule_version: String,
+    /// When the selection was decided.
+    pub decided_at: String,
+}
+
+/// One candidate row of the provider selection table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateProviderCandidate {
+    /// The provider's wire name.
+    pub provider: String,
+    /// The provider's human-facing name.
+    pub display_name: String,
+    /// Whether the provider's CLI is available on this machine.
+    pub cli_available: bool,
+    /// Why the CLI is unavailable (one of the health reason codes).
+    #[serde(default)]
+    pub cli_reason_code: Option<String>,
+    /// The launch capability state of this candidate:
+    /// `confirmed` / `unverified` / `denied` / `evidence_stale` /
+    /// `not_installed`.
+    pub capability_state: String,
+    /// Why this candidate was skipped: `cli_unavailable` /
+    /// `needs_verification` / `denied` / `evidence_stale`.
+    #[serde(default)]
+    pub skipped_reason: Option<String>,
+    /// The executable action for this candidate (never a bare status word).
+    pub action_hint: String,
+    /// A warning about this candidate (e.g. the known CLI command gaps).
+    /// `None` means "not verified / normal".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 /// Independent aggregate initialization operation record.
 ///
 /// Byte-stable serialized form: the field set, order and enum casing here are
@@ -399,6 +456,10 @@ pub struct AggregateInitializationOperation {
     /// 必须能从 operation 记录直接读到；旧记录缺省 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_initialization: Option<AggregateSkillsInitialization>,
+    /// provider 选择结果（创建期冻结）。候选表按 owner 顺序落盘，旧记录缺省
+    /// `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_selection: Option<AggregateProviderSelection>,
 }
 
 /// Layout version for the persisted aggregate-initialization record shape.
@@ -446,12 +507,27 @@ impl AggregateInitializationOperation {
             action_records: Vec::new(),
             full_recipe_requested: false,
             skills_initialization: None,
+            provider_selection: None,
         }
     }
 
     /// 「重新初始化（聚合）」入口：冻结「强制跑完整五步」的创建期事实。
     pub fn with_full_recipe_requested(mut self, full_recipe_requested: bool) -> Self {
         self.full_recipe_requested = full_recipe_requested;
+        self
+    }
+
+    /// 「provider 选择」入口：冻结创建期的 provider 选择事实（候选表按 owner
+    /// 顺序）。选择结果一旦落账就不再随机器状态变化。
+    ///
+    /// 接受 `AggregateProviderSelection` 或 `Option<AggregateProviderSelection>`
+    /// 两种入参：调用方（片4 的选择期入口）手上可能拿到的是「有选择 / 无
+    /// 选择」的可选值，直接透传即可。
+    pub fn with_provider_selection(
+        mut self,
+        provider_selection: impl Into<Option<AggregateProviderSelection>>,
+    ) -> Self {
+        self.provider_selection = provider_selection.into();
         self
     }
 

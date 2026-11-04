@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease() {
+async fn concurrent_same_work_item_loser_preserves_winner_repo_worktree_lease() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let state = WebAppState::new(
@@ -70,11 +70,23 @@ async fn concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease()
     assert_eq!(loser_status, StatusCode::CONFLICT);
     assert_eq!(loser["code"], "coding_attempt_active");
 
-    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-COD-03：迁移后单件 attempt 冻结 target 快照 → 仓维
+    // shared-worktrees/{repository} 三元键记录；legacy issue 维文件在该路由
+    // 下不存在。
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let winner_record = CodingAttemptStore::new(app_paths)
+        .get_attempt("project_0001", "issue_0001", &winner_attempt_id)
+        .expect("load winner attempt");
+    let winner_repo = winner_record
+        .target_snapshot
+        .as_ref()
+        .expect("repo-scoped winner snapshot")
+        .logical_repository_id;
     let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("load issue shared worktree")
-        .expect("issue shared worktree");
+        .get_repo_shared_worktree("project_0001", "issue_0001", winner_repo)
+        .expect("load repo shared worktree")
+        .expect("repo shared worktree");
     assert_eq!(
         shared.current_active_work_item_id.as_deref(),
         Some("work_item_0001")
@@ -92,7 +104,8 @@ async fn concurrent_same_work_item_loser_preserves_winner_issue_worktree_lease()
     )
     .await;
     assert_eq!(blocked_status, StatusCode::CONFLICT);
-    assert_eq!(blocked["code"], "issue_worktree_active");
+    // 仓维路由稳定码（REQ-COD-03 同仓串行）。
+    assert_eq!(blocked["code"], "repo_worktree_active");
 
     let (abort_status, _abort) = request_json(
         app.clone(),

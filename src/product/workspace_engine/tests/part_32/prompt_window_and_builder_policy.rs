@@ -511,9 +511,11 @@ fn entry_input(entry: &str) -> StreamingProviderInput {
             // 保持——marker 无物理 deny 片段）。
             let fixture = review_gateway_fixture();
             let driver =
-                crate::product::logical_codebase::aggregate_initialization_coordinator::GatewayBackedAggregateProviderTurnDriver::claude_code(
+                crate::product::logical_codebase::aggregate_initialization_coordinator::GatewayBackedAggregateProviderTurnDriver::with_provider(
                     fixture.gateway.clone(),
-                    "cap_claude_code_1_4_0",
+                    crate::product::logical_codebase::ProviderRef::claude_code(
+                        "cap_claude_code_1_4_0",
+                    ),
                 );
             let marker =
                 crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker::new(
@@ -814,7 +816,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
     // —— WorkItemPlan review 家族：dispatcher（candidate 分支）/ outline / batch /
     // draft（single-candidate 与 projection 分派分支在各自既有测试中断言）。
     {
-        let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+        let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
             make_work_item_plan_engine_with_draft_candidate("sess_family_wip_review");
         covered.push((
             "wip_plan_review_candidate".to_string(),
@@ -823,7 +825,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
                 .expect("plan review input"),
         ));
         prepare_work_item_plan_outline_artifact(&mut engine).await;
-        let outline_payload = work_item_plan_outline_artifact();
+        let outline_payload = work_item_plan_outline_artifact(None);
         let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } = outline_payload
         else {
             panic!("expected outline candidate artifact");
@@ -843,6 +845,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
         ));
         save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
         let draft_payload = work_item_draft_artifact_payload(
+            &lifecycle,
             &plan_id,
             "outline_a",
             "draft_a",

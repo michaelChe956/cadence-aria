@@ -23,6 +23,7 @@ use crate::product::logical_codebase::provider_gateway::{
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE,
     PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT, PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE,
 };
+use crate::product::logical_codebase::provider_selection as selection;
 use crate::product::logical_codebase::{
     LogicalCodebaseFeature, LogicalRepositoryId, PolicyTargetResolver, ProviderCapability,
     ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
@@ -244,7 +245,7 @@ impl StoreBackedProviderCapabilitySource {
     }
 
     /// 载入记录并施加公共硬门(缺记录 → Codex 阻断 → snapshot 不一致)。
-    fn load_record(
+    pub(crate) fn load_record(
         &self,
         provider: &ProviderRef,
     ) -> Result<
@@ -310,11 +311,9 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
     ) -> Result<ProviderCapability, ProviderGatewayError> {
         let record = self.load_record(provider)?;
         let row = record.action_matrix.row(&action);
-        match &row.launch {
-            ProviderCapabilityEvidence::Confirmed => Ok(Self::capability_from_record(&record, row)),
-            other => Err(ProviderGatewayError::UnsupportedCapability(format!(
-                "{PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED}: {action:?} launch cell is {other:?}"
-            ))),
+        match selection::launch_cell_state_from_record(&record, action) {
+            selection::LaunchCellState::Confirmed => Ok(Self::capability_from_record(&record, row)),
+            other => Err(selection::launch_rejection_error(action, &other)),
         }
     }
 

@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::logical_codebase::{
-    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+    IssueCodebaseSelection, IssueCodebaseSelectionStore,
     LogicalCodebaseStore, LogicalRepositoryId, CodebaseMemberRecord, MemberStatus,
     RepositorySourceIdentity, RepositoryType, IdentityMigrationExecutor,
     LegacySharedWorktreeMigration,
@@ -90,7 +90,7 @@ async fn creates_coding_attempt_for_confirmed_work_item_and_surfaces_latest_atte
         json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::CONFLICT, "body: {duplicate}");
     assert_eq!(duplicate["code"], "coding_attempt_active");
 
     let (status, lifecycle) = request_json(
@@ -232,7 +232,7 @@ async fn rejects_coding_attempt_when_dependency_work_item_is_not_completed() {
     );
 }
 #[tokio::test]
-async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
+async fn rejects_second_active_work_item_on_same_repo_shared_worktree() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -259,8 +259,11 @@ async fn rejects_second_active_work_item_on_same_issue_shared_worktree() {
         json!({}),
     )
     .await;
+    // REQ-COD-03（同仓串行）：迁移后两个 WorkItem 同落一个 logical 成员仓，
+    // 仓维锁稳定码为 repo_worktree_active（issue_worktree_active 仅限 Legacy
+    // 路由的 issue 维文件）。
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["code"], "issue_worktree_active");
+    assert_eq!(body["code"], "repo_worktree_active");
 }
 #[tokio::test]
 async fn create_group_attempt_multi_target_non_unique_is_ambiguous_4xx() {
@@ -626,8 +629,14 @@ async fn rejects_group_coding_attempt_for_unconfirmed_plan() {
     assert_eq!(body["code"], "work_item_plan_not_confirmed");
 }
 
+/// 断言迁移（REQ-MTG-02 2.2 单 active 细化，D2.1 A4）：同 target 桶的活跃
+/// 单件 attempt 阻止 group 创建（409 issue_worktree_active，映射自
+/// active_coding_attempt_exists）。旧夹具播种无快照 legacy 单件——细化后
+/// 「无快照 active attempt 不计入任何桶（物理互斥由三元键 worktree lock
+/// 兜底）」，不再构成阻塞；改为播种同 target 冻结快照的现代单件形态
+///（与 HTTP 创建产物同构），阻塞语义与断言保持不变。
 #[tokio::test]
-async fn rejects_group_coding_attempt_when_a_legacy_single_item_attempt_is_active() {
+async fn rejects_group_coding_attempt_when_a_same_target_single_item_attempt_is_active() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -635,12 +644,32 @@ async fn rejects_group_coding_attempt_when_a_legacy_single_item_attempt_is_activ
         WebRuntime::new_fake(root.path().to_path_buf()),
     ));
     bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let logical_repository_id = LogicalCodebaseStore::new(app_paths.clone())
+        .load_manifest("project_0001")
+        .expect("load logical manifest")
+        .expect("logical manifest")
+        .member_ids[0];
+    let lc_id = cadence_aria::product::logical_codebase::resolve_issue_logical_codebase_id(
+        &app_paths,
+        "project_0001",
+        "issue_0001",
+    )
+    .expect("resolve issue logical codebase");
+    let target_snapshot =
+        cadence_aria::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+            &app_paths,
+            "project_0001",
+            logical_repository_id,
+            Some(lc_id.as_str()),
+        )
+        .expect("same-target single attempt snapshot");
 
-    let single = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")))
+    let single = CodingAttemptStore::new(app_paths)
         .create_attempt(CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            work_item_id: "legacy_lock_holder".to_string(),
+            work_item_id: "same_target_lock_holder".to_string(),
             base_branch: "HEAD".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: None,
@@ -650,10 +679,10 @@ async fn rejects_group_coding_attempt_when_a_legacy_single_item_attempt_is_activ
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         })
-        .expect("active legacy single-item attempt");
+        .expect("active same-target single-item attempt");
     assert!(single.status.is_active());
 
     let (status, body) = request_json(
@@ -709,27 +738,8 @@ async fn group_coding_attempt_retry_is_not_blocked_after_unit_creation_failure()
     assert_eq!(retry_body["active_unit_id"], "coding_unit_0001");
 }
 
-#[tokio::test]
-async fn creates_coding_attempt_when_completed_dependency_has_no_handoff_summary() {
-    let root = tempdir().expect("root");
-    let repo = git_repo();
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-    ));
-    bootstrap_completed_dependency_without_handoff(app.clone(), root.path(), repo.path()).await;
-
-    let (status, body) = request_json(
-        app,
-        Method::POST,
-        "/api/projects/project_0001/issues/issue_0001/work-items/work_item_0002/coding-attempts",
-        json!({}),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_global_attempt_id(&body);
-}
+// part_01 拆分（large_file_guard 1200 行上限）：独立测试函数经 include! 挂载，与本文件同一模块作用域，测试全路径与行为零变化（纯移动）。
+include!("part_01b.rs");
 
 #[tokio::test]
 async fn delete_coding_attempt_releases_active_lock_when_clean() {

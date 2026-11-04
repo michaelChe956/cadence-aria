@@ -21,7 +21,11 @@ import {
   enrollmentTargetMemberCountText,
   enrollmentTargetPlaceholder,
 } from "../../state/enrollment-target-labels";
-import { sameProviderChoice } from "./automation-reenable";
+import {
+  carrierTargetFromEnrollmentTarget,
+  LEGACY_CARRIER_BLOCKED_MESSAGE,
+  sameProviderChoice,
+} from "./automation-reenable";
 import { DialogShell } from "../shared/DialogShell";
 
 export type AutomationMode = "manual" | "automatic";
@@ -89,7 +93,7 @@ export function WorkItemPlanOptionsDialog({
   const reenablePending = automatic && terminatedEnrollment !== null;
   // 重新开启时「实际会用的 provider」：当前生效＝enrollment 的生效 options
   // （不是表单里未生效的值）；本次将应用＝表单本次选择（未选＝沿用原授权）。
-  // 两者不一致＝本次会换 provider（契约路径：重新开启 → 关闭 → 再开启）。
+  // 两者不一致＝本次会换 provider（一次提交完成换代，会先删除现有工作项组）。
   const effectiveProviders = terminatedEnrollment
     ? {
         author_provider: terminatedEnrollment.options?.author_provider,
@@ -111,11 +115,32 @@ export function WorkItemPlanOptionsDialog({
   // C5 Task 7：automatic 提交必须有就绪的 target 投影——loading/GET 失败/
   // 身份（scope）缺失都禁止 stale automatic submit；manual 分支不受影响。
   // 重新开启（terminated）例外：payload 取终止记录，投影只用于展示。
+  //
+  // 发起侧载体收窄（方案 A，REQ-ROUTE-C5-TARGET 前端侧）：命令侧只接受
+  // 逻辑代码库两变体。**legacy 单仓载体只读展示，但不得再发起命令**——
+  // 禁用提交并给出提示（不静默降级、不猜一个 LC）。目标取「本次提交实际会
+  // 用的那个 target」：重新开启＝终止记录的 target（缺失才回退新投影），
+  // 常规启用＝新投影的 target——与提交链路同一口径。
+  const enrollmentTargetForSubmit: EnrollmentTarget | null = reenablePending
+    ? (terminatedEnrollment?.target ??
+      (targetProjection.status === "ready"
+        ? targetProjection.target.enrollment_target
+        : null))
+    : targetProjection.status === "ready"
+      ? targetProjection.target.enrollment_target
+      : null;
+  const submitCarrierTarget =
+    enrollmentTargetForSubmit === null
+      ? null
+      : carrierTargetFromEnrollmentTarget(enrollmentTargetForSubmit);
+  const legacyCarrierBlocked =
+    enrollmentTargetForSubmit !== null && submitCarrierTarget === null;
   const automaticSubmitBlocked =
     automatic &&
     automationAvailable &&
-    !reenablePending &&
-    (targetScope === null || targetProjection.status !== "ready");
+    ((!reenablePending &&
+      (targetScope === null || targetProjection.status !== "ready")) ||
+      legacyCarrierBlocked);
 
   // C5 Task 7：打开自动模式先取 automation-target 投影（无 query：身份
   // 投影与 provider options 无关，展示 target.kind 与双级身份）；scope
@@ -196,6 +221,7 @@ export function WorkItemPlanOptionsDialog({
       setSubmitError({
         message:
           reason instanceof Error ? reason.message : "创建 Work Item Plan 失败",
+        code: reason instanceof ApiRequestError ? reason.code : null,
         roleChainViolations: roleChainViolationsOf(reason),
       });
     } finally {
@@ -275,8 +301,9 @@ export function WorkItemPlanOptionsDialog({
           {/* REQ-PPS-01：创建即快照 provider，不再依赖创建后页面补发选择；
               不可用项置灰禁选，缺省项沿用服务端兼容默认。
               重新开启（terminated）时 provider 选择器保持可用——换 provider 是
-              契约允许的（先重新开启，再走既有 Disable→Enable 路径），本次
-              选择会真正生效（下方如实展示当前生效与本次将应用的取值）。 */}
+              契约允许的（一次提交完成换代：先删除现有工作项组再按新 provider
+              重建），本次选择会真正生效（下方如实展示当前生效与本次将应用的
+              取值）。 */}
           <ProviderSelect
             label="Author Provider"
             value={options.author_provider}
@@ -390,9 +417,21 @@ export function WorkItemPlanOptionsDialog({
                 确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。
               </p>
             ) : null}
+            {/* 发起侧载体收窄（方案 A）：legacy 单仓载体仍只读展示，但不得
+                再发起 Enable/Rebind——禁用提交并说明下一步。 */}
+            {legacyCarrierBlocked ? (
+              <p
+                role="alert"
+                data-testid="automation-legacy-carrier-notice"
+                className="text-xs text-[var(--aria-danger)]"
+              >
+                {LEGACY_CARRIER_BLOCKED_MESSAGE}
+              </p>
+            ) : null}
             {/* 「实际会用的 provider」如实取自 enrollment 的生效 options——不取
                 表单里未生效的值，杜绝静默陷阱；本次改了 provider 时同时展示
-                本次将应用的取值（重新开启 → 关闭 → 再开启后生效）。 */}
+                本次将应用的取值（换 provider 会先删除现有工作项组，其余参数
+                按原授权）。 */}
             {effectiveProviders && appliedProviders ? (
               <p
                 role="status"
@@ -402,7 +441,7 @@ export function WorkItemPlanOptionsDialog({
                 当前生效的 provider：
                 {`Author ${effectiveProviders.author_provider ?? "—"}、Reviewer ${effectiveProviders.reviewer_provider ?? "—"}`}
                 {providerChangePending
-                  ? `；本次将应用：Author ${appliedProviders.author_provider ?? "—"}、Reviewer ${appliedProviders.reviewer_provider ?? "—"}（重新开启后关闭再开启生效，其余参数按原授权）`
+                  ? `；本次将应用：Author ${appliedProviders.author_provider ?? "—"}、Reviewer ${appliedProviders.reviewer_provider ?? "—"}（换 provider 会先删除现有工作项组，其余参数按原授权）`
                   : "；本次按原授权重新开启（其余参数不变）。"}
               </p>
             ) : null}
@@ -420,7 +459,17 @@ export function WorkItemPlanOptionsDialog({
             role="alert"
             className="mt-3 text-sm font-semibold text-[var(--aria-danger)]"
           >
-            <p>{submitError.message}</p>
+            <p data-testid="submit-error-message">{submitError.message}</p>
+            {/* REQ-WIGA-SWAP-02：机器码只作次要信息（弱化小字），MUST NOT
+                充当主文案。 */}
+            {submitError.code ? (
+              <p
+                data-testid="submit-error-code"
+                className="mt-1 text-xs font-normal text-[var(--aria-ink-muted)]"
+              >
+                机器码：{submitError.code}
+              </p>
+            ) : null}
             {submitError.roleChainViolations ? (
               <>
                 <ul className="mt-1 list-disc pl-5 text-xs font-normal">
@@ -480,6 +529,9 @@ type AutomationEnrollmentProjectionState =
 
 type SubmitErrorState = {
   message: string;
+  /** REQ-WIGA-SWAP-02：机器码（ApiRequestError.code）只作次要信息展示；
+   * 非 ApiRequestError（已包装成中文主文案）时为 null。 */
+  code: string | null;
   /** C5 Task 3：automation_role_chain_unsupported 的逐角色违规
    *（ApiRequestError.details 原样派生，非该错误时为 null）。 */
   roleChainViolations: RoleChainViolation[] | null;
@@ -527,9 +579,13 @@ function roleChainViolationsOf(reason: unknown): RoleChainViolation[] | null {
 
 /** C5 Task 1：双载体 enrollment target 的展示身份（单仓=物理仓，
  * LC=双级身份）；多成员 LC 展示成员数量。任何分支都不得输出
- * undefined/null/[object Object]，缺字段用「—」占位。 */
+ * undefined/null/[object Object]，缺字段用「—」占位。
+ * ⚠ 三变体全覆盖：`single_repository` 分支**仅 legacy 只读**（老单仓记录
+ * 仍要显示，不退化为「target 未知」）；新投影不再产出它，命令侧也不接受
+ * （见 `carrierTargetFromEnrollmentTarget`）。 */
 function enrollmentTargetLabel(target: EnrollmentTarget): string {
   switch (target.kind) {
+    // legacy 只读：仅供老单仓 enrollment 记录展示。
     case "single_repository":
       return `single_repository ${enrollmentTargetPlaceholder(target.repository_id)}`;
     case "logical_codebase":

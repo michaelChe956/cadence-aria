@@ -28,6 +28,7 @@ impl IssueAutomationStore {
                 {
                     return Ok(TerminationResolution::Conflict {
                         current_revision: Some(saved.policy_revision),
+                        kind: ConflictKind::CommandLedgerPayloadMismatch,
                     });
                 }
                 if let Some(terminated_at) = saved.terminated_at.clone() {
@@ -39,11 +40,16 @@ impl IssueAutomationStore {
                 }
                 // 曾被同命令终止、其后又被人工重新开启：不重放，落到精确 CAS。
             }
-            if saved.enrollment_id != request.expected_enrollment_id
-                || request.expected_policy_revision != saved.policy_revision
-            {
+            if saved.enrollment_id != request.expected_enrollment_id {
                 return Ok(TerminationResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::BindingIdentityMismatch,
+                });
+            }
+            if request.expected_policy_revision != saved.policy_revision {
+                return Ok(TerminationResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::RevisionStale,
                 });
             }
             // 已 terminated 的异命令终止：终态不再接受新终止命令；未完成
@@ -51,6 +57,7 @@ impl IssueAutomationStore {
             if saved.terminated_at.is_some() {
                 return Ok(TerminationResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::DefensiveStateMismatch,
                 });
             }
             let binding_version = saved
@@ -100,6 +107,7 @@ impl IssueAutomationStore {
             if saved.terminated_at.is_some() {
                 return Ok(RebindResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::DefensiveStateMismatch,
                 });
             }
             // 命令账本先判：同 command 同 payload 返回首次 durable 结果，
@@ -117,11 +125,19 @@ impl IssueAutomationStore {
                 }
                 return Ok(RebindResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::CommandLedgerPayloadMismatch,
                 });
             }
-            if !saved.enabled || request.expected_policy_revision != saved.policy_revision {
+            if !saved.enabled {
                 return Ok(RebindResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::BindingIdentityMismatch,
+                });
+            }
+            if request.expected_policy_revision != saved.policy_revision {
+                return Ok(RebindResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::RevisionStale,
                 });
             }
             // target 授权域：无声明（旧 enrollment）不猜；跨载体/身份漂移拒绝。
@@ -149,6 +165,7 @@ impl IssueAutomationStore {
             if request.expected_binding_version != history.current.binding_version {
                 return Ok(RebindResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::BindingIdentityMismatch,
                 });
             }
             // 追加换代：previous 只读保留旧代完整身份；current 写新代；

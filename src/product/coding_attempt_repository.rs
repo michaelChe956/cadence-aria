@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{CodingAttemptScope, CodingExecutionAttempt};
-use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::snapshot_validator::validate_snapshot_fields;
@@ -30,22 +29,19 @@ pub enum SchemaV2GroupAttemptScopePolicy {
 
 /// 以逻辑代码库权威状态解析 coding attempt 所属 repository。
 ///
-/// 所有 coding 入口必须通过该函数执行三态 routing、snapshot 优先校验、
-/// group target 唯一性和 legacy 物理回退，避免不同入口产生 fail-closed 语义漂移。
-/// v1.3：按 issue 所属 lc_id 寻址（R9 编码/交付链切换点）；单仓/无 LC issue
-/// 回退 legacy project 级路径，行为不变。
+/// 所有 coding 入口必须通过该函数执行两态 routing、snapshot 优先校验和
+/// group target 唯一性，避免不同入口产生 fail-closed 语义漂移。
+/// v1.3：按 issue 所属 lc_id 寻址（R9 编码/交付链切换点）；单仓 legacy
+/// 回退已随 `Legacy` 变体删除，无归属一律 fail-closed。
 pub fn resolve_coding_attempt_repository(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
     group_scope_policy: SchemaV2GroupAttemptScopePolicy,
 ) -> Result<RepositoryRecord, ProductStoreError> {
-    let project = ProjectStore::new(app_paths.clone()).get(&attempt.project_id)?;
     let routing =
         RepositoryRouting::load_for_issue(app_paths, &attempt.project_id, &attempt.issue_id)?;
     let lc_id =
         resolve_issue_logical_codebase_id(app_paths, &attempt.project_id, &attempt.issue_id)?;
-    // Legacy 回退 store：仅单仓/无 LC issue 使用（R9 残留清理后唯一 for_project 用途）。
-    let legacy_repository_store = RepositoryStore::for_project(app_paths.clone(), &project);
 
     if let Some(snapshot) = attempt.target_snapshot.as_ref() {
         let (manifest, selection) = match routing {
@@ -53,19 +49,13 @@ pub fn resolve_coding_attempt_repository(
                 manifest,
                 selection,
             } => (manifest, selection),
-            RepositoryRouting::Legacy { .. } => {
-                return Err(routing_error(
-                    RepositoryRoutingErrorCode::Inconsistent,
-                    "target snapshot has no logical codebase authority",
-                ));
-            }
             RepositoryRouting::FailClosed { code, reason } => {
                 return Err(routing_error(code, reason));
             }
         };
         let selected_ids = validate_logical_selection(
             app_paths,
-            lc_id.as_deref(),
+            Some(lc_id.as_str()),
             &attempt.project_id,
             &attempt.issue_id,
             &manifest,
@@ -77,7 +67,7 @@ pub fn resolve_coding_attempt_repository(
                 "target snapshot repository is not in the effective selection",
             ));
         }
-        validate_snapshot_fields(app_paths, attempt, lc_id.as_deref()).map_err(|code| {
+        validate_snapshot_fields(app_paths, attempt, Some(lc_id.as_str())).map_err(|code| {
             routing_error(
                 code,
                 "target snapshot does not match logical codebase authority",
@@ -86,22 +76,19 @@ pub fn resolve_coding_attempt_repository(
         return resolve_logical_repository(
             app_paths,
             &attempt.project_id,
-            lc_id.as_deref(),
+            Some(lc_id.as_str()),
             snapshot.logical_repository_id,
         );
     }
 
     match routing {
-        RepositoryRouting::Legacy { .. } => {
-            legacy_repository_for_attempt(&legacy_repository_store, app_paths, attempt)
-        }
         RepositoryRouting::Logical {
             manifest,
             selection,
         } => {
             let selected_ids = validate_logical_selection(
                 app_paths,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
                 &attempt.project_id,
                 &attempt.issue_id,
                 &manifest,
@@ -135,7 +122,7 @@ pub fn resolve_coding_attempt_repository(
             resolve_logical_repository(
                 app_paths,
                 &attempt.project_id,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
                 logical_repository_id,
             )
         }
@@ -195,34 +182,6 @@ fn resolve_logical_repository(
                 "logical repository target cannot be resolved from authority",
             )
         })
-}
-
-fn legacy_repository_for_attempt(
-    repository_store: &RepositoryStore,
-    app_paths: &ProductAppPaths,
-    attempt: &CodingExecutionAttempt,
-) -> Result<RepositoryRecord, ProductStoreError> {
-    let current_work_item_id = current_work_item_id_for_attempt(attempt);
-    let physical_repository_id = LifecycleStore::new(app_paths.clone())
-        .list_work_items(&attempt.project_id, &attempt.issue_id)?
-        .into_iter()
-        .find(|work_item| work_item.id == current_work_item_id)
-        .map(|work_item| work_item.repository_id)
-        .or_else(|| {
-            IssueStore::new(app_paths.clone())
-                .get(&attempt.project_id, &attempt.issue_id)
-                .ok()
-                .and_then(|issue| issue.repo_id)
-        })
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "work_item",
-            id: current_work_item_id.to_string(),
-        })?;
-    legacy_physical_repository(
-        repository_store,
-        &attempt.project_id,
-        &physical_repository_id,
-    )
 }
 
 fn current_work_item_id_for_attempt(attempt: &CodingExecutionAttempt) -> &str {
@@ -361,21 +320,6 @@ fn validate_logical_selection(
     }
 }
 
-fn legacy_physical_repository(
-    repository_store: &RepositoryStore,
-    project_id: &str,
-    physical_repository_id: &str,
-) -> Result<RepositoryRecord, ProductStoreError> {
-    repository_store
-        .list(project_id)?
-        .into_iter()
-        .find(|repository| repository.id == physical_repository_id)
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "repository",
-            id: physical_repository_id.to_string(),
-        })
-}
-
 fn routing_error(code: RepositoryRoutingErrorCode, reason: impl Into<String>) -> ProductStoreError {
     let stable_code = code.stable_code();
     ProductStoreError::InvalidRecord {
@@ -400,18 +344,33 @@ mod tests {
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
     #[test]
-    fn repository_resolver_legacy_single_repo_without_selection_returns_physical_repository() {
-        // 无 manifest、无 selection 的单仓 attempt 必须从 work item 物理仓库解析。
+    fn repository_resolver_single_repo_without_lc_authority_fails_closed() {
+        // 单仓物理回退已随 `Legacy` 变体删除：issue 在 LC 侧
+        // 无 manifest/selection 归属时一律 fail-closed（稳定码 target_missing），
+        // 不再从 work item 物理仓库静默解析。
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         ProjectStore::new(paths.clone())
             .create(CreateProjectInput {
-                name: "legacy repository resolver".to_string(),
+                name: "single repo without lc authority".to_string(),
                 description: None,
             })
             .unwrap();
         let repository_path = root.path().join("repository_0001");
         write_repository_projection(&paths, &repository_path);
+        crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
+                title: "单仓 issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
         LifecycleStore::new(paths.clone())
             .create_work_item(CreateWorkItemInput {
                 id: Some("work_item_0001".to_string()),
@@ -423,15 +382,19 @@ mod tests {
             })
             .unwrap();
 
-        let repository = resolve_coding_attempt_repository(
+        let error = resolve_coding_attempt_repository(
             &paths,
             &attempt_fixture(),
             SchemaV2GroupAttemptScopePolicy::RequireWorkItemGroupScope,
         )
-        .unwrap();
-
-        assert_eq!(repository.id, "repository_0001");
-        assert_eq!(repository.path, repository_path);
+        .expect_err("single-repo issue without LC authority must fail closed");
+        let ProductStoreError::InvalidRecord { reason, .. } = &error else {
+            panic!("expected repository_routing InvalidRecord, got {error:?}");
+        };
+        assert!(
+            reason.contains("repository_routing_target_missing"),
+            "must carry routing target_missing stable code, got: {reason}"
+        );
     }
 
     #[test]
@@ -659,7 +622,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project.id.clone(),
                 repo_id: Some(physical_repository_id.clone()),
-                logical_codebase_id: Some(lc_id.clone()),
+                logical_codebase_id: lc_id.clone(),
                 title: "new lc issue".to_string(),
                 description: None,
                 change_id: None,

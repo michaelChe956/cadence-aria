@@ -1,6 +1,5 @@
 use super::*;
 use crate::product::coding_models::FindingSeverity;
-use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -97,8 +96,13 @@ async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_re
         )
         .expect("role run");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ResumeStallThenFreshSuccessProvider::default();
+    let provider = std::sync::Arc::new(ResumeStallThenFreshSuccessProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let worktree = attempt.worktree_path.clone().expect("worktree path");
     let legacy_input = AdapterInput {
@@ -120,14 +124,36 @@ async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_re
         crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
     );
     input.resume_provider_session_id = Some("stale-thread".to_string());
+    // 与生产 LC Coder launch 同源：有效 cwd 显式取 gateway authority root
+    // （`.aria` 的父目录），spawn 前复验以该字段与 envelope 冻结 cwd 比对。
+    input.working_directory = Some(
+        store
+            .paths()
+            .root()
+            .parent()
+            .expect("workspace root")
+            .to_path_buf(),
+    );
     let provider_name = ProviderName::Codex;
+    // REQ-ROUTE-01 两态化：有快照的 attempt 其 provider run 唯一经 gateway
+    // validated 通道；本用例直调 stream 入口，需先取与生产同源的 validated
+    // launch（gateway 未注入/旧路径 → None，行为不变）。
+    let working_dir = input.working_dir.clone();
+    let validated_input = engine
+        .prepare_streaming_launch_for_role(
+            &attempt,
+            CodingProviderRole::Coder,
+            &working_dir,
+            input.clone(),
+        )
+        .expect("prepare validated launch");
 
     let outcome = engine
         .run_provider_stream_invocation(CodingProviderStreamRun {
             attempt: &attempt,
             node_id: "coding_resume_invocation",
             role_run: Some(&role_run),
-            provider: &provider,
+            provider: provider.as_ref(),
             legacy_input: &legacy_input,
             input,
             provider_name: &provider_name,
@@ -137,7 +163,7 @@ async fn coder_resume_stall_maps_to_retryable_transport_without_same_role_run_re
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
-            validated_input: None,
+            validated_input,
         })
         .await;
 
@@ -176,12 +202,22 @@ async fn codex_fresh_session_recovery_consumes_one_of_three_attempts() {
     let attempt = seed_stale_coder_conversation(&store, &attempt);
     let worktree = attempt.worktree_path.clone().expect("worktree");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ResumeStallThenFreshSuccessProvider::default();
+    let provider = std::sync::Arc::new(ResumeStallThenFreshSuccessProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let completed = engine
-        .execute_coding_with_commands(&attempt, &provider, &coding_context(), &mut command_rx)
+        .execute_coding_with_commands(
+            &attempt,
+            provider.as_ref(),
+            &coding_context(),
+            &mut command_rx,
+        )
         .await
         .expect("fresh Codex retry succeeds inside the bounded cycle");
 
@@ -213,14 +249,19 @@ async fn successful_retry_then_reviewer_finding_starts_rework_without_incrementi
     let (_root, store, attempt) = running_attempt_with_worktree();
     let attempt = seed_stale_coder_conversation(&store, &attempt);
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let retrying_provider = ResumeStallThenFreshSuccessProvider::default();
+    let retrying_provider = std::sync::Arc::new(ResumeStallThenFreshSuccessProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        retrying_provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let coded = engine
         .execute_coding_with_commands(
             &attempt,
-            &retrying_provider,
+            retrying_provider.as_ref(),
             &coding_context(),
             &mut command_rx,
         )
@@ -242,13 +283,21 @@ async fn successful_retry_then_reviewer_finding_starts_rework_without_incrementi
             CodingExecutionStage::CodeReview,
         )
         .expect("code review stage");
-    let rework_provider = super::provider_driven::ReviewerDrivenReworkProvider::default();
+    let rework_provider =
+        std::sync::Arc::new(super::provider_driven::ReviewerDrivenReworkProvider::default());
+    let (rework_tx, _rework_rx) = mpsc::channel(32);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        rework_tx,
+        "project_0001",
+        rework_provider.clone(),
+    );
     let updated = engine
         .execute_coder_fix_from_review(
             &code_review,
             &review_report_requesting_changes(&code_review),
             &coding_context(),
-            &rework_provider,
+            rework_provider.as_ref(),
             &mut command_rx,
         )
         .await
@@ -286,8 +335,13 @@ async fn coder_rework_resume_stall_retries_in_a_new_role_run() {
         )
         .expect("code review stage");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ResumeStallThenFreshSuccessProvider::default();
+    let provider = std::sync::Arc::new(ResumeStallThenFreshSuccessProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let completed = engine
@@ -295,7 +349,7 @@ async fn coder_rework_resume_stall_retries_in_a_new_role_run() {
             &attempt,
             &review_report_requesting_changes(&attempt),
             &coding_context(),
-            &provider,
+            provider.as_ref(),
             &mut command_rx,
         )
         .await
@@ -322,12 +376,22 @@ async fn coder_rework_resume_stall_retries_in_a_new_role_run() {
 async fn fresh_coder_transport_failure_uses_bounded_retry_cycle() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = AlwaysResumeStallProvider::default();
+    let provider = std::sync::Arc::new(AlwaysResumeStallProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_coding_with_commands(&attempt, &provider, &coding_context(), &mut command_rx)
+        .execute_coding_with_commands(
+            &attempt,
+            provider.as_ref(),
+            &coding_context(),
+            &mut command_rx,
+        )
         .await
         .expect_err("three fresh transport failures exhaust the retry cycle");
 
@@ -371,12 +435,22 @@ async fn non_codex_transport_failure_uses_the_same_bounded_retry_cycle() {
         )
         .expect("seed claude coder conversation");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = AlwaysResumeStallProvider::default();
+    let provider = std::sync::Arc::new(AlwaysResumeStallProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_coding_with_commands(&attempt, &provider, &coding_context(), &mut command_rx)
+        .execute_coding_with_commands(
+            &attempt,
+            provider.as_ref(),
+            &coding_context(),
+            &mut command_rx,
+        )
         .await
         .expect_err("transport retry policy is provider-independent");
 
@@ -399,25 +473,23 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
     fs::write(shared_worktree.join("dirty.txt"), "uncommitted\n").expect("dirty worktree");
 
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：快照 attempt 的租约只按仓维分类；issue 维记录会被
+    // 判 `legacy_shared_worktree_present` fail-closed。LC 权威（issue + 成员 +
+    // 主 checkout + selection + policy）与冻结快照同源。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let lifecycle = LifecycleStore::new(paths.clone());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: shared_worktree.clone(),
-            base_branch: "HEAD".to_string(),
-        })
-        .expect("shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            "project_0001",
-            "issue_0001",
-            "work_item_0001",
-            "issue_worktree_lease_coder_resume",
-        )
-        .expect("shared worktree lock");
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        &shared_worktree,
+    );
 
     let store = CodingAttemptStore::new(paths);
     let attempt = store
@@ -435,20 +507,36 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
-    lifecycle
-        .bind_issue_worktree_lock_to_attempt(
-            "project_0001",
-            "issue_0001",
-            "work_item_0001",
-            &attempt.id,
-        )
-        .expect("bind shared worktree lock");
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        "work_item_0001",
+        &attempt.id,
+    );
     seed_group_attempt_fixture(&store, &attempt, true, false);
+    // 单仓语义在 LC 模型下 = 全部 work item 归属唯一成员仓：
+    // `validate_group_single_target` 对 Logical 路由要求每个权威 unit 带
+    // `target_repository_id` 且与 attempt 快照一致；共享夹具写入的 draft 仍
+    // 无归属，这里按同一不变量补齐（不改变任何断言事实）。
+    let plan_store = WorkItemPlanStore::new(store.paths());
+    for mut draft in plan_store
+        .list_draft_records("project_0001", "issue_0001", "work_item_plan_0001")
+        .expect("fixture draft records")
+    {
+        if draft.candidate.target_repository_id.is_none() {
+            draft.candidate.target_repository_id = Some(logical.member_id);
+            plan_store
+                .put_draft_record(&draft)
+                .expect("fixture draft target");
+        }
+    }
     let attempt = store
         .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
@@ -473,12 +561,22 @@ async fn repeated_coder_failure_blocks_with_retry_gate_and_preserves_worktree() 
         .expect("complete prior coder role run");
     let attempt = seed_stale_coder_conversation(&store, &attempt);
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = AlwaysResumeStallProvider::default();
+    let provider = std::sync::Arc::new(AlwaysResumeStallProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_coding_with_commands(&attempt, &provider, &coding_context(), &mut command_rx)
+        .execute_coding_with_commands(
+            &attempt,
+            provider.as_ref(),
+            &coding_context(),
+            &mut command_rx,
+        )
         .await
         .expect_err("repeated provider failure remains surfaced");
 

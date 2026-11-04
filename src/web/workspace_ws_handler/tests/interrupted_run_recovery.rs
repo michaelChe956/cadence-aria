@@ -118,7 +118,10 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             title: "Interrupted review issue".to_string(),
             description: None,
             change_id: None,

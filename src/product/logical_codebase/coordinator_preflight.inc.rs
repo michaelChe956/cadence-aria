@@ -66,6 +66,12 @@ impl AggregatePreflightService for DeterministicAggregatePreflightService {
                 retryable: false,
             });
         }
+        // 聚合根可写性是后续每一步的硬前提（provider turn 要往根上写规则/
+        // 配置/示例）。探测建删一个 `.aria-probe-<nonce>`，失败即
+        // `aggregate_root_not_writable`，且不留残留。
+        crate::product::logical_codebase::environment_probe::ensure_aggregate_root_writable(
+            &canonical_root,
+        )?;
 
         let store = self.authority_store();
         let members = store.list_members(project_id).map_err(|error| {
@@ -121,7 +127,18 @@ impl AggregatePreflightService for DeterministicAggregatePreflightService {
             members: projections,
             manifest_revision: manifest.membership_revision,
             manifest_digest,
+            ..Default::default()
         })
+    }
+}
+
+impl AggregatePreflightSnapshot {
+    /// REQ-BOOT-09：把 `advance_remaining` 探测到的 codegraph 证据落进
+    /// durable 预检快照。空版本 = 未装配探针（不伪造可用与版本号）。
+    pub(crate) fn with_codegraph_evidence(mut self, version: &str) -> Self {
+        self.codegraph_available = !version.is_empty();
+        self.codegraph_version = (!version.is_empty()).then(|| version.to_string());
+        self
     }
 }
 

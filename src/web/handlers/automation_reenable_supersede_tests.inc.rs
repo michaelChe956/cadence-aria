@@ -334,7 +334,10 @@ async fn termination_command_retries_after_revision_drift_converge() {
     assert_eq!(replay_body["state"], "replayed");
     let replayed = current_enrollment(&fixture);
     assert_eq!(replayed.policy_revision, terminated.policy_revision);
-    assert_eq!(replayed.terminated_at.as_deref(), Some(terminated_at.as_str()));
+    assert_eq!(
+        replayed.terminated_at.as_deref(),
+        Some(terminated_at.as_str())
+    );
     assert_eq!(replayed.command_ledger, terminated.command_ledger);
 
     // 重新开启后再用同一命令（带刷新后的当前 revision）终止：按新前置条件
@@ -473,7 +476,10 @@ async fn delete_confirmed_spec(
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+    (
+        status,
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 /// 情形①（悬空重授权）：级联删除原授权源后，人工重新开启按**当前已确认
@@ -506,11 +512,9 @@ async fn reenable_with_dangling_source_resigns_on_current_confirmed_source() {
         .unwrap_or(0);
 
     // 级联删除原授权源（先删引用 story 的 design，再删 story——上游放行）。
-    let (status, body) =
-        delete_confirmed_spec(&app, "design-specs", &fixture.design_id).await;
+    let (status, body) = delete_confirmed_spec(&app, "design-specs", &fixture.design_id).await;
     assert_eq!(status, StatusCode::OK, "delete design: {body}");
-    let (status, body) =
-        delete_confirmed_spec(&app, "story-specs", &fixture.story_id).await;
+    let (status, body) = delete_confirmed_spec(&app, "story-specs", &fixture.story_id).await;
     assert_eq!(status, StatusCode::OK, "delete story: {body}");
 
     // 新一代已确认授权源。
@@ -521,13 +525,14 @@ async fn reenable_with_dangling_source_resigns_on_current_confirmed_source() {
     let mut bad = enrollment_body(&fixture, 1, 1);
     bad["expected_revision"] = serde_json::json!(before.policy_revision);
     bad["command"]["command_id"] = serde_json::json!("cmd-dangling-bad-source");
-    bad["command"]["source"]["stories"][0]["id"] =
-        serde_json::json!(fixture.story_id.clone());
+    bad["command"]["source"]["stories"][0]["id"] = serde_json::json!(fixture.story_id.clone());
     bad["command"]["source"]["designs"][0]["id"] = serde_json::json!(design2.clone());
     let response = put_enrollment(&app, bad).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-    // 悬空重授权：source＝当前已确认新对，options/target 与终止记录逐字段相等。
+    // 悬空重授权：source＝当前已确认新对，options/target 与终止记录逐字段相等
+    //（悬空路径不放宽 options——REQ-DRG-18；正常重开路径的 options 漂移按
+    // 换代放行，见下方 reenable_with_new_provider_is_accepted_in_one_step）。
     let mut resign = enrollment_body(&fixture, 1, 1);
     resign["expected_revision"] = serde_json::json!(before.policy_revision);
     resign["command"]["command_id"] = serde_json::json!("cmd-dangling-resign");
@@ -564,7 +569,8 @@ async fn reenable_with_dangling_source_resigns_on_current_confirmed_source() {
 }
 
 /// 情形③（旧 source 仍有效但不同）：story 版本演进（实体仍在）→ 非悬空，
-/// 按当前版本提交的重新开启维持逐字段相等 409，零副作用。
+/// 按当前版本提交的重新开启因 **source 漂移** 维持 409（options 漂移在该
+/// 正常重开路径按换代放行——REQ-WIGA-SWAP-01），零副作用。
 #[tokio::test]
 async fn reenable_with_valid_but_divergent_source_stays_conflict() {
     let fixture = seed_fixture(1, true);
@@ -599,7 +605,8 @@ async fn reenable_with_valid_but_divergent_source_stays_conflict() {
         })
         .unwrap();
 
-    // 按当前版本（story v2）提交重新开启：非悬空 → 维持 409。
+    // 按当前版本（story v2）提交重新开启：非悬空 → source 漂移维持 409
+    //（options/target 与终止记录一致，不涉 options 放宽面）。
     let mut divergent = enrollment_body(&fixture, 2, 1);
     divergent["expected_revision"] = serde_json::json!(before.policy_revision);
     divergent["command"]["command_id"] = serde_json::json!("cmd-divergent-reenable");
@@ -615,4 +622,106 @@ async fn reenable_with_valid_but_divergent_source_stays_conflict() {
     assert_eq!(after.policy_revision, before.policy_revision);
     assert_eq!(after.source, before.source);
     assert_eq!(after.options, before.options);
+}
+
+/// 块1 片2（REQ-WIGA-SWAP-01）④：终止态**正常路径**上带不同 provider 的
+/// Enable 一步被接受——HTTP 200＋enabled=true＋terminated_at 清空＋换代
+/// 留痕（binding_version+1、旧代 fake provider 进 previous、旧 plan 作废
+/// 删除）。不再要求「先同 payload 取代再 Disable→Enable」两步换 provider。
+#[tokio::test]
+async fn reenable_with_new_provider_is_accepted_in_one_step() {
+    let fixture = seed_fixture(1, true);
+    let app = fixture.router();
+    let (bound, plan_1, _session_1) = seed_bound_enrollment(&fixture, &app).await;
+    // 新 provider（claude_code）的正向能力证据：bootstrap＋Confirmed 行
+    //（与 automation_target 测试族同构）——Fake 仅测试运行豁免，换 provider
+    // 必须过 Enable 前的完整角色链同源预检。
+    let paths = fixture.paths.clone();
+    let lc_id = crate::product::logical_codebase::RepositoryAuthorityResolver::new(paths.clone())
+        .resolve_for_issue(PROJECT_ID, ISSUE_ID)
+        .expect("resolve carrier")
+        .expect("logical carrier")
+        .target
+        .logical_codebase_id
+        .expect("resolver-frozen lc id");
+    crate::product::logical_codebase::ProviderCapabilityStore::for_lc(paths.clone(), &lc_id)
+        .ensure_bootstrap(PROJECT_ID)
+        .expect("capability bootstrap");
+    super::super::automation_enrollment_test_support::seed_confirmed_capability_records(
+        &paths,
+        PROJECT_ID,
+        Some(&lc_id),
+        &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+    );
+
+    let terminate = post_terminate(
+        &app,
+        &serde_json::json!({
+            "command_id": "cmd-swap-provider-terminate",
+            "expected_enrollment_id": bound.enrollment_id,
+            "expected_policy_revision": current_enrollment(&fixture).policy_revision,
+            "confirmed": true,
+        }),
+    )
+    .await;
+    assert_eq!(terminate.status(), StatusCode::OK);
+    let terminated = current_enrollment(&fixture);
+    assert!(terminated.terminated_at.is_some());
+    let binding_version_before = terminated
+        .binding_history
+        .as_ref()
+        .map(|history| history.current.binding_version)
+        .unwrap_or(0);
+
+    // 带 provider 漂移（options 漂移）的重新开启：一步 200。
+    let mut swap = enrollment_body(&fixture, 1, 1);
+    swap["expected_revision"] = serde_json::json!(terminated.policy_revision);
+    swap["command"]["command_id"] = serde_json::json!("cmd-swap-provider-reenable");
+    swap["command"]["options"]["author_provider"] = serde_json::json!("claude_code");
+    swap["command"]["options"]["reviewer_provider"] = serde_json::json!("claude_code");
+    let response = put_enrollment(&app, swap).await;
+    let status = response.status();
+    let payload = response_json(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "provider swap re-enable must be accepted in one step: {payload}"
+    );
+    assert_eq!(payload["enabled"], true);
+    assert!(payload["terminated_at"].is_null());
+
+    let after = current_enrollment(&fixture);
+    assert!(after.enabled && after.terminated_at.is_none());
+    assert_eq!(
+        after.options.author_provider,
+        crate::product::models::ProviderName::ClaudeCode
+    );
+    assert_eq!(
+        after.options.reviewer_provider,
+        crate::product::models::ProviderName::ClaudeCode
+    );
+    // 换代留痕：binding_version+1，新代 provider 生效，旧代（fake）进 previous。
+    let history = after.binding_history.as_ref().expect("binding history");
+    assert_eq!(history.current.binding_version, binding_version_before + 1);
+    assert_eq!(
+        history.current.author_provider,
+        crate::product::models::ProviderName::ClaudeCode
+    );
+    let previous = history
+        .previous
+        .last()
+        .expect("old generation archived in previous");
+    assert_eq!(previous.binding_version, binding_version_before);
+    assert_eq!(
+        previous.author_provider,
+        crate::product::models::ProviderName::Fake
+    );
+    // 旧 plan 已随取代作废删除，不复活。
+    assert!(
+        fixture
+            .lifecycle
+            .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, &plan_1)
+            .is_err(),
+        "superseded plan must not survive the provider swap"
+    );
 }

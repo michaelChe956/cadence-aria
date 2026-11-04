@@ -177,7 +177,7 @@ function sameEscalations(
 
 function escalationCopy(item: CockpitInboxItem, escalation: CockpitEscalation): string {
   if (escalation.kind === "budget") {
-    return `剩余修复轮次 ${item.gate?.remaining_budget ?? 0}，请优先处理`;
+    return `人工返修还可做 ${item.gate?.remaining_budget ?? 0} 次，请优先处理`;
   }
   return "前端计时提醒阈值已达到";
 }

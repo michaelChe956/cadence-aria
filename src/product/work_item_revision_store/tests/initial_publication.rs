@@ -10,14 +10,11 @@ use crate::product::coding_models::{
     CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
 };
 use crate::product::coding_work_item_context::load_coding_work_item_context;
-use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::models::{
     DependencyGraphRevision, PlanProjectionBundle, PlanValidationReportArtifact, ProviderName,
     VerificationPlanRevision, WorkItemPlanRevision, WorkItemProjectionBundle,
     WorkItemRuntimeBinding, WorkspaceSessionRecord, WorkspaceSessionStatus, WorkspaceType,
 };
-use crate::product::project_store::{CreateProjectInput, ProjectStore};
-use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_contract::{
     ContractFindingSeverity, ContractValidationFinding, ContractValidationReport,
     build_dependency_contract_graph, canonical_contract_hash,
@@ -36,6 +33,11 @@ use crate::web::coding_ws_handler::repository_path_for_attempt;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use sha2::Digest;
 use std::path::PathBuf;
+
+/// 已发布 work item revision 的**源 draft revision id**：group attempt 的
+/// 仓维归属（`target_repository_id`）经该 draft 的候选记录解析，夹具必须
+/// 落出同名 draft record，否则 routing fail-closed。
+const SOURCE_DRAFT_REVISION_ID: &str = "draft_revision_0001";
 
 #[test]
 fn initial_plan_publication_store_allocates_ids_deterministically_without_live_writes() {
@@ -346,7 +348,7 @@ fn initial_publication_journal(
     let work_item_revision = WorkItemRevision {
         id: work_item_ids.work_item_revision_id.clone(),
         logical_work_item_id: WORK_ITEM_ID.to_string(),
-        source_draft_revision_id: "draft_revision_0001".to_string(),
+        source_draft_revision_id: SOURCE_DRAFT_REVISION_ID.to_string(),
         canonical_contract: contract.clone(),
         canonical_contract_hash: contract_hash.clone(),
         work_item_projection_bundle_id: work_item_ids.work_item_projection_bundle_id.clone(),
@@ -473,7 +475,7 @@ fn initial_publication_journal(
             verification_plan_revision: VerificationPlanRevision {
                 id: work_item_ids.verification_plan_revision_id,
                 logical_work_item_id: WORK_ITEM_ID.to_string(),
-                source_draft_revision_id: "draft_revision_0001".to_string(),
+                source_draft_revision_id: SOURCE_DRAFT_REVISION_ID.to_string(),
                 verification_checks: contract.verification_checks,
                 created_at: timestamp.to_string(),
             },
@@ -928,34 +930,70 @@ struct BoundGroupAttemptFixture {
 fn bound_group_attempt_fixture() -> (TempDir, BoundGroupAttemptFixture) {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path().join(".aria"));
-    ProjectStore::new(paths.clone())
-        .create(CreateProjectInput {
-            name: "runtime reader project".to_string(),
-            description: None,
-        })
-        .unwrap();
-    let repository = RepositoryStore::new(paths.clone())
-        .create(CreateRepositoryInput {
+    // REQ-ROUTE-01 两态化（去单仓入口）后：issue 必须持久归属某个逻辑代码库，
+    // 且该 LC 权威侧须有 manifest/member/checkout/selection，否则两态 routing 落
+    // `FailClosed(TargetMissing)` ⇒ 评估链读仓库时得到
+    // `repository_routing_target_missing: issue_not_bound_to_logical_codebase`。
+    // 共享夹具建出完整权威现场（project + 归属 issue + LC 权威 + repos.json 投影）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        temp.path(),
+        PROJECT_ID,
+        ISSUE_ID,
+    );
+    let repository_id =
+        crate::product::logical_codebase::logical_test_fixture::FIXTURE_PHYSICAL_REPOSITORY_ID
+            .to_string();
+    let repository_path = logical.member_path.clone();
+    // 归属字段钉死：issue 必须持久归属该 LC（两态 routing 的唯一入口事实）。
+    let issue_record = crate::product::issue_store::IssueStore::new(paths.clone())
+        .get(PROJECT_ID, ISSUE_ID)
+        .expect("fixture issue record");
+    assert_eq!(
+        issue_record.logical_codebase_id, logical.logical_codebase_id,
+        "the fixture issue must be attributed to the seeded logical codebase"
+    );
+    // 归属字段（仓维）：group attempt 的权威 target 来自 work item 的**源 draft**
+    // （`resolve_authoritative_group_plan_binding` 按
+    // `draft.candidate.target_repository_id` 解析成员）。缺 draft ⇒ routing
+    // fail-closed（`repository_routing_inconsistent: work item revision source
+    // draft is missing`），故夹具必须落这条归属。
+    crate::product::work_item_plan_store::WorkItemPlanStore::new(paths.clone())
+        .put_draft_record(&crate::product::models::WorkItemDraftRecord {
             project_id: PROJECT_ID.to_string(),
-            name: "Runtime Reader Repository".to_string(),
-            path: temp.path().to_path_buf(),
-            default_policy_preset: None,
-            default_provider_mode: None,
-            idempotency_key: "runtime-reader-repository".to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: PLAN_ID.to_string(),
+            draft_id: SOURCE_DRAFT_REVISION_ID.to_string(),
+            outline_id: "outline_0001".to_string(),
+            generation_round_id: "generation_round_0001".to_string(),
+            batch_id: None,
+            attempt_index: 1,
+            outline_version_ref: "outline_version_0001".to_string(),
+            generation_mode: crate::product::models::WorkItemGenerationMode::Serial,
+            generation_diagnostics: None,
+            candidate: crate::product::models::WorkItemDraftCandidate {
+                target_repository_id: Some(logical.member_id),
+                outline_id: "outline_0001".to_string(),
+                logical_work_item_id: WORK_ITEM_ID.to_string(),
+                canonical_contract_candidate: canonical_contract_fixture(WORK_ITEM_ID),
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: canonical_contract_fixture(WORK_ITEM_ID).verification_checks,
+                },
+            },
+            status: crate::product::models::WorkItemDraftStatus::Accepted,
+            active: true,
+            superseded_by_draft_id: None,
+            supersede_reason: None,
+            copied_from_draft_id: None,
+            review_node_id: None,
+            review_verdict_ref: None,
+            generated_from_node_id: "author_run_0001".to_string(),
+            accepted_at: Some("2026-07-26T00:00:00Z".to_string()),
+            superseded_at: None,
+            created_at: "2026-07-26T00:00:00Z".to_string(),
+            updated_at: "2026-07-26T00:00:00Z".to_string(),
         })
-        .unwrap();
-    let issue = IssueStore::new(paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: PROJECT_ID.to_string(),
-            repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
-            title: "Runtime Reader Issue".to_string(),
-            description: None,
-            change_id: None,
-            base_branch: None,
-        })
-        .unwrap();
-    assert_eq!(issue.id, ISSUE_ID);
+        .expect("fixture source draft record");
     let revision_store = WorkItemRevisionStore::new(paths.clone());
     let published = revision_store
         .publish_or_resume_initial_plan_revision(&initial_publication_journal(&revision_store))
@@ -1015,8 +1053,8 @@ fn bound_group_attempt_fixture() -> (TempDir, BoundGroupAttemptFixture) {
         temp,
         BoundGroupAttemptFixture {
             paths,
-            repository_id: repository.id,
-            repository_path: repository.path,
+            repository_id,
+            repository_path,
             attempt,
             unit,
             run,

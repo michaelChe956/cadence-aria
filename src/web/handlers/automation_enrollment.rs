@@ -19,7 +19,7 @@ use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::LifecycleConfirmationStatus;
 use crate::product::models::WorkspaceType;
 use crate::product::models::automation::{
-    EnrollmentBindingIdentityInput, EnrollmentError, EnrollmentRebindRequest,
+    ConflictKind, EnrollmentBindingIdentityInput, EnrollmentError, EnrollmentRebindRequest,
     EnrollmentRebindResult, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
     LeaseTakeoverRequest, LeaseTakeoverResult, OperationState,
 };
@@ -30,7 +30,8 @@ use crate::web::state::WebAppState;
 use crate::web::types::{EnrollmentBindRequest, EnrollmentPutRequest};
 
 use super::automation_enrollment_conflict::{
-    enrollment_conflict, termination_api_error, termination_identity_conflict,
+    enrollment_conflict, enrollment_payload_immutable, enrollment_revision_stale,
+    termination_api_error, termination_identity_conflict,
 };
 use super::automation_enrollment_reenable::ensure_terminated_reenable_cleanup_closed;
 use super::support::{product_app_paths, product_store_api_error};
@@ -43,10 +44,10 @@ pub async fn put_automation_enrollment(
     validate_request_ids(&project_id, &issue_id)?;
     validate_enrollment_scope(&state, &project_id, &issue_id, &request.command)?;
     ensure_terminated_reenable_cleanup_closed(&state, &project_id, &issue_id, &request.command)?;
-    // 代际取代＋悬空源重授权（编排收敛在 reenable 模块；本文件在
+    // 代际取代＋换代/悬空源重授权（编排收敛在 reenable 模块；本文件在
     // large_file_guard 登记表内禁止增长）：terminated 重开＝旧 plan 作废，
-    // 原 source 悬空时仅放行 source 漂移（按当前已确认 source 重新授权，
-    // binding 换代留痕），其余维持逐字段相等 409。
+    // 一律走 `compare_and_set_reenable`：非悬空源时 options 漂移按换代放行、
+    // source/target 漂移仍拒；悬空源时仅放行 source 漂移，options/target 仍逐字段相等（REQ-DRG-18）。
     let enrollment =
         super::automation_enrollment_reenable::supersede_terminated_generation_and_cas(
             &state,
@@ -375,69 +376,53 @@ fn validate_enrollment_scope(
     validate_confirmed_source_refs(&lifecycle, project_id, issue_id, source)?;
 
     // C5 Task 2：载体判定与 GET 投影共用唯一 resolver 入口（Review
-    // Focus 5）；issue 记录为权威 repo_id 来源。
+    // Focus 5）。单仓载体已删除（REQ-ROUTE-01）：无归属 issue 在载体
+    // 判定处即 fail-closed，此处只剩 LC 载体的 canonical target 校验。
     let issue = IssueStore::new(paths.clone())
         .get(project_id, issue_id)
         .map_err(product_store_api_error)?;
     let carrier = super::support::resolve_automation_carrier(&paths, project_id, &issue)?;
-    match &carrier {
-        super::support::AutomationCarrierResolution::SingleRepository {
-            target: authoritative,
-        } => {
-            // 单仓载体：提交 target 必须与权威解析逐字节相等（错仓/跨载体
-            // 422 重选提示，不猜、不降级）；单仓跳过 gateway 谓词
-            //（Review Focus 5，A10 单仓不误拒）。
-            if *target != *authoritative {
-                return Err(invalid_scope(
-                    "automation enrollment target must match the issue's single physical \
-                     repository; re-select the automation target and retry",
-                ));
-            }
-            Ok(())
-        }
-        super::support::AutomationCarrierResolution::LogicalCodebase { resolution } => {
-            // 批 2 R1（REQ-WIGA-01、REQ-MTG-03）：LC 载体按 selection 候选
-            // 构造 canonical target（0 拒/1 旧 kind/N 集合）——提交 target
-            // 必须与 canonical 全等（乱序/重复已在反序列化归一），错配
-            // 422 重选提示，不猜、不降级、不以 plan focus 上界替代授权集。
-            let manifest = resolution.manifest.clone().ok_or_else(|| {
-                invalid_scope("automation enrollment requires a logical codebase manifest routing")
-            })?;
-            let selection = resolution.selection.as_ref().ok_or_else(|| {
-                invalid_scope(
-                    "automation enrollment requires an explicit logical codebase selection",
-                )
-            })?;
-            let candidate_ids = logical_repository_ids_for_preflight(&manifest, selection);
-            let expected = canonical_lc_enrollment_target(
-                &manifest.logical_codebase_id.to_string(),
-                &candidate_ids,
-            )?;
-            if target != &expected {
-                return Err(invalid_scope(
-                    "automation enrollment target must match the issue's authorized logical \
+    let super::support::AutomationCarrierResolution::LogicalCodebase { resolution } = &carrier;
+    {
+        // 批 2 R1（REQ-WIGA-01、REQ-MTG-03）：LC 载体按 selection 候选
+        // 构造 canonical target（0 拒/1 旧 kind/N 集合）——提交 target
+        // 必须与 canonical 全等（乱序/重复已在反序列化归一），错配
+        // 422 重选提示，不猜、不降级、不以 plan focus 上界替代授权集。
+        let manifest = resolution.manifest.clone().ok_or_else(|| {
+            invalid_scope("automation enrollment requires a logical codebase manifest routing")
+        })?;
+        let selection = resolution.selection.as_ref().ok_or_else(|| {
+            invalid_scope("automation enrollment requires an explicit logical codebase selection")
+        })?;
+        let candidate_ids = logical_repository_ids_for_preflight(&manifest, selection);
+        let expected = canonical_lc_enrollment_target(
+            &manifest.logical_codebase_id.to_string(),
+            &candidate_ids,
+        )?;
+        if target != &expected {
+            return Err(invalid_scope(
+                "automation enrollment target must match the issue's authorized logical \
                      member set; re-select the automation target and retry",
-                ));
-            }
-            // C5 Task 3/Task 8：canonical target 确认后做完整角色链同源
-            // 预检——与 GET automation-target 投影同一 carrier、同一判定,
-            // Enable 前拒绝,一次列全全部违规角色。批 2 R1：集合同属 LC，
-            // 一次 LC 预检覆盖全部成员（不按仓循环）。Task 8b:readonly
-            // gateway 接线(resolver 冻结的权威 lc_id),组装失败 fail-closed。
-            let gateway = super::automation_gateway_preflight::readonly_preflight_gateway(
-                state,
-                project_id,
-                resolution.target.logical_codebase_id.as_deref(),
-            );
-            super::automation_gateway_preflight::validate_role_chain_for_enrollment(
-                gateway.as_ref(),
-                &options.author_provider,
-                &options.reviewer_provider,
-                &carrier,
-                true,
-                state.test_provider_enabled,
-            )
+            ));
         }
+        // C5 Task 3/Task 8：canonical target 确认后做完整角色链同源
+        // 预检——与 GET automation-target 投影同一 carrier、同一判定,
+        // Enable 前拒绝,一次列全全部违规角色。批 2 R1：集合同属 LC，
+        // 一次 LC 预检覆盖全部成员（不按仓循环）。Task 8b:readonly
+        // gateway 接线(resolver 冻结的权威 lc_id),组装失败 fail-closed。
+        let gateway = super::automation_gateway_preflight::readonly_preflight_gateway(
+            state,
+            project_id,
+            resolution.target.logical_codebase_id.as_deref(),
+        );
+        super::automation_gateway_preflight::validate_role_chain_for_enrollment(
+            gateway.as_ref(),
+            &options.author_provider,
+            &options.reviewer_provider,
+            &carrier,
+            true,
+            state.test_provider_enabled,
+        )
     }
 }
 
@@ -581,9 +566,17 @@ fn binding_target_not_found(kind: &str) -> ApiError {
 
 pub(crate) fn enrollment_api_error(error: EnrollmentError) -> ApiError {
     match error {
-        EnrollmentError::Conflict { current_revision } => {
-            enrollment_conflict(current_revision, "automation enrollment revision conflict")
-        }
+        EnrollmentError::Conflict {
+            current_revision,
+            kind,
+        } => match kind {
+            // 类 1（运行中改 payload）：该先终止自动化，不是「等一下重试」。
+            ConflictKind::PayloadImmutable => enrollment_payload_immutable(current_revision, kind),
+            // 类 2（版本号过期）：该刷新后重试。
+            ConflictKind::RevisionStale => enrollment_revision_stale(current_revision, kind),
+            // 其余 7 类落回旧码（码字/状态码/message/details 逐字不变）。
+            _ => enrollment_conflict(current_revision, "automation enrollment revision conflict"),
+        },
         EnrollmentError::InvalidScope(reason) => invalid_scope(reason),
         EnrollmentError::NotFound => enrollment_not_found(),
         EnrollmentError::Store(error) => product_store_api_error(error),

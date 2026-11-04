@@ -134,6 +134,30 @@ fn seed_group_work_item_revisions(
 }
 
 fn partial_group_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
+    // 仓维路由对齐（REQ-MTG-02 2.2 唯一性细化，D2.1 A1）：端点创建会冻结
+    // target 快照；播种的半残 attempt 必须带同一 target 桶快照才能命中
+    // 「group attempt exists without an initialization journal」/units 全等
+    // 校验（无快照 attempt 不参与 per-(plan,target) 判定，创建会直接 200）。
+    let app_paths = store.paths();
+    let logical_repository_id = LogicalCodebaseStore::new(app_paths.clone())
+        .load_manifest("project_0001")
+        .expect("load logical manifest")
+        .expect("logical manifest")
+        .member_ids[0];
+    let lc_id = cadence_aria::product::logical_codebase::resolve_issue_logical_codebase_id(
+        &app_paths,
+        "project_0001",
+        "issue_0001",
+    )
+    .expect("resolve issue logical codebase");
+    let target_snapshot =
+        cadence_aria::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+            &app_paths,
+            "project_0001",
+            logical_repository_id,
+            Some(lc_id.as_str()),
+        )
+        .expect("partial group attempt target snapshot");
     store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -149,7 +173,7 @@ fn partial_group_attempt(store: &CodingAttemptStore) -> CodingExecutionAttempt {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
             start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })

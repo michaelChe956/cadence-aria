@@ -25,7 +25,7 @@ async fn logical_issue_lifecycle_does_not_require_repo_id() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "多仓聚合 Issue".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
@@ -77,7 +77,7 @@ async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "多仓聚合 Story".to_string(),
             description: Some("跨 api 仓库的聚合变更".to_string()),
             change_id: None,
@@ -171,7 +171,7 @@ async fn generate_story_specs_pinned_involved_derives_focus_for_member_anchored_
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "多仓聚合 Story pin".to_string(),
             description: Some("alpha 仓交付".to_string()),
             change_id: None,
@@ -243,7 +243,7 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "多仓聚合 Design".to_string(),
             description: Some("跨 api 仓库的聚合设计".to_string()),
             change_id: None,
@@ -364,7 +364,7 @@ async fn generate_design_specs_pinned_scope_pins_involved_in_context_prompt() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "多仓聚合 Design 钉定".to_string(),
             description: Some("跨 api 仓库的聚合设计".to_string()),
             change_id: None,
@@ -653,7 +653,7 @@ async fn multi_member_focus_design_fixture()
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "多仓聚合 Design 上界".to_string(),
             description: Some("跨 api/web 仓库的聚合设计".to_string()),
             change_id: None,
@@ -811,7 +811,7 @@ async fn create_logical_confirm_fixture(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "多仓聚合 confirm".to_string(),
             description: None,
             change_id: None,
@@ -969,7 +969,7 @@ async fn confirm_legacy_single_repo_story_without_involved_succeeds() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "单仓 Story confirm".to_string(),
             description: None,
             change_id: None,
@@ -1062,7 +1062,7 @@ async fn lifecycle_projects_review_status_from_workspace_timeline_reviewer_runs(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "review evidence issue".to_string(),
             description: None,
             change_id: None,

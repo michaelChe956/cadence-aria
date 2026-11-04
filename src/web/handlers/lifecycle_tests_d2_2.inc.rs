@@ -38,7 +38,11 @@ fn d2_2_seed_project_issue(paths: &ProductAppPaths) -> LifecycleStore {
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(REPOSITORY_ID.to_string()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: "D2.2 级联删除".to_string(),
             description: None,
             change_id: None,

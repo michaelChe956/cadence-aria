@@ -1144,6 +1144,9 @@ export type WsOutMessage = WithEventSeq<
       provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
       /** P0 1.2：durable automation 归属；服务端读取失败/未知时省略。 */
       automation?: AutomationOwnership | null;
+      /** REQ-HGC-04：本页底部「继续自动化」入口的服务端权威事实（与 HTTP control
+       * 的 `allowed_actions` 含 `continue_plan` 同源）；缺席/null=服务端未判定。 */
+      plan_continue_available?: boolean | null;
       /** C1（Task 6.1）：durable LC 恢复纯投影（waiting/fresh_reserved/
        * fresh_running/resolved 主状态＋last_operation）；空/旧 wire 缺省
        * 省略；resolved 保留证据供 Replay，allowed_actions 由后端权威下发。 */

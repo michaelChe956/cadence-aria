@@ -470,7 +470,11 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                "project_0001",
+            ),
             title: "Logical plan validation".to_string(),
             description: None,
             change_id: None,
@@ -534,18 +538,118 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
         })
         .expect("workspace session");
 
-    // Keep the already-built gateway in memory, then remove its policy artifact.  This
+    // Keep the already-built gateway in memory, then remove its capability rows.  This
     // deterministically exercises the validate-failure early return without a real provider.
+    // REQ-ROUTE-01 两态化：routing 无 legacy 单仓形态，上下文/anchor 链要求
+    // （manifest, selection, ≥1 有效成员）成对 ⇒ 保留 manifest 并登记本仓为
+    // LC 成员 + 带成员 selection（空成员会让计划上下文在 launch 前
+    // fail-closed）；Logical 路由的 revision-input 还消费聚合索引 ⇒ 一并
+    // 播种。validate 失败面由删除 capabilities.json（validate 首关唯一消费）
+    // 确定性触发，policy 保持有效。
     let gateway = fixture.gateway.clone();
-    std::fs::remove_file(fixture.paths.aggregate_policy_artifact_path("project_0001"))
-        .expect("remove policy artifact");
-    std::fs::remove_file(
+    let authority = LogicalCodebaseStore::new(fixture.paths.clone());
+    let mut manifest = authority
+        .load_manifest("project_0001")
+        .expect("load fixture manifest")
+        .expect("fixture manifest");
+    let member_id = crate::product::logical_codebase::types::LogicalRepositoryId(uuid::Uuid::new_v4());
+    let checkout_id =
+        crate::product::logical_codebase::types::RepositoryCheckoutId(uuid::Uuid::new_v4());
+    manifest.member_ids.push(member_id);
+    manifest.membership_revision += 1;
+    authority
+        .save_manifest("project_0001", &manifest)
+        .expect("add fixture member to manifest");
+    let now = chrono::Utc::now().to_rfc3339();
+    authority
+        .save_member(
+            "project_0001",
+            &crate::product::logical_codebase::types::CodebaseMemberRecord {
+                logical_repository_id: member_id,
+                physical_repository_id: repository.id.clone(),
+                alias: "member".to_string(),
+                role: "member".to_string(),
+                ordinal: 1,
+                source_identity:
+                    crate::product::logical_codebase::types::RepositorySourceIdentity::from_git_parts(
+                        &repo_path,
+                        repo_path.join(".git"),
+                        Some("ssh://git@example.test/gateway/member.git".to_string()),
+                    ),
+                repo_type: crate::product::logical_codebase::types::RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_id],
+                status: crate::product::logical_codebase::types::MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .expect("save fixture member");
+    authority
+        .save_checkout(
+            "project_0001",
+            &crate::product::logical_codebase::types::RepositoryCheckoutRecord {
+                checkout_id,
+                logical_repository_id: member_id,
+                physical_repository_id: repository.id.clone(),
+                kind: crate::product::logical_codebase::types::CheckoutKind::Main,
+                canonical_path: std::fs::canonicalize(&repo_path).expect("canonical member"),
+                checkout_path_hash: "sha256:gateway-member-checkout".to_string(),
+                git_dir_identity: "sha256:gateway-member-git-dir".to_string(),
+                revision: Some("abc123".to_string()),
+                availability:
+                    crate::product::logical_codebase::types::CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        )
+        .expect("save fixture checkout");
+    // strict 三层身份解析要求 repos.json 投影与登记的成员/checkout 对齐
+    //（logical_repository_id / primary_checkout_id / identity_schema_version）。
+    let mut projections = RepositoryStore::new(fixture.paths.clone())
+        .list("project_0001")
+        .expect("list fixture repositories");
+    for record in projections
+        .iter_mut()
+        .filter(|record| record.id == repository.id)
+    {
+        record.logical_repository_id = Some(member_id);
+        record.primary_checkout_id = Some(checkout_id);
+        record.identity_schema_version = 1;
+    }
+    std::fs::write(
         fixture
             .paths
-            .logical_codebase_root("project_0001")
-            .join("manifest.json"),
+            .project_root("project_0001")
+            .join("repos.json"),
+        serde_json::to_vec_pretty(&projections).expect("serialize fixture projections"),
     )
-    .expect("remove manifest to keep repository routing legacy");
+    .expect("rewrite repos.json with registered projection");
+    crate::product::logical_codebase::IssueCodebaseSelectionStore::new(fixture.paths.clone())
+        .save(&crate::product::logical_codebase::IssueCodebaseSelection::explicit(
+            "project_0001",
+            &issue.id,
+            vec![member_id],
+            Vec::new(),
+            Vec::new(),
+            None,
+        ))
+        .expect("save issue selection");
+    super::lc_fixture_support::ensure_planning_index_and_policy(&fixture.paths, "project_0001");
+    std::fs::remove_file(
+        crate::product::logical_codebase::store::lc_scope_root(
+            &fixture.paths,
+            "project_0001",
+            &None,
+        )
+        .expect("capability scope root")
+        .join("capabilities.json"),
+    )
+    .expect("remove capability rows");
 
     let (engine_tx, _engine_rx) = mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
     let mut session = WorkspaceSession::from_record(session_record.clone());
@@ -596,9 +700,11 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
         panic!("expected text error outbound");
     };
     let message: WsOutMessage = serde_json::from_str(&json).expect("ws error message");
-    assert!(matches!(
-        message,
-        WsOutMessage::Error { ref message }
-            if message.starts_with("logical plan launch failed:")
-    ));
+    let WsOutMessage::Error { message } = message else {
+        panic!("expected error outbound, got {message:?}");
+    };
+    assert!(
+        message.starts_with("logical plan launch failed:"),
+        "unexpected handler error (expected logical plan launch failure): {message}"
+    );
 }

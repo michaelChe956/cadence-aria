@@ -1,4 +1,11 @@
-    fn legacy_fixture() -> Fixture {
+    /// 无 LC 归属的 attempt（无 project/逻辑代码库/selection，且无
+    /// `target_snapshot`）。REQ-ROUTE-01 两态化后这类输入一律
+    /// `FailClosed(TargetMissing)` ⇒ admission 必须 fail-closed，绝不再走
+    /// 已删除的单仓 `legacy_snapshot_digest` 准入路径。
+    ///
+    /// 只用于验证「无归属 ⇒ fail-closed」契约本身；所有以「状态机/租约
+    /// 行为」为不变量的用例请用 `logical_fixture_with_snapshot()`。
+    fn unbound_fixture() -> Fixture {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path().join(".aria"));
         let store = CodingAttemptStore::new(paths.clone());
@@ -31,7 +38,7 @@
 
     fn logical_fixture_with_snapshot() -> Fixture {
         let mut fixture = logical_fixture_inner(None);
-        let snapshot = snapshot_for(&fixture);
+        let snapshot = snapshot_for(&fixture.paths, fixture.logical_id, fixture.checkout_id);
         let mut attempt = fixture.attempt.clone();
         attempt.target_snapshot = Some(snapshot);
         fixture
@@ -45,100 +52,7 @@
     fn logical_fixture_inner(snapshot: Option<AttemptTargetSnapshot>) -> Fixture {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path().join(".aria"));
-        ProjectStore::new(paths.clone())
-            .create(CreateProjectInput {
-                name: "project".to_string(),
-                description: None,
-            })
-            .unwrap();
-        let logical_id = LogicalRepositoryId(Uuid::new_v4());
-        let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
-        let repository_path = temp.path().join("repository_0001");
-        let source_identity = RepositorySourceIdentity::from_git_parts(
-            &repository_path,
-            repository_path.join(".git"),
-            None,
-        );
-        let authority = LogicalCodebaseStore::new(paths.clone());
-        let manifest = LogicalCodebaseManifest::new(
-            PROJECT_ID,
-            temp.path().join("aggregate-root"),
-            vec![logical_id],
-        );
-        authority.save_manifest(PROJECT_ID, &manifest).unwrap();
-        authority
-            .save_member(
-                PROJECT_ID,
-                &CodebaseMemberRecord {
-                    logical_repository_id: logical_id,
-                    physical_repository_id: "repository_0001".to_string(),
-                    alias: "repository_0001".to_string(),
-                    role: "repository".to_string(),
-                    ordinal: 1,
-                    source_identity: source_identity.clone(),
-                    repo_type: RepositoryType::Unknown,
-                    tech_stack: Vec::new(),
-                    owner: None,
-                    tags: Vec::new(),
-                    default_ref: None,
-                    checkout_ids: vec![checkout_id],
-                    status: MemberStatus::Active,
-                    created_at: "2026-08-11T00:00:00Z".to_string(),
-                    updated_at: "2026-08-11T00:00:00Z".to_string(),
-                },
-            )
-            .unwrap();
-        authority
-            .save_checkout(
-                PROJECT_ID,
-                &RepositoryCheckoutRecord {
-                    checkout_id,
-                    logical_repository_id: logical_id,
-                    physical_repository_id: "repository_0001".to_string(),
-                    kind: CheckoutKind::Main,
-                    canonical_path: repository_path.clone(),
-                    checkout_path_hash: "sha256:checkout".to_string(),
-                    git_dir_identity: source_identity.git_dir_identity(),
-                    revision: Some("abcdef".to_string()),
-                    availability: CheckoutAvailability::Available,
-                    observed_at: "2026-08-11T00:00:00Z".to_string(),
-                    created_at: "2026-08-11T00:00:00Z".to_string(),
-                    updated_at: "2026-08-11T00:00:00Z".to_string(),
-                },
-            )
-            .unwrap();
-        IssueCodebaseSelectionStore::new(paths.clone())
-            .save(&IssueCodebaseSelection::explicit(
-                PROJECT_ID,
-                ISSUE_ID,
-                vec![logical_id],
-                Vec::new(),
-                vec![logical_id],
-                None,
-            ))
-            .unwrap();
-        write_json(
-            &paths.project_root(PROJECT_ID).join("repos.json"),
-            &[RepositoryRecord {
-                id: "repository_0001".to_string(),
-                project_id: PROJECT_ID.to_string(),
-                name: "repository_0001".to_string(),
-                path: repository_path,
-                repo_hash: "sha256:repository".to_string(),
-                runtime_root: PathBuf::from("runtime"),
-                default_policy_preset: "manual-write".to_string(),
-                default_provider_mode: "fake".to_string(),
-                created_at: "2026-08-11T00:00:00Z".to_string(),
-                updated_at: "2026-08-11T00:00:00Z".to_string(),
-                logical_repository_id: Some(logical_id),
-                primary_checkout_id: Some(checkout_id),
-                identity_schema_version: 1,
-            }],
-        )
-        .unwrap();
-        AggregatePolicyArtifactStore::new(paths.clone())
-            .ensure_bootstrap(&manifest)
-            .unwrap();
+        let (logical_id, checkout_id) = seed_logical_authority(&paths, temp.path());
         let store = CodingAttemptStore::new(paths.clone());
         let attempt = store
             .create_attempt(CreateCodingAttemptInput {
@@ -163,31 +77,25 @@
         }
     }
 
-    fn snapshot_for(fixture: &Fixture) -> AttemptTargetSnapshot {
-        let checkout = LogicalCodebaseStore::new(fixture.paths.clone())
-            .load_checkout(PROJECT_ID, fixture.checkout_id)
-            .unwrap()
-            .unwrap();
-        let manifest = LogicalCodebaseStore::new(fixture.paths.clone())
-            .load_manifest(PROJECT_ID)
-            .unwrap()
-            .unwrap();
-        let policy = AggregatePolicyArtifactStore::new(fixture.paths.clone())
-            .get(PROJECT_ID)
-            .unwrap()
-            .unwrap();
-        AttemptTargetSnapshot {
-            logical_repository_id: fixture.logical_id,
-            checkout_id: fixture.checkout_id,
-            physical_repository_id: "repository_0001".to_string(),
-            canonical_path: checkout.canonical_path,
-            git_dir_identity: checkout.git_dir_identity,
-            revision: checkout.revision,
-            policy_digest: policy.digest,
-            membership_revision: manifest.membership_revision,
-            captured_at: "2026-08-11T00:00:00Z".to_string(),
-            capture_source: "test".to_string(),
-        }
+    /// 在给定 paths 下建 project + 逻辑代码库权威（manifest/member/checkout/
+    /// issue selection/policy/repos.json）。REQ-ROUTE-01 两态化后 admission 的
+    /// 唯一凭证是「LC 权威 + 冻结快照」：凡以 admission 为不变量的用例都必须
+    /// 先建它，无归属输入一律 `FailClosed(TargetMissing)`。
+    fn seed_logical_authority(
+        paths: &ProductAppPaths,
+        root: &std::path::Path,
+    ) -> (LogicalRepositoryId, RepositoryCheckoutId) {
+        crate::product::logical_codebase::logical_test_fixture::seed_logical_authority(
+            paths, PROJECT_ID, ISSUE_ID, root,
+        )
+    }
+
+    fn snapshot_for(
+        paths: &ProductAppPaths,
+        logical_id: LogicalRepositoryId,
+        checkout_id: RepositoryCheckoutId,
+    ) -> AttemptTargetSnapshot {
+        crate::product::logical_codebase::logical_test_fixture::snapshot_for(paths, PROJECT_ID, logical_id, checkout_id)
     }
 
     fn provider_snapshot() -> ProviderConfigSnapshot {
@@ -205,6 +113,12 @@
     fn terminated_automation_plan_rejects_admission_but_manual_unaffected() {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        // REQ-ROUTE-01 两态：admission 的唯一凭证是「LC 权威 + 冻结快照」——
+        // manual 路径也必须先有真实归属，否则 fail-closed 的
+        // `TargetSnapshotIdentityDrifted` 会掩盖本用例真正要钉的
+        // `automation_plan_terminated` 拒绝。
+        let (logical_id, checkout_id) = seed_logical_authority(&paths, temp.path());
+        let snapshot = snapshot_for(&paths, logical_id, checkout_id);
         let store = CodingAttemptStore::new(paths.clone());
         let group_input = |issue_id: &str, plan_id: &str| {
             crate::product::coding_attempt_store::CreateGroupCodingAttemptInput {
@@ -216,7 +130,7 @@
                 branch_name: format!("aria/{plan_id}/attempt-1"),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
-                target_snapshot: None,
+                target_snapshot: Some(snapshot.clone()),
                 max_auto_rework: 0,
                 start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             }

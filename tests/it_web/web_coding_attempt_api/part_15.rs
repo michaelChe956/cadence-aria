@@ -289,10 +289,21 @@ async fn delete_coding_attempt_cleans_shared_worktree_when_no_other_attempts() {
     assert_eq!(status, StatusCode::OK);
     let attempt_id = assert_global_attempt_id(&attempt);
 
-    // attempt 创建时会 upsert shared-worktree.json；记录路径便于删除后断言。
-    let shared_json = harden_issue_root(&app_paths).join("issue-shared-worktree.json");
-    let shared_lock = harden_issue_root(&app_paths).join(".issue-shared-worktree.json.lock");
-    assert!(shared_json.exists(), "precondition: shared-worktree seeded");
+    // attempt 创建时会 upsert 仓维 shared-worktrees/{repository}.json（REQ-COD-03
+    // 三元键；迁移后单件 attempt 冻结快照走仓维路由）。经文件路径断言便于
+    // 同步钉 json 与 lock 两个文件的清理。
+    let attempt_record = CodingAttemptStore::new(app_paths.clone())
+        .get_attempt(HARDEN_PROJECT_ID, HARDEN_ISSUE_ID, &attempt_id)
+        .expect("load attempt for repo route");
+    let logical_id = attempt_record
+        .target_snapshot
+        .as_ref()
+        .expect("repo-scoped attempt snapshot")
+        .logical_repository_id;
+    let repo_dir = harden_issue_root(&app_paths).join("shared-worktrees");
+    let shared_json = repo_dir.join(format!("{}.json", logical_id.0));
+    let shared_lock = repo_dir.join(format!(".{}.json.lock", logical_id.0));
+    assert!(shared_json.exists(), "precondition: repo shared-worktree seeded");
 
     let (status, body) = request_json(
         app.clone(),
@@ -305,11 +316,13 @@ async fn delete_coding_attempt_cleans_shared_worktree_when_no_other_attempts() {
 
     assert!(
         !shared_json.exists(),
-        "issue-shared-worktree.json must be deleted when no other attempts remain"
+        "repo shared-worktrees/{}.json must be deleted when no other active attempts remain",
+        logical_id.0
     );
     assert!(
         !shared_lock.exists(),
-        ".issue-shared-worktree.json.lock must be deleted when no other attempts remain"
+        "repo shared-worktrees/.{}.json.lock must be deleted when no other active attempts remain",
+        logical_id.0
     );
 }
 
@@ -336,12 +349,26 @@ async fn delete_coding_attempt_preserves_shared_worktree_when_other_attempts_exi
     assert_eq!(status, StatusCode::OK);
     let attempt_id = assert_global_attempt_id(&attempt);
 
-    let shared_json = harden_issue_root(&app_paths).join("issue-shared-worktree.json");
-    let shared_lock = harden_issue_root(&app_paths).join(".issue-shared-worktree.json.lock");
-    assert!(shared_json.exists(), "precondition: shared-worktree seeded");
+    // 仓维路由（REQ-COD-03）：删除后「同 logical repository 无其他【活动】
+    // attempt 引用时才删 shared-worktrees/{id}.json」。经文件路径断言 json 与
+    // lock 两个文件的保留。
+    let attempt_record = CodingAttemptStore::new(app_paths.clone())
+        .get_attempt(HARDEN_PROJECT_ID, HARDEN_ISSUE_ID, &attempt_id)
+        .expect("load attempt for repo route");
+    let logical_id = attempt_record
+        .target_snapshot
+        .as_ref()
+        .expect("repo-scoped attempt snapshot")
+        .logical_repository_id;
+    let repo_dir = harden_issue_root(&app_paths).join("shared-worktrees");
+    let shared_json = repo_dir.join(format!("{}.json", logical_id.0));
+    let shared_lock = repo_dir.join(format!(".{}.json.lock", logical_id.0));
+    assert!(shared_json.exists(), "precondition: repo shared-worktree seeded");
 
-    // 在 coding-attempts 目录里伪造另一条 attempt json（基于当前 attempt 改写 id/work_item_id）。
-    // 删除当前 attempt 后，list_attempts_for_issue 仍能 list 这条 → shared-worktree 保留。
+    // 在 coding-attempts 目录里伪造另一条同仓【活动】attempt json（基于当前
+    // attempt 改写 id/work_item_id，保持 created 活动态与同一冻结快照）。
+    // 删除当前 attempt 后，同仓仍有活动 attempt 引用 → 仓维 shared-worktree 保留
+    // （REQ-COD-03 §4.2.4：同仓其他 item 可能复用，不能一个 attempt 删就清）。
     let coding_root = harden_issue_root(&app_paths).join("coding-attempts");
     let current_json_path = coding_root.join(format!("{attempt_id}.json"));
     let mut other_record: serde_json::Value =
@@ -349,7 +376,7 @@ async fn delete_coding_attempt_preserves_shared_worktree_when_other_attempts_exi
             .expect("parse attempt json");
     other_record["id"] = json!("coding_attempt_otherremainingattempt00000");
     other_record["work_item_id"] = json!("work_item_other");
-    other_record["status"] = json!("aborted");
+    other_record["status"] = json!("created");
     let other_json_path = coding_root.join("coding_attempt_otherremainingattempt00000.json");
     fs::write(&other_json_path, other_record.to_string())
         .expect("seed other remaining attempt json");
@@ -365,11 +392,13 @@ async fn delete_coding_attempt_preserves_shared_worktree_when_other_attempts_exi
 
     assert!(
         shared_json.exists(),
-        "issue-shared-worktree.json must be preserved when another attempt remains"
+        "repo shared-worktrees/{}.json must be preserved while another active same-repo attempt remains",
+        logical_id.0
     );
     assert!(
         shared_lock.exists(),
-        ".issue-shared-worktree.json.lock must be preserved when another attempt remains"
+        "repo shared-worktrees/.{}.json.lock must be preserved while another active same-repo attempt remains",
+        logical_id.0
     );
     assert!(
         other_json_path.exists(),

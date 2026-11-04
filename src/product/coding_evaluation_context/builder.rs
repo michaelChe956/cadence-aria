@@ -294,22 +294,6 @@ fn schema_v2_evaluation_context_repository_id(
     let project = ProjectStore::new(paths.clone()).get(&attempt.project_id)?;
     let store = RepositoryStore::for_project(paths.clone(), &project);
     match RepositoryRouting::load_for_issue(paths, &attempt.project_id, &attempt.issue_id)? {
-        RepositoryRouting::Legacy { .. } => {
-            let issue =
-                IssueStore::new(paths.clone()).get(&attempt.project_id, &attempt.issue_id)?;
-            let physical_repository_id =
-                issue.repo_id.ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "repository",
-                    id: format!("issue:{}:repo_id", attempt.issue_id),
-                })?;
-            match store.resolve_legacy_physical_repository_if_dual(
-                &attempt.project_id,
-                &physical_repository_id,
-            ) {
-                Ok((_, _, repository)) => Ok(repository.id),
-                Err(_) => Ok(physical_repository_id),
-            }
-        }
         RepositoryRouting::Logical {
             manifest,
             selection,
@@ -350,7 +334,7 @@ fn schema_v2_evaluation_context_repository_id(
                 crate::product::logical_codebase::snapshot_validator::validate_snapshot_fields(
                     paths,
                     attempt,
-                    lc_id.as_deref(),
+                    Some(lc_id.as_str()),
                 )
                 .map_err(|code| {
                     routing_error(
@@ -717,7 +701,9 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
                 title: "评估上下文 fail-closed".to_string(),
                 description: None,
                 change_id: None,
@@ -891,7 +877,9 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: None,
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
                 title: "schema-v2 routing".to_string(),
                 description: None,
                 change_id: None,

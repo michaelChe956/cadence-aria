@@ -808,6 +808,38 @@ describe("c1TargetLabel", () => {
     expect(label).not.toContain("null");
     expect(label).toContain("—");
   });
+
+  // 发起侧载体收窄（方案 A）：收件箱展示侧**保留三变体**——第三变体
+  // `single_repository` 仅 legacy 只读（老单仓记录仍要显示，不退化为
+  // 「target 未知」）；新投影不再产出它。
+  it("c1_target_label_keeps_legacy_readonly", () => {
+    // 三变体全覆盖。
+    expect(
+      c1TargetLabel({ kind: "single_repository", repository_id: "repo_0001" }),
+    ).toBe("单仓 repo_0001");
+    expect(
+      c1TargetLabel({
+        kind: "logical_codebase",
+        logical_codebase_id: "lc_0001",
+        logical_repository_id: "lr_0001",
+      }),
+    ).toBe("逻辑代码库 lc_0001/lr_0001");
+    expect(
+      c1TargetLabel({
+        kind: "logical_codebase_members",
+        logical_codebase_id: "lc_0001",
+        logical_repository_ids: ["lr_0001", "lr_0002"],
+      }),
+    ).toBe("逻辑代码库 lc_0001[2 个成员]");
+    // 未知 kind → 「target 未知」（不猜、不打印 undefined）。
+    expect(
+      c1TargetLabel({
+        kind: "future_carrier_kind",
+      } as unknown as C1WaitingItem["target"]),
+    ).toBe("target 未知");
+    // 缺 target → 「target 未知」。
+    expect(c1TargetLabel(null)).toBe("target 未知");
+  });
 });
 
 // ── UI-3（待处理统一）：coding choice 规范身份与双来源去重 ──

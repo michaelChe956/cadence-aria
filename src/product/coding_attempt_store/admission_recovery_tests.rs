@@ -17,7 +17,7 @@
 
     #[test]
     fn blocked_attempt_cannot_reach_running_through_direct_status_update() {
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         seed_attempt_status(&fixture, CodingAttemptStatus::Blocked);
         let error = fixture
             .store
@@ -42,7 +42,7 @@
 
     #[test]
     fn blocked_attempt_re_enters_running_through_admission_cas() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         seed_attempt_status(&fixture, CodingAttemptStatus::Blocked);
         let version_before = fixture.attempt.version;
 
@@ -66,7 +66,7 @@
 
     #[test]
     fn paused_attempt_resume_cycle_consumes_fresh_admission_ticket() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         // 第一个 Running 会话：admit → transition。
         let ticket = fixture
             .store
@@ -109,7 +109,7 @@
 
     #[test]
     fn stale_ticket_replay_after_pause_is_rejected_by_version_cas() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let first_ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -166,7 +166,7 @@
 
     #[test]
     fn combined_admission_entry_transitions_created_attempt_to_running() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let attempt = fixture
             .store
             .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
@@ -178,7 +178,7 @@
 
     #[test]
     fn combined_admission_entry_rejects_attempt_that_is_already_running() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         fixture
             .store
             .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
@@ -214,7 +214,7 @@
 
     #[test]
     fn combined_admission_entry_resumes_applying_plan_amendment_attempt() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         seed_attempt_status(&fixture, CodingAttemptStatus::ApplyingPlanAmendment);
         let attempt = fixture
             .store
@@ -226,7 +226,7 @@
 
     #[test]
     fn manual_recovery_attempt_recovers_through_explicit_channel() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -261,7 +261,7 @@
 
     #[test]
     fn recovery_channel_rejects_non_manual_recovery_sources() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let error = fixture
             .store
             .recover_attempt_from_manual_recovery(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
@@ -290,7 +290,7 @@
         // F-14 零回归钉：恢复只能走显式通道（wire 动作 recover_coding），
         // 一般 admission（半启动重启 / sc_advance 等自动路径共用入口）对
         // AwaitingManualRecovery 保持 fail-closed 拒绝。
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -326,7 +326,7 @@
     fn manual_recovery_persists_diagnostic_chat_entry() {
         // 死因可考（§3#5）：人工恢复转换同步落 System/SystemEvent 尾帧
         // （稳定 reason 码 + 原始错误串），durable 层不再零痕迹。
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         let diagnostic = fixture
             .store
             .append_manual_recovery_diagnostic(
@@ -369,7 +369,7 @@
         // k3 P2 回归钉：诊断尾帧用独立号段（coding_manual_recovery_diagnostic_NNNN），
         // 后到的同号备注（chat entry id 由备注序号派生为同号 coding_chat_entry_NNNN，
         // chat_entry_id_for_context_note）不得 write_json 静默覆盖死因证据——两者共存。
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         let diagnostic = fixture
             .store
             .append_manual_recovery_diagnostic(

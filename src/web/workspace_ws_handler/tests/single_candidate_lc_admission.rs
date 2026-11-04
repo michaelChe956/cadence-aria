@@ -172,40 +172,6 @@ impl ProviderAdapter for LcStubSyncAdapter {
     }
 }
 
-fn lc_always_available_gate() -> Arc<ProviderAvailabilityGate> {
-    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
-    impl ProviderHealthSource for AlwaysHealthy {
-        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
-            self.0.clone()
-        }
-        fn degraded(&self) -> bool {
-            false
-        }
-    }
-
-    let checked_at = chrono::Utc::now();
-    let snapshot = Arc::new(ProviderHealthSnapshot {
-        schema_version: 1,
-        generation: 1,
-        checked_at,
-        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-            .into_iter()
-            .map(|provider| ProviderHealthEntry {
-                provider,
-                command: "stub".to_string(),
-                available: true,
-                version: Some("1.0".to_string()),
-                reason_code: None,
-                reason: None,
-                checked_at,
-            })
-            .collect(),
-    });
-    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
-        snapshot,
-    ))))
-}
-
 /// 记录输入并输出预置 markdown 的 author provider（gateway registry 与
 /// run-context registry 共用同一实例）。output 的 story/design 引用使用确定
 /// 字面量 story_0001/design_0001：provider 必须先于夹具构造（gateway registry
@@ -498,7 +464,9 @@ pub(super) fn register_alias_logical_codebase_with_extras(
     let capability_source: Arc<dyn ProviderCapabilitySource> = extras
         .capability
         .unwrap_or_else(|| Arc::new(LcStaticCapabilitySource));
-    let availability_gate = extras.availability.unwrap_or_else(lc_always_available_gate);
+    let availability_gate = extras.availability.unwrap_or_else(
+        crate::web::handlers::automation_enrollment_test_support::always_available_gate,
+    );
     let mut gateway_registry = ProviderRegistry::new();
     gateway_registry.register(ProviderName::ClaudeCode, gateway_author);
     let gateway = LogicalCodebaseProviderGateway::with_audit(

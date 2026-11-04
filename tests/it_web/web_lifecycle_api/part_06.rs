@@ -177,16 +177,24 @@ mod http_confirm_batch_gate {
             json!({"name":"Repo","path":repo.path()}),
         )
         .await;
-        let (status, issue) = super::request_json(
-            app.clone(),
-            Method::POST,
-            "/api/projects/project_0001/issues",
-            json!({"title":"批次确认门","description":null,"repository_id":"repository_0001"}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{issue}");
-
+        // 块3 夹具顺序：issue 经 store 建并携带确定性 legacy 别名 LC 归属（HTTP
+        // 创建要求 LC 权威先在，会把「work item 先建、迁移回填 target」顺序倒过来）。
         let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+        cadence_aria::product::issue_store::IssueStore::new(app_paths.clone())
+            .create(cadence_aria::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id:
+                    cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                        "project_0001",
+                    ),
+                title: "批次确认门".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .expect("create issue");
+
         let lifecycle = LifecycleStore::new(app_paths.clone());
         let mut work_item_ids = Vec::new();
         for index in 1..=2 {
@@ -227,6 +235,30 @@ mod http_confirm_batch_gate {
                 },
             )
             .expect("create plan");
+        // 迁移 + 生产 rebuild 端点建 active 聚合索引（WS 会话工厂经
+        // PlanningContextResolver 读索引，缺失即 aggregate_index_active_missing）；
+        // codegraph sync 与并行夹具互踩 ⇒ 持 crate 级锁串行。
+        {
+            let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
+            cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(
+                app_paths.clone(),
+            )
+            .ensure_identity_schema("project_0001")
+            .expect("migrate fixture repository into logical codebase authority");
+            let lc_id = cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                "project_0001",
+            );
+            let (status, index_rebuild) = super::request_json(
+                app.clone(),
+                Method::POST,
+                &format!(
+                    "/api/projects/project_0001/logical-codebases/{lc_id}/aggregate-indexes/rebuild"
+                ),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{index_rebuild}");
+        }
         let session = lifecycle
             .create_workspace_session(CreateWorkspaceSessionInput {
                 project_id: "project_0001".to_string(),

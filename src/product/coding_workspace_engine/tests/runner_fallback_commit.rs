@@ -234,6 +234,16 @@ async fn runner_fallback_commit_legacy_head_commit_none_channel_is_unchanged() {
         .to_string();
     let base_head = worktree_head(&repo);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：`start_attempt` 的准入凭证是「LC 权威 + 冻结
+    // target_snapshot」——无归属 attempt 一律 `FailClosed(TargetMissing)`，
+    // 本用例验证的是**提交兜底通道**（head_commit=None ⇒ 取 worktree HEAD），
+    // 故必须先补出合法归属。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -248,7 +258,7 @@ async fn runner_fallback_commit_legacy_head_commit_none_channel_is_unchanged() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("attempt");

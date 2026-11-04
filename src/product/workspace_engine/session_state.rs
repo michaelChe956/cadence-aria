@@ -426,6 +426,10 @@ impl WorkspaceEngine {
             automation: Some(
                 crate::product::models::automation::AutomationOwnership::client_default(),
             ),
+            // REQ-HGC-04：引擎自建帧不判「继续自动化」入口（引擎不知 durable
+            // enrollment）——对外出口（manager/router）以 durable 事实注入；
+            // 缺席即 None（未知，前端不给假指引）。
+            plan_continue_available: None,
             // A1c（Task 2.2）：durable LC 恢复纯投影——直取 runtime session
             // 镜像的 durable 字段（2.1 from_record 逐字段透传），引擎不写
             // 恢复业务；对外出口（manager/router）不二次覆写。

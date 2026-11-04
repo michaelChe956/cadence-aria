@@ -34,6 +34,10 @@ impl LogicalCodebaseBootstrapProjector {
             self.project_rules_policy_step(project_id, logical_codebase_id, &resolution)?;
         let member_index_step = self.project_member_index_step(project_id, logical_codebase_id)?;
         let aggregate_step = self.project_aggregate_index_step(project_id, logical_codebase_id)?;
+        // codegraph 环境前置是「被阻断未开始」而不是失败：两条索引步骤各自投影
+        // 为 NotStarted + 无动作 + 无 failure，通知由下方合成**恰好一条**引导
+        // （文案取自 failure_copy 同一码表，不另抄中文）。
+        let codegraph_block = self.codegraph_block_code(project_id, logical_codebase_id)?;
 
         let steps = vec![
             identity_step,
@@ -45,7 +49,7 @@ impl LogicalCodebaseBootstrapProjector {
         let planning_ready = steps
             .iter()
             .all(|step| step.status == LogicalCodebaseBootstrapStepStatus::Completed);
-        let notices = project_notices(&steps);
+        let notices = project_notices(&steps, codegraph_block.as_deref());
 
         Ok(LogicalCodebaseBootstrapProjection {
             project_id: project_id.to_string(),
@@ -60,6 +64,29 @@ impl LogicalCodebaseBootstrapProjector {
             planning_ready,
             notices,
         })
+    }
+
+    /// codegraph 环境前置的阻断码：片5 的 `EnvironmentPrecondition` 把
+    /// `codegraph_missing` / `codegraph_version_mismatch` 落成 operation 的
+    /// `error.reason_code`（且全部 step 保持 Pending）。它不是失败事实，
+    /// 因此投影为「被阻断未开始」，**不伪造 `failure`**。
+    fn codegraph_block_code(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        let operations =
+            crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore::for_lc(
+                self.paths.clone(),
+                logical_codebase_id,
+            )
+            .list(project_id)?;
+        Ok(operations
+            .first()
+            .and_then(|latest| latest.error.as_ref())
+            .map(|error| error.reason_code.as_str())
+            .filter(|code| matches!(*code, "codegraph_missing" | "codegraph_version_mismatch"))
+            .map(str::to_string))
     }
 
     /// identity：LC record + identity migration journal。Failed journal 投影
@@ -80,15 +107,18 @@ impl LogicalCodebaseBootstrapProjector {
                     status: LogicalCodebaseBootstrapStepStatus::Failed,
                     object_id: journal.migration_id.clone(),
                     checkpoint: None,
-                    failure: Some(BootstrapFailure {
-                        reason_code: "identity_migration_failed".to_string(),
-                        detail: journal
-                            .last_error
-                            .clone()
-                            .unwrap_or_else(|| "identity migration failed".to_string()),
-                        retryable: false,
-                        external_side_effect: "none".to_string(),
-                    }),
+                    failure: Some(BootstrapFailure::new(
+                        "identity_migration_failed".to_string(),
+                        sanitize_failure_detail(
+                            &journal
+                                .last_error
+                                .clone()
+                                .unwrap_or_else(|| "身份迁移没有留下更详细的诊断输出。".to_string()),
+                            None,
+                        ),
+                        false,
+                        "none".to_string(),
+                    )),
                     allowed_actions: vec![BootstrapActionKind::Repair],
                 });
             }
@@ -226,17 +256,18 @@ impl LogicalCodebaseBootstrapProjector {
                        detail: String,
                        allowed_actions: Vec<BootstrapActionKind>|
          -> BootstrapStepProjection {
+            let detail = sanitize_failure_detail(&detail, Some(&resolution.authority_root));
             BootstrapStepProjection {
                 step: LogicalCodebaseBootstrapStep::RulesPolicy,
                 status: LogicalCodebaseBootstrapStepStatus::WaitingForHuman,
                 object_id: policy.policy_id.clone(),
                 checkpoint: Some(policy_checkpoint.clone()),
-                failure: Some(BootstrapFailure {
-                    reason_code: reason_code.to_string(),
+                failure: Some(BootstrapFailure::new(
+                    reason_code.to_string(),
                     detail,
-                    retryable: true,
-                    external_side_effect: "none".to_string(),
-                }),
+                    true,
+                    "none".to_string(),
+                )),
                 allowed_actions,
             }
         };
@@ -325,35 +356,7 @@ impl LogicalCodebaseBootstrapProjector {
                     status: LogicalCodebaseBootstrapStepStatus::Failed,
                     object_id: latest.operation_id.clone(),
                     checkpoint: Some(policy_checkpoint.clone()),
-                    failure: Some(BootstrapFailure {
-                        reason_code: latest
-                            .error
-                            .as_ref()
-                            .map(|error| error.reason_code.clone())
-                            .unwrap_or_else(|| "root_recipe_failed".to_string()),
-                        detail: latest
-                            .error
-                            .as_ref()
-                            .map(|error| {
-                                format!(
-                                    "stage {}: {}",
-                                    error.stage,
-                                    error
-                                        .stderr_summary
-                                        .as_deref()
-                                        .unwrap_or("no stderr summary")
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                "the latest root recipe operation failed".to_string()
-                            }),
-                        retryable: latest
-                            .error
-                            .as_ref()
-                            .map(|error| error.retryable)
-                            .unwrap_or(true),
-                        external_side_effect: "aggregate_initialization_provider_turn".to_string(),
-                    }),
+                    failure: Some(operation_failure(latest, Some(&resolution.authority_root))),
                     allowed_actions: vec![BootstrapActionKind::Retry],
                 });
             }
@@ -555,6 +558,25 @@ impl LogicalCodebaseBootstrapProjector {
                 LogicalCodebaseBootstrapStepStatus::Running
             }
         };
+        // codegraph 环境前置：索引这一步根本没开始，不能投影成失败
+        // （REQ-BOOT-08 的「被阻断未开始」形态）。
+        let codegraph_blocked = latest
+            .error
+            .as_ref()
+            .map(|error| error.reason_code.as_str())
+            .is_some_and(|code| {
+                matches!(code, "codegraph_missing" | "codegraph_version_mismatch")
+            });
+        if codegraph_blocked {
+            return Ok(BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::MemberIndex,
+                status: LogicalCodebaseBootstrapStepStatus::NotStarted,
+                object_id: latest.operation_id.clone(),
+                checkpoint: None,
+                failure: None,
+                allowed_actions: Vec::new(),
+            });
+        }
         let preflight_checkpoint = latest
             .steps
             .iter()
@@ -567,33 +589,7 @@ impl LogicalCodebaseBootstrapProjector {
                 completed_at: step.completed_at.clone(),
             });
         let failure =
-            (status == LogicalCodebaseBootstrapStepStatus::Failed).then(|| BootstrapFailure {
-                reason_code: latest
-                    .error
-                    .as_ref()
-                    .map(|error| error.reason_code.clone())
-                    .unwrap_or_else(|| "aggregate_initialization_failed".to_string()),
-                detail: latest
-                    .error
-                    .as_ref()
-                    .map(|error| {
-                        format!(
-                            "stage {}: {}",
-                            error.stage,
-                            error
-                                .stderr_summary
-                                .as_deref()
-                                .unwrap_or("no stderr summary")
-                        )
-                    })
-                    .unwrap_or_else(|| "aggregate initialization failed".to_string()),
-                retryable: latest
-                    .error
-                    .as_ref()
-                    .map(|error| error.retryable)
-                    .unwrap_or(true),
-                external_side_effect: "aggregate_initialization_provider_turn".to_string(),
-            });
+            (status == LogicalCodebaseBootstrapStepStatus::Failed).then(|| operation_failure(latest, None));
         let allowed_actions = match status {
             LogicalCodebaseBootstrapStepStatus::Failed => vec![BootstrapActionKind::Retry],
             LogicalCodebaseBootstrapStepStatus::WaitingForHuman => {
@@ -637,6 +633,33 @@ impl LogicalCodebaseBootstrapProjector {
                 allowed_actions: Vec::new(),
             });
         }
+        // codegraph 缺位/版本不符时索引根本不会开始（片5 的探针在索引前拦下），
+        // 这里保持「未开始 + 无动作」，把引导交给合成的那一条通知。
+        let codegraph_blocked = {
+            let operations =
+                crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore::for_lc(
+                    self.paths.clone(),
+                    logical_codebase_id,
+                )
+                .list(project_id)?;
+            operations
+                .first()
+                .and_then(|latest| latest.error.as_ref())
+                .map(|error| error.reason_code.as_str())
+                .is_some_and(|code| {
+                    matches!(code, "codegraph_missing" | "codegraph_version_mismatch")
+                })
+        };
+        if codegraph_blocked {
+            return Ok(BootstrapStepProjection {
+                step: LogicalCodebaseBootstrapStep::AggregateIndexActive,
+                status: LogicalCodebaseBootstrapStepStatus::NotStarted,
+                object_id: format!("aggregate-index:{logical_codebase_id}"),
+                checkpoint: None,
+                failure: None,
+                allowed_actions: Vec::new(),
+            });
+        }
         let records = store.records(project_id).map_err(map_index_error)?;
         let latest_non_superseded = records
             .iter()
@@ -653,12 +676,13 @@ impl LogicalCodebaseBootstrapProjector {
                         .warning
                         .clone()
                         .unwrap_or_else(|| "first aggregate index build failed".to_string());
-                    // 覆盖不足（成员无可索引代码文件，如 README-only 空
-                    // 仓）投影专用 reason_code，前端呈现「聚合索引失败:
-                    // 成员代码覆盖不足」业务标题；其它 CLI 失败保持通用
-                    // aggregate_index_failed。沿既有失败卡通道。
-                    let reason_code = if warning.contains("aggregate_index_member_coverage_failed")
-                    {
+                    // 三个业务码各自透出自己的稳定 reason_code（REQ-LAYOUT-01）：
+                    // 目录布局不被支持、成员代码覆盖不足各自有精确动作文案；
+                    // 其余 CLI 失败保持通用 aggregate_index_failed。沿既有失败
+                    // 卡通道，不新建卡型。
+                    let reason_code = if warning.contains("aggregate_index_layout_unsupported") {
+                        "aggregate_index_layout_unsupported"
+                    } else if warning.contains("aggregate_index_member_coverage_failed") {
                         "aggregate_index_member_coverage_failed"
                     } else {
                         "aggregate_index_failed"
@@ -666,12 +690,12 @@ impl LogicalCodebaseBootstrapProjector {
                     (
                         LogicalCodebaseBootstrapStepStatus::Failed,
                         record.aggregate_index_id.clone(),
-                        Some(BootstrapFailure {
-                            reason_code: reason_code.to_string(),
-                            detail: warning,
-                            retryable: true,
-                            external_side_effect: "aggregate_index_cli".to_string(),
-                        }),
+                        Some(BootstrapFailure::new(
+                            reason_code.to_string(),
+                            sanitize_failure_detail(&warning, None),
+                            true,
+                            "aggregate_index_cli".to_string(),
+                        )),
                     )
                 }
                 AggregateIndexStatus::Stale | AggregateIndexStatus::Degraded => (
@@ -714,8 +738,32 @@ fn logical_policy_missing_object_id(project_id: &str) -> String {
     format!("aggregate-policy:{project_id}")
 }
 
-/// 由失败/等待步骤派生通知（key = lc:step:object 稳定去重键）。
-fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBootstrapNotice> {
+/// 通知主文案：中文三段（成品 copy）+ **原始诊断段**。
+///
+/// 通知卡没有独立的折叠区（不像步骤行由 `BootstrapFailureLine` 折叠 detail），
+/// 所以诊断里的可执行信息（例如「调用 `POST /api/projects/…/initializations`
+/// 并携带新的 idempotency_key」里的实际 API 路径）**必须**进主文案，否则用户
+/// 只看到「怎么做」而拿不到具体入口。
+///
+/// 已经是成品序列化（`operation_failure` 产出的 detail 自带「问题：」开头）
+/// 时原样复用，避免二次包裹。
+fn notice_summary(failure: &BootstrapFailure) -> String {
+    match failure.copy.as_ref() {
+        Some(_) if failure.detail.starts_with("问题：") => failure.detail.clone(),
+        Some(copy) => render_detail(copy, Some(&failure.detail)),
+        None => failure.detail.clone(),
+    }
+}
+
+/// 由失败/等待步骤派生通知（key = lc:step:object 稳定去重键），并为
+/// codegraph 环境前置合成**恰好一条**阻断引导通知。
+///
+/// 被阻断的索引步骤不会有 `failure`（那是「未开始」不是「失败」），所以
+/// 通知不能从步骤 failure 派生；文案仍来自 `failure_copy` 同一码表。
+fn project_notices(
+    steps: &[BootstrapStepProjection],
+    codegraph_block: Option<&str>,
+) -> Vec<LogicalCodebaseBootstrapNotice> {
     let mut notices = Vec::new();
     for step in steps {
         if step.status == LogicalCodebaseBootstrapStepStatus::Completed
@@ -732,12 +780,10 @@ fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBoot
         let summary = step
             .failure
             .as_ref()
-            .map(|failure| failure.detail.clone())
+            .map(notice_summary)
             .unwrap_or_else(|| {
-                format!(
-                    "step {} is waiting for an explicit action",
-                    step.step.as_str()
-                )
+                let copy = describe_code("bootstrap_waiting_for_human", None);
+                render_detail(&copy, None)
             });
         let external_side_effect = step
             .failure
@@ -765,6 +811,25 @@ fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBoot
             created_at: String::new(),
         });
     }
+    if let Some(code) = codegraph_block {
+        let copy = describe_code(code, None);
+        let object_id = steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::MemberIndex)
+            .map(|step| step.object_id.clone())
+            .unwrap_or_else(|| code.to_string());
+        notices.push(LogicalCodebaseBootstrapNotice {
+            key: format!("bootstrap:codegraph:{code}"),
+            step: LogicalCodebaseBootstrapStep::MemberIndex,
+            object_id,
+            reason_code: code.to_string(),
+            summary: render_detail(&copy, None),
+            external_side_effect: "none".to_string(),
+            allowed_actions: Vec::new(),
+            next_step: Some(LogicalCodebaseBootstrapStep::AggregateIndexActive),
+            created_at: String::new(),
+        });
+    }
     notices
 }
 
@@ -782,4 +847,51 @@ fn policy_digest_drift_actions() -> Vec<BootstrapActionKind> {
 fn policy_reference_drift_actions() -> Vec<BootstrapActionKind> {
     // 引用漂移同样只能靠重发生成新的权威引用。
     vec![BootstrapActionKind::Republish]
+}
+
+/// 失败详情统一脱敏：7 条密钥规则 + home/聚合根前缀降级 + 4096 字节/40 行上限。
+///
+/// 诊断文本来自 provider CLI / Git / codegraph，可能带令牌与用户 home 绝对
+/// 路径；唯一实现在 `crate::cross_cutting::diagnostic_redaction`。
+fn sanitize_failure_detail(detail: &str, root: Option<&std::path::Path>) -> String {
+    let home = crate::product::logical_codebase::provider_trust_adapters::resolve_owner_home_from_env()
+        .map(|path| path.to_string_lossy().into_owned());
+    let root = root.map(|path| path.to_string_lossy().into_owned());
+    crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
+        detail,
+        &crate::cross_cutting::diagnostic_redaction::RedactionContext::new(
+            home.as_deref(),
+            root.as_deref(),
+        ),
+    )
+}
+
+/// 聚合初始化 operation 的失败投影：**唯一**文案来源出成品 copy，
+/// 再用同一序列化器渲染「问题/原因/怎么做/机器码/诊断」文本。
+fn operation_failure(
+    latest: &crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperation,
+    root: Option<&std::path::Path>,
+) -> BootstrapFailure {
+    let Some(error) = latest.error.as_ref() else {
+        let copy = describe_code("aggregate_initialization_failed", None);
+        return BootstrapFailure::with_copy(
+            "aggregate_initialization_failed".to_string(),
+            render_detail(&copy, None),
+            true,
+            "aggregate_initialization_provider_turn".to_string(),
+            copy,
+        );
+    };
+    let copy = describe(FailureInput::from(error));
+    let diagnostic = sanitize_failure_detail(
+        &crate::product::logical_codebase::failure_copy::record_diagnostic(error),
+        root,
+    );
+    BootstrapFailure::with_copy(
+        error.reason_code.clone(),
+        render_detail(&copy, Some(&diagnostic)),
+        error.retryable,
+        "aggregate_initialization_provider_turn".to_string(),
+        copy,
+    )
 }

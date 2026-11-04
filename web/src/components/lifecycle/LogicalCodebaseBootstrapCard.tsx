@@ -21,6 +21,8 @@ import type {
   BootstrapActionName,
   LogicalCodebaseBootstrapProjection,
 } from "../../api/types";
+import { BootstrapFailureLine } from "./BootstrapFailureLine";
+import { LogicalCodebaseLayoutTree } from "./LogicalCodebaseLayoutTree";
 
 const STEP_LABELS: Record<string, string> = {
   identity: "身份",
@@ -265,6 +267,7 @@ export function LogicalCodebaseBootstrapCard({
           {projection.planning_ready ? "PlanningReady" : "冷启动未完成"}
         </span>
       </div>
+      <LogicalCodebaseLayoutTree className="mt-1.5" />
       {ruleDrift ? (
         <div
           data-testid="lc-bootstrap-rule-drift"
@@ -312,17 +315,9 @@ export function LogicalCodebaseBootstrapCard({
               {STATUS_LABELS[step.status] ?? step.status}
             </span>
             {step.failure ? (
-              <span className="text-[var(--aria-danger)]">
-                原因 {step.failure.reason_code}：{step.failure.detail}
-              </span>
-            ) : null}
-            {step.status === "failed" || step.status === "waiting_for_human" ? (
-              <span>
-                {step.failure?.external_side_effect &&
-                step.failure.external_side_effect !== "none"
-                  ? `可能副作用：${step.failure.external_side_effect}`
-                  : null}
-              </span>
+              // 失败面唯一实现：主行中文问题、次行原因/怎么做、机器码降到次要行、
+              // 原始诊断收进折叠区。块3 的 LayoutFailureAction 挂在这行之后。
+              <BootstrapFailureLine failure={step.failure} />
             ) : null}
             {stepActions(step).length > 0 ? (
               <div
@@ -356,10 +351,17 @@ export function LogicalCodebaseBootstrapCard({
               data-testid={`lc-bootstrap-notice-${notice.step}`}
               className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5"
             >
-              <p className="text-xs font-semibold text-amber-800">
+              {/* 主次反转（REQ-BOOT-08）：中文三段（服务端 render_detail 成品）
+                  是主文案，机器码降级为次要行；whitespace-pre-line 保留服务端换行。 */}
+              <p className="whitespace-pre-line text-xs text-slate-700">
+                {notice.summary}
+              </p>
+              <p
+                className="mt-0.5 font-mono text-[11px] text-slate-500"
+                data-testid={`lc-bootstrap-notice-machine-line-${notice.step}`}
+              >
                 {notice.reason_code}
               </p>
-              <p className="mt-0.5 text-xs text-slate-600">{notice.summary}</p>
               {notice.external_side_effect &&
               notice.external_side_effect !== "none" ? (
                 <p className="mt-0.5 text-xs text-[var(--aria-danger)]">

@@ -5,6 +5,7 @@ use crate::product::coding_models::{
 };
 use crate::product::work_item_projection::renderer_for;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn fixture() -> (
@@ -14,6 +15,14 @@ fn fixture() -> (
 ) {
     let root = tempdir().expect("root");
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：准入/租约/失败恢复链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且 issue 记录必须在场（issue 聚合/路由解析）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -29,7 +38,7 @@ fn fixture() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -208,17 +217,23 @@ async fn sc_advance_provider_retry_exhaustion_enters_awaiting_manual_recovery() 
     let (_root, store, attempt) = sc_advance_fixture();
     let unit_id = attempt.active_unit_id.clone().expect("active unit");
     seed_run(&store, &attempt, 0);
-    let provider = ScAdvanceFailureProvider {
+    let provider = Arc::new(ScAdvanceFailureProvider {
         starts: AtomicUsize::new(0),
-    };
+    });
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    // 有 target_snapshot 的 provider run 只能经 LC provider gateway 启动。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -260,17 +275,23 @@ async fn legacy_provider_retry_exhaustion_remains_blocked_and_gated() {
     store
         .write_coding_attempt_for_test(&attempt)
         .expect("legacy admission");
-    let provider = ScAdvanceFailureProvider {
+    let provider = Arc::new(ScAdvanceFailureProvider {
         starts: AtomicUsize::new(0),
-    };
+    });
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    // 有 target_snapshot 的 provider run 只能经 LC provider gateway 启动。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -394,13 +415,20 @@ async fn group_failure_exhausted_enters_manual_recovery_without_new_attempt() {
     );
     assert_eq!(persisted.scope, CodingAttemptScope::WorkItemGroup);
     assert_eq!(persisted.admission_kind, CodingAdmissionKind::ScAdvance);
+    // REQ-MTG-02：带冻结快照的 attempt 落在 per-(plan,target) 桶里；同一不变量
+    // 换维度表达——按快照 target 桶查回仍是同一 attempt（未新建第二个）。
+    let logical_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("group fixture attempt carries a target snapshot")
+        .logical_repository_id;
     assert_eq!(
         store
             .get_attempt_for_work_item_group(
                 &attempt.project_id,
                 &attempt.issue_id,
                 "work_item_plan_0001",
-                None,
+                Some(logical_id),
             )
             .expect("group attempts")
             .expect("attempt")

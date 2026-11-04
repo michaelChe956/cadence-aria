@@ -463,10 +463,7 @@ impl ProviderRef {
     /// (错误信息含稳定判别码 `PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH` 与
     /// provider 名)。🔴 禁止 `_ => claude_code` 之类的静默回退:用户配置的
     /// provider 不允许被悄悄换成 Claude 或其它 provider 启动。match 保持无
-    /// `_` 分支的穷举形态——未来新增 `ProviderName` 变体时编译期即强制补
-    /// 显式映射决策。Codex 的 danger-full-access 路由阻断(REQ-ENV-05)由
-    /// gateway 路由级硬门施加,与本映射正交——Codex 配置=显式阻断错误而非
-    /// 被改成 Claude。
+    /// `_` 分支的穷举形态——未来新增 `ProviderName` 变体时编译期即强制补显式映射决策。
     pub fn from_provider_name(
         provider: &ProviderName,
         capability_snapshot_ref: impl Into<String>,

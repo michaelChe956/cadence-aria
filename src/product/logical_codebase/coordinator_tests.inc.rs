@@ -111,6 +111,7 @@ mod tests {
                 members: Vec::new(),
                 manifest_revision: 1,
                 manifest_digest: "sha256:manifest".to_string(),
+                ..Default::default()
             })
         }
     }
@@ -759,13 +760,16 @@ mod tests {
     /// - `Complete`：立即发一条 Completed 事件（既有默认，保持原测试语义）；
     /// - `Hang`：事件流保持打开且永不发事件——驱动 select 只能靠超时臂收口；
     /// - `Fail`：立即发 Failed 事件——驱动按 provider 报告失败收口；
-    /// - `CancelWhileHanging`：先取消共享 token 再保持挂起——驱动取消臂确定性触发。
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// - `CancelWhileHanging`：先取消共享 token 再保持挂起——驱动取消臂确定性触发；
+    /// - `StartFail`：`start`/`start_validated` 直接以 `ProviderAdapterError`
+    ///   （携带 stdout/stderr）拒绝启动——7.7 启动期诊断的确定性触发面。
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum StreamingBehavior {
         Complete,
         Hang,
         Fail,
         CancelWhileHanging,
+        StartFail { stdout: String, stderr: String },
     }
 
     /// 测试用 streaming adapter:记录 start 调用次数并立即完成会话。
@@ -816,7 +820,7 @@ mod tests {
             self.inputs.lock().unwrap().push(input);
             let (event_tx, events) = tokio::sync::mpsc::channel(1);
             let (commands, _command_rx) = tokio::sync::mpsc::channel(1);
-            match self.behavior {
+            match &self.behavior {
                 StreamingBehavior::Complete => {
                     let _ = event_tx.try_send(
                         crate::cross_cutting::streaming_provider::ProviderEvent::Completed(
@@ -831,6 +835,19 @@ mod tests {
                     let _ = event_tx.try_send(
                         crate::cross_cutting::streaming_provider::ProviderEvent::Failed {
                             message: "simulated aggregate recipe failure".to_string(),
+                        },
+                    );
+                }
+                StreamingBehavior::StartFail { stdout, stderr } => {
+                    return Err(
+                        crate::cross_cutting::provider_adapter::ProviderAdapterError {
+                            code: crate::protocol::provider_errors::ProviderErrorCode::ProviderUnauthorized,
+                            details: "simulated start failure for diagnostics".to_string(),
+                            stdout: stdout.clone(),
+                            stderr: stderr.clone(),
+                            exit_code: None,
+                            timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+                            duration_ms: 1,
                         },
                     );
                 }
@@ -1051,8 +1068,15 @@ mod tests {
         let preflight: Arc<dyn AggregatePreflightService> = Arc::new(
             DeterministicAggregatePreflightService::new(paths.clone()).for_lc(legacy_lc),
         );
-        let driver =
-            GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_claude_code_1_4_0");
+        let driver = GatewayBackedAggregateProviderTurnDriver::with_provider(
+            gateway,
+            // 夹具按 provider 构造：与 input.provider 同源的 ClaudeCode 冻结名。
+            crate::product::logical_codebase::ProviderRef::from_provider_name(
+                &ProviderName::ClaudeCode,
+                "cap_claude_code_1_4_0",
+            )
+            .expect("claude_code is a launchable provider"),
+        );
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(match command_timeout {
             Some(timeout) => driver.with_command_timeout(timeout),
             None => driver,
@@ -1137,4 +1161,6 @@ mod tests {
     include!("coordinator_tests_contract.inc.rs");
     include!("coordinator_tests_profile_trust.inc.rs");
     include!("coordinator_tests_skills.inc.rs");
+    include!("coordinator_tests_environment.inc.rs");
+    include!("coordinator_tests_selection.inc.rs");
 }

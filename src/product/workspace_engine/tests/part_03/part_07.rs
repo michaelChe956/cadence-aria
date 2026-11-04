@@ -30,13 +30,14 @@ async fn item_and_batch_plan_reopen_without_index_enters_save_failure_human_conf
             TimelineNodeType::WorkItemBatchReview,
         ),
     ] {
-        let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+        let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
             make_work_item_plan_engine_with_draft_candidate(&format!(
                 "sess_plan_reopen_missing_index_{scope:?}"
             ));
         engine.session.stage = WorkspaceStage::CrossReview;
         if scope == WorkItemPlanReviewScope::Item {
             engine.session.artifact = Some(work_item_draft_artifact_payload(
+                &lifecycle,
                 &plan_id,
                 "outline_a",
                 "draft_a",

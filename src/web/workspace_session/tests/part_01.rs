@@ -625,6 +625,21 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
         ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
             unreachable!("workspace runs use start")
         }
+        /// LC gateway 启动面走 `start_validated`（validated launch 唯一入口，
+        /// raw `start` 仅保留单仓 direct）；trait 默认实现恒拒
+        /// 「streaming provider validated start is not supported by this
+        /// adapter」⇒ gateway 零启动。本夹具 provider 只实现裸 `start`
+        /// ⇒ 拆出 input 后与裸 `start` 同路径转发（与
+        /// `src/web/coding_ws_handler/tests/gateway.rs::SwappableProvider`
+        /// 同型）。
+        async fn start_validated(
+            &self,
+            validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+            cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (input, _launch) = validated.into_parts();
+            self.start(input, cancel).await
+        }
     }
 
     let root = tempfile::tempdir().expect("root");
@@ -664,13 +679,19 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                &project.id,
+            ),
             title: "throwaway run issue".to_string(),
             description: None,
             change_id: None,
             base_branch: None,
         })
         .expect("issue");
+    // REQ-ROUTE-01 两态化夹具前置：issue 归属的 LC 权威缺失即 manager create fail-closed。
+    seed_single_member_logical_codebase(&app_paths, "checkout-throwaway-run");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
@@ -705,16 +726,32 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
             event_tx: StdMutex::new(None),
         }),
     );
-    let manager = WorkspaceSessionManager::create(
-        &WebAppState::with_provider_registry(
-            root.path().to_path_buf(),
-            WebRuntime::new_fake(root.path().to_path_buf()),
-            provider_registry,
-        ),
-        &session_record.id,
+    // LC 会话经 manager 注入生产 gateway ⇒ spawn 前复验消费 durable
+    // capability 记录与 availability gate（夹具无真实 probe ⇒ 门恒拒）。
+    // 两样都在夹具侧补齐（只改装配，不改实现）。
+    crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
+        &app_paths,
+        "project_0001",
+        None,
+        &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+    );
+    let provider_registry = Arc::new(provider_registry);
+    let state = WebAppState::with_events_and_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        crate::web::events::EventHub::new(),
+        provider_registry.clone(),
     )
-    .await
-    .expect("create workspace session manager");
+    .with_gateway_factory(std::sync::Arc::new(
+        crate::web::gateway_factory::LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+            ProductAppPaths::new(root.path().join(".aria")),
+            provider_registry,
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
+        ),
+    ));
+    let manager = WorkspaceSessionManager::create(&state, &session_record.id)
+        .await
+        .expect("create workspace session manager");
     manager
         .engine()
         .lock()
@@ -793,9 +830,13 @@ async fn manager_create_injects_confirmation_trust_context_for_lc_session() {
     let context = engine
         .confirmation_trust_context()
         .expect("LC 会话注入确认 trust 冻结上下文");
+    // 冻结的「issue 原始归属」= issue 持久归属（legacy 别名 id）：确认面漂移复验
+    // （`confirmation_trust_scope_changed`）以它为准；None 形态已随单仓入口删除作废。
+    let alias_lc_id = crate::product::logical_codebase::legacy_logical_codebase_id("project_0001");
     assert_eq!(
-        context.issue_lc_id, None,
-        "legacy LC：冻结 issue 原始归属=None（registry 标签沿既有 legacy 别名约定推导）"
+        context.issue_lc_id.as_deref(),
+        Some(alias_lc_id.as_str()),
+        "legacy LC：冻结 issue 原始归属=issue 持久归属（legacy 别名 id）"
     );
     let manifest_root = LogicalCodebaseStore::new(fixture.paths.clone())
         .load_manifest("project_0001")
@@ -818,11 +859,11 @@ async fn manager_create_injects_confirmation_trust_context_for_lc_session() {
 }
 
 #[tokio::test]
-async fn manager_create_confirmation_context_boundaries() {
+async fn manager_create_fails_closed_without_lc_authority_and_scopes_confirmation_context() {
     use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
     use crate::product::models::ProviderName;
 
-    // 单仓会话：无 gateway、无确认上下文（确认免登记零调用）。
+    // 无 LC 权威的会话：create 面 fail-closed（单仓入口已删除）。
     let root = tempfile::tempdir().expect("root");
     let app_paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
     let project = ProjectStore::new(app_paths.clone())
@@ -845,7 +886,11 @@ async fn manager_create_confirmation_context_boundaries() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                &project.id,
+            ),
             base_branch: None,
             title: "single repo boundary issue".to_string(),
             description: None,
@@ -881,21 +926,15 @@ async fn manager_create_confirmation_context_boundaries() {
         WebRuntime::new_fake(root.path().to_path_buf()),
         ProviderRegistry::new(),
     );
-    let manager = WorkspaceSessionManager::create(&state, &session_record.id)
+    // 单仓入口已删除（REQ-ROUTE-01 两态化）：issue 无 LC 权威 ⇒ create fail-closed。
+    let refused = WorkspaceSessionManager::create(&state, &session_record.id)
         .await
-        .expect("create manager for single-repo session");
-    {
-        let engine_arc = manager.engine();
-        let engine = engine_arc.lock().await;
-        assert!(
-            engine.logical_provider_gateway().is_none(),
-            "单仓会话无 LC gateway"
-        );
-        assert!(
-            engine.confirmation_trust_context().is_none(),
-            "单仓会话不注入确认上下文（免登记）"
-        );
-    }
+        .err()
+        .expect("无 LC 权威的会话必须在 create 面 fail-closed（不得放行无 gateway 会话）");
+    assert!(
+        refused.contains("logical_codebase"),
+        "fail-closed 必须携带 logical_codebase 归属缺失事实: {refused}"
+    );
 
     // LC 会话缺 trust precondition（依赖图重建为无 trust 形态）：fail-closed
     // 不注入——确认时 ContextWaiting（引擎面已由 4.1 漂移矩阵「缺上下文」

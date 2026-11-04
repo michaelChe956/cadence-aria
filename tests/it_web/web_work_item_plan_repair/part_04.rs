@@ -67,14 +67,18 @@ async fn child_confirmation_publishes_applies_and_restarts_through_real_websocke
 
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let coding_store = CodingAttemptStore::new(paths.clone());
+    // 桶无关取「按 plan 的 group attempt」：夹具 attempt 带冻结快照
+    // （REQ-COD-03）⇒ target 桶键为 Some(logical_repository_id)，旧 None 桶键
+    // 检索会落空（见 coding_attempt_store/group.rs `attempt_target_bucket`）。
     let attempt = coding_store
-        .get_attempt_for_work_item_group(
+        .list_attempts_for_work_item_group(
             "project_0001",
             "issue_plan_0001",
             "work_item_plan_0001",
-            None,
         )
         .expect("load group attempt")
+        .into_iter()
+        .next()
         .expect("group attempt");
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
 
@@ -211,14 +215,18 @@ async fn child_confirmation_without_coding_socket_activates_and_redelivers_on_at
 
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let coding_store = CodingAttemptStore::new(paths);
+    // 桶无关取「按 plan 的 group attempt」：夹具 attempt 带冻结快照
+    // （REQ-COD-03）⇒ target 桶键为 Some(logical_repository_id)，旧 None 桶键
+    // 检索会落空（见 coding_attempt_store/group.rs `attempt_target_bucket`）。
     let attempt = coding_store
-        .get_attempt_for_work_item_group(
+        .list_attempts_for_work_item_group(
             "project_0001",
             "issue_plan_0001",
             "work_item_plan_0001",
-            None,
         )
         .expect("load group attempt")
+        .into_iter()
+        .next()
         .expect("group attempt");
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let child_url = format!(
@@ -346,14 +354,18 @@ async fn topology_child_confirmation_applies_and_resumes_through_real_websockets
 
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let coding_store = CodingAttemptStore::new(paths.clone());
+    // 桶无关取「按 plan 的 group attempt」：夹具 attempt 带冻结快照
+    // （REQ-COD-03）⇒ target 桶键为 Some(logical_repository_id)，旧 None 桶键
+    // 检索会落空（见 coding_attempt_store/group.rs `attempt_target_bucket`）。
     let attempt = coding_store
-        .get_attempt_for_work_item_group(
+        .list_attempts_for_work_item_group(
             "project_0001",
             "issue_plan_0001",
             "work_item_plan_0001",
-            None,
         )
         .expect("load group attempt")
+        .into_iter()
+        .next()
         .expect("group attempt");
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
 

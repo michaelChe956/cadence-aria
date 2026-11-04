@@ -1,71 +1,9 @@
 // 退役留档（T5/REQ-RET-02）：valid_canonical_draft_output 夹具为 staged draft 族测试（serial/batch/compile/
 // staged_flow/恢复矩阵）专用，随消息族一并退役。
 
-pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_outputs(
-    outputs: Vec<Value>,
-) -> (axum::Router, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {
-    let root = tempdir().expect("root");
-    let repo = root.path().join("repo");
-    std::fs::create_dir_all(&repo).expect("create repo dir");
-    // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
-    // 会令基线解析 fail-closed）。
-    let status = Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(&repo)
-        .status()
-        .expect("git init");
-    assert!(status.success());
-    for args in [
-        vec!["config", "user.email", "test@example.com"],
-        vec!["config", "user.name", "Test User"],
-        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
-    ] {
-        let status = Command::new("git")
-            .args(&args)
-            .current_dir(&repo)
-            .status()
-            .expect("git fixture");
-        assert!(status.success());
-    }
-
-    let runtime = WebRuntime::new_fake(root.path().to_path_buf());
-    let mut state = WebAppState::new(root.path().to_path_buf(), runtime).with_provider_adapter(
-        Arc::new(MockSplitProviderAdapter {
-            output: outputs.first().cloned().unwrap_or_else(valid_split_output),
-            revision_output: None,
-        }),
-    );
-
-    let captured_prompts = Arc::new(Mutex::new(Vec::new()));
-    let test_controls = cadence_aria::web::test_controls::TestControls::default();
-    let mut registry = ProviderRegistry::new();
-    registry.register(
-        ProviderName::Fake,
-        Arc::new(QueuedSplitStreamingProvider::new_recording(
-            outputs,
-            captured_prompts.clone(),
-        )),
-    );
-    registry.register(
-        ProviderName::Codex,
-        Arc::new(TestControlledFakeStreamingProvider::new(
-            test_controls.clone(),
-        )),
-    );
-    registry.register(
-        ProviderName::ClaudeCode,
-        Arc::new(TestControlledFakeStreamingProvider::new(
-            test_controls.clone(),
-        )),
-    );
-    state.test_controls = test_controls;
-    state.provider_registry = Arc::new(registry);
-
-    let app = build_web_router(state);
-    let app = bootstrap_project_repo_issue_and_specs(app, &repo).await;
-
-    (app, root, captured_prompts)
-}
+// 退役留档（T5/REQ-RET-02）：app_with_confirmed_story_and_design_and_streaming_outputs
+// 夹具（流式输出注入 + prompt 捕获）为 outline/structured 解析族测试专用，随消息族
+// 退役（下游 QueuedSplitStreamingProvider::new_recording 一并退役）。
 
 // 退役留档（T5/REQ-RET-02）：app_with_confirmed_story_and_design_and_streaming_raw_outputs 夹具
 // （raw stdout/挂起注入，驱动 outline structured 解析重试与 pending 场景）随消息族退役。

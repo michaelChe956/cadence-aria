@@ -6,7 +6,6 @@ use crate::product::coding_models::{
     GroupReviewReductionReport, GroupReviewShardReport,
 };
 use crate::product::json_store::write_json;
-use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
 use crate::web::coding_ws_handler::execute_start_coding_flow;
 use crate::web::runtime::WebRuntime;
 use crate::web::state::WebAppState;
@@ -591,16 +590,20 @@ async fn final_confirm_keeps_range_scope_and_dirty_worktree_gate() {
         .await
         .expect("prepare final confirmation");
     let lifecycle = LifecycleStore::new(fixture.store.paths());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: prepared.project_id.clone(),
-            issue_id: prepared.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: prepared.branch_name.clone(),
-            worktree_path: fixture.worktree.clone(),
-            base_branch: prepared.base_branch.clone(),
-        })
-        .expect("shared worktree");
+    // 有 `target_snapshot` 的 attempt 只按**仓维**分类租约/解析 worktree，
+    // issue 维记录会被判 `legacy_shared_worktree_present` 而 fail-closed。
+    let logical_id = prepared
+        .target_snapshot
+        .as_ref()
+        .expect("readiness fixture attempt carries a target snapshot")
+        .logical_repository_id;
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        &prepared.project_id,
+        &prepared.issue_id,
+        logical_id,
+        &fixture.worktree,
+    );
     let lock_work_item_id = fixture
         .store
         .list_coding_units(&prepared.project_id, &prepared.issue_id, &prepared.id)
@@ -609,14 +612,16 @@ async fn final_confirm_keeps_range_scope_and_dirty_worktree_gate() {
         .max_by_key(|unit| unit.order_index)
         .expect("last completed unit")
         .logical_work_item_id;
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+    let lease = lifecycle
+        .try_acquire_repo_worktree_lock(
             &prepared.project_id,
             &prepared.issue_id,
+            logical_id,
             &lock_work_item_id,
             &prepared.id,
         )
         .expect("shared worktree lock");
+    assert!(lease.acquired, "fixture repo lock must acquire");
     fs::write(
         fixture.worktree.join("manual-residue.txt"),
         "leave this alone\n",

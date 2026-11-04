@@ -381,17 +381,21 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
             idempotency_key: "coding-ws-part04-attempt-repository".to_string(),
         })
         .expect("create repository");
+    ensure_legacy_issue_before_lifecycle_writes(&app_paths, &repository.id);
     LifecycleStore::new(app_paths.clone())
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
+            repository_id: repository.id.clone(),
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "Coding work item".to_string(),
             ..Default::default()
         })
         .expect("create work item");
+    // 迁移档：升 LC 权威 + 冻结快照（admission 要求 Logical 必带快照；
+    // 本夹具 WorktreePrepare 确定性失败、不 launch，无需 gateway 槽位）。
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths);
     create_legacy_coding_attempt_fixture(
         &store,
@@ -408,7 +412,7 @@ fn app_with_attempt(root_path: &std::path::Path) -> axum::Router {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
@@ -574,7 +578,7 @@ fn app_with_full_chain_attempt_and_provider(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "coding ws full chain issue".to_string(),
             description: None,
             change_id: None,
@@ -596,7 +600,7 @@ fn app_with_full_chain_attempt_and_provider(
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
+            repository_id: repository.id.clone(),
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
@@ -611,6 +615,7 @@ fn app_with_full_chain_attempt_and_provider(
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths);
     create_legacy_coding_attempt_fixture(
         &store,
@@ -622,21 +627,24 @@ fn app_with_full_chain_attempt_and_provider(
             branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
             worktree_path: None,
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
 
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, provider);
-    build_web_router(WebAppState::with_provider_registry(
-        root_path.to_path_buf(),
-        WebRuntime::new_fake(root_path.to_path_buf()),
+    registry.register(
+        ProviderName::ClaudeCode,
+        GatewayDialectStreamingStub::wrapping(provider),
+    );
+    build_web_router(coding_ws_state_with_gateway(
+        root_path,
+        &store.paths(),
         registry,
     ))
 }

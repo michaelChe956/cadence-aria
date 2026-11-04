@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::cross_cutting::streaming_provider::{
     ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
 };
@@ -21,7 +22,6 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
 use crate::product::models::{
     AmendmentResumeMode, AmendmentResumeTarget, DependencyGraphRevision, LogicalWorkItem,
@@ -31,7 +31,6 @@ use crate::product::models::{
     WorkItemPlanRevision, WorkItemProjectionBundle, WorkItemRevision,
 };
 use crate::product::plan_repair::PlanDefectConfidence;
-use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_contract::{
     BlockerRoute, BlockerRule, CanonicalWorkItemContract, ContractCompatibilityPolicy,
     HandoffContract, PromisedOutputContract, RequiredInputContract, WorkItemContractIdentity,
@@ -61,6 +60,9 @@ struct PlanRepairFixture {
     revision_store: WorkItemRevisionStore,
     attempt: CodingExecutionAttempt,
     plan: WorkItemPlanLineage,
+    /// LC gateway 的 fake provider 槽位：用例把本次要用的 adapter 装进去
+    /// （快照 attempt 只能经 gateway 启动 provider）。
+    provider: crate::web::coding_ws_handler::tests::gateway::SwappableProvider,
     projection: crate::product::work_item_projection::ReviewerWorkItemProjection,
     event_rx: mpsc::Receiver<CodingWsOutMessage>,
     engine: CodingWorkspaceEngine,

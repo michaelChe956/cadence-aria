@@ -48,7 +48,7 @@ fn register_trust_fixture(
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: Some(lc_id.clone()),
+            logical_codebase_id: lc_id.clone(),
             base_branch: None,
             title: "register trust fixture".to_string(),
             description: None,
@@ -399,7 +399,7 @@ fn register_trust_real_fixture() -> (RegisterTrustFixture, Arc<Mutex<WorkspaceEn
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: Some(lc_id.clone()),
+            logical_codebase_id: lc_id.clone(),
             base_branch: None,
             title: "register trust fixture".to_string(),
             description: None,

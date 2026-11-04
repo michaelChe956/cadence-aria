@@ -8,17 +8,24 @@ async fn campaign_stage3_provider_failure_retries_same_unit_and_abort_preserves_
 
     // —— 案 1：transient 失败 → 同 attempt/unit bounded retry ——
     let (_root, store, attempt) = super::running_attempt_with_worktree();
-    let provider = super::provider_failure_recovery::TransportFailuresThenSuccessProvider::new(
-        1,
-        "coder retry completed",
+    let provider = std::sync::Arc::new(
+        super::provider_failure_recovery::TransportFailuresThenSuccessProvider::new(
+            1,
+            "coder retry completed",
+        ),
     );
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let _ = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext {
                 work_item_markdown: Some("# Retry work item\n\nKeep the full context.".to_string()),
                 verification_commands: vec!["cargo test --locked --lib retry".to_string()],
@@ -52,19 +59,26 @@ async fn campaign_stage3_provider_failure_retries_same_unit_and_abort_preserves_
 
     // —— 案 2：用户 abort → attempt Aborted，证据保留，投影显示 reason ——
     let (root, store, attempt) = super::running_attempt_with_worktree();
-    let provider = super::provider_failure_recovery::RetryBoundaryMutationProvider::new(
-        super::provider_failure_recovery::RetryBoundaryMutation::Abort {
-            store: store.clone(),
-            attempt: attempt.clone(),
-        },
+    let provider = std::sync::Arc::new(
+        super::provider_failure_recovery::RetryBoundaryMutationProvider::new(
+            super::provider_failure_recovery::RetryBoundaryMutation::Abort {
+                store: store.clone(),
+                attempt: attempt.clone(),
+            },
+        ),
     );
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let _ = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &crate::product::coding_workspace_engine::CodingExecutionContext::default(),
             &mut command_rx,
         )

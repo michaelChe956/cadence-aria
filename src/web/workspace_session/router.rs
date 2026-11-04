@@ -377,6 +377,8 @@ impl WorkspaceSessionManager {
         if let Ok(engine) = self.engine.try_lock() {
             let mut session_state = engine.build_session_state();
             self.project_automation_ownership(&mut session_state);
+            // REQ-HGC-04：取帧面同样携带「继续自动化」入口事实。
+            self.project_plan_continue_available(&mut session_state);
             Ok(session_state)
         } else {
             self.durable_projection()
@@ -623,6 +625,8 @@ impl WorkspaceSessionManager {
             let mut state = engine.build_session_state();
             drop(engine);
             self.project_automation_ownership(&mut state);
+            // REQ-HGC-04：广播帧同样携带「继续自动化」入口事实。
+            self.project_plan_continue_available(&mut state);
             self.broadcast(state);
             return;
         }
@@ -639,6 +643,8 @@ impl WorkspaceSessionManager {
             let mut state = engine.build_session_state();
             drop(engine);
             manager.project_automation_ownership(&mut state);
+            // REQ-HGC-04：异步补帧同样携带「继续自动化」入口事实。
+            manager.project_plan_continue_available(&mut state);
             manager.broadcast(state);
         });
     }
@@ -667,6 +673,8 @@ impl WorkspaceSessionManager {
             let mut state = engine.build_session_state();
             drop(engine);
             self.project_automation_ownership(&mut state);
+            // REQ-HGC-04：广播帧同样携带「继续自动化」入口事实。
+            self.project_plan_continue_available(&mut state);
             self.broadcast(state);
             return;
         }
@@ -685,6 +693,8 @@ impl WorkspaceSessionManager {
             let mut state = engine.build_session_state();
             drop(engine);
             manager.project_automation_ownership(&mut state);
+            // REQ-HGC-04：异步补帧同样携带「继续自动化」入口事实。
+            manager.project_plan_continue_available(&mut state);
             manager.broadcast(state);
         });
     }

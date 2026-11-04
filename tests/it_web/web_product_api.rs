@@ -1,5 +1,6 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::events::EventHub;
 use cadence_aria::web::runtime::WebRuntime;
@@ -361,6 +362,7 @@ async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
         2
     );
 
+    migrate_product_fixture_repository_to_lc(root.path());
     let (status, issue) = request_json(
         app.clone(),
         Method::POST,
@@ -368,7 +370,8 @@ async fn manages_workspace_repositories_and_keeps_issue_on_lifecycle_flow() {
         json!({
             "title":"优化任务管理页面",
             "description":"展示 story spec、design spec、work item 和完成状态",
-            "repository_id":"repository_0002"
+            "repository_id":"repository_0002",
+            "logical_codebase_id": legacy_logical_codebase_id("project_0001")
         }),
     )
     .await;
@@ -540,6 +543,7 @@ async fn deletes_workspace_project_repository_and_issue_records() {
         json!({"name":"Code Repo","path":repo.path()}),
     )
     .await;
+    migrate_product_fixture_repository_to_lc(root.path());
     request_json(
         app.clone(),
         Method::POST,
@@ -547,7 +551,8 @@ async fn deletes_workspace_project_repository_and_issue_records() {
         json!({
             "title":"Issue to delete",
             "description":null,
-            "repository_id":"repository_0001"
+            "repository_id":"repository_0001",
+            "logical_codebase_id": legacy_logical_codebase_id("project_0001")
         }),
     )
     .await;
@@ -718,6 +723,16 @@ fn seed_repository_record(
     .expect("seed repos.json");
 }
 
+/// 块3 夹具补偿：手播 repos.json 后按生产 v1.2→v1.3 身份迁移升 LC 权威
+/// （HTTP issue 创建要求权威先在；issue 随即以确定性 legacy 别名归属）。
+fn migrate_product_fixture_repository_to_lc(root: &std::path::Path) {
+    cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(
+        cadence_aria::product::app_paths::ProductAppPaths::new(root.join(".aria")),
+    )
+    .ensure_identity_schema("project_0001")
+    .expect("migrate fixture repository into logical codebase authority");
+}
+
 async fn seeded_issue_app(root: &std::path::Path) -> axum::Router {
     let state = WebAppState::with_events(
         root.to_path_buf(),
@@ -736,8 +751,12 @@ async fn seeded_issue_app(root: &std::path::Path) -> axum::Router {
     app
 }
 
+/// 块3 迁移（族D 第 13 条口径）：原「锁定显式 base_branch」钉的是单仓基线
+/// 语义；块3（REQ-ROUTE-02 全入口对齐 + product_resources.rs Non-Goal「逻辑
+/// 代码库 issue 不设置基准分支」）后，LC 入口对 base_branch 输入一律接受并
+/// 忽略、落盘恒 null。新断言钉住「LC 入口分支无关 + null 持久化」。
 #[tokio::test]
-async fn issue_creation_locks_explicit_base_branch() {
+async fn issue_creation_lc_entry_ignores_explicit_base_branch_and_persists_null() {
     let root = tempdir().expect("root");
     let repo = git_repo_with_branches("main", &["feature/x"]);
     let app = seeded_issue_app(root.path()).await;
@@ -748,6 +767,7 @@ async fn issue_creation_locks_explicit_base_branch() {
         "pib",
         repo.path(),
     );
+    migrate_product_fixture_repository_to_lc(root.path());
 
     let (status, created) = request_json(
         app.clone(),
@@ -757,14 +777,19 @@ async fn issue_creation_locks_explicit_base_branch() {
             "title":"分支锚定",
             "description":null,
             "repository_id":"repository_0001",
+            "logical_codebase_id": legacy_logical_codebase_id("project_0001"),
             "base_branch":"feature/x"
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    assert_eq!(created["base_branch"], "feature/x");
+    assert_eq!(
+        created["base_branch"],
+        Value::Null,
+        "LC 入口忽略 base_branch（Non-Goal）"
+    );
 
-    // 读取透传（锁定值持久化，而非每次重新推导）。
+    // 读取透传（持久化为 null，而非锁定请求值或每次重新推导）。
     let (status, issues) = request_json(
         app.clone(),
         Method::GET,
@@ -773,11 +798,11 @@ async fn issue_creation_locks_explicit_base_branch() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(issues["issues"][0]["base_branch"], "feature/x");
+    assert_eq!(issues["issues"][0]["base_branch"], Value::Null);
 }
 
 #[tokio::test]
-async fn issue_creation_default_chain_resolves_main_then_master() {
+async fn issue_creation_lc_entry_resolves_no_physical_default_chain() {
     let root = tempdir().expect("root");
     let main_repo = git_repo_with_branches("main", &[]);
     let master_repo = git_repo_with_branches("master", &[]);
@@ -804,29 +829,36 @@ async fn issue_creation_default_chain_resolves_main_then_master() {
     )
     .expect("seed repos.json");
 
+    migrate_product_fixture_repository_to_lc(root.path());
+
+    // 块3 迁移（族D 第 13 条）：原断言钉「main→master 默认链解析」单仓语义；
+    // REQ-ROUTE-02 后 LC 入口不读物理默认链，base_branch 恒 null（两个仓皆然）。
     let (status, on_main) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"main 默认","description":null,"repository_id":"repository_0001"}),
+        json!({"title":"main 默认","description":null,"repository_id":"repository_0001","logical_codebase_id": legacy_logical_codebase_id("project_0001")}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{on_main}");
-    assert_eq!(on_main["base_branch"], "main");
+    assert_eq!(on_main["base_branch"], Value::Null);
 
     let (status, on_master) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"master 默认","description":null,"repository_id":"repository_0002"}),
+        json!({"title":"master 默认","description":null,"repository_id":"repository_0002","logical_codebase_id": legacy_logical_codebase_id("project_0001")}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{on_master}");
-    assert_eq!(on_master["base_branch"], "master");
+    assert_eq!(on_master["base_branch"], Value::Null);
 }
 
 #[tokio::test]
-async fn issue_creation_without_default_requires_explicit_base_branch() {
+/// 块3 迁移（族D 第 13 条）：原「无默认分支须显式 base_branch 否则 422」是
+/// 单仓基线 fail-closed；REQ-ROUTE-02 后 LC 入口不依赖物理分支状态——无
+/// main/master 也可创建，显式 base_branch 同样被忽略、恒 null。
+async fn issue_creation_lc_entry_needs_no_explicit_base_branch_without_default() {
     let root = tempdir().expect("root");
     let repo = git_repo_with_branches("trunk", &["release/1.0"]);
     let app = seeded_issue_app(root.path()).await;
@@ -837,19 +869,20 @@ async fn issue_creation_without_default_requires_explicit_base_branch() {
         "pib",
         repo.path(),
     );
+    migrate_product_fixture_repository_to_lc(root.path());
 
-    // 无 main/master：无默认值，缺省提交即拒（fail-closed，不猜字母序）。
-    let (status, rejected) = request_json(
+    // 无 main/master：LC 入口不读物理默认链，直接创建成功且不锚基线。
+    let (status, created) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"皆无","description":null,"repository_id":"repository_0001"}),
+        json!({"title":"皆无","description":null,"repository_id":"repository_0001","logical_codebase_id": legacy_logical_codebase_id("project_0001")}),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
-    assert_eq!(rejected["code"], "issue_base_branch_required");
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["base_branch"], Value::Null);
 
-    // 显式选择 release/1.0 即可创建。
+    // 显式 base_branch 也不锚定（Non-Goal：LC issue 不设置基准分支）。
     let (status, created) = request_json(
         app.clone(),
         Method::POST,
@@ -858,16 +891,20 @@ async fn issue_creation_without_default_requires_explicit_base_branch() {
             "title":"显式选择",
             "description":null,
             "repository_id":"repository_0001",
+            "logical_codebase_id": legacy_logical_codebase_id("project_0001"),
             "base_branch":"release/1.0"
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    assert_eq!(created["base_branch"], "release/1.0");
+    assert_eq!(created["base_branch"], Value::Null);
 }
 
 #[tokio::test]
-async fn issue_creation_rejects_unknown_base_branch_without_side_effects() {
+/// 块3 迁移（族D 第 13 条）：原「未知分支 422 且零副作用」钉单仓基线校验；
+/// REQ-ROUTE-02 后 LC 入口不校验物理分支——未知分支不构成拒绝理由，创建
+/// 成功且 base_branch 恒 null（新钉「LC 入口分支无关」不变量）。
+async fn issue_creation_lc_entry_accepts_unknown_base_branch_without_locking() {
     let root = tempdir().expect("root");
     let repo = git_repo_with_branches("main", &[]);
     let app = seeded_issue_app(root.path()).await;
@@ -878,8 +915,9 @@ async fn issue_creation_rejects_unknown_base_branch_without_side_effects() {
         "pib",
         repo.path(),
     );
+    migrate_product_fixture_repository_to_lc(root.path());
 
-    let (status, rejected) = request_json(
+    let (status, created) = request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
@@ -887,21 +925,19 @@ async fn issue_creation_rejects_unknown_base_branch_without_side_effects() {
             "title":"不存在分支",
             "description":null,
             "repository_id":"repository_0001",
+            "logical_codebase_id": legacy_logical_codebase_id("project_0001"),
             "base_branch":"no-such-branch"
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
-    assert_eq!(rejected["code"], "issue_base_branch_not_found");
-    assert!(
-        rejected["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("no-such-branch"),
-        "诊断应包含分支名: {rejected}"
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(
+        created["base_branch"],
+        Value::Null,
+        "未知分支被忽略而非拒绝"
     );
 
-    // 不产生半配置 Issue。
+    // 创建真实落盘（LC 入口分支无关 ⇒ 不存在「半配置」形态）。
     let (status, issues) = request_json(
         app.clone(),
         Method::GET,
@@ -910,7 +946,7 @@ async fn issue_creation_rejects_unknown_base_branch_without_side_effects() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(issues["issues"].as_array().expect("issues").len(), 0);
+    assert_eq!(issues["issues"].as_array().expect("issues").len(), 1);
 }
 
 #[tokio::test]

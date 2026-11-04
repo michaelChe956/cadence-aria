@@ -20,18 +20,19 @@ async fn issue_lifecycle_backfills_legacy_spec_versions_and_returns_markdown_pre
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"爬楼梯问题","description":"写个 Python 程序解决爬楼梯","repository_id":"repository_0001"}),
+        json!({"title":"爬楼梯问题","description":"写个 Python 程序解决爬楼梯","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
-    request_json(
+    lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-        json!({"title":"爬楼梯问题 Story Spec"}),
+        json!({"title":"爬楼梯问题 Story Spec","involved_repository_ids":legacy_lc_involved_repository_ids(root.path())}),
     )
     .await;
 
@@ -121,18 +122,21 @@ async fn lifecycle_returns_artifact_versions() {
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属；story/design generate 显式
+    // 钉定 involved（REQ-PLN-04 确认门）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
+    let involved = legacy_lc_involved_repository_ids(root.path());
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"爬楼梯问题","description":"写个 Python 程序解决爬楼梯","repository_id":"repository_0001"}),
+        json!({"title":"爬楼梯问题","description":"写个 Python 程序解决爬楼梯","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
-    request_json(
+    lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-        json!({"title":"爬楼梯问题 Story Spec"}),
+        json!({"title":"爬楼梯问题 Story Spec","involved_repository_ids":involved.clone()}),
     )
     .await;
     request_json(
@@ -142,13 +146,13 @@ async fn lifecycle_returns_artifact_versions() {
         json!({"confirmed_by":"human"}),
     )
     .await;
-    request_json(
+    lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
         json!({
             "title":"爬楼梯问题 Design Spec",
-            "story_spec_ids":["story_spec_0001"]
+            "story_spec_ids":["story_spec_0001"],
+            "involved_repository_ids":involved
         }),
     )
     .await;
@@ -289,16 +293,17 @@ async fn workspace_session_missing_message_and_run_next_return_not_found() {
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
-    request_json(
+    lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
         json!({"title":"登录会话过期提示"}),
     )
@@ -347,16 +352,17 @@ async fn workspace_session_ambiguous_returns_conflict() {
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
-    request_json(
+    lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
         json!({"title":"登录会话过期提示"}),
     )
@@ -365,7 +371,7 @@ async fn workspace_session_ambiguous_returns_conflict() {
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"重复会话","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"重复会话","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
 
@@ -416,16 +422,17 @@ async fn workspace_session_message_rejects_invalid_role_and_empty_content() {
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"登录会话过期","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
-    request_json(
+    lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
         json!({"title":"登录会话过期提示"}),
     )
@@ -509,6 +516,57 @@ async fn request_json(
     (status, value)
 }
 
+/// 块3（remove-single-repository-path）夹具补偿（与 it_core workspace_ws_integration
+/// 同款已验证做法）：把 project_0001 的 repository_0001 按生产 v1.2→v1.3 身份迁移
+/// 升成 LC 权威（member/manifest/checkout 由 IdentityMigrationExecutor 落盘，LC
+/// record 由 require_logical_codebase 首读时的 migrate_legacy 自动生成），再经生产
+/// rebuild 端点建 active 聚合索引（generate 入口经 PlanningContextResolver 读取，
+/// 缺失即 aggregate_index_active_missing）。返回 issue 创建请求应携带的确定性
+/// legacy 别名 LC id——不是假 id。
+async fn migrate_repository_to_lc_and_rebuild(
+    app: &axum::Router,
+    root: &std::path::Path,
+) -> String {
+    // rebuild 触发 codegraph sync：并行夹具会争抢全局 /tmp/.codegraph/
+    // codegraph.lock（codegraph_sync_failed 422），经 crate 级互斥串行化。
+    let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
+    let app_paths = ProductAppPaths::new(root.join(".aria"));
+    IdentityMigrationExecutor::new(app_paths.clone())
+        .ensure_identity_schema("project_0001")
+        .expect("migrate fixture repository into logical codebase authority");
+    let lc_id = legacy_logical_codebase_id("project_0001");
+    let (status, index_rebuild) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!(
+            "/api/projects/project_0001/logical-codebases/{lc_id}/aggregate-indexes/rebuild"
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{index_rebuild}");
+    lc_id
+}
+
+/// story/design generate 的串行化包装：generate 经 build_with_fresh_index
+/// 触发 codegraph sync，须与其它夹具的 rebuild 串行。
+async fn lc_generate_json(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
+    request_json(app, Method::POST, uri, body).await
+}
+
+/// 迁移后 LC 成员的 logical id 列表：story/design generate 请求的 involved
+/// 钉定值（REQ-PLN-04 确认门要求 involved 非空，夹具不走 AI 自决回写）。
+fn legacy_lc_involved_repository_ids(root: &std::path::Path) -> Vec<String> {
+    let app_paths = ProductAppPaths::new(root.join(".aria"));
+    LogicalCodebaseStore::new(app_paths)
+        .list_members("project_0001")
+        .expect("list fixture logical members")
+        .into_iter()
+        .map(|member| member.logical_repository_id.0.to_string())
+        .collect()
+}
+
 async fn delete_repository_with_idempotency_key(
     app: axum::Router,
     project_id: &str,
@@ -545,10 +603,15 @@ fn git_repo() -> tempfile::TempDir {
         .status()
         .expect("git init");
     assert!(status.success());
+    // 聚合索引布局规则要求每个成员至少有 1 个可索引源码文件
+    // （aggregate_index_member_coverage_failed），空提交不算。
+    std::fs::create_dir_all(dir.path().join("src")).expect("repo src dir");
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("repo source");
     for args in [
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Test User"],
-        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+        vec!["add", "."],
+        vec!["commit", "-m", "fixture baseline"],
     ] {
         let status = Command::new("git")
             .args(&args)
@@ -568,7 +631,8 @@ fn git_repo() -> tempfile::TempDir {
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::lifecycle_store::CreateStorySpecInput;
 use cadence_aria::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IdentityMigrationExecutor,
+    IssueCodebaseSelection,
     IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
     LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
     RepositorySourceIdentity, RepositoryType,

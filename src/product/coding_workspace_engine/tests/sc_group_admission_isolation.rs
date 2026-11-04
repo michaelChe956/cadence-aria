@@ -7,7 +7,8 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::group_dependency_gate::dependency_gate_applies;
 use crate::product::git_workspace_service::GitWorkspaceService;
-use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::logical_codebase::logical_test_fixture::{self, LogicalFixture};
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 use tokio::sync::{Barrier, mpsc};
@@ -18,9 +19,16 @@ fn fixture(
     tempfile::TempDir,
     CodingAttemptStore,
     CodingExecutionAttempt,
+    LogicalFixture,
 ) {
     let root = tempfile::tempdir().expect("root");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：准入/租约的唯一凭证是「LC 权威 + 冻结 target_snapshot」，
+    // 无快照 attempt 无法经权威解析准入。`seed_complete` 先建 issue 再建 LC 权威
+    //（顺序不可颠倒：issue id 按 `issues/` 目录数分配）。
+    let logical =
+        logical_test_fixture::seed_complete(&paths, root.path(), "project_0001", "issue_0001");
+    let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -36,7 +44,7 @@ fn fixture(
                 review_rounds: 1,
                 permission_modes: Default::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -49,7 +57,7 @@ fn fixture(
     store
         .write_coding_attempt_for_test(&attempt)
         .expect("SC admission kind");
-    (root, store, attempt)
+    (root, store, attempt, logical)
 }
 
 fn unit(
@@ -94,7 +102,7 @@ fn set_dependencies(
 
 #[tokio::test]
 async fn sc_group_dependency_gate_allows_only_one_active_unit_under_concurrency() {
-    let (root, store, attempt) = fixture(false);
+    let (root, store, attempt, logical) = fixture(false);
     let first = unit(&store, &attempt, "work_item_0001");
     store
         .update_coding_unit_status(
@@ -109,20 +117,20 @@ async fn sc_group_dependency_gate_allows_only_one_active_unit_under_concurrency(
     let lifecycle = LifecycleStore::new(store.paths());
     let worktree_path = root.path().join("shared-worktree");
     std::fs::create_dir_all(&worktree_path).expect("worktree directory");
+    // 快照 attempt 只按仓维三元键分类租约；issue 维记录会被判成
+    // `legacy_shared_worktree_present` 而 fail-closed。
+    logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        &attempt.project_id,
+        &attempt.issue_id,
+        logical.member_id,
+        &worktree_path,
+    );
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: attempt.branch_name.clone(),
-            worktree_path,
-            base_branch: attempt.base_branch.clone(),
-        })
-        .expect("shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             &attempt.project_id,
             &attempt.issue_id,
+            logical.member_id,
             "work_item_0001",
             &attempt.id,
         )
@@ -186,7 +194,7 @@ async fn sc_group_dependency_gate_allows_only_one_active_unit_under_concurrency(
     // Concurrent selector snapshots are diagnostic artifacts and may reflect the last Ready
     // writer; the load-bearing assertion is durable active_unit_id + shared-worktree ownership.
     let worktree = lifecycle
-        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, logical.member_id)
         .expect("shared worktree")
         .expect("shared worktree record");
     assert_eq!(
@@ -201,7 +209,7 @@ async fn sc_group_dependency_gate_allows_only_one_active_unit_under_concurrency(
 
 #[tokio::test]
 async fn legacy_group_admission_bypasses_dependency_gate_and_uses_order_index() {
-    let (_root, store, original) = fixture(true);
+    let (root, store, original, logical) = fixture(true);
     let mut attempt = store
         .get_attempt(&original.project_id, &original.issue_id, &original.id)
         .expect("attempt");
@@ -225,6 +233,25 @@ async fn legacy_group_admission_bypasses_dependency_gate_and_uses_order_index() 
         .expect("legacy attempt JSON before advance")
         .get("flow_kind")
         .cloned();
+    let lifecycle = LifecycleStore::new(store.paths());
+    let worktree_path = root.path().join("shared-worktree");
+    std::fs::create_dir_all(&worktree_path).expect("worktree directory");
+    logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        &attempt.project_id,
+        &attempt.issue_id,
+        logical.member_id,
+        &worktree_path,
+    );
+    lifecycle
+        .try_acquire_repo_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            logical.member_id,
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("repo worktree owner");
     let (event_tx, _event_rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
     let updated = engine
@@ -261,7 +288,7 @@ async fn legacy_group_admission_bypasses_dependency_gate_and_uses_order_index() 
 
 #[test]
 fn legacy_group_old_json_defaults_to_legacy_admission() {
-    let (_root, store, original) = fixture(false);
+    let (_root, store, original, _logical) = fixture(false);
     let path = store.attempt_path(&original.project_id, &original.issue_id, &original.id);
     let mut json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("attempt JSON"))

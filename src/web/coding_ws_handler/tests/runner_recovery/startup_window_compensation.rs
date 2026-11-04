@@ -5,11 +5,20 @@
 //! 恢复→人工门/释放),再放行 claimed-run 分诊;不得沿「仅日志后继续在同树
 //! 启动 runner」的旧序。注入式崩溃前缀模拟(丢句柄重建 store);真进程重启
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::streaming_provider::{
+    ProviderCompletion, ProviderEvent, ProviderSession, StreamingProviderAdapter,
+    StreamingProviderInput,
+};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
+    AttemptTargetSnapshot, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
     CodingProviderPermissionMode, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
@@ -24,6 +33,50 @@ fn t21_dir() -> tempfile::TempDir {
     let root = Path::new("/tmp/aria-bug45/t21");
     std::fs::create_dir_all(root).expect("create /tmp/aria-bug45/t21");
     tempfile::tempdir_in(root).expect("t21 fixture dir")
+}
+
+/// 夹具用 ClaudeCode provider 替身（LC gateway 的 validated 启动面）。
+///
+/// REQ-ROUTE-01 两态化后逻辑 target 的 provider **只能**经 LC gateway 启动
+/// ⇒ 启动面是 `start_validated`（裸 `start` 与 legacy `run_streaming` 回退
+/// 对逻辑 target 已被强制关闭）。本替身只保证「provider 会话被建立」这一
+/// 可观察事实（role run 落盘 + 会话时间戳），不承载任何业务结论。
+struct FixtureClaudeProvider;
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for FixtureClaudeProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "fixture provider only supports the validated launch surface",
+            0,
+        ))
+    }
+
+    async fn start_validated(
+        &self,
+        _validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+        event_tx
+            .try_send(ProviderEvent::Completed(ProviderCompletion::plain(
+                "{}".to_string(),
+                Some("fixture-claude-session".to_string()),
+            )))
+            .expect("queue fixture provider completion");
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
 }
 
 fn git_ok(dir: &Path, args: &[&str]) {
@@ -74,7 +127,19 @@ impl WindowStartupFixture {
 
     /// 共享根构造(局部坏窗用例:多树同 `.aria`,project/issue 只种一次)。
     pub(super) fn new_in(root: &Path, label: &str) -> Self {
-        let worktree = root.join(label).join("worktree");
+        Self::new_in_with_worktree(root, label, &root.join(label).join("worktree"))
+    }
+
+    /// 共享根 + **显式 worktree 路径**构造。
+    ///
+    /// REQ-ROUTE-01 两态化后，带冻结 `target_snapshot` 的 attempt 的 provider
+    /// **只能**经 LC gateway 启动 ⇒ gateway 的生产 target resolver 复验
+    /// git-dir identity（worktree 的 `.git` 必须落在成员 checkout 的 `.git`
+    /// 之下）⇒ 需要「worktree 与 LC 成员 checkout 同仓」的夹具形态时，
+    /// worktree 路径必须与成员 checkout 逐字一致（生产形态是 checkout 之下
+    /// 的嵌套 worktree，二者同一 git-dir 身份）。
+    pub(super) fn new_in_with_worktree(root: &Path, label: &str, worktree: &Path) -> Self {
+        let worktree = worktree.to_path_buf();
         // B2/F3:serve_web 用例需要 schema 就绪——真实 aria 工作区由首次
         // 启动写 v2 schema 后才有业务数据;fixture 先种 schema 再建数据,
         // 否则 ensure_product_data_schema 会把既有数据判为 legacy。
@@ -109,18 +174,24 @@ impl WindowStartupFixture {
                 .expect("seed project")
                 .id
         };
-        let issue_id = crate::product::issue_store::IssueStore::new(paths.clone())
-            .create(crate::product::issue_store::CreateProductIssueInput {
-                project_id: project_id.clone(),
-                repo_id: None,
-                logical_codebase_id: None,
-                title: format!("t21 issue {label}"),
-                description: None,
-                change_id: None,
-                base_branch: None,
-            })
-            .expect("seed issue")
-            .id;
+        let issue_id =
+            crate::product::issue_store::IssueStore::new(paths.clone())
+                .create(crate::product::issue_store::CreateProductIssueInput {
+                    project_id: project_id.clone(),
+                    repo_id: None,
+                    // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+                    // 默认作用域（legacy 别名代码库 id）。
+                    logical_codebase_id:
+                        crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                            &project_id,
+                        ),
+                    title: format!("t21 issue {label}"),
+                    description: None,
+                    change_id: None,
+                    base_branch: None,
+                })
+                .expect("seed issue")
+                .id;
         let store = CodingAttemptStore::new(paths.clone());
         let attempt = store
             .create_attempt(CreateCodingAttemptInput {
@@ -225,6 +296,99 @@ impl WindowStartupFixture {
     pub(super) fn restart_state(&self) -> WebAppState {
         let root = self.root.clone();
         WebAppState::new(root.clone(), WebRuntime::new_fake(root))
+    }
+
+    /// 「进程重启」替身 + **gateway 可启动的 provider 装配**。
+    ///
+    /// REQ-ROUTE-01 两态化后，带冻结 `target_snapshot` 的 attempt 的 provider
+    /// **只能**经 `LogicalCodebaseProviderGateway` 启动 ⇒ runner 路径从
+    /// `state.gateway_factory()` 取 gateway。两处夹具接线缺口会让 gateway
+    /// 解析不到夹具 provider（provider 零启动）：
+    /// - 直改 `state.provider_registry` **不会**重建 factory（factory 在
+    ///   构造期持 registry 快照）⇒ 改用注入 registry 的构造路径；
+    /// - 生产 availability gate 读真实 provider 健康快照 ⇒ 单测环境恒拒 ⇒
+    ///   改用恒健康门重建 factory。
+    pub(super) fn restart_state_with_provider(&self) -> WebAppState {
+        let root = self.root.clone();
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, Arc::new(FixtureClaudeProvider));
+        let state = WebAppState::with_provider_registry(
+            root.clone(),
+            WebRuntime::new_fake(root.clone()),
+            registry,
+        );
+        let mut state = state;
+        state.test_provider_enabled = true;
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        // 先把 registry 取出来再 move state —— `with_gateway_factory` 按值收
+        // state，实参再借 state 会触发 E0382（borrow of moved value）。
+        let provider_registry = state.provider_registry.clone();
+        state.with_gateway_factory(std::sync::Arc::new(
+            crate::web::gateway_factory::LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+                paths,
+                provider_registry,
+                crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
+            ),
+        ))
+    }
+
+    /// 把本树 attempt 切到 **gateway 可启动的真实 provider 形态**。
+    ///
+    /// REQ-ROUTE-01 两态化后逻辑 target 的 provider 只能经 LC gateway 启动，
+    /// 而 `Fake` 不进 gateway 映射（`ProviderRef::from_provider_name(Fake)`
+    /// 恒失败）⇒ 需要真实 provider 名（ClaudeCode）+ 夹具替身 adapter。
+    pub(super) fn switch_to_gateway_provider(&self) {
+        self.store
+            .update_attempt_provider_config_snapshot(
+                &self.attempt.project_id,
+                &self.attempt.issue_id,
+                &self.attempt.id,
+                ProviderConfigSnapshot {
+                    author: ProviderName::ClaudeCode,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+            )
+            .expect("provider config snapshot");
+        self.store
+            .update_role_provider_config_snapshot(
+                &self.attempt.project_id,
+                &self.attempt.issue_id,
+                &self.attempt.id,
+                CodingRoleProviderConfigSnapshot {
+                    coder: ProviderName::ClaudeCode,
+                    code_reviewer: Some(ProviderName::ClaudeCode),
+                    internal_reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: CodingRolePermissionModes {
+                        coder: CodingProviderPermissionMode::Auto,
+                        code_reviewer: CodingProviderPermissionMode::Auto,
+                        internal_reviewer: CodingProviderPermissionMode::Auto,
+                    },
+                },
+            )
+            .expect("role provider config");
+    }
+
+    /// 给本树 attempt 补**与 LC 权威一致**的冻结快照。
+    ///
+    /// 带快照的 attempt 才走仓维租约分类与 LC gateway 启动面；无快照的
+    /// attempt 在 REQ-ROUTE-01 两态化下一律 `target_snapshot_missing_for_logical`
+    /// ⇒ 租约三态判未知 ⇒ provider run 停等（零 provider 会话）。
+    pub(super) fn attach_target_snapshot(&self, snapshot: AttemptTargetSnapshot) {
+        let mut attempt = self
+            .store
+            .get_attempt(
+                &self.attempt.project_id,
+                &self.attempt.issue_id,
+                &self.attempt.id,
+            )
+            .expect("reload attempt for snapshot");
+        attempt.target_snapshot = Some(snapshot);
+        self.store
+            .write_coding_attempt_for_test(&attempt)
+            .expect("write attempt with target snapshot");
     }
 
     pub(super) fn attempt_key(&self) -> CodingAttemptRunKey {
@@ -1047,11 +1211,66 @@ async fn container_without_observer_parks_lock_kept() {
 async fn bad_tree_fail_closed_while_conflict_free_tree_resumes() {
     let root = t21_dir();
     let bad = WindowStartupFixture::new_in(root.path(), "treeA");
-    let good = WindowStartupFixture::new_in(root.path(), "treeB");
+    // 好树的 coding worktree 恒取 LC 成员主 checkout（见 `new_in_with_worktree`）：
+    // gateway 的生产 target resolver 复验 git-dir identity ⇒ worktree 与成员
+    // checkout 必须同仓（生产形态是 checkout 下的嵌套 worktree）。
+    let member_path = root.path().join("aggregate-root").join("repository_0001");
+    let good = WindowStartupFixture::new_in_with_worktree(root.path(), "treeB", &member_path);
     bad.open_window(&bad.window_id, "run-t21-bad").await;
     register_tree_writer_scope(&bad, "bad", None).await;
     good.open_window(&good.window_id, "run-t21-good").await;
     pollute_worktree_scratch(&good);
+
+    // REQ-ROUTE-01 两态化（去单仓入口）：好树要真的起 provider 会话 ⇒ 补齐
+    // 三段前置（缺一段即零 provider 会话）：
+    // ① 完整 LC 权威（manifest/member/checkout/selection/policy/repos.json）——
+    //    authority resolver 直读 `logical-codebases/{alias}/record.json` 落空 ⇒
+    //    `NotFound { kind: "logical_codebase" }`；
+    // ② 与权威一致的冻结快照——带快照的 attempt 才走仓维租约与 gateway 启动面，
+    //    无快照者一律 `target_snapshot_missing_for_logical` ⇒ 租约三态判未知；
+    // ③ durable capability 记录——gateway 能力源读 durable 行，三格须 Confirmed。
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let (logical_id, checkout_id) =
+        crate::product::logical_codebase::logical_test_fixture::seed_logical_authority(
+            &paths,
+            &good.attempt.project_id,
+            &good.attempt.issue_id,
+            root.path(),
+        );
+    good.attach_target_snapshot(
+        crate::product::logical_codebase::logical_test_fixture::snapshot_for(
+            &paths,
+            &good.attempt.project_id,
+            logical_id,
+            checkout_id,
+        ),
+    );
+    crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
+        &paths,
+        &good.attempt.project_id,
+        None,
+        &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+    );
+    // 仓维 worktree 记录 + 仓维锁绑到本 attempt：带快照的 attempt 只按仓维
+    // 分类租约（issue 维记录在场会被判 `legacy_shared_worktree_present`），
+    // 自持活跃租约（owner == 本 attempt）放行。
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        &good.attempt.project_id,
+        &good.attempt.issue_id,
+        logical_id,
+        &good.worktree,
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        &good.attempt.project_id,
+        &good.attempt.issue_id,
+        logical_id,
+        "work_item_0001",
+        &good.attempt.id,
+    );
+    good.switch_to_gateway_provider();
 
     let outcomes = bad
         .engine()
@@ -1079,7 +1298,7 @@ async fn bad_tree_fail_closed_while_conflict_free_tree_resumes() {
     assert!(!good.worktree.join("reviewer-scratch.txt").exists());
 
     // 分诊:好树恢复 runner(材料采集放行),坏树零 runner。
-    let state = bad.restart_state();
+    let state = good.restart_state_with_provider();
     let resumed = crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state)
         .await
         .expect("reconcile");

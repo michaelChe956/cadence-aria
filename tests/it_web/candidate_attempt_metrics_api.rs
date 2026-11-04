@@ -14,6 +14,8 @@ use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::lifecycle_store::candidate_attempts::{
     CandidateAttemptFailure, CandidateAttemptOutcome, CandidateAttemptRecord, CandidateAttemptStage,
 };
+use cadence_aria::product::logical_codebase::IdentityMigrationExecutor;
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::models::{ProviderName, WorkspaceType};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::runtime::WebRuntime;
@@ -113,6 +115,15 @@ async fn candidate_attempt_metrics_endpoint_returns_series_and_readonly_metrics(
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3（remove-single-repository-path）：issue 必须挂 logical_codebase_id
+    // 归属。按生产 v1.2→v1.3 身份迁移把 repository_0001 升成 LC 权威（member/
+    // manifest/checkout 由 IdentityMigrationExecutor 落盘，LC record 由
+    // require_logical_codebase 首读时的 migrate_legacy 自动生成），issue 随即以
+    // 确定性 legacy 别名 LC 归属——不是假 id。
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IdentityMigrationExecutor::new(app_paths.clone())
+        .ensure_identity_schema("project_0001")
+        .expect("migrate fixture repository into logical codebase authority");
     let (status, _issue) = request_json(
         app.clone(),
         Method::POST,
@@ -120,7 +131,8 @@ async fn candidate_attempt_metrics_endpoint_returns_series_and_readonly_metrics(
         json!({
             "title":"候选尝试度量",
             "description":"验证尝试流水读数的只读出口",
-            "repository_id":"repository_0001"
+            "repository_id":"repository_0001",
+            "logical_codebase_id": legacy_logical_codebase_id("project_0001")
         }),
     )
     .await;
@@ -128,7 +140,6 @@ async fn candidate_attempt_metrics_endpoint_returns_series_and_readonly_metrics(
 
     // 种一个 WorkItemPlan 会话 + 两行尝试（同 issue：1 次结构拒收失败 + 1 次
     // 终编译通过）——度量输入与真实落盘路径完全一致（store 盖印序号/身份）。
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let session = lifecycle
         .create_workspace_session(
@@ -280,6 +291,11 @@ async fn candidate_attempt_metrics_project_endpoint_aggregates_issues_into_real_
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 挂 legacy 别名 LC 归属（LC 权威由上方迁移建立，非假 id）。
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IdentityMigrationExecutor::new(app_paths.clone())
+        .ensure_identity_schema("project_0001")
+        .expect("migrate fixture repository into logical codebase authority");
     let mut issue_ids = Vec::new();
     for title in ["首次通过", "首次失败"] {
         let (status, issue) = request_json(
@@ -289,7 +305,8 @@ async fn candidate_attempt_metrics_project_endpoint_aggregates_issues_into_real_
             json!({
                 "title":title,
                 "description":null,
-                "repository_id":"repository_0001"
+                "repository_id":"repository_0001",
+                "logical_codebase_id": legacy_logical_codebase_id("project_0001")
             }),
         )
         .await;
@@ -298,7 +315,6 @@ async fn candidate_attempt_metrics_project_endpoint_aggregates_issues_into_real_
     }
     assert_eq!(issue_ids.len(), 2, "两个 issue 是项目级聚合的最小样本");
 
-    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
     // issue A：首次即通过。
     let passed_session = lifecycle

@@ -209,14 +209,6 @@ fn authority_inventory(root: &Path, lc_id: &str) -> BTreeMap<String, Vec<u8>> {
     inventory
 }
 
-/// 生产 machine_skills 步骤在 fake runtime 下以 workspace root 为 home——
-/// 预置本地技能源目录，避免在线 clone（与 web 层生产依赖测试同构）。
-fn seed_local_skills_source(root: &Path) {
-    let skills_source = root.join(".agents/Cadence-skills/cadence-init/skills/demo");
-    std::fs::create_dir_all(&skills_source).expect("create skills source");
-    std::fs::write(skills_source.join("SKILL.md"), "# demo\n").expect("write demo skill");
-}
-
 /// Fake CodeGraph CLI：成员名单驱动 acceptance 断言（与 LcOperationsFixture
 /// 同构），保证 A03/A04 的 aggregate index 首建确定性成功。
 #[derive(Clone)]
@@ -461,7 +453,7 @@ impl ProviderAdapter for StubSyncAdapter {
 async fn a03_app() -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf) {
     let root = tempdir().expect("root");
     let root_path = root.path().to_path_buf();
-    seed_local_skills_source(&root_path);
+    crate::provider_capability_fixture::seed_local_skills_source(&root_path);
     let paths = ProductAppPaths::new(root_path.join(".aria"));
 
     let mut registry = ProviderRegistry::new();
@@ -478,10 +470,13 @@ async fn a03_app() -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf
         always_available_gate(),
     ));
 
-    let state = WebAppState::with_events(
-        root_path.clone(),
-        WebRuntime::new_fake(root_path.clone()),
-        EventHub::new(),
+    let state = crate::provider_capability_fixture::with_available_provider_health(
+        WebAppState::with_events(
+            root_path.clone(),
+            WebRuntime::new_fake(root_path.clone()),
+            EventHub::new(),
+        ),
+        &root_path,
     )
     .with_gateway_factory(factory.clone())
     .with_aggregate_index_operation(fake_index_operation(paths.clone(), &["alpha", "beta"]));
@@ -519,10 +514,13 @@ fn a04_app(
         Arc::new(StubSyncAdapter),
         always_available_gate(),
     ));
-    let state = WebAppState::with_events(
-        root_path.to_path_buf(),
-        WebRuntime::new_fake(root_path.to_path_buf()),
-        EventHub::new(),
+    let state = crate::provider_capability_fixture::with_available_provider_health(
+        WebAppState::with_events(
+            root_path.to_path_buf(),
+            WebRuntime::new_fake(root_path.to_path_buf()),
+            EventHub::new(),
+        ),
+        root_path,
     )
     .with_gateway_factory(factory.clone())
     .with_aggregate_index_operation(fake_index_operation(
@@ -587,6 +585,14 @@ async fn register_lc_members(
     .await;
     assert_eq!(status, StatusCode::OK, "{batch}");
     assert_eq!(batch["status"], "completed");
+    // 片4（REQ-BOOT-07）：选择器前置——LC 子树与 project 级 legacy 子树
+    // 都种 Confirmed（temp 根由 aggregate_root 的父目录恢复）。
+    let root = aggregate_root
+        .parent()
+        .expect("fixture root is the aggregate root's parent");
+    let paths = ProductAppPaths::new(root.join(".aria"));
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001", Some(&lc_id));
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001", None);
     lc_id
 }
 
@@ -826,7 +832,7 @@ fn legacy_lc_id(project_id: &str) -> String {
 async fn a04_failed_identity_and_missing_rules_require_product_repair_before_read_switch() {
     let root = tempdir().expect("root");
     let root_path = root.path().to_path_buf();
-    seed_local_skills_source(&root_path);
+    crate::provider_capability_fixture::seed_local_skills_source(&root_path);
     let paths = ProductAppPaths::new(root_path.join(".aria"));
 
     // legacy 存量布局：两个真实 git 成员仓（含实际规则文件；代表性查询
@@ -856,6 +862,11 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // 片4（REQ-BOOT-07）：选择器前置，种 project 作用域 Confirmed。必须在
+    // project 记录落地后：seed 会先建 `projects/project_0001/` 目录，若先
+    // seed 再 POST /api/projects，序号扫描（只看目录名）会把新 project 分到
+    // project_0002，后续硬编码 project_0001 的路由即 404 project_not_found。
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, PROJECT_ID, None);
     write_json(
         &paths.project_root(PROJECT_ID).join("repos.json"),
         &vec![
@@ -1105,18 +1116,27 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         operation_denied["error"]["code"], "aggregate_pre_check_failed",
         "durable error must name the interrupted turn: {operation_denied}"
     );
-    let durable_message = operation_denied["error"]["message"].as_str().unwrap_or("");
+    // 契约迁移(报 Main):error.message 已是 copy 标题,机器事实按契约在
+    // details.action/detail(dto/aggregate_initialization.rs 明文,
+    // operation_http.rs 同款先例),断言语义不变。
+    let durable_details = &operation_denied["error"]["details"];
+    let durable_action = durable_details["action"].as_str().unwrap_or("");
+    let durable_detail = durable_details["detail"].as_str().unwrap_or("");
     assert!(
-        !durable_message.contains("member_language_rules_missing"),
+        !durable_detail.contains("member_language_rules_missing")
+            && !durable_action.contains("member_language_rules_missing"),
         "bootstrap credential waives the member rules gate, got: {operation_denied}"
     );
     assert!(
-        !durable_message.contains("provider admission preflight denied"),
+        !durable_detail.contains("provider admission preflight denied")
+            && !durable_action.contains("provider admission preflight denied"),
         "the failure must be the injected interruption, not an admission denial: {operation_denied}"
     );
     assert!(
-        durable_message.contains("gateway start_streaming failed"),
-        "the injected turn failure must be observable: {operation_denied}"
+        durable_action.contains("gateway start_streaming failed")
+            && durable_detail
+                .contains("test-injected interruption during the pre_check provider turn"),
+        "the injected turn failure must be observable and attributable: {operation_denied}"
     );
     assert_eq!(
         factory.audit().stream_launches(),

@@ -468,7 +468,10 @@ fn seed_project_and_issue(paths: &ProductAppPaths, project_id: &str, issue_id: &
             id: issue_id.to_string(),
             project_id: project_id.to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id),
             title: title.to_string(),
             description: None,
             change_id: format!("c1_serial_{issue_id}"),
@@ -546,8 +549,12 @@ async fn a09_failed_advance_explicit_retry_chain() {
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let coding_store = CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        // 基座 attempt 带冻结快照 ⇒ 桶键 Some(logical_repository_id)，
+        // None 桶检索落空 ⇒ 桶无关取数（见 group.rs `attempt_target_bucket`）。
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store
         .delete_attempt(PROJECT_ID, ISSUE_ID, &seeded_attempt.id)
@@ -773,12 +780,26 @@ async fn a09_failed_advance_explicit_retry_chain() {
 
 /// advance 铺底：与 advance_handler 定向测试同款（accepted drafts 经真实
 /// store 面），保证 handle_advance 能推进到 PlanBindingSaved。
+///
+/// ⚠️ 每条 draft 的 `target_repository_id` 必须落**权威成员**（REQ-CS-05
+/// 成员单 target 纪律）：group 权威单元的 target 取自 source draft 的
+/// `candidate.target_repository_id`（`group_validation.rs`），缺 target ⇒
+/// advance 派生不出冻结快照 ⇒ group admission fail-closed 且**早于**
+/// 初始化 journal ⇒ 失败事实只剩 record、journal 缺失。
 fn seed_serial_advance_drafts(app_paths: &ProductAppPaths) {
     let revision_store = WorkItemRevisionStore::new(app_paths.clone());
     let lineage = revision_store
         .get_plan_lineage("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap();
     let plan_store = WorkItemPlanStore::new(app_paths.clone());
+    // 权威成员（seed 落 repos.json 投影 + manifest/member/checkout）。
+    let logical_member = crate::product::repository_store::RepositoryStore::new(app_paths.clone())
+        .list("project_0001")
+        .expect("seed repos.json projection")
+        .into_iter()
+        .find(|record| record.id == "repository_0001")
+        .and_then(|record| record.logical_repository_id)
+        .expect("seed repository logical member id");
     for (logical_id, revision_id) in [
         ("wi_core", "work_item_revision_wi_core_0001"),
         ("wi_registration", "work_item_revision_wi_registration_0001"),
@@ -801,7 +822,7 @@ fn seed_serial_advance_drafts(app_paths: &ProductAppPaths) {
                 generation_mode: WorkItemGenerationMode::Serial,
                 generation_diagnostics: None,
                 candidate: WorkItemDraftCandidate {
-                    target_repository_id: None,
+                    target_repository_id: Some(logical_member),
                     outline_id: format!("outline_{logical_id}"),
                     logical_work_item_id: logical_id.to_string(),
                     canonical_contract_candidate: revision.canonical_contract,

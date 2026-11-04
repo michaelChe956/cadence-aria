@@ -5,6 +5,16 @@
 // 路由；expected_gate_id 与当前 active gate/timeline node 比对。
 // ---------------------------------------------------------------------------
 
+/// 恒健康的 provider 可用性门（夹具 provider 是受控 double，无真实健康面）。
+///
+/// 生产 gateway 的可用性门读 `ProviderHealthService` 的 durable 快照；夹具
+/// 无真实 probe ⇒ `degraded()` = true ⇒ gateway 一律拒 provider。REST 侧经
+/// manager 重建 engine 走生产 gateway ⇒ 必须注入恒健康门（WS 侧孪生用例走
+/// 直连 registry 路径，不经此门 ⇒ 两面行为原本分叉）。
+///
+/// 该替身**不在本文件另建**：web 测试树共用
+/// `crate::web::handlers::automation_enrollment_test_support::always_available_gate`
+/// （唯一一份，见该文件注释）。
 pub(super) struct WorkspaceHumanActionHttpFixture {
     #[allow(dead_code)]
     harness: CampaignStage3Harness,
@@ -41,6 +51,22 @@ pub(super) async fn workspace_human_action_http_fixture(
         crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
         registry,
     );
+    // REQ-ROUTE-01 两态化：REST 侧经 manager 重建 engine ⇒ 走**生产 gateway**
+    // ⇒ gateway 的 provider 可用性门生效。`WebAppState::with_provider_registry`
+    // 沿用默认 `ProviderHealthService`（无真实 probe ⇒ `degraded()` = true）⇒
+    // gateway 一律拒 ClaudeCode（`provider health state is degraded`）⇒ 修订
+    // turn 的 provider 零启动。WS 侧孪生用例走直连 registry 路径不撞此门，
+    // REST 侧撞 ⇒ 两面行为分叉。
+    // ⇒ 这里注入**恒健康**的可用性门（夹具 provider 是受控 double，无真实
+    // 健康面可言）；只改夹具装配，不改实现。
+    let provider_registry = state.provider_registry.clone();
+    let state = state.with_gateway_factory(std::sync::Arc::new(
+        crate::web::gateway_factory::LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
+            crate::product::app_paths::ProductAppPaths::new(root_path.join(".aria")),
+            provider_registry,
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
+        ),
+    ));
     let manager = state
         .workspace_sessions
         .get_or_create(&harness.session_id, || {

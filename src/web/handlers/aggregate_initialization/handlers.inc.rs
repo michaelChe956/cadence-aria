@@ -1,3 +1,8 @@
+use crate::product::logical_codebase::provider_selection::{
+    provider_from_wire, select_aggregate_provider, AGGREGATE_PROVIDER_CANDIDATE_ORDER,
+    ProviderSelectionOutcome, REASON_CODE_PROVIDER_HEALTH_DEGRADED,
+};
+
 /// Legacy `/logical-codebase/initializations` compatibility alias for the
 /// default first logical codebase (v1.2 migration artifact).
 pub async fn create_aggregate_initialization(
@@ -89,34 +94,65 @@ pub(crate) fn start_lc_aggregate_initialization(
         aggregate_initialization_dependencies(state).for_lc(logical_codebase_id.to_string());
     let operation_id = deterministic_operation_id(project_id, idempotency_key);
     let manifest = load_manifest_for_profile(&project_paths, project_id, logical_codebase_id)?;
+    // 片4（REQ-BOOT-07）：provider 选择器——L1 health 快照 + L2 能力核验，
+    // 与 gateway 准入同源；失败时**不创建 operation**，候选表/单家核验
+    // 入口随失败码下发。同步桥接见 [`select_aggregate_provider_blocking`]。
+    let selection = select_aggregate_provider_blocking(
+        &project_paths,
+        &state.provider_health,
+        project_id,
+        logical_codebase_id,
+    )?;
+    let ProviderSelectionOutcome::Selected(selection_table) = selection else {
+        return Err(provider_selection_api_error(
+            &selection,
+            project_id,
+            logical_codebase_id,
+        ));
+    };
+    // 冻结进 `input.provider`：执行/重试期一律从 durable 记录解出（重试
+    // 不换人）；未知 wire 名 fail-closed，绝不静默回落默认 provider。
+    let selected = provider_from_wire(&selection_table.selected).ok_or_else(|| {
+        ApiError::runtime(
+            REASON_CODE_PROVIDER_HEALTH_DEGRADED,
+            "provider selection produced an unknown provider wire name",
+            json!({}),
+        )
+    })?;
     let input = crate::product::logical_codebase::AggregateInitializationOperationInput {
         idempotency_key: idempotency_key.to_string(),
         manifest_revision: manifest.membership_revision,
         policy_digest: "sha256:aggregate-policy".to_string(),
         profile_evidence_digest: Some("sha256:profile".to_string()),
         provider_context_root: manifest.provider_context_root.clone(),
-        provider: "claude_code".to_string(),
+        provider: selection_table.selected.clone(),
     };
     // Task 1.8（REQ-REG-14）：trust 硬前置门——生产依赖图（`production`/
     // `for_lc` 透传）注入 gate 时在 begin 之前评估；未 Ready 只保留 gate
     // 自行落盘的 waiting/审计事实，五步 operation 不创建、worker 不启动。
+    // 片4（REQ-BOOT-07）：准入清单 = 冻结的选中 provider——Pi/ClaudeCode
+    // 过滤后为空（门 no-op，与接线前 Claude 行为等价）；KimiCode/Codex
+    // 走既有 `aggregate_initialization_trust_waiting` 链路。
     ensure_recipe_trust_ready(
         &dependencies,
         project_id,
         &operation_id,
         logical_codebase_id,
         &manifest.provider_context_root,
+        &selected,
     )?;
-    let operation = if full_recipe_requested {
-        dependencies
-            .coordinator
-            .begin_reinitialization(operation_id, project_id, input)
-    } else {
-        dependencies
-            .coordinator
-            .begin(operation_id, project_id, input)
-    }
-    .map_err(aggregate_initialization_api_error)?;
+    // REQ-BOOT-07：候选表随 operation 落账（`provider_selection`），幂等
+    // 身份不含 provider ⇒ 同 key 重放返回首次落盘的选择结果。
+    let operation = dependencies
+        .coordinator
+        .begin_with_selection(
+            operation_id,
+            project_id,
+            input,
+            selection_table,
+            full_recipe_requested,
+        )
+        .map_err(aggregate_initialization_api_error)?;
     // `begin` returns only a newly-created operation: an existing terminal
     // operation with the same key is reported as an idempotency conflict.
     let key =
@@ -594,6 +630,7 @@ fn ensure_recipe_trust_ready(
     operation_id: &str,
     logical_codebase_id: &str,
     provider_context_root: &std::path::Path,
+    selected: &crate::product::models::ProviderName,
 ) -> ApiResult<()> {
     use crate::product::logical_codebase::provider_trust::ProviderTrustPreparationResult;
 
@@ -607,9 +644,9 @@ fn ensure_recipe_trust_ready(
         operation_id,
         logical_codebase_id,
         &canonical_root,
-        // 五步 recipe 固定 Claude Code；`requires_workspace_trust` 过滤后
-        // 仅 Codex/Kimi 进入登记（多 provider 入口由 Phase 2/3 扩展）。
-        &[crate::product::models::ProviderName::ClaudeCode],
+        // 片4（REQ-BOOT-07）：准入清单 = 冻结的选中 provider（Pi/
+        // ClaudeCode 过滤后为空 → 门 no-op；KimiCode/Codex 进入登记）。
+        std::slice::from_ref(selected),
         // route 面是五步 recipe 入口：以 Recipe 场景驱动中立 trust 门。
         crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Recipe,
     ) {
@@ -620,4 +657,160 @@ fn ensure_recipe_trust_ready(
             }),
         ),
     }
+}
+
+/// 片4（REQ-BOOT-07）：`start_lc_aggregate_initialization` 是同步入口
+/// （HTTP create 面与 bootstrap advance 的同步 prepare 派发共用），选择器
+/// 是 async——专用线程 + current-thread runtime 阻塞取值（先例：
+/// aggregate_index 的 codegraph runner）。health 刷新 token 在选择器内部
+/// 自建，与请求生命周期解耦；store 级错误走既有 product store 映射。
+fn select_aggregate_provider_blocking(
+    paths: &ProductAppPaths,
+    health: &std::sync::Arc<crate::cross_cutting::provider_health::ProviderHealthService>,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<ProviderSelectionOutcome> {
+    let health = health.clone();
+    let paths = paths.clone();
+    let project_id = project_id.to_string();
+    let logical_codebase_id = logical_codebase_id.to_string();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("provider selection runtime");
+        runtime.block_on(select_aggregate_provider(
+            &paths,
+            &health,
+            &project_id,
+            &logical_codebase_id,
+        ))
+    })
+    .join()
+    .map_err(|_| {
+        ApiError::runtime(
+            REASON_CODE_PROVIDER_HEALTH_DEGRADED,
+            "provider selection worker panicked",
+            json!({}),
+        )
+    })?
+    .map_err(product_store_api_error)
+}
+
+/// 片4（REQ-BOOT-07 / REQ-PCR-02）：选择期失败 → HTTP 失败面。**不创建
+/// operation**（选择器零写入），稳定码取选择器 `reason_code()`（四个
+/// `REASON_CODE_*`，三段成品与执行期三态同源放 `details.copy`）。
+///
+/// - `details.candidates`：四家候选表（owner 顺序，逐家 `action_hint`）；
+/// - `details.revalidate`：单家核验入口六字段——`NeedsVerification` 指向
+///   `suggested`；`Denied` 指向被点名者的**下一家**（owner 顺序）；
+/// - `details.fallback_provider`：仅 `Denied`——下一家 wire 名；被点名者
+///   已是末家时为 `null` 且不下发 `revalidate`（不指向不存在的下一家）。
+fn provider_selection_api_error(
+    outcome: &ProviderSelectionOutcome,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiError {
+    use crate::product::logical_codebase::failure_copy::{describe, FailureInput};
+    use crate::product::logical_codebase::provider_trust::provider_wire_label;
+
+    let code = outcome
+        .reason_code()
+        .unwrap_or("aggregate_initialization_failed");
+    // 被点名 provider：NeedsVerification = 建议核验的那家；Denied = owner
+    // 顺序中第一家已安装（被真实拒绝）的候选，其下一家为 fallback。
+    let (named, fallback) = match outcome {
+        ProviderSelectionOutcome::NeedsVerification { suggested, .. } => {
+            (Some(suggested.clone()), None)
+        }
+        ProviderSelectionOutcome::Denied { table } => {
+            let named = table
+                .candidates
+                .iter()
+                .find(|candidate| candidate.cli_available)
+                .and_then(|candidate| provider_from_wire(&candidate.provider));
+            let fallback = named.clone().and_then(|named| {
+                AGGREGATE_PROVIDER_CANDIDATE_ORDER
+                    .iter()
+                    .skip_while(|provider| *provider != &named)
+                    .nth(1)
+                    .cloned()
+            });
+            (named, fallback)
+        }
+        _ => (None, None),
+    };
+    let copy = describe(FailureInput {
+        provider: named
+            .map(|provider| provider_wire_label(&provider).to_string())
+            .as_deref(),
+        ..FailureInput::new(code)
+    });
+    let display_name = |wire: &str| -> String {
+        outcome
+            .table()
+            .and_then(|table| {
+                table
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.provider == wire)
+            })
+            .map(|candidate| candidate.display_name.clone())
+            .unwrap_or_else(|| wire.to_string())
+    };
+    let mut details = serde_json::json!({ "copy": copy });
+    if let Some(table) = outcome.table() {
+        details["candidates"] = serde_json::to_value(&table.candidates).unwrap_or_default();
+        details["rule_version"] = serde_json::json!(table.rule_version);
+        details["decided_at"] = serde_json::json!(table.decided_at);
+    }
+    if let ProviderSelectionOutcome::HealthDegraded { detail } = outcome {
+        details["detail"] = serde_json::json!(detail);
+    }
+    // 核验入口只指向单家：NeedsVerification → suggested；Denied → 下一家。
+    let revalidate_target = match outcome {
+        ProviderSelectionOutcome::NeedsVerification { suggested, .. } => Some(suggested.clone()),
+        ProviderSelectionOutcome::Denied { .. } => fallback.clone(),
+        _ => None,
+    };
+    if let Some(target) = revalidate_target {
+        let wire = provider_wire_label(&target).to_string();
+        details["suggested_provider"] = serde_json::json!(wire);
+        details["revalidate"] = capability_revalidate_entry(
+            &target,
+            &display_name(&wire),
+            project_id,
+            logical_codebase_id,
+        );
+    }
+    if let ProviderSelectionOutcome::Denied { .. } = outcome {
+        details["fallback_provider"] = match fallback {
+            Some(next) => serde_json::json!(provider_wire_label(&next)),
+            None => serde_json::Value::Null,
+        };
+    }
+    ApiError::runtime(code, copy.title_zh.clone(), details)
+}
+
+/// 单家核验入口（REQ-PCR-02 场景 2：`expect` 说明真实探针会消耗额度；
+/// MUST NOT 指向「一键核验全部」）。`ui_path` 是能力卡片（逻辑代码库
+/// 管理抽屉）所在的 workbench 页。
+fn capability_revalidate_entry(
+    target: &crate::product::models::ProviderName,
+    display_name: &str,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> serde_json::Value {
+    let wire =
+        crate::product::logical_codebase::provider_trust::provider_wire_label(target).to_string();
+    json!({
+        "ui_path": "/workbench",
+        "button_label": format!("核验 {display_name}"),
+        "method": "POST",
+        "path": format!(
+            "/api/projects/{project_id}/logical-codebases/{logical_codebase_id}/capability-revalidate"
+        ),
+        "body": json!({ "provider_type": wire }),
+        "expect": "点击后立即执行一次真实能力探针（会消耗少量该 provider 的额度），通过后自动导入核验记录；全行已核验时秒回 already_confirmed。",
+    })
 }

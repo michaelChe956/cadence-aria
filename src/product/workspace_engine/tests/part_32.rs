@@ -317,7 +317,8 @@ async fn equip_plan_review_window(
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id:
+                crate::product::logical_codebase::legacy_logical_codebase_id("project_0001"),
             base_branch: None,
             title: "t20b plan review window fixture".to_string(),
             description: None,

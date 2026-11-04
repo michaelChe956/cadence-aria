@@ -546,16 +546,79 @@ pub struct AutomationAttentionFact {
     pub gate_id: Option<String>,
 }
 
+/// 冲突原因判别位（REQ-WIGA-SWAP-02）。
+///
+/// 同一个 409 承载 9 类互斥语义；判别位让 HTTP 层把「运行中不能换
+/// payload」（该先终止）与「版本号过期」（该等一下重试）分成两个稳定码，
+/// 其余 7 类落回旧码 `automation_enrollment_conflict`——旧码被终止自愈
+/// 逻辑钉住（`automationTerminationConflict.tsx`），**不得改名**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// 运行中改 payload：enabled 状态下异 payload 的 Enable（换 provider）。
+    PayloadImmutable,
+    /// 版本过期：`expected_revision` 与当前 `policy_revision` 不符。
+    RevisionStale,
+    /// 命令账本 payload 不匹配：同 `command_id` 异 payload。
+    CommandLedgerPayloadMismatch,
+    /// 绑定身份互斥：plan/session 半绑定或绑定冲突。
+    BindingIdentityMismatch,
+    /// 授权源 / 载体漂移：`source` / `target` 与既有记录不等。
+    SourceTargetDrift,
+    /// 生成意图冲突：prepared intent 冲突或内容不匹配。
+    GenerationIntentMismatch,
+    /// attention 事实写入冲突：绑定互证失败。
+    AttentionFactConflict,
+    /// 生成阶段 / 计划判定冲突。
+    PlanPhaseConflict,
+    /// 防御性 / 状态重读不一致（重读失败、重读后身份变化等）。
+    DefensiveStateMismatch,
+}
+
+impl ConflictKind {
+    /// 判别位的稳定字符串（进 `details.kind`；机器可读，不做 i18n）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PayloadImmutable => "payload_immutable",
+            Self::RevisionStale => "revision_stale",
+            Self::CommandLedgerPayloadMismatch => "command_ledger_payload_mismatch",
+            Self::BindingIdentityMismatch => "binding_identity_mismatch",
+            Self::SourceTargetDrift => "source_target_drift",
+            Self::GenerationIntentMismatch => "generation_intent_mismatch",
+            Self::AttentionFactConflict => "attention_fact_conflict",
+            Self::PlanPhaseConflict => "plan_phase_conflict",
+            Self::DefensiveStateMismatch => "defensive_state_mismatch",
+        }
+    }
+}
+
 /// enrollment 写入失败语义：HTTP 层按 Conflict→409 / InvalidScope→422 /
 /// NotFound→404 / Store→fail-closed 其余映射。
 #[derive(Debug, thiserror::Error)]
 pub enum EnrollmentError {
     #[error("automation_enrollment_conflict: current_revision={current_revision:?}")]
-    Conflict { current_revision: Option<u64> },
+    Conflict {
+        current_revision: Option<u64>,
+        /// 冲突原因判别位（REQ-WIGA-SWAP-02）：HTTP 层按它分流稳定码；
+        /// 旧码语义（其余 7 类）逐字不变。
+        kind: ConflictKind,
+    },
     #[error("automation_enrollment_invalid_scope: {0}")]
     InvalidScope(String),
     #[error("automation_enrollment_not_found")]
     NotFound,
     #[error(transparent)]
     Store(#[from] ProductStoreError),
+}
+
+impl EnrollmentError {
+    /// 零余量文件 `gates.rs::lease_takeover_store_error` 用：不展开穷举模式
+    /// 即可取 revision（large_file_guard 对该文件锁定上限，任何净增即红）。
+    pub(crate) fn conflict_revision(&self) -> Option<u64> {
+        match self {
+            EnrollmentError::Conflict {
+                current_revision, ..
+            } => *current_revision,
+            _ => None,
+        }
+    }
 }

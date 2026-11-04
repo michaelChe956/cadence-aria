@@ -101,11 +101,11 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
 /// 分流结果：该 attempt 的 shared worktree 访问应走哪一族方法。
 ///
 /// REQ-COD-03（§4.2.3）：`Some(snapshot)` 走多仓仓维路径（三元键
-/// `(project, issue, logical repository)`）；`None + Legacy` 走单仓老路径（行为不变，红线）。
+/// `(project, issue, logical repository)`）；`Legacy` 路由臂已删除，
+/// `None` 且 routing 非 Logical 一律在 `route_issue_shared_worktree` 内 fail-closed。
 pub(crate) enum IssueSharedWorktreeRoute {
-    /// 单仓老路径：`issue-shared-worktree.json`。
-    Legacy,
-    /// 多仓仓维路径：`shared-worktrees/{repository_id}.json`。
+    /// 多仓仓维路径：`shared-worktrees/{repository_id}.json`（Legacy 单仓
+    /// 变体已随去单仓入口删除——运行时分流枚举，无持久化兼容语义）。
     Repository { repository_id: LogicalRepositoryId },
 }
 
@@ -115,10 +115,10 @@ impl CodingWorkspaceEngine {
     /// 语义（REQ-COD-03 §4.2.3）：
     /// - `Some(snapshot)` → 多仓仓维路径（repository_id 取自
     ///   `snapshot.logical_repository_id`；admission 已保证此时 routing 一致）。
-    /// - `None + Legacy` → 单仓老路径（行为不变）。
     /// - `None + Logical` → 防御性 fail-closed（`target_snapshot_missing_for_logical`，
     ///   正常不可能至此，admission 已拦截）。
-    /// - `None + FailClosed` → 防御性 fail-closed（`target_snapshot_identity_drifted`）。
+    /// - `None + FailClosed` → 防御性 fail-closed（`target_snapshot_identity_drifted`）；
+    ///   单仓 `Legacy` 变体已删除，无归属 issue 落在该臂。
     ///
     /// 多仓分支在分流前执行迁移 preflight 断言（§4.2.6）：同 issue 下存在旧
     /// `issue-shared-worktree.json` → fail-closed `legacy_shared_worktree_present`。
@@ -137,7 +137,6 @@ impl CodingWorkspaceEngine {
             &attempt.project_id,
             &attempt.issue_id,
         )? {
-            RepositoryRouting::Legacy { .. } => Ok(IssueSharedWorktreeRoute::Legacy),
             RepositoryRouting::Logical { .. } => Err(CodingWorkspaceEngineError::Store(
                 ProductStoreError::Io(TARGET_SNAPSHOT_MISSING_FOR_LOGICAL.to_string()),
             )),
@@ -464,9 +463,6 @@ impl CodingWorkspaceEngine {
     ) -> Result<(), CodingWorkspaceEngineError> {
         let lifecycle = LifecycleStore::new(self.store.paths());
         let shared = match self.route_issue_shared_worktree(attempt)? {
-            IssueSharedWorktreeRoute::Legacy => {
-                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
-            }
             IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
                 .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)?,
         };
@@ -627,9 +623,6 @@ impl CodingWorkspaceEngine {
 
         let lifecycle = LifecycleStore::new(self.store.paths());
         let shared_worktree = match self.route_issue_shared_worktree(attempt)? {
-            IssueSharedWorktreeRoute::Legacy => {
-                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
-            }
             IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
                 .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)?,
         };
@@ -691,12 +684,10 @@ impl CodingWorkspaceEngine {
             &attempt.issue_id,
         )
         .map_err(|error| unresolved(error.to_string()))?;
-        let authority = match lc_id.as_deref() {
-            Some(lc_id) => {
-                crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), lc_id)
-            }
-            None => crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone()),
-        };
+        let authority = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+            paths.clone(),
+            lc_id.as_str(),
+        );
         let manifest = authority
             .load_manifest(&attempt.project_id)
             .map_err(|error| unresolved(error.to_string()))?
@@ -775,9 +766,6 @@ impl CodingWorkspaceEngine {
         }
         let lifecycle = LifecycleStore::new(self.store.paths());
         let shared = match self.route_issue_shared_worktree(attempt)? {
-            IssueSharedWorktreeRoute::Legacy => {
-                lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)?
-            }
             IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
                 .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)?,
         };
@@ -998,9 +986,9 @@ fn lease_takeover_store_error(
 
     match error {
         EnrollmentError::Store(error) => error,
-        EnrollmentError::Conflict { current_revision } => ProductStoreError::Conflict {
+        ref err @ EnrollmentError::Conflict { .. } => ProductStoreError::Conflict {
             kind: "enrollment_command_ledger",
-            id: format!("current_revision={current_revision:?}"),
+            id: format!("current_revision={:?}", err.conflict_revision()),
         },
         EnrollmentError::InvalidScope(reason) => ProductStoreError::Io(reason),
         EnrollmentError::NotFound => ProductStoreError::NotFound {

@@ -303,7 +303,7 @@ describe("门卡「现在请做 X」指引行（按门状态分支）", () => {
     expect(guidance).toHaveTextContent("写明要怎么改");
     expect(guidance).toHaveTextContent("排除此项");
   });
-  it("动作被阻断但终止可用：指引给出人话原因与出路（终止）", () => {
+  it("动作被阻断但终止可用：指引按 durable 分流给出出路（终止仍可用）", () => {
     render(
       <GatePromptEntry
         entry={gateEntry("terminal_stage", undefined, { terminate_block_reason: null })}
@@ -311,9 +311,11 @@ describe("门卡「现在请做 X」指引行（按门状态分支）", () => {
       />,
     );
 
+    // REQ-HGC-04：过期卡指引来自分流单一事实源（推进到别的门 → 以页面最新
+    // 的一张门卡为准；终止保留为**可选**出口，不再表述为唯一出路）。
     const guidance = screen.getByTestId("gate-next-step");
-    expect(guidance).toHaveTextContent("已离开人工确认门");
-    expect(guidance).toHaveTextContent("终止此门后重新发起");
+    expect(guidance).toHaveTextContent("以页面最新的一张门卡为准");
+    expect(guidance).not.toHaveTextContent("只能终止此门后重新发起");
     expect(screen.getByRole("button", { name: "终止此门" })).toBeVisible();
   });
 
@@ -321,8 +323,8 @@ describe("门卡「现在请做 X」指引行（按门状态分支）", () => {
     render(<GatePromptEntry entry={gateEntry("terminal_stage")} actions={actions()} />);
 
     const guidance = screen.getByTestId("gate-next-step");
-    expect(guidance).toHaveTextContent("已离开人工确认门");
-    expect(guidance).toHaveTextContent("此卡不再接收操作");
+    expect(guidance).toHaveTextContent("不再接收操作");
+    expect(guidance).toHaveTextContent("以页面最新的一张门卡为准");
   });
 
   it("上下文阻断门：指引补充上下文或终止", () => {
@@ -444,10 +446,124 @@ describe("「确认当前版本」可用性与后果说明", () => {
   });
 });
 
+describe("REQ-HGC-04：过期门卡按 durable 停点分流（渲染面）", () => {
+  installWorkspaceStoreTestHooks();
+
+  it("过期卡渲染分流表文案，不再出现「只能终止此门后重新发起」", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      stage: "human_confirm",
+      sessionStatus: "stopped_needs_human",
+      planContinueAvailable: true,
+      humanGateSnapshot: null,
+      humanGateTurn: null,
+      humanGateClosure: null,
+    });
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry("phase_mismatch", undefined, { terminate_block_reason: null })}
+        actions={actions()}
+      />,
+    );
+
+    // 分流表文案（停在等 owner 回话 + 确有「继续自动化」入口）。
+    const guidance = screen.getByTestId("gate-next-step");
+    expect(guidance).toHaveTextContent("自动化停在等你回话的地方");
+    expect(guidance).toHaveTextContent("继续自动化");
+    // 旧误导措辞退役：不得把 owner 引向「只能终止此门后重新发起」。
+    expect(guidance).not.toHaveTextContent("只能终止此门后重新发起");
+    expect(screen.getByTestId("gate-prompt-entry").textContent).not.toContain(
+      "只能终止此门后重新发起",
+    );
+  });
+
+  it("过期卡按 durable 状态分流：四态均不渲染「终止此门」按钮", () => {
+    for (const status of [
+      "stopped_needs_human",
+      "failed",
+      "terminated",
+      "confirmed",
+    ] as const) {
+      useWorkspaceStore.setState({
+        workspaceType: "work_item_plan",
+        flowKind: "single_candidate",
+        stage: "human_confirm",
+        sessionStatus: status,
+        planContinueAvailable: true,
+        humanGateSnapshot: null,
+        humanGateTurn: null,
+        humanGateClosure: null,
+      });
+
+      const { unmount } = render(
+        <GatePromptEntry
+          entry={gateEntry("phase_mismatch", undefined, { terminate_block_reason: null })}
+          actions={actions()}
+        />,
+      );
+
+      expect(
+        screen.queryByRole("button", { name: "终止此门" }),
+        `durable 状态 ${status} 的过期卡不得挂「终止此门」`,
+      ).toBeNull();
+      unmount();
+    }
+  });
+
+  it("非过期卡仍渲染「终止此门」按钮（owner 正在用的动作面不得消失）", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      stage: "human_confirm",
+      sessionStatus: "stopped_needs_human",
+      planContinueAvailable: true,
+      humanGateSnapshot: null,
+      humanGateTurn: null,
+      humanGateClosure: null,
+    });
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, undefined, { terminate_block_reason: null })}
+        actions={actions()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "终止此门" })).toBeVisible();
+  });
+
+  it("无真实续跑入口时不得指引去点「继续自动化」", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      flowKind: "single_candidate",
+      stage: "human_confirm",
+      sessionStatus: "stopped_needs_human",
+      // 服务端未提供继续动作（false 与 null 同义：按「无真实续跑入口」处理）。
+      planContinueAvailable: false,
+      humanGateSnapshot: null,
+      humanGateTurn: null,
+      humanGateClosure: null,
+    });
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry("phase_mismatch", undefined, { terminate_block_reason: null })}
+        actions={actions()}
+      />,
+    );
+
+    const card = screen.getByTestId("gate-prompt-entry");
+    expect(card.textContent).toContain("请刷新页面看最新状态");
+    expect(card.textContent).not.toContain("继续自动化");
+  });
+});
+
 describe("元数据行计数人话化", () => {
   installWorkspaceStoreTestHooks();
 
-  it("触发原因/已回复轮次/剩余修复次数都用 owner 措辞，计数保留", () => {
+  it("触发原因/已说明轮次/人工返修余量都用 owner 措辞，计数保留", () => {
     useWorkspaceStore.setState({
       workspaceType: "work_item_plan",
       humanGateSnapshot: {
@@ -473,12 +589,55 @@ describe("元数据行计数人话化", () => {
 
     const meta = screen.getByTestId("gate-meta");
     expect(meta).toHaveTextContent("为什么找你：引擎自动评审拿不准，需要你来定");
-    expect(meta).toHaveTextContent("你已回复过 1 轮");
-    expect(meta).toHaveTextContent("还可自动修复 2 次");
+    // 块1 片6（G-2）：三个额度分别命名——「你已说明 N 轮」（C 池）与
+    // 「人工返修还可做 M 次」（B2 池，门预算账本）。
+    expect(meta).toHaveTextContent("你已说明 1 轮");
+    expect(meta).toHaveTextContent("人工返修还可做 2 次");
+    expect(meta).toHaveTextContent("门预算账本");
     // 旧机器措辞退役。
     expect(meta.textContent).not.toContain("触发：");
     expect(meta.textContent).not.toContain("引擎判定");
     expect(meta.textContent).not.toContain("已反馈");
     expect(meta.textContent).not.toContain("剩余修复轮次");
+    // 「自动修复」统称退役（本次要消除的混称）。
+    expect(meta.textContent).not.toContain("自动修复");
+  });
+
+  it("三个额度的原始计数在卡面技术事实里仍可见（改名不丢事实）", () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      humanGateSnapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 3,
+        accepted_feedback_turns: 1,
+        trigger: "native_human_required",
+        resumable: true,
+      },
+    });
+
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, undefined, {
+          gate_trigger: "native_human_required",
+          remaining_budget: 3,
+          candidate_compile_failure: {
+            code: "final_compile_failed",
+            message: "候选 Final Compile 未通过",
+            auto_rewrite: { phase: "running", remaining: 2, repeated: null },
+          },
+        })}
+        actions={actions()}
+      />,
+    );
+
+    const card = screen.getByTestId("gate-prompt-entry");
+    // B1 平台自动重写（编译面自动重写账本原始计数）。
+    expect(card.textContent).toContain("平台自动重写还可做 2 次");
+    // B2 人工返修（门预算账本原始计数）。
+    expect(card.textContent).toContain("人工返修还可做 3 次");
+    // C 人工说明回合（gate-local 原始计数）。
+    expect(card.textContent).toContain("你已说明 1 轮");
   });
 });

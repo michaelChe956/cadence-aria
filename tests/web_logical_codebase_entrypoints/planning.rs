@@ -17,6 +17,9 @@ use cadence_aria::cross_cutting::bounded_command_runner::{
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
+// 集成测试是独立 crate：`logical_codebase::legacy_logical_codebase_id` 只是
+// `pub(crate)` 再导出，必须走 `store` 子模块的完整路径。
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::logical_codebase::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
     IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
@@ -91,6 +94,7 @@ impl AggregatePreflightService for NoopPreflight {
             members: Vec::new(),
             manifest_revision: manifest.membership_revision,
             manifest_digest: "sha256:test-manifest".to_string(),
+            ..Default::default()
         })
     }
 }
@@ -375,7 +379,10 @@ impl PlanningHttpFixture {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: None,
-                logical_codebase_id: None,
+                // 夹具的 manifest 写在**项目级 legacy 根**（`LogicalCodebaseStore::new`），
+                // 因此归属填「项目默认作用域」= `legacy_logical_codebase_id`，
+                // 让 `lc_scope_root` 落回项目级根（与改造前的 `None` 同一条分支）。
+                logical_codebase_id: legacy_logical_codebase_id(PROJECT_ID),
                 title: "stale index planning".to_string(),
                 description: Some("exercise fresh planning read".to_string()),
                 change_id: None,
@@ -675,11 +682,15 @@ impl LegacyPlanningHttpFixture {
                 idempotency_key: "legacy-planning-repository".to_string(),
             })
             .expect("create legacy repository record");
+        // 该夹具**没有 LC 记录**（纯 legacy 单仓项目，无 manifest 迁移）：
+        // 归属填「项目默认作用域」让解析落回项目级 legacy 根，与改造前
+        // `None` 的行为一致（`lc_scope_root` 的 `_ =>` 分支）。
+        let logical_codebase_id = legacy_logical_codebase_id(&project.id);
         IssueStore::new(paths)
             .create(CreateProductIssueInput {
                 project_id: project.id,
                 repo_id: Some(repository.id),
-                logical_codebase_id: None,
+                logical_codebase_id,
                 title: "legacy planning issue".to_string(),
                 description: None,
                 change_id: None,

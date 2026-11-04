@@ -69,20 +69,32 @@ export type IssueLifecycleWorkbenchViewProps = {
   onDeleteAllCodingWorkspacesFromDrawer: () => void; groupCodingDeleteBusy: boolean;
   dialogs: ReactNode;
 };
-/// REQ-MRE-01：issue 创建可用性门——选中项目下有单仓，或存在 active 成员的
-/// 逻辑代码库（LC-only 项目的项目级 repositories 为空，成员经 LC members 投影）。
+/// REQ-MRE-01 / C5：issue 创建可用性门——**必须存在含 active 成员的逻辑代码库**。
+/// 存量单仓项目（项目级 repositories 非空但没有任何 LC / 成员）不再放行：
+/// 新建 Issue 的下拉只能选 LC，点开才发现无路可走是 UX 死路 ⇒ 明确禁用 + 原因提示。
 /// member_count 语义=该 LC active 成员数（后端按 manifest active 计，缺 manifest→0）；
-/// 纯空项目（无单仓且无 active 成员）保持禁用。
-function canCreateIssueForProject(
+/// 纯空项目（无 LC 或无 active 成员）保持禁用。
+function createIssueGate(
   selectedProjectId: string | null,
-  repositories: Repository[],
   logicalCodebases: CodebaseSummaryDto[],
-): boolean {
-  return (
-    Boolean(selectedProjectId) &&
-    (repositories.length > 0 ||
-      logicalCodebases.some((codebase) => (codebase.member_count ?? 0) > 0))
-  );
+): { canCreate: boolean; disabledReason: string | null } {
+  if (!selectedProjectId) {
+    return { canCreate: false, disabledReason: "先在左侧选择一个 Project" };
+  }
+  if (!logicalCodebases.some((codebase) => (codebase.member_count ?? 0) > 0)) {
+    return {
+      canCreate: false,
+      disabledReason:
+        "该项目还没有含 active 成员（member_count > 0）的逻辑代码库：请先「添加代码库」→ 登记成员仓 → 完成冷启动，再新建 Issue",
+    };
+  }
+  return { canCreate: true, disabledReason: null };
+}
+
+/// 服务端失败面是三段成品（问题 / 原因 / 怎么做，换行分隔）；告警条默认按
+/// 单段渲染会把三段合并成一行 ⇒ 本地只保留换行，不引入第二份文案。
+function AlertLines({ text }: { text: string }) {
+  return <span className="block whitespace-pre-line leading-snug">{text}</span>;
 }
 
 export function IssueLifecycleWorkbenchView({
@@ -106,10 +118,15 @@ export function IssueLifecycleWorkbenchView({
   onOpenCodingWorkspaceFromDrawer, onGenerateNext, onDeleteFromDrawer,
   onDeleteAllCodingWorkspacesFromDrawer, groupCodingDeleteBusy, dialogs,
 }: IssueLifecycleWorkbenchViewProps) {
+  const issueGate = createIssueGate(selectedProjectId, logicalCodebases);
   return <>
     <div data-testid="workbench-shell" className={`grid h-[100dvh] min-h-0 bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]${isDrawerOpen && focusedEntity ? " lg:pr-[calc(480px+1rem)]" : ""}`}>
       <ProjectSidebar projects={projects} codebases={codebases} deletedLogicalCodebases={deletedLogicalCodebases} repositories={repositories} selectedProjectId={selectedProjectId} issueCount={issueCount} busy={busy} onSelectProject={onSelectProject} onCreateProject={onCreateProject} onAddCodebase={onAddCodebase} onDeleteProject={onDeleteProject} onDeleteRepository={onDeleteRepository} onDeleteLogicalCodebase={onDeleteLogicalCodebase} onRestoreLogicalCodebase={onRestoreLogicalCodebase} onPurgeLogicalCodebase={onPurgeLogicalCodebase} />
-      <WorkbenchSurface mainLabel="Issue 生命周期工作台" statusBar={busy ? <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span> : null} alert={error} header={<IssueLifecycleWorkbenchHeader projectName={selectedProject?.name} focusedIssueId={focusedIssueId} canCreateIssue={canCreateIssueForProject(selectedProjectId, repositories, logicalCodebases)} onShowAll={onShowAll} onRefresh={onRefresh} onCreateIssue={onCreateIssue} onReopenOnboarding={onReopenOnboarding} />} main={<div className="space-y-3">
+      <WorkbenchSurface mainLabel="Issue 生命周期工作台" statusBar={busy ? <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span> : null} alert={error ? <AlertLines text={error} /> : null} header={<><IssueLifecycleWorkbenchHeader projectName={selectedProject?.name} focusedIssueId={focusedIssueId} canCreateIssue={issueGate.canCreate} onShowAll={onShowAll} onRefresh={onRefresh} onCreateIssue={onCreateIssue} onReopenOnboarding={onReopenOnboarding} />{issueGate.disabledReason ? (
+        <p data-testid="issue-create-disabled-reason" className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+          {issueGate.disabledReason}
+        </p>
+      ) : null}</>} main={<div className="space-y-3">
         {selectedProjectId && logicalCodebases.length > 0 ? <>
           <LogicalCodebaseSummaryBar summary={{ lcName: activeLogicalCodebaseName, indexState: (aggregateIndex as { state?: string } | null)?.state ?? null, publicationStatus: latestPointerPublication?.status ?? null, hasWarning: lcSummaryHasWarning }} expanded={lcSummaryExpanded} onToggle={onToggleLcSummary} />
         </> : null}

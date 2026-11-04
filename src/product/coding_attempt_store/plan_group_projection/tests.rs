@@ -42,7 +42,9 @@ fn setup_store() -> (TempDir, CodingAttemptStore) {
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: "issue".to_string(),
             description: None,
             change_id: None,

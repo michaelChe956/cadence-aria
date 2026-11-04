@@ -172,7 +172,10 @@ impl IntoResponse for ApiError {
             | "aggregate_scope_requires_logical_codebase"
             | "logical_codebase_name_required"
             | "aggregate_root_required"
-            | "target_not_in_selection" => StatusCode::BAD_REQUEST,
+            | "target_not_in_selection"
+            // REQ-ROUTE-01：老 issue 记录缺逻辑代码库归属 → 400（可修正的
+            // 请求侧数据状态，非 500 故障）。
+            | "issue_not_bound_to_logical_codebase" => StatusCode::BAD_REQUEST,
             "aggregate_root_is_git"
             | "aggregate_root_missing"
             | "aggregate_root_member_outside_root"
@@ -279,6 +282,10 @@ impl IntoResponse for ApiError {
             "pointer_not_found" => StatusCode::NOT_FOUND,
             // WIG Autopilot P0 enrollment 稳定码：冲突 409、缺失 404、作用域 422。
             "automation_enrollment_conflict" => StatusCode::CONFLICT,
+            // REQ-WIGA-SWAP-02：冲突原因判别位分流的两个新稳定码（409）——
+            // 运行中不许改 payload（该先终止）/ 版本号过期（该刷新后重试）。
+            "automation_enrollment_payload_immutable" => StatusCode::CONFLICT,
+            "automation_enrollment_revision_stale" => StatusCode::CONFLICT,
             // REQ-WIGA-09 修订：terminated 重新开启的收口门——存在未终结
             // attempt（未收口运行事实）→ 409 零副作用；绑定实体已删（墓碑）
             // 且无未终结 attempt 不触发本码（放行取代）。

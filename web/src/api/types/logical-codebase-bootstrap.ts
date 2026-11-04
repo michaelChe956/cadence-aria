@@ -39,11 +39,30 @@ export type BootstrapCheckpointDto = {
   completed_at: string | null;
 };
 
+/**
+ * 失败面三段成品（REQ-BOOT-08 / REQ-LAYOUT-02）——与 Rust `FailureCopyDto`
+ * 逐字段同构。五个字段**全部必填**：`reason_zh` 不是可选，前端不得把缺失
+ * 当降级路径（只有非法/损坏响应才可能缺，那种情况按防崩处理）。
+ */
+export type FailureCopyTriage = "environment" | "product_defect" | "retry_only";
+
+export type FailureCopyDto = {
+  title_zh: string;
+  reason_zh: string;
+  action_zh: string;
+  triage: FailureCopyTriage;
+  machine_line: string;
+};
+
 export type BootstrapFailureDto = {
   reason_code: string;
   detail: string;
   retryable: boolean;
   external_side_effect: string;
+  /** 只由后端 copy.triage 派生（兼容旧响应才缺省）。 */
+  triage?: FailureCopyTriage | null;
+  /** 后端已渲染好的同源成品，前端不再自拼中文。 */
+  copy?: FailureCopyDto | null;
 };
 
 export type BootstrapStepProjectionDto = {

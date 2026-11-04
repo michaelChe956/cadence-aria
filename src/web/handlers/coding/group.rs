@@ -15,7 +15,6 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::AttemptTargetSnapshot;
 use crate::product::coding_models::CodingAdmissionKind;
-use crate::product::issue_store::IssueStore;
 use crate::product::logical_codebase::{
     LogicalRepositoryId, RepositoryRouting, RepositoryRoutingErrorCode, SelectionPolicy,
 };
@@ -307,7 +306,8 @@ fn group_target_snapshot(
     issue_id: &str,
     authoritative: &AuthoritativeGroupPlanBinding,
 ) -> ApiResult<Option<AttemptTargetSnapshot>> {
-    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+    // 按 issue 所属 lc_id 寻址（R9）；lc_id 必填——无归属 issue 在 resolve 层
+    // 即报 NotFound，不再回退 project 级路径。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
         app_paths, project_id, issue_id,
     )
@@ -315,7 +315,6 @@ fn group_target_snapshot(
     match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?
     {
-        RepositoryRouting::Legacy { .. } => Ok(None),
         RepositoryRouting::Logical {
             manifest,
             selection,
@@ -332,7 +331,7 @@ fn group_target_snapshot(
             }
             let selected_ids = validate_logical_group_selection(
                 app_paths,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
                 project_id,
                 &manifest,
                 &selection,
@@ -370,7 +369,7 @@ fn group_target_snapshot(
                 app_paths,
                 project_id,
                 logical_repository_id,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
             )
             .map(Some)
             .map_err(target_snapshot_api_error)
@@ -395,7 +394,8 @@ fn resolve_group_repository(
     issue_id: &str,
     authoritative: &AuthoritativeGroupPlanBinding,
 ) -> ApiResult<RepositoryRecord> {
-    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+    // 按 issue 所属 lc_id 寻址（R9）；lc_id 必填——无归属 issue 在 resolve 层
+    // 即报 NotFound，不再回退 project 级路径。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
         app_paths, project_id, issue_id,
     )
@@ -403,19 +403,6 @@ fn resolve_group_repository(
     match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?
     {
-        RepositoryRouting::Legacy { .. } => {
-            let repository_id = IssueStore::new(app_paths.clone())
-                .get(project_id, issue_id)
-                .map_err(product_store_api_error)?
-                .repo_id
-                .ok_or_else(|| {
-                    product_store_api_error(ProductStoreError::NotFound {
-                        kind: "repository",
-                        id: format!("issue:{issue_id}:repo_id"),
-                    })
-                })?;
-            resolve_legacy_group_repository(app_paths, project_id, &repository_id)
-        }
         RepositoryRouting::Logical {
             manifest,
             selection,
@@ -432,7 +419,7 @@ fn resolve_group_repository(
             }
             let selected_ids = validate_logical_group_selection(
                 app_paths,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
                 project_id,
                 &manifest,
                 &selection,
@@ -466,19 +453,11 @@ fn resolve_group_repository(
                     "group target repository is not in the effective selection",
                 ));
             }
-            let store = match lc_id.as_deref() {
-                Some(_) => RepositoryStore::new(app_paths.clone()),
-                None => {
-                    let project = ProjectStore::new(app_paths.clone())
-                        .get(project_id)
-                        .map_err(product_store_api_error)?;
-                    RepositoryStore::for_project(app_paths.clone(), &project)
-                }
-            };
+            let store = RepositoryStore::new(app_paths.clone());
             store
                 .resolve_logical_repository_for_issue_codebase(
                     project_id,
-                    lc_id.as_deref(),
+                    Some(lc_id.as_str()),
                     logical_repository_id,
                 )
                 .map(|(_, _, repository)| repository)
@@ -488,26 +467,22 @@ fn resolve_group_repository(
     }
 }
 
-/// REQ-COD-04（WP1 分流化，REQ-MTG-01）：split 解析面的公共前置——routing 三态
+/// REQ-COD-04（WP1 分流化，REQ-MTG-01）：split 解析面的公共前置——routing 两态
 /// 判定 + fail-closed 校验（source_draft_error/selection）+ units target 收敛 +
 /// 0-target focus 唯一回落（与单值面同语义）。多 target 不再构成拒绝理由，
-/// 而是逐 target 进入分流解析。
-enum SplitGroupTargets {
-    Legacy,
-    Logical {
-        lc_id: Option<String>,
-        selected_ids: BTreeSet<LogicalRepositoryId>,
-        target_ids: Vec<LogicalRepositoryId>,
-    },
-}
-
+/// 而是逐 target 进入分流解析；FailClosed（含无归属旧数据）直接上抛稳定错误码。
 fn split_group_targets(
     app_paths: &ProductAppPaths,
     project_id: &str,
     issue_id: &str,
     authoritative: &AuthoritativeGroupPlanBinding,
-) -> ApiResult<SplitGroupTargets> {
-    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+) -> ApiResult<(
+    String,
+    BTreeSet<LogicalRepositoryId>,
+    Vec<LogicalRepositoryId>,
+)> {
+    // 按 issue 所属 lc_id 寻址（R9）；lc_id 必填——无归属 issue 在 resolve 层
+    // 即报 NotFound，不再回退 project 级路径。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
         app_paths, project_id, issue_id,
     )
@@ -515,7 +490,6 @@ fn split_group_targets(
     match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?
     {
-        RepositoryRouting::Legacy { .. } => Ok(SplitGroupTargets::Legacy),
         RepositoryRouting::Logical {
             manifest,
             selection,
@@ -532,7 +506,7 @@ fn split_group_targets(
             }
             let selected_ids = validate_logical_group_selection(
                 app_paths,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
                 project_id,
                 &manifest,
                 &selection,
@@ -555,11 +529,7 @@ fn split_group_targets(
             } else {
                 target_ids.into_iter().collect()
             };
-            Ok(SplitGroupTargets::Logical {
-                lc_id,
-                selected_ids,
-                target_ids,
-            })
+            Ok((lc_id, selected_ids, target_ids))
         }
         RepositoryRouting::FailClosed { code, reason } => Err(routing_api_error(code, &reason)),
     }
@@ -569,7 +539,7 @@ fn split_group_targets(
 /// `group_target_snapshot` 共享前置与单值语义（含 0-target focus 唯一回落、
 /// TargetUnknown/Inconsistent fail-closed）；差异仅在 `target_ids.len() >= 2`
 /// 不再拒绝——按 unit target 逐仓产出冻结快照。单 target 退化为单条目（语义与
-/// 单值面零变化）。Legacy 路由 → `None`（无逻辑仓可分流，走单值面既有语义）。
+/// 单值面零变化）。无归属旧数据在 routing 层即 FailClosed，无单仓回落。
 ///
 /// 注：WP2 分流创建循环落在 engine 侧（`workspace_engine::advance::
 /// initialize_advance_split`，product 层同语义实现：`units_by_target` 分桶 +
@@ -582,14 +552,8 @@ fn group_target_snapshots(
     issue_id: &str,
     authoritative: &AuthoritativeGroupPlanBinding,
 ) -> ApiResult<Option<BTreeMap<LogicalRepositoryId, AttemptTargetSnapshot>>> {
-    let SplitGroupTargets::Logical {
-        lc_id,
-        selected_ids,
-        target_ids,
-    } = split_group_targets(app_paths, project_id, issue_id, authoritative)?
-    else {
-        return Ok(None);
-    };
+    let (lc_id, selected_ids, target_ids) =
+        split_group_targets(app_paths, project_id, issue_id, authoritative)?;
     let mut snapshots = BTreeMap::new();
     for logical_repository_id in target_ids {
         if !selected_ids.contains(&logical_repository_id) {
@@ -602,7 +566,7 @@ fn group_target_snapshots(
             app_paths,
             project_id,
             logical_repository_id,
-            lc_id.as_deref(),
+            Some(lc_id.as_str()),
         )
         .map_err(target_snapshot_api_error)?;
         snapshots.insert(logical_repository_id, snapshot);
@@ -612,7 +576,7 @@ fn group_target_snapshots(
 
 /// REQ-COD-04（WP1 分流化）：`resolve_group_repository` 的多值同构变体——按
 /// unit target 逐仓解析 RepositoryRecord；前置/错误码语义与
-/// `group_target_snapshots` 一致。Legacy 路由 → `None`。同上注：engine 侧分流
+/// `group_target_snapshots` 一致。同上注：engine 侧分流
 /// 循环用 product 层实现，本函数为 web 创建面多值解析库存。
 #[allow(dead_code)] // web 创建面尚未消费（engine 侧分流循环用 product 层实现）。
 fn resolve_group_repositories(
@@ -621,23 +585,9 @@ fn resolve_group_repositories(
     issue_id: &str,
     authoritative: &AuthoritativeGroupPlanBinding,
 ) -> ApiResult<Option<BTreeMap<LogicalRepositoryId, RepositoryRecord>>> {
-    let SplitGroupTargets::Logical {
-        lc_id,
-        selected_ids,
-        target_ids,
-    } = split_group_targets(app_paths, project_id, issue_id, authoritative)?
-    else {
-        return Ok(None);
-    };
-    let store = match lc_id.as_deref() {
-        Some(_) => RepositoryStore::new(app_paths.clone()),
-        None => {
-            let project = ProjectStore::new(app_paths.clone())
-                .get(project_id)
-                .map_err(product_store_api_error)?;
-            RepositoryStore::for_project(app_paths.clone(), &project)
-        }
-    };
+    let (lc_id, selected_ids, target_ids) =
+        split_group_targets(app_paths, project_id, issue_id, authoritative)?;
+    let store = RepositoryStore::new(app_paths.clone());
     let mut repositories = BTreeMap::new();
     for logical_repository_id in target_ids {
         if !selected_ids.contains(&logical_repository_id) {
@@ -649,7 +599,7 @@ fn resolve_group_repositories(
         let repository = store
             .resolve_logical_repository_for_issue_codebase(
                 project_id,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
                 logical_repository_id,
             )
             .map(|(_, _, repository)| repository)
@@ -657,36 +607,6 @@ fn resolve_group_repositories(
         repositories.insert(logical_repository_id, repository);
     }
     Ok(Some(repositories))
-}
-
-fn resolve_legacy_group_repository(
-    app_paths: &ProductAppPaths,
-    project_id: &str,
-    physical_repository_id: &str,
-) -> ApiResult<RepositoryRecord> {
-    let project = ProjectStore::new(app_paths.clone())
-        .get(project_id)
-        .map_err(product_store_api_error)?;
-    let store = RepositoryStore::for_project(app_paths.clone(), &project);
-    match store.resolve_legacy_physical_repository_if_dual(project_id, physical_repository_id) {
-        Ok((_, _, repository)) => return Ok(repository),
-        Err(ProductStoreError::NotFound {
-            kind: "logical_repository",
-            ..
-        }) => {}
-        Err(error) => return Err(product_store_api_error(error)),
-    }
-    store
-        .list(project_id)
-        .map_err(product_store_api_error)?
-        .into_iter()
-        .find(|repository| repository.id == physical_repository_id)
-        .ok_or_else(|| {
-            product_store_api_error(ProductStoreError::NotFound {
-                kind: "repository",
-                id: physical_repository_id.to_string(),
-            })
-        })
 }
 
 fn validate_logical_group_selection(

@@ -27,6 +27,14 @@ fn verification_triage_group_fixture() -> (
     let store = crate::product::coding_attempt_store::CodingAttemptStore::new(ProductAppPaths::new(
         root.path().join(".aria"),
     ));
+    // REQ-ROUTE-01 两态化：完成/返修链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且 issue 记录必须在场（issue 聚合与路由解析）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -42,7 +50,7 @@ fn verification_triage_group_fixture() -> (
                 review_rounds: 1,
                 permission_modes: WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })

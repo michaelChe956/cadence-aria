@@ -11,6 +11,16 @@ fn group_completion_fixture_at_stage(
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：准入/租约/完成链的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」，且完成面还要 issue 记录在场（issue 聚合与
+    // `resolve_issue_logical_codebase_id`）。`seed_complete` 先建 issue 再建权威
+    //（顺序不可颠倒：issue id 按 `issues/` 目录数分配）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -26,12 +36,35 @@ fn group_completion_fixture_at_stage(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, with_dependency);
+    // 完成链(`mark_repo_worktree_completed_item` 等)在仓维 shared-worktree
+    // 记录上做读-改-写,且租约分类(`classify_worktree_lease_for_attempt`)
+    // 对「有快照 + 仓维记录在场但无人持锁」判 `coding_lease_state_unknown`
+    // 停等——完成/推进链会既到不了 preflight 也到不了 pause 点。故预置
+    // 仓维记录 + **以本 attempt 为 owner 的活跃锁**(自持租约 ⇒ Allowed),
+    // 与生产 acquire+bind 语义一致;owner 冲突/锁转移用例在
+    // `lock_group_fixture_with_other_owner` 里先释放本锁再演出冲突现场。
+    let lifecycle = LifecycleStore::new(store.paths());
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        &worktree,
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        "project_0001",
+        "issue_0001",
+        logical.member_id,
+        "work_item_0001",
+        &attempt.id,
+    );
     let attempt = store
         .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
@@ -122,26 +155,32 @@ fn snapshot_group_completion_state(
 
 fn lock_group_fixture_with_other_owner(fixture: &GroupCompletionFixture) -> LifecycleStore {
     let lifecycle = LifecycleStore::new(fixture.store.paths());
-    lifecycle
-        .upsert_issue_shared_worktree(
-            crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput {
-                project_id: fixture.attempt.project_id.clone(),
-                issue_id: fixture.attempt.issue_id.clone(),
-                repository_id: "repository_0001".to_string(),
-                branch_name: fixture.attempt.branch_name.clone(),
-                worktree_path: fixture.worktree.clone(),
-                base_branch: fixture.original_head.clone(),
-            },
-        )
-        .expect("shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+    let snapshot = fixture
+        .attempt
+        .target_snapshot
+        .as_ref()
+        .expect("group fixture attempt must carry a target snapshot");
+    // 有快照的 attempt 只按**仓维**分类租约(`run_exclusion`):issue 维记录会被
+    // 判成 `legacy_shared_worktree_present` 而 fail-closed,故冲突 owner 必须写在
+    // 仓维 worktree 记录 + 仓维锁上(REQ-ROUTE-01 §4.2.6)。夹具默认已由
+    // `group_completion_fixture_at_stage` 绑定本 attempt 的活跃锁,先释放再
+    // 以他人身份获取,复现「同仓他人持锁」的冲突现场。
+    let _ = lifecycle.release_repo_worktree_lock_by_owner(
+        &fixture.attempt.project_id,
+        &fixture.attempt.issue_id,
+        snapshot.logical_repository_id,
+        &fixture.attempt.id,
+    );
+    let lease = lifecycle
+        .try_acquire_repo_worktree_lock(
             &fixture.attempt.project_id,
             &fixture.attempt.issue_id,
+            snapshot.logical_repository_id,
             "work_item_0001",
             "coding_attempt_other",
         )
         .expect("conflicting shared worktree owner");
+    assert!(lease.acquired, "conflicting owner must hold the repo lock");
     lifecycle
 }
 
@@ -152,6 +191,25 @@ fn cleared_active_recovery_fixture() -> (
     HandoffRevision,
 ) {
     cleared_active_recovery_fixture_at_stage(CodingExecutionStage::ReviewRequest)
+}
+
+/// 该 attempt（带快照 ⇒ 仓维语义）对应的**仓维** shared-worktree 记录。
+///
+/// 有快照的 attempt 只按仓维分类租约，issue 维记录在场会被判
+/// `legacy_shared_worktree_present`；故夹具与断言都必须读仓维记录。
+fn repo_shared_worktree(
+    lifecycle: &LifecycleStore,
+    attempt: &CodingExecutionAttempt,
+) -> crate::product::models::IssueSharedWorktree {
+    let logical_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("group attempt carries a target snapshot")
+        .logical_repository_id;
+    lifecycle
+        .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, logical_id)
+        .expect("repo shared worktree")
+        .expect("repo shared worktree present")
 }
 
 #[tokio::test]
@@ -167,10 +225,7 @@ async fn group_completion_running_owner_conflict_is_zero_write_at_production_ent
     );
     let lifecycle = lock_group_fixture_with_other_owner(&fixture);
     let before = snapshot_group_completion_state(&fixture);
-    let lease_before = lifecycle
-        .get_issue_shared_worktree(&fixture.attempt.project_id, &fixture.attempt.issue_id)
-        .expect("shared worktree before")
-        .expect("shared worktree before");
+    let lease_before = repo_shared_worktree(&lifecycle, &fixture.attempt);
 
     let error = fixture
         .engine
@@ -181,16 +236,13 @@ async fn group_completion_running_owner_conflict_is_zero_write_at_production_ent
     assert!(matches!(
         error,
         CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
-            kind: "issue_worktree_lock_owner",
+            kind: "repo_worktree_lock_owner",
             ..
         })
     ));
     assert_eq!(snapshot_group_completion_state(&fixture), before);
     assert_eq!(
-        lifecycle
-            .get_issue_shared_worktree(&fixture.attempt.project_id, &fixture.attempt.issue_id)
-            .expect("shared worktree after")
-            .expect("shared worktree after"),
+        repo_shared_worktree(&lifecycle, &fixture.attempt),
         lease_before
     );
 }
@@ -200,10 +252,7 @@ async fn group_completion_retry_owner_conflict_is_zero_write_at_production_entry
     let (fixture, partial, _, _) = cleared_active_recovery_fixture();
     let lifecycle = lock_group_fixture_with_other_owner(&fixture);
     let before = snapshot_group_completion_state(&fixture);
-    let lease_before = lifecycle
-        .get_issue_shared_worktree(&partial.project_id, &partial.issue_id)
-        .expect("shared worktree before")
-        .expect("shared worktree before");
+    let lease_before = repo_shared_worktree(&lifecycle, &partial);
 
     let error = fixture
         .engine
@@ -214,23 +263,21 @@ async fn group_completion_retry_owner_conflict_is_zero_write_at_production_entry
     assert!(matches!(
         error,
         CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
-            kind: "issue_worktree_lock_owner",
+            kind: "repo_worktree_lock_owner",
             ..
         })
     ));
     assert_eq!(snapshot_group_completion_state(&fixture), before);
-    assert_eq!(
-        lifecycle
-            .get_issue_shared_worktree(&partial.project_id, &partial.issue_id)
-            .expect("shared worktree after")
-            .expect("shared worktree after"),
-        lease_before
-    );
+    assert_eq!(repo_shared_worktree(&lifecycle, &partial), lease_before);
 }
 
 #[tokio::test]
 async fn abort_during_running_group_completion_prewrite_pause_is_stable() {
-    let fixture = group_completion_fixture(false, true);
+    // 夹具预绑仓维锁后,handle_abort 的 shared-worktree clean 检查会对
+    // dirty worktree 触发人工清理门(生产正确语义);本用例验证的是
+    // 「prewrite pause 点 abort 生效 + resume 后 completion fail-closed」,
+    // dirty 并非其变量,故用 clean 现场让 abort 语义真正被执行。
+    let fixture = group_completion_fixture(false, false);
     create_authoritative_active_run(
         &fixture,
         "coding_unit_run_0001",
@@ -269,10 +316,17 @@ async fn abort_during_running_group_completion_prewrite_pause_is_stable() {
         .expect("running completion task")
         .expect_err("aborted running completion must fail closed");
 
+    // 与 abort_during_completed_retry 同款断言迁移(Main 裁定,2026-11-03):
+    // abort 正确释放仓维锁后,resume 的 completion 先撞锁归属冲突
+    // (`Conflict{repo_worktree_lock_owner}`)而非 status 复核——错误码因
+    // 「锁动作先于 status 复核」而变更;`group_completion_status_not_ready`
+    // 无 spec/tasks 契约出处(openspec/ 零命中),此处断「fail-closed +
+    // 零写」不变量族,两种错误码一并接受。
     assert!(
-        error
-            .to_string()
-            .contains("group_completion_status_not_ready"),
+        error.to_string().contains("repo_worktree_lock_owner")
+            || error
+                .to_string()
+                .contains("group_completion_status_not_ready"),
         "{error}"
     );
     assert_eq!(snapshot_group_completion_state(&fixture), after_abort);
@@ -307,10 +361,17 @@ async fn abort_during_completed_retry_prewrite_pause_is_stable() {
         .expect("completed retry task")
         .expect_err("aborted completed retry must fail closed");
 
+    // 断「fail-closed + 零写」不变量,不断具体错误码:abort 正确释放仓维锁
+    // (owner=attempt)后,resume 的 completed-retry 链先撞锁归属冲突
+    // (`Conflict{repo_worktree_lock_owner}`)而非 status 复核——错误码因
+    // 「锁动作先于 status 复核」而变更。经查 `group_completion_status_not_ready`
+    // 无 spec/tasks 契约出处(openspec/ 零命中,仅实现消息文本与本测试自约),
+    // 两种错误码同为「abort 后 completion 不得写」的拒绝形态,一并接受。
     assert!(
-        error
-            .to_string()
-            .contains("group_completion_status_not_ready"),
+        error.to_string().contains("repo_worktree_lock_owner")
+            || error
+                .to_string()
+                .contains("group_completion_status_not_ready"),
         "{error}"
     );
     assert_eq!(snapshot_group_completion_state(&fixture), after_abort);
@@ -1477,24 +1538,28 @@ async fn plan_coding_n5_second_unit_advance_keeps_worktree_lock_transfer() {
         )
         .expect("second unit review request stage");
 
-    // issue 共享 worktree 锁由本 attempt 持有、active 指向第 2 个 unit。
+    // 仓维共享 worktree 锁由本 attempt 持有、active 指向第 2 个 unit。
+    // （有快照的 attempt 只按仓维分类租约，issue 维记录会被判
+    // `legacy_shared_worktree_present` 而 fail-closed。）
     let lifecycle = LifecycleStore::new(fixture.store.paths());
+    let logical_id = fixture
+        .attempt
+        .target_snapshot
+        .as_ref()
+        .expect("group attempt carries a target snapshot")
+        .logical_repository_id;
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        &fixture.attempt.project_id,
+        &fixture.attempt.issue_id,
+        logical_id,
+        &fixture.worktree,
+    );
     lifecycle
-        .upsert_issue_shared_worktree(
-            crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput {
-                project_id: fixture.attempt.project_id.clone(),
-                issue_id: fixture.attempt.issue_id.clone(),
-                repository_id: "repository_0001".to_string(),
-                branch_name: fixture.attempt.branch_name.clone(),
-                worktree_path: fixture.worktree.clone(),
-                base_branch: fixture.original_head.clone(),
-            },
-        )
-        .expect("shared worktree record");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             &fixture.attempt.project_id,
             &fixture.attempt.issue_id,
+            logical_id,
             "work_item_0002",
             &second.id,
         )
@@ -1527,7 +1592,11 @@ async fn plan_coding_n5_second_unit_advance_keeps_worktree_lock_transfer() {
         Some(third_unit.id.as_str())
     );
     let record = lifecycle
-        .get_issue_shared_worktree(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+        .get_repo_shared_worktree(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            logical_id,
+        )
         .expect("shared worktree after transfer")
         .expect("shared worktree after transfer");
     assert_eq!(

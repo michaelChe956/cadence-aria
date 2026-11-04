@@ -69,16 +69,15 @@ import {
 } from "../../../state/gate-prompt-copy";
 import {
   GATE_CONFIRM_CONSEQUENCE_REJECTED,
-  GATE_HUMAN_TRIGGER_LABELS,
   GATE_STALE_COMPLETED_COPY,
   GateNextStepGuidance,
   gateBlockReasonHuman,
   gateNextStepGuidance,
   humanizeGateProse,
-  gateCompileFailureAutoRewriteStatusCopy,
   gateConfirmBlockedCompileFailureCopy,
-  type GateCompileFailureAutoRewriteInput,
 } from "./gate-next-step";
+import { staleGateGuidance } from "./gate-stale-guidance";
+import { gateQuotaPresentation } from "./gate-quota-labels";
 import {
   archiveNoteFromEntry,
   blockReasonFromEntry,
@@ -91,6 +90,11 @@ import {
   summaryFromEntry,
   verdictFromEntry,
 } from "./gate-card-metadata";
+import { gateRejectionInfoFromEntry, GateRejectionBlock } from "./gate-card-rejection";
+import {
+  candidateCompileFailureFromEntry,
+  GateCandidateCompileFailureBlock,
+} from "./gate-card-compile-failure";
 
 /** F-38：门卡产物行的种类名（与生命周期卡片同一套称呼）。 */
 const GATE_ARTIFACT_LABELS: Record<string, string> = {
@@ -204,6 +208,17 @@ export function GatePromptEntry({
   // 非空）分流——活门与未完成会话一律沿用既有措辞。
   const sessionCompleted = useWorkspaceStore((state) => state.sessionStatus === "confirmed");
   const staleCompleted = sessionCompleted && actionBlockReason !== null;
+  // REQ-HGC-04：过期门卡按 durable 停点分流的两个输入——
+  // ① durable 会话状态（分流主键）；② 服务端权威事实「本页底部此刻是否真有
+  // 『继续自动化』入口」（WS `plan_continue_available`；null=未知，按「无真实
+  // 续跑入口」处理，绝不给假指引）。
+  const sessionStatus = useWorkspaceStore((state) => state.sessionStatus);
+  const planContinueAvailable = useWorkspaceStore((state) => state.planContinueAvailable);
+  const staleGuidance = staleGateGuidance(
+    sessionStatus,
+    actionBlockReason,
+    planContinueAvailable,
+  );
   // C2（REQ-HGC-02 场景 1/F-54）：批次确认门专属标题/why——与候选修订门在
   // 标题/原因行层级可区分；确认动作走 confirmBatch（HTTP），无反馈编辑器。
   const isBatchConfirmGate = gateKindFromEntry(entry) === "batch_confirm";
@@ -216,6 +231,20 @@ export function GatePromptEntry({
       ? (state.humanGateSnapshot?.accepted_feedback_turns ?? null)
       : null,
   );
+  // G-2（块1 片6）：额度呈现层单一事实源——三个池分别命名（平台自动重写/
+  // 人工返修/你已说明 N 轮），两个账面事实分别呈现并标注来源，绝不合成
+  // 「共享余额」（后端无同域权威合并事实；sharedBalance 恒 null）。
+  // repair_budget_exhausted 的停止标签按 flowKind 分流（6-D，不再渲染为
+  // 「次数已用完」）；plan 流在场且 gate-local 轮次缺席 → 预算历史不可用
+  // （6-F，旧卡快照不读成当前授权）。
+  const flowKind = useWorkspaceStore((state) => state.flowKind);
+  const quotaPresentation = gateQuotaPresentation({
+    b1Remaining: candidateCompileFailure?.autoRewrite?.remaining ?? null,
+    b2Remaining: remainingBudget,
+    acceptedTurns: acceptedFeedbackTurns,
+    trigger: gateTrigger,
+    flowKind,
+  });
   // F-50 裁决 1（单标题制）：默认「需要人工确认」，仅 triage intent 门保留
   // 「需要判断 reviewer 意图」——标题回答「现在要做什么」，原因与建议交给
   // gate-why 单一原因行，不再三层同义。
@@ -402,6 +431,9 @@ export function GatePromptEntry({
     contextBlocker: isContextBlockerGate,
     actionBlockReason,
     staleCompleted,
+    // REQ-HGC-04：过期门卡分流输入（durable 状态 + 「继续自动化」入口事实）。
+    sessionStatus,
+    planContinueAvailable,
     terminateAvailable: terminateBlockReason === null,
     ownerQuestion: ownerGuidance !== null,
     requiredFindings: requiredFindings.length,
@@ -554,22 +586,16 @@ export function GatePromptEntry({
             {gateFindingsDeltaCopy(findingsDelta)}
           </p>
         ) : null}
-        {/* F-50 §4.1-4：trigger 与预算合并为一条弱化元数据行（不再两个胶囊
-            抢主视觉）。owner 2026-10-30：计数保留、措辞人话——「触发：引擎
-            判定需人工 · 已反馈 N 轮 · 剩余修复轮次 M」改为 owner 能懂的说法；
-            零轮次/旧会话缺席维持既有形态（缺席段不渲染）。 */}
-        {gateTrigger || remainingBudget !== null || (acceptedFeedbackTurns ?? 0) > 0 ? (
+        {/* G-2（块1 片6）：meta 行 = 额度呈现层单一事实源 gateQuotaPresentation
+            的输出——「为什么找你」（repair_budget_exhausted 按 6-D 分流，不再
+            渲染为「次数已用完」）· 你已说明 N 轮 · 平台自动重写还可做 N 次
+            （编译面自动重写账本）· 人工返修还可做 M 次（门预算账本）· 两处
+            账本尚未合并。不合成共享余额；旧数据缺 gate-local 事实 → 预算
+            历史不可用（不补默认值、不读成当前授权）。 */}
+        {quotaPresentation.lines.length > 0 ? (
           <p data-testid="gate-meta" className={`text-xs ${GATE_META_TEXT_CLASS}`}>
-            {[
-              gateTrigger
-                ? `为什么找你：${GATE_HUMAN_TRIGGER_LABELS[gateTrigger]}`
-                : null,
-              acceptedFeedbackTurns !== null && acceptedFeedbackTurns > 0
-                ? `你已回复过 ${acceptedFeedbackTurns} 轮`
-                : null,
-              remainingBudget !== null ? `还可自动修复 ${remainingBudget} 次` : null,
-            ]
-              .filter((part): part is string => Boolean(part))
+            {[...quotaPresentation.lines, quotaPresentation.note]
+              .filter((part): part is string => part !== null)
               .join(" · ")}
           </p>
         ) : null}
@@ -671,13 +697,16 @@ export function GatePromptEntry({
                 data-testid="gate-confirm-blocked-reason"
                 className={`text-xs ${GATE_META_TEXT_CLASS}`}
               >
+                {/* REQ-HGC-04：过期卡（已确认完成的历史卡）用分流单一事实源的
+                    文案；其余阻断保留「为什么不可确认」的人话原因，但**删掉**
+                    「；可终止此门后重新发起」——终止在终态/停点会话里是把
+                    owner 引向会作废这一轮的动作（出路由顶部指引行给出）。 */}
                 {staleCompleted ? (
-                  GATE_STALE_COMPLETED_COPY
+                  staleGuidance.copy
                 ) : (
                   <>
                     {isContextBlockerGate ? "" : "暂不可确认："}
                     {gateBlockReasonHuman(actionBlockReason)}
-                    {terminateBlockReason === null ? "；可终止此门后重新发起" : ""}
                   </>
                 )}
               </p>
@@ -769,16 +798,18 @@ export function GatePromptEntry({
                   {GATE_CONFIRM_CONSEQUENCE_REJECTED}
                 </span>
               ) : null}
-              {/* 过期且已完成的门卡是历史记录——不挂终止按钮（终态会话终止
-                  无意义、服务端也会拒；留着就是假按钮）。 */}
-              {staleCompleted ? null : (
+              {/* REQ-HGC-04：过期门卡按 durable 停点分流——「终止此门」只在
+                  分流表判定仍可用时挂（历史记录/已终止/停下等回话/本轮失败：
+                  终止是把 owner 引向会作废这一轮的动作 ⇒ 假按钮）；推进到别的
+                  门时保留为**可选**出口。非过期卡恒保留（owner 正在用的动作面）。 */}
+              {staleGuidance.showTerminate ? (
                 <ConfirmTwiceButton
                   variant="ghost"
                   label={GATE_TERMINATE_BUTTON_LABEL}
                   confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
                   onConfirm={actions.terminate}
                 />
-              )}
+              ) : null}
             </div>
           </div>
         ) : actions ? (
@@ -791,8 +822,9 @@ export function GatePromptEntry({
                 data-testid="gate-confirm-blocked-reason"
                 className={`text-xs ${GATE_META_TEXT_CLASS}`}
               >
+                {/* REQ-HGC-04：与主分支同一份事实/同一句话（不分叉）。 */}
                 {staleCompleted
-                  ? GATE_STALE_COMPLETED_COPY
+                  ? staleGuidance.copy
                   : `暂不可确认：${gateBlockReasonHuman(actionBlockReason)}`}
               </p>
             ) : confirmBlockedByCompileFailure ? (
@@ -915,248 +947,4 @@ function gateCardBlockReason(
     return gateIdentity === `stage:${state.stage}` ? persistedReason : "terminal_stage";
   }
   return "closed";
-}
-/** 根因 E：validation_reject 可操作化呈现所需的最小事实（全部可缺席）。 */
-type GateRejectionInfo = {
-  rejectedFeedback: string;
-  rejectionReason: string;
-  rejectionNextActions: string[];
-  rejectionDiagnostics: string[];
-};
-
-function gateRejectionInfoFromEntry(entry: ChatEntry): GateRejectionInfo | null {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  const rejectedFeedback =
-    typeof metadata?.rejectedFeedback === "string" ? metadata.rejectedFeedback : null;
-  // owner 2026-10-30：被拒原因是 REQ-WSC-14「可读原因」——已知机器码映射，
-  // 未解释术语逐字保留（jargon: "keep"，不套黑话兜底：整段/片段改写都会
-  // 丢真实原因）；下一步动作仍按默认片段摘除；rejectedFeedback 是 owner
-  // 自己的话、diagnostics 是逐字诊断，均保持原文。
-  const rejectionReason =
-    typeof metadata?.rejectionReason === "string"
-      ? humanizeGateProse(metadata.rejectionReason, { jargon: "keep" })
-      : null;
-  const rejectionNextActions = Array.isArray(metadata?.rejectionNextActions)
-    ? metadata.rejectionNextActions
-        .filter((item): item is string => typeof item === "string")
-        .map((item) => humanizeGateProse(item))
-    : [];
-  const rejectionDiagnostics = Array.isArray(metadata?.rejectionDiagnostics)
-    ? metadata.rejectionDiagnostics.filter((item): item is string => typeof item === "string")
-    : [];
-  if (
-    !rejectedFeedback &&
-    !rejectionReason &&
-    rejectionNextActions.length === 0 &&
-    rejectionDiagnostics.length === 0
-  ) {
-    return null;
-  }
-  return {
-    rejectedFeedback: rejectedFeedback ?? "",
-    rejectionReason: rejectionReason ?? "",
-    rejectionNextActions,
-    rejectionDiagnostics,
-  };
-}
-
-/** REQ-WSC-18：候选编译失败的可呈现事实（缺省字段显式 null/[]，不猜）。 */
-type GateCandidateCompileFailureInfo = {
-  code: string;
-  message: string;
-  detail: string | null;
-  /** owner 2026-10-31 意见 2：design 可能需要一起重写的 owner 提醒。 */
-  ownerHint: string | null;
-  /** 重新生成（author 教学重驱）着重要点，与后端同源。 */
-  rewriteGuidance: string[];
-  /** owner 2026-10-31 追加裁定：自动重写两阶段事实（null=无该信息，不猜）。 */
-  autoRewrite: GateCompileFailureAutoRewriteInput | null;
-};
-
-/**
- * REQ-WSC-18：门卡 metadata `candidate_compile_failure` 的形状校验读取
- * （{code,message,detail?,rewrite_guidance?,owner_hint?,auto_rewrite?}；
- * code/message 缺一即整条作废=null，不进「候选编译不过」态——fail-closed
- * 不猜。auto_rewrite.phase 非 running/stopped 亦按无该信息处理）。
- */
-function candidateCompileFailureFromEntry(
-  entry: ChatEntry,
-): GateCandidateCompileFailureInfo | null {
-  const value = (entry.metadata as Record<string, unknown> | undefined)
-    ?.candidate_compile_failure;
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const { code, message, detail, owner_hint, rewrite_guidance, auto_rewrite } =
-    value as Record<string, unknown>;
-  if (typeof code !== "string" || typeof message !== "string") {
-    return null;
-  }
-  const autoRewrite =
-    typeof auto_rewrite === "object" && auto_rewrite !== null
-      ? parseAutoRewrite(auto_rewrite as Record<string, unknown>)
-      : null;
-  return {
-    code,
-    message,
-    detail: typeof detail === "string" ? detail : null,
-    ownerHint: typeof owner_hint === "string" ? owner_hint : null,
-    rewriteGuidance: Array.isArray(rewrite_guidance)
-      ? rewrite_guidance.filter((item): item is string => typeof item === "string")
-      : [],
-    autoRewrite,
-  };
-}
-
-/** auto_rewrite 子对象校验：phase 合法才收；数字字段非 number 即 null（不自数）。 */
-function parseAutoRewrite(
-  value: Record<string, unknown>,
-): GateCompileFailureAutoRewriteInput | null {
-  const { phase, remaining, repeated } = value;
-  if (phase !== "running" && phase !== "stopped") {
-    return null;
-  }
-  return {
-    phase,
-    remaining: typeof remaining === "number" ? remaining : null,
-    repeated: typeof repeated === "number" ? repeated : null,
-  };
-}
-
-/**
- * REQ-WSC-18（owner 2026-10-31 意见 1/2）：候选 Final Compile 失败的醒目
- * 呈现——独立红框「候选无效：需重新生成」，不与普通 findings 混组、不藏
- * 折叠区；人话原因（message 完整不截断）、design 可能需重写提醒
- * （owner_hint）、重新生成要点（rewrite_guidance）直接可见；完整诊断原文
- * （detail）折叠可达、逐字不截断（owner 0009「看不到报错内容」修复）。
- */
-function GateCandidateCompileFailureBlock({
-  failure,
-}: {
-  failure: GateCandidateCompileFailureInfo;
-}) {
-  return (
-    <section
-      data-testid="gate-compile-failure"
-      className="space-y-2 rounded-md border-2 border-red-300 bg-red-50 px-3 py-2"
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <span
-          data-testid="gate-compile-failure-headline"
-          className="text-sm font-bold text-red-800"
-        >
-          候选无效：Final Compile 未通过，需重新生成
-        </span>
-        <span
-          data-testid="gate-compile-failure-code"
-          className="aria-mono rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-800"
-        >
-          {failure.code}
-        </span>
-      </div>
-      <div
-        data-testid="gate-compile-failure-message"
-        className="text-sm text-slate-900"
-      >
-        {failure.message}
-      </div>
-      {/* owner 2026-10-31 追加裁定：阶段事实行——阶段一（自动重写进行中）
-          陈述「还剩 N 次/无需手动推」；阶段二（同一环重复提前停）升级为
-          加粗红字「自动重写无法解决，请修改 design」，均醒目不折叠。 */}
-      {failure.autoRewrite ? (
-        <div
-          data-testid="gate-compile-failure-auto-rewrite"
-          className={
-            failure.autoRewrite.phase === "stopped"
-              ? "text-sm font-bold text-red-800"
-              : "text-sm font-medium text-slate-900"
-          }
-        >
-          {gateCompileFailureAutoRewriteStatusCopy(failure.autoRewrite)}
-        </div>
-      ) : null}
-      {failure.ownerHint ? (
-        <div
-          data-testid="gate-compile-failure-owner-hint"
-          className="text-sm font-semibold text-red-700"
-        >
-          {failure.ownerHint}
-        </div>
-      ) : null}
-      {failure.rewriteGuidance.length > 0 ? (
-        <div
-          data-testid="gate-compile-failure-rewrite-guidance"
-          className="text-sm text-slate-900"
-        >
-          <div className="font-semibold">重新生成时着重注意：</div>
-          <ul className="list-disc space-y-1 pl-5">
-            {failure.rewriteGuidance.map((item, index) => (
-              <li key={`${item}-${index}`}>{item}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {failure.detail ? (
-        <details data-testid="gate-compile-failure-detail-disclosure">
-          <summary
-            className={`${DISCLOSURE_SUMMARY_CLASS} flex items-center gap-1 text-xs font-semibold text-slate-900`}
-          >
-            <ChevronRight className={DISCLOSURE_CHEVRON_CLASS} aria-hidden="true" />
-            完整诊断原文
-          </summary>
-          <pre
-            data-testid="gate-compile-failure-detail"
-            className="aria-mono mt-1 overflow-x-auto whitespace-pre-wrap text-xs text-[var(--aria-ink)]"
-          >
-            {failure.detail}
-          </pre>
-        </details>
-      ) : null}
-    </section>
-  );
-}
-
-/**
- * 根因 E（REQ-WSC-15 前端面）：validation_reject 门 turn 的可操作化呈现——
- * 此前失败门只有 `failure_class · failure_message` 一行，owner 不知道被拒的是
- * 哪条反馈、为什么、下一步做什么（现场卡死主因）。被拒反馈与原因可读呈现，
- * 诊断逐字（不改写、不截断）。
- */
-function GateRejectionBlock({ info }: { info: GateRejectionInfo }) {
-  return (
-    <section
-      data-testid="gate-rejection-block"
-      className="space-y-2 rounded-md border border-red-200 bg-red-50 px-3 py-2"
-    >
-      <div className="text-xs font-semibold text-red-800">上一条反馈被拒收</div>
-      {info.rejectedFeedback ? (
-        <div data-testid="gate-rejected-feedback" className="text-sm text-slate-900">
-          被拒反馈：{info.rejectedFeedback}
-        </div>
-      ) : null}
-      {info.rejectionReason ? (
-        <div data-testid="gate-rejection-reason" className="text-sm text-slate-900">
-          原因：{info.rejectionReason}
-        </div>
-      ) : null}
-      {info.rejectionNextActions.length > 0 ? (
-        <ul
-          data-testid="gate-rejection-next-actions"
-          className="list-disc space-y-1 pl-5 text-sm text-slate-900"
-        >
-          {info.rejectionNextActions.map((action, index) => (
-            <li key={`${action}-${index}`}>{action}</li>
-          ))}
-        </ul>
-      ) : null}
-      {info.rejectionDiagnostics.length > 0 ? (
-        <pre
-          data-testid="gate-rejection-diagnostics"
-          className="aria-mono overflow-x-auto whitespace-pre-wrap text-xs text-[var(--aria-ink)]"
-        >
-          {info.rejectionDiagnostics.join("\n")}
-        </pre>
-      ) : null}
-    </section>
-  );
 }

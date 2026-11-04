@@ -326,6 +326,9 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
             Some("code_review_provider_interrupted".to_string()),
         )
         .expect("failed review role run");
+    // 夹具补件：手工 role run 无 Task 14 基线，交付前统一门（Task 15）会以
+    // cross_target_baseline_missing fail-closed 阻断——按生产同款形状补采。
+    seed_cross_target_baseline_for_role_run(&store.paths(), &attempt, &role_run.id);
     let gate = store
         .create_blocked_gate(&attempt, CreateBlockedGateInput {
             attempt_id: "coding_attempt_0001".to_string(),
@@ -427,11 +430,11 @@ async fn scoped_coding_ws_keeps_exact_identity_for_failed_review_recovery() {
 
 struct ScopedSessionProvider;
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for ScopedSessionProvider {
-    async fn start(
+impl ScopedSessionProvider {
+    /// 裸 start（单仓 direct 历史路径）与 LC gateway validated 启动共用的
+    /// 会话构造（本替身行为与输入无关；按 trait 契约 validated 不回调裸 start）。
+    async fn scoped_session(
         &self,
-        _input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let (event_tx, event_rx) = mpsc::channel(8);
@@ -452,6 +455,26 @@ impl StreamingProviderAdapter for ScopedSessionProvider {
             events: event_rx,
             commands: command_tx,
         })
+    }
+
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ScopedSessionProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.scoped_session(cancel).await
+    }
+
+    async fn start_validated(
+        &self,
+        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.scoped_session(cancel).await
     }
 }
 

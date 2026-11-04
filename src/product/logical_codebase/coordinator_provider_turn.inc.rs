@@ -38,18 +38,17 @@ pub struct GatewayBackedAggregateProviderTurnDriver {
 impl GatewayBackedAggregateProviderTurnDriver {
     pub(crate) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 1800;
 
-    /// 用 Claude Code dialect 与给定 capability snapshot ref 构造驱动。聚合
-    /// 初始化当前固定使用 Claude Code 作为唯一逻辑 provider(Codex 在
-    /// `danger-full-access` 下被 gateway 路由级阻断)。
-    pub fn claude_code(
+    /// 片4（REQ-BOOT-07，provider 走 request）：按冻结的 provider 构造驱动。
+    /// `ProviderRef` 由调用方经 `ProviderRef::from_provider_name` 从
+    /// `request.provider` 派生（四家显式映射、Fake fail-closed、无 `_ =>`
+    /// 静默回退——集中映射见 gateway 的 C-2），snapshot ref 与自举记录一致。
+    pub fn with_provider(
         gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
-        capability_snapshot_ref: impl Into<String>,
+        provider: crate::product::logical_codebase::ProviderRef,
     ) -> Self {
         Self {
             gateway,
-            provider: crate::product::logical_codebase::ProviderRef::claude_code(
-                capability_snapshot_ref,
-            ),
+            provider,
             admission_paths: None,
             command_timeout: std::time::Duration::from_secs(Self::DEFAULT_COMMAND_TIMEOUT_SECS),
         }
@@ -58,14 +57,14 @@ impl GatewayBackedAggregateProviderTurnDriver {
     /// C4 Task 8：带 admission 预检的构造——provider turn 前预检实际成员
     /// `.claude/rules/language.md`、policy artifact 与 gateway capability，
     /// 缺失/漂移时在 spawn 前返回 waiting 类错误，provider 保持零启动。
-    pub fn claude_code_with_admission(
+    pub fn with_provider_and_admission(
         gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
-        capability_snapshot_ref: impl Into<String>,
+        provider: crate::product::logical_codebase::ProviderRef,
         paths: crate::product::app_paths::ProductAppPaths,
     ) -> Self {
         Self {
             admission_paths: Some(paths),
-            ..Self::claude_code(gateway, capability_snapshot_ref)
+            ..Self::with_provider(gateway, provider)
         }
     }
 
@@ -271,19 +270,11 @@ impl GatewayBackedAggregateProviderTurnDriver {
             let event = tokio::select! {
                 _ = cancellation.cancelled() => {
                     best_effort_abort(&session);
-                    return Err(AggregateInitializationError::ProviderTurn {
-                        step,
-                        reason: "aggregate recipe command cancelled".to_string(),
-                        retryable: true,
-                    });
+                    return Err(turn_failure(step, CANCELLED, &output));
                 }
                 _ = &mut timeout => {
                     best_effort_abort(&session);
-                    return Err(AggregateInitializationError::ProviderTurn {
-                        step,
-                        reason: "aggregate recipe command timed out".to_string(),
-                        retryable: true,
-                    });
+                    return Err(turn_failure(step, TIMED_OUT, &output));
                 }
                 event = session.events.recv() => event,
             };
@@ -317,27 +308,14 @@ impl GatewayBackedAggregateProviderTurnDriver {
                         retryable: true,
                     });
                 }
-                Some(ProviderEvent::PermissionTimeout { permission_id }) => {
-                    output.push(&format!("permission request {permission_id} timed out"));
-                    return Err(AggregateInitializationError::ProviderTurn {
-                        step,
-                        reason: "provider permission timeout".to_string(),
-                        retryable: true,
-                    });
+                Some(ProviderEvent::PermissionTimeout { .. }) => {
+                    return Err(turn_failure(step, PERMISSION, &output));
                 }
                 Some(ProviderEvent::StatusChanged(ProviderStatus::Failed)) => {
-                    return Err(AggregateInitializationError::ProviderTurn {
-                        step,
-                        reason: "provider status failed".to_string(),
-                        retryable: true,
-                    });
+                    return Err(turn_failure(step, STATUS_FAILED, &output));
                 }
                 Some(ProviderEvent::StatusChanged(ProviderStatus::Aborted)) => {
-                    return Err(AggregateInitializationError::ProviderTurn {
-                        step,
-                        reason: "provider status aborted".to_string(),
-                        retryable: true,
-                    });
+                    return Err(turn_failure(step, STATUS_ABORTED, &output));
                 }
                 Some(ProviderEvent::PermissionRequest(_))
                 | Some(ProviderEvent::ChoiceRequest(_)) => {
@@ -355,13 +333,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
                 | Some(ProviderEvent::ToolPolicyWarning(_))
                 | Some(ProviderEvent::ToolPolicyTerminated(_))
                 | Some(ProviderEvent::TerminalActivity(_)) => {}
-                None => {
-                    return Err(AggregateInitializationError::ProviderTurn {
-                        step,
-                        reason: "provider event stream closed before completion".to_string(),
-                        retryable: true,
-                    });
-                }
+                None => return Err(turn_failure(step, (CLOSED_REASON, CLOSED_CAUSE), &output)),
             }
         }
     }
@@ -434,6 +406,7 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
             preflight,
             lc_id: _lc_id,
             bootstrap,
+            provider: _provider,
             cancellation,
         } = request;
 
@@ -546,13 +519,8 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
                     retryable: true,
                 });
             }
-            result = &mut start => result.map_err(|error| {
-                AggregateInitializationError::ProviderTurn {
-                    step,
-                    reason: format!("gateway start_streaming failed: {error}"),
-                    retryable: true,
-                }
-            })?,
+            result = &mut start => result
+                .map_err(|error| start_streaming_failure(step, error))?,
         };
         let remaining = command_timeout.saturating_sub(started.elapsed());
         self.consume_turn(session, step, remaining, cancellation)
@@ -568,9 +536,7 @@ struct BoundedOutput {
 
 impl BoundedOutput {
     fn new() -> Self {
-        Self {
-            buffer: String::new(),
-        }
+        Self { buffer: String::new() }
     }
 
     fn push(&mut self, value: &str) {
@@ -594,6 +560,33 @@ impl BoundedOutput {
 
     fn summary(&self) -> String {
         self.buffer.clone()
+    }
+}
+
+// 6 条原本丢弃 provider 输出的分支统一收敛：(持久化 reason 原文, 确定性 cause 子码)。
+const CANCELLED: (&str, &str) = ("aggregate recipe command cancelled", "provider_turn_cancelled");
+const TIMED_OUT: (&str, &str) = ("aggregate recipe command timed out", "provider_turn_timed_out");
+const PERMISSION: (&str, &str) = ("provider permission timeout", "provider_permission_timeout");
+const STATUS_FAILED: (&str, &str) = ("provider status failed", "provider_status_failed");
+const STATUS_ABORTED: (&str, &str) = ("provider status aborted", "provider_status_aborted");
+const CLOSED_REASON: &str = "provider event stream closed before completion";
+const CLOSED_CAUSE: &str = "provider_stream_closed";
+/// `reason` 逐字节不变；另带确定性 cause 子码与已脱敏输出（空则不空手返回）。
+fn turn_failure(
+    step: AggregateInitializationStepKind,
+    (reason, cause): (&str, &str),
+    output: &BoundedOutput,
+) -> AggregateInitializationError {
+    use crate::cross_cutting::diagnostic_redaction::sanitize_turn_output;
+    AggregateInitializationError::ProviderTurnDiagnosed {
+        step,
+        reason: reason.to_string(),
+        retryable: true,
+        provider: None,
+        diagnostic: TurnDiagnostic {
+            cause: Some(cause.to_string()),
+            output: Some(sanitize_turn_output(&output.summary())),
+        },
     }
 }
 
@@ -903,7 +896,7 @@ mod provider_turn_lcg_tests {
     /// Task 1c fixture(蓝图:LC=create+for_lc manifest+material prep 自动物化
     /// policy/capability;Running op=create→mark_running→start_step(PreCheck);
     /// 凭据=from_running_operation):真实 for_lc 存储链 + 生产装配驱动
-    /// (`claude_code_with_admission`,snapshot ref 与自举记录一致的
+    /// (`with_provider_and_admission`,snapshot ref 与自举记录一致的
     /// `cap_managed_snapshot`),capability source 为携带 root-recipe 凭据
     /// durable Running 重核验通道的 `StoreBackedProviderCapabilitySource::for_lc`。
     struct LcProductionTurnFixture {
@@ -1054,9 +1047,10 @@ mod provider_turn_lcg_tests {
         // 生产装配驱动:admission paths 在场=生产主路径(credential phase
         // 准备即本切片交付面);snapshot ref 与自举 capability 记录一致
         // (`cap_managed_snapshot`)。
-        let driver = GatewayBackedAggregateProviderTurnDriver::claude_code_with_admission(
+        let driver = GatewayBackedAggregateProviderTurnDriver::with_provider_and_admission(
             gateway,
-            "cap_managed_snapshot",
+            // 夹具按 provider 构造：与 input.provider 同源的 ClaudeCode 冻结名。
+            crate::product::logical_codebase::ProviderRef::claude_code("cap_managed_snapshot"),
             paths.clone(),
         );
         let workspace_session_id = format!("aggregate-{}-{}", project.id, operation_id);
@@ -1086,7 +1080,6 @@ mod provider_turn_lcg_tests {
         let seq = Arc::new(AtomicUsize::new(0));
         let observations: Arc<Mutex<Vec<ValidatedStartObservation>>> = Arc::default();
         let fixture = lc_production_turn_fixture(seq.clone(), observations.clone());
-
         let bootstrap = BootstrapPhaseCredential::from_running_operation(
             &fixture.operations,
             &fixture.project_id,
@@ -1105,6 +1098,7 @@ mod provider_turn_lcg_tests {
             members: Vec::new(),
             manifest_revision: 1,
             manifest_digest: "sha256:lcg-t01-manifest".to_string(),
+            ..Default::default()
         };
         let summary = fixture
             .driver
@@ -1116,6 +1110,7 @@ mod provider_turn_lcg_tests {
                 lc_id: Some(&fixture.lc_id),
                 bootstrap,
                 cancellation: CancellationToken::new(),
+                provider: &crate::product::models::ProviderName::ClaudeCode,
             })
             .await
             .expect("production turn must complete");

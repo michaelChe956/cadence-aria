@@ -80,7 +80,11 @@ pub(crate) fn seed_fixture(member_count: usize, confirm_design: bool) -> Fixture
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(REPOSITORY_ID.to_string()),
-            logical_codebase_id: None,
+            // 归属字段必填（REQ-ROUTE-01）：播种 issue 归属 legacy 别名 LC
+            //（seed_logical_codebase 写 project 级根，与别名子树字节等价）；
+            // 0 成员 fixture 由用例自行改写为无归属老记录形态。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(PROJECT_ID),
             title: "enrollment test issue".to_string(),
             description: None,
             change_id: None,
@@ -271,7 +275,137 @@ pub(crate) fn collection_enable_body(
        })
 }
 
-fn seed_logical_codebase(paths: &ProductAppPaths, members: &[(LogicalRepositoryId, &str)]) {
+/// 恒健康的 provider 可用性门（夹具 provider 是受控 double，无真实健康面）。
+///
+/// 生产 gateway 的 spawn 前复验消费 availability gate；单测环境无真实 probe
+/// ⇒ `ProviderHealthService::degraded()` 恒 true ⇒ gateway 一律拒 provider
+/// ⇒ provider 零启动。本门恒放行（只改夹具装配，不改实现）。
+///
+/// ✅ web 测试树恒健康可用性门替身的**唯一实现**。本轮已收敛全部历史副本：
+///   · 原 3 份（coding_ws_handler/tests/gateway.rs、campaign_stage3_interactive/human_action_http.rs、web 侧共享测试支持模块）—— 行为等价，直接合并
+///   · 原 4 份（web/gateway_factory.rs、web/handlers/automation_gateway_preflight.rs、
+///             workspace_ws_handler/tests/gateway_start.rs、
+///             workspace_ws_handler/tests/single_candidate_lc_admission.rs 的 lc_always_available_gate）
+///     —— 其中 3 份是较早的 2-provider 名单版（ClaudeCode/Codex），
+///        统一到本实现的 4-provider 名单（+Pi/KimiCode）；当前测试树零可观测差异
+///   · 同名不同物：lc_scoped_availability_gate（可参数化受控 double，非恒健康替身）—— 保留，不合并
+pub(crate) fn always_available_gate()
+-> std::sync::Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::product::models::ProviderName;
+
+    struct AlwaysHealthy(std::sync::Arc<ProviderHealthSnapshot>);
+
+    impl ProviderHealthSource for AlwaysHealthy {
+        fn snapshot(&self) -> std::sync::Arc<ProviderHealthSnapshot> {
+            self.0.clone()
+        }
+
+        fn degraded(&self) -> bool {
+            false
+        }
+    }
+
+    let checked_at = chrono::Utc::now();
+    let snapshot = std::sync::Arc::new(ProviderHealthSnapshot {
+        schema_version: 1,
+        generation: 1,
+        checked_at,
+        providers: [
+            ProviderName::ClaudeCode,
+            ProviderName::Codex,
+            ProviderName::Pi,
+            ProviderName::KimiCode,
+        ]
+        .into_iter()
+        .map(|provider| ProviderHealthEntry {
+            provider,
+            command: "stub".to_string(),
+            available: true,
+            version: Some("1.0".to_string()),
+            reason_code: None,
+            reason: None,
+            checked_at,
+        })
+        .collect(),
+    });
+    std::sync::Arc::new(ProviderAvailabilityGate::new(std::sync::Arc::new(
+        AlwaysHealthy(snapshot),
+    )))
+}
+
+/// 单成员 LC 夹具便捷入口（web 侧各测试共用）：一个成员 + 一个成员 checkout。
+///
+/// REQ-ROUTE-01 两态化（去单仓入口）下**任何** workspace 会话都经 issue 归属
+/// 的 LC 解析 repository；夹具缺这段权威 ⇒ authority resolver 报
+/// `NotFound { kind: "logical_codebase" }`，manager create / prepare 直接失败。
+pub(crate) fn seed_single_member_logical_codebase(paths: &ProductAppPaths, checkout_name: &str) {
+    // 成员 checkout 目录真实存在且是**真实 git 仓**：cross-target 基线采样
+    // （git_head / git_status）与 `build_attempt_target_snapshot` 都按真仓读
+    // HEAD——裸目录会直接 fail-closed 成 `CrossTargetStoreFailure`。
+    let checkout_path = paths.root().join(checkout_name);
+    std::fs::create_dir_all(&checkout_path).expect("fixture member checkout dir");
+    if !checkout_path.join(".git").exists() {
+        for args in [
+            ["init", "--quiet"].as_slice(),
+            ["config", "user.email", "fixture@example.test"].as_slice(),
+            ["config", "user.name", "Fixture"].as_slice(),
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&checkout_path)
+                .status()
+                .expect("fixture git command");
+            assert!(status.success(), "git {args:?} failed");
+        }
+        std::fs::write(checkout_path.join("README.md"), "fixture\n").expect("fixture readme");
+        for args in [
+            ["add", "README.md"].as_slice(),
+            ["commit", "--quiet", "-m", "fixture"].as_slice(),
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&checkout_path)
+                .status()
+                .expect("fixture git command");
+            assert!(status.success(), "git {args:?} failed");
+        }
+    }
+    // 成员语言规则（LC 规划 author 运行链路的 admission 预检消费成员
+    // `.claude/rules/language.md`；缺失 ⇒ 运行停等在 provider 启动之前）。
+    let rules = checkout_path.join(".claude/rules/language.md");
+    if !rules.exists() {
+        let _ = std::fs::create_dir_all(checkout_path.join(".claude/rules"));
+        let _ = std::fs::write(
+            &rules,
+            "## 语言规则\n\n- **必须使用中文** - 所有响应、解释、注释和文档必须使用中文。\n",
+        );
+    }
+    seed_logical_codebase(
+        paths,
+        &[(LogicalRepositoryId(uuid::Uuid::from_u128(1)), checkout_name)],
+    );
+}
+
+/// REQ-ROUTE-01 两态化（去单仓入口）夹具前置：把 issue 归属的 legacy 别名 LC
+/// 落成**可解析的完整权威**（manifest + member + checkout + selection +
+/// repos.json 投影 + 聚合索引 + 聚合 policy artifact）。
+///
+/// 缺这段时 authority resolver 直读 `logical-codebases/{alias}/record.json`
+/// （不经 `migrate_legacy`）落空 ⇒ `NotFound { kind: "logical_codebase" }`；
+/// 有 manifest 无 selection ⇒ `RepositoryRouting::classify` 判
+/// `issue_not_bound_to_logical_codebase` fail-closed（HTTP 422）。
+///
+/// ⚠️ 成员 checkout 位于 `paths.root()`（= manifest.provider_context_root）
+/// 之下；`repos.json` 会被本函数整体覆写（投影与权威 member/checkout 配对，
+/// `identity_schema_version=1`）。
+pub(crate) fn seed_logical_codebase(
+    paths: &ProductAppPaths,
+    members: &[(LogicalRepositoryId, &str)],
+) {
     // Task 2.8（cwd authority 契约）：真实 LC 拓扑里成员 checkout 位于
     // canonical 聚合根（CommonNonGitParent）之下。本 seed 的 checkout 是
     // paths.root() 的直接子目录，故 manifest.provider_context_root 取

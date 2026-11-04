@@ -1,4 +1,8 @@
-use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
+use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use cadence_aria::cross_cutting::provider_availability_gate::{
+    ProviderAvailabilityGate, ProviderHealthSource,
+};
+use cadence_aria::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
     ProviderCompletion, ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter,
@@ -23,6 +27,9 @@ use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::lifecycle_store::{
     CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
+use cadence_aria::product::coding_models::AttemptTargetSnapshot;
+use cadence_aria::product::logical_codebase::LogicalCodebaseStore;
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::models::WorkItemExecutionPlanStatus;
 use cadence_aria::product::models::WorkItemStatus;
 use cadence_aria::product::models::{
@@ -44,8 +51,10 @@ use cadence_aria::product::work_item_projection::{
     ReviewerGroupMatrix, ReviewerGroupMatrixEntry, WorkItemProjectionCompiler, projection_hashes,
 };
 use cadence_aria::product::work_item_revision_store::WorkItemRevisionStore;
-use cadence_aria::protocol::contracts::{AdapterInput, AdapterRole};
+use cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput;
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, AdapterRole, ProviderType};
 use cadence_aria::web::app::build_web_router;
+use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::coding_ws_handler::{
     CodingWsInMessage, CodingWsOutMessage, is_coding_ws_message_allowed,
 };

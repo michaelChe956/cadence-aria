@@ -20,13 +20,17 @@ async fn work_item_plan_context_message_includes_plan_brief_and_workspace_type()
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
             base_branch: None,
         })
         .expect("issue");
+    seed_legacy_alias_authority(&app_paths);
 
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle

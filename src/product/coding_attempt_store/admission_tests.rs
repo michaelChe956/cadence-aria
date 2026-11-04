@@ -9,13 +9,13 @@
         CodingExecutionAttempt,
     };
     use crate::product::logical_codebase::{
-        AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
-        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
-        LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
-        RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+        AggregatePolicyArtifactStore, CodebaseMemberRecord, IssueCodebaseSelection,
+        IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
+        LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositorySourceIdentity,
+        RepositoryType,
     };
     use crate::product::models::{
-        ProviderConversationRef, ProviderConversationRole, ProviderName, RepositoryRecord,
+        ProviderConversationRef, ProviderConversationRole, ProviderName,
     };
     use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -34,49 +34,43 @@
         checkout_id: RepositoryCheckoutId,
     }
 
+    /// REQ-ROUTE-01 / 去单仓入口：无 LC 归属且无 `target_snapshot` 的 attempt
+    /// 不再走已删除的单仓 `legacy_snapshot_digest` 准入路径，而是一律
+    /// fail-closed（`FailClosed(TargetMissing)` ⇒ `TargetSnapshotIdentityDrifted`）。
+    ///
+    /// 保留的不变量：**admission 的唯一凭证是「LC 权威 + 冻结快照」**——
+    /// 拒绝时既不签发 ticket（不得留下半凭证），也不改写 attempt
+    /// （status/version/admission marker 全部不变）。
     #[test]
-    fn legacy_attempt_without_snapshot_is_admitted_and_transitions_once() {
-        let fixture = legacy_fixture();
-
-        let ticket = fixture
-            .store
-            .admit_attempt_for_execution(&fixture.attempt.id)
-            .expect("legacy ticket");
-        assert_eq!(ticket.attempt_version, 0);
-        assert!(ticket.consumed_at.is_none());
-        assert!(ticket.snapshot_digest.starts_with("legacy:"));
-
-        fixture
-            .store
-            .transition_to_executable(&fixture.attempt.id, &ticket)
-            .expect("consume ticket");
-        let attempt = fixture
-            .store
-            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
-            .expect("running attempt");
-        assert_eq!(attempt.status, CodingAttemptStatus::Running);
-        assert_eq!(attempt.version, 1);
+    fn attempt_without_lc_authority_fails_closed_at_admission() {
+        let fixture = unbound_fixture();
 
         assert_eq!(
             fixture
                 .store
-                .transition_to_executable(&fixture.attempt.id, &ticket)
-                .expect_err("ticket cannot be consumed twice"),
-            StableCode::AdmissionTicketConsumed
+                .admit_attempt_for_execution(&fixture.attempt.id)
+                .expect_err("无 LC 归属的 attempt 不得签发 admission ticket"),
+            StableCode::TargetSnapshotIdentityDrifted
         );
-        assert!(attempt.admission_ticket_consumed_at.is_some());
         assert!(
             !fixture
                 .store
                 .admission_ticket_path(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
                 .exists(),
-            "ticket is only an admission credential and is removed after the authoritative attempt commit"
+            "fail-closed 不得留下半签发的 ticket 凭证"
         );
+        let attempt = fixture
+            .store
+            .get_attempt(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .expect("attempt");
+        assert_eq!(attempt.status, CodingAttemptStatus::Created);
+        assert_eq!(attempt.version, 0);
+        assert!(attempt.admission_ticket_consumed_at.is_none());
     }
 
     #[test]
     fn ticket_cleanup_failure_cannot_leave_a_half_committed_transition() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -113,7 +107,7 @@
 
     #[test]
     fn transition_rejects_version_mismatch_and_expired_ticket() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -199,7 +193,7 @@
 
     #[test]
     fn manual_recovery_transitions_active_attempt_and_terminal_transition_advances_version() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -241,7 +235,7 @@
 
     #[test]
     fn manual_recovery_leaving_running_clears_admission_marker() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -271,7 +265,7 @@
 
     #[test]
     fn transition_to_terminal_leaving_running_clears_admission_marker() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -298,7 +292,7 @@
 
     #[test]
     fn non_status_update_after_admission_preserves_running_cas_commit() {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)
@@ -342,7 +336,7 @@
         + Send
         + 'static,
     ) -> CodingExecutionAttempt {
-        let fixture = legacy_fixture();
+        let fixture = logical_fixture_with_snapshot();
         let ticket = fixture
             .store
             .admit_attempt_for_execution(&fixture.attempt.id)

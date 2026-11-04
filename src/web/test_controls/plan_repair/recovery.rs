@@ -720,9 +720,14 @@ pub(super) fn unique_repair_link(
 pub(super) fn fixture_attempt(
     store: &CodingAttemptStore,
 ) -> Result<crate::product::coding_models::CodingExecutionAttempt, PlanRepairFixtureError> {
+    // 桶无关取「按 plan 的 group attempt」：夹具 attempt 带冻结快照（REQ-COD-03）
+    // ⇒ 桶键为 Some(logical_repository_id)，旧 None 桶键检索会落空
+    // （见 coding_attempt_store/group.rs `attempt_target_bucket` 明示口径）。
     store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .map_err(fixture_error)?
+        .into_iter()
+        .next()
         .ok_or_else(|| fixture_error("fixture attempt is missing"))
 }
 

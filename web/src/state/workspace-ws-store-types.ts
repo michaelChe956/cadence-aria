@@ -615,6 +615,14 @@ export interface WorkspaceWsState {
    * owner!=="client" 退位发令。
    */
   automation: AutomationOwnership | null;
+  /**
+   * REQ-HGC-04：本页底部「继续自动化」入口的服务端权威事实（WS
+   * `plan_continue_available`；与 HTTP control 的 `allowed_actions` 含
+   * `continue_plan` 同源）。
+   * `true`=此刻确有入口；`false`=此刻确定没有；`null`=服务端未能判定
+   * （读取失败/非 plan 会话/旧帧）——前端按「无真实续跑入口」处理。
+   */
+  planContinueAvailable: boolean | null;
 
   snapshotGateIdentity: string | null;
   snapshotGateOpenedAt: string | null;
@@ -670,6 +678,8 @@ export interface WorkspaceSessionStatePayload {
   pending_choice_requests?: unknown;
   /** P0 1.2：durable automation 归属；缺省=未知（store 保持 null）。 */
   automation?: AutomationOwnership | null;
+  /** REQ-HGC-04：「继续自动化」入口事实；缺省=未知（store 保持 null）。 */
+  plan_continue_available?: boolean | null;
 }
 
 export interface WorkspaceWsActions {

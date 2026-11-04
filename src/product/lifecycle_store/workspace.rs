@@ -616,18 +616,16 @@ impl LifecycleStore {
         Ok(record)
     }
 
-    /// P2-4：会话所属 issue 是否为多仓（lc）形态——判据是
-    /// `IssueRecord.logical_codebase_id == Some(_)`。issue 记录缺失或不可判定
+    /// P2-4：会话所属 issue 是否为多仓（lc）形态——判据是 issue 记录存在
+    /// （归属字段已必填，读得到即归属）。issue 记录缺失或不可判定
     /// 一律按单仓处理（单仓不需该身份，读路径保持只读）。
     fn is_logical_codebase_session(&self, session: &WorkspaceSessionRecord) -> bool {
-        matches!(
-            crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-                &self.paths,
-                &session.project_id,
-                &session.issue_id,
-            ),
-            Ok(Some(_))
+        crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.paths,
+            &session.project_id,
+            &session.issue_id,
         )
+        .is_ok()
     }
 
     pub fn ensure_work_item_runtime_binding(

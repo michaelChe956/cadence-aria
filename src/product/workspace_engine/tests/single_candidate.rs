@@ -1248,11 +1248,13 @@ mod sg3a1_structure_gate {
         engine: &mut WorkspaceEngine,
         candidate: String,
     ) -> Result<crate::product::workspace_engine::SingleCandidateAuthorCompletion, String> {
+        let sc_target = fixture_sc_target(engine);
+        let sc_member_targets = fixture_sc_member_targets(engine);
         engine
             .complete_single_candidate_work_item_plan_author(
                 candidate,
-                "repo_fixture".to_string(),
-                None,
+                sc_target,
+                sc_member_targets,
                 false,
             )
             .await

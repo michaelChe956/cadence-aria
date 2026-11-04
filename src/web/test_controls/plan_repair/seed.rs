@@ -21,6 +21,15 @@ use crate::product::lifecycle_store::{
     CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateStorySpecInput,
     CreateWorkspaceSessionInput, LifecycleStore,
 };
+use crate::product::logical_codebase::aggregate_index::{
+    AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
+};
+use crate::product::logical_codebase::{
+    AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+    IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
+    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+};
 use crate::product::models::{
     DependencyGraphRevision, HandoffRevision, IssuePhase, IssueRecord, IssueStatus,
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, LogicalWorkItem, PlanDefectClass,
@@ -58,10 +67,15 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
     initialize_git_worktree(&worktree)?;
 
     let store = CodingAttemptStore::new(paths.clone());
-    if store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+    // REQ-COD-03：夹具 attempt 带冻结快照 ⇒ target 桶键为
+    // `Some(logical_repository_id)`（见 coding_attempt_store/group.rs
+    // `attempt_target_bucket`）。桶键检索 `get_attempt_for_work_item_group`
+    // 会落空，按 plan 取 group attempt 改用桶无关的
+    // `list_attempts_for_work_item_group`（group.rs 明示口径）。
+    if !store
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .map_err(fixture_error)?
-        .is_some()
+        .is_empty()
     {
         return Ok(());
     }
@@ -108,7 +122,10 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             id: ISSUE_ID.to_string(),
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(PROJECT_ID),
             title: "Plan Repair fixture issue".to_string(),
             description: None,
             change_id: "plan-repair-fixture".to_string(),
@@ -119,6 +136,96 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
             updated_at: CREATED_AT.to_string(),
             base_branch: None,
         },
+    )
+    .map_err(fixture_error)?;
+
+    // REQ-ROUTE-01 两态化（去单仓入口）后，admission/租约/advance 完成链的
+    // 唯一凭证是「LC 权威 + 冻结快照」。物理仓保持确定性 `repository_0001`
+    // （下游 fixture 全按字面量引用），这里按项目级 legacy 布局补权威：
+    // manifest + 本仓 member + 主 checkout + selection + policy 产物，并把
+    // repos.json 回填逻辑归属（`resolve_logical_repository_for_issue_codebase`
+    // 与 `build_attempt_target_snapshot` 都按它解析物理仓与快照事实）。
+    // issue 记录已上方直接落盘（固定 id，无 IssueStore 计数漂移问题），
+    // selection 在其之后写入，与共享夹具 `logical_test_fixture` 的顺序纪律
+    // 一致。
+    let logical_repository_id = LogicalRepositoryId(uuid::Uuid::new_v4());
+    let primary_checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+    let source_identity =
+        RepositorySourceIdentity::from_git_parts(&worktree, worktree.join(".git"), None);
+    let authority = LogicalCodebaseStore::new(paths.clone());
+    let manifest =
+        LogicalCodebaseManifest::new(PROJECT_ID, worktree.clone(), vec![logical_repository_id]);
+    authority
+        .save_manifest(PROJECT_ID, &manifest)
+        .map_err(fixture_error)?;
+    authority
+        .save_member(
+            PROJECT_ID,
+            &CodebaseMemberRecord {
+                logical_repository_id,
+                physical_repository_id: "repository_0001".to_string(),
+                alias: "Plan Repair fixture repository".to_string(),
+                role: "repository".to_string(),
+                ordinal: 1,
+                source_identity: source_identity.clone(),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![primary_checkout_id],
+                status: MemberStatus::Active,
+                created_at: CREATED_AT.to_string(),
+                updated_at: CREATED_AT.to_string(),
+            },
+        )
+        .map_err(fixture_error)?;
+    authority
+        .save_checkout(
+            PROJECT_ID,
+            &RepositoryCheckoutRecord {
+                checkout_id: primary_checkout_id,
+                logical_repository_id,
+                physical_repository_id: "repository_0001".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: worktree.clone(),
+                checkout_path_hash: "sha256:plan-repair-checkout".to_string(),
+                git_dir_identity: source_identity.git_dir_identity(),
+                // 生产不变量（snapshot_validator.rs 头注）：仓库登记与 identity
+                // 迁移从不持久化 checkout revision（恒 None）；快照的 revision 是
+                // admission 时冻结的 git HEAD。checkout 侧写死值会与冻结 HEAD
+                // 逐字比对失败 ⇒ validate_snapshot_fields 判 identity drift。
+                revision: None,
+                availability: CheckoutAvailability::Available,
+                observed_at: CREATED_AT.to_string(),
+                created_at: CREATED_AT.to_string(),
+                updated_at: CREATED_AT.to_string(),
+            },
+        )
+        .map_err(fixture_error)?;
+    IssueCodebaseSelectionStore::new(paths.clone())
+        .save(&IssueCodebaseSelection::all_members(
+            PROJECT_ID, ISSUE_ID, None,
+        ))
+        .map_err(fixture_error)?;
+    AggregatePolicyArtifactStore::new(paths.clone())
+        .ensure_bootstrap(&manifest)
+        .map_err(fixture_error)?;
+    let mut repositories = repository_store.list(PROJECT_ID).map_err(fixture_error)?;
+    for repository in repositories.iter_mut() {
+        if repository.id == "repository_0001" {
+            repository.logical_repository_id = Some(logical_repository_id);
+            repository.primary_checkout_id = Some(primary_checkout_id);
+            // strict 解析链（resolve_logical_repository_strict）要求权威
+            // member/checkout 与 repos.json 投影配对一致：本仓由 legacy
+            // 形态创建（identity_schema_version=0），仅回填逻辑归属会让
+            // 三层身份复验在 schema 版本上 identity_mismatch fail-closed。
+            repository.identity_schema_version = 1;
+        }
+    }
+    write_json(
+        &paths.project_root(PROJECT_ID).join("repos.json"),
+        &repositories,
     )
     .map_err(fixture_error)?;
 
@@ -169,6 +276,49 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
         })
         .map_err(fixture_error)?;
 
+    // REQ-COD-03（§4.2.3）：admission/租约/advance 完成链的唯一凭证是
+    // 「LC 权威 + 冻结快照」。快照取权威事实源 build_attempt_target_snapshot
+    // （上方 member/checkout/selection/policy/repos.json 投影同源解析 +
+    // checkout HEAD），不自造字段——validate_snapshot_fields 的三层身份
+    // 复验（member/checkout/repos 投影 + manifest membership_revision +
+    // policy digest）与权威逐字一致。
+    let target_snapshot =
+        crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+            &paths,
+            PROJECT_ID,
+            logical_repository_id,
+            None,
+        )
+        .map_err(fixture_error)?;
+    // REQ-PLN-01/03：规划上下文（child workspace context）经
+    // PlanningContextResolver 读 active 聚合索引，缺失即
+    // `aggregate_index_active_missing`（child session context 不可用）。
+    // 合成索引世代：成员快照 revision 取权威 checkout 的冻结 HEAD（与
+    // freshness 采集同源 ⇒ 不漂移 ⇒ 不触发 codegraph 同步）。
+    // 落盘 scope 与 `for_lc(legacy 别名)` 一致（legacy 别名 LC 的 scope root
+    // 即项目级 legacy 根，见 logical_codebase::lc_scope_root）。
+    let aggregate_index_id = format!("aggregate_index_{}", uuid::Uuid::new_v4().simple());
+    let mut aggregate_index_record = AggregateIndexRecord::building(
+        aggregate_index_id.clone(),
+        PROJECT_ID.to_string(),
+        manifest.membership_revision,
+        vec![AggregateIndexMemberSnapshot::indexed(
+            logical_repository_id,
+            primary_checkout_id,
+            target_snapshot.revision.clone().unwrap_or_default(),
+            false,
+            CREATED_AT.to_string(),
+        )],
+        CREATED_AT.to_string(),
+    );
+    aggregate_index_record.status = AggregateIndexStatus::Active;
+    aggregate_index_record.codegraph_root = worktree.clone();
+    AggregateIndexStore::for_lc(
+        paths.clone(),
+        crate::product::logical_codebase::store::legacy_logical_codebase_id(PROJECT_ID),
+    )
+    .create(PROJECT_ID, aggregate_index_record)
+    .map_err(fixture_error)?;
     let mut attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: PROJECT_ID.to_string(),
@@ -184,7 +334,7 @@ pub(super) fn seed_initial_fixture(root: &Path) -> Result<(), PlanRepairFixtureE
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -490,8 +640,10 @@ pub(super) async fn route_upstream_contract_invalid(
 ) -> Result<PlanRepairFixtureWaiting, PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .map_err(fixture_error)?
+        .into_iter()
+        .next()
         .ok_or_else(|| PlanRepairFixtureError::not_implemented("attempt_missing"))?;
     if attempt.status != CodingAttemptStatus::AwaitingPlanAmendment {
         replay_plan_defect_finding(root, "code_review_report_0001_finding_0001").await?;
@@ -525,8 +677,10 @@ pub(super) async fn start_plan_repair_finding(
 ) -> Result<(), PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .map_err(fixture_error)?
+        .into_iter()
+        .next()
         .ok_or_else(|| PlanRepairFixtureError::not_implemented("attempt_missing"))?;
     let revision_store = WorkItemRevisionStore::new(store.paths());
     let plan = revision_store

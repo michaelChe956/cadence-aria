@@ -1,7 +1,74 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
+
+/** 七个布局码的对外稳定码（块2 码表为键；块3 只消费 `details.copy`）。 */
+const LAYOUT_CODES = [
+  "aggregate_root_is_git",
+  "aggregate_root_member_outside_root",
+  "aggregate_root_member_symlink_escape",
+  "aggregate_root_nested_worktree",
+  "aggregate_root_overlap",
+  "aggregate_index_layout_unsupported",
+  "aggregate_index_member_coverage_failed",
+] as const;
+
+/** 后端 `FailureCopy` 的同构夹具：文案内容由码派生（改写分隔符，避免与
+ *  机器码字面重复），测试断言只做往返比对。 */
+function layoutCopy(code: string) {
+  const slug = code.split("_").join("·");
+  return {
+    title_zh: `问题 ${slug}`,
+    reason_zh: `原因 ${slug}`,
+    action_zh: `怎么做 ${slug}`,
+    triage: "environment" as const,
+    machine_line: code,
+  };
+}
+
+function installTarget(
+  overrides: Partial<{
+    target: string;
+    display_name: string;
+    cli_available: boolean;
+    local_version: string | null;
+    latest_version: string | null;
+    latest_checked_at: string | null;
+    install_source: string;
+    action: string;
+  }> = {},
+) {
+  return {
+    target: "codegraph",
+    display_name: "codegraph",
+    cli_available: false,
+    local_version: null,
+    latest_version: "1.7.0",
+    latest_checked_at: null,
+    install_source: "npm",
+    action: "install",
+    ...overrides,
+  };
+}
+
+/** 预检失败（带 copy）+ 安装目标面：用于 codegraph 前置的入口引导用例。 */
+function codegraphErrorFetch(code: string, targets: unknown[]) {
+  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const path = String(input);
+    if (path.endsWith("/api/providers/install-targets")) {
+      return jsonResponse({ targets });
+    }
+    return jsonResponse(
+      {
+        code,
+        message: "aggregate root preflight rejected",
+        details: { copy: layoutCopy(code) },
+      },
+      422,
+    );
+  });
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -251,5 +318,167 @@ describe("LogicalCodebaseRegistrationWizard", () => {
       details: {},
     });
     expect(alert).toHaveTextContent("预检失败");
+  });
+
+  // ---- 块3 片5：目录树 + 三段式失败面 + 安装入口 ----
+
+  it("entry_shows_directory_tree_diagram", async () => {
+    vi.stubGlobal("fetch", registrationFetch());
+    render(
+      <LogicalCodebaseRegistrationWizard
+        projectId="project_0001"
+        logicalCodebaseId="lc_0001"
+        onClose={vi.fn()}
+      />,
+    );
+
+    // REQ-LAYOUT-02：登记入口必须展示目录树示意。
+    expect(screen.getByTestId("lc-layout-tree")).toBeInTheDocument();
+    expect(screen.getByTestId("lc-layout-tree-root")).toHaveTextContent(
+      "my-lc-root/",
+    );
+  });
+
+  it("format_error_prefers_details_copy", async () => {
+    const copy = layoutCopy("aggregate_root_is_git");
+    const alert = await manualPreflightAlert({
+      code: "aggregate_root_is_git",
+      message: "aggregate root preflight rejected",
+      details: { reason: "（原始 reason 不应顶替成品）", copy },
+    });
+
+    // 三段分行：问题 / 原因 / 怎么做各自独立元素。
+    expect(
+      within(alert).getByTestId("lc-registration-error-title"),
+    ).toHaveTextContent(copy.title_zh);
+    expect(
+      within(alert).getByTestId("lc-registration-error-reason"),
+    ).toHaveTextContent(copy.reason_zh);
+    expect(
+      within(alert).getByTestId("lc-registration-error-action"),
+    ).toHaveTextContent(copy.action_zh);
+
+    // 机器码降到次要行：独立元素、等宽小字、位于最后一行，且不进主行。
+    const machineLine = within(alert).getByTestId(
+      "lc-registration-error-machine-line",
+    );
+    expect(machineLine).toHaveTextContent(copy.machine_line);
+    expect(machineLine.className).toContain("font-mono");
+    expect(alert.lastElementChild).toBe(machineLine);
+    expect(
+      within(alert).getByTestId("lc-registration-error-title"),
+    ).not.toHaveTextContent(copy.machine_line);
+
+    // copy 优先于 details.reason。
+    expect(alert).not.toHaveTextContent("原始 reason 不应顶替成品");
+  });
+
+  it("format_error_falls_back_when_copy_missing", async () => {
+    const alert = await manualPreflightAlert({
+      code: "aggregate_root_missing",
+      message: "aggregate root preflight rejected",
+      details: { reason: "could not inspect aggregate root /x" },
+    });
+
+    // 现行为不变：details.reason 优先，单行呈现，不出现三段/机器码次要行。
+    expect(alert).toHaveTextContent(
+      "预检失败：could not inspect aggregate root /x",
+    );
+    expect(
+      within(alert).queryByTestId("lc-registration-error-action"),
+    ).toBeNull();
+    expect(
+      within(alert).queryByTestId("lc-registration-error-machine-line"),
+    ).toBeNull();
+  });
+
+  it.each(LAYOUT_CODES)(
+    "each_layout_error_has_action_text：%s",
+    async (code) => {
+      const copy = layoutCopy(code);
+      const alert = await manualPreflightAlert({
+        code,
+        message: "aggregate root preflight rejected",
+        details: { copy },
+      });
+
+      // 七个布局码逐条：三段齐全（含 action），机器码在次要行。
+      expect(
+        within(alert).getByTestId("lc-registration-error-title"),
+      ).toHaveTextContent(copy.title_zh);
+      expect(
+        within(alert).getByTestId("lc-registration-error-reason"),
+      ).toHaveTextContent(copy.reason_zh);
+      expect(
+        within(alert).getByTestId("lc-registration-error-action"),
+      ).toHaveTextContent(copy.action_zh);
+      expect(
+        within(alert).getByTestId("lc-registration-error-machine-line"),
+      ).toHaveTextContent(copy.machine_line);
+    },
+  );
+
+  it("codegraph_missing_shows_install_entry", async () => {
+    vi.stubGlobal(
+      "fetch",
+      codegraphErrorFetch("codegraph_missing", [
+        installTarget({ cli_available: false }),
+      ]),
+    );
+    const user = userEvent.setup();
+    render(
+      <LogicalCodebaseRegistrationWizard
+        projectId="project_0001"
+        logicalCodebaseId="lc_0001"
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("聚合根目录"), "/x");
+    await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
+
+    // H3：安装一律走块2 的入口（含手动命令兜底）。
+    expect(
+      await screen.findByTestId("provider-install-start-codegraph"),
+    ).toHaveTextContent("安装");
+    expect(
+      screen.getByTestId("provider-install-manual-command-codegraph"),
+    ).toHaveTextContent("npm install -g");
+  });
+
+  it("codegraph_version_mismatch_shows_update_entry", async () => {
+    vi.stubGlobal(
+      "fetch",
+      codegraphErrorFetch("codegraph_version_mismatch", [
+        installTarget({
+          cli_available: true,
+          local_version: "1.6.0",
+          latest_version: "1.7.0",
+          action: "update",
+        }),
+      ]),
+    );
+    const user = userEvent.setup();
+    render(
+      <LogicalCodebaseRegistrationWizard
+        projectId="project_0001"
+        logicalCodebaseId="lc_0001"
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("聚合根目录"), "/x");
+    await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
+
+    expect(
+      await screen.findByTestId("provider-install-start-codegraph"),
+    ).toHaveTextContent("更新");
+    expect(
+      screen.getByTestId("provider-install-versions-codegraph"),
+    ).toHaveTextContent("当前 1.6.0 → 最新 1.7.0");
+    // 向导场景 capabilityConfirmed=true：不得渲染（禁用的）【核验】。
+    expect(
+      screen.queryByTestId("provider-install-verify-codegraph"),
+    ).toBeNull();
   });
 });

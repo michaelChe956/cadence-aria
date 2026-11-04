@@ -12,11 +12,22 @@
 //
 // 只读 state 层常量（gateActionBlockCopy 等），不改 state/api-types——那些是后端
 // agent 的写面。
-import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
+import type {
+  WorkItemPlanHumanGateSnapshot,
+  WorkspaceSessionStatus,
+} from "../../../api/types";
 import {
   gateActionBlockCopy,
   type GateActionBlockReason,
 } from "../../../state/workspace-cockpit-projection";
+import {
+  GATE_STALE_COMPLETED_COPY,
+  staleGateGuidance,
+} from "./gate-stale-guidance";
+
+// REQ-HGC-04：「已确认完成」历史卡文案的定义迁到分流单一事实源
+// （gate-stale-guidance.ts），此处再导出——既有导入面零变化。
+export { GATE_STALE_COMPLETED_COPY };
 
 /**
  * 已确认语义的机器短语映射（后端 metadata → owner 能懂的说法）——只替换
@@ -76,16 +87,11 @@ export function gateBlockReasonHuman(reason: Exclude<GateActionBlockReason, null
   return gateActionBlockCopy(reason);
 }
 
-/**
- * owner 2026-10-31 真机（会话 workspace_session_auto_111eafb6…）：计划已确认完成
- * （durable status=confirmed、相位 completed、Work Item 已建），对话流里第一轮评审
- * 的过期门卡仍写「会话已进入下一阶段，这扇门不再接收操作…此时只能终止此门后重新
- * 发起」+「终止此门」按钮——owner 读成「我卡死了，只能重来」。这张卡是历史记录、
- * 不是待办门：文案直说「无需处理」，且不出现「终止此门」「重新发起」这类指向动作
- * 的话（终态会话终止无意义，服务端也会拒——不挂假按钮）。
- */
-export const GATE_STALE_COMPLETED_COPY =
-  "这一版已确认完成，此卡是历史记录，无需处理";
+// REQ-HGC-04：「已确认完成」历史卡文案（`GATE_STALE_COMPLETED_COPY`）的定义
+// 已迁到分流单一事实源 `gate-stale-guidance.ts`——本文件顶部再导出，既有导入
+// 面零变化。语义不变：owner 2026-10-31 真机（会话
+// workspace_session_auto_111eafb6…）的过期门卡是历史记录、不是待办门，文案直说
+// 「无需处理」，且不出现「终止此门」「重新发起」这类指向动作的话。
 
 /** 「确认当前版本」按钮的后果说明（反馈被拒时它是明确出路）。 */
 export const GATE_CONFIRM_CONSEQUENCE_REJECTED = "确认后将用当前候选继续，不再等你的修改";
@@ -98,7 +104,7 @@ export const GATE_HUMAN_TRIGGER_LABELS: Record<
   native_human_required: "引擎自动评审拿不准，需要你来定",
   repeated_fingerprint: "同一问题又出现了，需要你来定",
   verification_new_findings: "复验又发现新问题，需要你来定",
-  repair_budget_exhausted: "自动修复次数已用完，需要你来定",
+  repair_budget_exhausted: "本轮评审自动返修已停止，需要你决定下一步。",
 };
 
 /** 指引行前缀（owner 第一眼定位「现在该做什么」）。 */
@@ -237,6 +243,16 @@ export type GateNextStepInput = {
    * 「终止此门/重新发起」（owner 2026-10-31 真机误导源）。
    */
   staleCompleted: boolean;
+  /**
+   * REQ-HGC-04：durable 会话状态（过期门卡分流的主键；null=未知）。
+   */
+  sessionStatus: WorkspaceSessionStatus | null;
+  /**
+   * REQ-HGC-04：服务端权威事实——底部「继续自动化」入口此刻是否真实存在
+   * （WS `plan_continue_available`；null=未知，按「无真实续跑入口」处理，
+   * 绝不给出假指引）。
+   */
+  planContinueAvailable: boolean | null;
   /** 终止是否仍可用（阻断指引的出路措辞据此分支）。 */
   terminateAvailable: boolean;
   /** 带人话裁决（owner_question + ≥2 选项）。 */
@@ -297,9 +313,13 @@ export function gateNextStepGuidance(input: GateNextStepInput): string | null {
     return GATE_NEXT_STEP_CONTEXT_BLOCKER;
   }
   if (input.actionBlockReason !== null) {
-    return input.terminateAvailable
-      ? `${gateBlockReasonHuman(input.actionBlockReason)}；此时只能终止此门后重新发起`
-      : `${gateBlockReasonHuman(input.actionBlockReason)}；此卡不再接收操作，请以页面最新状态为准`;
+    // REQ-HGC-04：过期门卡按 durable 停点分流（单一事实源）——不再自行拼接
+    // 「可终止此门后重新发起」（终态会话里那条出路是假的）。
+    return staleGateGuidance(
+      input.sessionStatus,
+      input.actionBlockReason,
+      input.planContinueAvailable,
+    ).copy;
   }
   let base: string;
   if (input.ownerQuestion) {

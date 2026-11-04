@@ -879,6 +879,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         publication_provenance_ref: None,
         pending_choice_requests: Vec::new(),
         automation: None,
+        plan_continue_available: None,
         // A1c（Task 2.2）：无恢复时 wire 省略该字段（旧客户端零变化）。
         lc_resume_recovery: None,
         structural_governance: None,
@@ -1014,6 +1015,7 @@ fn anchor_t03_recovery_snapshot_and_operation_result_wire() {
             publication_provenance_ref: None,
             pending_choice_requests: Vec::new(),
             automation: None,
+            plan_continue_available: None,
             lc_resume_recovery: Some(dto),
             structural_governance: None,
         }

@@ -132,8 +132,12 @@ pub(crate) mod workspace_reset_fixtures {
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let coding_store = CodingAttemptStore::new(paths.clone());
         let seeded = coding_store
-            .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+            // 基座 attempt 带冻结快照 ⇒ 桶键 Some(logical_repository_id)，
+            // None 桶检索落空 ⇒ 桶无关取数（见 group.rs `attempt_target_bucket`）。
+            .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
             .unwrap()
+            .into_iter()
+            .next()
             .expect("seeded legacy group attempt");
         coding_store
             .delete_attempt(PROJECT_ID, ISSUE_ID, &seeded.id)

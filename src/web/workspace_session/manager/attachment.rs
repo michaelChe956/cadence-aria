@@ -107,6 +107,8 @@ impl WorkspaceSessionManager {
             if let Ok(engine) = self.engine.try_lock() {
                 let mut session_state = engine.build_session_state();
                 self.project_automation_ownership(&mut session_state);
+                // REQ-HGC-04：首帧同样携带「继续自动化」入口事实（刷新路径）。
+                self.project_plan_continue_available(&mut session_state);
                 return Ok((
                     session_state,
                     engine.pending_author_choice_request_message(),

@@ -91,11 +91,9 @@ async fn rebuild_aggregate_index_for_lc(
         .aggregate_index_rebuilds
         .try_register(&rebuild_key)
         .ok_or_else(|| {
-            ApiError::runtime(
-                "aggregate_index_rebuild_in_progress",
-                "aggregate index rebuild is already in progress",
-                serde_json::json!({}),
-            )
+            // §13/§14 第三出口：并发拒绝同码复用内部条目（同源 describe
+            // 三段成品 + details.copy），不再直吐英文原文。
+            aggregate_index_rejection("aggregate_index_rebuild_in_progress")
         })?;
     let dependencies = state
         .aggregate_initialization_dependencies()
@@ -105,10 +103,23 @@ async fn rebuild_aggregate_index_for_lc(
     let result = tokio::task::spawn_blocking(move || operation.rebuild(&project_id_for_worker))
         .await
         .map_err(|error| {
+            // §13/§14 第三出口：worker join 异常外码走中性专用条目（脱敏
+            // 原文进 details.detail），不再直吐英文原文。
+            use crate::product::logical_codebase::failure_copy::{
+                FailureInput, describe, render_detail,
+            };
+            let diagnostic = crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
+                &error.to_string(),
+                &crate::cross_cutting::diagnostic_redaction::RedactionContext::default(),
+            );
+            let copy = describe(
+                FailureInput::new("aggregate_index_unavailable")
+                    .with_detail(&format!("aggregate index rebuild worker failed: {error}")),
+            );
             ApiError::runtime(
                 "aggregate_index_unavailable",
-                format!("aggregate index rebuild worker failed: {error}"),
-                serde_json::json!({}),
+                render_detail(&copy, Some(&diagnostic)),
+                serde_json::json!({ "detail": diagnostic, "copy": copy }),
             )
         })?;
     if let Err(error) = result {
@@ -217,18 +228,44 @@ fn validate_project_id(project_id: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// 聚合索引同步出口（第三出口）：内层稳定 code + message → **同一**文案来源。
+///
+/// 外层 code 与 HTTP 状态保持既有契约（`aggregate_index_unavailable`，
+/// `details.reason_code` 仍是内层码）；`message` 换成共享 `render_detail`
+/// 的三段成品（问题/原因/怎么做/机器码），原始错误脱敏后另存
+/// `details.detail`，不冒充中文原因。
 fn aggregate_index_api_error(error: AggregateIndexError) -> ApiError {
-    let code = match error {
-        AggregateIndexError::Failed { code, .. } | AggregateIndexError::Degraded { code, .. } => {
-            code
-        }
+    use crate::product::logical_codebase::failure_copy::{FailureInput, describe, render_detail};
+    let (code, message) = match &error {
+        AggregateIndexError::Failed { code, message }
+        | AggregateIndexError::Degraded { code, message } => (*code, message.as_str()),
     };
+    let copy = describe(FailureInput::new(code).with_detail(message));
+    let diagnostic = crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
+        message,
+        &crate::cross_cutting::diagnostic_redaction::RedactionContext::default(),
+    );
+    let rendered = render_detail(&copy, None);
     ApiError::runtime(
         "aggregate_index_unavailable",
-        error.to_string(),
+        rendered,
         serde_json::json!({
             "reason_code": code,
+            "detail": diagnostic,
+            "copy": copy,
         }),
+    )
+}
+
+/// §13/§14 第三出口：无内层错误的外层同步拒绝（并发 rebuild 等）——
+/// 同码复用共享文案源（describe 三段成品 + details.copy），不直吐英文。
+fn aggregate_index_rejection(code: &'static str) -> ApiError {
+    use crate::product::logical_codebase::failure_copy::{FailureInput, describe, render_detail};
+    let copy = describe(FailureInput::new(code));
+    ApiError::runtime(
+        code,
+        render_detail(&copy, None),
+        serde_json::json!({ "copy": copy }),
     )
 }
 
@@ -546,7 +583,7 @@ mod projection_tests {
             .create(CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: None,
-                logical_codebase_id: Some(lc2.clone()),
+                logical_codebase_id: lc2.clone(),
                 title: "explicit issue".to_string(),
                 description: None,
                 change_id: None,

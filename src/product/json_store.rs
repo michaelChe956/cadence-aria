@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Serialize, de::DeserializeOwned};
 
+use crate::product::audit_snapshot_budget::AuditSnapshotBudgetFailure;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProductStoreError {
     #[error("product_store_io: {0}")]
@@ -22,6 +24,13 @@ pub enum ProductStoreError {
     IdentityMismatch { kind: &'static str, id: String },
     #[error("product_store_path_escape: {0}")]
     PathEscape(String),
+    /// The audit snapshot exceeded its byte / entry budget. The payload keeps
+    /// the structured breakdown (limits, charged amounts, top groups, per
+    /// member contribution) so the failure copy can render an actionable
+    /// message; the English line stays machine-readable for existing
+    /// consumers.
+    #[error("product_store_audit_snapshot_budget_exceeded: {0}")]
+    AuditSnapshotBudgetExceeded(AuditSnapshotBudgetFailure),
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, ProductStoreError> {

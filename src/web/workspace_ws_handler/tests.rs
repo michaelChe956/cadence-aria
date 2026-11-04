@@ -27,6 +27,7 @@ mod human_gate_revision_cancel;
 mod human_presentation;
 #[path = "tests/interrupted_run_recovery.rs"]
 mod interrupted_run_recovery;
+mod lc_fixture_support;
 #[path = "tests/linked_amendment.rs"]
 mod linked_amendment;
 #[path = "tests/plan_repair_activation.rs"]
@@ -233,7 +234,10 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
     use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 
     let root = tempfile::tempdir().unwrap();
-    let repo = tempfile::tempdir().unwrap();
+    // REQ-ROUTE-01 两态化：成员 checkout 落聚合根直接子目录（LC 权威布局）。
+    let aggregate_root = root.path().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).unwrap();
+    let repo = tempfile::tempdir_in(&aggregate_root).unwrap();
     // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交）。
     init_ws_test_git_repo(repo.path());
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -252,13 +256,19 @@ async fn start_generation_refreshes_stale_provider_guidance_before_prompting_aut
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             title: "Provider guidance refresh".to_string(),
             description: Some("旧 context 不能把 Codex 交互纪律注入 Claude Code run".to_string()),
             change_id: None,
             base_branch: None,
         })
         .unwrap();
+    // REQ-ROUTE-01 两态化：登记 LC 权威全链（路由两态解析得到 Logical）；
+    // 不注入 gateway，保持 legacy 直连 provider 语义。
+    lc_fixture_support::register_legacy_direct_authority(&app_paths, &repository, repo.path());
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
@@ -365,7 +375,10 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
     use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 
     let root = tempfile::tempdir().unwrap();
-    let repo = tempfile::tempdir().unwrap();
+    // REQ-ROUTE-01 两态化：成员 checkout 落聚合根直接子目录（LC 权威布局）。
+    let aggregate_root = root.path().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).unwrap();
+    let repo = tempfile::tempdir_in(&aggregate_root).unwrap();
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     seed_legacy_project(&app_paths);
     let repository = RepositoryStore::new(app_paths.clone())
@@ -382,7 +395,10 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             title: "Provider guidance select refresh".to_string(),
             description: Some(
                 "prepare context should reflect selected author provider".to_string(),
@@ -391,6 +407,9 @@ async fn provider_select_refreshes_provider_guidance_in_session_state() {
             base_branch: None,
         })
         .unwrap();
+    // REQ-ROUTE-01 两态化：登记 LC 权威全链（路由两态解析得到 Logical）；
+    // 不注入 gateway，保持 legacy 直连 provider 语义。
+    lc_fixture_support::register_legacy_direct_authority(&app_paths, &repository, repo.path());
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
@@ -498,7 +517,10 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
     use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 
     let root = tempfile::tempdir().unwrap();
-    let repo = tempfile::tempdir().unwrap();
+    // REQ-ROUTE-01 两态化：成员 checkout 落聚合根直接子目录（LC 权威布局）。
+    let aggregate_root = root.path().join("aggregate-root");
+    std::fs::create_dir_all(&aggregate_root).unwrap();
+    let repo = tempfile::tempdir_in(&aggregate_root).unwrap();
     // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交）。
     init_ws_test_git_repo(repo.path());
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
@@ -517,13 +539,19 @@ async fn provider_select_then_user_message_forces_pi_to_auto_from_stale_supervis
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             title: "Pi permission bypass".to_string(),
             description: Some("stale Supervised mode must not reach Pi".to_string()),
             change_id: None,
             base_branch: None,
         })
         .unwrap();
+    // REQ-ROUTE-01 两态化：登记 LC 权威全链（路由两态解析得到 Logical）；
+    // 不注入 gateway，保持 legacy 直连 provider 语义。
+    lc_fixture_support::register_legacy_direct_authority(&app_paths, &repository, repo.path());
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {

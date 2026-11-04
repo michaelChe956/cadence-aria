@@ -137,6 +137,15 @@ fn cross_fixture_with_owner_worktree(with_owner_worktree: bool) -> CrossFixture 
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：issue 必须持久归属一个逻辑代码库——cross-target
+    // 基线采样按 issue 的 lc_id 寻址（`resolve_issue_logical_codebase_id`），
+    // 无归属会 fail-closed 成 CrossTargetStoreFailure。
+    crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        PROJECT_ID,
+        ISSUE_ID,
+    );
 
     let owner_worktree = with_owner_worktree.then(|| {
         let path = root.path().join("owner-worktree");
@@ -578,7 +587,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 // Task 7 既有 LC gateway 装置复用（worktree_discipline 同款）。
 use super::provider_gateway_validated_input::{
-    build_gateway_with_registry, engine as gateway_engine, seed_logical_codebase_checkout,
+    build_gateway_with_registry, engine as gateway_engine,
 };
 
 const UPSTREAM_SECTION_HEADER: &str = "[resolved_upstream_deliveries]";
@@ -670,29 +679,17 @@ fn owner_worktree_string(f: &CrossFixture) -> String {
         .to_string()
 }
 
-/// P3-a 注入面的 LC gateway 引擎装置（worktree_discipline 先例）：target
-/// snapshot attempt 的 provider run 必须 validated launch，无 gateway 直接
-/// 拒（logical_provider_gateway_required）。consumer 的 target 快照覆写为
-/// nil UUID（对齐 seed_logical_codebase_checkout 播种的成员主 checkout），
-/// coder 覆写 ClaudeCode（避开 Codex danger-full-access 路由级硬门）。
+/// P3-a 注入面的 LC gateway 引擎装置：target snapshot attempt 的 provider
+/// run 必须 validated launch，无 gateway 直接拒
+/// （`logical_provider_gateway_required`）。issue 的 LC 权威已由
+/// `cross_fixture_with_owner_worktree`（`seed_complete`）播种，这里直接复用
+/// ——manifest/policy 身份不得二次覆盖（`ensure_bootstrap` 对身份不一致
+/// fail-closed）。coder 覆写 ClaudeCode（避开 Codex danger-full-access 路由级硬门）。
 fn lc_prompt_capture_engine(
     store: &CodingAttemptStore,
     consumer: &CodingExecutionAttempt,
     adapter: &Arc<PromptCapturingProvider>,
 ) -> CodingWorkspaceEngine {
-    let mut consumer = consumer.clone();
-    let worktree = consumer.worktree_path.clone().expect("consumer worktree");
-    let snapshot = consumer.target_snapshot.clone().expect("target snapshot");
-    consumer.target_snapshot = Some(AttemptTargetSnapshot {
-        logical_repository_id: LogicalRepositoryId(Uuid::nil()),
-        checkout_id: RepositoryCheckoutId(Uuid::nil()),
-        canonical_path: worktree,
-        ..snapshot
-    });
-    store
-        .write_coding_attempt_for_test(&consumer)
-        .expect("nil-uuid target snapshot");
-    seed_logical_codebase_checkout(store, &consumer);
     store
         .update_role_provider_config_snapshot(
             &consumer.project_id,
@@ -884,13 +881,19 @@ async fn cross_bucket_coder_fresh_prompt_carries_upstream_section_and_keeps_cont
     );
 }
 
-/// 红测③（prompt 面）：legacy 单仓 coder 的实际 prompt 不出现注入段。
+/// 红测③（prompt 面）：无跨桶依赖的 coder 实际 prompt 不出现注入段。
 #[tokio::test]
-async fn single_repo_coder_prompt_has_no_upstream_section() {
-    let (_root, _store, attempt) = running_attempt_with_worktree();
+async fn coder_prompt_without_cross_bucket_dependency_has_no_upstream_section() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(_store.clone(), GitWorkspaceService::new(), tx);
     let provider = PromptCapturingProvider::new(vec!["{\"plan_defect_findings\": []}"], 0);
+    // 快照 attempt 的 provider 只能经 LogicalCodebaseProviderGateway 启动。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     engine

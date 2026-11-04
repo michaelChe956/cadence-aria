@@ -5,10 +5,17 @@
 #[tokio::test]
 async fn workspace_ws_user_message_interrupts_active_stream_before_completion() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // 会话 author 改挂 ClaudeCode；默认 fake registry 的 ClaudeCode 槽位
+    // 已是生产 TestControlledFakeStreamingProvider（其 start_validated 与
+    // 裸 start 同路径），无需另造替身。
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -57,10 +64,17 @@ async fn workspace_ws_user_message_interrupts_active_stream_before_completion() 
 #[tokio::test]
 async fn workspace_ws_abort_discards_partial_stream_without_completion() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
-    let app = build_web_router(WebAppState::new(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // 会话 author 改挂 ClaudeCode；默认 fake registry 的 ClaudeCode 槽位
+    // 已是生产 TestControlledFakeStreamingProvider（其 start_validated 与
+    // 裸 start 同路径），无需另造替身。
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::new(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -295,19 +309,24 @@ async fn workspace_ws_tcp_drop_records_eof_connection_diagnostic() {
 async fn workspace_ws_disconnect_during_active_run_writes_no_disconnect_terminal() {
     let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），替身
+    // 改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let state = WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let state = with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     );
     let controls = state.test_controls.clone();
     let app = build_web_router(state);
@@ -364,19 +383,23 @@ async fn workspace_ws_disconnect_during_active_run_writes_no_disconnect_terminal
 #[tokio::test]
 async fn workspace_ws_disconnect_does_not_cancel_active_provider_run() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -433,19 +456,23 @@ async fn workspace_ws_disconnect_does_not_cancel_active_provider_run() {
 #[tokio::test]
 async fn workspace_ws_idle_timeout_holds_reconnect_while_surviving_run_drives() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let state = WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let state = with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     );
     state
         .test_controls
@@ -519,13 +546,17 @@ async fn workspace_ws_idle_timeout_holds_reconnect_while_surviving_run_drives() 
 #[tokio::test]
 async fn workspace_ws_second_connection_does_not_mark_active_run_stale() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(HangingStreamingProvider));
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    registry.register(ProviderName::ClaudeCode, Arc::new(HangingStreamingProvider));
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -593,13 +624,17 @@ async fn workspace_ws_second_connection_does_not_mark_active_run_stale() {
 #[tokio::test]
 async fn workspace_ws_secondary_connection_takes_lease_and_can_abort_active_run_started_by_primary() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(HangingStreamingProvider));
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    registry.register(ProviderName::ClaudeCode, Arc::new(HangingStreamingProvider));
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -687,13 +722,17 @@ async fn workspace_ws_secondary_connection_takes_lease_and_can_abort_active_run_
 #[tokio::test]
 async fn workspace_ws_idle_timeout_does_not_close_socket_during_active_run() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, Arc::new(HangingStreamingProvider));
-    let state = WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    registry.register(ProviderName::ClaudeCode, Arc::new(HangingStreamingProvider));
+    let state = with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     );
     state
         .test_controls
@@ -777,16 +816,20 @@ async fn workspace_ws_test_control_drop_closes_registered_socket() {
 #[tokio::test]
 async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceThenCompletingStreamingProvider),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -843,16 +886,20 @@ async fn workspace_ws_hello_during_pending_choice_does_not_block_choice_response
 #[tokio::test]
 async fn workspace_ws_second_connection_receives_and_answers_pending_choice() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceThenCompletingStreamingProvider),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -916,16 +963,20 @@ async fn workspace_ws_second_connection_receives_and_answers_pending_choice() {
 #[tokio::test]
 async fn workspace_ws_stale_choice_response_after_new_run_is_rejected_before_provider() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // LC 会话必经 gateway：替身挂 ClaudeCode 名（Fake 不被 gateway 支持）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SequencedChoiceCompletingProvider::default()),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");

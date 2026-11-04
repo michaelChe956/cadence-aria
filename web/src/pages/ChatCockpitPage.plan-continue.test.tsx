@@ -243,7 +243,9 @@ describe("ChatCockpitPage plan continue (批2 P5)", () => {
     );
 
     renderCockpitPlanContinue();
-    expect(await screen.findByTestId("plan-continue-card")).toHaveTextContent("人工说明");
+    expect(await screen.findByTestId("plan-continue-card")).toHaveTextContent(
+      "自动化停在等你说明",
+    );
     expect(screen.getByTestId("plan-continue-submit")).toBeDisabled();
     expect(screen.getByTestId("plan-continue-context-hint")).toBeVisible();
 

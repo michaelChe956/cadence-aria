@@ -1,33 +1,3 @@
-/// C5 Task 5：单仓互证通过——attempt 无 target_snapshot 且 issue 当前
-/// authority 载体解析为 enrollment 同一物理仓 → typed 首启可发生
-///（provider 真实入口被 probe 暂停，不冒充启动）。
-#[tokio::test]
-async fn single_repository_start_coding_passes_mutual_verification() {
-    let fixture = ready_single_repository_attempt_fixture().await;
-    let attempt = fixture.attempt();
-    let (probe, _entry, _hold) = paused_start_probe();
-    let outcome = crate::web::coding_start::start_coding_once_with_probe(
-        &fixture.state,
-        &attempt.project_id,
-        &attempt.issue_id,
-        StartCodingCommand {
-            attempt_id: attempt.id.clone(),
-            command_id: "single-repo-start-ok".into(),
-            origin: fixture.auto_origin(),
-        },
-        probe,
-    )
-    .await
-    .expect("single-repository mutual verification passes");
-    assert!(
-        matches!(outcome, StartCodingOutcome::Started { .. }),
-        "unexpected outcome: {outcome:?}"
-    );
-    assert_eq!(
-        fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
-        1
-    );
-}
 
 /// C2 Task 3（REQ-CRO-03）：abort 置 retired 后，显式 restart 在同进程内
 /// 清退役标记→重开 admission→spawn 新 runner，无需重启服务；同 command
@@ -39,7 +9,6 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::CodingAttemptStore;
     use crate::product::coding_models::CodingAttemptStatus;
-    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
     use crate::product::models::automation::OperationState;
     use crate::web::coding_start::{RestartCodingAttemptRequest, restart_coding_attempt};
 
@@ -51,17 +20,19 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
     );
     let paths = ProductAppPaths::new(root.join(".aria"));
     let store = CodingAttemptStore::new(paths.clone());
-    IssueStore::new(paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
-            title: "restart issue".to_string(),
-            description: None,
-            change_id: None,
-            base_branch: None,
-        })
-        .expect("issue");
+    // REQ-ROUTE-01 两态化（去单仓入口）：durable 重开 admission 的唯一凭证是
+    // 「LC 权威 + 冻结 target_snapshot」——无归属 issue 一律 FailClosed
+    // (TargetMissing)，无快照的 Logical 路由一律 target_snapshot_missing_for_logical。
+    // 本用例此前只建 issue（无 LC 权威、attempt 无快照）⇒ 重开在路由判定处
+    // fail-closed 成 NeedsHuman，根本走不到 spawn。这里用共享夹具建出真实归属
+    // （project + manifest/member/checkout/selection/policy/repos.json + 归属
+    // 该 LC 的 issue），并给 attempt 带上与权威逐字一致的冻结快照。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        &root,
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_attempt(
             crate::product::coding_attempt_store::CreateCodingAttemptInput {
@@ -77,7 +48,7 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
                     review_rounds: 0,
                     permission_modes: Default::default(),
                 },
-                target_snapshot: None,
+                target_snapshot: Some(logical.snapshot(&paths)),
                 max_auto_rework: 0,
             },
         )
@@ -449,7 +420,7 @@ async fn restart_multi_repo_attempt_passes_precheck_despite_sibling_prebound_loc
 /// 启动)。
 #[tokio::test]
 async fn lcg_t13_ready_plan_does_not_start_other_target_without_manual_command() {
-    let fixture = ready_single_repository_attempt_fixture().await;
+    let fixture = crate::web::wiga_gate_fixture::ready_enrolled_attempt_fixture().await;
     let attempt = fixture.attempt();
     let store = fixture.store();
     let before_count = store

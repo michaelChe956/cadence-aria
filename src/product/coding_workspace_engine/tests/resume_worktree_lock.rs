@@ -13,7 +13,7 @@
 //! 接管面；证据未知 fail-closed。
 
 use super::*;
-use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+use crate::product::logical_codebase::logical_test_fixture::{self, LogicalFixture};
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -24,40 +24,33 @@ struct ResumeLockFixture {
     _root: tempfile::TempDir,
     lifecycle: LifecycleStore,
     store: CodingAttemptStore,
+    logical: LogicalFixture,
     attempt: CodingExecutionAttempt,
 }
 
 fn seed_running_attempt_with_bound_lock() -> ResumeLockFixture {
     let root = tempdir().expect("tempdir");
-    let worktree = root.path().join("shared-worktree");
-    std::fs::create_dir_all(&worktree).expect("shared worktree dir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01：准入/租约的唯一凭证是 LC 权威 + 冻结快照，且快照 attempt
+    // 只按仓维分类租约——故本夹具必须先播种完整 LC 权威，并全程使用仓维记录。
+    let logical = logical_test_fixture::seed_complete(&paths, root.path(), PROJECT_ID, ISSUE_ID);
     let lifecycle = LifecycleStore::new(paths.clone());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: PROJECT_ID.to_string(),
-            issue_id: ISSUE_ID.to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: worktree.clone(),
-            base_branch: "HEAD".to_string(),
-        })
-        .expect("shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            PROJECT_ID,
-            ISSUE_ID,
-            WORK_ITEM_ID,
-            "issue_worktree_lease_seed",
-        )
-        .expect("seed lease");
+    let worktree = logical.member_path.clone();
+    logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        PROJECT_ID,
+        ISSUE_ID,
+        logical.member_id,
+        &worktree,
+    );
     let store = CodingAttemptStore::new(paths);
+    let target_snapshot = logical.snapshot(&store.paths());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
             work_item_id: WORK_ITEM_ID.to_string(),
-            base_branch: "HEAD".to_string(),
+            base_branch: "main".to_string(),
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: Some(worktree),
             provider_config_snapshot: ProviderConfigSnapshot {
@@ -66,13 +59,18 @@ fn seed_running_attempt_with_bound_lock() -> ResumeLockFixture {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         })
         .expect("attempt");
-    lifecycle
-        .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, &attempt.id)
-        .expect("bind owner");
+    logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        PROJECT_ID,
+        ISSUE_ID,
+        logical.member_id,
+        WORK_ITEM_ID,
+        &attempt.id,
+    );
     let attempt = store
         .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
@@ -80,6 +78,7 @@ fn seed_running_attempt_with_bound_lock() -> ResumeLockFixture {
         _root: root,
         lifecycle,
         store,
+        logical,
         attempt,
     }
 }
@@ -92,7 +91,7 @@ fn engine_for(fixture: &ResumeLockFixture) -> CodingWorkspaceEngine {
 fn lock_record(fixture: &ResumeLockFixture) -> crate::product::models::IssueSharedWorktree {
     fixture
         .lifecycle
-        .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, fixture.logical.member_id)
         .expect("lock record")
         .expect("lock record present")
 }
@@ -111,7 +110,12 @@ fn resume_after_takeover_release_reacquires_and_rebinds_lock() {
     // 确认接管显式释放锁（A09 takeover 的落盘效果）。
     fixture
         .lifecycle
-        .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+        .release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.logical.member_id,
+            &fixture.attempt.id,
+        )
         .expect("takeover released the lock");
     let engine = engine_for(&fixture);
 
@@ -126,7 +130,7 @@ fn resume_after_takeover_release_reacquires_and_rebinds_lock() {
     assert!(matches!(
         residue,
         CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
-            kind: "issue_worktree_lock_owner",
+            kind: "repo_worktree_lock_owner",
             ..
         })
     ));
@@ -188,15 +192,21 @@ fn resume_with_transient_lease_residue_adopts_and_rebinds() {
     // 恢复 spawn 失败遗留的瞬态 lease 残留（active=WI，owner 未绑 attempt）。
     fixture
         .lifecycle
-        .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+        .release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.logical.member_id,
+            &fixture.attempt.id,
+        )
         .expect("clear owner");
     fixture
         .lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             PROJECT_ID,
             ISSUE_ID,
+            fixture.logical.member_id,
             WORK_ITEM_ID,
-            "issue_worktree_lease_transient_residue",
+            "repo_worktree_lease_transient_residue",
         )
         .expect("transient residue");
     let engine = engine_for(&fixture);
@@ -226,7 +236,12 @@ fn resume_with_foreign_active_holder_stops_waiting_without_preemption() {
         .expect("manual recovery");
     fixture
         .lifecycle
-        .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+        .release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.logical.member_id,
+            &fixture.attempt.id,
+        )
         .expect("clear owner");
     // 同 issue 另一 WI 的活跃 attempt B 持锁。
     let other = fixture
@@ -244,22 +259,31 @@ fn resume_with_foreign_active_holder_stops_waiting_without_preemption() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            // 他人持有场景同样必须是「带快照的合法 attempt」：无快照会走
+            // `target_snapshot_missing_for_logical`，测不到「活跃他人停等」本体。
+            target_snapshot: Some(fixture.logical.snapshot(&fixture.store.paths())),
             max_auto_rework: 2,
         })
         .expect("other attempt");
     fixture
         .lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             PROJECT_ID,
             ISSUE_ID,
+            fixture.logical.member_id,
             OTHER_WORK_ITEM_ID,
-            "issue_worktree_lease_b",
+            "repo_worktree_lease_b",
         )
         .expect("foreign lease");
     fixture
         .lifecycle
-        .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, OTHER_WORK_ITEM_ID, &other.id)
+        .bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.logical.member_id,
+            OTHER_WORK_ITEM_ID,
+            &other.id,
+        )
         .expect("bind foreign");
     let other = fixture
         .store
@@ -298,7 +322,12 @@ fn resume_with_foreign_dead_holder_requires_takeover_surface() {
         .expect("manual recovery");
     fixture
         .lifecycle
-        .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+        .release_repo_worktree_lock_by_owner(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.logical.member_id,
+            &fixture.attempt.id,
+        )
         .expect("clear owner");
     let other = fixture
         .store
@@ -315,22 +344,31 @@ fn resume_with_foreign_dead_holder_requires_takeover_surface() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            // 他人持有场景同样必须是「带快照的合法 attempt」：无快照会走
+            // `target_snapshot_missing_for_logical`，测不到「活跃他人停等」本体。
+            target_snapshot: Some(fixture.logical.snapshot(&fixture.store.paths())),
             max_auto_rework: 2,
         })
         .expect("other attempt");
     fixture
         .lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             PROJECT_ID,
             ISSUE_ID,
+            fixture.logical.member_id,
             OTHER_WORK_ITEM_ID,
-            "issue_worktree_lease_b",
+            "repo_worktree_lease_b",
         )
         .expect("foreign lease");
     fixture
         .lifecycle
-        .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, OTHER_WORK_ITEM_ID, &other.id)
+        .bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.logical.member_id,
+            OTHER_WORK_ITEM_ID,
+            &other.id,
+        )
         .expect("bind foreign");
     // B 终态（Failed）仍占锁：死亡他人（先经合法转换 Running→Failed）。
     fixture
@@ -364,9 +402,10 @@ fn resume_with_foreign_dead_holder_requires_takeover_surface() {
 }
 
 #[test]
-fn resume_without_worktree_record_is_noop_for_legacy_attempt() {
+fn resume_without_worktree_record_is_noop_for_snapshot_attempt() {
     let root = tempdir().expect("tempdir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let logical = logical_test_fixture::seed_complete(&paths, root.path(), PROJECT_ID, ISSUE_ID);
     let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
@@ -382,7 +421,7 @@ fn resume_without_worktree_record_is_noop_for_legacy_attempt() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -391,7 +430,7 @@ fn resume_without_worktree_record_is_noop_for_legacy_attempt() {
         .expect("running");
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    // 无租约事实（未启锁的 legacy attempt）：不拦截（C2 同语义）。
+    // 无租约事实（从未启锁的 attempt，仓维记录不存在）：不拦截（C2 同语义）。
     engine
         .ensure_issue_worktree_lock_for_resumed_attempt(&attempt)
         .expect("legacy attempt without lock record");

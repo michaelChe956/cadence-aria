@@ -18,14 +18,13 @@ const TEXT_FALLBACK_CHOICE_OUTPUT: &str = "感谢提供项目上下文。\n\n\
     - **B)** 用户打开 Web 工作台页面时（前端首次加载时）\n\
     - **C)** 两者都需要（后端启动时检测，前端展示弹窗）\n";
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for TextFallbackChoiceCompletingProvider {
-    async fn start(
+impl TextFallbackChoiceCompletingProvider {
+    /// 裸 `start`（单仓 direct 历史路径）与 `start_validated`（LC
+    /// gateway 路径）共用的会话构造：行为与输入无关，只吐固定文本回退提问。
+    fn text_fallback_choice_session(
         &self,
-        _input: StreamingProviderInput,
         cancel: CancellationToken,
-    ) -> Result<ProviderSession, cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError>
-    {
+    ) -> ProviderSession {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(8);
         tokio::spawn(async move {
@@ -44,11 +43,35 @@ impl StreamingProviderAdapter for TextFallbackChoiceCompletingProvider {
                 .await;
             cancel.cancelled().await;
         });
-        Ok(ProviderSession {
+        ProviderSession {
             native_session_id: None,
             events: event_rx,
             commands: command_tx,
-        })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for TextFallbackChoiceCompletingProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError>
+    {
+        Ok(self.text_fallback_choice_session(cancel))
+    }
+
+    /// LC 会话经 gateway validated 启动（同 it_web/issue_delivery_summary.rs
+    /// 的 FullChainStreamingProvider 先例）：从 validated 事实复刻同一行为；
+    /// 本替身行为与输入无关，按 trait 契约不回调裸 start。
+    async fn start_validated(
+        &self,
+        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError>
+    {
+        Ok(self.text_fallback_choice_session(cancel))
     }
 
     async fn run_streaming(
@@ -130,16 +153,21 @@ async fn recv_until_session_state_with_pending_choice(
 #[tokio::test]
 async fn workspace_ws_session_state_projects_pending_provider_choice_during_active_run() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceThenCompletingStreamingProvider),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -225,16 +253,21 @@ async fn workspace_ws_session_state_projects_pending_provider_choice_during_acti
 #[tokio::test]
 async fn workspace_ws_session_state_projects_text_fallback_pending_choice() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(TextFallbackChoiceCompletingProvider),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -311,16 +344,21 @@ async fn workspace_ws_session_state_projects_text_fallback_pending_choice() {
 #[tokio::test]
 async fn workspace_ws_pending_choice_projection_clears_after_run_completes() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceThenCompletingStreamingProvider),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -387,13 +425,10 @@ struct ChoiceHangingBroadcastProvider {
 const CHOICE_BROADCAST_PENDING_ID: &str = "choice_broadcast_r2_001";
 const CHOICE_ANSWER_BROADCAST_PENDING_ID: &str = "choice_broadcast_r2_002";
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for ChoiceHangingBroadcastProvider {
-    async fn start(
-        &self,
-        _input: StreamingProviderInput,
-        cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
+impl ChoiceHangingBroadcastProvider {
+    /// 挂起 choice 会话本体：裸 `start`（单仓 direct 历史路径）与
+    /// `start_validated`（LC gateway 路径）共用，行为与输入无关。
+    fn hanging_choice_session(&self, cancel: CancellationToken) -> ProviderSession {
         let (event_tx, event_rx) = mpsc::channel(8);
         let (command_tx, mut command_rx) = mpsc::channel::<ProviderCommand>(8);
         let pending_id = self.choice_id.to_string();
@@ -433,11 +468,33 @@ impl StreamingProviderAdapter for ChoiceHangingBroadcastProvider {
                 }
             }
         });
-        Ok(ProviderSession {
+        ProviderSession {
             native_session_id: None,
             events: event_rx,
             commands: command_tx,
-        })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ChoiceHangingBroadcastProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Ok(self.hanging_choice_session(cancel))
+    }
+
+    /// LC 会话经 gateway validated 启动（同 it_web/issue_delivery_summary.rs
+    /// 的 FullChainStreamingProvider 先例：从 validated 事实复刻行为；本替身
+    /// 行为与输入无关，按 trait 契约不回调裸 start）。
+    async fn start_validated(
+        &self,
+        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Ok(self.hanging_choice_session(cancel))
     }
 
     async fn run_streaming(
@@ -482,18 +539,23 @@ async fn recv_until_type(
 #[tokio::test]
 async fn workspace_ws_choice_pending_change_broadcasts_session_state_with_pending() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceHangingBroadcastProvider {
             choice_id: CHOICE_BROADCAST_PENDING_ID,
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -546,16 +608,21 @@ async fn workspace_ws_choice_pending_change_broadcasts_session_state_with_pendin
 #[tokio::test]
 async fn workspace_ws_text_fallback_choice_pending_change_broadcasts_session_state() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(TextFallbackChoiceCompletingProvider),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -615,18 +682,23 @@ async fn workspace_ws_text_fallback_choice_pending_change_broadcasts_session_sta
 #[tokio::test]
 async fn workspace_ws_choice_answer_broadcasts_session_state_without_answered_pending() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceHangingBroadcastProvider {
             choice_id: CHOICE_ANSWER_BROADCAST_PENDING_ID,
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -704,7 +776,9 @@ const CHOICE_REVIEW_DRIVE_PENDING_ID: &str = "choice_review_drive_r3_001";
 #[tokio::test]
 async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let plan = lifecycle
         .create_issue_work_item_plan(
@@ -737,8 +811,8 @@ async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state()
                 issue_id: "issue_0001".to_string(),
                 entity_id: plan.id,
                 workspace_type: cadence_aria::product::models::WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::Fake,
-                reviewer_provider: Some(ProviderName::Fake),
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
 
                 review_rounds: 0,
                 superpowers_enabled: false,
@@ -757,15 +831,18 @@ async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state()
         .expect("create legacy plan session");
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ChoiceHangingBroadcastProvider {
             choice_id: CHOICE_PLAN_SUBDRIVE_PENDING_ID,
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -780,7 +857,7 @@ async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state()
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
+                author: ProviderName::ClaudeCode,
                 reviewer: None,
                 review_rounds: 0,
                 permission_modes:
@@ -816,7 +893,13 @@ async fn workspace_ws_plan_subdrive_choice_pending_projects_into_session_state()
 #[tokio::test]
 async fn workspace_ws_review_drive_choice_pending_projects_into_session_state() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），本族
+    // 替身改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    // reviewer 侧由 Codex 改挂 Pi：gateway 对 Codex/KimiCode 强制**用户级
+    // workspace trust**（读真实 HOME 的 ~/.codex/config.toml），集成测试
+    // 无法（也不应）写用户 home；Pi 无该前置。本用例由 review 驱动真实
+    // 拉起 reviewer，故 reviewer 必须是 gateway 支持且无 trust 前置的名。
+    create_workspace_session_fixture_with_providers(&root, "claude_code", "pi", 1).await;
     // 会话手术：author 产物已落盘（artifact 版本指向 author 节点）、reviewer
     // 节点断线中止（Failed + 紧随 AbortedByDisconnect）——构成
     // recoverable_shared_review 可恢复现场，RetryInterruptedRun 重启 review。
@@ -827,7 +910,7 @@ async fn workspace_ws_review_drive_choice_pending_projects_into_session_state() 
     let stage_prepare_context =
         cadence_aria::web::workspace_ws_types::WorkspaceStage::PrepareContext;
     let snapshot = ProviderConfigSnapshot {
-        author: ProviderName::Fake,
+        author: ProviderName::ClaudeCode,
         reviewer: None,
         review_rounds: 0,
         permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
@@ -839,7 +922,7 @@ async fn workspace_ws_review_drive_choice_pending_projects_into_session_state() 
                 cadence_aria::web::workspace_ws_types::TimelineNode {
                     node_id: "author_run_review_r3".to_string(),
                     node_type: TimelineNodeType::AuthorRun,
-                    agent: Some(ProviderName::Fake),
+                    agent: Some(ProviderName::ClaudeCode),
                     stage: stage_running,
                     round: None,
                     status: TimelineNodeStatus::Completed,
@@ -855,7 +938,7 @@ async fn workspace_ws_review_drive_choice_pending_projects_into_session_state() 
                 cadence_aria::web::workspace_ws_types::TimelineNode {
                     node_id: "review_run_r3".to_string(),
                     node_type: TimelineNodeType::ReviewerRun,
-                    agent: Some(ProviderName::Fake),
+                    agent: Some(ProviderName::Pi),
                     stage: stage_cross_review,
                     round: Some(1),
                     status: TimelineNodeStatus::Failed,
@@ -896,7 +979,7 @@ async fn workspace_ws_review_drive_choice_pending_projects_into_session_state() 
                     markdown: VALID_STORY_SPEC.to_string(),
                     diff: None,
                 },
-                generated_by: ProviderName::Fake,
+                generated_by: ProviderName::ClaudeCode,
                 reviewed_by: None,
                 review_verdict: None,
                 confirmed_by: None,
@@ -909,15 +992,18 @@ async fn workspace_ws_review_drive_choice_pending_projects_into_session_state() 
 
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::Pi,
         Arc::new(ChoiceHangingBroadcastProvider {
             choice_id: CHOICE_REVIEW_DRIVE_PENDING_ID,
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");

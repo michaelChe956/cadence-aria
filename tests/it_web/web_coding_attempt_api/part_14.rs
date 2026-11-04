@@ -80,6 +80,29 @@ fn seed_issue_shared_worktree_fixture(lifecycle: &LifecycleStore) {
         .expect("seed issue shared worktree");
 }
 
+/// 播种仓维 shared worktree 记录（Logical 路由下 group attempt 创建与删除
+/// 清理的目标布局；issue 维 legacy 文件在该路由被组入口 preflight
+/// legacy_shared_worktree_present 422 拒绝）。
+fn seed_repo_shared_worktree_fixture(app_paths: &ProductAppPaths) {
+    let logical_id = LogicalCodebaseStore::new(app_paths.clone())
+        .load_manifest(GROUP_PROJECT_ID)
+        .expect("load logical manifest")
+        .expect("logical manifest")
+        .member_ids[0];
+    LifecycleStore::new(app_paths.clone())
+        .upsert_repo_shared_worktree(
+            cadence_aria::product::lifecycle_store::UpsertRepoSharedWorktreeInput {
+                project_id: GROUP_PROJECT_ID.to_string(),
+                issue_id: GROUP_ISSUE_ID.to_string(),
+                repository_id: logical_id,
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: PathBuf::from("/tmp/aria-issue-issue_0001"),
+                base_branch: "main".to_string(),
+            },
+        )
+        .expect("seed repo shared worktree");
+}
+
 /// 播种 plan store 的 outline context index（plan 删除需连带清理，避免孤儿）。
 fn seed_plan_outline_context_index(app_paths: &ProductAppPaths) {
     use cadence_aria::product::models::{DesignContextCapabilities, OutlineContextIndex};
@@ -366,7 +389,7 @@ async fn delete_work_item_plan_succeeds_on_half_deleted_state() {
     let lifecycle = LifecycleStore::new(app_paths.clone());
     seed_bound_work_item_session(&lifecycle, "work_item_0001", "work_item_revision_0001");
     seed_bound_work_item_session(&lifecycle, "work_item_0002", "work_item_revision_0002");
-    seed_issue_shared_worktree_fixture(&lifecycle);
+    seed_repo_shared_worktree_fixture(&app_paths);
     seed_plan_outline_context_index(&app_paths);
 
     // 模拟线上「半残」：先创建 group coding attempt，再手动抹掉 attempt 主体但留下锁，
@@ -445,6 +468,20 @@ async fn delete_work_item_plan_succeeds_on_half_deleted_state() {
         "half-deleted group must still delete cleanly: {body}"
     );
     assert_eq!(body["status"], "deleted");
+
+    // 仓维 shared worktree 记录随 plan 删除一并清理（REQ-COD-03 §4.2.4）。
+    let logical_id = LogicalCodebaseStore::new(app_paths.clone())
+        .load_manifest(GROUP_PROJECT_ID)
+        .expect("load logical manifest")
+        .expect("logical manifest")
+        .member_ids[0];
+    assert!(
+        LifecycleStore::new(app_paths.clone())
+            .get_repo_shared_worktree(GROUP_PROJECT_ID, GROUP_ISSUE_ID, logical_id)
+            .expect("read repo shared worktree after plan delete")
+            .is_none(),
+        "repo shared-worktrees record must be purged with the plan"
+    );
 
     assert_plan_artifacts_purged(&app_paths, Some(&attempt_id));
     assert_issue_and_specs_preserved(&app_paths);

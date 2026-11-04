@@ -60,7 +60,7 @@ describe("PlanRepairReadOnlyPanel", () => {
     expect(view).toHaveTextContent("修订编写");
     expect(view).toHaveTextContent("Plan Review");
     expect(view).toHaveTextContent("turn_0001");
-    expect(view).toHaveTextContent("剩余修复轮次 1");
+    expect(view).toHaveTextContent("人工返修还可做 1 次");
     expect(view).toHaveTextContent("amend_0001");
     expect(view).toHaveTextContent("plan_rev_0001 → plan_rev_0002");
     expect(view).toHaveTextContent("修订工作项 1");

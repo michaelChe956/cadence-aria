@@ -100,17 +100,25 @@ fn teaching_reredrive_node_count(
 async fn coder_invalid_plan_defect_output_gets_single_teaching_reredrive_and_recovers() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ScriptedOutputsProvider::new(vec![
+    // 有快照的 attempt 其 provider run 唯一经 LC gateway validated 启动
+    // (REQ-ROUTE-01),fake provider 同时注册为 gateway registry 的真实
+    // adapter(经 ValidatedPassthroughAdapter 桥接)。
+    let provider = std::sync::Arc::new(ScriptedOutputsProvider::new(vec![
         invalid_plan_defect_output(),
         "{\"plan_defect_findings\": []}",
-    ]);
+    ]));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let persisted = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -192,17 +200,22 @@ async fn coder_invalid_plan_defect_output_gets_single_teaching_reredrive_and_rec
 async fn coder_teaching_reredrive_still_invalid_lands_human_triage_gate_exactly_once() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ScriptedOutputsProvider::new(vec![
+    let provider = std::sync::Arc::new(ScriptedOutputsProvider::new(vec![
         invalid_plan_defect_output(),
         invalid_plan_defect_output(),
-    ]);
+    ]));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let persisted = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -260,14 +273,21 @@ async fn coder_teaching_reredrive_marker_prevents_second_reredrive_on_reentry() 
         .expect("seed reredrive marker node");
 
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ScriptedOutputsProvider::new(vec![invalid_plan_defect_output()]);
+    let provider = std::sync::Arc::new(ScriptedOutputsProvider::new(vec![
+        invalid_plan_defect_output(),
+    ]));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let persisted = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )

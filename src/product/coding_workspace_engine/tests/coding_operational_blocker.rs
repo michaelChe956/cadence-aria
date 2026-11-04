@@ -126,15 +126,22 @@ async fn coder_operational_gate_lands_operational_blocker_gate_with_three_action
     let (root, store, attempt) = running_attempt_with_worktree();
     init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        wi002_operational_output(),
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            wi002_operational_output(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut cmd_rx,
         )
@@ -195,9 +202,16 @@ async fn rework_operational_gate_lands_operational_blocker_gate() {
         )
         .expect("code review stage");
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        wi002_operational_output(),
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            wi002_operational_output(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
@@ -205,7 +219,7 @@ async fn rework_operational_gate_lands_operational_blocker_gate() {
             &attempt,
             &super::provider_driven::review_report_requesting_changes(&attempt),
             &CodingExecutionContext::default(),
-            &provider,
+            provider.as_ref(),
             &mut cmd_rx,
         )
         .await
@@ -245,17 +259,24 @@ async fn parse_failure_still_lands_human_triage_gate_with_two_actions() {
     let (root, store, attempt) = running_attempt_with_worktree();
     init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     // 声明了 plan_defect_findings 但结构非法：Vec 反序列化失败 → parse Err；
     // 教学重驱输出同样非法 → 仍 Err → StopForHumanTriage → 旧门。
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        "{\"plan_defect_findings\": \"not-an-array\"}",
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            "{\"plan_defect_findings\": \"not-an-array\"}",
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut cmd_rx,
         )
@@ -294,15 +315,22 @@ async fn land_operational_blocker_gate(
 ) -> (tempfile::TempDir, CodingAttemptStore, String) {
     let _ = root;
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        wi002_operational_output(),
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            wi002_operational_output(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
     );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut cmd_rx,
         )
@@ -365,14 +393,23 @@ async fn retry_coding_with_context_writes_note_and_resumes_coding() {
     );
 
     // 下一轮 coder prompt 带出「本轮补充上下文」段与 note 内容。
-    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
-        "{\"plan_defect_findings\": []}",
+    let provider = std::sync::Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            "{\"plan_defect_findings\": []}",
+        ),
+    );
+    let (rerun_tx, _rerun_rx) = mpsc::channel(64);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        rerun_tx,
+        "project_0001",
+        provider.clone(),
     );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
         .execute_coding_with_commands(
             &updated,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut cmd_rx,
         )

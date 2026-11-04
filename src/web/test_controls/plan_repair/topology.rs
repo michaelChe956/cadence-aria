@@ -29,8 +29,10 @@ pub(super) async fn route_dependency_graph_invalid(
 ) -> Result<PlanRepairFixtureWaiting, PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .map_err(fixture_error)?
+        .into_iter()
+        .next()
         .ok_or_else(|| PlanRepairFixtureError::not_implemented("attempt_missing"))?;
     if attempt.status != CodingAttemptStatus::AwaitingPlanAmendment {
         start_plan_repair_finding(

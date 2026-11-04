@@ -6,13 +6,18 @@ async fn queued_work_item_plan_outline_review_engine(
     mpsc::Receiver<EngineEvent>,
     String,
 ) {
-    let (tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+    let (tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate(session_id);
     let (tx, rx) = mpsc::channel(64);
     engine.event_tx = tx;
     engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(Vec::new()),
+            // review→repair 后的续链可能进入 generation/draft 校验，outline
+            // target 与 draft 夹具同源（REQ-PLN-02 draft_target 铁律）。
+            outline: test_work_item_plan_outline(
+                Vec::new(),
+                Some(fixture_logical_member_id(&lifecycle)),
+            ),
             design_context_gaps: Vec::new(),
             validator_findings: Vec::new(),
             context_blockers: Vec::new(),

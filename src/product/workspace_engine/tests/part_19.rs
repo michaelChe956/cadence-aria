@@ -1,10 +1,11 @@
 #[test]
 fn interrupted_work_item_draft_review_remains_recoverable_after_failed_outline_run() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_interrupted_draft_review");
     let outline_id = "outline_a";
     let draft_id = "draft_012";
     let draft_record = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         outline_id,
         draft_id,
@@ -38,6 +39,7 @@ fn interrupted_work_item_draft_review_remains_recoverable_after_failed_outline_r
         .expect("persist active index");
 
     let draft_payload = work_item_draft_artifact_payload(
+        &lifecycle,
         &plan_id,
         outline_id,
         draft_id,
@@ -382,10 +384,10 @@ fn interrupted_work_item_draft_generation_engine() -> (TempDir, WorkspaceEngine)
         })
         .expect("persist active index");
     engine.session.stage = WorkspaceStage::PrepareContext;
-    engine.session.artifact = Some(work_item_plan_outline_artifact());
+    engine.session.artifact = Some(work_item_plan_outline_artifact(None));
     engine.artifact_versions = vec![ArtifactVersion {
         version: 1,
-        payload: work_item_plan_outline_artifact(),
+        payload: work_item_plan_outline_artifact(None),
         generated_by: ProviderName::Codex,
         reviewed_by: Some(ProviderName::ClaudeCode),
         review_verdict: Some(ReviewVerdictType::Pass),

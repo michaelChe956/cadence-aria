@@ -1,3 +1,7 @@
+use crate::product::logical_codebase::failure_copy::{
+    describe, describe_code, render_detail, FailureCopy, FailureInput,
+};
+
 /// C4 冷启动五步（依赖顺序固定，见计划 Global Constraints）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,12 +58,55 @@ pub struct BootstrapCheckpoint {
 
 /// 失败/等待原因投影：reason_code 稳定，external_side_effect 描述可能的
 /// provider/index 外部副作用（"none" 表示纯内部 durable 事实）。
+///
+/// `copy` 是同源成品文案（`failure_copy`）的载体：一旦存在，其五个字段全部
+/// 必填；`triage` 只从 `copy.triage` 派生，**不另存第二份分诊真值**。
+/// 外层 `copy`/`triage` 用 `Option` 只为兼容历史非失败载体（旧响应没有
+/// 这两个键），新增的已知失败一律为 `Some`。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BootstrapFailure {
     pub reason_code: String,
     pub detail: String,
     pub retryable: bool,
     pub external_side_effect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<FailureCopy>,
+}
+
+impl BootstrapFailure {
+    /// 唯一构造入口：`copy` 与 `triage` 一律由同一文案来源派生，
+    /// 不存在「加了失败却漏了文案」的路径。
+    pub fn new(
+        reason_code: String,
+        detail: String,
+        retryable: bool,
+        external_side_effect: String,
+    ) -> Self {
+        let copy = describe_code(&reason_code, Some(detail.as_str()));
+        Self::with_copy(reason_code, detail, retryable, external_side_effect, copy)
+    }
+
+    /// 已持有成品 copy（例如来自 `AggregateInitializationErrorRecord` 的
+    /// 适配输入）时用它，避免二次查表得到与渲染不一致的文案。
+    pub fn with_copy(
+        reason_code: String,
+        detail: String,
+        retryable: bool,
+        external_side_effect: String,
+        copy: FailureCopy,
+    ) -> Self {
+        let triage = Some(copy.triage.as_str().to_string());
+        Self {
+            reason_code,
+            detail,
+            retryable,
+            external_side_effect,
+            triage,
+            copy: Some(copy),
+        }
+    }
 }
 
 /// 单个冷启动步骤的只读投影。

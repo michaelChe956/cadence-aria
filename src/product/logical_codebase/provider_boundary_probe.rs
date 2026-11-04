@@ -1601,8 +1601,9 @@ pub(crate) fn probe_import_record(
     resume: ProviderCapabilityEvidence,
 ) -> crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord {
     use crate::product::logical_codebase::provider_capability_store::{
-        CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-        ProviderActionMatrix, ProviderCapabilityRecord,
+        CapabilityEvidence, MANAGED_CAPABILITY_SNAPSHOT_REF,
+        PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability, ProviderActionMatrix,
+        ProviderCapabilityRecord,
     };
     use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
 
@@ -1633,7 +1634,7 @@ pub(crate) fn probe_import_record(
         // 先建过记录的家(Claude)经 import 合并保留既有 ref 不受影响;
         // 无 bootstrap 记录的 Pi/Kimi 探针直建记录 → gateway load_record
         // 比对 mismatch。
-        capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+        capability_snapshot_ref: MANAGED_CAPABILITY_SNAPSHOT_REF.to_string(),
         evidence: CapabilityEvidence::ProductionVerified,
         resume_evidence: ResumeEvidenceState::Unsupported,
         supported_actions: vec![action],

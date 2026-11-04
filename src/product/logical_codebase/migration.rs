@@ -23,11 +23,28 @@ use crate::product::logical_codebase::{
     RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
 };
 use crate::product::models::{
-    IssueRecord, IssueRuntimeBindingRecord, IssueSharedWorktree, LifecycleWorkItemRecord,
-    RepositoryProfile, RepositoryRecord, StorySpecRecord,
+    IssueRuntimeBindingRecord, IssueSharedWorktree, LifecycleWorkItemRecord, RepositoryProfile,
+    RepositoryRecord, StorySpecRecord,
 };
 
 const IDENTITY_MIGRATION_JOURNAL_FILE: &str = "identity-migration.json";
+
+/// 迁移/校验面消费的 issue 投影（只取身份与物理归属字段）。
+///
+/// REQ-ROUTE-01 后 `IssueRecord.logical_codebase_id` 收敛为必填 `String`，而迁移的
+/// 职责**恰恰是回填尚无该字段的存量记录**：直接用 `IssueRecord` 反序列化会被
+/// serde 的 `missing field` 打死，迁移器于是读不了它本来要修的那批数据。
+/// 这里用只声明必要字段的宽容投影读取（serde 默认忽略未知字段，缺
+/// `logical_codebase_id` 不构成错误）；**不放宽**
+/// `issue_store::read_issue_record` 的契约（缺字段 ⇒
+/// `InvalidRecord(issue_not_bound_to_logical_codebase)`）。
+#[derive(Debug, Deserialize)]
+struct LegacyIssueProjection {
+    id: String,
+    project_id: String,
+    #[serde(default)]
+    repo_id: Option<String>,
+}
 
 include!("migration_types.inc.rs");
 include!("migration_executor.inc.rs");

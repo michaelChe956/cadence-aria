@@ -128,6 +128,14 @@ async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentC
     init_test_git_repo(&worktree);
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let store = CodingAttemptStore::new(paths.clone());
+    // REQ-ROUTE-01 两态化：amendment 恢复进入 Running 必经 admission，凭证是
+    // 「LC 权威 + 冻结 target_snapshot」，issue 记录也必须在场。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let initial = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -143,7 +151,7 @@ async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentC
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -276,15 +284,16 @@ async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentC
     let plan_session_id = parent.id.clone();
     let trigger_unit_id = units[1].id.clone();
 
-    let manifest = publish_amendment_manifest(
-        &store,
-        &revision_store,
-        &lifecycle,
-        &plan,
-        &paths,
-        &child.id,
+    let manifest = publish_amendment_manifest(AmendmentPublishContext {
+        store: &store,
+        revision_store: &revision_store,
+        lifecycle: &lifecycle,
+        plan: &plan,
+        paths: &paths,
+        child_session_id: &child.id,
         resume_mode,
-    );
+        member_id: logical.member_id,
+    });
 
     let (event_tx, mut socket_event_rx) = mpsc::channel(16);
     let (observed_event_tx, event_rx) = mpsc::channel(16);
@@ -315,17 +324,34 @@ async fn amendment_chain_fixture(resume_mode: AmendmentResumeMode) -> AmendmentC
     }
 }
 
-fn publish_amendment_manifest(
-    store: &CodingAttemptStore,
-    revision_store: &WorkItemRevisionStore,
-    lifecycle: &LifecycleStore,
-    plan: &WorkItemPlanLineage,
-    paths: &ProductAppPaths,
-    child_session_id: &str,
+/// `publish_amendment_manifest` 的打包参数（clippy 参数上限；字段与原
+/// 参数一一对应，纯机械搬迁）。
+struct AmendmentPublishContext<'a> {
+    store: &'a CodingAttemptStore,
+    revision_store: &'a WorkItemRevisionStore,
+    lifecycle: &'a LifecycleStore,
+    plan: &'a WorkItemPlanLineage,
+    paths: &'a ProductAppPaths,
+    child_session_id: &'a str,
     resume_mode: AmendmentResumeMode,
-) -> PlanAmendmentManifest {
+    member_id: crate::product::logical_codebase::LogicalRepositoryId,
+}
+
+fn publish_amendment_manifest(context: AmendmentPublishContext<'_>) -> PlanAmendmentManifest {
+    let AmendmentPublishContext {
+        store,
+        revision_store,
+        lifecycle,
+        plan,
+        paths,
+        child_session_id,
+        resume_mode,
+        member_id,
+    } = context;
+    // 有快照的 attempt 其 target bucket = snapshot.logical_repository_id,
+    // 按桶检索必须传同一 bucket(None 只匹配无快照的 legacy attempt)。
     let attempt = store
-        .get_attempt_for_work_item_group("project_0001", "issue_0001", &plan.id, None)
+        .get_attempt_for_work_item_group("project_0001", "issue_0001", &plan.id, Some(member_id))
         .unwrap()
         .expect("group attempt");
     let old_revision = revision_store
