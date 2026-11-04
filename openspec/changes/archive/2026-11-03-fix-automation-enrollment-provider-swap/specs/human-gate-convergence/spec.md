@@ -2,23 +2,7 @@
 
 ### Requirement: 门预算权威与真实递减（REQ-HGC-01）
 
-当前 logical gate 的 `manual_repairs_remaining` SHALL 是**反馈可发送性**与**人工返修余量呈现**的唯一授权事实：CAS 预留恰扣一次（同 command replay 不重复扣）；同一 logical gate 内的修订轮次 SHALL carry-forward 预算（不得每轮重置回默认）；仅新 logical gate（新候选/新会话/REQ-CG-07 修订门重开按其接续语义）才建立新预算。门卡 SHALL 显示当前真值；接受的人工反馈轮次 SHALL 以 gate-local `accepted_feedback_turns`（或 durable HumanGateTurn 确定性派生，二选一不双计）呈现，SHALL NOT 以 policy `repairs_used`（仅自动返修）或静态快照冒充。
-
-**额度命名**：三类额度（**平台自动重写** / **人工返修** / **你已说明 N 轮**）SHALL 各自命名呈现，MUST NOT 共用「自动修复」这类会混淆的统称；机械返修池（`max_repairs`）MUST NOT 以额度名出现在门卡上。
-
-**余量呈现**：门卡 SHALL **分别呈现两个账面事实**——B1 的 `auto_rewrite.remaining`（平台自动重写侧）与 B2 的 `manual_repairs_remaining`（人工返修侧）——并各自标注其来源与用途；MUST NOT 任选其中一个充当「共享余额」，MUST NOT 合成或推测跨账本的余量值，MUST NOT 隐藏其中一个事实后宣称共享余额已确定。
-
-**共享余额**：仅在后端提供**同一预算域的权威合并事实**时，门卡才 MAY 展示「共享余额」；当前后端尚未提供该事实 → 门卡 MUST NOT 展示「共享余额」，SHALL 只呈现上述两个来源各自的账面事实 + 「两处账本尚未合并」的说明。
-
-**「已用完」文案**：`repair_budget_exhausted` trigger MUST NOT 被直接渲染为「次数已用完」——该 trigger 可由机械返修池耗尽、cycle initial/verification 的结构封闭等不同路径产生；文案 SHALL 按触发路径（`flowKind` / 触发路径事实）分流，无法判定路径时 SHALL 使用中性文案「本轮评审自动返修已停止，需要你决定下一步。」
-
-**共池表述**：界面 MAY 用说明性文字表达「平台自动重写与你的反馈共用同一份额度上限」（REQ-WSC-21 的 author 重写次数预算口径，初值 `max_manual_repairs`；`max_repairs` 机械返修池 MUST NOT 被当作该池），但 MUST NOT 承诺算术合并后的余量值，MUST NOT 宣称两者已并成一个池。
-
-**数据缺失**：旧记录缺 gate-local 事实时保守显示「预算历史不可用／共享余额无法确认」，MUST NOT 补默认值，MUST NOT 让旧卡读成当前授权。
-
-**卡片刷新**：当前门卡的重建 / 重连 SHALL 刷新同门当前事实；旧卡只读历史事实，SHALL NOT 呈现为当前授权。
-
-人工返修预算耗尽时门保持开启仅接受 approve/abandon（既有语义），门卡如实显示耗尽态（此处「耗尽」指 durable 事实为 0 的那一池，SHALL NOT 由 `repair_budget_exhausted` trigger 推断）。
+当前 logical gate 的 `manual_repairs_remaining` SHALL 是**反馈可发送性**与**人工返修余量呈现**的唯一授权事实：CAS 预留恰扣一次（同 command replay 不重复扣）；同一 logical gate 内的修订轮次 SHALL carry-forward 预算（不得每轮重置回默认）；仅新 logical gate（新候选/新会话/REQ-CG-07 修订门重开按其接续语义）才建立新预算；门卡 SHALL 显示当前真值。当前门卡的重建 / 重连 SHALL 刷新同门当前事实，旧卡只读历史事实、SHALL NOT 呈现为当前授权。人工返修预算耗尽时门保持开启仅接受 approve/abandon（既有语义），门卡如实显示耗尽态（「耗尽」指 durable 事实为 0 的那一池，SHALL NOT 由 `repair_budget_exhausted` trigger 推断）。
 
 #### Scenario: 三轮修订真实递减
 
@@ -89,6 +73,16 @@
 
 - **WHEN** 门卡所属记录缺少额度事实
 - **THEN** 门卡 SHALL 显示「预算历史不可用／共享余额无法确认」，MUST NOT 补默认值，MUST NOT 让旧卡读成当前授权
+
+#### Scenario: 旧卡只读历史事实、不得呈现为当前授权
+
+- **WHEN** 打开一张非当前门卡
+- **THEN** 该卡 SHALL 只读历史事实，SHALL NOT 呈现为当前授权
+
+#### Scenario: 人工返修预算耗尽时的门与耗尽态呈现
+
+- **WHEN** 人工返修预算的 durable 事实为 0
+- **THEN** 门 SHALL 保持开启且仅接受 approve/abandon；门卡 SHALL 如实显示耗尽态，且该耗尽态 SHALL NOT 由 `repair_budget_exhausted` trigger 推断
 
 #### Scenario: 共池权威事实缺席时只验收呈现修复
 

@@ -60,7 +60,8 @@ pub(crate) fn seed_logical_authority(
         RepositorySourceIdentity::from_git_parts(member_path, member_path.join(".git"), None);
 
     let authority = LogicalCodebaseStore::for_lc(paths.clone(), &logical_codebase_id);
-    let manifest = LogicalCodebaseManifest::new(project_id, aggregate_root.to_path_buf(), vec![member_id]);
+    let manifest =
+        LogicalCodebaseManifest::new(project_id, aggregate_root.to_path_buf(), vec![member_id]);
     authority
         .save_manifest(project_id, &manifest)
         .expect("fixture manifest");
