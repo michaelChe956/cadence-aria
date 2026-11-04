@@ -879,7 +879,10 @@ impl ProviderCapabilityStore {
     /// logical-codebase/capabilities.json`；不经 `lc_scope_root` 派生）。
     fn capabilities_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
-        Ok(self.paths.logical_codebase_root(project_id).join("capabilities.json"))
+        Ok(self
+            .paths
+            .logical_codebase_root(project_id)
+            .join("capabilities.json"))
     }
 }
 
@@ -1738,6 +1741,6 @@ mod tests {
         }
     }
 
-// 作用域唯一性用例（REQ-PCR-07）拆出承载：行数门禁的登记上限不可增长。
+    // 作用域唯一性用例（REQ-PCR-07）拆出承载：行数门禁的登记上限不可增长。
     include!("provider_capability_store_scope_tests.inc.rs");
 }
