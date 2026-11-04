@@ -12,10 +12,19 @@
 // - 失败（provider_capability_probe_failed）如实展示稳定码+原始 detail，
 //   不伪造 Confirmed，按钮恢复可点击；
 // - 批量核验作业的逐项状态并入同一行级列表（不再另起第二组列表）。
+//
+// 2026-11-04（宿主迁移）：owner 裁定能力核验已全局化 ⇒ provider 管理不再寄居
+// 在「逻辑代码库」抽屉里，本文件的渲染宿主换成独立的「Provider 管理」面板
+// （ProviderManagementDrawer + ProviderManagementPanel）。断言一条未删、未改松，
+// 只换宿主；结构性断言（块间分割线 / 行1 两端对齐 / 行2 胶囊 / 行3 维度在前
+// 操作在后 / 核验按钮次按钮 / 块内 ≥3 独立行容器 / 无圆角边框壳 / 无两列网格
+// / 4 个 listitem）全部保留。
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderCapabilityCard } from "./ProviderCapabilityCard";
+import { ProviderManagementDrawer } from "./ProviderManagementDrawer";
+import { ProviderManagementPanel } from "./ProviderManagementPanel";
 import type {
   ProviderCapabilityActionName,
   ProviderCapabilityActionRowDto,
@@ -299,6 +308,20 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     window.localStorage.clear();
   });
 
+  /** 2026-11-04：能力核验已全局化 ⇒ 能力卡不再寄居在「逻辑代码库」抽屉里，
+   *  宿主换成独立的「Provider 管理」面板（抽屉 + 面板）。断言内容一条未减，
+   *  只换宿主。 */
+  function renderProviderManagement() {
+    return render(
+      <ProviderManagementDrawer open onClose={() => {}}>
+        <ProviderManagementPanel
+          projectId={PROJECT_ID}
+          logicalCodebaseId={LC_ID}
+        />
+      </ProviderManagementDrawer>,
+    );
+  }
+
   it("renders nothing without an active logical codebase", async () => {
     const { container } = render(
       <ProviderCapabilityCard projectId={PROJECT_ID} logicalCodebaseId={null} />,
@@ -312,12 +335,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
   it("fetches the read-only projection and renders three aspect rows per provider", async () => {
     installFetchRouter(unknownProjection);
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     await screen.findByTestId("provider-capability-card");
     // 只读 GET（零写入、零探针触发）：首请求即 capability 投影，全程无 POST。
@@ -403,12 +421,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
   it("renders one row list instead of the 2x2 provider cards", async () => {
     installFetchRouter(unknownProjection);
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     // 行级列表渲染。
     const list = await screen.findByTestId("provider-capability-list");
@@ -453,12 +466,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
   it("lays out each provider as a separated block with three aligned rows", async () => {
     installFetchRouter(unknownProjection);
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const list = await screen.findByTestId("provider-capability-list");
     // 块间 1px 分割线挂在列表容器上（每个块自身没有边框壳）。
@@ -557,12 +565,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       ],
     });
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const providerRow = await screen.findByTestId(
       "provider-capability-provider-codex",
@@ -595,12 +598,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       batchJob(),
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     // 批量作业的逐项状态并入对应行（不再另起第二组列表）。
     expect(
@@ -650,12 +648,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       runningBatchJob(),
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     // 逐项状态并入对应行（已确认 / 核验中）。
     const claudeRow = await screen.findByTestId(
@@ -686,12 +679,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       batchJob(),
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const codexRow = await screen.findByTestId(
       "provider-capability-provider-codex",
@@ -758,12 +746,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       batchJob(),
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const piRow = await screen.findByTestId("provider-capability-provider-pi");
     expect(
@@ -805,12 +788,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       batchJob("confirmed"),
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const codexRow = await screen.findByTestId(
       "provider-capability-provider-codex",
@@ -848,12 +826,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       ],
     }, batchJob("confirmed"));
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const providerRow = await screen.findByTestId(
       "provider-capability-provider-codex",
@@ -890,12 +863,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       },
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
     await screen.findByTestId("provider-capability-card");
 
     await userEvent.click(
@@ -962,12 +930,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       },
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
     await screen.findByTestId("provider-capability-card");
 
     await userEvent.click(
@@ -999,12 +962,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
         }),
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
     await screen.findByTestId("provider-capability-card");
 
     await userEvent.click(
@@ -1060,12 +1018,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
         ),
     );
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
     await screen.findByTestId("provider-capability-card");
 
     await userEvent.click(
@@ -1104,12 +1057,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       ],
     });
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const installButton = await screen.findByTestId(
       "provider-install-start-codex",
@@ -1136,12 +1084,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       ],
     });
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const updateButton = await screen.findByTestId(
       "provider-install-start-codex",
@@ -1170,12 +1113,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       ],
     });
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     await screen.findByTestId("provider-capability-card");
     expect(
@@ -1196,12 +1134,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
   it("puts the batch revalidate button at the top of the card", async () => {
     installFetchRouter(unknownProjection);
 
-    render(
-      <ProviderCapabilityCard
-        projectId={PROJECT_ID}
-        logicalCodebaseId={LC_ID}
-      />,
-    );
+    renderProviderManagement();
 
     const card = await screen.findByTestId("provider-capability-card");
     const startButton = screen.getByTestId("capability-batch-start");
@@ -1214,9 +1147,22 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       startButton.compareDocumentPosition(firstProviderRow) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // 按钮区域说明作用域与成本（REQ-PCR-06）。
+    // 按钮区域说明作用域与成本（REQ-PCR-06）：全局口径（作用域 + 三项成本
+    // 告知逐项保留，仍是子串匹配，不弱化）。
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
-      "逐 LC 核验",
+      "全局核验",
+    );
+    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
+      "一次核验全项目可用",
+    );
+    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
+      "会真实跑一次探测",
+    );
+    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
+      "可能几分钟",
+    );
+    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
+      "消耗 provider 额度",
     );
   });
 });

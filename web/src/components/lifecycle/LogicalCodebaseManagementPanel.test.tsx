@@ -1,5 +1,13 @@
-// 票3 片6：逻辑代码库管理面板渲染批量核验条（与能力卡并列）。
+// 票3 片6 → 2026-11-04 迁移：逻辑代码库管理面板**不再**承载 provider 能力
+// 核验区（owner 裁定能力核验已全局化 ⇒ provider 管理搬去独立的「Provider 管理」
+// 面板）。本文件断言：
+// - LC 面板【不渲染】provider 核验区（能力卡 / 行级列表 / 「一键核验全部」按钮 /
+//   作用域说明一个都不在）；
+// - 原位置留一行只读说明 + 「去 Provider 管理」入口，点击即打开独立面板；
+// - 「一键核验全部」按钮在能力卡头部（上方）+ 全局核验口径说明的这组断言迁到
+//   ProviderManagementPanel.test.tsx（宿主换成 Provider 管理面板，断言不弱化）。
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LogicalCodebaseManagementPanel } from "./LogicalCodebaseManagementPanel";
 import type { CodebaseSummaryDto } from "../../api/types";
@@ -14,7 +22,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** 面板子组件（能力卡）挂载即 GET capabilities：给空投影即可。 */
+/** 面板子组件挂载即 GET：给空投影即可（本面板已不含能力卡）。 */
 function stubFetch(): void {
   vi.stubGlobal(
     "fetch",
@@ -56,7 +64,7 @@ const logicalCodebases: CodebaseSummaryDto[] = [
   },
 ];
 
-function renderPanel() {
+function renderPanel(onOpenProviderManagement: () => void = () => {}) {
   return render(
     <LogicalCodebaseManagementPanel
       logicalCodebases={logicalCodebases}
@@ -66,6 +74,7 @@ function renderPanel() {
       activeLogicalCodebaseId={LC_ID}
       onSelectLogicalCodebase={() => {}}
       onOpenRegistration={() => {}}
+      onOpenProviderManagement={onOpenProviderManagement}
       logicalCodebaseMembers={[]}
       aggregateInitialization={null}
       aggregateInitializationBusy={false}
@@ -91,31 +100,39 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
-describe("LogicalCodebaseManagementPanel 批量核验入口", () => {
-  it("「一键核验全部」按钮在能力卡头部（上方），不再有面板底部的独立批量条", async () => {
+describe("LogicalCodebaseManagementPanel 不再承载 provider 能力核验区", () => {
+  it("面板内不再渲染 provider 核验区（能力卡 / 行级列表 / 批量按钮 / 作用域说明）", () => {
     stubFetch();
     renderPanel();
 
-    // 按钮挂在能力卡里（不是面板底部另起一条）。
-    const card = await screen.findByTestId("provider-capability-card");
-    const startButton = screen.getByRole("button", { name: "一键核验全部" });
-    expect(card).toContainElement(startButton);
+    // 能力核验区整体搬去独立的「Provider 管理」面板 ⇒ 这里一个都不渲染。
+    expect(screen.queryByTestId("provider-capability-card")).toBeNull();
+    expect(screen.queryByTestId("provider-capability-list")).toBeNull();
     expect(
-      screen.queryByTestId("provider-capability-batch-bar"),
+      screen.queryByTestId("provider-capability-provider-claude_code"),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "一键核验全部" }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("capability-batch-scope")).toBeNull();
+    expect(screen.queryByTestId("capability-batch-start")).toBeNull();
+  });
 
-    // 按钮在卡片内位于四家 provider 行之前（即「上面」）。
-    const firstProviderRow = await screen.findByTestId(
-      "provider-capability-provider-claude_code",
-    );
-    expect(
-      startButton.compareDocumentPosition(firstProviderRow) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+  it("原位置留一行只读说明 + 「去 Provider 管理」入口，点击即打开独立面板", async () => {
+    stubFetch();
+    const onOpenProviderManagement = vi.fn();
+    const user = userEvent.setup();
+    renderPanel(onOpenProviderManagement);
 
-    // 按钮区域仍说明作用域与成本（REQ-PCR-06）。
-    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
-      "逐 LC 核验",
-    );
+    // 只读说明（不含任何自造的统计数字）。
+    const summary = screen.getByTestId("lc-provider-management-summary");
+    expect(summary).toHaveTextContent("Provider");
+    expect(summary).not.toHaveTextContent("已确认");
+
+    // 「去 Provider 管理」入口可点击，触发打开独立面板。
+    const link = screen.getByTestId("provider-management-link");
+    expect(link).toHaveTextContent("去 Provider 管理");
+    await user.click(link);
+    expect(onOpenProviderManagement).toHaveBeenCalledTimes(1);
   });
 });

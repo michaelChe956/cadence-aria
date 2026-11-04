@@ -34,6 +34,7 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
         onSelectProject={() => {}}
         onCreateProject={() => {}}
         onAddCodebase={() => {}}
+        onOpenProviderManagement={() => {}}
         onDeleteProject={() => {}}
         onDeleteRepository={() => {}}
         onDeleteLogicalCodebase={() => {}}

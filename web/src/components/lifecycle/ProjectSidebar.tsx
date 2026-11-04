@@ -1,4 +1,4 @@
-import { FolderKanban, GitBranch, Plus, Trash2 } from "lucide-react";
+import { FolderKanban, GitBranch, Package, Plus, Settings, Trash2 } from "lucide-react";
 import type { CodebaseSummaryDto, LogicalCodebaseListEntryDto, Project, Repository } from "../../api/types";
 
 export function ProjectSidebar({
@@ -12,6 +12,7 @@ export function ProjectSidebar({
   onSelectProject,
   onCreateProject,
   onAddCodebase,
+  onOpenProviderManagement,
   onDeleteProject,
   onDeleteRepository,
   onDeleteLogicalCodebase,
@@ -29,6 +30,9 @@ export function ProjectSidebar({
   onSelectProject: (projectId: string) => void;
   onCreateProject: () => void;
   onAddCodebase: () => void;
+  /** 2026-11-04：打开独立的「Provider 管理」面板（provider 能力核验已全局化，
+   *  不再寄居在逻辑代码库抽屉里）。 */
+  onOpenProviderManagement: () => void;
   onDeleteProject: (projectId: string) => void;
   onDeleteRepository: (repositoryId: string) => void;
   /// R8：逻辑代码库软删入口（调用方负责二次确认）。
@@ -214,6 +218,34 @@ export function ProjectSidebar({
               先选择 Project
             </p>
           )}
+        </section>
+
+        {/* 2026-11-04：Provider 管理独立入口——能力核验已全局化（项目级），
+            provider 的探针/核验/更新/安装/版本不再寄居在逻辑代码库抽屉里，
+            改由侧栏这个平级分区进入独立面板。 */}
+        <section
+          aria-label="Provider 管理"
+          data-testid="provider-management-section"
+          className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3"
+        >
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Package className="h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
+              <h3 className="truncate text-sm font-semibold text-[var(--aria-ink)]">
+                Provider
+              </h3>
+            </div>
+          </div>
+          <button
+            type="button"
+            data-testid="provider-management-open"
+            disabled={!selectedProjectId}
+            onClick={onOpenProviderManagement}
+            className="inline-flex h-8 w-full items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 text-xs font-semibold text-[var(--aria-ink)] disabled:text-[var(--aria-ink-muted)]"
+          >
+            <Settings className="mr-1 h-4 w-4" />
+            Provider 管理
+          </button>
         </section>
 
         {/* 2026-10-29：已软删（墓碑）LC 分区——只有这里出现「恢复」与「彻底删除」，
