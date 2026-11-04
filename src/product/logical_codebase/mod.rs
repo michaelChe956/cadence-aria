@@ -50,13 +50,14 @@ pub mod types;
 
 pub use aggregate_initialization::{
     AGGREGATE_INITIALIZATION_LAYOUT_VERSION, AGGREGATE_INITIALIZATION_OPERATION_KIND,
-    AggregateCancellationRecord, AggregateInitializationActionRecord,
-    AggregateInitializationErrorRecord, AggregateInitializationIdempotencyIdentity,
-    AggregateInitializationOperation, AggregateInitializationOperationInput,
-    AggregateInitializationOperationStatus, AggregateInitializationProfile,
-    AggregateInitializationStepKind, AggregateInitializationStepRecord,
-    AggregateInitializationStepStatus, AggregateProviderCandidate, AggregateProviderSelection,
-    RepositoryTypeEvidence,
+    AGGREGATE_PROVIDER_NOT_REQUIRED, AggregateCancellationRecord,
+    AggregateInitializationActionRecord, AggregateInitializationErrorRecord,
+    AggregateInitializationIdempotencyIdentity, AggregateInitializationOperation,
+    AggregateInitializationOperationInput, AggregateInitializationOperationStatus,
+    AggregateInitializationProfile, AggregateInitializationStepKind,
+    AggregateInitializationStepRecord, AggregateInitializationStepStatus,
+    AggregateProviderCandidate, AggregateProviderRequirement, AggregateProviderSelection,
+    RepositoryTypeEvidence, resolve_aggregate_provider_requirement,
 };
 pub use aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError,

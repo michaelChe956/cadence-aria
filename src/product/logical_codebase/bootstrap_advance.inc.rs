@@ -54,6 +54,8 @@ pub enum BootstrapAdvanceStop {
     WaitingForHuman {
         step: LogicalCodebaseBootstrapStep,
         reason_code: String,
+        /// 等待的可读上下文（如根配方启动链被拒的具体原因），已脱敏。
+        detail: Option<String>,
     },
     /// 步骤投影没有 Prepare/Continue 可做（例如只允许 Retry/Revalidate）。
     NoActionableStep {
@@ -97,6 +99,14 @@ impl BootstrapAdvanceStop {
             _ => None,
         }
     }
+
+    /// 停住步骤的可读上下文（目前仅等待人工分支携带，其余为 `None`）。
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::WaitingForHuman { detail, .. } => detail.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// 本次实际推进的一步（只记真正产生 durable 进展的派发）。
@@ -137,7 +147,11 @@ pub enum BootstrapPrepareOutcome {
     /// 根配方长任务早已在跑：本次没有推进任何东西（幂等拒绝重复启动）。
     AlreadyRunning,
     /// 无法自动准备（trust 未就绪/provider 不可用/已失败等）。
-    WaitingForHuman { reason_code: String },
+    WaitingForHuman {
+        reason_code: String,
+        /// 拒绝的可读上下文（HTTP 面错误 message + details 摘要）。
+        detail: Option<String>,
+    },
 }
 
 /// C4/A：把「跑起根配方 operation」注入产品层（web 层提供既有编排链）。
@@ -176,6 +190,7 @@ fn advance_decision(step: &BootstrapStepProjection) -> AdvanceDecision {
             BootstrapAdvanceStop::WaitingForHuman {
                 step: step.step,
                 reason_code: failure_reason(),
+                detail: None,
             },
         ),
         // Running：provider/index 长任务在跑，等它收口；GET 只是投影。
@@ -234,6 +249,104 @@ fn bootstrap_step_of(
     projection.steps.iter().find(|candidate| candidate.step == step)
 }
 
+/// advance/手动「准备」停止解释的 durable 载体：LC scope 下的
+/// `.bootstrap-advance-stop.json`。写入方只有 advance 收口与手动 Prepare
+/// 派发（POST 面）；GET/投影只读。原子写（tmp + rename），读侧对损坏
+/// 记录按缺失降级（解释载体不得把 GET 变 5xx）。
+const BOOTSTRAP_ADVANCE_STOP_FILE: &str = ".bootstrap-advance-stop.json";
+
+fn advance_stop_file(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> Result<PathBuf, ProductStoreError> {
+    Ok(crate::product::logical_codebase::store::lc_scope_root(
+        paths,
+        project_id,
+        &Some(logical_codebase_id.to_string()),
+    )?
+    .join(BOOTSTRAP_ADVANCE_STOP_FILE))
+}
+
+/// 落盘最近一次可解释停止（等待人工/失败/无可动步骤）。
+pub(crate) fn persist_advance_stop(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    record: &BootstrapAdvanceStopRecord,
+) -> Result<(), ProductStoreError> {
+    let path = advance_stop_file(paths, project_id, logical_codebase_id)?;
+    let bytes = serde_json::to_vec_pretty(record).map_err(|error| {
+        ProductStoreError::Io(format!("bootstrap advance stop record serialization: {error}"))
+    })?;
+    let temp_path = path.with_extension("json.tmp");
+    std::fs::write(&temp_path, &bytes)
+        .map_err(|error| ProductStoreError::Io(format!("{}: {error}", temp_path.display())))?;
+    std::fs::rename(&temp_path, &path)
+        .map_err(|error| ProductStoreError::Io(format!("{}: {error}", path.display())))?;
+    Ok(())
+}
+
+/// 清除停止解释（PlanningReady/进行中收口：链已动起来，旧解释不得残留）。
+pub(crate) fn clear_advance_stop(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> Result<(), ProductStoreError> {
+    let path = advance_stop_file(paths, project_id, logical_codebase_id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "{}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// 读取最近一次停止解释；无记录/记录损坏均按 `None`（解释性载体，
+/// 下一次推进会覆写）。
+pub(crate) fn load_advance_stop(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> Result<Option<BootstrapAdvanceStopRecord>, ProductStoreError> {
+    let path = advance_stop_file(paths, project_id, logical_codebase_id)?;
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ProductStoreError::Io(format!("{}: {error}", path.display())))
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(record) => Ok(Some(record)),
+        Err(error) => {
+            tracing::warn!(
+                project_id,
+                logical_codebase_id,
+                %error,
+                "bootstrap advance stop record is unreadable; treating it as absent"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// 由停止枚举派生可解释停止记录：仅等待人工/失败/无可动步骤落盘
+/// （它们携带 reason_code）；PlanningReady/进行中/迭代上限清除旧记录。
+fn advance_stop_record_from(stopped: &BootstrapAdvanceStop) -> Option<BootstrapAdvanceStopRecord> {
+    let step = stopped.step()?;
+    let reason_code = stopped.reason_code().map(str::to_string)?;
+    Some(BootstrapAdvanceStopRecord {
+        step,
+        reason: stopped.reason().to_string(),
+        reason_code,
+        detail: stopped.detail().map(|detail| sanitize_failure_detail(detail, None)),
+        stopped_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
 impl LogicalCodebaseBootstrapService {
     /// 首建自动推进：按依赖顺序把第一个可动步骤推进一格，复投影后继续，
     /// 直到 planning_ready / failed / waiting_for_human / 无动作 / 有界上限。
@@ -256,7 +369,51 @@ impl LogicalCodebaseBootstrapService {
                 &lock_path,
             )
             .await?;
-        self.advance_locked(request).await
+        let mut result = self.advance_locked(request).await?;
+        self.finalize_advance_stop(&mut result).await;
+        Ok(result)
+    }
+
+    /// 停止解释收口（仍持 LC 级 advance 锁）：可解释停止落盘、健康收口
+    /// 清除；随后重投影，让本响应与后续 GET 看到同一份解释。best-effort：
+    /// 解释载体写失败只降级可见性并告警，不回滚已产生的 durable 进展。
+    async fn finalize_advance_stop(&self, result: &mut BootstrapAdvanceResult) {
+        let persist = match advance_stop_record_from(&result.stopped) {
+            Some(record) => persist_advance_stop(
+                &self.paths,
+                &result.project_id,
+                &result.logical_codebase_id,
+                &record,
+            ),
+            None => clear_advance_stop(
+                &self.paths,
+                &result.project_id,
+                &result.logical_codebase_id,
+            ),
+        };
+        if let Err(error) = persist {
+            tracing::warn!(
+                project_id = %result.project_id,
+                logical_codebase_id = %result.logical_codebase_id,
+                %error,
+                "bootstrap advance stop record persist failed"
+            );
+        }
+        let reprojection = self
+            .project_async(&BootstrapAdvanceRequest {
+                project_id: result.project_id.clone(),
+                logical_codebase_id: result.logical_codebase_id.clone(),
+            })
+            .await;
+        match reprojection {
+            Ok(projection) => result.projection = projection,
+            Err(error) => tracing::warn!(
+                project_id = %result.project_id,
+                logical_codebase_id = %result.logical_codebase_id,
+                %error,
+                "bootstrap advance final reprojection failed; keeping the loop projection"
+            ),
+        }
     }
 
     async fn advance_locked(
@@ -338,7 +495,7 @@ impl LogicalCodebaseBootstrapService {
                     membership_revision: projection.membership_revision,
                 });
                 match outcome {
-                    BootstrapPrepareOutcome::WaitingForHuman { reason_code } => {
+                    BootstrapPrepareOutcome::WaitingForHuman { reason_code, detail } => {
                         return Ok(BootstrapAdvanceResult {
                             project_id: request.project_id,
                             logical_codebase_id: request.logical_codebase_id,
@@ -346,6 +503,7 @@ impl LogicalCodebaseBootstrapService {
                             stopped: BootstrapAdvanceStop::WaitingForHuman {
                                 step: step.step,
                                 reason_code,
+                                detail,
                             },
                             projection,
                         });
@@ -484,6 +642,7 @@ impl LogicalCodebaseBootstrapService {
                         stopped: BootstrapAdvanceStop::WaitingForHuman {
                             step: step.step,
                             reason_code,
+                            detail: None,
                         },
                         projection: result.projection,
                     });

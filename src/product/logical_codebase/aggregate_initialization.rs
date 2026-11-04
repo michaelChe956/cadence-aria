@@ -343,6 +343,63 @@ pub fn detect_skills_initialization(
     Ok(Some(markers))
 }
 
+/// 「本 LC 的聚合初始化不需要 provider」时冻结进 `input.provider` 的 wire 名。
+///
+/// 它**不是**一家 provider：`provider_from_wire` 解不出这个串，因此执行期
+/// 真要跑 provider turn 时必然 fail-closed（`provider_unsupported_for_
+/// aggregate_recipe`），绝不静默回落到别的 provider。
+pub const AGGREGATE_PROVIDER_NOT_REQUIRED: &str = "not_required";
+
+/// 聚合初始化对「provider 是否必需」的判定结论（创建期）。
+///
+/// 零 provider turn 的充要条件：聚合根已具备两个判定文件
+/// （`AGENTS.md` + `.claude/rules/language.md`）⇒ 四条 Cadence-skills 命令
+/// 没必要跑 ⇒ 整条链零 provider turn ⇒ **不需要任何 provider**。
+///
+/// 与执行期的跳过判定同源（同一个 [`detect_skills_initialization`] 原语 +
+/// 同一对判定文件常量），只是把「要不要 provider」这件事提前到创建期认出来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateProviderRequirement {
+    /// 整条链零 provider turn：不需要 provider（免过 provider 选择门）。
+    NotRequired {
+        /// 两个判定文件的冻结摘要（判定依据，顺序固定）。
+        markers: Vec<AggregateSkillsMarker>,
+    },
+    /// 需要 provider：必须过 provider 选择门（REQ-BOOT-07）。
+    Required,
+}
+
+impl AggregateProviderRequirement {
+    /// 是否「不需要 provider」（整条链零 provider turn）。
+    pub fn is_not_required(&self) -> bool {
+        matches!(self, Self::NotRequired { .. })
+    }
+}
+
+/// 创建期的 provider 需求判定（判定前移，owner 2026-11-04）。
+///
+/// - `full_recipe_requested`（手动「启动聚合初始化」/「重新初始化」）⇒ 永远
+///   需要 provider：四条 Cadence-skills 命令必须真跑。
+/// - 冷启动自动推进（`full_recipe_requested = false`）+ 两个判定文件都在
+///   ⇒ 零 provider turn ⇒ 不需要 provider ⇒ 免过 provider 选择门。
+/// - 两个判定文件不在 ⇒ 需要 provider ⇒ 选择门照旧评估（不过 ⇒ 不创建
+///   operation，守 REQ-BOOT-07）。
+///
+/// 读不到判定文件（IO/权限失败）**不等于**「未初始化」：按 fail-closed
+/// 上抛，绝不据此跳过四条命令，也绝不把失败改写成「不需要 provider」。
+pub fn resolve_aggregate_provider_requirement(
+    root: &std::path::Path,
+    full_recipe_requested: bool,
+) -> Result<AggregateProviderRequirement, crate::product::json_store::ProductStoreError> {
+    if full_recipe_requested {
+        return Ok(AggregateProviderRequirement::Required);
+    }
+    match detect_skills_initialization(root)? {
+        Some(markers) => Ok(AggregateProviderRequirement::NotRequired { markers }),
+        None => Ok(AggregateProviderRequirement::Required),
+    }
+}
+
 /// C4 Task 6：显式 bootstrap 动作在既有 operation 上的可审计命令记录。
 ///
 /// 同一 `command_id` 重放必须返回同一 durable 结果：动作执行后把
@@ -551,4 +608,100 @@ pub struct AggregateInitializationIdempotencyIdentity {
     pub manifest_revision: u64,
     pub policy_digest: String,
     pub profile_evidence_digest: Option<String>,
+}
+
+#[cfg(test)]
+mod provider_requirement_tests {
+    use super::{
+        AGGREGATE_SKILLS_MARKER_ENTRY, AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE,
+        AggregateProviderRequirement, resolve_aggregate_provider_requirement,
+    };
+
+    /// 写两个判定文件（聚合根已做过 Cadence-skills 初始化的形态）。
+    fn write_both_markers(root: &std::path::Path) {
+        std::fs::create_dir_all(root.join(".claude").join("rules")).expect("rules dir");
+        std::fs::write(root.join(AGGREGATE_SKILLS_MARKER_ENTRY), "# agents\n").expect("agents");
+        std::fs::write(
+            root.join(AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE),
+            "# language\n",
+        )
+        .expect("language rule");
+    }
+
+    #[test]
+    fn both_marker_files_mean_no_provider_is_required() {
+        let temp = tempfile::tempdir().expect("temp");
+        write_both_markers(temp.path());
+
+        let requirement =
+            resolve_aggregate_provider_requirement(temp.path(), false).expect("requirement");
+        assert!(
+            requirement.is_not_required(),
+            "two marker files mean the whole chain needs zero provider turn"
+        );
+        let AggregateProviderRequirement::NotRequired { markers } = &requirement else {
+            panic!("expected NotRequired, got {requirement:?}");
+        };
+        assert_eq!(markers.len(), 2, "both marker files are the evidence");
+        assert_eq!(markers[0].relative_path, AGGREGATE_SKILLS_MARKER_ENTRY);
+        assert_eq!(
+            markers[1].relative_path,
+            AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE
+        );
+        assert!(
+            markers
+                .iter()
+                .all(|marker| marker.digest.starts_with("sha256:"))
+        );
+    }
+
+    #[test]
+    fn a_missing_marker_file_still_requires_a_provider() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::write(
+            temp.path().join(AGGREGATE_SKILLS_MARKER_ENTRY),
+            "# agents\n",
+        )
+        .expect("agents");
+        assert_eq!(
+            resolve_aggregate_provider_requirement(temp.path(), false).expect("requirement"),
+            AggregateProviderRequirement::Required,
+            "one missing marker file still needs a provider"
+        );
+
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::create_dir_all(temp.path().join(".claude").join("rules")).expect("rules dir");
+        std::fs::write(
+            temp.path().join(AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE),
+            "# language\n",
+        )
+        .expect("language rule");
+        assert_eq!(
+            resolve_aggregate_provider_requirement(temp.path(), false).expect("requirement"),
+            AggregateProviderRequirement::Required,
+            "one missing marker file still needs a provider"
+        );
+    }
+
+    #[test]
+    fn an_absent_root_still_requires_a_provider() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("never-created");
+        assert_eq!(
+            resolve_aggregate_provider_requirement(&root, false).expect("requirement"),
+            AggregateProviderRequirement::Required,
+            "an unreadable/absent root must not be treated as initialized"
+        );
+    }
+
+    #[test]
+    fn a_forced_full_recipe_always_requires_a_provider() {
+        let temp = tempfile::tempdir().expect("temp");
+        write_both_markers(temp.path());
+        assert_eq!(
+            resolve_aggregate_provider_requirement(temp.path(), true).expect("requirement"),
+            AggregateProviderRequirement::Required,
+            "an explicit full recipe always runs the four commands, so it needs a provider"
+        );
+    }
 }

@@ -159,6 +159,25 @@ impl AggregateInitializationCoordinator {
         self.begin_with(operation_id, project_id, input, Some(selection), full_recipe_requested)
     }
 
+    /// 创建期「整条链不需要 provider」的操作创建入口（owner 2026-11-04
+    /// 判定前移）：冻结「零 provider turn」事实，**不落候选表**——没有候选，
+    /// 因为整条链一个 provider turn 都不跑（两个判定文件都在 ⇒ 四条
+    /// Cadence-skills 命令没必要跑）。
+    ///
+    /// 语义等价于 [`Self::begin_with_selection`] 的 `selection = None` 分支，
+    /// 但把「无 provider」这件事在创建期就写进 `input.provider`
+    /// （`AGGREGATE_PROVIDER_NOT_REQUIRED`），使 durable 记录自证「这条链
+    /// 没有 provider」。
+    pub fn begin_without_provider(
+        &self,
+        operation_id: String,
+        project_id: &str,
+        input: AggregateInitializationOperationInput,
+        full_recipe_requested: bool,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        self.begin_with(operation_id, project_id, input, None, full_recipe_requested)
+    }
+
     fn begin_with(
         &self,
         operation_id: String,

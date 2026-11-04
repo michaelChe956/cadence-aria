@@ -190,7 +190,17 @@ impl LogicalCodebaseBootstrapService {
                 self.paths.clone(),
                 &request.logical_codebase_id,
             );
-        let operation = store.get(&request.project_id, &request.expected_object_id)?;
+        let operation = match store.get(&request.project_id, &request.expected_object_id) {
+            Ok(operation) => operation,
+            Err(ProductStoreError::NotFound { .. })
+                if request.action == BootstrapActionKind::Prepare =>
+            {
+                // 步骤还没有任何根配方 operation（投影 not_started）：手动
+                //「准备」与自动推进走同一条根配方启动链，而不是 404 死路。
+                return self.dispatch_root_recipe_prepare(request);
+            }
+            Err(error) => return Err(error),
+        };
         use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationOperationStatus;
         // 同 command 重放：返回同一 durable 结果，不再推进状态。
         if operation
@@ -332,6 +342,12 @@ impl LogicalCodebaseBootstrapService {
         &self,
         request: &BootstrapActionRequest,
     ) -> Result<BootstrapActionOutcome, ProductStoreError> {
+        if request.action == BootstrapActionKind::Prepare {
+            // policy 尚未冻结（步骤 not_started）时，「准备」= 跑根配方
+            // operation——与自动推进同一条派发链；拒绝原因落 durable stop
+            // 记录，GET 投影据此解释「为什么停 + 下一步做什么」。
+            return self.dispatch_root_recipe_prepare(request);
+        }
         if request.action != BootstrapActionKind::Republish {
             return Ok(BootstrapActionOutcome::WaitingForHuman);
         }
@@ -392,6 +408,66 @@ impl LogicalCodebaseBootstrapService {
             }
             Err(ProductStoreError::NotFound { .. }) => Ok(BootstrapActionOutcome::WaitingForHuman),
             Err(error) => Err(error),
+        }
+    }
+
+    /// rules/policy 与 member index 的「准备」派发：复用自动推进注入的
+    /// 根配方启动链（幂等、不双推）。真正启动长任务才算 Accepted；已在跑
+    /// 不宣称进展；被拒（trust/选择/已失败配方等）落 stop 记录并保持
+    /// 等待人工——绝不把拒绝改写成成功，也不自动重试。
+    fn dispatch_root_recipe_prepare(
+        &self,
+        request: &BootstrapActionRequest,
+    ) -> Result<BootstrapActionOutcome, ProductStoreError> {
+        let Some(prepare) = self.prepare_root_recipe.as_ref() else {
+            // 未注入派发器（纯产品层装配）：保持等待人工，不假成功。
+            return Ok(BootstrapActionOutcome::WaitingForHuman);
+        };
+        let outcome = prepare(&BootstrapPrepareRequest {
+            project_id: request.project_id.clone(),
+            logical_codebase_id: request.logical_codebase_id.clone(),
+            command_id: request.command_id.clone(),
+            membership_revision: request.expected_revision,
+        });
+        match outcome {
+            BootstrapPrepareOutcome::Started => {
+                // 根配方已启动：旧停止解释作废（best-effort 清除，失败只
+                // 告警——投影侧的 NotStarted 过滤同样会压住陈旧记录）。
+                if let Err(error) = clear_advance_stop(
+                    &self.paths,
+                    &request.project_id,
+                    &request.logical_codebase_id,
+                ) {
+                    tracing::warn!(
+                        project_id = %request.project_id,
+                        logical_codebase_id = %request.logical_codebase_id,
+                        %error,
+                        "bootstrap prepare could not clear the stale advance stop record"
+                    );
+                }
+                Ok(BootstrapActionOutcome::Accepted)
+            }
+            BootstrapPrepareOutcome::AlreadyRunning => {
+                Ok(BootstrapActionOutcome::WaitingForHuman)
+            }
+            BootstrapPrepareOutcome::WaitingForHuman { reason_code, detail } => {
+                let record = BootstrapAdvanceStopRecord {
+                    step: request.step,
+                    reason: "waiting_for_human".to_string(),
+                    reason_code,
+                    detail: detail
+                        .as_deref()
+                        .map(|detail| sanitize_failure_detail(detail, None)),
+                    stopped_at: chrono::Utc::now().to_rfc3339(),
+                };
+                persist_advance_stop(
+                    &self.paths,
+                    &request.project_id,
+                    &request.logical_codebase_id,
+                    &record,
+                )?;
+                Ok(BootstrapActionOutcome::WaitingForHuman)
+            }
         }
     }
 }

@@ -2,6 +2,10 @@ use crate::product::logical_codebase::provider_selection::{
     provider_from_wire, select_aggregate_provider, AGGREGATE_PROVIDER_CANDIDATE_ORDER,
     ProviderSelectionOutcome, REASON_CODE_PROVIDER_HEALTH_DEGRADED,
 };
+use crate::product::logical_codebase::{
+    resolve_aggregate_provider_requirement, AggregateProviderRequirement,
+    AGGREGATE_PROVIDER_NOT_REQUIRED,
+};
 
 /// Legacy `/logical-codebase/initializations` compatibility alias for the
 /// default first logical codebase (v1.2 migration artifact).
@@ -94,38 +98,71 @@ pub(crate) fn start_lc_aggregate_initialization(
         aggregate_initialization_dependencies(state).for_lc(logical_codebase_id.to_string());
     let operation_id = deterministic_operation_id(project_id, idempotency_key);
     let manifest = load_manifest_for_profile(&project_paths, project_id, logical_codebase_id)?;
-    // 片4（REQ-BOOT-07）：provider 选择器——L1 health 快照 + L2 能力核验，
-    // 与 gateway 准入同源；失败时**不创建 operation**，候选表/单家核验
-    // 入口随失败码下发。同步桥接见 [`select_aggregate_provider_blocking`]。
-    let selection = select_aggregate_provider_blocking(
-        &project_paths,
-        &state.provider_health,
-        project_id,
-        logical_codebase_id,
-    )?;
-    let ProviderSelectionOutcome::Selected(selection_table) = selection else {
-        return Err(provider_selection_api_error(
-            &selection,
-            project_id,
-            logical_codebase_id,
-        ));
+    // owner 2026-11-04（判定前移）：创建期先认「这条链到底要不要
+    // provider」。聚合根已具备两个判定文件（`AGENTS.md` +
+    // `.claude/rules/language.md`）⇒ 四条 Cadence-skills 命令没必要跑
+    // ⇒ 整条链零 provider turn ⇒ **不需要任何 provider** ⇒ 免过
+    // provider 选择门（零额度、零探针：不跑 L1 health、不触发任何
+    // capability 探针），自动创建 operation ⇒ 自动开始。
+    // 两个判定文件不在 ⇒ 仍需要 provider ⇒ 选择门照旧评估（不过 ⇒
+    // **不创建 operation**，守 REQ-BOOT-07）。
+    let provider_requirement = resolve_aggregate_provider_requirement(
+        &manifest.provider_context_root,
+        full_recipe_requested,
+    )
+    .map_err(product_store_api_error)?;
+    // 冻结三件事：`input.provider`（执行/重试期一律从 durable 记录解出，
+    // 重试不换人）、trust 门的准入清单、候选表。
+    // 「整条链不需要 provider」时：provider 冻结为「本链无 provider」的
+    // 事实（`provider_from_wire` 解不出它 ⇒ 万一真要跑 provider turn
+    // 必然 fail-closed，绝不静默回落到别的 provider）、准入清单为空
+    // （门自身 no-op 语义）、**不落候选表**（没有候选）。
+    let (provider_wire, trust_admission, selection_table) = match provider_requirement {
+        AggregateProviderRequirement::NotRequired { .. } => (
+            AGGREGATE_PROVIDER_NOT_REQUIRED.to_string(),
+            Vec::new(),
+            None,
+        ),
+        AggregateProviderRequirement::Required => {
+            // 片4（REQ-BOOT-07）：provider 选择器——L1 health 快照 + L2
+            // 能力核验，与 gateway 准入同源；失败时**不创建 operation**，
+            // 候选表/单家核验入口随失败码下发。同步桥接见
+            // [`select_aggregate_provider_blocking`]。
+            let selection = select_aggregate_provider_blocking(
+                &project_paths,
+                &state.provider_health,
+                project_id,
+                logical_codebase_id,
+            )?;
+            let ProviderSelectionOutcome::Selected(selection_table) = selection else {
+                return Err(provider_selection_api_error(
+                    &selection,
+                    project_id,
+                    logical_codebase_id,
+                ));
+            };
+            // 未知 wire 名 fail-closed，绝不静默回落默认 provider。
+            let selected = provider_from_wire(&selection_table.selected).ok_or_else(|| {
+                ApiError::runtime(
+                    REASON_CODE_PROVIDER_HEALTH_DEGRADED,
+                    "provider selection produced an unknown provider wire name",
+                    json!({}),
+                )
+            })?;
+            (
+                selection_table.selected.clone(),
+                vec![selected],
+                Some(selection_table),
+            )
+        }
     };
-    // 冻结进 `input.provider`：执行/重试期一律从 durable 记录解出（重试
-    // 不换人）；未知 wire 名 fail-closed，绝不静默回落默认 provider。
-    let selected = provider_from_wire(&selection_table.selected).ok_or_else(|| {
-        ApiError::runtime(
-            REASON_CODE_PROVIDER_HEALTH_DEGRADED,
-            "provider selection produced an unknown provider wire name",
-            json!({}),
-        )
-    })?;
     let input = crate::product::logical_codebase::AggregateInitializationOperationInput {
         idempotency_key: idempotency_key.to_string(),
         manifest_revision: manifest.membership_revision,
         policy_digest: "sha256:aggregate-policy".to_string(),
         profile_evidence_digest: Some("sha256:profile".to_string()),
         provider_context_root: manifest.provider_context_root.clone(),
-        provider: selection_table.selected.clone(),
+        provider: provider_wire,
     };
     // Task 1.8（REQ-REG-14）：trust 硬前置门——生产依赖图（`production`/
     // `for_lc` 透传）注入 gate 时在 begin 之前评估；未 Ready 只保留 gate
@@ -139,20 +176,31 @@ pub(crate) fn start_lc_aggregate_initialization(
         &operation_id,
         logical_codebase_id,
         &manifest.provider_context_root,
-        &selected,
+        &trust_admission,
     )?;
     // REQ-BOOT-07：候选表随 operation 落账（`provider_selection`），幂等
     // 身份不含 provider ⇒ 同 key 重放返回首次落盘的选择结果。
-    let operation = dependencies
-        .coordinator
-        .begin_with_selection(
-            operation_id,
-            project_id,
-            input,
-            selection_table,
-            full_recipe_requested,
-        )
-        .map_err(aggregate_initialization_api_error)?;
+    let operation = match selection_table {
+        Some(selection_table) => dependencies
+            .coordinator
+            .begin_with_selection(
+                operation_id,
+                project_id,
+                input,
+                selection_table,
+                full_recipe_requested,
+            )
+            .map_err(aggregate_initialization_api_error)?,
+        None => dependencies
+            .coordinator
+            .begin_without_provider(
+                operation_id,
+                project_id,
+                input,
+                full_recipe_requested,
+            )
+            .map_err(aggregate_initialization_api_error)?,
+    };
     // `begin` returns only a newly-created operation: an existing terminal
     // operation with the same key is reported as an idempotency conflict.
     let key =
@@ -278,6 +326,7 @@ pub(crate) fn ensure_lc_initialization_started(
             );
             return BootstrapPrepareOutcome::WaitingForHuman {
                 reason_code: "aggregate_initialization_state_unreadable".to_string(),
+                detail: Some(format!("listing root recipe operations failed: {error}")),
             };
         }
     };
@@ -298,21 +347,39 @@ pub(crate) fn ensure_lc_initialization_started(
                 AggregateInitializationOperationStatus::Running => {
                     BootstrapPrepareOutcome::WaitingForHuman {
                         reason_code: "root_recipe_interrupted".to_string(),
+                        detail: Some(format!(
+                            "operation {operation_id} is durable-Running but no live run \
+                             is registered; an explicit continue/retry must resume it"
+                        )),
                     }
                 }
                 AggregateInitializationOperationStatus::Completed => {
                     BootstrapPrepareOutcome::WaitingForHuman {
                         reason_code: "root_recipe_already_completed".to_string(),
+                        detail: Some(format!(
+                            "operation {operation_id} already completed its root recipe"
+                        )),
                     }
                 }
                 AggregateInitializationOperationStatus::Failed => {
                     BootstrapPrepareOutcome::WaitingForHuman {
                         reason_code: "root_recipe_failed".to_string(),
+                        detail: Some(format!(
+                            "operation {operation_id} ended Failed{}",
+                            operation
+                                .error
+                                .as_ref()
+                                .map(|error| format!(": {} ({})", error.stage, error.reason_code))
+                                .unwrap_or_default()
+                        )),
                     }
                 }
                 AggregateInitializationOperationStatus::Cancelled => {
                     BootstrapPrepareOutcome::WaitingForHuman {
                         reason_code: "root_recipe_cancelled".to_string(),
+                        detail: Some(format!(
+                            "operation {operation_id} was cancelled before readiness froze"
+                        )),
                     }
                 }
             };
@@ -327,6 +394,7 @@ pub(crate) fn ensure_lc_initialization_started(
             );
             return BootstrapPrepareOutcome::WaitingForHuman {
                 reason_code: "aggregate_initialization_state_unreadable".to_string(),
+                detail: Some(format!("reading the root recipe operation failed: {error}")),
             };
         }
     }
@@ -356,10 +424,30 @@ fn start_lc_initialization_outcome(
                 "bootstrap advance root recipe prepare was rejected"
             );
             crate::product::logical_codebase::BootstrapPrepareOutcome::WaitingForHuman {
-                reason_code: error.code,
+                reason_code: error.code.clone(),
+                detail: prepare_rejection_detail(&error),
             }
         }
     }
+}
+
+/// prepare 被拒的可读上下文：HTTP 面错误 message + 非空 details 的紧凑
+/// JSON（provider 选择门的候选表/单家核验入口就在 details 里）。只作诊断
+/// 展示，落盘前统一走脱敏截断。
+fn prepare_rejection_detail(error: &crate::web::error::ApiError) -> Option<String> {
+    let details = if error
+        .details
+        .as_object()
+        .is_some_and(|details| !details.is_empty())
+    {
+        format!(
+            " | details: {}",
+            serde_json::to_string(&error.details).unwrap_or_default()
+        )
+    } else {
+        String::new()
+    };
+    Some(format!("{}{details}", error.message))
 }
 
 /// Legacy `/logical-codebase/initializations/{operation_id}` compatibility
@@ -630,7 +718,7 @@ fn ensure_recipe_trust_ready(
     operation_id: &str,
     logical_codebase_id: &str,
     provider_context_root: &std::path::Path,
-    selected: &crate::product::models::ProviderName,
+    providers: &[crate::product::models::ProviderName],
 ) -> ApiResult<()> {
     use crate::product::logical_codebase::provider_trust::ProviderTrustPreparationResult;
 
@@ -646,7 +734,9 @@ fn ensure_recipe_trust_ready(
         &canonical_root,
         // 片4（REQ-BOOT-07）：准入清单 = 冻结的选中 provider（Pi/
         // ClaudeCode 过滤后为空 → 门 no-op；KimiCode/Codex 进入登记）。
-        std::slice::from_ref(selected),
+        // 「整条链零 provider turn」时清单为空：门照旧被调用并评估
+        // （门自身 no-op 语义），只是没有需要登记 trust 的 provider。
+        providers,
         // route 面是五步 recipe 入口：以 Recipe 场景驱动中立 trust 门。
         crate::product::logical_codebase::provider_trust::ProviderTrustScenario::Recipe,
     ) {

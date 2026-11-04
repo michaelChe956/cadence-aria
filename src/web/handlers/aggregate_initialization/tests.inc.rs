@@ -94,11 +94,9 @@ fn build_test_dependencies(
 /// 同一种子 helper）。选择器据此稳定选中 claude_code，与接线前（固定
 /// claude_code）行为等价、零回归；选择期失败面由 tests_parts/
 /// selection_failure.inc.rs 的专用夹具逐场景构造，不经本 helper。
-fn with_selector_defaulting_to_claude(
+fn with_provider_health_all_available(
     state: WebAppState,
     root: &std::path::Path,
-    paths: &ProductAppPaths,
-    lc_id: Option<&str>,
 ) -> WebAppState {
     struct AllAvailableRunner;
     #[async_trait::async_trait]
@@ -151,13 +149,24 @@ fn with_selector_defaulting_to_claude(
             health.clone(),
         ),
     );
+    state.with_provider_health(health, gate, runner)
+}
+
+/// [`with_provider_health_all_available`] + 把 claude_code 种为 Confirmed：
+/// 选择器据此稳定选中 claude_code（与 provider turn 用例同一种子 helper）。
+fn with_selector_defaulting_to_claude(
+    state: WebAppState,
+    root: &std::path::Path,
+    paths: &ProductAppPaths,
+    lc_id: Option<&str>,
+) -> WebAppState {
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         paths,
         "project_0001",
         lc_id,
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
-    state.with_provider_health(health, gate, runner)
+    with_provider_health_all_available(state, root)
 }
 
 /// 测试用 gateway factory:fake streaming provider + 恒可用 gate + stub sync

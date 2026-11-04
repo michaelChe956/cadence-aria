@@ -140,7 +140,12 @@ async fn post_bootstrap_action_for_lc(
             move |project_id: &str, command_id: &str, expected_revision: u64| {
                 index_operation.build_with_command_id(project_id, expected_revision, command_id)
             },
-        ));
+        ))
+        // A（2026-11-04 真机缺陷）：rules/policy 与 member index 的手动
+        //「准备」与自动推进走同一条根配方启动链（幂等、不双推）——此前
+        // 只把它接进 advance，「准备」按钮落到 dispatch 层变成无声的
+        // waiting_for_human（零 durable 事实）。
+        .with_root_recipe_prepare(root_recipe_prepare_dispatcher(&state));
     let result = service
         .apply(BootstrapActionRequest {
             command_id: request.command_id.clone(),
@@ -330,7 +335,6 @@ pub(crate) async fn advance_lc_bootstrap(
         .for_lc(logical_codebase_id.to_string());
     let runs = dependencies.runs().clone();
     let index_operation = dependencies.index.clone();
-    let state_for_prepare = state.clone();
     let service = LogicalCodebaseBootstrapService::new(paths)
         .with_member_index_run_probe(Arc::new(
             move |project_id: &str, lc_id: &str, operation_id: &str| {
@@ -342,17 +346,9 @@ pub(crate) async fn advance_lc_bootstrap(
             },
         ))
         // A：rules/policy 与 member index 的 Prepare = 跑根配方 operation
-        //（provider 长任务）——复用既有 aggregate-initialization 编排链。
-        .with_root_recipe_prepare(Arc::new(
-            move |request: &crate::product::logical_codebase::BootstrapPrepareRequest| {
-                crate::web::handlers::aggregate_initialization::ensure_lc_initialization_started(
-                    &state_for_prepare,
-                    &request.project_id,
-                    &request.logical_codebase_id,
-                    &request.command_id,
-                )
-            },
-        ))
+        //（provider 长任务）——复用既有 aggregate-initialization 编排链，
+        // 与手动 action 面共用同一注入。
+        .with_root_recipe_prepare(root_recipe_prepare_dispatcher(state))
         // aggregate_index_active 的 Prepare = 既有 LC 隔离索引重建
         //（同 command 幂等、membership revision 冲突 fail-closed）。
         .with_aggregate_index_rebuild(Arc::new(
@@ -406,4 +402,23 @@ fn publish_bootstrap_advance(
             "planning_ready": result.projection.planning_ready,
         }),
     );
+}
+
+/// A（REQ-REG-10）：「跑起根配方 operation」的派发器——HTTP advance 面、
+/// 登记提交后的服务端自动推进与手动 bootstrap action 面共用同一注入，
+/// 不复制编排链语义。
+fn root_recipe_prepare_dispatcher(
+    state: &WebAppState,
+) -> crate::product::logical_codebase::BootstrapPrepareDispatcher {
+    let state_for_prepare = state.clone();
+    Arc::new(
+        move |request: &crate::product::logical_codebase::BootstrapPrepareRequest| {
+            crate::web::handlers::aggregate_initialization::ensure_lc_initialization_started(
+                &state_for_prepare,
+                &request.project_id,
+                &request.logical_codebase_id,
+                &request.command_id,
+            )
+        },
+    )
 }

@@ -100,19 +100,34 @@ fn submit_registration_for_lc(
     let project_for_advance = project_id.clone();
     let lc_for_advance = logical_codebase_id.clone();
     tokio::spawn(async move {
-        if let Err(error) = super::logical_codebase_bootstrap::advance_lc_bootstrap(
+        match super::logical_codebase_bootstrap::advance_lc_bootstrap(
             &state_for_advance,
             &project_for_advance,
             &lc_for_advance,
         )
         .await
         {
-            tracing::warn!(
-                project_id = %project_for_advance,
-                logical_codebase_id = %lc_for_advance,
-                code = %error.code,
-                "bootstrap advance after registration submit stopped"
-            );
+            Ok(result) => {
+                // 自动推进的停止解释已随 advance 落成 durable stop 记录
+                //（GET 投影可见）；这里补一条服务端日志，便于事后核对是
+                // 哪道门（provider 选择门/信任门）拦下的。
+                tracing::info!(
+                    project_id = %project_for_advance,
+                    logical_codebase_id = %lc_for_advance,
+                    stopped_reason = result.stopped.reason(),
+                    stopped_step = result.stopped.step().map(|step| step.as_str()),
+                    stopped_reason_code = result.stopped.reason_code(),
+                    "bootstrap advance after registration submit stopped"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    project_id = %project_for_advance,
+                    logical_codebase_id = %lc_for_advance,
+                    code = %error.code,
+                    "bootstrap advance after registration submit stopped"
+                );
+            }
         }
     });
     Ok(Json(RegistrationBatchDto::from_record(&completed)))

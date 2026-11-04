@@ -253,3 +253,103 @@ async fn reinitialization_runs_every_command_on_an_initialized_root() {
         "the forced path must freeze a full recipe receipt, not a skipped one"
     );
 }
+
+// -------------------------------------------------------------------
+// owner 2026-11-04（恢复 v0.1.1 语义）：**创建期**的 provider 需求判定
+// （判定前移）——
+//
+// 「自动开始」= 系统自动推进到【能推进的最远点】：
+// - 聚合根已具备两个判定文件（`AGENTS.md` + `.claude/rules/language.md`）
+//   ⇒ 四条 Cadence-skills 命令没必要跑 ⇒ 整条链【零 provider turn】
+//   ⇒ 【不需要任何 provider】⇒ 免过 provider 选择门 ⇒ 自动创建 operation
+//   ⇒ 自动开始 ⇒ 用户全程无感、零额度、零探针；
+// - 两个判定文件不在 ⇒ 仍需要 provider ⇒ 仍被 provider 选择门拦下
+//   ⇒【不创建 operation】（守 REQ-BOOT-07「无可用候选 SHALL 不创建
+//   operation」）。
+//
+// 夹具 `trust_route_fixture_unverified_providers()` 是 owner 2026-11-04
+// 真机同构形态：L1 health 四家全可用，但**不种任何已核验能力** ⇒ provider
+// 选择门（L2）以 `aggregate_initialization_provider_needs_verification`
+// 拦下创建链。
+// -------------------------------------------------------------------
+
+/// owner 2026-11-04 验收 ①：聚合根具备两个判定文件 ⇒ 免过 provider 选择门
+/// ⇒ 登记后【自动创建 operation 并自动开始】，且整条链**零 provider turn**
+/// （零额度、零探针：任何 provider 都没被启动过）。
+#[tokio::test]
+async fn advance_auto_starts_without_any_provider_when_the_markers_exist() {
+    let fixture = trust_route_fixture_unverified_providers();
+    preinitialize_aggregate_root(&fixture);
+    advance_seed_member(&fixture);
+
+    let (status, body) = advance_post(&fixture.app, &fixture.lc_id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        advanced_step_names(&body).contains(&"rules_policy".to_string()),
+        "the auto path must prepare the root recipe without a provider: {body}"
+    );
+
+    let operations = root_policy_operations(&fixture);
+    let operation_id = sole_operation_id(&fixture);
+    let operation = root_policy_poll_terminal(&operations, &operation_id).await;
+    assert_eq!(
+        operation.status,
+        crate::product::logical_codebase::AggregateInitializationOperationStatus::Completed,
+        "the auto path must start and finish on its own: {:?}",
+        operation.error
+    );
+    assert!(
+        !operation.full_recipe_requested,
+        "the advance path must not force the full recipe"
+    );
+    assert_eq!(
+        operation
+            .steps
+            .iter()
+            .map(|step| step.status.as_str())
+            .collect::<Vec<_>>(),
+        vec!["completed", "completed", "skipped", "skipped", "skipped"],
+        "an initialized root skips the four skills commands on the auto path"
+    );
+    assert_eq!(
+        fixture.factory.audit().stream_launches(),
+        0,
+        "the whole chain must run zero provider turns (zero quota, zero probe)"
+    );
+    // durable 记录自证「这条链没有 provider」：没有候选表（没有候选），
+    // 冻结的 provider wire 名解不出任何一家 provider。
+    assert!(
+        operation.provider_selection.is_none(),
+        "a chain without providers must not freeze a provider candidate table"
+    );
+    assert_eq!(
+        operation.input.provider,
+        crate::product::logical_codebase::AGGREGATE_PROVIDER_NOT_REQUIRED,
+        "the durable record must state that this chain needs no provider"
+    );
+}
+
+/// owner 2026-11-04 验收 ②（回归，REQ-BOOT-07）：聚合根**不具备**两个判定
+/// 文件 ⇒ 仍需要 provider ⇒ 仍被 provider 选择门拦下 ⇒ **不创建
+/// operation**。判定前移绝不放宽 REQ-BOOT-07。
+#[tokio::test]
+async fn advance_without_the_markers_still_creates_no_operation() {
+    let fixture = trust_route_fixture_unverified_providers();
+    advance_seed_member(&fixture);
+
+    let (status, body) = advance_post(&fixture.app, &fixture.lc_id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        root_policy_operations(&fixture)
+            .list("project_0001")
+            .expect("operation list")
+            .is_empty(),
+        "without the two marker files the provider selection gate still rejects the \
+         create chain, so no operation may be created (REQ-BOOT-07): {body}"
+    );
+    assert_eq!(
+        fixture.factory.audit().stream_launches(),
+        0,
+        "a rejected create chain must not start any provider turn"
+    );
+}

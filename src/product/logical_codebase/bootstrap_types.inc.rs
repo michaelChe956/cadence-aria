@@ -134,6 +134,24 @@ pub struct LogicalCodebaseBootstrapNotice {
     pub next_step: Option<LogicalCodebaseBootstrapStep>,
     pub created_at: String,
 }
+/// A（REQ-REG-10）：advance/手动「准备」停止解释的 durable 记录（LC scope
+/// `.bootstrap-advance-stop.json`）。首建链停在等待人工/失败/无可动步骤时
+/// 由推进收口落盘；PlanningReady/进行中收口时清除。被停步骤本身往往没有
+/// failure（那是「未开始」，不是失败），GET 投影靠它解释「为什么停在这一步
+/// +下一步做什么」；文案沿用 failure_copy 同一码表。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapAdvanceStopRecord {
+    pub step: LogicalCodebaseBootstrapStep,
+    /// 稳定停止名（`BootstrapAdvanceStop::reason()`）。
+    pub reason: String,
+    /// 停住步骤的稳定原因码（与 failure_copy 同码表）。
+    pub reason_code: String,
+    /// 可读上下文（如根配方启动链被拒的具体原因），写入前已脱敏。
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub stopped_at: String,
+}
+
 
 /// LC 冷启动总投影：GET `/logical-codebases/{lc_id}/bootstrap` 的唯一来源。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -146,6 +164,11 @@ pub struct LogicalCodebaseBootstrapProjection {
     pub steps: Vec<BootstrapStepProjection>,
     pub planning_ready: bool,
     pub notices: Vec<LogicalCodebaseBootstrapNotice>,
+    /// 最近一次 advance/手动「准备」的可解释停止；仅当该步骤仍投影
+    /// `not_started`（没有任何更新的 durable 事实接管解释权）时透出，
+    /// 否则为 `None`。GET 只读它，不写。
+    #[serde(default)]
+    pub advance_stop: Option<BootstrapAdvanceStopRecord>,
 }
 
 /// 显式 bootstrap 动作请求：command_id + 目标身份 + expected

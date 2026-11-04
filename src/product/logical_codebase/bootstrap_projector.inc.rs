@@ -49,7 +49,22 @@ impl LogicalCodebaseBootstrapProjector {
         let planning_ready = steps
             .iter()
             .all(|step| step.status == LogicalCodebaseBootstrapStepStatus::Completed);
-        let notices = project_notices(&steps, codegraph_block.as_deref());
+        let mut notices = project_notices(&steps, codegraph_block.as_deref());
+        // A（REQ-REG-10）：advance/手动「准备」停在「未开始」步骤时，durable
+        // stop 记录补上「为什么停 + 下一步做什么」——被停步骤本身没有
+        // failure（那是「未开始」，不是失败），通知不能从步骤 failure 派生，
+        // 文案仍取 failure_copy 同一码表（provider 选择门/信任门/配方终态
+        // 各自的稳定码都有成品 copy）。
+        let advance_stop = load_advance_stop(&self.paths, project_id, logical_codebase_id)?
+            .filter(|record| {
+                steps.iter().any(|step| {
+                    step.step == record.step
+                        && step.status == LogicalCodebaseBootstrapStepStatus::NotStarted
+                })
+            });
+        if let Some(record) = advance_stop.as_ref() {
+            notices.push(advance_stop_notice(record, &steps));
+        }
 
         Ok(LogicalCodebaseBootstrapProjection {
             project_id: project_id.to_string(),
@@ -63,6 +78,7 @@ impl LogicalCodebaseBootstrapProjector {
             steps,
             planning_ready,
             notices,
+            advance_stop,
         })
     }
 
@@ -731,6 +747,45 @@ impl LogicalCodebaseBootstrapProjector {
             failure,
             allowed_actions,
         })
+    }
+}
+
+/// A（REQ-REG-10）：由 durable stop 记录合成**恰好一条**「为什么停」通知。
+/// 步骤行仍是 `not_started`（没有 failure 可折叠），通知卡是唯一能同时
+/// 携带成品文案（问题/原因/怎么做/机器码）与原始诊断的通道；allowed_
+/// actions 即被停步骤当前可点的按钮，next_step 指向依赖顺序的下一步。
+fn advance_stop_notice(
+    record: &BootstrapAdvanceStopRecord,
+    steps: &[BootstrapStepProjection],
+) -> LogicalCodebaseBootstrapNotice {
+    let copy = describe_code(&record.reason_code, None);
+    let detail = record
+        .detail
+        .as_deref()
+        .map(|detail| sanitize_failure_detail(detail, None));
+    let step = steps
+        .iter()
+        .find(|step| step.step == record.step);
+    let next_step = LogicalCodebaseBootstrapStep::V1
+        .iter()
+        .position(|candidate| *candidate == record.step)
+        .and_then(|index| LogicalCodebaseBootstrapStep::V1.get(index + 1).copied());
+    LogicalCodebaseBootstrapNotice {
+        key: format!(
+            "bootstrap:advance-stop:{}:{}",
+            record.step.as_str(),
+            record.reason_code
+        ),
+        step: record.step,
+        object_id: step
+            .map(|step| step.object_id.clone())
+            .unwrap_or_else(|| record.step.as_str().to_string()),
+        reason_code: record.reason_code.clone(),
+        summary: render_detail(&copy, detail.as_deref()),
+        external_side_effect: "none".to_string(),
+        allowed_actions: step.map(|step| step.allowed_actions.clone()).unwrap_or_default(),
+        next_step,
+        created_at: record.stopped_at.clone(),
     }
 }
 

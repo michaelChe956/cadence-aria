@@ -236,8 +236,26 @@ fn trust_route_fixture(gate_fail: bool) -> TrustRouteFixture {
 }
 
 /// Task 4：`trust_route_fixture` 的参数化版本——规则材料与一次性中断
-/// 按 [`RecipeFixtureOptions`] 注入。
+/// 按 [`RecipeFixtureOptions`] 注入；claude_code 种为 Confirmed（选择器
+/// 前置与 provider turn 用例同源）。
 fn trust_route_fixture_with(gate_fail: bool, options: RecipeFixtureOptions) -> TrustRouteFixture {
+    trust_route_fixture_full(gate_fail, options, true)
+}
+
+/// owner 2026-11-04 现场同构：L1 health 全可用但**不种任何已核验能力**——
+/// provider 选择门（L2）以 `aggregate_initialization_provider_needs_
+/// verification` 拦下根配方创建链（四家全「未探测」的真机截图状态）。
+fn trust_route_fixture_unverified_providers() -> TrustRouteFixture {
+    trust_route_fixture_full(false, RecipeFixtureOptions::default(), false)
+}
+
+/// `trust_route_fixture_with` 的完整内核：`seed_confirmed_provider = false`
+/// 时不种 Confirmed capability（保持 provider 选择门可命中）。
+fn trust_route_fixture_full(
+    gate_fail: bool,
+    options: RecipeFixtureOptions,
+    seed_confirmed_provider: bool,
+) -> TrustRouteFixture {
     let root = tempdir().expect("root");
     let root_path = root.path().to_path_buf();
     let paths = ProductAppPaths::new(root_path.join(".aria"));
@@ -315,12 +333,12 @@ fn trust_route_fixture_with(gate_fail: bool, options: RecipeFixtureOptions) -> T
         index,
     )
     .with_trust(gate.clone());
-    let state = with_selector_defaulting_to_claude(
-        WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone())),
-        &root_path,
-        &paths,
-        Some(&lc_id),
-    )
+    let raw_state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()));
+    let state = if seed_confirmed_provider {
+        with_selector_defaulting_to_claude(raw_state, &root_path, &paths, Some(&lc_id))
+    } else {
+        with_provider_health_all_available(raw_state, &root_path)
+    }
     .with_aggregate_initialization_dependencies(dependencies.clone());
     std::mem::forget(root);
     TrustRouteFixture {
