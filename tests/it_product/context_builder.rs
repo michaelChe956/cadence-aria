@@ -391,7 +391,58 @@ pub(crate) fn attach_target_snapshot(
 /// `permission_mode` / `timeout_secs` / `resume_provider_session_id` 的替身
 /// （如 `SessionInputCapturingProvider`）在 validated 路径下拿不到这些字段
 /// （公开投影只有 role / working_dir / prompt），不能这样桥接。
-pub(crate) struct GatewayBridgedAdapter(pub Arc<dyn StreamingProviderAdapter>);
+pub(crate) struct GatewayBridgedAdapter {
+    /// 内层替身（真实 spawn 面）。
+    pub(crate) inner: Arc<dyn StreamingProviderAdapter>,
+    /// 重建 `AdapterInput` 时的 provider 类型（与 registry 注册名对应）。
+    pub(crate) provider_type: ProviderType,
+    /// 重建 `AdapterInput` 时的 output_schema；`None` ⇒ 按 prompt 标记复原
+    /// （it_web 同款口径，见 [`gateway_bridged_output_schema`]）。
+    pub(crate) output_schema: Option<String>,
+}
+
+impl GatewayBridgedAdapter {
+    /// 便捷构造：provider 类型显式给，output_schema 按 prompt 复原。
+    pub(crate) fn new(
+        inner: Arc<dyn StreamingProviderAdapter>,
+        provider_type: ProviderType,
+    ) -> Self {
+        Self {
+            inner,
+            provider_type,
+            output_schema: None,
+        }
+    }
+}
+
+/// 按 prompt 复原 output_schema（it_web 同款口径：
+/// `tests/it_web/web_coding_ws_handler/fixtures.rs` 的 `gateway_bridged_output_schema`）。
+///
+/// LC 侧两条 reviewer 生产模板：legacy 单 Work Item 中文模板（prompts.rs
+/// 「你是 CodeReviewer」）与 group(schema v2) 投影渲染模板
+/// （work_item_projection/render.rs「# {provider} Reviewer Work Item Projection」）
+/// ——两条都复原到 `coding_workspace_code_review_json`；group final review 模板
+/// 复原到 `coding_workspace_internal_pr_review_json`；其余（coder 等）空串。
+///
+/// ⚠️ **判别顺序：group final review 必须排在 code review 之前**
+/// （it_product 的 group final review prompt **同时**含
+/// 「你是 WorkItemGroup GroupFinalReview reviewer」与
+/// 「# {provider} Reviewer Work Item Projection」两段 ⇒ 若 code review 分支在前，
+/// 会先命中并复原成 `coding_workspace_code_review_json`，
+/// 与该模板的期望 `coding_workspace_internal_pr_review_json` 不符）。
+/// it_web 侧的两条模板不重叠，故其原始顺序在那边无害；此处按 it_product 的
+/// 实际 prompt 取更严的顺序（先判更具体的 group final review）。
+pub(crate) fn gateway_bridged_output_schema(prompt: &str) -> &'static str {
+    if prompt.contains("你是 WorkItemGroup GroupFinalReview reviewer") {
+        "coding_workspace_internal_pr_review_json"
+    } else if prompt.contains("你是 CodeReviewer")
+        || prompt.contains(" Reviewer Work Item Projection")
+    {
+        "coding_workspace_code_review_json"
+    } else {
+        ""
+    }
+}
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for GatewayBridgedAdapter {
@@ -400,7 +451,7 @@ impl StreamingProviderAdapter for GatewayBridgedAdapter {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        self.0.start(input, cancel).await
+        self.inner.start(input, cancel).await
     }
 
     /// 已自带 `start_validated` 的替身优先走其自身实现；仅当 inner 落到 trait
@@ -411,7 +462,7 @@ impl StreamingProviderAdapter for GatewayBridgedAdapter {
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         match self
-            .0
+            .inner
             .start_validated(validated.clone(), cancel.clone())
             .await
         {
@@ -432,7 +483,7 @@ impl StreamingProviderAdapter for GatewayBridgedAdapter {
         input: &AdapterInput,
         cancel: CancellationToken,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
-        self.0.run_streaming(input, cancel).await
+        self.inner.run_streaming(input, cancel).await
     }
 }
 
@@ -443,20 +494,24 @@ impl GatewayBridgedAdapter {
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let view = validated.launch_view();
+        let output_schema = self
+            .output_schema
+            .clone()
+            .unwrap_or_else(|| gateway_bridged_output_schema(view.prompt).to_string());
         let input = AdapterInput {
-            provider_type: ProviderType::ClaudeCode,
+            provider_type: self.provider_type.clone(),
             role: view.role.clone(),
             worktree_path: Some(view.working_dir.to_string_lossy().to_string()),
             working_directory: None,
             provider_stream_log_dir: None,
             prompt: view.prompt.to_string(),
             context_files: Vec::new(),
-            output_schema: String::new(),
+            output_schema,
             timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
             max_retries: 0,
             env_vars: Default::default(),
         };
-        let mut chunk_rx = self.0.run_streaming(&input, cancel).await?;
+        let mut chunk_rx = self.inner.run_streaming(&input, cancel).await?;
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
         let (command_tx, _command_rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(async move {
@@ -497,7 +552,9 @@ impl GatewayBridgedAdapter {
 ///
 /// ⚠️ 重建的 input 里 `permission_mode` / `timeout_secs` /
 /// `resume_provider_session_id` 是**中性默认**，不是引擎真实下发的值 ⇒
-/// 断言这三个字段的用例不能用本桥（那是 A1 `into_parts` 的缺口）。
+/// 断言这三个字段的用例**不能用本桥**（会**假绿**：断言的是自己重建的值）。
+/// A1（`ValidatedStreamingProviderInput::into_parts` 提为 `pub`）已解 ⇒
+/// 需要真值的用例请改用 [`GatewayExactInputAdapter`]（逐字透传真实 input）。
 pub(crate) struct GatewayValidatedStartAdapter {
     /// 内层替身（真实 spawn 面）。
     pub(crate) inner: Arc<dyn StreamingProviderAdapter>,
@@ -539,7 +596,7 @@ impl StreamingProviderAdapter for GatewayValidatedStartAdapter {
             {
                 let view = validated.launch_view();
                 let input = StreamingProviderInput {
-                    provider_type: self.provider_type,
+                    provider_type: self.provider_type.clone(),
                     role: view.role.clone(),
                     prompt: view.prompt.to_string(),
                     working_dir: view.working_dir.to_path_buf(),
@@ -554,6 +611,70 @@ impl StreamingProviderAdapter for GatewayValidatedStartAdapter {
                     timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
                     baseline_tree: None,
                 };
+                self.inner.start(input, cancel).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn run_streaming(
+        &self,
+        input: &AdapterInput,
+        cancel: CancellationToken,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        self.inner.run_streaming(input, cancel).await
+    }
+}
+
+/// validated 启动桥（A1 已解）：把 validated 载体**原样**拆回裸
+/// `StreamingProviderInput`（`into_parts` 自 A1 起是 `pub`），驱动内层 `start`。
+///
+/// 与 [`GatewayValidatedStartAdapter`] 的关键差别：后者用 `launch_view()` **重建**
+/// input（`permission_mode` / `timeout_secs` / `resume_provider_session_id` 是中性
+/// 默认 ⇒ 断言这些字段会**假绿**），本桥**逐字透传引擎真实下发的 input**
+/// ⇒ 断言 `permission_mode` / `provider_type` / `timeout_secs` /
+/// `resume_provider_session_id` 的用例**必须**用本桥。
+///
+/// 与 [`GatewayBridgedAdapter`] 的差别：后者走 `run_streaming`（trait 默认实现会把
+/// `ProviderEvent` 降级丢事件），本桥走裸 `start` ⇒ 事件流不丢。
+pub(crate) struct GatewayExactInputAdapter {
+    /// 内层替身（真实 spawn 面）。
+    pub(crate) inner: Arc<dyn StreamingProviderAdapter>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for GatewayExactInputAdapter {
+    fn supports_tool_calls(&self) -> bool {
+        self.inner.supports_tool_calls()
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.inner.start(input, cancel).await
+    }
+
+    /// 已自带 `start_validated` 的替身优先走其自身实现；仅当 inner 落到 trait
+    /// 默认拒绝时才拆载体驱动裸 `start`。
+    async fn start_validated(
+        &self,
+        validated: ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        match self
+            .inner
+            .start_validated(validated.clone(), cancel.clone())
+            .await
+        {
+            Ok(session) => Ok(session),
+            Err(error)
+                if error
+                    .stderr
+                    .contains("validated start is not supported by this adapter") =>
+            {
+                let (input, _policy) = validated.into_parts();
                 self.inner.start(input, cancel).await
             }
             Err(error) => Err(error),

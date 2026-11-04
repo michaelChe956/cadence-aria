@@ -774,9 +774,10 @@ async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() 
     // `logical_provider_gateway_required` fail-closed）：测试 adapter 必须同时
     // 交给引擎方法（断言捕获面）与 gateway registry（真实 spawn 面），两处
     // 指向同一实例。
-    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter(Arc::new(
-        FileWritingStreamingProvider,
-    )));
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(FileWritingStreamingProvider),
+        ProviderType::ClaudeCode,
+    ));
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, provider.clone());
     let gateway = crate::context_builder::build_gateway(
@@ -880,22 +881,38 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动；本替身断言
+    // `StreamingProviderInput` 的**真实**字段（permission_mode / timeout_secs /
+    // resume_provider_session_id）⇒ 必须用逐字透传真实 input 的 exact 桥
+    // （A1：`ValidatedStreamingProviderInput::into_parts` 已是 pub）。
+    let capturing = Arc::new(SessionInputCapturingProvider::default());
+    let provider = Arc::new(crate::context_builder::GatewayExactInputAdapter {
+        inner: capturing.clone(),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
+    );
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::default();
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     let first = engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("first coding run");
     let second = engine
-        .execute_coding(&first, &provider, &CodingExecutionContext::default())
+        .execute_coding(&first, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("second coding run");
 
     assert_eq!(second.stage, CodingExecutionStage::Coding);
-    let inputs = provider.inputs.lock().expect("inputs lock");
+    let inputs = capturing.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 2);
     assert_eq!(
         inputs[0].permission_mode,
@@ -946,17 +963,31 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
     };
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::with_outputs(
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动；本替身断言
+    // `StreamingProviderInput` 的**真实**字段 ⇒ 用逐字透传真实 input 的 exact 桥。
+    let capturing = Arc::new(SessionInputCapturingProvider::with_outputs(
         ["first coding done", "second coding done"],
         [
             Some("coder-session-1".to_string()),
             Some("coder-session-1".to_string()),
         ],
+    ));
+    let provider = Arc::new(crate::context_builder::GatewayExactInputAdapter {
+        inner: capturing.clone(),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Codex, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
     );
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     let first = engine
-        .execute_coding(&attempt, &provider, &context)
+        .execute_coding(&attempt, provider.as_ref(), &context)
         .await
         .expect("first coding run");
     store
@@ -975,11 +1006,11 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
         .expect("save rework instruction");
 
     engine
-        .execute_coding(&first, &provider, &context)
+        .execute_coding(&first, provider.as_ref(), &context)
         .await
         .expect("second coding run");
 
-    let inputs = provider.inputs.lock().expect("inputs lock");
+    let inputs = capturing.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 2);
     let second_input = &inputs[1];
     assert_eq!(

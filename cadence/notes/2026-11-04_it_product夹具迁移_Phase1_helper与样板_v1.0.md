@@ -47,7 +47,7 @@
 
 ## 2. 交付物
 
-### 2.1 新建：`tests/it_product/context_builder.rs`（727 行）
+### 2.1 新建：`tests/it_product/context_builder.rs`（865 行）
 
 只用**公开 API**（`cadence_aria::product::logical_codebase::*` 等）重写
 `src/product/logical_codebase/logical_test_fixture.rs`（后者是 `pub(crate)`，外部 crate 调不到）。
@@ -101,8 +101,54 @@ pub(crate) fn build_gateway(
 ) -> LogicalCodebaseProviderGateway;
 
 /// 把「只实现 legacy run_streaming」的替身桥接到 gateway 的 validated 启动路径
-pub(crate) struct GatewayBridgedAdapter(pub Arc<dyn StreamingProviderAdapter>);
+pub(crate) struct GatewayBridgedAdapter {
+    pub(crate) inner: Arc<dyn StreamingProviderAdapter>,
+    pub(crate) provider_type: ProviderType,   // 重建 AdapterInput.provider_type
+    pub(crate) output_schema: Option<String>,  // None ⇒ 按 prompt 标记复原
+}
+impl GatewayBridgedAdapter {
+    pub(crate) fn new(inner: Arc<dyn StreamingProviderAdapter>, provider_type: ProviderType) -> Self;
+}
+
+/// 按 prompt 复原 output_schema（it_web 同款口径）
+pub(crate) fn gateway_bridged_output_schema(prompt: &str) -> &'static str;
+
+/// 把「只实现裸 start」的替身桥接到 gateway 的 validated 启动路径（事件不丢）
+pub(crate) struct GatewayValidatedStartAdapter {
+    pub(crate) inner: Arc<dyn StreamingProviderAdapter>,
+    pub(crate) provider_type: ProviderType,
+}
 ```
+
+> **Phase 2 期间的 helper 增补（2026-11-04 晚）**：
+> - `always_available_gate()` 的健康快照扩到 **ClaudeCode / Codex / Pi / KimiCode**
+>   （原只 ClaudeCode + Codex ⇒ Pi/KimiCode 在 availability 门被拒）。
+>   ⚠️ gateway 对 **Codex / KimiCode** 强制**用户级 workspace trust**（读真实 HOME），
+>   集成测试无法提供 ⇒ 这两个 provider 仍会被 trust 门拒（**Pi 无此前置**）。
+> - 新增 `GatewayValidatedStartAdapter`（start 优先的 validated 桥）：
+>   事件流（Execution / ToolCall / PermissionRequest / ChoiceRequest）**不丢**。
+>   ⚠️ 它重建的 `StreamingProviderInput` 里 `permission_mode` / `timeout_secs` /
+>   `resume_provider_session_id` 是**中性默认**，不是引擎真实值 ⇒ 断言这三个字段
+>   的用例不能用它（A1 缺口）。
+> - `GatewayBridgedAdapter` 由 tuple struct **改为具名 struct**（签名变更）：
+>   旧 `GatewayBridgedAdapter(inner)` → 新 `GatewayBridgedAdapter::new(inner, provider_type)`。
+> - `gateway_bridged_output_schema` 的**判别顺序已修**：group final review 的特征段
+>   （「你是 WorkItemGroup GroupFinalReview reviewer」）提到 code review 之前
+>   ——it_product 的 group final review prompt **同时**含
+>   「# {provider} Reviewer Work Item Projection」段，原顺序会先命中 code review
+>   分支而复原成 `coding_workspace_code_review_json`。
+>   （P2B 在 part_08 显式钉 `output_schema: Some("coding_workspace_internal_pr_review_json")`
+>   的写法**不受影响**——显式值优先于按 prompt 复原。）
+> - **A1 已解**（`ValidatedStreamingProviderInput::into_parts` 提为 `pub`）⇒ 新增
+>   `GatewayExactInputAdapter { inner }`：把 validated 载体**逐字**拆回裸
+>   `StreamingProviderInput` 驱动内层 `start` ⇒ 引擎真实下发的
+>   `permission_mode` / `provider_type` / `timeout_secs` / `resume_provider_session_id`
+>   原样进替身。**断言这四个字段的用例必须用它**（`GatewayValidatedStartAdapter`
+>   用 `launch_view()` 重建 ⇒ 中性默认 ⇒ 会**假绿**）。
+> - 实测：`coding_coder_run_resumes_previous_coder_provider_session`（author=ClaudeCode）
+>   与 `coding_coder_rework_with_resume_uses_delta_prompt`（author=Codex）
+>   经 exact 桥**已转绿** ⇒ gateway 的「用户级 workspace trust」门在 coding
+>   provider run 路径上**未拦住 Codex**（此前担心的 trust 前置不是硬阻塞）。
 
 #### helper 建出的权威现场（形态）
 
@@ -372,11 +418,33 @@ flock /tmp/aria-cargo.lock cargo test --locked --test it_product
 ```
 
 ```
-test result: FAILED. 153 passed; 58 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+test result: FAILED. 202 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
 ```
 
-**迁移前基线**（本阶段开工时）：`148 passed; 62 failed`
-⇒ **净 +5 绿 / −4 红**（另新增 1 个 helper 自检用例 ⇒ 总用例数 210 → 211）。
+**数字演进**（本阶段 + 并行 Phase 2 worker 共同推进）：
+
+| 时点 | passed / failed |
+|---|---|
+| 本阶段开工基线 | 148 / 62 |
+| Phase 1 helper + part_01 样板完成后 | 153 / 58 |
+| Phase 2 worker 落地 + helper 增补后（**当前**） | **202 / 9** |
+
+**当前剩余 9 个失败用例**（全部 `product_coding_workspace_engine::`）：
+
+| # | 用例 | 归属 / 阻塞原因 |
+|---|---|---|
+| 1 | `aborted_group_attempt_releases_transferred_shared_worktree_lock_by_owner` | UnblockIntoPartsAndRepointP2 的 P2（issue 维 → 仓维） |
+| 2 | `dirty_group_delete_keeps_transferred_shared_worktree_lock` | 同上 |
+| 3 | `dirty_shared_worktree_blocks_lock_release_and_next_work_item` | 同上 |
+| 4 | `failed_attempt_releases_issue_shared_worktree_lock` | 同上 |
+| 5 | `failed_group_attempt_releases_transferred_shared_worktree_lock_by_owner` | 同上 |
+| 6 | `final_confirm_releases_issue_shared_worktree_lock` | 同上 |
+| 7 | `group_final_confirm_releases_transferred_shared_worktree_lock_by_owner` | 同上（夹具在 part_12） |
+| 8 | `execute_coding_persists_coder_role_run_and_full_output_chat_entry` | **产品侧缺口**：gateway 不支持 Fake（`provider_unsupported_for_gateway_launch`），而该用例断言 `metadata["provider"] == "fake"` |
+| 9 | `group_next_work_item_coder_run_does_not_resume_previous_unit_session` | 同 #8（夹具 author=Fake ⇒ gateway 拒 Fake）；改挂 ClaudeCode 属 fixture 改动，待 Main 裁定 |
+
+> 前 7 条是**块3 已下线的产品路径**（§3.3），第 8/9 条是**gateway 不支持 Fake** 这一
+> 产品侧约束 ⇒ 9 条**都不是夹具形态问题**，需产品侧/裁定收口。
 
 ### 6.2 module 级
 
@@ -505,10 +573,10 @@ flock /tmp/aria-cargo.lock cargo fmt --check
 
 | 文件 | 变化 |
 |---|---|
-| `tests/it_product/context_builder.rs` | **新建，727 行** |
+| `tests/it_product/context_builder.rs` | **新建，865 行** |
 | `tests/it_product.rs` | **+2 / −0**（`#[path]` + `mod` 声明） |
 | `tests/it_product/product_coding_workspace_engine/part_01.rs` | **+100 / −15** |
-| 合计 | 新建 727 + 改 102 − 15 |
+| 合计 | 新建 865 + 改 102 − 15 |
 
 `src/**`、`web/**`、其他 `tests/it_*`、`openspec/**`、`cadence/**`（除本报告）、`scripts/**`、
 `Cargo.toml`、`Cargo.lock`：**零改动**。
