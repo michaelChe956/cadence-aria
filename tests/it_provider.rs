@@ -1,4 +1,6 @@
 //! 集成测试入口：provider / recovery / execution / planning / final 域。
+#[path = "it_provider/context_builder.rs"]
+mod context_builder;
 #[path = "it_provider/execution_chain_fake_provider.rs"]
 mod execution_chain_fake_provider;
 #[path = "it_provider/final_closure_fake_provider.rs"]
