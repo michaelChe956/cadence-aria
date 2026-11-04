@@ -1,15 +1,17 @@
 // 票3「一键核验全部」批量作业回归（迁自原 ProviderCapabilityBatchBar.test.tsx）。
 //
-// - 点击 → POST 发起异步作业（立即拿到 job_id），按钮「核验中（N/4）」+ 禁用，
-//   逐项状态随 2.5s 轮询更新；
-// - 失败行【重试】只打既有单 provider 端点且不重跑整批；
-// - 跳过行显示【安装】（块2 组件），不显示为「核验失败」；
+// - 点击 → POST 发起异步作业（立即拿到 job_id），按钮「核验中（N/4）」+ 禁用；
 // - 终态停止轮询（不无限轮询）；
 // - 按钮区说明作用域与成本（逐 LC 核验 / 真实探测 / 几分钟 / 消耗额度）。
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+//
+// owner 2026-11-04：逐项结果（逐项状态 / 失败项【重试】/ 跳过项【安装】/
+// 版本落后【更新】）已迁到能力卡的**行级列表**，原 `ProviderCapabilityBatchResults`
+// 组件随之删除 ⇒ 与逐项结果相关的 4 组断言迁到 `ProviderCapabilityCard.test.tsx`
+// （断言对象换成行级列表的对应行，断言内容不弱化）；本文件只保留与作业状态 /
+// 按钮 / 说明区相关的断言。
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  ProviderCapabilityBatchResults,
   ProviderCapabilityBatchScope,
   ProviderCapabilityBatchStartButton,
   useProviderCapabilityBatch,
@@ -19,12 +21,10 @@ import type {
   CapabilityRevalidateBatchJobDto,
 } from "../../api/types/capability-revalidate-batch";
 import type { ProviderCapabilityType } from "../../api/types/provider-capability";
-import type { InstallTargetView } from "../../api/types/provider";
 
 const PROJECT_ID = "project_0001";
 const LC_ID = "logical_codebase_0001";
 const BATCH_URL = `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities/revalidate-all`;
-const SINGLE_URL = `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`;
 const STORAGE_KEY = `aria:capability-batch:${PROJECT_ID}:${LC_ID}`;
 
 const PROVIDERS: ProviderCapabilityType[] = [
@@ -82,26 +82,10 @@ function allRunning(jobId: string): CapabilityRevalidateBatchJobDto {
   );
 }
 
-function targetView(
-  overrides: Partial<InstallTargetView> & { target: InstallTargetView["target"] },
-): InstallTargetView {
-  return {
-    display_name: overrides.target,
-    cli_available: false,
-    local_version: null,
-    latest_version: null,
-    latest_checked_at: null,
-    install_source: "npm",
-    action: "none",
-    ...overrides,
-  };
-}
-
-/** POST 发起 / GET 轮询 / 单 provider 重试 + 块2 install-targets 的真实发送器路由。 */
+/** POST 发起 / GET 轮询作业的真实发送器路由（逐项结果的渲染已迁到能力卡）。 */
 function installBatchRouter(options: {
   jobIds?: string[];
   jobs?: (() => CapabilityRevalidateBatchJobDto)[];
-  installTargets?: InstallTargetView[];
 }): { requests: CapturedRequest[] } {
   const requests: CapturedRequest[] = [];
   const jobIds = [...(options.jobIds ?? ["job_0001"])];
@@ -129,16 +113,6 @@ function installBatchRouter(options: {
       const responder = jobs.length > 1 ? jobs.shift()! : jobs[0];
       return jsonResponse(responder ? responder() : allRunning(jobMatch[1]));
     }
-    if (method === "GET" && url === "/api/providers/install-targets") {
-      return jsonResponse({ targets: options.installTargets ?? [] });
-    }
-    if (method === "POST" && url === SINGLE_URL) {
-      return jsonResponse({
-        provider_type: "codex",
-        outcome: "already_confirmed",
-        version: "1.0.0",
-      });
-    }
     return jsonResponse(
       { code: "not_found", message: `no route for ${method} ${url}` },
       404,
@@ -148,27 +122,19 @@ function installBatchRouter(options: {
   return { requests };
 }
 
-/** 测试宿主：把 hook 与三个展示组件按能力卡的摆法组合起来。 */
-function BatchHost({
-  installTargets = {},
-}: {
-  installTargets?: Record<string, InstallTargetView>;
-}) {
+/** 测试宿主：把 hook 与按钮 / 说明区按能力卡的摆法组合起来。 */
+function BatchHost() {
   const state = useProviderCapabilityBatch(PROJECT_ID, LC_ID);
   return (
     <div>
       <ProviderCapabilityBatchStartButton state={state} />
       <ProviderCapabilityBatchScope />
-      <ProviderCapabilityBatchResults
-        state={state}
-        installTargets={installTargets}
-      />
     </div>
   );
 }
 
-function renderBatch(installTargets: Record<string, InstallTargetView> = {}) {
-  return render(<BatchHost installTargets={installTargets} />);
+function renderBatch() {
+  return render(<BatchHost />);
 }
 
 afterEach(() => {
@@ -178,7 +144,7 @@ afterEach(() => {
 });
 
 describe("ProviderCapabilityBatch（票3 一键批量核验）", () => {
-  it("点击后显示「核验中（N/4）」、按钮禁用，逐项状态随轮询更新", async () => {
+  it("点击后显示「核验中（N/4）」、按钮禁用，只发起一次整批作业", async () => {
     vi.useFakeTimers();
     const { requests } = installBatchRouter({
       jobIds: ["job_0001"],
@@ -207,108 +173,14 @@ describe("ProviderCapabilityBatch（票3 一键批量核验）", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    expect(
-      screen.getByTestId("capability-batch-status-claude_code"),
-    ).toHaveTextContent("已确认");
-    expect(
-      screen.getByTestId("capability-batch-status-codex"),
-    ).toHaveTextContent("核验中");
+    // 逐项状态（已确认 / 核验中）本身由能力卡的行级列表承载 ⇒ 迁到
+    // ProviderCapabilityCard.test.tsx 的行级列表断言（内容不弱化）。
     expect(startButton).toHaveTextContent("核验中（1/4）");
     expect(
       requests.filter(
         (request) => request.method === "POST" && request.url === BATCH_URL,
       ),
     ).toHaveLength(1);
-  });
-
-  it("失败行保留【重试】，只打单 provider 端点且不重跑整批", async () => {
-    vi.useFakeTimers();
-    window.localStorage.setItem(STORAGE_KEY, "job_0001");
-    const { requests } = installBatchRouter({
-      jobs: [
-        () =>
-          job("job_0001", "completed", [
-            item("claude_code", "confirmed", "revalidated"),
-            item("codex", "failed", "probe_failed"),
-            item("pi", "confirmed", "revalidated"),
-            item("kimi_code", "confirmed", "revalidated"),
-          ]),
-      ],
-    });
-    renderBatch();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    expect(screen.getByTestId("capability-batch-status-codex")).toHaveTextContent(
-      "核验失败",
-    );
-    expect(
-      screen.queryByTestId("capability-batch-retry-claude_code"),
-    ).not.toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("capability-batch-retry-codex"));
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-
-    const singleRetries = requests.filter(
-      (request) => request.method === "POST" && request.url === SINGLE_URL,
-    );
-    expect(singleRetries).toHaveLength(1);
-    expect(singleRetries[0].body).toEqual({ provider_type: "codex" });
-    expect(
-      requests.filter(
-        (request) => request.method === "POST" && request.url === BATCH_URL,
-      ),
-    ).toHaveLength(0);
-  });
-
-  it("跳过行显示【安装】入口，不显示为核验失败", async () => {
-    vi.useFakeTimers();
-    window.localStorage.setItem(STORAGE_KEY, "job_0001");
-    installBatchRouter({
-      jobs: [
-        () =>
-          job("job_0001", "completed", [
-            item("claude_code", "confirmed", "revalidated"),
-            item("codex", "confirmed", "revalidated"),
-            item("pi", "skipped", "cli_not_installed"),
-            item("kimi_code", "confirmed", "revalidated"),
-          ]),
-      ],
-    });
-    renderBatch({
-      pi: targetView({
-        target: "pi",
-        cli_available: false,
-        latest_version: "1.2.3",
-        action: "install",
-      }),
-    });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    const skippedRow = screen.getByTestId("capability-batch-row-pi");
-    expect(
-      within(skippedRow).getByTestId("capability-batch-status-pi"),
-    ).toHaveTextContent("跳过");
-    expect(within(skippedRow).queryByText(/核验失败/)).not.toBeInTheDocument();
-    expect(
-      within(skippedRow).getByRole("button", { name: "安装" }),
-    ).toBeInTheDocument();
-    // 安装行必须同时给出可抄的手动命令（块2 组件按 cliAvailable=false 渲染，
-    // 批量区不隐藏、不改写）。
-    expect(
-      within(skippedRow).getByTestId("provider-install-manual-command-pi"),
-    ).toHaveTextContent("npm install -g");
-    expect(
-      within(skippedRow).queryByRole("button", { name: "重试" }),
-    ).not.toBeInTheDocument();
   });
 
   it("终态后停止轮询，不无限轮询", async () => {
@@ -352,46 +224,6 @@ describe("ProviderCapabilityBatch（票3 一键批量核验）", () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(getCount()).toBe(settledPolls);
-  });
-
-  it("版本落后行渲染「版本落后」+【更新】与当前/最新版本（不是【安装】）", async () => {
-    vi.useFakeTimers();
-    window.localStorage.setItem(STORAGE_KEY, "job_0001");
-    installBatchRouter({
-      jobs: [
-        () =>
-          job(
-            "job_0001",
-            "completed",
-            PROVIDERS.map((provider) => item(provider, "confirmed", "revalidated")),
-          ),
-      ],
-    });
-    renderBatch({
-      codex: targetView({
-        target: "codex",
-        cli_available: true,
-        local_version: "1.0.0",
-        latest_version: "2.0.0",
-        action: "update",
-      }),
-    });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
-    const row = screen.getByTestId("capability-batch-row-codex");
-    expect(
-      within(row).getByTestId("capability-batch-outdated-codex"),
-    ).toHaveTextContent("版本落后");
-    expect(within(row).getByRole("button", { name: "更新" })).toBeInTheDocument();
-    const versions = within(row).getByTestId("provider-install-versions-codex");
-    expect(versions).toHaveTextContent("1.0.0");
-    expect(versions).toHaveTextContent("2.0.0");
-    expect(
-      within(row).queryByRole("button", { name: "安装" }),
-    ).not.toBeInTheDocument();
   });
 
   it("按钮区说明核验作用域与成本", () => {

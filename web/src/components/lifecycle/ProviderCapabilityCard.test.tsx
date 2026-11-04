@@ -238,6 +238,55 @@ function batchJob(codexStatus: "confirmed" | "failed" = "failed"): unknown {
   };
 }
 
+/** 批量核验作业（进行中）：逐项状态随轮询更新。 */
+function runningBatchJob(): unknown {
+  return {
+    job_id: BATCH_JOB_ID,
+    status: "running",
+    created_at: "2026-11-04T00:00:00Z",
+    updated_at: "2026-11-04T00:00:30Z",
+    finished_at: null,
+    results: [
+      {
+        provider_type: "claude_code",
+        status: "confirmed",
+        reason: "revalidated",
+        detail: null,
+        version: "1.0.34",
+        started_at: null,
+        finished_at: null,
+      },
+      {
+        provider_type: "codex",
+        status: "running",
+        reason: null,
+        detail: null,
+        version: null,
+        started_at: null,
+        finished_at: null,
+      },
+      {
+        provider_type: "pi",
+        status: "running",
+        reason: null,
+        detail: null,
+        version: null,
+        started_at: null,
+        finished_at: null,
+      },
+      {
+        provider_type: "kimi_code",
+        status: "running",
+        reason: null,
+        detail: null,
+        version: null,
+        started_at: null,
+        finished_at: null,
+      },
+    ],
+  };
+}
+
 describe("ProviderCapabilityCard revalidate surface", () => {
   beforeEach(() => {
     captured = [];
@@ -490,6 +539,201 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     expect(
       screen.queryByTestId("provider-capability-batch-results"),
     ).toBeNull();
+  });
+
+  // ↓↓↓ 以下 4 组断言迁自 ProviderCapabilityBatch.test.tsx（原
+  // `ProviderCapabilityBatchResults` 逐项结果组件的 6 条回归断言中与逐项结果
+  // 相关的 4 组）：owner 2026-11-04 组件删除 ⇒ 断言对象换成**行级列表**的对应
+  // 行（`provider-capability-provider-<type>`），断言内容不弱化。
+
+  it("keeps the per-item batch status in the row list (逐项状态随轮询更新)", async () => {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, BATCH_JOB_ID);
+    installFetchRouter(
+      unknownProjection,
+      undefined,
+      { targets: [] },
+      runningBatchJob(),
+    );
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    // 逐项状态并入对应行（已确认 / 核验中）。
+    const claudeRow = await screen.findByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    expect(
+      within(claudeRow).getByTestId("capability-batch-status-claude_code"),
+    ).toHaveTextContent("已确认");
+    const codexRow = screen.getByTestId("provider-capability-provider-codex");
+    expect(
+      within(codexRow).getByTestId("capability-batch-status-codex"),
+    ).toHaveTextContent("核验中");
+  });
+
+  it("keeps the retry entry for a failed batch item and does not re-run the whole batch", async () => {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, BATCH_JOB_ID);
+    installFetchRouter(
+      unknownProjection,
+      () =>
+        Promise.resolve(
+          jsonResponse({
+            provider_type: "codex",
+            outcome: "already_confirmed",
+            version: "0.44.0",
+          }),
+        ),
+      { targets: [] },
+      batchJob(),
+    );
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const codexRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    expect(
+      within(codexRow).getByTestId("capability-batch-status-codex"),
+    ).toHaveTextContent("核验失败");
+    // 只有失败项保留【重试】：已确认的行没有。
+    const claudeRow = screen.getByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    expect(
+      within(claudeRow).queryByTestId("capability-batch-retry-claude_code"),
+    ).toBeNull();
+
+    await userEvent.click(screen.getByTestId("capability-batch-retry-codex"));
+    await waitFor(() => {
+      expect(
+        captured.filter(
+          (request) =>
+            request.method === "POST" &&
+            request.url ===
+              `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+        ),
+      ).toHaveLength(1);
+    });
+    const singleRetries = captured.filter(
+      (request) =>
+        request.method === "POST" &&
+        request.url ===
+          `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+    );
+    expect(singleRetries[0].body).toEqual({ provider_type: "codex" });
+    // 不重跑整批。
+    expect(
+      captured.filter(
+        (request) =>
+          request.method === "POST" &&
+          request.url ===
+            `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities/revalidate-all`,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("keeps the install entry for a skipped batch item (not a probe failure)", async () => {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, BATCH_JOB_ID);
+    installFetchRouter(
+      unknownProjection,
+      undefined,
+      {
+        targets: [
+          {
+            target: "pi",
+            display_name: "Pi",
+            cli_available: false,
+            local_version: null,
+            latest_version: "1.2.3",
+            latest_checked_at: "2026-11-03T00:00:00Z",
+            install_source: "npm",
+            action: "install",
+          },
+        ],
+      },
+      batchJob(),
+    );
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const piRow = await screen.findByTestId("provider-capability-provider-pi");
+    expect(
+      within(piRow).getByTestId("capability-batch-status-pi"),
+    ).toHaveTextContent("跳过");
+    expect(within(piRow).queryByText(/核验失败/)).toBeNull();
+    expect(
+      within(piRow).getByRole("button", { name: "安装" }),
+    ).toBeInTheDocument();
+    // 安装行必须同时给出可抄的手动命令（块2 组件按 cliAvailable=false 渲染，
+    // 行级列表不隐藏、不改写）。
+    expect(
+      within(piRow).getByTestId("provider-install-manual-command-pi"),
+    ).toHaveTextContent("npm install -g");
+    expect(
+      within(piRow).queryByRole("button", { name: "重试" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the version-gap entry (版本落后 / 更新 / 当前→最新, not 安装) in the row list", async () => {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, BATCH_JOB_ID);
+    installFetchRouter(
+      unknownProjection,
+      undefined,
+      {
+        targets: [
+          {
+            target: "codex",
+            display_name: "Codex",
+            cli_available: true,
+            local_version: "1.0.0",
+            latest_version: "2.0.0",
+            latest_checked_at: "2026-11-03T00:00:00Z",
+            install_source: "npm @openai/codex",
+            action: "update",
+          },
+        ],
+      },
+      batchJob("confirmed"),
+    );
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const codexRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    expect(
+      within(codexRow).getByTestId("provider-capability-outdated-codex"),
+    ).toHaveTextContent("版本落后");
+    expect(
+      within(codexRow).getByRole("button", { name: "更新" }),
+    ).toBeInTheDocument();
+    const versions = within(codexRow).getByTestId(
+      "provider-install-versions-codex",
+    );
+    expect(versions).toHaveTextContent("1.0.0");
+    expect(versions).toHaveTextContent("2.0.0");
+    expect(
+      within(codexRow).queryByRole("button", { name: "安装" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the update entry for a provider the batch job confirmed", async () => {

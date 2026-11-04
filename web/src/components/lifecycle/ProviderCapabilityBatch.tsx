@@ -5,10 +5,14 @@
 //   核验全部』按钮」）。owner 2026-11-04 裁定：按钮放在上面、不要放在下面
 //   ⇒ 作业状态由本模块的 hook 持有，按钮与逐项结果拆成两个可分别摆放的组件；
 // - 按钮 → POST 发起异步作业（立即拿到 job_id），按钮变「核验中（N/4）」并
-//   禁用；2.5s 轮询 durable 作业，逐项渲染
-//   已确认 / 核验中 / 核验失败 / 跳过（CLI 不可用）/ 超时；
-// - 失败行【重试】走既有单 provider 端点（不重跑整批）；
-// - 跳过行显示【安装】入口 —— 复用块2 的 `ProviderInstallActionButton`
+//   禁用；2.5s 轮询 durable 作业；
+// - 逐项结果（已确认 / 核验中 / 核验失败 / 跳过（CLI 不可用）/ 超时）、失败项
+//   【重试】与跳过项【安装】入口，全部由能力卡的**行级列表**承载（owner
+//   2026-11-04 裁定：只保留一组行级列表）⇒ 原 `ProviderCapabilityBatchResults`
+//   逐项结果组件已删除；本模块只提供作业状态（hook）与逐项状态文案
+//   （`capabilityBatchStatusLabel`）供行级列表渲染；
+// - 失败项【重试】走既有单 provider 端点（不重跑整批）；
+// - 跳过项【安装】入口由能力卡行内复用块2 的 `ProviderInstallActionButton`
 //   （本模块不自建安装实现、不自判版本、不写安装文案）；
 // - 终态停轮询；job_id 记在 localStorage，刷新后按 job_id 继续（durable）。
 import { useCallback, useEffect, useState } from "react";
@@ -23,18 +27,9 @@ import type {
   CapabilityRevalidateBatchJobDto,
 } from "../../api/types/capability-revalidate-batch";
 import type { ProviderCapabilityType } from "../../api/types/provider-capability";
-import type { InstallTargetView } from "../../api/types/provider";
-import { ProviderInstallActionButton } from "./ProviderInstallActionButton";
 
 const POLL_INTERVAL_MS = 2_500;
 const BATCH_SIZE = 4;
-
-const PROVIDER_LABELS: Record<ProviderCapabilityType, string> = {
-  claude_code: "Claude Code",
-  codex: "Codex",
-  pi: "Pi",
-  kimi_code: "Kimi Code",
-};
 
 const STATUS_LABELS: Record<CapabilityRevalidateBatchItemDto["status"], string> = {
   running: "核验中",
@@ -91,36 +86,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 逐项安装面入口。版本判定归块2（`install-targets.action`，H3：本模块不自判
- *  版本、不自写安装文案）：`install`=CLI 不可用→【安装】；`update`=版本落后
- *  →【更新】+ 当前/最新版本；`verify`=已安装未核验→【核验】（接既有单 provider
- *  端点，不留一个点不动的按钮）；`none`/未知→无入口。 */
-type InstallEntryKind = "install" | "update" | "verify";
-
-function installEntryKind(
-  item: CapabilityRevalidateBatchItemDto,
-  target: InstallTargetView | undefined,
-): InstallEntryKind | null {
-  // 「CLI 不可用」是逐项结果的硬事实：优先引导安装，不谎报版本落后。
-  if (item.status === "skipped") {
-    return "install";
-  }
-  if (target === undefined) {
-    return null;
-  }
-  if (target.action === "install") {
-    return "install";
-  }
-  if (target.action === "update") {
-    return "update";
-  }
-  if (target.action === "verify" && item.status !== "confirmed") {
-    return "verify";
-  }
-  return null;
-}
-
-/** 批量作业状态（作业面 + 触发/重试动作）。能力卡按需摆放按钮与结果列表。 */
+/** 批量作业状态（作业面 + 触发/重试动作）。能力卡按需摆放按钮与逐项结果
+ *  （逐项结果渲染在能力卡的行级列表里）。 */
 export type ProviderCapabilityBatchState = {
   /** 逐项结果（作业未发起时为 null）。 */
   job: CapabilityRevalidateBatchJobDto | null;
@@ -145,7 +112,7 @@ export type ProviderCapabilityBatchState = {
 /**
  * 批量核验作业的持有者：job_id 持久化在 localStorage，2.5s 轮询 durable 作业，
  * 终态停轮询。行为语义与原批量条一致（本模块只是把状态从「条」里拆出来，
- * 让按钮能放在能力卡头部、结果列表仍留在能力卡下方）。
+ * 让按钮能放在能力卡头部、逐项结果并入能力卡的行级列表）。
  */
 export function useProviderCapabilityBatch(
   projectId: string | null,
@@ -311,105 +278,5 @@ export function ProviderCapabilityBatchScope() {
     >
       逐 LC 核验：会真实跑一次探测，可能几分钟，消耗 provider 额度。
     </p>
-  );
-}
-
-/**
- * 批量作业的逐项结果区（能力卡下方）：作业面错误 + 逐项状态 / 单项重试 /
- * 安装更新入口。
- */
-export function ProviderCapabilityBatchResults({
-  state,
-  installTargets,
-  onSettled,
-}: {
-  state: ProviderCapabilityBatchState;
-  /** 安装目标面（由能力卡读取块2 `install-targets` 后传入；本组件不自取）。 */
-  installTargets: Record<string, InstallTargetView>;
-  /** 安装/更新完成后的回调（能力卡据此重读安装目标面）。 */
-  onSettled?: () => void;
-}) {
-  return (
-    <div data-testid="provider-capability-batch-results" className="mt-2">
-      {state.error !== null ? (
-        <p role="alert" className="mt-1 text-[11px] text-[var(--aria-danger)]">
-          {state.error}
-        </p>
-      ) : null}
-      {state.job !== null ? (
-        <ul className="mt-2 space-y-1">
-          {state.job.results.map((item) => {
-            const target = installTargets[item.provider_type];
-            const entry = installEntryKind(item, target);
-            return (
-              <li
-                key={item.provider_type}
-                data-testid={`capability-batch-row-${item.provider_type}`}
-                className="flex flex-wrap items-center gap-2 text-[11px]"
-              >
-                <span className="font-semibold text-[var(--aria-ink)]">
-                  {PROVIDER_LABELS[item.provider_type]}
-                </span>
-                <span
-                  data-testid={`capability-batch-status-${item.provider_type}`}
-                  className={
-                    item.status === "failed"
-                      ? "text-[var(--aria-danger)]"
-                      : "text-[var(--aria-ink-muted)]"
-                  }
-                >
-                  {STATUS_LABELS[item.status]}
-                </span>
-                {entry === "update" ? (
-                  <span
-                    data-testid={`capability-batch-outdated-${item.provider_type}`}
-                    className="text-[var(--aria-primary)]"
-                  >
-                    版本落后
-                  </span>
-                ) : null}
-                {item.status === "failed" ? (
-                  <button
-                    type="button"
-                    data-testid={`capability-batch-retry-${item.provider_type}`}
-                    disabled={state.retrying === item.provider_type}
-                    onClick={() => {
-                      // 单项重试走单 provider 端点（不重跑整批）；完成后刷新
-                      // 安装目标面（本地版本可能已变）。
-                      void state.retry(item.provider_type).then(() => {
-                        onSettled?.();
-                      });
-                    }}
-                    className="rounded-md border border-[var(--aria-primary)] px-2 py-0.5 text-[11px] font-semibold text-[var(--aria-primary)] disabled:opacity-60"
-                  >
-                    重试
-                  </button>
-                ) : null}
-                {entry !== null ? (
-                  <ProviderInstallActionButton
-                    target={item.provider_type}
-                    cliAvailable={entry !== "install"}
-                    capabilityConfirmed={entry !== "verify"}
-                    localVersion={target?.local_version ?? null}
-                    latestVersion={target?.latest_version ?? null}
-                    onSettled={() => {
-                      onSettled?.();
-                      void state.refresh();
-                    }}
-                    onVerify={
-                      entry === "verify"
-                        ? () => {
-                            void state.retry(item.provider_type);
-                          }
-                        : undefined
-                    }
-                  />
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
-      ) : null}
-    </div>
   );
 }
