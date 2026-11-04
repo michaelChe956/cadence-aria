@@ -8,8 +8,11 @@
 //! `start_streaming`/`run_sync`。这把「真实 provider 必须持有一个 validated
 //! policy 才能启动」从编译期约束(无 public constructor)落到了启动边界上。
 //!
-//! `into_parts` 是 `pub(crate)`:外部调用方只能消费 validated input,无法拆出
-//! 裸 input 绕过 spawn 前复验。
+//! `into_parts` 曾经是 `pub(crate)`:外部调用方只能消费 validated input,无法拆出
+//! 裸 input 绕过 spawn 前复验。A1(2026-11-04)将其可见性放宽为 `pub`——
+//! crate 外集成测试替身需要在 `start_validated` 里把 validated 输入还原成
+//! 裸 input 才能接回启动事实;裸 input 的**构造**仍无 public 入口,validated
+//! 载体依旧是唯一启动凭据。
 //!
 //! `ValidatedSessionLaunchPolicy` 没有 public constructor(字段 private),因此
 //! 本模块的类型只能由 `LogicalCodebaseProviderGateway::validate` 产出的 policy
@@ -45,7 +48,13 @@ impl ValidatedStreamingProviderInput {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (StreamingProviderInput, ValidatedSessionLaunchPolicy) {
+    /// 拆出裸 input 与 validated policy(A1:可见性放宽为 `pub`)。
+    ///
+    /// crate 外集成测试替身需要在 `start_validated` 里把 validated 输入
+    /// 还原成 `StreamingProviderInput`,否则 `permission_mode` /
+    /// `timeout_secs` / `resume_provider_session_id` 等启动事实无法接回
+    /// validated 路径。实现/签名/行为与原 `pub(crate)` 版本完全一致。
+    pub fn into_parts(self) -> (StreamingProviderInput, ValidatedSessionLaunchPolicy) {
         (self.input, self.launch)
     }
 
@@ -74,7 +83,7 @@ impl ValidatedStreamingProviderInput {
     ///
     /// 外部 adapter 实现 `start_validated` 时要在自身上下文复刻 role 行为
     /// (crate 外 fixture:按 role 写 worktree、按 prompt 识别 recipe 命令、
-    /// 产出 review 结论),而 `into_parts` 仍是 crate 私有。本投影只借出三个
+    /// 产出 review 结论),而 `into_parts` 自 A1 起已是 crate 外可见。本投影只借出三个
     /// 启动事实,不借出结构化契约与资源归属,也不提供拆包与所有权转移——
     /// validated 载体仍是唯一启动凭据,`validate` 产出不可伪造。
     pub fn launch_view(&self) -> ProviderLaunchView<'_> {

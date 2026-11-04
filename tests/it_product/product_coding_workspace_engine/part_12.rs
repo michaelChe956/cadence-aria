@@ -553,8 +553,43 @@ fn group_attempt_waiting_for_final_confirm() -> (
     CodingWorkspaceEngine,
     CodingExecutionAttempt,
 ) {
-    let (root, paths, store, engine, attempt) =
-        completed_group_attempt_with_handoff_revisions();
+    // 块3（`fd0b9a8`）删掉了 `IssueSharedWorktreeRoute::Legacy` 臂 ⇒ 引擎只按
+    // attempt 冻结快照里的 logical repository 读写**仓维** shared worktree 记录；
+    // 无快照的 attempt 一律 fail-closed（`target_snapshot_missing_for_logical`）
+    // ⇒ 权威先建、attempt 带冻结快照、锁事实建在仓维三元键上。
+    // 权威先建 ⇒ project 分配为 project_0001（否则 attempt 落盘会抢走它）。
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    seed_group_work_items_and_plan(&paths);
+    let store = CodingAttemptStore::new(paths.clone());
+    let worktree = root.path().join("group-worktree");
+    init_group_worktree(&worktree);
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: Some(authority.snapshot(&paths)),
+            max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
+        })
+        .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
+    store
+        .save_review_request(&attempt, &sample_review_request(&attempt.id))
+        .expect("save review request");
     let lifecycle = LifecycleStore::new(paths.clone());
     for work_item_id in ["work_item_0001", "work_item_0002"] {
         lifecycle
@@ -582,7 +617,8 @@ fn group_attempt_waiting_for_final_confirm() -> (
             Some("frontend done".to_string()),
         )
         .expect("refresh terminal attempt pointers");
-    let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
+    let attempt =
+        crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
     let attempt = store
         .update_attempt_stage(
             &attempt.project_id,
@@ -611,24 +647,26 @@ fn group_attempt_waiting_for_final_confirm() -> (
         .worktree_path
         .clone()
         .expect("group attempt worktree");
+    // 仓维锁现场：owner = 本 attempt，活跃项 = 最后一个 unit。
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+        .upsert_repo_shared_worktree(cadence_aria::product::lifecycle_store::UpsertRepoSharedWorktreeInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
+            repository_id: authority.member_id,
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path,
             base_branch: "HEAD".to_string(),
         })
-        .expect("upsert shared worktree");
+        .expect("upsert repo shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             "project_0001",
             "issue_0001",
+            authority.member_id,
             "work_item_0002",
             &attempt.id,
         )
-        .expect("acquire shared worktree lock");
+        .expect("acquire repo shared worktree lock");
     store
         .save_timeline_node(&attempt, CodingTimelineNode {
             id: "coding_node_0001".to_string(),
@@ -644,5 +682,7 @@ fn group_attempt_waiting_for_final_confirm() -> (
         })
         .expect("save final confirm node");
     write_complete_group_final_readiness_snapshot(&store, &attempt);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     (root, paths, store, engine, attempt)
 }
