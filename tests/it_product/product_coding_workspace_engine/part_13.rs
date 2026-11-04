@@ -1,6 +1,161 @@
+use cadence_aria::product::lifecycle_store::UpsertRepoSharedWorktreeInput;
+
+// ── 本文件夹具：LC 权威 + 冻结 `target_snapshot` ────────────────────────────
+//
+// REQ-ROUTE-01 两态化（去单仓入口）后，group 完成链的路由凭证是「LC 权威 +
+// 冻结 target_snapshot」：无归属 attempt 一律 fail-closed
+// （`target_snapshot_identity_drifted` / `product_store_not_found: issue issue_0001`）。
+//
+// ⚠️ 形态纪律（本组实测踩到）：**LC 权威必须先于 coding attempt 建立**。
+// `ProjectStore::create` 的 project id 按 `projects/` 目录数分配，而 coding
+// attempt 落盘本身就会建 `projects/project_0001/issues/issue_0001/` ⇒ 先建
+// attempt 再建权威会把 project 分配成 `project_0002`，权威与 attempt 的
+// project 身份错位 ⇒ admission 的 `resolve_for_issue` 读不到归属 ⇒
+// fail-closed `target_snapshot_identity_drifted`（与 Phase 1 报告里
+// 「issue id 漂到 issue_0002」同源的目录序分配陷阱）。
+//
+// 故本组在 part_13 内部自带 group 夹具（**不改 part_12 的共享夹具**：它们同时
+// 被 part_17 / part_20 / part_01 使用，跨 owner 改动会打架），顺序固定为
+// 「LC 权威 → work item + plan → group attempt（含冻结快照）→ coding units」。
+
+/// 双 unit group 夹具 + 「LC 权威 + 冻结 target_snapshot」（权威先建）。
+fn group_engine_with_two_units_under_lc_authority() -> (
+    tempfile::TempDir,
+    ProductAppPaths,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    CodingExecutionAttempt,
+    LogicalAuthority,
+) {
+    group_engine_under_lc_authority(&["work_item_0001", "work_item_0002"], [
+        CodingExecutionUnitStatus::Running,
+        CodingExecutionUnitStatus::Pending,
+    ])
+}
+
+/// 「最后一个 unit 运行中」group 夹具 + 「LC 权威 + 冻结 target_snapshot」。
+fn group_engine_with_last_running_unit_under_lc_authority() -> (
+    tempfile::TempDir,
+    ProductAppPaths,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    CodingExecutionAttempt,
+    LogicalAuthority,
+) {
+    group_engine_under_lc_authority(&["work_item_0001", "work_item_0002"], [
+        CodingExecutionUnitStatus::Completed,
+        CodingExecutionUnitStatus::Running,
+    ])
+}
+
+/// group 夹具本体：先建 LC 权威，再建 group attempt（带冻结快照）与 coding units。
+fn group_engine_under_lc_authority(
+    work_item_ids: &[&str],
+    unit_statuses: [CodingExecutionUnitStatus; 2],
+) -> (
+    tempfile::TempDir,
+    ProductAppPaths,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    CodingExecutionAttempt,
+    LogicalAuthority,
+) {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    // group attempt 的准入（`admit_and_transition_attempt_to_executable`）要解析
+    // 归属 work item，故补齐 work item + plan（与 part_01 同款夹具顺序）。
+    seed_group_work_items_and_plan(&paths);
+    let store = CodingAttemptStore::new(paths.clone());
+    let worktree = root.path().join("group-worktree");
+    init_group_worktree(&worktree);
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: Some(authority.snapshot(&paths)),
+            max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
+        })
+        .expect("create group attempt");
+    for (index, work_item_id) in work_item_ids.iter().enumerate() {
+        store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                logical_work_item_id: (*work_item_id).to_string(),
+                work_item_revision_id: format!("work_item_revision_{:04}", index + 1),
+                dependency_logical_work_item_ids: if index == 1 {
+                    vec!["work_item_0001".to_string()]
+                } else {
+                    Vec::new()
+                },
+                order_index: index as u32,
+                status: unit_statuses[index].clone(),
+            })
+            .expect("create group coding unit");
+    }
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    (root, paths, store, engine, attempt, authority)
+}
+
+/// 建**仓维** shared worktree 并把锁绑到本 attempt。
+///
+/// group 推进的锁转移按仓维三元键 `(project, issue, logical repository)` 进行
+/// （块3 删掉了 `IssueSharedWorktreeRoute::Legacy` 臂，issue 维记录不再被引擎
+/// 读写）；故夹具须建仓维记录并让锁 owner = attempt id。
+fn seed_repo_shared_worktree_lock(
+    paths: &ProductAppPaths,
+    authority: &LogicalAuthority,
+    attempt: &CodingExecutionAttempt,
+    work_item_id: &str,
+) {
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: authority.member_id,
+            branch_name: attempt.branch_name.clone(),
+            worktree_path: attempt
+                .worktree_path
+                .clone()
+                .unwrap_or_else(|| paths.root().join("group-worktree")),
+            base_branch: attempt.base_branch.clone(),
+        })
+        .expect("upsert repo shared worktree");
+    lifecycle
+        .try_acquire_repo_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            authority.member_id,
+            work_item_id,
+            &attempt.id,
+        )
+        .expect("acquire repo worktree lock");
+}
+
 #[tokio::test]
 async fn completing_group_unit_marks_current_unit_completed_and_next_running() {
-    let (_root, paths, store, engine, attempt) = group_engine_with_two_units();
+    let (_root, paths, store, engine, attempt, authority) =
+        group_engine_with_two_units_under_lc_authority();
+    // 推进到下一个 unit 时锁按仓维三元键转移，故先建仓维锁现场。
+    seed_repo_shared_worktree_lock(&paths, &authority, &attempt, "work_item_0001");
 
     let updated = engine
         .complete_current_group_unit(&attempt, Some("unit handoff saved".to_string()))
@@ -62,7 +217,8 @@ async fn completing_group_unit_moves_issue_shared_lock_to_next_unit() {
 
 #[tokio::test]
 async fn completing_last_group_unit_enters_review_request_stage() {
-    let (_root, _paths, store, engine, attempt) = group_engine_with_last_running_unit();
+    let (_root, _paths, store, engine, attempt, _authority) =
+        group_engine_with_last_running_unit_under_lc_authority();
 
     let updated = engine
         .complete_current_group_unit(&attempt, Some("last unit done".to_string()))
@@ -83,7 +239,10 @@ async fn completing_last_group_unit_enters_review_request_stage() {
 
 #[tokio::test]
 async fn completing_group_units_publishes_revisions_without_legacy_handoff_artifacts() {
-    let (_root, paths, store, engine, attempt) = group_engine_with_two_units();
+    let (_root, paths, store, engine, attempt, authority) =
+        group_engine_with_two_units_under_lc_authority();
+    // unit 完成后的锁转移按仓维三元键进行，故先建仓维锁现场。
+    seed_repo_shared_worktree_lock(&paths, &authority, &attempt, "work_item_0001");
     seed_authoritative_group_terminal_fixture(&store, &attempt);
     create_active_coding_unit_run(&store, &attempt);
 

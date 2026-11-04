@@ -9,9 +9,15 @@ async fn review_request_blocks_when_only_runtime_artifacts_changed() {
         &repo,
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化（去单仓入口）后，无 LC 归属的 attempt 一律 fail-closed
+    // （admission 报 `target_snapshot_identity_drifted`）。本用例断言的是
+    // 「review request 的运行产物过滤与 push 阶段落盘」，须先建出
+    // 「LC 权威 + 冻结 target_snapshot」，否则测到的是 fail-closed。
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
-        .create_attempt(create_input())
+        .create_attempt(create_input_with_snapshot(&paths, &authority))
         .expect("create attempt");
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -80,9 +86,15 @@ async fn execute_review_request_keeps_push_started_when_failed_push_cannot_query
             root.path().join("missing.git").to_str().unwrap(),
         ],
     );
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化（去单仓入口）后，无 LC 归属的 attempt 一律 fail-closed
+    // （admission 报 `target_snapshot_identity_drifted`）。本用例断言的是
+    // 「push 起始后不可查询远端 ⇒ 保持可重试」，须先建出「LC 权威 + 冻结
+    // target_snapshot」。
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
-        .create_attempt(create_input())
+        .create_attempt(create_input_with_snapshot(&paths, &authority))
         .expect("create attempt");
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -149,8 +161,13 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\ninternal review\n").expect("modify file");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）后，逻辑 target 的 provider run 唯一经
+    // LC gateway 启动，且归属解析依赖「LC 权威 + 冻结 target_snapshot」；无归属
+    // 时 fail-closed（`coding_run_lease_unknown: … product_store_not_found: issue
+    // issue_0001`）。故先建权威现场并把与权威一致的冻结快照挂进 group attempt。
+    let authority = seed_lc_authority(&app_paths, root.path());
     seed_group_work_items_and_plan(&app_paths);
-    let store = CodingAttemptStore::new(app_paths);
+    let store = CodingAttemptStore::new(app_paths.clone());
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -166,12 +183,28 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(authority.snapshot(&app_paths)),
             max_auto_rework: 2,
             start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
+    // gateway 不支持 Fake（`provider_unsupported_for_gateway_launch`），故
+    // internal reviewer 角色改挂 ClaudeCode（it_web / part_01 同款手法）。
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
+            },
+        )
+        .expect("set role provider snapshot");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
@@ -186,11 +219,25 @@ async fn execute_group_final_review_persists_review_and_waits_for_final_confirm(
         .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, mut rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = InternalReviewStreamingProvider;
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动：测试 adapter 必须同时
+    // 交给引擎方法（断言捕获面）与 gateway registry（真实 spawn 面），两处同一实例。
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(InternalReviewStreamingProvider),
+        ProviderType::ClaudeCode,
+    ));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &app_paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
+    );
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     let review = engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .expect("execute internal pr review");
 
@@ -307,8 +354,13 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\ninternal review\n").expect("modify file");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）后，逻辑 target 的 provider run 唯一经
+    // LC gateway 启动，且归属解析依赖「LC 权威 + 冻结 target_snapshot」；无归属
+    // 时 fail-closed（`coding_run_lease_unknown: … product_store_not_found: issue
+    // issue_0001`）。故先建权威现场并把与权威一致的冻结快照挂进 group attempt。
+    let authority = seed_lc_authority(&app_paths, root.path());
     seed_group_work_items_and_plan(&app_paths);
-    let store = CodingAttemptStore::new(app_paths);
+    let store = CodingAttemptStore::new(app_paths.clone());
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -324,12 +376,28 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(authority.snapshot(&app_paths)),
             max_auto_rework: 2,
             start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("create group attempt");
     seed_authoritative_group_final_review_fixture(&store, &attempt);
+    // gateway 不支持 Fake（`provider_unsupported_for_gateway_launch`），故
+    // internal reviewer 角色改挂 ClaudeCode（it_web / part_01 同款手法）。
+    store
+        .update_role_provider_config_snapshot(
+            "project_0001",
+            "issue_0001",
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::Fake,
+                code_reviewer: Some(ProviderName::Fake),
+                internal_reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
+            },
+        )
+        .expect("set role provider snapshot");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(
@@ -344,10 +412,12 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
         .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = InputCapturingProvider {
-        input: Arc::new(Mutex::new(None)),
-        output: r#"{
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动：测试 adapter 必须同时
+    // 交给引擎方法（断言捕获面）与 gateway registry（真实 spawn 面），两处同一实例。
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(InputCapturingProvider {
+            input: Arc::new(Mutex::new(None)),
+            output: r#"{
             "verdict": "blocked",
             "summary": "内部 review 需要人工确认发布窗口",
             "findings": [],
@@ -355,11 +425,23 @@ async fn execute_group_final_review_blocked_opens_human_gate() {
             "pr_description": "实现 work item",
             "commit_message_suggestion": "feat: implement work item"
         }"#
-        .to_string(),
-    };
+            .to_string(),
+        }),
+        ProviderType::ClaudeCode,
+    ));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &app_paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
+    );
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     let review = engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .expect("execute internal pr review");
 
@@ -388,12 +470,17 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\ninternal prompt diff\n").expect("modify file");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）后，逻辑 target 的 provider run 唯一经
+    // LC gateway 启动，且归属解析依赖「LC 权威 + 冻结 target_snapshot」；无归属
+    // 时 fail-closed（`coding_run_lease_unknown: … product_store_not_found: issue
+    // issue_0001`）。故先建权威现场并把与权威一致的冻结快照挂进 group attempt。
+    let authority = seed_lc_authority(&app_paths, root.path());
     seed_work_item_markdown(
         &app_paths,
         "函数 climb_stairs(n: i32) -> i32 需要测试 n=10。",
     );
     seed_group_plan(&app_paths);
-    let store = CodingAttemptStore::new(app_paths);
+    let store = CodingAttemptStore::new(app_paths.clone());
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -409,7 +496,7 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(authority.snapshot(&app_paths)),
             max_auto_rework: 2,
             start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -443,15 +530,35 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
         .save_review_request(&attempt, &request)
         .expect("save review request");
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动：测试 adapter 必须同时
+    // 交给引擎方法（断言捕获面）与 gateway registry（真实 spawn 面），两处同一实例。
+    // internal reviewer 角色挂 Codex（gateway 不支持 Fake），故 bridge 侧
+    // provider_type 同为 Codex。
     let captured_input = Arc::new(Mutex::new(None));
-    let provider = InputCapturingProvider {
-        input: captured_input.clone(),
-        output: r#"{"verdict":"approve","summary":"internal ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#.to_string(),
-    };
+    // group final review 的 prompt 同时含「 Reviewer Work Item Projection」段，
+    // 按 prompt 标记复原会落到 code review 的 schema ⇒ 这里显式钉住
+    // internal pr review 的 output_schema（与断言一致，不改任何期望值）。
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter {
+        inner: Arc::new(InputCapturingProvider {
+            input: captured_input.clone(),
+            output: r#"{"verdict":"approve","summary":"internal ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#.to_string(),
+        }),
+        provider_type: ProviderType::Codex,
+        output_schema: Some("coding_workspace_internal_pr_review_json".to_string()),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Codex, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &app_paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
+    );
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .expect("execute internal review");
 
@@ -485,6 +592,11 @@ async fn execute_group_final_review_prompt_includes_request_commit_diff_and_func
 async fn handle_final_confirm_completes_when_required_plan_is_satisfied() {
     let root = tempdir().expect("root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）后，final confirm 链的归属解析依赖
+    // 「LC 权威 + 冻结 target_snapshot」；无归属时 fail-closed
+    // （`product_store_not_found: issue issue_0001`）。本用例断言的是
+    // 「required plan 满足 ⇒ 完成」，故先建权威现场。
+    let authority = seed_lc_authority(&app_paths, root.path());
     let lifecycle = LifecycleStore::new(app_paths.clone());
     create_required_verification_plan(
         &lifecycle,
@@ -511,9 +623,9 @@ async fn handle_final_confirm_completes_when_required_plan_is_satisfied() {
             WorkItemStatus::Coding,
         )
         .expect("coding work item");
-    let store = CodingAttemptStore::new(app_paths);
+    let store = CodingAttemptStore::new(app_paths.clone());
     let attempt = store
-        .create_attempt(create_input())
+        .create_attempt(create_input_with_snapshot(&app_paths, &authority))
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
