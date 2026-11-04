@@ -159,6 +159,15 @@
   - 指纹扫描用 `grep -a`（二进制安全），**不要用 `strings`**（只抽 ASCII，抽不到中文串）；且必须与回滚件对照（旧件应全部不命中）。
   - 「端口在听」不等于「服务可用」；上述任一项缺失即视为部署未完成，不得声称已重发。完整规则与检查清单详见 `cadence/project-rules/local-service-deploy.md`。
 
+- **浏览器验证规则（禁用 Playwright，只用 harness 内置浏览器）（强制）**
+  - 🔴 **禁止使用 Playwright**：`pnpm test:e2e` / `pnpm exec playwright test` / 代码里 import `@playwright/test` 或 `playwright` / `pnpm exec playwright install` / 为跑通 Playwright 而临时改 `web/playwright.config.ts` 或新增临时配置 —— 全部禁止。
+  - 需要浏览器能力时**只用 harness 内置浏览器能力**：Eval 的 `browser` 全局对象（`browser.open` → `tab.observe` / `tab.click` / `tab.fill` / `tab.type` / `tab.screenshot` / `tab.run` → `tab.close`）；用法文档 `read xd://eval/browser`（动手前先读）。内置浏览器按需自装 managed Chromium，**不需要也不允许自行下载浏览器**。
+  - 仓库既有 Playwright 资产（`web/playwright.config.ts`、`web/e2e/**`）**保持原样、不删不改** —— 本规则约束的是**本项目会话的行为**，不是仓库资产的存在与否。
+  - 内置浏览器能力不可用时**如实报出缺口**（缺什么、为什么不能用、需要谁补）；⛔ 禁止以「Playwright 跑不通」为理由退回 Playwright；⛔ 禁止把界面验证悄悄降级成「只读代码断言」后声称「已验证界面」。
+  - 界面验证的证据必须来自**真实渲染与真实点击**（`tab.observe()` 取结构 + `tab.screenshot()` 取视觉证据），不得从源码推断；截图作为正式验收证据保留到 `cadence/reports/`（例外见 `/tmp` 隔离规则）。
+  - 需要前后端联调时，用 `bash` 工具的**具名长驻服务**（`name` + `ready.port`）分别起 API 与前端 dev server，再用内置浏览器连上去；测试产物仍只能落 `/tmp`。
+  - 完整规则详见 `cadence/project-rules/browser-verification-only.md`。
+
 **示例规则**（默认不启用，需用户主动添加）：
 
 ```markdown
