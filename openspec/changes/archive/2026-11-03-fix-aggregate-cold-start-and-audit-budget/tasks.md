@@ -5,8 +5,8 @@
 > `validate --specs` 78 passed / 0 failed）。
 > 勾选口径与逐条文件:行级证据见 `cadence/notes/2026-11-03_收口_行数登记表改动清单_v1.0.md` §M.1。
 >
-> **剩余未勾 7 条及原因**：
-> · **12.1** 待统一绿测后判定（`cargo test --all-targets` 含 `large_file_guard` 门禁 + 前端 vitest）
+> **剩余未勾 6 条及原因**（2026-11-04 补记：12.1 已核验补勾，「待统一绿测」类现为 **0** 条；出处 `cadence/notes/2026-11-04_待绿测5条核验补勾_v1.0.md` §1.5）：
+> · **12.1** —— ✅ 2026-11-04 收口统一绿测核验后补勾完毕，不再计入未勾（同上 §1.5）
 > · **12.3–12.7**（5 条）真机验收 —— **⏳ 待实做（Main 真机验收批次：受控环境操控 + 浏览器实测；逐条做、逐条勾、逐条留证据）**
 >   ⇒ 本机四家 provider（`pi` / `codex` / `kimi` / `claude`）+ `codegraph` **均已安装**（`command -v` 实测：前四家在 `/home/michaelche/.local/share/fnm/aliases/default/bin/` 与 `/home/michaelche/.kimi-code/bin/`，`codegraph` 同 fnm 路径、全局包 `@colbymchenry/codegraph@1.6.2`）
 >   ⇒ **不是环境不具备，是尚未执行**；下列 5 条走**受控环境操控**（临时改 PATH / 临时造目录，**每条做完复原**）

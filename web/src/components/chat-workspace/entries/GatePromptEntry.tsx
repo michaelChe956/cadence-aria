@@ -2,6 +2,7 @@ import { Check, ChevronRight, FileText } from "lucide-react";
 import { useRef, useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import {
+  currentGateRemainingBudget,
   selectGateProjection,
   type GateActionBlockReason,
   type GateProjection,
@@ -82,6 +83,7 @@ import {
   archiveNoteFromEntry,
   blockReasonFromEntry,
   failureMessageFromEntry,
+  gateIdentityFromEntry,
   gateKindFromEntry,
   gateTriggerFromEntry,
   inlineErrorFromEntry,
@@ -154,7 +156,15 @@ export function GatePromptEntry({
   // L1（REQ-RET-02）：request-change 按钮随 legacy 决策发送面删除；findings 仅作呈现。
   const isResolved = entry.resolved === true;
   const gateTrigger = gateTriggerFromEntry(entry);
-  const remainingBudget = remainingBudgetFromEntry(entry);
+  // REQ-HGC-01「卡片刷新」：当前门卡的重建 / 重连 SHALL 刷新同门当前事实；旧卡
+  // 只读历史事实。当前卡（门身份 = 当前门投影身份、未收口）读同门当前余量
+  // （durable snapshot / turn 真值经门投影派生——门以新快照重建后取新预算）；
+  // 旧卡 / 已收口卡读卡片自带的创建时快照（历史事实，不读成当前授权）。
+  const entryGateIdentity = isResolved ? null : gateIdentityFromEntry(entry);
+  const liveRemainingBudget = useWorkspaceStore((state) =>
+    currentGateRemainingBudget(state, entryGateIdentity),
+  );
+  const remainingBudget = liveRemainingBudget ?? remainingBudgetFromEntry(entry);
   const failureMessage = failureMessageFromEntry(entry);
   const inlineError = inlineErrorFromEntry(entry);
   // 根因 E（REQ-WSC-15 前端面）：validation_reject 失败门的可操作化事实——

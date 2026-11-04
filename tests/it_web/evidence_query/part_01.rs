@@ -91,8 +91,29 @@ pub(crate) fn seed_evidence_fixture() -> EvidenceFixture {
     seed_evidence_fixture_with_options(EvidenceSourceSeed::Standard, true)
 }
 
-/// 可配置 fixture：`codegraph_indexed=false` 时聚合根不建 codegraph 索引，
-/// 用于 503 evidence_query_failed 场景（真实 `codegraph query` 非零退出）。
+/// 场景⑩「未建索引」的 durable 形态：移除聚合索引记录并把 manifest 的
+/// active 指针置空——这是产品对「未建索引」的权威判定层（evidence 链
+/// `load_or_pin_index` 对 active_aggregate_index_id=None fail-closed 为
+/// `evidence_index_unavailable` ⇒ evidence_query_failed/503）。不依赖第三方
+/// CLI 退出码：codegraph 1.6.2 对未建索引根恒 exit 0（见下方 fixture 注释）。
+pub(crate) fn deactivate_aggregate_index(fx: &EvidenceFixture) {
+    std::fs::remove_file(index_record_path(&fx.paths, &fx.aggregate_index_id))
+        .expect("remove aggregate index record");
+    let logical = LogicalCodebaseStore::new(fx.paths.clone());
+    let mut manifest = logical
+        .load_manifest(PROJECT_ID)
+        .expect("load manifest")
+        .expect("fixture manifest exists");
+    manifest.active_aggregate_index_id = None;
+    logical
+        .save_manifest(PROJECT_ID, &manifest)
+        .expect("save manifest without active index");
+}
+
+/// 可配置 fixture：`codegraph_indexed=false` 时聚合根不建 codegraph CLI 索引。
+/// 场景⑩「未建索引 ⇒ 503」据此播种后再经 `deactivate_aggregate_index` 落到
+/// durable 未建索引形态——codegraph 1.6.2（^1.6 支持区间内最新发布版）对
+/// 未建索引根的 `query --json` 实测 exit 0 + `[]`，「CLI 非零退出」前提不成立。
 pub(crate) fn seed_evidence_fixture_with_options(
     seed: EvidenceSourceSeed,
     codegraph_indexed: bool,

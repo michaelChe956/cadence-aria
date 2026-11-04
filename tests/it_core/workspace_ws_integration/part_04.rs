@@ -331,13 +331,38 @@ async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
     .await;
     assert_eq!(recv_until_stream_chunk(&mut ws).await, "Pi partial output");
     assert!(started.load(Ordering::SeqCst), "Pi author adapter must start");
+    // 「workspace 以 Pi 在 Auto 权限模式下发起 author run」在可观察层断言。
+    // LC gateway validated 启动面按设计只外借 launch_view()（role/working_dir/
+    // prompt），provider_type/permission_mode 不外借（into_parts 为
+    // pub(crate)），adapter 侧不可观察；改为断言引擎构造 launch input 的同一
+    // durable 事实源——build_streaming_input 读 session.author_provider ×
+    // session.permission_modes.author，经 provider_type_for_name /
+    // permission_mode_for_provider 映射成 input 的 (Pi, Auto)（Pi 恒 Auto），
+    // 外加引擎启动登记的 durable provider_start_ledger（启动前原子落盘的
+    // actual-launch 观察）。三项合并后 (Pi, Auto) 语义不减。
+    let durable_session = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")))
+        .get_workspace_session("workspace_session_0001")
+        .expect("persisted workspace session");
     assert_eq!(
-        seen_inputs.lock().expect("Pi input recorder").as_slice(),
-        &[(
-            cadence_aria::protocol::contracts::ProviderType::Pi,
-            cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
-        )],
-        "workspace must invoke Pi in Auto mode"
+        durable_session.author_provider,
+        cadence_aria::product::models::ProviderName::Pi,
+        "workspace must invoke Pi in Auto mode (durable author provider)"
+    );
+    assert_eq!(
+        durable_session.permission_modes.author,
+        cadence_aria::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+        "workspace must invoke Pi in Auto mode (durable author permission mode)"
+    );
+    let actual_launches: Vec<&str> = durable_session
+        .provider_start_ledger
+        .iter()
+        .filter(|entry| entry.is_actual_launch_observation())
+        .map(|entry| entry.provider.as_deref().unwrap_or("<missing>"))
+        .collect();
+    assert_eq!(
+        actual_launches,
+        vec!["pi"],
+        "engine must have registered exactly one actual Pi author launch"
     );
 
     send_json(&mut ws, &WsInMessage::Abort).await;

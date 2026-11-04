@@ -51,6 +51,18 @@ export function gateTriggerFromEntry(
     : null;
 }
 
+/**
+ * 门卡的门身份（buildGatePromptEntry 写入 metadata.gate_identity）。
+ *
+ * REQ-HGC-01「卡片刷新」的判据输入：身份与当前门投影一致 = 本卡是当前门
+ * （读同门当前事实）；不一致 = 旧卡（只读历史事实）。
+ */
+export function gateIdentityFromEntry(entry: ChatEntry): string | null {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  const value = metadata?.gate_identity;
+  return typeof value === "string" ? value : null;
+}
+
 export function remainingBudgetFromEntry(entry: ChatEntry): number | null {
   const metadata = entry.metadata as Record<string, unknown> | undefined;
   return typeof metadata?.remaining_budget === "number" ? metadata.remaining_budget : null;

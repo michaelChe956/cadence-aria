@@ -51,6 +51,22 @@ function installFetchRouter(advanceStatus = 200, advanceBody?: unknown): void {
       method,
       body: rawBody === null ? null : JSON.parse(rawBody),
     });
+    if (method === "GET" && url === "/api/providers/install-targets") {
+      return jsonResponse({
+        targets: [
+          {
+            target: "codegraph",
+            display_name: "codegraph",
+            cli_available: false,
+            local_version: null,
+            latest_version: "1.7.0",
+            latest_checked_at: "2026-11-04T00:00:00Z",
+            install_source: "npm @colbymchenry/codegraph",
+            action: "install",
+          },
+        ],
+      });
+    }
     if (method === "POST" && url === ACTIONS_URL) {
       return jsonResponse({
         command_id: "cmd",
@@ -456,6 +472,57 @@ describe("LogicalCodebaseBootstrapCard 步骤动作可见性", () => {
         "lc-bootstrap-step-action-rules_policy-republish",
       ),
     ).toBeNull();
+  });
+
+
+  // 块2 11.10：codegraph 缺失（`bootstrap:codegraph:codegraph_missing` 通知，
+  // allowed_actions 为空——聚合索引根本没开始）时给【安装】入口：用户装完
+  // codegraph 才能重试索引。
+  it("codegraph 阻断通知挂【安装】入口", async () => {
+    installFetchRouter();
+    render(
+      <LogicalCodebaseBootstrapCard
+        projectId={PROJECT_ID}
+        projection={projection({
+          notices: [
+            notice({
+              key: "bootstrap:codegraph:codegraph_missing",
+              step: "member_index",
+              object_id: "member_index-object",
+              reason_code: "codegraph_missing",
+              summary:
+                "未检测到 codegraph\n原因：聚合索引依赖 codegraph CLI，但当前 PATH 上找不到它。\n怎么做：执行 npm i -g @colbymchenry/codegraph 安装（或把已有安装加入 PATH），装好后点「重试」。",
+              allowed_actions: [],
+              next_step: "aggregate_index_active",
+            }),
+          ],
+        })}
+      />,
+    );
+
+    const install = await screen.findByTestId("provider-install-start-codegraph");
+    expect(install).toHaveTextContent("安装");
+    expect(
+      screen.getByTestId("lc-bootstrap-notice-codegraph-install"),
+    ).toBeTruthy();
+    // 安装来源用后端安装目标面的原文。
+    expect(
+      screen.getByTestId("lc-codegraph-install-source").textContent,
+    ).toContain("npm @colbymchenry/codegraph");
+  });
+
+  it("非 codegraph 的通知不挂【安装】入口", () => {
+    render(
+      <LogicalCodebaseBootstrapCard
+        projectId={PROJECT_ID}
+        projection={projection({ notices: [notice()] })}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("lc-bootstrap-notice-codegraph-install"),
+    ).toBeNull();
+    expect(screen.queryByTestId("provider-install-start-codegraph")).toBeNull();
   });
 
   it("已就绪或规则步骤正常时不显示规则漂移提示", () => {

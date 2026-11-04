@@ -379,7 +379,7 @@ mod logical_codebase_bootstrap;
 pub use logical_codebase_bootstrap::{
     BootstrapActionRequestDto, BootstrapActionResultDto, BootstrapAdvanceResultDto,
     BootstrapCheckpointDto, BootstrapFailureDto, BootstrapPolicyReferenceDto,
-    BootstrapStepProjectionDto, LogicalCodebaseBootstrapNoticeDto,
+    BootstrapStepProjectionDto, FailureCopyDto, LogicalCodebaseBootstrapNoticeDto,
     LogicalCodebaseBootstrapProjectionDto,
 };
 

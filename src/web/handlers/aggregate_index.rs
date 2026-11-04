@@ -13,8 +13,10 @@ use crate::product::json_store::validate_relative_id;
 use crate::product::logical_codebase::aggregate_index::{
     AggregateIndexError, AggregateIndexRecord, AggregateIndexStatus,
 };
+use crate::product::logical_codebase::aggregate_index::codegraph_cli::codegraph_library_present;
 use crate::web::error::ApiError;
 use crate::web::state::WebAppState;
+use crate::web::types::FailureCopyDto;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +25,14 @@ pub struct AggregateIndexActiveResponse {
     pub revision: Option<u64>,
     pub indexed_at: Option<String>,
     pub warning: Option<String>,
+    /// 索引不可用时的中文成品（问题/原因/怎么做/机器码）。
+    ///
+    /// 只在「跨仓证据检索现在必然失败」时给出：durable 在册的世代指向的聚合根
+    /// 上 codegraph 库目录不在（判据与 evidence 链同源：`codegraph_library_present`），
+    /// 或根本没有在册世代。索引可用时缺省——库目录在册而查询无命中是合法空结果，
+    /// 不进本分支（200 不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_copy: Option<FailureCopyDto>,
 }
 
 pub async fn get_active_aggregate_index(
@@ -159,7 +169,22 @@ fn read_active_projection(
         .iter()
         .find(|candidate| candidate.status == AggregateIndexStatus::Degraded)
         .cloned();
-    let response = match latest {
+    // 跨仓证据检索可用性（索引不可用 ⇒ 证据检索必然 503）：durable 在册的世代
+    // 指向的聚合根上 codegraph 库目录不在 ⇒ 索引不可用；没有任何在册世代 ⇒ 同样
+    // 不可用（mediator 无索引可钉住）。判据与 evidence 链的库目录守卫同源。
+    let usable_generation = records.iter().find(|record| {
+        matches!(
+            record.status,
+            AggregateIndexStatus::Active
+                | AggregateIndexStatus::Stale
+                | AggregateIndexStatus::Degraded
+        )
+    });
+    let evidence_unavailable = match usable_generation {
+        Some(record) => !codegraph_library_present(&record.codegraph_root),
+        None => true,
+    };
+    let mut response = match latest {
         None => missing_response(None),
         Some(record) if record.status == AggregateIndexStatus::Building => {
             projection("rebuilding", &record, None)
@@ -196,6 +221,15 @@ fn read_active_projection(
             None,
         ),
     };
+    // 「重建中」是用户正在行动，不判索引不可用（重建成功后会重建库目录）。
+    if evidence_unavailable && response.state != "rebuilding" {
+        response.evidence_copy = Some(FailureCopyDto::from(
+            &crate::product::logical_codebase::failure_copy::describe_code(
+                "evidence_index_unavailable",
+                None,
+            ),
+        ));
+    }
     Ok(response)
 }
 
@@ -209,6 +243,7 @@ fn projection(
         revision: Some(record.membership_revision),
         indexed_at: Some(record.updated_at.clone()),
         warning: warning.or_else(|| record.warning.clone()),
+        evidence_copy: None,
     }
 }
 
@@ -218,6 +253,7 @@ fn missing_response(warning: Option<String>) -> AggregateIndexActiveResponse {
         revision: None,
         indexed_at: None,
         warning,
+        evidence_copy: None,
     }
 }
 
@@ -392,6 +428,69 @@ mod projection_tests {
                 .unwrap_or_default()
                 .contains("codegraph_init_failed")
         );
+    }
+
+    /// 索引在册但磁盘 codegraph 库目录不在 ⇒ 跨仓证据检索必然 503
+    /// （`evidence_index_unavailable`）⇒ 投影必须带中文成品 + 入口指引。
+    #[test]
+    fn read_active_projection_reports_evidence_unavailable_when_library_dir_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        let mut generation = record(
+            "aggregate_index_gen",
+            AggregateIndexStatus::Active,
+            "2026-09-28T01:00:00Z",
+        );
+        // 在册世代指向的聚合根上没有 `.codegraph` 库目录。
+        generation.codegraph_root = temp.path().join("aggregate-root");
+        store.create("project_0001", generation).unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "active");
+        let copy = response
+            .evidence_copy
+            .expect("库目录缺失 ⇒ 跨仓证据检索不可用，投影必须给出中文成品");
+        assert_eq!(copy.machine_line, "evidence_index_unavailable");
+        assert!(copy.action_zh.contains("重建索引"));
+        assert!(copy.action_zh.contains("逻辑代码库管理面板"));
+    }
+
+    /// 硬边界①：库目录在册（哪怕查询零命中）⇒ 不是索引不可用，投影不带成品。
+    #[test]
+    fn read_active_projection_has_no_evidence_copy_when_library_dir_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        let mut generation = record(
+            "aggregate_index_gen",
+            AggregateIndexStatus::Active,
+            "2026-09-28T01:00:00Z",
+        );
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(aggregate_root.join(".codegraph")).unwrap();
+        generation.codegraph_root = aggregate_root;
+        store.create("project_0001", generation).unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "active");
+        assert!(
+            response.evidence_copy.is_none(),
+            "库目录在册 ⇒ 查询无命中仍是合法空结果，不进索引不可用分支"
+        );
+    }
+
+    /// 没有任何在册世代 ⇒ 同样不可用（mediator 无索引可钉住）。
+    #[test]
+    fn read_active_projection_reports_evidence_unavailable_without_any_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "missing");
+        assert!(response.evidence_copy.is_some());
     }
 
     #[test]

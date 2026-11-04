@@ -600,6 +600,14 @@ const TABLE: &[Entry] = &[
         "点「重试」；连续两次仍失败时，附机器码与诊断提交问题。",
         FailureTriage::ProductDefect,
     ),
+    // ── 跨仓证据检索（evidence_index_*）：索引不可用 ⇒ 重建索引后重试 ──
+    (
+        "evidence_index_unavailable",
+        "聚合索引不可用，跨仓证据检索无法执行",
+        "这不是「没有找到证据」：跨仓证据检索要读聚合索引，当前索引不可用（尚未建立，或记录在册但磁盘上的 codegraph 库目录已不在），检索根本没有执行，所以这次没有任何命中结果。",
+        "在逻辑代码库管理面板的「聚合索引」处点「重建索引」重建聚合索引；重建完成后重新发起跨仓证据检索。",
+        FailureTriage::Environment,
+    ),
     // ── 规则/政策等待（投影层既有码）──
     (
         "aggregate_policy_artifact_missing",

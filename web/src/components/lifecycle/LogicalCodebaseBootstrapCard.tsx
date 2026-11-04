@@ -22,6 +22,7 @@ import type {
   LogicalCodebaseBootstrapProjection,
 } from "../../api/types";
 import { BootstrapFailureLine } from "./BootstrapFailureLine";
+import { CodegraphInstallEntry, isCodegraphInstallCode } from "./CodegraphInstallEntry";
 import { LogicalCodebaseLayoutTree } from "./LogicalCodebaseLayoutTree";
 
 const STEP_LABELS: Record<string, string> = {
@@ -372,6 +373,17 @@ export function LogicalCodebaseBootstrapCard({
                 <p className="mt-0.5 text-xs text-slate-500">
                   下一步：{STEP_LABELS[notice.next_step] ?? notice.next_step}
                 </p>
+              ) : null}
+              {/* 块2 11.10：codegraph 环境前置被阻断（`bootstrap:codegraph:*`
+                  通知，allowed_actions 为空——索引根本没开始）时给【安装】
+                  入口：用户装完 codegraph 才能重试聚合索引。 */}
+              {isCodegraphInstallCode(notice.reason_code) ? (
+                <div
+                  className="mt-1.5"
+                  data-testid="lc-bootstrap-notice-codegraph-install"
+                >
+                  <CodegraphInstallEntry />
+                </div>
               ) : null}
               {noticeActions(notice).length > 0 ? (
                 <div className="mt-1.5 flex flex-wrap gap-2">

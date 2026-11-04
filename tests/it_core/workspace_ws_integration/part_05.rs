@@ -216,10 +216,11 @@ impl StreamingProviderAdapter for PiHangingStreamingProvider {
     /// LC 会话经 gateway validated 启动：会话行为（首段输出 → 挂起 → 取消
     /// 后收尾）逐字复刻；但 validated 启动面只外借 role/working_dir/prompt，
     /// **不外借** provider_type / permission_mode（`into_parts` 是
-    /// pub(crate)，crate 外取不到），故此处无法记录这两个 adapter 侧观察
-    /// 事实——用例 `workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output`
-    /// 的断言就此留红（已由 Main 裁定：LC gateway 的 validated 启动无等价
-    /// 可观察点）。按 trait 契约不回调裸 start。
+    /// pub(crate)，crate 外取不到），adapter 侧无法记录这两个观察事实；
+    /// 用例 `workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output`
+    /// 已改在 durable 层断言同一语义（session.author_provider ×
+    /// permission_modes.author × provider_start_ledger actual launch）。
+    /// 按 trait 契约不回调裸 start。
     async fn start_validated(
         &self,
         _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,

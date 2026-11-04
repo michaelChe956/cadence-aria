@@ -51,6 +51,43 @@ describe("AggregateIndexCard", () => {
     expect(onRebuild).toHaveBeenCalledOnce();
   });
 
+  it("renders the index-unavailable failure face with its own rebuild action", () => {
+    const onRebuild = vi.fn();
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "active",
+          revision: 7,
+          indexed_at: "2026-08-18T00:00:00Z",
+          evidence_copy: {
+            title_zh: "聚合索引不可用，跨仓证据检索无法执行",
+            reason_zh: "这不是「没有找到证据」：跨仓证据检索要读聚合索引。",
+            action_zh: "在逻辑代码库管理面板的「聚合索引」处点「重建索引」重建聚合索引。",
+            triage: "environment",
+            machine_line: "evidence_index_unavailable",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={onRebuild}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("aggregate-index-evidence-unavailable"),
+    ).toHaveTextContent("聚合索引不可用，跨仓证据检索无法执行");
+    expect(
+      screen.getByTestId("aggregate-index-evidence-title"),
+    ).toHaveTextContent("聚合索引不可用");
+    expect(
+      screen.getByTestId("aggregate-index-evidence-unavailable"),
+    ).toHaveTextContent("evidence_index_unavailable");
+
+    const rebuild = screen.getByRole("button", { name: "重建索引" });
+    fireEvent.click(rebuild);
+
+    expect(onRebuild).toHaveBeenCalledOnce();
+  });
+
   it("shows an actionable stale notice", () => {
     renderCard({
       state: "stale",

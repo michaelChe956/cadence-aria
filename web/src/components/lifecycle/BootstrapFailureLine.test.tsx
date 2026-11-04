@@ -10,7 +10,7 @@
 // 有进行中态（防重复点击）与成功/失败反馈；反馈里的安装指引逐字复用后端
 // `providers.rs` 的 `install_hint`，前端不自造安装文案。
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BootstrapFailureLine } from "./BootstrapFailureLine";
 import { recheckProviders } from "../../api/client";
 import type {
@@ -86,6 +86,78 @@ function providerSnapshot(providers: ProviderHealthEntry[]): ProviderHealthRespo
 describe("BootstrapFailureLine", () => {
   beforeEach(() => {
     recheckProvidersMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+
+  // 块2 11.10：codegraph 缺失面挂【安装】入口——复用 provider-cli-installation
+  // 的同一套机制（ProviderInstallActionButton + GET /api/providers/install-targets）。
+  // 【安装】（装 codegraph）与【重新检测】（复核可用性）是两个独立按钮。
+  it("gives the codegraph-missing failure an install entry", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              targets: [
+                {
+                  target: "codegraph",
+                  display_name: "codegraph",
+                  cli_available: false,
+                  local_version: null,
+                  latest_version: "1.7.0",
+                  latest_checked_at: "2026-11-04T00:00:00Z",
+                  install_source: "npm @colbymchenry/codegraph",
+                  action: "install",
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    render(
+      <BootstrapFailureLine
+        failure={layoutFailure({
+          reason_code: "codegraph_missing",
+          copy: {
+            title_zh: "未检测到 codegraph",
+            reason_zh: "聚合索引依赖 codegraph CLI，但当前 PATH 上找不到它。",
+            action_zh:
+              "执行 npm i -g @colbymchenry/codegraph 安装（或把已有安装加入 PATH），装好后点「重试」。",
+            triage: "environment",
+            machine_line: "codegraph_missing",
+          },
+        })}
+      />,
+    );
+
+    const install = await screen.findByTestId("provider-install-start-codegraph");
+    expect(install).toHaveTextContent("安装");
+    // 手动兜底命令逐字来自既有安装机制（npm 包名）。
+    expect(
+      screen.getByTestId("provider-install-manual-command-codegraph").textContent,
+    ).toContain("@colbymchenry/codegraph");
+    // 安装来源用后端安装目标面的原文，前端不自造安装文案。
+    expect(
+      screen.getByTestId("lc-codegraph-install-source").textContent,
+    ).toContain("npm @colbymchenry/codegraph");
+    // 「重新检测」是另一个独立按钮（语义不重叠）：装完后复核可用性。
+    expect(screen.getByTestId("lc-bootstrap-failure-recheck")).toHaveTextContent(
+      "重新检测",
+    );
+  });
+
+  it("keeps the codegraph install entry off unrelated failures", () => {
+    render(<BootstrapFailureLine failure={layoutFailure()} />);
+
+    expect(screen.queryByTestId("lc-bootstrap-failure-codegraph-install")).toBeNull();
+    expect(screen.queryByTestId("provider-install-start-codegraph")).toBeNull();
   });
 
   it("renders the three chinese segments and the machine code as a secondary line", () => {

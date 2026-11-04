@@ -1172,6 +1172,7 @@ fn validate_checkout_id(
 }
 
 include!("store_purge.inc.rs");
+include!("store_manifest_pointer.inc.rs");
 
 #[cfg(test)]
 include!("store_tests.inc.rs");

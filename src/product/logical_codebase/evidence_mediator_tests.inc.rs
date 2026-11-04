@@ -76,6 +76,10 @@ mod tests {
         let paths = ProductAppPaths::new(tmp.path().join(".aria"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
+        // 真实世界已建索引的聚合根必有 `.codegraph` 库目录（codegraph init
+        // 产物）；mediator 查询前置库目录守卫（④b）按此判「索引不可用」。
+        // fake-runner 夹具不跑真实 CLI，显式物化该目录以对齐已建索引形态。
+        std::fs::create_dir_all(repo.join(".codegraph")).expect("create codegraph library dir");
         seed_issue_authority(&paths);
 
         let api_id = LogicalRepositoryId(Uuid::new_v4());
@@ -877,6 +881,43 @@ mod tests {
         assert!(
             attempt_partition_file(&fx.paths, &attempt_b.id, EVIDENCE_INDEX_PIN_FILE).is_file()
         );
+    }
+
+    #[test]
+    fn write_back_active_pointer_unblocks_first_query_from_503() {
+        let mut fx = setup();
+        // 生产缺口形态：索引在册（Active）但 manifest.active_aggregate_index_id
+        // 恒 None（回写缺失）⇒ 首次检索必 503，且 pin 文件无从生成。
+        fx.manifest.active_aggregate_index_id = None;
+        LogicalCodebaseStore::new(fx.paths.clone())
+            .save_manifest(PROJECT_ID, &fx.manifest)
+            .expect("save manifest without active pointer");
+        let hits_json = serde_json::json!([
+            {"node": {"name": "usedByWeb", "filePath": "web/src/app.ts", "startLine": 10}},
+        ]);
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(&hits_json.to_string()));
+        let input = query_input(&fx.token, EvidenceRole::Coder, "usedByWeb");
+
+        let denied = handle_evidence_query_with_runner(&fx.paths, &input, runner.clone())
+            .expect_err("missing pointer fails closed");
+        assert!(matches!(
+            denied,
+            EvidenceError::QueryFailed { code, .. } if code == "evidence_index_unavailable"
+        ));
+        assert!(!pin_file_path(&fx.paths).exists());
+
+        // 激活落点回写（apply_index 在 replace_active 之后经
+        // set_active_aggregate_index 落盘的同一条通道）后：首查 200、pin
+        // 生成并钉住该 active 世代。
+        LogicalCodebaseStore::new(fx.paths.clone())
+            .set_active_aggregate_index(PROJECT_ID, &fx.aggregate_index_id)
+            .expect("write back active pointer");
+        let response = handle_evidence_query_with_runner(&fx.paths, &input, runner)
+            .expect("first query after write-back");
+        assert_eq!(response.text, "web/src/app.ts:10 usedByWeb\n");
+        let pin: EvidenceIndexPinRecord =
+            read_json(&pin_file_path(&fx.paths)).expect("pin written on first success");
+        assert_eq!(pin.pinned_aggregate_index_id, fx.aggregate_index_id);
     }
 
     // C2 政策读取测试段拆入子 include,共享 mod tests 作用域

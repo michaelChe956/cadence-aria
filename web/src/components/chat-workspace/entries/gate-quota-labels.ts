@@ -7,8 +7,9 @@
 // 三个额度分别命名（MUST NOT 用「自动修复」统称——那是本次要消除的混称）：
 // - B1 平台自动重写：candidate_compile_failure.auto_rewrite.remaining
 //   （编译面自动重写账本）。
-// - B2 人工返修：human_gate_snapshot.manual_repairs_remaining（门卡上
-//   读创建时快照 remaining_budget，来源标注「门预算账本」）。
+// - B2 人工返修：human_gate_snapshot.manual_repairs_remaining（当前卡读同门
+//   当前事实——门卡重建 / 重连随门刷新；旧卡只读卡片自带的创建时快照，
+//   来源标注「门预算账本」）。
 // - C 人工说明回合：human_gate_snapshot.accepted_feedback_turns
 //   （「你已说明 N 轮」）。
 // - A 机械返修池（max_repairs）不上界面额度名。
@@ -69,7 +70,8 @@ export function gateStoppedTriggerLabel(trigger: string, flowKind: string | null
 export interface GateQuotaPresentationInput {
   /** B1 平台自动重写余量（entry.metadata.candidate_compile_failure.auto_rewrite.remaining）。 */
   b1Remaining: number | null;
-  /** B2 人工返修余量（门卡 remaining_budget 快照 ← manual_repairs_remaining）。 */
+  /** B2 人工返修余量（当前卡 = 同门当前投影 ← manual_repairs_remaining；
+   *  旧卡 = 卡片自带的创建时快照 remaining_budget）。 */
   b2Remaining: number | null;
   /** C 已接受人工说明回合数（gate-local；缺席 = 旧数据预算历史不可用）。 */
   acceptedTurns: number | null;

@@ -22,6 +22,7 @@
 // `<li>` 内的兄弟表达式），因此本组件内部结构对块3 是只读契约。
 import { useCallback, useRef, useState } from "react";
 import { recheckProviders } from "../../api/client";
+import { CodegraphInstallEntry, isCodegraphInstallCode } from "./CodegraphInstallEntry";
 import type {
   BootstrapFailureDto,
   FailureCopyTriage,
@@ -72,6 +73,10 @@ export function BootstrapFailureLine({
   const triageLabel = triage === null ? null : (TRIAGE_LABELS[triage] ?? null);
   // 环境类（用户这边可修）才给「重新检测」；其它分诊的后端文案已写明下一步。
   const environmentFailure = triage === "environment";
+  // 块2 11.10：codegraph 环境前置被阻断（缺失 / 版本不符）时给【安装】入口
+  // ——与上面的「重新检测」是两个独立按钮：本按钮只管把 codegraph 装上，装完
+  // 后的复核由「重新检测」承担（后端 copy 的 action_zh 已写明「装好后点重试」）。
+  const codegraphInstallNeeded = isCodegraphInstallCode(failure.reason_code);
   const [rechecking, setRechecking] = useState(false);
   const [feedback, setFeedback] = useState<RecheckFeedback | null>(null);
   const inFlight = useRef(false);
@@ -149,6 +154,14 @@ export function BootstrapFailureLine({
           <span>可能副作用：{failure.external_side_effect}</span>
         ) : null}
       </p>
+      {codegraphInstallNeeded ? (
+        <div
+          className="mt-1"
+          data-testid="lc-bootstrap-failure-codegraph-install"
+        >
+          <CodegraphInstallEntry />
+        </div>
+      ) : null}
       {environmentFailure ? (
         <div
           className="mt-1 flex flex-wrap items-center gap-2"

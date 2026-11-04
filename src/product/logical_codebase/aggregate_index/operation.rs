@@ -462,7 +462,18 @@ impl AggregateIndexOperation {
         record.config_digest = config_digest;
         record.warning = acceptance.soft_warning();
         record.updated_at = now;
-        self.store.replace_active(project_id, record)
+        let active = self.store.replace_active(project_id, record)?;
+        // 激活落点回写 manifest 指针：evidence 链首查按
+        // `manifest.active_aggregate_index_id` 写 pin（`load_or_pin_index`），
+        // 该指针生产上无人写时，重建成功后每个 attempt 的首次检索仍恒
+        // 503——而 pin 文件要靠一次成功首查才生成（鸡生蛋）。回写时机＝该
+        // 世代 `replace_active` 成为 active 的此刻（不是 rebuild 入口）；
+        // 旧世代已被翻 Superseded，指针只认最新 active，与 patrol 对该字段
+        // 的引用巡检口径一致。回写失败显式失败：静默成功会留下「索引可用
+        // 但证据链恒 503」的假象。
+        self.logical
+            .set_active_aggregate_index(project_id, &active.aggregate_index_id)?;
+        Ok(active)
     }
 
     fn fail_building(

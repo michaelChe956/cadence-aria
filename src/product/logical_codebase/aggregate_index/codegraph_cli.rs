@@ -94,6 +94,23 @@ pub struct CodeGraphCli {
     executable: String,
 }
 
+/// 聚合根上的 codegraph 库目录路径（`.codegraph`）。
+///
+/// 判据与诊断同源：探测（`codegraph_library_present`）与错误消息里的路径
+/// 展示共用本函数，`.codegraph` 字面量全仓只此一处。
+pub fn codegraph_library_dir(root: &Path) -> PathBuf {
+    root.join(".codegraph")
+}
+
+/// 聚合根上的 codegraph 库目录是否在位。
+///
+/// 跨仓证据检索（evidence 链）要读该库目录：目录缺失时 codegraph 对该根恒返回
+/// 空结果（exit 0 + `[]`），证据链必须按「索引不可用」fail-closed，不能把
+/// 「索引坏了」误报成「没有证据」。库目录在册而查询无命中仍是合法空结果。
+pub fn codegraph_library_present(root: &Path) -> bool {
+    codegraph_library_dir(root).is_dir()
+}
+
 impl CodeGraphCli {
     pub fn new(runner: Arc<dyn BoundedCommandRunner>, executable: String) -> Self {
         Self { runner, executable }
@@ -149,7 +166,7 @@ impl CodeGraphCli {
         &self,
         root: &Path,
     ) -> Result<CodeGraphCommandResult, AggregateIndexError> {
-        if !root.join(".codegraph").is_dir() {
+        if !codegraph_library_present(root) {
             self.init(root)?;
             return self.sync(root);
         }
