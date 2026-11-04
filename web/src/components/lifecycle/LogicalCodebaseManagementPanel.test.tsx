@@ -21,7 +21,21 @@ function stubFetch(): void {
     vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.endsWith("/capabilities")) {
-        return jsonResponse({ providers: [] });
+        return jsonResponse({
+          providers: [
+            {
+              provider_type: "claude_code",
+              cli_program: "claude",
+              version: null,
+              probed_at: null,
+              probe_artifact_ref: null,
+              rows: [],
+            },
+          ],
+        });
+      }
+      if (url === "/api/providers/install-targets") {
+        return jsonResponse({ targets: [] });
       }
       return jsonResponse(
         { code: "not_found", message: `no route for ${url}` },
@@ -77,17 +91,29 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
-describe("LogicalCodebaseManagementPanel 批量核验条", () => {
-  it("面板渲染「一键核验全部」批量条（与能力卡并列）", () => {
+describe("LogicalCodebaseManagementPanel 批量核验入口", () => {
+  it("「一键核验全部」按钮在能力卡头部（上方），不再有面板底部的独立批量条", async () => {
     stubFetch();
     renderPanel();
 
+    // 按钮挂在能力卡里（不是面板底部另起一条）。
+    const card = await screen.findByTestId("provider-capability-card");
+    const startButton = screen.getByRole("button", { name: "一键核验全部" });
+    expect(card).toContainElement(startButton);
     expect(
-      screen.getByTestId("provider-capability-batch-bar"),
-    ).toBeInTheDocument();
+      screen.queryByTestId("provider-capability-batch-bar"),
+    ).not.toBeInTheDocument();
+
+    // 按钮在卡片内位于四家 provider 行之前（即「上面」）。
+    const firstProviderRow = await screen.findByTestId(
+      "provider-capability-provider-claude_code",
+    );
     expect(
-      screen.getByRole("button", { name: "一键核验全部" }),
-    ).toBeInTheDocument();
+      startButton.compareDocumentPosition(firstProviderRow) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // 按钮区域仍说明作用域与成本（REQ-PCR-06）。
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
       "逐 LC 核验",
     );

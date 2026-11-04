@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import addCodebaseDialogSource from "./AddCodebaseDialog.tsx?raw";
 import wizardSource from "./LogicalCodebaseRegistrationWizard.tsx?raw";
 import wizardTestSource from "./LogicalCodebaseRegistrationWizard.test.tsx?raw";
 import { LogicalCodebaseLayoutTree } from "./LogicalCodebaseLayoutTree";
@@ -9,6 +10,8 @@ import treeSource from "./LogicalCodebaseLayoutTree.tsx?raw";
 const PRODUCTION_SOURCES: Record<string, string> = {
   "LogicalCodebaseLayoutTree.tsx": treeSource,
   "LogicalCodebaseRegistrationWizard.tsx": wizardSource,
+  // 创建入口（添加代码库弹窗）复用同一目录树组件 ⇒ 也纳入"无第二份文案"扫描。
+  "AddCodebaseDialog.tsx": addCodebaseDialogSource,
 };
 
 /** 片5 含测试的全部源码文本（用于"不得引用已取消检索面"的全量锁）。 */

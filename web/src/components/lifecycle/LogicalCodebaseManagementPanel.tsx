@@ -2,7 +2,6 @@ import { AggregateIndexCard } from "./AggregateIndexCard";
 import { AggregateInitializationCard } from "./AggregateInitializationCard";
 import { LogicalCodebaseBootstrapCard } from "./LogicalCodebaseBootstrapCard";
 import { ProviderCapabilityCard } from "./ProviderCapabilityCard";
-import { ProviderCapabilityBatchBar } from "./ProviderCapabilityBatchBar";
 import { PointerPublicationPanel } from "./PointerPublicationPanel";
 import type {
   AggregateIndexActiveResponse,
@@ -122,12 +121,6 @@ export function LogicalCodebaseManagementPanel({
       ) : null}
       {logicalCodebases.length > 0 ? (
         <ProviderCapabilityCard
-          projectId={projectId}
-          logicalCodebaseId={activeLogicalCodebaseId}
-        />
-      ) : null}
-      {logicalCodebases.length > 0 ? (
-        <ProviderCapabilityBatchBar
           projectId={projectId}
           logicalCodebaseId={activeLogicalCodebaseId}
         />

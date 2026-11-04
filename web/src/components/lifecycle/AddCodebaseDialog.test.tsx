@@ -2,6 +2,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AddCodebaseDialog } from "./AddCodebaseDialog";
+import addCodebaseDialogSource from "./AddCodebaseDialog.tsx?raw";
+import layoutTreeSource from "./LogicalCodebaseLayoutTree.tsx?raw";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -137,6 +139,43 @@ describe("AddCodebaseDialog", () => {
     await vi.waitFor(() =>
       expect(onRegistrationCompleted).toHaveBeenCalledTimes(1),
     );
+  });
+
+  it("创建前给出目录布局说明（复用同一处布局文案源，不另抄一份）", () => {
+    render(
+      <AddCodebaseDialog
+        projectId="project_0001"
+        onCreatedLogical={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const tree = screen.getByTestId("lc-layout-tree");
+    // LC 根是普通空目录（不是 git 仓）；成员仓是直接子目录。
+    expect(tree).toHaveTextContent("my-lc-root/");
+    expect(tree).toHaveTextContent("不是 git 仓");
+    expect(
+      screen.getByTestId("lc-layout-tree-member-backend"),
+    ).toHaveTextContent("直接子目录");
+    expect(
+      screen.getByTestId("lc-layout-tree-member-frontend"),
+    ).toHaveTextContent("直接子目录");
+    // 可索引范围说明（只在 .worktrees/ 下的代码不可被索引）。
+    expect(screen.getByTestId("lc-layout-tree-note")).toHaveTextContent(
+      "只在 .worktrees/ 下的代码不可被索引",
+    );
+
+    // 文案同源：弹窗源码里不含第二份布局文案，只引用同一组件。
+    expect(addCodebaseDialogSource).toContain("LogicalCodebaseLayoutTree");
+    for (const marker of [
+      "my-lc-root/",
+      "逻辑代码库根",
+      "直接子目录",
+      "不可被索引",
+    ]) {
+      expect(addCodebaseDialogSource).not.toContain(marker);
+      expect(layoutTreeSource).toContain(marker);
+    }
   });
 
   it("name 手工输入后不被聚合根目录覆盖；创建失败展示错误", async () => {

@@ -552,7 +552,9 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     ).toHaveTextContent("1.0.1");
   });
 
-  it("gives codegraph its own install entry on the same card", async () => {
+  // owner 2026-11-04 裁定：codegraph 不是 provider，不展示在「Provider 能力核验」
+  // 面板里 ⇒ 断言【不出现】，不是「可选」。
+  it("does not show codegraph in the provider capability panel", async () => {
     installFetchRouter(unknownProjection, undefined, {
       targets: [
         {
@@ -575,14 +577,46 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       />,
     );
 
+    await screen.findByTestId("provider-capability-card");
     expect(
-      await screen.findByTestId("provider-install-target-codegraph"),
-    ).toBeInTheDocument();
+      screen.queryByTestId("provider-install-target-codegraph"),
+    ).toBeNull();
     expect(
-      screen.getByTestId("provider-install-start-codegraph"),
-    ).toHaveTextContent("安装");
+      screen.queryByTestId("provider-install-start-codegraph"),
+    ).toBeNull();
     expect(
-      screen.getByTestId("provider-install-manual-command-codegraph"),
-    ).toHaveTextContent("@colbymchenry/codegraph");
+      screen.queryByTestId("provider-install-manual-command-codegraph"),
+    ).toBeNull();
+    // 面板里也不出现 codegraph 字样。
+    expect(screen.queryByText("codegraph")).toBeNull();
+  });
+
+  // owner 2026-11-04 裁定：「一键核验全部」按钮放在上面 ⇒ 挂在能力卡头部，
+  // 且在四家 provider 行之前。
+  it("puts the batch revalidate button at the top of the card", async () => {
+    installFetchRouter(unknownProjection);
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const card = await screen.findByTestId("provider-capability-card");
+    const startButton = screen.getByTestId("capability-batch-start");
+    expect(startButton).toHaveTextContent("一键核验全部");
+    expect(card).toContainElement(startButton);
+    const firstProviderRow = screen.getByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    expect(
+      startButton.compareDocumentPosition(firstProviderRow) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // 按钮区域说明作用域与成本（REQ-PCR-06）。
+    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
+      "逐 LC 核验",
+    );
   });
 });

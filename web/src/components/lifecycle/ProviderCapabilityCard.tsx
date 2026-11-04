@@ -16,6 +16,12 @@ import type {
   ProviderCapabilityProviderSnapshotDto,
   ProviderCapabilitiesResponse,
 } from "../../api/types";
+import {
+  ProviderCapabilityBatchResults,
+  ProviderCapabilityBatchScope,
+  ProviderCapabilityBatchStartButton,
+  useProviderCapabilityBatch,
+} from "./ProviderCapabilityBatch";
 import { ProviderInstallActionButton } from "./ProviderInstallActionButton";
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -83,6 +89,8 @@ export function ProviderCapabilityCard({
   const [feedbackByProvider, setFeedbackByProvider] = useState<
     Record<string, RevalidateFeedback>
   >({});
+  // 「一键核验全部」的作业状态（REQ-PCR-06：按钮由能力卡提供 ⇒ 状态挂在卡上）。
+  const batch = useProviderCapabilityBatch(projectId, logicalCodebaseId);
 
   const reload = useCallback(async (): Promise<void> => {
     if (projectId === null || logicalCodebaseId === null) {
@@ -204,13 +212,15 @@ export function ProviderCapabilityCard({
       data-testid="provider-capability-card"
       className="border-b border-[var(--aria-line)] px-3 py-2"
     >
+      {/* 头部右侧 = 「一键核验全部」入口（REQ-PCR-06：能力卡 SHALL 提供该按钮；
+          owner 2026-11-04 裁定：按钮放在上面、不要放在下面）。 */}
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-xs font-semibold text-[var(--aria-ink)]">
           Provider 能力核验
         </h3>
-        <span className="text-xs text-[var(--aria-ink-muted)]">
-        </span>
+        <ProviderCapabilityBatchStartButton state={batch} />
       </div>
+      <ProviderCapabilityBatchScope />
       {loadError ? (
         <p
           data-testid="provider-capability-load-error"
@@ -333,34 +343,17 @@ export function ProviderCapabilityCard({
           })}
         </ul>
       ) : null}
-      {/* codegraph 纳入同一安装机制（11.10）：它没有 capability 探针，只按
-          本地是否可用给【安装】（+ 手动命令）或【更新】。 */}
-      {installTargets.codegraph ? (
-        <div
-          data-testid="provider-install-target-codegraph"
-          className="mt-2 rounded border border-[var(--aria-line)] px-2 py-1.5"
-        >
-          <div className="flex flex-wrap items-baseline justify-between gap-x-2">
-            <span className="text-xs font-semibold text-[var(--aria-ink)]">
-              codegraph
-            </span>
-            <span className="text-xs text-[var(--aria-ink-muted)]">
-              {installTargets.codegraph.local_version ?? "未探测"}
-            </span>
-          </div>
-          <ProviderInstallActionButton
-            target="codegraph"
-            cliAvailable={installTargets.codegraph.cli_available}
-            localVersion={installTargets.codegraph.local_version}
-            latestVersion={installTargets.codegraph.latest_version}
-            capabilityConfirmed
-            onSettled={() => {
-              void reload();
-              void reloadInstallTargets();
-            }}
-          />
-        </div>
-      ) : null}
+      {/* 一键批量核验的逐项结果（按钮在卡片头部上方；结果留在卡片下方，
+          逐项状态/单项重试/安装更新入口与既有批量条语义一致）。
+          owner 2026-11-04 裁定：codegraph 不展示在本面板 ⇒ 此处只呈现
+          四家真实 provider 的批量结果。 */}
+      <ProviderCapabilityBatchResults
+        state={batch}
+        installTargets={installTargets}
+        onSettled={() => {
+          void reloadInstallTargets();
+        }}
+      />
     </div>
   );
 }

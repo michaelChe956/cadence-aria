@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { createLogicalCodebase } from "../../api/codebases";
+import { LogicalCodebaseLayoutTree } from "./LogicalCodebaseLayoutTree";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import { DialogShell } from "../shared/DialogShell";
 import type { LogicalCodebaseDto } from "../../api/types";
@@ -90,6 +91,10 @@ export function AddCodebaseDialog({
           <p className="text-sm text-[var(--aria-ink-muted)]">
             以聚合根目录组织多个成员仓库，创建后在本弹窗内登记成员（自动发现）。
           </p>
+          {/* 目录布局说明：复用同一处布局文案源（`LogicalCodebaseLayoutTree`，
+              与登记向导 / 冷启动卡同一组件），不另抄一份文案。
+              REQ-LAYOUT-02：多仓创建/登记入口 SHALL 在显著位置给出目录树示意。 */}
+          <LogicalCodebaseLayoutTree />
           <label className="block text-sm font-semibold text-[var(--aria-ink)]">
             聚合根目录
             <input
