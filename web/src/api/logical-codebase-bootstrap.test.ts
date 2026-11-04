@@ -33,6 +33,13 @@ function projectionResponse() {
       },
     ],
     planning_ready: false,
+    advance_stop: {
+      step: "rules_policy",
+      reason: "waiting_for_human",
+      reason_code: "aggregate_initialization_trust_waiting",
+      detail: "workspace trust entry is blocked",
+      stopped_at: "2026-11-04T11:02:08Z",
+    },
     notices: [
       {
         key: "bootstrap:aggregate_index_active:aggregate-index-1:bootstrap_waiting_for_human",
@@ -73,6 +80,15 @@ describe("logical codebase bootstrap api client", () => {
     expect(projection.steps).toHaveLength(5);
     expect(projection.notices[0]?.reason_code).toBe(
       "bootstrap_waiting_for_human",
+    );
+    // 停止原因（advance_stop）随投影透传：机器码与原始诊断都在。
+    expect(projection.advance_stop?.step).toBe("rules_policy");
+    expect(projection.advance_stop?.reason).toBe("waiting_for_human");
+    expect(projection.advance_stop?.reason_code).toBe(
+      "aggregate_initialization_trust_waiting",
+    );
+    expect(projection.advance_stop?.detail).toContain(
+      "workspace trust entry is blocked",
     );
   });
 
@@ -127,6 +143,7 @@ describe("logical codebase bootstrap api client", () => {
           logical_codebase_id: "logical_codebase_0001",
           advanced_steps: ["rules_policy", "member_index"],
           stopped_reason: "planning_ready",
+          stopped_detail: "workspace trust entry is blocked",
           projection: projectionResponse(),
         }),
         { status: 200 },
@@ -150,6 +167,7 @@ describe("logical codebase bootstrap api client", () => {
     expect(JSON.parse(String(init.body))).toEqual({});
     expect(result.advanced_steps).toEqual(["rules_policy", "member_index"]);
     expect(result.stopped_reason).toBe("planning_ready");
+    expect(result.stopped_detail).toBe("workspace trust entry is blocked");
     expect(result.projection.steps).toHaveLength(5);
   });
 

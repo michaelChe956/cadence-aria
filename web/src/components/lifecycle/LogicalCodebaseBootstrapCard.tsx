@@ -12,6 +12,12 @@
 // 推进失败后的兼底入口——幂等端点，重复调用不重复推进。
 // 规则漂移（policy/rule/reference digest 漂移）另给一条显眼提示：provider
 // 启动会被 PolicyDrift 拒，必须显式「重新生成政策」。
+//
+// 2026-11-04（冷启动停止原因可见化）：投影的 `advance_stop`（后端落盘的
+// 最近一次可解释停止——停在哪一步 + 稳定机器码 + 原始拒绝上下文）渲染成
+// 一块次要信息：机器码与诊断降到次要行（等宽小字），成品中文三段与动作
+// 按钮仍由通知卡（`bootstrap:advance-stop:*`）承担——不重复渲染同一段话；
+// 两道闸门的区分键（provider 选择门 / trust 门）另给一个短标签。
 import { useState } from "react";
 import {
   postLogicalCodebaseBootstrapAction,
@@ -59,6 +65,17 @@ const ADVANCE_STOP_LABELS: Record<string, string> = {
   waiting_for_human: "等待人工处理",
   no_actionable_step: "没有可推进的步骤",
   iteration_limit: "已达单次推进上限",
+};
+
+// 冷启动停止原因的两道闸门区分键（后端稳定码）——通知 summary 已给成品
+// 三段（问题/原因/怎么做），这里只补一个**短标签**让用户一眼看出该去
+// 核验 provider 还是去完成信任确认（不重复渲染通知里的整段文案）：
+// - aggregate_initialization_provider_needs_verification：provider 选择门
+//   （provider 装了但还没核验能力证据）；
+// - aggregate_initialization_trust_waiting：trust 门（还没拿到这台机器的信任）。
+const ADVANCE_STOP_GATE_LABELS: Record<string, string> = {
+  aggregate_initialization_provider_needs_verification: "需先核验 provider",
+  aggregate_initialization_trust_waiting: "需先完成信任确认",
 };
 
 // 规则漂移（provider 启动会被 PolicyDrift 拒）的三种稳定 failure.reason_code
@@ -133,6 +150,11 @@ export function LogicalCodebaseBootstrapCard({
     return null;
   }
   const current = projection;
+  // 最近一次可解释的停止（被停步骤仍「未开始」时才有；就绪后后端清除）。
+  const advanceStop = current.advance_stop ?? null;
+  const advanceStopGateLabel = advanceStop
+    ? (ADVANCE_STOP_GATE_LABELS[advanceStop.reason_code] ?? null)
+    : null;
 
   // 同一步骤的动作去重：同一 (step, action) 只渲染一个按钮。
   // 优先级：显眼提示（规则漂移）> notice（带失败原因与副作用说明）> 步骤行。
@@ -344,6 +366,45 @@ export function LogicalCodebaseBootstrapCard({
           </li>
         ))}
       </ul>
+      {advanceStop ? (
+        // 冷启动为什么停在这一步：通知卡（`bootstrap:advance-stop:*`）给的是
+        // 成品中文三段（问题/原因/怎么做），这里补通知里没有的三样——停在哪
+        // 一步、机器码、原始拒绝上下文；机器码与诊断按本面板既有风格降到
+        // 次要行（等宽小字），不抢通知的成品文案。
+        <div
+          data-testid="lc-bootstrap-advance-stop"
+          className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs leading-snug"
+        >
+          <p
+            className="text-slate-700"
+            data-testid="lc-bootstrap-advance-stop-headline"
+          >
+            {`冷启动停在「${STEP_LABELS[advanceStop.step] ?? advanceStop.step}」：${ADVANCE_STOP_LABELS[advanceStop.reason] ?? advanceStop.reason}`}
+            {advanceStopGateLabel ? (
+              <span
+                className="ml-1 rounded bg-amber-200 px-1.5 py-0.5 text-[11px] font-semibold text-amber-900"
+                data-testid="lc-bootstrap-advance-stop-gate"
+              >
+                {advanceStopGateLabel}
+              </span>
+            ) : null}
+          </p>
+          <p
+            className="mt-0.5 font-mono text-[11px] text-slate-500"
+            data-testid="lc-bootstrap-advance-stop-machine-line"
+          >
+            机器码：{advanceStop.reason_code}
+          </p>
+          {advanceStop.detail ? (
+            <pre
+              className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[11px] text-slate-500"
+              data-testid="lc-bootstrap-advance-stop-detail"
+            >
+              {advanceStop.detail}
+            </pre>
+          ) : null}
+        </div>
+      ) : null}
       {projection.notices.length > 0 ? (
         <div className="mt-2 space-y-2">
           {projection.notices.map((notice) => (
