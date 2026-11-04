@@ -150,6 +150,134 @@ fn seed_repo_shared_worktree_lock(
         .expect("acquire repo worktree lock");
 }
 
+/// group 终局确认（FinalConfirm）夹具 + 「LC 权威 + 冻结 target_snapshot」。
+///
+/// 与 part_12 的 `group_attempt_waiting_for_final_confirm` 同形态（同样补齐
+/// work item + plan + handoff revision + 终局就绪快照），但**只把锁维度换成
+/// 仓维**：
+/// * 权威先建（`ProjectStore::create` 的 project id 按目录数分配，见本文件
+///   头部纪律注释）；
+/// * attempt 带冻结 `target_snapshot`（仓维路由凭证，否则 `route_issue_shared_worktree`
+///   fail-closed，测到的不是锁语义而是 fail-closed）；
+/// * 锁建在仓维三元键 `(project, issue, logical repository)` 上，owner = 本
+///   attempt，活跃项 = 最后一个 unit（块3 删掉 `IssueSharedWorktreeRoute::Legacy`
+///   臂后引擎只读写仓维记录）。
+fn group_attempt_waiting_for_final_confirm_under_lc_authority() -> (
+    tempfile::TempDir,
+    ProductAppPaths,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    CodingExecutionAttempt,
+    LogicalAuthority,
+) {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // 权威先建 ⇒ project 分配为 project_0001（否则 attempt 落盘会抢走 project_0001）。
+    let authority = seed_lc_authority(&paths, root.path());
+    seed_group_work_items_and_plan(&paths);
+    let store = CodingAttemptStore::new(paths.clone());
+    let worktree = root.path().join("group-worktree");
+    init_group_worktree(&worktree);
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Fake,
+                reviewer: Some(ProviderName::Fake),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: Some(authority.snapshot(&paths)),
+            max_auto_rework: 2,
+            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
+        })
+        .expect("create group attempt");
+    seed_authoritative_group_final_review_fixture(&store, &attempt);
+    store
+        .save_review_request(&attempt, &sample_review_request(&attempt.id))
+        .expect("save review request");
+    let lifecycle = LifecycleStore::new(paths.clone());
+    for work_item_id in ["work_item_0001", "work_item_0002"] {
+        lifecycle
+            .update_work_item_execution_status(
+                "project_0001",
+                "issue_0001",
+                work_item_id,
+                WorkItemStatus::Coding,
+            )
+            .expect("set coding status");
+    }
+    let last_unit = store
+        .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("group coding units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0002")
+        .expect("last coding unit");
+    store
+        .update_coding_unit_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &last_unit.id,
+            CodingExecutionUnitStatus::Completed,
+            Some("frontend done".to_string()),
+        )
+        .expect("refresh terminal attempt pointers");
+    let attempt =
+        crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::FinalConfirm,
+        )
+        .expect("final confirm stage");
+    let attempt = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::WaitingForHuman,
+        )
+        .expect("waiting for human");
+    let attempt = store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some("seed-commit".to_string()),
+        )
+        .expect("set head commit");
+    // 仓维锁现场：owner = 本 attempt，活跃项 = 最后一个 unit。
+    seed_repo_shared_worktree_lock(&paths, &authority, &attempt, "work_item_0002");
+    store
+        .save_timeline_node(&attempt, CodingTimelineNode {
+            id: "coding_node_0001".to_string(),
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::FinalConfirm,
+            title: "最终确认".to_string(),
+            status: CodingTimelineNodeStatus::Running,
+            agent_role: Some(CodingAgentRole::System),
+            summary: None,
+            started_at: "2026-06-27T00:00:00Z".to_string(),
+            completed_at: None,
+            artifact_refs: Vec::new(),
+        })
+        .expect("save final confirm node");
+    write_complete_group_final_readiness_snapshot(&store, &attempt);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    (root, paths, store, engine, attempt, authority)
+}
+
 #[tokio::test]
 async fn completing_group_unit_marks_current_unit_completed_and_next_running() {
     let (_root, paths, store, engine, attempt, authority) =
@@ -179,34 +307,22 @@ async fn completing_group_unit_marks_current_unit_completed_and_next_running() {
 
 #[tokio::test]
 async fn completing_group_unit_moves_issue_shared_lock_to_next_unit() {
-    let (_root, paths, _store, engine, attempt) = group_engine_with_two_units();
-    let lifecycle = LifecycleStore::new(paths.clone());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: paths.root().join("shared-worktree"),
-            base_branch: "HEAD".to_string(),
-        })
-        .expect("upsert shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
-            "project_0001",
-            "issue_0001",
-            "work_item_0001",
-            &attempt.id,
-        )
-        .expect("acquire shared lock for first unit");
+    // 锁事实在**仓维**三元键 `(project, issue, logical repository)`：块3 删掉
+    // `IssueSharedWorktreeRoute::Legacy` 臂后引擎只读写仓维记录，issue 维记录
+    // 不再被引擎读写 ⇒ 断言的**读取维度**由 issue 维改为仓维；语义不变：
+    // 锁仍从当前 unit 转移到下一个 unit（`current_active_work_item_id`
+    // 由 work_item_0001 变为 work_item_0002），且转移由本 attempt 持有。
+    let (_root, paths, _store, engine, attempt, authority) =
+        group_engine_with_two_units_under_lc_authority();
+    seed_repo_shared_worktree_lock(&paths, &authority, &attempt, "work_item_0001");
 
     engine
         .complete_current_group_unit(&attempt, Some("unit handoff saved".to_string()))
         .await
         .expect("complete unit");
 
-    let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+    let shared = LifecycleStore::new(paths.clone())
+        .get_repo_shared_worktree("project_0001", "issue_0001", authority.member_id)
         .expect("shared worktree")
         .expect("existing shared worktree");
     assert_eq!(
@@ -387,7 +503,15 @@ async fn group_final_review_prompt_rejects_dangling_published_handoff_revision()
 
 #[tokio::test]
 async fn group_final_confirm_completes_attempt_after_all_units_completed() {
-    let (_root, _paths, store, engine, attempt) = group_attempt_waiting_for_final_confirm();
+    // 断言的**读取维度**由 issue 维改为仓维：块3 删掉
+    // `IssueSharedWorktreeRoute::Legacy` 臂后引擎只读写仓维记录
+    // （`(project, issue, logical repository)` 三元键，锁 kind 为
+    // `repo_worktree_lock_owner`），issue 维记录不再被引擎读写 ⇒ 读 issue 维
+    // 永远拿不到引擎写的锁事实。语义不变：确认后 attempt 完成、全部 unit
+    // 完成、**锁被释放**（`current_active_work_item_id` 为空）且最后一个
+    // unit 记为已完成（`last_completed_work_item_id` = work_item_0002）。
+    let (_root, _paths, store, engine, attempt, authority) =
+        group_attempt_waiting_for_final_confirm_under_lc_authority();
 
     let updated = engine
         .handle_final_confirm(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -404,7 +528,7 @@ async fn group_final_confirm_completes_attempt_after_all_units_completed() {
             .all(|unit| unit.status == CodingExecutionUnitStatus::Completed)
     );
     let shared = LifecycleStore::new(store.paths())
-        .get_issue_shared_worktree(&updated.project_id, &updated.issue_id)
+        .get_repo_shared_worktree(&updated.project_id, &updated.issue_id, authority.member_id)
         .expect("shared worktree")
         .expect("existing shared worktree");
     assert_eq!(shared.current_active_work_item_id, None);
