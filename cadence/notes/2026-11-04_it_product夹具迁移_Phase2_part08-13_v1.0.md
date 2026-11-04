@@ -107,6 +107,16 @@
    `Ok(())`（"if present" 语义）⇒ 不建锁记录不会在入口 fail-closed，而是**到锁转移那一步才炸**。
    ⇒ 这条断言是**锚在真实仓维锁记录上**的（缺记录 ⇒ 直接 IO 失败），不是被 fail-closed 蒙混。
 
+   **负控实证**（`RepointP2ToRepoDimPart13` 带 md5 校验重跑，本组复核结论一致）：
+   - 负控 A（去掉 test1 的仓维 seeding）⇒ **红**：
+     `complete unit: Store(Io("open …/issues/issue_0001/shared-worktrees/<uuid>.json: No such file or directory (os error 2)"))`
+   - 负控 B（去掉终局夹具里的仓维 seeding）⇒ **红**：panic `existing shared worktree`
+     （`get_repo_shared_worktree` 返回 `None`）
+   ⇒ 两侧都证明「仓维 shared worktree 记录是 group 推进锁转移的**必要条件**」，
+   缺记录时既不是 fail-closed、也不是断言被弱化蒙混。
+   （注：首次负控曾报「2 passed」，那是并发写覆盖导致编译到了别人版本，结论已作废；
+   上述 A/B 是带 md5 校验重跑的结果。）
+
 3. **gateway 只认真实 provider**：`ProviderRef::from_provider_name(Fake)` 直接
    `provider_unsupported_for_gateway_launch` ⇒ 逻辑 target 的 provider 角色必须挂
    ClaudeCode / Codex / Pi / KimiCode。本组把 **internal reviewer 角色**改挂
@@ -143,53 +153,53 @@ flock /tmp/aria-cargo.lock cargo test --locked --test it_product
 ```
 ⇒ 迁移完成时：**test result: FAILED. 193 passed; 18 failed**
 ⇒ 并行 worker（P2A / P2 改指组）收口后复跑：**test result: FAILED. 202 passed; 9 failed**
-（与 Main 给的基线 202 / 9 一致；Phase 1 起始基线为 153 passed / 58 failed。）
+⇒ **全部收口后（本组独立复跑，20:36）：**
+```
+test result: ok. 211 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+```
 
-剩余 9 条：7 条 issue 维 shared worktree 族（P2 改指仓维，在途）+ 1 条 gateway 拒 Fake（P2A 文件）
-+ 1 条 Fake 族（part_01，helper 作者）。
-**本组范围内**：part_08 六条 P3、part_13 三条 P3 全绿；part_13 的两条 P2 已由
-`RepointP2ToRepoDimPart13` 完成**读取维度**改指仓维，本组补上**夹具侧的仓维锁 seeding**
-后，其中 `group_final_confirm_completes_attempt_after_all_units_completed` 已实测转绿
-（见 §3.3 注）。
+阶段基线对照：
 
-### 3.3 全量剩余 9 个失败用例名（202 / 9 口径，含归属与阻塞签名）
-
-| # | 用例 | 归属 | 类别 | 阻塞签名（原始错误文本） |
-|---|---|---|---|---|
-| 1 | `completing_group_unit_moves_issue_shared_lock_to_next_unit` | **part_13（本组）** | **P2** | `complete unit: Store(Io("open …/issues/issue_0001/shared-worktrees/8ce5948f-….json: No such file or directory (os error 2)"))` —— 夹具侧的**仓维锁 seeding**缺失（读取维度已由 `RepointP2ToRepoDimPart13` 改到仓维）。**本组已实测：同款 seeding 恢复后另一条同类用例直接转绿** ⇒ 只需取消注释该 seeding（由该 worker 收口） |
-| 2 | `group_final_confirm_completes_attempt_after_all_units_completed` | **part_13（本组）** | **P2** | `existing shared worktree`（仓维记录不存在）。**本组已在夹具侧补上仓维锁 seeding（part_13.rs:260）并实测转绿** ✅ |
-| 3 | `group_final_confirm_releases_transferred_shared_worktree_lock_by_owner` | part_01（夹具在 **part_12**，已派给 `UnblockIntoPartsAndRepointP2` 一并改） | **P2** | `group final confirm releases the transferred lock owned by the attempt: Store(NotFound { kind: "issue", id: "issue_0001" })` |
-| 4 | `aborted_group_attempt_releases_transferred_shared_worktree_lock_by_owner` | part_01 | P2 | `LegacySharedWorktreePresent("project_0001/issue_0001")` |
-| 5 | `failed_group_attempt_releases_transferred_shared_worktree_lock_by_owner` | part_01 | P2 | `LegacySharedWorktreePresent("project_0001/issue_0001")` |
-| 6 | `dirty_group_delete_keeps_transferred_shared_worktree_lock` | part_01 | P2 | `dirty group delete keeps the transferred lock: ()` |
-| 7 | `failed_attempt_releases_issue_shared_worktree_lock` | part_01 | P2 | `handle failed: LegacySharedWorktreePresent("project_0001/issue_0001")` |
-| 8 | `final_confirm_releases_issue_shared_worktree_lock` | part_01 | P2 | `final confirm: LegacySharedWorktreePresent("project_0001/issue_0001")` |
-| 9 | `dirty_shared_worktree_blocks_lock_release_and_next_work_item` | part_01 | P2 | `dirty worktree diagnostics must not replace terminal failure: LegacySharedWorktreePresent("project_0001/issue_0001")` |
-
-> 本组范围内**剩余红灯 2 条，均在 part_13，均为 P2**；第 2 条已由本组补夹具后转绿，
-> 第 1 条只差取消注释仓维锁 seeding（由 `RepointP2ToRepoDimPart13` 收口）。
-> part_12 的那条（#3）已按 Main 口径派给 `UnblockIntoPartsAndRepointP2`（part_01 + part_12 一并改），本组不再动 part_12。
-
-### 3.3.1 本组迁移完成时（193 / 18）的 18 条快照 —— 其后已收口 9 条
-
-已收口（⇒ 现已绿）：
-
-| 用例 | 归属 | 收口方 |
+| 时点 | passed | failed |
 |---|---|---|
-| `final_confirm_owner_conflict_does_not_complete_attempt` | part_17 | `RepointP2ToRepoDimPart17`（P2 改指仓维） |
-| `group_unit_owner_conflict_does_not_advance_unit_or_attempt` | part_17 | 同上 |
-| `coding_coder_run_resumes_previous_coder_provider_session` | part_01 | helper 作者（Fake → 真实 provider + gateway） |
-| `coding_coder_rework_with_resume_uses_delta_prompt` | part_01 | 同上 |
-| `group_next_work_item_coder_run_does_not_resume_previous_unit_session` | part_01 | 同上 |
-| `coding_code_reviewer_run_records_session_without_resume` | part_03 | P2A |
-| `coding_internal_reviewer_uses_fresh_provider_session` | part_03 | P2A |
-| `execute_coding_persists_coder_role_run_and_full_output_chat_entry` | part_04 | P2A |
-| `pi_role_with_supervised_mode_normalized_to_auto` | part_04 | P2A |
+| Phase 1 起始基线 | 153 | 58 |
+| 本组迁移完成 | 193 | 18 |
+| 并行 worker 收口后 | 202 | 9 |
+| **全部收口（本组复跑）** | **211** | **0** |
 
-其原始阻塞签名（留档）：
-- part_17 两条：`assertion failed: matches!(error, …Conflict { kind: "issue_worktree_lock_owner", .. })`
-- part_01 三条 Fake 族：`ProviderStream("logical_provider_gateway_required")`
-- part_03/part_04 四条：`ProviderStream("coding_run_lease_unknown: 租约状态未知，已停等：repository routing load failed: product_store_not_found: issue issue_0001")`
+`cargo fmt --check` ⇒ clean。
+
+### 3.3 全量剩余失败用例名：**0 条**（211 / 0）
+
+全部收口后**无剩余失败用例**。下表留档「202 / 9 口径下最后 9 条」的归属与原始阻塞签名，
+以及各条的收口方（便于追溯「谁把哪条从红转绿」）：
+
+| # | 用例（202/9 口径） | 归属 | 类别 | 原始阻塞签名 | 收口方 |
+|---|---|---|---|---|---|
+| 1 | `completing_group_unit_moves_issue_shared_lock_to_next_unit` | **part_13（本组）** | P2 | `complete unit: Store(Io("open …/issues/issue_0001/shared-worktrees/8ce5948f-….json: No such file or directory (os error 2)"))` | 读取维度：`RepointP2ToRepoDimPart13`；夹具侧仓维锁 seeding：**本组** |
+| 2 | `group_final_confirm_completes_attempt_after_all_units_completed` | **part_13（本组）** | P2 | `existing shared worktree`（仓维记录不存在） | 读取维度：`RepointP2ToRepoDimPart13`；夹具侧仓维锁 seeding：**本组** |
+| 3 | `group_final_confirm_releases_transferred_shared_worktree_lock_by_owner` | part_01（夹具在 part_12） | P2 | `Store(NotFound { kind: "issue", id: "issue_0001" })` | `UnblockIntoPartsAndRepointP2`（part_01 + part_12 一并改仓维） |
+| 4 | `aborted_group_attempt_releases_transferred_shared_worktree_lock_by_owner` | part_01 | P2 | `LegacySharedWorktreePresent("project_0001/issue_0001")` | `UnblockIntoPartsAndRepointP2` |
+| 5 | `failed_group_attempt_releases_transferred_shared_worktree_lock_by_owner` | part_01 | P2 | `LegacySharedWorktreePresent("project_0001/issue_0001")` | `UnblockIntoPartsAndRepointP2` |
+| 6 | `dirty_group_delete_keeps_transferred_shared_worktree_lock` | part_01 | P2 | `dirty group delete keeps the transferred lock: ()` | `UnblockIntoPartsAndRepointP2` |
+| 7 | `failed_attempt_releases_issue_shared_worktree_lock` | part_01 | P2 | `handle failed: LegacySharedWorktreePresent("project_0001/issue_0001")` | `UnblockIntoPartsAndRepointP2` |
+| 8 | `final_confirm_releases_issue_shared_worktree_lock` | part_01 | P2 | `final confirm: LegacySharedWorktreePresent("project_0001/issue_0001")` | `UnblockIntoPartsAndRepointP2` |
+| 9 | `dirty_shared_worktree_blocks_lock_release_and_next_work_item` | part_01 | P2 | `dirty worktree diagnostics must not replace terminal failure: LegacySharedWorktreePresent("project_0001/issue_0001")` | `UnblockIntoPartsAndRepointP2` |
+
+### 3.3.1 本组迁移完成时（193 / 18）的 18 条快照 —— 其后全部收口
+
+| 用例 | 归属 | 类别 | 原始阻塞签名 | 收口方 |
+|---|---|---|---|---|
+| `final_confirm_owner_conflict_does_not_complete_attempt` | part_17 | P2 | `assertion failed: matches!(error, …Conflict { kind: "issue_worktree_lock_owner", .. })` | `RepointP2ToRepoDimPart17` |
+| `group_unit_owner_conflict_does_not_advance_unit_or_attempt` | part_17 | P2 | 同上 | `RepointP2ToRepoDimPart17` |
+| `coding_coder_run_resumes_previous_coder_provider_session` | part_01 | P1 | `first coding run: ProviderStream("logical_provider_gateway_required")` | helper 作者（Fake → 真实 provider + gateway） |
+| `coding_coder_rework_with_resume_uses_delta_prompt` | part_01 | P1 | 同上 | 同上 |
+| `group_next_work_item_coder_run_does_not_resume_previous_unit_session` | part_01 | P1 | `execute second unit coding: ProviderStream("logical_provider_gateway_required")` | 同上 |
+| `coding_code_reviewer_run_records_session_without_resume` | part_03 | P1 | `code review provider run: ProviderStream("coding_run_lease_unknown: 租约状态未知，已停等：repository routing load failed: product_store_not_found: issue issue_0001")` | P2A |
+| `coding_internal_reviewer_uses_fresh_provider_session` | part_03 | P1 | `internal reviewer provider run: ProviderStream("coding_run_lease_unknown: … product_store_not_found: issue issue_0001")` | P2A |
+| `execute_coding_persists_coder_role_run_and_full_output_chat_entry` | part_04 | P1 | `execute coding: ProviderStream("coding_run_lease_unknown: … product_store_not_found: issue issue_0001")` | P2A |
+| `pi_role_with_supervised_mode_normalized_to_auto` | part_04 | P1 | `execute coding: ProviderStream("coding_run_lease_unknown: … product_store_not_found: issue issue_0001")` | P2A |
+| 本组 9 条 P3 + 3 条 P2 | part_08 / part_13 / part_12 | P3/P2 | 见 §1 逐用例表 | **本组** |
 
 > 本组**从未**产生 P1 红灯：Phase 1 判定的 part_08 P1
 > （`execute_group_final_review_prompt_includes_request_commit_diff_and_function_context`）
