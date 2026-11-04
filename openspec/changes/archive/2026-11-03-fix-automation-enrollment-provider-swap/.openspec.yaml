@@ -1,0 +1,13 @@
+schema: spec-driven
+created: 2026-11-02
+goal: 让 owner 能在界面上换掉 provider，且换失败不丢产物；让人工门失败面可行动
+x-tracker-status: draft
+x-owner-decisions:
+  - id: A-1-route
+    decided: 2026-11-02
+    decision: 路线甲（改现有四处：绑定不递增版本号 / 换 payload 同时换代 / 命令重试认版本号 / 失败文案指路）
+    rejected: 路线乙（新增原子换代命令）——改动面约一倍，持久化协议要新设计
+  - id: dialog-terminate-button
+    decided: 2026-11-02
+    decision: 不在配置弹窗新增「终止并换用新 provider」按钮，仅在失败文案指路到既有「终止整个自动化」确认面
+    reason: 终止不可逆，放在配置弹窗有误点风险；该界面另有终止确认面板可见性缺陷（F-C）

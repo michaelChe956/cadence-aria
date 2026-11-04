@@ -1,0 +1,51 @@
+schema: spec-driven
+created: 2026-11-03
+goal: 让新机器上的聚合冷启动能一次跑通，并让失败面与审计预算对 owner 可行动
+x-tracker-status: draft
+x-owner-decisions:
+  - id: K-2-git-skip
+    decided: 2026-11-03
+    decision: 整个 .git/ 跳过
+    accepted-cost: 平台检测不到成员仓的 git 提交状态；一个既有测试按新口径改写
+  - id: B-4-codegraph
+    decided: 2026-11-02
+    decision: 维持致命 + 前置探测 + 只报一次（spec:99 早有规定）
+  - id: pi-skills
+    decided: 2026-11-02
+    decision: 无需改动 —— Cadence-skills install.sh:401-404 明确 pi 与 Kimi Code 都用 ~/.agents/skills
+  - id: K-3-budget-model
+    decided: 2026-11-03
+    decision: 立项 + 与本批一起实施；实现方式为元数据差分法（不用 inotify）
+  - id: skills-marker
+    decided: 2026-11-02
+    decision: 不改（用户自己决定要不要重新初始化）
+  - id: streaming-read
+    decided: 2026-11-02
+    decision: 改（流式读，超了立刻停）
+  - id: b5-residual
+    decided: 2026-11-03
+    decision: R1（预览+备份）与 R2（workbench 透出 details）都不做，保持原样
+  - id: b2-button-target
+    decided: 2026-11-03
+    decision: 失败面只指单个「核验 X」；票3「一键核验全部」留在块3
+  - id: provider-install-button-location
+    decided: 2026-11-03
+    decision: 安装/更新按钮放到能力探针那块；探针不通过显示「安装」，本地已有不显示安装，版本落后显示「更新」；块3 票3 复用同一套
+  - id: provider-version-check
+    decided: 2026-11-03
+    decision: 精确比较（semver）+ 查 npm registry 的 dist-tags.latest
+  - id: provider-install-execution
+    decided: 2026-11-03
+    decision: A + B 兜底 —— 平台先跑安装；失败（权限/网络）给手动命令；不自动 sudo
+  - id: npm-registry
+    decided: 2026-11-03
+    decision: 默认阿里镜像 registry.npmmirror.com，允许环境变量 NPM_REGISTRY 覆盖
+  - id: npm-latest-cache
+    decided: 2026-11-03
+    decision: 查最新版本的结果 durable 缓存 24 小时
+  - id: codegraph-install
+    decided: 2026-11-03
+    decision: codegraph 同样纳入安装按钮机制，用阿里镜像
+  - id: kimi-install-source
+    decided: 2026-11-03
+    decision: Kimi Code 走官方脚本 https://code.kimi.com/kimi-code/install.sh；UI 必须告知「将执行来自 code.kimi.com 的安装脚本」，失败给手动命令

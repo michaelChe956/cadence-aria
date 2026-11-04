@@ -220,7 +220,7 @@
 #### Scenario: 终止后自动重开被拒、人工重新开启受控
 
 - **WHEN** enrollment 已写 terminated_at 后提交 Enable/rebind/继续
-- **THEN** rebind 与继续一律拒绝且零副作用；Enable 仅当由人工入口携带稳定 command_id、payload 与终止记录逐字段相等且收口已完成时，以同 id 新 revision 取代并清空 terminated_at（REQ-WIGA-09）；任何自动路径不得重新开启，不降级为手动轮
+- **THEN** rebind 与继续一律拒绝且零副作用；Enable 仅当由人工入口携带稳定 command_id、`source` 与 `target` 与终止记录逐字段相等、且收口已完成时，以同 id 新 revision 取代并清空 terminated_at（REQ-WIGA-09）；其中 `options`（含 provider）允许与终止记录不同 —— 该放行**仅限非悬空源场景**（终止记录的原 source 已悬空时，悬空源重授权路径的 `options`/`target` 仍须与终止记录逐字段相等，MUST 拒绝漂移，见 REQ-DRG-18）；非悬空源场景下该差异按换代路径落盘（REQ-WIGA-SWAP-01）；任何自动路径不得重新开启，不降级为手动轮
 
 ### Requirement: 无页面的确定性后端推进与人工停点（REQ-WIGA-03）
 对仍有效且精确绑定的 enrollment（单仓、单成员或成员集合授权），服务端 SHALL 从 durable 状态重建下一动作：至多幂等准备一次 plan/session、至多启动一次对应生成、正常批准自动通过（REQ-WIGA-02）、仅在 AI choice 与人工门停等并通知、等待既有 compile/publication 成功、以独立 advance 把全部实际桶推进到 Ready，再经共用 StartCoding 命令启动各桶 attempt。
@@ -696,7 +696,7 @@
 
 #### Scenario: terminated 记录经人工 Enable 重新开启（取代并留痕）
 
-- **WHEN** enrollment 已 terminated（`terminated_at` 非空、`policy_revision=n`），用户在人工入口提交 Enable（携带稳定 `command_id`、`expected_revision=n`，`source`/`options`/`target` 与终止记录逐字段相等）
+- **WHEN** enrollment 已 terminated（`terminated_at` 非空、`policy_revision=n`），用户在人工入口提交 Enable（携带稳定 `command_id`、`expected_revision=n`，`source`/`target` 与终止记录逐字段相等；`options`（含 provider）允许与终止记录不同 —— 该放行**仅限非悬空源场景**（终止记录的原 source 已悬空时，悬空源重授权路径的 `options`/`target` 仍须与终止记录逐字段相等，MUST 拒绝漂移，见 REQ-DRG-18）；非悬空源场景下该差异按换代路径落盘，见 REQ-WIGA-SWAP-01）
 - **THEN** 系统以同 `enrollment_id`、`policy_revision=n+1` 取代落盘：`terminated_at` 清空、`enabled=true`、`plan_id`/`session_id` 为空、`binding_history` 新代（旧代进 `previous`、`binding_version` 递增、plan/session 空串占位）、命令账本追加该 `command_id` 条目（`state=Accepted`）；响应 200 返回 enabled 记录
 - **AND** 随后既有 prepare 路径建立全新 plan/session 并绑定；被终止 plan 与既有 attempt 不复活、不复用，单次请求不重复生成
 - **AND** 同 `enrollment_id` 取代**必须轮换 `prepare_intent_id`**（`plan_id`/`session_id` 由其派生；沿用会让 prepare 幂等复用被终止的旧 plan 实体）
@@ -708,8 +708,8 @@
 
 #### Scenario: 重新开启不改写授权并保留墓碑语义
 
-- **WHEN** 对 terminated 记录提交 Enable 时 `source`/`options`/`target` 与终止记录不等、或提交 Disable、或 `expected_revision` 不等于当前 `policy_revision`
-- **THEN** 返回 409 Conflict 零副作用；改授权 payload 须先成功重新开启，再走既有 Disable→Enable 路径
+- **WHEN** 对 terminated 记录提交 Enable 时 `target` 与终止记录不等、或 `source` 与终止记录不等（**source 漂移的拒绝条件仅适用非悬空源场景** —— 终止记录的原 source 已悬空时 source 漂移放行，`options`/`target` 仍须与终止记录逐字段相等，见 REQ-DRG-18）、或提交 Disable、或 `expected_revision` 不等于当前 `policy_revision`
+- **THEN** 返回 409 Conflict 零副作用；**非悬空源场景下**，`options`（含 provider）与终止记录不等**不属于**本场景的拒绝条件 —— 该差异按 REQ-WIGA-SWAP-01 的换代语义以换代取代落盘；**终止记录的原 source 已悬空时不在本豁免内** —— 悬空源重授权路径的 `options`/`target` 漂移 MUST 拒绝（REQ-DRG-18），而 `source` 漂移放行（不属本场景拒绝条件）；**已 disabled（非 terminated）记录**换授权 payload 仍须先成功重新开启、再走既有 Disable→Enable 路径（见「非 terminated 记录的并发语义不变」）
 
 #### Scenario: 存在未终结 attempt 时不可重新开启
 
@@ -859,3 +859,60 @@
 
 - **WHEN** 手动单仓与手动多仓链执行原有操作
 - **THEN** 确认/中止/门行为与批 2 前一致；单仓显式选 auto 获得自动链并可统一终止
+
+### Requirement: 换 provider 一次完成且不做接续（REQ-WIGA-SWAP-01）
+
+对**已终止且无法继续**的自动化授权，owner SHALL 能通过**一次操作**完成「删除旧工作项组 → 以新 provider 从零重建」，系统 MUST NOT 要求 owner 先用旧 provider 重开一次。
+
+该操作 SHALL 保持既有换代留痕（授权身份轮换、绑定换代、旧代进历史、命令账本留痕、旧工作项组全闭包物理删除），且 SHALL NOT 残留旧 provider 的绑定身份、生成意图或半成品产物。
+
+本 requirement 只约束 **terminated** 路径。**运行中**（enabled）的授权变更 SHALL 继续走 REQ-WIGA-02 的 fail-closed，由 owner 显式终止后重开。
+
+#### Scenario: terminated 记录上直接以新 provider 重建被接受
+
+- **WHEN** owner 对一个已终止的授权提交带有不同 provider 的启用命令
+- **THEN** 系统 SHALL 接受该命令并完成换代（授权身份轮换、绑定换代、旧代进历史、命令账本留痕、旧工作项组全闭包物理删除），SHALL NOT 因「`options`（含 provider）与终止记录不同」而拒绝；`source`/`target` 的逐字段相等要求不变（见 REQ-WIGA-02 / REQ-WIGA-09 的相应场景）
+
+#### Scenario: 与既有 terminated 重开条款的分工
+
+- **WHEN** owner 对一个已终止的授权提交 Enable（可能携带与终止记录不同的 `options`）
+- **THEN** 逐字段相等要求与放行条件（人工入口、稳定 `command_id`、`expected_revision`、收口已完成、同 `enrollment_id` 新 `policy_revision` 取代、`prepare_intent_id` 轮换、旧 plan 不复活）SHALL 仍以 REQ-WIGA-02 / REQ-WIGA-09 的相应场景为准；只有 `options`（含 provider）的差异按本 requirement 的换代语义处理
+
+#### Scenario: 换 provider 后旧 provider 不再产出
+
+- **WHEN** owner 完成一次换 provider
+- **THEN** 系统 MUST NOT 以旧 provider 启动任何生成；SHALL NOT 产生归属旧 provider 的半成品产物
+
+#### Scenario: 换 provider 后不残留旧链身份
+
+- **WHEN** owner 完成一次换 provider
+- **THEN** 旧的生成意图文件 SHALL 已被删除、旧 plan/session 身份 SHALL 已解绑、新的生成意图 SHALL 由新的授权身份派生；SHALL NOT 复用旧链的身份派生产物
+
+#### Scenario: 换 provider 失败时旧工作项组已删除且失败面如实告知
+
+- **WHEN** 换 provider 的操作在「已删除旧工作项组」之后失败
+- **THEN** 系统 SHALL 停在「旧的已删除、新的未建立」的状态；错误面 SHALL 明确告知该事实并给出重试指引，MUST NOT 表述为「未发生任何变化」
+
+### Requirement: 授权变更失败面按语义分诊（REQ-WIGA-SWAP-02）
+
+授权写命令的失败 SHALL 以**区别于运行态限制**的稳定错误码呈现，并给出可执行的下一步；机器码与原始 detail SHALL 保留在次要行或折叠区，MUST NOT 作为主文案。
+
+#### Scenario: 运行中不许改授权内容
+
+- **WHEN** 自动化处于运行态，owner 提交与当前授权内容不同的变更
+- **THEN** 系统 SHALL 拒绝该提交并返回专属于「运行态限制」的稳定错误码；错误面 SHALL 以中文说明「运行中不能直接改」并 SHALL 指明 owner 可执行的下一步（在既有的「终止整个自动化」确认面终止后回到配置入口重新启用），且该指引 SHALL NOT 声称终止入口在所有落屏都可见
+
+#### Scenario: 版本号过期
+
+- **WHEN** owner 提交授权写命令时携带的预期版本与当前版本不一致
+- **THEN** 系统 SHALL 返回专属于「版本过期」的稳定错误码；错误面 SHALL 以中文说明「授权记录刚发生变化，本次操作没有生效」并 SHALL 指明「等当前生成停下来再点一次（会自动重试）」
+
+#### Scenario: 两类失败不得共用同一稳定码
+
+- **WHEN** 授权写命令因运行态限制而失败，或因版本号不一致而失败
+- **THEN** 两者 SHALL 返回不同的稳定错误码与不同的中文主文案；错误面 SHALL 能让 owner 分辨该「等一下重试」还是「该先终止」
+
+#### Scenario: 终止自愈路径保持原有稳定码
+
+- **WHEN** 终止确认面遇到授权版本冲突并触发既有自愈流程
+- **THEN** 该流程 SHALL 继续使用其原有稳定码与原有行为，MUST NOT 因本次错误码细分而失效
