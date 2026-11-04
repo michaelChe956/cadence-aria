@@ -20,6 +20,18 @@
 >   registration wizard 面**已有** codegraph 安装按钮
 >   （`LogicalCodebaseRegistrationWizard.tsx:543-552` ⇒ `ProviderInstallActionButton target="codegraph"`）
 >   ⇒ **聚合初始化面的【安装】按钮待立项补齐**，本轮不勾
+>   ⇒ **2026-11-04 口径补记（owner 真机实测后裁定，只补注记、不动勾选框、不改条目原文）**：
+>     · owner 裁定「**codegraph 不展示在「Provider 能力核验」面板**」⇒ 已实施并落地：
+>       该面板内 codegraph 的渲染行已删除（`ProviderCapabilityCard.tsx`），面板只剩四家 provider
+>       （Claude Code / Codex / Pi / Kimi Code）的【未探测 + 核验按钮】；
+>       实施依据＝codegraph 本就没有 capability 探针，只按安装面呈现 ⇒ 移出后该面板语义更纯
+>     · **本次移出【不影响】11.10 的安装机制本身**：冷启动失败面 / 通知面的【安装】入口
+>       （`CodegraphInstallEntry.tsx`）与登记向导的 codegraph 前置引导**均未动**，
+>       API 字段与 11.10 的「codegraph 纳入同一安装机制（阿里镜像）」也未动
+>     · ⇒ **11.10 仍保持未勾**：其「安装按钮出现在 codegraph 缺失的失败面上」这一条
+>       （聚合初始化失败面 `BootstrapFailureLine.tsx` 仍只有【重新检测】）**尚未落地**，待立项补齐
+>     · 证据：`cadence/notes/2026-11-04_前端_一键核验按钮位置与添加代码库布局说明_v1.0.md`、
+>       `cadence/notes/2026-11-04_真机验收发现_冷启动推进与聚合索引与codegraph与布局说明_v1.0.md`
 
 > owner 决策已全部拍板；技术方案见 `cadence/designs/2026-11-02_技术方案_块2_聚合冷启动与审计预算_v1.0.md`（owner 2026-11-02 审阅通过，2026-11-03 补决策）。
 > 精确文件、命令、测试与提交步骤由 `writing-plans` 写入 `cadence/plans/`；本文件只记高层工作包，每个工作包映射到相关 requirement。
