@@ -306,7 +306,7 @@ async fn completing_group_unit_marks_current_unit_completed_and_next_running() {
 }
 
 #[tokio::test]
-async fn completing_group_unit_moves_issue_shared_lock_to_next_unit() {
+async fn completing_group_unit_moves_repo_shared_lock_to_next_unit() {
     // 锁事实在**仓维**三元键 `(project, issue, logical repository)`：块3 删掉
     // `IssueSharedWorktreeRoute::Legacy` 臂后引擎只读写仓维记录，issue 维记录
     // 不再被引擎读写 ⇒ 断言的**读取维度**由 issue 维改为仓维；语义不变：

@@ -293,7 +293,7 @@ fn seed_repo_shared_worktree(
 }
 
 #[tokio::test]
-async fn final_confirm_releases_issue_shared_worktree_lock() {
+async fn final_confirm_releases_repo_shared_worktree_lock() {
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let authority = seed_lc_authority(&paths, root.path());
@@ -690,7 +690,7 @@ async fn single_work_item_delete_rejects_same_owner_lock_for_another_work_item()
 }
 
 #[tokio::test]
-async fn failed_attempt_releases_issue_shared_worktree_lock() {
+async fn failed_attempt_releases_repo_shared_worktree_lock() {
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let authority = seed_lc_authority(&paths, root.path());
