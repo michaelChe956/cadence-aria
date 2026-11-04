@@ -126,10 +126,14 @@
 
 ## 8. 回归与门禁
 
-- [ ] 8.1 授权持久化相关单测全绿（含行数门禁 `large_file_guard`）
-- [ ] 8.2 隔离与纪律测试（`assert_aggregate_scope_discipline` 等）全绿
-- [ ] 8.3 前端 vitest 全绿（含改动的门卡文案测试与 WS 状态字段相关测试）
-- [ ] 8.4 全量回归（Rust lib + it_core + it_web + 前端 test/build）由 controller 在重发前统一跑
+- [x] 8.1 授权持久化相关单测全绿（含行数门禁 `large_file_guard`）
+  - ✅ 2026-11-04 补勾（收口统一绿测实测）：`cargo test --locked --lib` → 5964 passed / 0 failed / 7 ignored / 0 measured，101.33s；`cargo test --locked --all-targets` → lib 5964/0（99.91s）、large_file_guard 2 passed / 0 failed（product_source_and_test_files_stay_under_line_limit ok）；行数门禁 109 条登记 · 超自身上限 0 · 未登记且超 1200 的 0 · 路径升序 · cap 全 >1200。lib 与门禁两档 0 红；全树仅剩 2 条红均为有意登记（it_core/it_web 各 1，详见 8.4 注记及出处）
+- [x] 8.2 隔离与纪律测试（`assert_aggregate_scope_discipline` 等）全绿
+  - ✅ 2026-11-04 补勾：`assert_aggregate_scope_discipline` 为 lib 单测（定义于 `src/product/logical_codebase/coordinator_provider_turn.inc.rs:678`），含于 `cargo test --locked --lib` → 5964 passed / 0 failed / 7 ignored / 0 measured，101.33s ⇒ 隔离与纪律测试全绿。全树仅剩 2 条红均为有意登记（详见 8.4 注记及出处），均不在 lib 档
+- [x] 8.3 前端 vitest 全绿（含改动的门卡文案测试与 WS 状态字段相关测试）
+  - ✅ 2026-11-04 补勾：`pnpm test` → 260 files / 2662 tests passed / exit 0（29.18s），改动的门卡文案测试与 WS 状态字段（`plan_continue_available`）相关测试含于其中、全绿；`pnpm build` → exit 0（✓ built in 2.90s）。前端档 0 红；全树仅剩 2 条红均为有意登记且均在 Rust it 档（详见 8.4 注记及出处）
+- [x] 8.4 全量回归（Rust lib + it_core + it_web + 前端 test/build）由 controller 在重发前统一跑
+  - ✅ 2026-11-04 补勾（controller 收口统一跑）：`cargo build --all-targets` → exit 0，1m59s；`cargo test --locked --lib` → 5964 passed / 0 failed / 7 ignored / 0 measured，101.33s；`cargo test --locked --all-targets` → lib 5964/0（99.91s）、large_file_guard 2 passed / 0 failed；`cargo clippy --locked --all-targets -- -D warnings` → exit 0；`pnpm build` → exit 0（✓ built in 2.90s）；`pnpm test` → 260 files / 2662 tests passed / exit 0（29.18s）。仅剩 2 条红均为【有意登记】：① it_core 197 passed / 1 failed = `workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output`（`tests/it_core/workspace_ws_integration/part_04.rs:291`；断言钉 adapter 侧观察点 (ProviderType::Pi, ProviderPermissionMode::Auto)，而 validated 启动按设计只外借 launch_view() 的 role/working_dir/prompt ⇒ 无等价可观察点 ⇒ 已裁定暂留红、待立项；出处：`cadence/notes/2026-11-03_全量失败收尾_it_core_ws_integration_v1.0.md` §6、`cadence/notes/2026-11-03_越线拆分_it_core_part05_v1.0.md`）；② it_web 593 passed / 1 failed = `evidence_query::invalid_query_returns_422_and_uninitialized_index_returns_503`（`tests/it_web/evidence_query/part_03.rs:43`；环境态：codegraph 1.6.2 对未建索引目录恒 exit 0 ⇒「未建索引 ⇒ 503」本机不可复现，产品契约另由 `src/web/handlers/evidence_error_mapping.rs` 的单测钉住；出处：`cadence/notes/2026-11-03_全量失败收尾_it_web_派A3_v1.0.md` §3.1）
 
 ## 9. 真机验收
 

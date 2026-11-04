@@ -160,7 +160,8 @@
 
 映射 requirement：REQ-BOOT-07 ~ REQ-PCI-06（全部）
 
-- [ ] 12.1 全部单测绿（含行数门禁 `large_file_guard`）；隔离与纪律测试（`assert_aggregate_scope_discipline` 等）绿；前端 vitest 全绿
+- [x] 12.1 全部单测绿（含行数门禁 `large_file_guard`）；隔离与纪律测试（`assert_aggregate_scope_discipline` 等）绿；前端 vitest 全绿
+  - ✅ 2026-11-04 补勾（收口统一绿测实测）：`cargo test --locked --lib` → 5964 passed / 0 failed / 7 ignored / 0 measured，101.33s（`assert_aggregate_scope_discipline` 等隔离与纪律测试为 lib 单测，定义于 `src/product/logical_codebase/coordinator_provider_turn.inc.rs:678`，含于其中）；`cargo test --locked --all-targets` → lib 5964/0（99.91s）、large_file_guard 2 passed / 0 failed（product_source_and_test_files_stay_under_line_limit ok；行数门禁 109 条登记 · 超自身上限 0 · 未登记且超 1200 的 0 · 路径升序 · cap 全 >1200）；`pnpm test` → 260 files / 2662 tests passed / exit 0（29.18s）。仅剩 2 条红均为【有意登记】：① it_core 197 passed / 1 failed = `workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output`（`tests/it_core/workspace_ws_integration/part_04.rs:291`；断言钉 adapter 侧观察点 (ProviderType::Pi, ProviderPermissionMode::Auto)，而 validated 启动按设计只外借 launch_view() 的 role/working_dir/prompt ⇒ 无等价可观察点 ⇒ 已裁定暂留红、待立项；出处：`cadence/notes/2026-11-03_全量失败收尾_it_core_ws_integration_v1.0.md` §6、`cadence/notes/2026-11-03_越线拆分_it_core_part05_v1.0.md`）；② it_web 593 passed / 1 failed = `evidence_query::invalid_query_returns_422_and_uninitialized_index_returns_503`（`tests/it_web/evidence_query/part_03.rs:43`；环境态：codegraph 1.6.2 对未建索引目录恒 exit 0 ⇒「未建索引 ⇒ 503」本机不可复现，产品契约另由 `src/web/handlers/evidence_error_mapping.rs` 的单测钉住；出处：`cadence/notes/2026-11-03_全量失败收尾_it_web_派A3_v1.0.md` §3.1）
 - [x] 12.2 明确不改：`with_snapshot_budget()` 生产接线、能力核验「不点击不运行探针」契约、rebuild/sync 的 Degraded 语义、「已初始化」判定文件、B-5 残项 R1 / R2（owner 裁定不做，保持原样）
 - [ ] 12.3 真机：只装 pi 的机器点聚合初始化 → 中文指引 + 「核验 Pi」按钮，**不出现**英文 `launch cell is Unknown`
 - [ ] 12.4 真机：点核验 → 点重试 → 三个 provider turn 依次完成，**全程只用 Pi**；operation JSON 里 `input.provider == "pi"`、`provider_selection.candidates` 四家齐全
