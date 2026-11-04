@@ -537,6 +537,7 @@ pub struct AggregateInitializationCoordinator {
 include!("coordinator_frozen_provider.inc.rs");
 include!("coordinator_provider_turn.inc.rs");
 include!("coordinator_lifecycle.inc.rs");
+include!("coordinator_lifecycle_provider_setup.inc.rs");
 include!("coordinator_preflight.inc.rs");
 include!("coordinator_profile.inc.rs");
 include!("coordinator_tests.inc.rs");
