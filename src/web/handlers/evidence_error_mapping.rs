@@ -39,12 +39,12 @@ pub(crate) fn evidence_api_error(error: &EvidenceError) -> ApiError {
             // 外层稳定码、details.reason_code 与 HTTP 状态码一律不变；其余内层码
             // 的既有形态也不变。
             if *code == "evidence_index_unavailable" {
-                let copy = crate::product::logical_codebase::failure_copy::describe_code(code, None);
-                let diagnostic =
-                    crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
-                        message,
-                        &crate::cross_cutting::diagnostic_redaction::RedactionContext::default(),
-                    );
+                let copy =
+                    crate::product::logical_codebase::failure_copy::describe_code(code, None);
+                let diagnostic = crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
+                    message,
+                    &crate::cross_cutting::diagnostic_redaction::RedactionContext::default(),
+                );
                 return ApiError::runtime(
                     evidence_error_code(error),
                     crate::product::logical_codebase::failure_copy::render_detail(
