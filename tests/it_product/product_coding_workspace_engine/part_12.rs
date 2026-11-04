@@ -16,68 +16,11 @@ use cadence_aria::product::work_item_projection::{
     projection_hashes, renderer_for,
 };
 
-fn group_engine_with_two_units() -> (
-    tempfile::TempDir,
-    ProductAppPaths,
-    CodingAttemptStore,
-    CodingWorkspaceEngine,
-    CodingExecutionAttempt,
-) {
-    let root = tempdir().expect("root");
-    let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let store = CodingAttemptStore::new(paths.clone());
-    let worktree = root.path().join("group-worktree");
-    init_group_worktree(&worktree);
-    let attempt = store
-        .create_group_attempt(CreateGroupCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            current_work_item_id: "work_item_0001".to_string(),
-            base_branch: "HEAD".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: Some(worktree),
-            provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
-                review_rounds: 1,
-                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
-            },
-            target_snapshot: None,
-            max_auto_rework: 2,
-            start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
-        })
-        .expect("create group attempt");
-    store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            logical_work_item_id: "work_item_0001".to_string(),
-            work_item_revision_id: "work_item_revision_0001".to_string(),
-            dependency_logical_work_item_ids: Vec::new(),
-            order_index: 0,
-            status: CodingExecutionUnitStatus::Running,
-        })
-        .expect("create coding unit 1");
-    store
-        .create_coding_unit(CreateCodingExecutionUnitInput {
-            attempt_id: attempt.id.clone(),
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            plan_id: "work_item_plan_0001".to_string(),
-            logical_work_item_id: "work_item_0002".to_string(),
-            work_item_revision_id: "work_item_revision_0002".to_string(),
-            dependency_logical_work_item_ids: vec!["work_item_0001".to_string()],
-            order_index: 1,
-            status: CodingExecutionUnitStatus::Pending,
-        })
-        .expect("create coding unit 2");
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    (root, paths, store, engine, attempt)
-}
+// 注：原 `group_engine_with_two_units` 夹具（无 LC 权威 + `target_snapshot: None`）
+// 已被 part_13 的 `group_engine_with_two_units_under_lc_authority` 与 part_17 的
+// `part17_group_engine_with_two_units_under_lc_authority` 取代，**全仓零引用**
+// ⇒ 删除以免 `dead_code` 告警阻断 `cargo clippy --all-targets -- -D warnings`。
+// `group_engine_with_last_running_unit` 仍被 part_01 / part_13 / part_20 使用，保留。
 
 fn group_engine_with_last_running_unit() -> (
     tempfile::TempDir,

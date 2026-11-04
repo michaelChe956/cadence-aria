@@ -174,13 +174,20 @@ flock /tmp/aria-cargo.lock cargo fmt --check     ⇒ exit 0，无输出
 
 ## 4. 被改文件行数
 
-| 文件 | 变化 |
-|---|---|
-| `tests/it_product/product_coding_workspace_engine/part_08.rs` | **+140 / −28** |
-| `tests/it_product/product_coding_workspace_engine/part_13.rs` | **+162 / −3** |
-| `tests/it_product/product_coding_workspace_engine/part_09.rs` | **0** |
-| `tests/it_product/product_coding_workspace_engine/part_12.rs` | **0** |
-| 合计 | **+302 / −31** |
+| 文件 | 变化 | 状态 |
+|---|---|---|
+| `tests/it_product/product_coding_workspace_engine/part_08.rs` | **+140 / −28** | 已随 `8fa977b` 入库 |
+| `tests/it_product/product_coding_workspace_engine/part_13.rs` | **+162 / −3**（本组）<br>另叠加 `RepointP2ToRepoDimPart13` 的 P2 改指仓维改动 | 已随 `8fa977b` 入库 |
+| `tests/it_product/product_coding_workspace_engine/part_09.rs` | **0** | 无失败用例，未动 |
+| `tests/it_product/product_coding_workspace_engine/part_12.rs` | **+5 / −62** | 未入库（工作区） |
+| 本组合计 | **+307 / −93** | |
+
+> part_12 的净变化是**删除**已无引用的 `group_engine_with_two_units` 夹具
+> （原定义 62 行 → 换成 5 行去向注释）：part_13 / part_17 已各自改用自带
+> 「LC 权威 + 冻结快照」的仓维夹具 ⇒ 该函数全仓零引用 ⇒ `dead_code` 告警会阻断
+> `cargo clippy --all-targets -- -D warnings`。
+> `group_engine_with_last_running_unit` 仍被 part_01 / part_13 / part_20 使用，**保留未动**。
+> 验证：`flock /tmp/aria-cargo.lock cargo build --locked --tests` ⇒ **零 warning / 零 error**。
 
 ---
 
@@ -188,12 +195,13 @@ flock /tmp/aria-cargo.lock cargo fmt --check     ⇒ exit 0，无输出
 
 1. **未弱化任何断言**：全程零 `assert_*` 改动、零期望值改动、零测试名改动、零 `#[ignore]`。
    所有改动都是「setup 补齐」（LC 权威 / 冻结快照 / 仓维锁 / gateway 注入 / 角色 provider 改挂）。
-2. **共享夹具未动**：part_12 的 `group_engine_with_two_units` /
-   `group_engine_with_last_running_unit` / `completed_group_attempt_with_handoff_revisions` /
+2. **共享夹具未动**：part_12 的 `group_engine_with_last_running_unit` /
+   `completed_group_attempt_with_handoff_revisions` /
    `group_attempt_waiting_for_final_confirm` / `seed_authoritative_group_*_fixture`
    **一行未改**（它们同时被 part_17 / part_20 / part_01 使用，跨 owner 改动会打架）。
    本组改为在 part_13 内部新建 `group_engine_under_lc_authority` 夹具本体 +
    `*_under_lc_authority` 两个变体 + `seed_repo_shared_worktree_lock` 助手。
+   **唯一的 part_12 改动**：删除全仓零引用的 `group_engine_with_two_units`（见 §4）。
 3. **与并行 worker 的交叉**：
    - `context_builder.rs` 的 `GatewayBridgedAdapter` 在本组施工期间由 helper 作者
      （`MigrateItProductFixtures`）从 tuple struct 升级为具名 struct（签名变更）；
