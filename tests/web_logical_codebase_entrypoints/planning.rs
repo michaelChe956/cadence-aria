@@ -245,6 +245,11 @@ impl PlanningHttpFixture {
                 description: None,
             })
             .expect("create multi-repo project");
+        if with_initialization {
+            // 创建期 provider 选择门（判定前移）要求被选 provider 能力已 Confirmed
+            // ⇒ 夹具显式物化「已探测」事实（capability 记录作用域 = 项目级全局）。
+            crate::capability_fixture::seed_confirmed_capabilities(&paths, PROJECT_ID);
+        }
 
         let aggregate_root = root.join("aggregate-root");
         let api_root = aggregate_root.join("api");
@@ -682,9 +687,11 @@ impl LegacyPlanningHttpFixture {
                 idempotency_key: "legacy-planning-repository".to_string(),
             })
             .expect("create legacy repository record");
-        // 该夹具**没有 LC 记录**（纯 legacy 单仓项目，无 manifest 迁移）：
-        // 归属填「项目默认作用域」让解析落回项目级 legacy 根，与改造前
-        // `None` 的行为一致（`lc_scope_root` 的 `_ =>` 分支）。
+        // 该夹具**没有 LC 权威记录**（纯 legacy 单仓项目，无 manifest 迁移）。
+        // REQ-ROUTE-01 起归属必填：issue 记录携带 legacy 别名 id，但项目级
+        // legacy 根没有 manifest/selection ⇒ `for_lc` 子树读空，两态分流
+        // fail-closed（改造前 `None` + `lc_scope_root` 回退分支已随 Legacy
+        // 变体整体删除）。
         let logical_codebase_id = legacy_logical_codebase_id(&project.id);
         IssueStore::new(paths)
             .create(CreateProductIssueInput {
@@ -707,31 +714,51 @@ impl LegacyPlanningHttpFixture {
 }
 
 #[tokio::test]
-async fn single_repo_aggregate_scope_is_rejected_over_http() {
+async fn single_repo_project_without_lc_fails_closed_over_http() {
     let fixture = LegacyPlanningHttpFixture::new();
     let aggregate_member = "00000000-0000-0000-0000-000000000001";
 
-    assert_error(
-        request(
-            &fixture.app,
-            Method::POST,
-            "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-            json!({
-                "title": "single-repository Story must reject aggregate scope",
-                "involved_repository_ids": [aggregate_member],
-                "author_provider": "fake",
-                "reviewer_provider": "codex",
-                "review_rounds": 1,
-                "superpowers_enabled": false,
-                "openspec_enabled": false
-            }),
-        )
-        .await,
-        StatusCode::BAD_REQUEST,
-        "aggregate_scope_requires_logical_codebase",
+    // 块3（REQ-ROUTE-01/02）收敛后：单仓 Legacy 路由变体已删除，
+    // `aggregate_scope_requires_logical_codebase` 不再有产码点。无 LC 权威
+    // 记录的 issue 在两态分流处即 fail-closed：422
+    // `repository_routing_target_missing`，reason 同源
+    // `issue_not_bound_to_logical_codebase`。与改造前断言同钉「单仓形态
+    // 不得承载聚合视野」红线；改造后口径更强：不带聚合字段的请求同样
+    // fail-closed，不存在可回退的物理仓正向路径（旧 200 正向路径随单仓
+    // 入口一并移除；界外 involved 的出生值守卫由 it_web web_lifecycle_api
+    // `generate_design_specs_rejects_involved_outside_selection_focus_bound`
+    // 覆盖。design 入口先校验已确认 Story 再分流，单仓 issue 下无 Story
+    // 可确认 ⇒ 路由红线在 story 入口钉死即可）。
+    let (status, body) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({
+            "title": "single-repository Story must reject aggregate scope",
+            "involved_repository_ids": [aggregate_member],
+            "author_provider": "fake",
+            "reviewer_provider": "codex",
+            "review_rounds": 1,
+            "superpowers_enabled": false,
+            "openspec_enabled": false
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "aggregate scope on a single-repository issue must fail closed: {body}"
+    );
+    assert_eq!(body["code"], "repository_routing_target_missing", "{body}");
+    assert!(
+        body["details"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("issue_not_bound_to_logical_codebase")),
+        "fail-closed reason must name the missing attribution: {body}"
     );
 
-    let (status, story) = request(
+    // 不带聚合字段：同一 fail-closed（单仓正向路径已随 Legacy 变体移除）。
+    let (status, body) = request(
         &fixture.app,
         Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
@@ -745,47 +772,12 @@ async fn single_repo_aggregate_scope_is_rejected_over_http() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "generate legacy Story: {story}");
-    let story_id = story["story_specs"][0]["story_spec_id"]
-        .as_str()
-        .expect("generated legacy Story id");
-    let story_session_id = story["workspace_session"]["workspace_session_id"]
-        .as_str()
-        .expect("generated legacy Story session id");
-    let (status, confirmed_story) = request(
-        &fixture.app,
-        Method::POST,
-        &format!("/api/workspace-sessions/{story_session_id}/confirm"),
-        json!({"confirmed_by": "single-repository scope test"}),
-    )
-    .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "confirm legacy Story before Design validation: {confirmed_story}"
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "single-repository positive path was removed with the Legacy routing variant: {body}"
     );
-
-    assert_error(
-        request(
-            &fixture.app,
-            Method::POST,
-            "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
-            json!({
-                "title": "single-repository Design must reject aggregate scope",
-                "story_spec_ids": [story_id],
-                "involved_repository_ids": [aggregate_member],
-                "change_order": [aggregate_member],
-                "author_provider": "fake",
-                "reviewer_provider": "codex",
-                "review_rounds": 1,
-                "superpowers_enabled": false,
-                "openspec_enabled": false
-            }),
-        )
-        .await,
-        StatusCode::BAD_REQUEST,
-        "aggregate_scope_requires_logical_codebase",
-    );
+    assert_eq!(body["code"], "repository_routing_target_missing", "{body}");
 }
 
 #[tokio::test]

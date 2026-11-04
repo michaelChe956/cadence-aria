@@ -116,6 +116,9 @@ impl AggregateInitializationHttpFixture {
                 description: None,
             })
             .expect("create project");
+        // 创建期 provider 选择门（判定前移）要求被选 provider 能力已 Confirmed ⇒
+        // 夹具显式物化「已探测」事实（capability 记录作用域 = 项目级全局）。
+        crate::capability_fixture::seed_confirmed_capabilities(&paths, "project_0001");
         let aggregate_root = root.join("aggregate-root");
         std::fs::create_dir_all(&aggregate_root).expect("aggregate root");
         LogicalCodebaseStore::new(paths.clone())

@@ -25,6 +25,7 @@ use cadence_aria::cross_cutting::streaming_provider::{
     ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::logical_codebase::environment_probe::AGGREGATE_SKILL_COMMANDS;
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
@@ -215,8 +216,19 @@ impl P0HttpFixture {
         // production WebAppState then supplies its normal aggregate
         // coordinator/index/gateway wiring; its fake runtime routes provider
         // turns through the existing fake registry without external calls.
-        fs::create_dir_all(root.join(".agents/Cadence-skills/cadence-init/skills/p0-http-chain"))
+        let skills_source = root.join(".agents/Cadence-skills/cadence-init/skills");
+        fs::create_dir_all(skills_source.join("p0-http-chain"))
             .expect("seed local Cadence skills source");
+        // machine_skills 后的链接层校验（ensure_skills_commands_linked）要求
+        // shared/codex/claude 三层都能解析四条聚合命令——同步器从本地源建链,
+        // 源里缺任一命令即在 member_index 前以 skills_commands_missing 阻断
+        // （与 it_web provider_capability_fixture::seed_local_skills_source 同构）。
+        for command in AGGREGATE_SKILL_COMMANDS {
+            let command_source = skills_source.join(command);
+            fs::create_dir_all(&command_source).expect("seed aggregate skill source dir");
+            fs::write(command_source.join("SKILL.md"), format!("# {command}\n"))
+                .expect("write aggregate skill SKILL.md");
+        }
         let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(P0CommandRunner {
             inner: TokioBoundedCommandRunner,
         });
@@ -286,6 +298,15 @@ impl P0HttpFixture {
             .as_str()
             .expect("project id")
             .to_string();
+        // 创建期 provider 选择门（判定前移）要求被选 provider 能力已
+        // Confirmed ⇒ 夹具显式物化「已探测」事实（capability 记录作用域 =
+        // 项目级全局）。本夹具走**生产接线**的初始化链：root-recipe 相位
+        // 只接受固定 Claude provider，故只种 ClaudeCode（四家全 Confirmed
+        // 会让选择器按 owner 序选中 Pi 并在 recipe 相位被拒）。
+        crate::capability_fixture::seed_confirmed_claude_capability(
+            &ProductAppPaths::new(self.root.join(".aria")),
+            &project_id,
+        );
         let (status, codebase) = request(
             &self.app,
             Method::POST,
