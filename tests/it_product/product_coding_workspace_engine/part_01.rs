@@ -1045,12 +1045,31 @@ async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() 
         authority.snapshot(&paths),
     );
     let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
+    // gateway 拒 Fake（`provider_unsupported_for_gateway_launch`，设计如此）⇒
+    // role provider 改挂真实 provider（ClaudeCode）。这是**夹具改动**：用例要验的
+    // 是「上一 unit 的会话不被恢复」，不是「Fake 替身能不能用」；故下方 seed 的
+    // 上一 unit 会话也同步挂 ClaudeCode —— provider 两侧一致，**保持原语义**
+    // （provider 相同仍不跨 unit 恢复）。
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::ClaudeCode,
+                code_reviewer: None,
+                internal_reviewer: None,
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
+            },
+        )
+        .expect("override coder role provider to a gateway-supported provider");
     let attempt = store
         .replace_attempt_provider_conversations(
             &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
-                provider: ProviderName::Fake,
+                provider: ProviderName::ClaudeCode,
                 provider_session_id: "coder-session-from-unit-1".to_string(),
                 updated_at: "2026-07-08T00:00:00Z".to_string(),
                 last_node_id: Some("coding_node_0002".to_string()),
@@ -1064,20 +1083,34 @@ async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() 
         ),
         verification_commands: vec!["cargo test --locked --lib provider_metadata".to_string()],
     };
-    let (tx, mut rx) = mpsc::channel(64);
-    tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::with_outputs(
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动；本替身断言
+    // `StreamingProviderInput` 的**真实**字段 ⇒ 用逐字透传真实 input 的 exact 桥。
+    let capturing = Arc::new(SessionInputCapturingProvider::with_outputs(
         ["unit 2 coding done"],
         [Some("coder-session-unit-2".to_string())],
+    ));
+    let provider = Arc::new(crate::context_builder::GatewayExactInputAdapter {
+        inner: capturing.clone(),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
     );
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     engine
-        .execute_coding(&attempt, &provider, &context)
+        .execute_coding(&attempt, provider.as_ref(), &context)
         .await
         .expect("execute second unit coding");
 
-    let inputs = provider.inputs.lock().expect("inputs lock");
+    let inputs = capturing.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
     let input = &inputs[0];
     assert_eq!(input.resume_provider_session_id, None);

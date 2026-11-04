@@ -418,7 +418,7 @@ flock /tmp/aria-cargo.lock cargo test --locked --test it_product
 ```
 
 ```
-test result: FAILED. 202 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+test result: FAILED. 203 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.29s
 ```
 
 **数字演进**（本阶段 + 并行 Phase 2 worker 共同推进）：
@@ -427,9 +427,10 @@ test result: FAILED. 202 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out
 |---|---|
 | 本阶段开工基线 | 148 / 62 |
 | Phase 1 helper + part_01 样板完成后 | 153 / 58 |
-| Phase 2 worker 落地 + helper 增补后（**当前**） | **202 / 9** |
+| Phase 2 worker 落地 + helper 增补后 | 202 / 9 |
+| Fake→ClaudeCode 授权改动落地后（**当前**） | **203 / 8** |
 
-**当前剩余 9 个失败用例**（全部 `product_coding_workspace_engine::`）：
+**当前剩余 8 个失败用例**（全部 `product_coding_workspace_engine::`）：
 
 | # | 用例 | 归属 / 阻塞原因 |
 |---|---|---|
@@ -440,11 +441,15 @@ test result: FAILED. 202 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out
 | 5 | `failed_group_attempt_releases_transferred_shared_worktree_lock_by_owner` | 同上 |
 | 6 | `final_confirm_releases_issue_shared_worktree_lock` | 同上 |
 | 7 | `group_final_confirm_releases_transferred_shared_worktree_lock_by_owner` | 同上（夹具在 part_12） |
-| 8 | `execute_coding_persists_coder_role_run_and_full_output_chat_entry` | **产品侧缺口**：gateway 不支持 Fake（`provider_unsupported_for_gateway_launch`），而该用例断言 `metadata["provider"] == "fake"` |
-| 9 | `group_next_work_item_coder_run_does_not_resume_previous_unit_session` | 同 #8（夹具 author=Fake ⇒ gateway 拒 Fake）；改挂 ClaudeCode 属 fixture 改动，待 Main 裁定 |
+| 8 | `group_final_confirm_completes_attempt_after_all_units_completed` | part_08/12 方向（并行 worker 在途） |
 
-> 前 7 条是**块3 已下线的产品路径**（§3.3），第 8/9 条是**gateway 不支持 Fake** 这一
-> 产品侧约束 ⇒ 9 条**都不是夹具形态问题**，需产品侧/裁定收口。
+> 8 条**全部是 issue 维 shared worktree 族或并行 worker 在途**，**都不是夹具形态问题**：
+> 前 7 条是**块3 已下线的产品路径**（§3.3），第 8 条属 part_08/12 方向的在途改动。
+>
+> 本阶段负责的 part_01 侧**只剩这 6+1 条 issue 维用例**（其余全绿）；
+> `execute_coding_persists_coder_role_run_and_full_output_chat_entry`（Fake 族）
+> 与 `group_next_work_item_coder_run_does_not_resume_previous_unit_session`
+> 已按「Fake→真实 provider」授权改挂 ClaudeCode 并转绿。
 
 ### 6.2 module 级
 
