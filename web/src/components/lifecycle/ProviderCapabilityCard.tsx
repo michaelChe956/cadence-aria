@@ -1,9 +1,15 @@
-// add-provider-revalidate-probe Task 3.2：LC provider capability 卡——
+// add-provider-revalidate-probe Task 3.2：LC provider capability 面板——
 // 只读 durable 投影（GET capabilities）渲染四家 provider 的
 // launch/write_boundary/resume 三行聚合状态，按 provider 提供「核验」
 // 按钮显式触发真实探针（POST capability-revalidate，首次分钟级同步等待），
 // already_confirmed/revalidated/probing/failed 四态如实回显；成功后重读
 // 同一 GET 面刷新状态（不乐观改 durable 事实）。
+//
+// owner 2026-11-04 裁定：去掉 2×2 方格卡片，只保留行级列表 ⇒ 四家 provider
+// 各占一行（名字 / 状态 / 三个能力维度 / 版本 / 版本落后 / 安装更新入口 /
+// 核验按钮）；「一键核验全部」按钮仍在标题行右侧、作用域说明仍在按钮下方；
+// 批量核验作业的逐项状态并入同一行（不再另起第二组列表）。能力核验的
+// 行为、接口调用与状态语义均未改动。
 import { useCallback, useEffect, useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import { getInstallTargets } from "../../api/provider-install";
@@ -17,7 +23,7 @@ import type {
   ProviderCapabilitiesResponse,
 } from "../../api/types";
 import {
-  ProviderCapabilityBatchResults,
+  capabilityBatchStatusLabel,
   ProviderCapabilityBatchScope,
   ProviderCapabilityBatchStartButton,
   useProviderCapabilityBatch,
@@ -45,6 +51,13 @@ const ASPECT_STATUS_LABELS: Record<string, string> = {
   unknown: "未核验",
   denied: "拒绝",
 };
+
+/** provider 级状态文案（行级列表的一列）：三个能力维度全 Confirmed 才
+ *  「已确认」（与 admission fail-closed 同口径，不夸大）；否则「未核验」。 */
+const PROVIDER_STATUS_LABELS = {
+  confirmed: "已确认",
+  unknown: "未核验",
+} as const;
 
 /** 单 aspect 聚合：三 action 行全 Confirmed 才已核验（与 admission
  * fail-closed 同口径，不夸大）；任一 Unknown 仍未核验（重验证可补）；
@@ -237,96 +250,150 @@ export function ProviderCapabilityCard({
           安装状态读取失败：{installTargetsError}
         </p>
       ) : null}
+      {batch.error !== null ? (
+        <p role="alert" className="mt-1 text-[11px] text-[var(--aria-danger)]">
+          {batch.error}
+        </p>
+      ) : null}
       {projection === null && loadError === null ? (
         <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">载入中…</p>
       ) : null}
+      {/* 行级列表（owner 2026-11-04：删掉 2×2 方格卡片，只保留这一组行）：
+          四家 provider 各一行；批量核验作业的逐项状态并入同一行。 */}
       {projection ? (
-        <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <ul
+          data-testid="provider-capability-list"
+          className="mt-2 divide-y divide-[var(--aria-line)]"
+        >
           {projection.providers.map((provider) => {
-            const feedback = feedbackByProvider[provider.provider_type] ?? null;
-            const installView = installTargets[provider.provider_type] ?? null;
+            const providerType = provider.provider_type;
+            const label = PROVIDER_LABELS[providerType] ?? providerType;
+            const feedback = feedbackByProvider[providerType] ?? null;
+            const installView = installTargets[providerType] ?? null;
+            // 批量作业的逐项结果（作业未发起时为 null）：并入本行展示。
+            const batchItem =
+              batch.job?.results.find(
+                (item) => item.provider_type === providerType,
+              ) ?? null;
             // 三行聚合全 Confirmed 才算已核验（与 admission fail-closed 同口径）。
             const providerConfirmed = CAPABILITY_ASPECTS.every(
               (aspect) => aspectStatus(provider, aspect) === "confirmed",
             );
+            // 已核验 = durable 投影的聚合结论，或批量作业已确认（任一成立；
+            // 批量作业的逐项结论与投影同源，作业成功时投影可能尚未刷新）。
+            const confirmed = providerConfirmed || batchItem?.status === "confirmed";
+            // 版本落后由安装目标面判定（块2 `install-targets.action`）。
+            const outdated = installView?.action === "update";
             return (
               <li
-                key={provider.provider_type}
-                data-testid={`provider-capability-provider-${provider.provider_type}`}
-                className="rounded border border-[var(--aria-line)] px-2 py-1.5"
+                key={providerType}
+                data-testid={`provider-capability-provider-${providerType}`}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1 text-xs"
               >
-                <div className="flex flex-wrap items-baseline justify-between gap-x-2">
-                  <span className="text-xs font-semibold text-[var(--aria-ink)]">
-                    {PROVIDER_LABELS[provider.provider_type] ??
-                      provider.provider_type}
+                <span className="font-semibold text-[var(--aria-ink)]">
+                  {label}
+                </span>
+                <span
+                  data-testid={`provider-capability-status-${providerType}`}
+                  className="text-[var(--aria-ink-muted)]"
+                >
+                  {providerConfirmed
+                    ? PROVIDER_STATUS_LABELS.confirmed
+                    : PROVIDER_STATUS_LABELS.unknown}
+                </span>
+                {batchItem !== null ? (
+                  <span
+                    data-testid={`capability-batch-status-${providerType}`}
+                    className={
+                      batchItem.status === "failed"
+                        ? "text-[var(--aria-danger)]"
+                        : "text-[var(--aria-ink-muted)]"
+                    }
+                  >
+                    批量：{capabilityBatchStatusLabel(batchItem.status)}
                   </span>
-                  <span className="flex items-baseline gap-2">
-                    <span
-                      data-testid={`provider-capability-${provider.provider_type}-version`}
-                      className="text-xs text-[var(--aria-ink-muted)]"
-                    >
-                      {provider.version ?? "未探测"}
+                ) : null}
+                {outdated ? (
+                  <span
+                    data-testid={`provider-capability-outdated-${providerType}`}
+                    className="text-[var(--aria-primary)]"
+                  >
+                    版本落后
+                  </span>
+                ) : null}
+                <span
+                  data-testid={`provider-capability-${providerType}-version`}
+                  className="text-[var(--aria-ink-muted)]"
+                >
+                  {provider.version ?? "未探测"}
+                </span>
+                {/* 三个能力维度（启动 / 写边界 / 恢复）：原方格卡片里的聚合
+                    状态，删卡片后并入本行（不丢信息）。 */}
+                {CAPABILITY_ASPECTS.map((aspect) => (
+                  <span
+                    key={aspect}
+                    className="flex items-baseline gap-x-1 text-[var(--aria-ink-muted)]"
+                  >
+                    <span className="font-semibold text-[var(--aria-ink)]">
+                      {ASPECT_LABELS[aspect]}
                     </span>
-                    <button
-                      type="button"
-                      disabled={busyProvider !== null}
-                      onClick={() =>
-                        void handleRevalidate(provider.provider_type)
-                      }
-                      className="min-h-9 rounded-md border border-[var(--aria-primary)] bg-white px-2.5 py-1 text-xs font-semibold text-[var(--aria-primary)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] disabled:cursor-not-allowed disabled:opacity-60"
-                      data-testid={`provider-capability-revalidate-${provider.provider_type}`}
+                    <span
+                      data-testid={`provider-capability-${providerType}-${aspect}`}
                     >
-                      核验{" "}
-                      {PROVIDER_LABELS[provider.provider_type] ??
-                        provider.provider_type}
-                    </button>
+                      {ASPECT_STATUS_LABELS[aspectStatus(provider, aspect)]}
+                    </span>
                   </span>
-                </div>
-                <ul className="mt-1 space-y-1">
-                  {CAPABILITY_ASPECTS.map((aspect) => (
-                    <li
-                      key={aspect}
-                      className="flex flex-wrap items-baseline gap-x-2 text-xs text-[var(--aria-ink-muted)]"
-                    >
-                      <span className="font-semibold text-[var(--aria-ink)]">
-                        {ASPECT_LABELS[aspect]}
-                      </span>
-                      <span
-                        data-testid={`provider-capability-${provider.provider_type}-${aspect}`}
-                      >
-                        {
-                          ASPECT_STATUS_LABELS[
-                            aspectStatus(provider, aspect)
-                          ]
-                        }
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                ))}
+                <button
+                  type="button"
+                  disabled={busyProvider !== null}
+                  onClick={() => void handleRevalidate(providerType)}
+                  className="min-h-9 rounded-md border border-[var(--aria-primary)] bg-white px-2.5 py-1 text-xs font-semibold text-[var(--aria-primary)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] disabled:cursor-not-allowed disabled:opacity-60"
+                  data-testid={`provider-capability-revalidate-${providerType}`}
+                >
+                  核验 {label}
+                </button>
                 {/* 安装 / 更新入口（REQ-PCI-02）：未安装 → 【安装】+ 手动命令；
                     已安装且已核验但版本落后 → 【更新】。已安装但未核验时由本行
                     既有「核验」按钮负责（不显示安装，也不重复渲染一个核验）。 */}
                 {installView &&
-                (!installView.cli_available || providerConfirmed) ? (
+                (!installView.cli_available || confirmed) ? (
                   <ProviderInstallActionButton
                     target={installView.target}
                     cliAvailable={installView.cli_available}
                     localVersion={installView.local_version ?? provider.version}
                     latestVersion={installView.latest_version}
-                    capabilityConfirmed={providerConfirmed}
+                    capabilityConfirmed={confirmed}
                     onSettled={() => {
                       void reload();
                       void reloadInstallTargets();
                     }}
                   />
                 ) : null}
+                {/* 批量作业里的失败项：单项重试走单 provider 端点（不重跑整批）。 */}
+                {batchItem !== null && batchItem.status === "failed" ? (
+                  <button
+                    type="button"
+                    data-testid={`capability-batch-retry-${providerType}`}
+                    disabled={batch.retrying === providerType}
+                    onClick={() => {
+                      void batch.retry(providerType).then(() => {
+                        void reload();
+                        void reloadInstallTargets();
+                      });
+                    }}
+                    className="rounded-md border border-[var(--aria-primary)] px-2 py-0.5 text-[11px] font-semibold text-[var(--aria-primary)] disabled:opacity-60"
+                  >
+                    重试
+                  </button>
+                ) : null}
                 {feedback ? (
                   <p
-                    data-testid={`provider-capability-result-${provider.provider_type}`}
+                    data-testid={`provider-capability-result-${providerType}`}
                     className={
                       feedback.state === "failed"
-                        ? "mt-1 text-xs text-[var(--aria-danger)]"
-                        : "mt-1 text-xs text-[var(--aria-ink-muted)]"
+                        ? "text-xs text-[var(--aria-danger)]"
+                        : "text-xs text-[var(--aria-ink-muted)]"
                     }
                   >
                     {feedback.state === "probing"
@@ -343,17 +410,6 @@ export function ProviderCapabilityCard({
           })}
         </ul>
       ) : null}
-      {/* 一键批量核验的逐项结果（按钮在卡片头部上方；结果留在卡片下方，
-          逐项状态/单项重试/安装更新入口与既有批量条语义一致）。
-          owner 2026-11-04 裁定：codegraph 不展示在本面板 ⇒ 此处只呈现
-          四家真实 provider 的批量结果。 */}
-      <ProviderCapabilityBatchResults
-        state={batch}
-        installTargets={installTargets}
-        onSettled={() => {
-          void reloadInstallTargets();
-        }}
-      />
     </div>
   );
 }

@@ -1,15 +1,18 @@
 // add-provider-revalidate-probe Task 3.1：capability 卡真实 DTO/按钮交互回归。
 //
 // - ProviderCapabilityCard：挂载即 GET 只读投影（URL 逐字断言），四家
-//   provider 各渲染 launch/write_boundary/resume 三行聚合状态（未核验/
-//   已核验/拒绝，聚合口径=三 action 行逐 aspect 全 Confirmed 才显示已核验）；
+//   provider 以【行级列表】渲染（owner 2026-11-04：删掉 2×2 方格卡片），
+//   每行带 launch/write_boundary/resume 三项聚合状态（未核验/已核验/拒绝，
+//   聚合口径=三 action 行逐 aspect 全 Confirmed 才显示已核验）与 provider
+//   级状态（已确认/未核验）；
 // - 点击「核验」经真实 fetch 发送器打 POST capability-revalidate（URL/
 //   method/body 逐条断言）；already_confirmed/revalidated 如实回显，成功后
 //   重新 GET 同一 capabilities 面刷新三行（不乐观改状态）；
 // - POST 在途时按钮禁用＋核验中提示（首次真实探针分钟级，用户需可见等待）；
 // - 失败（provider_capability_probe_failed）如实展示稳定码+原始 detail，
-//   不伪造 Confirmed，按钮恢复可点击。
-import { render, screen, waitFor } from "@testing-library/react";
+//   不伪造 Confirmed，按钮恢复可点击；
+// - 批量核验作业的逐项状态并入同一行级列表（不再另起第二组列表）。
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderCapabilityCard } from "./ProviderCapabilityCard";
@@ -22,6 +25,8 @@ import type {
 
 const PROJECT_ID = "project_0001";
 const LC_ID = "logical_codebase_0001";
+const BATCH_JOB_ID = "job_0001";
+const BATCH_STORAGE_KEY = `aria:capability-batch:${PROJECT_ID}:${LC_ID}`;
 
 type CapturedRequest = { url: string; method: string; body: unknown };
 let captured: CapturedRequest[];
@@ -40,6 +45,7 @@ function installFetchRouter(
   getResponse: () => ProviderCapabilitiesResponse,
   postResponse?: RevalidateResponder,
   installTargets: unknown = { targets: [] },
+  batchJob: unknown = null,
 ): void {
   captured = [];
   const router = async (
@@ -62,6 +68,13 @@ function installFetchRouter(
     }
     if (method === "GET" && url === "/api/providers/install-targets") {
       return jsonResponse(installTargets);
+    }
+    if (
+      method === "GET" &&
+      url ===
+        `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities/revalidate-all/${BATCH_JOB_ID}`
+    ) {
+      return jsonResponse(batchJob);
     }
     if (
       method === "POST" &&
@@ -170,6 +183,61 @@ function confirmedCodexProjection(): ProviderCapabilitiesResponse {
   return projection;
 }
 
+/** 批量核验作业（终态）：逐项状态并入行级列表。 */
+function batchJob(codexStatus: "confirmed" | "failed" = "failed"): unknown {
+  return {
+    job_id: BATCH_JOB_ID,
+    status: "completed",
+    created_at: "2026-11-04T00:00:00Z",
+    updated_at: "2026-11-04T00:01:00Z",
+    finished_at: "2026-11-04T00:01:00Z",
+    results: [
+      {
+        provider_type: "claude_code",
+        status: "confirmed",
+        reason: "revalidated",
+        detail: null,
+        version: "1.0.34",
+        started_at: null,
+        finished_at: null,
+      },
+      {
+        provider_type: "codex",
+        status: codexStatus,
+        reason:
+          codexStatus === "confirmed"
+            ? "revalidated"
+            : "probe_failed",
+        detail:
+          codexStatus === "confirmed"
+            ? null
+            : "codex --version exited 127: command not found",
+        version: codexStatus === "confirmed" ? "0.44.0" : null,
+        started_at: null,
+        finished_at: null,
+      },
+      {
+        provider_type: "pi",
+        status: "skipped",
+        reason: "cli_not_installed",
+        detail: null,
+        version: null,
+        started_at: null,
+        finished_at: null,
+      },
+      {
+        provider_type: "kimi_code",
+        status: "confirmed",
+        reason: "already_confirmed",
+        detail: null,
+        version: "0.9.1",
+        started_at: null,
+        finished_at: null,
+      },
+    ],
+  };
+}
+
 describe("ProviderCapabilityCard revalidate surface", () => {
   beforeEach(() => {
     captured = [];
@@ -179,6 +247,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    window.localStorage.clear();
   });
 
   it("renders nothing without an active logical codebase", async () => {
@@ -218,7 +287,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       ),
     ).toHaveLength(1);
 
-    // 四家 provider 全渲染。
+    // 四家 provider 全渲染（行级列表：每家一行）。
     expect(
       screen.getByTestId("provider-capability-provider-claude_code"),
     ).toBeTruthy();
@@ -230,7 +299,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       screen.getByTestId("provider-capability-provider-kimi_code"),
     ).toBeTruthy();
 
-    // codex 未探测：三行 launch/write_boundary/resume 全未核验。
+    // codex 未探测：三个能力维度全未核验，provider 级状态为「未核验」。
     expect(
       screen.getByTestId("provider-capability-codex-launch").textContent,
     ).toBe("未核验");
@@ -244,8 +313,11 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     expect(
       screen.getByTestId("provider-capability-codex-version").textContent,
     ).toBe("未探测");
+    expect(
+      screen.getByTestId("provider-capability-status-codex").textContent,
+    ).toBe("未核验");
 
-    // claude_code 全 Confirmed：三行已核验，版本如实展示。
+    // claude_code 全 Confirmed：三维度已核验，provider 级「已确认」，版本如实展示。
     expect(
       screen.getByTestId("provider-capability-claude_code-launch").textContent,
     ).toBe("已核验");
@@ -259,6 +331,9 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     expect(
       screen.getByTestId("provider-capability-claude_code-version").textContent,
     ).toBe("1.0.34");
+    expect(
+      screen.getByTestId("provider-capability-status-claude_code").textContent,
+    ).toBe("已确认");
 
     // kimi_code 混合：launch 有 Unknown → 未核验；write_boundary 全 denied →
     // 拒绝；resume 全 confirmed → 已核验（聚合不夸大、不遮蔽）。
@@ -272,6 +347,192 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     expect(
       screen.getByTestId("provider-capability-kimi_code-resume").textContent,
     ).toBe("已核验");
+  });
+
+  // owner 2026-11-04 裁定：删掉 2×2 方格卡片，只保留行级列表 ⇒ 断言卡片
+  // 【不再渲染】、行级列表【渲染】，且行内承载原卡片里的全部信息。
+  it("renders one row list instead of the 2x2 provider cards", async () => {
+    installFetchRouter(unknownProjection);
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    // 行级列表渲染。
+    const list = await screen.findByTestId("provider-capability-list");
+    // 方格卡片（两列网格）不再渲染。
+    expect(list.className).not.toContain("grid-cols-2");
+    expect(list.className).not.toContain("sm:grid-cols-2");
+    // 每家 provider 一行，且行内不再有卡片自带的嵌套维度列表 ⇒ 整块只有 4 行。
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    const providerRow = screen.getByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    // provider 元素不再是带圆角边框的方格卡片。
+    expect(providerRow.className).not.toContain("rounded");
+    expect(providerRow.className).not.toContain("border");
+    // 原卡片里的信息一个不少地进了这一行：状态 + 三个能力维度 + 版本。
+    expect(
+      screen.getByTestId("provider-capability-status-claude_code").textContent,
+    ).toBe("已确认");
+    expect(
+      screen.getByTestId("provider-capability-claude_code-launch").textContent,
+    ).toBe("已核验");
+    expect(
+      screen.getByTestId("provider-capability-claude_code-write_boundary")
+        .textContent,
+    ).toBe("已核验");
+    expect(
+      screen.getByTestId("provider-capability-claude_code-resume").textContent,
+    ).toBe("已核验");
+    expect(
+      screen.getByTestId("provider-capability-claude_code-version").textContent,
+    ).toBe("1.0.34");
+    // 单 provider 核验入口仍在行内（能力核验行为不变）。
+    expect(
+      screen.getByTestId("provider-capability-revalidate-claude_code"),
+    ).toBeTruthy();
+  });
+
+  it("keeps the version-gap entry (版本落后 / 更新 / 当前→最新) in the row list", async () => {
+    installFetchRouter(() => confirmedCodexProjection(), undefined, {
+      targets: [
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: true,
+          local_version: "0.44.0",
+          latest_version: "1.0.1",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "update",
+        },
+      ],
+    });
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const providerRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    // 版本落后提示 +【更新】+ 当前 → 最新版本，全部在行内。
+    expect(
+      within(providerRow).getByTestId("provider-capability-outdated-codex"),
+    ).toHaveTextContent("版本落后");
+    expect(
+      within(providerRow).getByTestId("provider-install-start-codex"),
+    ).toHaveTextContent("更新");
+    expect(
+      within(providerRow).getByTestId("provider-install-versions-codex"),
+    ).toHaveTextContent("当前 0.44.0 → 最新 1.0.1");
+  });
+
+  it("folds the batch job item state into the same row list", async () => {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, BATCH_JOB_ID);
+    installFetchRouter(
+      unknownProjection,
+      () =>
+        Promise.resolve(
+          jsonResponse({
+            provider_type: "codex",
+            outcome: "already_confirmed",
+            version: "0.44.0",
+          }),
+        ),
+      { targets: [] },
+      batchJob(),
+    );
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    // 批量作业的逐项状态并入对应行（不再另起第二组列表）。
+    expect(
+      await screen.findByTestId("capability-batch-status-claude_code"),
+    ).toHaveTextContent("批量：已确认");
+    expect(
+      screen.getByTestId("capability-batch-status-codex").textContent,
+    ).toBe("批量：核验失败");
+    expect(
+      screen.getByTestId("capability-batch-status-pi").textContent,
+    ).toBe("批量：跳过（CLI 不可用）");
+    // 失败项保留【重试】（走单 provider 端点，不重跑整批）。
+    const retryButton = screen.getByTestId("capability-batch-retry-codex");
+    await userEvent.click(retryButton);
+    await waitFor(() => {
+      expect(
+        captured.find(
+          (request) =>
+            request.method === "POST" &&
+            request.url ===
+              `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+        ),
+      ).toEqual({
+        url: `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+        method: "POST",
+        body: { provider_type: "codex" },
+      });
+    });
+    // 整块只有一组行级列表（4 行），不再有第二组逐项列表。
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    expect(
+      screen.queryByTestId("provider-capability-batch-results"),
+    ).toBeNull();
+  });
+
+  it("keeps the update entry for a provider the batch job confirmed", async () => {
+    window.localStorage.setItem(BATCH_STORAGE_KEY, BATCH_JOB_ID);
+    installFetchRouter(unknownProjection, undefined, {
+      targets: [
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: true,
+          local_version: "0.44.0",
+          latest_version: "1.0.1",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "update",
+        },
+      ],
+    }, batchJob("confirmed"));
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const providerRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    // 批量作业已确认这一家 ⇒ 行内保留【版本落后】+【更新】+ 当前 → 最新版本
+    // （批量作业的逐项结论与投影同源，不因投影尚未刷新而丢掉更新入口）。
+    expect(
+      await screen.findByTestId("capability-batch-status-codex"),
+    ).toHaveTextContent("批量：已确认");
+    expect(
+      within(providerRow).getByTestId("provider-capability-outdated-codex"),
+    ).toHaveTextContent("版本落后");
+    expect(
+      within(providerRow).getByTestId("provider-install-start-codex"),
+    ).toHaveTextContent("更新");
+    expect(
+      within(providerRow).getByTestId("provider-install-versions-codex"),
+    ).toHaveTextContent("当前 0.44.0 → 最新 1.0.1");
   });
 
   it("dispatches POST revalidate for the clicked provider and echoes already_confirmed", async () => {

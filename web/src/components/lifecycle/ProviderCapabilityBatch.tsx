@@ -45,6 +45,13 @@ const STATUS_LABELS: Record<CapabilityRevalidateBatchItemDto["status"], string> 
   timeout: "超时（该项未完成，未确认）",
 };
 
+/** 逐项状态文案（能力面板的行级列表复用同一份标签，不两处各写一份）。 */
+export function capabilityBatchStatusLabel(
+  status: CapabilityRevalidateBatchItemDto["status"],
+): string {
+  return STATUS_LABELS[status];
+}
+
 function storageKey(projectId: string, logicalCodebaseId: string): string {
   return `aria:capability-batch:${projectId}:${logicalCodebaseId}`;
 }
