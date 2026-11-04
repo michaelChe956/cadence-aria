@@ -446,6 +446,101 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     ).toBeTruthy();
   });
 
+  // owner 2026-11-04 视觉重排：每家 provider 一个**块**（块间 1px 分割线
+  // --aria-line，不套圆角边框卡片壳），块内固定三行 grid 对齐——行1 名与版本
+  // 两端对齐、行2 状态胶囊、行3 左维度胶囊 + 右操作按钮，且不退化成一段
+  // 连续文字流。断言对象换成新结构，语义只增不减。
+  it("lays out each provider as a separated block with three aligned rows", async () => {
+    installFetchRouter(unknownProjection);
+
+    render(
+      <ProviderCapabilityCard
+        projectId={PROJECT_ID}
+        logicalCodebaseId={LC_ID}
+      />,
+    );
+
+    const list = await screen.findByTestId("provider-capability-list");
+    // 块间 1px 分割线挂在列表容器上（每个块自身没有边框壳）。
+    expect(list.className).toContain("divide-y");
+    expect(list.className).toContain("divide-[var(--aria-line)]");
+    const providerRow = screen.getByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    expect(providerRow.className).not.toContain("rounded");
+    expect(providerRow.className).not.toContain("border");
+
+    // 行1：provider 名（600 字重）在左，版本在右（次要色 + 等宽字体）。
+    const head = within(providerRow).getByTestId(
+      "provider-capability-head-claude_code",
+    );
+    expect(head.className).toContain("grid");
+    expect(head.className).toContain("grid-cols-[1fr_auto]");
+    expect(
+      within(providerRow).getByTestId("provider-capability-name-claude_code"),
+    ).toHaveClass("font-semibold");
+    const version = within(providerRow).getByTestId(
+      "provider-capability-claude_code-version",
+    );
+    expect(version).toHaveClass("text-right");
+    expect(version).toHaveClass("aria-mono");
+    expect(version).toHaveClass("text-[var(--aria-ink-muted)]");
+
+    // 行2：状态胶囊们（flex-wrap + gap），胶囊是 rounded-full 不是方角 badge。
+    const statusRow = within(providerRow).getByTestId(
+      "provider-capability-status-row-claude_code",
+    );
+    expect(statusRow.className).toContain("flex-wrap");
+    expect(statusRow.className).toContain("gap-x-2");
+    const statusChip = within(providerRow).getByTestId(
+      "provider-capability-status-claude_code",
+    );
+    expect(statusChip).toHaveClass("rounded-full");
+    expect(statusChip).toHaveClass("bg-[var(--aria-success-soft)]");
+    expect(statusChip).toHaveClass("text-[var(--aria-success)]");
+
+    // 行3：左 = 三个能力维度胶囊（rounded-full），右 = 操作按钮（右对齐）。
+    const actionsRow = within(providerRow).getByTestId(
+      "provider-capability-actions-row-claude_code",
+    );
+    // 行3 用 gap 排布；空间不够时操作区整体换行，不靠自然换行拼行。
+    expect(actionsRow.className).toContain("flex-wrap");
+    expect(actionsRow.className).toContain("gap-y-2");
+    const aspects = within(providerRow).getByTestId(
+      "provider-capability-aspects-claude_code",
+    );
+    const operations = within(providerRow).getByTestId(
+      "provider-capability-operations-claude_code",
+    );
+    // 维度在左、操作在右（DOM 顺序 + 右对齐容器 + 推到行尾）。
+    expect(
+      aspects.compareDocumentPosition(operations) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(operations.className).toContain("ml-auto");
+    expect(operations.className).toContain("justify-end");
+    for (const aspect of ["launch", "write_boundary", "resume"]) {
+      const chip = within(providerRow).getByTestId(
+        `provider-capability-aspect-chip-claude_code-${aspect}`,
+      );
+      expect(chip).toHaveClass("rounded-full");
+      expect(chip.className).not.toContain("rounded-md");
+    }
+    // 操作按钮是次按钮（MASTER §5：淡蓝紫底 + 蓝紫字 + rounded-xl）。
+    expect(
+      within(providerRow).getByTestId(
+        "provider-capability-revalidate-claude_code",
+      ),
+    ).toHaveClass("btn-secondary");
+
+    // 未退化成一段连续文字流：块内至少三个独立行容器（名/版本、状态、操作）。
+    expect(providerRow.children.length).toBeGreaterThanOrEqual(3);
+    expect(
+      within(providerRow).getByTestId("provider-capability-head-claude_code"),
+    ).not.toBe(aspects);
+    expect(aspects).not.toBe(operations);
+  });
+
   it("keeps the version-gap entry (版本落后 / 更新 / 当前→最新) in the row list", async () => {
     installFetchRouter(() => confirmedCodexProjection(), undefined, {
       targets: [

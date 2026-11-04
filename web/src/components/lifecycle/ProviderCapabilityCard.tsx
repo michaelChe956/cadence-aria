@@ -5,11 +5,17 @@
 // already_confirmed/revalidated/probing/failed 四态如实回显；成功后重读
 // 同一 GET 面刷新状态（不乐观改 durable 事实）。
 //
-// owner 2026-11-04 裁定：去掉 2×2 方格卡片，只保留行级列表 ⇒ 四家 provider
-// 各占一行（名字 / 状态 / 三个能力维度 / 版本 / 版本落后 / 安装更新入口 /
-// 核验按钮）；「一键核验全部」按钮仍在标题行右侧、作用域说明仍在按钮下方；
-// 批量核验作业的逐项状态并入同一行（不再另起第二组列表）。能力核验的
-// 行为、接口调用与状态语义均未改动。
+// owner 2026-11-04 裁定（视觉重排）：去掉 2×2 方格卡片，也不做「一整行文字
+// 流」⇒ 每家 provider 一个**块**，块之间用 1px 分割线（--aria-line）分隔
+// （不套圆角边框卡片壳），块内固定三行并用 grid 对齐：
+//   行1 provider 名（600 字重）· 右对齐版本（次要色 + 等宽字体）
+//   行2 状态胶囊们（已确认 / 批量逐项状态 / 版本落后）
+//   行3 左：三个能力维度胶囊（启动 / 写边界 / 恢复）· 右：操作按钮（右对齐）
+// 窄屏（<640px）行3 允许上下堆叠，但用 gap 排布，绝不退化成连续文字流。
+// 视觉契约以 design-system/MASTER.md 为准：胶囊 rounded-full（§6）、次按钮
+// btn-secondary（§5）、1px 分割线（§3）、hover 只变颜色且 150-300ms（§5/§7）。
+// 「一键核验全部」按钮、作用域说明与 codegraph 不出现等既有行为全部保持；
+// 接口调用、参数、状态语义与回显文案均未改动。
 import { useCallback, useEffect, useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import { getInstallTargets } from "../../api/provider-install";
@@ -53,11 +59,73 @@ const ASPECT_STATUS_LABELS: Record<string, string> = {
 };
 
 /** provider 级状态文案（行级列表的一列）：三个能力维度全 Confirmed 才
- *  「已确认」（与 admission fail-closed 同口径，不夸大）；否则「未核验」。 */
+ * 「已确认」（与 admission fail-closed 同口径，不夸大）；否则「未核验」。 */
 const PROVIDER_STATUS_LABELS = {
   confirmed: "已确认",
   unknown: "未核验",
 } as const;
+
+/** 胶囊基座（MASTER §6）：rounded-full + 1px 细边或无边框浅底；紧凑尺寸
+ * （padding 2px 10px、字号 12px）。禁止方角 badge。 */
+const CHIP_CLASS =
+  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium";
+
+/** 能力维度胶囊配色：已核验 = success-soft 底 + success 字；未核验 = 无边框
+ * 弱化墨色；拒绝 = danger-soft 底 + danger 字（真实探针如实拒绝的证据）。 */
+const ASPECT_CHIP_CLASSES: Record<
+  "confirmed" | "unknown" | "denied",
+  string
+> = {
+  confirmed:
+    "border-[var(--aria-success)] bg-[var(--aria-success-soft)] text-[var(--aria-success)]",
+  unknown:
+    "border-[var(--aria-line)] bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)]",
+  denied:
+    "border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] text-[var(--aria-danger)]",
+};
+
+/** provider 级状态胶囊配色：已确认 = success-soft 底 + success 字；未核验 =
+ * 无边框 + 弱化墨色（未探测不谎报）。 */
+const PROVIDER_STATUS_CHIP_CLASSES: Record<
+  keyof typeof PROVIDER_STATUS_LABELS,
+  string
+> = {
+  confirmed:
+    "border-[var(--aria-success)] bg-[var(--aria-success-soft)] text-[var(--aria-success)]",
+  unknown:
+    "border-transparent bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)]",
+};
+
+/** 批量作业逐项状态胶囊配色：已确认 = success、核验中 = primary、失败 =
+ * danger、跳过 / 超时 = warning（跳过 ≠ 失败，不谎报也不谎报已确认）。 */
+const BATCH_STATUS_CHIP_CLASSES: Record<
+  Parameters<typeof capabilityBatchStatusLabel>[0],
+  string
+> = {
+  confirmed:
+    "border-[var(--aria-success)] bg-[var(--aria-success-soft)] text-[var(--aria-success)]",
+  running:
+    "border-[var(--aria-primary)] bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]",
+  failed:
+    "border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] text-[var(--aria-danger)]",
+  skipped:
+    "border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] text-[var(--aria-warning)]",
+  timeout:
+    "border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] text-[var(--aria-warning)]",
+};
+
+/** 次按钮（MASTER §5）：淡蓝紫底 + 蓝紫字 + 无边框 + rounded-xl。仓内
+ * `.btn-secondary` 已实现该契约（hover 只出现 1px 细边、transition 200ms），
+ * 这里只覆盖本面板的紧凑密度与焦点可见性。 */
+const SECONDARY_BUTTON_CLASS =
+  "btn-secondary min-h-9 cursor-pointer px-2.5 py-1 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60";
+
+/** 安装 / 更新按钮由 `ProviderInstallActionButton`（另一个文件，不在本任务可改
+ * 范围）渲染 ⇒ 在本组件内用后代选择器把它统一成本面板的次按钮外观
+ * （MASTER §5）。只命中安装动作容器里的操作按钮，不动 Kimi 远程脚本确认框里
+ * 的【确认并安装】/【取消】（那是主/次语义按钮，不是行级操作）。 */
+const INSTALL_ACTION_CLASS =
+  "[&>div]:mt-0 [&>div>div>button]:rounded-xl [&>div>div>button]:border-transparent [&>div>div>button]:bg-[var(--aria-primary-soft)] [&>div>div>button]:text-[var(--aria-primary)] [&>div>div>button]:hover:border-[var(--aria-line-strong)] [&>div>div>button]:hover:bg-[var(--aria-primary-soft)]";
 
 /** 单 aspect 聚合：三 action 行全 Confirmed 才已核验（与 admission
  * fail-closed 同口径，不夸大）；任一 Unknown 仍未核验（重验证可补）；
@@ -258,8 +326,9 @@ export function ProviderCapabilityCard({
       {projection === null && loadError === null ? (
         <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">载入中…</p>
       ) : null}
-      {/* 行级列表（owner 2026-11-04：删掉 2×2 方格卡片，只保留这一组行）：
-          四家 provider 各一行；批量核验作业的逐项状态并入同一行。 */}
+      {/* 行级列表（owner 2026-11-04：删掉 2×2 方格卡片，也不做一整行文字流）：
+          每家 provider 一个块，块间 1px 分割线（--aria-line），块内三行
+          grid 对齐（名/版本 · 状态胶囊 · 维度胶囊 + 操作按钮）。 */}
       {projection ? (
         <ul
           data-testid="provider-capability-list"
@@ -281,112 +350,163 @@ export function ProviderCapabilityCard({
             );
             // 已核验 = durable 投影的聚合结论，或批量作业已确认（任一成立；
             // 批量作业的逐项结论与投影同源，作业成功时投影可能尚未刷新）。
-            const confirmed = providerConfirmed || batchItem?.status === "confirmed";
+            const confirmed =
+              providerConfirmed || batchItem?.status === "confirmed";
             // 版本落后由安装目标面判定（块2 `install-targets.action`）。
             const outdated = installView?.action === "update";
+            const latestVersion = installView?.latest_version ?? null;
             return (
               <li
                 key={providerType}
                 data-testid={`provider-capability-provider-${providerType}`}
-                className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1 text-xs"
+                className="grid gap-1.5 py-2"
               >
-                <span className="font-semibold text-[var(--aria-ink)]">
-                  {label}
-                </span>
-                <span
-                  data-testid={`provider-capability-status-${providerType}`}
-                  className="text-[var(--aria-ink-muted)]"
+                {/* 行1：provider 名（600 字重）· 右对齐版本（次要色 + 等宽）。 */}
+                <div
+                  data-testid={`provider-capability-head-${providerType}`}
+                  className="grid grid-cols-[1fr_auto] items-baseline gap-x-3"
                 >
-                  {providerConfirmed
-                    ? PROVIDER_STATUS_LABELS.confirmed
-                    : PROVIDER_STATUS_LABELS.unknown}
-                </span>
-                {batchItem !== null ? (
                   <span
-                    data-testid={`capability-batch-status-${providerType}`}
-                    className={
-                      batchItem.status === "failed"
-                        ? "text-[var(--aria-danger)]"
-                        : "text-[var(--aria-ink-muted)]"
-                    }
+                    data-testid={`provider-capability-name-${providerType}`}
+                    className="truncate text-sm font-semibold text-[var(--aria-ink)]"
                   >
-                    批量：{capabilityBatchStatusLabel(batchItem.status)}
+                    {label}
                   </span>
-                ) : null}
-                {outdated ? (
                   <span
-                    data-testid={`provider-capability-outdated-${providerType}`}
-                    className="text-[var(--aria-primary)]"
+                    data-testid={`provider-capability-${providerType}-version`}
+                    className="aria-mono text-right text-xs text-[var(--aria-ink-muted)]"
                   >
-                    版本落后
+                    {provider.version ?? "未探测"}
                   </span>
-                ) : null}
-                <span
-                  data-testid={`provider-capability-${providerType}-version`}
-                  className="text-[var(--aria-ink-muted)]"
+                </div>
+                {/* 行2：状态胶囊（provider 级状态 / 批量逐项状态 / 版本落后）。 */}
+                <div
+                  data-testid={`provider-capability-status-row-${providerType}`}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1"
                 >
-                  {provider.version ?? "未探测"}
-                </span>
-                {/* 三个能力维度（启动 / 写边界 / 恢复）：原方格卡片里的聚合
-                    状态，删卡片后并入本行（不丢信息）。 */}
-                {CAPABILITY_ASPECTS.map((aspect) => (
                   <span
-                    key={aspect}
-                    className="flex items-baseline gap-x-1 text-[var(--aria-ink-muted)]"
+                    data-testid={`provider-capability-status-${providerType}`}
+                    className={`${CHIP_CLASS} ${
+                      providerConfirmed
+                        ? PROVIDER_STATUS_CHIP_CLASSES.confirmed
+                        : PROVIDER_STATUS_CHIP_CLASSES.unknown
+                    }`}
                   >
-                    <span className="font-semibold text-[var(--aria-ink)]">
-                      {ASPECT_LABELS[aspect]}
-                    </span>
                     <span
-                      data-testid={`provider-capability-${providerType}-${aspect}`}
-                    >
-                      {ASPECT_STATUS_LABELS[aspectStatus(provider, aspect)]}
-                    </span>
+                      aria-hidden="true"
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        providerConfirmed
+                          ? "bg-[var(--aria-success)]"
+                          : "bg-[var(--aria-line-strong)]"
+                      }`}
+                    />
+                    {providerConfirmed
+                      ? PROVIDER_STATUS_LABELS.confirmed
+                      : PROVIDER_STATUS_LABELS.unknown}
                   </span>
-                ))}
-                <button
-                  type="button"
-                  disabled={busyProvider !== null}
-                  onClick={() => void handleRevalidate(providerType)}
-                  className="min-h-9 rounded-md border border-[var(--aria-primary)] bg-white px-2.5 py-1 text-xs font-semibold text-[var(--aria-primary)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] disabled:cursor-not-allowed disabled:opacity-60"
-                  data-testid={`provider-capability-revalidate-${providerType}`}
+                  {batchItem !== null ? (
+                    <span
+                      data-testid={`capability-batch-status-${providerType}`}
+                      className={`${CHIP_CLASS} ${BATCH_STATUS_CHIP_CLASSES[batchItem.status]}`}
+                    >
+                      批量：{capabilityBatchStatusLabel(batchItem.status)}
+                    </span>
+                  ) : null}
+                  {outdated ? (
+                    <span
+                      data-testid={`provider-capability-outdated-${providerType}`}
+                      className={`${CHIP_CLASS} border-[var(--aria-cta)] bg-[var(--aria-cta-soft)] text-[var(--aria-cta)]`}
+                    >
+                      版本落后{latestVersion === null ? "" : ` → ${latestVersion}`}
+                    </span>
+                  ) : null}
+                </div>
+                {/* 行3：左 = 三个能力维度胶囊；右 = 操作按钮（右对齐）。
+                    空间不够时操作区整体换行（flex-wrap + gap），维度胶囊仍保持
+                    一行，绝不退化成连续文字流。 */}
+                <div
+                  data-testid={`provider-capability-actions-row-${providerType}`}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-2"
                 >
-                  核验 {label}
-                </button>
-                {/* 安装 / 更新入口（REQ-PCI-02）：未安装 → 【安装】+ 手动命令；
-                    已安装且已核验但版本落后 → 【更新】。已安装但未核验时由本行
-                    既有「核验」按钮负责（不显示安装，也不重复渲染一个核验）。 */}
-                {installView &&
-                (!installView.cli_available || confirmed) ? (
-                  <ProviderInstallActionButton
-                    target={installView.target}
-                    cliAvailable={installView.cli_available}
-                    localVersion={installView.local_version ?? provider.version}
-                    latestVersion={installView.latest_version}
-                    capabilityConfirmed={confirmed}
-                    onSettled={() => {
-                      void reload();
-                      void reloadInstallTargets();
-                    }}
-                  />
-                ) : null}
-                {/* 批量作业里的失败项：单项重试走单 provider 端点（不重跑整批）。 */}
-                {batchItem !== null && batchItem.status === "failed" ? (
-                  <button
-                    type="button"
-                    data-testid={`capability-batch-retry-${providerType}`}
-                    disabled={batch.retrying === providerType}
-                    onClick={() => {
-                      void batch.retry(providerType).then(() => {
-                        void reload();
-                        void reloadInstallTargets();
-                      });
-                    }}
-                    className="rounded-md border border-[var(--aria-primary)] px-2 py-0.5 text-[11px] font-semibold text-[var(--aria-primary)] disabled:opacity-60"
+                  <div
+                    data-testid={`provider-capability-aspects-${providerType}`}
+                    className="flex flex-wrap items-center gap-x-2 gap-y-1"
                   >
-                    重试
-                  </button>
-                ) : null}
+                    {CAPABILITY_ASPECTS.map((aspect) => {
+                      const status = aspectStatus(provider, aspect);
+                      return (
+                        <span
+                          key={aspect}
+                          data-testid={`provider-capability-aspect-chip-${providerType}-${aspect}`}
+                          className={`${CHIP_CLASS} ${ASPECT_CHIP_CLASSES[status]}`}
+                        >
+                          <span className="text-[var(--aria-ink)]">
+                            {ASPECT_LABELS[aspect]}
+                          </span>
+                          <span
+                            data-testid={`provider-capability-${providerType}-${aspect}`}
+                          >
+                            {ASPECT_STATUS_LABELS[status]}
+                          </span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <div
+                    data-testid={`provider-capability-operations-${providerType}`}
+                    className="ml-auto flex flex-wrap items-center justify-end gap-2"
+                  >
+                    <button
+                      type="button"
+                      disabled={busyProvider !== null}
+                      onClick={() => void handleRevalidate(providerType)}
+                      className={SECONDARY_BUTTON_CLASS}
+                      data-testid={`provider-capability-revalidate-${providerType}`}
+                    >
+                      核验 {label}
+                    </button>
+                    {/* 安装 / 更新入口（REQ-PCI-02）：未安装 → 【安装】+ 手动命令；
+                        已安装且已核验但版本落后 → 【更新】。已安装但未核验时由本行
+                        既有「核验」按钮负责（不显示安装，也不重复渲染一个核验）。 */}
+                    {installView &&
+                    (!installView.cli_available || confirmed) ? (
+                      <div className={INSTALL_ACTION_CLASS}>
+                        <ProviderInstallActionButton
+                          target={installView.target}
+                          cliAvailable={installView.cli_available}
+                          localVersion={
+                            installView.local_version ?? provider.version
+                          }
+                          latestVersion={installView.latest_version}
+                          capabilityConfirmed={confirmed}
+                          onSettled={() => {
+                            void reload();
+                            void reloadInstallTargets();
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                    {/* 批量作业里的失败项：单项重试走单 provider 端点（不重跑整批）。 */}
+                    {batchItem !== null && batchItem.status === "failed" ? (
+                      <button
+                        type="button"
+                        data-testid={`capability-batch-retry-${providerType}`}
+                        disabled={batch.retrying === providerType}
+                        onClick={() => {
+                          void batch.retry(providerType).then(() => {
+                            void reload();
+                            void reloadInstallTargets();
+                          });
+                        }}
+                        className={SECONDARY_BUTTON_CLASS}
+                      >
+                        重试
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                {/* 核验回显（瞬态第四行：核验中 / already_confirmed / revalidated /
+                    失败码 + detail，如实呈现，不乐观改状态）。 */}
                 {feedback ? (
                   <p
                     data-testid={`provider-capability-result-${providerType}`}
