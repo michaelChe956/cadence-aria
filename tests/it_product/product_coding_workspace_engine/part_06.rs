@@ -4,29 +4,48 @@ async fn execute_code_review_blocked_creates_retry_gate() {
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = InputCapturingProvider {
-        input: Arc::new(Mutex::new(None)),
-        output: r#"{
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(InputCapturingProvider {
+            input: Arc::new(Mutex::new(None)),
+            output: r#"{
             "verdict": "blocked",
             "summary": "缺少人工测试账号，无法完成 review",
             "findings": []
         }"#
         .to_string(),
-    };
+        }),
+        ProviderType::ClaudeCode,
+    ));
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let report = engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 
@@ -64,21 +83,40 @@ async fn code_review_provider_start_failure_marks_attempt_blocked_and_node_faile
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = StartFailingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(StartFailingProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let error = engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect_err("provider start should fail");
 
@@ -124,16 +162,24 @@ async fn execute_code_review_prompt_includes_diff_work_item_rules_and_role_provi
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nstairs implementation\n").expect("modify file");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&app_paths, root.path());
     seed_work_item_markdown(
         &app_paths,
         "实现爬楼梯问题：给定 n 阶楼梯，每次可以爬 1 或 2 阶。",
     );
-    let store = CodingAttemptStore::new(app_paths);
+    let store = CodingAttemptStore::new(app_paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&app_paths, &authority)
         })
         .expect("create attempt");
     store
@@ -152,15 +198,25 @@ async fn execute_code_review_prompt_includes_diff_work_item_rules_and_role_provi
         .expect("set role provider snapshot");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
     let captured_input = Arc::new(Mutex::new(None));
-    let provider = InputCapturingProvider {
-        input: captured_input.clone(),
-        output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(InputCapturingProvider {
+            input: captured_input.clone(),
+            output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
+        }),
+        ProviderType::Codex,
+    ));
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &app_paths,
+        &authority,
+        provider.clone(),
+        ProviderName::Codex,
+        tx,
+    );
 
     engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 
