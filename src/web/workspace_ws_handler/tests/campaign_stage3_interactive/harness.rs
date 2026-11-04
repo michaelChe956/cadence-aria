@@ -240,12 +240,11 @@ pub(super) async fn campaign_stage3_fixture(
     // **durable capability 记录**（`production_policy_resolvers.rs` 的
     // `load_record` 缺记录即拒 ⇒ `provider_capability_launch_not_confirmed`，
     // provider 零启动）。基座 fixture 不种该记录 ⇒ 修订 turn 的 provider 起不来。
-    // 此处按项目级 legacy 子树播种 ClaudeCode 的 Confirmed 记录
+    // 此处按**项目级全局**播种 ClaudeCode 的 Confirmed 记录
     // （`capability_snapshot_ref` 与 gateway 的 `ProviderRef` 对得上）。
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &app_paths,
         "project_0001",
-        None,
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
     // —— 会话 scope 唯一化(并发隔离)——

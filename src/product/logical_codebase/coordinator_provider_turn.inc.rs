@@ -898,7 +898,8 @@ mod provider_turn_lcg_tests {
     /// 凭据=from_running_operation):真实 for_lc 存储链 + 生产装配驱动
     /// (`with_provider_and_admission`,snapshot ref 与自举记录一致的
     /// `cap_managed_snapshot`),capability source 为携带 root-recipe 凭据
-    /// durable Running 重核验通道的 `StoreBackedProviderCapabilitySource::for_lc`。
+    /// durable Running 重核验通道的
+    /// `StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck`。
     struct LcProductionTurnFixture {
         _temp: tempfile::TempDir,
         paths: ProductAppPaths,
@@ -952,7 +953,7 @@ mod provider_turn_lcg_tests {
         AggregatePolicyArtifactStore::for_lc(paths.clone(), lc.id.clone())
             .ensure_bootstrap(&manifest)
             .expect("bootstrap policy");
-        ProviderCapabilityStore::for_lc(paths.clone(), lc.id.clone())
+        ProviderCapabilityStore::new(paths.clone())
             .ensure_bootstrap(&project.id)
             .expect("bootstrap capability");
 
@@ -965,11 +966,13 @@ mod provider_turn_lcg_tests {
         let gateway = Arc::new(
             crate::product::logical_codebase::LogicalCodebaseProviderGateway::with_audit(
                 AggregatePolicyArtifactStore::for_lc(paths.clone(), lc.id.clone()),
-                Arc::new(StoreBackedProviderCapabilitySource::for_lc(
-                    paths.clone(),
-                    project.id.clone(),
-                    lc.id.clone(),
-                )),
+                Arc::new(
+                    StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
+                        paths.clone(),
+                        project.id.clone(),
+                        lc.id.clone(),
+                    ),
+                ),
                 Arc::new(PassThroughTargetResolver),
                 Arc::new(registry),
                 Arc::new(StubSyncAdapter),

@@ -195,7 +195,7 @@ fn app_and_state_with_pending_choice(
     // gateway 组装复用 web_coding_ws_handler 共享助手层（registry 槽位 +
     // always-available gate + 同步 adapter 桩，同 `coding_ws_state_with_gateway`），
     // 并按生产 runner 形态以 issue 的 LC 作用域 `build_readonly_for_lc` 组装。
-    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, "project_0001", None);
+    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, "project_0001");
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, Arc::new(F43ChoiceAwaitingProvider));
     let gateway = Arc::new(

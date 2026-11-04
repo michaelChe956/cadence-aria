@@ -404,4 +404,57 @@ describe("AggregateInitializationCard", () => {
       screen.queryByTestId("aggregate-initialization-provider-selection"),
     ).not.toBeInTheDocument();
   });
+
+  // 停止原因可见化（owner 2026-11-04）：点「启动聚合初始化」失败时，卡片上
+  // 必须能看到「卡在哪一步、为什么、属于哪道闸门」——不是一个无解释的按钮。
+  it("renders the advance stop reason next to the start button", () => {
+    render(
+      <AggregateInitializationCard
+        operation={null}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+        advanceStop={{
+          step: "rules_policy",
+          reason: "waiting_for_human",
+          reason_code: "aggregate_initialization_provider_needs_verification",
+          detail: "provider 能力未核验",
+          stopped_at: "2026-11-04T00:00:00Z",
+        }}
+      />,
+    );
+
+    const stop = screen.getByTestId("aggregate-initialization-advance-stop");
+    const headline = screen.getByTestId(
+      "aggregate-initialization-advance-stop-headline",
+    );
+    // 停在哪一步（中文口径，与冷启动卡片同一套标签）。
+    expect(headline.textContent).toContain("规则/政策");
+    // 为什么（停止枚举的中文口径）。
+    expect(headline.textContent).toContain("等待人工处理");
+    // 属于哪道闸门（稳定机器码 → 短标签）。
+    expect(
+      screen.getByTestId("aggregate-initialization-advance-stop-gate").textContent,
+    ).toContain("需先核验 provider");
+    // 机器码本身不重复渲染（由 bootstrap 通知卡承担）。
+    expect(stop.textContent).not.toContain(
+      "aggregate_initialization_provider_needs_verification",
+    );
+  });
+
+  it("does not render the advance stop block when advanceStop is absent", () => {
+    render(
+      <AggregateInitializationCard
+        operation={null}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByTestId("aggregate-initialization-advance-stop"),
+    ).not.toBeInTheDocument();
+  });
 });

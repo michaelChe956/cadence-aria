@@ -161,11 +161,13 @@ mod tests {
             .unwrap()
     }
 
-    /// Task 8(8b):为 fixture 的权威 LC 子树播种 capability 记录——
+    /// Task 8(8b):为 fixture 播种 capability 记录——
     /// `ensure_bootstrap` 写 ClaudeCode/Codex 两条 bootstrap 记录(矩阵
     /// 全 Unknown,只作未探测占位);Pi/KimiCode 保持无记录(action 证据
-    /// 缺失形态)。lc_id 权威取 resolver 冻结的 resolution(与 GET/Enable
-    /// 接线同源)。
+    /// 缺失形态)。
+    ///
+    /// capability 记录的作用域是**项目级全局**(owner 2026-11-04)⇒ 不再按
+    /// LC 子树分叉,故无 lc_id 参数。
     ///
     /// 迁移桥退役(4749a1fc)后 bootstrap 的 Unknown 行不再放行:claude_code
     /// 的正向角色链必须在自举之后显式物化为 Confirmed。该测试族的负向期望
@@ -175,21 +177,12 @@ mod tests {
         fixture: &super::super::automation_enrollment_test_support::Fixture,
     ) {
         let paths = fixture.paths.clone();
-        let lc_id =
-            crate::product::logical_codebase::RepositoryAuthorityResolver::new(paths.clone())
-                .resolve_for_issue(PROJECT_ID, ISSUE_ID)
-                .expect("resolve carrier")
-                .expect("logical carrier")
-                .target
-                .logical_codebase_id
-                .expect("resolver-frozen lc id");
-        crate::product::logical_codebase::ProviderCapabilityStore::for_lc(paths.clone(), &lc_id)
+        crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone())
             .ensure_bootstrap(PROJECT_ID)
             .expect("capability bootstrap");
         super::super::automation_enrollment_test_support::seed_confirmed_capability_records(
             &paths,
             PROJECT_ID,
-            Some(&lc_id),
             &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
         );
     }

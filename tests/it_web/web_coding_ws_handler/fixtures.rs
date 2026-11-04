@@ -279,7 +279,7 @@ fn coding_ws_state_with_gateway(
     app_paths: &ProductAppPaths,
     registry: ProviderRegistry,
 ) -> WebAppState {
-    crate::provider_capability_fixture::seed_confirmed_claude(app_paths, "project_0001", None);
+    crate::provider_capability_fixture::seed_confirmed_claude(app_paths, "project_0001");
     let registry = Arc::new(registry);
     WebAppState::with_events_and_provider_registry(
         root_path.to_path_buf(),

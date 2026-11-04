@@ -2364,9 +2364,8 @@ mod tests {
             "探针真实启动过 CLI,launch 必须签 Confirmed(r2 三家首错锚点)"
         );
         let record = outcome.record;
-        let store = crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore::for_lc(
+        let store = crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore::new(
             crate::product::app_paths::ProductAppPaths::new(base.path().join(".aria")),
-            "lc-unit-external-entry",
         );
         ProviderCapabilityProbeService::with_durable_writer(store)
             .record_verified_probe("project_0001", &record, &evidence, &projection)

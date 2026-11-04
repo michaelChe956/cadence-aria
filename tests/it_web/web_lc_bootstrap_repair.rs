@@ -585,14 +585,13 @@ async fn register_lc_members(
     .await;
     assert_eq!(status, StatusCode::OK, "{batch}");
     assert_eq!(batch["status"], "completed");
-    // 片4（REQ-BOOT-07）：选择器前置——LC 子树与 project 级 legacy 子树
-    // 都种 Confirmed（temp 根由 aggregate_root 的父目录恢复）。
+    // 片4（REQ-BOOT-07）：选择器前置——capability 记录作用域 = 项目级全局
+    // （temp 根由 aggregate_root 的父目录恢复）。
     let root = aggregate_root
         .parent()
         .expect("fixture root is the aggregate root's parent");
     let paths = ProductAppPaths::new(root.join(".aria"));
-    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001", Some(&lc_id));
-    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001", None);
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001");
     lc_id
 }
 
@@ -866,7 +865,7 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
     // project 记录落地后：seed 会先建 `projects/project_0001/` 目录，若先
     // seed 再 POST /api/projects，序号扫描（只看目录名）会把新 project 分到
     // project_0002，后续硬编码 project_0001 的路由即 404 project_not_found。
-    crate::provider_capability_fixture::seed_confirmed_claude(&paths, PROJECT_ID, None);
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, PROJECT_ID);
     write_json(
         &paths.project_root(PROJECT_ID).join("repos.json"),
         &vec![

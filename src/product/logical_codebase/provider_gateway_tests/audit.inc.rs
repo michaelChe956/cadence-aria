@@ -169,10 +169,10 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
     store
         .upsert(project_id, &stale)
         .expect("seed durable 旧字节");
-    let capabilities_path =
-        crate::product::logical_codebase::lc_scope_root(&paths, project_id, &None)
-            .expect("lc scope root")
-            .join("capabilities.json");
+    // capability 记录的**项目级全局**落盘路径（owner 2026-11-04 决策 1）。
+    let capabilities_path = paths
+        .logical_codebase_root(project_id)
+        .join("capabilities.json");
     let bytes_before = std::fs::read(&capabilities_path).expect("read durable bytes");
 
     // 三方不一致:evidence 的 projection_digest 漂移(record/projection 一致)。

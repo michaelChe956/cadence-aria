@@ -35,7 +35,6 @@ pub(super) fn plan_repair_fixture_with_dependency(with_dependency: bool) -> Plan
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &paths,
         "project_0001",
-        None,
         &[
             crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
             crate::product::logical_codebase::provider_gateway::ProviderRefType::Codex,

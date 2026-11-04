@@ -33,11 +33,9 @@ use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 
 /// 生产 target resolver:按请求 project 构造 `RepositoryStore` 以在启动前重新解析三层身份。
-///
-/// v1.3（R9 fix round 1）：`lc_id = Some` 时 checkout 目标改从
-/// `logical-codebases/{lc_id}/` 子树权威记录解析（与
-/// `RepositoryStore::resolve_logical_repository_for_issue_codebase` 语义一致）；
-/// `lc_id = None`（单仓/legacy）保持既有 project 级 `for_project` + strict 行为不变。
+/// v1.3（R9 fix round 1）：`lc_id = Some` 时 checkout 目标改从 `logical-codebases/{lc_id}/`
+/// 子树权威记录解析（与 `RepositoryStore::resolve_logical_repository_for_issue_codebase`
+/// 语义一致）；`lc_id = None`（单仓/legacy）保持既有 project 级 `for_project` + strict 行为不变。
 pub struct ProductionPolicyTargetResolver {
     paths: ProductAppPaths,
     lc_id: Option<String>,
@@ -57,10 +55,9 @@ impl ProductionPolicyTargetResolver {
         }
     }
 
-    /// C4 Task 2：当前请求的有效 lc 作用域：显式 `for_lc` 优先；无显式作用域
-    /// 但 legacy 别名 LC record 存在（旧 project 级布局）时返回别名 id（其子树
-    /// 与旧布局字节等价），使别名路径同样经过 authority resolver 冲突校验；
-    /// 两者皆无 → `None`（单仓兼容路径）。
+    /// C4 Task 2：当前请求的有效 lc 作用域：显式 `for_lc` 优先；无显式作用域但 legacy
+    /// 别名 LC record 存在（旧 project 级布局）时返回别名 id（其子树与旧布局字节等价），
+    /// 使别名路径同样经过 authority resolver 冲突校验；两者皆无 → `None`（单仓兼容路径）。
     fn effective_lc_id(&self, project_id: &str) -> Option<String> {
         if let Some(lc_id) = self.lc_id.as_deref() {
             return Some(lc_id.to_string());
@@ -192,18 +189,18 @@ impl PolicyTargetResolver for ProductionPolicyTargetResolver {
 /// project id。Task 2b 起 capability 组装消费 record v2(wire dialect、逐 action
 /// 三态行、trust),并按相位分流:正常会话走 action row 分格门(`require_supported`
 /// launch / `require_write_boundary` / `require_resume_supported`),root-recipe
-/// 相位走 `require_root_recipe_supported`(凭据每次重验 durable Running,不推
-/// normal Confirmed)。顺序 fail-closed:记录缺失 → Codex 硬阻断 → snapshot
-/// 不一致 → 分格不满足。
+/// 相位走 `require_root_recipe_supported`。顺序 fail-closed:记录缺失 → Codex
+/// 硬阻断 → snapshot 不一致 → 分格不满足。capability 记录的作用域唯一
+/// （**项目级全局**，owner 2026-11-04）。
 pub struct StoreBackedProviderCapabilitySource {
+    /// capability 记录：**项目级全局**（唯一作用域，owner 2026-11-04）。
     store: ProviderCapabilityStore,
     project_id: String,
-    /// root-recipe 凭据的 durable Running 重核验通道(`for_lc` 构造时可用;
-    /// `new`/`with_store` 无通道,root-recipe 相位 fail-closed 拒绝)。
+    /// root-recipe 凭据的 durable Running 重核验通道（**按 lc**；`new`/`with_store` 无通道 ⇒ root-recipe 相位 fail-closed 拒绝）。
     recipe_recheck: Option<RootRecipeCredentialRecheck>,
 }
 
-/// root-recipe 凭据重核验通道:durable operation store(lc 作用域)+ 核验 LC。
+/// root-recipe 凭据重核验通道:durable operation store(按 lc 作用域)+ 核验 LC；与 capability 的**项目级全局**作用域不同（operation 本身是 per-lc 的事实）。
 struct RootRecipeCredentialRecheck {
     operations: crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore,
     lc_id: String,
@@ -218,8 +215,7 @@ impl StoreBackedProviderCapabilitySource {
         }
     }
 
-    /// v1.3:接受已按 lc_id 作用域的 `ProviderCapabilityStore`,使 gateway 的
-    /// capability 读取落在 issue 所属代码库子树。
+    /// v1.3:接受已构造的 `ProviderCapabilityStore`（作用域唯一 = 项目级全局）。
     pub fn with_store(store: ProviderCapabilityStore, project_id: String) -> Self {
         Self {
             store,
@@ -228,11 +224,16 @@ impl StoreBackedProviderCapabilitySource {
         }
     }
 
-    /// Task 2b:按 lc 作用域构造,并同时建立 root-recipe 凭据的 durable
-    /// Running 重核验通道(capability store 与 operation store 同一 lc 子树)。
-    pub fn for_lc(paths: ProductAppPaths, project_id: String, lc_id: String) -> Self {
+    /// **全局 capability 记录 + 按 lc 的 root-recipe 凭据重核验通道**——两个作用域
+    /// 刻意不同：capability 记录是**项目级全局**（一次核验全项目可用）；root-recipe
+    /// 通道**按 lc**。旧构造器 `for_lc` 曾把两件事捆在一起，已删除。
+    pub fn global_capability_with_lc_recipe_recheck(
+        paths: ProductAppPaths,
+        project_id: String,
+        lc_id: String,
+    ) -> Self {
         Self {
-            store: ProviderCapabilityStore::for_lc(paths.clone(), &lc_id),
+            store: ProviderCapabilityStore::new(paths.clone()),
             project_id,
             recipe_recheck: Some(RootRecipeCredentialRecheck {
                 operations:
@@ -299,11 +300,10 @@ impl StoreBackedProviderCapabilitySource {
 }
 
 impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
-    /// 正常 action row 的 launch 分格门(T10/DEV-01):仅 `Confirmed` 放行;
-    /// v1→v2 过渡桥(Unknown + 旧 allow 列表)已退役——旧 allow 列表在
-    /// launch 分格无放行效力,`Denied`(真实负向证据)与 `Unknown` 一律
-    /// fail-closed 拒绝(稳定判别码),等待真实 probe(2d)写入 Confirmed
-    /// 行后才可启动。
+    /// 正常 action row 的 launch 分格门(T10/DEV-01):仅 `Confirmed` 放行;v1→v2 过渡桥
+    /// (Unknown + 旧 allow 列表)已退役——旧 allow 列表在 launch 分格无放行效力,
+    /// `Denied`(真实负向证据)与 `Unknown` 一律 fail-closed 拒绝(稳定判别码),等待
+    /// 真实 probe(2d)写入 Confirmed 行后才可启动。
     fn require_supported(
         &self,
         provider: &ProviderRef,

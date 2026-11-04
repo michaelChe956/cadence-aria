@@ -15,7 +15,8 @@
 // ============================================================================
 
 fn git_repo_with_feature_branch() -> tempfile::TempDir {
-    let dir = tempdir().expect("repo");
+    // 成员仓落在专属底座内（底座 = 聚合根，见 part_05 的 member_repo_base）。
+    let dir = member_repo_dir();
     run_git(dir.path(), &["init", "-b", "main"]);
     run_git(dir.path(), &["config", "user.email", "aria@example.com"]);
     run_git(dir.path(), &["config", "user.name", "Aria Test"]);

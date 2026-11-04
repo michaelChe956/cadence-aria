@@ -128,12 +128,8 @@ pub(crate) fn start_lc_aggregate_initialization(
             // 能力核验，与 gateway 准入同源；失败时**不创建 operation**，
             // 候选表/单家核验入口随失败码下发。同步桥接见
             // [`select_aggregate_provider_blocking`]。
-            let selection = select_aggregate_provider_blocking(
-                &project_paths,
-                &state.provider_health,
-                project_id,
-                logical_codebase_id,
-            )?;
+            let selection =
+                select_aggregate_provider_blocking(&project_paths, &state.provider_health, project_id)?;
             let ProviderSelectionOutcome::Selected(selection_table) = selection else {
                 return Err(provider_selection_api_error(
                     &selection,
@@ -758,23 +754,16 @@ fn select_aggregate_provider_blocking(
     paths: &ProductAppPaths,
     health: &std::sync::Arc<crate::cross_cutting::provider_health::ProviderHealthService>,
     project_id: &str,
-    logical_codebase_id: &str,
 ) -> ApiResult<ProviderSelectionOutcome> {
     let health = health.clone();
     let paths = paths.clone();
     let project_id = project_id.to_string();
-    let logical_codebase_id = logical_codebase_id.to_string();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("provider selection runtime");
-        runtime.block_on(select_aggregate_provider(
-            &paths,
-            &health,
-            &project_id,
-            &logical_codebase_id,
-        ))
+        runtime.block_on(select_aggregate_provider(&paths, &health, &project_id))
     })
     .join()
     .map_err(|_| {

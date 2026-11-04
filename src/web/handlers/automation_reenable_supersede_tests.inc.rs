@@ -637,20 +637,12 @@ async fn reenable_with_new_provider_is_accepted_in_one_step() {
     //（与 automation_target 测试族同构）——Fake 仅测试运行豁免，换 provider
     // 必须过 Enable 前的完整角色链同源预检。
     let paths = fixture.paths.clone();
-    let lc_id = crate::product::logical_codebase::RepositoryAuthorityResolver::new(paths.clone())
-        .resolve_for_issue(PROJECT_ID, ISSUE_ID)
-        .expect("resolve carrier")
-        .expect("logical carrier")
-        .target
-        .logical_codebase_id
-        .expect("resolver-frozen lc id");
-    crate::product::logical_codebase::ProviderCapabilityStore::for_lc(paths.clone(), &lc_id)
+    crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone())
         .ensure_bootstrap(PROJECT_ID)
         .expect("capability bootstrap");
     super::super::automation_enrollment_test_support::seed_confirmed_capability_records(
         &paths,
         PROJECT_ID,
-        Some(&lc_id),
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
 

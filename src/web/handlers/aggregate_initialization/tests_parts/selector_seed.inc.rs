@@ -69,16 +69,17 @@ fn with_provider_health_all_available(
 
 /// [`with_provider_health_all_available`] + 把 claude_code 种为 Confirmed：
 /// 选择器据此稳定选中 claude_code（与 provider turn 用例同一种子 helper）。
+///
+/// capability 记录的作用域是**项目级全局**（owner 2026-11-04）⇒ 不再按 LC
+/// 分叉播种，故无 lc_id 参数。
 fn with_selector_defaulting_to_claude(
     state: WebAppState,
     root: &std::path::Path,
     paths: &ProductAppPaths,
-    lc_id: Option<&str>,
 ) -> WebAppState {
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         paths,
         "project_0001",
-        lc_id,
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
     with_provider_health_all_available(state, root)

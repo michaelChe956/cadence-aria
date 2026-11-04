@@ -267,8 +267,7 @@ fn root_safety_fixture(rogue: bool) -> RootSafetyFixture {
         WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone())),
         &root_path,
         &paths,
-        Some(&lc_id),
-    )
+            )
     .with_aggregate_initialization_dependencies(dependencies.clone());
     std::mem::forget(root);
     RootSafetyFixture {
@@ -472,10 +471,7 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
     // launch 种为 Confirmed（选择期 L2 事实，见 with_selector_defaulting_
     // to_claude）。隔离契约的判定相应改为「跑完后 normal 矩阵与起跑时
     // 逐格相同」——recipe 成功既不得铸造、也不得降级任何 normal 分格。
-    let pre_run_claude = crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
-        fixture.paths.clone(),
-        fixture.lc_id.clone(),
-    )
+    let pre_run_claude = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone())
     .get(
         "project_0001",
         crate::product::logical_codebase::ProviderRefType::ClaudeCode,
@@ -618,10 +614,7 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
     //    事实），故判定改为「跑完后 normal 矩阵与起跑快照逐格相同」：
     //    五步 recipe 完整 Completed(上方断言)证明 root-recipe 相位只消费
     //    固定 Claude recipe 事实,不被 normal 分格形态阻断。
-    let capability_store = crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
-        fixture.paths.clone(),
-        fixture.lc_id.clone(),
-    );
+    let capability_store = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone());
     let claude_record = capability_store
         .get(
             "project_0001",

@@ -123,10 +123,7 @@ async fn selection_failure_fixture(
         )
         .unwrap();
     // bootstrap 能力行（全 Unknown）：选择器 L2 的真实读取形态。
-    crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
-        paths.clone(),
-        lc_id.clone(),
-    )
+    crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone())
     .ensure_bootstrap("project_0001")
     .expect("bootstrap capability rows");
 
@@ -378,7 +375,6 @@ async fn selected_kimi_without_trust_returns_existing_waiting_surface() {
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &fixture.paths,
         "project_0001",
-        Some(&fixture.lc_id),
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::KimiCode],
     );
     let (status, body) = selection_failure_create(&fixture, "kimi-trust-1").await;
@@ -403,7 +399,6 @@ async fn selected_pi_skips_trust_gate_and_freezes_provider() {
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &fixture.paths,
         "project_0001",
-        Some(&fixture.lc_id),
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::Pi],
     );
     let (status, body) = selection_failure_create(&fixture, "pi-direct-1").await;
@@ -432,10 +427,7 @@ async fn selected_pi_skips_trust_gate_and_freezes_provider() {
 #[tokio::test]
 async fn denied_pi_points_fallback_at_next_owner_order_candidate() {
     let fixture = selection_failure_fixture(&["kimi", "claude", "codex"], None).await;
-    let store = crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
-        fixture.paths.clone(),
-        fixture.lc_id.clone(),
-    );
+    let store = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone());
     store
         .upsert(
             "project_0001",
@@ -482,10 +474,7 @@ async fn denied_pi_points_fallback_at_next_owner_order_candidate() {
 #[tokio::test]
 async fn denied_codex_has_no_fallback_and_no_revalidate() {
     let fixture = selection_failure_fixture(&["pi", "kimi", "claude"], None).await;
-    let store = crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
-        fixture.paths.clone(),
-        fixture.lc_id.clone(),
-    );
+    let store = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone());
     store
         .upsert(
             "project_0001",

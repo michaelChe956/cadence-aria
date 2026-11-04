@@ -2,7 +2,8 @@
 //
 // - 点击 → POST 发起异步作业（立即拿到 job_id），按钮「核验中（N/4）」+ 禁用；
 // - 终态停止轮询（不无限轮询）；
-// - 按钮区说明作用域与成本（逐 LC 核验 / 真实探测 / 几分钟 / 消耗额度）。
+// - 按钮区说明作用域与成本（全局核验（一次核验全项目可用）/ 真实探测 / 几分钟 /
+//   消耗额度）。
 //
 // owner 2026-11-04：逐项结果（逐项状态 / 失败项【重试】/ 跳过项【安装】/
 // 版本落后【更新】）已迁到能力卡的**行级列表**，原 `ProviderCapabilityBatchResults`
@@ -231,7 +232,8 @@ describe("ProviderCapabilityBatch（票3 一键批量核验）", () => {
     renderBatch();
 
     const scope = screen.getByTestId("capability-batch-scope");
-    expect(scope).toHaveTextContent("逐 LC 核验");
+    expect(scope).toHaveTextContent("全局核验");
+    expect(scope).toHaveTextContent("一次核验全项目可用");
     expect(scope).toHaveTextContent("真实跑一次探测");
     expect(scope).toHaveTextContent("几分钟");
     expect(scope).toHaveTextContent("额度");

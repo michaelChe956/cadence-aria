@@ -497,17 +497,15 @@ mod policy_body_tests {
         let fixture = admission_fixture();
         let (_operations, _operation_id, credential) = derived_credential(&fixture);
 
-        // 记录写入 lc 子树;source 走 for_lc(recipe 凭据 durable 重核验通道)。
-        let store = T02Store::for_lc(fixture.paths.clone(), &fixture.lc_id);
+        // 记录写入**项目级全局** capability store;source 走
+        // `global_capability_with_lc_recipe_recheck`(capability 全局 +
+        // recipe 凭据 durable 重核验通道仍按 LC)。
+        let store = T02Store::new(fixture.paths.clone());
         store.ensure_bootstrap(&fixture.project_id).unwrap();
         store
             .upsert(&fixture.project_id, &t02_recipe_contract_record())
             .unwrap();
-        let source = T02Source::for_lc(
-            fixture.paths.clone(),
-            fixture.project_id.clone(),
-            fixture.lc_id.clone(),
-        );
+        let source = T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.project_id.clone(), fixture.lc_id.clone());
 
         // recipe 相位:同一记录的已交付 recipe 证据 + 有效凭据(durable
         // Running 派生)→ 固定 Claude recipe 事实放行(先于 source 移入 gateway)。
@@ -652,12 +650,13 @@ mod policy_body_tests {
 
     // ===== Task 2b 第二段(lcg_t02):root-recipe 凭据 durable 重验/漂移 =====
 
-    /// 以三态记录 + 指定 Delivered 版本构造 lc 作用域 source fixture。
+    /// 以三态记录 + 指定 Delivered 版本构造 source fixture（capability 记录
+    /// 落**项目级全局**，recipe 凭据重核验通道按 LC）。
     fn t02_recipe_source_with_delivered_version(
         fixture: &AdmissionFixture,
         delivered_version: &str,
     ) -> T02Source {
-        let store = T02Store::for_lc(fixture.paths.clone(), &fixture.lc_id);
+        let store = T02Store::new(fixture.paths.clone());
         store.ensure_bootstrap(&fixture.project_id).unwrap();
         let mut record = t02_recipe_contract_record();
         record.root_recipe_evidence = T02RecipeEvidence::Delivered {
@@ -665,11 +664,7 @@ mod policy_body_tests {
             version: delivered_version.to_string(),
         };
         store.upsert(&fixture.project_id, &record).unwrap();
-        T02Source::for_lc(
-            fixture.paths.clone(),
-            fixture.project_id.clone(),
-            fixture.lc_id.clone(),
-        )
+        T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.project_id.clone(), fixture.lc_id.clone())
     }
 
     /// 凭据每次对 durable Running 重验:Running 放行;operation 完成后
@@ -702,7 +697,7 @@ mod policy_body_tests {
 
         // 无 durable 重核验通道(with_store 构造):即使记录在场也拒绝。
         let channelless = T02Source::with_store(
-            T02Store::for_lc(fixture.paths.clone(), &fixture.lc_id),
+            T02Store::new(fixture.paths.clone()),
             fixture.project_id.clone(),
         );
         let error = channelless
@@ -769,13 +764,12 @@ mod policy_body_tests {
         let mut fixture = admission_fixture();
         fixture.write_language_rules("# rules\n");
 
-        // 存量 v1 记录写入 LC 作用域 capability store(真实读取路径)。
-        let scope_root = crate::product::logical_codebase::store::lc_scope_root(
-            &fixture.paths,
-            &fixture.project_id,
-            &Some(fixture.lc_id.clone()),
-        )
-        .unwrap();
+        // 存量 v1 记录写入**项目级全局** capability store(真实读取路径;
+        // owner 2026-11-04 决策 1：capability 记录唯一作用域 = 项目级)。
+        let scope_root = fixture
+            .paths
+            .logical_codebase_root(&fixture.project_id)
+            .to_path_buf();
         std::fs::create_dir_all(&scope_root).unwrap();
         std::fs::write(
             scope_root.join("capabilities.json"),
@@ -795,11 +789,13 @@ mod policy_body_tests {
         );
         fixture.gateway = Arc::new(LogicalCodebaseProviderGateway::with_audit(
             fixture.policy_store.clone(),
-            Arc::new(StoreBackedProviderCapabilitySource::for_lc(
-                fixture.paths.clone(),
-                fixture.project_id.clone(),
-                fixture.lc_id.clone(),
-            )),
+            Arc::new(
+                StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
+                    fixture.paths.clone(),
+                    fixture.project_id.clone(),
+                    fixture.lc_id.clone(),
+                ),
+            ),
             Arc::new(PassThroughTargetResolver),
             Arc::new(registry),
             Arc::new(StubSyncAdapter),
@@ -809,8 +805,7 @@ mod policy_body_tests {
         ));
 
         // 存量读取:v1 记录的 launch 分格 = Unknown(不产生 Confirmed)。
-        let capability_store =
-            ProviderCapabilityStore::for_lc(fixture.paths.clone(), fixture.lc_id.clone());
+        let capability_store = ProviderCapabilityStore::new(fixture.paths.clone());
         let legacy = capability_store
             .get(&fixture.project_id, ProviderRefType::ClaudeCode)
             .unwrap()

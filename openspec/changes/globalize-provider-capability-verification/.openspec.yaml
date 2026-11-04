@@ -1,0 +1,17 @@
+schema: spec-driven
+created: 2026-11-04
+goal: 让 provider 能力核验从「逐逻辑代码库」改为「一次核验、全项目可用」，并让聚合初始化在全局核验后自动开始
+x-tracker-status: draft
+x-owner-decisions:
+  - id: global-scope
+    decided: 2026-11-04
+    decision: 方案 A —— 能力核验改为【全局（项目级）】：provider 只需要核验一次 ⇒ 全局可用 ⇒ 不再逐 LC 核验
+    reason: 能力核验要真跑一次探测（分钟级、消耗 provider 额度），逐 LC 重复核验对用户是纯浪费
+  - id: no-history-data
+    decided: 2026-11-04
+    decision: 本产品没有历史数据 ⇒ 存量 per-LC 能力记录不需要处理
+    consequence: 写入一律落项目级全局；读取只读项目级全局；既不迁移存量记录，也不做读时提升、不留兼容读取分支
+  - id: gate-l2-payoff
+    decided: 2026-11-04
+    decision: 能力核验改全局后，聚合初始化的第二道门 L2 自动变成「全局已核验」
+    consequence: 四家 provider 全局核验一次后，聚合初始化自动开始；用户不再需要往聚合根里放 AGENTS.md + .claude/rules/language.md

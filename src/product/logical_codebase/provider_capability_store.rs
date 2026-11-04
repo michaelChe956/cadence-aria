@@ -1,7 +1,12 @@
 //! Store-backed provider capability records.
 //!
-//! `ProviderCapabilityRecord` 是逻辑代码库 provider 能力的持久化事实来源,存于
-//! `.aria/projects/{project_id}/logical-codebase/capabilities.json`。v2 记录
+//! `ProviderCapabilityRecord` 是 provider 能力的持久化事实来源,存于
+//! `.aria/projects/{project_id}/logical-codebase/capabilities.json`。
+//!
+//! **唯一作用域 = 项目级全局**(owner 2026-11-04):能力是本机 provider CLI 的
+//! 事实 ⇒ 一次核验对项目内全部逻辑代码库同时生效;SHALL NOT 存在第二条作用域。
+//!
+//! v2 记录
 //! 携带逐 action 三态矩阵(`ProviderActionCapability`:launch/resume/
 //! write_boundary 各自 `Confirmed`/`Denied{reason}`/`Unknown`)、trust、探测
 //! 引用与根 recipe 隔离证据;v1 旧记录(supported_actions/provenance/resume
@@ -733,24 +738,15 @@ fn resume_evidence_from_string(value: &str) -> Option<ResumeEvidenceState> {
 const BOOTSTRAP_VERSION: &str = "0.0.0-managed";
 pub(crate) const MANAGED_CAPABILITY_SNAPSHOT_REF: &str = "cap_managed_snapshot";
 
-/// provider capability 的持久化 store。
+/// provider capability 的持久化 store（**唯一作用域 = 项目级全局**，owner 2026-11-04）。
 #[derive(Debug, Clone)]
 pub struct ProviderCapabilityStore {
     paths: ProductAppPaths,
-    lc_id: Option<String>,
 }
 
 impl ProviderCapabilityStore {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths, lc_id: None }
-    }
-
-    /// Scopes capability reads/writes to one logical codebase subtree（v1.3）。
-    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
-        Self {
-            paths,
-            lc_id: Some(lc_id.into()),
-        }
+        Self { paths }
     }
 
     /// 读取指定 provider 的 capability 记录;文件或记录不存在返回 `Ok(None)`。
@@ -879,12 +875,11 @@ impl ProviderCapabilityStore {
         write_json(&path, &records)
     }
 
+    /// capability 记录的落盘路径：**项目级全局**（`projects/{project_id}/
+    /// logical-codebase/capabilities.json`；不经 `lc_scope_root` 派生）。
     fn capabilities_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(project_id)?;
-        Ok(
-            crate::product::logical_codebase::lc_scope_root(&self.paths, project_id, &self.lc_id)?
-                .join("capabilities.json"),
-        )
+        Ok(self.paths.logical_codebase_root(project_id).join("capabilities.json"))
     }
 }
 
@@ -1742,4 +1737,7 @@ mod tests {
             );
         }
     }
+
+// 作用域唯一性用例（REQ-PCR-07）拆出承载：行数门禁的登记上限不可增长。
+    include!("provider_capability_store_scope_tests.inc.rs");
 }

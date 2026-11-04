@@ -335,7 +335,7 @@ fn trust_route_fixture_full(
     .with_trust(gate.clone());
     let raw_state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()));
     let state = if seed_confirmed_provider {
-        with_selector_defaulting_to_claude(raw_state, &root_path, &paths, Some(&lc_id))
+        with_selector_defaulting_to_claude(raw_state, &root_path, &paths, )
     } else {
         with_provider_health_all_available(raw_state, &root_path)
     }

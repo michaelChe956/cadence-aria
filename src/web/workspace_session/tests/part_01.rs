@@ -732,7 +732,6 @@ async fn provider_run_requested_without_attachments_spawns_throwaway_run() {
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &app_paths,
         "project_0001",
-        None,
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
     let provider_registry = Arc::new(provider_registry);

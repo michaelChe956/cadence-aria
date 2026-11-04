@@ -4,10 +4,15 @@
 //! 一次真实现场边界探针（复用 6c `run_cli_boundary_probe`，覆盖
 //! Coding/Planning/Review 三个 action 含 resume 面）→ 经 2d
 //! `record_verified_probe` 原子导入 durable Confirmed（与 gateway 消费的
-//! capability store 同一 LC 作用域）。一次性语义：action 行已在当前 CLI
-//! exact version 上全 Confirmed 时秒回不重跑；不点击不运行任何探针；探针
-//! 失败如实上报，绝不伪造 Confirmed。门本身（admission fail-closed）不在
-//! 本模块改动范围。
+//! capability store **同一份项目级全局**记录——owner 2026-11-04 决策 1：
+//! 能力是本机 provider CLI 的事实，一次核验全项目可用）。一次性语义：action 行
+//! 已在当前 CLI exact version 上全 Confirmed 时秒回不重跑；不点击不运行任何
+//! 探针；探针失败如实上报，绝不伪造 Confirmed。门本身（admission
+//! fail-closed）不在本模块改动范围。
+//!
+//! `revalidate` 的 `lc_id` 参数**保留**：它承担「哪个 LC 的面板发起的」这一
+//! 探针执行上下文/审计归属职责（决策 10），与记录作用域无关；证据根随记录
+//! 一起全局化（决策 7）。
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -160,14 +165,17 @@ pub struct ProviderCapabilityRevalidateService {
 
 /// probe_and_import 的作用域参数包(clippy too_many_arguments 收敛;
 /// 生命周期跟 revalidate 调用栈)。
+///
+/// **无 lc_id**：能力记录与证据根都已是项目级全局（owner 2026-11-04 决策 1/7）
+/// ⇒ 探针落盘作用域与逻辑代码库无关；「哪个 LC 的面板发起的」这一归属事实
+/// 保留在 `resource_scope_id`（审计/资源身份）里。
 struct ProbeScope<'a> {
     project_id: &'a str,
-    lc_id: &'a str,
     provider: ProviderName,
     cli_program: &'a str,
     resume_kind: ResumeChannelKind,
     base: &'a std::path::Path,
-    /// 本次重验证的资源身份(审计/资源归属可追溯)。
+    /// 本次重验证的资源身份(审计/资源归属可追溯;携带发起 LC 的归属事实)。
     resource_scope_id: String,
 }
 
@@ -242,7 +250,7 @@ impl ProviderCapabilityRevalidateService {
                 detail: error.to_string(),
             })?;
         let provider_type = provider_type_for_name(&provider);
-        let store = ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id);
+        let store = ProviderCapabilityStore::new(self.paths.clone());
         let record = store.get(project_id, provider_type)?;
         let missing: Vec<SessionPolicyAction> = REVALIDATE_ACTIONS
             .iter()
@@ -259,16 +267,18 @@ impl ProviderCapabilityRevalidateService {
         // 探测结束 best-effort 清理；证据 durable 落 LC 子树。
         let base = probe_base_dir()?;
         // 本次重验证的资源身份(批2 Task 9:审计/资源归属可追溯;按调用
-        // 隔离)。
+        // 隔离)。**携带 lc_id**：能力记录已全局化(一次核验全项目可用),
+        // 但探针仍是「某个 LC 的面板发起」的一次运行 ⇒ 审计归属必须留在
+        // 探针工件里(决策 10:lc_id 承担「探针的执行上下文/审计归属」职责,
+        // 与记录作用域无关)。
         let resource_scope_id = format!(
-            "aria-capability-revalidate-{}",
+            "aria-capability-revalidate-{lc_id}-{}",
             uuid::Uuid::new_v4().simple()
         );
         let result = self
             .probe_and_import(
                 ProbeScope {
                     project_id,
-                    lc_id,
                     provider,
                     cli_program,
                     resume_kind,
@@ -293,14 +303,13 @@ impl ProviderCapabilityRevalidateService {
     ) -> Result<Vec<SessionPolicyAction>, RevalidateError> {
         let ProbeScope {
             project_id,
-            lc_id,
             provider,
             cli_program,
             resume_kind,
             base,
             resource_scope_id,
         } = scope;
-        let evidence_root = capability_evidence_root(&self.paths, project_id, lc_id)?;
+        let evidence_root = capability_evidence_root(&self.paths, project_id)?;
         let mut imported_actions = Vec::new();
         for action in missing {
             let session_label = format!(
@@ -337,7 +346,7 @@ impl ProviderCapabilityRevalidateService {
                     detail: error.to_string(),
                 }
             })?;
-            self.import_outcome(project_id, lc_id, &outcome)?;
+            self.import_outcome(project_id, &outcome)?;
             imported_actions.push(*action);
         }
         Ok(imported_actions)
@@ -345,12 +354,16 @@ impl ProviderCapabilityRevalidateService {
 
     /// 只读 capability 状态投影（零写入、零探针触发；bootstrap 默认记录
     /// 不产生真实 Confirmed 显示）。
+    ///
+    /// 投影的是**项目级全局**记录 ⇒ 同一项目的任意逻辑代码库面板读到同一份
+    /// 事实（owner 2026-11-04 决策 1）。故本方法**不接受 lc_id**：记录作用域
+    /// 与逻辑代码库无关（HTTP 路由仍带 lc_id，承担 404 守卫与「哪个面板
+    /// 发起」，见决策 10）。
     pub fn capability_snapshot(
         &self,
         project_id: &str,
-        lc_id: &str,
     ) -> Result<Vec<ProviderCapabilityProviderSnapshot>, ProductStoreError> {
-        let store = ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id);
+        let store = ProviderCapabilityStore::new(self.paths.clone());
         let mut snapshots = Vec::new();
         for provider_type in [
             ProviderRefType::ClaudeCode,
@@ -393,16 +406,15 @@ impl ProviderCapabilityRevalidateService {
         Ok(snapshots)
     }
 
-    /// 把三方一致的探针结果导入 durable（writer 装配=与 gateway 读子树
-    /// 同一 `lc_scope_root` 派生的 capability store，构造保证同源）。
+    /// 把三方一致的探针结果导入 durable（writer 装配=与 gateway 读的**同一份
+    /// 项目级全局** capability store，构造保证同源）。
     fn import_outcome(
         &self,
         project_id: &str,
-        lc_id: &str,
         outcome: &CliBoundaryProbeOutcome,
     ) -> Result<(), ProductStoreError> {
         let durable = ProviderCapabilityProbeService::with_durable_writer(
-            ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id),
+            ProviderCapabilityStore::new(self.paths.clone()),
         );
         durable.record_verified_probe(
             project_id,
@@ -444,20 +456,18 @@ fn row_confirmed_at_version(
     }
 }
 
-/// 探针证据的 durable 落盘根：LC 子树 `capability-evidence/boundary`
-/// （与 capabilities.json 同一 `lc_scope_root`，可审计）。
+/// 探针证据的 durable 落盘根：**项目级全局** `capability-evidence/boundary`
+/// （与全局 `capabilities.json` 同一项目级根 ⇒ 证据与它的记录同作用域、
+/// 互相可指；owner 2026-11-04 决策 7）。
 fn capability_evidence_root(
     paths: &ProductAppPaths,
     project_id: &str,
-    lc_id: &str,
 ) -> Result<PathBuf, ProductStoreError> {
-    Ok(crate::product::logical_codebase::store::lc_scope_root(
-        paths,
-        project_id,
-        &Some(lc_id.to_string()),
-    )?
-    .join("capability-evidence")
-    .join("boundary"))
+    crate::product::json_store::validate_relative_id(project_id)?;
+    Ok(paths
+        .logical_codebase_root(project_id)
+        .join("capability-evidence")
+        .join("boundary"))
 }
 
 /// 受控 fixture 基目录：`$TMPDIR/aria-capability-revalidate-<uuid>`（按
@@ -716,7 +726,7 @@ mod tests {
     async fn pcr_already_confirmed_same_version_returns_without_probing() {
         let (paths, _root) = paths_fixture();
         let lc_id = lc_id_fixture();
-        let store = ProviderCapabilityStore::for_lc(paths.clone(), &lc_id);
+        let store = ProviderCapabilityStore::new(paths.clone());
         store
             .upsert(
                 PROJECT_ID,
@@ -760,7 +770,7 @@ mod tests {
             }
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3, "三 action 各一次真探针");
-        let record = ProviderCapabilityStore::for_lc(paths, &lc_id)
+        let record = ProviderCapabilityStore::new(paths)
             .get(PROJECT_ID, ProviderRefType::Codex)
             .expect("读回")
             .expect("导入后记录在场");
@@ -794,7 +804,7 @@ mod tests {
             SessionPolicyAction::PlanningReadOnly,
             SessionPolicyAction::ReviewReadOnly,
         ];
-        ProviderCapabilityStore::for_lc(paths.clone(), &lc_id)
+        ProviderCapabilityStore::new(paths.clone())
             .upsert(
                 PROJECT_ID,
                 &fully_confirmed_record(PROBE_VERSION, &confirmed),
@@ -822,7 +832,7 @@ mod tests {
     async fn pcr_version_drift_reprobes_all_actions() {
         let (paths, _root) = paths_fixture();
         let lc_id = lc_id_fixture();
-        ProviderCapabilityStore::for_lc(paths.clone(), &lc_id)
+        ProviderCapabilityStore::new(paths.clone())
             .upsert(
                 PROJECT_ID,
                 &fully_confirmed_record("0.9.0-old", &REVALIDATE_ACTIONS),
@@ -873,7 +883,7 @@ mod tests {
             }
             other => panic!("期望 ProbeFailed，实际 {other:?}"),
         }
-        let record = ProviderCapabilityStore::for_lc(paths, &lc_id)
+        let record = ProviderCapabilityStore::new(paths)
             .get(PROJECT_ID, ProviderRefType::Codex)
             .expect("读回")
             .expect("先成功的导入保留");
@@ -930,9 +940,7 @@ mod tests {
             .with_probe_runner(counting_runner(calls.clone(), None));
 
         // 未探测：bootstrap 默认记录不得显示为真实 Confirmed。
-        let before = service
-            .capability_snapshot(PROJECT_ID, &lc_id)
-            .expect("快照");
+        let before = service.capability_snapshot(PROJECT_ID).expect("快照");
         assert_eq!(before.len(), 4, "四家真实 provider");
         for snapshot in &before {
             assert!(snapshot.probed_at.is_none(), "未探测无 probed_at");
@@ -949,9 +957,7 @@ mod tests {
             .revalidate(PROJECT_ID, &lc_id, ProviderName::Codex)
             .await
             .expect("探测导入");
-        let after = service
-            .capability_snapshot(PROJECT_ID, &lc_id)
-            .expect("快照");
+        let after = service.capability_snapshot(PROJECT_ID).expect("快照");
         let codex = after
             .iter()
             .find(|snapshot| snapshot.provider_type == ProviderRefType::Codex)

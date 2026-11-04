@@ -78,17 +78,18 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
 }
 
 /// 先物化 bootstrap 行（保持生产「未探测」语义），再把指定 provider 覆盖写为
-/// `Confirmed`。`lc_id = None` 写 project 级 legacy 子树，`Some` 写 LC 子树。
+/// `Confirmed`。
+///
+/// capability 记录的**唯一作用域 = 项目级全局**（owner 2026-11-04 裁定：能力描述
+/// 的是「本机上某家 provider CLI 能不能跑这个 action」，与逻辑代码库的代码内容
+/// 无关 ⇒ 一次核验对项目内全部逻辑代码库同时生效）。⇒ 播种只认项目，不再按
+/// LC 子树分叉（原 `lc_id` 参数随之退役）。
 pub(crate) fn seed_confirmed_capability(
     paths: &ProductAppPaths,
     project_id: &str,
-    lc_id: Option<&str>,
     providers: &[ProviderRefType],
 ) {
-    let store = match lc_id {
-        Some(lc_id) => ProviderCapabilityStore::for_lc(paths.clone(), lc_id),
-        None => ProviderCapabilityStore::new(paths.clone()),
-    };
+    let store = ProviderCapabilityStore::new(paths.clone());
     store
         .ensure_bootstrap(project_id)
         .expect("bootstrap capability records");
@@ -101,12 +102,8 @@ pub(crate) fn seed_confirmed_capability(
 
 /// 常用形态：仅把 ClaudeCode（gateway 多仓/逻辑路径的默认 provider）覆盖写为
 /// `Confirmed`。
-pub(crate) fn seed_confirmed_claude(
-    paths: &ProductAppPaths,
-    project_id: &str,
-    lc_id: Option<&str>,
-) {
-    seed_confirmed_capability(paths, project_id, lc_id, &[ProviderRefType::ClaudeCode]);
+pub(crate) fn seed_confirmed_claude(paths: &ProductAppPaths, project_id: &str) {
+    seed_confirmed_capability(paths, project_id, &[ProviderRefType::ClaudeCode]);
 }
 
 /// 片4（REQ-BOOT-07）：为「期望创建成功」的 it_web 夹具注入全可用

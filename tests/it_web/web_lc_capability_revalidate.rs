@@ -197,9 +197,9 @@ async fn capability_revalidate_rejects_fake_provider_without_probe_or_write() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
     assert_eq!(body["code"], "provider_capability_probe_unsupported");
     // 零 durable 写入：capabilities.json 不因拒绝产生。
+    // capability 记录作用域 = 项目级全局（owner 2026-11-04）。
     let capabilities = paths
-        .logical_codebases_root(PROJECT_ID)
-        .join(&lc_id)
+        .logical_codebase_root(PROJECT_ID)
         .join("capabilities.json");
     assert!(
         !capabilities.exists(),
@@ -272,7 +272,7 @@ async fn capability_revalidate_confirmed_rows_fast_return_without_probe() {
         evidence_ref: "probe://boundary/codex/seed".to_string(),
     })
     .collect();
-    ProviderCapabilityStore::for_lc(paths.clone(), &lc_id)
+    ProviderCapabilityStore::new(paths.clone())
         .upsert(
             PROJECT_ID,
             &ProviderCapabilityRecord {
@@ -418,9 +418,10 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
         confirmed_row.replace("{action}", "planning_read_only"),
         confirmed_row.replace("{action}", "review_read_only"),
     );
+    // capability 记录作用域 = 项目级全局（owner 2026-11-04）：旧 v2 字节播种在
+    // 项目级路径上（迁移面按同一路径读）。
     let capabilities_path = paths
-        .logical_codebases_root(PROJECT_ID)
-        .join(&lc_id)
+        .logical_codebase_root(PROJECT_ID)
         .join("capabilities.json");
     std::fs::create_dir_all(capabilities_path.parent().expect("dir")).expect("create dir");
     std::fs::write(&capabilities_path, &old_v2_json).expect("seed old v2 bytes");

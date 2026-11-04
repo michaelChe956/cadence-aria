@@ -429,7 +429,7 @@ fn matrix_provider_gateway(
     );
     let registry = Arc::new(registry);
     let capability_store =
-        crate::product::logical_codebase::ProviderCapabilityStore::for_lc(paths.clone(), &lc_id);
+        crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone());
     capability_store
         .ensure_bootstrap(PROJECT_ID)
         .map_err(fixture_error)?;

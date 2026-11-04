@@ -259,7 +259,7 @@ export function ProviderCapabilityBatchStartButton({
       onClick={() => {
         void state.start();
       }}
-      className="rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+      className="rounded-xl border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-1.5 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:opacity-60"
     >
       {state.running ? `核验中（${state.done}/${BATCH_SIZE}）` : "一键核验全部"}
     </button>
@@ -267,8 +267,9 @@ export function ProviderCapabilityBatchStartButton({
 }
 
 /**
- * 按钮区的作用域与成本说明（REQ-PCR-06「按钮区域 SHALL 说明：逐逻辑代码库 /
- * 真实探测 / 消耗额度 / 可能几分钟」）。紧贴按钮渲染，不藏进折叠区。
+ * 按钮区的作用域与成本说明（REQ-PCR-06「按钮区域 SHALL 说明：**项目级全局**
+ * （一次核验全项目可用，不再逐逻辑代码库分别核验）/ 真实探测 / 消耗额度 /
+ * 可能几分钟」）。紧贴按钮渲染，不藏进折叠区。
  */
 export function ProviderCapabilityBatchScope() {
   return (
@@ -276,7 +277,7 @@ export function ProviderCapabilityBatchScope() {
       data-testid="capability-batch-scope"
       className="mt-1 text-[11px] text-[var(--aria-ink-muted)]"
     >
-      逐 LC 核验：会真实跑一次探测，可能几分钟，消耗 provider 额度。
+      全局核验：一次核验全项目可用；会真实跑一次探测，可能几分钟，消耗 provider 额度。
     </p>
   );
 }

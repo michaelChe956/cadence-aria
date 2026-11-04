@@ -167,7 +167,7 @@ async fn build_delivery_fixture(
     // 正向播种（4749a1fc 起 bootstrap 行恒 Unknown）：交付链（逻辑多仓/单仓皆
     // 可）经 provider gateway 启动 claude_code，必须显式物化「已探测」事实，
     // 否则 launch 分格 fail-closed 为 provider_capability_launch_not_confirmed。
-    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, PROJECT_ID, None);
+    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, PROJECT_ID);
 
     let mut repository_ids = Vec::new();
     for (index, repo_dir) in repo_dirs.iter().enumerate() {

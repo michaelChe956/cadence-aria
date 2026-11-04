@@ -40,32 +40,33 @@ async fn bootstrap_project_repo_issue(
 /// 迁移升成 LC 权威（member/checkout/identity-registry/manifest 由
 /// IdentityMigrationExecutor 落盘，LC record 由 require_logical_codebase
 /// 首读时的 migrate_legacy 自动生成，issue selection 由迁移回填写入），
-/// 再经生产 rebuild 端点建 active 聚合索引（generate 入口经
-/// PlanningContextResolver 读取，缺失即 aggregate_index_active_missing），
-/// 最后物化四家 provider 的 Confirmed capability 行（bootstrap 行恒 Unknown，
-/// 仅真实 probe 可写 Confirmed；正向夹具不物化「已探测」事实会在 launch 分格
-/// fail-closed 为 provider_capability_launch_not_confirmed。fake 在 gateway
-/// 中映射为 claude_code，四家全 Confirmed 与 it_core 同款复刻）。
-async fn migrate_rebuild_and_seed_capabilities(app: &axum::Router, app_paths: &ProductAppPaths) {
-    let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
+/// 再建 active 聚合索引（generate 入口经 PlanningContextResolver 读取，
+/// 缺失即 aggregate_index_active_missing），最后物化四家 provider 的
+/// Confirmed capability 行（bootstrap 行恒 Unknown，仅真实 probe 可写
+/// Confirmed；正向夹具不物化「已探测」事实会在 launch 分格 fail-closed 为
+/// provider_capability_launch_not_confirmed。fake 在 gateway 中映射为
+/// claude_code，四家全 Confirmed 与 it_core 同款复刻）。
+///
+/// 聚合索引走**生产聚合索引操作 + 假 CodeGraph CLI**（`aggregate_index_fixture`）：
+/// 夹具不真跑 `codegraph sync .`——那是本机重活（抢全局 `/tmp/.codegraph` 锁、
+/// 吃 `AggregateIndexBudget::INCREMENTAL` 的 30s 预算），并行夹具互踩会 422
+/// `codegraph_timeout`，整批用例红在与被测行为无关的夹具前置上。假 CLI 只替换
+/// CLI 应答，真实 git 成员快照 / 成员覆盖校验 / durable 世代落盘 / active
+/// 投影全部走生产链路（⇒ 读侧 freshness 判定为 active，不会触发真实同步）。
+/// rebuild 端点本身的行为覆盖由 `web_aggregate_index_api` 的用例经同一假
+/// CLI 承担（端点覆盖不丢，只是与本夹具前置解耦）。
+async fn migrate_rebuild_and_seed_capabilities(app_paths: &ProductAppPaths) {
     IdentityMigrationExecutor::new(app_paths.clone())
         .ensure_identity_schema("project_0001")
         .expect("migrate fixture repository into logical codebase authority");
-    let (status, index_rebuild) = request_json(
-        app.clone(),
-        Method::POST,
-        &format!(
-            "/api/projects/project_0001/logical-codebases/{}/aggregate-indexes/rebuild",
-            legacy_logical_codebase_id("project_0001")
-        ),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{index_rebuild}");
+    crate::aggregate_index_fixture::seed_active_aggregate_index(
+        app_paths,
+        "project_0001",
+        &legacy_logical_codebase_id("project_0001"),
+    );
     crate::provider_capability_fixture::seed_confirmed_capability(
         app_paths,
         "project_0001",
-        None,
         &[
             cadence_aria::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
             cadence_aria::product::logical_codebase::provider_gateway::ProviderRefType::Codex,
@@ -93,8 +94,10 @@ async fn generate_and_confirm_story_and_design(
     app: &axum::Router,
     involved_repository_ids: Vec<String>,
 ) {
-    // generate 经 build_with_fresh_index 触发 codegraph sync，须与其它夹具的
-    // rebuild 串行（CODEGRAPH_FIXTURE_LOCK），否则 codegraph_sync_failed 422。
+    // generate 经 build_with_fresh_index 读 active 索引：夹具已发布 fresh 世代
+    // ⇒ freshness 判定 active，不会触发真实 codegraph sync；若判定 stale 则会
+    // 真跑 sync（与其它夹具的 codegraph 调用互踩 ⇒ codegraph_sync_failed 422），
+    // 故持 crate 级锁串行。
     let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
     let (status, story) = request_json(
         app.clone(),
@@ -141,7 +144,9 @@ async fn generate_and_confirm_story_and_design(
     assert_eq!(status, StatusCode::OK, "{confirmed}");
 }
 
-async fn register_repository_and_wait(app: axum::Router, request: Value) -> Value {
+/// 仓库登记助手（真实 HTTP 路由 + 等初始化操作落定）——crate 级可见：
+/// 聚合索引端点用例（`web_aggregate_index_api`）复用同款登记前置。
+pub(crate) async fn register_repository_and_wait(app: axum::Router, request: Value) -> Value {
     let (status, accepted) = request_json(
         app.clone(),
         Method::POST,
@@ -259,8 +264,69 @@ pub(crate) fn assert_group_attempt_creation_rolled_back(app_paths: &ProductAppPa
     }
 }
 
+/// 成员仓的**专属底座**：成员仓的公共非 git 父目录 = LC 的聚合根
+/// （`common_non_git_parent` 由成员仓路径推出）。
+///
+/// 聚合根不是可以随便指的目录：生产聚合索引链会在 `manifest.provider_context_root`
+/// 写 `codegraph.json`（排除清单）并建 `.codegraph` 库目录。成员仓若直接落在
+/// 系统临时目录（`tempfile::tempdir()` ⇒ `/tmp/.tmpX`），聚合根就是**共享的
+/// `/tmp`** ⇒ 排除清单写到 `/tmp/codegraph.json`、库目录落到 `/tmp/.codegraph`
+/// （与 codegraph 自身的全局状态目录同名 ⇒ 互相污染），且任何走真实 CLI 的路径
+/// 都会把整个 `/tmp` 当项目索引 ⇒ 机器上任何残留目录（被杀掉的测试运行留下的
+/// 上万个 `.tmp*`）都会拖垮 30s 增量预算
+/// （`AggregateIndexBudget::INCREMENTAL.fail_secs = 30`）⇒ `codegraph_timeout`
+/// ⇒ 422 `aggregate_index_unavailable`。
+///
+/// ⇒ 成员仓统一落在这个专属底座内：聚合根随之落在底座（小目录）内。
+/// 底座里的残留成员仓按**创建进程 pid** 回收（进程已消失 ⇒ 该轮被杀的残留），
+/// 避免底座随运行次数无限膨胀。
+fn member_repo_base() -> std::path::PathBuf {
+    let base = std::env::temp_dir().join("aria-it-web-member-repos");
+    std::fs::create_dir_all(&base).expect("member repo base");
+    gc_stale_member_repos(&base);
+    base
+}
+
+/// 回收底座里属于**已消失进程**的残留成员仓（成员仓目录名带创建进程 pid）。
+fn gc_stale_member_repos(base: &std::path::Path) {
+    // 非 Linux 无 /proc ⇒ 无法判活 ⇒ 不删（宁可底座膨胀也不误删在用目录）。
+    if !std::path::Path::new("/proc").is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(pid) = name
+            .strip_prefix("member-")
+            .and_then(|rest| rest.split('-').next())
+        else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        if std::path::Path::new("/proc").join(pid.to_string()).exists() {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
+/// 成员仓目录：落在专属底座内（底座即聚合根）。
+fn member_repo_dir() -> tempfile::TempDir {
+    let base = member_repo_base();
+    tempfile::Builder::new()
+        .prefix(&format!("member-{}-", std::process::id()))
+        .tempdir_in(&base)
+        .expect("repo")
+}
+
 pub(crate) fn git_repo() -> tempfile::TempDir {
-    let dir = tempdir().expect("repo");
+    let dir = member_repo_dir();
     run_git(dir.path(), &["init"]);
     run_git(dir.path(), &["config", "user.email", "aria@example.com"]);
     run_git(dir.path(), &["config", "user.name", "Aria Test"]);

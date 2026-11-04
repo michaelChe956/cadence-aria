@@ -303,18 +303,8 @@ async fn app_with_gateway_launchable_design_history() -> (axum::Router, tempfile
         )
         .await;
         assert!(status.is_success(), "bootstrap issue failed: {response}");
-        // capability 播种：LC 子树 + project legacy 子树双种（gateway 经
-        // for_lc(lc_id) 子树读行；legacy 双种同 web_lc_operations_api 先例）。
-        crate::provider_capability_fixture::seed_confirmed_claude(
-            &app_paths,
-            "project_0001",
-            Some(&lc_id),
-        );
-        crate::provider_capability_fixture::seed_confirmed_claude(
-            &app_paths,
-            "project_0001",
-            None,
-        );
+        // capability 播种：作用域 = 项目级全局（owner 2026-11-04）⇒ 只种一次。
+        crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, "project_0001");
         involved
     };
 

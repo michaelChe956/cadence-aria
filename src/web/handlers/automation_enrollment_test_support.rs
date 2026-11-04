@@ -846,19 +846,16 @@ pub(crate) fn confirmed_capability_record(
 /// 才能写入 Confirmed（Unknown+legacy allow 列表的迁移桥已退役）。正向路径
 /// 的 fixture 因此在 `ensure_bootstrap` 之后显式调用本 helper 物化「已探测」
 /// 事实；需要断言「能力未确认」的负向场景不得调用，保留 bootstrap Unknown
-/// 行即可。`lc_id = None` 写 project 级 legacy 子树，`Some` 写 LC 子树。
+/// 行即可。capability 记录的唯一作用域是**项目级全局**（owner 2026-11-04）
+/// ⇒ 不再按逻辑代码库分叉。
 pub(crate) fn seed_confirmed_capability_records(
     paths: &ProductAppPaths,
     project_id: &str,
-    lc_id: Option<&str>,
     providers: &[crate::product::logical_codebase::provider_gateway::ProviderRefType],
 ) {
     use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
 
-    let store = match lc_id {
-        Some(lc_id) => ProviderCapabilityStore::for_lc(paths.clone(), lc_id),
-        None => ProviderCapabilityStore::new(paths.clone()),
-    };
+    let store = ProviderCapabilityStore::new(paths.clone());
     for provider_type in providers {
         store
             .upsert(project_id, &confirmed_capability_record(*provider_type))

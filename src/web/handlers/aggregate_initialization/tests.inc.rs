@@ -34,8 +34,7 @@ fn aggregate_init_test_app() -> axum::Router {
         WebAppState::new(root_path.clone(), WebRuntime::new_fake(runtime_root)),
         &root_path,
         &ProductAppPaths::new(root_path.join(".aria")),
-        None,
-    )
+            )
     .with_aggregate_initialization_dependencies(build_test_dependencies(
         root_path,
         Some(factory),
@@ -372,7 +371,6 @@ async fn aggregate_initialization_provider_turn_launches_through_gateway_factory
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &paths,
         "project_0001",
-        None,
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
 
@@ -382,8 +380,7 @@ async fn aggregate_initialization_provider_turn_launches_through_gateway_factory
         WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone())),
         &root_path,
         &paths,
-        None,
-    )
+            )
     .with_aggregate_initialization_dependencies(dependencies.clone());
     std::mem::forget(root);
     let app = build_web_router(state);
@@ -1124,5 +1121,6 @@ include!("tests_parts/root_safety.inc.rs");
 include!("tests_parts/skip_skills.inc.rs");
 include!("tests_parts/bootstrap_advance.inc.rs");
 include!("tests_parts/selection_failure.inc.rs");
+include!("tests_parts/l2_global_capability.inc.rs");
 include!("tests_parts/resume_legacy_compat.inc.rs");
 include!("tests_parts/selector_seed.inc.rs");

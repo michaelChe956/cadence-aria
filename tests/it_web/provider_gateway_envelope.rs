@@ -91,7 +91,7 @@ async fn aggregate_initialization_provider_turns_validate_envelope_and_audit_thr
             description: None,
         })
         .expect("create multi-repository project fixture");
-    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001", None); // 正向播种
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001"); // 正向播种
 
     let aggregate_root = root_path.join("aggregate-root"); // 必须真实存在:resolver 会 canonicalize
     std::fs::create_dir_all(&aggregate_root).expect("aggregate root");
@@ -390,7 +390,7 @@ async fn non_default_lc_coding_gateway_validate_resolves_lc_scoped_checkout_targ
         )
         .expect("create logical codebase record");
     let lc_id = record.id;
-    crate::provider_capability_fixture::seed_confirmed_claude(&paths, &project.id, Some(&lc_id)); // lc 子树
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, &project.id);
 
     let worktree = root.path().join("api");
     std::fs::create_dir_all(&worktree).expect("create repository root");

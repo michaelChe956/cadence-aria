@@ -21,6 +21,57 @@ const STEP_LABELS: Record<string, string> = {
 };
 
 /**
+ * 冷启动推进的停止原因（advance / 手动「准备」被拒时落盘，GET 投影透出）。
+ *
+ * 与冷启动卡片（`LogicalCodebaseBootstrapCard`）同一份后端事实、同一套文案
+ * 来源——聚合初始化卡片只把它挂在按钮旁，让用户看到「卡在哪一步、为什么」，
+ * 不新造措辞（机器码与原始诊断由 bootstrap 通知卡承担，同一信息只呈现一次）。
+ */
+export type AggregateInitializationAdvanceStop = {
+  /** 停住的步骤（依赖顺序里的那一步）。 */
+  step: string;
+  /** 停止枚举（waiting_for_human / failed / no_actionable_step …），不是中文文案。 */
+  reason: string;
+  /** 稳定机器码——两道闸门的区分键。 */
+  reason_code: string;
+  /** 已脱敏的原始拒绝上下文（拒绝 message + details），可空。 */
+  detail?: string | null;
+  /** 停止时间。 */
+  stopped_at: string;
+};
+
+/** 冷启动步骤名 → 中文标签（与冷启动卡片同一套）。 */
+const BOOTSTRAP_STEP_LABELS: Record<string, string> = {
+  identity: "身份",
+  manifest_checkout: "清单/检出",
+  rules_policy: "规则/政策",
+  member_index: "成员索引",
+  aggregate_index_active: "聚合索引激活",
+};
+
+/**
+ * advance 停止原因的中文口径（与冷启动卡片同一份标签表）。
+ * in_progress = 长任务（provider turn / 索引构建）正在跑——不是错误。
+ */
+const ADVANCE_STOP_LABELS: Record<string, string> = {
+  planning_ready: "已就绪（PlanningReady）",
+  in_progress: "进行中，稍后刷新",
+  failed: "已失败",
+  waiting_for_human: "等待人工处理",
+  no_actionable_step: "没有可推进的步骤",
+  iteration_limit: "已达单次推进上限",
+};
+
+/**
+ * 停止原因的两道闸门区分键（后端稳定码）——与冷启动卡片同一套短标签：
+ * 让用户一眼看出该去核验 provider 还是去完成信任确认。
+ */
+const ADVANCE_STOP_GATE_LABELS: Record<string, string> = {
+  aggregate_initialization_provider_needs_verification: "需先核验 provider",
+  aggregate_initialization_trust_waiting: "需先完成信任确认",
+};
+
+/**
  * 「已跳过」步骤的说明文案：服务端判定该步骤本次不执行（对应命令未运行）。
  * 具体判定依据只落在服务端 operation 记录里，不随步骤状态投影到前端，
  * 故此处只陈述「被判定跳过 / 未执行」这一可观测事实。
@@ -145,6 +196,15 @@ export type AggregateInitializationCardProps = {
   onStart: () => void;
   onCancel: () => void;
   onReinitialize: () => void;
+  /**
+   * 冷启动推进的停止原因（可选）：聚合初始化卡片本身没有 operation 时
+   * （点「启动聚合初始化」失败、或推进在准备阶段被拒），用户就只看到一个
+   * 无解释的按钮——把后端落盘的停止原因挂在按钮旁，让用户看到「卡在哪一步、
+   * 为什么、属于哪道闸门」。
+   *
+   * 未推进过 / 未提供时为 undefined ⇒ 卡片维持现状（不渲染该块）。
+   */
+  advanceStop?: AggregateInitializationAdvanceStop | null;
 };
 
 export function AggregateInitializationCard({
@@ -153,6 +213,7 @@ export function AggregateInitializationCard({
   onStart,
   onCancel,
   onReinitialize,
+  advanceStop,
 }: AggregateInitializationCardProps) {
   const active =
     operation !== null &&
@@ -165,6 +226,11 @@ export function AggregateInitializationCard({
       operation.status === "failed" ||
       operation.status === "cancelled");
   const statusLabel = operation ? STATUS_LABELS[operation.status] : "尚未初始化";
+  // 停止原因属于哪道闸门（provider 选择门 / trust 门）——未知原因码不硬套
+  // 标签，如实只给中文口径。
+  const advanceStopGateLabel = advanceStop
+    ? (ADVANCE_STOP_GATE_LABELS[advanceStop.reason_code] ?? null)
+    : null;
 
   function handleReinitialize() {
     if (!window.confirm(REINITIALIZE_CONFIRM_TEXT)) {
@@ -278,6 +344,33 @@ export function AggregateInitializationCard({
             </li>
           ))}
         </ol>
+      ) : null}
+
+      {advanceStop ? (
+        // 聚合初始化为什么没开始：**只给通知卡没有的东西**——停在哪一步、
+        // 属于哪道闸门。机器码与原始诊断由 bootstrap 通知卡
+        // （`bootstrap:advance-stop:*`，通用渲染）承担：它的 summary 已含
+        // 「机器码：…」与「诊断：…」，另有自己的机器码次要行——同一份信息
+        // 只呈现一次（与冷启动卡片同一口径）。
+        <div
+          data-testid="aggregate-initialization-advance-stop"
+          className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs leading-snug"
+        >
+          <p
+            className="text-slate-700"
+            data-testid="aggregate-initialization-advance-stop-headline"
+          >
+            {`聚合初始化停在「${BOOTSTRAP_STEP_LABELS[advanceStop.step] ?? advanceStop.step}」：${ADVANCE_STOP_LABELS[advanceStop.reason] ?? advanceStop.reason}`}
+            {advanceStopGateLabel ? (
+              <span
+                className="ml-1 rounded bg-amber-200 px-1.5 py-0.5 text-[11px] font-semibold text-amber-900"
+                data-testid="aggregate-initialization-advance-stop-gate"
+              >
+                {advanceStopGateLabel}
+              </span>
+            ) : null}
+          </p>
+        </div>
       ) : null}
 
       {operation?.provider_selection ? (

@@ -1292,7 +1292,8 @@ async fn run_task11_write_matrix(
     env: &MatrixEnvironment,
 ) -> Result<Task11WriteMatrix, LiveMatrixFailure> {
     fp_enter_phase("t11-boundary", "write_matrix", "fresh");
-    let store = ProviderCapabilityStore::for_lc(env.app_paths.clone(), env.lc_id.clone());
+    // capability 记录作用域 = 项目级全局（owner 2026-11-04）。
+    let store = ProviderCapabilityStore::new(env.app_paths.clone());
     let provider = ProviderRef::from_provider_name(&env.provider, "cap_managed_snapshot").map_err(
         |error| {
             matrix_failure(
@@ -2271,11 +2272,13 @@ fn task11_assembled_gateway(
 ) -> Result<LogicalCodebaseProviderGateway, String> {
     let gateway = LogicalCodebaseProviderGateway::new(
         AggregatePolicyArtifactStore::for_lc(env.app_paths.clone(), env.lc_id.clone()),
-        Arc::new(StoreBackedProviderCapabilitySource::for_lc(
-            env.app_paths.clone(),
-            PROJECT_ID.to_string(),
-            env.lc_id.clone(),
-        )),
+        Arc::new(
+            StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
+                env.app_paths.clone(),
+                PROJECT_ID.to_string(),
+                env.lc_id.clone(),
+            ),
+        ),
         Arc::new(ProductionPolicyTargetResolver::for_lc(
             env.app_paths.clone(),
             &env.lc_id,
@@ -2322,7 +2325,8 @@ struct Task11CapabilityRestore {
 
 impl Task11CapabilityRestore {
     fn capture(env: &MatrixEnvironment, provider_type: ProviderRefType) -> Self {
-        let store = ProviderCapabilityStore::for_lc(env.app_paths.clone(), env.lc_id.clone());
+        // capability 记录作用域 = 项目级全局（owner 2026-11-04）。
+        let store = ProviderCapabilityStore::new(env.app_paths.clone());
         let original = store.get(PROJECT_ID, provider_type).ok().flatten();
         Self {
             store,
@@ -2963,8 +2967,8 @@ async fn scenario_codex_danger(env: &MatrixEnvironment, sid: &str) -> ScenarioOu
     let codex_ref = ProviderRef::codex("cap_managed_snapshot");
     let guard = Task11CapabilityRestore::capture(env, codex_ref.provider_type);
     let record = Task11CapabilityRestore::fixture_record(codex_ref.provider_type);
-    if let Err(error) = ProviderCapabilityStore::for_lc(env.app_paths.clone(), env.lc_id.clone())
-        .upsert(PROJECT_ID, &record)
+    if let Err(error) =
+        ProviderCapabilityStore::new(env.app_paths.clone()).upsert(PROJECT_ID, &record)
     {
         drop(guard);
         return scenario_unobservable(format!("codex 受控 setup 行写入失败:{error}"));

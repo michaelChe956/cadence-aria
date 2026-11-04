@@ -567,7 +567,7 @@ mod tests {
         let paths = ProductAppPaths::new(temp.path().to_path_buf());
         let project_id = "project_t08".to_string();
         let lc_id = "lc_t08".to_string();
-        let capability_store = ProviderCapabilityStore::for_lc(paths.clone(), lc_id.clone());
+        let capability_store = ProviderCapabilityStore::new(paths.clone());
         for record in records {
             capability_store
                 .upsert(&project_id, record)
@@ -587,9 +587,11 @@ mod tests {
         std::fs::create_dir_all(&authority_root).expect("authority root");
         let gateway = LogicalCodebaseProviderGateway::new(
             AggregatePolicyArtifactStore::new(paths.clone()),
-            Arc::new(StoreBackedProviderCapabilitySource::for_lc(
-                paths, project_id, lc_id,
-            )),
+            Arc::new(
+                StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
+                    paths, project_id, lc_id,
+                ),
+            ),
             Arc::new(UnreachableTargetResolver),
             Arc::new(registry),
             Arc::new(StubSyncAdapter),

@@ -1248,7 +1248,6 @@ async fn bad_tree_fail_closed_while_conflict_free_tree_resumes() {
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &paths,
         &good.attempt.project_id,
-        None,
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
     // 仓维 worktree 记录 + 仓维锁绑到本 attempt：带快照的 attempt 只按仓维

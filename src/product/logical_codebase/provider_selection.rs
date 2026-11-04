@@ -203,13 +203,16 @@ impl ProviderSelectionOutcome {
 /// 聚合冷启动的 provider 选择器。
 ///
 /// 见模块文档:两层判据 + 与 gateway 同源。**不创建 operation**。
+///
+/// **无 lc_id 参数**：L2 读项目级全局 capability 记录（owner 2026-11-04
+/// 决策 1/4）⇒ 选择结论与逻辑代码库无关（同项目内任意 LC 的选择结论相同）。
+/// LC 作用域仍存在于 HTTP 层（404 守卫 / 失败面核验入口路径），不在此判定内。
 pub async fn select_aggregate_provider(
     paths: &ProductAppPaths,
     health: &ProviderHealthService,
     project_id: &str,
-    lc_id: &str,
 ) -> Result<ProviderSelectionOutcome, ProductStoreError> {
-    select_aggregate_provider_at(paths, health, project_id, lc_id, Utc::now()).await
+    select_aggregate_provider_at(paths, health, project_id, Utc::now()).await
 }
 
 /// 选择器(显式给出「当前时刻」)。
@@ -220,7 +223,6 @@ pub async fn select_aggregate_provider_at(
     paths: &ProductAppPaths,
     health: &ProviderHealthService,
     project_id: &str,
-    lc_id: &str,
     now: DateTime<Utc>,
 ) -> Result<ProviderSelectionOutcome, ProductStoreError> {
     let snapshot = health.snapshot();
@@ -234,8 +236,10 @@ pub async fn select_aggregate_provider_at(
         }
     }
     let snapshot = health.snapshot();
+    // L2 读**项目级全局** capability 记录（owner 2026-11-04 决策 4/R1）：
+    // 一次核验 ⇒ 全项目（含本 LC）L2 放行 ⇒ 聚合初始化自动开始。
     let source = StoreBackedProviderCapabilitySource::with_store(
-        ProviderCapabilityStore::for_lc(paths.clone(), lc_id),
+        ProviderCapabilityStore::new(paths.clone()),
         project_id.to_string(),
     );
     decide_selection(&source, snapshot.as_ref(), now)
@@ -552,19 +556,20 @@ mod tests {
         }
     }
 
-    /// 把能力记录写进指定 LC 的 capability store。
+    /// 把能力记录写进**项目级全局** capability store。
+    ///
+    /// capability 记录的唯一作用域是项目级（owner 2026-11-04 决策 1）⇒
+    /// 播种不再按 LC 分支：不同场景靠**不同项目**（= 全局作用域边界）或
+    /// **不同记录内容**区分，不再靠「不同 lc_id」区分。
     fn write_records(
         paths: &ProductAppPaths,
-        lc_id: &str,
+        project_id: &str,
         rows: &[(ProviderRefType, ProviderCapabilityEvidence)],
     ) {
-        let store = ProviderCapabilityStore::for_lc(paths.clone(), lc_id);
+        let store = ProviderCapabilityStore::new(paths.clone());
         for (provider, launch) in rows {
             store
-                .upsert(
-                    "project_0001",
-                    &capability_record(*provider, launch.clone()),
-                )
+                .upsert(project_id, &capability_record(*provider, launch.clone()))
                 .expect("upsert capability record");
         }
     }
@@ -602,7 +607,7 @@ mod tests {
         let (health, _runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "lc_0001",
+            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -611,7 +616,7 @@ mod tests {
             ],
         );
 
-        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("selection");
         let ProviderSelectionOutcome::Selected(table) = outcome else {
@@ -638,7 +643,7 @@ mod tests {
         let (health, _runner) = health_service(root.path(), vec!["pi".to_string()], now);
         write_records(
             &paths,
-            "lc_0001",
+            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -647,7 +652,7 @@ mod tests {
             ],
         );
 
-        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("selection");
         let ProviderSelectionOutcome::Selected(table) = outcome else {
@@ -688,7 +693,7 @@ mod tests {
         );
         write_records(
             &paths,
-            "lc_0001",
+            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -697,7 +702,7 @@ mod tests {
             ],
         );
 
-        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("selection");
         assert_eq!(
@@ -725,7 +730,7 @@ mod tests {
         let (health, _runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "lc_0001",
+            "project_0001",
             &[
                 (ProviderRefType::Pi, unknown()),
                 (ProviderRefType::KimiCode, unknown()),
@@ -734,7 +739,7 @@ mod tests {
             ],
         );
 
-        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("selection");
         assert_eq!(
@@ -763,7 +768,7 @@ mod tests {
         let (health, _runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "lc_0001",
+            "project_0001",
             &[
                 (ProviderRefType::Pi, denied("pi refuses this action")),
                 (ProviderRefType::KimiCode, unknown()),
@@ -772,7 +777,7 @@ mod tests {
             ],
         );
 
-        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("selection");
         let ProviderSelectionOutcome::NeedsVerification { suggested, table } = outcome else {
@@ -797,7 +802,7 @@ mod tests {
         std::fs::write(&blocked, "not a directory").expect("write blocking file");
         let (health, _runner) = health_service(&blocked, Vec::new(), now);
 
-        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("selection");
         assert_eq!(
@@ -819,7 +824,7 @@ mod tests {
         let (health, runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "lc_0001",
+            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -829,21 +834,21 @@ mod tests {
         );
 
         // 第一次:generation == 0 → 刷新一次(四家各一次版本探测)。
-        select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("first selection");
         let after_first = runner.call_count();
         assert_eq!(after_first, 4);
 
         // 第二次:快照新鲜 → 不刷新。
-        select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", now)
+        select_aggregate_provider_at(&paths, &health, "project_0001", now)
             .await
             .expect("second selection");
         assert_eq!(runner.call_count(), after_first);
 
         // 第三次:快照超过 10 分钟 → 刷新一次。
         let stale = now + chrono::Duration::minutes(11);
-        select_aggregate_provider_at(&paths, &health, "project_0001", "lc_0001", stale)
+        select_aggregate_provider_at(&paths, &health, "project_0001", stale)
             .await
             .expect("third selection");
         assert_eq!(runner.call_count(), after_first * 2);
@@ -855,39 +860,48 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
 
-        // 每种输入一个独立 LC 作用域,互不干扰。
+        // 每种输入一个独立**项目**作用域,互不干扰。
+        //
+        // capability 记录的唯一作用域是项目级全局(owner 2026-11-04 决策 1)
+        // ⇒ 场景区分方式从「不同 lc_id」改为「不同 project_id + 不同记录
+        // 内容」(X18):全局化后 lc_id 不再决定记录落在哪,靠 lc_id 区分的场景
+        // 已失效。
         write_records(
             &paths,
-            "lc_confirmed",
+            "project_confirmed",
             &[(ProviderRefType::Pi, confirmed())],
         );
         write_records(
             &paths,
-            "lc_denied",
+            "project_denied",
             &[(ProviderRefType::Pi, denied("pi refuses this action"))],
         );
-        write_records(&paths, "lc_unknown", &[(ProviderRefType::Pi, unknown())]);
-        // lc_missing:不写任何记录 → 记录缺失。
+        write_records(
+            &paths,
+            "project_unknown",
+            &[(ProviderRefType::Pi, unknown())],
+        );
+        // project_missing:不写任何记录 → 记录缺失。
 
         let cases: Vec<(&str, &str, LaunchCellState)> = vec![
-            ("confirmed", "lc_confirmed", LaunchCellState::Confirmed),
+            ("confirmed", "project_confirmed", LaunchCellState::Confirmed),
             (
                 "denied",
-                "lc_denied",
+                "project_denied",
                 LaunchCellState::Denied {
                     reason: "pi refuses this action".to_string(),
                 },
             ),
             (
                 "unknown",
-                "lc_unknown",
+                "project_unknown",
                 LaunchCellState::Unverified {
                     detail: "PlanningReadOnly launch cell is unknown".to_string(),
                 },
             ),
             (
                 "record missing",
-                "lc_missing",
+                "project_missing",
                 LaunchCellState::Unverified {
                     detail:
                         "provider_capability_launch_not_confirmed: Pi capability record missing"
@@ -896,10 +910,10 @@ mod tests {
             ),
         ];
 
-        for (name, lc_id, expected) in cases {
+        for (name, project_id, expected) in cases {
             let source = StoreBackedProviderCapabilitySource::with_store(
-                ProviderCapabilityStore::for_lc(paths.clone(), lc_id),
-                "project_0001".to_string(),
+                ProviderCapabilityStore::new(paths.clone()),
+                project_id.to_string(),
             );
             let provider_ref = ProviderRef::pi(MANAGED_CAPABILITY_SNAPSHOT_REF);
             let state = launch_cell_state(
@@ -925,9 +939,12 @@ mod tests {
         }
 
         // 快照引用不一致:选择器判 `EvidenceStale`,gateway 拒绝。
+        //
+        // 区分方式:读**同一个项目**的全局记录,但用**不同的快照引用**去
+        // 问它(X18:作用域全局化后不能再靠「不同 lc_id」区分场景)。
         let source = StoreBackedProviderCapabilitySource::with_store(
-            ProviderCapabilityStore::for_lc(paths.clone(), "lc_confirmed"),
-            "project_0001".to_string(),
+            ProviderCapabilityStore::new(paths.clone()),
+            "project_confirmed".to_string(),
         );
         let mismatched_ref = ProviderRef::pi("cap_other_snapshot");
         let state = launch_cell_state(

@@ -204,7 +204,7 @@ async fn bootstrap_confirmed_work_item_with_providers(
         })
         .expect("create work item");
 
-    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    migrate_rebuild_and_seed_capabilities(&app_paths).await;
     generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
     let author_provider = provider_name_from_str(work_item_author_provider);
     let reviewer_provider = provider_name_from_str(work_item_reviewer_provider);
@@ -239,7 +239,7 @@ async fn bootstrap_unconfirmed_work_item(app: axum::Router, repo_path: &std::pat
             ..Default::default()
         })
         .expect("create work item");
-    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    migrate_rebuild_and_seed_capabilities(&app_paths).await;
     generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
@@ -345,7 +345,7 @@ async fn bootstrap_confirmed_split_work_items(
             ..Default::default()
         })
         .expect("create item2 with dependency");
-    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    migrate_rebuild_and_seed_capabilities(&app_paths).await;
     generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
@@ -385,7 +385,7 @@ pub(crate) async fn bootstrap_two_ready_confirmed_work_items(
             ..Default::default()
         })
         .expect("create item2");
-    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    migrate_rebuild_and_seed_capabilities(&app_paths).await;
     generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
@@ -435,7 +435,7 @@ async fn bootstrap_completed_dependency_without_handoff(
             ..Default::default()
         })
         .expect("create item2 with handoff dependency");
-    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    migrate_rebuild_and_seed_capabilities(&app_paths).await;
     generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
 }
 
@@ -575,7 +575,7 @@ async fn bootstrap_work_item_plan_group(
         })
         .expect("create work item plan group");
 
-    migrate_rebuild_and_seed_capabilities(&app, &app_paths).await;
+    migrate_rebuild_and_seed_capabilities(&app_paths).await;
     generate_and_confirm_story_and_design(&app, lc_member_logical_ids(&app_paths)).await;
     seed_group_plan_revision(&app_paths);
     // 块3 收尾（Logical 路由对齐）：迁移后 routing=Logical，权威 draft target

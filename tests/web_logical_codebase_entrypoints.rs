@@ -43,6 +43,8 @@ pub(crate) fn assert_error(
     body
 }
 
+#[path = "web_logical_codebase_entrypoints/capability_fixture.rs"]
+mod capability_fixture;
 #[path = "web_logical_codebase_entrypoints/guards.rs"]
 mod guards;
 #[path = "web_logical_codebase_entrypoints/initialization.rs"]
