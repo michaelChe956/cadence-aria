@@ -14,10 +14,11 @@
 // 启动会被 PolicyDrift 拒，必须显式「重新生成政策」。
 //
 // 2026-11-04（冷启动停止原因可见化）：投影的 `advance_stop`（后端落盘的
-// 最近一次可解释停止——停在哪一步 + 稳定机器码 + 原始拒绝上下文）渲染成
-// 一块次要信息：机器码与诊断降到次要行（等宽小字），成品中文三段与动作
-// 按钮仍由通知卡（`bootstrap:advance-stop:*`）承担——不重复渲染同一段话；
-// 两道闸门的区分键（provider 选择门 / trust 门）另给一个短标签。
+// 最近一次可解释停止——停在哪一步 + 稳定机器码 + 原始拒绝上下文）只渲染
+// 通知卡**没有**的那部分：停在哪一步 + 属于哪道闸门（provider 选择门 /
+// trust 门各一个短标签）。机器码与原始诊断由通知卡（`bootstrap:advance-stop:*`，
+// 通用渲染）承担——它的 summary 已含「机器码：…」与「诊断：…」，另有自己的
+// 机器码次要行——同一份信息只呈现一次（真机复核结论，2026-11-04）。
 import { useState } from "react";
 import {
   postLogicalCodebaseBootstrapAction,
@@ -367,10 +368,10 @@ export function LogicalCodebaseBootstrapCard({
         ))}
       </ul>
       {advanceStop ? (
-        // 冷启动为什么停在这一步：通知卡（`bootstrap:advance-stop:*`）给的是
-        // 成品中文三段（问题/原因/怎么做），这里补通知里没有的三样——停在哪
-        // 一步、机器码、原始拒绝上下文；机器码与诊断按本面板既有风格降到
-        // 次要行（等宽小字），不抢通知的成品文案。
+        // 冷启动为什么停在这一步：**只给通知卡没有的东西**——停在哪一步、
+        // 属于哪道闸门。机器码与原始诊断由通知卡（`bootstrap:advance-stop:*`，
+        // 通用渲染）承担：它的 summary 已含「机器码：…」与「诊断：…」，另有
+        // 自己的机器码次要行——同一份信息只呈现一次（真机复核结论）。
         <div
           data-testid="lc-bootstrap-advance-stop"
           className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs leading-snug"
@@ -389,20 +390,6 @@ export function LogicalCodebaseBootstrapCard({
               </span>
             ) : null}
           </p>
-          <p
-            className="mt-0.5 font-mono text-[11px] text-slate-500"
-            data-testid="lc-bootstrap-advance-stop-machine-line"
-          >
-            机器码：{advanceStop.reason_code}
-          </p>
-          {advanceStop.detail ? (
-            <pre
-              className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[11px] text-slate-500"
-              data-testid="lc-bootstrap-advance-stop-detail"
-            >
-              {advanceStop.detail}
-            </pre>
-          ) : null}
         </div>
       ) : null}
       {projection.notices.length > 0 ? (

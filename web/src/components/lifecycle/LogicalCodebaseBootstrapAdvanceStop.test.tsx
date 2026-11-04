@@ -4,17 +4,16 @@
 // 记录），并经 GET 投影透出 `projection.advance_stop`：
 //   step / reason / reason_code / detail / stopped_at
 // 同时合成恰好一条 `bootstrap:advance-stop:*` 通知（summary 是服务端渲染
-// 好的中文成品三段：问题/原因/怎么做）。
+// 好的成品文案：问题/原因/怎么做 + 机器码 + 诊断）。
 //
 // 本用例钉住前端三件事：
-// - advance_stop 存在时，界面能看到**机器码 reason_code** 与**原始诊断
-//   detail**（次要行，等宽小字）——不再只剩一行「未开始」；
+// - 停止原因块只给通知卡**没有**的东西：停在哪一步 + 属于哪道闸门；
+// - 机器码与原始诊断由**通知卡**呈现（通用渲染：summary + 机器码次要行），
+//   同一份信息只呈现一次——停止原因块里不再重复（真机复核结论）；
 // - 两道闸门的区分键在界面上可区分：
 //   `aggregate_initialization_provider_needs_verification`（provider 选择门：
 //   装了但没核验） vs `aggregate_initialization_trust_waiting`（trust 门：
-//   没拿到这台机器的信任）；
-// - 通知的成品文案由面板的**通用渲染**给出（summary 非空且可见）——前端
-//   不重复自拼中文。
+//   没拿到这台机器的信任）。
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LogicalCodebaseBootstrapCard } from "./LogicalCodebaseBootstrapCard";
@@ -67,9 +66,13 @@ function advanceStop(
   };
 }
 
-/** advance-stop 通知：服务端渲染好的成品三段（问题/原因/怎么做/机器码）。 */
+/**
+ * advance-stop 通知：服务端渲染好的成品文案（后端 `render_detail` 同款形态）
+ * ——问题/原因/怎么做 + 机器码 + （detail 非空时的）诊断段。
+ */
 function advanceStopNotice(
   reasonCode: string,
+  detail: string | null,
   overrides: Partial<LogicalCodebaseBootstrapNoticeDto> = {},
 ): LogicalCodebaseBootstrapNoticeDto {
   return {
@@ -82,6 +85,7 @@ function advanceStopNotice(
       "原因：provider 尚未获得这台机器上的信任（登录/工作区信任），配方因此不能开始。",
       "怎么做：按界面提示完成该 provider 的授权或信任确认，然后点「继续」。",
       `机器码：${reasonCode}`,
+      ...(detail ? [`诊断：${detail}`] : []),
     ].join("\n"),
     external_side_effect: "none",
     allowed_actions: ["prepare"],
@@ -124,7 +128,7 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
     vi.restoreAllMocks();
   });
 
-  it("advance_stop 存在时机器码与原始诊断降到次要行可见", () => {
+  it("停止原因块给出停在哪一步与停止原因（通知卡没有的部分）", () => {
     render(
       <LogicalCodebaseBootstrapCard
         projectId={PROJECT_ID}
@@ -132,23 +136,45 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
       />,
     );
 
-    const block = screen.getByTestId("lc-bootstrap-advance-stop");
-    // 停在哪一步 + 停止原因（枚举的中文口径）。
+    const headline = screen.getByTestId("lc-bootstrap-advance-stop-headline");
+    expect(headline.textContent).toContain("规则/政策");
+    expect(headline.textContent).toContain("等待人工处理");
+  });
+
+  it("机器码与原始诊断由通知卡呈现（停止原因块不重复）", () => {
+    render(
+      <LogicalCodebaseBootstrapCard
+        projectId={PROJECT_ID}
+        projection={projection({
+          advance_stop: advanceStop(),
+          notices: [advanceStopNotice(TRUST_GATE_CODE, TRUST_GATE_DETAIL)],
+        })}
+      />,
+    );
+
+    const notice = screen.getByTestId("lc-bootstrap-notice-rules_policy");
+    // 机器码：通知卡的机器码次要行（前端渲染）+ summary 里的「机器码：」。
     expect(
-      screen.getByTestId("lc-bootstrap-advance-stop-headline").textContent,
-    ).toContain("规则/政策");
-    expect(
-      screen.getByTestId("lc-bootstrap-advance-stop-headline").textContent,
-    ).toContain("等待人工处理");
-    // 机器码：等宽小字的次要行。
-    expect(
-      screen.getByTestId("lc-bootstrap-advance-stop-machine-line").textContent,
+      within(notice).getByTestId(
+        "lc-bootstrap-notice-machine-line-rules_policy",
+      ).textContent,
     ).toContain(TRUST_GATE_CODE);
-    // 原始诊断：次要行，可见（不是收进折叠区）。
+    expect(notice.textContent).toContain(`机器码：${TRUST_GATE_CODE}`);
+    // 原始诊断（含 provider 候选表）：通知卡 summary 的「诊断：」段——可见。
+    expect(notice.textContent).toContain("诊断：");
+    expect(notice.textContent).toContain("workspace trust entry is blocked");
+    expect(notice.textContent).toContain("kimi_trust_blocked_for_route_test");
+
+    // 同一份信息只呈现一次：停止原因块里不再有机器码行与诊断行。
+    const stopBlock = screen.getByTestId("lc-bootstrap-advance-stop");
+    expect(stopBlock.textContent).not.toContain(TRUST_GATE_CODE);
+    expect(stopBlock.textContent).not.toContain("workspace trust entry");
     expect(
-      screen.getByTestId("lc-bootstrap-advance-stop-detail").textContent,
-    ).toContain("workspace trust entry is blocked");
-    expect(block.textContent).toContain(TRUST_GATE_CODE);
+      screen.queryByTestId("lc-bootstrap-advance-stop-machine-line"),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("lc-bootstrap-advance-stop-detail"),
+    ).toBeNull();
   });
 
   it("两道闸门的 reason_code 在界面上可区分（provider 选择门 vs trust 门）", () => {
@@ -160,6 +186,7 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
             reason_code: PROVIDER_GATE_CODE,
             detail: PROVIDER_GATE_DETAIL,
           }),
+          notices: [advanceStopNotice(PROVIDER_GATE_CODE, PROVIDER_GATE_DETAIL)],
         })}
       />,
     );
@@ -168,15 +195,24 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
     ).textContent;
     expect(providerGate).toContain("核验");
     expect(providerGate).not.toContain("信任");
+    // 机器码仍须在界面可见——归属通知卡。
+    const providerNotice = screen.getByTestId("lc-bootstrap-notice-rules_policy");
     expect(
-      screen.getByTestId("lc-bootstrap-advance-stop-machine-line").textContent,
+      within(providerNotice).getByTestId(
+        "lc-bootstrap-notice-machine-line-rules_policy",
+      ).textContent,
     ).toContain(PROVIDER_GATE_CODE);
+    expect(providerNotice.textContent).toContain("诊断：");
+    expect(providerNotice.textContent).toContain("no provider carries verified");
     unmount();
 
     render(
       <LogicalCodebaseBootstrapCard
         projectId={PROJECT_ID}
-        projection={projection({ advance_stop: advanceStop() })}
+        projection={projection({
+          advance_stop: advanceStop(),
+          notices: [advanceStopNotice(TRUST_GATE_CODE, TRUST_GATE_DETAIL)],
+        })}
       />,
     );
     const trustGate = screen.getByTestId(
@@ -184,8 +220,11 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
     ).textContent;
     expect(trustGate).toContain("信任");
     expect(trustGate).not.toContain("核验");
+    const trustNotice = screen.getByTestId("lc-bootstrap-notice-rules_policy");
     expect(
-      screen.getByTestId("lc-bootstrap-advance-stop-machine-line").textContent,
+      within(trustNotice).getByTestId(
+        "lc-bootstrap-notice-machine-line-rules_policy",
+      ).textContent,
     ).toContain(TRUST_GATE_CODE);
   });
 
@@ -195,13 +234,13 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
         projectId={PROJECT_ID}
         projection={projection({
           advance_stop: advanceStop(),
-          notices: [advanceStopNotice(TRUST_GATE_CODE)],
+          notices: [advanceStopNotice(TRUST_GATE_CODE, TRUST_GATE_DETAIL)],
         })}
       />,
     );
 
     const notice = screen.getByTestId("lc-bootstrap-notice-rules_policy");
-    // 通知 summary（服务端成品三段）完整可见——前端不另拼中文。
+    // 通知 summary（服务端成品文案）完整可见——前端不另拼中文。
     expect(notice.textContent).toContain("问题：");
     expect(notice.textContent).toContain("怎么做：");
     expect(notice.textContent).toContain(TRUST_GATE_CODE);
@@ -209,11 +248,6 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
     expect(
       screen.getAllByTestId("lc-bootstrap-notice-rules_policy"),
     ).toHaveLength(1);
-    expect(
-      within(notice).getByTestId(
-        "lc-bootstrap-notice-machine-line-rules_policy",
-      ).textContent,
-    ).toContain(TRUST_GATE_CODE);
   });
 
   it("没有 advance_stop 时不渲染停止原因块", () => {
@@ -227,19 +261,27 @@ describe("LogicalCodebaseBootstrapCard 冷启动停止原因可见化", () => {
     expect(screen.queryByTestId("lc-bootstrap-advance-stop")).toBeNull();
   });
 
-  it("detail 为空时不渲染诊断行（机器码仍在）", () => {
+  it("detail 为空时通知卡没有诊断段（机器码仍在）", () => {
     render(
       <LogicalCodebaseBootstrapCard
         projectId={PROJECT_ID}
         projection={projection({
           advance_stop: advanceStop({ detail: null }),
+          notices: [advanceStopNotice(TRUST_GATE_CODE, null)],
         })}
       />,
     );
 
-    expect(screen.queryByTestId("lc-bootstrap-advance-stop-detail")).toBeNull();
+    const notice = screen.getByTestId("lc-bootstrap-notice-rules_policy");
+    expect(notice.textContent).not.toContain("诊断：");
     expect(
-      screen.getByTestId("lc-bootstrap-advance-stop-machine-line").textContent,
+      within(notice).getByTestId(
+        "lc-bootstrap-notice-machine-line-rules_policy",
+      ).textContent,
     ).toContain(TRUST_GATE_CODE);
+    // 停止原因块照旧只给步骤与闸门标签。
+    expect(
+      screen.getByTestId("lc-bootstrap-advance-stop-headline").textContent,
+    ).toContain("规则/政策");
   });
 });
