@@ -315,6 +315,13 @@ export function AggregateInitializationCard({
         ) : null}
       </div>
 
+      <p
+        role="alert"
+        data-testid="aggregate-initialization-aggregate-order-notice"
+        className="mb-2 rounded border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-2 py-1 text-[11px] text-[var(--aria-danger)]"
+      >
+        聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi &gt; Claude Code &gt; Codex。
+      </p>
       {operation ? (
         <ol className="mt-3 grid gap-1.5">
           {operation.steps.map((step) => (

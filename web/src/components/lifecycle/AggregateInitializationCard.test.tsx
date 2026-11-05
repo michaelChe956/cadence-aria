@@ -154,7 +154,14 @@ describe("AggregateInitializationCard", () => {
       "data-status",
       "failed",
     );
-    expect(screen.getByRole("alert")).toHaveTextContent("初始化命令执行失败");
+    // 2026-11-05：卡片常驻「聚合初始化 provider 顺序」红条同为 alert，
+    // 原 getByRole("alert") 单元素假设不再成立 ⇒ 断言错误信息出现在 alert 之中。
+    expect(
+      screen
+        .getAllByRole("alert")
+        .map((alert) => alert.textContent ?? "")
+        .join("\n"),
+    ).toContain("初始化命令执行失败");
     expect(
       screen.getByRole("button", { name: "重新初始化" }),
     ).toBeEnabled();
