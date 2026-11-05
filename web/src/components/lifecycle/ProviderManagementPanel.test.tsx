@@ -186,4 +186,20 @@ describe("Provider 管理面板", () => {
 
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
+  it("面板渲染聚合初始化准备阶段 provider 顺序红字（不含 Kimi Code）", async () => {
+    stubFetch();
+
+    render(
+      <ProviderManagementDrawer open onClose={() => {}}>
+        <ProviderManagementPanel />
+      </ProviderManagementDrawer>,
+    );
+
+    const notice = await screen.findByTestId(
+      "provider-management-aggregate-order-notice",
+    );
+    expect(notice.textContent).toBe(
+      "聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。",
+    );
+  });
 });

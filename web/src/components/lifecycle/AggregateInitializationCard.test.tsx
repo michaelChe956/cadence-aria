@@ -457,4 +457,25 @@ describe("AggregateInitializationCard", () => {
       screen.queryByTestId("aggregate-initialization-advance-stop"),
     ).not.toBeInTheDocument();
   });
+  it("renders the aggregate initialization provider order notice without Kimi Code", () => {
+    render(
+      <AggregateInitializationCard
+        operation={operation("running")}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("aggregate-initialization-aggregate-order-notice"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("aggregate-initialization-aggregate-order-notice")
+        .textContent,
+    ).toBe(
+      "聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。",
+    );
+  });
 });
