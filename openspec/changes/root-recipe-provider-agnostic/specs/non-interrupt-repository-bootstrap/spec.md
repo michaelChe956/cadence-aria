@@ -4,14 +4,14 @@
 
 逻辑代码库的 root-cwd recipe SHALL 复用四条无中断命令的取消、超时、输出摘要与步骤恢复语义，并将其映射到既有五步聚合初始化 operation。
 
-**recipe provider SHALL NOT 固定为 Claude Code。** 聚合初始化 SHALL 在 operation 创建之前按 owner 顺序（`Pi > KimiCode > ClaudeCode > Codex`）自动选择一个本机可用的 provider，并把它**冻结**在该 operation 上；执行期与重试期 MUST NOT 改选。选中的 provider SHALL 记入 `operation.input.provider`，候选表 SHALL 记入 `operation.provider_selection`。provider 选择 SHALL NOT 放宽 gateway 的 capability 准入门。
+**recipe provider SHALL NOT 固定为 Claude Code。** 聚合初始化 SHALL 在 operation 创建之前按 owner 顺序（`Pi > ClaudeCode > Codex`）自动选择一个本机可用的 provider，并把它**冻结**在该 operation 上；执行期与重试期 MUST NOT 改选。选中的 provider SHALL 记入 `operation.input.provider`，候选表 SHALL 记入 `operation.provider_selection`。provider 选择 SHALL NOT 放宽 gateway 的 capability 准入门。
 
 **四条命令的调用形态 SHALL 按所选 provider 的 skill 调用语法生成**（见 REQ-BOOT-16）；四条命令的**顺序**、**参数**、取消/超时/输出摘要语义 SHALL 与既有实现一致。
 
 #### Scenario: 配方提供者固定
 
 - **WHEN** 逻辑代码库根 recipe 选择 provider
-- **THEN** 系统 SHALL 按 `Pi > KimiCode > ClaudeCode > Codex` 的顺序逐个探测，选中第一个命令可用且其**机器级**能力已核验、且通过 root-recipe 相位准入的 provider；recipe provider MUST NOT 固定为 Claude Code；选中结果 SHALL 冻结在该 operation 上（`operation.input.provider`），执行期与重试期 MUST NOT 改选
+- **THEN** 系统 SHALL 按 `Pi > ClaudeCode > Codex` 的顺序逐个探测，选中第一个命令可用且其**机器级**能力已核验、且通过 root-recipe 相位准入的 provider；recipe provider MUST NOT 固定为 Claude Code；选中结果 SHALL 冻结在该 operation 上（`operation.input.provider`），执行期与重试期 MUST NOT 改选
 
 #### Scenario: 信任登记不入步骤
 
@@ -50,7 +50,7 @@
 
 ### Requirement: 聚合初始化的 provider 自动选择与冻结（REQ-BOOT-07）
 
-聚合初始化 SHALL 提供 provider 选择器：按 owner 顺序 `Pi > KimiCode > ClaudeCode > Codex` 逐个探测，在 **operation 创建之前**选中第一个可用的 provider 并**冻结**（执行期与重试期 MUST NOT 改选）。
+聚合初始化 SHALL 提供 provider 选择器：按 owner 顺序 `Pi > ClaudeCode > Codex` 逐个探测，在 **operation 创建之前**选中第一个可用的 provider 并**冻结**（执行期与重试期 MUST NOT 改选）。
 
 判定分两层：**L1** 命令可用（取自 provider health 快照）；**L2** 该 provider 在**机器级** capability 记录中的 `PlanningReadOnly.launch` 为 `Confirmed` 且 snapshot 引用一致 —— L2 SHALL 与 gateway 共用**同一个**只读判定函数，MUST NOT 另写一套。
 
@@ -58,9 +58,9 @@
 
 被选中的 provider 若要执行 root recipe，SHALL 另行通过 root-recipe 相位准入（见 REQ-BOOT-15）：该准入**不再要求** provider 是 Claude Code，但其凭据三道检查（重核验通道在场 / 版本钉定 / 凭据对 durable Running operation 重核验）SHALL 一条不减。
 
-#### Scenario: 四家皆可用且已核验时选中顺序第一家
+#### Scenario: 候选皆可用且已核验时选中顺序第一家
 
-- **WHEN** 四家候选的命令均在本机可用，且各自的**机器级** `PlanningReadOnly` 能力均为 `Confirmed`
+- **WHEN** 候选序列中的 provider 命令均在本机可用，且各自的**机器级** `PlanningReadOnly` 能力均为 `Confirmed`
 - **THEN** 选择器 SHALL 选中 `Pi`；operation SHALL 以 `pi` 作为 `input.provider` 冻结下来；该 operation 的四条 recipe 命令 SHALL 按 **Pi 的 skill 调用语法**生成（见 REQ-BOOT-16）
 
 #### Scenario: 命令可用性以健康快照为准
@@ -70,13 +70,13 @@
 
 #### Scenario: 命令缺失时跳过该家并记录原因
 
-- **WHEN** 首选候选 `Pi` 的命令不在本机（health `available=false`，`reason_code=command_missing`），而下一家 `KimiCode` 命令可用且其**机器级**能力已核验
-- **THEN** 选择器 SHALL 跳过 `Pi` 并在候选表里记下 `cli_unavailable` 类原因；选中 `KimiCode`；失败面与候选表 MUST NOT 把「未安装」说成「未核验」
+- **WHEN** 首选候选 `Pi` 的命令不在本机（health `available=false`，`reason_code=command_missing`），而下一家 `ClaudeCode` 命令可用且其**机器级**能力已核验
+- **THEN** 选择器 SHALL 跳过 `Pi` 并在候选表里记下 `cli_unavailable` 类原因；选中 `ClaudeCode`；失败面与候选表 MUST NOT 把「未安装」说成「未核验」
 
-#### Scenario: 四家命令可用但都未核验时不创建 operation
+#### Scenario: 候选命令可用但都未核验时不创建 operation
 
-- **WHEN** 四家候选的命令均在本机可用，但没有任何一家在**机器级**核验过能力
-- **THEN** 系统 SHALL **不创建 operation**（不产生任何 provider turn），并返回「需要核验」的失败码，失败面 SHALL 建议核验「顺序中第一家命令可用的 provider」，并携带四家候选表与可点击的核验入口
+- **WHEN** 候选序列中的 provider 命令均在本机可用，但没有任何一家在**机器级**核验过能力
+- **THEN** 系统 SHALL **不创建 operation**（不产生任何 provider turn），并返回「需要核验」的失败码，失败面 SHALL 建议核验「顺序中第一家命令可用的 provider」，并携带候选表与可点击的核验入口
 
 #### Scenario: 已核验真实拒绝与未核验可分辨
 
@@ -106,13 +106,15 @@
 #### Scenario: 候选表可解释
 
 - **WHEN** 查询任意一次聚合初始化的 operation 记录
-- **THEN** `provider_selection.candidates` SHALL 按 owner 顺序列出四家候选，每家 SHALL 带有判定依据与可执行动作提示（未安装 / 未核验 / 实测拒绝等）；候选顺序 MUST NOT 按结果重排
+- **THEN** `provider_selection.candidates` SHALL 按 owner 顺序列出候选 provider，每家 SHALL 带有判定依据与可执行动作提示（未安装 / 未核验 / 实测拒绝等）；候选顺序 MUST NOT 按结果重排
 
 ## ADDED Requirements
 
 ### Requirement: root-recipe 相位的 provider 无关准入（REQ-BOOT-15）
 
 root-recipe 相位的 provider 准入 SHALL **不要求** provider 是 Claude Code：任何通过普通 capability 准入（`Confirmed` + snapshot 一致）的 provider SHALL 能进入 root-recipe 相位。
+
+**例外（owner 2026-11-05 裁定）**：`KimiCode` 暂**不参与**聚合初始化的 provider 候选序列 —— 其 LC 策略会话启动层拒绝一切非 `ReviewerVerify` 的通用策略（bootstrap executor marker 在该层被拒），结构上无法承载 root-recipe 相位。该缺口已记录在独立 change `kimi-root-recipe-support`（方案 a：marker 通道放行 + 宿主侧授权等价表达），后续另开 change 解决；**本例外 SHALL NOT 被当作永久形态**。
 
 准入的其余检查 SHALL **一条不减**，且 SHALL 继续 fail-closed：
 
@@ -121,6 +123,11 @@ root-recipe 相位的 provider 准入 SHALL **不要求** provider 是 Claude Co
 3. 凭据 SHALL 每次对**该逻辑代码库的** durable Running operation 重核验（operation 终态 / step 推进 / digest 或 root 漂移 ⇒ 拒绝）。
 
 本 requirement MUST NOT 放宽普通会话的准入强度，也 MUST NOT 让 root recipe 的能力证据被普通会话复用（隔离契约不变）。
+
+#### Scenario: Kimi 不进入聚合初始化候选
+
+- **WHEN** 系统构建聚合初始化的 provider 候选序列
+- **THEN** 候选序列 SHALL 为 `Pi` > `ClaudeCode` > `Codex`（**不含** `KimiCode`）；SHALL NOT 把 KimiCode 列为候选、SHALL NOT 在选中后才发现它无法承载 root-recipe 相位
 
 #### Scenario: 非 Claude provider 通过 root-recipe 准入
 
@@ -197,3 +204,31 @@ root recipe 的四个 step（`PreCheck` / `RuleAndMcpConfig` / `OpenspecAndExamp
 
 - **WHEN** 既有 receipt auditor 的动作判定逻辑被复核
 - **THEN** SHALL 复用它；MUST NOT 出现第二套「有无变更」判定
+
+### Requirement: Kimi 能力边界与候选顺序的用户面告知（REQ-BOOT-18）
+
+系统 SHALL 在**两个用户可见入口**用**红字**如实告知聚合初始化准备阶段的 provider 边界与候选顺序：
+
+| 入口 | 位置 | 文案 |
+|---|---|---|
+| **Provider 管理抽屉** | 作用域说明之后、能力卡之前 | 「聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。」 |
+| **逻辑代码库管理抽屉（聚合初始化卡）** | 标题行状态之后、步骤列表之前 | 同上 |
+
+- 红字 SHALL 使用危险色 token（`--aria-danger`；带框提示用 `--aria-danger-soft` 底 + `--aria-danger` 边与字）；SHALL NOT 用普通灰字或提示黄字掩盖该边界。
+- 该告知 SHALL 与**实际候选序列一致**（见 REQ-BOOT-15 的 Kimi 例外与 REQ-BOOT-03/07 的顺序）；SHALL NOT 声称 Kimi Code 可用于该阶段。
+- 该告知是**临时形态**：Kimi 支持该阶段的缺口修复后（change `kimi-root-recipe-support`），两处红字 SHALL 随之移除或改写。
+
+#### Scenario: Provider 管理抽屉的红字
+
+- **WHEN** 用户打开 Provider 管理抽屉
+- **THEN** 作用域说明下方 SHALL 出现红字「聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。」
+
+#### Scenario: 聚合初始化卡的红字
+
+- **WHEN** 用户在逻辑代码库管理抽屉查看聚合初始化卡
+- **THEN** 标题行状态之后、步骤列表之前 SHALL 出现红字「聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。」
+
+#### Scenario: 红字与实际候选一致
+
+- **WHEN** 聚合初始化的 provider 候选序列发生变化
+- **THEN** 两处红字 SHALL 随之更新，SHALL NOT 继续显示已过时的顺序或已支持的 provider

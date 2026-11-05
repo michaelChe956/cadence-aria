@@ -4,12 +4,12 @@
 
 逻辑代码库的 root-cwd recipe SHALL 复用四条无中断命令的取消、超时、输出摘要与步骤恢复语义，并将其映射到既有五步聚合初始化 operation。
 
-**recipe provider SHALL NOT 固定为 Claude Code。** 聚合初始化 SHALL 在 operation 创建之前按 owner 顺序（`Pi > KimiCode > ClaudeCode > Codex`）自动选择一个本机可用的 provider，并把它**冻结**在该 operation 上；执行期与重试期 MUST NOT 改选。选中的 provider SHALL 记入 `operation.input.provider`，候选表 SHALL 记入 `operation.provider_selection`。provider 选择 SHALL NOT 放宽 gateway 的 capability 准入门。
+**recipe provider SHALL NOT 固定为 Claude Code。** 聚合初始化 SHALL 在 operation 创建之前按 owner 顺序（`Pi > ClaudeCode > Codex`）自动选择一个本机可用的 provider，并把它**冻结**在该 operation 上；执行期与重试期 MUST NOT 改选。选中的 provider SHALL 记入 `operation.input.provider`，候选表 SHALL 记入 `operation.provider_selection`。provider 选择 SHALL NOT 放宽 gateway 的 capability 准入门。
 
 #### Scenario: 配方提供者固定
 
 - **WHEN** 逻辑代码库根 recipe 选择 provider
-- **THEN** 系统 SHALL 按 `Pi > KimiCode > ClaudeCode > Codex` 的顺序逐个探测，选中第一个命令可用且其**机器级**能力已核验的 provider；recipe provider MUST NOT 固定为 Claude Code；选中结果 SHALL 冻结在该 operation 上（`operation.input.provider`），执行期与重试期 MUST NOT 改选
+- **THEN** 系统 SHALL 按 `Pi > ClaudeCode > Codex` 的顺序逐个探测，选中第一个命令可用且其**机器级**能力已核验的 provider；recipe provider MUST NOT 固定为 Claude Code；选中结果 SHALL 冻结在该 operation 上（`operation.input.provider`），执行期与重试期 MUST NOT 改选
 
 #### Scenario: 信任登记不入步骤
 
@@ -48,7 +48,7 @@
 
 ### Requirement: 聚合初始化的 provider 自动选择与冻结（REQ-BOOT-07）
 
-聚合初始化 SHALL 提供 provider 选择器：按 owner 顺序 `Pi > KimiCode > ClaudeCode > Codex` 逐个探测，在 **operation 创建之前**选中第一个可用的 provider 并**冻结**（执行期与重试期 MUST NOT 改选）。
+聚合初始化 SHALL 提供 provider 选择器：按 owner 顺序 `Pi > ClaudeCode > Codex` 逐个探测，在 **operation 创建之前**选中第一个可用的 provider 并**冻结**（执行期与重试期 MUST NOT 改选）。
 
 判定分两层：**L1** 命令可用（取自 provider health 快照）；**L2** 该 provider 在**机器级** capability 记录中的 `PlanningReadOnly.launch` 为 `Confirmed` 且 snapshot 引用一致 —— L2 SHALL 与 gateway 共用**同一个**只读判定函数，MUST NOT 另写一套。
 
