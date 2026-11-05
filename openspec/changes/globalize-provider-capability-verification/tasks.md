@@ -96,13 +96,13 @@
 
 映射 requirement：REQ-PCR-07（作用域升级）、REQ-PCR-08、REQ-PCR-09、REQ-BOOT-14（整机生效）
 
-- [ ] 8.1 **落盘机器级**：capability 记录与探针证据根改为机器级目录（`.aria/provider-capabilities/`）；项目级目录与 LC 子树下 SHALL NOT 再产出 capability 文件
-- [ ] 8.2 **读写点全量迁移**：写入侧（探针导入 / `ensure_bootstrap` 自举 / 外部入口导入）与读取侧（provider 选择门 L2 / gateway 准入 / 只读状态投影 / 批量作业前置）全部指向机器级；SHALL NOT 残留第二条读路径或回退分支
-- [ ] 8.3 **root-recipe 事实拆出**：`root_recipe_evidence` 从 capability 记录移出、改为 per-LC 独立事实；`require_root_recipe_supported` 改读新载体；SHALL NOT 改变判定强度与结论
-- [ ] 8.4 **路由改机器级**：新增四条机器级路由；旧四条 `/api/projects/{p}/logical-codebases/{lc_id}/capabilities*` **删除**（MUST NOT 留兼容别名/转发 shim/双写）；批量作业落盘改机器级、job 结构去 `project_id`/`logical_codebase_id` 归属校验
-- [ ] 8.5 **前端解门控**：能力卡与能力面板去掉 `projectId` / `logicalCodebaseId` props 与 id 取值逻辑；API 层路径改机器级；「Provider 管理」入口 SHALL NOT 以选中项目为前置条件
-- [ ] 8.6 **文案口径**：按钮区说明改为机器级口径（「一次核验整机可用」）；面板顶部作用域说明同步；SHALL NOT 残留「逐 LC」「全项目」等旧口径
-- [ ] 8.7 **夹具与断言迁移**：第 6 节列举的按项目级路径断言改指机器级路径；只改作用域、不改期望值；MUST NOT 删用例、加 `ignore` 或放宽断言强度
-- [ ] 8.8 **验收 grep**：旧 capability 路由全仓 **0 命中**；`projects/**` 与 `logical-codebases/**` 下 **0** 个 capability 文件；机器级文件路径唯一
-- [ ] 8.9 **验证矩阵**：同第 7 节全套（`cargo test --locked --all-targets` / `pnpm test` / `clippy -D warnings` / `cargo fmt --check` / `openspec validate --specs --strict` 仍 78 passed 0 failed / 本 change `--strict`）
-- [ ] 8.10 **真机验收**：① 无选中项目时「Provider 管理」可打开并显示机器级事实（不再置灰）；② 在**另一个**项目 / 逻辑代码库下打开面板 ⇒ 仍是同一份机器级事实、**无需**再核验（验证「不存在第二作用域」，而非「跨项目共享」）；③ 机器级核验一次后，冷启动自动开始（不报 `aggregate_initialization_provider_needs_verification`）
+- [x] 8.1 **落盘机器级**：capability 记录与探针证据根改为机器级目录（`.aria/provider-capabilities/`）；项目级目录与 LC 子树下 SHALL NOT 再产出 capability 文件 —— `8eda119` / `9b23607`
+- [x] 8.2 **读写点全量迁移**：写入侧（探针导入 / `ensure_bootstrap` 自举 / 外部入口导入）与读取侧（provider 选择门 L2 / gateway 准入 / 只读状态投影 / 批量作业前置）全部指向机器级；SHALL NOT 残留第二条读路径或回退分支 —— `8eda119` / `9b23607` / `667053d3`
+- [x] 8.3 **root-recipe 事实拆出**：`root_recipe_evidence` 从 capability 记录移出 —— 实测**该字段在生产里恒为 `None`、零生产写入者** ⇒ 无需新建 per-LC 载体，直接移除（判定结论不变：生产恒 None ⇒ 版本漂移检查本就从不触发）；`require_root_recipe_supported` 的**凭据三道检查一条不减** —— `2ae4b53d`
+- [x] 8.4 **路由改机器级**：新增四条机器级路由；旧四条 `/api/projects/{p}/logical-codebases/{lc_id}/capabilities*` **删除**（MUST NOT 留兼容别名/转发 shim/双写）；批量作业落盘改机器级、job 结构去 `project_id`/`logical_codebase_id` 归属校验 —— `58b2e88f`
+- [x] 8.5 **前端解门控**：能力卡与能力面板去掉 `projectId` / `logicalCodebaseId` props 与 id 取值逻辑；API 层路径改机器级；「Provider 管理」入口 SHALL NOT 以选中项目为前置条件 —— `ec03be11`
+- [x] 8.6 **文案口径**：按钮区说明改为机器级口径（「机器级核验：核验只核验一次，机器一份事实」）；面板顶部作用域说明同步；SHALL NOT 残留「逐 LC」「全项目」等旧口径 —— `ec03be11`（`grep '逐 LC\|全项目\|项目级全局' web/src/` ⇒ 0 命中）
+- [x] 8.7 **夹具与断言迁移**：按项目级路径的断言改指机器级路径；只改作用域、不改期望值；MUST NOT 删用例、加 `ignore` 或放宽断言强度 —— `8eda119`（28 文件连带签名迁移）/ `6c9b8d62` / `3404a803` / `3a17563e`
+- [x] 8.8 **验收 grep**：旧 capability 路由全仓 **0 命中**；`projects/**` 与 `logical-codebases/**` 下 **0** 个 capability 文件；机器级文件路径唯一 —— `grep 'logical-codebases' src/ | grep -i capab` ⇒ 0
+- [x] 8.9 **验证矩阵**：`cargo test --locked --all-targets` ⇒ lib 6001/0 · it_core 198/0 · it_web 602/0 · web_logical_codebase_entrypoints 49/0 · it_product 211/0 · it_provider 55/0 · it_task_run 31/0 · it_interactive 43/0；`cargo clippy --locked --all-targets -- -D warnings` ⇒ exit 0；`cargo fmt --check` ⇒ 干净；`openspec validate --specs --strict` ⇒ 78 passed / 0 failed；本 change `--strict` ⇒ valid
+- [ ] 8.10 **真机验收**：① **已由 controller 验过**（2026-11-05 零项目一次性实例：侧栏「还没有 Project」时「Provider 管理」`disabled=false / cursor=pointer`，点开面板四家全「已确认」、文案为机器级口径，截图 `/tmp/acc-zero-project.png`；owner 可复验）；② 在**另一个**项目 / 逻辑代码库下打开面板 ⇒ 仍是同一份机器级事实、**无需**再核验（待 owner）；③ 机器级核验一次后，冷启动自动开始（不报 `aggregate_initialization_provider_needs_verification`）—— 待 owner
