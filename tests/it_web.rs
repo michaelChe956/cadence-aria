@@ -178,6 +178,8 @@ mod web_project_delete_confirmation;
 mod web_projection;
 #[path = "it_web/web_provider_availability.rs"]
 mod web_provider_availability;
+#[path = "it_web/web_provider_capabilities_machine_level.rs"]
+mod web_provider_capabilities_machine_level;
 #[path = "it_web/web_provider_execution_events.rs"]
 mod web_provider_execution_events;
 #[path = "it_web/web_provider_health_api.rs"]

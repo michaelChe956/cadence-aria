@@ -1,14 +1,18 @@
 //! add-provider-revalidate-probe（Task 2）：capability 重验证 HTTP 面的
 //! it_web 验收。
 //!
-//! - GET `/logical-codebases/{lc_id}/capabilities`：只读投影四家 durable
+//! 能力面已改**机器级**（REQ-PCR-08）：路由不再按项目 / 逻辑代码库定位 ⇒
+//! 本文件走 `/api/providers/capabilities*`；旧的按项目 / 逻辑代码库定位的
+//! 路由整条删除（404 断言见
+//! `tests/it_web/web_provider_capabilities_machine_level.rs`）。
+//!
+//! - GET `/api/providers/capabilities`：只读投影四家 durable
 //!   capability 行（未探测全 Unknown；bootstrap 默认记录不显示 Confirmed）；
 //!   GET 不触发任何探针/写入。
-//! - POST `/logical-codebases/{lc_id}/capability-revalidate`：
+//! - POST `/api/providers/capabilities/revalidate`：
 //!   - Fake/未知 provider_type → 422 `provider_capability_probe_unsupported`，零探针、零 durable 写入；
 //!   - 全行已 Confirmed@当前版本（注入版本源）→ 200 `already_confirmed`，秒回（探针 runner 被调用即失败——证明不重跑）；
-//!   - 探针失败（注入恒败 runner）→ 稳定码 `provider_capability_probe_failed`，携带 action/detail，durable 保持点击前状态；
-//!   - 未知 LC → 404 `logical_codebase_not_found`。
+//!   - 探针失败（注入恒败 runner）→ 稳定码 `provider_capability_probe_failed`，携带 action/detail，durable 保持点击前状态。
 //! - 探测导入成功路径（probe→import→Confirmed→再点秒回）由产品层
 //!   `provider_capability_revalidate` 单测以真实三方一致性材料包覆盖
 //!   （it_web 侧 pub(crate) 构造器不可达，不在此重复）。
@@ -111,11 +115,17 @@ fn app_fixture(
     (app, paths, lc_id)
 }
 
-fn capabilities_uri(lc_id: &str) -> String {
-    format!("/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/capabilities")
+/// 机器级能力面路由（provider 是平台公用能力，与项目 / 逻辑代码库无关）。
+fn capabilities_uri() -> String {
+    "/api/providers/capabilities".to_string()
 }
 
-fn revalidate_uri(lc_id: &str) -> String {
+fn revalidate_uri() -> String {
+    "/api/providers/capabilities/revalidate".to_string()
+}
+
+/// 旧的按项目 / 逻辑代码库定位的路由（REQ-PCR-08 整条删除 ⇒ 必须 404）。
+fn legacy_revalidate_uri(lc_id: &str) -> String {
     format!("/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/capability-revalidate")
 }
 
@@ -153,9 +163,8 @@ fn failing_service(aria_root: &std::path::Path) -> Arc<ProviderCapabilityRevalid
 
 #[tokio::test]
 async fn capabilities_get_projects_durable_rows_without_confirmed_defaults() {
-    let (app, _paths, lc_id) = app_fixture(|_| None);
-    let (status, body) =
-        request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    let (app, _paths, _lc_id) = app_fixture(|_| None);
+    let (status, body) = request_json(&app, Method::GET, &capabilities_uri(), json!({})).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let providers = body["providers"].as_array().expect("providers");
     assert_eq!(providers.len(), 4, "四家真实 provider: {body}");
@@ -179,18 +188,17 @@ async fn capabilities_get_projects_durable_rows_without_confirmed_defaults() {
         }
     }
     // 只读：重复 GET 投影不变（零写入）。
-    let (_, body_again) =
-        request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    let (_, body_again) = request_json(&app, Method::GET, &capabilities_uri(), json!({})).await;
     assert_eq!(body, body_again, "GET 必须零副作用");
 }
 
 #[tokio::test]
 async fn capability_revalidate_rejects_fake_provider_without_probe_or_write() {
-    let (app, paths, lc_id) = app_fixture(|_| None);
+    let (app, paths, _lc_id) = app_fixture(|_| None);
     let (status, body) = request_json(
         &app,
         Method::POST,
-        &revalidate_uri(&lc_id),
+        &revalidate_uri(),
         json!({ "provider_type": "fake" }),
     )
     .await;
@@ -208,11 +216,11 @@ async fn capability_revalidate_rejects_fake_provider_without_probe_or_write() {
 
 #[tokio::test]
 async fn capability_revalidate_unknown_provider_type_is_unsupported() {
-    let (app, _paths, lc_id) = app_fixture(|_| None);
+    let (app, _paths, _lc_id) = app_fixture(|_| None);
     let (status, body) = request_json(
         &app,
         Method::POST,
-        &revalidate_uri(&lc_id),
+        &revalidate_uri(),
         json!({ "provider_type": "not-a-provider" }),
     )
     .await;
@@ -220,18 +228,24 @@ async fn capability_revalidate_unknown_provider_type_is_unsupported() {
     assert_eq!(body["code"], "provider_capability_probe_unsupported");
 }
 
+/// REQ-PCR-08：旧的按项目 / 逻辑代码库定位的核验路由**整条删除** ⇒ 请求旧
+/// 路由 404，且不是转发到机器级路由（能力面不再按项目 / 逻辑代码库定位，
+/// 故「未知 LC ⇒ 404」这一旧守卫随路由一并退场）。
 #[tokio::test]
-async fn capability_revalidate_unknown_lc_is_404() {
-    let (app, _paths, _lc_id) = app_fixture(|_| None);
+async fn capability_revalidate_legacy_project_scoped_route_is_404() {
+    let (app, _paths, lc_id) = app_fixture(|_| None);
     let (status, body) = request_json(
         &app,
         Method::POST,
-        &revalidate_uri("lc_unknown"),
+        &legacy_revalidate_uri(&lc_id),
         json!({ "provider_type": "codex" }),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
-    assert_eq!(body["code"], "logical_codebase_not_found");
+    assert!(
+        body.get("providers").is_none(),
+        "旧路由不得转发到机器级能力面: {body}"
+    );
 }
 
 /// fast-path：seed 全行 Confirmed@1.42.0（durable 直建，全 pub 材料包），
@@ -242,7 +256,7 @@ async fn capability_revalidate_confirmed_rows_fast_return_without_probe() {
     // seed 由产品层 store 完成（pub API）。
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let lc_id = create_project_and_lc(&paths, &root.path().join("aggregate-root"));
+    let _lc_id = create_project_and_lc(&paths, &root.path().join("aggregate-root"));
     use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
     use cadence_aria::product::logical_codebase::policy::{
         ProviderDialect, ProviderWireDialect, SessionPolicyAction,
@@ -306,7 +320,7 @@ async fn capability_revalidate_confirmed_rows_fast_return_without_probe() {
     let (status, body) = request_json(
         &app,
         Method::POST,
-        &revalidate_uri(&lc_id),
+        &revalidate_uri(),
         json!({ "provider_type": "codex" }),
     )
     .await;
@@ -314,7 +328,7 @@ async fn capability_revalidate_confirmed_rows_fast_return_without_probe() {
     assert_eq!(body["outcome"], json!("already_confirmed"), "body: {body}");
     assert_eq!(body["version"], json!("1.42.0"));
     // GET 投影同步显示 Confirmed（durable seed 可见）。
-    let (_, snapshot) = request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    let (_, snapshot) = request_json(&app, Method::GET, &capabilities_uri(), json!({})).await;
     let codex = snapshot["providers"]
         .as_array()
         .expect("providers")
@@ -328,11 +342,11 @@ async fn capability_revalidate_confirmed_rows_fast_return_without_probe() {
 
 #[tokio::test]
 async fn capability_revalidate_probe_failure_reports_stable_error_and_keeps_durable() {
-    let (app, paths, lc_id) = app_fixture(|root| Some(failing_service(&root.join(".aria"))));
+    let (app, paths, _lc_id) = app_fixture(|root| Some(failing_service(&root.join(".aria"))));
     let (status, body) = request_json(
         &app,
         Method::POST,
-        &revalidate_uri(&lc_id),
+        &revalidate_uri(),
         json!({ "provider_type": "codex" }),
     )
     .await;
@@ -353,7 +367,7 @@ async fn capability_revalidate_probe_failure_reports_stable_error_and_keeps_dura
         "原始错误透传: {body}"
     );
     // durable 保持点击前状态（全 Unknown）。
-    let (_, snapshot) = request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    let (_, snapshot) = request_json(&app, Method::GET, &capabilities_uri(), json!({})).await;
     let codex = snapshot["providers"]
         .as_array()
         .expect("providers")
@@ -377,7 +391,7 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
 
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let lc_id = create_project_and_lc(&paths, &root.path().join("aggregate-root"));
+    let _lc_id = create_project_and_lc(&paths, &root.path().join("aggregate-root"));
 
     // 旧 v2 durable 字节(三格 Confirmed @ 当前版本)直接落在生产 store
     // 路径——历史记录,不得被读取改写。
@@ -471,8 +485,7 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
     std::mem::forget(root);
 
     // 1) GET:旧 v2 Confirmed 不可见(当前行 Unknown),且 GET 不改写历史字节。
-    let (status, snapshot) =
-        request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    let (status, snapshot) = request_json(&app, Method::GET, &capabilities_uri(), json!({})).await;
     assert_eq!(status, StatusCode::OK, "body: {snapshot}");
     let codex = snapshot["providers"]
         .as_array()
@@ -502,7 +515,7 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
     let (status, body) = request_json(
         &app,
         Method::POST,
-        &revalidate_uri(&lc_id),
+        &revalidate_uri(),
         json!({ "provider_type": "codex" }),
     )
     .await;
@@ -525,7 +538,7 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
 
     // 3) GET:重探针后的行可见(launch/write Confirmed;resume 替身
     //    无应答通道,如实 Unknown——fresh/resume 分格)。
-    let (_, snapshot) = request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    let (_, snapshot) = request_json(&app, Method::GET, &capabilities_uri(), json!({})).await;
     let codex = snapshot["providers"]
         .as_array()
         .expect("providers")
@@ -560,7 +573,7 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
     let (status, body) = request_json(
         &app,
         Method::POST,
-        &revalidate_uri(&lc_id),
+        &revalidate_uri(),
         json!({ "provider_type": "codex" }),
     )
     .await;

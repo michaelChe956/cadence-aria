@@ -1,10 +1,13 @@
-//! 票3「一键核验全部」HTTP 面（REQ-PCR-03/04/05）。
+//! 票3「一键核验全部」HTTP 面（REQ-PCR-03/04/05，**机器级**路由）。
 //!
-//! - `POST /logical-codebases/{lc_id}/capabilities/revalidate-all`：用户显式
-//!   发起批量核验，**立即**返回 `{job_id, status:"running"}`（202 Accepted，
+//! provider 是平台公用能力 ⇒ 批量核验作业**不绑定项目 / 逻辑代码库**
+//! （REQ-PCR-03）：作业只凭 `job_id` 定位与读回。
+//!
+//! - `POST /api/providers/capabilities/revalidate-all`：用户显式发起批量
+//!   核验，**立即**返回 `{job_id, status:"running"}`（202 Accepted，
 //!   MUST NOT 在响应内等待探针）。
-//! - `GET /logical-codebases/{lc_id}/capabilities/revalidate-all/{job_id}`：
-//!   轮询作业状态 + 逐家结果（durable，终态仍可读）。
+//! - `GET /api/providers/capabilities/revalidate-all/{job_id}`：轮询作业状态
+//!   + 逐家结果（durable，终态仍可读）。
 //!
 //! 单家语义（探针 / 幂等短路 / CLI 缺失快速失败）一律复用既有
 //! `ProviderCapabilityRevalidateService`（本文件不改其一行）；本文件只做
@@ -16,7 +19,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use super::support::{product_app_paths, product_store_api_error, require_logical_codebase};
+use super::support::{product_app_paths, product_store_api_error};
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::capability_revalidate_batch::{
     CapabilityRevalidateBatchJob, CapabilityRevalidateBatchService, revalidate_call_for,
@@ -48,16 +51,13 @@ fn job_dto(job: &CapabilityRevalidateBatchJob) -> Value {
     })
 }
 
-/// POST `/logical-codebases/{lc_id}/capabilities/revalidate-all`：显式发起
-/// 批量核验（异步作业，立即返回 `job_id`）。
+/// POST `/api/providers/capabilities/revalidate-all`：显式发起批量核验
+/// （异步作业，立即返回 `job_id`；机器级，无项目 / 逻辑代码库前置）。
 pub async fn post_lc_capability_revalidate_all(
     State(state): State<WebAppState>,
-    Path((project_id, logical_codebase_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let paths = product_app_paths(&state);
-    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
     let job = batch_service(&state)
-        .start(&project_id, &logical_codebase_id)
+        .start()
         .map_err(product_store_api_error)?;
     Ok((
         StatusCode::ACCEPTED,
@@ -66,16 +66,15 @@ pub async fn post_lc_capability_revalidate_all(
         .into_response())
 }
 
-/// GET `/logical-codebases/{lc_id}/capabilities/revalidate-all/{job_id}`：
-/// 轮询作业状态与逐家结果（durable，终态仍可读）。
+/// GET `/api/providers/capabilities/revalidate-all/{job_id}`：轮询作业状态与
+/// 逐家结果（durable，终态仍可读；只凭 `job_id`）。
 pub async fn get_lc_capability_revalidate_all_job(
     State(state): State<WebAppState>,
-    Path((project_id, logical_codebase_id, job_id)): Path<(String, String, String)>,
+    Path(job_id): Path<String>,
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
-    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
     let service = CapabilityRevalidateBatchService::new(paths);
-    match service.get(&project_id, &logical_codebase_id, &job_id) {
+    match service.get(&job_id) {
         Ok(job) => Ok(Json(job_dto(&job)).into_response()),
         // 未知 / 过期 job_id：明确的 404 稳定码（不返回空作业冒充进度）。
         // 注：`src/web/error.rs` 的状态映射表归属片 1（跨块串行文件），本片
@@ -108,43 +107,18 @@ mod tests {
     use crate::product::logical_codebase::provider_capability_revalidate::{
         ProbeInvocation, ProviderCapabilityRevalidateService,
     };
-    use crate::product::logical_codebase::store::{
-        LogicalCodebaseCreateInput, LogicalCodebaseStore,
-    };
-    use crate::product::project_store::{CreateProjectInput, ProjectStore};
     use crate::web::events::EventHub;
     use crate::web::runtime::WebRuntime;
 
-    const PROJECT_ID: &str = "project_0001";
-
     struct Fixture {
         state: WebAppState,
-        logical_codebase_id: String,
         _root: TempDir,
     }
 
-    /// project + LC 直建（批量核验面只要求 LC 在场）。
+    /// 机器级夹具（REQ-PCR-03）：批量核验面**不要求**任何项目 / 逻辑代码库
+    /// 在场 ⇒ 夹具一个都不建。
     fn fixture(injected: Option<ProviderCapabilityRevalidateService>) -> Fixture {
         let root = tempfile::tempdir().expect("temp root");
-        let paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
-        ProjectStore::new(paths.clone())
-            .create(CreateProjectInput {
-                name: "batch-project".to_string(),
-                description: None,
-            })
-            .expect("project");
-        let aggregate_root = root.path().join("aggregate-root");
-        std::fs::create_dir_all(&aggregate_root).expect("aggregate root");
-        let logical_codebase_id = LogicalCodebaseStore::new(paths)
-            .create(
-                PROJECT_ID,
-                LogicalCodebaseCreateInput {
-                    name: "batch-lc".to_string(),
-                    aggregate_root,
-                },
-            )
-            .expect("lc")
-            .id;
         let mut state = WebAppState::with_events(
             root.path().to_path_buf(),
             WebRuntime::new_fake(root.path().to_path_buf()),
@@ -153,11 +127,7 @@ mod tests {
         if let Some(service) = injected {
             state = state.with_capability_revalidate_service(Arc::new(service));
         }
-        Fixture {
-            state,
-            logical_codebase_id,
-            _root: root,
-        }
+        Fixture { state, _root: root }
     }
 
     async fn body_json(response: Response) -> Value {
@@ -168,12 +138,9 @@ mod tests {
     }
 
     async fn post_batch(fixture: &Fixture) -> (StatusCode, Value) {
-        let response = post_lc_capability_revalidate_all(
-            State(fixture.state.clone()),
-            Path((PROJECT_ID.to_string(), fixture.logical_codebase_id.clone())),
-        )
-        .await
-        .expect("post batch");
+        let response = post_lc_capability_revalidate_all(State(fixture.state.clone()))
+            .await
+            .expect("post batch");
         let status = response.status();
         (status, body_json(response).await)
     }
@@ -181,11 +148,7 @@ mod tests {
     async fn get_batch(fixture: &Fixture, job_id: &str) -> (StatusCode, Value) {
         let response = get_lc_capability_revalidate_all_job(
             State(fixture.state.clone()),
-            Path((
-                PROJECT_ID.to_string(),
-                fixture.logical_codebase_id.clone(),
-                job_id.to_string(),
-            )),
+            Path(job_id.to_string()),
         )
         .await
         .expect("get batch");
@@ -306,19 +269,30 @@ mod tests {
         assert_eq!(error["code"], "capability_revalidate_batch_job_not_found");
     }
 
-    /// 未知 LC：既有 404 守卫（批量端点不绕过 `require_logical_codebase`）。
+    /// 机器级（REQ-PCR-03）：批量作业**不绑定**项目 / 逻辑代码库 ⇒ 响应体
+    /// 不带归属字段，且一个项目都没有也能发起与读回。
     #[tokio::test]
-    async fn unknown_logical_codebase_is_404() {
-        let fixture = fixture(None);
-        let response = post_lc_capability_revalidate_all(
-            State(fixture.state.clone()),
-            Path((
-                PROJECT_ID.to_string(),
-                "logical_codebase_missing".to_string(),
-            )),
-        )
-        .await;
-        let error = response.expect_err("unknown LC 必须拒绝");
-        assert_eq!(error.code, "logical_codebase_not_found");
+    async fn batch_job_carries_no_project_or_lc_ownership() {
+        let root_dir = tempfile::tempdir().expect("probe root");
+        let service = cli_missing_service(root_dir.path());
+        let fixture = fixture(Some(service));
+
+        let (status, body) = post_batch(&fixture).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+        let job_id = body["job_id"].as_str().expect("job_id").to_string();
+
+        let (status, job) = get_batch(&fixture, &job_id).await;
+        assert_eq!(status, StatusCode::OK, "body: {job}");
+        assert_eq!(job["job_id"], json!(job_id), "body: {job}");
+        assert!(job.get("project_id").is_none(), "作业不得绑定项目: {job}");
+        assert!(
+            job.get("logical_codebase_id").is_none(),
+            "作业不得绑定逻辑代码库: {job}"
+        );
+        assert_eq!(
+            job["results"].as_array().expect("results").len(),
+            4,
+            "四家逐项结果: {job}"
+        );
     }
 }

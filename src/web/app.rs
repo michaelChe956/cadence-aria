@@ -180,21 +180,24 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             "/api/projects/{project_id}/logical-codebases/{lc_id}/bootstrap/advance",
             post(handlers::post_lc_bootstrap_advance),
         )
+        // provider 能力面改**机器级**（REQ-PCR-08）：provider 是平台公用
+        // 能力，与项目 / 逻辑代码库无关 ⇒ 旧的按项目 / 逻辑代码库定位的四条
+        // 路由整条删除（不留兼容别名 / 转发 shim / 双写）。
         .route(
-            "/api/projects/{project_id}/logical-codebases/{lc_id}/capabilities",
+            "/api/providers/capabilities",
             get(handlers::get_lc_capabilities),
         )
         .route(
-            "/api/projects/{project_id}/logical-codebases/{lc_id}/capability-revalidate",
+            "/api/providers/capabilities/revalidate",
             post(handlers::post_lc_capability_revalidate),
         )
         // 票3：「一键核验全部」异步作业（四家并发；POST 立即返回 job_id，GET 轮询）。
         .route(
-            "/api/projects/{project_id}/logical-codebases/{lc_id}/capabilities/revalidate-all",
+            "/api/providers/capabilities/revalidate-all",
             post(handlers::post_lc_capability_revalidate_all),
         )
         .route(
-            "/api/projects/{project_id}/logical-codebases/{lc_id}/capabilities/revalidate-all/{job_id}",
+            "/api/providers/capabilities/revalidate-all/{job_id}",
             get(handlers::get_lc_capability_revalidate_all_job),
         )
         .route(

@@ -13,13 +13,8 @@ use tempfile::TempDir;
 use super::*;
 use crate::product::logical_codebase::SessionPolicyAction;
 
-const PROJECT_ID: &str = "project_0001";
-/// 作业存盘的路径 scope：用项目默认作用域的既有 helper（`lc_scope_root` 判定
-/// 落回项目级根的那一支），不手写字面量、不涉 manifest/selection 解析。
-fn lc_id() -> String {
-    crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID)
-}
-
+/// 批量核验作业是**机器级**事实（REQ-PCR-03）：不绑定项目 / 逻辑代码库 ⇒
+/// 夹具不建任何项目，作业只凭 `job_id` 定位。
 fn paths_fixture() -> (ProductAppPaths, TempDir) {
     let root = tempfile::tempdir().expect("temp root");
     (ProductAppPaths::new(root.path().join(".aria")), root)
@@ -37,9 +32,7 @@ async fn wait_terminal(
     job_id: &str,
 ) -> CapabilityRevalidateBatchJob {
     for _ in 0..400 {
-        let job = service
-            .get(PROJECT_ID, &lc_id(), job_id)
-            .expect("job 必须 durable 可读");
+        let job = service.get(job_id).expect("job 必须 durable 可读");
         if job.is_terminal() {
             return job;
         }
@@ -54,7 +47,7 @@ async fn start_returns_job_id_without_waiting_for_probe() {
     let (paths, _root) = paths_fixture();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let gate_for_call = gate.clone();
-    let call: BatchRevalidateCall = Arc::new(move |_project, _lc, _provider| {
+    let call: BatchRevalidateCall = Arc::new(move |_provider| {
         let gate = gate_for_call.clone();
         Box::pin(async move {
             let _permit = gate.acquire().await.expect("gate never closed");
@@ -66,7 +59,7 @@ async fn start_returns_job_id_without_waiting_for_probe() {
     let service = CapabilityRevalidateBatchService::new(paths).with_revalidate_call(call);
 
     let started = Instant::now();
-    let job = service.start(PROJECT_ID, &lc_id()).expect("start");
+    let job = service.start().expect("start");
     let elapsed = started.elapsed();
 
     assert!(
@@ -86,7 +79,7 @@ async fn start_returns_job_id_without_waiting_for_probe() {
     }
 
     // 探针仍被闸门挡住 ⇒ 作业仍在跑（证明发起未等探针）。
-    let observed = service.get(PROJECT_ID, &lc_id(), &job.job_id).expect("job");
+    let observed = service.get(&job.job_id).expect("job");
     assert_eq!(observed.status, BatchJobStatus::Running);
 
     gate.add_permits(8);
@@ -100,7 +93,7 @@ async fn four_providers_run_concurrently() {
     let (paths, _root) = paths_fixture();
     let spans: Arc<Mutex<Vec<(ProviderName, Instant, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
     let spans_for_call = spans.clone();
-    let call: BatchRevalidateCall = Arc::new(move |_project, _lc, provider| {
+    let call: BatchRevalidateCall = Arc::new(move |provider| {
         let spans = spans_for_call.clone();
         Box::pin(async move {
             let start = Instant::now();
@@ -112,7 +105,7 @@ async fn four_providers_run_concurrently() {
     });
     let service = CapabilityRevalidateBatchService::new(paths).with_revalidate_call(call);
 
-    let job = service.start(PROJECT_ID, &lc_id()).expect("start");
+    let job = service.start().expect("start");
     let done = wait_terminal(&service, &job.job_id).await;
     assert_eq!(done.status, BatchJobStatus::Completed);
 
@@ -138,7 +131,7 @@ async fn four_providers_run_concurrently() {
 #[tokio::test]
 async fn single_provider_failure_does_not_block_others() {
     let (paths, _root) = paths_fixture();
-    let call: BatchRevalidateCall = Arc::new(move |_project, _lc, provider| {
+    let call: BatchRevalidateCall = Arc::new(move |provider| {
         Box::pin(async move {
             if provider == ProviderName::Codex {
                 Err(RevalidateError::ProbeFailed {
@@ -152,7 +145,7 @@ async fn single_provider_failure_does_not_block_others() {
     });
     let service = CapabilityRevalidateBatchService::new(paths).with_revalidate_call(call);
 
-    let job = service.start(PROJECT_ID, &lc_id()).expect("start");
+    let job = service.start().expect("start");
     let done = wait_terminal(&service, &job.job_id).await;
 
     assert_eq!(
@@ -188,7 +181,7 @@ async fn already_confirmed_provider_returns_immediately() {
     let (paths, _root) = paths_fixture();
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_call = calls.clone();
-    let call: BatchRevalidateCall = Arc::new(move |_project, _lc, _provider| {
+    let call: BatchRevalidateCall = Arc::new(move |_provider| {
         let calls = calls_for_call.clone();
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -199,7 +192,7 @@ async fn already_confirmed_provider_returns_immediately() {
     });
     let service = CapabilityRevalidateBatchService::new(paths).with_revalidate_call(call);
 
-    let job = service.start(PROJECT_ID, &lc_id()).expect("start");
+    let job = service.start().expect("start");
     let done = wait_terminal(&service, &job.job_id).await;
 
     assert_eq!(done.status, BatchJobStatus::Completed);
@@ -219,7 +212,7 @@ async fn already_confirmed_provider_returns_immediately() {
 #[tokio::test]
 async fn missing_cli_is_skipped_with_stable_reason() {
     let (paths, _root) = paths_fixture();
-    let call: BatchRevalidateCall = Arc::new(move |_project, _lc, provider| {
+    let call: BatchRevalidateCall = Arc::new(move |provider| {
         Box::pin(async move {
             if provider == ProviderName::Pi {
                 Err(RevalidateError::ProbeFailed {
@@ -235,7 +228,7 @@ async fn missing_cli_is_skipped_with_stable_reason() {
     });
     let service = CapabilityRevalidateBatchService::new(paths).with_revalidate_call(call);
 
-    let job = service.start(PROJECT_ID, &lc_id()).expect("start");
+    let job = service.start().expect("start");
     let done = wait_terminal(&service, &job.job_id).await;
 
     assert_eq!(done.status, BatchJobStatus::Completed, "不整体失败");
@@ -270,7 +263,7 @@ async fn missing_cli_is_skipped_with_stable_reason() {
 #[tokio::test]
 async fn unfinished_provider_at_terminal_is_marked_timeout() {
     let (paths, _root) = paths_fixture();
-    let call: BatchRevalidateCall = Arc::new(move |_project, _lc, provider| {
+    let call: BatchRevalidateCall = Arc::new(move |provider| {
         Box::pin(async move {
             if provider == ProviderName::KimiCode {
                 std::future::pending::<()>().await;
@@ -283,7 +276,7 @@ async fn unfinished_provider_at_terminal_is_marked_timeout() {
         .with_revalidate_call(call)
         .with_job_deadline(Duration::from_millis(800));
 
-    let job = service.start(PROJECT_ID, &lc_id()).expect("start");
+    let job = service.start().expect("start");
     let done = wait_terminal(&service, &job.job_id).await;
 
     assert_eq!(done.status, BatchJobStatus::Completed);
@@ -310,7 +303,7 @@ async fn job_state_is_durable_across_reads() {
     let (paths, _root) = paths_fixture();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let gate_for_call = gate.clone();
-    let call: BatchRevalidateCall = Arc::new(move |_project, _lc, _provider| {
+    let call: BatchRevalidateCall = Arc::new(move |_provider| {
         let gate = gate_for_call.clone();
         Box::pin(async move {
             let _permit = gate.acquire().await.expect("gate never closed");
@@ -318,13 +311,11 @@ async fn job_state_is_durable_across_reads() {
         })
     });
     let service = CapabilityRevalidateBatchService::new(paths.clone()).with_revalidate_call(call);
-    let job = service.start(PROJECT_ID, &lc_id()).expect("start");
+    let job = service.start().expect("start");
 
     // 另一实例按 job_id 读：进度不丢（刷新即续）。
     let reader = CapabilityRevalidateBatchService::new(paths.clone());
-    let mid = reader
-        .get(PROJECT_ID, &lc_id(), &job.job_id)
-        .expect("mid read");
+    let mid = reader.get(&job.job_id).expect("mid read");
     assert_eq!(mid.job_id, job.job_id);
     assert_eq!(mid.status, BatchJobStatus::Running);
     assert_eq!(mid.results.len(), 4);
@@ -334,14 +325,12 @@ async fn job_state_is_durable_across_reads() {
     assert_eq!(done.status, BatchJobStatus::Completed);
 
     // 终态再读：不得返回「作业不存在」。
-    let terminal = reader
-        .get(PROJECT_ID, &lc_id(), &job.job_id)
-        .expect("终态仍可读");
+    let terminal = reader.get(&job.job_id).expect("终态仍可读");
     assert_eq!(terminal.status, BatchJobStatus::Completed);
     assert!(terminal.finished_at.is_some());
 
     // 未知 job_id：明确的 NotFound（非静默空作业）。
-    match reader.get(PROJECT_ID, &lc_id(), "capability_batch_missing") {
+    match reader.get("capability_batch_missing") {
         Err(ProductStoreError::NotFound { .. }) => {}
         other => panic!("期望 NotFound，实际 {other:?}"),
     }
@@ -353,7 +342,7 @@ fn batch_is_never_auto_triggered() {
     // ① 构造服务不产生任何作业（只有显式 start 才创建）。
     let (paths, _root) = paths_fixture();
     let _service = CapabilityRevalidateBatchService::new(paths.clone());
-    let jobs_dir = batch_jobs_dir(&paths, PROJECT_ID, &lc_id()).expect("jobs dir");
+    let jobs_dir = batch_jobs_dir(&paths);
     assert!(
         !jobs_dir.exists(),
         "无显式点击不得创建作业目录：{}",
@@ -372,4 +361,51 @@ fn batch_is_never_auto_triggered() {
             "REQ-PCR-03：批量核验只由显式点击发起，不得被自动触发"
         );
     }
+}
+
+/// REQ-PCR-03：批量作业是机器一份事实 ⇒ 作业结构**不含**项目 / 逻辑代码库
+/// 归属字段，且落盘在机器级目录（不在任何项目 / LC 子树下）。
+#[tokio::test]
+async fn batch_job_has_no_project_or_lc_ownership() {
+    let (paths, _root) = paths_fixture();
+    let call: BatchRevalidateCall =
+        Arc::new(move |_provider| Box::pin(async move { revalidated() }));
+    let service = CapabilityRevalidateBatchService::new(paths.clone()).with_revalidate_call(call);
+    let job = service.start().expect("start");
+
+    let serialized = serde_json::to_value(&job).expect("作业可序列化");
+    let object = serialized.as_object().expect("作业是 JSON 对象");
+    assert!(
+        !object.contains_key("project_id"),
+        "批量作业不得绑定项目：{serialized}"
+    );
+    assert!(
+        !object.contains_key("logical_codebase_id"),
+        "批量作业不得绑定逻辑代码库：{serialized}"
+    );
+
+    // 落盘在机器级 `provider-capabilities/revalidate-batch/`。
+    let job_path = batch_jobs_dir(&paths).join(format!("{}.json", job.job_id));
+    assert!(job_path.is_file(), "作业须落机器级：{}", job_path.display());
+    assert!(
+        job_path.starts_with(paths.provider_capabilities_root()),
+        "作业路径必须在 provider-capabilities 机器级根下：{}",
+        job_path.display()
+    );
+}
+
+/// REQ-PCR-03：作业只凭 `job_id` 就能读回（无项目 / 逻辑代码库标识）。
+#[tokio::test]
+async fn batch_job_is_readable_without_project_or_lc() {
+    let (paths, _root) = paths_fixture();
+    let call: BatchRevalidateCall =
+        Arc::new(move |_provider| Box::pin(async move { revalidated() }));
+    let service = CapabilityRevalidateBatchService::new(paths.clone()).with_revalidate_call(call);
+    let job = service.start().expect("start");
+
+    // 另一实例（模拟刷新后重连）只凭 job_id 读回。
+    let reader = CapabilityRevalidateBatchService::new(paths);
+    let read = reader.get(&job.job_id).expect("凭 job_id 读回");
+    assert_eq!(read.job_id, job.job_id);
+    assert_eq!(read.results.len(), 4, "四家逐项结果");
 }

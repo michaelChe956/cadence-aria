@@ -131,11 +131,7 @@ pub(crate) fn start_lc_aggregate_initialization(
             let selection =
                 select_aggregate_provider_blocking(&project_paths, &state.provider_health, project_id)?;
             let ProviderSelectionOutcome::Selected(selection_table) = selection else {
-                return Err(provider_selection_api_error(
-                    &selection,
-                    project_id,
-                    logical_codebase_id,
-                ));
+                return Err(provider_selection_api_error(&selection));
             };
             // 未知 wire 名 fail-closed，绝不静默回落默认 provider。
             let selected = provider_from_wire(&selection_table.selected).ok_or_else(|| {
@@ -785,11 +781,7 @@ fn select_aggregate_provider_blocking(
 ///   `suggested`；`Denied` 指向被点名者的**下一家**（owner 顺序）；
 /// - `details.fallback_provider`：仅 `Denied`——下一家 wire 名；被点名者
 ///   已是末家时为 `null` 且不下发 `revalidate`（不指向不存在的下一家）。
-fn provider_selection_api_error(
-    outcome: &ProviderSelectionOutcome,
-    project_id: &str,
-    logical_codebase_id: &str,
-) -> ApiError {
+fn provider_selection_api_error(outcome: &ProviderSelectionOutcome) -> ApiError {
     use crate::product::logical_codebase::failure_copy::{describe, FailureInput};
     use crate::product::logical_codebase::provider_trust::provider_wire_label;
 
@@ -855,12 +847,7 @@ fn provider_selection_api_error(
     if let Some(target) = revalidate_target {
         let wire = provider_wire_label(&target).to_string();
         details["suggested_provider"] = serde_json::json!(wire);
-        details["revalidate"] = capability_revalidate_entry(
-            &target,
-            &display_name(&wire),
-            project_id,
-            logical_codebase_id,
-        );
+        details["revalidate"] = capability_revalidate_entry(&target, &display_name(&wire));
     }
     if let ProviderSelectionOutcome::Denied { .. } = outcome {
         details["fallback_provider"] = match fallback {
@@ -874,11 +861,12 @@ fn provider_selection_api_error(
 /// 单家核验入口（REQ-PCR-02 场景 2：`expect` 说明真实探针会消耗额度；
 /// MUST NOT 指向「一键核验全部」）。`ui_path` 是能力卡片（逻辑代码库
 /// 管理抽屉）所在的 workbench 页。
+///
+/// 能力面改**机器级**（REQ-PCR-08）：核验入口不再按项目 / 逻辑代码库定位 ⇒
+/// 路径是机器级路由（一个项目都没有也能核验）。
 fn capability_revalidate_entry(
     target: &crate::product::models::ProviderName,
     display_name: &str,
-    project_id: &str,
-    logical_codebase_id: &str,
 ) -> serde_json::Value {
     let wire =
         crate::product::logical_codebase::provider_trust::provider_wire_label(target).to_string();
@@ -886,9 +874,7 @@ fn capability_revalidate_entry(
         "ui_path": "/workbench",
         "button_label": format!("核验 {display_name}"),
         "method": "POST",
-        "path": format!(
-            "/api/projects/{project_id}/logical-codebases/{logical_codebase_id}/capability-revalidate"
-        ),
+        "path": "/api/providers/capabilities/revalidate",
         "body": json!({ "provider_type": wire }),
         "expect": "点击后立即执行一次真实能力探针（会消耗少量该 provider 的额度），通过后自动导入核验记录；全行已核验时秒回 already_confirmed。",
     })

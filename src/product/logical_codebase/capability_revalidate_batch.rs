@@ -9,8 +9,9 @@
 //! - 逐项状态 `running` → `confirmed` / `failed` / `skipped`（带稳定原因），
 //!   终态仍未完成项标 `timeout`，绝不谎报已确认；
 //! - 单家失败不阻断其它家，整批不因一家失败而失败；
-//! - 作业状态 durable（落 LC 子树 `capability-revalidate-batch/`），刷新后
-//!   可凭 `job_id` 继续轮询，终态仍可读。
+//! - 作业状态 durable（落**机器级** `provider-capabilities/revalidate-batch/`），
+//!   刷新后可凭 `job_id` 继续轮询，终态仍可读；作业**不绑定项目 / 逻辑代码库**
+//!   （REQ-PCR-03：批量核验是机器一份事实）。
 //!
 //! 与块2 安装作业（`src/product/provider_installation/**`）的边界：本模块
 //! 自建作业存储与编排，块2 文件零改动；两者只在契约层同构（创建 → 轮询 →
@@ -170,12 +171,13 @@ impl BatchItemResult {
 }
 
 /// 批量核验作业（durable 记录；刷新后按 `job_id` 继续轮询）。
+///
+/// **不绑定项目 / 逻辑代码库**（REQ-PCR-03）：批量核验是机器一份事实，作业
+/// 只凭 `job_id` 定位。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityRevalidateBatchJob {
     pub schema_version: u32,
     pub job_id: String,
-    pub project_id: String,
-    pub logical_codebase_id: String,
     pub status: BatchJobStatus,
     pub created_at: String,
     pub updated_at: String,
@@ -198,35 +200,26 @@ impl CapabilityRevalidateBatchJob {
 }
 
 /// 逐家核验调用 seam（生产 = 既有单家 `revalidate`；测试注入可控实现）。
+///
+/// 机器级重验证（REQ-PCR-07）：单家核验不再按项目 / 逻辑代码库定位 ⇒ seam
+/// 只带 provider，不再带作用域参数。
 pub type BatchRevalidateFuture =
     Pin<Box<dyn Future<Output = Result<RevalidateOutcome, RevalidateError>> + Send>>;
-pub type BatchRevalidateCall =
-    Arc<dyn Fn(String, String, ProviderName) -> BatchRevalidateFuture + Send + Sync>;
+pub type BatchRevalidateCall = Arc<dyn Fn(ProviderName) -> BatchRevalidateFuture + Send + Sync>;
 
 /// 把既有单家服务包装成批量核验调用（只做转发，不改单家语义）。
 pub fn revalidate_call_for(service: ProviderCapabilityRevalidateService) -> BatchRevalidateCall {
-    Arc::new(
-        move |_project_id: String, _logical_codebase_id: String, provider: ProviderName| {
-            let service = service.clone();
-            // 机器级重验证（REQ-PCR-07）：单家核验不再按项目/逻辑代码库定位，
-            // seam 的两个作用域参数仅为兼容既有批量作业签名（Task 5 收敛）。
-            Box::pin(async move { service.revalidate(provider).await })
-        },
-    )
+    Arc::new(move |provider: ProviderName| {
+        let service = service.clone();
+        Box::pin(async move { service.revalidate(provider).await })
+    })
 }
 
-/// 批量核验作业存储目录（LC 子树；durable）。
-pub fn batch_jobs_dir(
-    paths: &ProductAppPaths,
-    project_id: &str,
-    logical_codebase_id: &str,
-) -> Result<PathBuf, ProductStoreError> {
-    validate_relative_id(project_id)?;
-    validate_relative_id(logical_codebase_id)?;
-    Ok(
-        super::store::lc_scope_root(paths, project_id, &Some(logical_codebase_id.to_string()))?
-            .join("capability-revalidate-batch"),
-    )
+/// 批量核验作业存储目录（**机器级**；durable）。
+///
+/// 作业是机器一份事实（REQ-PCR-03）⇒ 不落任何项目 / 逻辑代码库子树。
+pub fn batch_jobs_dir(paths: &ProductAppPaths) -> PathBuf {
+    paths.provider_capabilities_root().join("revalidate-batch")
 }
 
 fn timestamp() -> String {
@@ -277,21 +270,15 @@ impl CapabilityRevalidateBatchService {
     /// 显式发起批量核验：立即返回 `running` 作业（零探针等待），四家并发在
     /// 后台推进。
     ///
+    /// 机器级（REQ-PCR-03）：不接受任何项目 / 逻辑代码库标识。
+    ///
     /// # Panics
     /// 需在 tokio runtime 内调用（后台作业以 `tokio::spawn` 推进）。
-    pub fn start(
-        &self,
-        project_id: &str,
-        logical_codebase_id: &str,
-    ) -> Result<CapabilityRevalidateBatchJob, ProductStoreError> {
-        validate_relative_id(project_id)?;
-        validate_relative_id(logical_codebase_id)?;
+    pub fn start(&self) -> Result<CapabilityRevalidateBatchJob, ProductStoreError> {
         let now = timestamp();
         let job = CapabilityRevalidateBatchJob {
             schema_version: BATCH_JOB_SCHEMA_VERSION,
             job_id: format!("capability_batch_{}", uuid::Uuid::new_v4().simple()),
-            project_id: project_id.to_string(),
-            logical_codebase_id: logical_codebase_id.to_string(),
             status: BatchJobStatus::Running,
             created_at: now.clone(),
             updated_at: now.clone(),
@@ -309,13 +296,10 @@ impl CapabilityRevalidateBatchService {
     }
 
     /// 按 `job_id` 读取 durable 作业状态（终态仍可读）。
-    pub fn get(
-        &self,
-        project_id: &str,
-        logical_codebase_id: &str,
-        job_id: &str,
-    ) -> Result<CapabilityRevalidateBatchJob, ProductStoreError> {
-        self.read_job(project_id, logical_codebase_id, job_id)?
+    ///
+    /// 机器级（REQ-PCR-03）：只凭 `job_id` 定位，无归属校验。
+    pub fn get(&self, job_id: &str) -> Result<CapabilityRevalidateBatchJob, ProductStoreError> {
+        self.read_job(job_id)?
             .ok_or_else(|| ProductStoreError::NotFound {
                 kind: "capability_revalidate_batch_job",
                 id: job_id.to_string(),
@@ -324,57 +308,32 @@ impl CapabilityRevalidateBatchService {
 
     /// 四家全并发推进；总预算耗尽则把未完成项如实标超时。
     async fn run(&self, job: CapabilityRevalidateBatchJob) {
-        let project_id = job.project_id.clone();
-        let logical_codebase_id = job.logical_codebase_id.clone();
         let job_id = job.job_id.clone();
         let futures = BATCH_PROVIDER_TYPES.iter().cloned().map(|provider| {
             let service = self.clone();
-            let project_id = project_id.clone();
-            let logical_codebase_id = logical_codebase_id.clone();
             let job_id = job_id.clone();
             async move {
-                service
-                    .run_provider(&job_id, &project_id, &logical_codebase_id, provider)
-                    .await;
+                service.run_provider(&job_id, provider).await;
             }
         });
         // join_all 同时轮询四家（真并发，不串行 await）；超时后丢弃未完成
         // 的探针 future（显式取消），并把它们标成 timeout。
         let joined = tokio::time::timeout(self.job_deadline, join_all(futures)).await;
         if joined.is_err() {
-            self.mark_unfinished_timeout(&project_id, &logical_codebase_id, &job_id)
-                .await;
+            self.mark_unfinished_timeout(&job_id).await;
         }
     }
 
-    async fn run_provider(
-        &self,
-        job_id: &str,
-        project_id: &str,
-        logical_codebase_id: &str,
-        provider: ProviderName,
-    ) {
-        let outcome = (self.revalidate)(
-            project_id.to_string(),
-            logical_codebase_id.to_string(),
-            provider.clone(),
-        )
-        .await;
+    async fn run_provider(&self, job_id: &str, provider: ProviderName) {
+        let outcome = (self.revalidate)(provider.clone()).await;
         let item = classify_outcome(provider, outcome, timestamp());
-        self.apply_item(project_id, logical_codebase_id, job_id, item)
-            .await;
+        self.apply_item(job_id, item).await;
     }
 
     /// 单家结果落盘（逐项进度可见；全部终态 ⇒ 作业 completed）。
-    async fn apply_item(
-        &self,
-        project_id: &str,
-        logical_codebase_id: &str,
-        job_id: &str,
-        item: BatchItemResult,
-    ) {
+    async fn apply_item(&self, job_id: &str, item: BatchItemResult) {
         let _guard = self.write_lock.lock().await;
-        let Ok(Some(mut job)) = self.read_job(project_id, logical_codebase_id, job_id) else {
+        let Ok(Some(mut job)) = self.read_job(job_id) else {
             return;
         };
         for slot in job
@@ -395,14 +354,9 @@ impl CapabilityRevalidateBatchService {
     }
 
     /// 终态收口：未完成项标 timeout（不谎报已确认，不覆盖已得结果）。
-    async fn mark_unfinished_timeout(
-        &self,
-        project_id: &str,
-        logical_codebase_id: &str,
-        job_id: &str,
-    ) {
+    async fn mark_unfinished_timeout(&self, job_id: &str) {
         let _guard = self.write_lock.lock().await;
-        let Ok(Some(mut job)) = self.read_job(project_id, logical_codebase_id, job_id) else {
+        let Ok(Some(mut job)) = self.read_job(job_id) else {
             return;
         };
         let now = timestamp();
@@ -427,41 +381,27 @@ impl CapabilityRevalidateBatchService {
         }
     }
 
-    fn job_path(
-        &self,
-        project_id: &str,
-        logical_codebase_id: &str,
-        job_id: &str,
-    ) -> Result<PathBuf, ProductStoreError> {
+    fn job_path(&self, job_id: &str) -> Result<PathBuf, ProductStoreError> {
         validate_relative_id(job_id)?;
-        Ok(
-            batch_jobs_dir(&self.paths, project_id, logical_codebase_id)?
-                .join(format!("{job_id}.json")),
-        )
+        Ok(batch_jobs_dir(&self.paths).join(format!("{job_id}.json")))
     }
 
     fn write_job(&self, job: &CapabilityRevalidateBatchJob) -> Result<(), ProductStoreError> {
-        write_json(
-            &self.job_path(&job.project_id, &job.logical_codebase_id, &job.job_id)?,
-            job,
-        )
+        write_json(&self.job_path(&job.job_id)?, job)
     }
 
-    /// 读取归属该 project/LC 的作业；不存在或归属不符 → `None`。
+    /// 读取作业；不存在 → `None`。
+    ///
+    /// 机器级（REQ-PCR-03）：作业不绑定项目 / 逻辑代码库 ⇒ 无归属校验。
     fn read_job(
         &self,
-        project_id: &str,
-        logical_codebase_id: &str,
         job_id: &str,
     ) -> Result<Option<CapabilityRevalidateBatchJob>, ProductStoreError> {
-        let path = self.job_path(project_id, logical_codebase_id, job_id)?;
+        let path = self.job_path(job_id)?;
         if !path.exists() {
             return Ok(None);
         }
         let job: CapabilityRevalidateBatchJob = read_json(&path)?;
-        if job.project_id != project_id || job.logical_codebase_id != logical_codebase_id {
-            return Ok(None);
-        }
         Ok(Some(job))
     }
 }

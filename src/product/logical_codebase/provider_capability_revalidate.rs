@@ -731,8 +731,7 @@ mod tests {
         // 预置项目/逻辑代码库子树（真实工作区形态）：核验**不得**往这里写证据。
         let project_dir = root.path().join(".aria/projects/project_0001");
         std::fs::create_dir_all(project_dir.join("logical-codebase")).expect("create project dir");
-        std::fs::create_dir_all(project_dir.join("logical-codebases/lc_0001"))
-            .expect("create lc dir");
+        std::fs::create_dir_all(project_dir.join("lc-subtree/lc_0001")).expect("create lc dir");
 
         let calls = Arc::new(AtomicUsize::new(0));
         let service = ProviderCapabilityRevalidateService::new(paths.clone())

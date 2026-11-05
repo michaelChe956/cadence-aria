@@ -265,11 +265,11 @@ async fn all_unverified_providers_reject_create_with_single_revalidate_entry() {
         );
     }
     assert_eq!(revalidate["method"], "POST", "{body}");
-    assert!(
-        revalidate["path"]
-            .as_str()
-            .expect("path")
-            .contains("capability-revalidate"),
+    // 能力面改机器级（REQ-PCR-08）：核验入口按机器级路由，不再按项目 / 逻辑
+    // 代码库定位。
+    assert_eq!(
+        revalidate["path"],
+        serde_json::json!("/api/providers/capabilities/revalidate"),
         "{body}"
     );
     assert_eq!(revalidate["body"]["provider_type"], "pi", "{body}");

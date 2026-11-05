@@ -933,14 +933,14 @@ mod tests {
 
         // 项目目录与逻辑代码库子树真实存在（否则「不存在」是空断言）。
         let project_dir = temp.path().join(".aria/projects/project_0001");
-        let lc_dir = project_dir.join("logical-codebases/lc_0001");
+        let lc_dir = project_dir.join("lc-subtree/lc_0001");
         std::fs::create_dir_all(&lc_dir).unwrap();
 
         // 项目级 / LC 级子树下一律不得存在 capability 记录。
         for forbidden in [
             project_dir.join("capabilities.json"),
             project_dir.join("logical-codebase/capabilities.json"),
-            project_dir.join("logical-codebases/capabilities.json"),
+            project_dir.join("lc-subtree/capabilities.json"),
             lc_dir.join("capabilities.json"),
         ] {
             assert!(
