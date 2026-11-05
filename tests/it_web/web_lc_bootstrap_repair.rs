@@ -19,6 +19,12 @@
 //!   凭据豁免成员规则门——裸成员的 recipe turn 不再被 admission 拒绝，
 //!   Failed 检查点改由注入的 pre_check 中断保留）；显式 Retry 后裸成员
 //!   原链继续至 planning_ready、冻结 policy digest，成员规则零重建。
+//! - A05 `a05_zero_change_pre_check_turn_fails_the_step_with_durable_cause`：
+//!   REQ-BOOT-17 负例——provider turn 正常结束但零落盘（零动作）时该 step
+//!   必须判失败，durable 失败事实含 provider / step / 零变更三项
+//!   （cause=root_recipe_turn_zero_change），后续 step 不推进。正例（A03/A04）
+//!   的夹具按真实四命令落盘面产生变更，本负例是「零变更 ⇒ 失败」在 HTTP 面
+//!   的护栏。
 //!
 //! 全程同一 `WebAppState`：无服务重启、无 registry 清理、无 journal 删除、无
 //! `repos.json`/权威 JSON 编辑脱困（repos.json 仅作为 legacy 存量布局在场景
@@ -55,6 +61,7 @@ use cadence_aria::product::logical_codebase::{
     IdentityMigrationExecutor, MigrationFaultInjector, RepositoryIdentityMapping,
 };
 use cadence_aria::product::models::{ProviderName, RepositoryRecord};
+use cadence_aria::product::repository_store::RepositoryInitializationStepKind;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::events::EventHub;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
@@ -290,37 +297,119 @@ fn fake_index_operation(
 // 聚合根生成 AGENTS/language 规则材料，使末命令发布收口有真实材料可聚合。
 //
 // Task 7 分流收口后 gateway 唯一经 `start_validated` 分发（绝不回落裸
-// `start`），且库外（it_web）无法拆 `ValidatedStreamingProviderInput`
-// （`into_parts` 为 pub(crate)），prompt 不可匹配——本 fixture 改按确定性
-// 轮次合同注入：bootstrap 编排的首个 provider turn 恒为 pre_check
-// （machine_skills/aggregate_preflight 是确定性步骤，不启动 provider），
-// 首个 validated start 注入一次中断；中断后的首个成功 turn 是 pre_check
-// 重试，第二个成功 turn 恒为 rule_and_mcp_config（真实 provider 生成根
-// 规则的位置），在该轮向聚合根落盘材料。此前本 fixture 只实现 `start`，
-// 生产路径全部命中 trait 默认的「validated start is not supported」，
-// 注入从未生效（基线即红）。
+// `start`）。`ValidatedStreamingProviderInput::into_parts` 自 A1 起已是
+// crate 外可见（it_web 集成测试可直接取回 `prompt` 与 spawn `working_dir`）
+// ——故本 fixture 按 **prompt 里的真实 recipe 命令**识别当前 turn，不再
+// 依赖「第几个成功 turn」的轮次猜测（断点续跑时轮次不可靠）。
+//
+// REQ-BOOT-17：root recipe 的 provider turn 零动作 ⇒ 该 step 判失败，故本
+// fixture 按**真实四命令的落盘面**同构——每个 provider turn 都必须产生真实
+// 文件变更（落盘面取自 `ROOT_RECIPE_ALLOWLIST` 的实测证据）：
+// - pre_check → `.claude/settings.json`（真实 pre-check 写 `.claude/**`）；
+// - rule_config → 根规则材料 `AGENTS.md` + `.claude/rules/language.md`
+//   （真实 rule-config 写 `AGENTS.md` / `.claude/rules`）；
+// - project-rules-examples → `cadence/project-rules/examples`。
+//
+// Task 4（aggregate-policy-root-publication）起在 RuleAndMcpConfig 轮向
+// 聚合根生成 AGENTS/language 规则材料，使末命令发布收口有真实材料可聚合；
+// 该写入落在命令审计窗口内，重试链将其作为 allowlisted 变更冻结。
 // ---------------------------------------------------------------------------
 
+/// 夹具 provider 的 turn 行为开关。
+#[derive(Debug, Clone)]
+struct RecipeProviderOptions {
+    /// 首个 pre_check turn 注入一次中断（deterministic checkpoint：中断
+    /// 先于成功启动，audit 不计 launch）。
+    interrupt_first_pre_check: bool,
+    /// REQ-BOOT-17 负例：pre_check turn **零动作**（不产生任何落盘）——
+    /// 该 step 必须判失败（零动作 turn 不得静默通过）。
+    zero_change_pre_check: bool,
+}
+
+impl Default for RecipeProviderOptions {
+    fn default() -> Self {
+        Self {
+            interrupt_first_pre_check: true,
+            zero_change_pre_check: false,
+        }
+    }
+}
+
+/// 真实 recipe 命令文本（与产品层 `RepositoryInitializationStepKind::command()`
+/// 同源——不硬编码命令串，避免与生产命令漂移）。
+fn recipe_command(kind: RepositoryInitializationStepKind) -> &'static str {
+    kind.command().expect("recipe command")
+}
+
 struct FaultOncePreCheckStreamingProvider {
+    options: RecipeProviderOptions,
     fired: AtomicBool,
     successful_starts: AtomicUsize,
-    /// provider spawn cwd（= canonical 聚合根；fixture 构造时已知）。
-    aggregate_root: PathBuf,
 }
 
 impl FaultOncePreCheckStreamingProvider {
-    fn new(aggregate_root: PathBuf) -> Self {
+    fn new(options: RecipeProviderOptions) -> Self {
         Self {
+            options,
             fired: AtomicBool::new(false),
             successful_starts: AtomicUsize::new(0),
-            aggregate_root,
         }
     }
 
-    async fn start_turn(&self) -> Result<ProviderSession, ProviderAdapterError> {
+    /// 真实四命令的落盘面（REQ-BOOT-17 同构）：每个 provider turn 都必须
+    /// 产生真实文件变更。每次落盘的内容带 turn 序号——同一 turn 重复执行
+    /// （重试/续跑）也是真实变更，夹具绝不产出「零变更」turn。
+    fn write_turn_material(&self, prompt: &str, root: &Path, turn: usize) {
+        if prompt.contains(recipe_command(RepositoryInitializationStepKind::PreCheck))
+            && !self.options.zero_change_pre_check
+        {
+            let claude_dir = root.join(".claude");
+            std::fs::create_dir_all(&claude_dir).expect("create root .claude dir");
+            std::fs::write(
+                claude_dir.join("settings.json"),
+                format!("{{\"pre_check_turn\":{turn}}}\n"),
+            )
+            .expect("write root claude settings");
+        }
+        if prompt.contains(recipe_command(RepositoryInitializationStepKind::RuleConfig)) {
+            std::fs::write(
+                root.join("AGENTS.md"),
+                format!("{A03_ROOT_AGENTS}\n- fixture provider turn {turn}.\n"),
+            )
+            .expect("write root AGENTS.md");
+            let rules_dir = root.join(".claude").join("rules");
+            std::fs::create_dir_all(&rules_dir).expect("create root rules dir");
+            std::fs::write(
+                rules_dir.join("language.md"),
+                format!("{A03_ROOT_LANGUAGE}\n- fixture provider turn {turn}.\n"),
+            )
+            .expect("write root language rule");
+        }
+        if prompt.contains(recipe_command(
+            RepositoryInitializationStepKind::ProjectRulesExamples,
+        )) {
+            let examples = root.join("cadence").join("project-rules").join("examples");
+            std::fs::create_dir_all(&examples).expect("create project rules examples dir");
+            std::fs::write(
+                examples.join("examples.md"),
+                format!("{A03_ROOT_EXAMPLES}\n- fixture provider turn {turn}.\n"),
+            )
+            .expect("write project rules examples");
+        }
+    }
+
+    async fn start_turn(
+        &self,
+        input: StreamingProviderInput,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
         // deterministic checkpoint：首个 pre_check turn 在真实 gateway 启动路径
         // 内被注入一次中断（audit 只记录成功启动，中断不计 launch）。
-        if !self.fired.swap(true, Ordering::SeqCst) {
+        if self.options.interrupt_first_pre_check
+            && input
+                .prompt
+                .contains(recipe_command(RepositoryInitializationStepKind::PreCheck))
+            && !self.fired.swap(true, Ordering::SeqCst)
+        {
             return Err(ProviderAdapterError::execution_failed(
                 None,
                 String::new(),
@@ -328,22 +417,10 @@ impl FaultOncePreCheckStreamingProvider {
                 0,
             ));
         }
-        let successful = self.successful_starts.fetch_add(1, Ordering::SeqCst);
-        // RuleAndMcpConfig 命令时机（第二个成功 turn）：真实 provider 生成
-        // 根规则的位置——测试 provider 在聚合根落盘 AGENTS 入口与 language
-        // 规则，使末命令发布收口有真实材料可聚合；该写入落在命令审计
-        // 窗口内，重试链将其作为 allowlisted 变更冻结。
-        if successful == 1 {
-            let root = &self.aggregate_root;
-            std::fs::write(root.join("AGENTS.md"), A03_ROOT_AGENTS).expect("write root AGENTS.md");
-            std::fs::create_dir_all(root.join(".claude").join("rules"))
-                .expect("create root rules dir");
-            std::fs::write(
-                root.join(".claude").join("rules").join("language.md"),
-                A03_ROOT_LANGUAGE,
-            )
-            .expect("write root language rule");
-        }
+        let turn = self.successful_starts.fetch_add(1, Ordering::SeqCst);
+        // 真实落盘面（同上）：provider 在自己的 spawn cwd（= canonical 聚合根）
+        // 内按当前命令写入材料——每个 turn 都必须留下真实变更。
+        self.write_turn_material(&input.prompt, &input.working_dir, turn);
         // 轮次输出无结构化契约（aggregate recipe turn 消费自由文本摘要），
         // 以 plain completion 立即完结（同 ReviewStreamingAdapter 先例）。
         let (event_tx, events) = tokio::sync::mpsc::channel(4);
@@ -371,24 +448,31 @@ impl FaultOncePreCheckStreamingProvider {
 const A03_ROOT_AGENTS: &str =
     "# aggregate root rules\n\n- Members follow their .claude/rules language rules.\n";
 const A03_ROOT_LANGUAGE: &str = "# language rule\n\n- Use Rust 2024 edition.\n";
+/// `/project-rules-examples` 的真实落盘面（`cadence/project-rules/examples`
+/// ——见 ROOT_RECIPE_ALLOWLIST 的实测证据）：零动作 turn 会被判失败，故测试
+/// provider 必须按真实命令落盘面产生文件变更。
+const A03_ROOT_EXAMPLES: &str = "# root rule examples\n\n- Members share one language rule set.\n";
 
 #[async_trait]
 impl StreamingProviderAdapter for FaultOncePreCheckStreamingProvider {
     async fn start(
         &self,
-        _input: StreamingProviderInput,
+        input: StreamingProviderInput,
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        self.start_turn().await
+        self.start_turn(input).await
     }
 
     /// 生产 gateway 唯一分发入口（Task 7 分流收口）。
     async fn start_validated(
         &self,
-        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        self.start_turn().await
+        // `into_parts` 自 A1 起 crate 外可见：库外 fixture 借此取回 prompt
+        // 与 spawn cwd（生产同构——provider 在自己的 cwd 内落盘）。
+        let (input, _launch) = validated.into_parts();
+        self.start_turn(input).await
     }
 }
 
@@ -451,6 +535,14 @@ impl ProviderAdapter for StubSyncAdapter {
 /// turn 走生产 `GatewayFactoryProviderTurnDriver` + admission 预检）+ fake
 /// CodeGraph CLI index operation。
 async fn a03_app() -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf) {
+    a03_app_with(RecipeProviderOptions::default()).await
+}
+
+/// A03 fixture（可调 provider 行为）：REQ-BOOT-17 负例需要「零动作 pre_check
+/// turn」的 provider，故把 turn 行为开关参数化。
+async fn a03_app_with(
+    options: RecipeProviderOptions,
+) -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf) {
     let root = tempdir().expect("root");
     let root_path = root.path().to_path_buf();
     crate::provider_capability_fixture::seed_local_skills_source(&root_path);
@@ -459,9 +551,7 @@ async fn a03_app() -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf
     let mut registry = ProviderRegistry::new();
     registry.register(
         ProviderName::ClaudeCode,
-        Arc::new(FaultOncePreCheckStreamingProvider::new(
-            root_path.join("aggregate-root"),
-        )),
+        Arc::new(FaultOncePreCheckStreamingProvider::new(options)),
     );
     let factory = Arc::new(LogicalCodebaseGatewayFactory::new(
         paths.clone(),
@@ -488,12 +578,9 @@ async fn a03_app() -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>, PathBuf
 }
 
 /// A04 fixture：生产默认依赖（fake-mode registry + 生产 admission driver）+
-/// fake CodeGraph CLI index operation。`aggregate_root` 是 LC 的 canonical
-/// 根（fixture provider 在 rule_config 轮向其落盘根材料）。
-fn a04_app(
-    root_path: &Path,
-    aggregate_root: &Path,
-) -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>) {
+/// fake CodeGraph CLI index operation。provider 在真实 recipe 命令时机向
+/// LC 的 canonical 根（= provider 的 spawn cwd）落盘根材料。
+fn a04_app(root_path: &Path) -> (axum::Router, Arc<LogicalCodebaseGatewayFactory>) {
     let paths = ProductAppPaths::new(root_path.join(".aria"));
     // 与生产 driver 相同的 admission 接线（with_gateway_factory 重建生产依赖），
     // registry 用恒可用 fake streaming provider——默认 factory 的 provider
@@ -505,7 +592,7 @@ fn a04_app(
     registry.register(
         ProviderName::ClaudeCode,
         Arc::new(FaultOncePreCheckStreamingProvider::new(
-            aggregate_root.to_path_buf(),
+            RecipeProviderOptions::default(),
         )),
     );
     let factory = Arc::new(LogicalCodebaseGatewayFactory::new(
@@ -852,7 +939,7 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         run_git(member, &["remote", "add", "origin", remote]);
     }
 
-    let (app, factory) = a04_app(&root_path, &legacy_root);
+    let (app, factory) = a04_app(&root_path);
     let (status, _) = request_json(
         &app,
         Method::POST,
@@ -1195,4 +1282,85 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         Some(digest.as_str())
     );
     assert_eq!(reread["planning_ready"], true);
+}
+
+// ---------------------------------------------------------------------------
+// REQ-BOOT-17 负例（it_web 级回归）：零动作的 provider turn 必须让该 step
+// 判失败（cause=root_recipe_turn_zero_change）——零变更 turn 绝不静默通过。
+// 正例（A03/A04）的夹具按真实四命令落盘面产生变更，故本负例是「零变更 ⇒
+// 失败」这条契约在 HTTP 面的唯一护栏。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a05_zero_change_pre_check_turn_fails_the_step_with_durable_cause() {
+    let (app, factory, root_path) = a03_app_with(RecipeProviderOptions {
+        // 不注入中断：pre_check turn 正常结束（零动作）——失败原因必须是
+        // 「零变更」，不得被中断注入混淆。
+        interrupt_first_pre_check: false,
+        zero_change_pre_check: true,
+    })
+    .await;
+    let aggregate_root = root_path.join("aggregate-root");
+    let member_a = aggregate_root.join("alpha");
+    let member_b = aggregate_root.join("beta");
+    for member in [&member_a, &member_b] {
+        git_repo_at(member);
+        git_commit_initial(member);
+    }
+
+    let lc_id =
+        register_lc_members(&app, &aggregate_root, &[member_a.clone(), member_b.clone()]).await;
+    let uri = bootstrap_uri(&lc_id);
+
+    // 零动作的 pre_check turn ⇒ 该 step 判失败（不静默通过）。
+    let failed = poll_until(
+        &app,
+        &uri,
+        |projection| bootstrap_step(projection, "member_index")["status"] == "failed",
+        "the zero-change pre_check turn fails its step",
+    )
+    .await;
+    let member_index = bootstrap_step(&failed, "member_index");
+    assert_eq!(
+        member_index["failure"]["reason_code"], "aggregate_pre_check_failed",
+        "the zero-change turn must fail its step: {member_index}"
+    );
+    // 零变更 ≠ 未启动：turn 确实启动过（否则失败原因会是启动失败）。
+    assert_eq!(factory.audit().stream_launches(), 1);
+
+    // durable 失败事实含 provider / step / 零变更三项。
+    let operation_id = member_index["object_id"]
+        .as_str()
+        .expect("root recipe operation id")
+        .to_string();
+    let (status, operation) = request_json(
+        &app,
+        Method::GET,
+        &format!(
+            "/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/initializations/{operation_id}"
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{operation}");
+    assert_eq!(operation["error"]["code"], "aggregate_pre_check_failed");
+    let details = &operation["error"]["details"];
+    assert_eq!(
+        details["cause"], "root_recipe_turn_zero_change",
+        "the durable failure must name the zero-change cause: {operation}"
+    );
+    assert_eq!(details["provider"], "claude_code");
+    let action = details["action"].as_str().unwrap_or("");
+    assert!(
+        action.contains("zero_change") && action.contains("pre_check"),
+        "the failure fact must state the zero change and the step: {operation}"
+    );
+
+    // 后续 step 不推进：零动作 turn 绝不放行 readiness。
+    assert_eq!(failed["planning_ready"], false, "{failed}");
+    assert_ne!(
+        bootstrap_step(&failed, "aggregate_index_active")["status"],
+        "completed",
+        "a zero-change turn must not advance the later steps: {failed}"
+    );
 }
