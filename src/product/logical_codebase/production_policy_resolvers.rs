@@ -223,10 +223,7 @@ impl StoreBackedProviderCapabilitySource {
     /// 刻意不同:capability 记录是**机器级**(一次核验整机可用,REQ-PCR-07);
     /// root-recipe 通道**按 lc**(operation 是 per-lc 的事实,REQ-PCR-09)。
     /// 旧构造器 `for_lc` 曾把两件事捆在一起,已删除。
-    pub fn global_capability_with_lc_recipe_recheck(
-        paths: ProductAppPaths,
-        lc_id: String,
-    ) -> Self {
+    pub fn global_capability_with_lc_recipe_recheck(paths: ProductAppPaths, lc_id: String) -> Self {
         Self {
             store: ProviderCapabilityStore::new(paths.clone()),
             recipe_recheck: Some(RootRecipeCredentialRecheck {

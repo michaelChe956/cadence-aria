@@ -2514,8 +2514,7 @@ mod tests {
             evidence: CapabilityEvidence::ProductionVerified,
             resume_evidence: ResumeEvidenceState::Unsupported,
             supported_actions: vec![action],
-            action_matrix: ProviderActionMatrix::from_rows(vec![row])
-                .expect("probe action rows"),
+            action_matrix: ProviderActionMatrix::from_rows(vec![row]).expect("probe action rows"),
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: Some(evidence.probed_at().to_string()),
             probe_artifact_ref: Some(evidence.artifact_ref().to_string()),

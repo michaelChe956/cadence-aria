@@ -57,9 +57,7 @@ impl T10StoreFixture {
             std::fs::canonicalize(manifest.provider_context_root).expect("authority root");
         LogicalCodebaseProviderGateway::with_audit(
             AggregatePolicyArtifactStore::new(self.paths.clone()),
-            Arc::new(StoreBackedProviderCapabilitySource::new(
-                self.paths.clone(),
-            )),
+            Arc::new(StoreBackedProviderCapabilitySource::new(self.paths.clone())),
             Arc::new(MutableTargetResolver::new(
                 self.paths.root().join("baseline.git"),
             )),

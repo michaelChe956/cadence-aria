@@ -240,9 +240,9 @@ pub async fn select_aggregate_provider_at(
     // L2 读**机器级** capability 记录(REQ-PCR-07):一次核验 ⇒ 整机
     // (含本 LC)L2 放行 ⇒ 聚合初始化自动开始;不存在按项目/LC 读取
     // 的第二作用域分支。
-    let source = StoreBackedProviderCapabilitySource::with_store(
-        ProviderCapabilityStore::new(paths.clone()),
-    );
+    let source = StoreBackedProviderCapabilitySource::with_store(ProviderCapabilityStore::new(
+        paths.clone(),
+    ));
     decide_selection(&source, snapshot.as_ref(), now)
 }
 
@@ -657,15 +657,19 @@ mod tests {
 
         // 读取点(新接口):机器级 store 直接装配,无 project_id 参数;
         // 判定仍走选择器与 gateway 唯一共用的只读判定函数 launch_cell_state。
-        let source = StoreBackedProviderCapabilitySource::with_store(
-            ProviderCapabilityStore::new(paths.clone()),
-        );
+        let source = StoreBackedProviderCapabilitySource::with_store(ProviderCapabilityStore::new(
+            paths.clone(),
+        ));
         let provider_ref =
             ProviderRef::from_provider_name(&ProviderName::Pi, MANAGED_CAPABILITY_SNAPSHOT_REF)
                 .expect("pi provider ref");
         assert!(
             matches!(
-                launch_cell_state(&source, &provider_ref, SessionPolicyAction::PlanningReadOnly),
+                launch_cell_state(
+                    &source,
+                    &provider_ref,
+                    SessionPolicyAction::PlanningReadOnly
+                ),
                 Ok(LaunchCellState::Confirmed)
             ),
             "machine-level Confirmed record must read Confirmed without any project/lc"
@@ -1003,9 +1007,9 @@ mod tests {
         let snapshot_root = tempfile::tempdir().expect("temporary product root");
         let snapshot_paths = ProductAppPaths::new(snapshot_root.path().join(".aria"));
         write_records(&snapshot_paths, &[(ProviderRefType::Pi, confirmed())]);
-        let source = StoreBackedProviderCapabilitySource::with_store(
-            ProviderCapabilityStore::new(snapshot_paths.clone()),
-        );
+        let source = StoreBackedProviderCapabilitySource::with_store(ProviderCapabilityStore::new(
+            snapshot_paths.clone(),
+        ));
         let mismatched_ref = ProviderRef::pi("cap_other_snapshot");
         let state = launch_cell_state(
             &source,

@@ -1198,8 +1198,7 @@ mod tests {
             .unwrap();
 
         let bytes =
-            std::fs::read_to_string(store.capabilities_path().expect("capabilities path"))
-                .unwrap();
+            std::fs::read_to_string(store.capabilities_path().expect("capabilities path")).unwrap();
         let records: serde_json::Value = serde_json::from_str(&bytes).unwrap();
         let records = records.as_array().expect("records array");
         assert!(!records.is_empty(), "seeded record must be on disk");
