@@ -285,7 +285,7 @@ const TABLE: &[Entry] = &[
     ),
     (
         "aggregate_initialization_no_provider_available",
-        "四家 provider 都不可用",
+        "候选 provider 都不可用",
         "当前机器上没有任何一家 provider 能承担这一步（未安装或不可执行）。",
         "按下面的安装线索逐家安装一家 provider，装好后点「重试」。",
         FailureTriage::Environment,
@@ -300,7 +300,7 @@ const TABLE: &[Entry] = &[
     (
         "aggregate_initialization_provider_capability_denied",
         "已安装的 provider 都实测拒绝这一步",
-        "四家 provider 中已安装的那些都在真实调用里拒绝了这一步，逐家原因见下方诊断。",
+        "候选 provider 中已安装的那些都在真实调用里拒绝了这一步，逐家原因见下方诊断。",
         "按诊断逐家修掉拒绝原因（授权/信任/版本），或安装另一家 provider 后重试。",
         FailureTriage::Environment,
     ),

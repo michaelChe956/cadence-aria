@@ -41,9 +41,8 @@ use crate::product::logical_codebase::provider_trust::provider_wire_label;
 use crate::product::models::ProviderName;
 
 /// 聚合冷启动的 provider 候选顺序(owner 顺序,冻结)。
-pub const AGGREGATE_PROVIDER_CANDIDATE_ORDER: [ProviderName; 4] = [
+pub const AGGREGATE_PROVIDER_CANDIDATE_ORDER: [ProviderName; 3] = [
     ProviderName::Pi,
-    ProviderName::KimiCode,
     ProviderName::ClaudeCode,
     ProviderName::Codex,
 ];
@@ -62,7 +61,7 @@ pub const REASON_CODE_PROVIDER_HEALTH_DEGRADED: &str =
     "aggregate_initialization_provider_health_degraded";
 
 /// 候选表规则版本(冻结:owner 顺序 + L1/L2 两层判据)。
-pub const PROVIDER_SELECTION_RULE_VERSION: &str = "aggregate-provider-owner-order-v1";
+pub const PROVIDER_SELECTION_RULE_VERSION: &str = "aggregate-provider-owner-order-v2";
 
 /// gateway 判定「快照引用不一致」时的既有文案(分类器按同一子串匹配)。
 const CAPABILITY_SNAPSHOT_MISMATCH: &str = "capability snapshot mismatch";
@@ -634,7 +633,7 @@ mod tests {
                 .iter()
                 .map(|row| row.provider.clone())
                 .collect::<Vec<_>>(),
-            vec!["pi", "kimi_code", "claude_code", "codex"]
+            vec!["pi", "claude_code", "codex"]
         );
         assert_eq!(table.candidates[0].capability_state, "confirmed");
         assert!(table.candidates[0].skipped_reason.is_none());
@@ -747,7 +746,15 @@ mod tests {
         let ProviderSelectionOutcome::Selected(table) = outcome else {
             panic!("expected a selected provider, got {outcome:?}");
         };
-        assert_eq!(table.selected, "kimi_code");
+        assert_eq!(table.selected, "claude_code");
+        assert_eq!(
+            table
+                .candidates
+                .iter()
+                .map(|row| row.provider.clone())
+                .collect::<Vec<_>>(),
+            vec!["pi", "claude_code", "codex"]
+        );
         assert!(!table.candidates[0].cli_available);
         assert_eq!(
             table.candidates[0].cli_reason_code.as_deref(),
@@ -869,7 +876,7 @@ mod tests {
         let ProviderSelectionOutcome::NeedsVerification { suggested, table } = outcome else {
             panic!("expected needs verification, got {outcome:?}");
         };
-        assert_eq!(suggested, ProviderName::KimiCode);
+        assert_eq!(suggested, ProviderName::ClaudeCode);
         assert_eq!(table.candidates[0].capability_state, "denied");
         assert_eq!(
             table.candidates[0].warning.as_deref(),

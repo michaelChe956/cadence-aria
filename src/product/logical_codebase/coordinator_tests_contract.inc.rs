@@ -163,7 +163,7 @@
                 .iter()
                 .map(|candidate| candidate.provider.as_str())
                 .collect::<Vec<_>>(),
-            vec!["pi", "kimi_code", "claude_code", "codex"],
+            vec!["pi", "claude_code", "codex"],
             "candidates keep the owner order (AGGREGATE_PROVIDER_CANDIDATE_ORDER)"
         );
         assert!(selection
