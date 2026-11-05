@@ -3,6 +3,7 @@
 // 子模块包裹并 `use super::*` 复用父 fixture，避免与其它 include! 文件的
 // 同合同私有 helper 重名（设计 §6.3；隔离器实现属 Step 8，本文件先行红测）。
 pub(crate) mod process_smoke {
+    #[allow(unused_imports)] // 复用父 fixture 的通道：任务 9/10 真实制品 smoke 场景消费后移除
     use super::*;
 
     /// 子模式环境标识（与单元侧 small_stack_worker 同合同、各自私有）。

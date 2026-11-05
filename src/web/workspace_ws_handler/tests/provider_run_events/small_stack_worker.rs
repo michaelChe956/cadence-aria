@@ -273,5 +273,8 @@ fn isolated_case_rejects_assertion_signal_and_timeout() {
         err.contains("provider_case_child_timeout"),
         "report must carry the case name: {err}"
     );
-    assert!(err.contains("timeout"), "report must attribute timeout: {err}");
+    assert!(
+        err.contains("timeout"),
+        "report must attribute timeout: {err}"
+    );
 }

@@ -1115,10 +1115,10 @@ async fn single_candidate_followup_review_guard_only_breaks_on_delegated_generat
 }
 #[path = "provider_run_events/sc_delegated_rerun.rs"]
 mod sc_delegated_rerun;
-#[path = "provider_run_events/stack_budget.rs"]
-mod stack_budget;
 #[path = "provider_run_events/small_stack_worker.rs"]
 mod small_stack_worker;
+#[path = "provider_run_events/stack_budget.rs"]
+mod stack_budget;
 #[path = "provider_run_events/supersede_reclaim.rs"]
 mod supersede_reclaim;
 include!("provider_run_events_parts/root_cwd_launch.inc.rs");

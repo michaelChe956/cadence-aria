@@ -7,24 +7,24 @@ pub(crate) use entry::{
     ProviderRunStartMode, spawn_provider_run_claiming_idle, spawn_provider_run_from_event,
     spawn_provider_run_from_handler,
 };
-#[path = "provider_run/task_body.rs"]
-mod task_body;
 #[path = "provider_run/basic_arms.rs"]
 mod basic_arms;
-#[path = "provider_run/single_candidate_arm.rs"]
-mod single_candidate_arm;
 #[path = "provider_run/sc_manual_revision.rs"]
 mod sc_manual_revision;
+#[path = "provider_run/single_candidate_arm.rs"]
+mod single_candidate_arm;
+#[path = "provider_run/task_body.rs"]
+mod task_body;
 pub(crate) use task_body::provider_run_task_body;
 // S0 体积基线（stack_budget）仅测试用窄再导出；库构建不经此处。
 #[cfg(test)]
 pub(crate) use basic_arms::{
-    drive_author_arm, drive_author_choice_followup_arm, drive_revision_arm, drive_review_only_arm,
+    drive_author_arm, drive_author_choice_followup_arm, drive_review_only_arm, drive_revision_arm,
 };
 #[cfg(test)]
-pub(crate) use single_candidate_arm::drive_single_candidate_author_arm;
-#[cfg(test)]
 pub(crate) use sc_manual_revision::drive_human_gate_sc_revision_arm;
+#[cfg(test)]
+pub(crate) use single_candidate_arm::drive_single_candidate_author_arm;
 #[cfg(test)]
 pub(crate) use task_body::ArmDrive;
 

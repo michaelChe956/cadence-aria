@@ -198,7 +198,10 @@ async fn run_raw_budget_measurement() {
         },
         outbound_tx.clone(),
     );
-    print_raw_baseline("spawn_provider_run_from_handler", std::mem::size_of_val(&entry));
+    print_raw_baseline(
+        "spawn_provider_run_from_handler",
+        std::mem::size_of_val(&entry),
+    );
     drop(entry);
 
     let settle = crate::web::workspace_ws_handler::run::drive_until_cancelled_settles(
@@ -238,8 +241,11 @@ async fn measure_named_arms(
     let mut sizes = Vec::new();
     {
         let engine_guard = run_context.engine.lock().await;
-        let mut idle_guard =
-            Some(run_context.workspace_runs.begin_provider_drive(&run_context.session_id));
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
         let (_tx, command_rx) = mpsc::channel(8);
         let author = drive_author_arm(
             arm_drive(
@@ -261,8 +267,11 @@ async fn measure_named_arms(
     }
     {
         let engine_guard = run_context.engine.lock().await;
-        let mut idle_guard =
-            Some(run_context.workspace_runs.begin_provider_drive(&run_context.session_id));
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
         let (_tx, command_rx) = mpsc::channel(8);
         let followup = drive_author_choice_followup_arm(
             arm_drive(
@@ -284,8 +293,11 @@ async fn measure_named_arms(
     }
     {
         let engine_guard = run_context.engine.lock().await;
-        let mut idle_guard =
-            Some(run_context.workspace_runs.begin_provider_drive(&run_context.session_id));
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
         let (_tx, command_rx) = mpsc::channel(8);
         let revision = drive_revision_arm(arm_drive(
             engine_guard,
@@ -304,8 +316,11 @@ async fn measure_named_arms(
     }
     {
         let engine_guard = run_context.engine.lock().await;
-        let mut idle_guard =
-            Some(run_context.workspace_runs.begin_provider_drive(&run_context.session_id));
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
         let (_tx, command_rx) = mpsc::channel(8);
         let review_only = drive_review_only_arm(arm_drive(
             engine_guard,
@@ -324,8 +339,11 @@ async fn measure_named_arms(
     }
     {
         let engine_guard = run_context.engine.lock().await;
-        let mut idle_guard =
-            Some(run_context.workspace_runs.begin_provider_drive(&run_context.session_id));
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
         let (_tx, command_rx) = mpsc::channel(8);
         let single_candidate = drive_single_candidate_author_arm(arm_drive(
             engine_guard,
@@ -344,8 +362,11 @@ async fn measure_named_arms(
     }
     {
         let engine_guard = run_context.engine.lock().await;
-        let mut idle_guard =
-            Some(run_context.workspace_runs.begin_provider_drive(&run_context.session_id));
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
         let (_tx, command_rx) = mpsc::channel(8);
         let sc_manual = drive_human_gate_sc_revision_arm(
             arm_drive(

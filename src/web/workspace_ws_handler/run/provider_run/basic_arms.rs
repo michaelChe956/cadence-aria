@@ -10,15 +10,13 @@
 //! - idle `provider_drive_guard` 是外层 `Option<WorkspaceProviderDriveGuard>`
 //!   （臂借 `&mut`，drop drive **不等于**释放 idle）；
 //! - `entity_run_lease` 是独立外层 binding（不传给臂）。
+//!
 //! 不得用「provider_drive_guard 随 drive 一律释放」的歧义说法代替三者合同。
 
-use super::*;
 use super::task_body::{ArmDrive, ArmExit};
+use super::*;
 /// Author 臂（原 `:333–342`，机械迁移）：单轮 user message 驱动。
-pub(crate) async fn drive_author_arm<'e>(
-    drive: ArmDrive<'e, '_>,
-    content: String,
-) -> ArmExit<'e> {
+pub(crate) async fn drive_author_arm<'e>(drive: ArmDrive<'e, '_>, content: String) -> ArmExit<'e> {
     let ArmDrive {
         mut engine,
         provider: provider_for_run,
@@ -109,15 +107,14 @@ pub(crate) async fn drive_review_only_arm<'e>(drive: ArmDrive<'e, '_>) -> ArmExi
                     .get_human_gate_turn(&record.id, &turn_id)
                     .ok()
                     .filter(|turn| {
-                        turn.status
-                            == crate::product::models::HumanGateTurnStatus::Completed
+                        turn.status == crate::product::models::HumanGateTurnStatus::Completed
                     })
                     .filter(|turn| turn.result_artifact_ref.is_some())
                     .map(|turn| (turn_id, turn.result_artifact_ref))
             });
         if let Some((turn_id, Some(artifact_ref))) = closed_turn {
             let _ = send_json_outbound(
-                &outbound_tx_for_task,
+                outbound_tx_for_task,
                 &WsOutMessage::HumanGateTurnCompleted {
                     turn_id,
                     artifact_ref,
