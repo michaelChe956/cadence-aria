@@ -1,0 +1,14 @@
+Script started on 2026-11-05 23:32:37+08:00 [COMMAND="/home/michaelche/workspace/github/cadence-aria/.worktrees/bugfix-b-11-02/target/debug/aria web --workspace /tmp/aria-verify --host 127.0.0.1 --port 4317" TERM="xterm-256color" TTY="/dev/pts/2" COLUMNS="120" LINES="40"]
+[aria-startup] dangling reference governance done: report=/tmp/aria-verify/cadence/analysis-docs/2026-11-05_分析报告_悬空引用巡检清单_v1.0.md dangling=0 undetermined=0 deleted=0 token=sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+[aria-startup] dangling reference governance self-proof: governance_complete=true unzeroed=0 residual=0 undetermined=0
+aria web listening on http://127.0.0.1:4317
+[master (root-commit) 81f5a10] init
+[master (root-commit) c364a89] init
+[master (root-commit) c364a89] init
+[master (root-commit) c364a89] init
+[aria-cancellation] workspace handler_run_supersede trigger=handler_run_supersede session_id=workspace_session_0001 kind=Author { content: "" }
+
+thread 'tokio-rt-worker' (2125447) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+
+Script done on 2026-11-06 00:24:06+08:00 [COMMAND_EXIT_CODE="134"]
