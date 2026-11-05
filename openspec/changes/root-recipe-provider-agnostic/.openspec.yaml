@@ -1,0 +1,24 @@
+schema: spec-driven
+created: 2026-11-05
+goal: 让聚合初始化的 root recipe 对 provider 无关 —— 选择器选中的 provider 都能跑那四条命令（命令按各家 skill 调用语法生成），且「命令没被认出来」不再静默通过
+x-tracker-status: draft
+x-owner-decisions:
+  - id: open-root-recipe-gate
+    decided: 2026-11-05
+    decision: 方案 B —— 放开 root-recipe 相位的 Claude-only 硬拒（`require_root_recipe_supported`），保留其余三道检查（凭据重核验通道在场 / 版本钉定 / 凭据对 durable Running operation 重核验）
+    reason: owner 裁定 provider 能力是平台公用能力，recipe 阶段不该被某一家绑死；现行 spec REQ-BOOT-03/07 已写明「recipe provider SHALL NOT 固定为 Claude Code」
+    consequence: 选择器按 owner 顺序选中 Pi 时，Pi 可通过 root-recipe 准入，不再出现 `root_recipe_requires_fixed_claude_provider: got Pi`
+  - id: per-provider-command-syntax
+    decided: 2026-11-05
+    decision: B 必须连同「命令按 provider 的 skill 调用语法生成」一起落地，否则 B 只是拆护栏
+    reason: 当前四条命令是 `types.rs:143-146` 的**一处写死**、发给四家**同一串**裸 Claude 形态（`/pre-check ...`）；pi / codex / kimi 的形态各不相同，形态不对时 provider 侧**没有任何错误码**（turn 正常 Completed 但零文件变更）⇒ 不生成正确形态 = 一次骗人的假成功
+    consequence: Claude `/<skill>` / Pi 与 Kimi `/skill:<skill>` / Codex `$cadence-init:<skill>`；args 不变
+  - id: zero-change-must-fail
+    decided: 2026-11-05
+    decision: root recipe turn 未产生任何变更 SHALL 判为明确失败，不得静默 Completed
+    reason: 「命令未被 provider 识别」当前无专属失败码，表现为零变更的正常完成 ⇒ 语法/参数错、skill 缺失、CLI 行为变化都会伪装成成功
+    consequence: 新增稳定失败码（具体码在 Plan 阶段定），并复用既有 receipt auditor 的零变更判据
+  - id: archive-order
+    decided: 2026-11-05
+    decision: 本 change MUST 在 `globalize-provider-capability-verification` 归档**之后**归档
+    reason: 两个 change 都 MODIFIED `non-interrupt-repository-bootstrap` 的 REQ-BOOT-03 / REQ-BOOT-07；delta 以「全文替换」语义应用，顺序错会覆盖掉对方的措辞
