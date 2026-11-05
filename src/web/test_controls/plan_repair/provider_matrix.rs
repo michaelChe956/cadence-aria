@@ -430,15 +430,13 @@ fn matrix_provider_gateway(
     let registry = Arc::new(registry);
     let capability_store =
         crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone());
-    capability_store
-        .ensure_bootstrap(PROJECT_ID)
-        .map_err(fixture_error)?;
+    capability_store.ensure_bootstrap().map_err(fixture_error)?;
     for provider_type in [
         crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode,
         crate::product::logical_codebase::provider_gateway::ProviderRefType::Codex,
     ] {
         capability_store
-            .upsert(PROJECT_ID, &confirmed_capability_record(provider_type))
+            .upsert(&confirmed_capability_record(provider_type))
             .map_err(fixture_error)?;
     }
     let factory = crate::web::gateway_factory::LogicalCodebaseGatewayFactory::new(

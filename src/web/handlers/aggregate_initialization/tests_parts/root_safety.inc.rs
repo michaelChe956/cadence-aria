@@ -472,10 +472,7 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
     // to_claude）。隔离契约的判定相应改为「跑完后 normal 矩阵与起跑时
     // 逐格相同」——recipe 成功既不得铸造、也不得降级任何 normal 分格。
     let pre_run_claude = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone())
-    .get(
-        "project_0001",
-        crate::product::logical_codebase::ProviderRefType::ClaudeCode,
-    )
+    .get(crate::product::logical_codebase::ProviderRefType::ClaudeCode)
     .expect("capability record readable")
     .expect("selector precondition must seed the claude recipe provider record");
     let root_before = aggregate_root_inventory(&fixture.aggregate_root);
@@ -616,10 +613,7 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
     //    固定 Claude recipe 事实,不被 normal 分格形态阻断。
     let capability_store = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone());
     let claude_record = capability_store
-        .get(
-            "project_0001",
-            crate::product::logical_codebase::ProviderRefType::ClaudeCode,
-        )
+        .get(crate::product::logical_codebase::ProviderRefType::ClaudeCode)
         .expect("capability record readable")
         .expect("selector precondition must seed the claude recipe provider record");
     for action in [

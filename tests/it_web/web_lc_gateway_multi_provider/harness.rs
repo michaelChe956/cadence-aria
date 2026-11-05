@@ -1304,7 +1304,7 @@ async fn run_task11_write_matrix(
         },
     )?;
     let current = store
-        .get(PROJECT_ID, provider.provider_type)
+        .get(provider.provider_type)
         .ok()
         .flatten()
         .ok_or_else(|| {
@@ -1489,7 +1489,7 @@ async fn run_task11_write_matrix(
 
     // 3) 证据面零副作用:守卫 Drop 恢复后记录与探测前逐字节一致。
     let restored = store
-        .get(PROJECT_ID, provider.provider_type)
+        .get(provider.provider_type)
         .ok()
         .flatten()
         .ok_or_else(|| {
@@ -2327,7 +2327,7 @@ impl Task11CapabilityRestore {
     fn capture(env: &MatrixEnvironment, provider_type: ProviderRefType) -> Self {
         // capability 记录作用域 = 项目级全局（owner 2026-11-04）。
         let store = ProviderCapabilityStore::new(env.app_paths.clone());
-        let original = store.get(PROJECT_ID, provider_type).ok().flatten();
+        let original = store.get(provider_type).ok().flatten();
         Self {
             store,
             original,
@@ -2384,7 +2384,7 @@ impl Drop for Task11CapabilityRestore {
     fn drop(&mut self) {
         match &self.original {
             Some(original) => {
-                if let Err(error) = self.store.upsert(PROJECT_ID, original) {
+                if let Err(error) = self.store.upsert(original) {
                     fp(
                         "t11_capability_restore_failed",
                         format_args!("{:?}: {error:?}", self.provider_type),
@@ -2422,7 +2422,7 @@ fn task11_mutate_selected_record(
     mutate(&mut record);
     guard
         .store
-        .upsert(PROJECT_ID, &record)
+        .upsert(&record)
         .map_err(|error| error.to_string())?;
     fp(
         "t11_capability_mutated",
@@ -2967,9 +2967,7 @@ async fn scenario_codex_danger(env: &MatrixEnvironment, sid: &str) -> ScenarioOu
     let codex_ref = ProviderRef::codex("cap_managed_snapshot");
     let guard = Task11CapabilityRestore::capture(env, codex_ref.provider_type);
     let record = Task11CapabilityRestore::fixture_record(codex_ref.provider_type);
-    if let Err(error) =
-        ProviderCapabilityStore::new(env.app_paths.clone()).upsert(PROJECT_ID, &record)
-    {
+    if let Err(error) = ProviderCapabilityStore::new(env.app_paths.clone()).upsert(&record) {
         drop(guard);
         return scenario_unobservable(format!("codex 受控 setup 行写入失败:{error}"));
     }
@@ -4008,7 +4006,7 @@ impl MatrixEnvironment {
             // 签发结果、launch=Unknown 由 2b 过渡桥继续覆盖),harness 不自
             // 造 record 身份字段(投影 getter 冻结为 crate 内)。
             durable
-                .record_verified_probe(PROJECT_ID, &outcome.record, &evidence, &outcome.projection)
+                .record_verified_probe(&outcome.record, &evidence, &outcome.projection)
                 .map_err(|error| {
                     matrix_failure(
                         "capability_probe_import_rejected",

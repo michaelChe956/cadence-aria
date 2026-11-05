@@ -833,7 +833,7 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
 fn seed_confirmed_gateway_capabilities(app_paths: &ProductAppPaths) {
     let store = ProviderCapabilityStore::new(app_paths.clone());
     store
-        .ensure_bootstrap("project_0001")
+        .ensure_bootstrap()
         .expect("bootstrap capability records");
     for provider_type in [
         ProviderRefType::ClaudeCode,
@@ -842,7 +842,7 @@ fn seed_confirmed_gateway_capabilities(app_paths: &ProductAppPaths) {
         ProviderRefType::KimiCode,
     ] {
         store
-            .upsert("project_0001", &confirmed_capability_record(provider_type))
+            .upsert(&confirmed_capability_record(provider_type))
             .expect("seed confirmed capability record");
     }
 }

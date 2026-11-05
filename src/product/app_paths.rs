@@ -39,6 +39,13 @@ impl ProductAppPaths {
         self.root.join("state")
     }
 
+    /// provider capability 记录的**机器级唯一作用域**（REQ-PCR-07）：
+    /// 能力是本机 provider CLI 的事实 ⇒ 整机一份记录，与项目/逻辑代码库无关。
+    /// 记录文件 `capabilities.json` 与探针证据 `evidence/` 同落此根下。
+    pub fn provider_capabilities_root(&self) -> PathBuf {
+        self.root.join("provider-capabilities")
+    }
+
     pub fn last_project_path(&self) -> PathBuf {
         self.state_root().join("last-project.json")
     }
@@ -317,6 +324,17 @@ mod tests {
         assert_eq!(
             paths.provider_version_cache_path(),
             std::path::PathBuf::from("/tmp/aria/state/provider-installation/version-cache.json")
+        );
+    }
+
+    /// REQ-PCR-07：provider capability 记录落**机器级**根（不按项目/逻辑代码库
+    /// 分叉）。
+    #[test]
+    fn provider_capability_paths_are_machine_scoped() {
+        let paths = ProductAppPaths::new("/tmp/aria");
+        assert_eq!(
+            paths.provider_capabilities_root(),
+            std::path::PathBuf::from("/tmp/aria/provider-capabilities")
         );
     }
 }

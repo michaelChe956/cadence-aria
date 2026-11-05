@@ -954,7 +954,7 @@ mod provider_turn_lcg_tests {
             .ensure_bootstrap(&manifest)
             .expect("bootstrap policy");
         ProviderCapabilityStore::new(paths.clone())
-            .ensure_bootstrap(&project.id)
+            .ensure_bootstrap()
             .expect("bootstrap capability");
 
         let streaming_adapter = Arc::new(RootRecipeObservingAdapter { seq, observations });

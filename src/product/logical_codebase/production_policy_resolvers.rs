@@ -193,8 +193,11 @@ impl PolicyTargetResolver for ProductionPolicyTargetResolver {
 /// 硬阻断 → snapshot 不一致 → 分格不满足。capability 记录的作用域唯一
 /// （**项目级全局**，owner 2026-11-04）。
 pub struct StoreBackedProviderCapabilitySource {
-    /// capability 记录：**项目级全局**（唯一作用域，owner 2026-11-04）。
+    /// capability 记录：**机器级**（唯一作用域，REQ-PCR-07）。
     store: ProviderCapabilityStore,
+    /// 记录作用域已升为机器级（REQ-PCR-07）⇒ 本字段不再参与读取；构造签名
+    /// 暂留以免波及既有调用点，读取点迁移（后续 Task）时移除。
+    #[allow(dead_code)]
     project_id: String,
     /// root-recipe 凭据的 durable Running 重核验通道（**按 lc**；`new`/`with_store` 无通道 ⇒ root-recipe 相位 fail-closed 拒绝）。
     recipe_recheck: Option<RootRecipeCredentialRecheck>,
@@ -255,7 +258,7 @@ impl StoreBackedProviderCapabilitySource {
     > {
         let record = self
             .store
-            .get(&self.project_id, provider.provider_type)
+            .get(provider.provider_type)
             .map_err(ProviderGatewayError::policy)?
             .ok_or_else(|| {
                 // Task 3(6b carry 重钉):Pi/Kimi 已是 1a 合法映射,缺 durable
@@ -1007,7 +1010,7 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         ProviderCapabilityStore::new(paths.clone())
-            .ensure_bootstrap(project_id)
+            .ensure_bootstrap()
             .expect("bootstrap capabilities");
         let source = StoreBackedProviderCapabilitySource::new(paths, project_id.to_string());
         (root, source)
@@ -1088,11 +1091,7 @@ mod tests {
                         .to_string(),
             };
         store
-            .import_verified_probe_row(
-                "project_0001",
-                &verified,
-                SessionPolicyAction::PlanningReadOnly,
-            )
+            .import_verified_probe_row(&verified, SessionPolicyAction::PlanningReadOnly)
             .expect("import probe row");
 
         let capability = source
@@ -1161,10 +1160,9 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let store = ProviderCapabilityStore::new(paths.clone());
-        store.ensure_bootstrap("project_0001").unwrap();
+        store.ensure_bootstrap().unwrap();
         store
             .upsert(
-                "project_0001",
                 // 2a 的 FRU 过渡桩已整体替换:显式新字段构造(v2 全字段),
                 // 行为与旧桩一致(矩阵全 Unknown),语义由 v2 分格门接管。
                 &ProviderCapabilityRecord {
@@ -1256,12 +1254,9 @@ mod tests {
     ) -> StoreBackedProviderCapabilitySource {
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let store = ProviderCapabilityStore::new(paths.clone());
-        store.ensure_bootstrap("project_0001").unwrap();
+        store.ensure_bootstrap().unwrap();
         store
-            .upsert(
-                "project_0001",
-                &lcg_t02_v2_record(matrix, supported_actions),
-            )
+            .upsert(&lcg_t02_v2_record(matrix, supported_actions))
             .unwrap();
         StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string())
     }
@@ -1443,7 +1438,7 @@ mod tests {
     #[test]
     fn lcg_t02_v1_legacy_actions_are_rejected_without_confirmed_cells() {
         let root = tempfile::tempdir().expect("temporary product root");
-        let dir = root.path().join("projects/project_0001/logical-codebase");
+        let dir = root.path().join("provider-capabilities");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("capabilities.json"),

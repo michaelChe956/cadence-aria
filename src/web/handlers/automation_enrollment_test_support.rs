@@ -850,7 +850,7 @@ pub(crate) fn confirmed_capability_record(
 /// ⇒ 不再按逻辑代码库分叉。
 pub(crate) fn seed_confirmed_capability_records(
     paths: &ProductAppPaths,
-    project_id: &str,
+    _project_id: &str,
     providers: &[crate::product::logical_codebase::provider_gateway::ProviderRefType],
 ) {
     use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
@@ -858,7 +858,7 @@ pub(crate) fn seed_confirmed_capability_records(
     let store = ProviderCapabilityStore::new(paths.clone());
     for provider_type in providers {
         store
-            .upsert(project_id, &confirmed_capability_record(*provider_type))
+            .upsert(&confirmed_capability_record(*provider_type))
             .expect("seed confirmed capability record");
     }
 }

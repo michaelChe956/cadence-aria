@@ -501,9 +501,9 @@ mod policy_body_tests {
         // `global_capability_with_lc_recipe_recheck`(capability 全局 +
         // recipe 凭据 durable 重核验通道仍按 LC)。
         let store = T02Store::new(fixture.paths.clone());
-        store.ensure_bootstrap(&fixture.project_id).unwrap();
+        store.ensure_bootstrap().unwrap();
         store
-            .upsert(&fixture.project_id, &t02_recipe_contract_record())
+            .upsert(&t02_recipe_contract_record())
             .unwrap();
         let source = T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.project_id.clone(), fixture.lc_id.clone());
 
@@ -564,7 +564,7 @@ mod policy_body_tests {
 
         // recipe 事实不回写 normal 矩阵:行保持原三态,不产生 Confirmed。
         let reloaded = store
-            .get(&fixture.project_id, ProviderRefType::ClaudeCode)
+            .get(ProviderRefType::ClaudeCode)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -603,7 +603,7 @@ mod policy_body_tests {
         .unwrap();
         admission_record.supported_actions = Vec::new();
         store
-            .upsert(&fixture.project_id, &admission_record)
+            .upsert(&admission_record)
             .unwrap();
         let preflight =
             crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
@@ -657,13 +657,13 @@ mod policy_body_tests {
         delivered_version: &str,
     ) -> T02Source {
         let store = T02Store::new(fixture.paths.clone());
-        store.ensure_bootstrap(&fixture.project_id).unwrap();
+        store.ensure_bootstrap().unwrap();
         let mut record = t02_recipe_contract_record();
         record.root_recipe_evidence = T02RecipeEvidence::Delivered {
             evidence_ref: "recipe://evidence-0001".to_string(),
             version: delivered_version.to_string(),
         };
-        store.upsert(&fixture.project_id, &record).unwrap();
+        store.upsert(&record).unwrap();
         T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.project_id.clone(), fixture.lc_id.clone())
     }
 
@@ -764,12 +764,9 @@ mod policy_body_tests {
         let mut fixture = admission_fixture();
         fixture.write_language_rules("# rules\n");
 
-        // 存量 v1 记录写入**项目级全局** capability store(真实读取路径;
-        // owner 2026-11-04 决策 1：capability 记录唯一作用域 = 项目级)。
-        let scope_root = fixture
-            .paths
-            .logical_codebase_root(&fixture.project_id)
-            .to_path_buf();
+        // 存量 v1 记录写入**机器级** capability store(真实读取路径;
+        // REQ-PCR-07：capability 记录唯一作用域 = 机器级)。
+        let scope_root = fixture.paths.provider_capabilities_root();
         std::fs::create_dir_all(&scope_root).unwrap();
         std::fs::write(
             scope_root.join("capabilities.json"),
@@ -807,7 +804,7 @@ mod policy_body_tests {
         // 存量读取:v1 记录的 launch 分格 = Unknown(不产生 Confirmed)。
         let capability_store = ProviderCapabilityStore::new(fixture.paths.clone());
         let legacy = capability_store
-            .get(&fixture.project_id, ProviderRefType::ClaudeCode)
+            .get(ProviderRefType::ClaudeCode)
             .unwrap()
             .unwrap();
         let legacy_launch_state = legacy

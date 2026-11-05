@@ -251,7 +251,7 @@ impl ProviderCapabilityRevalidateService {
             })?;
         let provider_type = provider_type_for_name(&provider);
         let store = ProviderCapabilityStore::new(self.paths.clone());
-        let record = store.get(project_id, provider_type)?;
+        let record = store.get(provider_type)?;
         let missing: Vec<SessionPolicyAction> = REVALIDATE_ACTIONS
             .iter()
             .copied()
@@ -361,7 +361,7 @@ impl ProviderCapabilityRevalidateService {
     /// 发起」，见决策 10）。
     pub fn capability_snapshot(
         &self,
-        project_id: &str,
+        _project_id: &str,
     ) -> Result<Vec<ProviderCapabilityProviderSnapshot>, ProductStoreError> {
         let store = ProviderCapabilityStore::new(self.paths.clone());
         let mut snapshots = Vec::new();
@@ -375,7 +375,7 @@ impl ProviderCapabilityRevalidateService {
             let cli_program = provider_probe_channel(provider)
                 .map(|(program, _)| program)
                 .unwrap_or("");
-            let record = store.get(project_id, provider_type)?;
+            let record = store.get(provider_type)?;
             let rows = REVALIDATE_ACTIONS
                 .iter()
                 .map(|action| {
@@ -410,18 +410,13 @@ impl ProviderCapabilityRevalidateService {
     /// 项目级全局** capability store，构造保证同源）。
     fn import_outcome(
         &self,
-        project_id: &str,
+        _project_id: &str,
         outcome: &CliBoundaryProbeOutcome,
     ) -> Result<(), ProductStoreError> {
         let durable = ProviderCapabilityProbeService::with_durable_writer(
             ProviderCapabilityStore::new(self.paths.clone()),
         );
-        durable.record_verified_probe(
-            project_id,
-            &outcome.record,
-            &outcome.evidence,
-            &outcome.projection,
-        )
+        durable.record_verified_probe(&outcome.record, &outcome.evidence, &outcome.projection)
     }
 }
 
@@ -728,10 +723,7 @@ mod tests {
         let lc_id = lc_id_fixture();
         let store = ProviderCapabilityStore::new(paths.clone());
         store
-            .upsert(
-                PROJECT_ID,
-                &fully_confirmed_record(PROBE_VERSION, &REVALIDATE_ACTIONS),
-            )
+            .upsert(&fully_confirmed_record(PROBE_VERSION, &REVALIDATE_ACTIONS))
             .expect("seed");
         let calls = Arc::new(AtomicUsize::new(0));
         let service = ProviderCapabilityRevalidateService::new(paths)
@@ -771,7 +763,7 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3, "三 action 各一次真探针");
         let record = ProviderCapabilityStore::new(paths)
-            .get(PROJECT_ID, ProviderRefType::Codex)
+            .get(ProviderRefType::Codex)
             .expect("读回")
             .expect("导入后记录在场");
         assert_eq!(record.version, PROBE_VERSION, "版本钉定");
@@ -805,10 +797,7 @@ mod tests {
             SessionPolicyAction::ReviewReadOnly,
         ];
         ProviderCapabilityStore::new(paths.clone())
-            .upsert(
-                PROJECT_ID,
-                &fully_confirmed_record(PROBE_VERSION, &confirmed),
-            )
+            .upsert(&fully_confirmed_record(PROBE_VERSION, &confirmed))
             .expect("seed");
         let calls = Arc::new(AtomicUsize::new(0));
         let service = ProviderCapabilityRevalidateService::new(paths)
@@ -833,10 +822,7 @@ mod tests {
         let (paths, _root) = paths_fixture();
         let lc_id = lc_id_fixture();
         ProviderCapabilityStore::new(paths.clone())
-            .upsert(
-                PROJECT_ID,
-                &fully_confirmed_record("0.9.0-old", &REVALIDATE_ACTIONS),
-            )
+            .upsert(&fully_confirmed_record("0.9.0-old", &REVALIDATE_ACTIONS))
             .expect("seed");
         let calls = Arc::new(AtomicUsize::new(0));
         let service = ProviderCapabilityRevalidateService::new(paths)
@@ -884,7 +870,7 @@ mod tests {
             other => panic!("期望 ProbeFailed，实际 {other:?}"),
         }
         let record = ProviderCapabilityStore::new(paths)
-            .get(PROJECT_ID, ProviderRefType::Codex)
+            .get(ProviderRefType::Codex)
             .expect("读回")
             .expect("先成功的导入保留");
         assert_eq!(

@@ -1,10 +1,11 @@
 //! Store-backed provider capability records.
 //!
 //! `ProviderCapabilityRecord` 是 provider 能力的持久化事实来源,存于
-//! `.aria/projects/{project_id}/logical-codebase/capabilities.json`。
+//! `.aria/provider-capabilities/capabilities.json`。
 //!
-//! **唯一作用域 = 项目级全局**(owner 2026-11-04):能力是本机 provider CLI 的
-//! 事实 ⇒ 一次核验对项目内全部逻辑代码库同时生效;SHALL NOT 存在第二条作用域。
+//! **唯一作用域 = 机器级**(REQ-PCR-07):能力是本机 provider CLI 的
+//! 事实 ⇒ 一次核验整机生效;SHALL NOT 存在按项目/按逻辑代码库区分的第二条
+//! 作用域。
 //!
 //! v2 记录
 //! 携带逐 action 三态矩阵(`ProviderActionCapability`:launch/resume/
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN;
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::json_store::{ProductStoreError, read_json, write_json};
 use crate::product::logical_codebase::policy::{
     ProviderDialect, ProviderWireDialect, SessionPolicyAction,
 };
@@ -738,7 +739,7 @@ fn resume_evidence_from_string(value: &str) -> Option<ResumeEvidenceState> {
 const BOOTSTRAP_VERSION: &str = "0.0.0-managed";
 pub(crate) const MANAGED_CAPABILITY_SNAPSHOT_REF: &str = "cap_managed_snapshot";
 
-/// provider capability 的持久化 store（**唯一作用域 = 项目级全局**，owner 2026-11-04）。
+/// provider capability 的持久化 store（**唯一作用域 = 机器级**，REQ-PCR-07）。
 #[derive(Debug, Clone)]
 pub struct ProviderCapabilityStore {
     paths: ProductAppPaths,
@@ -752,10 +753,9 @@ impl ProviderCapabilityStore {
     /// 读取指定 provider 的 capability 记录;文件或记录不存在返回 `Ok(None)`。
     pub fn get(
         &self,
-        project_id: &str,
         provider_type: ProviderRefType,
     ) -> Result<Option<ProviderCapabilityRecord>, ProductStoreError> {
-        let path = self.capabilities_path(project_id)?;
+        let path = self.capabilities_path()?;
         if !path.try_exists().map_err(|error| {
             ProductStoreError::Io(format!("try_exists {}: {error}", path.display()))
         })? {
@@ -772,12 +772,8 @@ impl ProviderCapabilityStore {
     }
 
     /// 插入或覆盖指定 provider 的 capability 记录。
-    pub fn upsert(
-        &self,
-        project_id: &str,
-        record: &ProviderCapabilityRecord,
-    ) -> Result<(), ProductStoreError> {
-        let path = self.capabilities_path(project_id)?;
+    pub fn upsert(&self, record: &ProviderCapabilityRecord) -> Result<(), ProductStoreError> {
+        let path = self.capabilities_path()?;
         let mut records: Vec<ProviderCapabilityRecordJson> =
             if path.try_exists().map_err(|error| {
                 ProductStoreError::Io(format!("try_exists {}: {error}", path.display()))
@@ -814,11 +810,10 @@ impl ProviderCapabilityStore {
     /// - provenance 升级 `ProductionVerified`(真实 probe 导入)。
     pub fn import_verified_probe_row(
         &self,
-        project_id: &str,
         verified: &ProviderCapabilityRecord,
         action: SessionPolicyAction,
     ) -> Result<(), ProductStoreError> {
-        let existing = self.get(project_id, verified.provider_type)?;
+        let existing = self.get(verified.provider_type)?;
         let mut merged = existing.unwrap_or_else(|| ProviderCapabilityRecord {
             provider_type: verified.provider_type,
             schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
@@ -856,13 +851,13 @@ impl ProviderCapabilityStore {
         merged.probed_at = verified.probed_at.clone();
         merged.probe_artifact_ref = verified.probe_artifact_ref.clone();
         merged.evidence = CapabilityEvidence::ProductionVerified;
-        self.upsert(project_id, &merged)
+        self.upsert(&merged)
     }
 
     /// 确保存在 bootstrap 记录;幂等。文件不存在才写两条默认记录
     /// (ClaudeCode + Codex);文件已存在(含用户 upsert 后)直接 `Ok` 跳过,不覆盖。
-    pub fn ensure_bootstrap(&self, project_id: &str) -> Result<(), ProductStoreError> {
-        let path = self.capabilities_path(project_id)?;
+    pub fn ensure_bootstrap(&self) -> Result<(), ProductStoreError> {
+        let path = self.capabilities_path()?;
         if path.try_exists().map_err(|error| {
             ProductStoreError::Io(format!("try_exists {}: {error}", path.display()))
         })? {
@@ -875,13 +870,13 @@ impl ProviderCapabilityStore {
         write_json(&path, &records)
     }
 
-    /// capability 记录的落盘路径：**项目级全局**（`projects/{project_id}/
-    /// logical-codebase/capabilities.json`；不经 `lc_scope_root` 派生）。
-    fn capabilities_path(&self, project_id: &str) -> Result<PathBuf, ProductStoreError> {
-        validate_relative_id(project_id)?;
+    /// capability 记录的落盘路径：**机器级唯一作用域**（`provider-capabilities/
+    /// capabilities.json`；不经 `lc_scope_root`/`logical_codebase_root` 派生
+    /// ——REQ-PCR-07：能力是本机 provider CLI 的事实，整机一份）。
+    pub fn capabilities_path(&self) -> Result<PathBuf, ProductStoreError> {
         Ok(self
             .paths
-            .logical_codebase_root(project_id)
+            .provider_capabilities_root()
             .join("capabilities.json"))
     }
 }
@@ -894,18 +889,100 @@ mod tests {
         ProviderRefType, ResumeEvidenceState,
     };
 
+    /// REQ-PCR-07：capability 记录的落盘路径是**机器级唯一作用域**
+    /// （`.aria/provider-capabilities/capabilities.json`）——与项目/逻辑代码库
+    /// 无关。
+    #[test]
+    fn machine_level_capability_path_is_under_provider_capabilities_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = ProviderCapabilityStore::new(paths.clone());
+
+        assert_eq!(
+            store.capabilities_path().unwrap(),
+            temp.path()
+                .join(".aria/provider-capabilities/capabilities.json")
+        );
+        assert_eq!(
+            paths.provider_capabilities_root(),
+            temp.path().join(".aria/provider-capabilities")
+        );
+    }
+
+    /// REQ-PCR-07：写入只落机器级——项目目录与逻辑代码库子树下**不存在**
+    /// capability 记录（出现即为第二作用域 = 缺陷）。
+    #[test]
+    fn no_capability_file_under_project_or_lc_subtree() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        let store = ProviderCapabilityStore::new(paths.clone());
+
+        let record = ProviderCapabilityRecord {
+            provider_type: ProviderRefType::ClaudeCode,
+            version: "1.2.3".to_string(),
+            ..ProviderCapabilityRecord::legacy_transition_claude_code()
+        };
+        store.upsert(&record).unwrap();
+
+        // 机器级文件在场。
+        assert!(
+            store.capabilities_path().unwrap().is_file(),
+            "capability 记录必须落机器级路径: {}",
+            store.capabilities_path().unwrap().display()
+        );
+
+        // 项目目录与逻辑代码库子树真实存在（否则「不存在」是空断言）。
+        let project_dir = temp.path().join(".aria/projects/project_0001");
+        let lc_dir = project_dir.join("logical-codebases/lc_0001");
+        std::fs::create_dir_all(&lc_dir).unwrap();
+
+        // 项目级 / LC 级子树下一律不得存在 capability 记录。
+        for forbidden in [
+            project_dir.join("capabilities.json"),
+            project_dir.join("logical-codebase/capabilities.json"),
+            project_dir.join("logical-codebases/capabilities.json"),
+            lc_dir.join("capabilities.json"),
+        ] {
+            assert!(
+                !forbidden.exists(),
+                "项目/逻辑代码库子树下不得存在 capability 记录（第二作用域）: {}",
+                forbidden.display()
+            );
+        }
+        // 递归兜底：`.aria/projects/**` 下任何层级都不得出现 capabilities.json。
+        assert!(
+            !has_capabilities_json(&project_dir),
+            "`.aria/projects/**` 下不得存在 capabilities.json"
+        );
+    }
+
+    /// 递归查找子树内是否存在 `capabilities.json`（存在即为第二作用域）。
+    fn has_capabilities_json(dir: &std::path::Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                if has_capabilities_json(&path) {
+                    return true;
+                }
+            } else if path.file_name().and_then(|name| name.to_str()) == Some("capabilities.json") {
+                return true;
+            }
+        }
+        false
+    }
+
     #[test]
     fn provider_capability_store_bootstrap_is_idempotent_and_writes_two_defaults() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
 
-        store.ensure_bootstrap("project_0001").unwrap();
-        store.ensure_bootstrap("project_0001").unwrap(); // 幂等:第二次无副作用
+        store.ensure_bootstrap().unwrap();
+        store.ensure_bootstrap().unwrap(); // 幂等:第二次无副作用
 
-        let claude = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
-            .unwrap()
-            .unwrap();
+        let claude = store.get(ProviderRefType::ClaudeCode).unwrap().unwrap();
         assert_eq!(claude.version, "0.0.0-managed");
         assert_eq!(claude.adapter_dialect, ProviderDialect::ClaudeCodeCliV1);
         assert_eq!(claude.capability_snapshot_ref, "cap_managed_snapshot");
@@ -920,10 +997,7 @@ mod tests {
             ]
         );
 
-        let codex = store
-            .get("project_0001", ProviderRefType::Codex)
-            .unwrap()
-            .unwrap();
+        let codex = store.get(ProviderRefType::Codex).unwrap().unwrap();
         assert_eq!(codex.version, "0.0.0-managed");
         assert_eq!(codex.adapter_dialect, ProviderDialect::CodexCliV1);
         assert_eq!(codex.capability_snapshot_ref, "cap_managed_snapshot");
@@ -931,10 +1005,18 @@ mod tests {
         assert_eq!(codex.resume_evidence, ResumeEvidenceState::Unsupported);
         assert!(codex.supported_actions.is_empty());
 
+        // 机器级唯一落点（REQ-PCR-07）：`.aria/provider-capabilities/`。
         assert!(
             temp.path()
-                .join("projects/project_0001/logical-codebase/capabilities.json")
+                .join("provider-capabilities/capabilities.json")
                 .exists()
+        );
+        assert!(
+            !temp
+                .path()
+                .join("projects/project_0001/logical-codebase/capabilities.json")
+                .exists(),
+            "项目级不得存在 capability 记录（唯一作用域 = 机器级）"
         );
     }
 
@@ -942,17 +1024,16 @@ mod tests {
     fn provider_capability_store_get_hits_existing_record_and_misses_absent() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
-        store.ensure_bootstrap("project_0001").unwrap();
+        store.ensure_bootstrap().unwrap();
 
-        let claude = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
-            .unwrap();
+        let claude = store.get(ProviderRefType::ClaudeCode).unwrap();
         assert!(claude.is_some());
 
-        // 未 bootstrap 的项目 → 文件不存在 → None
-        let missing = store
-            .get("project_missing", ProviderRefType::ClaudeCode)
-            .unwrap();
+        // 未 bootstrap 的机器 → 文件不存在 → None
+        let missing =
+            ProviderCapabilityStore::new(ProductAppPaths::new(temp.path().join("fresh-machine")))
+                .get(ProviderRefType::ClaudeCode)
+                .unwrap();
         assert!(missing.is_none());
     }
 
@@ -960,7 +1041,7 @@ mod tests {
     fn provider_capability_store_upsert_overwrites_existing_record() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
-        store.ensure_bootstrap("project_0001").unwrap();
+        store.ensure_bootstrap().unwrap();
 
         let updated = ProviderCapabilityRecord {
             provider_type: ProviderRefType::ClaudeCode,
@@ -972,20 +1053,12 @@ mod tests {
             supported_actions: vec![SessionPolicyAction::CodingTargetWrite],
             ..ProviderCapabilityRecord::legacy_transition_claude_code()
         };
-        store.upsert("project_0001", &updated).unwrap();
+        store.upsert(&updated).unwrap();
 
-        let loaded = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
-            .unwrap()
-            .unwrap();
+        let loaded = store.get(ProviderRefType::ClaudeCode).unwrap().unwrap();
         assert_eq!(loaded, updated);
         // Codex 记录不被覆盖
-        assert!(
-            store
-                .get("project_0001", ProviderRefType::Codex)
-                .unwrap()
-                .is_some()
-        );
+        assert!(store.get(ProviderRefType::Codex).unwrap().is_some());
     }
 
     // ===== Task 2a(lcg_t02):capability 三态矩阵 DTO/roundtrip/legacy 迁移 =====
@@ -1032,8 +1105,10 @@ mod tests {
         }
     }
 
+    /// 把历史记录字节直接落在**机器级** capability 文件上（REQ-PCR-07：唯一
+    /// 作用域 = 机器级，历史字节同样只落这一处）。
     fn lcg_t02_write_capabilities_json(temp: &tempfile::TempDir, json: &str) {
-        let dir = temp.path().join("projects/project_0001/logical-codebase");
+        let dir = temp.path().join("provider-capabilities");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("capabilities.json"), json).unwrap();
     }
@@ -1084,11 +1159,8 @@ mod tests {
         .unwrap();
         let written = lcg_t02_v2_record("1.2.3", matrix);
 
-        store.upsert("project_0001", &written).unwrap();
-        let loaded = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
-            .unwrap()
-            .unwrap();
+        store.upsert(&written).unwrap();
+        let loaded = store.get(ProviderRefType::ClaudeCode).unwrap().unwrap();
 
         // 三态经 JSON/store 往返不丢失(矩阵整体相等)。
         assert_eq!(loaded.action_matrix, written.action_matrix);
@@ -1154,10 +1226,7 @@ mod tests {
         let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
 
         lcg_t02_write_capabilities_json(&temp, LCG_T02_V1_RECORDS);
-        let legacy = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
-            .unwrap()
-            .unwrap();
+        let legacy = store.get(ProviderRefType::ClaudeCode).unwrap().unwrap();
 
         // v1 旧记录缺矩阵 → 三个 action 全部 Unknown;旧 supported_actions/
         // provenance/resume 二态不产生任何 Confirmed(Global Constraints 第 2 条)。
@@ -1189,11 +1258,7 @@ mod tests {
   }
 ]"#;
         lcg_t02_write_capabilities_json(&temp, unknown_schema);
-        assert!(
-            store
-                .get("project_0001", ProviderRefType::ClaudeCode)
-                .is_err()
-        );
+        assert!(store.get(ProviderRefType::ClaudeCode).is_err());
 
         // 矩阵内未知 evidence 状态串拒绝(fail-closed)。
         let unknown_state = r#"[
@@ -1224,11 +1289,7 @@ mod tests {
   }
 ]"#;
         lcg_t02_write_capabilities_json(&temp, unknown_state);
-        assert!(
-            store
-                .get("project_0001", ProviderRefType::ClaudeCode)
-                .is_err()
-        );
+        assert!(store.get(ProviderRefType::ClaudeCode).is_err());
     }
 
     #[test]
@@ -1347,7 +1408,6 @@ mod tests {
         // 1.2.3 真实导入(2d durable 通道):行 Confirmed。
         store
             .import_verified_probe_row(
-                "project_0001",
                 &lcg_t14_verified_row_record(
                     "1.2.3",
                     "probe://claude-code/1.2.3/coding",
@@ -1356,10 +1416,7 @@ mod tests {
                 SessionPolicyAction::CodingTargetWrite,
             )
             .unwrap();
-        let durable = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
-            .unwrap()
-            .unwrap();
+        let durable = store.get(ProviderRefType::ClaudeCode).unwrap().unwrap();
         assert_eq!(
             durable
                 .current_action_row(
@@ -1444,7 +1501,6 @@ mod tests {
         .unwrap();
         store
             .import_verified_probe_row(
-                "project_0001",
                 &lcg_t14_verified_row_record(
                     "2.0.0",
                     "probe://claude-code/2.0.0/coding",
@@ -1453,10 +1509,7 @@ mod tests {
                 SessionPolicyAction::CodingTargetWrite,
             )
             .unwrap();
-        let reloaded = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
-            .unwrap()
-            .unwrap();
+        let reloaded = store.get(ProviderRefType::ClaudeCode).unwrap().unwrap();
         assert_eq!(
             reloaded
                 .current_action_row(

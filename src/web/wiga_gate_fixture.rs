@@ -250,7 +250,7 @@ impl EnrolledGateFixture {
             .ensure_bootstrap(&seed_manifest)
             .expect("seed aggregate policy artifact");
             crate::product::logical_codebase::ProviderCapabilityStore::new(inner.paths.clone())
-                .ensure_bootstrap(PROJECT_ID)
+                .ensure_bootstrap()
                 .expect("seed capability record");
             // 迁移桥退役（4749a1fc）后 bootstrap 行恒为 Unknown：正向路径
             // 必须在自举之后物化「已探测」Confirmed 行，Enable 预检与
@@ -501,7 +501,7 @@ impl EnrolledGateFixture {
             .ensure_bootstrap(&seed_manifest)
             .expect("seed aggregate policy artifact");
             crate::product::logical_codebase::ProviderCapabilityStore::new(inner.paths.clone())
-                .ensure_bootstrap(PROJECT_ID)
+                .ensure_bootstrap()
                 .expect("seed capability record");
             // 迁移桥退役（4749a1fc）后 bootstrap 行恒为 Unknown：正向路径
             // 必须在自举之后物化「已探测」Confirmed 行，Enable 预检与

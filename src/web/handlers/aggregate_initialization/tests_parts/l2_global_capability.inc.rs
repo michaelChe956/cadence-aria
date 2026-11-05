@@ -21,9 +21,8 @@
 // Denied 回归用例）。
 // -------------------------------------------------------------------
 
-/// 把 provider 能力种为**项目级全局** Confirmed 行（一次核验全项目可用的
-/// 形态）。落盘路径 = `projects/{project}/logical-codebase/capabilities.json`
-/// （owner 2026-11-04 决策 1）。
+/// 把 provider 能力种为**机器级** Confirmed 行（一次核验整机可用的形态）。
+/// 落盘路径 = `provider-capabilities/capabilities.json`（REQ-PCR-07）。
 ///
 /// 只种 ClaudeCode：聚合根 recipe 相位**只接受固定的 Claude recipe provider**
 /// （`root_recipe_requires_fixed_claude_provider`，既有契约，本次不变）⇒ 能力
@@ -38,17 +37,26 @@ fn seed_claude_code_confirmed_globally(fixture: &TrustRouteFixture) {
     );
 }
 
-/// 断言 capability 记录确实落在**项目级全局**、且逻辑代码库子树下没有它
-/// （REQ-PCR-07「唯一作用域」：出现 LC 子树副本即为第二作用域 = 缺陷）。
+/// 断言 capability 记录确实落在**机器级**、且项目/逻辑代码库子树下没有它
+/// （REQ-PCR-07「唯一作用域」：出现项目级或 LC 子树副本即为第二作用域 = 缺陷）。
 fn assert_capability_scope_is_project_global(fixture: &TrustRouteFixture) {
     let global_path = fixture
+        .paths
+        .provider_capabilities_root()
+        .join("capabilities.json");
+    assert!(
+        global_path.is_file(),
+        "the capability record must live in the machine-level file: {}",
+        global_path.display()
+    );
+    let project_path = fixture
         .paths
         .logical_codebase_root("project_0001")
         .join("capabilities.json");
     assert!(
-        global_path.is_file(),
-        "the capability record must live in the project-global file: {}",
-        global_path.display()
+        !project_path.exists(),
+        "no capability record may exist under a project subtree: {}",
+        project_path.display()
     );
     let lc_path = fixture
         .paths

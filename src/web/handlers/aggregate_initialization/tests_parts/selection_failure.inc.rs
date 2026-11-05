@@ -124,7 +124,7 @@ async fn selection_failure_fixture(
         .unwrap();
     // bootstrap 能力行（全 Unknown）：选择器 L2 的真实读取形态。
     crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone())
-    .ensure_bootstrap("project_0001")
+    .ensure_bootstrap()
     .expect("bootstrap capability rows");
 
     let factory = fake_registry_gateway_factory(paths.clone());
@@ -430,7 +430,6 @@ async fn denied_pi_points_fallback_at_next_owner_order_candidate() {
     let store = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone());
     store
         .upsert(
-            "project_0001",
             &denied_capability_record(
                 crate::product::logical_codebase::provider_gateway::ProviderRefType::Pi,
                 "planning probe rejected the read-only launch",
@@ -477,7 +476,6 @@ async fn denied_codex_has_no_fallback_and_no_revalidate() {
     let store = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone());
     store
         .upsert(
-            "project_0001",
             &denied_capability_record(
                 crate::product::logical_codebase::provider_gateway::ProviderRefType::Codex,
                 "planning probe rejected the read-only launch",

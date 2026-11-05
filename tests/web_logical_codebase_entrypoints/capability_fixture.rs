@@ -80,10 +80,10 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
 
 /// 先物化 bootstrap 行（保持生产「未探测」语义），再把四家 provider 覆盖写为
 /// `Confirmed`（创建期选择门按 owner 顺序取第一家可用者）。
-pub(crate) fn seed_confirmed_capabilities(paths: &ProductAppPaths, project_id: &str) {
+pub(crate) fn seed_confirmed_capabilities(paths: &ProductAppPaths, _project_id: &str) {
     let store = ProviderCapabilityStore::new(paths.clone());
     store
-        .ensure_bootstrap(project_id)
+        .ensure_bootstrap()
         .expect("bootstrap capability records");
     for provider_type in [
         ProviderRefType::Pi,
@@ -92,7 +92,7 @@ pub(crate) fn seed_confirmed_capabilities(paths: &ProductAppPaths, project_id: &
         ProviderRefType::Codex,
     ] {
         store
-            .upsert(project_id, &confirmed_capability_record(provider_type))
+            .upsert(&confirmed_capability_record(provider_type))
             .expect("seed confirmed capability record");
     }
 }
@@ -104,15 +104,12 @@ pub(crate) fn seed_confirmed_capabilities(paths: &ProductAppPaths, project_id: &
 /// 全 Confirmed 会让选择器选中 Pi 并在 recipe 相位被拒。正形 = 只种
 /// ClaudeCode，选择器跳过未核验三家选中它（与 src 侧
 /// `l2_global_capability.inc.rs::seed_claude_code_confirmed_globally` 同构）。
-pub(crate) fn seed_confirmed_claude_capability(paths: &ProductAppPaths, project_id: &str) {
+pub(crate) fn seed_confirmed_claude_capability(paths: &ProductAppPaths, _project_id: &str) {
     let store = ProviderCapabilityStore::new(paths.clone());
     store
-        .ensure_bootstrap(project_id)
+        .ensure_bootstrap()
         .expect("bootstrap capability records");
     store
-        .upsert(
-            project_id,
-            &confirmed_capability_record(ProviderRefType::ClaudeCode),
-        )
+        .upsert(&confirmed_capability_record(ProviderRefType::ClaudeCode))
         .expect("seed confirmed ClaudeCode capability record");
 }

@@ -2368,7 +2368,7 @@ mod tests {
             crate::product::app_paths::ProductAppPaths::new(base.path().join(".aria")),
         );
         ProviderCapabilityProbeService::with_durable_writer(store)
-            .record_verified_probe("project_0001", &record, &evidence, &projection)
+            .record_verified_probe(&record, &evidence, &projection)
             .expect("2d import from external entry evidence");
     }
 

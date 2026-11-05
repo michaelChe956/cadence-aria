@@ -569,9 +569,7 @@ mod tests {
         let lc_id = "lc_t08".to_string();
         let capability_store = ProviderCapabilityStore::new(paths.clone());
         for record in records {
-            capability_store
-                .upsert(&project_id, record)
-                .expect("upsert");
+            capability_store.upsert(record).expect("upsert");
         }
         let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
         let mut registry = ProviderRegistry::new();

@@ -178,7 +178,7 @@ mod tests {
     ) {
         let paths = fixture.paths.clone();
         crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone())
-            .ensure_bootstrap(PROJECT_ID)
+            .ensure_bootstrap()
             .expect("capability bootstrap");
         super::super::automation_enrollment_test_support::seed_confirmed_capability_records(
             &paths,

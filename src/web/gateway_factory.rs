@@ -146,7 +146,7 @@ impl LogicalCodebaseGatewayFactory {
         // 决策 1/3）：自举占位行只写全局一份，不随 LC 分叉。
         let capabilities = ProviderCapabilityStore::new(self.paths.clone());
         if ensure_stores {
-            capabilities.ensure_bootstrap(project_id)?;
+            capabilities.ensure_bootstrap()?;
         }
 
         // 权威根 = manifest.provider_context_root(聚合根 cwd)。若为相对路径,
@@ -557,9 +557,15 @@ mod tests {
         assert!(!legacy_root.join("manifest.json").exists());
         assert!(!legacy_root.join("aggregate-policy.json").exists());
 
-        // capability 落**项目级全局**（legacy 项目根），且 LC 子树下**不存在**
+        // capability 落**机器级**唯一作用域，且项目/LC 子树下**不存在**
         // capability 记录（唯一作用域：出现即为缺陷）。
-        assert!(legacy_root.join("capabilities.json").is_file());
+        assert!(
+            paths
+                .provider_capabilities_root()
+                .join("capabilities.json")
+                .is_file()
+        );
+        assert!(!legacy_root.join("capabilities.json").exists());
         assert!(!lc_root.join("capabilities.json").exists());
 
         // gateway 可用：validate 通过并回读 lc 子树 policy revision。

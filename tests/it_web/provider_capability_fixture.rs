@@ -86,16 +86,16 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
 /// LC 子树分叉（原 `lc_id` 参数随之退役）。
 pub(crate) fn seed_confirmed_capability(
     paths: &ProductAppPaths,
-    project_id: &str,
+    _project_id: &str,
     providers: &[ProviderRefType],
 ) {
     let store = ProviderCapabilityStore::new(paths.clone());
     store
-        .ensure_bootstrap(project_id)
+        .ensure_bootstrap()
         .expect("bootstrap capability records");
     for provider_type in providers {
         store
-            .upsert(project_id, &confirmed_capability_record(*provider_type))
+            .upsert(&confirmed_capability_record(*provider_type))
             .expect("seed confirmed capability record");
     }
 }

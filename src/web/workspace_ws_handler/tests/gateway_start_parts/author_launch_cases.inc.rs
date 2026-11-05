@@ -640,12 +640,12 @@ async fn logical_plan_validate_failure_is_reported_by_handler() {
         ))
         .expect("save issue selection");
     super::lc_fixture_support::ensure_planning_index_and_policy(&fixture.paths, "project_0001");
-    // capability 记录的**项目级全局**落盘路径（owner 2026-11-04 决策 1）：
+    // capability 记录的**机器级**落盘路径（REQ-PCR-07）：
     // 删掉它 ⇒ validate 首关确定失败（与作用域无关，触发语义不变）。
     std::fs::remove_file(
         fixture
             .paths
-            .logical_codebase_root("project_0001")
+            .provider_capabilities_root()
             .join("capabilities.json"),
     )
     .expect("remove capability rows");

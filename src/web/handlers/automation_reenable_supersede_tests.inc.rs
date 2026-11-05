@@ -638,7 +638,7 @@ async fn reenable_with_new_provider_is_accepted_in_one_step() {
     // 必须过 Enable 前的完整角色链同源预检。
     let paths = fixture.paths.clone();
     crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone())
-        .ensure_bootstrap(PROJECT_ID)
+        .ensure_bootstrap()
         .expect("capability bootstrap");
     super::super::automation_enrollment_test_support::seed_confirmed_capability_records(
         &paths,

@@ -12,7 +12,7 @@
 //!   evidence boundary 模式与 action 读写语义一致)、evidence 引用一致
 //!   (`record.probe_artifact_ref ↔ evidence.artifact_ref`,含 action 行
 //!   `evidence_ref` 与 probe 元数据 `probed_at`)。
-//! - `record_verified_probe(project_id, record, evidence, projection)`(2d,
+//! - `record_verified_probe(record, evidence, projection)`(2d,
 //!   后置 6c)先通过上述 shape 校验,再逐字段比对三方 version/provider/
 //!   digest/artifact_ref/probed_at,一致才把 action row 原子导入 durable
 //!   Confirmed;不一致返回错误且旧 durable 字节保持。
@@ -107,7 +107,6 @@ impl ProviderCapabilityProbeService {
     /// 错误且旧 durable 字节保持。不重新 probe、不接受 record 自报。
     pub fn record_verified_probe(
         &self,
-        project_id: &str,
         record: &ProviderCapabilityRecord,
         evidence: &ProviderBoundaryEvidence,
         projection: &ProviderPolicyProjection,
@@ -135,7 +134,7 @@ impl ProviderCapabilityProbeService {
         }
         // 3) 原子导入 durable Confirmed(merge 在 store 内完成后单次
         //    temp+rename 落盘;任一前置失败不触达 durable 字节)。
-        store.import_verified_probe_row(project_id, record, projection.action())
+        store.import_verified_probe_row(record, projection.action())
     }
 
     /// 冻结签名:只验证三方可比对性(字段可比对/digest 形状/action 类型/
@@ -926,7 +925,6 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path());
         let store = ProviderCapabilityStore::new(paths);
-        let project_id = "project_0001";
         let action = SessionPolicyAction::CodingTargetWrite;
         let (record, evidence, projection) =
             consistent_triple(action, ProviderBoundaryMode::TargetWriteOnly);
@@ -955,13 +953,13 @@ mod tests {
 
         let service = ProviderCapabilityProbeService::with_durable_writer(store.clone());
         service
-            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .record_verified_probe(&record, &evidence, &projection)
             .expect("三方一致的真实三元组应导入 durable Confirmed");
 
         // durable 侧:被探测 action 行 Confirmed,digest/evidence 引用与
         // probe 元数据三方一致落盘。
         let loaded = store
-            .get(project_id, ProviderRefType::KimiCode)
+            .get(ProviderRefType::KimiCode)
             .expect("durable 读取")
             .expect("导入后 durable 行存在");
         assert_eq!(loaded.version, evidence.exact_version());
@@ -992,11 +990,11 @@ mod tests {
 
         // 同版本重复导入:幂等,不漂移既有行。
         service
-            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .record_verified_probe(&record, &evidence, &projection)
             .expect("同版本重复导入仍应成功");
         assert_eq!(
             store
-                .get(project_id, ProviderRefType::KimiCode)
+                .get(ProviderRefType::KimiCode)
                 .expect("durable 读取")
                 .expect("durable 行存在"),
             loaded
@@ -1018,15 +1016,13 @@ mod tests {
             evidence_ref: "probe://boundary/kimi-code/0000".to_string(),
         });
         stale.action_matrix = ProviderActionMatrix::from_rows(rows).expect("唯一 action 行");
-        store
-            .upsert(project_id, &stale)
-            .expect("seed 旧版本 durable 行");
+        store.upsert(&stale).expect("seed 旧版本 durable 行");
 
         service
-            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .record_verified_probe(&record, &evidence, &projection)
             .expect("新版本导入应成功");
         let reloaded = store
-            .get(project_id, ProviderRefType::KimiCode)
+            .get(ProviderRefType::KimiCode)
             .expect("durable 读取")
             .expect("durable 行存在");
         assert_eq!(reloaded.version, evidence.exact_version());
@@ -1135,11 +1131,8 @@ mod tests {
     fn t9_import_rejects_missing_semantics_and_keeps_durable_bytes() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
-        let project_id = "project_0001";
-        store.ensure_bootstrap(project_id).unwrap();
-        let path = temp
-            .path()
-            .join("projects/project_0001/logical-codebase/capabilities.json");
+        store.ensure_bootstrap().unwrap();
+        let path = temp.path().join("provider-capabilities/capabilities.json");
         let bytes_before = std::fs::read(&path).unwrap();
 
         let (mut record, evidence, projection) = consistent_triple(
@@ -1149,7 +1142,7 @@ mod tests {
         record.execution_semantics = String::new();
         let service = ProviderCapabilityProbeService::with_durable_writer(store.clone());
         let error = service
-            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .record_verified_probe(&record, &evidence, &projection)
             .expect_err("缺语义记录不得导入 Confirmed");
         assert!(
             error.to_string().contains("provider_probe_import_rejected"),

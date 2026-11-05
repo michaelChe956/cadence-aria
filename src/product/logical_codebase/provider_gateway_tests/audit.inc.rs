@@ -167,11 +167,11 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         execution_semantics: String::new(),
     };
     store
-        .upsert(project_id, &stale)
+        .upsert(&stale)
         .expect("seed durable 旧字节");
-    // capability 记录的**项目级全局**落盘路径（owner 2026-11-04 决策 1）。
+    // capability 记录的**机器级**落盘路径（REQ-PCR-07）。
     let capabilities_path = paths
-        .logical_codebase_root(project_id)
+        .provider_capabilities_root()
         .join("capabilities.json");
     let bytes_before = std::fs::read(&capabilities_path).expect("read durable bytes");
 
@@ -244,7 +244,7 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         .durable_probe_writer_for_lc(project_id, None)
         .expect("factory 注入 durable probe writer");
     let error = service
-        .record_verified_probe(project_id, &record, &evidence, &projection)
+        .record_verified_probe(&record, &evidence, &projection)
         .expect_err("三方不一致必须 fail-closed 拒绝导入");
     assert!(
         error.to_string().contains("provider_probe_import_rejected"),
@@ -258,7 +258,7 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         "mismatch 导入不得改动 durable 字节"
     );
     let loaded = store
-        .get(project_id, ProviderRefType::KimiCode)
+        .get(ProviderRefType::KimiCode)
         .expect("durable 读取")
         .expect("旧 durable 行保持");
     assert_eq!(loaded, stale, "durable 行保持旧值");

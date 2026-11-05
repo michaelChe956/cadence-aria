@@ -556,20 +556,19 @@ mod tests {
         }
     }
 
-    /// 把能力记录写进**项目级全局** capability store。
+    /// 把能力记录写进**机器级** capability store（REQ-PCR-07：唯一作用域 =
+    /// 机器级 ⇒ 播种不再按项目/LC 分支）。
     ///
-    /// capability 记录的唯一作用域是项目级（owner 2026-11-04 决策 1）⇒
-    /// 播种不再按 LC 分支：不同场景靠**不同项目**（= 全局作用域边界）或
-    /// **不同记录内容**区分，不再靠「不同 lc_id」区分。
+    /// 场景区分方式：不同场景用**不同的机器根**（各自 tempdir）或**不同记录
+    /// 内容**区分，不再靠「不同 project_id / lc_id」区分。
     fn write_records(
         paths: &ProductAppPaths,
-        project_id: &str,
         rows: &[(ProviderRefType, ProviderCapabilityEvidence)],
     ) {
         let store = ProviderCapabilityStore::new(paths.clone());
         for (provider, launch) in rows {
             store
-                .upsert(project_id, &capability_record(*provider, launch.clone()))
+                .upsert(&capability_record(*provider, launch.clone()))
                 .expect("upsert capability record");
         }
     }
@@ -607,7 +606,6 @@ mod tests {
         let (health, _runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -643,7 +641,6 @@ mod tests {
         let (health, _runner) = health_service(root.path(), vec!["pi".to_string()], now);
         write_records(
             &paths,
-            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -693,7 +690,6 @@ mod tests {
         );
         write_records(
             &paths,
-            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -730,7 +726,6 @@ mod tests {
         let (health, _runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "project_0001",
             &[
                 (ProviderRefType::Pi, unknown()),
                 (ProviderRefType::KimiCode, unknown()),
@@ -768,7 +763,6 @@ mod tests {
         let (health, _runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "project_0001",
             &[
                 (ProviderRefType::Pi, denied("pi refuses this action")),
                 (ProviderRefType::KimiCode, unknown()),
@@ -824,7 +818,6 @@ mod tests {
         let (health, runner) = health_service(root.path(), Vec::new(), now);
         write_records(
             &paths,
-            "project_0001",
             &[
                 (ProviderRefType::Pi, confirmed()),
                 (ProviderRefType::KimiCode, confirmed()),
@@ -857,51 +850,43 @@ mod tests {
     /// 同源锁:选择器的判定与 gateway 的判定结论必须一致,且只有 `Confirmed` 放行。
     #[test]
     fn launch_cell_state_and_require_supported_agree_on_every_input() {
-        let root = tempfile::tempdir().expect("temporary product root");
-        let paths = ProductAppPaths::new(root.path().join(".aria"));
-
-        // 每种输入一个独立**项目**作用域,互不干扰。
+        // 每种输入一个独立**机器根**（各自 tempdir），互不干扰。
         //
-        // capability 记录的唯一作用域是项目级全局(owner 2026-11-04 决策 1)
-        // ⇒ 场景区分方式从「不同 lc_id」改为「不同 project_id + 不同记录
-        // 内容」(X18):全局化后 lc_id 不再决定记录落在哪,靠 lc_id 区分的场景
-        // 已失效。
-        write_records(
-            &paths,
-            "project_confirmed",
-            &[(ProviderRefType::Pi, confirmed())],
-        );
-        write_records(
-            &paths,
-            "project_denied",
-            &[(ProviderRefType::Pi, denied("pi refuses this action"))],
-        );
-        write_records(
-            &paths,
-            "project_unknown",
-            &[(ProviderRefType::Pi, unknown())],
-        );
-        // project_missing:不写任何记录 → 记录缺失。
-
-        let cases: Vec<(&str, &str, LaunchCellState)> = vec![
-            ("confirmed", "project_confirmed", LaunchCellState::Confirmed),
+        // capability 记录的唯一作用域是机器级(REQ-PCR-07) ⇒ 场景区分方式
+        // 既不能靠「不同 lc_id」也不能靠「不同 project_id」（记录不再按项目
+        // 分叉），只能靠**不同机器根 + 不同记录内容**。
+        //
+        // 「record missing」场景：不写任何记录 → 记录缺失。
+        let cases: Vec<(
+            &str,
+            Option<Vec<(ProviderRefType, ProviderCapabilityEvidence)>>,
+            LaunchCellState,
+        )> = vec![
+            (
+                "confirmed",
+                Some(vec![(ProviderRefType::Pi, confirmed())]),
+                LaunchCellState::Confirmed,
+            ),
             (
                 "denied",
-                "project_denied",
+                Some(vec![(
+                    ProviderRefType::Pi,
+                    denied("pi refuses this action"),
+                )]),
                 LaunchCellState::Denied {
                     reason: "pi refuses this action".to_string(),
                 },
             ),
             (
                 "unknown",
-                "project_unknown",
+                Some(vec![(ProviderRefType::Pi, unknown())]),
                 LaunchCellState::Unverified {
                     detail: "PlanningReadOnly launch cell is unknown".to_string(),
                 },
             ),
             (
                 "record missing",
-                "project_missing",
+                None,
                 LaunchCellState::Unverified {
                     detail:
                         "provider_capability_launch_not_confirmed: Pi capability record missing"
@@ -910,10 +895,15 @@ mod tests {
             ),
         ];
 
-        for (name, project_id, expected) in cases {
+        for (name, rows, expected) in cases {
+            let root = tempfile::tempdir().expect("temporary product root");
+            let paths = ProductAppPaths::new(root.path().join(".aria"));
+            if let Some(rows) = rows {
+                write_records(&paths, &rows);
+            }
             let source = StoreBackedProviderCapabilitySource::with_store(
                 ProviderCapabilityStore::new(paths.clone()),
-                project_id.to_string(),
+                "project_0001".to_string(),
             );
             let provider_ref = ProviderRef::pi(MANAGED_CAPABILITY_SNAPSHOT_REF);
             let state = launch_cell_state(
@@ -940,11 +930,13 @@ mod tests {
 
         // 快照引用不一致:选择器判 `EvidenceStale`,gateway 拒绝。
         //
-        // 区分方式:读**同一个项目**的全局记录,但用**不同的快照引用**去
-        // 问它(X18:作用域全局化后不能再靠「不同 lc_id」区分场景)。
+        // 区分方式:读**同一个机器根**的记录,但用**不同的快照引用**去问它。
+        let snapshot_root = tempfile::tempdir().expect("temporary product root");
+        let snapshot_paths = ProductAppPaths::new(snapshot_root.path().join(".aria"));
+        write_records(&snapshot_paths, &[(ProviderRefType::Pi, confirmed())]);
         let source = StoreBackedProviderCapabilitySource::with_store(
-            ProviderCapabilityStore::new(paths.clone()),
-            "project_confirmed".to_string(),
+            ProviderCapabilityStore::new(snapshot_paths.clone()),
+            "project_0001".to_string(),
         );
         let mismatched_ref = ProviderRef::pi("cap_other_snapshot");
         let state = launch_cell_state(

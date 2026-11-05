@@ -52,11 +52,11 @@
         lcg_t02_write_capabilities_json(&temp, T9_V2_CONFIRMED_HISTORY);
         let path = temp
             .path()
-            .join("projects/project_0001/logical-codebase/capabilities.json");
+            .join("provider-capabilities/capabilities.json");
         let bytes_before = std::fs::read(&path).unwrap();
 
         let record = store
-            .get("project_0001", ProviderRefType::ClaudeCode)
+            .get(ProviderRefType::ClaudeCode)
             .unwrap()
             .expect("v2 历史记录可解码(不报错、不删除)");
 
@@ -145,7 +145,7 @@
             );
             lcg_t02_write_capabilities_json(&temp, &json);
             let record = store
-                .get("project_0001", ProviderRefType::ClaudeCode)
+                .get(ProviderRefType::ClaudeCode)
                 .unwrap_or_else(|error| panic!("{label} 语义缺位/未知应可解码为 Unknown: {error}"))
                 .expect("记录在场");
             let coding = record

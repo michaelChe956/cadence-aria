@@ -28,7 +28,7 @@ impl T10StoreFixture {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path());
         let store = ProviderCapabilityStore::new(paths.clone());
-        store.ensure_bootstrap("project_0001").expect("bootstrap");
+        store.ensure_bootstrap().expect("bootstrap");
         Self {
             _root: root,
             paths,
@@ -39,9 +39,7 @@ impl T10StoreFixture {
     }
 
     fn upsert(&self, record: &ProviderCapabilityRecord) {
-        self.store
-            .upsert("project_0001", record)
-            .expect("upsert capability record");
+        self.store.upsert(record).expect("upsert capability record");
     }
 
     fn gateway(&self) -> LogicalCodebaseProviderGateway {

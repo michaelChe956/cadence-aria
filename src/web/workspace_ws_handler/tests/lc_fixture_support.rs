@@ -219,13 +219,10 @@ pub(super) fn ensure_planning_index_and_policy(app_paths: &ProductAppPaths, proj
     let capability_store =
         crate::product::logical_codebase::ProviderCapabilityStore::new(app_paths.clone());
     capability_store
-        .ensure_bootstrap(project_id)
+        .ensure_bootstrap()
         .expect("bootstrap provider capability rows");
     if let Some(mut record) = capability_store
-        .get(
-            project_id,
-            crate::product::logical_codebase::ProviderRefType::ClaudeCode,
-        )
+        .get(crate::product::logical_codebase::ProviderRefType::ClaudeCode)
         .expect("read claude code capability record")
     {
         use crate::product::logical_codebase::SessionPolicyAction;
@@ -245,7 +242,7 @@ pub(super) fn ensure_planning_index_and_policy(app_paths: &ProductAppPaths, proj
         }
         record.execution_semantics = "host-open-v1".to_string();
         capability_store
-            .upsert(project_id, &record)
+            .upsert(&record)
             .expect("upsert confirmed claude code capability rows");
     }
 }
