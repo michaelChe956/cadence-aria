@@ -27,7 +27,8 @@ pub(crate) use sc_manual_revision::drive_human_gate_sc_revision_arm;
 pub(crate) use single_candidate_arm::drive_single_candidate_author_arm;
 #[cfg(test)]
 pub(crate) use task_body::{
-    ArmDrive, PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS, provider_run_drive_body, provider_run_task_body,
+    ArmDrive, ArmExit, PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS, provider_run_drive_body,
+    provider_run_task_body,
 };
 
 /// B2b3（Task 5.4，设计 §5.3）：读取本会话当前 LC 显式 fresh 恢复记录——

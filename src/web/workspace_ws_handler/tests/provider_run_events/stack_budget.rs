@@ -14,9 +14,9 @@ use super::*;
 /// S0 具名 task body 的未装箱体积门禁（设计 §2.2：≤128 KiB 硬上限）。
 const RAW_TASK_BODY_BUDGET: usize = 131072;
 
-/// 打印单对象基线：实际字节 / profile / target / toolchain 一次成型，供
-/// 报告留档与 dev/release 双基线对比。
-fn print_raw_baseline(object: &str, bytes: usize) {
+/// （P2/任务3 起 `pub(super)`：基础族+SC 行为/预算用例 `basic_sc_arm_cases`
+/// 复用同一量测面——仍限 provider_run_events 测试树，不做公共 API。）
+pub(super) fn print_raw_baseline(object: &str, bytes: usize) {
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
@@ -40,7 +40,7 @@ fn print_raw_baseline(object: &str, bytes: usize) {
 /// 与 r16 `supersede_reclaims_engine_lock_from_run_hanging_outside_select`
 /// 同构的最小夹具：真实 LifecycleStore/engine/registry/run_context（量测
 /// 不依赖 provider 行为，PendingStartProvider 仅占位注册表项）。
-async fn stack_budget_fixture() -> (
+pub(super) async fn stack_budget_fixture() -> (
     ProviderRunContext,
     mpsc::Sender<OutboundControl>,
     CancellationToken,
@@ -611,8 +611,9 @@ async fn measure_named_arms(
 }
 
 /// 臂共享入参的构造捷径（与 task_body 分发点字段一一对应）。
+/// （P2/任务3 起 `pub(super)`：`basic_sc_arm_cases` 直驱臂用例复用。）
 #[allow(clippy::too_many_arguments)]
-fn arm_drive<'e, 'd>(
+pub(super) fn arm_drive<'e, 'd>(
     engine: tokio::sync::MutexGuard<'e, WorkspaceEngine>,
     command_rx: mpsc::Receiver<ProviderCommand>,
     provider: Arc<dyn StreamingProviderAdapter>,

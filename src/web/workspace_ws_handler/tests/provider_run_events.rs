@@ -1113,6 +1113,8 @@ async fn single_candidate_followup_review_guard_only_breaks_on_delegated_generat
         );
     }
 }
+#[path = "provider_run_events/basic_sc_arm_cases.rs"]
+mod basic_sc_arm_cases;
 #[path = "provider_run_events/sc_delegated_rerun.rs"]
 mod sc_delegated_rerun;
 #[path = "provider_run_events/small_stack_worker.rs"]

@@ -35,6 +35,8 @@ use super::single_candidate_arm::drive_single_candidate_author_arm;
 /// 交还的 engine MutexGuard（原正常穿过 match 末尾的路径）；`Stop` 表示臂内
 /// 已按原顺序完成该分支收口并退出了原 drive 级 `return` 的路径——父 drive
 /// 遇 Stop 立即返回：不继续 followups、不补一次通用 finish、不补错误帧。
+/// P2（任务3）冻结：本合同即基础族/SC/后续各族臂的唯一控制流出口，后续
+/// 任务不得另造错误枚举或第二套 Stop 语义。
 pub(crate) enum ArmExit<'e> {
     /// 正常穿过 match：guard 交给下一段（followups + 正常尾部）。
     Continue(tokio::sync::MutexGuard<'e, WorkspaceEngine>),
@@ -236,7 +238,8 @@ pub(crate) async fn provider_run_task_body(
 /// engine MutexGuard 随 A 按值属于本 drive——取消强制 drop 时连同释放且
 /// **先于**兜底重取锁（三守卫合同见文件头）。`run_kind` 移动进本函数后
 /// 只分发到实际选中的臂：Continue 才 followups+正常尾部，Stop 立即返回。
-/// 唯一构造点在 `provider_run_task_body`（boxed）；尚未拆族的
+/// 唯一构造点在 `provider_run_task_body`（boxed）。P2（任务3）起基础族
+/// 四臂与 SC author 臂以 `Box::pin` 间接边界分发；尚未拆族的
 /// draft/batch/revision/legacy 仍以原语句留在本体内。
 pub(crate) async fn provider_run_drive_body<'e, 'd>(
     drive: ArmDrive<'e, 'd>,
@@ -245,6 +248,9 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
     // S2：A 展开为原 drive 块的逐字段绑定（机械改名：引用型字段即原匿名
     // 块的借用捕获；engine guard 与 command_rx 按值。具名臂构造从本绑定
     // 取字段，include/宏臂继续直接引用同名绑定）。
+    // P2（任务3）：基础族四臂与 SC author 臂经 `Box::pin(...).await` 真实
+    // 间接边界分发（只为实际选中的臂分配）；尚未拆族的 draft/batch/
+    // revision/legacy 仍以原语句留在本体内。
     let ArmDrive {
         mut engine,
         command_rx,
@@ -266,7 +272,9 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
         // （ArmDrive），Continue 交还、Stop 即 drive 级 return（见
         // ArmExit 合同）。
         ProviderRunKind::Author { content } => {
-            engine = match drive_author_arm(
+            // P2（任务3）真实 Box 间接边界（设计 §3.1.5）：只为实际选中的臂
+            // 分配，drive 状态机不再内嵌完整臂状态。
+            engine = match Box::pin(drive_author_arm(
                 ArmDrive {
                     engine,
                     command_rx,
@@ -284,7 +292,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                     is_outline_revision_run,
                 },
                 content,
-            )
+            ))
             .await
             {
                 ArmExit::Continue(engine) => engine,
@@ -292,7 +300,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
             };
         }
         ProviderRunKind::AuthorChoiceFollowup { content } => {
-            engine = match drive_author_choice_followup_arm(
+            engine = match Box::pin(drive_author_choice_followup_arm(
                 ArmDrive {
                     engine,
                     command_rx,
@@ -310,7 +318,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                     is_outline_revision_run,
                 },
                 content,
-            )
+            ))
             .await
             {
                 ArmExit::Continue(engine) => engine,
@@ -318,7 +326,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
             };
         }
         ProviderRunKind::Revision => {
-            engine = match drive_revision_arm(ArmDrive {
+            engine = match Box::pin(drive_revision_arm(ArmDrive {
                 engine,
                 command_rx,
                 provider: provider_for_run.clone(),
@@ -333,7 +341,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                 rebuild_context,
                 outline_revision_feedback,
                 is_outline_revision_run,
-            })
+            }))
             .await
             {
                 ArmExit::Continue(engine) => engine,
@@ -341,7 +349,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
             };
         }
         ProviderRunKind::ReviewOnly => {
-            engine = match drive_review_only_arm(ArmDrive {
+            engine = match Box::pin(drive_review_only_arm(ArmDrive {
                 engine,
                 command_rx,
                 provider: provider_for_run.clone(),
@@ -356,7 +364,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                 rebuild_context,
                 outline_revision_feedback,
                 is_outline_revision_run,
-            })
+            }))
             .await
             {
                 ArmExit::Continue(engine) => engine,
@@ -369,7 +377,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
             include!("work_item_plan_legacy_author.inc.rs")
         }
         ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
-            engine = match drive_single_candidate_author_arm(ArmDrive {
+            engine = match Box::pin(drive_single_candidate_author_arm(ArmDrive {
                 engine,
                 command_rx,
                 provider: provider_for_run.clone(),
@@ -384,7 +392,7 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                 rebuild_context,
                 outline_revision_feedback,
                 is_outline_revision_run,
-            })
+            }))
             .await
             {
                 ArmExit::Continue(engine) => engine,
