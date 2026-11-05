@@ -262,8 +262,7 @@ impl CodexProvider {
         .await
     }
 
-    /// `start_validated` 的相位感知执行体(Task 7):`root_recipe_phase`
-    /// 来自 validated policy 的冻结相位,供共用 LC guard 消费 marker 语义。
+    /// `start_validated` 的相位感知执行体(Task 7):`root_recipe_phase` 来自 validated policy 的冻结相位,供共用 LC guard 与 LC 投影消费 marker 语义(REQ-BOOT-15)。
     /// Task 3.4(B0c):`frozen_lc_projection` 为 gateway full 上下文路径
     /// (`resume_or_start_with_projection` Resume / prepared candidate)冻结的
     /// 候选投影——`Some` 时直接消费(spawn 前复验冻结版本,audit 与 prepared
@@ -328,12 +327,9 @@ impl CodexProvider {
             .exact_version()
             .to_string();
 
-        // 5) danger 投影(T12,REQ-LCG-04 改版):gateway full 上下文路径冻结的
-        //    候选投影直接消费——spawn 前复验冻结 exact version 与当前 TTL
-        //    观测一致(不一致以 `CODEX_LC_PREPARED_VERSION_DRIFT` 稳定码
-        //    child 前拒绝,零 ②③),sandbox/audit 与 prepared full 投影同源;
-        //    裸 validate(None)沿 adapter 侧自建投影(trust/MCP 空串同样纳入
-        //    session digest,装配后任一漂移都会改变 projection_digest)。
+        // 5) danger 投影(T12,REQ-LCG-04 改版):gateway full 上下文路径冻结的候选投影直接消费——spawn 前复验冻结 exact version 与当前 TTL
+        //    观测一致(不一致以 `CODEX_LC_PREPARED_VERSION_DRIFT` 稳定码 child 前拒绝,零 ②③),sandbox/audit 与 prepared full 投影同源;
+        //    裸 validate(None)沿 adapter 侧自建投影(trust/MCP 空串同样纳入 session digest,装配后任一漂移都会改变 projection_digest)。
         let (lc_projection, sandbox) = match frozen_lc_projection {
             Some(frozen) => {
                 if frozen.exact_version() != provider_version {
@@ -366,7 +362,8 @@ impl CodexProvider {
                         String::new(),
                         Some(boundary),
                     );
-                let projector = CodexPolicyProjector::new(provider_version.clone());
+                let projector = CodexPolicyProjector::new(provider_version.clone())
+                    .with_root_recipe_phase(root_recipe_phase);
                 let lc_projection = projector
                     .project(&projection_input)
                     .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
@@ -519,9 +516,11 @@ impl CodexProvider {
         // 8) provider_start 统一审计:sandbox/approvalPolicy 与 wire 同源;
         //    lc_projection 必填(LC 会话不因 tool_policy=None 跳过统一 audit);
         //    boundary 引用同样从 sandbox 投影单一来源取值。
-        let tool_policy_digest =
-            projection::lc_tool_policy_canonical_digest(input.tool_policy.as_ref())
-                .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+        let tool_policy_digest = projection::lc_tool_policy_canonical_digest(
+            input.tool_policy.as_ref(),
+            root_recipe_phase,
+        )
+        .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
         let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
             provider: session::TOOL_POLICY_PROVIDER_NAME.to_string(),
             role: crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
@@ -1294,9 +1293,10 @@ impl StreamingProviderAdapter for CodexProvider {
             approval_policy,
             String::new(),
             boundary,
-            std::sync::Arc::new(CodexPolicyProjector::new(
-                observation.exact_version().to_string(),
-            )),
+            std::sync::Arc::new(
+                CodexPolicyProjector::new(observation.exact_version().to_string())
+                    .with_root_recipe_phase(launch.is_root_recipe_phase()),
+            ),
         ))
     }
 }

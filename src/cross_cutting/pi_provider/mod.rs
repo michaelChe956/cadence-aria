@@ -1027,13 +1027,11 @@ impl StreamingProviderAdapter for PiProvider {
     /// LC validated 启动(Task 4b):只接受 gateway 产出的 validated input,
     /// 消费冻结 envelope 派生的不可伪造 boundary plan 与 LC 权限投影,以
     /// canonical LC root 为进程 cwd 启动,统一落盘 `ProviderStartAudit.
-    /// lc_projection`;无通用 tool policy 的角色(Coding/Executor)同样执行
-    /// exact version 解析、原生会话与统一 launch audit,不以
+    /// lc_projection`;无通用 tool policy 的角色(Coding/Executor)同样执行 exact version 解析、原生会话与统一 launch audit,不以
     /// `tool_policy=None` 早退。Task 9:resume 在 child 前比较全 LC audit
     /// (9a),spawn 后由 RPC `get_state` 真实确认同 id(9c)——缺/错 id
     /// kill/reap 并显式记录「未恢复」,不回填请求 id、不清 id 转 fresh。
-    /// Task 3.5(B0d):exact version 与 `prepare_lc_facts` 消费同一 60 秒
-    /// TTL 观测;full-context resume 携带 prepare 冻结候选投影时,复验
+    /// Task 3.5(B0d):exact version 与 `prepare_lc_facts` 消费同一 60 秒 TTL 观测;full-context resume 携带 prepare 冻结候选投影时,复验
     /// version 后直接消费该投影(audit 与 prepared 同 fingerprint);
     /// extension 准备在 resume mismatch 判定之后(拒绝路径零 extension 写)。
     async fn start_validated(
@@ -1061,19 +1059,12 @@ impl StreamingProviderAdapter for PiProvider {
             )
         })?;
 
-        // Task 3.5(B0d):exact version 与 `prepare_lc_facts` 同源——同一 60
-        // 秒 TTL/single-flight 观测(prepare 与 spawn 前复验同 key 命中,不
-        // 伪称每次实测二进制;失败/超时/取消不缓存)。全 LC 路径必填,非仅
-        // 策略角色;direct `start` 的无过期 `cached_cli_version` 不受影响。
+        // Task 3.5(B0d):exact version 与 `prepare_lc_facts` 同源——同一 60 秒 TTL/single-flight 观测(prepare 与 spawn 前复验同 key 命中,不伪称每次实测二进制;失败/超时/取消不缓存)。全 LC 路径必填,非仅策略角色;direct `start` 的无过期 `cached_cli_version` 不受影响。
         let (_version_probe_key, observation) = self.observe_lc_version(cancel.clone()).await?;
         let provider_version = observation.exact_version().to_string();
-
-        // 投影来源(B0d):full-context resume 携带 prepare 冻结的候选投影时,
-        // adapter 先复验本家 mutable fact(exact version)——漂移 typed 拒
-        // (等价 gateway `assert_frozen_version` 的 provider_version 维度),
-        // 一致则**消费该投影**为 audit 字面量(prepared 与 audit 同
-        // fingerprint);裸 validate(无候选投影)沿现状:同版本 projector
-        // 现算。trust/MCP bundle digest 的 gateway 侧装配归 1b/1c/B0f;空串
+        // 投影来源(B0d):full-context resume 携带 prepare 冻结的候选投影时,adapter 先复验本家 mutable fact(exact version)——漂移 typed 拒
+        // (等价 gateway `assert_frozen_version` 的 provider_version 维度),一致则**消费该投影**为 audit 字面量(prepared 与 audit 同
+        // fingerprint);裸 validate(无候选投影)沿现状:同版本 projector 现算。trust/MCP bundle digest 的 gateway 侧装配归 1b/1c/B0f;空串
         // 同样纳入 session digest,装配后任一漂移都会改变 projection_digest。
         let lc_projection = match launch.lc_projection() {
             Some(prepared) => {
@@ -1113,6 +1104,7 @@ impl StreamingProviderAdapter for PiProvider {
                     Some(boundary),
                 );
                 PiPolicyProjector::new(provider_version.clone())
+                    .with_root_recipe_phase(launch.is_root_recipe_phase())
                     .project(&projection_input)
                     .map_err(|error| {
                         ProviderAdapterError::parse_error(
@@ -1296,24 +1288,26 @@ impl StreamingProviderAdapter for PiProvider {
         // (握手 = id 已预生成/传入完成);无通用 tool policy 也有 canonical
         // digest(空 token 序列形态)。append 失败终止子进程并 fail-closed
         // (engine 沿既有 kill 链判失败)。
-        let tool_policy_digest =
-            match projection::lc_tool_policy_canonical_digest(input.tool_policy.as_ref()) {
-                Ok(digest) => digest,
-                Err(error) => {
-                    // B1-1:spawn 已发生——归属路径先 kill+wait 再收口注销,
-                    // 不留活 child;无归属路径保持既有上抛语义。
-                    if let Some((ownership, _reservation)) = owned.as_ref() {
-                        let _ = child.start_kill();
-                        let _ = child.wait().await;
-                        ownership.release_after_session_tail().await;
-                    }
-                    return Err(ProviderAdapterError::parse_error(
-                        format!("pi lc validated start: {error}"),
-                        String::new(),
-                        String::new(),
-                    ));
+        let tool_policy_digest = match projection::lc_tool_policy_canonical_digest(
+            input.tool_policy.as_ref(),
+            launch.is_root_recipe_phase(),
+        ) {
+            Ok(digest) => digest,
+            Err(error) => {
+                // B1-1:spawn 已发生——归属路径先 kill+wait 再收口注销,
+                // 不留活 child;无归属路径保持既有上抛语义。
+                if let Some((ownership, _reservation)) = owned.as_ref() {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    ownership.release_after_session_tail().await;
                 }
-            };
+                return Err(ProviderAdapterError::parse_error(
+                    format!("pi lc validated start: {error}"),
+                    String::new(),
+                    String::new(),
+                ));
+            }
+        };
         let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
             provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
             role: crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
@@ -1472,7 +1466,10 @@ impl StreamingProviderAdapter for PiProvider {
                 projection::PI_LC_APPROVAL_POLICY.to_string(),
                 String::new(),
                 boundary,
-                std::sync::Arc::new(PiPolicyProjector::new(exact_version)),
+                std::sync::Arc::new(
+                    PiPolicyProjector::new(exact_version)
+                        .with_root_recipe_phase(launch.is_root_recipe_phase()),
+                ),
             ),
         )
     }
