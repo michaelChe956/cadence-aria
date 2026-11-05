@@ -85,4 +85,21 @@
 - [x] 7.6 `openspec validate --specs --strict` ⇒ **仍 78 passed / 0 failed**（MUST NOT 把现有 spec 改红）
 - [x] 7.7 `openspec validate globalize-provider-capability-verification --strict` ⇒ exit 0
 - [x] 7.8 契约留痕：本 change 的 proposal / design / 两份 spec delta / tasks；归档前补独立审查结论
-- [ ] 7.9 真机验收：①「一键核验全部」跑一次 ⇒ 面板显示全局口径文案；② 新建第二个逻辑代码库 ⇒ 面板直接显示已核验（**无需**再核验）；③ 冷启动推进到聚合初始化 ⇒ **不往聚合根放** `AGENTS.md` + `.claude/rules/language.md` 也**能**自动开始；④ 聚合根放了两个判定文件 ⇒ 仍走零 provider turn 路径
+- [ ] 7.9 真机验收：①「一键核验全部」跑一次 ⇒ 面板显示全局口径文案；②新建第二个逻辑代码库 ⇒ 面板直接显示已核验（**无需**再核验）；③冷启动推进到聚合初始化 ⇒ **不往聚合根放** `AGENTS.md` + `.claude/rules/language.md` 也**能**自动开始；④聚合根放了两个判定文件 ⇒ 仍走零 provider turn 路径
+
+## 8. 平台级化（owner 2026-11-05 追加裁定：provider 是平台公用能力）
+
+> 精确文件、命令、测试与提交步骤由 `writing-plans` 写入 `cadence/plans/`。本节只记高层工作包。范围与验收边界见同目录 `proposal.md` / `design.md` 决策 13~16。
+
+映射 requirement：REQ-PCR-07（作用域升级）、REQ-PCR-08、REQ-PCR-09、REQ-BOOT-14（整机生效）
+
+- [ ] 8.1 **落盘平台级**：capability 记录与探针证据根改为平台级目录（`.aria/provider-capabilities/`）；项目级目录与 LC 子树下 SHALL NOT 再产出 capability 文件
+- [ ] 8.2 **读写点全量迁移**：写入侧（探针导入 / `ensure_bootstrap` 自举 / 外部入口导入）与读取侧（provider 选择门 L2 / gateway 准入 / 只读状态投影 / 批量作业前置）全部指向平台级；SHALL NOT 残留第二条读路径或回退分支
+- [ ] 8.3 **root-recipe 事实拆出**：`root_recipe_evidence` 从 capability 记录移出、改为 per-LC 独立事实；`require_root_recipe_supported` 改读新载体；SHALL NOT 改变判定强度与结论
+- [ ] 8.4 **路由改平台级**：新增四条平台级路由；旧四条 `/api/projects/{p}/logical-codebases/{lc_id}/capabilities*` **删除**（MUST NOT 留兼容别名/转发 shim/双写）；批量作业落盘改平台级、job 结构去 `project_id`/`logical_codebase_id` 归属校验
+- [ ] 8.5 **前端解门控**：能力卡与能力面板去掉 `projectId` / `logicalCodebaseId` props 与 id 取值逻辑；API 层路径改平台级；「Provider 管理」入口 SHALL NOT 以选中项目为前置条件
+- [ ] 8.6 **文案口径**：按钮区说明改为平台级口径（「一次核验整机可用」）；面板顶部作用域说明同步；SHALL NOT 残留「逐 LC」「全项目」等旧口径
+- [ ] 8.7 **夹具与断言迁移**：第 6 节列举的按项目级路径断言改指平台级路径；只改作用域、不改期望值；MUST NOT 删用例、加 `ignore` 或放宽断言强度
+- [ ] 8.8 **验收 grep**：旧 capability 路由全仓 **0 命中**；`projects/**` 与 `logical-codebases/**` 下 **0** 个 capability 文件；平台级文件路径唯一
+- [ ] 8.9 **验证矩阵**：同第 7 节全套（`cargo test --locked --all-targets` / `pnpm test` / `clippy -D warnings` / `cargo fmt --check` / `openspec validate --specs --strict` 仍 78 passed 0 failed / 本 change `--strict`）
+- [ ] 8.10 **真机验收**：① 无选中项目时「Provider 管理」可打开并显示平台级事实（不再置灰）；② 项目 A 核验后，项目 B 的面板**直接**显示已核验、无需再核验；③ 跨项目冷启动自动开始（不报 `aggregate_initialization_provider_needs_verification`）
