@@ -86,6 +86,10 @@ impl AggregateSkillsPreparation for RouteTestSkills {
 const ROOT_POLICY_TEST_AGENTS: &str =
     "# aggregate root rules\n\n- 根入口规则：成员仓统一遵守语言与工程规范。\n";
 const ROOT_POLICY_TEST_LANGUAGE: &str = "# 语言规则\n\n- 必须使用中文回答。\n";
+/// `/project-rules-examples` 的真实落盘面（`cadence/project-rules/examples`
+/// ——见 ROOT_RECIPE_ALLOWLIST 的实测证据）：零动作 turn 会被判失败，故测试
+/// provider 必须按真实命令落盘面产生文件变更。
+const ROOT_POLICY_TEST_EXAMPLES: &str = "# 根规则示例\n\n- 示例：成员仓统一使用中文注释。\n";
 
 /// `trust_route_fixture` 的可调选项（Task 4）。
 #[derive(Debug, Clone)]
@@ -97,8 +101,11 @@ struct RecipeFixtureOptions {
     /// 前的确定性观察窗口）。
     fault_first_final_turn: bool,
     /// RuleAndMcpConfig turn 是否落盘 `.claude/rules/language.md`
-    ///（缺 language 的发布负例置 false）。
+    /// （缺 language 的发布负例置 false）。
     write_language_rule: bool,
+    /// REQ-BOOT-17 负例：pre_check turn **零动作**（不产生任何落盘）——
+    /// 该 step 必须判失败（零动作 turn 不得静默通过）。
+    zero_change_pre_check: bool,
 }
 
 impl Default for RecipeFixtureOptions {
@@ -107,6 +114,7 @@ impl Default for RecipeFixtureOptions {
             fault_first_pre_check: false,
             fault_first_final_turn: false,
             write_language_rule: true,
+            zero_change_pre_check: false,
         }
     }
 }
@@ -168,6 +176,16 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
                 "test-injected interruption during the pre_check provider turn",
             ));
         }
+        if self.options.fault_first_final_turn
+            && input.prompt.contains(project_rules_examples)
+            && !self
+                .final_turn_fault_fired
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(Self::interruption(
+                "test-injected interruption during the final command provider turn",
+            ));
+        }
         // RuleAndMcpConfig 命令时机：真实 provider 生成根规则的位置——
         // 测试 provider 在 working_dir（聚合根）落盘 AGENTS 入口与
         // language 规则，使末命令发布收口有真实材料可聚合。
@@ -185,15 +203,37 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
                 .expect("write root language rule");
             }
         }
-        if self.options.fault_first_final_turn
-            && input.prompt.contains(project_rules_examples)
-            && !self
-                .final_turn_fault_fired
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(Self::interruption(
-                "test-injected interruption during the final command provider turn",
-            ));
+        // REQ-BOOT-17：零动作的 provider turn 会被判失败（该 step 失败），
+        // 故测试 provider 按真实四命令的落盘面同构——每个 provider turn 都
+        // 必须产生真实文件变更：
+        // - pre_check 写 `.claude/`（真实 pre-check 写 .agents/.claude/...）；
+        // - project_rules_examples 写 `cadence/project-rules/examples`
+        //   （真实落盘面，见 ROOT_RECIPE_ALLOWLIST 的实测证据）。
+        if input.prompt.contains(pre_check) && !self.options.zero_change_pre_check {
+            let claude_dir = input.working_dir.join(".claude");
+            std::fs::create_dir_all(&claude_dir).expect("create root .claude dir");
+            // 追加式落盘：每次 turn 都有真实体积变化（预初始化根与重试同样
+            // 可观测——零动作 turn 会被判失败，夹具不得产出「零变更」turn）。
+            let mut marker = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(claude_dir.join("settings.json"))
+                .expect("open root claude settings");
+            std::io::Write::write_all(&mut marker, b"{\"pre_check\":true}\n")
+                .expect("append root claude settings");
+        }
+        if input.prompt.contains(project_rules_examples) {
+            let examples = input
+                .working_dir
+                .join("cadence")
+                .join("project-rules")
+                .join("examples");
+            std::fs::create_dir_all(&examples).expect("create project rules examples dir");
+            std::fs::write(
+                examples.join("examples.md"),
+                ROOT_POLICY_TEST_EXAMPLES,
+            )
+            .expect("write project rules examples");
         }
         crate::cross_cutting::streaming_provider::FakeStreamingProvider
             .start(input, cancel)

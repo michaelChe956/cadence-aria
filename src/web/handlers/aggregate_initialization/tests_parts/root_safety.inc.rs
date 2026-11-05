@@ -508,6 +508,14 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
         ".claude".to_string(),
         ".claude/rules".to_string(),
         ".claude/rules/language.md".to_string(),
+        ".claude/settings.json".to_string(),
+        // REQ-BOOT-17 起每个 provider turn 都必须产生真实落盘：末命令
+        // （project-rules-examples）按真实落盘面写 `cadence/project-rules/
+        // examples`（见 ROOT_RECIPE_ALLOWLIST 的实测证据）。
+        "cadence".to_string(),
+        "cadence/project-rules".to_string(),
+        "cadence/project-rules/examples".to_string(),
+        "cadence/project-rules/examples/examples.md".to_string(),
     ];
     let mut prefix = String::new();
     for segment in policy_artifact.policy_id.split('/') {
@@ -588,22 +596,22 @@ async fn shared_executor_cannot_reach_repository_registration_or_git_finalize() 
             receipt.verdict,
             crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandVerdict::Allowed
         );
-        match receipt.command_index {
-            // 命令 2/3 共享同一 RuleAndMcpConfig turn（两条 watch 都在 turn
-            // 前开启）——窗口包含规则材料生成（AGENTS/.claude 规则），全部
-            // allowlisted；命令 1/4 窗口零写入（发布发生在全部审计窗口
-            // 关闭之后，不进任何窗口）。
-            2 | 3 => assert!(
-                receipt.observed_changes.iter().all(|change| change.allowed),
-                "rule-material generation must be allowlisted evidence: {:?}",
-                receipt.observed_changes
-            ),
-            _ => assert!(
-                receipt.observed_changes.is_empty(),
-                "command {} must not touch anything outside its own audit window",
-                receipt.command_index
-            ),
-        }
+        // REQ-BOOT-17：每个 provider turn 都必须产生真实落盘（零动作 turn
+        // 会被判失败）——命令 1 写 `.claude/settings.json`，命令 2/3（同一
+        // RuleAndMcpConfig turn，两条 watch 都在 turn 前开启）写根规则材料，
+        // 命令 4 写 `cadence/project-rules/examples`；全部 allowlisted（发布
+        // 发生在全部审计窗口关闭之后，不进任何窗口）。
+        assert!(
+            !receipt.observed_changes.is_empty(),
+            "command {} must produce a real change (REQ-BOOT-17)",
+            receipt.command_index
+        );
+        assert!(
+            receipt.observed_changes.iter().all(|change| change.allowed),
+            "command {} changes must be allowlisted evidence: {:?}",
+            receipt.command_index,
+            receipt.observed_changes
+        );
     }
     // 5. lcg_t13:recipe 成功不铸造（也不降级）normal 分格（相位分流互
     //    不渗透的隔离契约）。片4（REQ-BOOT-07）起 fixture 起跑前由选择器

@@ -56,9 +56,12 @@ use super::aggregate_initialization_store::root_recipe_command_index;
 // - root_recipe_receipt_store.inc.rs：RootRecipeReceiptStore 与命令/receipt 校验、
 //   allowlist/classify/digest 及 durable 原子写入辅助函数。
 // - root_recipe_receipt_tests.inc.rs：tests 模块。
+// - root_recipe_zero_change_tests.inc.rs：REQ-BOOT-17 零动作 turn 判失败的
+//   单测（零动作 ⇒ step 失败且失败事实含 provider / step / 零变更）。
 include!("root_recipe_receipt_types.inc.rs");
 include!("root_recipe_receipt_gitignore.inc.rs");
 include!("root_recipe_snapshot.inc.rs");
 include!("root_recipe_receipt_auditor.inc.rs");
 include!("root_recipe_receipt_store.inc.rs");
 include!("root_recipe_receipt_tests.inc.rs");
+include!("root_recipe_zero_change_tests.inc.rs");

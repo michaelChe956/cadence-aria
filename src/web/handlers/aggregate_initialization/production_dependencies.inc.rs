@@ -219,8 +219,14 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 .await?;
             // 命令未执行完成（turn 失败/取消）不落 receipt：无执行即无证据，
             // 重试窗口重新审计；同 index 同内容重放幂等。
-            complete_root_recipe_command_receipts(paths, lc_id, project_id, watches)
-                .map_err(|error| root_recipe_audit_failure(step, error))?;
+            complete_root_recipe_command_receipts(
+                paths,
+                lc_id,
+                project_id,
+                watches,
+                step,
+                provider,
+            )?;
             if step_owns_final_recipe_command(step) {
                 // Task 4：末命令唯一收口（先审计后发布——发布产物
                 // policy/** 不进任何命令审计窗口）。中断 seam 仅测试编译。
@@ -312,72 +318,6 @@ mod root_policy_test_faults {
         armed.remove(position);
         true
     }
-}
-
-/// Task 1.8（D2）：本 step 在固定 root recipe 命令索引中的命令
-/// （全局 index + 命令文本）。确定性 step 无命令（空表）。
-fn root_recipe_step_commands(step: AggregateInitializationStepKind) -> Vec<(usize, &'static str)> {
-    crate::product::logical_codebase::aggregate_initialization_store::root_recipe_command_index()
-        .into_iter()
-        .filter(|(command_step, _, _)| *command_step == step)
-        .map(|(_, command_index, command)| (command_index, command))
-        .collect()
-}
-
-/// 末命令判定：本 step 持有全局最大 command index（固定顺序下即
-/// OpenspecAndExamples 的命令 4）——最终 receipt 的 finalize 挂点。
-fn step_owns_final_recipe_command(step: AggregateInitializationStepKind) -> bool {
-    let step_max = root_recipe_step_commands(step)
-        .iter()
-        .map(|(command_index, _)| *command_index)
-        .max();
-    let global_max = crate::product::logical_codebase::aggregate_initialization_store::root_recipe_command_index()
-        .iter()
-        .map(|(_, command_index, _)| *command_index)
-        .max();
-    step_max.is_some_and(|step_max| Some(step_max) == global_max)
-}
-
-/// 命令审计窗口开启：canonical root 冻结 + before 全量快照。IO/命令身份
-/// 漂移 fail-closed 为可重试 ProviderTurn 失败（不可观测绝不静默）。
-fn begin_root_recipe_command_watches(
-    operation_id: &str,
-    step: AggregateInitializationStepKind,
-    preflight: &AggregatePreflightSnapshot,
-) -> Result<
-    Vec<crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandWatch>,
-    crate::product::json_store::ProductStoreError,
-> {
-    let auditor =
-        crate::product::logical_codebase::root_recipe_receipt::RootRecipeFilesystemAuditor::new();
-    let canonical_root = std::path::PathBuf::from(&preflight.aggregate_root);
-    root_recipe_step_commands(step)
-        .into_iter()
-        .map(|(command_index, command)| {
-            auditor.before_command(operation_id, &canonical_root, step, command_index, command)
-        })
-        .collect()
-}
-
-/// 命令成功后逐条落 per-command receipt（拒绝也 durable 保留证据）。
-/// 同 index 同内容重放幂等；同 index 不同内容冲突不覆盖（fail-closed）。
-fn complete_root_recipe_command_receipts(
-    paths: &ProductAppPaths,
-    lc_id: &str,
-    project_id: &str,
-    watches: Vec<crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandWatch>,
-) -> Result<(), crate::product::json_store::ProductStoreError> {
-    let auditor =
-        crate::product::logical_codebase::root_recipe_receipt::RootRecipeFilesystemAuditor::new();
-    let store = crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
-        paths.clone(),
-        lc_id.to_string(),
-    );
-    for watch in watches {
-        let receipt = auditor.after_command(watch, chrono::Utc::now().to_rfc3339())?;
-        store.append_command(project_id, receipt)?;
-    }
-    Ok(())
 }
 
 /// 固定命令索引中的末命令（全局最大 command index——固定顺序下即

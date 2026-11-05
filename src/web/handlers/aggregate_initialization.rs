@@ -44,6 +44,7 @@ use crate::web::types::{
 };
 
 include!("aggregate_initialization/dependencies.inc.rs");
+include!("aggregate_initialization/root_recipe_audit_windows.inc.rs");
 include!("aggregate_initialization/production_dependencies.inc.rs");
 include!("aggregate_initialization/handlers.inc.rs");
 

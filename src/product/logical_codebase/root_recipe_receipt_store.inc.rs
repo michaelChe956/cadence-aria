@@ -108,6 +108,40 @@ impl RootRecipeReceiptStore {
         })
     }
 
+    /// REQ-BOOT-17：落盘**一个 provider turn** 的命令审计事实，并返回该
+    /// turn 的**零动作**判定（`Some(reason)` ⇒ 零动作，调用方须判该 step
+    /// 失败，后续 step 不再推进）。
+    ///
+    /// 零动作判据**复用**既有 receipt auditor 的事实：auditor 已把窗口内的
+    /// 每次落盘差异记成 `observed_changes`，零动作 ⇒ 变更清单为空——本方法
+    /// 不引入第二套「有无变更」判定，只消费 auditor 的结论。
+    ///
+    /// 有动作 ⇒ `Ok(None)`（照既有语义成功：审计事实照旧 durable 追加，
+    /// 拒绝证据同样保留）；零动作 ⇒ `Ok(Some(reason))`，reason 含
+    /// **provider / step / 零变更** 三项失败事实。
+    pub fn append_turn_receipts(
+        &self,
+        project_id: &str,
+        step: AggregateInitializationStepKind,
+        provider: &crate::product::models::ProviderName,
+        receipts: Vec<RootRecipeCommandReceipt>,
+    ) -> Result<Option<String>, ProductStoreError> {
+        let mut changed = false;
+        for receipt in receipts {
+            changed |= !receipt.observed_changes.is_empty();
+            self.append_command(project_id, receipt)?;
+        }
+        if changed {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "root recipe turn produced no workspace change \
+             (provider={}, step={}, zero_change=true)",
+            crate::product::logical_codebase::provider_trust::provider_wire_label(provider),
+            step.as_str()
+        )))
+    }
+
     /// Lists the operation's command audit facts, oldest command first.
     pub fn list_commands(
         &self,
