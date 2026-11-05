@@ -226,19 +226,17 @@ impl LogicalCodebaseGatewayFactory {
 
     /// Task 2d:durable probe writer 注入(owner 门 §0.3)。构造
     /// `ProviderCapabilityProbeService::with_durable_writer`,使「已通过三方
-    /// 一致性校验的 evidence 导入 durable Confirmed」写入的**项目级全局**
+    /// 一致性校验的 evidence 导入 durable Confirmed」写入的**机器级**
     /// capability store 与 gateway 读取的 capability store 完全同源
-    /// (owner 2026-11-04 决策 3/W4)。
+    /// (REQ-PCR-07)。
     /// 导入通道本身不重新 probe、不 spawn(provider spawn count 恒 0);
     /// Task 3 admission 消费本通道。
+    ///
+    /// **无 project_id / 无 lc_id**：写入目标是机器级唯一作用域 ⇒ 不要求
+    /// 选中项目、不要求存在逻辑代码库。
     pub fn durable_probe_writer_for_lc(
         &self,
-        project_id: &str,
-        lc_id: Option<&str>,
     ) -> Result<ProviderCapabilityProbeService, ProviderGatewayError> {
-        // capability 作用域是项目级全局 ⇒ 与 LC 无关；但保留 lc 作用域解析
-        // （legacy 别名/未知 LC 的既有行为不变）。
-        let _lc_id = self.resolve_lc_scope(project_id, lc_id)?;
         let capabilities = ProviderCapabilityStore::new(self.paths.clone());
         Ok(ProviderCapabilityProbeService::with_durable_writer(
             capabilities,

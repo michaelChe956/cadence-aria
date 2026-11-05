@@ -79,7 +79,7 @@ pub async fn get_lc_capabilities(
     let paths = product_app_paths(&state);
     require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
     let providers = capability_service(&state)
-        .capability_snapshot(&project_id)
+        .capability_snapshot()
         .map_err(product_store_api_error)?;
     let providers: Vec<Value> = providers
         .iter()
@@ -131,10 +131,7 @@ pub async fn post_lc_capability_revalidate(
     let paths = product_app_paths(&state);
     require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
     let service = capability_service(&state);
-    match service
-        .revalidate(&project_id, &logical_codebase_id, provider)
-        .await
-    {
+    match service.revalidate(provider).await {
         Ok(outcome) => Ok((
             StatusCode::OK,
             Json(match outcome {

@@ -4,15 +4,15 @@
 //! 一次真实现场边界探针（复用 6c `run_cli_boundary_probe`，覆盖
 //! Coding/Planning/Review 三个 action 含 resume 面）→ 经 2d
 //! `record_verified_probe` 原子导入 durable Confirmed（与 gateway 消费的
-//! capability store **同一份项目级全局**记录——owner 2026-11-04 决策 1：
-//! 能力是本机 provider CLI 的事实，一次核验全项目可用）。一次性语义：action 行
+//! capability store **同一份机器级**记录——REQ-PCR-07：能力是本机 provider
+//! CLI 的事实，核验只核验一次，机器一份事实）。一次性语义：action 行
 //! 已在当前 CLI exact version 上全 Confirmed 时秒回不重跑；不点击不运行任何
 //! 探针；探针失败如实上报，绝不伪造 Confirmed。门本身（admission
 //! fail-closed）不在本模块改动范围。
 //!
-//! `revalidate` 的 `lc_id` 参数**保留**：它承担「哪个 LC 的面板发起的」这一
-//! 探针执行上下文/审计归属职责（决策 10），与记录作用域无关；证据根随记录
-//! 一起全局化（决策 7）。
+//! **无 project_id / 无 lc_id**（REQ-PCR-07/08）：重验证面向**整机** provider
+//! CLI 能力，不要求选中项目、不要求存在逻辑代码库；探针证据同样落机器级
+//! 证据根 `.aria/provider-capabilities/evidence/boundary/<session_label>`。
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -145,6 +145,11 @@ pub struct ProviderCapabilityActionRowSnapshot {
     pub evidence_ref: String,
 }
 
+/// capability 状态投影的**机器级**快照（逐 provider 的 durable 事实）。
+///
+/// 作用域：机器级唯一（REQ-PCR-07）——投影内容不随项目/逻辑代码库变化。
+pub type ProviderCapabilitiesSnapshot = Vec<ProviderCapabilityProviderSnapshot>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCapabilityProviderSnapshot {
     pub provider_type: ProviderRefType,
@@ -166,16 +171,15 @@ pub struct ProviderCapabilityRevalidateService {
 /// probe_and_import 的作用域参数包(clippy too_many_arguments 收敛;
 /// 生命周期跟 revalidate 调用栈)。
 ///
-/// **无 lc_id**：能力记录与证据根都已是项目级全局（owner 2026-11-04 决策 1/7）
-/// ⇒ 探针落盘作用域与逻辑代码库无关；「哪个 LC 的面板发起的」这一归属事实
-/// 保留在 `resource_scope_id`（审计/资源身份）里。
+/// **无 project_id / 无 lc_id**：能力记录与证据根都已是**机器级**（REQ-PCR-07）
+/// ⇒ 探针落盘作用域与项目/逻辑代码库均无关；本次运行的归属事实保留在
+/// `resource_scope_id`（审计/资源身份）里。
 struct ProbeScope<'a> {
-    project_id: &'a str,
     provider: ProviderName,
     cli_program: &'a str,
     resume_kind: ResumeChannelKind,
     base: &'a std::path::Path,
-    /// 本次重验证的资源身份(审计/资源归属可追溯;携带发起 LC 的归属事实)。
+    /// 本次重验证的资源身份(审计/资源归属可追溯;按调用隔离)。
     resource_scope_id: String,
 }
 
@@ -233,8 +237,6 @@ impl ProviderCapabilityRevalidateService {
     /// 证事实，不回滚、不伪造）。
     pub async fn revalidate(
         &self,
-        project_id: &str,
-        lc_id: &str,
         provider: ProviderName,
     ) -> Result<RevalidateOutcome, RevalidateError> {
         let Some((cli_program, resume_kind)) = provider_probe_channel(provider.clone()) else {
@@ -264,21 +266,19 @@ impl ProviderCapabilityRevalidateService {
         }
         // 受控 fixture：每次点击一个 /tmp 族独立目录（按调用隔离，uuid
         // 命名；与 repository_store 登记先例同构，不引运行时新依赖），
-        // 探测结束 best-effort 清理；证据 durable 落 LC 子树。
+        // 探测结束 best-effort 清理；证据 durable 落**机器级**证据根。
         let base = probe_base_dir()?;
         // 本次重验证的资源身份(批2 Task 9:审计/资源归属可追溯;按调用
-        // 隔离)。**携带 lc_id**：能力记录已全局化(一次核验全项目可用),
-        // 但探针仍是「某个 LC 的面板发起」的一次运行 ⇒ 审计归属必须留在
-        // 探针工件里(决策 10:lc_id 承担「探针的执行上下文/审计归属」职责,
-        // 与记录作用域无关)。
+        // 隔离)。**不再携带 project_id / lc_id**：能力记录与证据根都已是
+        // 机器级(REQ-PCR-07)⇒ 探针工件里的归属事实只保留「本次运行」的
+        // 唯一标识。
         let resource_scope_id = format!(
-            "aria-capability-revalidate-{lc_id}-{}",
+            "aria-capability-revalidate-{}",
             uuid::Uuid::new_v4().simple()
         );
         let result = self
             .probe_and_import(
                 ProbeScope {
-                    project_id,
                     provider,
                     cli_program,
                     resume_kind,
@@ -302,14 +302,13 @@ impl ProviderCapabilityRevalidateService {
         missing: &[SessionPolicyAction],
     ) -> Result<Vec<SessionPolicyAction>, RevalidateError> {
         let ProbeScope {
-            project_id,
             provider,
             cli_program,
             resume_kind,
             base,
             resource_scope_id,
         } = scope;
-        let evidence_root = capability_evidence_root(&self.paths, project_id)?;
+        let evidence_root = capability_evidence_root(&self.paths);
         let mut imported_actions = Vec::new();
         for action in missing {
             let session_label = format!(
@@ -346,7 +345,7 @@ impl ProviderCapabilityRevalidateService {
                     detail: error.to_string(),
                 }
             })?;
-            self.import_outcome(project_id, &outcome)?;
+            self.import_outcome(&outcome)?;
             imported_actions.push(*action);
         }
         Ok(imported_actions)
@@ -355,14 +354,9 @@ impl ProviderCapabilityRevalidateService {
     /// 只读 capability 状态投影（零写入、零探针触发；bootstrap 默认记录
     /// 不产生真实 Confirmed 显示）。
     ///
-    /// 投影的是**项目级全局**记录 ⇒ 同一项目的任意逻辑代码库面板读到同一份
-    /// 事实（owner 2026-11-04 决策 1）。故本方法**不接受 lc_id**：记录作用域
-    /// 与逻辑代码库无关（HTTP 路由仍带 lc_id，承担 404 守卫与「哪个面板
-    /// 发起」，见决策 10）。
-    pub fn capability_snapshot(
-        &self,
-        _project_id: &str,
-    ) -> Result<Vec<ProviderCapabilityProviderSnapshot>, ProductStoreError> {
+    /// 投影的是**机器级**记录 ⇒ 任意上下文读到同一份事实（REQ-PCR-07）。故
+    /// 本方法**不接受任何作用域标识**：记录作用域与项目/逻辑代码库均无关。
+    pub fn capability_snapshot(&self) -> Result<ProviderCapabilitiesSnapshot, ProductStoreError> {
         let store = ProviderCapabilityStore::new(self.paths.clone());
         let mut snapshots = Vec::new();
         for provider_type in [
@@ -408,11 +402,7 @@ impl ProviderCapabilityRevalidateService {
 
     /// 把三方一致的探针结果导入 durable（writer 装配=与 gateway 读的**同一份
     /// 项目级全局** capability store，构造保证同源）。
-    fn import_outcome(
-        &self,
-        _project_id: &str,
-        outcome: &CliBoundaryProbeOutcome,
-    ) -> Result<(), ProductStoreError> {
+    fn import_outcome(&self, outcome: &CliBoundaryProbeOutcome) -> Result<(), ProductStoreError> {
         let durable = ProviderCapabilityProbeService::with_durable_writer(
             ProviderCapabilityStore::new(self.paths.clone()),
         );
@@ -451,18 +441,14 @@ fn row_confirmed_at_version(
     }
 }
 
-/// 探针证据的 durable 落盘根：**项目级全局** `capability-evidence/boundary`
-/// （与全局 `capabilities.json` 同一项目级根 ⇒ 证据与它的记录同作用域、
-/// 互相可指；owner 2026-11-04 决策 7）。
-fn capability_evidence_root(
-    paths: &ProductAppPaths,
-    project_id: &str,
-) -> Result<PathBuf, ProductStoreError> {
-    crate::product::json_store::validate_relative_id(project_id)?;
-    Ok(paths
-        .logical_codebase_root(project_id)
-        .join("capability-evidence")
-        .join("boundary"))
+/// 探针证据的 durable 落盘根：**机器级** `provider-capabilities/evidence/
+/// boundary`（与机器级 `capabilities.json` 同一根 ⇒ 证据与它的记录同作用域、
+/// 互相可指；REQ-PCR-07）。
+fn capability_evidence_root(paths: &ProductAppPaths) -> PathBuf {
+    paths
+        .provider_capabilities_root()
+        .join("evidence")
+        .join("boundary")
 }
 
 /// 受控 fixture 基目录：`$TMPDIR/aria-capability-revalidate-<uuid>`（按
@@ -499,17 +485,12 @@ mod tests {
     use crate::protocol::contracts::AdapterRole;
     use tempfile::tempdir;
 
-    const PROJECT_ID: &str = "project_0001";
     const PROBE_VERSION: &str = "1.42.0";
 
     fn paths_fixture() -> (ProductAppPaths, tempfile::TempDir) {
         let root = tempdir().expect("root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         (paths, root)
-    }
-
-    fn lc_id_fixture() -> String {
-        format!("lc_{}", uuid::Uuid::new_v4().simple())
     }
 
     fn digest64(seed: u8) -> String {
@@ -670,8 +651,8 @@ mod tests {
                 assert!(
                     invocation
                         .evidence_root
-                        .ends_with("capability-evidence/boundary"),
-                    "证据根必须落 LC 子树: {}",
+                        .ends_with("provider-capabilities/evidence/boundary"),
+                    "证据根必须落机器级: {}",
                     invocation.evidence_root.display()
                 );
                 assert!(invocation.resume.is_some(), "产品通道必须携带 resume 面");
@@ -697,6 +678,103 @@ mod tests {
         })
     }
 
+    /// 写证据工件的 fake runner（模拟真实探针落盘：证据根/会话标签下写一个
+    /// 工件文件）。
+    fn evidence_writing_runner(calls: Arc<AtomicUsize>) -> ProbeRunner {
+        Arc::new(move |invocation: ProbeInvocation| {
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let session_dir = invocation.evidence_root.join(&invocation.session_label);
+                std::fs::create_dir_all(&session_dir).expect("create evidence session dir");
+                std::fs::write(
+                    session_dir.join("probe-artifact.json"),
+                    br#"{"probe":"machine-level-evidence"}"#,
+                )
+                .expect("write evidence artifact");
+                let seed = match invocation.action {
+                    SessionPolicyAction::CodingTargetWrite => 21,
+                    SessionPolicyAction::PlanningReadOnly => 22,
+                    SessionPolicyAction::ReviewReadOnly => 23,
+                };
+                Ok(codex_confirmed_outcome(invocation.action, seed))
+            })
+        })
+    }
+
+    /// 递归查找子树内是否存在 `capability-evidence/` 目录（存在即为第二作用域）。
+    fn has_capability_evidence_dir(dir: &std::path::Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) == Some("capability-evidence") {
+                    return true;
+                }
+                if has_capability_evidence_dir(&path) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// REQ-PCR-07：探针证据落**机器级**证据根
+    /// （`.aria/provider-capabilities/evidence/boundary/<session_label>`），
+    /// 且 `.aria/projects/**` 下**不存在** `capability-evidence/`（第二作用域
+    /// = 缺陷）。
+    #[tokio::test]
+    async fn probe_evidence_lands_under_machine_level_evidence_root() {
+        let (paths, root) = paths_fixture();
+        // 预置项目/逻辑代码库子树（真实工作区形态）：核验**不得**往这里写证据。
+        let project_dir = root.path().join(".aria/projects/project_0001");
+        std::fs::create_dir_all(project_dir.join("logical-codebase")).expect("create project dir");
+        std::fs::create_dir_all(project_dir.join("logical-codebases/lc_0001"))
+            .expect("create lc dir");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = ProviderCapabilityRevalidateService::new(paths.clone())
+            .with_version_source(version_source(PROBE_VERSION))
+            .with_probe_runner(evidence_writing_runner(calls.clone()));
+        service
+            .revalidate(ProviderName::Codex)
+            .await
+            .expect("revalidate 应成功");
+
+        // 机器级证据根在场，且其下有会话工件。
+        let machine_evidence = paths.provider_capabilities_root().join("evidence");
+        assert!(
+            machine_evidence.is_dir(),
+            "证据根必须落机器级: {}",
+            machine_evidence.display()
+        );
+        let evidence_root = machine_evidence.join("boundary");
+        let sessions = std::fs::read_dir(&evidence_root)
+            .expect("read machine-level evidence root")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(
+            !sessions.is_empty(),
+            "机器级证据根下必须有会话工件: {}",
+            evidence_root.display()
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.join("probe-artifact.json").is_file()),
+            "机器级证据根下必须有探针工件文件"
+        );
+
+        // 项目/逻辑代码库子树下不得出现 capability-evidence/（第二作用域）。
+        assert!(
+            !has_capability_evidence_dir(&project_dir),
+            "`.aria/projects/**` 下不得存在 capability-evidence/（第二作用域）"
+        );
+    }
+
     #[tokio::test]
     async fn pcr_unsupported_provider_returns_stable_error_without_probe() {
         let (paths, _root) = paths_fixture();
@@ -705,7 +783,7 @@ mod tests {
             .with_version_source(version_source(PROBE_VERSION))
             .with_probe_runner(counting_runner(calls.clone(), None));
         let error = service
-            .revalidate(PROJECT_ID, &lc_id_fixture(), ProviderName::Fake)
+            .revalidate(ProviderName::Fake)
             .await
             .expect_err("Fake 无通道必须拒绝");
         match error {
@@ -720,7 +798,6 @@ mod tests {
     #[tokio::test]
     async fn pcr_already_confirmed_same_version_returns_without_probing() {
         let (paths, _root) = paths_fixture();
-        let lc_id = lc_id_fixture();
         let store = ProviderCapabilityStore::new(paths.clone());
         store
             .upsert(&fully_confirmed_record(PROBE_VERSION, &REVALIDATE_ACTIONS))
@@ -730,7 +807,7 @@ mod tests {
             .with_version_source(version_source(PROBE_VERSION))
             .with_probe_runner(counting_runner(calls.clone(), None));
         let outcome = service
-            .revalidate(PROJECT_ID, &lc_id, ProviderName::Codex)
+            .revalidate(ProviderName::Codex)
             .await
             .expect("全行已验证应秒回");
         assert_eq!(
@@ -745,13 +822,12 @@ mod tests {
     #[tokio::test]
     async fn pcr_unknown_rows_probe_all_actions_and_import_confirmed() {
         let (paths, _root) = paths_fixture();
-        let lc_id = lc_id_fixture();
         let calls = Arc::new(AtomicUsize::new(0));
         let service = ProviderCapabilityRevalidateService::new(paths.clone())
             .with_version_source(version_source(PROBE_VERSION))
             .with_probe_runner(counting_runner(calls.clone(), None));
         let outcome = service
-            .revalidate(PROJECT_ID, &lc_id, ProviderName::Codex)
+            .revalidate(ProviderName::Codex)
             .await
             .expect("Unknown 应逐 action 探测导入");
         assert_eq!(
@@ -791,7 +867,6 @@ mod tests {
     #[tokio::test]
     async fn pcr_partial_rows_probe_only_missing_actions() {
         let (paths, _root) = paths_fixture();
-        let lc_id = lc_id_fixture();
         let confirmed = [
             SessionPolicyAction::PlanningReadOnly,
             SessionPolicyAction::ReviewReadOnly,
@@ -804,7 +879,7 @@ mod tests {
             .with_version_source(version_source(PROBE_VERSION))
             .with_probe_runner(counting_runner(calls.clone(), None));
         let outcome = service
-            .revalidate(PROJECT_ID, &lc_id, ProviderName::Codex)
+            .revalidate(ProviderName::Codex)
             .await
             .expect("仅缺失行需补探");
         assert_eq!(
@@ -820,7 +895,6 @@ mod tests {
     #[tokio::test]
     async fn pcr_version_drift_reprobes_all_actions() {
         let (paths, _root) = paths_fixture();
-        let lc_id = lc_id_fixture();
         ProviderCapabilityStore::new(paths.clone())
             .upsert(&fully_confirmed_record("0.9.0-old", &REVALIDATE_ACTIONS))
             .expect("seed");
@@ -829,7 +903,7 @@ mod tests {
             .with_version_source(version_source(PROBE_VERSION))
             .with_probe_runner(counting_runner(calls.clone(), None));
         let outcome = service
-            .revalidate(PROJECT_ID, &lc_id, ProviderName::Codex)
+            .revalidate(ProviderName::Codex)
             .await
             .expect("版本漂移应整体重验");
         assert_eq!(
@@ -845,7 +919,6 @@ mod tests {
     #[tokio::test]
     async fn pcr_probe_failure_reports_honest_error_and_keeps_prior_imports() {
         let (paths, _root) = paths_fixture();
-        let lc_id = lc_id_fixture();
         let calls = Arc::new(AtomicUsize::new(0));
         // Coding(首个)成功、Planning 失败 → 如实点名失败 action，Coding 的
         // 已导入 Confirmed 保留，失败行不落盘。
@@ -856,7 +929,7 @@ mod tests {
                 Some(SessionPolicyAction::PlanningReadOnly),
             ));
         let error = service
-            .revalidate(PROJECT_ID, &lc_id, ProviderName::Codex)
+            .revalidate(ProviderName::Codex)
             .await
             .expect_err("探针失败必须如实失败");
         match error {
@@ -903,7 +976,7 @@ mod tests {
             }))
             .with_probe_runner(counting_runner(calls.clone(), None));
         let error = service
-            .revalidate(PROJECT_ID, &lc_id_fixture(), ProviderName::Codex)
+            .revalidate(ProviderName::Codex)
             .await
             .expect_err("CLI 缺失必须如实失败");
         match error {
@@ -919,14 +992,13 @@ mod tests {
     #[tokio::test]
     async fn pcr_snapshot_projects_durable_rows_and_import_visible() {
         let (paths, _root) = paths_fixture();
-        let lc_id = lc_id_fixture();
         let calls = Arc::new(AtomicUsize::new(0));
         let service = ProviderCapabilityRevalidateService::new(paths.clone())
             .with_version_source(version_source(PROBE_VERSION))
             .with_probe_runner(counting_runner(calls.clone(), None));
 
         // 未探测：bootstrap 默认记录不得显示为真实 Confirmed。
-        let before = service.capability_snapshot(PROJECT_ID).expect("快照");
+        let before = service.capability_snapshot().expect("快照");
         assert_eq!(before.len(), 4, "四家真实 provider");
         for snapshot in &before {
             assert!(snapshot.probed_at.is_none(), "未探测无 probed_at");
@@ -940,10 +1012,10 @@ mod tests {
         }
 
         service
-            .revalidate(PROJECT_ID, &lc_id, ProviderName::Codex)
+            .revalidate(ProviderName::Codex)
             .await
             .expect("探测导入");
-        let after = service.capability_snapshot(PROJECT_ID).expect("快照");
+        let after = service.capability_snapshot().expect("快照");
         let codex = after
             .iter()
             .find(|snapshot| snapshot.provider_type == ProviderRefType::Codex)

@@ -3900,10 +3900,7 @@ impl MatrixEnvironment {
             );
             return Err(self.fail_with_diagnostics(failure, None).await);
         };
-        let durable = match self
-            .gateway_factory
-            .durable_probe_writer_for_lc(PROJECT_ID, Some(&self.lc_id))
-        {
+        let durable = match self.gateway_factory.durable_probe_writer_for_lc() {
             Ok(writer) => writer,
             Err(error) => {
                 let failure = matrix_failure(

@@ -556,6 +556,13 @@ mod tests {
         }
     }
 
+    /// 四场景用例：(场景名, 该机器根下要写的记录, 期望判定)。
+    type LaunchCellCase = (
+        &'static str,
+        Option<Vec<(ProviderRefType, ProviderCapabilityEvidence)>>,
+        LaunchCellState,
+    );
+
     /// 把能力记录写进**机器级** capability store（REQ-PCR-07：唯一作用域 =
     /// 机器级 ⇒ 播种不再按项目/LC 分支）。
     ///
@@ -857,11 +864,7 @@ mod tests {
         // 分叉），只能靠**不同机器根 + 不同记录内容**。
         //
         // 「record missing」场景：不写任何记录 → 记录缺失。
-        let cases: Vec<(
-            &str,
-            Option<Vec<(ProviderRefType, ProviderCapabilityEvidence)>>,
-            LaunchCellState,
-        )> = vec![
+        let cases: Vec<LaunchCellCase> = vec![
             (
                 "confirmed",
                 Some(vec![(ProviderRefType::Pi, confirmed())]),

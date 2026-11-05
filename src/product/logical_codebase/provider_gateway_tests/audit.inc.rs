@@ -147,7 +147,6 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
     let root = tempfile::tempdir().expect("temporary product root");
     let paths = ProductAppPaths::new(root.path());
     let store = ProviderCapabilityStore::new(paths.clone());
-    let project_id = "project_0001";
     let action = SessionPolicyAction::CodingTargetWrite;
     let stale = ProviderCapabilityRecord {
         provider_type: ProviderRefType::KimiCode,
@@ -241,7 +240,7 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         fixture.gate.clone(),
     );
     let service = factory
-        .durable_probe_writer_for_lc(project_id, None)
+        .durable_probe_writer_for_lc()
         .expect("factory 注入 durable probe writer");
     let error = service
         .record_verified_probe(&record, &evidence, &projection)

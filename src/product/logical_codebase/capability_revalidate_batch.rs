@@ -206,13 +206,11 @@ pub type BatchRevalidateCall =
 /// 把既有单家服务包装成批量核验调用（只做转发，不改单家语义）。
 pub fn revalidate_call_for(service: ProviderCapabilityRevalidateService) -> BatchRevalidateCall {
     Arc::new(
-        move |project_id: String, logical_codebase_id: String, provider: ProviderName| {
+        move |_project_id: String, _logical_codebase_id: String, provider: ProviderName| {
             let service = service.clone();
-            Box::pin(async move {
-                service
-                    .revalidate(&project_id, &logical_codebase_id, provider)
-                    .await
-            })
+            // 机器级重验证（REQ-PCR-07）：单家核验不再按项目/逻辑代码库定位，
+            // seam 的两个作用域参数仅为兼容既有批量作业签名（Task 5 收敛）。
+            Box::pin(async move { service.revalidate(provider).await })
         },
     )
 }
