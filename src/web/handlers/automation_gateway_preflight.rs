@@ -565,7 +565,6 @@ mod tests {
     fn role_chain_fixture(records: &[ProviderCapabilityRecord]) -> RoleChainFixture {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = ProductAppPaths::new(temp.path().to_path_buf());
-        let project_id = "project_t08".to_string();
         let lc_id = "lc_t08".to_string();
         let capability_store = ProviderCapabilityStore::new(paths.clone());
         for record in records {
@@ -587,7 +586,7 @@ mod tests {
             AggregatePolicyArtifactStore::new(paths.clone()),
             Arc::new(
                 StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
-                    paths, project_id, lc_id,
+                    paths, lc_id,
                 ),
             ),
             Arc::new(UnreachableTargetResolver),

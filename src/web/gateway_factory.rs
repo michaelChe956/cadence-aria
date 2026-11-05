@@ -114,8 +114,8 @@ impl LogicalCodebaseGatewayFactory {
 
     /// v1.3:按 issue 所属代码库构造 gateway——lc_id Some 时 policy/manifest
     /// 解析到 `logical-codebases/{lc_id}/` 子树 (C4 Task 2 legacy 别名统一走
-    /// `for_lc`)；**capability 记录是项目级全局**（owner 2026-11-04 决策 1：
-    /// 一次核验全项目可用 ⇒ 不随 LC 分叉）。
+    /// `for_lc`)；**capability 记录是机器级**（REQ-PCR-07：一次核验整机
+    /// 可用 ⇒ 不随 LC/项目分叉）。
     /// Task 3b:`ensure_stores` 区分只读组装与 material prep(写 ensure_bootstrap)。
     fn build_scoped(
         &self,
@@ -142,10 +142,12 @@ impl LogicalCodebaseGatewayFactory {
             policies.ensure_bootstrap(&manifest)?;
         }
 
-        // capability 记录的唯一作用域 = **项目级全局**（owner 2026-11-04
-        // 决策 1/3）：自举占位行只写全局一份，不随 LC 分叉。
+        // capability 记录的唯一作用域 = **机器级**（REQ-PCR-07）：
+        // 自举占位行整机一份，不随项目/LC 分叉。
         let capabilities = ProviderCapabilityStore::new(self.paths.clone());
         if ensure_stores {
+            // material prep(#8/recipe):允许写 recipe 材料;readonly 组装
+            // 绝不在读取路径上物化自举桩。
             capabilities.ensure_bootstrap()?;
         }
 
@@ -174,21 +176,18 @@ impl LogicalCodebaseGatewayFactory {
 
         Ok(LogicalCodebaseProviderGateway::with_audit(
             policies,
-            // Task 1c-factory(carry③):LC 作用域装配 **全局 capability 记录 +
-            // 按 LC 的 root-recipe 凭据重核验通道**（capability 作用域是项目级
-            // 全局；root-recipe 通道重验的是本 LC 的聚合初始化 operation，仍按
+            // Task 1c-factory(carry③):LC 作用域装配 **机器级 capability 记录 +
+            // 按 LC 的 root-recipe 凭据重核验通道**（capability 作用域是机器级；
+            // root-recipe 通道重验的是本 LC 的聚合初始化 operation，仍按
             // LC）；无 LC 作用域(legacy)保持 `with_store` 原语义（无通道）。
             Arc::new(match lc_id.as_deref() {
                 Some(lc_id) => {
                     StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
                         self.paths.clone(),
-                        project_id.to_string(),
                         lc_id.to_string(),
                     )
                 }
-                None => {
-                    StoreBackedProviderCapabilitySource::with_store(capabilities, project_id.to_string())
-                }
+                None => StoreBackedProviderCapabilitySource::with_store(capabilities),
             }),
             Arc::new(match lc_id.as_deref() {
                 // R9 fix round 1【Important-1】：resolver 同步按 lc_id 作用域解析 checkout

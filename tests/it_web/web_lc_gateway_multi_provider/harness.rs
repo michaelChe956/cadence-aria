@@ -2275,7 +2275,6 @@ fn task11_assembled_gateway(
         Arc::new(
             StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
                 env.app_paths.clone(),
-                PROJECT_ID.to_string(),
                 env.lc_id.clone(),
             ),
         ),

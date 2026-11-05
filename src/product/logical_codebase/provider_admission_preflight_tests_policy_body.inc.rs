@@ -497,15 +497,15 @@ mod policy_body_tests {
         let fixture = admission_fixture();
         let (_operations, _operation_id, credential) = derived_credential(&fixture);
 
-        // 记录写入**项目级全局** capability store;source 走
-        // `global_capability_with_lc_recipe_recheck`(capability 全局 +
+        // 记录写入**机器级** capability store;source 走
+        // `global_capability_with_lc_recipe_recheck`(capability 机器级 +
         // recipe 凭据 durable 重核验通道仍按 LC)。
         let store = T02Store::new(fixture.paths.clone());
         store.ensure_bootstrap().unwrap();
         store
             .upsert(&t02_recipe_contract_record())
             .unwrap();
-        let source = T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.project_id.clone(), fixture.lc_id.clone());
+        let source = T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.lc_id.clone());
 
         // recipe 相位:同一记录的已交付 recipe 证据 + 有效凭据(durable
         // Running 派生)→ 固定 Claude recipe 事实放行(先于 source 移入 gateway)。
@@ -664,7 +664,7 @@ mod policy_body_tests {
             version: delivered_version.to_string(),
         };
         store.upsert(&record).unwrap();
-        T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.project_id.clone(), fixture.lc_id.clone())
+        T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.lc_id.clone())
     }
 
     /// 凭据每次对 durable Running 重验:Running 放行;operation 完成后
@@ -696,10 +696,7 @@ mod policy_body_tests {
         );
 
         // 无 durable 重核验通道(with_store 构造):即使记录在场也拒绝。
-        let channelless = T02Source::with_store(
-            T02Store::new(fixture.paths.clone()),
-            fixture.project_id.clone(),
-        );
+        let channelless = T02Source::with_store(T02Store::new(fixture.paths.clone()));
         let error = channelless
             .require_root_recipe_supported(&provider_ref, &credential)
             .unwrap_err();
@@ -754,7 +751,6 @@ mod policy_body_tests {
         store.upsert(&t02_pi_recipe_contract_record()).unwrap();
         let source = T02Source::global_capability_with_lc_recipe_recheck(
             fixture.paths.clone(),
-            fixture.project_id.clone(),
             fixture.lc_id.clone(),
         );
         source
@@ -773,10 +769,7 @@ mod policy_body_tests {
         let store = T02Store::new(fixture.paths.clone());
         store.ensure_bootstrap().unwrap();
         store.upsert(&t02_pi_recipe_contract_record()).unwrap();
-        let channelless = T02Source::with_store(
-            T02Store::new(fixture.paths.clone()),
-            fixture.project_id.clone(),
-        );
+        let channelless = T02Source::with_store(T02Store::new(fixture.paths.clone()));
         let error = channelless
             .require_root_recipe_supported(
                 &ProviderRef::pi("cap_managed_snapshot"),
@@ -800,7 +793,6 @@ mod policy_body_tests {
         store.upsert(&t02_pi_recipe_contract_record()).unwrap();
         let source = T02Source::global_capability_with_lc_recipe_recheck(
             fixture.paths.clone(),
-            fixture.project_id.clone(),
             fixture.lc_id.clone(),
         );
         finish_bootstrap_operation(&operations, &fixture, &operation_id);
@@ -874,7 +866,6 @@ mod policy_body_tests {
             Arc::new(
                 StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
                     fixture.paths.clone(),
-                    fixture.project_id.clone(),
                     fixture.lc_id.clone(),
                 ),
             ),

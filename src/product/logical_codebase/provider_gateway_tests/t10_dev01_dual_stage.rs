@@ -59,7 +59,6 @@ impl T10StoreFixture {
             AggregatePolicyArtifactStore::new(self.paths.clone()),
             Arc::new(StoreBackedProviderCapabilitySource::new(
                 self.paths.clone(),
-                "project_0001".to_string(),
             )),
             Arc::new(MutableTargetResolver::new(
                 self.paths.root().join("baseline.git"),

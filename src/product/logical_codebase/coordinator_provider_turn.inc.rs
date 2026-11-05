@@ -936,7 +936,6 @@ mod provider_turn_lcg_tests {
                 Arc::new(
                     StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
                         paths.clone(),
-                        project.id.clone(),
                         lc.id.clone(),
                     ),
                 ),

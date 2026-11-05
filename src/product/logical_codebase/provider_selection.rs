@@ -204,15 +204,16 @@ impl ProviderSelectionOutcome {
 ///
 /// 见模块文档:两层判据 + 与 gateway 同源。**不创建 operation**。
 ///
-/// **无 lc_id 参数**：L2 读项目级全局 capability 记录（owner 2026-11-04
-/// 决策 1/4）⇒ 选择结论与逻辑代码库无关（同项目内任意 LC 的选择结论相同）。
-/// LC 作用域仍存在于 HTTP 层（404 守卫 / 失败面核验入口路径），不在此判定内。
+/// **选择判定与项目/逻辑代码库无关**:L2 读**机器级** capability 记录
+/// (REQ-PCR-07,一次核验整机可用)⇒ 任意上下文的选择结论相同。
+/// LC 作用域仍存在于 HTTP 层(404 守卫 / 失败面核验入口路径),不在此
+/// 判定内;`project_id` 参数不参与判定(capability 记录无第二作用域)。
 pub async fn select_aggregate_provider(
     paths: &ProductAppPaths,
     health: &ProviderHealthService,
-    project_id: &str,
+    _project_id: &str,
 ) -> Result<ProviderSelectionOutcome, ProductStoreError> {
-    select_aggregate_provider_at(paths, health, project_id, Utc::now()).await
+    select_aggregate_provider_at(paths, health, _project_id, Utc::now()).await
 }
 
 /// 选择器(显式给出「当前时刻」)。
@@ -222,7 +223,7 @@ pub async fn select_aggregate_provider(
 pub async fn select_aggregate_provider_at(
     paths: &ProductAppPaths,
     health: &ProviderHealthService,
-    project_id: &str,
+    _project_id: &str,
     now: DateTime<Utc>,
 ) -> Result<ProviderSelectionOutcome, ProductStoreError> {
     let snapshot = health.snapshot();
@@ -236,11 +237,11 @@ pub async fn select_aggregate_provider_at(
         }
     }
     let snapshot = health.snapshot();
-    // L2 读**项目级全局** capability 记录（owner 2026-11-04 决策 4/R1）：
-    // 一次核验 ⇒ 全项目（含本 LC）L2 放行 ⇒ 聚合初始化自动开始。
+    // L2 读**机器级** capability 记录(REQ-PCR-07):一次核验 ⇒ 整机
+    // (含本 LC)L2 放行 ⇒ 聚合初始化自动开始;不存在按项目/LC 读取
+    // 的第二作用域分支。
     let source = StoreBackedProviderCapabilitySource::with_store(
         ProviderCapabilityStore::new(paths.clone()),
-        project_id.to_string(),
     );
     decide_selection(&source, snapshot.as_ref(), now)
 }
@@ -640,6 +641,73 @@ mod tests {
         assert!(table.candidates[0].skipped_reason.is_none());
     }
 
+    /// Task 3(读取点迁移):capability 读取只认**机器级**记录(REQ-PCR-07
+    /// 「读取只读机器级」)。机器级路径种一条 Confirmed(全程不创建任何
+    /// 项目/LC)⇒ 选择器读到 Confirmed;项目级/LC 级路径(子树真实存在)
+    /// 下没有任何记录 ⇒ 判未核验——不存在「机器级无记录时回退扫描其它
+    /// 作用域」的读取分支。构造接口不再携带 project_id 作用域参数
+    /// (capability 记录作用域唯一 = 机器级)。
+    #[tokio::test]
+    async fn selection_reads_machine_level_capability() {
+        // —— 场景一:机器级种 Confirmed;不创建任何项目/LC ——
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let now = Utc::now();
+        let (health, _runner) = health_service(root.path(), Vec::new(), now);
+        write_records(&paths, &[(ProviderRefType::Pi, confirmed())]);
+
+        // 读取点(新接口):机器级 store 直接装配,无 project_id 参数;
+        // 判定仍走选择器与 gateway 唯一共用的只读判定函数 launch_cell_state。
+        let source = StoreBackedProviderCapabilitySource::with_store(
+            ProviderCapabilityStore::new(paths.clone()),
+        );
+        let provider_ref =
+            ProviderRef::from_provider_name(&ProviderName::Pi, MANAGED_CAPABILITY_SNAPSHOT_REF)
+                .expect("pi provider ref");
+        assert!(
+            matches!(
+                launch_cell_state(&source, &provider_ref, SessionPolicyAction::PlanningReadOnly),
+                Ok(LaunchCellState::Confirmed)
+            ),
+            "machine-level Confirmed record must read Confirmed without any project/lc"
+        );
+
+        // 选择器端到端:同一机器级事实 ⇒ Selected(Pi);项目/LC 是否存在
+        // 与结论无关(本场景根本没有建)。
+        let outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
+            .await
+            .expect("selection");
+        assert!(
+            matches!(outcome, ProviderSelectionOutcome::Selected(_)),
+            "selector must read the machine-level Confirmed record"
+        );
+
+        // —— 场景二:项目级/LC 级路径下没有记录 ⇒ 判未核验 ——
+        let empty = tempfile::tempdir().expect("empty product root");
+        let empty_paths = ProductAppPaths::new(empty.path().join(".aria"));
+        // 项目级/LC 级子树真实存在(否则「不存在」是空断言),但机器级
+        // capability 文件不存在。
+        std::fs::create_dir_all(
+            empty_paths
+                .logical_codebase_root("project_0001")
+                .join("lc_0001"),
+        )
+        .expect("project/lc subtree dirs");
+        let empty_source = StoreBackedProviderCapabilitySource::new(empty_paths);
+        match launch_cell_state(
+            &empty_source,
+            &provider_ref,
+            SessionPolicyAction::PlanningReadOnly,
+        )
+        .expect("launch cell state")
+        {
+            LaunchCellState::Unverified { .. } => {}
+            other => panic!(
+                "no machine-level record must read unverified (no fallback scope), got {other:?}"
+            ),
+        }
+    }
+
     #[tokio::test]
     async fn selection_skips_provider_with_missing_command_and_picks_next() {
         let root = tempfile::tempdir().expect("temporary product root");
@@ -906,7 +974,6 @@ mod tests {
             }
             let source = StoreBackedProviderCapabilitySource::with_store(
                 ProviderCapabilityStore::new(paths.clone()),
-                "project_0001".to_string(),
             );
             let provider_ref = ProviderRef::pi(MANAGED_CAPABILITY_SNAPSHOT_REF);
             let state = launch_cell_state(
@@ -939,7 +1006,6 @@ mod tests {
         write_records(&snapshot_paths, &[(ProviderRefType::Pi, confirmed())]);
         let source = StoreBackedProviderCapabilitySource::with_store(
             ProviderCapabilityStore::new(snapshot_paths.clone()),
-            "project_0001".to_string(),
         );
         let mismatched_ref = ProviderRef::pi("cap_other_snapshot");
         let state = launch_cell_state(
