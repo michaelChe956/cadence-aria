@@ -15,7 +15,7 @@ mod sc_manual_revision;
 mod single_candidate_arm;
 #[path = "provider_run/task_body.rs"]
 mod task_body;
-pub(crate) use task_body::provider_run_task_body;
+pub(crate) use task_body::provider_run_task;
 // S0 体积基线（stack_budget）仅测试用窄再导出；库构建不经此处。
 #[cfg(test)]
 pub(crate) use basic_arms::{
@@ -26,7 +26,9 @@ pub(crate) use sc_manual_revision::drive_human_gate_sc_revision_arm;
 #[cfg(test)]
 pub(crate) use single_candidate_arm::drive_single_candidate_author_arm;
 #[cfg(test)]
-pub(crate) use task_body::ArmDrive;
+pub(crate) use task_body::{
+    ArmDrive, PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS, provider_run_drive_body, provider_run_task_body,
+};
 
 /// B2b3（Task 5.4，设计 §5.3）：读取本会话当前 LC 显式 fresh 恢复记录——
 /// 仅 `FreshRunning` 时返回 `Some`（臂内据此区分 fresh 消费与正常续跑：
@@ -327,10 +329,11 @@ pub(super) async fn spawn_provider_run_with_start_mode(
         _ => None,
     };
     let cancel_arm_outbound_tx = outbound_tx_for_task.clone();
-    // S0 机械提取：spawn 处直接构造具名 task body future（此步不加
-    // trampoline；Box 边界属后续任务）。原匿名 async 块逐字迁移至
-    // provider_run/task_body.rs；参数即原块被 move 的逐捕获。
-    tokio::spawn(provider_run_task_body(
+    // S2 小外壳收口（设计 §3.1.2）：spawn 只搬运 `provider_run_task` 的小
+    // 捕获外壳（≤32 KiB 门禁）；task body 的构造/装箱推迟到新任务首次
+    // poll 内（`Box::pin(provider_run_task_body(..))` 边界，见 task_body.rs），
+    // 深 inbound 调用链不再构造巨型 body future。
+    tokio::spawn(provider_run_task(
         run_kind,
         run_context_clone,
         engine_for_run,

@@ -12,10 +12,10 @@
                     {
                         Ok(r) => r,
                         Err(message) => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             drop(engine);
                             let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                             return;
                         }
                     };
@@ -27,12 +27,12 @@
                 ) {
                     Ok(r) => r,
                     Err(error) => {
-                        engine.mark_active_run_finished(&run_label);
+                        engine.mark_active_run_finished(run_label);
                         drop(engine);
                         let err = WsOutMessage::Error {
                             message: format!("load repository failed: {error}"),
                         };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
@@ -43,12 +43,12 @@
                 ) {
                     Ok(i) => i,
                     Err(error) => {
-                        engine.mark_active_run_finished(&run_label);
+                        engine.mark_active_run_finished(run_label);
                         drop(engine);
                         let err = WsOutMessage::Error {
                             message: format!("load issue failed: {error}"),
                         };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
@@ -57,12 +57,12 @@
                 let plan_launch = match resolve_plan_author_launch(&engine) {
                     Ok(launch) => launch,
                     Err(error) => {
-                        engine.mark_active_run_finished(&run_label);
+                        engine.mark_active_run_finished(run_label);
                         drop(engine);
                         let err = WsOutMessage::Error {
                             message: format!("logical plan launch failed: {error}"),
                         };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
@@ -116,14 +116,14 @@
                     ) {
                         Ok(invocation) => invocation,
                         Err(error) => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             let err = WsOutMessage::Error {
                                 message: format!(
                                     "outline fresh revision invocation failed: {}",
                                     error.message
                                 ),
                             };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                             return;
                         }
                     }
@@ -142,14 +142,14 @@
                     ) {
                         Ok(invocation) => invocation,
                         Err(error) => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             let err = WsOutMessage::Error {
                                 message: format!(
                                     "outline revision invocation failed: {}",
                                     error.message
                                 ),
                             };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                             return;
                         }
                     }
@@ -163,10 +163,10 @@
                     ) {
                         Ok(resolutions) => resolutions,
                         Err(message) => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             drop(engine);
                             let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                             return;
                         }
                     };
@@ -181,11 +181,11 @@
                     ) {
                         Ok(invocation) => invocation,
                         Err(error) => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             let err = WsOutMessage::Error {
                                 message: format!("split generate failed: {}", error.message),
                             };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                             return;
                         }
                     }
@@ -217,12 +217,12 @@
                     match engine.active_timeline_node_id() {
                         Some(node_id) => node_id,
                         None => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             drop(engine);
                             let err = WsOutMessage::Error {
                                 message: "work item plan outline run node unavailable".to_string(),
                             };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                            let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                             return;
                         }
                     }
@@ -271,10 +271,10 @@
                 let provider_input = match provider_input {
                     Ok(provider_input) => provider_input,
                     Err(message) => {
-                        engine.mark_active_run_finished(&run_label);
+                        engine.mark_active_run_finished(run_label);
                         drop(engine);
                         let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
@@ -290,10 +290,10 @@
                 ) {
                     Ok(run) => run,
                     Err(message) => {
-                        engine.mark_active_run_finished(&run_label);
+                        engine.mark_active_run_finished(run_label);
                         drop(engine);
                         let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
@@ -331,7 +331,7 @@
                             plan_split_run.as_ref(),
                             &format!("provider session drive failed: {message}"),
                         );
-                        engine.mark_active_run_finished(&run_label);
+                        engine.mark_active_run_finished(run_label);
                         return;
                     }
                 };
@@ -349,7 +349,7 @@
                             .await;
                         drop(engine);
                         let err = WsOutMessage::Error { message };
-                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                         return;
                     }
                 };
@@ -362,14 +362,14 @@
                 loop {
                     match outcome {
                         WorkItemPlanAuthorOutcome::AuthorConfirm => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             drop(engine);
                             drop(provider_drive_guard.take());
                             manager_for_task.finish_run(run_token).await;
                             return;
                         }
                         WorkItemPlanAuthorOutcome::HumanConfirm { reason: _ } => {
-                            engine.mark_active_run_finished(&run_label);
+                            engine.mark_active_run_finished(run_label);
                             drop(engine);
                             drop(provider_drive_guard.take());
                             manager_for_task.finish_run(run_token).await;
@@ -378,13 +378,13 @@
                         WorkItemPlanAuthorOutcome::AutoRevision { findings } => {
                             revision_iterations += 1;
                             if revision_iterations > 5 {
-                                engine.mark_active_run_finished(&run_label);
+                                engine.mark_active_run_finished(run_label);
                                 drop(engine);
                                 let err = WsOutMessage::Error {
                                     message: "work item plan author revision exceeded hard limit"
                                         .to_string(),
                                 };
-                                let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                                 return;
                             }
 
@@ -400,12 +400,12 @@
                             let plan_launch = match resolve_plan_author_launch(&engine) {
                                 Ok(launch) => launch,
                                 Err(error) => {
-                                    engine.mark_active_run_finished(&run_label);
+                                    engine.mark_active_run_finished(run_label);
                                     drop(engine);
                                     let err = WsOutMessage::Error {
                                         message: format!("logical plan launch failed: {error}"),
                                     };
-                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                                     return;
                                 }
                             };
@@ -421,7 +421,7 @@
                                 ) {
                                     Ok(invocation) => invocation,
                                     Err(error) => {
-                                        engine.mark_active_run_finished(&run_label);
+                                        engine.mark_active_run_finished(run_label);
                                         drop(engine);
                                         let err = WsOutMessage::Error {
                                             message: format!(
@@ -430,7 +430,7 @@
                                             ),
                                         };
                                         let _ =
-                                            send_json_outbound(&outbound_tx_for_task, &err).await;
+                                            send_json_outbound(outbound_tx_for_task, &err).await;
                                         return;
                                     }
                                 };
@@ -461,10 +461,10 @@
                             let provider_input = match provider_input {
                                 Ok(provider_input) => provider_input,
                                 Err(message) => {
-                                    engine.mark_active_run_finished(&run_label);
+                                    engine.mark_active_run_finished(run_label);
                                     drop(engine);
                                     let err = WsOutMessage::Error { message };
-                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                                     return;
                                 }
                             };
@@ -481,10 +481,10 @@
                             ) {
                                 Ok(run) => run,
                                 Err(message) => {
-                                    engine.mark_active_run_finished(&run_label);
+                                    engine.mark_active_run_finished(run_label);
                                     drop(engine);
                                     let err = WsOutMessage::Error { message };
-                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                                     return;
                                 }
                             };
@@ -513,7 +513,7 @@
                                         plan_split_run.as_ref(),
                                         &format!("provider session drive failed: {message}"),
                                     );
-                                    engine.mark_active_run_finished(&run_label);
+                                    engine.mark_active_run_finished(run_label);
                                     return;
                                 }
                             };
@@ -535,7 +535,7 @@
                                         .await;
                                     drop(engine);
                                     let err = WsOutMessage::Error { message };
-                                    let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                                    let _ = send_json_outbound(outbound_tx_for_task, &err).await;
                                     return;
                                 }
                             };

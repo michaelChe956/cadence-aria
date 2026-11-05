@@ -34,6 +34,9 @@ pub(crate) async fn drive_human_gate_sc_revision_arm<'e>(
         run_token,
         provider_drive_guard,
         run_cancel,
+        // S2：ArmDrive 新增 drive 尾部字段（provider_registry/rebuild_context
+        // 等）本臂不消费——`..` 忽略，不改变臂内绑定面。
+        ..
     } = drive;
     use crate::product::models::HumanGateTurnFailureClass;
     let mut command_rx = command_rx;

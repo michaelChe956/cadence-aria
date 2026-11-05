@@ -28,6 +28,9 @@ pub(crate) async fn drive_single_candidate_author_arm<'e>(drive: ArmDrive<'e, '_
         run_token,
         provider_drive_guard,
         run_cancel,
+        // S2：ArmDrive 新增 drive 尾部字段（provider_registry/rebuild_context
+        // 等）本臂不消费——`..` 忽略，不改变臂内绑定面。
+        ..
     } = drive;
     let mut command_rx = command_rx;
     // B2c（Task 5.5，设计 §5.3 sc_author 行）：FreshRunning 的

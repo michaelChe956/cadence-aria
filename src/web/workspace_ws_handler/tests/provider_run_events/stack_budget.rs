@@ -107,6 +107,194 @@ async fn provider_case_child_raw_budget() {
     run_raw_budget_measurement().await;
 }
 
+/// S2 body-probe 子模式用例：wrapper 首次 poll 构造语义探针（子进程隔离
+/// ——进程内其它用例的并发 provider spawn 不会污染构造计数）。
+#[tokio::test]
+async fn provider_case_child_body_probe() {
+    if std::env::var_os(super::small_stack_worker::PROVIDER_CASE_CHILD_MODE_ENV).is_none() {
+        return;
+    }
+    run_body_probe_measurement().await;
+}
+
+/// S2 同步父用例（不依赖进程内计数）：隔离子例证明「spawn 调用侧不构造
+/// task body、body 构造发生在 wrapper 首次 poll 内」（设计 §3.1.2）。
+#[test]
+fn body_is_not_constructed_before_wrapper_first_poll() {
+    super::small_stack_worker::run_isolated_provider_case(
+        "provider_case_child_body_probe",
+        std::time::Duration::from_secs(120),
+    )
+    .expect("body 构造必须推迟到 wrapper 首次 poll（隔离子例证据）");
+}
+
+/// S2 门禁：小外壳未装箱体积 ≤32 KiB（设计 §2.2）。直接量
+/// `provider_run_task` 的未 box 返回值——`Pin<Box<_>>` 的指针大小不是本
+/// 门禁对象（不测 box 后的指针形成假门禁）。
+#[tokio::test]
+async fn raw_wrapper_is_at_most_32768_bytes() {
+    let (run_context, outbound_tx, run_cancel, command_rx, run_token) =
+        stack_budget_fixture().await;
+    let provider_for_run = run_context
+        .provider_registry
+        .get(&ProviderName::ClaudeCode)
+        .expect("fixture provider");
+    let entity_run_lease =
+        crate::product::provider_workspace_runner::acquire_run_lease_for_session(
+            &run_context.app_paths,
+            &run_context.session_record,
+        )
+        .expect("fixture run lease");
+    let provider_drive_guard = run_context
+        .workspace_runs
+        .begin_provider_drive(&run_context.session_id);
+    let wrapper = provider_run_task(
+        ProviderRunKind::Author {
+            content: "stack budget baseline".to_string(),
+        },
+        run_context.clone(),
+        run_context.engine.clone(),
+        run_context.manager.clone(),
+        run_context.provider_registry.clone(),
+        provider_for_run.clone(),
+        outbound_tx.clone(),
+        outbound_tx.clone(),
+        run_context.session_id.clone(),
+        "run-1".to_string(),
+        run_token,
+        run_cancel.clone(),
+        command_rx,
+        provider_drive_guard,
+        entity_run_lease,
+        None,
+        false,
+        None,
+    );
+    let wrapper_bytes = std::mem::size_of_val(&wrapper);
+    print_raw_baseline("provider_run_task(wrapper)", wrapper_bytes);
+    drop(wrapper);
+    assert!(
+        wrapper_bytes <= 32768,
+        "raw future provider_run_task(外壳) = {wrapper_bytes} B exceeds 32768 B（S2 外壳门禁，设计 §2.2；profile/target/toolchain 见上方打印）"
+    );
+}
+
+/// S2 探针子模式执行体：真实 author 链夹具（engine 事件通道存活，与 r16
+/// 用例同构），构造 wrapper→断言计数 0→手动首 poll→断言计数 1→中途 drop
+/// 验证三守卫随任务体释放。
+async fn run_body_probe_measurement() {
+    let root = tempfile::tempdir().expect("temporary workspace root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("workspace session");
+    let (engine_tx, engine_rx) = mpsc::channel(64);
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle,
+        engine_tx,
+        WorkspaceSession::from_record(session_record.clone()),
+    )));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let held_event_senders = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        ProviderName::ClaudeCode,
+        Arc::new(PendingStartProvider {
+            starts: starts.clone(),
+            held_event_senders: held_event_senders.clone(),
+        }),
+    );
+    let workspace_runs = WorkspaceRunRegistry::default();
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(registry),
+        engine.clone(),
+        workspace_runs.clone(),
+        session_record.id.clone(),
+        app_paths,
+        session_record.clone(),
+    );
+    let (outbound_tx, _outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let forward =
+        spawn_engine_event_forward_task(engine_rx, outbound_tx.clone(), Some(run_context.clone()));
+    let provider_for_run = run_context
+        .provider_registry
+        .get(&ProviderName::ClaudeCode)
+        .expect("fixture provider");
+    let entity_run_lease =
+        crate::product::provider_workspace_runner::acquire_run_lease_for_session(
+            &run_context.app_paths,
+            &run_context.session_record,
+        )
+        .expect("fixture run lease");
+    let provider_drive_guard = run_context
+        .workspace_runs
+        .begin_provider_drive(&run_context.session_id);
+    let run_cancel = CancellationToken::new();
+    let (_command_tx, command_rx) = mpsc::channel(8);
+
+    PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS.store(0, Ordering::SeqCst);
+    let mut wrapper = Box::pin(provider_run_task(
+        ProviderRunKind::Author {
+            content: "body probe first poll".to_string(),
+        },
+        run_context.clone(),
+        run_context.engine.clone(),
+        run_context.manager.clone(),
+        run_context.provider_registry.clone(),
+        provider_for_run.clone(),
+        outbound_tx.clone(),
+        outbound_tx.clone(),
+        run_context.session_id.clone(),
+        "run-probe".to_string(),
+        1,
+        run_cancel.clone(),
+        command_rx,
+        provider_drive_guard,
+        entity_run_lease,
+        None,
+        false,
+        None,
+    ));
+    assert_eq!(
+        PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS.load(Ordering::SeqCst),
+        0,
+        "构造 provider_run_task 返回值（spawn 调用侧、未 poll）不得构造 task body"
+    );
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    let _ = wrapper.as_mut().poll(&mut cx);
+    assert_eq!(
+        PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS.load(Ordering::SeqCst),
+        1,
+        "task body 必须在 wrapper 首次 poll 内构造（计数不得为 0 或 >1）"
+    );
+    // 中途 drop：engine guard/idle/实体 lease 随任务体释放（r16 合同）——
+    // engine 锁必须立即可取。
+    drop(wrapper);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let _ = engine.lock().await;
+    })
+    .await
+    .expect("engine lock must be re-acquirable after dropping the wrapper mid-run");
+
+    held_event_senders.lock().await.clear();
+    forward.abort();
+    let _ = forward.await;
+}
+
 /// S0 characterization 同步父用例（不 poll 被测 future）：隔离执行专用
 /// raw-budget 子模式，验证其真实测量输出与预算失败分类并保存 S0 红值。
 /// 这不是「预算已通过」——任务 9 启用最终 raw 硬 assert 时移除本通过
@@ -119,10 +307,12 @@ fn raw_task_body_baseline() {
     );
     match result {
         Ok(()) => {
-            // 机械提取后预算意外已绿：如实打印（S0 预期为红，绿属异常需复核）。
+            // S2 后 task_body 只持外壳捕获+settle 装配，≤128 KiB 属预期绿
+            //（drive 整体体积改由 provider_run_drive_body 基线单独记录；
+            // 未拆族臂的超线治理属任务 3–8，不在此宣告根修完成）。
             println!(
-                "[stack-budget] raw-budget child unexpectedly green: task_body already \
-                 within {RAW_TASK_BODY_BUDGET} B"
+                "[stack-budget] raw-budget child green: task_body within \
+                 {RAW_TASK_BODY_BUDGET} B after S2 shell/boxed-drive split"
             );
         }
         Err(report) => {
@@ -179,6 +369,36 @@ async fn run_raw_budget_measurement() {
     let task_body_bytes = std::mem::size_of_val(&task_body);
     print_raw_baseline("provider_run_task_body", task_body_bytes);
 
+    // —— S2 具名 drive body：未装箱整体量测（boxed 前的真实基线；尚含
+    //    未拆族臂 ⇒ 预期超 128 KiB 硬线，任务 3–8 逐族拆分后才达标——
+    //    只记录，硬断言随任务 9 冻结）——
+    {
+        let engine_guard = run_context.engine.lock().await;
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
+        let (_drive_tx, drive_command_rx) = mpsc::channel(8);
+        let drive_body = provider_run_drive_body(
+            arm_drive(
+                engine_guard,
+                drive_command_rx,
+                provider_for_run.clone(),
+                &run_context,
+                &outbound_tx,
+                &mut idle_guard,
+                &run_cancel,
+                run_token,
+            ),
+            ProviderRunKind::Author {
+                content: "stack budget baseline".to_string(),
+            },
+        );
+        let drive_bytes = std::mem::size_of_val(&drive_body);
+        print_raw_baseline("provider_run_drive_body", drive_bytes);
+        drop(drive_body);
+    }
     // —— 基础臂 / SC author 臂原始 child：逐对象构造量测（各自作用域，互不
     //    共享 &mut idle Option 与 engine guard；仍只构造不 poll）——
     let arm_bytes = measure_named_arms(
@@ -407,11 +627,17 @@ fn arm_drive<'e, 'd>(
         command_rx,
         provider,
         manager: &run_context.manager,
+        provider_registry: &run_context.provider_registry,
         run_context,
         outbound_tx,
         run_label: "run-1",
         run_token,
         provider_drive_guard,
         run_cancel,
+        // S2：drive 尾部字段量测构造默认空置（尺寸按类型固定，不受运行期
+        // 值影响；legacy 载荷随 P3 迁移后再按族冻结）。
+        rebuild_context: None,
+        outline_revision_feedback: None,
+        is_outline_revision_run: false,
     }
 }
