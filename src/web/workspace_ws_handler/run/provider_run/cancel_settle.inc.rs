@@ -14,7 +14,7 @@
 // provider_run_events 的 supersede_reclaims_engine_lock 用例），窗口必须显著小于
 // 它；drive 侧收口只有本地 flush + durable 写 + 事件帧（毫秒级），250ms 留足余量。
 #[allow(clippy::too_many_arguments)] // 收口上下文与 run 主体同源，逐个传入不再包一层。
-pub(super) async fn drive_until_cancelled_settles<F>(
+pub(crate) async fn drive_until_cancelled_settles<F>(
     drive: F,
     run_cancel: &CancellationToken,
     cancelled_revision_turn_id: Option<String>,

@@ -262,7 +262,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     // 「归属必填」注释 + 别名 id 调用（多行）⇒ +8 行。
     ("src/web/workspace_session/tests/part_01.rs", 1619),
     ("src/web/workspace_session/tests/part_07.rs", 1272),
-    ("src/web/workspace_ws_handler/run/provider_run.rs", 1678),
     // 2026-10-30（REQ-WSC-10，待 owner 裁决）：运行期预校验接线成员 checkout
     // 前缀表装载（共享门控，单块调用）+8。
     ("src/web/workspace_ws_handler/run/single_candidate.rs", 1666),
@@ -280,10 +279,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         // 注释 + 别名 id 调用（rustfmt 规范形态，多行）⇒ +5 行。
         "src/web/workspace_ws_handler/tests/planning_resume.rs",
         2458,
-    ),
-    (
-        "src/web/workspace_ws_handler/tests/provider_run_events.rs",
-        1257,
     ),
     (
         "src/web/workspace_ws_handler/tests/single_candidate_lc_admission.rs",

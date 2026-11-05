@@ -41,6 +41,14 @@ pub(crate) use provider_run::{
 pub(crate) use provider_run::{
     deliver_attempt2_frozen_prompt, fail_cancelled_human_gate_revision_turn,
 };
+// S0（任务1）体积基线 raw 构造点窄再导出（stack_budget 专用；库构建不经此处）。
+#[cfg(test)]
+pub(crate) use provider_run::{
+    drive_author_arm, drive_author_choice_followup_arm, drive_revision_arm, drive_review_only_arm,
+    drive_single_candidate_author_arm, drive_human_gate_sc_revision_arm,
+    drive_until_cancelled_settles, provider_run_task_body,
+    ArmDrive,
+};
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);
 
