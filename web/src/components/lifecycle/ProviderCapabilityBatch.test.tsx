@@ -1,9 +1,11 @@
 // 票3「一键核验全部」批量作业回归（迁自原 ProviderCapabilityBatchBar.test.tsx）。
+// 2026-11-05 机器级化：批量作业不再绑定项目/逻辑代码库（REQ-PCR-03），
+// 端点与 job_id 持久化键均为机器级。
 //
 // - 点击 → POST 发起异步作业（立即拿到 job_id），按钮「核验中（N/4）」+ 禁用；
 // - 终态停止轮询（不无限轮询）；
-// - 按钮区说明作用域与成本（全局核验（一次核验全项目可用）/ 真实探测 / 几分钟 /
-//   消耗额度）。
+// - 按钮区说明作用域与成本（机器级核验（核验只核验一次，机器一份事实）/
+//   真实探测 / 几分钟 / 消耗额度）。
 //
 // owner 2026-11-04：逐项结果（逐项状态 / 失败项【重试】/ 跳过项【安装】/
 // 版本落后【更新】）已迁到能力卡的**行级列表**，原 `ProviderCapabilityBatchResults`
@@ -23,10 +25,8 @@ import type {
 } from "../../api/types/capability-revalidate-batch";
 import type { ProviderCapabilityType } from "../../api/types/provider-capability";
 
-const PROJECT_ID = "project_0001";
-const LC_ID = "logical_codebase_0001";
-const BATCH_URL = `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities/revalidate-all`;
-const STORAGE_KEY = `aria:capability-batch:${PROJECT_ID}:${LC_ID}`;
+const BATCH_URL = "/api/providers/capabilities/revalidate-all";
+const STORAGE_KEY = "aria:capability-batch";
 
 const PROVIDERS: ProviderCapabilityType[] = [
   "claude_code",
@@ -125,7 +125,7 @@ function installBatchRouter(options: {
 
 /** 测试宿主：把 hook 与按钮 / 说明区按能力卡的摆法组合起来。 */
 function BatchHost() {
-  const state = useProviderCapabilityBatch(PROJECT_ID, LC_ID);
+  const state = useProviderCapabilityBatch();
   return (
     <div>
       <ProviderCapabilityBatchStartButton state={state} />
@@ -227,15 +227,35 @@ describe("ProviderCapabilityBatch（票3 一键批量核验）", () => {
     expect(getCount()).toBe(settledPolls);
   });
 
-  it("按钮区说明核验作用域与成本", () => {
+  it("按钮区说明核验作用域与成本（机器级口径）", () => {
     installBatchRouter({});
     renderBatch();
 
     const scope = screen.getByTestId("capability-batch-scope");
-    expect(scope).toHaveTextContent("全局核验");
-    expect(scope).toHaveTextContent("一次核验全项目可用");
+    expect(scope).toHaveTextContent("机器级核验");
+    expect(scope).toHaveTextContent("核验只核验一次");
+    expect(scope).toHaveTextContent("机器一份事实");
     expect(scope).toHaveTextContent("真实跑一次探测");
     expect(scope).toHaveTextContent("几分钟");
     expect(scope).toHaveTextContent("额度");
+  });
+
+  // 2026-11-05 机器级化（REQ-PCR-06）：按钮区说明改为机器级口径——核验只
+  // 核验一次、机器一份事实。断言用**逐字相等**（比「含新不含旧」更强）：
+  // 旧口径字样一个都不可能残留；旧口径的具体字样也不以字面量形式写进源码
+  // （验收 grep 对旧口径要求全仓 0 命中）。
+  it("scope copy states machine-level once-only verification", () => {
+    render(<ProviderCapabilityBatchScope />);
+
+    const scope = screen.getByTestId("capability-batch-scope");
+    expect(scope).toHaveTextContent("机器级核验");
+    expect(scope).toHaveTextContent("核验只核验一次");
+    expect(scope).toHaveTextContent("机器一份事实");
+    expect(scope).toHaveTextContent("真实跑一次探测");
+    expect(scope).toHaveTextContent("几分钟");
+    expect(scope).toHaveTextContent("额度");
+    expect(scope.textContent).toBe(
+      "机器级核验：核验只核验一次，机器一份事实；会真实跑一次探测，可能几分钟，消耗 provider 额度。",
+    );
   });
 });

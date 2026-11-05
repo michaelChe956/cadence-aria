@@ -1,5 +1,7 @@
 // 票3「一键核验全部」：批量核验作业的发起与轮询 API（独立于块2 的
 // provider-capability.ts / provider-install.ts，互不改写）。
+// 2026-11-05 机器级化（REQ-PCR-03）：批量作业不绑定项目/逻辑代码库 ⇒
+// 端点不再携带 project/logical-codebase 标识。
 import { ApiRequestError, normalizeApiError } from "./client";
 import type {
   CapabilityRevalidateBatchJobDto,
@@ -24,24 +26,13 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-function batchPath(projectId: string, logicalCodebaseId: string): string {
-  return `/api/projects/${encodeURIComponent(
-    projectId,
-  )}/logical-codebases/${encodeURIComponent(
-    logicalCodebaseId,
-  )}/capabilities/revalidate-all`;
-}
-
 /**
  * 显式发起「一键核验全部」：四家并发、异步作业，立即返回 `job_id`
  * （202；MUST NOT 在响应内等待探针）。
  */
-export function startCapabilityRevalidateBatch(
-  projectId: string,
-  logicalCodebaseId: string,
-): Promise<CapabilityRevalidateBatchStartResult> {
+export function startCapabilityRevalidateBatch(): Promise<CapabilityRevalidateBatchStartResult> {
   return requestJson<CapabilityRevalidateBatchStartResult>(
-    batchPath(projectId, logicalCodebaseId),
+    "/api/providers/capabilities/revalidate-all",
     { method: "POST" },
   );
 }
@@ -51,11 +42,9 @@ export function startCapabilityRevalidateBatch(
  * 未知 job_id 抛 `capability_revalidate_batch_job_not_found`（404）。
  */
 export function getCapabilityRevalidateBatchJob(
-  projectId: string,
-  logicalCodebaseId: string,
   jobId: string,
 ): Promise<CapabilityRevalidateBatchJobDto> {
   return requestJson<CapabilityRevalidateBatchJobDto>(
-    `${batchPath(projectId, logicalCodebaseId)}/${encodeURIComponent(jobId)}`,
+    `/api/providers/capabilities/revalidate-all/${encodeURIComponent(jobId)}`,
   );
 }

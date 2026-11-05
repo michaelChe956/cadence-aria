@@ -1,10 +1,12 @@
 // Provider 管理面板（独立于「逻辑代码库」管理面板）单测。
-// 2026-11-04：owner 裁定 provider 的探针/核验/更新/安装/版本属【项目级全局】
-// 能力，不该寄居在 LC 仓抽屉里 ⇒ 侧栏「Provider 管理」入口 → 独立面板。
+// 2026-11-04：owner 裁定 provider 的探针/核验/更新/安装/版本属全局能力，
+// 不该寄居在 LC 仓抽屉里 ⇒ 侧栏「Provider 管理」入口 → 独立面板。
+// 2026-11-05 机器级化（REQ-PCR-08）：能力面不再按项目/逻辑代码库定位 ⇒
+// 面板不接收任何 id。
 // 本文件断言：
 // - Provider 管理面板【渲染】provider 能力核验区（行级列表 + 四家 provider）；
 // - 「一键核验全部」按钮挂在能力卡头部（四家 provider 行之前）且说明区是
-//   **全局核验**口径（作用域 + 三项成本告知）——这组断言自
+//   **机器级核验**口径（作用域 + 三项成本告知）——这组断言自
 //   LogicalCodebaseManagementPanel.test.tsx 迁来（宿主换成 Provider 管理面板，
 //   断言内容不弱化）；
 // - 抽屉外壳：标题「Provider 管理」、可关闭（× / Esc）、与 LC 管理抽屉互不干扰。
@@ -17,9 +19,6 @@ import type {
   ProviderCapabilitiesResponse,
   ProviderCapabilityType,
 } from "../../api/types";
-
-const PROJECT_ID = "project_0001";
-const LC_ID = "logical_codebase_0001";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -87,10 +86,7 @@ describe("Provider 管理面板", () => {
 
     render(
       <ProviderManagementDrawer open onClose={() => {}}>
-        <ProviderManagementPanel
-          projectId={PROJECT_ID}
-          logicalCodebaseId={LC_ID}
-        />
+        <ProviderManagementPanel />
       </ProviderManagementDrawer>,
     );
 
@@ -107,16 +103,13 @@ describe("Provider 管理面板", () => {
 
   // 自 LogicalCodebaseManagementPanel.test.tsx 迁来（宿主换成 Provider 管理
   // 面板）：「一键核验全部」按钮挂在能力卡头部（上方）、在四家 provider 行之前，
-  // 说明区是全局核验口径（作用域 + 三项成本告知）。断言内容不弱化。
-  it("「一键核验全部」按钮在能力卡头部（上方），说明区是全局核验口径", async () => {
+  // 说明区是机器级核验口径（作用域 + 三项成本告知）。断言内容不弱化。
+  it("「一键核验全部」按钮在能力卡头部（上方），说明区是机器级核验口径", async () => {
     stubFetch();
 
     render(
       <ProviderManagementDrawer open onClose={() => {}}>
-        <ProviderManagementPanel
-          projectId={PROJECT_ID}
-          logicalCodebaseId={LC_ID}
-        />
+        <ProviderManagementPanel />
       </ProviderManagementDrawer>,
     );
 
@@ -137,12 +130,15 @@ describe("Provider 管理面板", () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
 
-    // 按钮区域说明作用域与成本（REQ-PCR-06，全局口径）。
+    // 按钮区域说明作用域与成本（REQ-PCR-06，机器级口径）。
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
-      "全局核验",
+      "机器级核验",
     );
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
-      "一次核验全项目可用",
+      "核验只核验一次",
+    );
+    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
+      "机器一份事实",
     );
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
       "会真实跑一次探测",
@@ -162,10 +158,7 @@ describe("Provider 管理面板", () => {
 
     render(
       <ProviderManagementDrawer open onClose={onClose}>
-        <ProviderManagementPanel
-          projectId={PROJECT_ID}
-          logicalCodebaseId={LC_ID}
-        />
+        <ProviderManagementPanel />
       </ProviderManagementDrawer>,
     );
 
@@ -184,10 +177,7 @@ describe("Provider 管理面板", () => {
 
     render(
       <ProviderManagementDrawer open onClose={onClose}>
-        <ProviderManagementPanel
-          projectId={PROJECT_ID}
-          logicalCodebaseId={LC_ID}
-        />
+        <ProviderManagementPanel />
       </ProviderManagementDrawer>,
     );
 

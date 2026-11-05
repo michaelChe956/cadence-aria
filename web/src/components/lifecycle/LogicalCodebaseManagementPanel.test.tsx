@@ -4,8 +4,9 @@
 // - LC 面板【不渲染】provider 核验区（能力卡 / 行级列表 / 「一键核验全部」按钮 /
 //   作用域说明一个都不在）；
 // - 原位置留一行只读说明 + 「去 Provider 管理」入口，点击即打开独立面板；
-// - 「一键核验全部」按钮在能力卡头部（上方）+ 全局核验口径说明的这组断言迁到
-//   ProviderManagementPanel.test.tsx（宿主换成 Provider 管理面板，断言不弱化）。
+// - 「一键核验全部」按钮在能力卡头部（上方）+ 机器级核验口径说明的这组断言
+//   迁到 ProviderManagementPanel.test.tsx（宿主换成 Provider 管理面板，断言
+//   不弱化）。
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";

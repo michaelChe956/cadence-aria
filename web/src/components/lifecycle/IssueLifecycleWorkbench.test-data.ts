@@ -1,5 +1,6 @@
 import type {
   CodingAttempt,
+  Project,
   IssueWorkItemPlanDetailDto,
   LifecycleWorkItem,
   WorkspaceSession,
@@ -49,7 +50,7 @@ export function projectRecord(
   projectId: string,
   name: string,
   description: string | null = null,
-) {
+): Project {
   return {
     project_id: projectId,
     name,

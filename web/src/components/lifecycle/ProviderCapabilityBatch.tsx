@@ -21,7 +21,7 @@ import {
   getCapabilityRevalidateBatchJob,
   startCapabilityRevalidateBatch,
 } from "../../api/capability-revalidate-batch";
-import { postLogicalCodebaseCapabilityRevalidate } from "../../api/provider-capability";
+import { postProviderCapabilityRevalidate } from "../../api/provider-capability";
 import type {
   CapabilityRevalidateBatchItemDto,
   CapabilityRevalidateBatchJobDto,
@@ -47,32 +47,24 @@ export function capabilityBatchStatusLabel(
   return STATUS_LABELS[status];
 }
 
-function storageKey(projectId: string, logicalCodebaseId: string): string {
-  return `aria:capability-batch:${projectId}:${logicalCodebaseId}`;
-}
+/** 机器级作业的 job_id 持久化键：机器同一时刻只有一份事实 ⇒ 单键即可
+ *  （不再按项目/逻辑代码库分键）。 */
+const STORAGE_KEY = "aria:capability-batch";
 
-function readStoredJobId(
-  projectId: string,
-  logicalCodebaseId: string,
-): string | null {
+function readStoredJobId(): string | null {
   try {
-    return window.localStorage.getItem(storageKey(projectId, logicalCodebaseId));
+    return window.localStorage.getItem(STORAGE_KEY);
   } catch {
     return null;
   }
 }
 
-function storeJobId(
-  projectId: string,
-  logicalCodebaseId: string,
-  jobId: string | null,
-): void {
+function storeJobId(jobId: string | null): void {
   try {
-    const key = storageKey(projectId, logicalCodebaseId);
     if (jobId === null) {
-      window.localStorage.removeItem(key);
+      window.localStorage.removeItem(STORAGE_KEY);
     } else {
-      window.localStorage.setItem(key, jobId);
+      window.localStorage.setItem(STORAGE_KEY, jobId);
     }
   } catch {
     // localStorage 不可用只影响「刷新续轮询」，不影响核验本身。
@@ -111,52 +103,36 @@ export type ProviderCapabilityBatchState = {
 
 /**
  * 批量核验作业的持有者：job_id 持久化在 localStorage，2.5s 轮询 durable 作业，
- * 终态停轮询。行为语义与原批量条一致（本模块只是把状态从「条」里拆出来，
- * 让按钮能放在能力卡头部、逐项结果并入能力卡的行级列表）。
+ * 终态停轮询。机器级作业（不绑定项目/逻辑代码库，机器同一时刻一份事实）。
  */
-export function useProviderCapabilityBatch(
-  projectId: string | null,
-  logicalCodebaseId: string | null,
-): ProviderCapabilityBatchState {
+export function useProviderCapabilityBatch(): ProviderCapabilityBatchState {
   const [jobId, setJobId] = useState<string | null>(null);
   const [job, setJob] = useState<CapabilityRevalidateBatchJobDto | null>(null);
   const [starting, setStarting] = useState(false);
   const [retrying, setRetrying] = useState<ProviderCapabilityType | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // 切换 LC / 首次挂载：按 localStorage 的 job_id 续读 durable 作业
-  // （刷新不丢进度）。
+  // 首次挂载：按 localStorage 的 job_id 续读 durable 作业（刷新不丢进度）。
   useEffect(() => {
     setJob(null);
     setError(null);
-    setJobId(
-      projectId !== null && logicalCodebaseId !== null
-        ? readStoredJobId(projectId, logicalCodebaseId)
-        : null,
-    );
-  }, [projectId, logicalCodebaseId]);
+    setJobId(readStoredJobId());
+  }, []);
 
   const refreshById = useCallback(
     async (id: string): Promise<void> => {
-      if (projectId === null || logicalCodebaseId === null) {
-        return;
-      }
       try {
-        const next = await getCapabilityRevalidateBatchJob(
-          projectId,
-          logicalCodebaseId,
-          id,
-        );
+        const next = await getCapabilityRevalidateBatchJob(id);
         setJob(next);
         setError(null);
       } catch (caught) {
         setError(errorMessage(caught));
         // 未知 / 过期 job_id：停止续轮询（不无限打 404）。
-        storeJobId(projectId, logicalCodebaseId, null);
+        storeJobId(null);
         setJobId(null);
       }
     },
-    [projectId, logicalCodebaseId],
+    [],
   );
 
   const running = jobId !== null && (job === null || job.status === "running");
@@ -177,17 +153,11 @@ export function useProviderCapabilityBatch(
   }, [running, jobId, job, refreshById]);
 
   const start = useCallback(async (): Promise<void> => {
-    if (projectId === null || logicalCodebaseId === null) {
-      return;
-    }
     setStarting(true);
     setError(null);
     try {
-      const started = await startCapabilityRevalidateBatch(
-        projectId,
-        logicalCodebaseId,
-      );
-      storeJobId(projectId, logicalCodebaseId, started.job_id);
+      const started = await startCapabilityRevalidateBatch();
+      storeJobId(started.job_id);
       setJob(null);
       setJobId(started.job_id);
     } catch (caught) {
@@ -195,22 +165,15 @@ export function useProviderCapabilityBatch(
     } finally {
       setStarting(false);
     }
-  }, [projectId, logicalCodebaseId]);
+  }, []);
 
   // 失败项单独重试：走既有单 provider 端点（不重跑整批），随后刷新作业。
   const retry = useCallback(
     async (providerType: ProviderCapabilityType): Promise<void> => {
-      if (projectId === null || logicalCodebaseId === null) {
-        return;
-      }
       setRetrying(providerType);
       setError(null);
       try {
-        await postLogicalCodebaseCapabilityRevalidate(
-          projectId,
-          logicalCodebaseId,
-          providerType,
-        );
+        await postProviderCapabilityRevalidate(providerType);
         if (jobId !== null) {
           await refreshById(jobId);
         }
@@ -220,7 +183,7 @@ export function useProviderCapabilityBatch(
         setRetrying(null);
       }
     },
-    [projectId, logicalCodebaseId, jobId, refreshById],
+    [jobId, refreshById],
   );
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -267,9 +230,9 @@ export function ProviderCapabilityBatchStartButton({
 }
 
 /**
- * 按钮区的作用域与成本说明（REQ-PCR-06「按钮区域 SHALL 说明：**项目级全局**
- * （一次核验全项目可用，不再逐逻辑代码库分别核验）/ 真实探测 / 消耗额度 /
- * 可能几分钟」）。紧贴按钮渲染，不藏进折叠区。
+ * 按钮区的作用域与成本说明（REQ-PCR-06「按钮区域 SHALL 说明：**机器级**
+ * （核验只核验一次，机器一份事实，与项目、逻辑代码库无关）/ 真实探测 /
+ * 消耗额度 / 可能几分钟」）。紧贴按钮渲染，不藏进折叠区。
  */
 export function ProviderCapabilityBatchScope() {
   return (
@@ -277,7 +240,7 @@ export function ProviderCapabilityBatchScope() {
       data-testid="capability-batch-scope"
       className="mt-1 text-[11px] text-[var(--aria-ink-muted)]"
     >
-      全局核验：一次核验全项目可用；会真实跑一次探测，可能几分钟，消耗 provider 额度。
+      机器级核验：核验只核验一次，机器一份事实；会真实跑一次探测，可能几分钟，消耗 provider 额度。
     </p>
   );
 }

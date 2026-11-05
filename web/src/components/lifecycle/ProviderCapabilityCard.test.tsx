@@ -32,10 +32,11 @@ import type {
   ProviderCapabilitiesResponse,
 } from "../../api/types";
 
-const PROJECT_ID = "project_0001";
-const LC_ID = "logical_codebase_0001";
 const BATCH_JOB_ID = "job_0001";
-const BATCH_STORAGE_KEY = `aria:capability-batch:${PROJECT_ID}:${LC_ID}`;
+const BATCH_STORAGE_KEY = "aria:capability-batch";
+const CAPABILITIES_URL = "/api/providers/capabilities";
+const REVALIDATE_URL = "/api/providers/capabilities/revalidate";
+const BATCH_URL = "/api/providers/capabilities/revalidate-all";
 
 type CapturedRequest = { url: string; method: string; body: unknown };
 let captured: CapturedRequest[];
@@ -69,27 +70,16 @@ function installFetchRouter(
       method,
       body: rawBody === null ? null : JSON.parse(rawBody),
     });
-    if (
-      method === "GET" &&
-      url === `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities`
-    ) {
+    if (method === "GET" && url === CAPABILITIES_URL) {
       return jsonResponse(getResponse());
     }
     if (method === "GET" && url === "/api/providers/install-targets") {
       return jsonResponse(installTargets);
     }
-    if (
-      method === "GET" &&
-      url ===
-        `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities/revalidate-all/${BATCH_JOB_ID}`
-    ) {
+    if (method === "GET" && url === `${BATCH_URL}/${BATCH_JOB_ID}`) {
       return jsonResponse(batchJob);
     }
-    if (
-      method === "POST" &&
-      url ===
-        `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`
-    ) {
+    if (method === "POST" && url === REVALIDATE_URL) {
       if (!postResponse) {
         return jsonResponse(
           { code: "not_found", message: `no POST route for ${url}` },
@@ -314,22 +304,44 @@ describe("ProviderCapabilityCard revalidate surface", () => {
   function renderProviderManagement() {
     return render(
       <ProviderManagementDrawer open onClose={() => {}}>
-        <ProviderManagementPanel
-          projectId={PROJECT_ID}
-          logicalCodebaseId={LC_ID}
-        />
+        <ProviderManagementPanel />
       </ProviderManagementDrawer>,
     );
   }
 
-  it("renders nothing without an active logical codebase", async () => {
-    const { container } = render(
-      <ProviderCapabilityCard projectId={PROJECT_ID} logicalCodebaseId={null} />,
-    );
-    expect(container.firstChild).toBeNull();
-    // 不发任何请求。
-    await Promise.resolve();
-    expect(captured).toEqual([]);
+  // 原「renders nothing without an active logical codebase」用例随 2026-11-05
+  // 机器级化（REQ-PCR-08）删除：能力卡不再接收 id，「缺 LC id 就不渲染」的
+  // 门控行为不复存在 ⇒ 由下方机器级渲染用例接替（不传任何 id 仍渲染四家）。
+
+
+  // 2026-11-05 机器级化（REQ-PCR-08：能力面不再按项目/逻辑代码库定位）：
+  // 能力卡 props 不再携带任何 id，仍要渲染四家 provider 行（机器一份事实，
+  // 与项目、逻辑代码库无关）。
+  it("capability card renders without any project or lc id (machine-level surface)", async () => {
+    installFetchRouter(unknownProjection);
+
+    render(<ProviderCapabilityCard />);
+
+    for (const providerType of [
+      "claude_code",
+      "codex",
+      "pi",
+      "kimi_code",
+    ]) {
+      expect(
+        await screen.findByTestId(
+          `provider-capability-provider-${providerType}`,
+        ),
+      ).toBeInTheDocument();
+    }
+    // 只读 GET 打机器级路由（路径不含项目/逻辑代码库标识）。
+    expect(
+      captured.find(
+        (request) =>
+          request.method === "GET" &&
+          request.url === "/api/providers/capabilities",
+      ),
+    ).toBeTruthy();
   });
 
   it("fetches the read-only projection and renders three aspect rows per provider", async () => {
@@ -340,7 +352,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     await screen.findByTestId("provider-capability-card");
     // 只读 GET（零写入、零探针触发）：首请求即 capability 投影，全程无 POST。
     expect(captured[0]).toEqual({
-      url: `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities`,
+      url: CAPABILITIES_URL,
       method: "GET",
       body: null,
     });
@@ -616,13 +628,10 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     await waitFor(() => {
       expect(
         captured.find(
-          (request) =>
-            request.method === "POST" &&
-            request.url ===
-              `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+          (request) => request.method === "POST" && request.url === REVALIDATE_URL,
         ),
       ).toEqual({
-        url: `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+        url: REVALIDATE_URL,
         method: "POST",
         body: { provider_type: "codex" },
       });
@@ -700,26 +709,20 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       expect(
         captured.filter(
           (request) =>
-            request.method === "POST" &&
-            request.url ===
-              `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+            request.method === "POST" && request.url === REVALIDATE_URL,
         ),
       ).toHaveLength(1);
     });
     const singleRetries = captured.filter(
       (request) =>
-        request.method === "POST" &&
-        request.url ===
-          `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+        request.method === "POST" && request.url === REVALIDATE_URL,
     );
     expect(singleRetries[0].body).toEqual({ provider_type: "codex" });
     // 不重跑整批。
     expect(
       captured.filter(
         (request) =>
-          request.method === "POST" &&
-          request.url ===
-            `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities/revalidate-all`,
+          request.method === "POST" && request.url === BATCH_URL,
       ),
     ).toHaveLength(0);
   });
@@ -874,7 +877,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       expect(
         captured.find((request) => request.method === "POST"),
       ).toEqual({
-        url: `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capability-revalidate`,
+        url: REVALIDATE_URL,
         method: "POST",
         body: { provider_type: "codex" },
       });
@@ -902,8 +905,7 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       captured.filter(
         (request, index) =>
           request.method === "GET" &&
-          request.url ===
-            `/api/projects/${PROJECT_ID}/logical-codebases/${LC_ID}/capabilities` &&
+          request.url === CAPABILITIES_URL &&
           index > captured.findIndex((item) => item.method === "POST"),
       ).length,
     ).toBeGreaterThan(0);
@@ -1147,13 +1149,16 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       startButton.compareDocumentPosition(firstProviderRow) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // 按钮区域说明作用域与成本（REQ-PCR-06）：全局口径（作用域 + 三项成本
+    // 按钮区域说明作用域与成本（REQ-PCR-06 机器级口径：作用域 + 三项成本
     // 告知逐项保留，仍是子串匹配，不弱化）。
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
-      "全局核验",
+      "机器级核验",
     );
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
-      "一次核验全项目可用",
+      "核验只核验一次",
+    );
+    expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
+      "机器一份事实",
     );
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
       "会真实跑一次探测",

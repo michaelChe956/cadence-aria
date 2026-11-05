@@ -220,9 +220,10 @@ export function ProjectSidebar({
           )}
         </section>
 
-        {/* 2026-11-04：Provider 管理独立入口——能力核验已全局化（项目级），
-            provider 的探针/核验/更新/安装/版本不再寄居在逻辑代码库抽屉里，
-            改由侧栏这个平级分区进入独立面板。 */}
+        {/* 2026-11-04：Provider 管理独立入口——provider 的探针/核验/更新/
+            安装/版本不再寄居在逻辑代码库抽屉里，改由侧栏这个平级分区进入
+            独立面板。2026-11-05 机器级化（REQ-PCR-08）：能力面与项目无关 ⇒
+            没有选中项目（甚至零项目）时入口也保持可点。 */}
         <section
           aria-label="Provider 管理"
           data-testid="provider-management-section"
@@ -239,9 +240,8 @@ export function ProjectSidebar({
           <button
             type="button"
             data-testid="provider-management-open"
-            disabled={!selectedProjectId}
             onClick={onOpenProviderManagement}
-            className="inline-flex h-8 w-full items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 text-xs font-semibold text-[var(--aria-ink)] disabled:text-[var(--aria-ink-muted)]"
+            className="inline-flex h-8 w-full items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 text-xs font-semibold text-[var(--aria-ink)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
           >
             <Settings className="mr-1 h-4 w-4" />
             Provider 管理

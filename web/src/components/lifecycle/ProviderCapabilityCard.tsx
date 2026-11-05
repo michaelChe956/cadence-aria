@@ -1,5 +1,6 @@
-// add-provider-revalidate-probe Task 3.2：LC provider capability 面板——
-// 只读 durable 投影（GET capabilities）渲染四家 provider 的
+// Provider capability 面板（2026-11-05 机器级化，REQ-PCR-08：能力面不再按
+// 项目/逻辑代码库定位 ⇒ 本组件不接收任何 id）——只读 durable 投影
+// （GET capabilities）渲染四家 provider 的
 // launch/write_boundary/resume 三行聚合状态，按 provider 提供「核验」
 // 按钮显式触发真实探针（POST capability-revalidate，首次分钟级同步等待），
 // already_confirmed/revalidated/probing/failed 四态如实回显；成功后重读
@@ -20,8 +21,8 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import { getInstallTargets } from "../../api/provider-install";
 import {
-  getLogicalCodebaseCapabilities,
-  postLogicalCodebaseCapabilityRevalidate,
+  getProviderCapabilities,
+  postProviderCapabilityRevalidate,
 } from "../../api/provider-capability";
 import type {
   InstallTargetView,
@@ -147,15 +148,7 @@ type RevalidateFeedback =
   | { state: "revalidated"; version: string; importedActions: string[] }
   | { state: "failed"; code: string; message: string; detail: string | null };
 
-type ProviderCapabilityCardProps = {
-  projectId: string | null;
-  logicalCodebaseId: string | null;
-};
-
-export function ProviderCapabilityCard({
-  projectId,
-  logicalCodebaseId,
-}: ProviderCapabilityCardProps) {
+export function ProviderCapabilityCard() {
   const [projection, setProjection] = useState<ProviderCapabilitiesResponse | null>(
     null,
   );
@@ -171,17 +164,11 @@ export function ProviderCapabilityCard({
     Record<string, RevalidateFeedback>
   >({});
   // 「一键核验全部」的作业状态（REQ-PCR-06：按钮由能力卡提供 ⇒ 状态挂在卡上）。
-  const batch = useProviderCapabilityBatch(projectId, logicalCodebaseId);
+  const batch = useProviderCapabilityBatch();
 
   const reload = useCallback(async (): Promise<void> => {
-    if (projectId === null || logicalCodebaseId === null) {
-      return;
-    }
     try {
-      const response = await getLogicalCodebaseCapabilities(
-        projectId,
-        logicalCodebaseId,
-      );
+      const response = await getProviderCapabilities();
       if (!Array.isArray(response?.providers)) {
         // 负载不合规（无 providers 数组）如实报错，不静默空白、不崩溃。
         setProjection(null);
@@ -194,14 +181,11 @@ export function ProviderCapabilityCard({
       setProjection(null);
       setLoadError(error instanceof Error ? error.message : "状态读取失败");
     }
-  }, [projectId, logicalCodebaseId]);
+  }, []);
 
   /** 安装目标面（本地可用性 / 版本 / 安装源）：与能力投影并行读取。
    *  读取失败只降级为「不提供安装入口 + 提示」，不影响能力三行的展示。 */
   const reloadInstallTargets = useCallback(async (): Promise<void> => {
-    if (projectId === null || logicalCodebaseId === null) {
-      return;
-    }
     try {
       const views = await getInstallTargets();
       const byTarget: Record<string, InstallTargetView> = {};
@@ -216,22 +200,15 @@ export function ProviderCapabilityCard({
         error instanceof Error ? error.message : "安装状态读取失败",
       );
     }
-  }, [projectId, logicalCodebaseId]);
+  }, []);
 
   useEffect(() => {
-    if (projectId === null || logicalCodebaseId === null) {
-      return;
-    }
     setProjection(null);
     setInstallTargets({});
     setFeedbackByProvider({});
     void reload();
     void reloadInstallTargets();
-  }, [projectId, logicalCodebaseId, reload, reloadInstallTargets]);
-
-  if (projectId === null || logicalCodebaseId === null) {
-    return null;
-  }
+  }, [reload, reloadInstallTargets]);
 
   async function handleRevalidate(providerType: string): Promise<void> {
     setBusyProvider(providerType);
@@ -240,9 +217,7 @@ export function ProviderCapabilityCard({
       [providerType]: { state: "probing" },
     }));
     try {
-      const result = await postLogicalCodebaseCapabilityRevalidate(
-        projectId!,
-        logicalCodebaseId!,
+      const result = await postProviderCapabilityRevalidate(
         providerType as ProviderCapabilityProviderSnapshotDto["provider_type"],
       );
       setFeedbackByProvider((current) => ({

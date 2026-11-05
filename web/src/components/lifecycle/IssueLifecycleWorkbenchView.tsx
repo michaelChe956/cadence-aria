@@ -123,13 +123,9 @@ export function IssueLifecycleWorkbenchView({
   const issueGate = createIssueGate(selectedProjectId, logicalCodebases);
   // 2026-11-04：Provider 管理是独立于 LC 管理抽屉的第二个管理浮层（能力核验
   // 已全局化，不再寄居在 LC 仓抽屉里）⇒ 开关独立，与 LC 抽屉互斥不叠加。
+  // 2026-11-05 机器级化（REQ-PCR-08）：能力面不按项目/逻辑代码库定位 ⇒
+  // 抽屉无条件渲染（没有选中项目时也能打开）。
   const [providerManagementOpen, setProviderManagementOpen] = useState(false);
-  // 能力面端点仍按逻辑代码库定位（承载 404 守卫），内容与逻辑代码库无关
-  // （项目级全局）⇒ 取当前选中 LC，没有就取项目下任意一个已存在的 LC。
-  const providerCapabilityScopeId =
-    activeLogicalCodebaseId ??
-    logicalCodebases[0]?.logical_codebase_id ??
-    null;
 
   function handleOpenProviderManagement() {
     // 两个右侧管理抽屉互斥：先收起 LC 管理抽屉再开 Provider 管理（否则两层
@@ -163,19 +159,15 @@ export function IssueLifecycleWorkbenchView({
         <LogicalCodebaseManagementPanel projectId={selectedProjectId} bootstrapProjection={bootstrapProjection as never} onBootstrapChanged={onBootstrapChanged} logicalCodebases={logicalCodebases} activeLogicalCodebaseId={activeLogicalCodebaseId} onSelectLogicalCodebase={onSelectLogicalCodebase} onOpenRegistration={onOpenRegistration} onOpenProviderManagement={handleOpenProviderManagement} logicalCodebaseMembers={logicalCodebaseMembers as never} aggregateInitialization={aggregateInitialization as never} aggregateInitializationBusy={aggregateInitializationBusy} onStartAggregateInitialization={onStartAggregateInitialization} onCancelAggregateInitialization={onCancelAggregateInitialization} onReinitializeAggregateInitialization={onReinitializeAggregateInitialization} aggregateIndex={aggregateIndex as never} aggregateIndexRebuilding={aggregateIndexRebuilding} onRebuildAggregateIndex={onRebuildAggregateIndex} latestPointerPublication={latestPointerPublication} pointerPublicationBusy={pointerPublicationBusy} showIncrementalHint={showIncrementalHint} onPublishFull={onPublishFull} onPublishIncremental={onPublishIncremental} onRetryRepo={onRetryRepo} onRevoke={onRevoke} />
       </LogicalCodebaseManagementDrawer>
     ) : null}
-    {/* Provider 管理（独立浮层，与 LC 管理抽屉互斥）：能力核验已全局化，
-        provider 的探针/核验/更新/安装/版本统一在这里管理。 */}
-    {selectedProjectId ? (
-      <ProviderManagementDrawer
-        open={providerManagementOpen}
-        onClose={() => setProviderManagementOpen(false)}
-      >
-        <ProviderManagementPanel
-          projectId={selectedProjectId}
-          logicalCodebaseId={providerCapabilityScopeId}
-        />
-      </ProviderManagementDrawer>
-    ) : null}
+    {/* Provider 管理（独立浮层，与 LC 管理抽屉互斥）：机器级能力面
+        （2026-11-05，REQ-PCR-08），provider 的探针/核验/更新/安装/版本统一
+        在这里管理，与项目、逻辑代码库无关 ⇒ 无条件渲染。 */}
+    <ProviderManagementDrawer
+      open={providerManagementOpen}
+      onClose={() => setProviderManagementOpen(false)}
+    >
+      <ProviderManagementPanel />
+    </ProviderManagementDrawer>
     {dialogs}
   </>;
 }

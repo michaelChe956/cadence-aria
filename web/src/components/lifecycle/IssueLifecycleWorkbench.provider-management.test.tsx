@@ -1,6 +1,8 @@
 // 2026-11-04：Provider 管理独立入口的接线回归（工作台级）。
-// owner 裁定 provider 的探针/核验/更新/安装/版本属【项目级全局】能力，不该寄居
+// owner 裁定 provider 的探针/核验/更新/安装/版本属平台公用能力，不该寄居
 // 在「逻辑代码库」抽屉里 ⇒ 侧栏新增平级分区「Provider 管理」，点开是独立面板。
+// 2026-11-05 机器级化（REQ-PCR-08）：能力面不按项目/逻辑代码库定位 ⇒
+// 零项目时入口也必须可点、面板照常打开。
 // 断言：
 // - 侧栏有「Provider 管理」入口，点击后打开独立抽屉（标题「Provider 管理」），
 //   面板里渲染四家 provider 的行级列表；
@@ -9,6 +11,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Project } from "../../api/types";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
 import {
   installIssueLifecycleWorkbenchTestHooks,
@@ -51,10 +54,22 @@ function projection() {
   };
 }
 
-function installFetch() {
+function installFetch(
+  options?: {
+    projects?: Project[];
+    logicalCodebases?: Array<{
+      id: string;
+      name: string;
+      member_count: number;
+    }>;
+  },
+) {
   const base = lifecycleFetch({
-    projects: [projectRecord("project_0001", "Aria")],
-    logicalCodebases: [{ id: "lc_0001", name: "platform", member_count: 1 }],
+    projects: options?.projects ?? [projectRecord("project_0001", "Aria")],
+    logicalCodebases:
+      options?.logicalCodebases ?? [
+        { id: "lc_0001", name: "platform", member_count: 1 },
+      ],
   });
   vi.stubGlobal(
     "fetch",
@@ -158,5 +173,32 @@ describe("Provider 管理独立入口（工作台接线）", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("lc-management-drawer")).toBeNull(),
     );
+  });
+
+  // owner 核心诉求（2026-11-05 机器级化，REQ-PCR-08）：provider 是平台公用
+  // 能力 ⇒ 即使一个项目都没有，「Provider 管理」入口也必须可点、面板照常
+  // 打开（机器一份事实，与项目、逻辑代码库无关）。
+  it("零项目时「Provider 管理」入口仍可点，面板照常打开", async () => {
+    installFetch({ projects: [], logicalCodebases: [] });
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    const openButton = await screen.findByTestId("provider-management-open");
+    expect(openButton).toBeEnabled();
+
+    await user.click(openButton);
+
+    expect(
+      await screen.findByTestId("provider-management-drawer"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("provider-capability-card"),
+    ).toBeInTheDocument();
+    for (const providerType of ["claude_code", "codex", "pi", "kimi_code"]) {
+      expect(
+        screen.getByTestId(`provider-capability-provider-${providerType}`),
+      ).toBeInTheDocument();
+    }
   });
 });
