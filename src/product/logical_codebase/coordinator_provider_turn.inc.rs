@@ -544,7 +544,6 @@ fn turn_failure(
     (reason, cause): (&str, &str),
     output: &BoundedOutput,
 ) -> AggregateInitializationError {
-    use crate::cross_cutting::diagnostic_redaction::sanitize_turn_output;
     AggregateInitializationError::ProviderTurnDiagnosed {
         step,
         reason: reason.to_string(),
@@ -552,7 +551,10 @@ fn turn_failure(
         provider: None,
         diagnostic: TurnDiagnostic {
             cause: Some(cause.to_string()),
-            output: Some(sanitize_turn_output(&output.summary())),
+            output: Some(provider_turn_diagnostic_output(
+                &output.summary(),
+                reason,
+            )),
         },
     }
 }

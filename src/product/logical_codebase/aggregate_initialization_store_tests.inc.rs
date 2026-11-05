@@ -949,6 +949,41 @@ mod tests {
         );
     }
 
+    /// 启动前就被拒的 provider（进程压根没拉起 ⇒ stdout/stderr 都空）：真因
+    /// 只在 adapter details / turn reason 里。失败面的「诊断」段必须看得到
+    /// 真因，**不能**只显示「未捕获到 provider 输出。」这句无信息量的兜底串
+    /// ——真因被遮住时，用户与 agent 都无法判断真实问题。
+    #[test]
+    fn provider_turn_failure_keeps_the_real_reason_when_provider_output_is_empty() {
+        use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+        use crate::protocol::contracts::TimeoutStatus;
+        use crate::protocol::provider_errors::ProviderErrorCode;
+
+        let adapter = ProviderAdapterError::with_output(
+            ProviderErrorCode::ProviderParseError,
+            "pi lc validated start: provider_projection_invalid: pi lc tool policy is not canonicalizable: bootstrap executor marker has no tool policy translation",
+            String::new(),
+            String::new(),
+            None,
+            TimeoutStatus::NotTimedOut,
+            0,
+        );
+        let failure = crate::product::logical_codebase::aggregate_initialization_coordinator::start_streaming_failure(
+            AggregateInitializationStepKind::PreCheck,
+            crate::product::logical_codebase::ProviderGatewayError::Adapter(adapter),
+        );
+        let record = error_record(failure);
+        let summary = record.stderr_summary.expect("stderr summary");
+        assert!(
+            summary.contains("provider_projection_invalid"),
+            "summary must carry the real reason: {summary}"
+        );
+        assert!(
+            !summary.contains("未捕获到 provider 输出"),
+            "summary must not be the empty-output placeholder: {summary}"
+        );
+    }
+
     #[test]
     fn provider_turn_denial_and_stale_evidence_get_their_own_reason_codes() {
         let denied = error_record(AggregateInitializationError::ProviderTurn {
