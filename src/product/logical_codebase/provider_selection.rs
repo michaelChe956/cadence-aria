@@ -639,6 +639,20 @@ mod tests {
         assert_eq!(table.candidates[0].capability_state, "confirmed");
         assert!(table.candidates[0].skipped_reason.is_none());
     }
+    #[test]
+    fn aggregate_provider_candidate_order_is_pi_claude_code_codex_without_kimi() {
+        let order: Vec<ProviderName> = AGGREGATE_PROVIDER_CANDIDATE_ORDER.to_vec();
+        assert_eq!(order.len(), 3, "owner order must list exactly three candidates");
+        assert_eq!(
+            order,
+            vec![ProviderName::Pi, ProviderName::ClaudeCode, ProviderName::Codex],
+            "candidate order must be pi > claude_code > codex"
+        );
+        assert!(
+            !order.iter().any(|p| matches!(p, ProviderName::KimiCode)),
+            "kimi_code must not be an aggregate-initialization candidate"
+        );
+    }
 
     /// Task 3(读取点迁移):capability 读取只认**机器级**记录(REQ-PCR-07
     /// 「读取只读机器级」)。机器级路径种一条 Confirmed(全程不创建任何
