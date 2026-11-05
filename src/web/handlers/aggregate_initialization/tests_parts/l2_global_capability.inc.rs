@@ -24,11 +24,11 @@
 /// 把 provider 能力种为**机器级** Confirmed 行（一次核验整机可用的形态）。
 /// 落盘路径 = `provider-capabilities/capabilities.json`（REQ-PCR-07）。
 ///
-/// 只种 ClaudeCode：聚合根 recipe 相位**只接受固定的 Claude recipe provider**
-/// （root-recipe 相位对 provider 无关，REQ-BOOT-15）⇒ 能力
-/// 记录里必须有 ClaudeCode 的 Confirmed 行，recipe 相位才放行。其余三家
-/// 保持「未核验」⇒ 选择器按 owner 顺序跳过它们、选中 ClaudeCode（这正是
-/// 选择器的既有语义：第一个命令可用且已核验的候选）。
+/// 只种 ClaudeCode：root-recipe 相位已对 provider 无关（REQ-BOOT-15，Claude-only
+/// 硬拒已删除），但本夹具要验的是「**有一家已核验 ⇒ L2 放行 ⇒ 聚合初始化自动
+/// 开始**」这条链，只需种一家 Confirmed 即可。其余三家保持「未核验」⇒ 选择器
+/// 按 owner 顺序跳过它们、选中 ClaudeCode（既有语义：第一个命令可用且已核验的候选）。
+/// ⚠ 不要按「recipe 相位只认 Claude」来理解这条种子——那是被删除的旧契约。
 fn seed_claude_code_confirmed_globally(fixture: &TrustRouteFixture) {
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &fixture.paths,
@@ -39,7 +39,7 @@ fn seed_claude_code_confirmed_globally(fixture: &TrustRouteFixture) {
 
 /// 断言 capability 记录确实落在**机器级**、且项目/逻辑代码库子树下没有它
 /// （REQ-PCR-07「唯一作用域」：出现项目级或 LC 子树副本即为第二作用域 = 缺陷）。
-fn assert_capability_scope_is_project_global(fixture: &TrustRouteFixture) {
+fn assert_capability_scope_is_machine_global(fixture: &TrustRouteFixture) {
     let global_path = fixture
         .paths
         .provider_capabilities_root()
@@ -100,10 +100,10 @@ async fn advance_auto_starts_after_one_global_capability_verification() {
             .exists(),
         "the aggregate root must not carry the language rule marker in this scenario"
     );
-    // 用户执行一次「一键核验全部」⇒ provider 在项目级全局被核验。
+    // 用户执行一次「一键核验全部」⇒ provider 在机器级被核验。
     seed_claude_code_confirmed_globally(&fixture);
-    // 记录落在项目级全局、LC 子树下没有副本（唯一作用域）。
-    assert_capability_scope_is_project_global(&fixture);
+    // 记录落在机器级全局、项目与 LC 子树下都没有副本（唯一作用域）。
+    assert_capability_scope_is_machine_global(&fixture);
     advance_seed_member(&fixture);
 
     let (status, body) = advance_post(&fixture.app, &fixture.lc_id).await;
