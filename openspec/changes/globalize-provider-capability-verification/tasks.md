@@ -86,9 +86,9 @@
 - [x] 7.7 `openspec validate globalize-provider-capability-verification --strict` ⇒ exit 0
 - [x] 7.8 契约留痕：本 change 的 proposal / design / 两份 spec delta / tasks；归档前补独立审查结论
 - [x] 7.9 真机验收 ①：「一键核验全部」跑一次 ⇒ 面板显示全局口径文案 —— **2026-11-05 owner 真机实测通过**：四家全部「已确认」、三维度全部「已核验」、版本落后标记正常（Claude Code 2.1.307→2.1.318 / Pi 1.3.0→1.5.0），证据截图 `cadence/reports/2026-11-05_前端截图_Provider能力核验四家全部已确认_v1.0.png`
-- [ ] 7.10 真机验收 ②：新建第二个逻辑代码库 ⇒ 面板直接显示已核验（**无需**再核验）
+- [x] 7.10 真机验收 ②：新建第二个逻辑代码库 ⇒ 面板直接显示已核验（**无需**再核验）—— ✅ **2026-11-06 owner 真机实测通过**：owner 在**新项目 project_0002** 下建第二个代码库 `my-lc-root-marker`（聚合根 `/tmp/aria-accept/my-lc-root-marker`）⇒ 该库冷启动五步**全部「已完成」**、聚合初始化 `completed`，**全程未要求重新核验**（无 `provider_needs_verification`）；机器级 capability 文件**全仓唯一**（`.aria/provider-capabilities/capabilities.json`），LC 子树下 per-LC capability 文件 **0 个** ⇒ 面板读到的是同一份机器级事实（`GET /api/providers/capabilities` ⇒ 四家三维度全 `confirmed`）
 - [x] 7.11 真机验收 ③：冷启动推进到聚合初始化 ⇒ **不往聚合根放** `AGENTS.md` + `.claude/rules/language.md` 也**能**自动开始 —— ✅ **2026-11-06 owner 从零冷启动实测通过**：聚合根初始只有 memberA/B/C 两个 git 仓，未预置 `AGENTS.md` / `.claude/rules/language.md` ⇒ 冷启动五步（身份/清单·检出/规则·政策/成员索引/聚合索引激活）**全部「已完成」**，聚合初始化 `completed`，根级产出 `AGENTS.md`(8K) / `CLAUDE.md`(4K) / `policy`(48K) / `cadence`(168K) / `openspec` / `codegraph.json`；证据截图 `cadence/reports/2026-11-06_前端截图_聚合初始化真跑通_红字与Pi选中_v1.0.png`；operation 记录 `input.provider=pi` + 五 step 全 `completed`。此前撞到的独立缺陷（`82658d58` provider 无关准入、`a60020c3` 失败诊断被兜底串遮住）**均已解除**
-- [ ] 7.12 真机验收 ④：聚合根放了两个判定文件 ⇒ 仍走零 provider turn 路径
+- [x] 7.12 真机验收 ④：聚合根放了两个判定文件 ⇒ 仍走零 provider turn 路径 —— ✅ **2026-11-06 owner 真机实测通过**：第二个代码库 `my-lc-root-marker`（聚合根含 `.claude/rules/language.md` + `AGENTS.md` 两个判定文件）⇒ 聚合初始化 `completed`，但 operation 记录 `input.provider = **not_required**`、5 步中**预检 / 规则与 MCP 配置 / OpenSpec 与示例 三步 `skipped`**、`provider_selection.candidates = []`（空表）⇒ **零 provider turn**；成员仓 `backend` / `frontend` 内容零改动（仍只有 `.git` / `README.md` / `src`）⇒ provider 一个字都没写；`aggregate-recipe-receipts/` 下**无 `commands/` 子目录**（无 provider 命令 receipt）。截图 `cadence/reports/2026-11-06_前端截图_第二代码库零providerturn_三步已跳过_v1.0.png`
 
 ## 8. 机器级化（owner 2026-11-05 追加裁定：provider 是平台公用能力）
 
@@ -106,5 +106,5 @@
 - [x] 8.8 **验收 grep**：旧 capability 路由全仓 **0 命中**；`projects/**` 与 `logical-codebases/**` 下 **0** 个 capability 文件；机器级文件路径唯一 —— `grep 'logical-codebases' src/ | grep -i capab` ⇒ 0
 - [x] 8.9 **验证矩阵**：`cargo test --locked --all-targets` ⇒ lib 6001/0 · it_core 198/0 · it_web 602/0 · web_logical_codebase_entrypoints 49/0 · it_product 211/0 · it_provider 55/0 · it_task_run 31/0 · it_interactive 43/0；`cargo clippy --locked --all-targets -- -D warnings` ⇒ exit 0；`cargo fmt --check` ⇒ 干净；`openspec validate --specs --strict` ⇒ 78 passed / 0 failed；本 change `--strict` ⇒ valid
 - [x] 8.10① **真机验收**：侧栏「还没有 Project」时「Provider 管理」`disabled=false / cursor=pointer`，点开面板四家全「已确认」、文案为机器级口径 —— **已由 controller 验过**（2026-11-05 零项目一次性实例，截图 `/tmp/acc-zero-project.png`；owner 可复验）
-- [ ] 8.10② **真机验收**：在**另一个**项目 / 逻辑代码库下打开面板 ⇒ 仍是同一份机器级事实、**无需**再核验（待 owner）
+- [x] 8.10② **真机验收**：在**另一个**项目 / 逻辑代码库下打开面板 ⇒ 仍是同一份机器级事实、**无需**再核验 —— ✅ **2026-11-06 owner 真机实测通过**：owner 在**新项目 project_0002**（`test2`）下建第二个代码库 `my-lc-root-marker` ⇒ 该库冷启动五步全部「已完成」直接推进到聚合初始化，**未要求重新核验**（无 `provider_needs_verification`）；机器级 capability 文件全仓唯一、LC 子树下 per-LC 文件 0 个 ⇒ 面板读同一份机器级事实（API 四家三维度全 `confirmed`）
 - [x] 8.10③ **真机验收**：机器级核验一次后，冷启动自动开始（不报 `aggregate_initialization_provider_needs_verification`）—— ✅ **2026-11-06 owner 从零冷启动实测通过**：先「一键核验全部」（机器级）→ 建项目/代码库 → 冷启动五步全部「已完成」直接推进到聚合初始化，全程无 `provider_needs_verification` 失败
