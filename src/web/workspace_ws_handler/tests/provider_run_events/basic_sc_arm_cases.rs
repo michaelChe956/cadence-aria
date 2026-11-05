@@ -417,366 +417,11 @@ fn case_rewrite_session_record(
 }
 
 // ---------------------------------------------------------------------------
-// SC author：五类 typed 出口的 Stop 合同（brief Step 1/4）
+// SC author：五类 typed 出口的 Stop 合同（brief Step 1/4）——行数门禁拆分
+// 至 `basic_sc_arm_cases/sc_author_stop_cases.rs`（#[path] 链下显式路径）。
 // ---------------------------------------------------------------------------
-
-/// 覆盖 AlreadyFinished / Superseded / Message / AdmissionWaiting /
-/// NativeSupersededWaiting：原分支 start 数量、phase/reservation、Error 帧、
-/// finish 次序保持；Stop 后父层不再 followups / 二次 finish。
-#[tokio::test]
-async fn sc_author_stop_does_not_start_followups() {
-    sc_superseded_late_run_stops_silently().await;
-    sc_terminal_failed_message_frame_after_finish().await;
-    sc_drive_failure_already_finished_stops_silently().await;
-    sc_admission_waiting_keeps_prepare_face_and_reservation().await;
-    sc_native_superseded_waiting_keeps_key_and_phase().await;
-}
-
-/// Superseded（败者让位）：零 start、零 Error、durable phase/ledger 原样、
-/// run 注册被 finish_run 清空、engine 锁可重取。
-async fn sc_superseded_late_run_stops_silently() {
-    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
-    // 模拟健康胜者：reserve 已领取首轮键（phase→Generate，ledger [:0]）。
-    {
-        let mut engine = fixture.engine.lock().await;
-        let claimed = engine
-            .reserve_single_candidate_author_start()
-            .expect("healthy winner claims the first provider start key");
-        assert!(claimed);
-    }
-    let ledger_before = serde_json::to_vec(&case_durable_session(&fixture).provider_start_ledger)
-        .expect("serialize ledger before");
-    let starts = Arc::new(AtomicUsize::new(0));
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let provider = Arc::new(CaseAuthorProvider {
-        output: None,
-        starts: starts.clone(),
-        inputs: input_tx,
-    });
-    let (context, mut outbound_rx) = case_inbound_context(&fixture, provider);
-    handle_workspace_inbound_message(
-        context,
-        WsInMessage::StartGeneration {
-            provider_config: provider_config(),
-            reviewer_enabled: false,
-            resume_recovery: None,
-        },
-    )
-    .await;
-
-    case_wait_run_registration_cleared(&fixture.manager).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    assert_eq!(
-        starts.load(Ordering::SeqCst),
-        0,
-        "Superseded 败者不得启动 provider（原分支 start 数量保持 0）"
-    );
-    case_assert_no_error_frame(&mut outbound_rx, "Superseded 静默退场不得广播 Error").await;
-    case_assert_no_more_provider_inputs(
-        &mut input_rx,
-        "Superseded Stop 后父层不得再燃 followups provider",
-    )
-    .await;
-    let after = case_durable_session(&fixture);
-    assert_eq!(
-        after.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Generate),
-        "Superseded 不得改写 durable phase"
-    );
-    assert_eq!(
-        serde_json::to_vec(&after.provider_start_ledger).expect("serialize ledger"),
-        ledger_before,
-        "Superseded 不得追加/改写 provider_start_ledger（reservation 原样）"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        let _ = fixture.engine.lock().await;
-    })
-    .await
-    .expect("Superseded Stop 后 engine 锁必须可重取（guard 按值释放）");
-}
-
-/// Message（终态 Failed 入口）：Error 帧到达时 run 注册已被 finish_run 清空
-/// （finish 次序保持：failed node→drop engine→idle take→finish→Error）。
-async fn sc_terminal_failed_message_frame_after_finish() {
-    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
-    {
-        let mut engine = fixture.engine.lock().await;
-        engine.persist_single_candidate_terminal_phase(
-            crate::product::models::SingleCandidatePhase::Failed,
-        );
-    }
-    let starts = Arc::new(AtomicUsize::new(0));
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let provider = Arc::new(CaseAuthorProvider {
-        output: None,
-        starts: starts.clone(),
-        inputs: input_tx,
-    });
-    let run_context = case_event_run_context(&fixture, provider);
-    let (outbound_tx, mut outbound_rx) = mpsc::channel(64);
-    spawn_provider_run_from_event(
-        run_context,
-        ProviderRunKind::WorkItemPlanSingleCandidateAuthor,
-        None,
-        outbound_tx,
-    )
-    .await
-    .expect("spawn the terminal-failed start attempt");
-
-    let message = case_next_error_message(&mut outbound_rx).await;
-    assert!(
-        message.contains("已终态失败") && message.contains("请显式重新开始生成"),
-        "Message 分支必须保持可见恢复入口错误：{message}"
-    );
-    assert!(
-        fixture.manager.active_run().await.is_none(),
-        "Error 帧到达时 finish_run 必须已完成（arm 内 finish 先于 Error 帧）"
-    );
-    assert_eq!(
-        starts.load(Ordering::SeqCst),
-        0,
-        "Message（终态 Failed）分支不得启动 provider"
-    );
-    case_assert_no_more_provider_inputs(
-        &mut input_rx,
-        "Message Stop 后父层不得再燃 followups provider",
-    )
-    .await;
-    assert_eq!(
-        case_durable_session(&fixture).single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Failed),
-        "Message 分支不得改写 durable 终态 Failed"
-    );
-}
-
-/// AlreadyFinished（驱动失败收口）：恰一次真实 start、臂内静默 Stop（不新发
-/// Error、不改写 durable——Failed 已由 child 落盘）、无 followups。
-async fn sc_drive_failure_already_finished_stops_silently() {
-    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
-    let starts = Arc::new(AtomicUsize::new(0));
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let provider = Arc::new(CaseAuthorProvider {
-        output: None,
-        starts: starts.clone(),
-        inputs: input_tx,
-    });
-    let (context, mut outbound_rx) = case_inbound_context(&fixture, provider);
-    handle_workspace_inbound_message(
-        context,
-        WsInMessage::StartGeneration {
-            provider_config: provider_config(),
-            reviewer_enabled: false,
-            resume_recovery: None,
-        },
-    )
-    .await;
-
-    case_wait_run_registration_cleared(&fixture.manager).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    assert_eq!(
-        starts.load(Ordering::SeqCst),
-        1,
-        "AlreadyFinished 分支原形态：恰一次真实 start 后驱动失败"
-    );
-    // 消费恰一条真实 input（full prompt 非空），随后窗口内不得再有第二条
-    //（Stop 后无 reredrive/followups）。
-    let first_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
-        .await
-        .expect("AlreadyFinished 必须恰有一条 provider input")
-        .expect("provider input channel open");
-    assert!(
-        !first_input.prompt.is_empty(),
-        "AlreadyFinished 的唯一一次 start 必须携带真实完整 prompt"
-    );
-    case_assert_no_error_frame(
-        &mut outbound_rx,
-        "AlreadyFinished 臂内收口不得新发 Error（durable Failed 已由 child 落盘）",
-    )
-    .await;
-    case_assert_no_more_provider_inputs(
-        &mut input_rx,
-        "AlreadyFinished Stop 后父层不得再燃 followups/reredrive provider",
-    )
-    .await;
-    assert_eq!(
-        case_durable_session(&fixture).single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Failed),
-        "AlreadyFinished 的 durable Failed 由 child 落盘（臂不重复改写）"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        let _ = fixture.engine.lock().await;
-    })
-    .await
-    .expect("AlreadyFinished Stop 后 engine 锁必须可重取");
-}
-
-/// AdmissionWaiting（LC 成员规则缺失）：waiting/Prepare 面（不 generic Failed）、
-/// reservation 不重臂（ledger 恰一条）、Error 帧在 finish 之后、零 start。
-async fn sc_admission_waiting_keeps_prepare_face_and_reservation() {
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let provider = Arc::new(CaseAuthorProvider {
-        output: Some(single_candidate_markdown("story_0001", "design_0001")),
-        starts: Arc::new(AtomicUsize::new(0)),
-        inputs: input_tx,
-    });
-    // 成员缺 .claude/rules/language.md（write_member_language_rules=false）。
-    let fixture = ProviderRunFixture::new_logical(false, provider.clone());
-    let (context, mut outbound_rx) = case_inbound_context(&fixture, provider);
-    handle_workspace_inbound_message(
-        context,
-        WsInMessage::StartGeneration {
-            provider_config: provider_config(),
-            reviewer_enabled: false,
-            resume_recovery: None,
-        },
-    )
-    .await;
-
-    let message = case_next_error_message(&mut outbound_rx).await;
-    assert!(
-        message.contains("member_language_rules_missing"),
-        "AdmissionWaiting 消息必须携带预检判别码，got: {message}"
-    );
-    assert!(
-        fixture.manager.active_run().await.is_none(),
-        "AdmissionWaiting 的 Error 帧到达时 finish_run 必须已完成"
-    );
-    let durable = case_durable_session(&fixture);
-    assert_eq!(
-        durable.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Prepare),
-        "AdmissionWaiting 必须保持 waiting/Prepare 面（不 generic Failed）"
-    );
-    assert_ne!(
-        durable.status,
-        crate::product::models::WorkspaceSessionStatus::Failed
-    );
-    assert_eq!(
-        durable.provider_start_ledger.len(),
-        1,
-        "AdmissionWaiting 保留原 reservation（不重臂、不追加 ledger）"
-    );
-    case_assert_no_more_provider_inputs(
-        &mut input_rx,
-        "AdmissionWaiting 必须 reject before provider startup",
-    )
-    .await;
-    case_assert_no_more_provider_inputs(
-        &mut input_rx,
-        "AdmissionWaiting Stop 后父层不得再燃 followups provider",
-    )
-    .await;
-}
-
-/// NativeSupersededWaiting（native mismatch typed 等待）：判别码/显式出口上浮、
-/// phase=Generate 与 ledger 原样保留（不 reserve 第二次、不 rearm）、零 start。
-async fn sc_native_superseded_waiting_keeps_key_and_phase() {
-    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
-    let reservation_key = format!("single_candidate_author:{}:0", fixture.record.id);
-    // 修订轮形态：phase=Generate + ledger [reservation_key] + Author conversation
-    // 指向旧 native 且已被 tombstone（anchor_t17 同构种子）。
-    let seeded = case_rewrite_session_record(&fixture, |record| {
-        record.status = crate::product::models::WorkspaceSessionStatus::Running;
-        record.single_candidate_phase =
-            Some(crate::product::models::SingleCandidatePhase::Generate);
-        record.provider_start_ledger = vec![
-            crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
-                provider_start_idempotency_key: reservation_key.clone(),
-                started: true,
-                provider: None,
-                started_at: None,
-            },
-        ];
-        record.provider_conversations = vec![crate::product::models::ProviderConversationRef {
-            role: crate::product::models::ProviderConversationRole::Author,
-            provider: ProviderName::ClaudeCode,
-            provider_session_id: "case-old-native".to_string(),
-            updated_at: "2026-11-06T00:00:00Z".to_string(),
-            last_node_id: Some("timeline_node_001".to_string()),
-        }];
-        record.superseded_native_sessions =
-            vec![crate::product::models::SupersededNativeSessionRecord {
-                role: crate::product::models::ProviderConversationRole::Author,
-                provider: ProviderName::ClaudeCode,
-                native_session_id: "case-old-native".to_string(),
-                reason_code: "resume_fingerprint_unavailable".to_string(),
-                recovery_id: "seed".to_string(),
-                superseded_at: "2026-11-06T00:00:00Z".to_string(),
-            }];
-    });
-    // 引擎内存镜像同步（保留 repository_path）。
-    {
-        let mut engine = fixture.engine.lock().await;
-        let repository_path = engine.session.repository_path.clone();
-        engine.session = crate::product::workspace_engine::WorkspaceSession::from_record(seeded);
-        engine.session.repository_path = repository_path;
-    }
-    let ledger_before = serde_json::to_vec(&case_durable_session(&fixture).provider_start_ledger)
-        .expect("serialize ledger before");
-    let starts = Arc::new(AtomicUsize::new(0));
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let provider = Arc::new(CaseAuthorProvider {
-        output: None,
-        starts: starts.clone(),
-        inputs: input_tx,
-    });
-    let (context, mut outbound_rx) = case_inbound_context(&fixture, provider);
-    handle_workspace_inbound_message(
-        context,
-        WsInMessage::StartGeneration {
-            provider_config: provider_config(),
-            reviewer_enabled: false,
-            resume_recovery: None,
-        },
-    )
-    .await;
-
-    let message = case_next_error_message(&mut outbound_rx).await;
-    assert!(
-        message.contains("resume_fingerprint_unavailable") && message.contains("显式"),
-        "NativeSupersededWaiting 必须携带稳定判别码与显式恢复出口，got: {message}"
-    );
-    assert!(
-        fixture.manager.active_run().await.is_none(),
-        "NativeSupersededWaiting 的 Error 帧到达时 finish_run 必须已完成"
-    );
-    assert_eq!(
-        starts.load(Ordering::SeqCst),
-        0,
-        "NativeSupersededWaiting 必须 precheck 先于 provider 启动（零 start）"
-    );
-    let after = case_durable_session(&fixture);
-    assert_eq!(
-        after.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Generate),
-        "等待保留原 phase（不 generic Failed、不回 Prepare 重臂）"
-    );
-    assert_ne!(
-        after.status,
-        crate::product::models::WorkspaceSessionStatus::Failed
-    );
-    assert_eq!(
-        serde_json::to_vec(&after.provider_start_ledger).expect("serialize ledger"),
-        ledger_before,
-        "等待不得追加 provider_start_ledger（不 reserve 第二次）"
-    );
-    let recovery = after
-        .lc_resume_recovery
-        .clone()
-        .expect("mismatch must persist a waiting recovery record");
-    assert_eq!(
-        recovery.state,
-        crate::product::models::LcResumeRecoveryState::Waiting
-    );
-    assert_eq!(recovery.reason_code, "resume_fingerprint_unavailable");
-    case_assert_no_more_provider_inputs(
-        &mut input_rx,
-        "NativeSupersededWaiting Stop 后父层不得再燃 followups provider",
-    )
-    .await;
-}
+#[path = "basic_sc_arm_cases/sc_author_stop_cases.rs"]
+mod sc_author_stop_cases;
 
 /// ReviewOnly 两路帧时序用例（行数门禁拆分；#[path] 链下需显式路径）。
 #[path = "basic_sc_arm_cases/review_only_cases.rs"]
@@ -963,43 +608,149 @@ async fn empty_content_author_starts_and_late_valid_run_regenerates() {
 }
 
 /// Revision 臂：单一 owned receiver 只移动一次（进入当前臂），经真实 spawn
-/// 链收口；不重建第二消费者。
+/// 链收口。活 TempDir 夹具（root 活过整用例——stack_budget_fixture 的
+/// TempDir 返回即删，durable 读写无从谈起）：先经 Author 轮建立可修订
+/// 会话态，Revision 轮核定恰 2 次真实 provider start（1 次正式修订 + 1 次
+/// artifact 补驱，见用例内注释依据）且 durable timeline 发生进展——brief
+/// Step 5「真实 start 或该 typed 拒绝规定的零 start 证据」的前一支。
 #[tokio::test]
 async fn revision_run_consumes_single_receiver_and_completes() {
-    // Story 夹具（engine/manager/生命周期真实），registry 换可完成的 provider
-    //（stack_budget_fixture 的 PendingStartProvider 永不完成，收口断言需要
-    // 会话终结）；出站通道自持存活接收端。
-    let (fixture_context, _dead_outbound_tx, _run_cancel, _command_rx, _run_token) =
-        stack_budget_fixture().await;
+    let root = tempfile::tempdir().expect("temporary workspace root");
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let session_record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("workspace session");
+    let (engine_tx, engine_rx) = mpsc::channel(64);
+    drop(engine_rx);
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        Arc::new(CheckpointStore::new(root.path().join("checkpoints"))),
+        lifecycle,
+        engine_tx,
+        WorkspaceSession::from_record(session_record.clone()),
+    )));
     let starts = Arc::new(AtomicUsize::new(0));
-    let (_input_tx, _input_rx) = mpsc::unbounded_channel();
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(CaseAuthorProvider {
         output: Some("case revision completed output".to_string()),
         starts: starts.clone(),
-        inputs: _input_tx,
+        inputs: input_tx,
     });
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, provider);
+    let workspace_runs = WorkspaceRunRegistry::default();
     let run_context = ProviderRunContext::test_fixture(
         Arc::new(registry),
-        fixture_context.engine.clone(),
-        fixture_context.workspace_runs.clone(),
-        fixture_context.session_id.clone(),
-        fixture_context.app_paths.clone(),
-        fixture_context.session_record.clone(),
+        engine.clone(),
+        workspace_runs,
+        session_record.id.clone(),
+        app_paths.clone(),
+        session_record.clone(),
     );
-    let (outbound_tx, _outbound_rx) = mpsc::channel(64);
     let manager = run_context.manager.clone();
-    let engine = run_context.engine.clone();
+    let (outbound_tx, _outbound_rx) = mpsc::channel(64);
+
+    // 前置 Author 轮：建立可修订会话态（助理消息 + AuthorConfirm）。
+    spawn_provider_run_from_event(
+        run_context.clone(),
+        ProviderRunKind::Author {
+            content: "case author before revision".to_string(),
+        },
+        None,
+        outbound_tx.clone(),
+    )
+    .await
+    .expect("spawn author run");
+    case_wait_run_registration_cleared(&manager).await;
+    let author_phase_starts = starts.load(Ordering::SeqCst);
+    assert!(
+        author_phase_starts >= 1,
+        "前置 Author 轮必须真实 start（实测 {author_phase_starts}）"
+    );
+    // 排空 Author 轮 input：Revision 轮的会话消费单独计数。
+    while input_rx.try_recv().is_ok() {}
+    let nodes_before = LifecycleStore::new(app_paths.clone())
+        .load_timeline_nodes(&session_record.id)
+        .expect("durable timeline before revision")
+        .len();
+    // 建立 Story 修订上下文（用户反馈面）：无待修订反馈时 Revision 链在
+    // provider 启动前早退（build_revision_input 失败 → Error 事件 +
+    // finish_failed_run 收口，零 start）——本锚取「真实 start」支，先注入
+    // pending 反馈再发 Revision run。
+    {
+        let mut engine_guard = engine.lock().await;
+        engine_guard.pending_revision_context = Some("case revision feedback".to_string());
+    }
+    // Revision 轮：核定恰 2 次 start——1 次正式修订 start + 恰一次 artifact
+    // 补驱。依据（诊断核定，与 Author 轮基线每轮 2 次同构、稳定复现）：
+    // 本夹具 provider 输出为纯文本，修订产物被判「不完整 artifact」后
+    // 引擎发恰一轮补驱（input[1] 头部即「上一轮已结束，但没有输出完整
+    // artifact」补驱模板；input[0] 为正式修订 prompt）。单一 owned
+    // receiver 语义锚定：恰这两轮会话消费（非 0、非 3+），收口后无新增。
     spawn_provider_run_from_event(run_context, ProviderRunKind::Revision, None, outbound_tx)
         .await
         .expect("spawn revision run");
     case_wait_run_registration_cleared(&manager).await;
-    assert!(
-        starts.load(Ordering::SeqCst) <= 1,
-        "Revision 臂单一 owned receiver：至多一次 provider 会话消费（实测 {}）",
+    let revision_starts = starts.load(Ordering::SeqCst) - author_phase_starts;
+    let mut revision_inputs = Vec::new();
+    while let Ok(input) = input_rx.try_recv() {
+        revision_inputs.push(input.prompt.clone());
+    }
+    assert_eq!(
+        revision_starts,
+        2,
+        "Revision 轮必须恰为「1 次正式修订 start + 1 次 artifact 补驱」\
+         （实测 {revision_starts}，总 {}／Author 基线 {author_phase_starts}）",
         starts.load(Ordering::SeqCst)
     );
+    assert_eq!(
+        revision_inputs.len(),
+        2,
+        "start 计数与 input 计数必须一一对应（实测 {} 条）",
+        revision_inputs.len()
+    );
+    assert!(
+        revision_inputs[0].contains("增量修订"),
+        "input[0] 必须是正式修订 prompt（真实 start）：{}",
+        revision_inputs[0].chars().take(80).collect::<String>()
+    );
+    assert!(
+        revision_inputs[1].contains("上一轮已结束"),
+        "input[1] 必须是 artifact 补驱 prompt：{}",
+        revision_inputs[1].chars().take(80).collect::<String>()
+    );
+    // durable 进展：Revision 节点落盘使 timeline 严格增长。
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let nodes = LifecycleStore::new(app_paths.clone())
+                .load_timeline_nodes(&session_record.id)
+                .expect("durable timeline after revision")
+                .len();
+            if nodes > nodes_before {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Revision 轮必须留下 durable timeline 进展");
+    // 无第二消费者/重驱：收口后不得再出现 provider input。
+    case_assert_no_more_provider_inputs(
+        &mut input_rx,
+        "Revision 收口后不得再燃第二消费者（单一 receiver 只移动一次）",
+    )
+    .await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         let _ = engine.lock().await;
     })
