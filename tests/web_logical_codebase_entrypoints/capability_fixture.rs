@@ -99,7 +99,7 @@ pub(crate) fn seed_confirmed_capabilities(paths: &ProductAppPaths, _project_id: 
 
 /// 只把 **ClaudeCode** 种为 `Confirmed`（bootstrap 行保持其余三家
 /// `Unknown`）。生产接线的聚合初始化走 root-recipe 相位时**只接受固定的
-/// Claude recipe provider**（`root_recipe_requires_fixed_claude_provider`，
+/// Claude recipe provider**（root-recipe 相位对 provider 无关，REQ-BOOT-15，
 /// 既有契约）——owner 候选序为 Pi → KimiCode → ClaudeCode → Codex，四家
 /// 全 Confirmed 会让选择器选中 Pi 并在 recipe 相位被拒。正形 = 只种
 /// ClaudeCode，选择器跳过未核验三家选中它（与 src 侧

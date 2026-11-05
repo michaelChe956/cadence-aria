@@ -788,12 +788,6 @@ impl ProviderCapabilitySource for StaticCapabilitySource {
         provider: &ProviderRef,
         _credential: &cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        if provider.provider_type != ProviderRefType::ClaudeCode {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                cadence_aria::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                    .to_string(),
-            ));
-        }
         Ok(Self::capability(
             provider,
             cadence_aria::product::logical_codebase::SessionPolicyAction::PlanningReadOnly,

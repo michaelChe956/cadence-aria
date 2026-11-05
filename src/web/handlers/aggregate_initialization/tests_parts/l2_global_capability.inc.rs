@@ -25,7 +25,7 @@
 /// 落盘路径 = `provider-capabilities/capabilities.json`（REQ-PCR-07）。
 ///
 /// 只种 ClaudeCode：聚合根 recipe 相位**只接受固定的 Claude recipe provider**
-/// （`root_recipe_requires_fixed_claude_provider`，既有契约，本次不变）⇒ 能力
+/// （root-recipe 相位对 provider 无关，REQ-BOOT-15）⇒ 能力
 /// 记录里必须有 ClaudeCode 的 Confirmed 行，recipe 相位才放行。其余三家
 /// 保持「未核验」⇒ 选择器按 owner 顺序跳过它们、选中 ClaudeCode（这正是
 /// 选择器的既有语义：第一个命令可用且已核验的候选）。

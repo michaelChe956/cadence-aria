@@ -60,7 +60,6 @@ use cadence_aria::product::logical_codebase::aggregate_index::{
 };
 use cadence_aria::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
 use cadence_aria::product::logical_codebase::provider_capability_store::ProviderActionCapability;
-use cadence_aria::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE;
 use cadence_aria::product::logical_codebase::{
     AggregatePolicyArtifactStore, CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
     GatewayRunAudit, IssueCodebaseSelection, IssueCodebaseSelectionStore,
@@ -803,11 +802,6 @@ impl ProviderCapabilitySource for StaticCapabilitySource {
         provider: &ProviderRef,
         _credential: &BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        if provider.provider_type != ProviderRefType::ClaudeCode {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE.to_string(),
-            ));
-        }
         Ok(Self::capability(
             provider,
             SessionPolicyAction::PlanningReadOnly,

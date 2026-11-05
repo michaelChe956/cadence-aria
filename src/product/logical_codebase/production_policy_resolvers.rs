@@ -21,13 +21,12 @@ use crate::product::logical_codebase::provider_gateway::{
     PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE,
-    PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT, PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE,
+    PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT,
 };
 use crate::product::logical_codebase::provider_selection as selection;
 use crate::product::logical_codebase::{
     LogicalCodebaseFeature, LogicalRepositoryId, PolicyTargetResolver, ProviderCapability,
-    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
-    SessionLaunchRequest,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, SessionLaunchRequest,
 };
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
@@ -355,23 +354,19 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
         }
     }
 
-    /// root-recipe 相位:仅现有固定 Claude recipe 事实放行——provider 必须
-    /// 是固定 Claude recipe provider、记录在场且 snapshot 一致;凭据是
-    /// durable Running operation 派生的 opaque 相位证明(类型面保证),每次
-    /// 重验由 `for_lc` 通道/GREEN 第二段接入。返回的 capability 只镜像
-    /// durable normal 状态(行不因 recipe 事实铸造 Confirmed),不推 normal
-    /// Confirmed(隔离契约)。
+    /// root-recipe 相位:**对 provider 无关**(REQ-BOOT-15)——记录在场且
+    /// snapshot 一致即过第一关;凭据是 durable Running operation 派生的 opaque
+    /// 相位证明(类型面保证),每次重验由 `for_lc` 通道/GREEN 第二段接入。
+    /// 返回的 capability 只镜像 durable normal 状态(行不因 recipe 事实铸造
+    /// Confirmed),不推 normal Confirmed(隔离契约)。
+    ///
+    /// **凭据三道检查一条不减**:① 重核验通道在场 ② 已交付 recipe 证据的
+    /// 版本钉定一致 ③ 凭据对 durable Running operation 重核验通过。
     fn require_root_recipe_supported(
         &self,
         provider: &ProviderRef,
         credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        if provider.provider_type != ProviderRefType::ClaudeCode {
-            return Err(ProviderGatewayError::UnsupportedCapability(format!(
-                "{PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE}: got {:?}",
-                provider.provider_type
-            )));
-        }
         // 凭据重核验通道:durable Running 重验是 recipe 相位的硬前置;
         // 无通道(new/with_store 构造)fail-closed,绝不在无凭据重验下放行。
         let Some(recheck) = &self.recipe_recheck else {
@@ -538,6 +533,7 @@ mod tests {
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
         ProviderActionMatrix, ProviderCapabilityRecord, RootRecipeEvidence,
     };
+    use crate::product::logical_codebase::provider_gateway::ProviderRefType;
     use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
     use crate::product::logical_codebase::provider_gateway::{
         PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,

@@ -107,15 +107,6 @@ impl ProviderCapabilitySource for LcStaticCapabilitySource {
         provider: &ProviderRef,
         _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
-        use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
-        if provider.provider_type
-            != crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode
-        {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                    .to_string(),
-            ));
-        }
         Ok(Self::capability(
             provider,
             SessionPolicyAction::PlanningReadOnly,
@@ -1210,15 +1201,6 @@ impl ProviderCapabilitySource for LcDialectCapabilitySource {
         provider: &ProviderRef,
         _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
-        use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
-        if provider.provider_type
-            != crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode
-        {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                    .to_string(),
-            ));
-        }
         Ok(Self::capability(
             provider,
             SessionPolicyAction::PlanningReadOnly,

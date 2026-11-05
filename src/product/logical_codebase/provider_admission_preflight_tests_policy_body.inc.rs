@@ -732,6 +732,91 @@ mod policy_body_tests {
         );
     }
 
+    // ===== root-recipe 对 provider 无关（REQ-BOOT-15）=====
+
+    /// 非 Claude provider（Pi）的 root-recipe 契约记录。
+    fn t02_pi_recipe_contract_record() -> T02Record {
+        let mut record = t02_recipe_contract_record();
+        record.provider_type = ProviderRefType::Pi;
+        record.adapter_dialect = ProviderDialect::PiRpcV1;
+        record.wire_dialect = T02WireDialect::PiRpc;
+        record
+    }
+
+    /// root-recipe 相位准入**不再绑死 Claude Code**（REQ-BOOT-15）：Pi +
+    /// 有效凭据(durable Running 派生) + 已交付 recipe 证据 ⇒ 放行。
+    #[test]
+    fn root_recipe_admission_accepts_non_claude_provider() {
+        let fixture = admission_fixture();
+        let (_operations, _operation_id, credential) = derived_credential(&fixture);
+        let store = T02Store::new(fixture.paths.clone());
+        store.ensure_bootstrap().unwrap();
+        store.upsert(&t02_pi_recipe_contract_record()).unwrap();
+        let source = T02Source::global_capability_with_lc_recipe_recheck(
+            fixture.paths.clone(),
+            fixture.project_id.clone(),
+            fixture.lc_id.clone(),
+        );
+        source
+            .require_root_recipe_supported(
+                &ProviderRef::pi("cap_managed_snapshot"),
+                &credential,
+            )
+            .expect("non-Claude provider must be admitted in the root-recipe phase");
+    }
+
+    /// 凭据重核验通道缺失 ⇒ **仍然 fail-closed**（凭据三道检查一条不减）。
+    #[test]
+    fn root_recipe_admission_still_denies_when_credential_channel_missing() {
+        let fixture = admission_fixture();
+        let (_operations, _operation_id, credential) = derived_credential(&fixture);
+        let store = T02Store::new(fixture.paths.clone());
+        store.ensure_bootstrap().unwrap();
+        store.upsert(&t02_pi_recipe_contract_record()).unwrap();
+        let channelless = T02Source::with_store(
+            T02Store::new(fixture.paths.clone()),
+            fixture.project_id.clone(),
+        );
+        let error = channelless
+            .require_root_recipe_supported(
+                &ProviderRef::pi("cap_managed_snapshot"),
+                &credential,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                if reason.starts_with("root_recipe_credential_recheck_unavailable")),
+            "channel-less source must fail closed: {error:?}"
+        );
+    }
+
+    /// 凭据重核验被拒（operation 已终态）⇒ **仍然 fail-closed**。
+    #[test]
+    fn root_recipe_admission_still_denies_when_credential_recheck_fails() {
+        let fixture = admission_fixture();
+        let (operations, operation_id, credential) = derived_credential(&fixture);
+        let store = T02Store::new(fixture.paths.clone());
+        store.ensure_bootstrap().unwrap();
+        store.upsert(&t02_pi_recipe_contract_record()).unwrap();
+        let source = T02Source::global_capability_with_lc_recipe_recheck(
+            fixture.paths.clone(),
+            fixture.project_id.clone(),
+            fixture.lc_id.clone(),
+        );
+        finish_bootstrap_operation(&operations, &fixture, &operation_id);
+        let error = source
+            .require_root_recipe_supported(
+                &ProviderRef::pi("cap_managed_snapshot"),
+                &credential,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
+                if reason.starts_with("root_recipe_credential_recheck_denied")),
+            "completed operation must fail the recheck: {error:?}"
+        );
+    }
+
     // ===== Task 14(lcg_t14):legacy Unknown 行的可操作迁移等待投影 =====
 
     /// 存量 v1 记录:supported_actions 为空(部分迁移形态),无 v2 矩阵

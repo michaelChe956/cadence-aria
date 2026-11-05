@@ -476,15 +476,6 @@ mod tests {
             crate::product::logical_codebase::provider_gateway::ProviderCapability,
             crate::product::logical_codebase::provider_gateway::ProviderGatewayError,
         > {
-            use crate::product::logical_codebase::provider_gateway::{
-                ProviderGatewayError, ProviderRefType,
-            };
-            if provider.provider_type != ProviderRefType::ClaudeCode {
-                return Err(ProviderGatewayError::UnsupportedCapability(
-                    crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                        .to_string(),
-                ));
-            }
             Ok(Self::capability(
                 provider,
                 SessionPolicyAction::PlanningReadOnly,

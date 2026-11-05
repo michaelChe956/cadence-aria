@@ -2975,10 +2975,6 @@ pub const PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED: &str =
 pub const PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED: &str =
     "provider_capability_write_boundary_not_confirmed";
 
-/// root-recipe 相位仅接受固定 Claude recipe provider 的稳定判别码。
-pub const PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE: &str =
-    "root_recipe_requires_fixed_claude_provider";
-
 /// root-recipe 凭据对 durable Running operation 重核验失败时的稳定判别码。
 pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED: &str =
     "root_recipe_credential_recheck_denied";
