@@ -641,10 +641,18 @@ mod tests {
     #[test]
     fn aggregate_provider_candidate_order_is_pi_claude_code_codex_without_kimi() {
         let order: Vec<ProviderName> = AGGREGATE_PROVIDER_CANDIDATE_ORDER.to_vec();
-        assert_eq!(order.len(), 3, "owner order must list exactly three candidates");
+        assert_eq!(
+            order.len(),
+            3,
+            "owner order must list exactly three candidates"
+        );
         assert_eq!(
             order,
-            vec![ProviderName::Pi, ProviderName::ClaudeCode, ProviderName::Codex],
+            vec![
+                ProviderName::Pi,
+                ProviderName::ClaudeCode,
+                ProviderName::Codex
+            ],
             "candidate order must be pi > claude_code > codex"
         );
         assert!(

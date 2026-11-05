@@ -133,7 +133,7 @@ async fn advance_auto_starts_after_one_global_capability_verification() {
         .provider_selection
         .as_ref()
         .expect("a selected provider must freeze its candidate table");
-    assert_eq!(selection.candidates.len(), 4, "{selection:?}");
+    assert_eq!(selection.candidates.len(), 3, "{selection:?}");
     assert_eq!(
         selection.selected, "claude_code",
         "the recipe phase requires the fixed claude provider: {selection:?}"

@@ -46,35 +46,44 @@
 
     use crate::product::logical_codebase::aggregate_initialization::AggregateProviderCandidate;
 
-    /// 按 owner 顺序构造四家候选表（display_name/action_hint 只需稳定可读）。
+    /// 按 owner 顺序构造候选表（display_name/action_hint 只需稳定可读）。
+    /// 候选行派生自 `AGGREGATE_PROVIDER_CANDIDATE_ORDER`：顺序/家数与生产
+    /// 常量自洽，候选序列变更时本夹具无需再动。
     fn frozen_selection_table(
         selected: &str,
     ) -> crate::product::logical_codebase::AggregateProviderSelection {
-        let rows = [
-            ("pi", "Pi"),
-            ("kimi_code", "Kimi"),
-            ("claude_code", "Claude Code"),
-            ("codex", "Codex"),
-        ];
-        crate::product::logical_codebase::AggregateProviderSelection {
-            selected: selected.to_string(),
-            candidates: rows
-                .iter()
-                .map(|(wire, display)| AggregateProviderCandidate {
+        use crate::product::logical_codebase::provider_selection::AGGREGATE_PROVIDER_CANDIDATE_ORDER;
+        use crate::product::logical_codebase::provider_trust::provider_wire_label;
+        use crate::product::models::ProviderName;
+        let display_name = |provider: &ProviderName| match provider {
+            ProviderName::Pi => "Pi",
+            ProviderName::ClaudeCode => "Claude Code",
+            ProviderName::Codex => "Codex",
+            _ => "Provider",
+        };
+        let candidates = AGGREGATE_PROVIDER_CANDIDATE_ORDER
+            .iter()
+            .map(|provider| {
+                let wire = provider_wire_label(provider);
+                AggregateProviderCandidate {
                     provider: wire.to_string(),
-                    display_name: display.to_string(),
+                    display_name: display_name(provider).to_string(),
                     cli_available: true,
                     cli_reason_code: None,
-                    capability_state: if *wire == selected {
+                    capability_state: if wire == selected {
                         "confirmed".to_string()
                     } else {
                         "needs_verification".to_string()
                     },
-                    skipped_reason: (*wire != selected).then(|| "needs_verification".to_string()),
+                    skipped_reason: (wire != selected).then(|| "needs_verification".to_string()),
                     action_hint: format!("hint:{wire}"),
                     warning: None,
-                })
-                .collect(),
+                }
+            })
+            .collect();
+        crate::product::logical_codebase::AggregateProviderSelection {
+            selected: selected.to_string(),
+            candidates,
             rule_version: "v1".to_string(),
             decided_at: CREATED_AT.to_string(),
         }
@@ -183,7 +192,7 @@
                 .iter()
                 .map(|candidate| candidate.provider.as_str())
                 .collect::<Vec<_>>(),
-            vec!["pi", "kimi_code", "claude_code", "codex"],
+            vec!["pi", "claude_code", "codex"],
             "candidates stay in owner order, never reordered by outcome"
         );
         assert!(selection

@@ -215,8 +215,8 @@ fn assert_no_operation_created(fixture: &SelectionFailureFixture) {
     );
 }
 
-/// 测试点 #4 + 8b：四家全 Unknown → `aggregate_initialization_provider_
-/// needs_verification`，operation 未创建；`details.candidates` 四家齐全
+/// 测试点 #4 + 8b：候选全 Unknown → `aggregate_initialization_provider_
+/// needs_verification`，operation 未创建；`details.candidates` 候选齐全
 /// （owner 顺序），`details.revalidate` 六字段逐个非空且只指向单家
 /// （suggested=pi），`body.provider_type` 等于被点名 provider，`expect`
 /// 说明真实探针会消耗额度（REQ-PCR-02 场景 2 的唯一落点）。
@@ -238,9 +238,9 @@ async fn all_unverified_providers_reject_create_with_single_revalidate_entry() {
     let candidates = body["details"]["candidates"]
         .as_array()
         .expect("candidate table");
-    assert_eq!(candidates.len(), 4, "all four candidates listed: {body}");
+    assert_eq!(candidates.len(), 3, "owner-order candidates listed: {body}");
     assert_eq!(candidates[0]["provider"], "pi");
-    assert_eq!(candidates[3]["provider"], "codex");
+    assert_eq!(candidates[2]["provider"], "codex");
     assert!(
         candidates
             .iter()
@@ -321,12 +321,12 @@ async fn degraded_provider_health_rejects_create_without_operation() {
     assert_no_operation_created(&fixture);
 }
 
-/// 测试点 #6：四家命令都不可用 → `aggregate_initialization_no_provider_
+/// 测试点 #6：候选命令都不可用 → `aggregate_initialization_no_provider_
 /// available`，operation 未创建；逐家 `action_hint` 指向安装方式，
 /// 不得归因为「未核验」。
 #[tokio::test]
 async fn no_available_cli_rejects_create_with_install_hints() {
-    let fixture = selection_failure_fixture(&["claude", "codex", "pi", "kimi"], None).await;
+    let fixture = selection_failure_fixture(&["claude", "codex", "pi"], None).await;
     let (status, body) = selection_failure_create(&fixture, "no-cli-1").await;
     assert!(
         status.is_client_error() || status.is_server_error(),
@@ -340,10 +340,10 @@ async fn no_available_cli_rejects_create_with_install_hints() {
     let candidates = body["details"]["candidates"]
         .as_array()
         .expect("candidate table");
-    assert_eq!(candidates.len(), 4, "{body}");
+    assert_eq!(candidates.len(), 3, "{body}");
     assert!(
         candidates.iter().all(|candidate| candidate["cli_available"] == false),
-        "all four report their cli unavailable: {body}"
+        "every candidate reports its cli unavailable: {body}"
     );
     assert!(
         candidates
@@ -366,18 +366,21 @@ async fn no_available_cli_rejects_create_with_install_hints() {
     );
 }
 
-/// 测试点 #7a：选中 kimi_code 且 trust 未 Ready → 既有
+/// 测试点 #7a：选中 codex 且 trust 未 Ready → 既有
 /// `aggregate_initialization_trust_waiting` 链路（选择成功后才评估门）。
+/// 候选序改三家后 KimiCode 不再是候选，trust 分流改由 Codex 承载；
+/// 门 stub（RouteTrustGate）的 Waiting 载荷固定为 kimi 字段，与本用例
+/// 断言的 HTTP 面契约（code/reason_code）无关。
 #[tokio::test]
-async fn selected_kimi_without_trust_returns_existing_waiting_surface() {
-    let fixture = selection_failure_fixture(&["pi"], Some(true)).await;
-    // pi 未安装，kimi 已核验 ⇒ 选中 kimi_code ⇒ trust 门 Waiting。
+async fn selected_codex_without_trust_returns_existing_waiting_surface() {
+    let fixture = selection_failure_fixture(&["pi", "claude"], Some(true)).await;
+    // pi/claude 未安装，codex 已核验 ⇒ 选中 codex ⇒ trust 门 Waiting。
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &fixture.paths,
         "project_0001",
-        &[crate::product::logical_codebase::provider_gateway::ProviderRefType::KimiCode],
+        &[crate::product::logical_codebase::provider_gateway::ProviderRefType::Codex],
     );
-    let (status, body) = selection_failure_create(&fixture, "kimi-trust-1").await;
+    let (status, body) = selection_failure_create(&fixture, "codex-trust-1").await;
     assert!(
         status.is_client_error() || status.is_server_error(),
         "trust waiting must reject the create request: {status} {body}"
@@ -417,7 +420,7 @@ async fn selected_pi_skips_trust_gate_and_freezes_provider() {
         .provider_selection
         .expect("selection is recorded on the operation");
     assert_eq!(selection.selected, "pi");
-    assert_eq!(selection.candidates.len(), 4);
+    assert_eq!(selection.candidates.len(), 3);
 }
 
 /// 测试点 #8c：Denied 的 fallback 位置规则——被点名者（owner 顺序第一
@@ -426,7 +429,7 @@ async fn selected_pi_skips_trust_gate_and_freezes_provider() {
 /// 且不下发 `revalidate`（不指向不存在的下一家）。
 #[tokio::test]
 async fn denied_pi_points_fallback_at_next_owner_order_candidate() {
-    let fixture = selection_failure_fixture(&["kimi", "claude", "codex"], None).await;
+    let fixture = selection_failure_fixture(&["claude", "codex"], None).await;
     let store = crate::product::logical_codebase::ProviderCapabilityStore::new(fixture.paths.clone());
     store
         .upsert(
@@ -446,16 +449,16 @@ async fn denied_pi_points_fallback_at_next_owner_order_candidate() {
         "{body}"
     );
     assert_no_operation_created(&fixture);
-    assert_eq!(body["details"]["fallback_provider"], "kimi_code", "{body}");
+    assert_eq!(body["details"]["fallback_provider"], "claude_code", "{body}");
     assert_eq!(
         body["details"]["revalidate"]["body"]["provider_type"],
-        "kimi_code",
+        "claude_code",
         "revalidate points at the next candidate: {body}"
     );
     let candidates = body["details"]["candidates"]
         .as_array()
         .expect("candidate table");
-    assert_eq!(candidates.len(), 4, "{body}");
+    assert_eq!(candidates.len(), 3, "{body}");
     assert_eq!(candidates[0]["capability_state"], "denied", "{body}");
     assert!(
         candidates
