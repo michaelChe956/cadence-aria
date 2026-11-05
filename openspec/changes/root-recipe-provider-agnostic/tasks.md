@@ -44,6 +44,18 @@
 - [x] 4.6 归档顺序自查：本 change 的 delta 覆盖 REQ-BOOT-03 / REQ-BOOT-07 ⇒ 归档时 MUST 在 `globalize-provider-capability-verification` **之后**
 - [ ] 4.7 真机验收：owner 在 4317 上重跑聚合初始化 ⇒ 选择器选中 Pi ⇒ Pi 收到 `/skill:pre-check …` ⇒ pre_check **真的产生变更**（或**明确失败**并指出 provider + step），SHALL NOT 静默零变更
 
+## 4A. owner 2026-11-05 四点裁决的落地（顺序 / Kimi 例外 / 两处红字）
+
+映射 requirement：REQ-BOOT-03、REQ-BOOT-07、REQ-BOOT-15、REQ-BOOT-18
+
+- [x] 4A.1 契约增补：owner 四点裁决写入 delta（顺序改三家 / Kimi 例外 / 两处红字）—— `d185174c`；Kimi 缺口另立 change `kimi-root-recipe-support`（只记录、不实施，owner 裁定）—— `d185174c` / `3be0ab52`
+- [x] 4A.2 候选顺序改三家：`AGGREGATE_PROVIDER_CANDIDATE_ORDER` = Pi > ClaudeCode > Codex（不含 KimiCode）；`PROVIDER_SELECTION_RULE_VERSION` bump 到 `aggregate-provider-owner-order-v2` —— `aeb9ddd2`（红测试）/ `ef19dfa4`（实现）
+- [x] 4A.3 连带同步：候选表夹具改为从常量派生、`selection_failure` / `l2_global_capability` / `coordinator_tests_contract` 的家数与期望同步；失败文案「四家 provider …」改为与家数无关措辞 —— `bbf17190`
+- [x] 4A.4 两处红字：Provider 管理抽屉（作用域说明之后）+ 逻辑代码库管理抽屉（聚合初始化卡标题行之后）—— `9a939faf`（红测试）/ `bf9db0d9`（实现）/ `b723814d`（去常驻 `role="alert"`）
+- [x] 4A.5 独立审查：前端切片 0 阻断、后端切片 0 阻断（4 条注释建议已收进 `e2fe3736`）—— `cadence/reports/2026-11-05_审查_聚合初始化红字前端切片_v1.0.md` / `…_候选顺序改三家后端切片_v1.0.md`
+- [x] 4A.6 全量门禁：`cargo test --locked --all-targets` ⇒ lib 6006 / it_core 198 / it_web 602 / entrypoints 49，**0 failed**；clippy / fmt / `openspec validate --specs --strict`（78 passed / 0 failed）全过
+- [ ] 4A.7 真机验收（owner，2026-11-05 从零冷启动）：① 候选表只三家、顺序 Pi > Claude Code > Codex；② 两处红字逐字可见；③ 聚合初始化选中 Pi 并真产生根级材料（与 4.7 合并验）
+
 ## 5. 与机器级化 change 的关系
 
 - 本 change 与 `globalize-provider-capability-verification` **并行推进但归档有序**（后者先）

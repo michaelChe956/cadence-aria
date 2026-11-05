@@ -87,7 +87,7 @@
 - [x] 7.8 契约留痕：本 change 的 proposal / design / 两份 spec delta / tasks；归档前补独立审查结论
 - [x] 7.9 真机验收 ①：「一键核验全部」跑一次 ⇒ 面板显示全局口径文案 —— **2026-11-05 owner 真机实测通过**：四家全部「已确认」、三维度全部「已核验」、版本落后标记正常（Claude Code 2.1.307→2.1.318 / Pi 1.3.0→1.5.0），证据截图 `cadence/reports/2026-11-05_前端截图_Provider能力核验四家全部已确认_v1.0.png`
 - [ ] 7.10 真机验收 ②：新建第二个逻辑代码库 ⇒ 面板直接显示已核验（**无需**再核验）
-- [ ] 7.11 真机验收 ③：冷启动推进到聚合初始化 ⇒ **不往聚合根放** `AGENTS.md` + `.claude/rules/language.md` 也**能**自动开始 —— ⚠️ 2026-11-05 owner 真机撞到**独立缺陷**：选择器选中 Pi，但 root-recipe 相位硬拒非 Claude（`root_recipe_requires_fixed_claude_provider: got Pi`），pre_check 零 spawn 即失败 ⇒ 修完该缺陷才能验本条
+- [ ] 7.11 真机验收 ③：冷启动推进到聚合初始化 ⇒ **不往聚合根放** `AGENTS.md` + `.claude/rules/language.md` 也**能**自动开始 —— ⚠️ 2026-11-05 owner 真机撞到的**独立缺陷已修**（`82658d58`：Pi/Codex 的 LC 投影承载 BootstrapExecutorMarker，root recipe 相位对 provider 无关）；同轮还修了 pre_check 的 provider 命令形态（`cadence-init:` ⇒ `/skill:pre-check …`）与失败诊断被空输出兜底串遮住（`a60020c3`）⇒ **待 owner 从零冷启动复验本条**
 - [ ] 7.12 真机验收 ④：聚合根放了两个判定文件 ⇒ 仍走零 provider turn 路径
 
 ## 8. 机器级化（owner 2026-11-05 追加裁定：provider 是平台公用能力）
