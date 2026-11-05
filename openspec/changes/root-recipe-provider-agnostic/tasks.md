@@ -42,7 +42,7 @@
 - [x] 4.4 `openspec validate --specs --strict` ⇒ **仍 78 passed / 0 failed**（MUST NOT 把现有 spec 改红）
 - [x] 4.5（2026-11-05 实测）`openspec validate root-recipe-provider-agnostic --strict` ⇒ valid
 - [x] 4.6 归档顺序自查：本 change 的 delta 覆盖 REQ-BOOT-03 / REQ-BOOT-07 ⇒ 归档时 MUST 在 `globalize-provider-capability-verification` **之后**
-- [ ] 4.7 真机验收：owner 在 4317 上重跑聚合初始化 ⇒ 选择器选中 Pi ⇒ Pi 收到 `/skill:pre-check …` ⇒ pre_check **真的产生变更**（或**明确失败**并指出 provider + step），SHALL NOT 静默零变更
+- [x] 4.7 真机验收：owner 在 4317 上重跑聚合初始化 ⇒ 选择器选中 Pi ⇒ Pi 收到 pre_check 命令 ⇒ pre_check **真的产生变更**（或**明确失败**并指出 provider + step），SHALL NOT 静默零变更 —— ✅ **2026-11-06 owner 从零冷启动实测通过**：operation 记录 `input.provider=pi`；pre_check 命令 receipt（`aggregate-recipe-receipts/<op>/commands/01.json`）逐字为 `/pre-check --no-interrupt --upgrade 用大陆镜像`（与主 spec REQ-BOOT-16 的四条命令一致；`/skill:` 是 Claude Code 方言形态，本 provider 走 `/` 命令形态）；根级产出 `AGENTS.md`(8K) / `CLAUDE.md`(4K) / `policy`(48K) / `cadence`(168K) / `openspec` / `codegraph.json` ⇒ **真产生变更**，非零变更静默
 
 ## 4A. owner 2026-11-05 四点裁决的落地（顺序 / Kimi 例外 / 两处红字）
 
@@ -54,7 +54,7 @@
 - [x] 4A.4 两处红字：Provider 管理抽屉（作用域说明之后）+ 逻辑代码库管理抽屉（聚合初始化卡标题行之后）—— `9a939faf`（红测试）/ `bf9db0d9`（实现）/ `b723814d`（去常驻 `role="alert"`）
 - [x] 4A.5 独立审查：前端切片 0 阻断、后端切片 0 阻断（4 条注释建议已收进 `e2fe3736`）—— `cadence/reports/2026-11-05_审查_聚合初始化红字前端切片_v1.0.md` / `…_候选顺序改三家后端切片_v1.0.md`
 - [x] 4A.6 全量门禁：`cargo test --locked --all-targets` ⇒ lib 6006 / it_core 198 / it_web 602 / entrypoints 49，**0 failed**；clippy / fmt / `openspec validate --specs --strict`（78 passed / 0 failed）全过
-- [ ] 4A.7 真机验收（owner，2026-11-05 从零冷启动）：① 候选表只三家、顺序 Pi > Claude Code > Codex；② 两处红字逐字可见；③ 聚合初始化选中 Pi 并真产生根级材料（与 4.7 合并验）
+- [x] 4A.7 真机验收（owner，2026-11-06 从零冷启动）：① 候选表只三家、顺序 Pi > Claude Code > Codex ✅（operation 记录 `provider_selection.candidates` = `[pi, claude_code, codex]`，**不含 Kimi**）；② 两处红字逐字可见 ✅（截图：聚合初始化卡标题行下方**带框 soft 底红条**，文案「聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。」）；③ 聚合初始化选中 Pi 并真产生根级材料 ✅（见 4.7）。截图 `cadence/reports/2026-11-06_前端截图_聚合初始化真跑通_红字与Pi选中_v1.0.png`
 
 ## 5. 与机器级化 change 的关系
 
