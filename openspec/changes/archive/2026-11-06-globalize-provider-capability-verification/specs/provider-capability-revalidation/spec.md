@@ -4,8 +4,6 @@
 
 系统 SHALL 提供 per-provider 的显式 capability 重验证动作：仅由用户显式触发（HTTP POST，携带 `provider_type`），对该 provider 执行真实现场边界探针（复用既有 `run_cli_boundary_probe` 通道：覆盖 CodingTargetWrite、PlanningReadOnly、ReviewReadOnly 三个 action，含 resume 面），并把每个通过三方一致性校验的探针结果经 `record_verified_probe` 原子导入 durable Confirmed。导入写入的 capability store SHALL 是**机器级（整机）**记录，且 SHALL 与 gateway/admission 消费的作用域**完全同一份**。系统 SHALL NOT 在无显式点击时运行任何探针，SHALL NOT 提供手工改写 Confirmed 的旁路。SHALL NOT 存在按项目或按逻辑代码库分别维护或分别读取的 capability 记录。
 
-该重验证动作 SHALL **不要求**选中项目、不要求存在逻辑代码库：它 SHALL 面向整机 provider CLI 能力，与项目、逻辑代码库、聚合根、成员仓均无关。
-
 #### Scenario: 点击核验补齐 Unknown
 
 - **WHEN** provider 的 capability 行为 Unknown 且用户对该 provider 触发重验证
@@ -29,7 +27,7 @@
 #### Scenario: 无项目也能核验
 
 - **WHEN** 当前工作区没有选中任何项目（或该工作区根本没有项目），用户仍显式触发某 provider 的重验证
-- **THEN** 系统 SHALL 正常执行探针并把结果写入机器级记录；SHALL NOT 因缺少项目或逻辑代码库而拒绝、SHALL NOT 静默跳过
+- **THEN** 系统 SHALL 正常执行探针并把结果写入机器级记录；SHALL NOT 因缺少项目或逻辑代码库而拒绝、SHALL NOT 静默跳过；该动作面向整机 provider CLI 能力，与项目、逻辑代码库、聚合根、成员仓均无关
 
 ### Requirement: 只读 capability 状态投影
 
