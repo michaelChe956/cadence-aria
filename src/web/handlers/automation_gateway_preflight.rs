@@ -309,7 +309,6 @@ mod tests {
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
         ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
-        RootRecipeEvidence,
     };
     use crate::product::logical_codebase::provider_gateway::{
         LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderRefType, ResumeEvidenceState,
@@ -528,7 +527,6 @@ mod tests {
             trust: evidence(confirmed),
             probed_at: None,
             probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: if confirmed {
                 crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string()

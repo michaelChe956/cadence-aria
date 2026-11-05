@@ -52,7 +52,7 @@ use cadence_aria::product::logical_codebase::provider_boundary_probe::{
 };
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-    ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore, RootRecipeEvidence,
+    ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
 };
 use cadence_aria::product::logical_codebase::provider_gateway::{
     LogicalCodebaseProviderGateway, ProviderLaunchAuditContext, ProviderRef, ProviderRefType,
@@ -2371,7 +2371,6 @@ impl Task11CapabilityRestore {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: None,
             probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics:
                 cadence_aria::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string(),

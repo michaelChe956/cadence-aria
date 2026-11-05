@@ -198,21 +198,6 @@ impl ProviderActionMatrix {
 // `lcg_t02_matrix_missing_action_row_reads_unknown` /
 // `lcg_t02_matrix_duplicate_action_rows_are_rejected` 直接钉住。
 
-/// 根 recipe 证据隔离格(record.root_recipe_evidence,冻结接口):仅承载固定
-/// Claude root recipe 的已交付证据事实,与 normal action matrix 相互隔离,
-/// 不参与 normal 会话放行,也不被 normal 会话消费(消费语义归后续切片)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RootRecipeEvidence {
-    /// 尚无已交付 recipe 证据。
-    None,
-    /// 已交付的固定 Claude root recipe 事实(证据引用 + 钉定版本)。
-    Delivered {
-        evidence_ref: String,
-        version: String,
-    },
-}
-
 // ---- Task 14(lcg_t14):存量迁移等待面与冻结稳定判别码 ----
 
 /// Task 14 冻结:capability 行未探测(Unknown)/版本漂移失效的迁移等待
@@ -301,8 +286,6 @@ pub struct ProviderCapabilityRecord {
     pub probed_at: Option<String>,
     /// 探测工件引用(未探测为 None)。
     pub probe_artifact_ref: Option<String>,
-    /// 根 recipe 证据隔离格(独立于 normal 矩阵)。
-    pub root_recipe_evidence: RootRecipeEvidence,
     /// 执行语义标识(批2 Task 9;v3 新证写入恒为
     /// `PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN`,bootstrap/历史形状为空串
     /// = 无语义主张,当前行读取 Unknown)。
@@ -332,7 +315,6 @@ impl ProviderCapabilityRecord {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: None,
             probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: String::new(),
         }
     }
@@ -353,7 +335,6 @@ impl ProviderCapabilityRecord {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: None,
             probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: String::new(),
         }
     }
@@ -381,7 +362,6 @@ impl ProviderCapabilityRecord {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: None,
             probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: String::new(),
         }
     }
@@ -515,7 +495,6 @@ impl ProviderCapabilityRecord {
             trust: Some(self.trust.clone()),
             probed_at: self.probed_at.clone(),
             probe_artifact_ref: self.probe_artifact_ref.clone(),
-            root_recipe_evidence: Some(self.root_recipe_evidence.clone()),
             execution_semantics: Some(self.execution_semantics.clone()),
         }
     }
@@ -558,7 +537,6 @@ struct ProviderCapabilityRecordJson {
     trust: Option<ProviderCapabilityEvidence>,
     probed_at: Option<String>,
     probe_artifact_ref: Option<String>,
-    root_recipe_evidence: Option<RootRecipeEvidence>,
 }
 
 impl ProviderCapabilityRecordJson {
@@ -591,7 +569,6 @@ impl ProviderCapabilityRecordJson {
             trust,
             probed_at,
             probe_artifact_ref,
-            root_recipe_evidence,
             execution_semantics,
         ) =
             match self.schema_version {
@@ -603,7 +580,6 @@ impl ProviderCapabilityRecordJson {
                     ProviderCapabilityEvidence::Unknown,
                     None,
                     None,
-                    RootRecipeEvidence::None,
                     String::new(),
                 ),
                 // v2 历史:形状仍须可解码(matrix/wire 在场且合法,损坏即拒),
@@ -632,9 +608,6 @@ impl ProviderCapabilityRecordJson {
                             .unwrap_or(ProviderCapabilityEvidence::Unknown),
                         self.probed_at.clone(),
                         self.probe_artifact_ref.clone(),
-                        self.root_recipe_evidence
-                            .clone()
-                            .unwrap_or(RootRecipeEvidence::None),
                         String::new(),
                     )
                 }
@@ -669,9 +642,6 @@ impl ProviderCapabilityRecordJson {
                             .unwrap_or(ProviderCapabilityEvidence::Unknown),
                         self.probed_at.clone(),
                         self.probe_artifact_ref.clone(),
-                        self.root_recipe_evidence
-                            .clone()
-                            .unwrap_or(RootRecipeEvidence::None),
                         execution_semantics,
                     )
                 }
@@ -696,7 +666,6 @@ impl ProviderCapabilityRecordJson {
             trust,
             probed_at,
             probe_artifact_ref,
-            root_recipe_evidence,
             execution_semantics,
         })
     }
@@ -805,8 +774,6 @@ impl ProviderCapabilityStore {
     /// - durable 既有 version/wire/adapter dialect/执行语义与本次 probe 不
     ///   一致(CLI 漂移/语义换代)时,旧行整体失效为 Unknown 等待各自真实
     ///   probe(旧 evidence 工件保留在盘,此处不删除任何探测工件);
-    /// - `root_recipe_evidence` 独立隔离:原样保留,不被 normal 导入升级
-    ///   (RootRecipe 凭据独立,不升级为 normal 行);
     /// - provenance 升级 `ProductionVerified`(真实 probe 导入)。
     pub fn import_verified_probe_row(
         &self,
@@ -828,7 +795,6 @@ impl ProviderCapabilityStore {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: None,
             probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: verified.execution_semantics.clone(),
         });
         // CLI version/wire/adapter dialect/执行语义任一漂移:旧 Confirmed 不
@@ -1097,10 +1063,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Confirmed,
             probed_at: Some("2026-10-02T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://artifact-0001".to_string()),
-            root_recipe_evidence: RootRecipeEvidence::Delivered {
-                evidence_ref: "recipe://evidence-0001".to_string(),
-                version: "0.0.0-managed".to_string(),
-            },
             execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
         }
     }
@@ -1206,18 +1168,53 @@ mod tests {
             loaded.probe_artifact_ref.as_deref(),
             Some("probe://artifact-0001")
         );
-        assert_eq!(
-            loaded.root_recipe_evidence,
-            RootRecipeEvidence::Delivered {
-                evidence_ref: "recipe://evidence-0001".to_string(),
-                version: "0.0.0-managed".to_string(),
-            }
-        );
         // v3 语义字段一并往返(host-open 标识原样保留)。
         assert_eq!(
             loaded.execution_semantics,
             PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
         );
+    }
+
+    /// REQ-PCR-09:机器级 capability 记录**不携带任何 per-LC 形状字段**——
+    /// root-recipe 交付事实按 LC 归属,由 per-LC durable operation 状态
+    /// 重核验承载,不进机器级记录。对落盘字节断言:序列化面不得出现
+    /// root-recipe 证据键(REQ-PCR-09 拆出的 per-LC 字段),也不得出现任何
+    #[test]
+    fn machine_level_record_has_no_per_lc_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
+        store.ensure_bootstrap().unwrap();
+        store
+            .upsert(&lcg_t02_v2_record(
+                "1.2.3",
+                ProviderActionMatrix::from_rows(vec![lcg_t02_matrix_row(
+                    SessionPolicyAction::PlanningReadOnly,
+                    ProviderCapabilityEvidence::Confirmed,
+                    ProviderCapabilityEvidence::Unknown,
+                    ProviderCapabilityEvidence::Unknown,
+                )])
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let bytes =
+            std::fs::read_to_string(store.capabilities_path().expect("capabilities path"))
+                .unwrap();
+        let records: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        let records = records.as_array().expect("records array");
+        assert!(!records.is_empty(), "seeded record must be on disk");
+        for record in records {
+            for key in record.as_object().expect("record object").keys() {
+                assert!(
+                    !key.contains("root_recipe")
+                        && !key.contains("project")
+                        && !key.contains("logical_codebase")
+                        && !key.contains("lc_")
+                        && !key.contains("path"),
+                    "machine-level record must not carry per-LC shape field: {key}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1284,8 +1281,7 @@ mod tests {
     ],
     "trust": {"state": "unknown"},
     "probed_at": null,
-    "probe_artifact_ref": null,
-    "root_recipe_evidence": {"kind": "none"}
+    "probe_artifact_ref": null
   }
 ]"#;
         lcg_t02_write_capabilities_json(&temp, unknown_state);

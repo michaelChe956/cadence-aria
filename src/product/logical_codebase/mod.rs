@@ -144,7 +144,7 @@ pub use provider_boundary_probe::{
 pub use provider_capability_probe::{ProviderCapabilityProbeError, ProviderCapabilityProbeService};
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
-    ProviderCapabilityStore, RootRecipeEvidence,
+    ProviderCapabilityStore,
 };
 pub use provider_gateway::{
     GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LaunchTrustFailureClassification,

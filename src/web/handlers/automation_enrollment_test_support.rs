@@ -790,7 +790,7 @@ pub(crate) fn confirmed_capability_record(
     };
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-        ProviderActionMatrix, ProviderCapabilityRecord, RootRecipeEvidence,
+        ProviderActionMatrix, ProviderCapabilityRecord,
     };
     use crate::product::logical_codebase::provider_gateway::{
         ProviderRefType, ResumeEvidenceState,
@@ -835,7 +835,6 @@ pub(crate) fn confirmed_capability_record(
         trust: ProviderCapabilityEvidence::Confirmed,
         probed_at: None,
         probe_artifact_ref: None,
-        root_recipe_evidence: RootRecipeEvidence::None,
         execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
     }
 }

@@ -420,7 +420,6 @@ mod policy_body_tests {
         PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION as T02SchemaVersion,
         ProviderActionCapability as T02Row, ProviderActionMatrix as T02Matrix,
         ProviderCapabilityRecord as T02Record, ProviderCapabilityStore as T02Store,
-        RootRecipeEvidence as T02RecipeEvidence,
     };
 
     /// root recipe 契约记录:v2 三态矩阵(Planning: Confirmed/Denied/Confirmed;
@@ -478,10 +477,6 @@ mod policy_body_tests {
             trust: T02Evidence::Confirmed,
             probed_at: Some("2026-10-03T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://artifact-0001".to_string()),
-            root_recipe_evidence: T02RecipeEvidence::Delivered {
-                evidence_ref: "recipe://evidence-0001".to_string(),
-                version: "1.4.0".to_string(),
-            },
             execution_semantics:
                 crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string(),
@@ -648,23 +643,18 @@ mod policy_body_tests {
         assert_eq!(streaming.start_count(), 0);
     }
 
-    // ===== Task 2b 第二段(lcg_t02):root-recipe 凭据 durable 重验/漂移 =====
+    // ===== Task 2b 第二段(lcg_t02):root-recipe 凭据 durable 重验 =====
 
-    /// 以三态记录 + 指定 Delivered 版本构造 source fixture（capability 记录
-    /// 落**项目级全局**，recipe 凭据重核验通道按 LC）。
-    fn t02_recipe_source_with_delivered_version(
-        fixture: &AdmissionFixture,
-        delivered_version: &str,
-    ) -> T02Source {
+    /// 以三态记录构造 source fixture（capability 记录落**机器级**，recipe
+    /// 凭据重核验通道按 LC）。
+    fn t02_recipe_source(fixture: &AdmissionFixture) -> T02Source {
         let store = T02Store::new(fixture.paths.clone());
         store.ensure_bootstrap().unwrap();
-        let mut record = t02_recipe_contract_record();
-        record.root_recipe_evidence = T02RecipeEvidence::Delivered {
-            evidence_ref: "recipe://evidence-0001".to_string(),
-            version: delivered_version.to_string(),
-        };
-        store.upsert(&record).unwrap();
-        T02Source::global_capability_with_lc_recipe_recheck(fixture.paths.clone(), fixture.lc_id.clone())
+        store.upsert(&t02_recipe_contract_record()).unwrap();
+        T02Source::global_capability_with_lc_recipe_recheck(
+            fixture.paths.clone(),
+            fixture.lc_id.clone(),
+        )
     }
 
     /// 凭据每次对 durable Running 重验:Running 放行;operation 完成后
@@ -676,7 +666,7 @@ mod policy_body_tests {
         let fixture = admission_fixture();
         let (operations, operation_id, credential) = derived_credential(&fixture);
 
-        let source = t02_recipe_source_with_delivered_version(&fixture, "1.4.0");
+        let source = t02_recipe_source(&fixture);
         let provider_ref = ProviderRef::claude_code("cap_managed_snapshot");
 
         // durable Running → 固定 recipe 事实放行。
@@ -707,26 +697,42 @@ mod policy_body_tests {
         );
     }
 
-    /// 已交付 recipe 证据钉定版本与记录版本漂移 → fail-closed,稳定码
-    /// root_recipe_evidence_version_drift(凭据有效也不例外)。
+    /// root-recipe 事实已拆出机器级记录（REQ-PCR-09）：机器级 capability
+    /// 字节**不含任何 per-LC 形状字段**（`root_recipe_evidence` 键不出现）；
+    /// 拆出不改变判定结论——凭据有效时 root-recipe 相位仍放行（与拆出前
+    /// 版本钉定一致的结论相同），凭据失效仍 fail-closed（由
+    /// `lcg_t02_root_recipe_credential_revalidated_against_durable_running`
+    /// 与 `root_recipe_admission_still_denies_when_credential_recheck_fails`
+    /// 钉住）。
     #[test]
-    fn lcg_t02_root_recipe_evidence_version_drift_rejected() {
+    fn lcg_t02_machine_record_has_no_per_lc_fields_and_conclusion_unchanged() {
         let fixture = admission_fixture();
         let (_operations, _operation_id, credential) = derived_credential(&fixture);
 
-        // t02_recipe_contract_record 的记录版本为 1.4.0;Delivered 钉 9.9.9。
-        let source = t02_recipe_source_with_delivered_version(&fixture, "9.9.9");
-        let error = source
-            .require_root_recipe_supported(
-                &ProviderRef::claude_code("cap_managed_snapshot"),
-                &credential,
-            )
-            .unwrap_err();
-        assert!(
-            matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
-                if reason.starts_with("root_recipe_evidence_version_drift")),
-            "delivered evidence version drift must fail closed: {error:?}"
-        );
+        let source = t02_recipe_source(&fixture);
+        let provider_ref = ProviderRef::claude_code("cap_managed_snapshot");
+
+        // 机器级字节不含 root_recipe_evidence / 任何项目/LC 形状键。
+        let capabilities_path = fixture
+            .paths
+            .provider_capabilities_root()
+            .join("capabilities.json");
+        let bytes = std::fs::read_to_string(&capabilities_path).expect("machine-level bytes");
+        let records: serde_json::Value = serde_json::from_str(&bytes).expect("records json");
+        for record in records.as_array().expect("records array") {
+            for key in record.as_object().expect("record object").keys() {
+                assert!(
+                    !key.contains("root_recipe") && !key.contains("project")
+                        && !key.contains("logical_codebase") && !key.contains("lc_"),
+                    "machine-level record must not carry per-LC shape field: {key}"
+                );
+            }
+        }
+
+        // 拆出不改变判定结论（REQ-PCR-09）：凭据有效 ⇒ root-recipe 相位放行。
+        source
+            .require_root_recipe_supported(&provider_ref, &credential)
+            .expect("valid credential must keep admitting the root-recipe phase");
     }
 
     // ===== root-recipe 对 provider 无关（REQ-BOOT-15）=====

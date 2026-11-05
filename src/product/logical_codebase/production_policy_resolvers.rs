@@ -21,7 +21,6 @@ use crate::product::logical_codebase::provider_gateway::{
     PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE,
-    PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT,
 };
 use crate::product::logical_codebase::provider_selection as selection;
 use crate::product::logical_codebase::{
@@ -353,8 +352,10 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
     /// 返回的 capability 只镜像 durable normal 状态(行不因 recipe 事实铸造
     /// Confirmed),不推 normal Confirmed(隔离契约)。
     ///
-    /// **凭据三道检查一条不减**:① 重核验通道在场 ② 已交付 recipe 证据的
-    /// 版本钉定一致 ③ 凭据对 durable Running operation 重核验通过。
+    /// **凭据重核验门一条不减**:① 重核验通道在场 ② 凭据对 durable
+    /// Running operation 重核验通过。root-recipe 交付事实按 LC 归属
+    /// (REQ-PCR-09),不在机器级 capability 记录里,由凭据对 per-LC
+    /// durable operation 的重核验承载。
     fn require_root_recipe_supported(
         &self,
         provider: &ProviderRef,
@@ -368,16 +369,6 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
             ));
         };
         let record = self.load_record(provider)?;
-        // 已交付 recipe 证据钉定版本与记录版本漂移 → fail-closed(旧证据
-        // 不跨 CLI 版本沿用,等待重新交付)。
-        if let crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::Delivered { version, .. } =
-            &record.root_recipe_evidence
-            && version != &record.version {
-                return Err(ProviderGatewayError::UnsupportedCapability(format!(
-                    "{PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT}: evidence pins {version}, record has {}",
-                    record.version
-                )));
-            }
         // 凭据每次重验 durable Running:operation 终态/step 推进/digest 或
         // root 漂移 → 凭据失效,fail-closed(稳定码 + admission reason_code)。
         if let Err(denied) =
@@ -524,7 +515,7 @@ mod tests {
     use crate::product::logical_codebase::policy::SessionPolicyAction;
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-        ProviderActionMatrix, ProviderCapabilityRecord, RootRecipeEvidence,
+        ProviderActionMatrix, ProviderCapabilityRecord,
     };
     use crate::product::logical_codebase::provider_gateway::ProviderRefType;
     use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
@@ -1074,7 +1065,6 @@ mod tests {
                 trust: ProviderCapabilityEvidence::Unknown,
                 probed_at: Some("2026-10-07T00:00:00Z".to_string()),
                 probe_artifact_ref: Some("probe-evidence".to_string()),
-                root_recipe_evidence: RootRecipeEvidence::None,
                 execution_semantics:
                     crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                         .to_string(),
@@ -1168,7 +1158,6 @@ mod tests {
                     trust: ProviderCapabilityEvidence::Unknown,
                     probed_at: None,
                     probe_artifact_ref: None,
-                    root_recipe_evidence: RootRecipeEvidence::None,
                     execution_semantics: String::new(),
                 },
             )
@@ -1228,7 +1217,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Confirmed,
             probed_at: Some("2026-10-03T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://artifact-0001".to_string()),
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics:
                 crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string(),

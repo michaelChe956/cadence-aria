@@ -24,7 +24,7 @@ use cadence_aria::product::logical_codebase::policy::{
 };
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
-    ProviderCapabilityStore, RootRecipeEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+    ProviderCapabilityStore, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
 };
 use cadence_aria::product::logical_codebase::provider_gateway::{ProviderRefType, ResumeEvidenceState};
 use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;

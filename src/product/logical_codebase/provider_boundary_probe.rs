@@ -1642,8 +1642,6 @@ pub(crate) fn probe_import_record(
         trust: ProviderCapabilityEvidence::Unknown,
         probed_at: Some(evidence.probed_at().to_string()),
         probe_artifact_ref: Some(evidence.artifact_ref().to_string()),
-        root_recipe_evidence:
-            crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::None,
         execution_semantics: evidence.execution_semantics().to_string(),
     }
 }
@@ -2521,8 +2519,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: Some(evidence.probed_at().to_string()),
             probe_artifact_ref: Some(evidence.artifact_ref().to_string()),
-            root_recipe_evidence:
-                crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::None,
             execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
         }
     }

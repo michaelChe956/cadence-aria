@@ -426,7 +426,7 @@ mod tests {
     };
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-        ProviderActionMatrix, RootRecipeEvidence,
+        ProviderActionMatrix,
     };
     use crate::product::logical_codebase::provider_gateway::{
         ProviderRefType, ResumeEvidenceState,
@@ -552,7 +552,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Confirmed,
             probed_at: Some("2026-11-03T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://artifact".to_string()),
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
         }
     }

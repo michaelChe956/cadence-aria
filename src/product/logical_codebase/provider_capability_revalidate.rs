@@ -478,7 +478,7 @@ mod tests {
     };
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-        ProviderActionMatrix, RootRecipeEvidence,
+        ProviderActionMatrix,
     };
     use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
     use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
@@ -573,7 +573,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: Some(probed_at),
             probe_artifact_ref: Some(artifact_ref),
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics:
                 crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string(),
@@ -615,7 +614,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: Some("2026-10-09T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://boundary/codex/seed".to_string()),
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics:
                 crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string(),

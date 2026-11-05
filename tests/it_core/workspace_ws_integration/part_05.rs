@@ -822,7 +822,6 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
         trust: ProviderCapabilityEvidence::Confirmed,
         probed_at: None,
         probe_artifact_ref: None,
-        root_recipe_evidence: RootRecipeEvidence::None,
         execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
     }
 }

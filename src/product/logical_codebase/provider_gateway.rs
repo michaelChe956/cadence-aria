@@ -2983,9 +2983,6 @@ pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED: &str =
 pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE: &str =
     "root_recipe_credential_recheck_unavailable";
 
-/// 已交付 recipe evidence 钉定版本与当前记录版本漂移时的稳定判别码。
-pub const PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT: &str = "root_recipe_evidence_version_drift";
-
 /// 把 gateway 校验错误映射为 admission waiting 事实(与 preflight `check`
 /// 的映射同型;early verdict 只读,不产生 store 错误面)。
 fn admission_waiting_from_gateway(error: ProviderGatewayError) -> ProviderAdmissionError {

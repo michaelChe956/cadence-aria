@@ -136,7 +136,6 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
         ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
-        RootRecipeEvidence,
     };
     use crate::web::gateway_factory::LogicalCodebaseGatewayFactory;
 
@@ -162,7 +161,6 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         trust: ProviderCapabilityEvidence::Unknown,
         probed_at: None,
         probe_artifact_ref: None,
-        root_recipe_evidence: RootRecipeEvidence::None,
         execution_semantics: String::new(),
     };
     store

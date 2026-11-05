@@ -472,7 +472,7 @@ mod tests {
         PolicyTarget, ProviderDialect, ProviderWireDialect,
     };
     use crate::product::logical_codebase::provider_capability_store::{
-        CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, RootRecipeEvidence,
+        CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix,
     };
     use crate::product::logical_codebase::provider_gateway::{
         ProviderRefType, ResumeEvidenceState,
@@ -579,7 +579,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Unknown,
             probed_at: Some(PROBE_PROBED_AT.to_string()),
             probe_artifact_ref: Some(PROBE_ARTIFACT_REF.to_string()),
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
         }
     }

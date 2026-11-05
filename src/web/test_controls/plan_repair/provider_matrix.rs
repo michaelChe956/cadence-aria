@@ -356,7 +356,7 @@ fn confirmed_capability_record(
     };
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-        ProviderActionMatrix, ProviderCapabilityRecord, RootRecipeEvidence,
+        ProviderActionMatrix, ProviderCapabilityRecord,
     };
     let (adapter_dialect, wire_dialect) = match provider_type {
         crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode => (
@@ -402,7 +402,6 @@ fn confirmed_capability_record(
         trust: ProviderCapabilityEvidence::Confirmed,
         probed_at: None,
         probe_artifact_ref: None,
-        root_recipe_evidence: RootRecipeEvidence::None,
         execution_semantics:
             crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                 .to_string(),

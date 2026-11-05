@@ -24,7 +24,7 @@ use cadence_aria::product::logical_codebase::policy::{
 };
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-    ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore, RootRecipeEvidence,
+    ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
 };
 use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderRefType, ResumeEvidenceState,
@@ -73,7 +73,6 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
         trust: ProviderCapabilityEvidence::Confirmed,
         probed_at: None,
         probe_artifact_ref: None,
-        root_recipe_evidence: RootRecipeEvidence::None,
         execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
     }
 }
