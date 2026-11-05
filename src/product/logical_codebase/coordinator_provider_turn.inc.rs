@@ -75,35 +75,6 @@ impl GatewayBackedAggregateProviderTurnDriver {
         self
     }
 
-    /// Task 1.4（REQ-BOOT-03）：五步 root recipe 的三个 provider turn 到四条
-    /// 无中断命令的固定映射。命令文本唯一来源是
-    /// `RepositoryInitializationStepKind::command()`（Task 1.1 隔离锁显式豁免
-    /// 该消费）：`PreCheck`=命令 1，`RuleAndMcpConfig`=命令 2+3（同一 Claude
-    /// turn 内顺序执行），`OpenspecAndExamples`=命令 4。确定性 step 不映射任何
-    /// 命令（空表=fail-closed，调用方拒绝该 turn）。
-    fn recipe_commands(step: AggregateInitializationStepKind) -> Vec<&'static str> {
-        use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
-        match step {
-            AggregateInitializationStepKind::PreCheck => [RepoStep::PreCheck]
-                .into_iter()
-                .filter_map(|kind| kind.command())
-                .collect(),
-            AggregateInitializationStepKind::RuleAndMcpConfig => {
-                [RepoStep::RuleConfig, RepoStep::McpConfiguration]
-                    .into_iter()
-                    .filter_map(|kind| kind.command())
-                    .collect()
-            }
-            AggregateInitializationStepKind::OpenspecAndExamples => {
-                [RepoStep::ProjectRulesExamples]
-                    .into_iter()
-                    .filter_map(|kind| kind.command())
-                    .collect()
-            }
-            _ => Vec::new(),
-        }
-    }
-
     /// 把单个 provider turn 组装成经 gateway 启动的 streaming 请求。read-only
     /// planning action(聚合根不写成员仓),target 锚定聚合根本身。
     fn launch_request(
@@ -193,13 +164,22 @@ impl GatewayBackedAggregateProviderTurnDriver {
             // 调用面保持 `None`（普通 Executor 不得携带任何 tool policy）。
             tool_policy,
             audit_sink: None,
-            provider_type: ProviderType::ClaudeCode,
+            provider_type: match self.provider.provider_type {
+                crate::product::logical_codebase::ProviderRefType::ClaudeCode => {
+                    ProviderType::ClaudeCode
+                }
+                crate::product::logical_codebase::ProviderRefType::Codex => ProviderType::Codex,
+                crate::product::logical_codebase::ProviderRefType::Pi => ProviderType::Pi,
+                crate::product::logical_codebase::ProviderRefType::KimiCode => {
+                    ProviderType::KimiCode
+                }
+            },
             role: AdapterRole::Executor,
             // Task 1.4：真实 root recipe 命令（固定顺序，来源
             // `RepositoryInitializationStepKind::command()`），替换占位串。
             // OracleAggInitScope：recipe 命令保持逐字前缀，scope 纪律线
             // 只追加（`recipe_prompt`）。
-            prompt: Self::recipe_prompt(step, aggregate_root),
+            prompt: Self::recipe_prompt(step, aggregate_root, self.provider_name()),
             working_dir: aggregate_root.to_path_buf(),
             workspace_session_id: None,
             resume_provider_session_id: None,
@@ -233,19 +213,6 @@ impl GatewayBackedAggregateProviderTurnDriver {
              - 必须实际逐条执行上述命令并产生真实文件变更；零文件变更的空完成不满足本任务要求，不得在未实际执行命令的情况下宣告完成。\n",
             path = aggregate_root.display(),
             allowed = crate::product::logical_codebase::ROOT_RECIPE_ALLOWLIST.join("、")
-        )
-    }
-
-    /// OracleAggInitScope：root recipe turn prompt 拼接纯函数——recipe
-    /// 命令逐字前缀+scope 纪律线追加(不经 gateway 即可直接测试)。
-    fn recipe_prompt(
-        step: AggregateInitializationStepKind,
-        aggregate_root: &std::path::Path,
-    ) -> String {
-        format!(
-            "{}{}",
-            Self::recipe_commands(step).join("\n"),
-            Self::scope_discipline_section(aggregate_root)
         )
     }
 
@@ -411,7 +378,7 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
         } = request;
 
         // 确定性 step 不得进入 provider turn：固定映射为空即 fail-closed。
-        let commands = Self::recipe_commands(step);
+        let commands = Self::recipe_commands(step, self.provider_name());
         if commands.is_empty() {
             return Err(AggregateInitializationError::ProviderTurn {
                 step,
@@ -1201,19 +1168,27 @@ mod provider_turn_lcg_tests {
         std::fs::create_dir_all(&aggregate_root).unwrap();
         let canonical_root = std::fs::canonicalize(&aggregate_root).unwrap();
 
+        use crate::product::models::ProviderName;
         let prompt = GatewayBackedAggregateProviderTurnDriver::recipe_prompt(
             AggregateInitializationStepKind::RuleAndMcpConfig,
             &canonical_root,
+            ProviderName::ClaudeCode,
         );
         use crate::product::repository_store::RepositoryInitializationStepKind as RepoStep;
         assert!(
             prompt.starts_with(&format!(
                 "{}\n{}",
-                RepoStep::RuleConfig.command().unwrap(),
-                RepoStep::McpConfiguration.command().unwrap()
+                RepoStep::RuleConfig
+                    .command_for(ProviderName::ClaudeCode)
+                    .unwrap(),
+                RepoStep::McpConfiguration
+                    .command_for(ProviderName::ClaudeCode)
+                    .unwrap()
             )),
             "recipe 命令文本必须保持 prompt 逐字前缀:\n{prompt}"
         );
         super::assert_aggregate_scope_discipline(&prompt, &canonical_root);
     }
 }
+
+include!("coordinator_recipe_commands.inc.rs");

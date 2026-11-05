@@ -79,7 +79,10 @@ impl ClaudeRepositoryInitializer {
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         let commands = RepositoryInitializationStepKind::ALL
             .into_iter()
-            .filter_map(|step| step.command().map(|command| (step, command)));
+            .filter_map(|step| {
+                step.command_for(ProviderName::ClaudeCode)
+                    .map(|command| (step, command))
+            });
         let mut summaries = Vec::with_capacity(4);
         for (offset, (step, command)) in commands.enumerate() {
             let command_index = offset + 1;
@@ -91,7 +94,7 @@ impl ClaudeRepositoryInitializer {
                         "repository_init_provider_gate",
                         error.code(),
                         command_index,
-                        command,
+                        &command,
                         Some(sanitize_and_truncate(error.reason(), self.output_limit)),
                         true,
                         "Restore Claude Code availability, then retry repository initialization.",
@@ -105,7 +108,7 @@ impl ClaudeRepositoryInitializer {
                         "repository_init_provider_lookup",
                         "provider_unavailable",
                         command_index,
-                        command,
+                        &command,
                         Some("Claude Code provider is not registered".to_string()),
                         true,
                         "Register the gated Claude Code provider, then retry.",
@@ -132,7 +135,7 @@ impl ClaudeRepositoryInitializer {
                     adapter,
                     input,
                     command_index,
-                    command,
+                    &command,
                     command_timeout,
                     cancellation.clone(),
                 )

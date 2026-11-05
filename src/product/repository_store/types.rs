@@ -147,6 +147,37 @@ impl RepositoryInitializationStepKind {
         }
     }
 
+    /// provider 的 skill 调用前缀（REQ-BOOT-16）：**逐字固定**，禁止运行时
+    /// 拼装其它形式。
+    ///
+    /// - ClaudeCode → `/`
+    /// - Pi → `/skill:`
+    /// - KimiCode → `/skill:`
+    /// - Codex → `$cadence-init:`
+    pub fn skill_command_prefix(
+        provider: crate::product::models::ProviderName,
+    ) -> Option<&'static str> {
+        use crate::product::models::ProviderName;
+        match provider {
+            ProviderName::ClaudeCode => Some("/"),
+            ProviderName::Pi => Some("/skill:"),
+            ProviderName::KimiCode => Some("/skill:"),
+            ProviderName::Codex => Some("$cadence-init:"),
+            ProviderName::Fake => None,
+        }
+    }
+
+    /// provider-aware 命令生成（**唯一运行时命令来源**，REQ-BOOT-16）。
+    ///
+    /// 完整形态 = 前缀 + 命令名 + `" "` + 原 args（args 逐字不变）。
+    /// `command()` 保留 Claude 形态的裸命令文本（命令名 + args），供本函数
+    /// 取用命令名/args 段。
+    pub fn command_for(self, provider: crate::product::models::ProviderName) -> Option<String> {
+        let prefix = Self::skill_command_prefix(provider)?;
+        let command = self.command()?;
+        Some(format!("{prefix}{}", command.trim_start_matches('/')))
+    }
+
     pub fn from_command_index(command_index: usize) -> Option<Self> {
         [
             Self::PreCheck,
@@ -300,5 +331,170 @@ impl RepositoryRegistrationError {
         error.command_index = Some(command_index);
         error.command = Some(command.to_string());
         error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RepositoryInitializationStepKind as Step;
+    use crate::product::models::ProviderName;
+
+    /// REQ-BOOT-16：四条命令 × 四家 provider = 16 个形态**逐字断言**。
+    ///
+    /// 完整形态 = 前缀 + 命令名 + `" "` + 原 args（args 逐字不变）。
+    #[test]
+    fn command_for_generates_provider_skill_syntax_verbatim() {
+        let cases: Vec<(ProviderName, Step, &str)> = vec![
+            (
+                ProviderName::ClaudeCode,
+                Step::PreCheck,
+                "/pre-check --no-interrupt --upgrade 用大陆镜像",
+            ),
+            (
+                ProviderName::Pi,
+                Step::PreCheck,
+                "/skill:pre-check --no-interrupt --upgrade 用大陆镜像",
+            ),
+            (
+                ProviderName::KimiCode,
+                Step::PreCheck,
+                "/skill:pre-check --no-interrupt --upgrade 用大陆镜像",
+            ),
+            (
+                ProviderName::Codex,
+                Step::PreCheck,
+                "$cadence-init:pre-check --no-interrupt --upgrade 用大陆镜像",
+            ),
+            (
+                ProviderName::ClaudeCode,
+                Step::RuleConfig,
+                "/rule-config --no-interrupt",
+            ),
+            (
+                ProviderName::Pi,
+                Step::RuleConfig,
+                "/skill:rule-config --no-interrupt",
+            ),
+            (
+                ProviderName::KimiCode,
+                Step::RuleConfig,
+                "/skill:rule-config --no-interrupt",
+            ),
+            (
+                ProviderName::Codex,
+                Step::RuleConfig,
+                "$cadence-init:rule-config --no-interrupt",
+            ),
+            (
+                ProviderName::ClaudeCode,
+                Step::McpConfiguration,
+                "/mcp-configuration --no-interrupt",
+            ),
+            (
+                ProviderName::Pi,
+                Step::McpConfiguration,
+                "/skill:mcp-configuration --no-interrupt",
+            ),
+            (
+                ProviderName::KimiCode,
+                Step::McpConfiguration,
+                "/skill:mcp-configuration --no-interrupt",
+            ),
+            (
+                ProviderName::Codex,
+                Step::McpConfiguration,
+                "$cadence-init:mcp-configuration --no-interrupt",
+            ),
+            (
+                ProviderName::ClaudeCode,
+                Step::ProjectRulesExamples,
+                "/project-rules-examples --no-interrupt",
+            ),
+            (
+                ProviderName::Pi,
+                Step::ProjectRulesExamples,
+                "/skill:project-rules-examples --no-interrupt",
+            ),
+            (
+                ProviderName::KimiCode,
+                Step::ProjectRulesExamples,
+                "/skill:project-rules-examples --no-interrupt",
+            ),
+            (
+                ProviderName::Codex,
+                Step::ProjectRulesExamples,
+                "$cadence-init:project-rules-examples --no-interrupt",
+            ),
+        ];
+        for (provider, step, expected) in cases {
+            assert_eq!(
+                step.command_for(provider.clone()).as_deref(),
+                Some(expected),
+                "{provider:?} / {step:?} 形态必须逐字一致"
+            );
+        }
+    }
+
+    /// 同一 (provider, step) 两次调用结果相同（纯函数、确定性）。
+    #[test]
+    fn command_for_is_deterministic() {
+        for provider in [
+            ProviderName::ClaudeCode,
+            ProviderName::Pi,
+            ProviderName::KimiCode,
+            ProviderName::Codex,
+        ] {
+            for step in [
+                Step::PreCheck,
+                Step::RuleConfig,
+                Step::McpConfiguration,
+                Step::ProjectRulesExamples,
+            ] {
+                assert_eq!(
+                    step.command_for(provider.clone()),
+                    step.command_for(provider.clone()),
+                    "{provider:?} / {step:?} 必须确定性"
+                );
+            }
+        }
+    }
+
+    /// 四家之间**只有前缀不同**（命令名与 args 部分相同）。
+    #[test]
+    fn command_for_differs_only_by_prefix_across_providers() {
+        for step in [
+            Step::PreCheck,
+            Step::RuleConfig,
+            Step::McpConfiguration,
+            Step::ProjectRulesExamples,
+        ] {
+            let claude = step
+                .command_for(ProviderName::ClaudeCode)
+                .expect("claude command");
+            let pi = step.command_for(ProviderName::Pi).expect("pi command");
+            let kimi = step
+                .command_for(ProviderName::KimiCode)
+                .expect("kimi command");
+            let codex = step
+                .command_for(ProviderName::Codex)
+                .expect("codex command");
+            let claude_tail = claude.strip_prefix('/').expect("claude tail");
+            assert_eq!(pi.strip_prefix("/skill:").expect("pi tail"), claude_tail);
+            assert_eq!(
+                kimi.strip_prefix("/skill:").expect("kimi tail"),
+                claude_tail
+            );
+            assert_eq!(
+                codex.strip_prefix("$cadence-init:").expect("codex tail"),
+                claude_tail
+            );
+        }
+    }
+
+    /// Fake 无 skill 调用通道 ⇒ 无命令（不冒充探测）。
+    #[test]
+    fn command_for_is_none_for_fake_provider() {
+        assert!(Step::PreCheck.command_for(ProviderName::Fake).is_none());
+        assert!(Step::skill_command_prefix(ProviderName::Fake).is_none());
     }
 }
