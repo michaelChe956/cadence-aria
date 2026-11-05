@@ -1,4 +1,4 @@
-# 设计：provider 能力核验平台级化（一次核验，整机可用）
+# 设计：provider 能力核验机器级化（一次核验，整机可用）
 
 > 本文件是 OpenSpec 层的**决策记录**：背景 / 决定 / 理由 / 代价 / 冲突裁决。所有落点均已在本仓（`.worktrees/bugfix-b-11-02`）核对过行号与语义；未核实的假设一律标注为「假设 + 核验方式」。
 > 精确文件、命令、测试与提交步骤由 `writing-plans` 写入 `cadence/plans/`；本文件不写实施步骤。
@@ -24,7 +24,7 @@ HTTP 路由带 `lc_id`，且 `lc_id` 承担 404 守卫职责 | `src/web/app.rs:1
 
 ## 决策 1：能力记录的作用域唯一化 —— 项目级全局
 
-> ⚠️ **本决策的作用域部分已被 owner 2026-11-05 的决策 13 取代**（项目级全局 → **平台级（整机）**）。本决策保留为历史记录；「单一作用域」「无第二条读路径」「clean cutover」三条原则**继续有效**，只是作用域边界外扩。
+> ⚠️ **本决策的作用域部分已被 owner 2026-11-05 的决策 13 取代**（项目级全局 → **机器级（整机）**）。本决策保留为历史记录；「单一作用域」「无第二条读路径」「clean cutover」三条原则**继续有效**，只是作用域边界外扩。
 
 **决定**：capability 记录**只有一个作用域：项目级全局**。
 
@@ -179,6 +179,8 @@ R6 | `production_policy_resolvers.rs:235`（`StoreBackedProviderCapabilitySource
 
 ## 决策 9：无历史数据 ⇒ 直接切，无迁移、无提升、无兼容分支
 
+> ⚠️ 本决策在 2026-11-05 由 owner 再次确认（决策 16）：**旧的项目都不用管，没有旧的** ⇒ 不写任何存量分支。
+
 **决定**：
 
 - **不**写迁移脚本、**不**做读时提升（扫描各 LC 旧记录取该 provider 最新一条提升为全局）、**不**保留「全局没有就回退读 per-LC」的兼容分支、**不**保留任何 `for_lc` 别名。
@@ -190,7 +192,7 @@ R6 | `production_policy_resolvers.rs:235`（`StoreBackedProviderCapabilitySource
 
 ## 决策 10：路由与 API 形状不变
 
-> ⚠️ **本决策已被 owner 2026-11-05 的决策 14 取代**：capability 面改为**平台级路由**（不带 `project_id` / `logical_codebase_id`），旧路由删除、不留兼容 shim。本决策保留为历史记录。
+> ⚠️ **本决策已被 owner 2026-11-05 的决策 14 取代**：capability 面改为**机器级路由**（不带 `project_id` / `logical_codebase_id`），旧路由删除、不留兼容 shim。本决策保留为历史记录。
 
 **决定**：`POST /api/projects/{p}/logical-codebases/{lc_id}/capability-revalidate`、`GET .../capabilities`、`POST .../capabilities/revalidate-all` 等**路由形状不变**。
 
@@ -266,15 +268,15 @@ X1 | `StoreBackedProviderCapabilitySource::for_lc` **同时**承担 capability s
 - 不改 provider 优先级、安装/更新机制、探针文案
 - 不改「不点击不运行探针」契约
 - 不改任何 **capability 以外** 的 per-LC 作用域（manifest / policy / operation / trust / receipt / checkout / index）
-- ⚠️ **不改路由形状** —— 已被决策 14 取代（capability 面改平台级路由）；**不改 DTO 形状**仍有效（除新增 root-recipe 事实的独立载体）
+- ⚠️ **不改路由形状** —— 已被决策 14 取代（capability 面改机器级路由）；**不改 DTO 形状**仍有效（除新增 root-recipe 事实的独立载体）
 - 不新增 capability 判定函数（`launch_cell_state` 仍是选择器与 gateway 的唯一共用判定）
 - 不做迁移脚本、不做读时提升、不留兼容读取分支（决策 9）
 
-## 15. 2026-11-05 追加决策（平台级化）
+## 15. 2026-11-05 追加决策（机器级化）
 
 > 触发：owner 指出「provider 不是项目的附属，是平台的公用能力」⇒ 作用域不应停在项目级。下列事实全部已在本仓核对（行号为准）。
 
-### 15.1 新增事实（平台级化的证据基础）
+### 15.1 新增事实（机器级化的证据基础）
 
 | # | 事实 | 位置 |
 |---|---|---|
@@ -283,47 +285,47 @@ P2 | 探针**不读**真实聚合根、成员仓、项目 policy artifact、root
 P3 | capability 记录字段**无任何** project_id / lc_id / 路径字段；绑定只发生在**文件位置层** | `src/product/logical_codebase/provider_capability_store.rs:541-561`、`:878-886` |
 P4 | 记录中唯一项目相关的字段是 `root_recipe_evidence`（绑某 LC 的 root recipe 交付 + 凭据按 per-LC operation Running 重核验） | `provider_capability_store.rs:205-208`；`src/product/logical_codebase/production_policy_resolvers.rs:361-419`、`:382-402` |
 P5 | `probe_artifact_ref` 指向**项目级**证据目录 `capability-evidence/boundary` | `provider_capability_revalidate.rs:462-471` |
-P6 | 同仓 provider 健康与安装面**已是平台级**：路由无 `{project_id}` 段，handler 内 `project_id` / `projects_root` grep **零命中** | `src/web/app.rs:24-27`；`src/web/handlers/providers.rs`、`src/web/handlers/provider_installation.rs` |
+P6 | 同仓 provider 健康与安装面**已是机器级**：路由无 `{project_id}` 段，handler 内 `project_id` / `projects_root` grep **零命中** | `src/web/app.rs:24-27`；`src/web/handlers/providers.rs`、`src/web/handlers/provider_installation.rs` |
 P7 | capability 的 4 条路由全部带 `{project_id}` + `{lc_id}`；`lc_id` 现仅承担 404 守卫与探针工件归属，**不进快照** | `src/web/app.rs:188-198`；`src/web/handlers/logical_codebase_capabilities.rs:75-77`、`:101-102` |
 P8 | 批量作业是**唯一**按 `lc_scope_root` 分目录的 capability 面；job 结构固化 `project_id` + `logical_codebase_id` 并双校验归属 | `src/product/logical_codebase/capability_revalidate_batch.rs:174-184`、`:221-230`、`:432-442`、`:456-461` |
 P9 | 前端入口按钮被 `disabled={!selectedProjectId}` 门控；面板 props 传 `projectId` + `logicalCodebaseId`，任一为 null 则整卡不渲染 | `web/src/components/lifecycle/ProjectSidebar.tsx:242`；`web/src/components/lifecycle/ProviderManagementPanel.tsx:10-30`；`web/src/components/lifecycle/ProviderCapabilityCard.tsx:177/202/222/232` |
 P10 | 前端取 id 的逻辑自述「端点仍按逻辑代码库定位（承载 404 守卫），内容与逻辑代码库无关」 | `web/src/components/lifecycle/IssueLifecycleWorkbenchView.tsx:128-132` |
 P11 | 共享验收实例实测**没有**任何 capability 记录文件（核验从未成功）⇒ 存量面近乎为零 | `.aria/projects/project_0001/logical-codebase/` 实测无 `capabilities.json` |
 
-### 决策 13：作用域唯一化 —— 平台级（整机）
+### 决策 13：作用域唯一化 —— 机器级（整机）
 
-**决定**：capability 记录**只有一个作用域：平台级（整机）**。
+**决定**：capability 记录**只有一个作用域：机器级（整机）**。
 
-- 写：全部落平台级文件（`.aria/provider-capabilities/capabilities.json`）。
+- 写：全部落机器级文件（`.aria/provider-capabilities/capabilities.json`）。
 - 读：全部读同一份。
 - **SHALL NOT** 存在第二条读路径（项目级 / per-LC 子树）、**SHALL NOT** 存在回退/提升分支。
 
 **理由**：
 
 1. **事实的归属是整机**：探针跑在临时目录的自造 fixture 里（P1/P2），记录字段无一绑定项目或 LC（P3）⇒ 「这台机器上某家 provider CLI 能不能跑这个 action」就是**整机事实**。
-2. **仓库已有同构先例**：provider 健康与安装面早就是平台级（P6）⇒ capability 面是**唯一的例外**，这个例外没有技术理由，只是历史包袱。
-3. **成本**：一次真实验证起 provider 进程、跑分钟级探针、烧额度。按项目复制 = 同一份结论重跑 N 遍，且 N = 项目数 × 逻辑代码库数。
+2. **仓库已有同构先例**：provider 健康与安装面早就是机器级（P6）⇒ capability 面是**唯一的例外**，这个例外没有技术理由，只是历史包袱。
+3. **成本**：一次真实验证起 provider 进程、跑分钟级探针、烧额度。按项目/逻辑代码库复制 = 同一份结论重跑 N 遍。
 4. **可用性**：现状下「没有选中项目 ⇒ 能力面板不可用」（P9）⇒ 平台公用的能力被一个项目绑住，用户在别的项目里用不了同一台机器已具备的能力。
 
 **代价**：
 
-- 项目 A 的核验结果对项目 B 生效 —— 这是**要的效果**（owner 明确裁定），不是副作用。
+- 用户在任意项目里做的核验会改变**整机**的能力状态 —— 这是**要的效果**，不是副作用（owner 明确：核验只核验一次，是机器级的）。
 - provider 换代/版本漂移会让**整机**同时需要重验 —— 同样是要的效果（本来就是同一份事实）。
 
-### 决策 14：能力面改平台级路由（clean cutover）
+### 决策 14：能力面改机器级路由（clean cutover）
 
 **决定**：
 
 - 新路由：`GET /api/providers/capabilities`、`POST /api/providers/capabilities/revalidate`、`POST /api/providers/capabilities/revalidate-all`、`GET /api/providers/capabilities/revalidate-all/{job_id}`。
 - 旧路由（`/api/projects/{p}/logical-codebases/{lc_id}/capabilities*` 四条）**删除**，不留兼容别名、不留转发 shim、不留双写。
-- 批量作业落盘改为平台级（不再按 `lc_scope_root` 分目录）；job 结构不再固化 `project_id` / `logical_codebase_id`，归属校验相应取消。
+- 批量作业落盘改为机器级（不再按 `lc_scope_root` 分目录）；job 结构不再固化 `project_id` / `logical_codebase_id`，归属校验相应取消。
 - 前端：能力卡与面板**不再**以「选中项目 / 存在逻辑代码库」为渲染或发起的前置条件；「Provider 管理」入口在无选中项目时也可用。
 
 **理由**：
 
-- 平台级事实用项目级路由承载，是「作用域与路由形状错配」的典型形态（决策 10 已被取代）；留着会让下一个改这块的人重新得出「lc_id 决定记录作用域」。
+- 机器级事实用项目级路由承载，是「作用域与路由形状错配」的典型形态（决策 10 已被取代）；留着会让下一个改这块的人重新得出「lc_id 决定记录作用域」。
 - 仓库铁律要求**干净切换**：迁走所有调用方、删除旧路径，不留 shim。
-- 入口的门控（P9）在平台级语义下是**纯 bug**：平台公用能力被一个项目绑住。
+- 入口的门控（P9）在机器级语义下是**纯 bug**：平台公用能力被一个项目绑住。
 
 **代价**：前端 4 处 + 后端 4 个文件 + 夹具与断言需一次性迁完（P7/P8/P10 的调用点清单见 tasks 第 8 节）。
 
@@ -333,17 +335,15 @@ P11 | 共享验收实例实测**没有**任何 capability 记录文件（核验�
 
 - `root_recipe_evidence`（某 LC 的 root recipe 是否交付、凭据是否仍有效）**从 capability 记录拆出**，改为 **per-LC 独立事实**（存放于该 LC 的作用域）。
 - 它继续按 per-LC durable operation 的 Running 状态重核验（`AggregateInitializationOperationStore::for_lc` 不动）。
-- 平台级 capability 记录 SHALL NOT 含任何 project/lc/路径字段。
+- 机器级 capability 记录 SHALL NOT 含任何 project/lc/路径字段。
 - 准入强度与结论**均不变**。
 
-**理由**：`root_recipe_evidence` 的效力依赖某个具体 LC 的 durable operation 状态（P4）⇒ 它是 per-LC 事实。若塞进整机记录，就把「某个 LC 的状态」写死成「整机的事实」—— 别的项目会读到与自己无关的 root-recipe 结论。反之，通用能力证据（版本 / 方言 / 三格矩阵 / 执行语义）本就不带项目信息（P3），升平台级无损。
+**理由**：`root_recipe_evidence` 的效力依赖某个具体 LC 的 durable operation 状态（P4）⇒ 它是 per-LC 事实。若塞进整机记录，就把「某个 LC 的状态」写死成「整机的事实」—— 别的项目会读到与自己无关的 root-recipe 结论。反之，通用能力证据（版本 / 方言 / 三格矩阵 / 执行语义）本就不带项目信息（P3），升机器级无损。
 
 **代价**：多一个 per-LC 事实载体；写入者（root recipe 交付路径）与读取者（`require_root_recipe_supported`）都要改落点/读点，但判定逻辑不变。
 
-### 决策 16：存量数据 —— 沿用「无历史数据」口径
+### 决策 16：存量数据 —— 没有旧的，不写任何存量分支
 
-**决定**：**不**迁移存量 capability 记录、**不**做读时提升、**不**保留兼容读取分支。
+**决定**：**不**迁移存量 capability 记录、**不**做读时提升、**不**保留兼容读取分支、**不**写任何「若未来出现存量」的兜底逻辑。
 
-**理由**：owner 2026-11-04 已裁定本产品无历史数据；共享验收实例实测亦无任何 capability 记录文件（P11）⇒ 迁移代码是为不存在的问题写代码，反而制造第二种作用域。
-
-**代价**：若未来出现存量，平台级无记录时按「未核验」处理，用户重新核验一次。
+**理由**：owner 2026-11-05 再次确认「**旧的项目都不用管，没有旧的**」；owner 2026-11-04 已裁定本产品无历史数据；共享验收实例实测亦无任何 capability 记录文件（P11）⇒ 迁移代码是为不存在的问题写代码，反而制造第二种作用域。

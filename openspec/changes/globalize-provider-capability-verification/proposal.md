@@ -1,13 +1,13 @@
-# 提案：provider 能力核验平台级化（一次核验，整机可用）
+# 提案：provider 能力核验机器级化（一次核验，整机可用）
 
-> 状态：草案 —— owner 2026-11-04 已拍板（方案 A：全局；且本产品无历史数据 ⇒ 不做存量处理）；**owner 2026-11-05 追加拍板：作用域升级为平台级（整机）+ 两层分离 + 平台级路由**。见文末「owner 决策记录」。
+> 状态：草案 —— owner 2026-11-04 已拍板（方案 A：全局；且本产品无历史数据 ⇒ 不做存量处理）；**owner 2026-11-05 追加拍板：作用域升级为机器级（整机）+ 两层分离 + 机器级路由**。见文末「owner 决策记录」。
 > 技术方案与决策记录见同目录 `design.md`；精确文件、命令、测试与提交步骤由 `writing-plans` 写入 `cadence/plans/`。
 
 ## 背景
 
 owner 2026-11-04 裁定：**provider 能力只需要核验一次，核验一次全局可用**。
 
-> **2026-11-05 补充裁定（本次修订的由来）**：owner 指出「provider 不是项目的附属，是平台的公用能力」⇒ 作用域**不止**是项目级，而应是**平台级（整机）**。实测证据支持这一判断：能力探针在 `std::env::temp_dir()` 下的**自造 fixture** 里执行（假 `AGENTS.md` / 假 `.mcp.json` / 假成员仓），**不读**真实聚合根、成员仓、policy artifact、root-recipe、trust registry —— 唯一真实输入是宿主 PATH 上该 CLI 的存在与版本；capability 记录字段（版本 / 方言 / 三格矩阵 / 执行语义 / trust / resume）**没有一个带 project_id 或 lc_id**。同仓的 provider 健康与安装面（`/api/providers/status`、`/api/providers/install-targets`、`/api/providers/recheck`）早已是**平台级**（handler 内 `project_id` / `projects_root` grep 零命中）⇒ 「安装与健康是平台级、唯独能力核验按项目切了一份」是真实的不一致。
+> **2026-11-05 补充裁定（本次修订的由来）**：owner 指出「provider 不是项目的附属，是平台的公用能力」⇒ 作用域**不止**是项目级，而应是**机器级（整机）**：**核验只核验一次**，机器上一份事实，不存在按项目/逻辑代码库区分的记录副本（owner 明确：「不存在『跨项目共享』这种概念」）。实测证据支持这一判断：能力探针在 `std::env::temp_dir()` 下的**自造 fixture** 里执行（假 `AGENTS.md` / 假 `.mcp.json` / 假成员仓），**不读**真实聚合根、成员仓、policy artifact、root-recipe、trust registry —— 唯一真实输入是宿主 PATH 上该 CLI 的存在与版本；capability 记录字段（版本 / 方言 / 三格矩阵 / 执行语义 / trust / resume）**没有一个带 project_id 或 lc_id**。同仓的 provider 健康与安装面（`/api/providers/status`、`/api/providers/install-targets`、`/api/providers/recheck`）早已是**机器级**（handler 内 `project_id` / `projects_root` grep 零命中）⇒ 「安装与健康是机器级、唯独能力核验按项目切了一份」是真实的不一致。
 
 现状是**逐逻辑代码库（per-LC）核验**：
 
@@ -24,10 +24,10 @@ owner 2026-11-04 裁定：**provider 能力只需要核验一次，核验一次�
 
 | # | 目标 |
 |---|---|
-1 | **能力核验平台级化**：写入一律落平台级 `capabilities.json`；读取只读平台级。一次核验 ⇒ **整机**（所有项目、所有逻辑代码库）可用 |
-2 | **读时零歧义**：产品 SHALL NOT 维护、读取或提升任何 per-项目 / per-LC 能力记录；不存在「平台级没有就去找某个项目或 LC 的旧记录」这类回退分支 |
-3 | **界面口径同步**：能力面板的「逐 LC 核验：会真实跑一次探测…」改为平台级口径，并说清「一次核验，整机可用」；**「Provider 管理」入口不再以「是否选中项目」为前置条件** |
-4 | **门 L2 联动（本次最重要的用户面收益）**：能力核验改平台级后，聚合初始化的 L2 自动变成「平台级已核验」⇒ **四家 provider 全局核验一次（四家执行一次「一键核验全部」）之后，聚合初始化自动开始** ⇒ **用户不再需要往聚合根里放 `AGENTS.md` + `.claude/rules/language.md` 这两个判定文件来解锁自动开始** |
+1 | **能力核验机器级化**：写入一律落机器级 `capabilities.json`；读取只读机器级。**核验只核验一次**，机器上一份事实 |
+2 | **读时零歧义**：产品 SHALL NOT 维护、读取或提升任何按项目/逻辑代码库区分的能力记录；不存在「机器级没有就去找别处旧记录」这类回退分支 |
+3 | **界面口径同步**：能力面板的「逐 LC 核验：会真实跑一次探测…」改为机器级口径，并说清「核验只核验一次」；**「Provider 管理」入口不再以「是否选中项目」为前置条件** |
+4 | **门 L2 联动（本次最重要的用户面收益）**：能力核验改机器级后，聚合初始化的 L2 自动变成「机器级已核验」⇒ **四家 provider 全局核验一次（四家执行一次「一键核验全部」）之后，聚合初始化自动开始** ⇒ **用户不再需要往聚合根里放 `AGENTS.md` + `.claude/rules/language.md` 这两个判定文件来解锁自动开始** |
 
 > **口径澄清（必须如实，不得夸大）**：
 > - 「全局核验后自动开始」= 冷启动推进到聚合初始化时，provider 选择门的 L2 通过 ⇒ operation 被创建并开始执行。这条路径**会真跑四条无中断命令、会消耗所选 provider 的额度**。
@@ -41,30 +41,30 @@ owner 2026-11-04 裁定：**provider 能力只需要核验一次，核验一次�
 - 不改「不点击不运行任何探针」契约：核验仍只由用户显式触发，聚合初始化失败**不得**自动发起核验
 - 不改 capability 记录**以外**的任何 per-LC 作用域：manifest / `aggregate-policy.json` / 聚合初始化 operation / provider trust / root-recipe receipt / checkout / 聚合索引一律**继续按 LC 作用域**
 - **root-recipe 事实仍属 per-LC**：归属**不变**（仍是 per-LC），但 SHALL 从 capability 记录里**拆出**、改为 per-LC 独立事实文件；准入强度不变
-- 例外（本次**确实要改**的一条）：HTTP 路由形状 —— capability 面 SHALL 改为**平台级路由**（不带 `project_id` / `logical_codebase_id`）；旧的 per-项目/per-LC capability 路由 SHALL 删除，不留兼容别名或转发 shim
+- 例外（本次**确实要改**的一条）：HTTP 路由形状 —— capability 面 SHALL 改为**机器级路由**（不带 `project_id` / `logical_codebase_id`）；旧的 per-项目/per-LC capability 路由 SHALL 删除，不留兼容别名或转发 shim
 - 不新增 provider、不改 provider 优先级顺序（`Pi > KimiCode > ClaudeCode > Codex`）、不改 provider 安装机制
 - 不做「已核验能力随 provider 换代自动失效」之类的新机制（既有版本钉定语义已覆盖）
-- 不做存量 capability 记录的迁移、提升、兼容读取（owner 裁定：本产品无历史数据；平台级无记录时按「未核验」处理，用户重新核验一次）
+- 不做存量 capability 记录的迁移、提升、兼容读取（owner 裁定：本产品无历史数据；owner 明确「旧的项目都不用管，没有旧的」⇒ 不写任何存量兜底逻辑）
 
 ## 范围
 
 | 能力 | 变更 |
 |---|---|
-`provider-capability-revalidation` | MODIFIED：重验证导入作用域、只读状态投影、批量核验入口的作用域口径与路由形状、按钮区域说明；REQ-PCR-07 的作用域由「项目级全局」升级为「平台级（整机）」；ADDED：能力面不再按项目或逻辑代码库定位（REQ-PCR-08）、root-recipe 事实的 per-LC 归属（REQ-PCR-09） |
-`non-interrupt-repository-bootstrap` | MODIFIED：REQ-BOOT-03 / REQ-BOOT-07 中「本 LC 能力已核验」的判定口径改为平台级；REQ-BOOT-14 的「全局核验只在本项目内生效」场景翻为「全局核验在整机生效」；ADDED：全局核验后聚合初始化自动开始 |
+`provider-capability-revalidation` | MODIFIED：重验证导入作用域、只读状态投影、批量核验入口的作用域口径与路由形状、按钮区域说明；REQ-PCR-07 的作用域由「项目级全局」升级为「机器级（整机）」；ADDED：能力面不再按项目或逻辑代码库定位（REQ-PCR-08）、root-recipe 事实的 per-LC 归属（REQ-PCR-09） |
+`non-interrupt-repository-bootstrap` | MODIFIED：REQ-BOOT-03 / REQ-BOOT-07 中「本 LC 能力已核验」的判定口径改为机器级；REQ-BOOT-14 的「全局核验只在本项目内生效」场景翻为「全局核验在整机生效」；ADDED：全局核验后聚合初始化自动开始 |
 
 ## 关键联动（必须在实施中兑现）
 
 ```
-能力记录作用域：per-LC ──► 项目级全局 ──► 平台级（整机）
+能力记录作用域：per-LC ──► 项目级全局 ──► 机器级（整机）
         │
-        ├─► provider 选择门 L2：「本 LC 能力已核验」──► 「平台级能力已核验」
+        ├─► provider 选择门 L2：「本 LC 能力已核验」──► 「机器级能力已核验」
         │        │
         │        └─► 四家核验一次 ⇒ L2 放行 ⇒ 冷启动推进到聚合初始化时
         │            operation 被创建并自动开始
         │            ⇒ 用户不再需要往聚合根放 AGENTS.md + .claude/rules/language.md
         │
-        ├─► gateway 准入（require_supported）：读同一份平台级记录
+        ├─► gateway 准入（require_supported）：读同一份机器级记录
         │        ⇒ 准入强度不变（只有 Confirmed 放行），只是作用域变大
         │
         └─► root-recipe 凭据重核验：仍按 LC（拆出为 per-LC 独立事实）
@@ -88,15 +88,15 @@ owner 2026-11-04 裁定：**provider 能力只需要核验一次，核验一次�
 
 | # | 决策 | 结论 |
 |---|---|---|
-| 1 | 作用域 | **方案 A：全局（项目级）**。provider 只需要核验一次 ⇒ 全局可用 ⇒ 不再逐 LC 核验 —— ⚠️ **该作用域已被 2026-11-05 的决策 4 升级为平台级**，本行保留为历史记录 |
+| 1 | 作用域 | **方案 A：全局（项目级）**。provider 只需要核验一次 ⇒ 全局可用 ⇒ 不再逐 LC 核验 —— ⚠️ **该作用域已被 2026-11-05 的决策 4 升级为机器级**，本行保留为历史记录 |
 | 2 | 存量数据 | **本产品没有历史数据** ⇒ 存量 per-LC 能力记录不需要处理：不迁移、不提升、不做兼容读取分支 |
 | 3 | 门 L2 联动 | 能力核验改全局后 L2 自动变成「全局已核验」⇒ 四家全局核验一次 ⇒ 聚合初始化自动开始 ⇒ **不再需要聚合根放 `AGENTS.md` + `.claude/rules/language.md`** |
 
-### 2026-11-05（平台级化）
+### 2026-11-05（机器级化）
 
 | # | 决策 | 结论 |
 |---|---|---|
-| 4 | 作用域升级 | **方案 A：平台级（整机）**。owner 指出「provider 不是项目的附属，是平台的公用能力」⇒ 作用域由「项目级全局」升级为「整机一份」；跨项目、跨逻辑代码库共享同一份记录 |
-| 5 | 两层分离 | **方案 A：两层分离**。通用能力证据（版本 / 方言 / 三格矩阵 / 执行语义）升平台级；`root_recipe_evidence`（绑定某 LC 的 root recipe 交付与凭据有效性）**拆出** capability 记录、改为 per-LC 独立事实，准入强度不变 |
-| 6 | 路由形状 | capability 面改**平台级路由**（不带 `project_id` / `logical_codebase_id`）；旧路由删除，不留兼容 shim（clean cutover） |
-| 7 | 存量数据 | 沿用 2026-11-04 口径：**本产品无历史数据** ⇒ 不迁移存量记录；平台级无记录时按「未核验」处理，用户重新核验一次 |
+| 4 | 作用域升级 | **方案 A：机器级（整机）**。owner 指出「provider 不是项目的附属，是平台的公用能力」⇒ 作用域由「项目级全局」升级为**整机一份**；**核验只核验一次**，不存在按项目/逻辑代码库区分的记录副本（owner 明确：「不存在『跨项目共享』这种概念」） |
+| 5 | 两层分离 | **方案 A：两层分离**。通用能力证据（版本 / 方言 / 三格矩阵 / 执行语义）升机器级；`root_recipe_evidence`（绑定某 LC 的 root recipe 交付与凭据有效性）**拆出** capability 记录、改为 per-LC 独立事实，准入强度不变 |
+| 6 | 路由形状 | capability 面改**机器级路由**（不带 `project_id` / `logical_codebase_id`）；旧路由删除，不留兼容 shim（clean cutover） |
+| 7 | 存量数据 | 沿用 2026-11-04 口径：**本产品无历史数据** ⇒ 不迁移存量记录；owner 明确「旧的项目都不用管，没有旧的」⇒ 不写任何存量兜底逻辑 |

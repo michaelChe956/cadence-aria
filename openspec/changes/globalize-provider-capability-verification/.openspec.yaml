@@ -18,16 +18,16 @@ x-owner-decisions:
     consequence: 四家 provider 全局核验一次后，聚合初始化自动开始；用户不再需要往聚合根里放 AGENTS.md + .claude/rules/language.md
   - id: platform-scope
     decided: 2026-11-05
-    decision: 方案 A —— 作用域由「项目级全局」升级为【平台级（整机）】：provider 不是项目的附属，是平台的公用能力
-    reason: 能力探针在临时目录的自造 fixture 里执行，不读真实聚合根/成员仓/policy/root-recipe/trust，唯一真实输入是宿主 PATH 上该 CLI 的存在与版本；记录字段无一带 project_id 或 lc_id；同仓 provider 健康与安装面早已是平台级
+    decision: 方案 A —— 作用域由「项目级全局」升级为【机器级（整机）】：provider 不是项目的附属，是平台的公用能力
+    reason: 能力探针在临时目录的自造 fixture 里执行，不读真实聚合根/成员仓/policy/root-recipe/trust，唯一真实输入是宿主 PATH 上该 CLI 的存在与版本；记录字段无一带 project_id 或 lc_id；同仓 provider 健康与安装面早已是机器级
     consequence: 一次核验对整机所有项目与逻辑代码库生效；旧的项目级/LC 级 capability 路由删除；「Provider 管理」入口不再以选中项目为前置条件；REQ-BOOT-14「全局核验只在本项目内生效」翻为「全局核验在整机生效」
   - id: two-layer-separation
     decided: 2026-11-05
-    decision: 方案 A —— 两层分离：通用能力证据升平台级；root_recipe_evidence（绑定某 LC 的 root recipe 交付与凭据有效性）拆出 capability 记录、改为 per-LC 独立事实
+    decision: 方案 A —— 两层分离：通用能力证据升机器级；root_recipe_evidence（绑定某 LC 的 root recipe 交付与凭据有效性）拆出 capability 记录、改为 per-LC 独立事实
     reason: root-recipe 事实的效力依赖 per-LC durable operation 的 Running 状态重核验，塞进整机记录会把 per-LC 事实写死成整机事实
-    consequence: root-recipe 准入强度与结论均不变；平台级 capability 记录不再含任何 project/lc/路径字段
+    consequence: root-recipe 准入强度与结论均不变；机器级 capability 记录不再含任何 project/lc/路径字段
   - id: platform-routes
     decided: 2026-11-05
-    decision: capability 面改平台级路由（不带 project_id / logical_codebase_id），旧路由删除、不留兼容 shim
+    decision: capability 面改机器级路由（不带 project_id / logical_codebase_id），旧路由删除、不留兼容 shim
     reason: 能力是整机事实，按项目/LC 定位只是历史包袱；仓库铁律要求干净切换、迁走所有调用方
     consequence: 前端能力卡与面板去掉 projectId / logicalCodebaseId props；「Provider 管理」入口在无选中项目时也可用
