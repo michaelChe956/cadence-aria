@@ -776,7 +776,7 @@ fn select_aggregate_provider_blocking(
 /// operation**（选择器零写入），稳定码取选择器 `reason_code()`（四个
 /// `REASON_CODE_*`，三段成品与执行期三态同源放 `details.copy`）。
 ///
-/// - `details.candidates`：四家候选表（owner 顺序，逐家 `action_hint`）；
+/// - `details.candidates`：候选表（owner 顺序，逐家 `action_hint`）；
 /// - `details.revalidate`：单家核验入口六字段——`NeedsVerification` 指向
 ///   `suggested`；`Denied` 指向被点名者的**下一家**（owner 顺序）；
 /// - `details.fallback_provider`：仅 `Denied`——下一家 wire 名；被点名者

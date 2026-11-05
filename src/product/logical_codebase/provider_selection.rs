@@ -47,7 +47,7 @@ pub const AGGREGATE_PROVIDER_CANDIDATE_ORDER: [ProviderName; 3] = [
     ProviderName::Codex,
 ];
 
-/// 选择期失败码:四家命令都不可用。
+/// 选择期失败码:候选 provider 的命令都不可用。
 pub const REASON_CODE_NO_PROVIDER_AVAILABLE: &str =
     "aggregate_initialization_no_provider_available";
 /// 选择期失败码:命令可用,但没有一家完成核验。
@@ -164,7 +164,7 @@ pub fn launch_rejection_error(
 pub enum ProviderSelectionOutcome {
     /// 选中一家(命令可用 + 已核验)。
     Selected(AggregateProviderSelection),
-    /// 四家命令都不可用。
+    /// 候选 provider 的命令都不可用。
     NoCliAvailable(AggregateProviderSelection),
     /// 命令可用但没有一家完成核验:`suggested` 是建议核验的那一家。
     NeedsVerification {
