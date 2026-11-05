@@ -316,7 +316,6 @@ export function AggregateInitializationCard({
       </div>
 
       <p
-        role="alert"
         data-testid="aggregate-initialization-aggregate-order-notice"
         className="mb-2 rounded border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-2 py-1 text-[11px] text-[var(--aria-danger)]"
       >

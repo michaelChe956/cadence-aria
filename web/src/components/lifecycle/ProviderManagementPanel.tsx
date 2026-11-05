@@ -17,7 +17,6 @@ export function ProviderManagementPanel() {
         Provider 能力核验、安装与版本管理属机器级能力，与项目、逻辑代码库无关。
       </p>
       <p
-        role="alert"
         data-testid="provider-management-aggregate-order-notice"
         className="mb-2 text-[11px] text-[var(--aria-danger)]"
       >
