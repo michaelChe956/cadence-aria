@@ -220,10 +220,14 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       ).not.toBeInTheDocument(),
     );
 
+    // 2026-11-05：删除 Project 先过二次确认；确认后 DELETE 带确认意图
+    //（未确认路径见 IssueLifecycleWorkbench.project-delete.test.tsx）。
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     await user.click(screen.getByRole("button", { name: "删除 Project Aria" }));
 
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001",
+      "/api/projects/project_0001?confirmed=true",
       expect.objectContaining({ method: "DELETE" }),
     );
     expect(await screen.findByText("还没有 Project")).toBeInTheDocument();

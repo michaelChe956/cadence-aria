@@ -321,9 +321,15 @@ export function createProject(payload: {
   });
 }
 
-export function deleteProject(projectId: string): Promise<{ status: string }> {
+export function deleteProject(
+  projectId: string,
+  options?: DeleteLifecycleEntityOptions,
+): Promise<{ status: string }> {
+  // 2026-11-05 真机事故回归：项目删除必须携带显式确认意图（后端 409
+  // deletion_confirmation_required 强制）；默认 URL 无 query，与级联删除
+  // D2.3 同式——仅确认弹窗同意后显式 confirmed=true。
   return requestJson<{ status: string }>(
-    `/api/projects/${encodeURIComponent(projectId)}`,
+    `/api/projects/${encodeURIComponent(projectId)}${deleteLifecycleEntityQueryString(options)}`,
     {
       method: "DELETE",
     },

@@ -172,6 +172,8 @@ mod web_node_context;
 mod web_policy_runtime;
 #[path = "it_web/web_product_api.rs"]
 mod web_product_api;
+#[path = "it_web/web_project_delete_confirmation.rs"]
+mod web_project_delete_confirmation;
 #[path = "it_web/web_projection.rs"]
 mod web_projection;
 #[path = "it_web/web_provider_availability.rs"]

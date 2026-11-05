@@ -173,14 +173,26 @@ export function useIssueLifecycleWorkbenchActions({
   }
 
   async function handleDeleteProject(projectId: string) {
+    // 2026-11-05 真机事故回归：侧栏垃圾桶一次点击曾直接硬删整个项目工作区
+    //（项目 + 全部逻辑代码库 + 成员登记 + capability 记录）。对齐逻辑代码库
+    // 删除/清除的二次确认形态：先弹强警告，取消零副作用；确认后 delete 才
+    // 带 confirmed=true，后端 409 deletion_confirmation_required 强制兜底。
+    const confirmed = window.confirm(
+      "确定删除该 Project？将删除整个项目及其全部逻辑代码库、成员登记与 capability 记录，且不可恢复。",
+    );
+    if (!confirmed) return;
     setError(null);
-    await deleteProject(projectId);
-    if (projectId === selectedProjectId) {
-      setSelectedProjectId(null);
-      setFocusedIssueId(null);
-      setSelectedCardKey(null);
+    try {
+      await deleteProject(projectId, { confirmed: true });
+      if (projectId === selectedProjectId) {
+        setSelectedProjectId(null);
+        setFocusedIssueId(null);
+        setSelectedCardKey(null);
+      }
+      await refresh(null);
+    } catch (reason) {
+      setError(errorMessage(reason, "删除 Project 失败"));
     }
-    await refresh(null);
   }
 
   async function handleDeleteRepository(repositoryId: string) {

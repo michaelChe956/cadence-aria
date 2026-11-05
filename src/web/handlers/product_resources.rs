@@ -82,10 +82,34 @@ pub async fn open_project(
     Ok(Json(project_dto(project)))
 }
 
+/// DELETE /api/projects/{project_id} 的确认参数（对齐级联删除 D2.3 的
+/// `DeleteEntityQuery` 口径）：默认 URL 无 query；仅前端确认弹窗同意后
+/// 显式传 `?confirmed=true`。query 布尔不是安全授权——门禁由本端点强制。
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DeleteProjectQuery {
+    confirmed: Option<bool>,
+}
+
+/// 项目删除二次确认（2026-11-05 真机事故回归）：侧栏垃圾桶一次点击曾直接
+/// 硬删整个项目工作区（项目 + 全部逻辑代码库 + 成员登记 + capability 记录）。
+/// 未携带显式确认意图（`?confirmed=true`）MUST 以稳定码
+/// `deletion_confirmation_required`（409）拒绝且零副作用——沿用既有码，
+/// 不新造；确认门禁先于存在性判定，拒绝路径绝不触碰 store。
 pub async fn delete_project(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
+    Query(query): Query<DeleteProjectQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if query.confirmed != Some(true) {
+        return Err(ApiError::runtime(
+            "deletion_confirmation_required",
+            "删除 Project 前需要二次确认：将删除整个项目及其全部逻辑代码库、成员登记与 capability 记录，且不可恢复。",
+            json!({
+                "entity_kind": "project",
+                "entity_id": project_id,
+            }),
+        ));
+    }
     let store = ProjectStore::new(product_app_paths(&state));
     store.delete(&project_id).map_err(product_store_api_error)?;
     Ok(Json(json!({"status":"deleted"})))

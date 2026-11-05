@@ -165,7 +165,9 @@ export function lifecycleFetch(
       projects.push(project);
       return jsonResponse(project);
     }
-    const projectDeleteMatch = url.match(/^\/api\/projects\/([^/]+)$/);
+    // 2026-11-05：项目删除带 ?confirmed=true（二次确认意图）——捕获组剔除
+    // query，避免 project_id 误含 ?confirmed=true 导致夹具错位。
+    const projectDeleteMatch = url.match(/^\/api\/projects\/([^/?]+)(?:\?.*)?$/);
     if (projectDeleteMatch && init?.method === "DELETE") {
       const projectId = projectDeleteMatch[1];
       const index = projects.findIndex(

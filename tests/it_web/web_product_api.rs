@@ -595,10 +595,12 @@ async fn deletes_workspace_project_repository_and_issue_records() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(issues["issues"].as_array().expect("issues").len(), 0);
 
+    // 2026-11-05：项目删除需显式确认意图（未确认 → 409
+    // deletion_confirmation_required，见 web_project_delete_confirmation）。
     let (status, _) = request_json(
         app.clone(),
         Method::DELETE,
-        "/api/projects/project_0001",
+        "/api/projects/project_0001?confirmed=true",
         json!({}),
     )
     .await;
