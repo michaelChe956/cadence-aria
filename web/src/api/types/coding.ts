@@ -116,7 +116,7 @@ export type CodingAttempt = {
   updated_at: string;
 };
 
-export type CodingTimelineNodeStatus = "pending" | "running" | "completed" | "failed" | "blocked";
+export type CodingTimelineNodeStatus = "pending" | "running" | "completed" | "failed" | "blocked" | "aborted";
 export type CodingAgentRole = "author" | "reviewer" | "git" | "system";
 export type CodingProviderRole = "coder" | "code_reviewer" | "internal_reviewer";
 export type CodingProviderSelectRole =

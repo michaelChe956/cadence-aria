@@ -108,7 +108,7 @@ export type TimelineNodeType =
   | "protocol_error"
   | "completed"
   | (string & {});
-export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped";
+export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped" | "aborted";
 export type ReviewVerdictType = "pass" | "revise" | "needs_human";
 
 export interface PermissionRequest {

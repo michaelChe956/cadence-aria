@@ -761,6 +761,8 @@ function codingTimelineStatus(status: TimelineNode["status"]): CodingTimelineNod
       return "completed";
     case "failed":
       return "failed";
+    case "aborted":
+      return "aborted";
   }
 }
 
