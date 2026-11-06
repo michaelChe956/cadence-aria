@@ -20,6 +20,17 @@ export function detailHydrationNodeIds(timelineNodes: TimelineNode[]): string[] 
 }
 
 /**
+ * fetchWorkspaceNodeDetail 对非 2xx 抛 `Error("加载节点详情失败：<status>")`
+ * （见 ../api/workspace-content.ts，未改）。404 = 该节点天生无 detail（门卡/
+ * 上下文类节点）的合法终答，不是瞬态失败。
+ */
+function isNodeDetailNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error && /加载节点详情失败：404$/.test(error.message)
+  );
+}
+
+/**
  * cockpit 节点 detail 水合 effect 族（自 ChatCockpitPage 机械拆出，纯移动零行为
  * 变化）：v40 复验 #3 水合去重 ref + 会话切换清空 + 终态/active 节点 detail
  * 拉取 + 断连中止节点确认态恢复，effect 体与依赖数组原样迁移。
@@ -40,8 +51,13 @@ export function useCockpitNodeDetailHydration({
 }): void {
   // v40 复验 #3：节点 detail 水合去重（见下方水合 effect）。
   const hydratedNodeIdsRef = useRef<Set<string>>(new Set());
+  // 404 记忆集合：把「已确认无 detail」与「还没试过」区分开。此前 .catch 一律
+  // 把 id 从去重集合 delete，而 timelineNodes 每次 WS 事件都换数组身份 ⇒ 同一
+  // 节点反复重打 404（请求洪水，服务端每个 404 还各付一次全扫描）。
+  const noDetailNodeIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     hydratedNodeIdsRef.current.clear();
+    noDetailNodeIdsRef.current.clear();
   }, [sessionId]);
   useEffect(() => {
     const nodeIds = Array.from(
@@ -52,7 +68,10 @@ export function useCockpitNodeDetailHydration({
       ),
     );
     for (const nodeId of nodeIds) {
-      if (hydratedNodeIdsRef.current.has(nodeId)) {
+      if (
+        hydratedNodeIdsRef.current.has(nodeId) ||
+        noDetailNodeIdsRef.current.has(nodeId)
+      ) {
         continue;
       }
       hydratedNodeIdsRef.current.add(nodeId);
@@ -68,8 +87,17 @@ export function useCockpitNodeDetailHydration({
           }
           current.setNodeDetail(detail);
         })
-        .catch(() => {
+        .catch((error) => {
           hydratedNodeIdsRef.current.delete(nodeId);
+          // 404 是终答：进记忆集合，本会话内不再请求该节点（水合集合选取口径
+          // 不变，仍由 detailHydrationNodeIds 的排除法决定「试不试」）。其它错误
+          // 仍可能是瞬态：保持既有 delete-允许重试语义。
+          if (
+            isNodeDetailNotFound(error) &&
+            useWorkspaceStore.getState().sessionId === sessionId
+          ) {
+            noDetailNodeIdsRef.current.add(nodeId);
+          }
         });
     }
   }, [sessionId, activeNodeId, timelineNodes]);

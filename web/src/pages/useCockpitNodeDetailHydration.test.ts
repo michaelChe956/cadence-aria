@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchWorkspaceNodeDetail } from "../api/workspace-content";
 import { useWorkspaceStore } from "../state/workspace-ws-store";
@@ -48,6 +48,21 @@ function renderHydration(nodes: TimelineNode[], activeNodeId: string | null = nu
       useCockpitNodeDetailHydration({ sessionId: SESSION_ID, timelineNodes, activeNodeId }),
     { initialProps: { timelineNodes: nodes } },
   );
+}
+
+async function settleFetches(): Promise<void> {
+  // await mock 已暴露的真实 fetch promise（rejected 也吞掉），再排空 hook 链上
+  // 排在 fetch promise 之后一拍的 .then/.catch 反应——全程微任务，不用真实定时器。
+  await act(async () => {
+    await Promise.all(
+      vi
+        .mocked(fetchWorkspaceNodeDetail)
+        .mock.results.map((result) =>
+          Promise.resolve(result.value).catch(() => undefined),
+        ),
+    );
+    await Promise.resolve();
+  });
 }
 
 describe("useCockpitNodeDetailHydration", () => {
@@ -158,5 +173,50 @@ describe("useCockpitNodeDetailHydration", () => {
       expect(useWorkspaceStore.getState().nodeDetails.n_completed).toBeDefined();
     });
     expect(fetchWorkspaceNodeDetail).toHaveBeenCalledTimes(1);
+  });
+
+  // ④ 404 记忆：门卡/上下文类节点天生无 detail，404 是合法终答而非瞬态失败。
+  // 此前 .catch 一律把 id 从去重集合 delete，而 timelineNodes 每次 WS 事件都换
+  // 身份 ⇒ 同一节点反复重打 404（前端请求洪水，服务端还各付一次全扫描）。
+  it("does not re-fetch a node whose detail request ended in 404", async () => {
+    const nodes = [timelineNode({ node_id: "n_no_detail", status: "completed" })];
+    vi.mocked(fetchWorkspaceNodeDetail).mockRejectedValue(
+      new Error("加载节点详情失败：404"),
+    );
+
+    const { rerender } = renderHydration(nodes);
+    await waitFor(() => {
+      expect(fetchWorkspaceNodeDetail).toHaveBeenCalledTimes(1);
+    });
+    // 等已结算的 rejection 走完 .catch（红态：把 id 从去重集合 delete）。
+    await settleFetches();
+
+    // 同一批节点换数组身份（WS 快照到达即换身份）：404 已是终答，不得重打。
+    rerender({ timelineNodes: [...nodes] });
+    rerender({ timelineNodes: [...nodes] });
+    await settleFetches();
+
+    expect(fetchWorkspaceNodeDetail).toHaveBeenCalledTimes(1);
+    expect(fetchedNodeIds()).toEqual(["n_no_detail"]);
+  });
+
+  // 404 之外（网络抖动/5xx 等）仍可能是瞬态失败：保持既有 delete-重试语义，
+  // 只有「确认无 detail」的终答才进记忆集合。
+  it("still retries a node when the detail request fails with a non-404 error", async () => {
+    const nodes = [timelineNode({ node_id: "n_transient", status: "completed" })];
+    vi.mocked(fetchWorkspaceNodeDetail).mockRejectedValue(
+      new Error("加载节点详情失败：500"),
+    );
+
+    const { rerender } = renderHydration(nodes);
+    await waitFor(() => {
+      expect(fetchWorkspaceNodeDetail).toHaveBeenCalledTimes(1);
+    });
+    await settleFetches();
+
+    rerender({ timelineNodes: [...nodes] });
+    await waitFor(() => {
+      expect(fetchWorkspaceNodeDetail).toHaveBeenCalledTimes(2);
+    });
   });
 });
