@@ -1,0 +1,20 @@
+schema: spec-driven
+created: 2026-11-06
+goal: 记录 provider run 体积预算与四层门禁的「收尾未完成项」—— 第一阶段已交付可用（爆栈根治 + A/B/C/D 门禁骨架 + 逐族拆分至 6/13 族），本 change 冻结剩余未完成项的接口、预算与验收口径，供后续单独实施
+x-tracker-status: draft
+x-owner-decisions:
+  - id: phase-split
+    decided: 2026-11-06
+    decision: 第一阶段只保证「产品可用」：爆栈根治 + A/B/C/D 四层门禁就位 + 逐族拆分做到 6/13 族；剩余族拆分（plan revision / SC manual / followups）、clippy 仓级启用、双 profile CI、全仓大 future 盘点、手写 Builder（dev 8 / prod 16 MiB）、双制品发布证据与回退合同，全部延到本 change 后续实施
+    reason: owner 明确「目标是第一阶段，暂时先保证产品可用，后续再进行彻底优化」；且爆栈的结构性根因已由「入口小 capture 外壳 + 首次 poll 内 boxed body」消除，剩余项属纵深优化与护栏扩面，不阻塞可用
+    consequence: 第一阶段交付态仍有三处已知未验证/未完成（见 design.md §4）：drive body 112,024 B 在硬线内但高于优先线 64 KiB；release profile 体积未实测；prod 仍用 tokio 默认 2 MiB 栈且「可发布」证据不齐
+  - id: budget-hard-vs-preferred
+    decided: 2026-11-06
+    decision: 体积预算保留「硬线 131,072 B / 优先线 65,536 B」两级；第一阶段只对硬线做断言，优先线逐对象收敛在后续实施
+    reason: 第一阶段要快速取得可用性；硬线已足以阻断「238 KiB 级」的回归，优先线是逐族收敛目标
+    consequence: drive body（112,024 B）与 SC manual 臂（70,024 B）在第一阶段属「未达优先线但在线内」，A 层不得因此放宽硬线
+  - id: prod-stack-deferred
+    decided: 2026-11-06
+    decision: 手写 runtime Builder 与编译期栈分档（dev 8 MiB / prod 16 MiB）延到后续实施；第一阶段 prod 沿用 tokio 默认 2 MiB worker 栈
+    reason: 崩溃已结构性根治（构造期临时值不再出现在深 inbound 栈上），2 MiB 栈对已收敛的入口与各臂（≤131,072 B）足够；16 MiB 是纵深兜底而非修复前提
+    consequence: 与 2026-11-06 早先「prod 先 16 MiB」的决策不同 —— 本 change 记录该决策被延后的事实与恢复条件（见 tasks.md 5.x）
