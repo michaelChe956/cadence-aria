@@ -26,9 +26,10 @@ export const TERMINAL_NODE_STATUSES: Record<string, true> = {
   completed: true,
   failed: true,
   skipped: true,
+  aborted: true,
 };
 export type TerminalNodeContext = {
-  status: "completed" | "failed" | "skipped";
+  status: "completed" | "failed" | "skipped" | "aborted";
   elapsedMs: number | null;
 };
 
@@ -92,7 +93,9 @@ export function generationStatusText(
         ? "生成失败"
         : terminal.status === "completed"
           ? "生成完成"
-          : "生成已跳过";
+          : terminal.status === "aborted"
+            ? "生成已中止"
+            : "生成已跳过";
     return [
       label,
       stageLabel,

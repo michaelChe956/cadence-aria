@@ -617,7 +617,7 @@ export type TimelineNodeType =
   | "completed"
   | (string & {});
 
-export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped";
+export type TimelineNodeStatus = "active" | "paused" | "completed" | "failed" | "skipped" | "aborted";
 export type ProviderStatus =
   | "starting"
   | "running"
