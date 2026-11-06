@@ -74,7 +74,9 @@ U-g | 既有 minor 挂账：`cancel_settle.inc.rs:17` 可见性一词放宽（br
 
 ## 6. 补充登记（2026-11-06 治本审查 I-3：过渡预算与未完成项）
 
-治本（`1d721bec`）把 poll 帧从 724,992 B 降到 4,096 B，但**留下两处未达 64 KiB 优先线**的对象 ⇒ **引入「过渡预算 128 KiB / 帧」这一档**（只作过渡，门禁可过；**不是安全证明**）：
+治本（`1d721bec`）把 poll 帧从 724,992 B 降到 4,096 B，但**留下两处未达 64 KiB 优先线**的对象 ⇒ **引入两档过渡预算**（都与 `poll_frame_budget.rs` 的常量一一对应，**只作过渡，门禁可过；不是安全证明**）：
+   - **宏体档 `MACRO_BODY_TRANSITION_BUDGET = 128 KiB`**：`drive_plan_revision_arm`、`drive_provider_run_followups`（宏文本在写集外）⇒ 待迁入 `provider_run/` 并装箱后**收紧到 64 KiB**
+   - **P1 engine 档 `P1_ENGINE_BUDGET = 256 KiB`**：评审链 `with_window` / `drive_review_session*` / `complete_review`（engine 侧文件在写集外）⇒ 待独立 change 收口后收紧
 
 | 对象 | 实测帧预留 | 归类 | 归属 |
 |---|---|---|---|

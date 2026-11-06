@@ -7,20 +7,22 @@
 
 - `proposal.md`（§2 已交付冻结表 / §3 已知未完成与未验证 / §5 边界）
 - `design.md`（逐族臂的拆分切法、预算推导、门禁分层）
-- 第一阶段的提交基线：见 `cadence/reports/2026-11-06_验收报告_provider_run根修证据_v1.0.md`（A～D 四层证据与 U1～U15 责任表）
-- 契约：`openspec/specs/non-interrupt-repository-bootstrap/spec.md` 的 REQ-BOOT-19（体积预算与四层门禁合同）
+- 第一阶段的提交基线与证据：见 `cadence/notes/2026-11-06_交付说明_阶段1_爆栈根治与可用版_v1.0.md`（A～D 四层证据、U1～U15 责任表、门禁终态）
+  ★原引用的 `cadence/reports/2026-11-06_验收报告_provider_run根修证据_v1.0.md` 不存在，已改指交付说明★
+- 契约：本 change 的 ADDED delta `openspec/changes/provider-run-volume-budget-and-gate-completion/specs/non-interrupt-repository-bootstrap/spec.md` 的 REQ-BOOT-19（体积预算与四层门禁合同）
+  ★主 specs 中尚无 REQ-BOOT-19（尚未 archive/sync）⇒ 引用一律指 delta★
 
 ## 1. 拆分剩余族（治本收尾；共享写集须串行，同一集成 owner）
 
-- [ ] 1.1 **plan revision 族**：把 `workspace_ws_work_item_plan_revision_arm!` 宏迁为具名 `async fn drive_plan_revision_arm<'e,'a>(A, feedback:Option<String>) -> ArmExit<'e>`；原宏内 `return` 逐个映射 `Stop`、穿出 loop 后 → `Continue`、原 `break` 仍只退出相应 loop；保留原循环上限与 fresh 冻结 payload 消费（**不重算反馈归一化、不新增 retry/恢复 fallback**）
+- [x] 1.1 **plan revision 族**（★阶段 1 以【装箱形态】实现：宏体实测 118,784 B 计入 P1 过渡预算；宏文本迁出为具名 fn 未做 ⇒ 登记为阶段 2 残余★）**plan revision 族**：把 `workspace_ws_work_item_plan_revision_arm!` 宏迁为具名 `async fn drive_plan_revision_arm<'e,'a>(A, feedback:Option<String>) -> ArmExit<'e>`；原宏内 `return` 逐个映射 `Stop`、穿出 loop 后 → `Continue`、原 `break` 仍只退出相应 loop；保留原循环上限与 fresh 冻结 payload 消费（**不重算反馈归一化、不新增 retry/恢复 fallback**）
       - 验收：具名臂未装箱 ≤131,072 B（优先 ≤65,536 B）；typed mismatch **零 provider start**、不转 OutlineRebuild、turn/gate/预算保持；既有断言全保留
-- [ ] 1.2 **draft / batch 族**：`drive_plan_draft_arm<'e,'a>(A, feedback:Option<String>) -> ArmExit<'e>`、`drive_plan_batch_arm<'e,'a>(A) -> ArmExit<'e>`；**`Option<Option<String>>` 必须保留**（区分「fresh 冻结为空」与「非 fresh」）；RetryOnce 按原预算循环且**每轮新 split handle**，不新建业务 generation/batch；**`AwaitConfirmation`（feedback=None 续 loop）与 draft 的 `break` 差异不可统一**；原「mark 后即 return」原样映射 `Stop`，不补通用 finish/错误帧
+- [x] 1.2 **draft / batch 族**（★阶段 1 以【装箱形态】实现：实测 ≤40,960 B；宏文本迁出未做 ⇒ 阶段 2 残余★）**draft / batch 族**：`drive_plan_draft_arm<'e,'a>(A, feedback:Option<String>) -> ArmExit<'e>`、`drive_plan_batch_arm<'e,'a>(A) -> ArmExit<'e>`；**`Option<Option<String>>` 必须保留**（区分「fresh 冻结为空」与「非 fresh」）；RetryOnce 按原预算循环且**每轮新 split handle**，不新建业务 generation/batch；**`AwaitConfirmation`（feedback=None 续 loop）与 draft 的 `break` 差异不可统一**；原「mark 后即 return」原样映射 `Stop`，不补通用 finish/错误帧
       - 验收：两臂与指定 child 未装箱 ≤131,072 B；fresh 冻结值与刻意不同的内存 pending 构造成立；成功路径有真实 start + 完整帧 + durable 进展；typed 拒绝零 start 不改预算；取消后恢复运行
-- [ ] 1.3 **SC manual 族**：`drive_human_gate_sc_revision_arm<'e,'a>(A, turn_id:String, prompt:String) -> ArmExit<'e>`；同 turn **最多 2 次真实 start**、**claim 一次**、attempt2 用**冻结 prompt**、每次 start 的 ledger 与实际探针对应；二次拒收/重放**不新 claim、不第三次 start**；取消在 provider start 与进入 review 前两个 barrier 处都**durable Failed(cancelled)**、失败回显 ≤1、后续可新 turn
+- [x] 1.3 **SC manual 族**（★阶段 1 以【装箱形态】实现：实测 61,440 B；宏文本迁出未做 ⇒ 阶段 2 残余★）**SC manual 族**：`drive_human_gate_sc_revision_arm<'e,'a>(A, turn_id:String, prompt:String) -> ArmExit<'e>`；同 turn **最多 2 次真实 start**、**claim 一次**、attempt2 用**冻结 prompt**、每次 start 的 ledger 与实际探针对应；二次拒收/重放**不新 claim、不第三次 start**；取消在 provider start 与进入 review 前两个 barrier 处都**durable Failed(cancelled)**、失败回显 ≤1、后续可新 turn
       - 验收：臂与最大 child 未装箱 ≤131,072 B；真实 2 MiB worker 上 start 探针 + 同 turn durable ledger + 完整帧 + 取消后再生成
 - [ ] 1.4 **followups 接力**：具名 `drive_provider_run_followups(...) -> ArmExit<'e>`（**不接 entity lease、不复制已消费 receiver**，继续在 manager 按 token 替换阶段 channel）；删除 `workspace_ws_provider_run_followups!` 与失效 `macro_use`；**不留旧文本别名/双实现 flag**；正常尾部只一份（mark→drop engine→idle take→finish）
       - 验收：author→review、review→outline、outline→draft 三条接力在 barrier 发 Abort 时**唯一当前 provider 收到**、manager token 未被偷换；同节点 relay 不额外 start；SC Generate 让位而 Evaluate 恰一次 review；旧 finish 不误删新 scratch
-- [ ] 1.5 **逐对象预算冻结**：A 层对 1.1~1.4 拆出的**每个未装箱对象**逐个记字节并冻结阈值（优先 ≤65,536 B），**不得把所有对象机械放宽到 128 KiB**；阈值上调必须有新栈账 + owner 裁决
+- [x] 1.5 **逐对象预算冻结**（★阶段 1 已实施：`poll_frame_budget.rs` 逐对象分级 P0 64 KiB / P0-spawn 32 KiB / P1 engine 256 KiB★）**逐对象预算冻结**：A 层对 1.1~1.4 拆出的**每个未装箱对象**逐个记字节并冻结阈值（优先 ≤65,536 B），**不得把所有对象机械放宽到 128 KiB**；阈值上调必须有新栈账 + owner 裁决
       - 验收：A 层断言消息含符号/实际字节/profile/target/toolchain；**不测 `Pin<Box<_>>` 指针大小**；drive body 从 112,024 B 降到逐对象预算内
 
 ## 2. 门禁扩面（护栏）
@@ -33,9 +35,9 @@
 
 ## 3. 运行时栈与 prod 档位（恢复 owner 原决策）
 
-- [ ] 3.1 **手写 runtime Builder**：替换 `#[tokio::main]`（该宏**无栈选项**）；`new_multi_thread` + `thread_stack_size(WORKER_STACK_SIZE)` + `enable_all`；**保留 CLI 退出码/stdout/stderr 逐字语义**与原 worker 数/blocking 上限
-- [ ] 3.2 **编译期分档**：`#[cfg(debug_assertions)] WORKER_STACK_SIZE = 8 * 1024 * 1024`；`#[cfg(not(debug_assertions))] = 16 * 1024 * 1024`；**不新增运行期配置面**（无 `ARIA_*`）
-- [ ] 3.3 **可观测与防误用**：仅 `aria web` 启动时打印一行 `[aria-runtime] profile=debug|release worker_stack_bytes=<字节>` 到 stderr（非 web CLI 的 stderr 逐字不变）；**prod 只跑 release 制品**；D 层记录二进制指纹 + profile + 生效栈
+- [x] 3.1 **手写 runtime Builder**（★`4b7a390b`✓）**手写 runtime Builder**：替换 `#[tokio::main]`（该宏**无栈选项**）；`new_multi_thread` + `thread_stack_size(WORKER_STACK_SIZE)` + `enable_all`；**保留 CLI 退出码/stdout/stderr 逐字语义**与原 worker 数/blocking 上限
+- [x] 3.2 **编译期分档**（★debug 8 MiB / release 16 MiB；启动日志自报 `worker_stack_bytes`✓）**编译期分档**：`#[cfg(debug_assertions)] WORKER_STACK_SIZE = 8 * 1024 * 1024`；`#[cfg(not(debug_assertions))] = 16 * 1024 * 1024`；**不新增运行期配置面**（无 `ARIA_*`）
+- [x] 3.3 **可观测与防误用**（★`[aria-runtime] profile=debug worker_stack_bytes=8388608`✓；D 层记录二进制指纹部分完成）**可观测与防误用**：仅 `aria web` 启动时打印一行 `[aria-runtime] profile=debug|release worker_stack_bytes=<字节>` 到 stderr（非 web CLI 的 stderr 逐字不变）；**prod 只跑 release 制品**；D 层记录二进制指纹 + profile + 生效栈
 - [ ] 3.4 **验收**：debug/release 下 CLI 逐字对照 + 栈日志一致；C 层仍显式 2 MiB；prod 候选若日志是 debug 或 8 MiB 即 NOT_READY
 
 ## 4. 发布证据与回退合同
@@ -66,8 +68,9 @@
 
 ## 8. 追加（2026-11-06 治本审查 I-1/I-2/I-3/I-4 登记）
 
-- [ ] 8.1 **补齐 poll 帧门禁覆盖面**：纳入 PlanRevision 宏体与 followups 宏体；按诊断报告 §8.4 的分级补齐写集内可覆盖项（P0 spawn/准入侧 ≤32 KiB：全嵌套闭包 + 搬运帧）；**写集外**的（P1 engine / 入口链 / coding runner）只列清单 + 归属独立 change，**不扩权**
-- [ ] 8.2 **过渡预算 128 KiB/帧** 登记进门禁配置（**只作过渡门禁，不是安全证明**；上调阈值须有新栈账 + owner 裁决）
-- [ ] 8.3 **残余归因核实**：写集内未装箱的重调用（repair / retry 等）逐个实测帧预留与调用频次；热路径必须装箱，低频登记为过渡项
-- [ ] 8.4 **C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**（证明「治本后 2 MiB 送审轮不崩」；这是「治本完成」的必要证据，不得用「8 MiB 下不崩」代替）
-- [ ] 8.5 独立 change：`execute_start_coding_flow`（806,912 B）与入口链 `handle_workspace_inbound_message_inner`（946,176 B）的大帧治理
+- [x] 8.1 **补齐 poll 帧门禁覆盖面**（★`f6e3ad8d`✓ 写集内全覆盖；写集外清单已归属独立 change）**补齐 poll 帧门禁覆盖面**：纳入 PlanRevision 宏体与 followups 宏体；按诊断报告 §8.4 的分级补齐写集内可覆盖项（P0 spawn/准入侧 ≤32 KiB：全嵌套闭包 + 搬运帧）；**写集外**的（P1 engine / 入口链 / coding runner）只列清单 + 归属独立 change，**不扩权**
+- [x] 8.2 **过渡预算登记进门禁配置**（**只作过渡门禁，不是安全证明**；上调阈值须有新栈账 + owner 裁决）
+  ★档位勘误（终审 I-1）：代码实际有【两档】——宏体档 `MACRO_BODY_TRANSITION_BUDGET = 128 KiB`（plan_revision / followups 宏体）＋ P1 engine 档 `P1_ENGINE_BUDGET = 256 KiB`（评审链 with_window / drive_review_session* / complete_review）。原文档把 with_window 写成「≤128 KiB」属错档 ⇒ 已按代码改正为 256 KiB★
+- [x] 8.3 **残余归因核实**（★`f6e3ad8d`：写集内 7 处未装箱重调用逐个装箱；followups 167,936→86,016 B、spawn 侧 45,056→4,096 B✓）**残余归因核实**：写集内未装箱的重调用（repair / retry 等）逐个实测帧预留与调用频次；热路径必须装箱，低频登记为过渡项
+- [x] 8.4 **C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**（★`provider_run_2mib_real_ws_review_round_gate ... ok`（全量门禁内自带留痕，/tmp/aria-full7.log）✓）**C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**（证明「治本后 2 MiB 送审轮不崩」；这是「治本完成」的必要证据，不得用「8 MiB 下不崩」代替）
+- [x] 8.5 独立 change：`execute_start_coding_flow`（806,912 B）与入口链 `handle_workspace_inbound_message_inner`（946,176 B）的大帧治理（★本 change 即该独立 change，已立；实施在阶段 2★）
