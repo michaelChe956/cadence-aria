@@ -2,7 +2,7 @@
 
 ### Requirement: provider run 体积预算与四层门禁（REQ-BOOT-19）
 
-provider run 的每个**未装箱** async 对象 SHALL 受两级预算：**硬线 131,072 B**（超过即回归，须断言阻断）与**优先线 65,536 B**（逐对象收敛目标）；入口外壳 SHALL ≤32,768 B。
+provider run 的每个**未装箱** async 对象 SHALL 受**按归属分层的预算**（超其所属档位硬线即回归、须断言阻断；四档见场景）；入口外壳 SHALL ≤32,768 B。
 
 体积 SHALL 以**未装箱类型**度量，SHALL NOT 以 `Pin<Box<_>>` 指针大小代替（恒绿即假门禁）。
 
@@ -18,8 +18,8 @@ provider run 的每个**未装箱** async 对象 SHALL 受两级预算：**硬�
 
 #### Scenario: 超硬线的对象被断言阻断
 
-- **WHEN** 某个未装箱 future 的体积超过 131,072 B
-- **THEN** 体积门禁 SHALL 失败并报出符号、实际字节与 profile/target/toolchain
+- **WHEN** 某个未装箱 future 的体积超过**其所属档位的硬线**
+- **THEN** 体积门禁 SHALL 失败并报出符号、实际字节、**所属档位**与 profile/target/toolchain
 
 #### Scenario: 四层门禁各证其责
 
@@ -28,7 +28,7 @@ provider run 的每个**未装箱** async 对象 SHALL 受两级预算：**硬�
 
 #### Scenario: C 层永不被栈档位豁免
 
-- **WHEN** 生产运行时栈被配置为 8 MiB 或 16 MiB
+- **WHEN** 生产运行时栈被配置为 8 MiB 或更高
 - **THEN** C 层 SHALL 仍以显式 2 MiB worker 执行真实 WS 回归
 
 #### Scenario: 退出码 0 不构成通过
@@ -40,3 +40,15 @@ provider run 的每个**未装箱** async 对象 SHALL 受两级预算：**硬�
 
 - **WHEN** 体积证据只来自 debug profile
 - **THEN** 该证据 SHALL 标注为 debug，且发布前 SHALL 以 release 制品复核
+
+#### Scenario: 四档预算与过渡档归属
+
+- **WHEN** 门禁判定某对象所属的预算档位
+- **THEN** 四档为：**P0 核心** 65,536 B · **P0 spawn/准入侧** 32,768 B · **宏体过渡档** 131,072 B · **P1 engine 侧过渡档** 262,144 B
+- **AND** 宏体档与 P1 engine 档的对象其源码在写集外（宏文本未迁入 `provider_run/`、engine 侧文件未治理）⇒ SHALL 已登记归属独立 change 与收紧条件
+- **AND** P1 engine 档内超过 131,072 B SHALL NOT 判回归，但 SHALL NOT 被当作已收敛
+
+#### Scenario: 过渡档对象必须登记归属
+
+- **WHEN** 某对象按宏体档或 P1 engine 过渡档判绿
+- **THEN** 该对象 SHALL 已登记其归属的独立 change 与收紧条件；SHALL NOT 被当作已收敛

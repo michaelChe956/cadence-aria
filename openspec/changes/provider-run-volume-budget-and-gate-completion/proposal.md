@@ -87,7 +87,7 @@ U-g | 既有 minor 挂账：`cancel_settle.inc.rs:17` 可见性一词放宽（br
 `drive_human_gate_sc_revision_arm` | 61,440 B | 达标（≤64 KiB） | — |
 `drive_legacy_outline_arm` | 61,440 B | 达标（≤64 KiB） | — |
 author / draft / batch / revision 臂 | ≤40,960 B | 达标 | — |
-**评审链 `with_window` 两变体** | **118,784 / 102,400 B** | **过渡预算（≤128 KiB）** | 写集外（engine 侧 `complete_review` 等）⇒ 建议独立 change |
+**评审链 `with_window` 两变体** | **110,592 / 102,400 B** | **P1 engine 256 KiB 档** | 写集外（engine 侧 `complete_review` 等）⇒ 建议独立 change |
 **`execute_start_coding_flow`（coding runner）** | **806,912 B** | **未覆盖（同量级大帧）** | 写集外（`src/web/coding_ws_handler/**`）⇒ 建议独立 change |
 `handle_workspace_inbound_message_inner`（入口链） | 946,176 B | 未覆盖（链和 ≈1.55–1.6 MiB） | 入口链专项 |
 

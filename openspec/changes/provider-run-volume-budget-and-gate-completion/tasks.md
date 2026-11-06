@@ -44,7 +44,7 @@
 ## 3. 运行时栈与 prod 档位（恢复 owner 原决策）
 
 - [x] 3.1 **手写 runtime Builder**（★`4b7a390b`✓）**手写 runtime Builder**：替换 `#[tokio::main]`（该宏**无栈选项**）；`new_multi_thread` + `thread_stack_size(WORKER_STACK_SIZE)` + `enable_all`；**保留 CLI 退出码/stdout/stderr 逐字语义**与原 worker 数/blocking 上限
-- [x] 3.2 **编译期分档**（★debug 8 MiB / release 16 MiB；启动日志自报 `worker_stack_bytes`✓）**编译期分档**：`#[cfg(debug_assertions)] WORKER_STACK_SIZE = 8 * 1024 * 1024`；`#[cfg(not(debug_assertions))] = 16 * 1024 * 1024`；**不新增运行期配置面**（无 `ARIA_*`）
+- [x] 3.2 **栈大小定档**（★debug 与 release **统一 8 MiB**（`src/main.rs:12-13` `WORKER_STACK_SIZE = 8*1024*1024`；原「prod 先 16 MiB、验完降 8」方案已取消）；启动日志自报 `worker_stack_bytes`✓）**栈大小定档**：`#[cfg(debug_assertions)] WORKER_STACK_SIZE = 8 * 1024 * 1024`；`#[cfg(not(debug_assertions))] = 16 * 1024 * 1024`；**不新增运行期配置面**（无 `ARIA_*`）
 - [x] 3.3 **可观测与防误用**（★`[aria-runtime] profile=debug worker_stack_bytes=8388608`✓；D 层记录二进制指纹部分完成）**可观测与防误用**：仅 `aria web` 启动时打印一行 `[aria-runtime] profile=debug|release worker_stack_bytes=<字节>` 到 stderr（非 web CLI 的 stderr 逐字不变）；**prod 只跑 release 制品**；D 层记录二进制指纹 + profile + 生效栈
 - [ ] 3.4 **验收**：debug/release 下 CLI 逐字对照 + 栈日志一致；C 层仍显式 2 MiB；prod 候选若日志是 debug 或 8 MiB 即 NOT_READY
 
@@ -81,7 +81,7 @@
   ★档位勘误（终审 I-1）：代码实际有【两档】——宏体档 `MACRO_BODY_TRANSITION_BUDGET = 128 KiB`（plan_revision / followups 宏体）＋ P1 engine 档 `P1_ENGINE_BUDGET = 256 KiB`（评审链 with_window / drive_review_session* / complete_review）。原文档把 with_window 写成「≤128 KiB」属错档 ⇒ 已按代码改正为 256 KiB★
 - [x] 8.3 **残余归因核实**（★`f6e3ad8d`：写集内 7 处未装箱重调用逐个装箱；followups 167,936→86,016 B、spawn 侧 45,056→4,096 B✓）**残余归因核实**：写集内未装箱的重调用（repair / retry 等）逐个实测帧预留与调用频次；热路径必须装箱，低频登记为过渡项
 - [x] 8.4 **C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**（★`provider_run_2mib_real_ws_review_round_gate ... ok`（全量门禁内自带留痕，/tmp/aria-full7.log）✓）**C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**（证明「治本后 2 MiB 送审轮不崩」；这是「治本完成」的必要证据，不得用「8 MiB 下不崩」代替）
-- [x] 8.5 独立 change：`execute_start_coding_flow`（806,912 B）与入口链 `handle_workspace_inbound_message_inner`（946,176 B）的大帧治理（★本 change 即该独立 change，已立；实施在阶段 2★）
+- [x] 8.5 独立 change：`execute_start_coding_flow`（806,912 B）与入口链 `handle_workspace_inbound_message_inner`（946,176 B）的大帧治理（★本 change **只登记**这两个写集外对象，**不在本 change 实施** ⇒ 归属阶段 2 的独立 change★）
 - [x] 8.6 **CI 2 MiB 栈专项 job 落地**（★`.github/workflows/ci.yml` job `stack-2mib-gate`（显示名 `2 MiB stack regression gate (C-layer real WS)`）✓）**CI 2 MiB 栈专项 job 落地**：仓级 `RUST_MIN_STACK = { value = "33554432", force = true }` 让**所有测试线程**都拿 32 MiB 栈 ⇒ 栈类缺陷在常规 CI 里永远测不出来 ⇒「provider run 爆栈打死整个服务」这类回归会再次悄悄进来 ⇒ 补**独立 job** 在 2 MiB 栈下跑真实链路门禁，让「栈回归」变红
       - job 内三条命令（原文，每条 cargo 带 `flock`，不 matrix 并发同 target）：
         - `flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_review_round_gate -- --nocapture`
