@@ -707,7 +707,7 @@ async fn workspace_ws_secondary_connection_takes_lease_and_can_abort_active_run_
             assert_eq!(stage, "prepare_context");
             assert!(active_run_id.is_none());
             let last = timeline_nodes.last().expect("timeline node");
-            assert_eq!(last.status, TimelineNodeStatus::Failed);
+            assert_eq!(last.status, TimelineNodeStatus::Aborted);
             assert_eq!(last.summary.as_deref(), Some("运行已中止"));
         }
         other => panic!("expected session_state, got {other:?}"),

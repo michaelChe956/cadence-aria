@@ -415,7 +415,7 @@ async fn workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output() {
                         assert_eq!(stage, "prepare_context");
                         assert!(active_run_id.is_none());
                         let last = timeline_nodes.last().expect("cancelled Pi timeline node");
-                        assert_eq!(last.status, TimelineNodeStatus::Failed);
+                        assert_eq!(last.status, TimelineNodeStatus::Aborted);
                         assert_eq!(last.summary.as_deref(), Some("运行已中止"));
                     }
                     other => panic!("expected cancellation session state, got {other:?}"),
