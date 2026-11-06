@@ -150,6 +150,14 @@
   - 前端改动（`web/src/**`）重发前必须重建 `web/dist` **并**重建二进制；重发后必须验证页面实际加载的资源包含本次改动（判断优先级：页面实际 JS > 二进制内字符串扫描；扫描用 `grep -a`，**不要用 `strings`** —— 它默认只抽 ASCII 序列，抽不到二进制里的中文串，会误判「没编进去」）。
   - 违反任一情形视为交付未完成，不得声称完成。完整规则与检查清单详见 `cadence/project-rules/delivery-completeness.md`。
 
+- **开发期测试端口与发布态回归端口规则（5173 测 / 4317 回归）（强制）**
+  - **开发期一律用 5173 测**（vite 直服务 `web/src` 当前源码 ⇒ 改完刷新即生效，不需重建 dist、不需重发二进制）；后端 API 仍是 4317。
+  - ⛔ **不许**用 4317 的页面判断「前端改没改对」⇒ 它的前端是 `rust-embed` 在 `cargo build` 那一刻烤进二进制的 `web/dist` 快照，可能过期。
+  - **4317 只做发布态回归**：开发期问题全部测完后，owner 用 4317 再走一遍，验证「重建 dist → 内嵌资源 → origin 白名单 → 生效栈」这条发布链。
+  - 构建顺序不可颠倒：`pnpm -C web build` → `cargo build` → 只经 `/tmp/aria-deploy/start.sh` 重启；顺序错了就内嵌旧 dist ⇒ 表现为「两套 UI」。
+  - 两端口 UI 不一致时**先取证再下结论**：取 4317 内嵌资源名（`curl -s http://127.0.0.1:4317/ | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js'`）与 `ls web/dist/assets/` 比对 ⇒ 不一致 = dist 过期，不是代码错。
+  - 汇报/取证/缺陷单必须写清是哪个端口。完整规则见 `cadence/project-rules/dev-test-port-policy.md`。
+
 - **本地服务部署与启动规则（4317 共享实例）（强制）**
   - **只经 `/tmp/aria-deploy/start.sh` 启动 4317**，禁止手工拼命令行直起二进制 —— 脚本内的 `ARIA_API_TRUSTED_ORIGINS` 一旦丢失，owner 访问即报 `[request origin not allowed]`（端口在听但服务不可用）。
   - 必须带 TTY（`script -qfc`）：T1 鉴权 bootstrap token 只在 TTY 交付；启动日志首行应含 `TTY="/dev/pts/..."`。
