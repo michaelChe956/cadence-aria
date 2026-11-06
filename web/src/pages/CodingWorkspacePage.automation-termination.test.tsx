@@ -221,4 +221,79 @@ describe("CodingWorkspacePage automation termination（T4）", () => {
     await user.click(abortButton);
     expect(api.abortAttempt).toHaveBeenCalledTimes(1);
   });
+
+  // 2026-11-06 陈旧回执修复：同 issue「终止 → 删 work item → 新建」后
+  // enrollment 换绑新 plan/session——前端内存残留的旧回执不得盖在新会话上
+  // 呈现「自动化已终止」。当前 plan 身份取 automation.plan_id（WS 快照同源
+  // 投影）；回执缺 planId 或当前身份不可得均 fail-closed 不展示。
+  function seedTerminationReceipt(planId: string | null) {
+    useCodingWorkspaceStore.setState({
+      planTermination: {
+        pending: null,
+        submitting: false,
+        error: null,
+        terminated: {
+          projectId: "project_0001",
+          issueId: "issue_0001",
+          planId,
+          terminatedAt: "2026-10-16T06:00:00Z",
+          outcome: "terminated",
+        },
+      },
+    });
+  }
+
+  it("同 issue 旧回执（planId=旧 plan）+ 当前是新 plan ⇒ 横幅不渲染，终止入口恢复", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      automation: { ...MANAGED_AUTOMATION, plan_id: "plan_0002" },
+    });
+    seedTerminationReceipt("plan_0001");
+
+    renderCodingPage();
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+    // 新 plan 未终止 ⇒ 统一终止入口恢复（不再被陈旧回执压住）。
+    expect(screen.getByTestId("automation-termination-entry")).toBeInTheDocument();
+  });
+
+  it("回执缺 planId（旧响应/回放）⇒ 横幅不渲染（fail-closed）", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      automation: MANAGED_AUTOMATION,
+    });
+    seedTerminationReceipt(null);
+
+    renderCodingPage();
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+    expect(screen.getByTestId("automation-termination-entry")).toBeInTheDocument();
+  });
+
+  it("当前 plan 身份不可得（automation.plan_id 缺省）⇒ 横幅不渲染（fail-closed）", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      automation: { ...MANAGED_AUTOMATION, plan_id: null },
+    });
+    seedTerminationReceipt("plan_0001");
+
+    renderCodingPage();
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+  });
 });

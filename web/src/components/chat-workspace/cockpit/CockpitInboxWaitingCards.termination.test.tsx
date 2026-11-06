@@ -20,6 +20,7 @@ import {
   AutomationTerminatedBanner,
   AutomationTerminationConfirmSurface,
   C1RecoveryCard,
+  terminationReceiptBelongsToCurrentPlan,
 } from "./CockpitInboxWaitingCards";
 import {
   AUTOMATION_ENROLLMENT_CONFLICT,
@@ -146,11 +147,12 @@ describe("AutomationTerminationConfirmSurface（T4 统一二次确认面）", ()
       );
     });
 
-    // 成功后：确认面关闭，终态（terminated_at/outcome）进 store。
+    // 成功后：确认面关闭，终态（planId/terminated_at/outcome）进 store。
     expect(screen.queryByTestId("automation-termination-confirm")).toBeNull();
     expect(useCodingWorkspaceStore.getState().planTermination.terminated).toEqual({
       projectId: "project_0001",
       issueId: "issue_0001",
+      planId: "plan_0001",
       terminatedAt: "2026-10-16T06:00:00Z",
       outcome: "terminated",
     });
@@ -406,5 +408,44 @@ describe("AutomationTerminatedBanner（T4 终止态呈现）", () => {
     expect(banner).toHaveTextContent("清理未完成");
     expect(banner).toHaveTextContent("需管理员介入");
     expect(banner).not.toHaveTextContent("重试");
+  });
+});
+
+// 2026-11-06 陈旧回执修复：终止回执展示门（fail-closed）。场景：同 issue
+// 「终止 → 删 work item → 新建」后 enrollment 换绑新 plan/session——旧回执
+//（前端内存残留）不得再盖在新会话上呈现「自动化已终止」。
+describe("terminationReceiptBelongsToCurrentPlan（陈旧回执展示门）", () => {
+  it("回执缺 planId（旧响应/回放）⇒ 不渲染横幅（fail-closed，宁可少显示不可错显示）", () => {
+    expect(terminationReceiptBelongsToCurrentPlan({ planId: null }, "plan_0002")).toBe(
+      false,
+    );
+    expect(terminationReceiptBelongsToCurrentPlan({ planId: "" }, "plan_0002")).toBe(
+      false,
+    );
+  });
+
+  it("当前 plan 身份不可得（旧帧/读取失败）⇒ 不渲染横幅（fail-closed）", () => {
+    expect(terminationReceiptBelongsToCurrentPlan({ planId: "plan_0001" }, null)).toBe(
+      false,
+    );
+    expect(terminationReceiptBelongsToCurrentPlan({ planId: "plan_0001" }, undefined)).toBe(
+      false,
+    );
+  });
+
+  it("回执 planId 与当前 plan 不一致（跨 work item 陈旧回执）⇒ 不渲染横幅", () => {
+    expect(
+      terminationReceiptBelongsToCurrentPlan({ planId: "plan_0001" }, "plan_0002"),
+    ).toBe(false);
+  });
+
+  it("回执为空 ⇒ 不渲染横幅", () => {
+    expect(terminationReceiptBelongsToCurrentPlan(null, "plan_0001")).toBe(false);
+  });
+
+  it("回执 planId 与当前 plan 一致 ⇒ 允许渲染（原终止语义保留）", () => {
+    expect(
+      terminationReceiptBelongsToCurrentPlan({ planId: "plan_0001" }, "plan_0001"),
+    ).toBe(true);
   });
 });

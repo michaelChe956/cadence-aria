@@ -79,6 +79,26 @@ export function AutomationTerminationEntryButton({
   );
 }
 
+/**
+ * 2026-11-06 陈旧回执修复：终止回执是否属于当前 plan——渲染「自动化已终止」
+ * 横幅前的展示门（两页共用）。fail-closed：回执缺 planId（旧响应/旧缓存/
+ * 回放）或当前 plan 身份不可得（旧帧/读取失败）均判不属于（不展示横幅），
+ * 宁可少显示不可错显示。终止语义本体不变（全部仓库停止、已产出文件保留、
+ * cleanup_required 管理员介入说明），只是不再跨 plan/work item 复用回执。
+ */
+export function terminationReceiptBelongsToCurrentPlan(
+  receipt: { planId: string | null } | null,
+  currentPlanId: string | null | undefined,
+): boolean {
+  if (receipt === null || receipt.planId === null || receipt.planId === "") {
+    return false;
+  }
+  if (currentPlanId === null || currentPlanId === undefined || currentPlanId === "") {
+    return false;
+  }
+  return receipt.planId === currentPlanId;
+}
+
 /** 终止态呈现（terminated_at＋不可逆说明）；视觉与 P5 托管卡同源
  *（琥珀指引底，`stopped-managed-hint` 同族）。 */
 export function AutomationTerminatedBanner({
@@ -170,6 +190,9 @@ export function AutomationTerminationConfirmSurface() {
       setResult({
         projectId: request.projectId,
         issueId: request.issueId,
+        // 2026-11-06 陈旧回执修复：回执带上 plan 身份（响应本就含 plan_id），
+        // 供展示守卫与当前 plan 比对；缺省 null 由消费方 fail-closed。
+        planId: response.plan_id ?? null,
         terminatedAt: response.terminated_at,
         outcome: response.outcome,
       });

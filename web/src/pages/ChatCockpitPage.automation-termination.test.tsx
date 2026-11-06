@@ -6,7 +6,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ApiClient from "../api/client";
-import { findWorkspaceSessionIssueAddress } from "../api/client";
+import { findWorkspaceSessionIssueAddress, getAutomationEnrollmentControl } from "../api/client";
 import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
@@ -24,6 +24,7 @@ vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ApiClient>()),
   findWorkspaceSessionIssueAddress: vi.fn(),
   getAutomationEnrollment: vi.fn(),
+  getAutomationEnrollmentControl: vi.fn(),
   postAutomationEnrollmentTerminate: vi.fn(),
   takeoverWorkspaceSession: vi.fn(),
 }));
@@ -103,6 +104,11 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
       projectId: "project_0001",
       issueId: "issue_0001",
     });
+    // control 默认失败（等价此前未 mock 时真实 fetch 在 jsdom 失败 →
+    // planControl=null，fail-closed）；需要投影的用例各自 mockResolvedValue。
+    vi.mocked(getAutomationEnrollmentControl).mockRejectedValue(
+      new Error("control projection not stubbed for this test"),
+    );
   });
 
   it("managed plan 会话显示统一终止入口；点击经目录解析打开同一确认面", async () => {
@@ -156,5 +162,84 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
     await user.click(screen.getByRole("button", { name: "中止" }));
     expect(useCodingWorkspaceStore.getState().planTermination.pending).toBeNull();
     expect(currentMockWorkspaceWs().abort).toHaveBeenCalledTimes(1);
+  });
+
+  // 2026-11-06 陈旧回执修复：同 issue「终止 → 删 work item → 新建」后
+  // enrollment 换绑新 plan——前端内存残留的旧回执（planId=旧 plan）不得再
+  // 盖在正常推进的新会话上呈现「自动化已终止」。当前 plan 身份取 control
+  // 投影 plan_id（与终止响应同源）；缺身份/不一致均 fail-closed 不展示。
+  function controlFixture(planId: string | null) {
+    return {
+      managed: true,
+      plan_id: planId,
+      session_id: "session_001",
+      terminated_at: null,
+      stop_key: null,
+      stage: "running",
+      allowed_actions: [],
+      context_required: false,
+    };
+  }
+
+  function seedStaleTerminationReceipt(planId: string | null) {
+    useCodingWorkspaceStore.setState({
+      planTermination: {
+        pending: null,
+        submitting: false,
+        error: null,
+        terminated: {
+          projectId: "project_0001",
+          issueId: "issue_0001",
+          planId,
+          terminatedAt: "2026-10-16T06:00:00Z",
+          outcome: "terminated",
+        },
+      },
+    });
+  }
+
+  it("同 issue 旧回执（planId=旧 plan）+ 当前是新 plan ⇒ 横幅不渲染，终止入口恢复", async () => {
+    setManagedPlanSession();
+    vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(controlFixture("plan_0002"));
+    seedStaleTerminationReceipt("plan_0001");
+    renderCockpit("session_001");
+
+    // 先等 control 投影落地（否则「不渲染」可能是尚未走到守卫的假阴性）。
+    await vi.waitFor(() => {
+      expect(getAutomationEnrollmentControl).toHaveBeenCalledWith("project_0001", "issue_0001");
+    });
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+    // 新 plan 未终止 ⇒ 统一终止入口恢复可见（不再被陈旧回执压住）。
+    expect(screen.getByTestId("automation-termination-entry")).toBeInTheDocument();
+  });
+
+  it("当前 plan 身份不可得（control 无 plan_id）⇒ 横幅不渲染（fail-closed）", async () => {
+    setManagedPlanSession();
+    vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(controlFixture(null));
+    seedStaleTerminationReceipt("plan_0001");
+    renderCockpit("session_001");
+
+    await vi.waitFor(() => {
+      expect(getAutomationEnrollmentControl).toHaveBeenCalled();
+    });
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+  });
+
+  it("回执 planId 与当前 plan 一致 ⇒ 横幅照常渲染（原终止语义不弱化）", async () => {
+    setManagedPlanSession();
+    vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(controlFixture("plan_0001"));
+    seedStaleTerminationReceipt("plan_0001");
+    renderCockpit("session_001");
+
+    await vi.waitFor(() => {
+      expect(getAutomationEnrollmentControl).toHaveBeenCalled();
+    });
+
+    expect(await screen.findByTestId("automation-terminated-banner")).toHaveTextContent(
+      "2026-10-16T06:00:00Z",
+    );
+    expect(screen.queryByTestId("automation-termination-entry")).toBeNull();
   });
 });

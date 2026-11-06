@@ -1141,15 +1141,19 @@ describe("automation ownership projection and unified termination confirm state"
     store.setTerminationResult({
       projectId: "project_0001",
       issueId: "issue_0001",
+      // 2026-11-06 陈旧回执修复：回执带上 plan 身份并可读回（展示守卫依据）。
+      planId: "plan_0001",
       terminatedAt: "2026-10-16T06:00:00Z",
       outcome: "terminated",
     });
 
     const termination = useCodingWorkspaceStore.getState().planTermination;
     expect(termination.pending).toBeNull();
+    expect(termination.terminated?.planId).toBe("plan_0001");
     expect(termination.terminated).toEqual({
       projectId: "project_0001",
       issueId: "issue_0001",
+      planId: "plan_0001",
       terminatedAt: "2026-10-16T06:00:00Z",
       outcome: "terminated",
     });

@@ -29,6 +29,7 @@ import {
   AutomationTerminatedBanner,
   AutomationTerminationConfirmSurface,
   AutomationTerminationEntryButton,
+  terminationReceiptBelongsToCurrentPlan,
 } from "../components/chat-workspace/cockpit/CockpitInboxWaitingCards";
 import {
   useCockpitObservedRecords,
@@ -851,11 +852,19 @@ export function ChatCockpitPage({
   const cockpitPlanTermination = useCodingWorkspaceStore(
     (storeState) => storeState.planTermination,
   );
+  // 2026-11-06 陈旧回执修复：回执除同 issue 外还需与当前 plan 身份
+  //（control 投影 plan_id，与终止响应同源）一致——同 issue 换绑新 plan
+  //（终止→删 work item→新建）后旧回执不再盖在新会话上；回执缺 planId
+  // 或当前身份不可得（control 未加载/读取失败）均 fail-closed 不展示。
   const cockpitTerminatedAt =
     planIssueAddress !== null &&
     cockpitPlanTermination.terminated !== null &&
     cockpitPlanTermination.terminated.projectId === planIssueAddress.projectId &&
-    cockpitPlanTermination.terminated.issueId === planIssueAddress.issueId
+    cockpitPlanTermination.terminated.issueId === planIssueAddress.issueId &&
+    terminationReceiptBelongsToCurrentPlan(
+      cockpitPlanTermination.terminated,
+      planControl?.plan_id,
+    )
       ? cockpitPlanTermination.terminated.terminatedAt
       : null;
   // F-11/F-28 二轮：裸 driver 抢走租约（STALE_DRIVER_LEASE）或本连接以

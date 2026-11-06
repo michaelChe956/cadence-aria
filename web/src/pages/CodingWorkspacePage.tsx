@@ -48,6 +48,7 @@ import {
   AutomationTerminatedBanner,
   AutomationTerminationConfirmSurface,
   AutomationTerminationEntryButton,
+  terminationReceiptBelongsToCurrentPlan,
 } from "../components/chat-workspace/cockpit/CockpitInboxWaitingCards";
 import { AutomationSessionInvalidHint } from "../components/chat-workspace/cockpit/automationTerminationConflict";
 import {
@@ -172,12 +173,20 @@ export function CodingWorkspacePage({
   // 批 2 T4（REQ-WIGA-09/08）：托管判据用 T3 同源投影（owner=server 即
   // managed，terminated 仍 managed）；终止态优先投影 terminated_at，其次
   // 本页提交的 durable 结果（同一 project/issue 才呈现，防跨页残留）。
+  // 2026-11-06 陈旧回执修复：回执还需与当前 plan 身份（automation.plan_id
+  // 同源投影）一致——同 issue 换绑新 plan（终止→删 work item→新建）后旧
+  // 回执不再复用；回执缺 planId 或当前身份不可得均 fail-closed 不展示
+  //（宁可少显示，不可错显示）。
   const automationManaged = store.automation?.owner === "server";
   const terminationTerminatedAt =
     store.automation?.terminated_at ??
     (store.planTermination.terminated !== null &&
       store.planTermination.terminated.projectId === (store.projectId ?? address.projectId) &&
-      store.planTermination.terminated.issueId === (store.issueId ?? address.issueId)
+      store.planTermination.terminated.issueId === (store.issueId ?? address.issueId) &&
+      terminationReceiptBelongsToCurrentPlan(
+        store.planTermination.terminated,
+        store.automation?.plan_id,
+      )
       ? store.planTermination.terminated.terminatedAt
       : null);
   const openAutomationTermination = () => {
