@@ -263,8 +263,12 @@ async fn app_with_gateway_launchable_design_history() -> (axum::Router, tempfile
         .to_string();
 
     // 块3：issue 必须挂 logical_codebase_id 归属；按生产 v1.2→v1.3 身份迁移
-    // 把 repository 升成 LC 权威，再经生产 rebuild 端点建 active 聚合索引；
-    // codegraph sync 与并行夹具互踩 ⇒ 持 crate 级锁串行。
+    // 把 repository 升成 LC 权威，再经**生产聚合索引操作 + 假 CodeGraph CLI**
+    // （`aggregate_index_fixture`）建 active 聚合索引。夹具不真跑 `codegraph sync .`
+    // （本机重活：抢全局 `/tmp/.codegraph` 锁 + 吃 30s 增量预算 ⇒ 422
+    // codegraph_timeout）；假 CLI 只替换 CLI 应答，真实 git 成员快照 / 成员覆盖校验 /
+    // durable 世代落盘 / active 投影全走生产链路。rebuild 端点本身的行为覆盖由
+    // `web_aggregate_index_api` 承担。
     let involved: Vec<String> = {
         let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
         cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(
@@ -276,18 +280,10 @@ async fn app_with_gateway_launchable_design_history() -> (axum::Router, tempfile
             cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
                 "project_0001",
             );
-        let (status, index_rebuild) = request_json(
-            app.clone(),
-            Method::POST,
-            &format!(
-                "/api/projects/project_0001/logical-codebases/{lc_id}/aggregate-indexes/rebuild"
-            ),
-            json!({}),
-        )
-        .await;
-        assert!(
-            status.is_success(),
-            "bootstrap index rebuild failed: {index_rebuild}"
+        crate::aggregate_index_fixture::seed_active_aggregate_index(
+            &app_paths,
+            "project_0001",
+            &lc_id,
         );
         let involved: Vec<String> = LogicalCodebaseStore::new(app_paths.clone())
             .list_members("project_0001")
