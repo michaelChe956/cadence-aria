@@ -1,6 +1,9 @@
 import { renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { LifecycleCard, LifecycleColumns } from "../../api/types/lifecycle";
+import type {
+  LifecycleCard,
+  LifecycleColumns,
+} from "../../state/lifecycle-workbench-store";
 import type {
   IssueLifecycleGenerationActions,
   IssueLifecycleGenerationOptions,

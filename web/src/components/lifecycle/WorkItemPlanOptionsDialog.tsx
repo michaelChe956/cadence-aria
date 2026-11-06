@@ -436,7 +436,7 @@ export function WorkItemPlanOptionsDialog({
                   data-testid="automation-terminated-notice"
                   className="text-xs text-[var(--aria-ink-muted)]"
                 >
-                  该 issue 的自动化已于 {terminatedEnrollment.terminated_at} 终止；
+                  该 issue 的自动化已于 {terminatedEnrollment?.terminated_at} 终止；
                   确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。
                 </p>
               )
