@@ -1,4 +1,6 @@
 //! 集成测试入口：核心域（artifact/spec/plan/design/openspec/cli/runtime 等）。
+#[path = "support/aggregate_index_fixture.rs"]
+mod aggregate_index_fixture;
 #[path = "it_core/approval_gate_handlers.rs"]
 mod approval_gate_handlers;
 #[path = "it_core/artifact_schema_min_fields.rs"]
