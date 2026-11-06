@@ -45,6 +45,17 @@ describe("MonacoDiffViewer", () => {
 
     expect(screen.getByTestId("monaco-diff-skeleton")).toHaveStyle({ height: "280px" });
   });
+  it("shows visible loading text while the diff editor module is loading", async () => {
+    // 动态 import 属例外：需全新的 lazy 闭包才能重新走到 Suspense 骨架分支（静态导入的模块缓存已被首个用例解析）
+    vi.resetModules();
+    const { MonacoDiffViewer } = await import("../MonacoDiffViewer");
+
+    render(<MonacoDiffViewer original="# v1" modified="# v2" height="280px" />);
+
+    const skeleton = screen.getByTestId("monaco-diff-skeleton");
+    expect(skeleton.textContent?.trim()).not.toBe("");
+    expect(skeleton.textContent).toMatch(/加载|Loading/);
+  });
 
   it("renders a read-only side-by-side markdown diff", async () => {
     render(
