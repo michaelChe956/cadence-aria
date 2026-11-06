@@ -1,7 +1,7 @@
 # 工作项组不再提供手动生成模式（REQ-WIGA-01 MODIFIED）
 
 > **本 change 记录 2026-11-07 owner 的业务裁定：「work item group 不允许手动生成模式，从弹窗里去掉『手动』」。**
-> ★**粒度待 owner 拍板**（① 整个 fieldset 固定 automatic ／ ② 仅当本次提交将生成 group 时隐藏「手动」）——见 `## 两种粒度`。本 proposal 按**推荐 ①** 展开，并列出若改选 ② 所需的额外契约变更。
+> ★**粒度已由 oracle 终裁（owner 已授权 oracle 决策）：D1 = ①（整个 fieldset 固定 automatic，范围限定 `automationAvailable === true` 的弹窗；未确认 design 时弹窗本来就没有任何模式选项）／D2 = (b)（不保留任何「创建并打开 Workspace」兜底）／D3 = 保持现状（未确认 design 继续走人工路径，`prepareWorkItemPlan` 保留）**——见 `## 两种粒度` 与「已终裁事项」表。本 proposal 按**①** 展开；原 ② 方案所需的额外契约变更见 `## 两种粒度` 的 ② 小节（若将来要 ②，须独立立项）。
 
 ## Why
 
@@ -46,7 +46,7 @@
 ⇒ 属于契约层变更 ⇒ 走 OpenSpec change（delta 落在 REQ-WIGA-01）。
 ```
 
-## 两种粒度（★待 owner 拍板★）
+## 两种粒度（★D1 已由 oracle 终裁为 ①★）
 
 ### ①（推荐）整个 fieldset 固定 automatic（无论 kind）
 
@@ -63,7 +63,7 @@
 - 既有引用「手动」radio 的 3 处断言需要**改写**（不是删断言意图）：
   `WorkItemPlanOptionsDialog.reenable.test.tsx:189`、`WorkItemPlanOptionsDialog.target.test.tsx:246-250`、`WorkItemPlanOptionsDialog.plan-approval.test.tsx:110-115`。
 - hook 层既有用例 `useIssueLifecycleGeneration.plan-approval.test.ts:246-270`（「manual 走 prepare 且不带 `plan_approval`／`automation_mode`」）的前提消失 ⇒ 需改写。
-- ★**失败面风险**：目标投影读取失败或授权载体不受支持时，automatic 分支提交是 fail-closed 禁用的（`WorkItemPlanOptionsDialog.tsx:151-155`）。当前用户可以「切回手动」绕过（`WorkItemPlanOptionsDialog.target.test.tsx:246-250` 就是这条断言）；去掉「手动」后**该绕过消失** ⇒ 可能把用户堵死。兜底形态见下方待拍板项 D2。
+- ★**失败面风险**：目标投影读取失败或授权载体不受支持时，automatic 分支提交是 fail-closed 禁用的（`WorkItemPlanOptionsDialog.tsx:151-155`）。当前用户可以「切回手动」绕过（`WorkItemPlanOptionsDialog.target.test.tsx:246-250` 就是这条断言）；去掉「手动」后**该绕过消失** ⇒ 可能把用户堵死。兜底形态见下方 D2（已终裁为 (b)，不保留兜底）。
 
 **推荐理由**
 
@@ -85,17 +85,17 @@
 - 要让 ② 有意义，必须**先产出一条新的先验判据**（新增一条 projection 或新字段）⇒ 那是**独立的一次契约变更**，须先走 brainstorming 与契约评审，再谈弹窗改动。
 - ⇒ ② 不是「① 的更细版本」，而是「① + 一条新判据的契约变更」。**若 owner 将来要 ②，建议独立成一个后续 change**，不与本 change 捆绑。
 
-### ★需要 owner 一并拍板的事项
+### ★已终裁事项（owner 已授权 oracle 决策）★
 
-| 编号 | 待拍板项 | 选项 | 我的推荐 |
+| 编号 | 决策项 | 选项 | 结论（我的推荐） |
 |---|---|---|---|
-| **D1** | **粒度** | ① / ② | **①**（与原话逐字对齐；② 无判据可用） |
+| **D1** | **粒度** | ① / ② | **①（已终裁）**（与原话逐字对齐；② 无判据可用）：整个 fieldset 固定 automatic，范围限定 `automationAvailable === true` 的弹窗（未确认 design 时弹窗本来就没有任何模式选项） |
 | **D2** | **目标投影不可得时的兜底**（automatic fail-closed 后用户被堵死） | (a) 保留「创建并打开 Workspace」兜底出口（**不**以「生成模式」radio 形态呈现）／(b) 只如实报错，无兜底 | **(b)（已终裁）**：弹窗保持打开、提交保持禁用、目标投影读取失败时提供「重试」（`automation-target-retry`）、用户可「取消」退出，之后修复目标/载体问题再回来；(a) 等于把「手动」改名（「创建并打开 Workspace」调 `prepareWorkItemPlan`，产出的就是人工推进的 workspace 会话），直接违反 delta 的「SHALL NOT 改为人工推进的 workspace 会话」与「SHALL NOT 静默改为手动生成」 |
-| **D3** | **未确认 design 的弹窗**是否也强制托管 | (a) 保持现状（未确认 ⇒ 不呈现生成模式 ⇒ 走既有手动）／(b) 一并托管化 | **(a)**：自动化授权的前提是 design 已确认（`useIssueLifecycleGeneration.ts:451-453` 明写「自动化要求 Design Spec 已确认」），未确认时**技术上无法**托管化 ⇒ (b) 不可实现 |
+| **D3** | **未确认 design 的弹窗**是否也强制托管 | (a) 保持现状（未确认 ⇒ 不呈现生成模式 ⇒ 走既有手动）／(b) 一并托管化 | **(a)（已终裁）**：自动化授权的前提是 design 已确认（`useIssueLifecycleGeneration.ts:451-453` 明写「自动化要求 Design Spec 已确认」），未确认时**技术上无法**托管化 ⇒ (b) 不可实现 |
 
-> D2 / D3 不改本 change 的 delta 结构（delta 已按「不得静默降级」「不得伪造托管事实」写定），只影响前端实现细节 ⇒ 拍板结果落在 tasks 的实现工作包里。
+> D2 / D3 不改本 change 的 delta 结构（delta 已按「不得静默降级」「不得伪造托管事实」写定），只影响前端实现细节 ⇒ 终裁结果落在 tasks 的实现工作包里。
 
-### 灰区事实（D3 = 保持现状的直接推论，交 owner 时须如实写明）
+### 灰区事实（D3 = 保持现状的直接推论，交 owner 时须如实写明；★需 owner 知情确认★）
 
 未确认 design 的提交走既有 manual 链路（`prepareWorkItemPlan`），而前端把 issue 的 `work_item_plan` 一律渲染成 `kind: "work_item_group"` 卡片（`web/src/state/lifecycle-workbench-store.ts:130-146`，卡片标题即「Work Item Group」）⇒ **手动路径仍能产出工作项组**——只是该产物不经「工作项组生成路径」（delta 定义里 design 尚未确认的提交不属于该路径），不在本 change 的禁止范围内。owner 原话「work item group 不允许手动生成模式」的覆盖面以该路径定义为准；这是定义之外的灰区，须在交 owner 时写明，不得依契约当作「没有」。
 

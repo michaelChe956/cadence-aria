@@ -1,15 +1,15 @@
 # Tasks: 工作项组不再提供手动生成模式（REQ-WIGA-01 MODIFIED）
 
 > 契约：本 change 的 MODIFIED delta `openspec/changes/work-item-group-manual-mode-removed/specs/work-item-group-autopilot/spec.md` 的 REQ-WIGA-01（主 spec 尚未 archive/sync ⇒ 引用一律指 delta）
-> 设计依据：`proposal.md`（现象 / 现状落点 / 两种粒度 / 推荐与理由 / 待拍板项 D1–D3）
-> ★**粒度待 owner 拍板**（① 整个 fieldset 固定 automatic ／ ② 仅当本次提交将生成 group 时隐藏「手动」）。本 tasks 按**推荐 ①** 展开；若 owner 改选 ②，见 §2.0。
+> 设计依据：`proposal.md`（现象 / 现状落点 / 两种粒度 / 推荐与理由 / 终裁项 D1–D3）
+> ★**粒度已由 oracle 终裁（owner 已授权 oracle 决策）：D1 = ①（整个 fieldset 固定 automatic，范围限定 `automationAvailable === true` 的弹窗）／D2 = (b)（不保留任何「创建并打开 Workspace」兜底）／D3 = 保持现状（未确认 design 继续走人工路径，`prepareWorkItemPlan` 保留）**——详见 `proposal.md`。本 tasks 按**①** 展开。
 
 ## 0. 接手前必读
 
 - [ ] 0.1 `proposal.md`（含现状落点表与「两条决定粒度的关键事实」）
 - [ ] 0.2 契约 delta（本 change 的 `specs/work-item-group-autopilot/spec.md`）——重点读三个新场景：
       「工作项组生成路径不提供手动模式」「托管目标不可得时不得静默降级」「工作项组生成路径之外的既有行为逐字不变」
-- [ ] 0.3 ★**向 owner 确认 D1（粒度）／D2（目标投影不可得时的兜底）／D3（未确认 design 的弹窗）**——D1 未定则不得进入 §2 的实现
+- [ ] 0.3 ★**D1／D2／D3 已由 oracle 终裁（owner 已授权 oracle 决策）**：D1 = ①（范围限定 `automationAvailable === true`）／D2 = (b)（不保留任何「创建并打开 Workspace」兜底）／D3 = 保持现状——**不再需要 owner 拍板**，可直接进入 §2 的实现（终裁依据见 `proposal.md`）
 
 ## 1. 红测先行（★第一步必须是失败测试★）
 
@@ -26,9 +26,9 @@
 
 ## 2. 实现
 
-- [ ] 2.0 ★**粒度落地确认**★
-      - 选 ① ⇒ 按 2.1–2.5 执行
-      - 选 ② ⇒ ★前置插入一个独立工作包★：产出「本次提交是否生成 group」的新先验判据（新增 projection／新字段）并走契约评审；未完成前**不得**改弹窗
+- [ ] 2.0 ★**粒度已终裁：D1 = ①（范围限定 `automationAvailable === true` 的弹窗），D2 = (b)，D3 = 保持现状（详见 `proposal.md`）**★
+      - 按 ① ⇒ 按 2.1–2.5 执行
+      - ★原「选 ②」分支已因 D1 终裁为 ① 而关闭★：若将来要 ②，须独立成一个后续 change——★前置插入一个独立工作包★：产出「本次提交是否生成 group」的新先验判据（新增 projection／新字段）并走契约评审；未完成前**不得**改弹窗
 - [ ] 2.1 `web/src/components/lifecycle/WorkItemPlanOptionsDialog.tsx:333-361`：「手动」radio 不再渲染（① 下 fieldset 只保留「自动化」且呈固定托管态；提交按钮恒为「启用自动化」）
       - ★同步更新组件自陈注释 `:42-43`、`:60-61`（它们现在写着「缺省手动／人工链路不变」，与新行为矛盾）
 - [ ] 2.2 `web/src/components/lifecycle/useIssueLifecycleGeneration.ts:632-665`：**保留** manual 提交分支与 `prepareWorkItemPlan` 引用——未确认 design 的提交仍走 manual（`:245` 默认值）并继续调用 `prepareWorkItemPlan`（`:653-665`；后端路由与 `web/src/api/client.ts:550` 导出一并不动，Rust 集成测试大量直接调用，删除没有对象）；唯一要求：manual 分支在 `automationAvailable === true` 的弹窗里**不可达**（弹窗已不提供「手动」选项，且 `onConfirm` 发出的 mode 已归一为 `automatic`）
@@ -63,7 +63,7 @@
 
 - [ ] 5.1 派 `k3-reviewer` 独立审查（重点：① 契约与实现是否一致；② 「不得静默降级」是否被违反；③ 既有断言改写是否弱化了原意；④ 后端是否真的零改动；⑤ 是否有死代码/第二入口残留）
 - [ ] 5.2 逐条回应审查意见；未采纳的写明理由
-- [ ] 5.3 交付报告落 `cadence/reports/`（含：owner 裁定原文、粒度拍板结果 D1/D2/D3、红测失败输出、改写断言逐条对照、门禁输出、未做项）
+- [ ] 5.3 交付报告落 `cadence/reports/`（含：owner 裁定原文、粒度终裁结果 D1/D2/D3、红测失败输出、改写断言逐条对照、门禁输出、未做项）
 
 ## 6. owner 真机验收（★这次必须执行，不留未勾★）
 
