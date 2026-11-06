@@ -14,6 +14,9 @@
 pub(crate) mod process_smoke {
     use super::*;
 
+    // D 层证据合同与制品工具（文本内联——同一模块作用域，无需跨模块可见性）。
+    include!("provider_run_process_smoke_contract.rs");
+
     /// 子模式环境标识（与单元侧 small_stack_worker 同合同、各自私有）。
     const PROCESS_PROVIDER_CASE_CHILD_MODE_ENV: &str = "ARIA_PROVIDER_CASE_CHILD_MODE";
 
@@ -275,107 +278,6 @@ pub(crate) mod process_smoke {
     // -----------------------------------------------------------------------
 
     /// D 层证据：二进制指纹/profile/实际启动栈配置/日志规模/进程收口（打印进
-    /// 测试输出，供验收报告摘录）。
-    #[derive(Debug)]
-    struct ProcessSmokeEvidence {
-        binary: String,
-        binary_sha256: String,
-        profile: &'static str,
-        toolchain: String,
-        /// 启动时进程环境继承的 RUST_MIN_STACK（任务13 前无显式 Builder 栈日志，
-        /// 实际生效栈 = tokio 默认 + 该环境值，如实记录；任务13 后须复测分档）。
-        inherited_rust_min_stack: Option<String>,
-        server_port: u16,
-        stdout_lines: usize,
-        stderr_lines: usize,
-        /// 无进程残留证据：整组 SIGKILL + wait 收口后进程组 ESRCH 探测结果。
-        process_group_residue_free: bool,
-    }
-
-    fn binary_sha256(binary: &std::path::Path) -> Result<String, String> {
-        let output = std::process::Command::new("sha256sum")
-            .arg(binary)
-            .output()
-            .map_err(|error| format!("sha256sum failed: {error}"))?;
-        let text = String::from_utf8_lossy(&output.stdout).to_string();
-        text.split_whitespace()
-            .next()
-            .map(|digest| digest.to_string())
-            .ok_or_else(|| format!("sha256sum produced no digest: {text}"))
-    }
-
-    fn rustc_version() -> String {
-        std::process::Command::new("rustc")
-            .arg("--version")
-            .output()
-            .ok()
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    /// 自有空闲端口：bind :0 取端口号后释放（服务进程随后自 bind）。
-    fn acquire_free_port() -> Result<u16, String> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .map_err(|error| format!("probe bind failed: {error}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|error| format!("probe local_addr failed: {error}"))?
-            .port();
-        drop(listener);
-        Ok(port)
-    }
-
-    type ProcessWsStream =
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-    /// 带可信同源 Origin 的 WS 连接（生产 serve_web 装配 api_auth：WS upgrade
-    /// 必须携带受信精确 Origin——loopback bind 的默认受信来源即 `http://<bind>`）。
-    async fn connect_process_ws(url: &str, origin: &str) -> Result<ProcessWsStream, String> {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let mut request = url
-            .into_client_request()
-            .map_err(|error| format!("ws request build failed: {error}"))?;
-        request.headers_mut().insert(
-            "origin",
-            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(origin)
-                .map_err(|error| format!("origin header failed: {error}"))?,
-        );
-        connect_async(request)
-            .await
-            .map_err(|error| format!("connect ws failed: {error}"))
-            .map(|(ws, _)| ws)
-    }
-
-    /// 收帧并完整解析为 `Value`（serde 失败即失败——不完整帧不是证据）。
-    async fn recv_process_frame(ws: &mut ProcessWsStream) -> Result<Value, String> {
-        // 真实 adapter 走真实 `claude` CLI 会话：冷启动 + 鉴权 + 首包远超
-        // 进程内替身的量级——30s 不足以区分「慢」与「缺前置」，故给足 180s。
-        let frame = match timeout(Duration::from_secs(180), ws.next()).await {
-            Err(_) => return Err("D 未验证：客户端 180s 读超时（服务无帧）".to_string()),
-            Ok(None) => return Err("D 未验证：连接关闭".to_string()),
-            Ok(Some(Err(_))) => return Err("D 未验证：非文本/非法帧".to_string()),
-            Ok(Some(Ok(message))) => message,
-        };
-        let Message::Text(text) = frame else {
-            return Err(format!("D 未验证：期望文本帧，得到 {frame:?}"));
-        };
-        serde_json::from_str(&text).map_err(|error| format!("D 未验证：JSON 帧解析失败: {error}"))
-    }
-
-    fn process_start_generation_message() -> WsInMessage {
-        WsInMessage::StartGeneration {
-            provider_config: ProviderConfigSnapshot {
-                author: ProviderName::ClaudeCode,
-                reviewer: None,
-                review_rounds: 0,
-                permission_modes:
-                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
-            },
-            reviewer_enabled: false,
-            resume_recovery: None,
-        }
-    }
-
     /// D 层真实 WS 深链：与 C 层同一动态合同（真实 start / 完整帧+偏序 /
     /// durable 进展 / 取消后再生成 / health+重连），但 provider 是真实
     /// ClaudeCode adapter（进程内无 Scripted 替身——任何流式输出都来自真实
@@ -768,12 +670,15 @@ pub(crate) mod process_smoke {
         };
         #[cfg(not(unix))]
         let process_group_residue_free = true;
+        let (startup_log_profile, effective_stack_bytes) = parse_startup_stack_line(&stderr);
         let evidence = ProcessSmokeEvidence {
             binary: binary.display().to_string(),
             binary_sha256,
             profile,
             toolchain,
             inherited_rust_min_stack,
+            effective_stack_bytes,
+            startup_log_profile,
             server_port: port,
             stdout_lines: stdout.lines().count(),
             stderr_lines: stderr.lines().count(),
@@ -824,6 +729,40 @@ pub(crate) mod process_smoke {
         }
         if evidence.server_port == 0 {
             return Err("D 层失败：服务端口无效".to_string());
+        }
+        // 生效栈交叉核对：产品启动日志自报的 profile 必须与二进制 profile 一致
+        // （防 debug/release 张冠李戴——任务14 发布检查单的硬要求）。
+        match (&evidence.startup_log_profile, evidence.effective_stack_bytes) {
+            (Some(startup_profile), Some(stack_bytes)) => {
+                if startup_profile != expected_profile {
+                    return Err(format!(
+                        "D 层失败：启动日志 profile 与二进制 profile 不一致（启动日志={startup_profile}，\
+                         二进制={expected_profile}，binary={}）",
+                        evidence.binary
+                    ));
+                }
+                if stack_bytes == 0 {
+                    return Err("D 层失败：启动日志 worker_stack_bytes 为 0".to_string());
+                }
+                println!(
+                    "[process-smoke] effective stack: profile={startup_profile} \
+                     worker_stack_bytes={stack_bytes}"
+                );
+            }
+            (None, None) => {
+                return Err(format!(
+                    "D 层失败：产品启动日志缺 [aria-runtime] 生效栈行（无法核对生效栈与 profile；\
+                     stderr 尾={}）",
+                    excerpt(&stderr)
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "D 层失败：产品启动日志的 profile/worker_stack_bytes 不完整（profile={:?}, \
+                     bytes={:?}）",
+                    evidence.startup_log_profile, evidence.effective_stack_bytes
+                ));
+            }
         }
         if evidence.toolchain.is_empty() || evidence.toolchain == "unknown" {
             return Err(format!(
