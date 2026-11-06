@@ -33,6 +33,8 @@ mod phase1_profile;
 mod plan_projection;
 #[path = "it_core/policy_override_degrade.rs"]
 mod policy_override_degrade;
+#[path = "it_core/provider_run_runtime_entry.rs"]
+mod provider_run_runtime_entry;
 #[path = "it_core/risk_registry_minimal.rs"]
 mod risk_registry_minimal;
 #[path = "it_core/runtime_prompt_routing.rs"]
