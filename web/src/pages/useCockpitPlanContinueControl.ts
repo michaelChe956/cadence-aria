@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  findWorkspaceSessionAutomationIdentity,
   findWorkspaceSessionIssueAddress,
   getAutomationEnrollmentControl,
   type AutomationControlStatus,
@@ -83,4 +84,46 @@ export function useCockpitPlanContinueControl({
   ]);
 
   return { planIssueAddress, planControl, planControlRefreshTick, setPlanControlRefreshTick };
+}
+
+type CockpitTerminationIdentity = {
+  projectId: string;
+  issueId: string;
+  planId: string | null;
+};
+
+/**
+ * 2026-11-06 陈旧回执修复（REQ-WIGA-14）：终止横幅的当前 plan 身份源。
+ * 与 planControl（停点形态投影，终止 CAS 写 enabled=false 即被清空）不同，
+ * 这里走 durable 会话记录（entity_id=plan_id，终止后仍在）⇒ 终止态/重挂载
+ * 后仍可得，「本计划被终止 ⇒ 横幅仍渲染」与「身份不可得 ⇒ fail-closed」
+ * 得以同时成立。仅在终止回执存在时解析一次（缓存），失败静默保持 null。
+ */
+export function useCockpitTerminationIdentity({
+  receiptActive,
+  sessionId,
+}: {
+  receiptActive: boolean;
+  sessionId: string;
+}): CockpitTerminationIdentity | null {
+  const [identity, setIdentity] = useState<CockpitTerminationIdentity | null>(null);
+
+  useEffect(() => {
+    if (!receiptActive || identity !== null) {
+      return;
+    }
+    let alive = true;
+    void findWorkspaceSessionAutomationIdentity(sessionId)
+      .then((resolved) => {
+        if (alive && resolved !== null) {
+          setIdentity(resolved);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [receiptActive, identity, sessionId]);
+
+  return identity;
 }

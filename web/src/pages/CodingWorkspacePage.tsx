@@ -176,19 +176,21 @@ export function CodingWorkspacePage({
   // 2026-11-06 陈旧回执修复：回执还需与当前 plan 身份（automation.plan_id
   // 同源投影）一致——同 issue 换绑新 plan（终止→删 work item→新建）后旧
   // 回执不再复用；回执缺 planId 或当前身份不可得均 fail-closed 不展示
-  //（宁可少显示，不可错显示）。
+  //（宁可少显示，不可错显示）。r2（REQ-WIGA-14）：outcome 与 terminatedAt
+  // 同走身份门——旧代回执的 cleanup_required 等文案不得叠加到新代横幅。
   const automationManaged = store.automation?.owner === "server";
+  const terminationReceipt =
+    store.planTermination.terminated !== null &&
+    store.planTermination.terminated.projectId === (store.projectId ?? address.projectId) &&
+    store.planTermination.terminated.issueId === (store.issueId ?? address.issueId) &&
+    terminationReceiptBelongsToCurrentPlan(
+      store.planTermination.terminated,
+      store.automation?.plan_id,
+    )
+      ? store.planTermination.terminated
+      : null;
   const terminationTerminatedAt =
-    store.automation?.terminated_at ??
-    (store.planTermination.terminated !== null &&
-      store.planTermination.terminated.projectId === (store.projectId ?? address.projectId) &&
-      store.planTermination.terminated.issueId === (store.issueId ?? address.issueId) &&
-      terminationReceiptBelongsToCurrentPlan(
-        store.planTermination.terminated,
-        store.automation?.plan_id,
-      )
-      ? store.planTermination.terminated.terminatedAt
-      : null);
+    store.automation?.terminated_at ?? terminationReceipt?.terminatedAt ?? null;
   const openAutomationTermination = () => {
     useCodingWorkspaceStore.getState().openTerminationConfirm({
       projectId: store.projectId ?? address.projectId,
@@ -1051,7 +1053,7 @@ export function CodingWorkspacePage({
       {terminationTerminatedAt !== null ? (
         <AutomationTerminatedBanner
           terminatedAt={terminationTerminatedAt}
-          outcome={store.planTermination.terminated?.outcome ?? null}
+          outcome={terminationReceipt?.outcome ?? null}
         />
       ) : null}
       {/* owner 2026-10-25 真机：会话已失效（WS 侧 attempt 不存在）时明确提示

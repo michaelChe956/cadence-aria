@@ -6,7 +6,11 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ApiClient from "../api/client";
-import { findWorkspaceSessionIssueAddress, getAutomationEnrollmentControl } from "../api/client";
+import {
+  findWorkspaceSessionAutomationIdentity,
+  findWorkspaceSessionIssueAddress,
+  getAutomationEnrollmentControl,
+} from "../api/client";
 import type * as WorkspaceWsModule from "../hooks/useWorkspaceWs";
 import { readCockpitSettings } from "../state/cockpit-settings";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
@@ -23,6 +27,7 @@ import { currentMockWorkspaceWs } from "./ChatWorkspacePage.test-utils";
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ApiClient>()),
   findWorkspaceSessionIssueAddress: vi.fn(),
+  findWorkspaceSessionAutomationIdentity: vi.fn(),
   getAutomationEnrollment: vi.fn(),
   getAutomationEnrollmentControl: vi.fn(),
   postAutomationEnrollmentTerminate: vi.fn(),
@@ -104,8 +109,10 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
       projectId: "project_0001",
       issueId: "issue_0001",
     });
+    // 身份解析默认失败（fail-closed 基线）；需要身份的用例各自覆写。
+    vi.mocked(findWorkspaceSessionAutomationIdentity).mockResolvedValue(null);
     // control 默认失败（等价此前未 mock 时真实 fetch 在 jsdom 失败 →
-    // planControl=null，fail-closed）；需要投影的用例各自 mockResolvedValue。
+    // planControl=null）；plan-continue 面用例各自覆写。
     vi.mocked(getAutomationEnrollmentControl).mockRejectedValue(
       new Error("control projection not stubbed for this test"),
     );
@@ -164,21 +171,13 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
     expect(currentMockWorkspaceWs().abort).toHaveBeenCalledTimes(1);
   });
 
-  // 2026-11-06 陈旧回执修复：同 issue「终止 → 删 work item → 新建」后
-  // enrollment 换绑新 plan——前端内存残留的旧回执（planId=旧 plan）不得再
-  // 盖在正常推进的新会话上呈现「自动化已终止」。当前 plan 身份取 control
-  // 投影 plan_id（与终止响应同源）；缺身份/不一致均 fail-closed 不展示。
-  function controlFixture(planId: string | null) {
-    return {
-      managed: true,
-      plan_id: planId,
-      session_id: "session_001",
-      terminated_at: null,
-      stop_key: null,
-      stage: "running",
-      allowed_actions: [],
-      context_required: false,
-    };
+  // 2026-11-06 陈旧回执修复（r2/REQ-WIGA-14）：同 issue「终止 → 删 work
+  // item → 新建」后 enrollment 换绑新 plan——前端内存残留的旧回执（planId=
+  // 旧 plan）不得再盖在新会话上呈现「自动化已终止」。当前 plan 身份走
+  // durable 会话记录（entity_id=plan_id，终止态仍可得，不随停点投影清空）；
+  // 缺身份/不一致均 fail-closed 不展示。
+  function identityFixture(planId: string | null) {
+    return { projectId: "project_0001", issueId: "issue_0001", planId };
   }
 
   function seedStaleTerminationReceipt(planId: string | null) {
@@ -200,13 +199,15 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
 
   it("同 issue 旧回执（planId=旧 plan）+ 当前是新 plan ⇒ 横幅不渲染，终止入口恢复", async () => {
     setManagedPlanSession();
-    vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(controlFixture("plan_0002"));
+    vi.mocked(findWorkspaceSessionAutomationIdentity).mockResolvedValue(
+      identityFixture("plan_0002"),
+    );
     seedStaleTerminationReceipt("plan_0001");
     renderCockpit("session_001");
 
-    // 先等 control 投影落地（否则「不渲染」可能是尚未走到守卫的假阴性）。
+    // 先等身份解析落地（否则「不渲染」可能是尚未走到守卫的假阴性）。
     await vi.waitFor(() => {
-      expect(getAutomationEnrollmentControl).toHaveBeenCalledWith("project_0001", "issue_0001");
+      expect(findWorkspaceSessionAutomationIdentity).toHaveBeenCalledWith("session_001");
     });
 
     expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
@@ -214,14 +215,14 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
     expect(screen.getByTestId("automation-termination-entry")).toBeInTheDocument();
   });
 
-  it("当前 plan 身份不可得（control 无 plan_id）⇒ 横幅不渲染（fail-closed）", async () => {
+  it("当前 plan 身份不可得（会话记录解析失败）⇒ 横幅不渲染（fail-closed）", async () => {
     setManagedPlanSession();
-    vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(controlFixture(null));
+    vi.mocked(findWorkspaceSessionAutomationIdentity).mockResolvedValue(null);
     seedStaleTerminationReceipt("plan_0001");
     renderCockpit("session_001");
 
     await vi.waitFor(() => {
-      expect(getAutomationEnrollmentControl).toHaveBeenCalled();
+      expect(findWorkspaceSessionAutomationIdentity).toHaveBeenCalledWith("session_001");
     });
 
     expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
@@ -229,17 +230,60 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
 
   it("回执 planId 与当前 plan 一致 ⇒ 横幅照常渲染（原终止语义不弱化）", async () => {
     setManagedPlanSession();
-    vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(controlFixture("plan_0001"));
+    vi.mocked(findWorkspaceSessionAutomationIdentity).mockResolvedValue(
+      identityFixture("plan_0001"),
+    );
     seedStaleTerminationReceipt("plan_0001");
     renderCockpit("session_001");
-
-    await vi.waitFor(() => {
-      expect(getAutomationEnrollmentControl).toHaveBeenCalled();
-    });
 
     expect(await screen.findByTestId("automation-terminated-banner")).toHaveTextContent(
       "2026-10-16T06:00:00Z",
     );
     expect(screen.queryByTestId("automation-termination-entry")).toBeNull();
+  });
+
+  // Critical（r2）：终止 CAS 恒写 enabled=false ⇒ sessionManagedByAutomation
+  // 翻 false ⇒ planContinueEligible 翻 false ⇒ 停点形态投影（planControl）
+  // 被清空——身份源若依赖它（r1 缺陷），「本计划被终止」的横幅会在终止态
+  // 必然消失。身份走 durable 会话记录（终止不清记录）⇒ 终止态横幅仍渲染
+  // 且文案逐字不变（REQ-WIGA-14「本计划被终止时横幅仍然渲染」）。
+  it("本计划被终止（enabled=false、停点投影已清）⇒ 横幅仍渲染且文案逐字不变", async () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      stage: "completed",
+      sessionStatus: "stopped_needs_human",
+      automation: { ...MANAGED_AUTOMATION, enabled: false },
+    });
+    vi.mocked(findWorkspaceSessionAutomationIdentity).mockResolvedValue(
+      identityFixture("plan_0001"),
+    );
+    seedStaleTerminationReceipt("plan_0001");
+    renderCockpit("session_001");
+
+    const banner = await screen.findByTestId("automation-terminated-banner");
+    expect(banner).toHaveTextContent("自动化已终止");
+    expect(banner).toHaveTextContent("2026-10-16T06:00:00Z");
+    expect(banner).toHaveTextContent("本计划全部仓库已停止，不可继续；已产出文件保留。");
+    // 终止后入口撤下（enabled=false ⇒ 非托管推进态）。
+    expect(screen.queryByTestId("automation-termination-entry")).toBeNull();
+  });
+
+  it("终止态下同 issue 旧代回执（旧 plan）⇒ 仍不渲染（身份门独立于停点形态）", async () => {
+    useWorkspaceStore.setState({
+      workspaceType: "work_item_plan",
+      stage: "completed",
+      sessionStatus: "stopped_needs_human",
+      automation: { ...MANAGED_AUTOMATION, enabled: false },
+    });
+    vi.mocked(findWorkspaceSessionAutomationIdentity).mockResolvedValue(
+      identityFixture("plan_0002"),
+    );
+    seedStaleTerminationReceipt("plan_0001");
+    renderCockpit("session_001");
+
+    await vi.waitFor(() => {
+      expect(findWorkspaceSessionAutomationIdentity).toHaveBeenCalledWith("session_001");
+    });
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
   });
 });
