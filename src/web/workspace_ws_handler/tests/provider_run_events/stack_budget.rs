@@ -167,8 +167,6 @@ async fn raw_wrapper_is_at_most_32768_bytes() {
         provider_drive_guard,
         entity_run_lease,
         None,
-        false,
-        None,
     );
     let wrapper_bytes = std::mem::size_of_val(&wrapper);
     print_raw_baseline("provider_run_task(wrapper)", wrapper_bytes);
@@ -265,8 +263,6 @@ async fn run_body_probe_measurement() {
         provider_drive_guard,
         entity_run_lease,
         None,
-        false,
-        None,
     ));
     assert_eq!(
         PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS.load(Ordering::SeqCst),
@@ -362,8 +358,6 @@ async fn run_raw_budget_measurement() {
         command_rx,
         provider_drive_guard,
         entity_run_lease,
-        None,
-        false,
         None,
     );
     let task_body_bytes = std::mem::size_of_val(&task_body);
@@ -635,10 +629,8 @@ pub(super) fn arm_drive<'e, 'd>(
         run_token,
         provider_drive_guard,
         run_cancel,
-        // S2：drive 尾部字段量测构造默认空置（尺寸按类型固定，不受运行期
-        // 值影响；legacy 载荷随 P3 迁移后再按族冻结）。
-        rebuild_context: None,
-        outline_revision_feedback: None,
-        is_outline_revision_run: false,
+        // P3（任务4）：legacy 载荷字段已从 A 移除——rebuild Box/feedback/
+        // revision 标记由 legacy 臂独立入参承载（legacy_outline_cases 量测），
+        // A 只保留各族共享面。
     }
 }

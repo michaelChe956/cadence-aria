@@ -10,8 +10,9 @@
 //!    参数交既有 settle helper。
 //! 3. `provider_run_drive_body`（drive）：engine MutexGuard 按值随 A 属于
 //!    drive；run_kind 只分发实际选中的臂（Continue 才 followups+正常
-//!    尾部，Stop 立即返回）。draft/batch/revision/legacy 仍留本体
-//!    （include/宏原样），后续任务逐族迁移后再按族冻结体积门禁。
+//!    尾部，Stop 立即返回）。P3（任务4）起 legacy outline 三族拆入
+//!    `legacy_outline.rs` 具名臂；draft/batch/revision 仍留本体（宏原样），
+//!    后续任务逐族迁移后再按族冻结体积门禁。
 //!
 //! 三守卫不可混用（r16 现场死锁根修，缺陷#10家族——设计 §3.4）：
 //! - engine 的 `MutexGuard` 按值属 drive/当前臂：drop 取消 drive 必须释放它，
@@ -28,6 +29,7 @@ use super::*;
 use super::basic_arms::{
     drive_author_arm, drive_author_choice_followup_arm, drive_review_only_arm, drive_revision_arm,
 };
+use super::legacy_outline::drive_legacy_outline_arm;
 use super::sc_manual_revision::drive_human_gate_sc_revision_arm;
 use super::single_candidate_arm::drive_single_candidate_author_arm;
 
@@ -75,14 +77,6 @@ pub(crate) struct ArmDrive<'e, 'd> {
     /// provider 注册表（followups 查 reviewer/outline/draft provider 用；
     /// S2 随 A 传入 drive，P7 followups 具名化时随之下沉）。
     pub(crate) provider_registry: &'d Arc<ProviderRegistry>,
-    /// StaleContext 重建上下文（原 task_body 在 `match run_kind` 前提取的
-    /// 裸副本，legacy 臂专用；P3 拆 legacy 臂时改由 run_kind 匹配直接交
-    /// Box 载荷并删除该副本——设计 §3.3）。
-    pub(crate) rebuild_context: Option<ResolvedPlanningContext>,
-    /// Outline 返修 feedback（legacy 臂专用；原 spawn 前提取随 T 流入）。
-    pub(crate) outline_revision_feedback: Option<String>,
-    /// 是否 OutlineRevision run（legacy 臂提示词/分支标记）。
-    pub(crate) is_outline_revision_run: bool,
 }
 
 /// S2 小外壳（设计 §3.1.2）：spawn 捕获面＝任务参数本身；task body 的构造
@@ -109,8 +103,6 @@ pub(crate) fn provider_run_task(
     command_rx: mpsc::Receiver<ProviderCommand>,
     provider_drive_guard: crate::web::state::WorkspaceProviderDriveGuard,
     entity_run_lease: Option<crate::product::entity_operation_store::EntityRunLease>,
-    outline_revision_feedback: Option<String>,
-    is_outline_revision_run: bool,
     cancelled_revision_turn_id: Option<String>,
 ) -> impl Future<Output = ()> + Send + 'static {
     async move {
@@ -138,8 +130,6 @@ pub(crate) fn provider_run_task(
             command_rx,
             provider_drive_guard,
             entity_run_lease,
-            outline_revision_feedback,
-            is_outline_revision_run,
             cancelled_revision_turn_id,
         ))
         .await
@@ -173,8 +163,6 @@ pub(crate) async fn provider_run_task_body(
     command_rx: mpsc::Receiver<ProviderCommand>,
     provider_drive_guard: crate::web::state::WorkspaceProviderDriveGuard,
     entity_run_lease: Option<crate::product::entity_operation_store::EntityRunLease>,
-    outline_revision_feedback: Option<String>,
-    is_outline_revision_run: bool,
     cancelled_revision_turn_id: Option<String>,
 ) {
     // D2.1a：run lease 随任务全生命周期持有——drive/取消臂收口/最终
@@ -183,12 +171,10 @@ pub(crate) async fn provider_run_task_body(
     let mut provider_drive_guard = Some(provider_drive_guard);
     let mut engine = engine_for_run.lock().await;
     engine.use_run_token(run_cancel.clone());
-    // B3：StaleContext 重建携带的 rebuilt planning context（provider run 构造新会话
-    // 使用：cwd/inventory/policy digest）。在 `match run_kind` 前提取，供共享 arm 使用。
-    let rebuild_context = match &run_kind {
-        ProviderRunKind::WorkItemPlanOutlineRebuild { rebuilt } => Some((**rebuilt).clone()),
-        _ => None,
-    };
+    // P3（任务4）：StaleContext 重建的 `Box<ResolvedPlanningContext>` 不再在
+    // 共通前奏裸 clone——run_kind 匹配 OutlineRebuild 时由 drive 分发点把
+    // 原 Box 载荷按值移交 legacy 臂（设计 §3.3 rebuild_context 行）；
+    // outline feedback / revision 标记同理按 variant 精确移动，不再提前复制。
     // r16 现场死锁根修(缺陷 #10 家族,授权:run 注册/取消链):驱动体可能
     // 悬停在 select 之外的裸 await(现场形态:provider 启动链/SC 臂体内
     // 链),engine MutexGuard 随任务体永驻,supersede 取消 token 后新 run
@@ -213,9 +199,6 @@ pub(crate) async fn provider_run_task_body(
             run_token,
             provider_drive_guard: &mut provider_drive_guard,
             run_cancel: &run_cancel,
-            rebuild_context,
-            outline_revision_feedback,
-            is_outline_revision_run,
         },
         run_kind,
     ));
@@ -239,18 +222,18 @@ pub(crate) async fn provider_run_task_body(
 /// **先于**兜底重取锁（三守卫合同见文件头）。`run_kind` 移动进本函数后
 /// 只分发到实际选中的臂：Continue 才 followups+正常尾部，Stop 立即返回。
 /// 唯一构造点在 `provider_run_task_body`（boxed）。P2（任务3）起基础族
-/// 四臂与 SC author 臂以 `Box::pin` 间接边界分发；尚未拆族的
-/// draft/batch/revision/legacy 仍以原语句留在本体内。
+/// 四臂与 SC author 臂、P3（任务4）起 legacy outline 三族均以 `Box::pin`
+/// 间接边界分发；尚未拆族的 draft/batch/revision 仍以原语句留在本体内。
 pub(crate) async fn provider_run_drive_body<'e, 'd>(
     drive: ArmDrive<'e, 'd>,
     run_kind: ProviderRunKind,
 ) {
     // S2：A 展开为原 drive 块的逐字段绑定（机械改名：引用型字段即原匿名
     // 块的借用捕获；engine guard 与 command_rx 按值。具名臂构造从本绑定
-    // 取字段，include/宏臂继续直接引用同名绑定）。
-    // P2（任务3）：基础族四臂与 SC author 臂经 `Box::pin(...).await` 真实
-    // 间接边界分发（只为实际选中的臂分配）；尚未拆族的 draft/batch/
-    // revision/legacy 仍以原语句留在本体内。
+    // 取字段，宏臂继续直接引用同名绑定）。
+    // P2/P3：基础族四臂、SC author 臂与 legacy outline 三族经
+    // `Box::pin(...).await` 真实间接边界分发（只为实际选中的臂分配）；
+    // 尚未拆族的 draft/batch/revision 仍以原语句留在本体内。
     let ArmDrive {
         mut engine,
         command_rx,
@@ -263,9 +246,6 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
         run_token,
         provider_drive_guard,
         run_cancel,
-        rebuild_context,
-        outline_revision_feedback,
-        is_outline_revision_run,
     } = drive;
     match run_kind {
         // S2 分发（原 S0 机械提取）：engine MutexGuard 按值进当前臂
@@ -287,9 +267,6 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                     run_token,
                     provider_drive_guard: &mut *provider_drive_guard,
                     run_cancel,
-                    rebuild_context,
-                    outline_revision_feedback,
-                    is_outline_revision_run,
                 },
                 content,
             ))
@@ -313,9 +290,6 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                     run_token,
                     provider_drive_guard: &mut *provider_drive_guard,
                     run_cancel,
-                    rebuild_context,
-                    outline_revision_feedback,
-                    is_outline_revision_run,
                 },
                 content,
             ))
@@ -338,9 +312,6 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                 run_token,
                 provider_drive_guard: &mut *provider_drive_guard,
                 run_cancel,
-                rebuild_context,
-                outline_revision_feedback,
-                is_outline_revision_run,
             }))
             .await
             {
@@ -361,9 +332,6 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                 run_token,
                 provider_drive_guard: &mut *provider_drive_guard,
                 run_cancel,
-                rebuild_context,
-                outline_revision_feedback,
-                is_outline_revision_run,
             }))
             .await
             {
@@ -371,10 +339,84 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                 ArmExit::Stop => return,
             };
         }
-        ProviderRunKind::WorkItemPlanLegacyAuthor
-        | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
-        | ProviderRunKind::WorkItemPlanOutlineRebuild { .. } => {
-            include!("work_item_plan_legacy_author.inc.rs")
+        // P3（任务4）：legacy outline 三族经 `Box::pin(...).await` 真实间接
+        // 边界分发；三 variant 移入精确载荷（Legacy=(None,false,None)、
+        // Revision=(feedback,true,None)、Rebuild=(None,false,Some(rebuilt))，
+        // 设计 §3.3——不在共通前奏 clone rebuilt/feedback）。
+        ProviderRunKind::WorkItemPlanLegacyAuthor => {
+            engine = match Box::pin(drive_legacy_outline_arm(
+                ArmDrive {
+                    engine,
+                    command_rx,
+                    provider: provider_for_run.clone(),
+                    manager: manager_for_task,
+                    provider_registry: provider_registry_for_run,
+                    run_context: run_context_clone,
+                    outbound_tx: outbound_tx_for_task,
+                    run_label,
+                    run_token,
+                    provider_drive_guard: &mut *provider_drive_guard,
+                    run_cancel,
+                },
+                None,
+                false,
+                None,
+            ))
+            .await
+            {
+                ArmExit::Continue(engine) => engine,
+                ArmExit::Stop => return,
+            };
+        }
+        ProviderRunKind::WorkItemPlanOutlineRevision { feedback } => {
+            engine = match Box::pin(drive_legacy_outline_arm(
+                ArmDrive {
+                    engine,
+                    command_rx,
+                    provider: provider_for_run.clone(),
+                    manager: manager_for_task,
+                    provider_registry: provider_registry_for_run,
+                    run_context: run_context_clone,
+                    outbound_tx: outbound_tx_for_task,
+                    run_label,
+                    run_token,
+                    provider_drive_guard: &mut *provider_drive_guard,
+                    run_cancel,
+                },
+                feedback,
+                true,
+                None,
+            ))
+            .await
+            {
+                ArmExit::Continue(engine) => engine,
+                ArmExit::Stop => return,
+            };
+        }
+        ProviderRunKind::WorkItemPlanOutlineRebuild { rebuilt } => {
+            engine = match Box::pin(drive_legacy_outline_arm(
+                ArmDrive {
+                    engine,
+                    command_rx,
+                    provider: provider_for_run.clone(),
+                    manager: manager_for_task,
+                    provider_registry: provider_registry_for_run,
+                    run_context: run_context_clone,
+                    outbound_tx: outbound_tx_for_task,
+                    run_label,
+                    run_token,
+                    provider_drive_guard: &mut *provider_drive_guard,
+                    run_cancel,
+                },
+                None,
+                false,
+                Some(rebuilt),
+            ))
+            .await
+            {
+                ArmExit::Continue(engine) => engine,
+                ArmExit::Stop => return,
+            };
         }
         ProviderRunKind::WorkItemPlanSingleCandidateAuthor => {
             engine = match Box::pin(drive_single_candidate_author_arm(ArmDrive {
@@ -389,9 +431,6 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                 run_token,
                 provider_drive_guard: &mut *provider_drive_guard,
                 run_cancel,
-                rebuild_context,
-                outline_revision_feedback,
-                is_outline_revision_run,
             }))
             .await
             {
@@ -848,9 +887,6 @@ pub(crate) async fn provider_run_drive_body<'e, 'd>(
                     run_token,
                     provider_drive_guard: &mut *provider_drive_guard,
                     run_cancel,
-                    rebuild_context,
-                    outline_revision_feedback,
-                    is_outline_revision_run,
                 },
                 turn_id,
                 prompt,

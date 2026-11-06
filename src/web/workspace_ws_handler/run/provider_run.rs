@@ -9,6 +9,8 @@ pub(crate) use entry::{
 };
 #[path = "provider_run/basic_arms.rs"]
 mod basic_arms;
+#[path = "provider_run/legacy_outline.rs"]
+mod legacy_outline;
 #[path = "provider_run/sc_manual_revision.rs"]
 mod sc_manual_revision;
 #[path = "provider_run/single_candidate_arm.rs"]
@@ -21,6 +23,8 @@ pub(crate) use task_body::provider_run_task;
 pub(crate) use basic_arms::{
     drive_author_arm, drive_author_choice_followup_arm, drive_review_only_arm, drive_revision_arm,
 };
+#[cfg(test)]
+pub(crate) use legacy_outline::drive_legacy_outline_arm;
 #[cfg(test)]
 pub(crate) use sc_manual_revision::drive_human_gate_sc_revision_arm;
 #[cfg(test)]
@@ -315,14 +319,9 @@ pub(super) async fn spawn_provider_run_with_start_mode(
     let manager_for_task = manager.clone();
     let provider_registry_for_run = provider_registry.clone();
     let outbound_tx_for_task = outbound_tx.clone();
-    let outline_revision_feedback = match &run_kind {
-        ProviderRunKind::WorkItemPlanOutlineRevision { feedback } => feedback.clone(),
-        _ => None,
-    };
-    let is_outline_revision_run = matches!(
-        &run_kind,
-        ProviderRunKind::WorkItemPlanOutlineRevision { .. }
-    );
+    // P3（任务4）：outline feedback/revision 标记不再在 spawn 前共通提取
+    //（原 `feedback.clone()` 删除）——由 drive 分发点按 variant 精确移动
+    // 进 legacy 臂（设计 §3.3 outline_revision_feedback 行）。
     // 蒸发链顺手项（取消臂回显化）：run_kind 被 move 进 drive 前取出 SC 修订
     // turn id 与回显通道克隆——取消臂 drop drive 后据此终态化 turn 并回显。
     let cancelled_revision_turn_id = match &run_kind {
@@ -350,8 +349,6 @@ pub(super) async fn spawn_provider_run_with_start_mode(
         command_rx,
         provider_drive_guard,
         entity_run_lease,
-        outline_revision_feedback,
-        is_outline_revision_run,
         cancelled_revision_turn_id,
     ));
 
