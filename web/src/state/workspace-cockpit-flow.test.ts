@@ -35,6 +35,21 @@ describe("workspace cockpit execution flow projection", () => {
     ]);
   });
 
+  it("treats an aborted node as a finished flow row instead of an in-progress one", () => {
+    const store = useWorkspaceStore.getState();
+    store.setTimelineNodesForTest([
+      timelineNode({ node_id: "n1", node_type: "author_run", status: "aborted" }),
+    ]);
+
+    const row = selectCockpitFlow(useWorkspaceStore.getState())[0];
+
+    // 六态词汇里没有独立的 aborted 态：中止是终态，行已收尾 → 落终态 "done"，
+    // 绝不能被当作仍在进行中（新增独立态需同步 coding-dashboard-projection.ts 的
+    // 穷举标签 Record 与 styles.css 的 --aria-topo-node-aborted-* token）。
+    expect(row?.state).toBe("done");
+    expect(row?.state).not.toBe("running");
+  });
+
   it("marks the active node as awaiting_triage when the gate is a triage gate", () => {
     const store = useWorkspaceStore.getState();
     store.setTimelineNodesForTest([

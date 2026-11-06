@@ -633,6 +633,54 @@ describe("plan repair session aggregation", () => {
     },
   );
 
+  it("does not let a newer snapshot regress an aborted plan repair node", () => {
+    const store = useCodingWorkspaceStore.getState();
+    const current = snapshot({ timeline_nodes: [] });
+    store.setSessionState(codingSessionState(current));
+    store.addPlanRepairTimelineNode(
+      current,
+      liveTimelineNode({ status: "aborted", completed_at: "2026-07-18T00:07:30Z" }),
+    );
+
+    store.updatePlanRepairSession({
+      ...current,
+      request: { ...current.request, updated_at: "2026-07-18T00:08:00Z" },
+      timeline_nodes: [
+        liveTimelineNode({
+          status: "failed",
+          summary: "权威失败",
+          completed_at: "2026-07-18T00:07:45Z",
+        }),
+      ],
+    });
+
+    expect(useCodingWorkspaceStore.getState().activePlanRepair?.timelineNodes).toEqual([
+      expect.objectContaining({ status: "aborted" }),
+    ]);
+  });
+
+  it("does not let a late update regress an aborted plan repair node", () => {
+    const store = useCodingWorkspaceStore.getState();
+    const current = snapshot({ timeline_nodes: [] });
+    store.setSessionState(codingSessionState(current));
+    store.addPlanRepairTimelineNode(
+      current,
+      liveTimelineNode({ status: "aborted", completed_at: "2026-07-18T00:07:30Z" }),
+    );
+
+    store.updatePlanRepairTimelineNode(
+      current,
+      "plan_repair_node_shared",
+      "failed",
+      "迟到失败",
+      "2026-07-18T00:07:45Z",
+    );
+
+    expect(useCodingWorkspaceStore.getState().activePlanRepair?.timelineNodes).toEqual([
+      expect.objectContaining({ status: "aborted" }),
+    ]);
+  });
+
   it("keeps a legal live node after the watermark across an equal-version snapshot", () => {
     const store = useCodingWorkspaceStore.getState();
     const authoritative = snapshot({

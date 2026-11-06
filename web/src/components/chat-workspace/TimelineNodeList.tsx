@@ -110,6 +110,12 @@ const FLOW_STATE_LABELS: Record<CockpitFlowState, string> = {
   pending: "待执行",
   done: "已完成",
 };
+// legacy 列表的节点徽标按原始 status 透出（completed 显示「✓」）。`aborted` 是新增
+// 终态值，直接透出会显示英文 "aborted"；这里给它中文标签，其余状态的既有渲染逐字
+// 不变（仍透出原始 status 串）。
+const NODE_STATUS_LABELS: Partial<Record<TimelineNode["status"], string>> = {
+  aborted: "已中止",
+};
 
 function TimelineNodeButton({
   node,
@@ -148,7 +154,7 @@ function TimelineNodeButton({
             </span>
             <span className="aria-chip shrink-0 text-[11px] text-[var(--aria-ink-muted)]">
               {completed ? <Check className="h-3 w-3" aria-hidden="true" /> : null}
-              {completed ? "✓" : node.status}
+              {completed ? "✓" : NODE_STATUS_LABELS[node.status] ?? node.status}
             </span>
           </div>
           {node.summary ? (
