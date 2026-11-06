@@ -98,6 +98,10 @@ type CockpitTerminationIdentity = {
  * 这里走 durable 会话记录（entity_id=plan_id，终止后仍在）⇒ 终止态/重挂载
  * 后仍可得，「本计划被终止 ⇒ 横幅仍渲染」与「身份不可得 ⇒ fail-closed」
  * 得以同时成立。仅在终止回执存在时解析一次（缓存），失败静默保持 null。
+ * r4（复审 Important-1）：缓存以 sessionId 为键——同挂载切会话（路由无
+ * key、参数变化不 remount）时旧会话身份立即失效，不得跨会话复用（否则
+ * 旧代横幅可能错显到新会话/新代合法横幅被误藏）；sessionId 变化即触发
+ * 重新解析（失败后的重试也随之自然发生）。
  */
 export function useCockpitTerminationIdentity({
   receiptActive,
@@ -106,24 +110,29 @@ export function useCockpitTerminationIdentity({
   receiptActive: boolean;
   sessionId: string;
 }): CockpitTerminationIdentity | null {
-  const [identity, setIdentity] = useState<CockpitTerminationIdentity | null>(null);
+  const [cached, setCached] = useState<{
+    sessionId: string;
+    identity: CockpitTerminationIdentity;
+  } | null>(null);
+  const identity =
+    cached !== null && cached.sessionId === sessionId ? cached.identity : null;
 
   useEffect(() => {
-    if (!receiptActive || identity !== null) {
+    if (!receiptActive || (cached !== null && cached.sessionId === sessionId)) {
       return;
     }
     let alive = true;
     void findWorkspaceSessionAutomationIdentity(sessionId)
       .then((resolved) => {
         if (alive && resolved !== null) {
-          setIdentity(resolved);
+          setCached({ sessionId, identity: resolved });
         }
       })
       .catch(() => undefined);
     return () => {
       alive = false;
     };
-  }, [receiptActive, identity, sessionId]);
+  }, [receiptActive, cached, sessionId]);
 
   return identity;
 }

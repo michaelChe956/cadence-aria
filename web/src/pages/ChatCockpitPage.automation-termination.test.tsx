@@ -286,4 +286,68 @@ describe("ChatCockpitPage automation termination（T4 总览入口）", () => {
     });
     expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
   });
+
+  // r4（复审 Important-1）：路由无 key、参数变化不 remount ⇒ 同挂载切会话
+  // 时 identity 缓存必须以 sessionId 为键失效——旧会话身份不得跨会话复用
+  //（否则旧代横幅错显到新会话/新代合法横幅被误藏）。用例必须复用同一组件
+  // 实例（rerender，不重新 mount）才测得到缓存缺陷。
+  it("同挂载 rerender 换 sessionId：旧代回执不渲染，新会话自身的回执照常渲染", async () => {
+    setManagedPlanSession();
+    // session_002 ⇒ plan_0002（新 plan）；切回 session_001 ⇒ plan_0001。
+    vi.mocked(findWorkspaceSessionAutomationIdentity)
+      .mockResolvedValueOnce(identityFixture("plan_0002"))
+      .mockResolvedValueOnce(identityFixture("plan_0001"));
+    seedStaleTerminationReceipt("plan_0001");
+    const view = renderCockpit("session_002");
+
+    // ① 旧代回执（plan_0001）在 session_002（plan_0002）上 ⇒ 不渲染。
+    await vi.waitFor(() => {
+      expect(findWorkspaceSessionAutomationIdentity).toHaveBeenCalledWith("session_002");
+    });
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+
+    // ② 同一实例切到 session_001：缓存须失效并重解析，该会话自身的回执
+    //（plan_0001）照常渲染——不是一律 fail-closed 隐藏。
+    view.rerender(
+      <ChatCockpitPage
+        sessionId="session_001"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+        workspaceWs={currentMockWorkspaceWs()}
+      />,
+    );
+    expect(await screen.findByTestId("automation-terminated-banner")).toHaveTextContent(
+      "2026-10-16T06:00:00Z",
+    );
+    expect(findWorkspaceSessionAutomationIdentity).toHaveBeenCalledWith("session_001");
+  });
+
+  it("同挂载 rerender 换 sessionId：本会话已渲染的横幅不带到新会话（错显方向）", async () => {
+    setManagedPlanSession();
+    vi.mocked(findWorkspaceSessionAutomationIdentity)
+      .mockResolvedValueOnce(identityFixture("plan_0001"))
+      .mockResolvedValueOnce(identityFixture("plan_0002"));
+    seedStaleTerminationReceipt("plan_0001");
+    const view = renderCockpit("session_001");
+
+    // session_001 自身回执照常渲染。
+    expect(await screen.findByTestId("automation-terminated-banner")).toHaveTextContent(
+      "2026-10-16T06:00:00Z",
+    );
+
+    // 同一实例切到 session_002（plan_0002）：旧代（plan_0001）身份缓存与
+    // 横幅都不得跨会话复用 ⇒ 不渲染。
+    view.rerender(
+      <ChatCockpitPage
+        sessionId="session_002"
+        onBack={vi.fn()}
+        onOpenSession={vi.fn()}
+        workspaceWs={currentMockWorkspaceWs()}
+      />,
+    );
+    await vi.waitFor(() => {
+      expect(findWorkspaceSessionAutomationIdentity).toHaveBeenCalledWith("session_002");
+    });
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+  });
 });
