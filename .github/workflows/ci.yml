@@ -47,3 +47,57 @@ jobs:
         run: cargo check --locked
       - name: Run tests
         run: cargo test --locked
+
+  # 2 MiB 栈回归门禁（owner 2026-11-06 裁决：仓级 32 MiB force 保留，另加本专项 job）。
+  #
+  # 为什么必须独立：仓级 `.cargo/config.toml` 的
+  # `RUST_MIN_STACK = { value = "33554432", force = true }` 让**所有测试线程**
+  # 都拿 32 MiB 栈 ⇒ 栈类缺陷在常规 CI 里永远测不出来 ⇒ 「provider run 爆栈
+  # 打死整个服务」这类回归会再次悄悄进来。
+  #
+  # 为什么不需要覆盖环境变量：C 层门禁**自带显式 2 MiB runtime**
+  # （`tests/it_core/workspace_ws_integration/provider_run_small_stack.rs`
+  # 的 `run_ws_child_scenario_with_stack` → `.worker_threads(1)
+  # .thread_stack_size(stack_bytes)`）⇒ 显式栈值覆盖环境变量 ⇒ 仓级
+  # 32 MiB force 对这批用例无影响 ⇒ 本 job 不改 RUST_MIN_STACK。
+  stack-2mib-gate:
+    name: 2 MiB stack regression gate (C-layer real WS)
+    runs-on: ubuntu-latest
+    # 三条门禁各带 240~300s 墙钟上限（用例内隔离器自带），整 job 留足余量。
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      # 前端必须先构建：aria 通过 rust-embed 在编译期嵌入 web/dist，
+      # build.rs 在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
+      - name: Build frontend
+        run: pnpm -C web install --frozen-lockfile && pnpm -C web build
+      # C 层真实 WS 夹具走生产 aggregate-index rebuild 端点，该端点 shell out
+      # 到真实 `codegraph` CLI（src/web/handlers/aggregate_initialization/
+      # production_dependencies.inc.rs 装配 CodeGraphCli，executable="codegraph"）
+      # ⇒ runner 上没有该工具时夹具直接失败。钉版本安装（与本地、rust job 一致）。
+      - name: Install codegraph (C-layer real WS fixtures need the real CLI)
+        run: npm install -g @colbymchenry/codegraph@1.6.2
+      # 门禁本体：真实 WS 深链走到 ReviewOnly 送审轮，在显式 2 MiB worker 上
+      # 必须跑完并留下四条件证据。栈回归 ⇒ 本步红。
+      - name: "2 MiB stack gate: real WS review round"
+        run: flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_review_round_gate -- --nocapture
+      # 2 MiB 下的真实 WS 场景矩阵（story_author / plan_relay / sc_manual_gate）。
+      - name: "2 MiB stack gate: real WS scenario matrix"
+        run: flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_matrix -- --nocapture
+      # 对照面（8 MiB worker，同一送审轮场景）：证明上面 2 MiB 的红确实落在
+      # 栈深上，而不是「场景根本没走到送审轮」的假阳性。门禁判据永远是 2 MiB 那条。
+      - name: "8 MiB control: real WS review round (proves the 2 MiB red is stack-depth-caused)"
+        run: flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_8mib_ws_review_round_control_gate -- --nocapture

@@ -29,8 +29,16 @@
 
 - [ ] 2.1 **clippy `large_futures` 仓级启用**：先**核实它量的是未装箱 future 还是 Box 后的指针**（后者恒绿＝假门禁）；阈值 16 KiB；**不全仓 deny、不全局 allow、不抬阈值**；受影响模块先启用
       - 验收：受控对照（>16 KiB 未装箱 child 必触发；boxed 同 child 记录实际行为）；CI 以 `-D warnings` 执行时该 lint 真实生效
-- [ ] 2.2 **双 profile 常规 CI**：debug 全 suite + 依次 `--release` 跑 A/B/C 指定门禁（体积硬断言 / 2 MiB worker 矩阵 / 真实 WS）；每条 cargo 带 `flock`；**不 matrix 并发同 target**
-      - 验收：两 profile 全绿；**release 的体积数字被记录**（解除 U-b）
+- [x] 2.2 **CI 栈门禁（★owner 2026-11-06 裁决改写本条范围★）**：owner 裁决「**保留仓级 32 MiB force，另加 CI 专项 job**」⇒ 原「debug 全 suite + 依次 `--release` 双 profile」方案作废，C 层栈门禁改由**独立 2 MiB 栈专项 CI job** 承载
+      - ★已落地★：`.github/workflows/ci.yml` 新增独立 job **`stack-2mib-gate`**（显示名 `2 MiB stack regression gate (C-layer real WS)`）
+      - job 内三条命令（原文）：
+        - `flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_review_round_gate -- --nocapture`
+        - `flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_matrix -- --nocapture`
+        - `flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_8mib_ws_review_round_control_gate -- --nocapture`
+      - job 前置：`pnpm -C web install --frozen-lockfile && pnpm -C web build`（rust-embed 编译期嵌入 `web/dist`，缺失则 `build.rs` 硬失败）+ 钉版本装 `@colbymchenry/codegraph@1.6.2`（C 层夹具走生产 aggregate-index rebuild 端点 → shell out 真实 CLI，缺则夹具直接失败）
+      - 边界：**不改** `.cargo/config.toml` 的 `RUST_MIN_STACK = { value = "33554432", force = true }`（owner 裁决保留）；**不改** rust job 既有任何步骤；无 `-j 1` / `--ignored` / skip / `allow` / `continue-on-error` / 无条件 true（门禁红了就是红了）
+      - 为何 job 不需要覆盖 `RUST_MIN_STACK`：C 层门禁**自带显式 2 MiB runtime**（`provider_run_small_stack.rs` 的 `run_ws_child_scenario_with_stack` → `.worker_threads(1).thread_stack_size(stack_bytes)`）⇒ 显式栈值覆盖环境变量 ⇒ 仓级 32 MiB force 对这批用例无影响
+      - 残留（**不在本条范围**）：release profile 的体积数字（解除 U-b）仍未记录 ⇒ 挂 8.7
 - [ ] 2.3 **C 层 2 MiB 永不豁免**：任何档位（含 prod 16 MiB）都不得放宽 C 层的显式 2 MiB 真实 WS 回归
 
 ## 3. 运行时栈与 prod 档位（恢复 owner 原决策）
@@ -74,3 +82,14 @@
 - [x] 8.3 **残余归因核实**（★`f6e3ad8d`：写集内 7 处未装箱重调用逐个装箱；followups 167,936→86,016 B、spawn 侧 45,056→4,096 B✓）**残余归因核实**：写集内未装箱的重调用（repair / retry 等）逐个实测帧预留与调用频次；热路径必须装箱，低频登记为过渡项
 - [x] 8.4 **C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**（★`provider_run_2mib_real_ws_review_round_gate ... ok`（全量门禁内自带留痕，/tmp/aria-full7.log）✓）**C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**（证明「治本后 2 MiB 送审轮不崩」；这是「治本完成」的必要证据，不得用「8 MiB 下不崩」代替）
 - [x] 8.5 独立 change：`execute_start_coding_flow`（806,912 B）与入口链 `handle_workspace_inbound_message_inner`（946,176 B）的大帧治理（★本 change 即该独立 change，已立；实施在阶段 2★）
+- [x] 8.6 **CI 2 MiB 栈专项 job 落地**（★`.github/workflows/ci.yml` job `stack-2mib-gate`（显示名 `2 MiB stack regression gate (C-layer real WS)`）✓）**CI 2 MiB 栈专项 job 落地**：仓级 `RUST_MIN_STACK = { value = "33554432", force = true }` 让**所有测试线程**都拿 32 MiB 栈 ⇒ 栈类缺陷在常规 CI 里永远测不出来 ⇒「provider run 爆栈打死整个服务」这类回归会再次悄悄进来 ⇒ 补**独立 job** 在 2 MiB 栈下跑真实链路门禁，让「栈回归」变红
+      - job 内三条命令（原文，每条 cargo 带 `flock`，不 matrix 并发同 target）：
+        - `flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_review_round_gate -- --nocapture`
+        - `flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_matrix -- --nocapture`
+        - `flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_8mib_ws_review_round_control_gate -- --nocapture`
+      - 前置：先 `pnpm -C web install --frozen-lockfile && pnpm -C web build`（rust-embed 编译期嵌入 `web/dist`，缺失则 `build.rs` 硬失败）；再钉版本装 `@colbymchenry/codegraph@1.6.2`（C 层夹具走生产 aggregate-index rebuild 端点 → shell out 真实 `codegraph` CLI）
+      - 边界：**不改** `.cargo/config.toml` 的 32 MiB force（owner 裁决保留）；**不改** rust job 既有任何步骤；无 `-j 1` / `--ignored` / skip / `allow` / `continue-on-error` / 无条件 true
+      - 为何不覆盖 `RUST_MIN_STACK`：C 层门禁**自带显式 2 MiB runtime**（`provider_run_small_stack.rs` 的 `run_ws_child_scenario_with_stack` → `.worker_threads(1).thread_stack_size(stack_bytes)`）⇒ 显式栈值覆盖环境变量
+      - 落地报告：`cadence/reports/2026-11-06_实施_CI加2MiB栈专项job_v1.0.md`
+- [ ] 8.7 **release profile 体积数字留痕**（★由 2.2 范围改写剥离出来，仍未做★）**release profile 体积数字留痕**：`--release` 下逐对象体积数字实测并记录（标 profile/target/toolchain，**debug 数字不得冒充 release**）⇒ 解除 U-b
+      - 验收：release 数字落在报告里且标注 profile/target/toolchain；`--release` 下 C 层 2 MiB 门禁复跑留痕
