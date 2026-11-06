@@ -519,32 +519,32 @@ async fn request_json(
 /// 块3（remove-single-repository-path）夹具补偿（与 it_core workspace_ws_integration
 /// 同款已验证做法）：把 project_0001 的 repository_0001 按生产 v1.2→v1.3 身份迁移
 /// 升成 LC 权威（member/manifest/checkout 由 IdentityMigrationExecutor 落盘，LC
-/// record 由 require_logical_codebase 首读时的 migrate_legacy 自动生成），再经生产
-/// rebuild 端点建 active 聚合索引（generate 入口经 PlanningContextResolver 读取，
-/// 缺失即 aggregate_index_active_missing）。返回 issue 创建请求应携带的确定性
+/// record 由 require_logical_codebase 首读时的 migrate_legacy 自动生成），再经
+/// **生产聚合索引操作 + 假 CodeGraph CLI**（`aggregate_index_fixture`）建 active
+/// 聚合索引（generate 入口经 PlanningContextResolver 读取，缺失即
+/// aggregate_index_active_missing）。返回 issue 创建请求应携带的确定性
 /// legacy 别名 LC id——不是假 id。
+///
+/// 聚合索引走假 CLI 而非真跑 `codegraph sync .`：后者是本机重活（抢全局
+/// `/tmp/.codegraph` 锁 + 吃 `AggregateIndexBudget::INCREMENTAL` 的 30s 预算），
+/// 并行夹具互踩 ⇒ 422 `codegraph_timeout`，整批用例红在与被测行为无关的夹具
+/// 前置上。假 CLI 只替换 CLI 应答，真实 git 成员快照 / 成员覆盖校验 / durable
+/// 世代落盘 / active 投影全部走生产链路（⇒ 读侧 freshness 判定为 active，
+/// 不会触发真实同步）。rebuild 端点本身的行为覆盖由 `web_aggregate_index_api`
+/// 的用例经同一假 CLI 承担（端点覆盖不丢，只是与本夹具前置解耦）。
 async fn migrate_repository_to_lc_and_rebuild(
-    app: &axum::Router,
+    _app: &axum::Router,
     root: &std::path::Path,
 ) -> String {
-    // rebuild 触发 codegraph sync：并行夹具会争抢全局 /tmp/.codegraph/
-    // codegraph.lock（codegraph_sync_failed 422），经 crate 级互斥串行化。
+    // 读侧（generate）若判定索引 stale 仍可能触发真实 codegraph sync ⇒ 仍持
+    // crate 级互斥，与其它夹具的真实 rebuild 串行。
     let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
     let app_paths = ProductAppPaths::new(root.join(".aria"));
     IdentityMigrationExecutor::new(app_paths.clone())
         .ensure_identity_schema("project_0001")
         .expect("migrate fixture repository into logical codebase authority");
     let lc_id = legacy_logical_codebase_id("project_0001");
-    let (status, index_rebuild) = request_json(
-        app.clone(),
-        Method::POST,
-        &format!(
-            "/api/projects/project_0001/logical-codebases/{lc_id}/aggregate-indexes/rebuild"
-        ),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{index_rebuild}");
+    crate::aggregate_index_fixture::seed_active_aggregate_index(&app_paths, "project_0001", &lc_id);
     lc_id
 }
 
