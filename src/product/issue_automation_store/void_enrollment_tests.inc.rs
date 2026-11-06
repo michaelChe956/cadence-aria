@@ -397,7 +397,7 @@ fn void_enrollment_voids_writes_fields_binds_predecessor_and_appends_ledger() {
         )
         .unwrap()
     {
-        VoidOutcome::Voided(voided) => voided,
+        VoidOutcome::Voided(voided) => *voided,
         other => panic!("expected Voided, got {other:?}"),
     };
     assert!(voided.voided_at.as_deref().is_some_and(|at| !at.is_empty()));

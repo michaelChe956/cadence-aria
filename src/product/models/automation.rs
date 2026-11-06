@@ -359,7 +359,7 @@ pub enum VoidOutcome {
     NotFound,
     AlreadyVoided,
     NotBoundToPlan,
-    Voided(IssueAutomationEnrollment),
+    Voided(Box<IssueAutomationEnrollment>),
 }
 
 // ─── C1 Task 6：租约三态与确认接管（REQ-WIGA-03）───

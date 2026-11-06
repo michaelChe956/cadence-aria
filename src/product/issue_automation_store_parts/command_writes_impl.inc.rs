@@ -147,7 +147,7 @@ impl IssueAutomationStore {
                 binding_version,
             });
             write_json(&path, &saved)?;
-            Ok(VoidOutcome::Voided(saved))
+            Ok(VoidOutcome::Voided(Box::new(saved)))
         })
         .map_err(EnrollmentError::from)
     }
