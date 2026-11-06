@@ -2,15 +2,14 @@
 
 ### Requirement: provider run 体积预算与四层门禁（REQ-BOOT-19）
 
-provider run 的每个**未装箱** async 对象 SHALL 受两级体积预算：**硬线 131,072 B**（超过即回归，必须被断言阻断）与**优先线 65,536 B**（逐对象收敛目标）；provider run 的**入口外壳** SHALL ≤32,768 B。
+provider run 的每个**未装箱** async 对象 SHALL 受两级预算：**硬线 131,072 B**（超过即回归，须断言阻断）与**优先线 65,536 B**（逐对象收敛目标）；入口外壳 SHALL ≤32,768 B。
 
-体积 SHALL 以**未装箱类型**度量，SHALL NOT 以 `Pin<Box<_>>` 的指针大小代替（恒绿即假门禁）。
+体积 SHALL 以**未装箱类型**度量，SHALL NOT 以 `Pin<Box<_>>` 指针大小代替（恒绿即假门禁）。
 
-入口 SHALL 只构造**小 capture 外壳**，task body SHALL 在该外壳的**首次 poll 内**被装箱（构造落堆），SHALL NOT 在 WS inbound 深栈上构造大对象。
+入口 SHALL 只构造**小 capture 外壳**，task body SHALL 首次 poll 内被装箱（构造落堆），SHALL NOT 在 WS inbound 深栈上构造大对象。
 
-门禁 SHALL 由 A（体积）/ B（显式 2 MiB worker + 三守卫与 run 隔离）/ C（真实 WS 深链）/ D（真实制品进程）四层构成，各层 SHALL NOT 互相替代；**C 层的 2 MiB SHALL NOT 被任何运行时栈档位豁免**。
+门禁 SHALL 由 A（体积）/ B（显式 2 MiB worker + 三守卫与 run 隔离）/ C（真实 WS 深链）/ D（真实制品进程）四层构成，各层 SHALL NOT 互相替代；**C 层的 2 MiB SHALL NOT 被任何栈档位豁免**。
 
-动态验收 SHALL NOT 以「退出码 0」为通过依据；SIGABRT 不可进程内捕获 ⇒ 易 abort 场景 SHALL 以子进程隔离执行。体积数字 SHALL 标注 profile、target 与 toolchain，**debug 数字 SHALL NOT 冒充 release**。
 
 #### Scenario: 入口外壳小且构造落在堆上
 

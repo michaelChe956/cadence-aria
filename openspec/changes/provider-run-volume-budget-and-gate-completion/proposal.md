@@ -69,3 +69,25 @@ U-g | 既有 minor 挂账：`cancel_settle.inc.rs:17` 可见性一词放宽（br
 - **不改 panic 策略、不改 Cargo 现有 dev/release 优化参数、不新建 `ARIA_*` 配置、不保留旧巨型驱动 flag**。
 - **不纳入** inbound/socket 减栈、锁/actor/专用 runtime 改造（若已完整实施仍过不了 2 MiB 真实 WS，带测量证据回 owner 定范围）。
 - **体积数字必须标 profile/target/toolchain**；debug 数字不得冒充 release。
+
+---
+
+## 6. 补充登记（2026-11-06 治本审查 I-3：过渡预算与未完成项）
+
+治本（`1d721bec`）把 poll 帧从 724,992 B 降到 4,096 B，但**留下两处未达 64 KiB 优先线**的对象 ⇒ **引入「过渡预算 128 KiB / 帧」这一档**（只作过渡，门禁可过；**不是安全证明**）：
+
+| 对象 | 实测帧预留 | 归类 | 归属 |
+|---|---|---|---|
+`drive_body` | 4,096 B | 达标 | — |
+`task_body` | 4,096 B | 达标 | — |
+`drive_review_only_arm` | 904 B | 达标 | — |
+`drive_single_candidate_author_arm` | 4,096 B | 达标 | — |
+`drive_human_gate_sc_revision_arm` | 61,440 B | 达标（≤64 KiB） | — |
+`drive_legacy_outline_arm` | 61,440 B | 达标（≤64 KiB） | — |
+author / draft / batch / revision 臂 | ≤40,960 B | 达标 | — |
+**评审链 `with_window` 两变体** | **118,784 / 102,400 B** | **过渡预算（≤128 KiB）** | 写集外（engine 侧 `complete_review` 等）⇒ 建议独立 change |
+**`execute_start_coding_flow`（coding runner）** | **806,912 B** | **未覆盖（同量级大帧）** | 写集外（`src/web/coding_ws_handler/**`）⇒ 建议独立 change |
+`handle_workspace_inbound_message_inner`（入口链） | 946,176 B | 未覆盖（链和 ≈1.55–1.6 MiB） | 入口链专项 |
+
+⇒ ★**「治本后 2 MiB 安全」不能由门禁或「8 MiB 下不崩」证明**（链和 ≈1.88–1.97 MB 贴边）⇒ **必须由 C 层送审轮 2 MiB E2E 在治本提交后复跑留痕**。
+⇒ ★门禁覆盖面（诊断报告 §8.4）尚有缺口：PlanRevision 与 followups 两宏体未纳入 poll 帧门禁 ⇒ 本 change 的门禁任务必须补齐。
