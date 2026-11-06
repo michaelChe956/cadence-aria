@@ -38,7 +38,7 @@
       - job 前置：`pnpm -C web install --frozen-lockfile && pnpm -C web build`（rust-embed 编译期嵌入 `web/dist`，缺失则 `build.rs` 硬失败）+ 钉版本装 `@colbymchenry/codegraph@1.6.2`（C 层夹具走生产 aggregate-index rebuild 端点 → shell out 真实 CLI，缺则夹具直接失败）
       - 边界：**不改** `.cargo/config.toml` 的 `RUST_MIN_STACK = { value = "33554432", force = true }`（owner 裁决保留）；**不改** rust job 既有任何步骤；无 `-j 1` / `--ignored` / skip / `allow` / `continue-on-error` / 无条件 true（门禁红了就是红了）
       - 为何 job 不需要覆盖 `RUST_MIN_STACK`：C 层门禁**自带显式 2 MiB runtime**（`provider_run_small_stack.rs` 的 `run_ws_child_scenario_with_stack` → `.worker_threads(1).thread_stack_size(stack_bytes)`）⇒ 显式栈值覆盖环境变量 ⇒ 仓级 32 MiB force 对这批用例无影响
-      - 残留（**不在本条范围**）：release profile 的体积数字（解除 U-b）仍未记录 ⇒ 挂 8.7
+      - 残留（**由 8.7 承接**）：release profile 的体积数字（解除 U-b）⇒ 另加独立 job **`release-profile-gates`**（显示名 `Release profile gates (A volume / B 2 MiB worker / C real WS)`）已落地；★**release 实测数字待 CI 首次运行取证**（本机 release 编译为让位 owner 部署构建被终止 ⇒ 无 release 数字 ⇒ 不编造）★，见 8.7
 - [ ] 2.3 **C 层 2 MiB 永不豁免**：任何档位（含 prod 16 MiB）都不得放宽 C 层的显式 2 MiB 真实 WS 回归
 
 ## 3. 运行时栈与 prod 档位（恢复 owner 原决策）
@@ -91,5 +91,18 @@
       - 边界：**不改** `.cargo/config.toml` 的 32 MiB force（owner 裁决保留）；**不改** rust job 既有任何步骤；无 `-j 1` / `--ignored` / skip / `allow` / `continue-on-error` / 无条件 true
       - 为何不覆盖 `RUST_MIN_STACK`：C 层门禁**自带显式 2 MiB runtime**（`provider_run_small_stack.rs` 的 `run_ws_child_scenario_with_stack` → `.worker_threads(1).thread_stack_size(stack_bytes)`）⇒ 显式栈值覆盖环境变量
       - 落地报告：`cadence/reports/2026-11-06_实施_CI加2MiB栈专项job_v1.0.md`
-- [ ] 8.7 **release profile 体积数字留痕**（★由 2.2 范围改写剥离出来，仍未做★）**release profile 体积数字留痕**：`--release` 下逐对象体积数字实测并记录（标 profile/target/toolchain，**debug 数字不得冒充 release**）⇒ 解除 U-b
-      - 验收：release 数字落在报告里且标注 profile/target/toolchain；`--release` 下 C 层 2 MiB 门禁复跑留痕
+- [ ] 8.7 **release profile 体积数字留痕**（★CI job **`release-profile-gates`** 已落地✓；★**验收证据（release 数字入报告 + `--release` C 层复跑留痕）待 CI 首次运行取证**★）**release profile 体积数字留痕**：`--release` 下逐对象体积数字实测并记录（标 profile/target/toolchain，**debug 数字不得冒充 release**）⇒ 解除 U-b
+      - ★为何仍未勾选★：本机 release 档逐对象实测**未完成**——为让位 owner 的部署构建（占 `/tmp/aria-cargo.lock`），controller 终止了本机 release 编译 ⇒ 本机**没有** release 实测数字 ⇒ **不编造** ⇒ 取证改由新 job 在 CI 上完成（job 内 A 层步骤把逐对象字节写进 job summary + artifact）
+      - 已有（非 release）旁证：debug 档门禁在常规 suite 内**实测绿**（`poll_frame_reservations_stay_within_budget ... ok`），且用同一套 `nm`/`objdump` 方法在**当前源码**的 debug 测试二进制上逐对象实测 22/22 **全部定位成功、无越界**（数值见落地报告 §2.3）——**debug 数字不得冒充 release**
+      - job：`.github/workflows/ci.yml` 新增独立 job **`release-profile-gates`**（显示名 `Release profile gates (A volume / B 2 MiB worker / C real WS)`，`runs-on: ubuntu-latest`，`timeout-minutes: 90`）
+      - job 前置：`actions/checkout@v4` + `dtolnay/rust-toolchain@master`（toolchain: stable）+ `Swatinem/rust-cache@v2` + Node 20 / pnpm 10 + `pnpm -C web install --frozen-lockfile && pnpm -C web build`（rust-embed 编译期嵌入 `web/dist`，缺失则 `build.rs` 硬失败）+ 钉版本装 `@colbymchenry/codegraph@1.6.2`（C 层夹具走生产 aggregate-index rebuild 端点 → shell out 真实 CLI）
+      - job 内命令（原文，每条 cargo 带 `flock`，禁 `-j 1`）：
+        - `flock /tmp/aria-cargo.lock cargo build --release --locked`
+        - `flock /tmp/aria-cargo.lock cargo test --release --locked --lib poll_frame_budget -- --nocapture`（A 层体积：★`--nocapture` 把 release 下逐对象实测字节打印出来，并 tee 到 `/tmp/aria-release-evidence/poll-frame-budget.log`、写入 job summary、上传 artifact `release-poll-frame-budget-evidence`★）
+        - `flock /tmp/aria-cargo.lock cargo test --release --locked --lib provider_run_2mib_worker_matrix -- --nocapture`（B 层显式 2 MiB worker 矩阵）
+        - `flock /tmp/aria-cargo.lock cargo test --release --locked --lib real_run_guards_keep_depth_lease_and_new_token -- --nocapture`（B 层显式 2 MiB 三守卫 / 新旧 run 隔离）
+        - `flock /tmp/aria-cargo.lock cargo test --release --locked --test it_core provider_run_2mib_real_ws_review_round_gate -- --nocapture`（C 层真实 WS 送审轮）
+        - `flock /tmp/aria-cargo.lock cargo test --release --locked --test it_core provider_run_2mib_real_ws_matrix -- --nocapture`（C 层真实 WS 场景矩阵）
+      - 边界：**不改** `.cargo/config.toml` 的 `RUST_MIN_STACK = { value = "33554432", force = true }`（owner 裁决保留）；**不改** `rust` / `stack-2mib-gate` 两个既有 job 的任何步骤；无 `-j 1` / `--ignored` / skip / `allow` / `continue-on-error` / 无条件 true（release-only 越界必须能把 CI 打红）
+      - 留痕位置：CI job 日志（`--nocapture` 打印）+ `$GITHUB_STEP_SUMMARY` + artifact `release-poll-frame-budget-evidence`
+      - 落地报告：`cadence/reports/2026-11-06_实施_CI双profile常规门禁_v1.0.md`（含 22 个受门禁对象的**档位/预算表**、**debug 档逐对象实测值**、release 取证方式与「release 数字待 CI 取证」的明确声明）
