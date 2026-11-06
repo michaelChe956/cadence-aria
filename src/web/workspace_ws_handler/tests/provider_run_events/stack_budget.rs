@@ -634,3 +634,154 @@ pub(super) fn arm_drive<'e, 'd>(
         // A 只保留各族共享面。
     }
 }
+
+// ---------------------------------------------------------------------------
+// P4（任务5，brief task-5）：draft/batch 两族臂与启动/输出 child 的体积门禁
+// ---------------------------------------------------------------------------
+
+/// P4 draft/batch 臂/child 的未装箱体积硬预算（设计 §2.2：≤128 KiB 硬上限）。
+const RAW_DRAFT_BATCH_BUDGET: usize = 131072;
+
+/// 量测并硬断言单对象预算；失败格式逐字对齐 brief Step 2。
+fn assert_draft_batch_raw_budget(symbol: &'static str, bytes: usize) {
+    print_raw_baseline(symbol, bytes);
+    assert!(
+        bytes <= RAW_DRAFT_BATCH_BUDGET,
+        "raw future {symbol} {bytes} exceeds {RAW_DRAFT_BATCH_BUDGET}\
+         （P4 draft/batch 预算；profile/target/toolchain 见上方打印）"
+    );
+}
+
+/// raw-budget 子模式用例：draft/batch 两臂与 provider 启动/输出 child 硬断言
+/// 全部在隔离子进程内执行（父不 poll 被测 future）；常规套件直通空壳。
+#[tokio::test]
+async fn provider_case_child_draft_batch_raw_budget() {
+    if std::env::var_os(super::small_stack_worker::PROVIDER_CASE_CHILD_MODE_ENV).is_none() {
+        return;
+    }
+    run_draft_batch_raw_budget_measurement().await;
+}
+
+/// P4 同步父用例（brief Step 1/2）：隔离子例逐对象量未装箱两臂与 child。
+#[test]
+fn raw_draft_batch_children_respect_budget() {
+    super::small_stack_worker::run_isolated_provider_case(
+        "provider_case_child_draft_batch_raw_budget",
+        std::time::Duration::from_secs(120),
+    )
+    .expect("draft/batch 臂与启动/输出 child 的未装箱体积必须全部≤131072（隔离子例证据）");
+}
+
+/// 逐对象构造未装箱 future 并硬断言（只构造不 poll，Drop 即释放夹具资源）。
+async fn run_draft_batch_raw_budget_measurement() {
+    // —— 未装箱两臂：feedback 载荷是运行期值，不改类型布局 ——
+    let (run_context, outbound_tx, run_cancel, _command_rx, run_token) =
+        stack_budget_fixture().await;
+    let provider_for_run = run_context
+        .provider_registry
+        .get(&ProviderName::ClaudeCode)
+        .expect("fixture provider");
+    // children 量测与两臂量测共用同一 fixture provider（只构造不 poll）。
+    let child_provider = provider_for_run.clone();
+    {
+        let engine_guard = run_context.engine.lock().await;
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
+        let (_tx, command_rx) = mpsc::channel(8);
+        let draft = drive_plan_draft_arm(
+            arm_drive(
+                engine_guard,
+                command_rx,
+                provider_for_run.clone(),
+                &run_context,
+                &outbound_tx,
+                &mut idle_guard,
+                &run_cancel,
+                run_token,
+            ),
+            Some("stack budget baseline".to_string()),
+        );
+        assert_draft_batch_raw_budget("drive_plan_draft_arm", std::mem::size_of_val(&draft));
+        drop(draft);
+    }
+    {
+        let engine_guard = run_context.engine.lock().await;
+        let mut idle_guard = Some(
+            run_context
+                .workspace_runs
+                .begin_provider_drive(&run_context.session_id),
+        );
+        let (_tx, command_rx) = mpsc::channel(8);
+        let batch = drive_plan_batch_arm(arm_drive(
+            engine_guard,
+            command_rx,
+            provider_for_run,
+            &run_context,
+            &outbound_tx,
+            &mut idle_guard,
+            &run_cancel,
+            run_token,
+        ));
+        assert_draft_batch_raw_budget("drive_plan_batch_arm", std::mem::size_of_val(&batch));
+        drop(batch);
+    }
+
+    // —— provider 启动/输出 child（真实 Legacy 夹具构造真实 launch/input/
+    //    session，逐对象只构造不 poll）——
+    let (fixture, _engine_rx) =
+        ProviderRunFixture::new_with_engine_rx(WorkItemPlanFlowKind::Legacy);
+    {
+        // 启动 child：start_work_item_plan_author（唯一物理启动口）。
+        let engine = fixture.engine.lock().await;
+        let launch = crate::web::workspace_ws_handler::run::resolve_plan_author_launch(&engine)
+            .expect("legacy plan launch");
+        let input = engine
+            .build_work_item_plan_streaming_input(
+                crate::protocol::contracts::ProviderType::ClaudeCode,
+                "p4 stack budget draft/batch prompt".to_string(),
+                fixture.member_checkout_root().to_string_lossy().to_string(),
+                ProviderName::ClaudeCode,
+                crate::product::workspace_engine::PlanAuthorOutputContract::Structured,
+            )
+            .expect("legacy provider input");
+        let start_child = crate::web::workspace_ws_handler::run::start_work_item_plan_author(
+            launch,
+            child_provider,
+            input,
+            CancellationToken::new(),
+            None,
+        );
+        assert_draft_batch_raw_budget(
+            "start_work_item_plan_author",
+            std::mem::size_of_val(&start_child),
+        );
+        drop(start_child);
+    }
+    {
+        // 输出驱动 child：drive_work_item_plan_provider_session_to_output。
+        let mut engine = fixture.engine.lock().await;
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(1);
+        drop((event_tx, _command_rx));
+        let session = ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        };
+        let (_tx, mut command_rx) = mpsc::channel(8);
+        let drive_child = engine.drive_work_item_plan_provider_session_to_output(
+            Ok(session),
+            &mut command_rx,
+            "stack_budget_p4_node".to_string(),
+            ProviderName::ClaudeCode,
+        );
+        assert_draft_batch_raw_budget(
+            "drive_work_item_plan_provider_session_to_output",
+            std::mem::size_of_val(&drive_child),
+        );
+        drop(drive_child);
+    }
+}
