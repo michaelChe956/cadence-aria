@@ -179,19 +179,21 @@ impl IssueAutomationStore {
                     },
                 ) if saved.terminated_at.is_some()
                     || (saved.voided_at.is_some() && !saved.enabled) =>
+                {
                     supersede_terminated_enrollment(
-                    &path,
-                    saved,
-                    SupersedeEnableRequest {
-                        command_id: command_id.as_deref(),
-                        selection_key,
-                        source,
-                        options,
-                        target,
-                        expected_revision,
-                        original_source_dangling,
-                    },
-                )?,
+                        &path,
+                        saved,
+                        SupersedeEnableRequest {
+                            command_id: command_id.as_deref(),
+                            selection_key,
+                            source,
+                            options,
+                            target,
+                            expected_revision,
+                            original_source_dangling,
+                        },
+                    )?
+                }
                 // 批 2 T1（REQ-WIGA-09）：terminated 对其余写命令（含缺
                 // 门禁的 Enable——由取代分支内部拒绝）一律 Conflict 零副
                 // 作用；终止命令重放只走 terminate_plan 的账本分支。

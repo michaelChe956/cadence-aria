@@ -181,7 +181,7 @@ describe("WorkItemPlanOptionsDialog：作废态（已随工作项组删除作废
 
     // 既有终止文案逐字不变；两种状态可区分（作废态不渲染终止文案）。
     expect(notice).toHaveTextContent(
-      "该 issue 的自动化已于 2026-11-06T00:00:00Z 终止；确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。",
+      /该 issue 的自动化已于 2026-11-06T00:00:00Z 终止；\s*确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。/,
     );
     expect(
       within(dialog).queryByTestId("automation-voided-notice"),
