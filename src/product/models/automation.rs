@@ -348,6 +348,20 @@ pub struct EnrollmentTerminationResult {
     pub enrollment: IssueAutomationEnrollment,
 }
 
+/// REQ-WIGA-VOID-01（tasks 2.1）：`void_enrollment_for_deleted_plan` 的结果。
+/// `NotFound`＝该 issue 无登记（幂等成功——删工作项组时没有登记是正常
+/// 情况，不报错）；`AlreadyVoided`＝已作废（幂等返回，不重复追加账本）；
+/// `NotBoundToPlan`＝登记未绑定被删 plan（不得作废别人的登记，零副作用）；
+/// `Voided`＝本次锁内落盘作废（携带最新投影）。作废只由「删除工作项组」
+/// 这一条路径产生。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoidOutcome {
+    NotFound,
+    AlreadyVoided,
+    NotBoundToPlan,
+    Voided(IssueAutomationEnrollment),
+}
+
 // ─── C1 Task 6：租约三态与确认接管（REQ-WIGA-03）───
 
 /// 租约三态判定。只从现有 lock record、attempt terminal/activity/status

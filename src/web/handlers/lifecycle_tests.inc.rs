@@ -1181,3 +1181,5 @@ include!("lifecycle_tests_d2_2.inc.rs");
 // 同 D2.2 拆分片段：失败重入/owned-index 与 F3/F5 占用级联（行数红线，纯移动）。
 include!("lifecycle_tests_d2_2_reentry.inc.rs");
 include!("lifecycle_tests_d2_2_f3_f5.inc.rs");
+// REQ-WIGA-VOID-01：删除工作项组 ⇒ 自动化登记一并作废（tasks 4.1/4.2）。
+include!("lifecycle_tests_wiga_void.inc.rs");

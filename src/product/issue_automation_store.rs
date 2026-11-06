@@ -19,7 +19,7 @@ use crate::product::models::automation::{
     EnrollmentCommandResult, EnrollmentError, EnrollmentOptions, EnrollmentRebindRequest,
     EnrollmentRebindResult, EnrollmentSource, EnrollmentTerminationRequest,
     EnrollmentTerminationResult, EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState,
-    PlanGenerationIntent, PlanGenerationPhase, PreparedPlanIntent,
+    PlanGenerationIntent, PlanGenerationPhase, PreparedPlanIntent, VoidOutcome,
 };
 use crate::product::termination_command_ledger::{
     TerminationLedgerVerdict, record_termination_ledger_accept, termination_ledger_verdict,

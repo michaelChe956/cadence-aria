@@ -81,6 +81,21 @@ impl IssueAutomationStore {
         resolve_termination(resolution)
     }
 
+    /// REQ-WIGA-VOID-01（tasks 2.1）：删除工作项组后的登记作废——全仓唯一
+    /// 能写 `voided_at` 的锁内写命令（红测桩：行为测试先行，实现在后续提交）。
+    pub fn void_enrollment_for_deleted_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        reason: &str,
+    ) -> Result<VoidOutcome, EnrollmentError> {
+        let _ = (project_id, issue_id, plan_id, reason);
+        Err(EnrollmentError::Store(ProductStoreError::Io(
+            "void_enrollment_for_deleted_plan: red-phase stub, not implemented yet".to_string(),
+        )))
+    }
+
     /// C1 Task 1（REQ-WIGA-01、REQ-C1-TARGET-01）：显式重绑/换代。在同一
     /// enrollment 文件锁内：先查命令账本（同 command 同 payload 幂等重放
     /// 首次 durable 结果、异 payload Conflict），再校验 enabled、expected
