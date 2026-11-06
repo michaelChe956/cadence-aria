@@ -40,7 +40,7 @@
 - **AND** SHALL NOT 改动人工终止路径（REST terminate / WebSocket abort）的既有行为、顺序与文案
 - **AND** SHALL NOT 新增或放宽任何删除前置条件；owner 既有裁决「执行中禁删保持现状」仍成立——run 在跑时不得删，本 requirement 只是让终止**先把 run 停掉**
 
-### Requirement: 被中止的 run 在时间线中不得表述为失败且 stage 与 status 必须一致（REQ-WIGA-16）
+### Requirement: 被中止的 run 不得表述为失败，且其 stage 归一为终态阶段（REQ-WIGA-16）
 
 run 被取消（中止）时，其时间线节点 SHALL **NOT** 以「失败」表述「中止」：节点 `status` SHALL NOT 为 `failed`，SHALL 使用与既有词汇一致、可与失败区分的「中止」表达（既有 `ProviderStatus` / `ExecutionEventStatus` 已使用 `aborted`，SHALL NOT 另造冲突词汇）；节点 `summary` SHALL 表达「已中止」而非失败原因。
 

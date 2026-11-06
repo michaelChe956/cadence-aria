@@ -56,7 +56,7 @@
 - **断言**：`engine.finish_aborted_run()` 之后，落盘时间线节点
   - `status` **不是** `failed`（须表达「中止」）
   - `summary` 表达「已中止」而不是失败原因
-  - `stage` 与 `status` 相互一致：**不得**出现「`stage=running` + 终态语义」的组合
+  - `stage` 归一只适用于**带 provider agent 的 provider run 节点**：终态时其 `stage` SHALL 归一为终态阶段 `completed`；**无 provider agent 的工作流节点**（compile / 门卡 / 上下文类）**不归一**，`stage` 仍表示其所属阶段（既有断言逐字不变）
   - `completed_at` 已落盘
 - **回归**：真实失败路径（`finish_failed_run` / provider 失败 / 权限超时）仍为 `failed`，既有断言逐字不变。
 
@@ -195,7 +195,7 @@ openspec validate work-item-delete-cancels-inflight-run --strict
 - [ ] 6.1 启用自动化（生成 WIG）⇒ provider 开始输出
 - [ ] 6.2 **不点右下角「终止」**，直接点该 WIG 的「删除」⇒ 不再报「实体存在进行中的运行或并发写入，请等待收口后重试删除」（HTTP 409 `entity_busy`），删除成功
 - [ ] 6.3 删除后 provider **立即停止输出**（不再有新 chunk）
-- [ ] 6.4 时间线节点：被取消的 run 显示为「中止」而**不是**「失败」；`stage` 与 `status` 一致（不再是 `stage=running` + `failed`）
+- [ ] 6.4 被取消的 provider run 节点：`status` 显示为「中止」而不是「失败」，`summary` 为「运行已中止」，`completed_at` 已落盘，且 `stage` 不再是 `running`；compile、门卡、上下文类节点的 `stage` 保持其所属阶段，不属于本项判据
 - [ ] 6.5 回归：无 in-flight run 的 WIG 删除行为与改动前一致；人工「终止整个自动化」路径行为与文案不变
 - [ ] 6.6 证据：`/tmp/aria-deploy/session.log` 在删除时刻出现 `[aria-cancellation]` 打点（取消确实发生过），且其后无新 provider 输出
 - [ ] 6.7 日志/返回体中**不得出现**与事实相反的「已取消/已停止」表述（取消未真正收口时不得谎称）；删除本身仍按既有独占判定给出结果
