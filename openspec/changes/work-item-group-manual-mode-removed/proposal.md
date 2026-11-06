@@ -62,7 +62,7 @@
 - 该弹窗内不再有「本次 plan 走人工推进」的入口。
 - 既有引用「手动」radio 的 3 处断言需要**改写**（不是删断言意图）：
   `WorkItemPlanOptionsDialog.reenable.test.tsx:189`、`WorkItemPlanOptionsDialog.target.test.tsx:246-250`、`WorkItemPlanOptionsDialog.plan-approval.test.tsx:110-115`。
-- hook 层既有用例 `useIssueLifecycleGeneration.plan-approval.test.ts:246-270`（「manual 走 prepare 且不带 `plan_approval`／`automation_mode`」）的前提消失 ⇒ 需改写。
+- hook 层既有用例 `useIssueLifecycleGeneration.plan-approval.test.ts:246-270`（「manual 走 prepare 且不带 `plan_approval`／`automation_mode`」）：D3 = 保持现状 ⇒ manual 提交分支与 `prepareWorkItemPlan` 引用**均保留** ⇒ 该用例的断言本身仍成立、**不删不弱化**；变化仅在于该分支不再由弹窗「手动」radio 触发（`automationAvailable === true` 时不可达），用例需改述为「未确认 design 的 manual 提交仍走 prepare」的语义，并在交付报告里列「原断言 → 新断言」。
 - ★**失败面风险**：目标投影读取失败或授权载体不受支持时，automatic 分支提交是 fail-closed 禁用的（`WorkItemPlanOptionsDialog.tsx:151-155`）。当前用户可以「切回手动」绕过（`WorkItemPlanOptionsDialog.target.test.tsx:246-250` 就是这条断言）；去掉「手动」后**该绕过消失** ⇒ 可能把用户堵死。兜底形态见下方 D2（已终裁为 (b)，不保留兜底）。
 
 **推荐理由**
@@ -97,7 +97,15 @@
 
 ### 灰区事实（D3 = 保持现状的直接推论，交 owner 时须如实写明；★需 owner 知情确认★）
 
-未确认 design 的提交走既有 manual 链路（`prepareWorkItemPlan`），而前端把 issue 的 `work_item_plan` 一律渲染成 `kind: "work_item_group"` 卡片（`web/src/state/lifecycle-workbench-store.ts:130-146`，卡片标题即「Work Item Group」）⇒ **手动路径仍能产出工作项组**——只是该产物不经「工作项组生成路径」（delta 定义里 design 尚未确认的提交不属于该路径），不在本 change 的禁止范围内。owner 原话「work item group 不允许手动生成模式」的覆盖面以该路径定义为准；这是定义之外的灰区，须在交 owner 时写明，不得依契约当作「没有」。
+> ★**先前版本（「未确认 design 提交时，生成的 plan 仍会被渲染成 `kind: "work_item_group"` 的卡 ⇒ 手动路径仍能产出工作项组」）已作废，以本段为准。**
+
+**投影层**规则成立：`web/src/state/lifecycle-workbench-store.ts:130-146` 把任何现存 plan 渲染为 `kind: "work_item_group"`。
+
+★**但真实「未确认 design」的 prepare 走不通**：`src/web/handlers/lifecycle/plan_preparation.rs:73-74` 调 `validate_confirmed_design_specs` ⇒ `src/web/handlers/lifecycle_aggregate_scope.inc.rs:94-98` 拒绝 `design_spec_not_confirmed`（plan 的创建在 `plan_preparation.rs:142` 之后）⇒ ⇒ **不能宣称「未确认 design 已能成功产出工作项组」**。
+
+⇒ ⇒ **灰区是「条件性」的**：当前状态下「手动路径产出工作项组」这条路径**不可达**；只有当 design 确认前置被放开、或出现别的产出 group 的路径时，投影层那条「plan 一律渲染成 group 卡」的规则才会显现出与 owner 原话「不允许手动生成模式」的张力。
+
+⇒ **严重性低于先前描述的版本**；★owner 读到的版本应以本条为准★。
 
 ### 残余风险（★需 owner 知情确认，非阻塞★）
 

@@ -39,7 +39,7 @@
       - `WorkItemPlanOptionsDialog.reenable.test.tsx:189`（原「生成模式仍可切回手动」）⇒ 改为断言「手动 radio 不存在」
       - `WorkItemPlanOptionsDialog.target.test.tsx:246-250`（原「automatic GET 失败后切回 manual」）⇒ 按 2.3 的 D2 结论改写
       - `WorkItemPlanOptionsDialog.plan-approval.test.tsx:110-115`（原「切回手动：复选框恢复可用」）⇒ 按新行为改写
-      - `useIssueLifecycleGeneration.plan-approval.test.ts:246-270`（原「manual 走 prepare」）⇒ manual 分支下线后改写
+      - `useIssueLifecycleGeneration.plan-approval.test.ts:246-270`（原「manual 走 prepare」）⇒ D3 = 保持现状：manual 分支与 `prepareWorkItemPlan` **均保留**，断言本身不删不弱化；仅把用例前提改述为「未确认 design 的 manual 提交仍走 prepare」（该分支在 `automationAvailable === true` 时不可达，不再由弹窗「手动」radio 触发）
       - ★每条改写都要在交付报告里列出「原断言 → 新断言」
 - [ ] 2.6 **后端零改动自检**：确认 `src/**` 无任何改动（`git diff --stat -- src` 空），且 `automation_mode` 在 `src/**` 仍零命中
 - [ ] 2.7 **未确认 design 的弹窗（D3 = 保持现状）**：`automationAvailable=false` ⇒ fieldset 不渲染、提交仍为既有「创建并打开 Workspace」（manual 人工链路，见 2.2 的保留结论）⇒ 逐字不变；用 §1.2 的回归锚点证明
