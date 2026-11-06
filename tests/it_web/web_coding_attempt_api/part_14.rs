@@ -1,5 +1,15 @@
 use cadence_aria::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
 use cadence_aria::product::models::WorkItemRuntimeBinding;
+use cadence_aria::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
+use cadence_aria::product::entity_operation_store::{
+    EntityOperationError, EntityOperationStore, EntityRunLease,
+};
+use cadence_aria::product::issue_automation_store::IssueAutomationStore;
+use cadence_aria::web::workspace_session::WorkspaceSessionManager;
+use cadence_aria::product::workspace_engine::ProviderRunKind;
+
+use tokio_util::sync::CancellationToken;
+
 
 // Task 3 端到端测试：schema v2 work item group 删除的健壮化。
 //
@@ -619,4 +629,198 @@ async fn delete_work_item_plan_top_level_attempt_locks_purge_orphans_only() {
         !orphan_lock.exists(),
         "orphan attempt lock (no corresponding json) must be purged"
     );
+}
+
+// ---- REQ-WIGA-15 场景 1：删除工作项组先取消该实体在途 run 再取删除独占 ----
+
+/// §1.5「可控假 run」：复刻生产语义——run 任务在跑期间持 scope **共享** flock
+/// （`acquire_run`），被取消后先释放共享锁、再按 token 发**真实 completion**
+/// （`finish_run`）。不依赖真实 provider、不靠 sleep 撞竞速；Task 2/3/6 复用。
+struct FakeInflightRun {
+    cancel_token: CancellationToken,
+    completion_handle: tokio::task::JoinHandle<()>,
+    shared_lease: std::sync::Arc<std::sync::Mutex<Option<EntityRunLease>>>,
+}
+
+impl FakeInflightRun {
+    /// 手动释放 scope 共享 flock（幂等；本用例中假 run 任务被取消后自行
+    /// 释放，Task 3 时序尾隙用例以显式调用倒转释放顺序）。
+    /// 本 Task 尚无调用方（Task 2/3/6 复用），dead_code 显式豁免。
+    #[allow(dead_code)]
+    fn release_scope_lock(&self) {
+        if let Some(lease) = self.shared_lease.lock().unwrap().take() {
+            drop(lease);
+        }
+    }
+}
+
+/// 起一个确定性的「假 in-flight run」：先 `start_run` 登记 manager 活跃 run，
+/// 再由调用侧同步取得 scope 共享 flock（返回时锁已确定在手），最后 spawn
+/// 假 run 任务：等取消 → drop lease 释放 flock → `finish_run` 发真实 completion。
+async fn spawn_fake_inflight_run(
+    app_paths: &ProductAppPaths,
+    manager: std::sync::Arc<WorkspaceSessionManager>,
+    scope: EntityScope,
+) -> FakeInflightRun {
+    let (_run_id, token, cancel_token, _cmd_rx, _node_id) = manager
+        .start_run(ProviderRunKind::ReviewOnly, None)
+        .await
+        .expect("start fake in-flight run");
+    let lease = EntityOperationStore::new(app_paths.clone())
+        .acquire_run(&scope)
+        .expect("fake run acquires scope shared lock");
+    let shared_lease = std::sync::Arc::new(std::sync::Mutex::new(Some(lease)));
+    let task_lease = shared_lease.clone();
+    let cancel_in_task = cancel_token.clone();
+    let completion_handle = tokio::spawn(async move {
+        cancel_in_task.cancelled().await;
+        if let Some(lease) = task_lease.lock().unwrap().take() {
+            drop(lease);
+        }
+        manager.finish_run(token).await;
+    });
+    FakeInflightRun {
+        cancel_token,
+        completion_handle,
+        shared_lease,
+    }
+}
+
+#[tokio::test]
+async fn delete_work_item_plan_cancels_inflight_run_before_delete_exclusive() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+    bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+
+    // ①/② 绑定创建 entity_id == work_item_plan_0001 的 WorkItemPlan 会话。
+    let session = lifecycle
+        .create_workspace_session_bound(
+            CreateWorkspaceSessionInput {
+                project_id: GROUP_PROJECT_ID.to_string(),
+                issue_id: GROUP_ISSUE_ID.to_string(),
+                entity_id: GROUP_PLAN_ID.to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+            "workspace_session_9101".to_string(),
+        )
+        .expect("create bound plan workspace session");
+
+    // ③ manager 挂进 registry（先例 web_lifecycle_api/part_05.rs:373-383）。
+    let factory_state = state.clone();
+    let factory_session_id = session.id.clone();
+    state
+        .workspace_sessions
+        .get_or_create(&session.id, move || {
+            let state = factory_state.clone();
+            let session_id = factory_session_id.clone();
+            async move { WorkspaceSessionManager::create(&state, &session_id).await }
+        })
+        .await
+        .expect("plan manager attached");
+    let manager = state
+        .workspace_sessions
+        .get(&session.id)
+        .await
+        .expect("plan manager in registry");
+
+    // ④ 假 in-flight run：持 scope 共享 flock 直到被取消收口。
+    let scope = EntityScope::new(
+        GROUP_PROJECT_ID,
+        GROUP_ISSUE_ID,
+        DeletionEntityKind::Plan,
+        GROUP_PLAN_ID,
+    );
+    let fake = spawn_fake_inflight_run(&app_paths, manager, scope.clone()).await;
+
+    // 删除前事实快照：假 run 登记不等于启动 provider——actual-launch 单源
+    // provider_start_ledger 必须无 actual-launch 条目。
+    let ledger_before = lifecycle
+        .get_workspace_session(&session.id)
+        .expect("read durable plan session before delete")
+        .provider_start_ledger;
+    assert!(
+        ledger_before.iter().all(|entry| !entry.started),
+        "假 run 不得启动 provider（provider_start_ledger 条目数 {}）",
+        ledger_before.len()
+    );
+
+    // ⑤ DELETE：必须先取消在途 run 并等真实收口，再取删除独占。
+    let (status, body) = request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "删除必须先取消在途 run 再取独占（409 entity_busy 即缺本修法）；body: {body}"
+    );
+    assert_eq!(body["status"], "deleted");
+
+    // 取消真的发生了：该 run 的 CancellationToken 已被触发，且假 run 已按
+    // token 发出真实 completion（任务收口）。
+    assert!(
+        fake.cancel_token.is_cancelled(),
+        "删除路径必须取消该实体在途 run 的 CancellationToken"
+    );
+    fake.completion_handle
+        .await
+        .expect("假 run 任务必须已收口（真实 completion）");
+
+    // 共享 flock 已释放：删除后再取独占不得被 Busy 挡住（成功删除后墓碑
+    // 稳定拒绝 Deleted，恰好证明独占锁可获得、共享锁已放）。
+    let exclusive = EntityOperationStore::new(app_paths.clone()).try_acquire_delete(&scope);
+    assert!(
+        matches!(exclusive, Err(EntityOperationError::Deleted)),
+        "scope 共享 flock 必须已释放（再取独占不得 Busy，实际 {:?}）",
+        exclusive.err()
+    );
+
+    // 既有删除语义未被削弱：plan 不再可读。
+    assert!(
+        lifecycle
+            .get_issue_work_item_plan(GROUP_PROJECT_ID, GROUP_ISSUE_ID, GROUP_PLAN_ID)
+            .is_err(),
+        "plan 必须已被删除"
+    );
+
+    // 取消没有偷偷再起一次 provider：durable session 的 provider_start_ledger
+    // 无新增 actual-launch 条目（会话记录随级联删除后不可读 ⇒ 残留才复核）。
+    let sessions_after = lifecycle
+        .list_workspace_sessions(GROUP_PROJECT_ID, GROUP_ISSUE_ID)
+        .expect("list sessions after delete");
+    if let Some(record) = sessions_after.iter().find(|item| item.id == session.id) {
+        assert!(
+            record.provider_start_ledger.len() <= ledger_before.len()
+                && record
+                    .provider_start_ledger
+                    .iter()
+                    .all(|entry| !entry.started),
+            "provider_start_ledger 不得新增 actual-launch 条目（{} 条）",
+            record.provider_start_ledger.len()
+        );
+    }
+
+    // enrollment / 命令账本无自相矛盾条目：删除后不得残留 enabled 且未终止
+    // 的绑定登记（本夹具未播种 enrollment ⇒ Ok(None) 为无矛盾正常态）。
+    match IssueAutomationStore::new(app_paths.clone()).get(GROUP_PROJECT_ID, GROUP_ISSUE_ID) {
+        Ok(None) => {}
+        Ok(Some(enrollment)) => {
+            assert!(
+                enrollment.terminated_at.is_some() || !enrollment.enabled,
+                "删除后不得残留 enabled 且未终止的 enrollment：{}",
+                enrollment.enrollment_id
+            );
+        }
+        Err(error) => panic!("读取自动化登记失败：{error}"),
+    }
 }
