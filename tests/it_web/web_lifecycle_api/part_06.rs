@@ -235,9 +235,13 @@ mod http_confirm_batch_gate {
                 },
             )
             .expect("create plan");
-        // 迁移 + 生产 rebuild 端点建 active 聚合索引（WS 会话工厂经
-        // PlanningContextResolver 读索引，缺失即 aggregate_index_active_missing）；
-        // codegraph sync 与并行夹具互踩 ⇒ 持 crate 级锁串行。
+        // 迁移 + **生产聚合索引操作 + 假 CodeGraph CLI**（`aggregate_index_fixture`）
+        // 建 active 聚合索引（WS 会话工厂经 PlanningContextResolver 读索引，缺失即
+        // aggregate_index_active_missing）。夹具不真跑 `codegraph sync .`（本机重活：
+        // 抢全局 `/tmp/.codegraph` 锁 + 吃 30s 增量预算 ⇒ 422 codegraph_timeout，
+        // 整批用例红在夹具前置上）；假 CLI 只替换 CLI 应答，真实 git 成员快照 /
+        // 成员覆盖校验 / durable 世代落盘 / active 投影全走生产链路。rebuild 端点
+        // 本身的行为覆盖由 `web_aggregate_index_api` 承担。
         {
             let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
             cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(
@@ -248,16 +252,11 @@ mod http_confirm_batch_gate {
             let lc_id = cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
                 "project_0001",
             );
-            let (status, index_rebuild) = super::request_json(
-                app.clone(),
-                Method::POST,
-                &format!(
-                    "/api/projects/project_0001/logical-codebases/{lc_id}/aggregate-indexes/rebuild"
-                ),
-                json!({}),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{index_rebuild}");
+            crate::aggregate_index_fixture::seed_active_aggregate_index(
+                &app_paths,
+                "project_0001",
+                &lc_id,
+            );
         }
         let session = lifecycle
             .create_workspace_session(CreateWorkspaceSessionInput {
