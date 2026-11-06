@@ -203,7 +203,9 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ),
     // 2026-11-03（块3 片1 类型收敛）：3 处 issue 夹具 `logical_codebase_id`
     // 改 legacy lc_id 各 +1 行，2559→2562。
-    ("src/product/workspace_engine/review/drive.rs", 2565),
+    // 2026-11-06（Task 14b 治本）：review/drive.rs 已按职责拆入
+    // review/drive_parts/*.inc.rs（261 行），降至 ≤1200 ⇒ 按仓规删除其祖父
+    // 登记项（不给将来重新长回 2645 行留暗门）。
     ("src/product/workspace_engine/review/drive_tests.rs", 1379),
     ("src/product/workspace_engine/review/routing.rs", 1391),
     ("src/product/workspace_engine/session_state.rs", 1457),

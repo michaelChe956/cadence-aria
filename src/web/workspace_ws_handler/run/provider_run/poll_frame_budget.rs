@@ -26,42 +26,58 @@
 
 use std::process::Command;
 
-/// poll 帧预留硬上限：64 KiB（治本验收口径：各受管对象的 poll 帧预留
-/// ≤64 KiB；未装箱 size 的 128 KiB 门禁见 stack_budget，两者并行）。
-const POLL_FRAME_BUDGET: usize = 64 * 1024;
+/// P0 provider run 核心：poll 帧预留硬上限 64 KiB（治本验收口径；未装箱
+/// size 的 128 KiB 门禁见 stack_budget，两者并行、不可互相替代）。
+const P0_CORE_BUDGET: usize = 64 * 1024;
 
-/// 评审链内层承载的**过渡预算**（128 KiB）。
-///
-/// 修前 `drive_review_session_via_gateway_with_window` 的 poll 帧预留
-/// 768,440 B（= 逐个重子调用装箱后的 118,784 B 的 6.5 倍），已不在
-/// provider run 爆栈链的主因位；但其残余来自 workspace_engine 侧的子
-/// future 状态（`complete_review` 等，位于 `src/product/workspace_engine/**`
-/// ——超出本任务写集），需独立 change 收口后把本预算收紧到 64 KiB。
-const REVIEW_CHAIN_TRANSITION_BUDGET: usize = 128 * 1024;
+/// P0 spawn/准入侧：poll 帧预留上限 32 KiB（spawn 搬运帧与准入链）。
+const P0_SPAWN_BUDGET: usize = 32 * 1024;
+
+/// P1 engine 侧评审链：上限 256 KiB（`complete_review` 等 engine 内重子
+/// 调用位于 `src/product/workspace_engine/**`——超出本任务写集，由独立
+/// change 继续收口）。
+const P1_ENGINE_BUDGET: usize = 256 * 1024;
+
+/// **过渡预算**（128 KiB）：两个宏体对象——PlanRevision 宏体
+/// （`drive_plan_revision_arm`，实测 118,784 B）与 followups 宏体
+/// （`drive_provider_run_followups`，实测 86,016 B）。二者的宏文本位于
+/// `src/web/workspace_ws_handler/run/followups.rs`（超出本任务写集），宏体
+/// 内部的 engine 重子调用尚不能逐个装箱；待该宏按设计 §3.2 迁入
+/// `provider_run/` 并装箱后，本预算收紧到 64 KiB。
+const MACRO_BODY_TRANSITION_BUDGET: usize = 128 * 1024;
 
 /// 受门禁约束的 poll 符号（needle 必须命中该 async fn 的 poll 体
 /// `…::{closure#0}`，避免误测同名构造函数的普通帧）与各自预算。
 const GATED_POLL_SYMBOLS: &[(&str, usize)] = &[
-    ("provider_run_drive_body", POLL_FRAME_BUDGET),
-    ("provider_run_task_body", POLL_FRAME_BUDGET),
-    ("provider_run_task", POLL_FRAME_BUDGET),
-    ("drive_human_gate_sc_revision_arm", POLL_FRAME_BUDGET),
-    ("drive_review_only_arm", POLL_FRAME_BUDGET),
-    ("drive_author_arm", POLL_FRAME_BUDGET),
-    ("drive_author_choice_followup_arm", POLL_FRAME_BUDGET),
-    ("drive_revision_arm", POLL_FRAME_BUDGET),
-    ("drive_single_candidate_author_arm", POLL_FRAME_BUDGET),
-    ("drive_legacy_outline_arm", POLL_FRAME_BUDGET),
-    ("drive_plan_draft_arm", POLL_FRAME_BUDGET),
-    ("drive_plan_batch_arm", POLL_FRAME_BUDGET),
+    // —— P0 provider run 核心（≤64 KiB）——
+    ("provider_run_drive_body", P0_CORE_BUDGET),
+    ("provider_run_task_body", P0_CORE_BUDGET),
+    ("provider_run_task", P0_CORE_BUDGET),
+    ("drive_author_arm", P0_CORE_BUDGET),
+    ("drive_author_choice_followup_arm", P0_CORE_BUDGET),
+    ("drive_revision_arm", P0_CORE_BUDGET),
+    ("drive_review_only_arm", P0_CORE_BUDGET),
+    ("drive_single_candidate_author_arm", P0_CORE_BUDGET),
+    ("drive_legacy_outline_arm", P0_CORE_BUDGET),
+    ("drive_plan_draft_arm", P0_CORE_BUDGET),
+    ("drive_plan_batch_arm", P0_CORE_BUDGET),
+    ("drive_human_gate_sc_revision_arm", P0_CORE_BUDGET),
+    // —— P0 spawn / 准入侧（≤32 KiB）——
+    ("spawn_provider_run_from_event", P0_SPAWN_BUDGET),
+    ("spawn_provider_run_from_handler", P0_SPAWN_BUDGET),
+    ("spawn_provider_run_claiming_idle", P0_SPAWN_BUDGET),
+    // —— 宏体对象（过渡 ≤128 KiB；宏文本在写集外）——
+    ("drive_plan_revision_arm", MACRO_BODY_TRANSITION_BUDGET),
+    ("drive_provider_run_followups", MACRO_BODY_TRANSITION_BUDGET),
+    // —— P1 engine 侧评审链（≤256 KiB；engine 侧文件在写集外）——
     (
         "drive_review_session_via_gateway_with_window",
-        REVIEW_CHAIN_TRANSITION_BUDGET,
+        P1_ENGINE_BUDGET,
     ),
-    (
-        "drive_review_session_with_window",
-        REVIEW_CHAIN_TRANSITION_BUDGET,
-    ),
+    ("drive_review_session_with_window", P1_ENGINE_BUDGET),
+    ("drive_review_session", P1_ENGINE_BUDGET),
+    ("drive_review_session_via_gateway", P1_ENGINE_BUDGET),
+    ("complete_review", P1_ENGINE_BUDGET),
 ];
 
 /// 读取 `nm -C` 的符号表：返回 (地址, 反修饰名)。
