@@ -158,6 +158,20 @@ async fn cascade_delete_entity(
     //     automation_termination_failed，删除不执行（未取锁、零落盘）。
     let terminated_automation = terminate_automation_bound_to_entity(&app_paths, &store, &scope)?;
 
+    // ①.6 REQ-WIGA-15（场景 1）：终止自动化登记后、取删除独占前，先取消该
+    //     实体绑定 session 的在途 run 并等其真实收口——provider run 全程持
+    //     scope 共享 flock（acquire_run），不先收口则删除独占永远抢不到
+    //     （entity_busy 长期阻塞）。复用非 WebSocket 取消入口（等真实
+    //     completion，内部 30s 兜底）；只遍历 ⓪ 已按 entity_id 精确收集的
+    //     session_ids，取消不越界。registry 无该 session 的 manager（进程
+    //     重启后不在内存）时零动作，删除继续按既有独占判定走——既有行为
+    //     的自然延伸。
+    for session_id in &session_ids {
+        if let Some(manager) = state.workspace_sessions.get(session_id).await {
+            manager.abort_active_run_and_wait_completion().await;
+        }
+    }
+
     // ② try 删除独占（非阻塞）：争用/同 scope 运行 writer → entity_busy；
     //    已删竞态 → 幂等成功。刚终止过自动化时给在途短写一个有限排空窗口
     //    （tick 写是毫秒级；长 run 不在此等，仍按 entity_busy 报占用者）。
