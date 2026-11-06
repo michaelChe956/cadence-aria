@@ -10,6 +10,7 @@
 | 工作树 | `.worktrees/bugfix-b-11-02`（分支 `bugfix-b-11-02`，HEAD `52af734b`） |
 | 涉及主体 | 工作项组（WIG）级联删除路径 `src/web/handlers/lifecycle/deletion.rs` |
 | 稳定错误码 | `entity_busy`（HTTP 409） |
+| 修订 | 2026-11-06 增补 §8.6「修法 A 的技术可行性核实」+ §13 行号勘误（文件名版本号沿用 v1.0） |
 
 > **本文只呈现证据与修法选项，未做最终裁决；修复由 owner 与设计角色决策后另行实施。**
 > 本文不实施任何修复、不改动任何代码。
@@ -19,6 +20,9 @@
 ## 1. 一句话摘要
 
 owner 对一个**正在被 provider 运行占用**的工作项组点「删除」时，删除路径虽然已把该实体绑定的自动化登记置为「已终止」（页面上「终止整个自动化」按钮因此消失），但**终止只落在登记层、没有触达 workspace session 里那个仍在跑的 in-flight run**；run 继续持有 scope 的共享文件锁，导致删除侧的独占锁永远抢不到，最终以 `entity_busy`（409）拒绝删除 —— 同一时刻 provider 仍在继续输出，owner 只能额外点一次页面右下角的「终止」把 run 收口之后，这个工作项组才删得掉。
+
+> **当前状态（2026-11-06 更新）**：**修法 A 的技术可行性已核实** —— 后端**已有**不经 WS 也能取消 in-flight run 的现成 API（`WorkspaceSessionManager::abort_active_run_and_wait_completion`，**无需新增**），且**已有同源的非 WS 调用先例**（REST 终止 handler 已在用），删除路径的**落点与上下文齐备**（详见 §8.6）。
+> **待 owner 拍板 + 走 OpenSpec** —— 因为修法 A 改变的是「终止」与「删除前置条件」的**契约语义**（是否隐含「取消 run」），属契约层裁决，不是实现细节（详见 §8.6.6、§10 未决问题 1）。
 
 ---
 
@@ -72,7 +76,7 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 |---|---|
 | `src/product/entity_operation_store.rs:174-195` | `EntityOperationStore::try_acquire_delete`：先 `StableFileLock::try_acquire_exclusive(&lock_path)` 拿 **scope 锁的独占（`LOCK_EX`）**；拿不到 ⇒ 返回 `EntityOperationError::Busy`；拿到后再在锁内复核墓碑（`Deleted` 稳定拒绝、`Purging` 允许删除重入） |
 | `src/product/entity_operation_store.rs:199+` | 对应的运行侧是 `with_live_write`：**try-shared**（共享锁），锁争用立即返回 `Conflict{kind:"entity_deleting"}` |
-| `src/web/handlers/lifecycle/deletion.rs:165-181` | 删除编排层 `cascade_delete_entity` 的取锁循环：`Err(Busy \| Deleting)` ⇒ `delete_attempts -= 1`、每次 `sleep(100ms)` 后重试；次数耗尽 ⇒ `return Err(deletion_busy_error(&scope, occupant))` |
+| `src/web/handlers/lifecycle/deletion.rs:169-185` | 删除编排层 `cascade_delete_entity` 的取锁循环：`Err(Busy \| Deleting)` ⇒ `delete_attempts -= 1`、每次 `sleep(100ms)` 后重试；次数耗尽 ⇒ `return Err(deletion_busy_error(&scope, occupant))` |
 | `src/web/handlers/lifecycle/deletion.rs:549-565` | `fn deletion_busy_error(scope, occupant)` → `ApiError::runtime("entity_busy", "实体存在进行中的运行或并发写入，请等待收口后重试删除", details{entity_kind, entity_id, automation_enrollment_id?})` |
 | `src/web/handlers/lifecycle/deletion.rs:894-902` | `pub(crate) fn cascade_delete_api_error` 的 `CascadeDeleteError::Busy` 分支：**同一句文案又写了一遍**（details 为空对象 `{}`）—— 与 `:549-565` 无共享常量 |
 | `src/web/error.rs:197-201` | `entity_busy` 归入冲突族 ⇒ HTTP **409 CONFLICT** |
@@ -85,7 +89,8 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 |---|---|
 | `src/web/handlers/lifecycle/deletion.rs:159` | `cascade_delete_entity` 的第一步：`let terminated_automation = terminate_automation_bound_to_entity(&app_paths, &store, &scope)?;` —— **先终止，再删** |
 | `src/web/handlers/lifecycle/deletion.rs:608-611+` | `fn terminate_automation_bound_to_entity(...)` 的实现：走与人工终止同源的 terminate CAS，效果是 enrollment 的 `enabled=false` + 写 `terminated_at`（+ 命令账本留痕） |
-| `src/web/handlers/lifecycle/deletion.rs:155-158`（代码自带注释） | 注释写明其意图：「自动化占用预解除 —— 绑定该实体的 enabled enrollment 会让 autopilot 每 tick ensure/reconcile/生成写该实体（scope 共享锁），删除独占永远抢不到（真机 entity_busy 删不掉的根因）；且被删实体一旦消失该 enrollment 本身不可继续，终止是语义必然」 |
+| `src/web/handlers/lifecycle/deletion.rs:153-158`（代码自带注释） | 注释逐字写明其意图：「①.5 F3：自动化占用预解除——绑定该实体的 enabled enrollment 会让 autopilot 每 tick ensure/reconcile/生成写该实体（scope 共享锁），删除独占永远抢不到（真机 entity_busy 删不掉的根因）；且被删实体一旦消失该 enrollment 本身不可继续（Y 已证同向），终止是语义必然。复用与人工终止/autopilot 自愈同源的 terminate CAS；失败 → 明确 automation_termination_failed，删除不执行（未取锁、零落盘）」 |
+| `src/product/issue_automation_store_parts/command_writes_impl.inc.rs:9-77`（`IssueAutomationStore::terminate_plan`） | 该 terminate CAS 的**写入范围被限制在 enrollment 文件本身**：`saved.enabled = false;`（`:69`）、`saved.terminated_at = Some(now);`（`:70`）、`saved.policy_revision += 1;`（`:71`）+ 命令账本追加（`:73`）、`write_json(&path, &saved)?`（`:74`）⇒ **不碰任何 run、不碰任何 session、不碰 provider 进程** |
 | **缺口** | 该终止**只改登记**。它不向 workspace session 发 abort、**不取消 in-flight run**，因此 run 持有的 scope 共享锁**不会释放** |
 
 ⇒ 登记层已经「终止」，但引擎层还在跑 ⇒ 共享锁还在 ⇒ 删除继续 Busy。
@@ -95,9 +100,9 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 
 | 位置 | 事实 |
 |---|---|
-| `src/web/handlers/lifecycle/deletion.rs:162-164` | `let mut delete_attempts = if terminated_automation.is_some() { 10 } else { 1 };` |
-| `src/web/handlers/lifecycle/deletion.rs:165-181` | 每次重试 `tokio::time::sleep(Duration::from_millis(100))` ⇒ **刚终止过自动化时的总等待上限 = 10 × 100ms = 1 秒** |
-| `src/web/handlers/lifecycle/deletion.rs:163-164`（代码自带注释） | 注释自述：「刚终止过自动化时给在途短写一个有限排空窗口（tick 写是毫秒级；**长 run 不在此等**，仍按 entity_busy 报占用者）」 |
+| `src/web/handlers/lifecycle/deletion.rs:164` | `let mut delete_attempts = if terminated_automation.is_some() { 10 } else { 1 };`（赋值行；其上方 `:161-163` 为注释，`:165-167` 为该 `if/else` 的三行字面量） |
+| `src/web/handlers/lifecycle/deletion.rs:169-185` | 每次重试 `tokio::time::sleep(Duration::from_millis(100))`（`:176`）⇒ **刚终止过自动化时的总等待上限 = 10 × 100ms = 1 秒** |
+| `src/web/handlers/lifecycle/deletion.rs:161-163`（代码自带注释） | 注释自述：「刚终止过自动化时给在途短写一个有限排空窗口（tick 写是毫秒级；**长 run 不在此等**，仍按 entity_busy 报占用者）」 |
 | 现场实测 | 本次被阻塞的 run 从 `22:15:44` 持续到 `22:22:30`（**6 分 46 秒**）⇒ 远超 1 秒窗口 ⇒ **长 run 场景下必然 Busy，这不是偶发** |
 
 ⇒ 三层叠加的因果链一句话：
@@ -138,6 +143,8 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 
 ⇒ 两轮的差别**不在「删除能不能删」，而在「终止有没有传播到 run」**。
 
+> **★ 符号名订正（§5 / §6 通用）**：日志里的 `abort_workspace_run` 是**打点用的 trigger 字符串**，**不是函数名**；真实函数名是私有的 `WorkspaceSessionManager::cancel_run`（`fn cancel_run(run: &ActiveRun)`，`src/web/workspace_session/manager/runs.rs:483`，打点行 `:485`），被 `abort_active_run`（`runs.rs:292`）/ `abort_active_run_and_wait_completion`（`runs.rs:238`）/ `abort_active_run_from_attachment`（`runs.rs:63`）三处调用。完整取消链见 §8.6.5。
+
 ### 5.3 磁盘事实
 
 | 检查项 | 结果 | 意义 |
@@ -168,14 +175,14 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 | 维度 | 上一轮（22:14:43，能删） | 本轮（22:15:44，删不掉） |
 |---|---|---|
 | 终止的发出者 | owner 点「终止整个自动化」（前端 WS 通路） | **删除路径自己**发出（账本 `entity-delete-terminate-…-r12`） |
-| 是否进入取消链 | ✅ `ws_abort_message` → `abort_workspace_run` → `engine_cancelled_observed` 三段齐全 | ❌ `22:15:44` 之后日志中**零** `[aria-cancellation]` 行 |
+| 是否进入取消链 | ✅ `ws_abort_message` → `abort_workspace_run`（**日志 trigger 字符串**；真实函数 `WorkspaceSessionManager::cancel_run`）→ `engine_cancelled_observed` 三段齐全 | ❌ `22:15:44` 之后日志中**零** `[aria-cancellation]` 行 |
 | run 是否立即停 | ✅ 立即停 | ❌ 一直跑到 22:22:30 |
 | scope 共享锁 | 及时释放 ⇒ 22:14:56 删除成功 | 持续持有（22:21:39 观测到 `LOCK_SH`）⇒ 删除持续 Busy |
 | 终局 | 删除成功（账本 `void-enrollment-issue_work_item_plan_auto_c8d522f9-…`，`binding_version = 4`） | owner 额外点右下角「终止」后（22:22:27）才收口（22:22:30），22:27:23 后可删 |
 
 **结论（证据支持的强结论）**：删除功能本身没有坏 —— 它在上一轮、在 run 已收口的情况下都能正常完成删除。本轮失败的**唯一差异**是「终止是否传播到 in-flight run」。
 
-进一步说：上一轮之所以能取消，**取消并不是「终止命令」自身做的**，而是前端 WS 的 abort 消息恰好先到了（`ws_abort_message`），取消是被 WS 层的**副作用**触发的（`src/web/workspace_ws_handler/decisions/inbound.rs:490-494` → `abort_active_run()` → `src/web/workspace_session/manager/runs.rs:484-488` 打 `ProviderCommand::Abort` → 引擎侧 `src/product/workspace_engine/provider_drive.rs:403` / `provider_drive/work_item_plan.rs:144` 打出 `engine_cancelled_observed`）。删除路径**没有任何一条通往这条链的通路**。
+进一步说：上一轮之所以能取消，**取消并不是「终止命令」自身做的**，而是前端 WS 的 abort 消息恰好先到了（`ws_abort_message`），取消是被 WS 层的**副作用**触发的（`src/web/workspace_ws_handler/decisions/inbound.rs:489-511`，`:494` 调 `manager.abort_active_run()` → `src/web/workspace_session/manager/runs.rs:292` → `cancel_run`（`runs.rs:483-488`，`:488` 打 `ProviderCommand::Abort`）→ 引擎侧 `src/product/workspace_engine/provider_drive.rs:399-411`（取消臂）/ `provider_drive/work_item_plan.rs:140`（取消臂，打 `engine_cancelled_observed`，日志原文见 §5.2））。删除路径**没有任何一条通往这条链的通路**。
 
 ⇒ 这不是「删除功能坏了」，而是「**终止与取消之间的耦合是靠副作用建立的，不是靠契约建立的**」。
 
@@ -246,7 +253,7 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 
 ### 选项 B：把排空窗口从 1 秒改成「等 run 收口」或可配的长窗口
 
-**改哪层**：改「第三层」（排空窗口层）—— `src/web/handlers/lifecycle/deletion.rs:162`（`delete_attempts = 10`）与 `:165-181` 的重试循环。
+**改哪层**：改「第三层」（排空窗口层）—— `src/web/handlers/lifecycle/deletion.rs:164`（`delete_attempts = 10`）与 `:169-185` 的重试循环。
 
 **改什么**：把「刚终止过自动化」的重试次数从固定 10 次（= 1 秒）改为：① 可配的长窗口（例如数十秒 / 分钟级）；或 ② 真正「等 run 收口」—— 订阅该 session 的终态后再取锁。
 
@@ -266,7 +273,7 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 
 ### 选项 C：删除判定排除「已终止自动化下的 session」/ 提供强制收口入口
 
-**改哪层**：改「第一层」（判定原语层）—— `src/product/entity_operation_store.rs:174-195` `try_acquire_delete` 的占用者判定，以及 `src/web/handlers/lifecycle/deletion.rs:165-181` 的占用者识别（`automation_enrollment_bound_to_entity`，`deletion.rs:568+`）。
+**改哪层**：改「第一层」（判定原语层）—— `src/product/entity_operation_store.rs:174-195` `try_acquire_delete` 的占用者判定，以及 `src/web/handlers/lifecycle/deletion.rs:169-185` 的占用者识别（`automation_enrollment_bound_to_entity`，`deletion.rs:568+`）。
 
 **改什么**：① 让「已终止自动化所辖 session」的共享锁**不再计入删除占用者**（即：登记已终止 ⇒ 该 scope 视作可删）；或 ② 在删除失败面里提供一个**「强制收口并删除」**的显式入口（由 owner 显式确认后强制取消 run 并完成删除）。
 
@@ -310,6 +317,101 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 
 ---
 
+### 8.6 修法 A 的技术可行性核实（2026-11-06 独立只读勘察）
+
+> 本节**只陈述已核实的事实**（每条带 `文件:行号`），不替 owner 做裁决，也**不改动** §8 的 A / B / C / D 四个选项本身。
+> 核实方式：独立只读勘察 + 与本文既有行号交叉校准；**未运行 cargo / npm / pnpm，未改动任何代码**。
+> 结论提要：修法 A 所需的「取消 in-flight run 并等真实收口」的能力**后端已经具备**，**已有同源的非 WS 调用先例**，删除路径的**落点与上下文齐备** —— ⇒ **技术可行，无需新增任何取消 API**；剩下的只有**契约层裁决**（见 8.6.6）。
+
+#### 8.6.1 后端**已有**不经 WS 也能取消 in-flight run 的现成 API，**无需新增**
+
+| API | 签名 | 可 await | 位置 |
+|---|---|---|---|
+| `WorkspaceSessionManager::abort_active_run` | `pub async fn abort_active_run(&self) -> bool` | 是（`true` = 确实取消了活 run） | `src/web/workspace_session/manager/runs.rs:292` |
+| **`WorkspaceSessionManager::abort_active_run_and_wait_completion`** | `pub async fn abort_active_run_and_wait_completion(&self) -> bool` | 是，**等真实 completion**（内部 30s 兜底超时） | `src/web/workspace_session/manager/runs.rs:238` |
+| `WorkspaceSessionManager::abort_active_run_from_attachment` | `pub async fn abort_active_run_from_attachment(&self, connection_id: Option<&str>) -> Result<(), String>` | 是；⚠️ 要求 attachment lease 持有者身份，**只适合 WS socket 路径，不适合删除路径** | `src/web/workspace_session/manager/runs.rs:63` |
+| `WorkspaceSessionRegistry::get` | `pub async fn get(&self, session_id: &str) -> Option<Arc<WorkspaceSessionManager>>` | 是 | `src/web/workspace_session/registry.rs:94` |
+| `WorkspaceSessionRegistry::peek` | `pub async fn peek(&self, session_id: &str) -> Option<Arc<WorkspaceSessionManager>>` | 是，无副作用查找 | `src/web/workspace_session/registry.rs:51` |
+
+⇒ 修法 A 需要的「取消 + 等真实收口」能力**已经存在**（`abort_active_run_and_wait_completion`）；删除路径**不需要新增任何取消 API**。
+
+#### 8.6.2 ★已有「非 WS 调用」先例（同一套 API，REST handler 已在用）
+
+- `src/web/workspace_session/manager/mod.rs:755-757`（`terminate_plan_engine_side` 内）：
+
+```rust
+    if let Some(manager) = session_registry.get(session_id).await {
+        manager.abort_active_run_and_wait_completion().await;
+    }
+```
+
+- 其调用者是 **REST handler**（非 WS）：`src/web/handlers/automation_enrollment.rs:778-782`，位于 `pub async fn post_automation_enrollment_terminate(...)`（`src/web/handlers/automation_enrollment.rs:710`）内。
+
+⇒ **「终止自动化 ⇒ 取消其 in-flight run」这条语义，在人工终止路径上已经存在且已上线**；缺的只是**删除路径复用它**。
+- 另一条 REST 面直接取 manager 的先例：`src/web/handlers/workspace_sc_recovery.rs:353-357`。
+
+#### 8.6.3 ★删除路径已具备全部所需上下文（不需要新查任何东西）
+
+1. **删除路径已在删除前按 entity_id 精确收集了 session_ids**：`deletion.rs:132-134`
+
+   ```rust
+       let entity_ids = [entity_id.to_string()];
+       let mut session_ids =
+           workspace_session_ids_for_entities(&store, project_id, issue_id, &entity_ids)?;
+   ```
+
+   实现 `deletion.rs:861-875`（`store.list_workspace_sessions(...)` 后 `filter(|session| entity_ids.contains(&session.entity_id))`）⇒ **`session_ids` 就是现成的「实体 → session_id」映射**，且在 `⓪` 阶段（磁盘删除前）收集，此刻仍可读。
+2. **plan 的 workspace session 的 `entity_id` == plan_id** ⇒ 过滤必然命中：`src/web/handlers/lifecycle/plan_preparation.rs:222-229`（另一分支 `:197-204` 同形）`entity_id: plan.id.clone()`。
+3. **自动化登记侧另有权威 session_id**：`IssueAutomationEnrollment.session_id`（`automation_enrollment_bound_to_entity:588` 已在用）⇒ 最精确来源（自动化派发的 run 一定在该 session 上）。
+4. **删除路径已持有 `state: &WebAppState`**（`deletion.rs:112`），`state.workspace_sessions` 即 `WorkspaceSessionRegistry`（`src/web/state.rs:146`、`:230`）。
+5. **plan_id 来源**：`scope.entity_id`（`deletion.rs:124` 的 `EntityScope::new(project_id, issue_id, kind, entity_id)`）。
+
+#### 8.6.4 落点闭集素材（NEW 代码块）
+
+**落点** = `src/web/handlers/lifecycle/deletion.rs:160` —— 紧接 `:159` 的 terminate 调用之后、`:161` 的「② try 删除独占」注释之前；且 `:161-163` 的注释与 `:164` 的 `delete_attempts` 赋值**保持原样不动**。
+
+```rust
+    // ①.6 取消本实体的 in-flight run（补 ①.5 的另一半语义）：①.5 只停
+    //     「未来的 tick」，已派发的 provider run 仍持 scope 共享 flock
+    //     （entity_operation_store.rs:154 `acquire_run` try-shared，lease
+    //     由 run task 全生命周期持有 → provider_run/task_body.rs:203），
+    //     删除独占永远抢不到 ⇒ entity_busy。此处沿**既有非 WS 取消入口**
+    //     取消本实体绑定 session 的活跃 run 并等真实 completion
+    //     （manager/mod.rs:753-757 同款先例；不等 completion 就取锁仍会
+    //     撞上「lease 释放晚于 completion 信号」的尾隙）。
+    //     取消范围严格限定在「本实体绑定的 session」：⓪ 已按 entity_id
+    //     精确收集（session.entity_id == entity_id），不越界取消其它
+    //     session 的 run。
+    for session_id in &session_ids {
+        if let Some(manager) = state.workspace_sessions.get(session_id).await {
+            manager.abort_active_run_and_wait_completion().await;
+        }
+    }
+```
+
+#### 8.6.5 取消链的真实符号名订正 + 完整链路
+
+- `abort_workspace_run` 是**日志里的 trigger 字符串**（`runs.rs:485`），**真实函数名**是私有的 `WorkspaceSessionManager::cancel_run`（`fn cancel_run(run: &ActiveRun)`，`src/web/workspace_session/manager/runs.rs:483`），被 `abort_active_run`（`runs.rs:292`）、`abort_active_run_and_wait_completion`（`runs.rs:238`）、`abort_active_run_from_attachment`（`runs.rs:63`）三处调用。
+- WS 入口：`src/web/workspace_ws_handler/decisions/inbound.rs:489-511`（`WsInMessage::Abort` 臂 → `manager.abort_active_run()`，`:494`）。
+- 引擎收口：`src/product/workspace_engine/provider_drive.rs:399-411`（`cancel.cancelled()` 臂 → `flush_stream_buffer` → `finish_aborted_run()`）；同型另有 3 处：`provider_drive.rs:415-433`（`ProviderCommand::Abort` 命令臂）、`provider_drive/work_item_plan.rs:158-175`、`provider_drive/review/drive_parts/reviewer_provider_session.inc.rs:224-240`。
+- 完整链路：
+
+```
+WS Abort 消息 (inbound.rs:494)
+  → manager.abort_active_run() (runs.rs:292) → cancel_run (runs.rs:483)
+      ├─ command_tx.try_send(ProviderCommand::Abort) → 驱动循环命令臂 (provider_drive.rs:418) → session.commands.send(Abort) → adapter kill 链
+      └─ run.cancel.cancel()                        → 驱动循环取消臂 (provider_drive.rs:399) → finish_aborted_run()
+```
+
+- `finish_aborted_run()` 的落点：`src/product/workspace_engine/session_state/timeline.rs:132-141`（时间线节点置 `Failed` + summary「运行已中止」）。
+
+#### 8.6.6 一条对「§10 未决问题」的直接回答
+
+- **「是否维持『执行中禁删』」这条不受修法 A 影响**：修法 A **不放宽任何删除前置条件**，而是**让「终止」真正把 run 停掉**，从而让原本就该可删的情况可删；owner 既有裁决「执行中禁删保持现状」指的是 **run 仍在跑时不得删**，修法 A 恰恰是让终止把 run 停掉（run 不再在跑 ⇒ 不违反该裁决）。
+- 但**「终止」是否应当隐含「取消 run」**这一条，是**契约层**的新增语义 ⇒ 需走 OpenSpec（`REQ-WIGA-09` 的统一 Abort 语义是否已覆盖 / 是否需要新增 requirement），由 owner 与设计角色裁决。
+
+---
+
 ## 9. 建议的验收判据
 
 修好后应满足下列**可观察**结果（建议作为回归判据固化）：
@@ -332,7 +434,7 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 ## 10. 未决问题（需 owner / 设计角色裁决）
 
 1. **「终止」与「取消」的契约关系**：删除路径的「删前终止」是否**应当**取消 in-flight run？若「是」，它是 `REQ-WIGA-09`「统一 Abort 语义」的组成部分，还是一条独立的新语义？（决定选项 A 是否需要改契约）
-2. **「执行中禁删」的边界是否维持**：owner 2026-11-06 已裁定「执行中禁删**保持现状**」（`work-item-group-delete-voids-enrollment/tasks.md:5`）。选项 C 会正面触碰该裁定 —— 是否维持？若维持，则选项 C 出局，只在 A / B / D 中选。
+2. **「执行中禁删」的边界是否维持**（**已澄清：与修法 A 不冲突** —— 详见 §8.6.6）：owner 2026-11-06 已裁定「执行中禁删**保持现状**」（`work-item-group-delete-voids-enrollment/tasks.md:5`）。**修法 A 不触碰这条裁定** —— 它**不放宽任何删除前置条件**，只是让「终止」真正把 run 停掉（run 不再在跑 ⇒ 不违反该裁定）；真正需要裁决的是「终止是否隐含取消 run」这条**契约层**新语义（已并入未决问题 1）。选项 C 会正面触碰该裁定 —— 是否维持？若维持，则选项 C 出局，只在 A / B / D 中选。
 3. **「删除」是否允许同步等待**：删除请求是否可以挂起等待 run 收口（选项 B②）？若允许，等待上限与超时后的失败面如何定义？若不允许，A 必须自带足够的排空窗口。
 4. **错误面是否需要改文案**：`entity_busy` 当前统一表述为「请等待收口后重试删除」，在本缺陷语境下是**误导性**的（AC-7）。是否需要新增一个更具体的稳定码 / 文案区分「需人工终止」？
 5. **`entity_busy` 文案双写**（`deletion.rs:549-565` 与 `:894-902`）：是否在本轮一并收敛为共享常量？（属清理项，不影响功能，但影响后续维护）
@@ -362,3 +464,24 @@ owner 对一个**正在被 provider 运行占用**的工作项组点「删除」
 >
 > 本次工作**未改动任何 `src/**`、`tests/**`、`web/**` 文件**，未运行 cargo / npm / pnpm 命令，未提交任何 commit。
 > 本文的现场事实（时间线、日志行、磁盘事实、`lslocks` 观测）均来自 2026-11-06 的只读勘察；代码行号已在本工作树（`.worktrees/bugfix-b-11-02`，HEAD `52af734b`）逐条复核。
+>
+> **本次修订（2026-11-06，增补 §8.6）同样未改动任何 `src/**`、`tests/**`、`web/**` 文件**，未运行 cargo / npm / pnpm 命令，未提交任何 commit；本次只做文档增量修订，**未实施任何修复**。
+
+---
+
+## 13. 勘误（2026-11-06 修订）
+
+> 本节只记录**行号 / 符号名**层面的勘误，**不改变**任何结论、选项或裁决。
+
+| 编号 | 原引用 | 实际 | 涉及位置 | 说明 |
+|---|---|---|---|---|
+| **E-1** | `deletion.rs:162` | **`deletion.rs:164`** | §4.3、§8 选项 B | ★ **`delete_attempts` 赋值行是 `:164`**（`let mut delete_attempts = if terminated_automation.is_some() { 10 } else { 1 };`）；原引用的 `:162` 其实是**注释行**（「已删竞态 → 幂等成功。刚终止过自动化时给在途短写一个有限排空窗口」）。全文所有指向该赋值行的引用已统一改为 `:164` |
+| **E-2** | `deletion.rs:165-181` | **`deletion.rs:169-185`** | §4.1、§4.3、§8 选项 C | 取锁循环 `let lease = loop { … }` 实际为 `:169-185`；原引用区间混入了 `:165-167` 的 `if/else` 三行字面量 |
+| **E-3** | `deletion.rs:163-164`（代码自带注释） | **`deletion.rs:161-163`** | §4.3 | 「② try 删除独占（非阻塞）……长 run 不在此等」这段注释实际占 `:161-163` |
+| **E-4** | `deletion.rs:155-158`（代码自带注释） | **`deletion.rs:153-158`** | §4.2 | ①.5 F3 预解除注释块实际占 `:153-158`（`:159` 是 terminate 调用行） |
+| **E-5** | `abort_workspace_run`（当作函数名） | **`WorkspaceSessionManager::cancel_run`** | §5、§6、§8.6.5 | `abort_workspace_run` 是**日志打点的 trigger 字符串**（`runs.rs:485`）；真实函数名是私有的 `WorkspaceSessionManager::cancel_run`（`src/web/workspace_session/manager/runs.rs:483`）。§5.2 / §6 中的日志原文按原样保留（那是日志原文，不是函数名） |
+| **E-6** | `manager/mod.rs:753-757` | **`manager/mod.rs:755-757`** | §8.6.2、§8.6.4 的 NEW 代码块注释 | 非 WS 取消先例的 `if let Some(manager) = session_registry.get(session_id).await {` 实际起始于 `:755`；§8.6.4 的 NEW 代码块按**原文**收录，其注释内的 `:753-757` 未作改动（以免改动闭集素材），以本条为准 |
+| **E-7** | `deletion.rs:135-136`（采集 session_ids 的位置） | **`deletion.rs:132-134`** | §8.6.3 第 1 条 | 按本工作树实际代码校准：`let entity_ids = [entity_id.to_string()];` 在 `:132`，`workspace_session_ids_for_entities(...)` 在 `:134` |
+| **E-8** | `command_writes_impl.inc.rs:11-77` | **`command_writes_impl.inc.rs:9-77`** | §8.6 / §4.2 | `pub fn terminate_plan(` 的定义行在 `:9`；写入语句在 `:69-74` |
+
+**行号基准声明**：除 §8.6.4 明确标注的**落点**（`deletion.rs:160`）外，本文所有 `文件:行号` 均以**本次修订前**的本工作树（`.worktrees/bugfix-b-11-02`，HEAD `52af734b`）为准 ⇒ **一旦按 §8.6.4 实施落地，`deletion.rs:161` 及其之后的行号将整体后移**（后移行数 = 新增代码块行数），实施时需同步刷新。
