@@ -57,9 +57,9 @@
 
 ## 5. 全仓大 future 只读盘点（另案整改）
 
-- [ ] 5.1 **只读盘点**：按 tokio 阈值 **dev 2048 B / release 16384 B** 分档扫描全仓 `spawn` 参数与 await child；每条记录 `{symbol, source_path, line, profile, raw_bytes, tokio_threshold, boundary_kind, evidence_source, boxed_blind_spot, confidence}`；**区分 raw 类型与 Box 包装**
-- [ ] 5.2 **工具边界诚实登记**：无 nightly 时用 stable Clippy 临时阈值扫描并**明确 Box/spawn/未执行分支缺口**；**盘点结论是「证据与局限如实盘点」，不是「全仓 future 均 ≤阈值」**；**不得发布 patched 依赖、不得凭 Box 指针标安全**
-- [ ] 5.3 **整改另案**：盘点报告只出清单，**不在本 change 整改**
+- [x] 5.1 **只读盘点**（★已完成：`cadence/reports/2026-11-06_盘点_全仓大future清单_v1.0.md`——产品域真 async 体 288 行（debug poll 帧 ≥2,048 B：>16,384 的 79 行 / 2,048~16,383 的 209 行），release 实测 >16,384 的 5 行，Box 盲区 5 行；双 profile 冻结二进制 sha256 在册；与 poll_frame_budget 门禁 22 项实测对账一致★）**只读盘点**：按 tokio 阈值 **dev 2048 B / release 16384 B** 分档扫描全仓 `spawn` 参数与 await child；每条记录 `{symbol, source_path, line, profile, raw_bytes, tokio_threshold, boundary_kind, evidence_source, boxed_blind_spot, confidence}`；**区分 raw 类型与 Box 包装**
+- [x] 5.2 **工具边界诚实登记**（★已完成：报告 §3 三类缺口（Box 恒绿已最小 crate 对照实验确证 / spawn 参数全盲 / 未执行分支不可判）+ §6 局限 L1~L8（双快照非同一源、release LTO 合并、序言窗口启发式等）；未发布 patched 依赖、未凭 Box 指针标安全★）**工具边界诚实登记**：无 nightly 时用 stable Clippy 临时阈值扫描并**明确 Box/spawn/未执行分支缺口**；**盘点结论是「证据与局限如实盘点」，不是「全仓 future 均 ≤阈值」**；**不得发布 patched 依赖、不得凭 Box 指针标安全**
+- [x] 5.3 **整改另案**（★已完成：盘点只出清单与建议（报告 §7：先治 Top5 = inbound_inner / execute_start_coding_flow / spawn_engine_event_forward_task / handle_workspace_socket / run_single_candidate_author），本 change 未整改任何对象★）**整改另案**：盘点报告只出清单，**不在本 change 整改**
 
 ## 6. 挂账清理（交最终整分支审查分诊）
 
