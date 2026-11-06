@@ -64,9 +64,7 @@ impl ScenarioScriptedProvider {
     pub(super) fn session(
         &self,
         step: ScenarioStep,
-        contract: Option<
-            cadence_aria::cross_cutting::structured_output::StructuredOutputContract,
-        >,
+        contract: Option<cadence_aria::cross_cutting::structured_output::StructuredOutputContract>,
         cancel: CancellationToken,
     ) -> ProviderSession {
         let (event_tx, event_rx) = mpsc::channel(8);
@@ -250,8 +248,8 @@ impl FrameCollector {
             .get_workspace_session(&self.session_id)
             .map(|record| record.messages.len())
             .unwrap_or(self.baseline_messages);
-        self.durable_progress = timeline_now > self.baseline_timeline_nodes
-            || messages_now > self.baseline_messages;
+        self.durable_progress =
+            timeline_now > self.baseline_timeline_nodes || messages_now > self.baseline_messages;
     }
 
     /// 取消收口的 durable 证据：本 run 节点出现 Failed 终态。
@@ -261,8 +259,7 @@ impl FrameCollector {
             return false;
         };
         nodes.iter().any(|node| {
-            self.run_node_ids.contains(&node.node_id)
-                && node.status == TimelineNodeStatus::Failed
+            self.run_node_ids.contains(&node.node_id) && node.status == TimelineNodeStatus::Failed
         })
     }
 
@@ -446,8 +443,7 @@ pub(super) async fn connect_ws_with_origin(url: &str, origin: &str) -> WsStream 
     let mut request = url.into_client_request().expect("ws request");
     request.headers_mut().insert(
         "origin",
-        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(origin)
-            .expect("origin header"),
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(origin).expect("origin header"),
     );
     connect_async(request).await.expect("connect ws").0
 }
@@ -482,7 +478,8 @@ pub(super) fn start_generation_message() -> WsInMessage {
             author: ProviderName::ClaudeCode,
             reviewer: None,
             review_rounds: 0,
-            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(
+            ),
         },
         reviewer_enabled: false,
         resume_recovery: None,
@@ -577,6 +574,98 @@ pub(super) const PLAN_OUTLINE_AUTHOR_OUTPUT: &str = "完成拆分规划：\n\
        \"context_blockers\": []\n\
      }\n\
      </ARIA_STRUCTURED_OUTPUT>";
+
+/// 送审轮 reviewer 的结构化 review 输出（verdict=pass；契约包装由父夹具的
+/// `scripted_provider_completion` 依 prompt 的真实 nonce 完成——与
+/// part_02 `http_confirm_on_story_author_confirm_starts_reviewer_then_finalizes`
+/// 同款文案，保证评审轮走**真实 verdict 解析**而不是失败回退）。
+pub(super) const REVIEW_ROUND_OUTPUT: &str =
+    "审核通过。\n```json\n{\"verdict\":\"pass\",\"summary\":\"可进入人工确认\"}\n```";
+
+/// 真实 socket 上的 HTTP POST（JSON 体）——送审确认必须走真实 axum→socket
+/// 入站链（与 WS 深链同源），不得用进程内 `oneshot` 旁路：旁路会丢掉真实
+/// 入站帧深度，而帧深度正是本门禁要测的栈深来源之一。
+pub(super) async fn http_post_json(
+    addr: std::net::SocketAddr,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<(u16, String), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|error| format!("http post connect failed: {error}"))?;
+    let payload = body.to_string();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| format!("http post write failed: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .await
+        .map_err(|error| format!("http post read failed: {error}"))?;
+    let (head, response_body) = response
+        .split_once("\r\n\r\n")
+        .unwrap_or((response.as_str(), ""));
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| format!("http post response has no status line: {head}"))?;
+    Ok((status, response_body.to_string()))
+}
+
+/// durable `provider_start_ledger` 中 **reviewer 角色**的实际启动条目。
+///
+/// 键形如 `workspace_reviewer:{session_id}:{attempt}`（`register_provider_start_in_ledger`
+/// 以角色前缀登记）；只认 `is_actual_launch_observation()`（started + provider +
+/// started_at 齐备）——「登记/占位」不算真实启动。
+pub(super) fn reviewer_start_ledger_keys(
+    app_paths: &ProductAppPaths,
+    session_id: &str,
+) -> Vec<String> {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let Ok(record) = lifecycle.get_workspace_session(session_id) else {
+        return Vec::new();
+    };
+    record
+        .provider_start_ledger
+        .iter()
+        .filter(|entry| {
+            entry
+                .provider_start_idempotency_key
+                .starts_with("workspace_reviewer:")
+                && entry.is_actual_launch_observation()
+        })
+        .map(|entry| entry.provider_start_idempotency_key.clone())
+        .collect()
+}
+
+/// 场景证据落盘（跨 SIGABRT 存活）。
+///
+/// 栈溢出是 SIGABRT ⇒ 进程内不可捕获 ⇒ 子进程被 abort 时，stdout 缓冲与
+/// 析构都可能丢失。证据必须**先落文件**（每行 flush），父进程在子进程退出
+/// 后读取——「送审轮是否真的走到」不能只依赖子进程退出前的打印。
+pub(super) fn record_evidence(line: &str) {
+    println!("{line}");
+    let Some(path) = std::env::var_os(super::ws_small_stack::WS_PROVIDER_CASE_EVIDENCE_ENV) else {
+        return;
+    };
+    use std::io::Write as _;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{line}");
+        let _ = file.flush();
+    }
+}
 
 /// plan reviewer 的结构化 review 输出（verdict=approved；契约包装同上）。
 pub(super) const PLAN_REVIEW_OUTPUT: &str = "评审意见：拆分合理。\n\

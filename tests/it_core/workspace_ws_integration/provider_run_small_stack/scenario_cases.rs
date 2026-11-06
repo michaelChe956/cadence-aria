@@ -6,9 +6,8 @@
 //! （场景替身 / 帧收集器 / WS 辅助）在 `scenario_support.rs`。
 use super::ws_scenario_support::{
     FrameCollector, PLAN_OUTLINE_AUTHOR_OUTPUT, PLAN_REVIEW_OUTPUT, ScenarioScriptedProvider,
-    ScenarioStep, author_terminal_variant, connect_ws_with_origin,
-    hello_driver_admission, http_health_check, recv_frame_bounded, serve_ws_app,
-    start_generation_message,
+    ScenarioStep, author_terminal_variant, connect_ws_with_origin, hello_driver_admission,
+    http_health_check, recv_frame_bounded, serve_ws_app, start_generation_message,
 };
 use super::ws_small_stack::verify_ws_smoke_evidence;
 use super::*;

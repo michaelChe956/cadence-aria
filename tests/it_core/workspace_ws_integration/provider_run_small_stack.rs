@@ -22,13 +22,22 @@ pub(crate) mod ws_scenario_support;
 #[path = "provider_run_small_stack/scenario_cases.rs"]
 pub(crate) mod ws_scenario_cases;
 
+// 送审轮场景（ReviewOnly——真机爆栈所在的轮次）独立成文件：它的证据合同与
+// 上面三个场景族不同（要观测 reviewer 的真实 start + durable ledger）。
+#[path = "provider_run_small_stack/scenario_review.rs"]
+pub(crate) mod ws_scenario_review;
+
 pub(crate) mod ws_small_stack {
     /// 子模式环境标识（与单元侧 small_stack_worker 同合同、各自私有）。
     const WS_PROVIDER_CASE_CHILD_MODE_ENV: &str = "ARIA_PROVIDER_CASE_CHILD_MODE";
 
+    /// 子进程场景证据落盘路径（父→子）。栈溢出是 SIGABRT ⇒ 子进程被 abort
+    /// 时 stdout 与析构都可能丢；「送审轮是否真的走到」必须由父进程在子进程
+    /// 退出后从该文件读取，不能只依赖子进程退出前的打印。
+    pub(super) const WS_PROVIDER_CASE_EVIDENCE_ENV: &str = "ARIA_PROVIDER_CASE_EVIDENCE_PATH";
+
     // 真实场景执行体（Story 空 Author / 最重 plan 接力 / SC manual 门）。
     use super::ws_scenario_cases as scenario_cases;
-
 
     // 私有同合同隔离 helper（同 small_stack_worker 合同，本测试二进制内私有，
     // 不跨二进制耦合）。
@@ -72,6 +81,15 @@ pub(crate) mod ws_small_stack {
             .env(WS_PROVIDER_CASE_CHILD_MODE_ENV, "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // 证据落盘文件（跨 SIGABRT 存活）：子进程每条证据行即时 flush，父进程
+        // 在子进程退出后读取——子进程被 abort 时 stdout 可能只到一半。
+        let evidence_path = std::env::temp_dir().join(format!(
+            "aria-provider-case-evidence-{}-{}.log",
+            std::process::id(),
+            case_suffix.replace(['/', ':', ' '], "_")
+        ));
+        let _ = std::fs::remove_file(&evidence_path);
+        command.env(WS_PROVIDER_CASE_EVIDENCE_ENV, &evidence_path);
         // 自有进程组（子进程即组长）：墙钟超时可整组 kill，不误伤父套件。
         #[cfg(unix)]
         {
@@ -99,9 +117,12 @@ pub(crate) mod ws_small_stack {
                         let stderr = stderr_thread.join().unwrap_or_default();
                         let stdout_excerpt = excerpt(&stdout);
                         let stderr_excerpt = excerpt(&stderr);
+                        let evidence_excerpt = excerpt(&read_case_evidence(&evidence_path));
+                        let durable_evidence =
+                            read_durable_evidence(&read_case_evidence(&evidence_path));
                         return Err(format!(
                             "isolated child failure must be rejected: case={case} timeout after {timeout:?}\
-                             （墙钟到期 kill 自有进程组；status={status}）stdout[..]={stdout_excerpt}, stderr[..]={stderr_excerpt}"
+                             （墙钟到期 kill 自有进程组；status={status}）stdout[..]={stdout_excerpt}, stderr[..]={stderr_excerpt}, evidence[..]={evidence_excerpt}, {durable_evidence}"
                         ));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -113,25 +134,117 @@ pub(crate) mod ws_small_stack {
         let stderr = stderr_thread.join().unwrap_or_default();
         let stdout_excerpt = excerpt(&stdout);
         let stderr_excerpt = excerpt(&stderr);
+        let evidence = read_case_evidence(&evidence_path);
+        let evidence_excerpt = excerpt(&evidence);
+        // 子进程被 SIGABRT 终结时 stdout/析构都可能丢：durable 证据（ReviewerRun
+        // 节点 / provider_start_ledger）只能由父进程从**遗留数据根**读回。
+        let durable_evidence = read_durable_evidence(&evidence);
 
         if status.success() {
+            if !evidence.is_empty() {
+                println!("[ws-2mib] isolated case {case} 场景证据:\n{evidence}");
+            }
             return Ok(());
         }
         // Unix：任何信号都算失败（SIGABRT=signal 6 是易 abort 场景的预期红形态）；
         // 正常场景永不要求「必须 abort 才通过」。
         #[cfg(unix)]
         if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+            // 栈溢出归因：Rust runtime 的栈溢出诊断串（"has overflowed its
+            // stack"）是本次爆栈的可判定特征——SIGABRT 在此必须归因为
+            // **stack overflow**（深 inbound 链 + 评审链 poll 帧之和超 2 MiB
+            // worker 栈），不得笼统写成 signal 6。
+            let stack_overflow = stderr.contains("has overflowed its stack")
+                || stdout.contains("has overflowed its stack");
+            let attribution = if stack_overflow {
+                "stack overflow（tokio worker 栈溢出：深 inbound 链 + 评审链 poll 帧之和超 2 MiB）"
+            } else {
+                "signal（未观测到栈溢出特征）"
+            };
             return Err(format!(
-                "isolated child failure must be rejected: case={case} signal {signal} (code {}), \
-                 stdout[..]={stdout_excerpt}, stderr[..]={stderr_excerpt}",
+                "isolated child failure must be rejected: case={case} {attribution} signal {signal} (code {}), \
+                 stdout[..]={stdout_excerpt}, stderr[..]={stderr_excerpt}, evidence[..]={evidence_excerpt}, {durable_evidence}",
                 status.code().unwrap_or(-1)
             ));
         }
         Err(format!(
             "isolated child failure must be rejected: case={case} exit {} (nonzero), \
-             stdout[..]={stdout_excerpt}, stderr[..]={stderr_excerpt}",
+             stdout[..]={stdout_excerpt}, stderr[..]={stderr_excerpt}, evidence[..]={evidence_excerpt}, {durable_evidence}",
             status.code().unwrap_or(-1)
         ))
+    }
+
+    /// 读取子进程落盘的场景证据（跨 SIGABRT 存活；缺失即空串——不因此判失败，
+    /// 证据缺失只影响归因信息量）。
+    fn read_case_evidence(evidence_path: &std::path::Path) -> String {
+        std::fs::read_to_string(evidence_path).unwrap_or_default()
+    }
+
+    /// 子进程遗留的 durable 证据（读回崩溃当时已落盘的事实）。
+    ///
+    /// 子进程被 SIGABRT 终结 ⇒ `TempDir` 不析构 ⇒ 数据根仍在盘上；父进程从
+    /// 证据行的 `data_root=` 取出数据根，用生产 `LifecycleStore` 读出 durable
+    /// 会话记录与时间线节点 ⇒ **送审轮是否真的走到**（ReviewerRun 节点已建 /
+    /// reviewer 的 provider_start_ledger 条目）在崩溃后仍可判定。
+    /// 读不到（子进程正常退出并清理了数据根）时返回空串，不影响判定。
+    fn read_durable_evidence(evidence: &str) -> String {
+        use super::{LifecycleStore, ProductAppPaths, TimelineNodeType};
+        let Some(data_root) = evidence
+            .split("data_root=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(str::to_string)
+        else {
+            return String::new();
+        };
+        let app_paths = ProductAppPaths::new(std::path::Path::new(&data_root).join(".aria"));
+        let lifecycle = LifecycleStore::new(app_paths);
+        let session = lifecycle.get_workspace_session("workspace_session_0001");
+        let nodes = lifecycle
+            .load_timeline_nodes("workspace_session_0001")
+            .unwrap_or_default();
+        let reviewer_nodes: Vec<String> = nodes
+            .iter()
+            .filter(|node| node.node_type == TimelineNodeType::ReviewerRun)
+            .map(|node| format!("{}:{:?}", node.node_id, node.status))
+            .collect();
+        let node_types: Vec<String> = nodes
+            .iter()
+            .map(|node| format!("{:?}", node.node_type))
+            .collect();
+        let ledger: Vec<String> = session
+            .as_ref()
+            .map(|record| {
+                record
+                    .provider_start_ledger
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "{}(started={},provider={:?},at={:?})",
+                            entry.provider_start_idempotency_key,
+                            entry.started,
+                            entry.provider,
+                            entry.started_at
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let status = session
+            .as_ref()
+            .map(|record| format!("{:?}", record.status))
+            .unwrap_or_else(|_| "<会话记录不可读>".to_string());
+        let reviewer_provider = session
+            .as_ref()
+            .map(|record| format!("{:?}", record.reviewer_provider))
+            .unwrap_or_else(|_| "<会话记录不可读>".to_string());
+        // 遗留数据根清理（子进程被 abort ⇒ TempDir 未析构，父进程负责回收）。
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&data_root));
+        format!(
+            "durable 送审轮证据: status={status}, reviewer_provider={reviewer_provider}, \
+             reviewer_run_nodes={reviewer_nodes:?}, provider_start_ledger={ledger:?}, \
+             timeline_node_types={node_types:?}"
+        )
     }
 
     /// 后台排空一条子进程管道直到 EOF（持续读，防管道写满伪超时）。
@@ -268,7 +381,8 @@ pub(crate) mod ws_small_stack {
                  （只收到初始 session_state 判失败）"
             ));
         }
-        if evidence.expects_provider_locked && evidence.provider_locked_at >= evidence.first_output_at
+        if evidence.expects_provider_locked
+            && evidence.provider_locked_at >= evidence.first_output_at
         {
             return Err(format!(
                 "causal order violated: provider_locked must precede run output \
@@ -389,6 +503,16 @@ pub(crate) mod ws_small_stack {
     // 显式 2 MiB 覆盖 RUST_MIN_STACK 环境值，记录线程 identity）。
     // -----------------------------------------------------------------------
     fn run_ws_child_scenario(scenario: &str) {
+        run_ws_child_scenario_with_stack(scenario, 2 * 1024 * 1024);
+    }
+
+    /// 子模式执行体（显式 worker 栈可参数化）。
+    ///
+    /// 门禁固定 2 MiB（设计 §6.1 C 行 / §6.2：显式值覆盖仓级
+    /// `RUST_MIN_STACK=32 MiB`）；`8 MiB` **仅供对照面**使用——同一送审轮
+    /// 场景在宽栈上跑通，证明「2 MiB 的红是栈深所致、且送审轮确实被走到」，
+    /// **不是**门禁放宽（门禁永远是 2 MiB 那条）。
+    fn run_ws_child_scenario_with_stack(scenario: &str, stack_bytes: usize) {
         if std::env::var_os(WS_PROVIDER_CASE_CHILD_MODE_ENV).is_none() {
             // 常规套件直通：本用例是隔离入口，不是常规断言面。
             return;
@@ -396,25 +520,28 @@ pub(crate) mod ws_small_stack {
         let root_thread = std::thread::current().id();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
-            .thread_stack_size(2 * 1024 * 1024)
+            .thread_stack_size(stack_bytes)
             .enable_all()
             .build()
-            .expect("ws child explicit 2 MiB runtime");
+            .expect("ws child explicit stack runtime");
         let scenario = scenario.to_string();
+        let stack_mib = stack_bytes / (1024 * 1024);
         let outcome = rt.block_on(async {
             tokio::spawn(async move {
                 // 记录线程 identity：入口必须运行在 rt.spawn worker（显式
-                // 2 MiB），不在 block_on 根线程（设计 §6.2）。
+                // 栈值），不在 block_on 根线程（设计 §6.2）。
                 let entry_thread = std::thread::current().id();
-                let entry_thread_name =
-                    std::thread::current().name().unwrap_or("<unnamed>").to_string();
+                let entry_thread_name = std::thread::current()
+                    .name()
+                    .unwrap_or("<unnamed>")
+                    .to_string();
                 assert_ne!(
                     root_thread, entry_thread,
                     "入口必须运行在 rt.spawn worker，而非 block_on 根线程"
                 );
                 println!(
-                    "[ws-2mib] thread identity: block_on_root={root_thread:?} \
-                     entry_worker={entry_thread:?} name={entry_thread_name} stack=2MiB"
+                    "[ws-{stack_mib}mib] thread identity: block_on_root={root_thread:?} \
+                     entry_worker={entry_thread:?} name={entry_thread_name} stack={stack_mib}MiB"
                 );
                 match scenario.as_str() {
                     "success" => Ok(()),
@@ -430,6 +557,7 @@ pub(crate) mod ws_small_stack {
                     "story_author" => scenario_cases::run_story_author_scenario().await,
                     "plan_relay" => scenario_cases::run_plan_relay_scenario().await,
                     "sc_manual_gate" => scenario_cases::run_sc_manual_gate_scenario().await,
+                    "review_round" => super::ws_scenario_review::run_review_round_scenario().await,
                     other => unreachable!("unknown ws child scenario: {other}"),
                 }
             })
@@ -475,6 +603,22 @@ pub(crate) mod ws_small_stack {
     #[test]
     fn provider_run_2mib_real_ws_child_sc_manual_gate() {
         run_ws_child_scenario("sc_manual_gate");
+    }
+
+    /// 送审轮子模式入口（常规套件直通；隔离执行体见
+    /// `provider_run_2mib_real_ws_review_round_gate`）。
+    #[test]
+    fn provider_run_2mib_real_ws_child_review_round() {
+        run_ws_child_scenario("review_round");
+    }
+
+    /// 送审轮**对照面**子模式入口（8 MiB worker，**非门禁**）：同一场景在宽栈
+    /// 上必须跑通并观测到 reviewer 的真实 validated start——用来证明「2 MiB 的
+    /// 红确实发生在送审轮、且送审轮真被走到」，排除「场景根本没走到评审轮就
+    /// 别处崩了」的假阳性。门禁本身永远是 2 MiB 那条。
+    #[test]
+    fn provider_run_8mib_ws_review_round_control() {
+        run_ws_child_scenario_with_stack("review_round", 8 * 1024 * 1024);
     }
 
     #[test]
@@ -557,5 +701,45 @@ pub(crate) mod ws_small_stack {
                 "C 层真实 WS 场景 {case_suffix} 未通过（四条件证据见子输出）: {result:?}"
             );
         }
+    }
+
+    /// C 层送审轮门禁（当前代码下**预期红**）：真实 WS 深链 + 显式 2 MiB
+    /// worker 走到 ReviewOnly 送审轮 ⇒ 真机爆栈（SIGABRT / 栈溢出）被隔离器
+    /// 捕获并归因「stack overflow」。
+    ///
+    /// 本用例断言的是**正确行为**（送审轮必须能在 2 MiB worker 上跑完并留下
+    /// 四条证据），当前产品未修 ⇒ 红；治本落地后自动转绿。**不得**为了让本
+    /// 用例变绿而放宽 worker 栈、跳过送审轮或把「只收到 locked」当通过。
+    #[test]
+    fn provider_run_2mib_real_ws_review_round_gate() {
+        let result = run_isolated_provider_case(
+            "provider_run_2mib_real_ws_child_review_round",
+            std::time::Duration::from_secs(300),
+        );
+        assert!(
+            result.is_ok(),
+            "C 层送审轮门禁未通过（当前代码预期红：送审轮深链在 2 MiB worker 上\
+             栈溢出，被隔离器判失败；治本落地后应转绿）: {result:?}"
+        );
+    }
+
+    /// 送审轮**对照面**（8 MiB worker，**非门禁**）：同一送审轮场景在宽栈上
+    /// 必须跑通——由此证明 2 MiB 门禁的红确实落在送审轮（reviewer 的真实
+    /// validated start 被观测到、评审轮完成、durable 证据齐备），而不是「场景
+    /// 没走到评审轮就崩了」的假阳性。
+    ///
+    /// 本用例**不**放宽门禁：2 MiB 那条（`provider_run_2mib_real_ws_review_round_gate`）
+    /// 才是判据；本条只是对照说明。
+    #[test]
+    fn provider_run_8mib_ws_review_round_control_gate() {
+        let result = run_isolated_provider_case(
+            "provider_run_8mib_ws_review_round_control",
+            std::time::Duration::from_secs(300),
+        );
+        assert!(
+            result.is_ok(),
+            "送审轮对照面（8 MiB worker）未通过——说明场景本身有问题（未真正走到\
+             送审轮或评审轮未完成），不能作为 2 MiB 红门的归因依据: {result:?}"
+        );
     }
 }
