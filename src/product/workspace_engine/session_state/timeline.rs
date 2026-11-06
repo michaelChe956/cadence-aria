@@ -434,9 +434,7 @@ impl WorkspaceEngine {
             // 与终态 status 自相矛盾；无 agent 的工作流节点（如 WorkItemPlanCompile）
             // 的 stage 是「该节点所属的工作流阶段」历史标签（既有断言：compile 节点
             // 收口后仍记 running），不是执行态，不得改写。
-            if is_terminal_status
-                && node.agent.is_some()
-                && node.stage == WsWorkspaceStage::Running
+            if is_terminal_status && node.agent.is_some() && node.stage == WsWorkspaceStage::Running
             {
                 node.stage = ws_stage(&WorkspaceStage::Completed);
             }
