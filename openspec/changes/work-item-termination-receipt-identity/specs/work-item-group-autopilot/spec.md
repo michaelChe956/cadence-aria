@@ -10,7 +10,7 @@ enrollment **换代**（supersede）后**旧代**回执 SHALL 立即失效，新
 
 回执**缺失计划身份**时 ⇒ SHALL **fail-closed 不展示**。
 
-身份源 SHALL 在**终止态仍可得**（终止会清空停点形态投影如 `planControl`）⇒ SHALL NOT 以停点形态为唯一身份源；**本计划被终止时其横幅 SHALL 仍渲染**；旧代 `outcome` SHALL NOT 叠加到新代横幅。
+身份源 SHALL 在**终止态仍可得**（终止会清空停点形态投影）⇒ SHALL NOT 以停点形态为唯一身份源；**本计划被终止时其横幅 SHALL 仍渲染**；旧代 `outcome` 不得叠加到新代横幅。
 
 既有终止语义与文案不变；本 requirement 只约束不得跨计划/跨世代复用回执，SHALL NOT 削弱 REQ-WIGA-09 或推翻 DRG 的「销账 MUST NOT 删除 enrollment 记录」。
 
