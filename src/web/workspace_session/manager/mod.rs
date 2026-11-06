@@ -43,11 +43,6 @@ pub(crate) use lease_diagnostics::lease_diagnostics_path;
 mod lease_diagnostics;
 mod runs;
 
-// REQ-WIGA-17：取消结果三态契约面（计划指定经 manager 导出）。`manager`
-// 为 workspace_session 私有子模块，删除路径（handlers 子树）无法具名引用
-// 该类型，改经 runs.rs 的谓词方法按三态如实分支；上层 re-export 超出本
-// change 文件面，crate 内暂无具名消费点 ⇒ unused_imports 显式豁免。
-#[allow(unused_imports)]
 pub use runs::RunAbortOutcome;
 
 /// REQ-WIGA-17：取消等待 completion 的兜底时长生产默认（30s，毫秒）。

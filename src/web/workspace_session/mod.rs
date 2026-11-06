@@ -9,6 +9,9 @@ pub(crate) use manager::lease_diagnostics_path;
 // 批 2 T3：统一终止服务调用 T2 引擎侧专用取消契约（manager 为私有模块，
 // 经此 crate 内出口；接线后 terminate_plan_engine_side 不再 dead_code）。
 pub(crate) use manager::terminate_plan_engine_side;
+// REQ-WIGA-17：取消结果三态契约面（manager 为私有子模块，删除路径
+// handlers 子树经此 crate 内出口具名 match 三态）。
+pub use manager::RunAbortOutcome;
 pub use manager::{ActiveRun, WorkspaceSessionManager};
 
 #[cfg(test)]

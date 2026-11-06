@@ -8,6 +8,7 @@ use crate::product::entity_operation_store::{
     SharedResourceKey,
 };
 use crate::product::models::{DeletionConfirmation, DeletionConfirmationReason};
+use crate::web::workspace_session::RunAbortOutcome;
 
 /// DELETE /{story-specs|design-specs|work-item-plans}/{id} 的确认参数（plan §0.2）：
 /// 默认 URL 无 query；仅前端确认弹窗同意后显式传 `?confirmed=true`。query 布尔
@@ -173,16 +174,19 @@ async fn cascade_delete_entity(
             // 零副作用、不打任何「取消」字样；Completed 只打事实性打点；
             // TimedOut 只打「取消未在兜底内收口」的事实（不谎称已取消/已
             // 停止），且不因此阻塞删除（按既有独占判定推进）。
-            let outcome = manager.abort_active_run_and_wait_completion().await;
-            if outcome.is_completed() {
-                eprintln!(
-                    "[aria-cancellation] entity delete cancelled in-flight run session_id={session_id}"
-                );
-                run_cancel_settled = true;
-            } else if outcome.is_timed_out() {
-                eprintln!(
-                    "[aria-cancellation] entity delete run cancel did not settle within completion wait timeout session_id={session_id}"
-                );
+            match manager.abort_active_run_and_wait_completion().await {
+                RunAbortOutcome::NoActiveRun => {}
+                RunAbortOutcome::Completed => {
+                    eprintln!(
+                        "[aria-cancellation] entity delete cancelled in-flight run session_id={session_id}"
+                    );
+                    run_cancel_settled = true;
+                }
+                RunAbortOutcome::TimedOut => {
+                    eprintln!(
+                        "[aria-cancellation] entity delete run cancel did not settle within completion wait timeout session_id={session_id}"
+                    );
+                }
             }
         }
     }
