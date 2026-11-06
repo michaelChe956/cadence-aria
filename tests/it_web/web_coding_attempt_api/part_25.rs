@@ -205,6 +205,10 @@ async fn delete_work_item_plan_does_not_claim_cancel_when_completion_times_out()
         .await
         .expect("plan manager in registry");
 
+    // 兜底时长注入为可测级（200ms；生产默认仍 30s——不得为跑得快删掉
+    // 兜底语义，只经 set_run_completion_wait_timeout 注入）。
+    manager.set_run_completion_wait_timeout(std::time::Duration::from_millis(200));
+
     // 假 in-flight run：收口失联——被取消后既不发 completion 信号，也不
     // 释放 scope 共享 flock（run「卡死」仍占删除独占的对手锁）。
     let scope = EntityScope::new(

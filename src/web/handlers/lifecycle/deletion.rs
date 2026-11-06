@@ -166,9 +166,45 @@ async fn cascade_delete_entity(
     //     session_ids，取消不越界。registry 无该 session 的 manager（进程
     //     重启后不在内存）时零动作，删除继续按既有独占判定走——既有行为
     //     的自然延伸。
+    let mut run_cancel_settled = false;
     for session_id in &session_ids {
         if let Some(manager) = state.workspace_sessions.get(session_id).await {
-            manager.abort_active_run_and_wait_completion().await;
+            // REQ-WIGA-17：按取消结果三态如实分支——NoActiveRun 属正常结果，
+            // 零副作用、不打任何「取消」字样；Completed 只打事实性打点；
+            // TimedOut 只打「取消未在兜底内收口」的事实（不谎称已取消/已
+            // 停止），且不因此阻塞删除（按既有独占判定推进）。
+            let outcome = manager.abort_active_run_and_wait_completion().await;
+            if outcome.is_completed() {
+                eprintln!(
+                    "[aria-cancellation] entity delete cancelled in-flight run session_id={session_id}"
+                );
+                run_cancel_settled = true;
+            } else if outcome.is_timed_out() {
+                eprintln!(
+                    "[aria-cancellation] entity delete run cancel did not settle within completion wait timeout session_id={session_id}"
+                );
+            }
+        }
+    }
+    if run_cancel_settled {
+        // REQ-WIGA-17 时序尾隙补足：completion 信号已到 ≠ scope 共享 flock
+        // 已释放（run 收口点与释锁点的先后无契约保证，不得依赖未验证时序
+        // 假设）。有界短退避：≤10 轮、每轮间隔 50ms（合计 ≤500ms），每轮
+        // 一次「取删除独占并立即释放」的探测——探测成功即说明共享锁已释放
+        // （探测不保留 lease、不触碰任何破坏性清理）；Busy/Deleting 退避
+        // 重试，Deleted/Store 交给下方既有循环按既有分支处理；不得无限
+        // 等待或长挂起。
+        for _ in 0..10 {
+            match operations.try_acquire_delete(&scope) {
+                Ok(probe) => {
+                    drop(probe);
+                    break;
+                }
+                Err(EntityOperationError::Busy | EntityOperationError::Deleting) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(EntityOperationError::Deleted | EntityOperationError::Store(_)) => break,
+            }
         }
     }
 

@@ -75,7 +75,7 @@ run 被取消（中止）时，其时间线节点 SHALL **NOT** 以「失败」�
 
 - **WHEN** 取消已发出且该 run 已真实收口
 - **THEN** 删除独占 SHALL 最终取得成功，删除 SHALL NOT 仍以 `entity_busy` 失败
-- **AND** 取消与取锁之间的锁释放时序 SHALL 由实现保证（若存在尾隙，SHALL 以等待 scope 锁释放的短退避补足），SHALL NOT 依赖未验证的时序假设
+- **AND** 取消与取锁之间的锁释放时序 SHALL 由实现保证，SHALL NOT 依赖未验证的时序假设：completion 信号已到而 scope 共享锁尚未释放的尾隙，SHALL 以**有界**短退避补足——每轮一次「取删除独占并立即释放」的探测（探测不保留 lease、不触碰任何破坏性清理），Busy/Deleting 才重试，至多 10 轮、每轮间隔 50ms（合计 ≤500ms），SHALL NOT 无限等待或长挂起
 
 #### Scenario: 取消未真正收口时不得谎称已取消
 
