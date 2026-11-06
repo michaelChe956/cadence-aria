@@ -1,0 +1,15 @@
+schema: spec-driven
+created: 2026-11-06
+goal: 删除工作项组时，先取消该实体绑定的在途 provider run 并等其真实收口，使删除独占可获得；删除不再以 entity_busy 长期阻塞，被中止的 run 在时间线中以「中止」而非「失败」表达
+x-tracker-status: draft
+x-owner-decisions:
+  - id: terminate-must-cancel-inflight-run
+    decided: 2026-11-06
+    decision: 删除工作项组时的「删前终止」必须同时取消该实体绑定的 in-flight provider run 并等待其真实收口（真实 completion），否则删除独占永远抢不到
+    reason: owner 真机（开发期 5173 / 后端 4317）现象——点该 WIG 的「删除」恒报「实体存在进行中的运行或并发写入，请等待收口后重试删除」（HTTP 409 entity_busy），同一时刻自动化登记已被终止（「终止整个自动化」按钮消失）但 provider 仍在继续输出，只有点右下角「终止」让 provider 停下后才删得掉。三层根因（均已核实）：①判定层——删除路径只做了「终止」的一半，deletion.rs:159 的 terminate CAS 只写 enrollment 文件（enabled=false / terminated_at / policy_revision+1 / 账本追加），不碰任何 run / session / provider 进程，而人工终止路径 terminate_plan_engine_side（manager/mod.rs:755-757）会真正调用 abort_active_run_and_wait_completion 等真实 completion，两处「终止」语义不一致；②占用层——真正挡住删除的是 in-flight run 持的 scope 共享 flock（entity_operation_store.rs:154 acquire_run try-shared，删除要 :174 try_acquire_delete 独占）⇒ Busy；③对照层——人工终止路径本来就会取消 in-flight run，删除路径只复用了 terminate 的 CAS
+    consequence: 只改删除路径（deletion.rs:160 在终止 CAS 之后、取删除独占之前插入取消块），复用既有 abort_active_run_and_wait_completion，不造第二套终止语义、不新增任何 HTTP API；不动人工终止路径（REST terminate / WS abort）的既有行为、顺序与文案；不改 enrollment 写入，不物理删除 enrollment 记录（REQ-DRG-18 / REQ-WIGA-VOID-01）；取消返回值必须被检查——「无活跃 run」属正常，「已取消但未真正收口」（30s 兜底超时）时删除不得谎称已取消、也不得因此阻塞删除
+  - id: no-delete-while-running-but-deletable-after-terminate
+    decided: 2026-11-06
+    decision: owner 既有裁决「执行中禁删保持现状」不变——run 还在跑时不得删；本 change 是让「终止」先把 run 停掉，使终止后可删；不新增、不放松任何删除前置条件
+    reason: 缺陷的根因不是「删除前置条件太严」，而是删除路径的「终止」只做了 CAS 未取消在途 run（见上一条裁决的根因链）；若直接放宽删除前置条件（允许 run 在跑时删），等于取消互斥与 REQ-DEL-06 的同 scope writer 互斥，会引入「run 仍在跑时开始破坏性清理」的新风险面；而「终止 ⇒ run 停 ⇒ 独占可获得」的路径已在真机被验证可行（owner 点右下角「终止」后 provider 立即停止输出，scope 锁释放，随后删除成功，账本留 void-enrollment 条目）
+    consequence: 删除前置条件集合一字不改（REQ-DEL-04 确认门禁、REQ-DEL-05 coding attempt 存在即拒删、REQ-DEL-06 同 scope writer 互斥均保持）；本 change 只补齐 REQ-DEL-06 中「writer 恰好是该实体自身绑定的自动化 run」这一支的例外语义——删除路径先取消该 run 并等真实收口，再取删除独占；取消未真正收口时 MUST 明确报出占用者，MUST NOT 在该 run 仍在跑时开始破坏性清理
