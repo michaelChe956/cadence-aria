@@ -371,7 +371,9 @@ impl FrameCollector {
                 second_hit = Some(frame.clone());
             }
             if first_hit.is_some() && second_hit.is_some() {
-                return (first_hit.expect("first hit"), second_hit.expect("second hit"));
+                let first_hit = first_hit.unwrap_or_else(|| unreachable!("first hit 已判定"));
+                let second_hit = second_hit.unwrap_or_else(|| unreachable!("second hit 已判定"));
+                return (first_hit, second_hit);
             }
         }
         panic!(
