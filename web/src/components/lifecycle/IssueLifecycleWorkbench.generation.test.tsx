@@ -29,6 +29,21 @@ vi.mock("../shared/MonacoViewer", () => ({
   ),
 }));
 
+/**
+ * 未确认 design 的人工 prepare 入口：Work Item 阶段空面板「准备 Work Item Plan」。
+ * ⑤ 之后已确认 design 的弹窗恒为「启用自动化」（无「创建并打开 Workspace」），
+ * 人工 prepare 路径只剩未确认 design；而 Design 抽屉的「生成 Work Item」仅对
+ * 已确认 design 出现（LifecycleCardDrawer：status === "confirmed"），所以未确认
+ * design 只能从该空面板进入（需配合 `designDraftInitially` + `workItemPlans: []`）。
+ */
+async function openDraftDesignPlanDialog(user: UserEvent) {
+  await user.click(await screen.findByTestId("stage-tab-work_item"));
+  await user.click(
+    screen.getByRole("button", { name: "准备 Work Item Plan" }),
+  );
+  return await screen.findByRole("dialog", { name: "Work Item Plan 配置" });
+}
+
 describe("IssueLifecycleWorkbench generation actions", () => {
   installIssueLifecycleWorkbenchTestHooks();
 
@@ -121,21 +136,19 @@ describe("IssueLifecycleWorkbench generation actions", () => {
     ).toBeInTheDocument();
   });
 
-  it("prepares work item plan from design spec drawer and opens workspace", async () => {
-    const fetchMock = lifecycleFetch();
+  it("prepares work item plan from the work item stage panel of an unconfirmed design and opens workspace", async () => {
+    const fetchMock = lifecycleFetch({
+      designDraftInitially: true,
+      workItemPlans: [],
+    });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const onOpenWorkspace = vi.fn();
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    // Task 6：Design 卡片在 Design 阶段页内。
-    await user.click(await screen.findByTestId("stage-tab-design"));
-    await user.click(screen.getByRole("button", { name: "前端提示设计" }));
-    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Work Item Plan 配置",
-    });
+    // 人工 prepare 路径只存在于未确认 design（见 openDraftDesignPlanDialog）。
+    const dialog = await openDraftDesignPlanDialog(user);
     await user.click(
       within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
     );
@@ -256,18 +269,16 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
   it("sends default work item split options after confirming the dialog", async () => {
     const user = userEvent.setup();
-    const fetchMock = lifecycleFetch();
+    const fetchMock = lifecycleFetch({
+      designDraftInitially: true,
+      workItemPlans: [],
+    });
     vi.stubGlobal("fetch", fetchMock);
     const onOpenWorkspace = vi.fn();
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(await screen.findByTestId("stage-tab-design"));
-    await user.click(screen.getByText("前端提示设计"));
-    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Work Item Plan 配置",
-    });
+    const dialog = await openDraftDesignPlanDialog(user);
 
     await user.click(
       within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
@@ -300,18 +311,16 @@ describe("IssueLifecycleWorkbench generation actions", () => {
 
   it("sends selected work item split options after confirming the dialog", async () => {
     const user = userEvent.setup();
-    const fetchMock = lifecycleFetch();
+    const fetchMock = lifecycleFetch({
+      designDraftInitially: true,
+      workItemPlans: [],
+    });
     vi.stubGlobal("fetch", fetchMock);
     const onOpenWorkspace = vi.fn();
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    await user.click(await screen.findByTestId("stage-tab-design"));
-    await user.click(screen.getByText("前端提示设计"));
-    await user.click(screen.getByRole("button", { name: "生成 Work Item" }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Work Item Plan 配置",
-    });
+    const dialog = await openDraftDesignPlanDialog(user);
 
     await user.click(within(dialog).getByLabelText("包含 E2E 测试 Work Item"));
     await user.click(
@@ -716,7 +725,10 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
 
   it("sends the plan creation request with the providers chosen in the dialog", async () => {
     const user = userEvent.setup();
-    const fetchMock = lifecycleFetch();
+    const fetchMock = lifecycleFetch({
+      designDraftInitially: true,
+      workItemPlans: [],
+    });
     vi.stubGlobal("fetch", fetchMock);
     const onOpenWorkspace = vi.fn();
     writeProviderDefaults("codex", "codex");
@@ -724,7 +736,7 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    const dialog = await openPlanDialog(user);
+    const dialog = await openDraftDesignPlanDialog(user);
     await user.selectOptions(
       within(dialog).getByLabelText("Author Provider"),
       "pi",
@@ -746,13 +758,16 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
 
   it("omits provider fields when no user default is stored", async () => {
     const user = userEvent.setup();
-    const fetchMock = lifecycleFetch();
+    const fetchMock = lifecycleFetch({
+      designDraftInitially: true,
+      workItemPlans: [],
+    });
     vi.stubGlobal("fetch", fetchMock);
     setProviderAvailability({ codex: true });
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
 
-    const dialog = await openPlanDialog(user);
+    const dialog = await openDraftDesignPlanDialog(user);
     expect(within(dialog).getByLabelText("Author Provider")).toHaveValue("");
     expect(within(dialog).getByLabelText("Reviewer Provider")).toHaveValue("");
     await user.click(
@@ -774,7 +789,7 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
   it("keeps the plan dialog open and shows the provider_unavailable message inline", async () => {
     const user = userEvent.setup();
     const fetchMock = failRequests(
-      lifecycleFetch(),
+      lifecycleFetch({ designDraftInitially: true, workItemPlans: [] }),
       "/work-item-plans:prepare",
       "Provider Codex 当前不可用，请重新选择",
     );
@@ -784,7 +799,7 @@ describe("IssueLifecycleWorkbench plan provider snapshots", () => {
 
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
 
-    const dialog = await openPlanDialog(user);
+    const dialog = await openDraftDesignPlanDialog(user);
     await user.click(
       within(dialog).getByRole("button", { name: "创建并打开 Workspace" }),
     );
