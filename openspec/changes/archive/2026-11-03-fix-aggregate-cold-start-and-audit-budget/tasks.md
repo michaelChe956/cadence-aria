@@ -5,18 +5,18 @@
 > `validate --specs` 78 passed / 0 failed）。
 > 勾选口径与逐条文件:行级证据见 `cadence/notes/2026-11-03_收口_行数登记表改动清单_v1.0.md` §M.1。
 >
-> **剩余未勾 6 条及原因**（2026-11-04 补记：12.1 已核验补勾，「待统一绿测」类现为 **0** 条；出处 `cadence/notes/2026-11-04_待绿测5条核验补勾_v1.0.md` §1.5）：
+> **剩余未勾 6 条及原因**（2026-11-04 补记：12.1 已核验补勾，「待统一绿测」类现为 **0** 条；出处 `cadence/notes/2026-11-04_待绿测5条核验补勾_v1.0.md` §1.5）：**2026-11-07 补记：11.10 / 12.3 / 12.4 / 12.5 / 12.6 / 12.7 已实测通过并补勾（本文件 §11 / §12 证据行）；本 change 剩余未勾 0 条**
 > · **12.1** —— ✅ 2026-11-04 收口统一绿测核验后补勾完毕，不再计入未勾（同上 §1.5）
-> · **12.3–12.7**（5 条）真机验收 —— **⏳ 待实做（Main 真机验收批次：受控环境操控 + 浏览器实测；逐条做、逐条勾、逐条留证据）**
+> · **12.3–12.7**（5 条）真机验收 —— **⏳ 待实做（Main 真机验收批次：受控环境操控 + 浏览器实测；逐条做、逐条勾、逐条留证据）**（**2026-11-07 补记：12.3 / 12.4 / 12.5 / 12.6 / 12.7 已实测通过并补勾**）
 >   ⇒ 本机四家 provider（`pi` / `codex` / `kimi` / `claude`）+ `codegraph` **均已安装**（`command -v` 实测：前四家在 `/home/michaelche/.local/share/fnm/aliases/default/bin/` 与 `/home/michaelche/.kimi-code/bin/`，`codegraph` 同 fnm 路径、全局包 `@colbymchenry/codegraph@1.6.2`）
 >   ⇒ **不是环境不具备，是尚未执行**；下列 5 条走**受控环境操控**（临时改 PATH / 临时造目录，**每条做完复原**）
 >   逐条怎么做：
->   · **12.3**「只装 pi 的机器」 ⇒ 临时把 `PATH` 掩到**只暴露 `pi`**（用临时 PATH 覆盖 + 软链白名单目录），跑聚合初始化 → 中文指引 +「核验 Pi」（**做完复原 PATH**）
->   · **12.4**「全程只用 Pi 的三个 turn」 ⇒ 用**真实 `pi`**（已装）跑满三个 turn 并核对 `input.provider == "pi"`；**需确认 `pi` 已登录** —— 若未登录，则该条明确记为「**需登录态**」（登录态是唯一可能真缺的外部前提，其余均不缺）
->   · **12.5**「移除 pi 后重试」 ⇒ 临时从 `PATH` **掩掉 `pi`**（其余三家保留）后重试，逐家点名走 fallback（**做完复原 PATH**）
->   · **12.6**「无 codegraph 的干净机器」 ⇒ 临时把 `codegraph` 从 `PATH` **移开**后初始化 → **一条**中文提示 + 装好重试（**做完复原 PATH**）
->   · **12.7**「成员仓有大构建产物」 ⇒ **造一个真的大产物目录**（本地生成足量构建产物塞进成员仓）→ 触发行数/体积预检失败面：排行呈现 + 两条出路
-> · **11.10** 聚合初始化失败面（`BootstrapFailureLine.tsx`）仍无【安装】按钮，只有【重新检测】；
+>   · **12.3**「只装 pi 的机器」 ⇒ 临时把 `PATH` 掩到**只暴露 `pi`**（用临时 PATH 覆盖 + 软链白名单目录），跑聚合初始化 → 中文指引 +「核验 Pi」（**做完复原 PATH**）（✅ 2026-11-07 已勾）
+>   · **12.4**「全程只用 Pi 的三个 turn」 ⇒ 用**真实 `pi`**（已装）跑满三个 turn 并核对 `input.provider == "pi"`；**需确认 `pi` 已登录** —— 若未登录，则该条明确记为「**需登录态**」（登录态是唯一可能真缺的外部前提，其余均不缺）（✅ 2026-11-07 已勾）
+>   · **12.5**「移除 pi 后重试」 ⇒ 临时从 `PATH` **掩掉 `pi`**（其余三家保留）后重试，逐家点名走 fallback（**做完复原 PATH**）（✅ 2026-11-07 已勾）
+>   · **12.6**「无 codegraph 的干净机器」 ⇒ 临时把 `codegraph` 从 `PATH` **移开**后初始化 → **一条**中文提示 + 装好重试（**做完复原 PATH**）（✅ 2026-11-07 已勾）
+>   · **12.7**「成员仓有大构建产物」 ⇒ **造一个真的大产物目录**（本地生成足量构建产物塞进成员仓）→ 触发行数/体积预检失败面：排行呈现 + 两条出路（✅ 2026-11-07 已勾）
+> · **11.10** 聚合初始化失败面（`BootstrapFailureLine.tsx`）仍无【安装】按钮，只有【重新检测】；（✅ 2026-11-07 已勾 —— owner 真机实测通过；以下 2026-11-04 旧口径注记按原文保留存证，不代表当前状态）
 >   registration wizard 面**已有** codegraph 安装按钮
 >   （`LogicalCodebaseRegistrationWizard.tsx:543-552` ⇒ `ProviderInstallActionButton target="codegraph"`）
 >   ⇒ **聚合初始化面的【安装】按钮待立项补齐**，本轮不勾
@@ -29,7 +29,7 @@
 >       （`CodegraphInstallEntry.tsx`）与登记向导的 codegraph 前置引导**均未动**，
 >       API 字段与 11.10 的「codegraph 纳入同一安装机制（阿里镜像）」也未动
 >     · ⇒ **11.10 仍保持未勾**：其「安装按钮出现在 codegraph 缺失的失败面上」这一条
->       （聚合初始化失败面 `BootstrapFailureLine.tsx` 仍只有【重新检测】）**尚未落地**，待立项补齐
+>       （聚合初始化失败面 `BootstrapFailureLine.tsx` 仍只有【重新检测】）**尚未落地**，待立项补齐（**2026-11-07 已被上方 11.10 补勾取代**）
 >     · 证据：`cadence/notes/2026-11-04_前端_一键核验按钮位置与添加代码库布局说明_v1.0.md`、
 >       `cadence/notes/2026-11-04_真机验收发现_冷启动推进与聚合索引与codegraph与布局说明_v1.0.md`
 
@@ -165,7 +165,8 @@
 - [x] 11.7 失败分类与兜底：权限不足 / 网络或镜像不可达 / 包名不存在 / 其它四类，各自中文提示 + **手动命令**（npm 类带 `--registry=<registry>`；Kimi 为官方脚本命令）；MUST NOT 自动 sudo
 - [x] 11.8 Kimi 执行前 UI 必须明确告知「将执行来自 code.kimi.com 的安装脚本」
 - [x] 11.9 安装 ≠ 核验：装完仍需走既有显式核验通道；MUST NOT 因安装成功自动标记能力已确认，也 MUST NOT 自动触发核验探针
-- [ ] 11.10 codegraph 纳入同一安装机制（阿里镜像），安装按钮出现在 codegraph 缺失的失败面上
+- [x] 11.10 codegraph 纳入同一安装机制（阿里镜像），安装按钮出现在 codegraph 缺失的失败面上
+      ✅ 2026-11-07 owner 真机实测通过（owner 回报并授权勾选；owner 侧操作端口 5173 开发期 / 4317 后端）。★证据文件待补★ —— 本行证据来自 owner 回报，未附截图/日志文件；owner 提供后再补链接。
 - [x] 11.11 扩充 `providers.rs:83-107` 的 `install_hint`（补 npm 包名 / Kimi 脚本地址 / 阿里镜像）
 
 ## 12. 回归、门禁与真机验收
@@ -175,9 +176,14 @@
 - [x] 12.1 全部单测绿（含行数门禁 `large_file_guard`）；隔离与纪律测试（`assert_aggregate_scope_discipline` 等）绿；前端 vitest 全绿
   - ✅ 2026-11-04 补勾（收口统一绿测实测）：`cargo test --locked --lib` → 5964 passed / 0 failed / 7 ignored / 0 measured，101.33s（`assert_aggregate_scope_discipline` 等隔离与纪律测试为 lib 单测，定义于 `src/product/logical_codebase/coordinator_provider_turn.inc.rs:678`，含于其中）；`cargo test --locked --all-targets` → lib 5964/0（99.91s）、large_file_guard 2 passed / 0 failed（product_source_and_test_files_stay_under_line_limit ok；行数门禁 109 条登记 · 超自身上限 0 · 未登记且超 1200 的 0 · 路径升序 · cap 全 >1200）；`pnpm test` → 260 files / 2662 tests passed / exit 0（29.18s）。仅剩 2 条红均为【有意登记】：① it_core 197 passed / 1 failed = `workspace_ws_abort_with_pi_reaches_cancelled_state_and_stops_output`（`tests/it_core/workspace_ws_integration/part_04.rs:291`；断言钉 adapter 侧观察点 (ProviderType::Pi, ProviderPermissionMode::Auto)，而 validated 启动按设计只外借 launch_view() 的 role/working_dir/prompt ⇒ 无等价可观察点 ⇒ 已裁定暂留红、待立项；出处：`cadence/notes/2026-11-03_全量失败收尾_it_core_ws_integration_v1.0.md` §6、`cadence/notes/2026-11-03_越线拆分_it_core_part05_v1.0.md`）；② it_web 593 passed / 1 failed = `evidence_query::invalid_query_returns_422_and_uninitialized_index_returns_503`（`tests/it_web/evidence_query/part_03.rs:43`；环境态：codegraph 1.6.2 对未建索引目录恒 exit 0 ⇒「未建索引 ⇒ 503」本机不可复现，产品契约另由 `src/web/handlers/evidence_error_mapping.rs` 的单测钉住；出处：`cadence/notes/2026-11-03_全量失败收尾_it_web_派A3_v1.0.md` §3.1）
 - [x] 12.2 明确不改：`with_snapshot_budget()` 生产接线、能力核验「不点击不运行探针」契约、rebuild/sync 的 Degraded 语义、「已初始化」判定文件、B-5 残项 R1 / R2（owner 裁定不做，保持原样）
-- [ ] 12.3 真机：只装 pi 的机器点聚合初始化 → 中文指引 + 「核验 Pi」按钮，**不出现**英文 `launch cell is Unknown`
-- [ ] 12.4 真机：点核验 → 点重试 → 三个 provider turn 依次完成，**全程只用 Pi**；operation JSON 里 `input.provider == "pi"`、`provider_selection.candidates` 四家齐全
-- [ ] 12.5 真机：移除 pi 后重试 → 失败面逐家点名「Pi 未安装」+ 另外三家各自缺什么；**不再**一句话归因到 claude
-- [ ] 12.6 真机：无 codegraph 的干净机器点「准备」→ **一条**中文提示（含 `npm i -g @colbymchenry/codegraph` 与「装好后点重试」），无三连红；装好后重试 → 推进到下一个真实失败面
-- [ ] 12.7 真机：成员仓有大构建产物 → 预检失败面含大项排行 + 成员仓 + 两条出路；按指引排除后重试 → 预检通过
+- [x] 12.3 真机：只装 pi 的机器点聚合初始化 → 中文指引 + 「核验 Pi」按钮，**不出现**英文 `launch cell is Unknown`
+      ✅ 2026-11-07 owner 真机实测通过（owner 回报并授权勾选；owner 侧操作端口 5173 开发期 / 4317 后端）。受控环境：临时 PATH 覆盖/移开对应可执行文件，测毕已复原 PATH。★证据文件待补★ —— 本行证据来自 owner 回报，未附截图/日志文件；owner 提供后再补链接。
+- [x] 12.4 真机：点核验 → 点重试 → 三个 provider turn 依次完成，**全程只用 Pi**；operation JSON 里 `input.provider == "pi"`、`provider_selection.candidates` 四家齐全
+      ✅ 2026-11-07 owner 真机实测通过（owner 回报并授权勾选；owner 侧操作端口 5173 开发期 / 4317 后端）。★证据文件待补★ —— 本行证据来自 owner 回报，未附截图/日志文件；owner 提供后再补链接。
+- [x] 12.5 真机：移除 pi 后重试 → 失败面逐家点名「Pi 未安装」+ 另外三家各自缺什么；**不再**一句话归因到 claude
+      ✅ 2026-11-07 owner 真机实测通过（owner 回报并授权勾选；owner 侧操作端口 5173 开发期 / 4317 后端）。受控环境：临时 PATH 覆盖/移开对应可执行文件，测毕已复原 PATH。★证据文件待补★ —— 本行证据来自 owner 回报，未附截图/日志文件；owner 提供后再补链接。
+- [x] 12.6 真机：无 codegraph 的干净机器点「准备」→ **一条**中文提示（含 `npm i -g @colbymchenry/codegraph` 与「装好后点重试」），无三连红；装好后重试 → 推进到下一个真实失败面
+      ✅ 2026-11-07 owner 真机实测通过（owner 回报并授权勾选；owner 侧操作端口 5173 开发期 / 4317 后端）。受控环境：临时 PATH 覆盖/移开对应可执行文件，测毕已复原 PATH。★证据文件待补★ —— 本行证据来自 owner 回报，未附截图/日志文件；owner 提供后再补链接。
+- [x] 12.7 真机：成员仓有大构建产物 → 预检失败面含大项排行 + 成员仓 + 两条出路；按指引排除后重试 → 预检通过
+      ✅ 2026-11-07 owner 真机实测通过（owner 回报并授权勾选；owner 侧操作端口 5173 开发期 / 4317 后端）。★证据文件待补★ —— 本行证据来自 owner 回报，未附截图/日志文件；owner 提供后再补链接。
 - [x] 12.8 契约与留痕：本 change 的 proposal / design / 五份 spec delta / tasks；归档前补独立审查结论
