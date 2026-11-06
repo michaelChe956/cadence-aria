@@ -393,10 +393,13 @@ async fn bootstrap_project_repo_issue_and_specs(
         .as_str()
         .expect("bootstrap initialized repository id");
     // 块3（remove-single-repository-path）：issue 必须挂 logical_codebase_id 归属。
-    // 按生产 v1.2→v1.3 身份迁移把 repository 升成 LC 权威，再经生产 rebuild
-    // 端点建 active 聚合索引（generate 经 PlanningContextResolver 读取）；
-    // story/design generate 显式钉 involved（REQ-PLN-04 确认门）。codegraph
-    // sync 与并行夹具互踩 ⇒ 持 crate 级锁串行。
+    // 按生产 v1.2→v1.3 身份迁移把 repository 升成 LC 权威，再经**生产聚合索引操作
+    // + 假 CodeGraph CLI**（`aggregate_index_fixture`）建 active 聚合索引（generate
+    // 经 PlanningContextResolver 读取）；story/design generate 显式钉 involved
+    // （REQ-PLN-04 确认门）。夹具不真跑 `codegraph sync .`（本机重活：抢全局
+    // `/tmp/.codegraph` 锁 + 吃 30s 增量预算 ⇒ 422 codegraph_timeout）；假 CLI 只替换
+    // CLI 应答，真实 git 成员快照 / 成员覆盖校验 / durable 世代落盘 / active 投影全
+    // 走生产链路。rebuild 端点本身的行为覆盖由 `web_aggregate_index_api` 承担。
     let bootstrap_root = {
         let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
         let (status, info) =
@@ -412,18 +415,10 @@ async fn bootstrap_project_repo_issue_and_specs(
         let lc_id = cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
             "project_0001",
         );
-        let (status, index_rebuild) = request_json(
-            app.clone(),
-            Method::POST,
-            &format!(
-                "/api/projects/project_0001/logical-codebases/{lc_id}/aggregate-indexes/rebuild"
-            ),
-            json!({}),
-        )
-        .await;
-        assert!(
-            status.is_success(),
-            "bootstrap index rebuild failed: {index_rebuild}"
+        crate::aggregate_index_fixture::seed_active_aggregate_index(
+            &app_paths,
+            "project_0001",
+            &lc_id,
         );
         let involved: Vec<String> =
             cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(app_paths)
