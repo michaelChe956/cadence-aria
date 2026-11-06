@@ -51,9 +51,9 @@ pub(crate) use provider_run::{
 pub(crate) use provider_run::{
     ArmDrive, ArmExit, PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS, drive_author_arm,
     drive_author_choice_followup_arm, drive_human_gate_sc_revision_arm, drive_legacy_outline_arm,
-    drive_review_only_arm, drive_revision_arm, drive_single_candidate_author_arm,
-    drive_until_cancelled_settles, provider_run_drive_body, provider_run_task,
-    provider_run_task_body,
+    drive_plan_batch_arm, drive_plan_draft_arm, drive_review_only_arm, drive_revision_arm,
+    drive_single_candidate_author_arm, drive_until_cancelled_settles, provider_run_drive_body,
+    provider_run_task, provider_run_task_body,
 };
 #[cfg(test)]
 pub(crate) use single_candidate::{

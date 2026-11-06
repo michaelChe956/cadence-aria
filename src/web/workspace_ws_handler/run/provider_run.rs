@@ -11,6 +11,19 @@ pub(crate) use entry::{
 mod basic_arms;
 #[path = "provider_run/legacy_outline.rs"]
 mod legacy_outline;
+#[path = "provider_run/plan_batch.rs"]
+mod plan_batch;
+#[path = "provider_run/plan_draft.rs"]
+mod plan_draft;
+#[path = "provider_run/plan_revision.rs"]
+mod plan_revision;
+// 治本门禁（Task 14b）：poll 帧预留体积门禁（与 stack_budget 的未装箱 size
+// 门禁并行，二者不可互相替代）。
+#[cfg(test)]
+#[path = "provider_run/poll_frame_budget.rs"]
+mod poll_frame_budget;
+#[path = "provider_run/run_followups.rs"]
+mod run_followups;
 #[path = "provider_run/sc_manual_revision.rs"]
 mod sc_manual_revision;
 #[path = "provider_run/single_candidate_arm.rs"]
@@ -25,6 +38,10 @@ pub(crate) use basic_arms::{
 };
 #[cfg(test)]
 pub(crate) use legacy_outline::drive_legacy_outline_arm;
+#[cfg(test)]
+pub(crate) use plan_batch::drive_plan_batch_arm;
+#[cfg(test)]
+pub(crate) use plan_draft::drive_plan_draft_arm;
 #[cfg(test)]
 pub(crate) use sc_manual_revision::drive_human_gate_sc_revision_arm;
 #[cfg(test)]

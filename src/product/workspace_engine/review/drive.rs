@@ -15,6 +15,25 @@ use crate::product::workspace_engine::provider_drive::{
     PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT, PendingChoiceRequests,
 };
 use crate::product::workspace_engine::types::ReviewProviderRunFailure;
+use std::pin::Pin;
+
+/// 重子调用装箱助手（治本 Task 14b，栈根修）：被包的 future 在**本助手
+/// 自己的栈帧**内构造，随即装箱到堆——调用方（评审链各层）的 poll 帧里
+/// 只剩胖指针，不再摊住子 future 的构造临时区。
+///
+/// 修前 `drive_review_session_via_gateway_with_window` 的 poll 帧预留
+/// 768,440 B（重子调用的构造临时区之和），是 provider run 爆栈链上的最大
+/// 单帧；逐个装箱后降到目标量级。语义零变化：只是把「构造」挪进助手的
+/// 栈帧、把 future 状态搬到堆。
+#[inline(never)]
+fn boxed_child<'a, F, Fut>(make: F) -> Pin<Box<dyn Future<Output = Fut::Output> + Send + 'a>>
+where
+    F: FnOnce() -> Fut + Send + 'a,
+    Fut: Future + Send + 'a,
+    Fut::Output: Send + 'a,
+{
+    Box::pin(make())
+}
 
 impl WorkspaceEngine {
     /// 批2 Task 20b(决策项⑦):公共入口——reviewer 解析后、一切材料采集
@@ -44,7 +63,7 @@ impl WorkspaceEngine {
                     message: "reviewer_configuration_missing: review run not started".to_string(),
                 })
                 .await;
-            self.finish_failed_run().await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         };
         // T20b:开窗早于材料采集(生产入口无条件;测试内层直调走
@@ -54,8 +73,8 @@ impl WorkspaceEngine {
         let review_target = match self.plan_review_window_worktree() {
             Ok(resolved) => resolved,
             Err(message) => {
-                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                self.finish_failed_run().await;
+                let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                boxed_child(|| self.finish_failed_run()).await;
                 return;
             }
         };
@@ -63,14 +82,14 @@ impl WorkspaceEngine {
             .begin_plan_review_window(&reviewer, review_target)
             .await
         {
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-            self.finish_failed_run().await;
+            let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         }
         self.drive_review_session_with_window(provider, command_rx)
             .await;
         // 统一收口(覆盖成功/失败/中止一切退出;内层已收口时幂等)。
-        self.close_plan_review_window("plan_review_completed").await;
+        boxed_child(|| self.close_plan_review_window("plan_review_completed")).await;
     }
 
     /// 内层承载(批2 Task 20b):公共入口开窗后进入;测试面可直接调用
@@ -90,7 +109,7 @@ impl WorkspaceEngine {
                     message: "reviewer_configuration_missing: review run not started".to_string(),
                 })
                 .await;
-            self.finish_failed_run().await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         };
         let input = match self
@@ -100,24 +119,25 @@ impl WorkspaceEngine {
         {
             Ok(input) => input,
             Err(message) => {
-                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                self.finish_failed_run().await;
+                let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                boxed_child(|| self.finish_failed_run()).await;
                 return;
             }
         };
         if let Some(node_id) = self.active_node_id.clone() {
-            let _ = self
-                .persist_prompt_snapshot(&node_id, input.prompt.clone())
-                .await;
-            self.emit_execution_event(
-                provider_prompt_event(
-                    &node_id,
-                    input.prompt.clone(),
-                    "发送给 Workspace provider 的完整提示词",
-                ),
-                Some(node_id),
-                Some(reviewer.clone()),
-            )
+            let _ =
+                boxed_child(|| self.persist_prompt_snapshot(&node_id, input.prompt.clone())).await;
+            boxed_child(|| {
+                self.emit_execution_event(
+                    provider_prompt_event(
+                        &node_id,
+                        input.prompt.clone(),
+                        "发送给 Workspace provider 的完整提示词",
+                    ),
+                    Some(node_id),
+                    Some(reviewer.clone()),
+                )
+            })
             .await;
         }
         let mut command_rx = command_rx;
@@ -127,8 +147,8 @@ impl WorkspaceEngine {
         // T20b(决策项⑦):provider 启动前同源复验——窗口 Running 且材料
         // 与 baseline 同指纹(fail-closed,不无窗启动)。
         if let Err(message) = self.assert_plan_review_window() {
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-            self.finish_failed_run().await;
+            let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         }
         // F-19：reviewer run 拉起前登记 provider start（诊断面，best-effort）。
@@ -143,25 +163,28 @@ impl WorkspaceEngine {
                 self.cancel.clone(),
             )
             .await;
-        let first_completion = match self
-            .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
-            .await
-        {
+        // 治本（Task 14b）：重子调用装箱——provider 驱动的 future 状态不再内联
+        // 在本函数帧里（本帧只留胖指针；poll 帧预留随之下沉）。
+        let first_result = boxed_child(|| {
+            self.drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
+        })
+        .await;
+        let first_completion = match first_result {
             ReviewProviderRunResult::Completed(completion) => completion,
             ReviewProviderRunResult::Aborted => return,
             ReviewProviderRunResult::Failed(failure) => {
-                self.finish_review_provider_run_failure(failure).await;
+                boxed_child(|| self.finish_review_provider_run_failure(failure)).await;
                 return;
             }
         };
 
         match self.parse_review_completion_for_active_node(&first_completion) {
-            Ok(verdict) => self.complete_review(first_completion, verdict).await,
+            Ok(verdict) => boxed_child(|| self.complete_review(first_completion, verdict)).await,
             // 分类枚举错误必须直接沿 fallback diagnostic → policy fatal
             // 路径收口，不能进入 JSON repair 或人工 gate。
             Err(first_error) if first_error.is_classification_fatal() => {
                 let verdict = fallback_review_verdict(&first_completion, &first_error, false);
-                self.complete_review(first_completion, verdict).await;
+                boxed_child(|| self.complete_review(first_completion, verdict)).await;
             }
             // Kimi 仅复用既有的一次 JSON 等值 repair；Pi 仍不进入 repair。
             Err(first_error)
@@ -177,26 +200,29 @@ impl WorkspaceEngine {
                     Err(_) => {
                         let verdict =
                             fallback_review_verdict(&first_completion, &first_error, false);
-                        self.complete_review(first_completion, verdict).await;
+                        boxed_child(|| self.complete_review(first_completion, verdict)).await;
                         return;
                     }
                 };
                 let repair_node_id = self.active_node_id.clone();
-                self.emit_execution_event(
-                    structured_output_repair_event(
-                        ProviderExecutionEventStatus::Started,
-                        first_error.code(),
-                    ),
-                    repair_node_id.clone(),
-                    Some(reviewer.clone()),
-                )
+                boxed_child(|| {
+                    self.emit_execution_event(
+                        structured_output_repair_event(
+                            ProviderExecutionEventStatus::Started,
+                            first_error.code(),
+                        ),
+                        repair_node_id.clone(),
+                        Some(reviewer.clone()),
+                    )
+                })
                 .await;
                 let repair_input = self.attach_tool_policy_audit(repair_input);
                 // T20b:repair 入口同窗复验(恢复成功不洗白;窗口失效
                 // 即停,不换窗续跑)。
                 if let Err(message) = self.assert_plan_review_window() {
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                    self.finish_failed_run().await;
+                    let _ =
+                        boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                    boxed_child(|| self.finish_failed_run()).await;
                     return;
                 }
                 let repair_session = provider
@@ -216,30 +242,34 @@ impl WorkspaceEngine {
                 let repaired_completion = match repair_result {
                     ReviewProviderRunResult::Completed(completion) => completion,
                     ReviewProviderRunResult::Aborted => {
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                first_error.code(),
-                            ),
-                            repair_node_id,
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    first_error.code(),
+                                ),
+                                repair_node_id,
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         return;
                     }
                     ReviewProviderRunResult::Failed(_) => {
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                first_error.code(),
-                            ),
-                            repair_node_id,
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    first_error.code(),
+                                ),
+                                repair_node_id,
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         let verdict =
                             fallback_review_verdict(&first_completion, &first_error, true);
-                        self.complete_review(first_completion, verdict).await;
+                        boxed_child(|| self.complete_review(first_completion, verdict)).await;
                         return;
                     }
                 };
@@ -259,30 +289,34 @@ impl WorkspaceEngine {
                             structured_output: repaired_completion.structured_output,
                             provider_session_id: repaired_completion.provider_session_id,
                         };
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Completed,
-                                first_error.code(),
-                            ),
-                            repair_node_id.clone(),
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Completed,
+                                    first_error.code(),
+                                ),
+                                repair_node_id.clone(),
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
-                        self.complete_review(normalized, verdict).await;
+                        boxed_child(|| self.complete_review(normalized, verdict)).await;
                     }
                     Ok(_) => {
                         let error = ReviewCompletionError::RepairPayloadChanged;
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                error.code(),
-                            ),
-                            repair_node_id.clone(),
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    error.code(),
+                                ),
+                                repair_node_id.clone(),
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         let verdict = fallback_review_verdict(&first_completion, &error, true);
-                        self.complete_review(first_completion, verdict).await;
+                        boxed_child(|| self.complete_review(first_completion, verdict)).await;
                     }
                     Err(second_error) => {
                         let normalized = ProviderCompletion {
@@ -294,17 +328,19 @@ impl WorkspaceEngine {
                             structured_output: repaired_completion.structured_output,
                             provider_session_id: repaired_completion.provider_session_id,
                         };
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                second_error.code(),
-                            ),
-                            repair_node_id,
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    second_error.code(),
+                                ),
+                                repair_node_id,
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         let verdict = fallback_review_verdict(&normalized, &second_error, true);
-                        self.complete_review(normalized, verdict).await;
+                        boxed_child(|| self.complete_review(normalized, verdict)).await;
                     }
                 }
             }
@@ -325,8 +361,9 @@ impl WorkspaceEngine {
                 };
                 // T20b:静默重试同窗复验(不换窗、不清窗)。
                 if let Err(message) = self.assert_plan_review_window() {
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                    self.finish_failed_run().await;
+                    let _ =
+                        boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                    boxed_child(|| self.finish_failed_run()).await;
                     return;
                 }
                 let retry_session = provider
@@ -347,7 +384,7 @@ impl WorkspaceEngine {
             }
             Err(error) => {
                 let verdict = fallback_review_verdict(&first_completion, &error, false);
-                self.complete_review(first_completion, verdict).await;
+                boxed_child(|| self.complete_review(first_completion, verdict)).await;
             }
         }
     }
@@ -368,9 +405,9 @@ impl WorkspaceEngine {
         // Task 2(REQ-ENV-14,设计 A 条目 3):多仓(lc)形态不开评审窗——
         // gateway 版公共入口同构直入内层承载,材料断言替代窗口断言。
         if self.is_logical_codebase_issue() {
-            return self
-                .drive_review_session_via_gateway_with_window(command_rx)
-                .await;
+            // 治本（Task 14b）：内层承载 future 的构造临时区落在装箱边界内
+            // ——本帧只留胖指针（评审链的嵌套 poll 帧体积同步下降）。
+            return Box::pin(self.drive_review_session_via_gateway_with_window(command_rx)).await;
         }
         let Some(reviewer) = self.session.reviewer_provider.clone() else {
             let _ = self
@@ -379,14 +416,14 @@ impl WorkspaceEngine {
                     message: "reviewer_configuration_missing: review run not started".to_string(),
                 })
                 .await;
-            self.finish_failed_run().await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         };
         let review_target = match self.plan_review_window_worktree() {
             Ok(resolved) => resolved,
             Err(message) => {
-                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                self.finish_failed_run().await;
+                let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                boxed_child(|| self.finish_failed_run()).await;
                 return;
             }
         };
@@ -394,16 +431,21 @@ impl WorkspaceEngine {
             .begin_plan_review_window(&reviewer, review_target)
             .await
         {
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-            self.finish_failed_run().await;
+            let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         }
-        self.drive_review_session_via_gateway_with_window(command_rx)
-            .await;
-        self.close_plan_review_window("plan_review_completed").await;
+        // 治本（Task 14b）：内层承载 future 经装箱边界进入——本帧只留胖指针。
+        Box::pin(self.drive_review_session_via_gateway_with_window(command_rx)).await;
+        boxed_child(|| self.close_plan_review_window("plan_review_completed")).await;
     }
 
     /// gateway 版内层承载(测试 seam 同 direct 版)。
+    ///
+    /// 治本（Task 14b，栈根修）：本函数的**重子调用**（评审完成、provider
+    /// 驱动、事件回呈等）一律经 `boxed_child` 装箱——子 future 的构造临时区
+    /// 落在助手自己的栈帧内、随即装箱到堆，本函数帧里只剩胖指针（修前本
+    /// 函数 poll 帧预留 768,440 B）。
     pub(crate) async fn drive_review_session_via_gateway_with_window(
         &mut self,
         command_rx: mpsc::Receiver<ProviderCommand>,
@@ -422,34 +464,40 @@ impl WorkspaceEngine {
                     message: "reviewer_configuration_missing: review run not started".to_string(),
                 })
                 .await;
-            self.finish_failed_run().await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         };
-        let input = match self
-            .ensure_review_invocation_scope()
-            .await
-            .and_then(|_| self.build_review_input())
-        {
+        // 治本（Task 14b）：把「开窗 + 采集材料」两级链装箱一层——本函数的 poll
+        // 帧不再内联该链的构造临时区（评审链嵌套 poll 深度降一层）。语义与原
+        // `ensure_review_invocation_scope().await.and_then(|_| build_review_input())`
+        // 逐字等价（开窗失败即原样上浮 message）。
+        let review_input_result = boxed_child(|| async {
+            self.ensure_review_invocation_scope().await?;
+            self.build_review_input()
+        })
+        .await;
+        let input = match review_input_result {
             Ok(input) => input,
             Err(message) => {
-                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                self.finish_failed_run().await;
+                let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                boxed_child(|| self.finish_failed_run()).await;
                 return;
             }
         };
         if let Some(node_id) = self.active_node_id.clone() {
-            let _ = self
-                .persist_prompt_snapshot(&node_id, input.prompt.clone())
-                .await;
-            self.emit_execution_event(
-                provider_prompt_event(
-                    &node_id,
-                    input.prompt.clone(),
-                    "发送给 Workspace provider 的完整提示词",
-                ),
-                Some(node_id),
-                Some(reviewer.clone()),
-            )
+            let _ =
+                boxed_child(|| self.persist_prompt_snapshot(&node_id, input.prompt.clone())).await;
+            boxed_child(|| {
+                self.emit_execution_event(
+                    provider_prompt_event(
+                        &node_id,
+                        input.prompt.clone(),
+                        "发送给 Workspace provider 的完整提示词",
+                    ),
+                    Some(node_id),
+                    Some(reviewer.clone()),
+                )
+            })
             .await;
         }
         // review 会话 repository 数据同 10a 来源:project_id 取
@@ -464,8 +512,8 @@ impl WorkspaceEngine {
         let input = self.attach_tool_policy_audit(input);
         // T20b(决策项⑦):gateway 启动前同源复验(窗口 Running+指纹一致)。
         if let Err(message) = self.assert_plan_review_window() {
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-            self.finish_failed_run().await;
+            let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+            boxed_child(|| self.finish_failed_run()).await;
             return;
         }
         // F-19：gateway review 路径同样登记 reviewer provider start（k3 P2——
@@ -474,38 +522,49 @@ impl WorkspaceEngine {
             ProviderConversationRole::Reviewer,
             reviewer.clone(),
         );
-        let (first_session, first_trust_waiting) = start_review_session_via_gateway_owned(
-            &gateway,
-            &reviewer,
-            input.clone(),
-            project_id.clone(),
-            self.plan_review_launch_ownership(),
-            self.cancel.clone(),
-        )
+        // 闭包只捕获 owned/共享引用（不捕获 `&self`——engine 在测试构建下非
+        // Sync，捕获 `&self` 会让闭包失去 Send）。
+        let first_launch_ownership = self.plan_review_launch_ownership();
+        let first_cancel = self.cancel.clone();
+        let first_input = input.clone();
+        let first_project_id = project_id.clone();
+        let (first_session, first_trust_waiting) = boxed_child(|| {
+            start_review_session_via_gateway_owned(
+                &gateway,
+                &reviewer,
+                first_input,
+                first_project_id,
+                first_launch_ownership,
+                first_cancel,
+            )
+        })
         .await;
-        let first_completion = match self
-            .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
-            .await
-        {
+        // 治本（Task 14b）：重子调用装箱——provider 驱动的 future 状态不再内联
+        // 在本函数帧里（本帧只留胖指针；poll 帧预留随之下沉）。
+        let first_result = boxed_child(|| {
+            self.drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
+        })
+        .await;
+        let first_completion = match first_result {
             ReviewProviderRunResult::Completed(completion) => completion,
             ReviewProviderRunResult::Aborted => return,
             ReviewProviderRunResult::Failed(failure) => {
-                self.finish_review_provider_run_failure(failure).await;
+                boxed_child(|| self.finish_review_provider_run_failure(failure)).await;
                 // 指引卡简化补缺：trust 分型命中时，紧随 error 事件之后
                 // 发出结构化指导（启动成功恒 None，其余 Failed 形态同样
                 // 零发出）。
-                self.emit_launch_trust_guidance(first_trust_waiting).await;
+                boxed_child(|| self.emit_launch_trust_guidance(first_trust_waiting)).await;
                 return;
             }
         };
 
         match self.parse_review_completion_for_active_node(&first_completion) {
-            Ok(verdict) => self.complete_review(first_completion, verdict).await,
+            Ok(verdict) => boxed_child(|| self.complete_review(first_completion, verdict)).await,
             // 分类枚举错误必须直接沿 fallback diagnostic → policy fatal
             // 路径收口，不能进入 JSON repair 或人工 gate。
             Err(first_error) if first_error.is_classification_fatal() => {
                 let verdict = fallback_review_verdict(&first_completion, &first_error, false);
-                self.complete_review(first_completion, verdict).await;
+                boxed_child(|| self.complete_review(first_completion, verdict)).await;
             }
             Err(first_error) if first_error.is_repairable() && reviewer != ProviderName::Pi => {
                 let repair_input = match self.build_review_repair_input(
@@ -518,39 +577,45 @@ impl WorkspaceEngine {
                     Err(_) => {
                         let verdict =
                             fallback_review_verdict(&first_completion, &first_error, false);
-                        self.complete_review(first_completion, verdict).await;
+                        boxed_child(|| self.complete_review(first_completion, verdict)).await;
                         return;
                     }
                 };
                 let repair_node_id = self.active_node_id.clone();
-                self.emit_execution_event(
-                    structured_output_repair_event(
-                        ProviderExecutionEventStatus::Started,
-                        first_error.code(),
-                    ),
-                    repair_node_id.clone(),
-                    Some(reviewer.clone()),
-                )
+                boxed_child(|| {
+                    self.emit_execution_event(
+                        structured_output_repair_event(
+                            ProviderExecutionEventStatus::Started,
+                            first_error.code(),
+                        ),
+                        repair_node_id.clone(),
+                        Some(reviewer.clone()),
+                    )
+                })
                 .await;
                 let repair_input = self.attach_tool_policy_audit(repair_input);
                 // 修复轮：首发已成功启动（trust 已复验通过），结构化等待
                 // 恒 None——解包丢弃。
                 // T20b:repair 入口同窗复验。
                 if let Err(message) = self.assert_plan_review_window() {
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                    self.finish_failed_run().await;
+                    let _ =
+                        boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                    boxed_child(|| self.finish_failed_run()).await;
                     return;
                 }
-                let (repair_session, _repair_trust_waiting) =
+                let repair_launch_ownership = self.plan_review_launch_ownership();
+                let repair_cancel = self.cancel.clone();
+                let (repair_session, _repair_trust_waiting) = boxed_child(|| {
                     start_review_session_via_gateway_owned(
                         &gateway,
                         &reviewer,
                         repair_input,
                         project_id,
-                        self.plan_review_launch_ownership(),
-                        self.cancel.clone(),
+                        repair_launch_ownership,
+                        repair_cancel,
                     )
-                    .await;
+                })
+                .await;
                 let repair_result = self
                     .drive_reviewer_provider_session_once(
                         repair_session,
@@ -561,30 +626,34 @@ impl WorkspaceEngine {
                 let repaired_completion = match repair_result {
                     ReviewProviderRunResult::Completed(completion) => completion,
                     ReviewProviderRunResult::Aborted => {
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                first_error.code(),
-                            ),
-                            repair_node_id,
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    first_error.code(),
+                                ),
+                                repair_node_id,
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         return;
                     }
                     ReviewProviderRunResult::Failed(_) => {
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                first_error.code(),
-                            ),
-                            repair_node_id,
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    first_error.code(),
+                                ),
+                                repair_node_id,
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         let verdict =
                             fallback_review_verdict(&first_completion, &first_error, true);
-                        self.complete_review(first_completion, verdict).await;
+                        boxed_child(|| self.complete_review(first_completion, verdict)).await;
                         return;
                     }
                 };
@@ -604,30 +673,34 @@ impl WorkspaceEngine {
                             structured_output: repaired_completion.structured_output,
                             provider_session_id: repaired_completion.provider_session_id,
                         };
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Completed,
-                                first_error.code(),
-                            ),
-                            repair_node_id.clone(),
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Completed,
+                                    first_error.code(),
+                                ),
+                                repair_node_id.clone(),
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
-                        self.complete_review(normalized, verdict).await;
+                        boxed_child(|| self.complete_review(normalized, verdict)).await;
                     }
                     Ok(_) => {
                         let error = ReviewCompletionError::RepairPayloadChanged;
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                error.code(),
-                            ),
-                            repair_node_id.clone(),
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    error.code(),
+                                ),
+                                repair_node_id.clone(),
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         let verdict = fallback_review_verdict(&first_completion, &error, true);
-                        self.complete_review(first_completion, verdict).await;
+                        boxed_child(|| self.complete_review(first_completion, verdict)).await;
                     }
                     Err(second_error) => {
                         let normalized = ProviderCompletion {
@@ -639,17 +712,19 @@ impl WorkspaceEngine {
                             structured_output: repaired_completion.structured_output,
                             provider_session_id: repaired_completion.provider_session_id,
                         };
-                        self.emit_execution_event(
-                            structured_output_repair_event(
-                                ProviderExecutionEventStatus::Failed,
-                                second_error.code(),
-                            ),
-                            repair_node_id,
-                            Some(reviewer.clone()),
-                        )
+                        boxed_child(|| {
+                            self.emit_execution_event(
+                                structured_output_repair_event(
+                                    ProviderExecutionEventStatus::Failed,
+                                    second_error.code(),
+                                ),
+                                repair_node_id,
+                                Some(reviewer.clone()),
+                            )
+                        })
                         .await;
                         let verdict = fallback_review_verdict(&normalized, &second_error, true);
-                        self.complete_review(normalized, verdict).await;
+                        boxed_child(|| self.complete_review(normalized, verdict)).await;
                     }
                 }
             }
@@ -668,8 +743,9 @@ impl WorkspaceEngine {
                 // 恒 None——解包丢弃。
                 // T20b:静默重试同窗复验。
                 if let Err(message) = self.assert_plan_review_window() {
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                    self.finish_failed_run().await;
+                    let _ =
+                        boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                    boxed_child(|| self.finish_failed_run()).await;
                     return;
                 }
                 let (retry_session, _retry_trust_waiting) = start_review_session_via_gateway_owned(
@@ -692,7 +768,7 @@ impl WorkspaceEngine {
             }
             Err(error) => {
                 let verdict = fallback_review_verdict(&first_completion, &error, false);
-                self.complete_review(first_completion, verdict).await;
+                boxed_child(|| self.complete_review(first_completion, verdict)).await;
             }
         }
     }
@@ -726,7 +802,7 @@ impl WorkspaceEngine {
             let message = format!(
                 "logical revision blocked by lc resume recovery ({reason_code}): recovery {recovery_id} is waiting for an explicit fresh and no provider was started; start a new generation explicitly"
             );
-            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
             return;
         }
         // B1（终审 P1）：fresh 重入准备——冻结 feedback 原样透传（重连重建
@@ -836,7 +912,8 @@ impl WorkspaceEngine {
                         superseded.superseded_session_id,
                         record.recovery_id
                     );
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    let _ =
+                        boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
                 }
                 Err(message) => {
                     let _ = self
@@ -845,7 +922,7 @@ impl WorkspaceEngine {
                             message: format!("persist lc superseded wait failed: {message}"),
                         })
                         .await;
-                    self.finish_failed_run().await;
+                    boxed_child(|| self.finish_failed_run()).await;
                 }
             }
             return;
@@ -859,8 +936,8 @@ impl WorkspaceEngine {
         let input = match self.build_revision_input_with_resume(allow_resume) {
             Ok(input) => input,
             Err(message) => {
-                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                self.finish_failed_run().await;
+                let _ = boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                boxed_child(|| self.finish_failed_run()).await;
                 // 复审 P2：驱动前失败必须对账 recovery——回 Waiting +
                 // operation Failed（fail-safe），不得滞留 FreshRunning 令后续
                 // claim 恒 Busy。
@@ -877,18 +954,19 @@ impl WorkspaceEngine {
             }
         };
         if let Some(node_id) = node_id.clone() {
-            let _ = self
-                .persist_prompt_snapshot(&node_id, input.prompt.clone())
-                .await;
-            self.emit_execution_event(
-                provider_prompt_event(
-                    &node_id,
-                    input.prompt.clone(),
-                    "发送给 Workspace provider 的完整提示词",
-                ),
-                Some(node_id),
-                Some(author.clone()),
-            )
+            let _ =
+                boxed_child(|| self.persist_prompt_snapshot(&node_id, input.prompt.clone())).await;
+            boxed_child(|| {
+                self.emit_execution_event(
+                    provider_prompt_event(
+                        &node_id,
+                        input.prompt.clone(),
+                        "发送给 Workspace provider 的完整提示词",
+                    ),
+                    Some(node_id),
+                    Some(author.clone()),
+                )
+            })
             .await;
         }
         // Task 2.3：LC 分支——cwd 重绑 root（envelope 冻结的 canonical
@@ -902,8 +980,9 @@ impl WorkspaceEngine {
             let decision = match decision {
                 Ok(decision) => decision,
                 Err(message) => {
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                    self.finish_failed_run().await;
+                    let _ =
+                        boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                    boxed_child(|| self.finish_failed_run()).await;
                     // 复审 P2：驱动前（launch 决策 Err）同 input 构建失败——
                     // fresh 判据下对账回 Waiting，不滞留 FreshRunning。
                     if fresh_recovery.is_some() {
@@ -942,8 +1021,9 @@ impl WorkspaceEngine {
             {
                 Ok(validated) => validated,
                 Err(message) => {
-                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
-                    self.finish_failed_run().await;
+                    let _ =
+                        boxed_child(|| self.event_tx.send(EngineEvent::Error { message })).await;
+                    boxed_child(|| self.finish_failed_run()).await;
                     if fresh_recovery.is_some() {
                         let reconcile_node = node_id.clone().or_else(|| {
                             fresh_recovery
