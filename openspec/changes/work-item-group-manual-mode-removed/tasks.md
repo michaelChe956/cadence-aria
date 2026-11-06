@@ -31,12 +31,9 @@
       - 选 ② ⇒ ★前置插入一个独立工作包★：产出「本次提交是否生成 group」的新先验判据（新增 projection／新字段）并走契约评审；未完成前**不得**改弹窗
 - [ ] 2.1 `web/src/components/lifecycle/WorkItemPlanOptionsDialog.tsx:333-361`：「手动」radio 不再渲染（① 下 fieldset 只保留「自动化」且呈固定托管态；提交按钮恒为「启用自动化」）
       - ★同步更新组件自陈注释 `:42-43`、`:60-61`（它们现在写着「缺省手动／人工链路不变」，与新行为矛盾）
-- [ ] 2.2 `web/src/components/lifecycle/useIssueLifecycleGeneration.ts:632-665`：manual 提交分支随之下线；`prepareWorkItemPlan` 的 import 与调用一并移除（clean cutover，不留死代码、不留第二个入口）
-      - 核对：`web/src/api/client.ts:550` 的 `prepareWorkItemPlan` 导出将失去生产调用方（只剩 `client.test.ts`）⇒ 决定保留导出（端点仍在）或一并删除，**在报告里写明取舍**
-- [ ] 2.3 ★**失败面（D2）落地**：目标投影读取失败／授权载体不受支持时（`WorkItemPlanOptionsDialog.tsx:151-155` 的 fail-closed），按 owner 拍板执行：
-      - (a) 保留「创建并打开 Workspace」兜底出口（**不**以「生成模式」radio 形态呈现）＋ 如实说明
-      - (b) 只如实报错并给出可执行下一步，无人工兜底
-      - 两种形态都 MUST 满足 delta 场景「托管目标不可得时不得静默降级」（不静默转手动、不伪造托管状态）
+- [ ] 2.2 `web/src/components/lifecycle/useIssueLifecycleGeneration.ts:632-665`：**保留** manual 提交分支与 `prepareWorkItemPlan` 引用——未确认 design 的提交仍走 manual（`:245` 默认值）并继续调用 `prepareWorkItemPlan`（`:653-665`；后端路由与 `web/src/api/client.ts:550` 导出一并不动，Rust 集成测试大量直接调用，删除没有对象）；唯一要求：manual 分支在 `automationAvailable === true` 的弹窗里**不可达**（弹窗已不提供「手动」选项，且 `onConfirm` 发出的 mode 已归一为 `automatic`）
+- [ ] 2.3 ★**失败面（D2 已终裁为 (b)）落地**：目标投影读取失败／授权载体不受支持时（`WorkItemPlanOptionsDialog.tsx:151-155` 的 fail-closed），弹窗保持打开、提交保持禁用、目标投影读取失败时提供「重试」（`automation-target-retry`）、用户可「取消」退出，之后修复目标/载体问题再回来；不提供任何以人工推进 workspace 会话创建工作项组的替代提交（含「创建并打开 Workspace」），不发起人工 prepare 请求
+      - MUST 满足 delta 场景「托管目标不可得时不得静默降级」（不静默转手动、不伪造托管状态）
 - [ ] 2.4 `web/src/components/lifecycle/IssueLifecycleWorkbench.tsx:980-984`：`automationAvailable` 口径①下**逐字不变**；仅 ② 才扩展
 - [ ] 2.5 **既有断言改写（逐条，不弱化原意）**：
       - `WorkItemPlanOptionsDialog.reenable.test.tsx:189`（原「生成模式仍可切回手动」）⇒ 改为断言「手动 radio 不存在」
@@ -45,7 +42,7 @@
       - `useIssueLifecycleGeneration.plan-approval.test.ts:246-270`（原「manual 走 prepare」）⇒ manual 分支下线后改写
       - ★每条改写都要在交付报告里列出「原断言 → 新断言」
 - [ ] 2.6 **后端零改动自检**：确认 `src/**` 无任何改动（`git diff --stat -- src` 空），且 `automation_mode` 在 `src/**` 仍零命中
-- [ ] 2.7 **未确认 design 的弹窗（D3）**：`automationAvailable=false` ⇒ fieldset 不渲染、提交仍为既有「创建并打开 Workspace」⇒ 逐字不变；用 §1.2 的回归锚点证明
+- [ ] 2.7 **未确认 design 的弹窗（D3 = 保持现状）**：`automationAvailable=false` ⇒ fieldset 不渲染、提交仍为既有「创建并打开 Workspace」（manual 人工链路，见 2.2 的保留结论）⇒ 逐字不变；用 §1.2 的回归锚点证明
 
 ## 3. 定向验证
 
@@ -72,6 +69,6 @@
 
 - [ ] 6.1 已确认 design 上打开「Work Item Plan 配置」弹窗 ⇒ ★界面上没有「手动」选项★，只有托管自动化
 - [ ] 6.2 提交 ⇒ 产出确为**托管自动化**的工作项组（enrollment 已绑定 plan/session，界面呈现托管事实，驾驶舱可见托管态）
-- [ ] 6.3 未确认 design 的弹窗 ⇒ 逐字不变（不呈现「生成模式」，仍有「创建并打开 Workspace」）
+- [ ] 6.3 未确认 design 的弹窗 ⇒ 逐字不变（不呈现「生成模式」，仍有「创建并打开 Workspace」，提交仍走 manual 并调用 `prepareWorkItemPlan`）
 - [ ] 6.4 目标投影不可得（422 / 载体不受支持）⇒ 界面如实告知并给出可执行下一步，★不静默转手动、不伪造托管状态★（按 D2 结论核对兜底形态）
 - [ ] 6.5 托管链路的人工门 / AI choice / 最终确认仍在（REQ-WIGA-03 / REQ-WIGA-05 未被削弱）

@@ -54,7 +54,7 @@
 
 - 「生成模式」fieldset 不再渲染「手动」radio；已确认 design 的弹窗里生成模式**恒为托管自动化**。
 - 提交恒走 `enrollConfirmedDesignAutomation`（写 enrollment）⇒ 工作项组由服务端编排推进。
-- 随之，弹窗内的 manual 提交分支失去唯一生产入口 ⇒ 一并下线（不做「留死代码」式的半吊子）。
+- 未确认 design 的提交仍走 manual（`useIssueLifecycleGeneration.ts:245` 默认值）并继续调用 `prepareWorkItemPlan`（`:653-665`）⇒ **manual 提交分支与 `prepareWorkItemPlan` 引用均保留**；唯一要求：manual 分支在 `automationAvailable === true` 的弹窗里**不可达**（弹窗不提供「手动」选项，且 `onConfirm` 发出的 mode 已归一为 `automatic`）。
 - `automationAvailable` 的判定口径**不变**（design_spec + 已确认）⇒ 未确认 design 的弹窗仍不呈现「生成模式」，提交仍是既有人工路径。
 
 **代价**
@@ -90,10 +90,22 @@
 | 编号 | 待拍板项 | 选项 | 我的推荐 |
 |---|---|---|---|
 | **D1** | **粒度** | ① / ② | **①**（与原话逐字对齐；② 无判据可用） |
-| **D2** | **目标投影不可得时的兜底**（automatic fail-closed 后用户被堵死） | (a) 保留「创建并打开 Workspace」兜底出口（**不**以「生成模式」radio 形态呈现）／(b) 只如实报错，无兜底 | **(a)**：不给「生成模式」选项 ≠ 取消人工推进能力；但 (a) 实质上保留了人工路径，owner 若认为「任何情况下都不许人工」则选 (b) |
+| **D2** | **目标投影不可得时的兜底**（automatic fail-closed 后用户被堵死） | (a) 保留「创建并打开 Workspace」兜底出口（**不**以「生成模式」radio 形态呈现）／(b) 只如实报错，无兜底 | **(b)（已终裁）**：弹窗保持打开、提交保持禁用、目标投影读取失败时提供「重试」（`automation-target-retry`）、用户可「取消」退出，之后修复目标/载体问题再回来；(a) 等于把「手动」改名（「创建并打开 Workspace」调 `prepareWorkItemPlan`，产出的就是人工推进的 workspace 会话），直接违反 delta 的「SHALL NOT 改为人工推进的 workspace 会话」与「SHALL NOT 静默改为手动生成」 |
 | **D3** | **未确认 design 的弹窗**是否也强制托管 | (a) 保持现状（未确认 ⇒ 不呈现生成模式 ⇒ 走既有手动）／(b) 一并托管化 | **(a)**：自动化授权的前提是 design 已确认（`useIssueLifecycleGeneration.ts:451-453` 明写「自动化要求 Design Spec 已确认」），未确认时**技术上无法**托管化 ⇒ (b) 不可实现 |
 
 > D2 / D3 不改本 change 的 delta 结构（delta 已按「不得静默降级」「不得伪造托管事实」写定），只影响前端实现细节 ⇒ 拍板结果落在 tasks 的实现工作包里。
+
+### 灰区事实（D3 = 保持现状的直接推论，交 owner 时须如实写明）
+
+未确认 design 的提交走既有 manual 链路（`prepareWorkItemPlan`），而前端把 issue 的 `work_item_plan` 一律渲染成 `kind: "work_item_group"` 卡片（`web/src/state/lifecycle-workbench-store.ts:130-146`，卡片标题即「Work Item Group」）⇒ **手动路径仍能产出工作项组**——只是该产物不经「工作项组生成路径」（delta 定义里 design 尚未确认的提交不属于该路径），不在本 change 的禁止范围内。owner 原话「work item group 不允许手动生成模式」的覆盖面以该路径定义为准；这是定义之外的灰区，须在交 owner 时写明，不得依契约当作「没有」。
+
+### 残余风险（★需 owner 知情确认，非阻塞★）
+
+三条已裁定/已存在的事实叠加出一个只有 owner 能接受的残余风险：
+
+1. **①（自动化目标预检忽略所选 provider）的根因代码仍在原位**：`web/src/components/lifecycle/WorkItemPlanOptionsDialog.tsx:167` 的 `getAutomationTarget(..., {})` 仍传空 query；`src/web/handlers/support.rs:381` 仍默认 `"codex"`。owner 已裁定 ①「不用改」（理由：provider 不核验就到不了后续流程）。
+2. **⑤ 去掉「手动」后弹窗没有出路**：若 ① 在别的机器复现（该机器上 codex 被判可用但未核验，目标预检失败），提交禁用、无「创建并打开 Workspace」兜底（D2 已终裁为 (b)），且 ⑧（失败面不可行动：页面丢 `details.violations`）owner 已裁「先不管」。
+3. ⇒ **叠加结果**：目标预检在特定机器配置下失败时，用户在该弹窗内无法完成任何提交。本 change 不修复 ①/⑧（owner 已裁定关闭），仅在此如实记录，交 owner 知情确认。
 
 ## 不做（anti-goals）
 
@@ -107,6 +119,12 @@
 ✗ 不新增「本次提交是否生成 group」的先验判据（那是 ② 的前提，须独立立项）。
 ✗ 不删后端 `POST …/work-item-plans:prepare` 端点：端点契约面保留，只是该弹窗不再由前端调用它。
 ✗ 不动「工作项组」卡片、抽屉、编码侧（group attempt / 逐仓渲染）的既有呈现。
+✗ 不改 ① 的根因代码（弹窗 `WorkItemPlanOptionsDialog.tsx:167` 的空 query 预检／`src/web/handlers/support.rs:381` 默认 codex）：
+  owner 已裁定「不用改」，本 change 只在上方「残余风险」里如实记录。
+✗ 不改断连/权限超时仍写 Failed（`src/product/workspace_engine/lifecycle.rs:1862`、
+  `src/product/workspace_engine/session_state/timeline.rs:166`）与
+  `src/web/plan_confirmed_info.rs:247-252` 的 `matches!` 不含 `Aborted`：
+  这几条已另立阶段 2，不纳入本轮。
 ```
 
 ## Impact
@@ -114,7 +132,7 @@
 - **契约**：`work-item-group-autopilot` —— REQ-WIGA-01 **MODIFIED**（本 change 的 delta）。
 - **前端（生产代码）**：
   - `web/src/components/lifecycle/WorkItemPlanOptionsDialog.tsx`（「生成模式」fieldset 与「手动」radio；提交按钮形态）。
-  - `web/src/components/lifecycle/useIssueLifecycleGeneration.ts`（弹窗提交分流；manual 分支随之下线时，其 `prepareWorkItemPlan` 引用一并清理）。
+  - `web/src/components/lifecycle/useIssueLifecycleGeneration.ts`（弹窗提交分流：已确认 design 恒走 automatic；未确认 design 的提交仍走 manual（`:245` 默认值）并继续调用 `prepareWorkItemPlan`（`:653-665`）⇒ manual 提交分支与 `prepareWorkItemPlan` 引用均保留）。
   - `web/src/components/lifecycle/IssueLifecycleWorkbench.tsx`（`automationAvailable` 口径——① 下**逐字不变**；仅 ② 才需扩展）。
 - **前端（测试）**：新增 1 个弹窗用例文件；改写既有 4 处引用「手动」的断言；`IssueLifecycleWorkbench.generation.test.tsx:590-612`（未确认 design ⇒「自动化」radio 不存在、且「创建并打开 Workspace」存在）作为「逐字不变」的回归锚点**保持不动**。
 - **后端**：零改动。

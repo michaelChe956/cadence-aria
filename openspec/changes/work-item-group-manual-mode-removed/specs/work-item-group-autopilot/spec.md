@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: 人工 design 确认后的显式授权与范围（REQ-WIGA-01）
-系统 SHALL 保持 story/design 的生成和确认由人完成，并仅在 design 经人工确认后提供自动化模式选择。**「工作项组生成路径」SHALL 指：用户从 Work Item Plan 配置入口提交、其产物为一个工作项组（Work Item Group）的生成提交。在工作项组生成路径上 SHALL NOT 提供手动模式选择——已确认 design 的 Work Item Plan 配置弹窗 SHALL NOT 呈现「手动」选项，该路径的提交 SHALL 恒走托管自动化，其产物 SHALL 为托管自动化的工作项组。工作项组生成路径之外的既有行为 SHALL 逐字不变。**
+系统 SHALL 保持 story/design 的生成和确认由人完成，并仅在 design 经人工确认后提供自动化模式选择。**「工作项组生成路径」SHALL 指：用户在已确认 design 上经 Work Item Plan 配置弹窗提交的工作项组生成。design 尚未确认时该弹窗不提供任何生成模式选择（既无「自动化」亦无「手动」），其提交不属于工作项组生成路径。在工作项组生成路径上 SHALL NOT 提供手动模式选择——已确认 design 的 Work Item Plan 配置弹窗 SHALL NOT 呈现「手动」选项，该路径的提交 SHALL 恒走托管自动化，其产物 SHALL 为托管自动化的工作项组。工作项组生成路径之外的既有行为 SHALL 逐字不变。**
 
 #### Scenario: 未选自动化默认关闭
 
@@ -14,12 +14,14 @@
 - **THEN** 界面 SHALL NOT 呈现「手动」模式选项
 - **AND** 该次提交 SHALL 走托管自动化路径：SHALL 创建自动化 enrollment 并绑定其 plan/session，工作项组 SHALL 由服务端编排推进（REQ-WIGA-03），界面 SHALL 如实呈现托管事实
 - **AND** 该次提交 SHALL NOT 改为人工推进的 workspace 会话，SHALL NOT 静默降级为手动生成
+- **AND** 提交形态 SHALL 为「启用自动化」，SHALL NOT 出现「创建并打开 Workspace」
 
 #### Scenario: 托管目标不可得时不得静默降级
 
 - **WHEN** 用户在工作项组生成路径上提交，但托管自动化所需的授权目标不可得（目标投影读取失败或授权载体不受支持）
 - **THEN** 界面 SHALL 如实告知该事实并给出可执行的下一步
 - **AND** SHALL NOT 静默改为手动生成，SHALL NOT 伪造已启用自动化的状态
+- **AND** 提交 SHALL 保持禁用；目标投影读取失败时 SHALL 提供重试；弹窗 SHALL NOT 提供任何以人工推进 workspace 会话创建工作项组的替代提交（含「创建并打开 Workspace」），且 SHALL NOT 发起人工 prepare 请求；用户 SHALL 可取消退出
 
 #### Scenario: 工作项组生成路径之外的既有行为逐字不变
 
