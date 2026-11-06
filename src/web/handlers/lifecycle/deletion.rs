@@ -138,7 +138,14 @@ async fn cascade_delete_entity(
         .get(&scope)
         .map_err(product_store_api_error)?
     {
-        Some(record) if record.phase == DeletionPhase::Deleted => return Ok(()),
+        Some(record) if record.phase == DeletionPhase::Deleted => {
+            // REQ-WIGA-VOID-01：该删除早已成功收口——补一次作废（收敛
+            // 「complete 与作废之间」的崩溃窗口）；尽力收口不阻断幂等成功。
+            if kind == DeletionEntityKind::Plan {
+                void_enrollment_after_plan_deletion(&app_paths, project_id, issue_id, entity_id);
+            }
+            return Ok(());
+        }
         Some(_) => true,
         None => false,
     };
@@ -305,6 +312,12 @@ async fn cascade_delete_entity(
     deletion_store
         .complete(&lease)
         .map_err(product_store_api_error)?;
+    // ⑩.5 REQ-WIGA-VOID-01：工作项组删除已完整收口（complete 在前——失败
+    //     路径在上方已 return Err，不会到达这里）⇒ 绑定该 plan 的自动化
+    //     登记一并作废。作废在删除成功之后：失败不回滚、只 warn 留诊断。
+    if kind == DeletionEntityKind::Plan {
+        void_enrollment_after_plan_deletion(&app_paths, project_id, issue_id, entity_id);
+    }
     // ⑪ 内存面驱逐（v37 反馈 #3）：删除已完成 → 驱逐该实体的 workspace
     //    session manager。`manifest.session_ids` 覆盖 reentry（pending 原始
     //    全量 ∪ 重新采集）与 Plan 归属的子 work item 会话；与 ⓪ 的删除前
@@ -790,6 +803,56 @@ fn invalidate_automation_referencing_entity(app_paths: &ProductAppPaths, scope: 
                 return;
             }
         }
+    }
+}
+
+/// REQ-WIGA-VOID-01（tasks 4.1/4.2）：工作项组删除成功之后，把该 issue 绑定
+/// 被删 plan 的自动化登记标成已作废（锁内命令：voided_at/void_reason、
+/// revision+1、绑定前代进 previous、账本追加一条；不物理删除登记）。
+///
+/// 尽力收口：作废失败 MUST NOT 回滚已完成的删除（owner 裁决「删了就是
+/// 全部都删了」），但 MUST NOT 静默吞掉——按结果记录可诊断日志（失败
+/// warn、成功 info、无事可做 debug）。NotFound/AlreadyVoided/NotBoundToPlan
+/// 都是幂等正常态（删 WIG 时无登记、重复删除重入、登记属于别的 plan）。
+fn void_enrollment_after_plan_deletion(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) {
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::models::automation::VoidOutcome;
+    match IssueAutomationStore::new(app_paths.clone()).void_enrollment_for_deleted_plan(
+        project_id,
+        issue_id,
+        plan_id,
+        "work_item_group_deleted",
+    ) {
+        Ok(VoidOutcome::Voided(enrollment)) => tracing::info!(
+            automation_enrollment_id = %enrollment.enrollment_id,
+            plan_id = %plan_id,
+            voided_at = enrollment.voided_at.as_deref().unwrap_or_default(),
+            "automation enrollment voided after work item group deletion"
+        ),
+        Ok(VoidOutcome::NotFound) | Ok(VoidOutcome::AlreadyVoided) => tracing::debug!(
+            project_id = %project_id,
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            "no enrollment to void after work item group deletion (idempotent)"
+        ),
+        Ok(VoidOutcome::NotBoundToPlan) => tracing::debug!(
+            project_id = %project_id,
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            "enrollment bound to another plan; not voided"
+        ),
+        Err(error) => tracing::warn!(
+            project_id = %project_id,
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            error = %error,
+            "自动化登记未能随工作项组删除作废（删除已完成，不回滚）"
+        ),
     }
 }
 

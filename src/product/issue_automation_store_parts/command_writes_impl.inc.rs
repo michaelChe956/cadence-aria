@@ -82,7 +82,19 @@ impl IssueAutomationStore {
     }
 
     /// REQ-WIGA-VOID-01（tasks 2.1）：删除工作项组后的登记作废——全仓唯一
-    /// 能写 `voided_at` 的锁内写命令（红测桩：行为测试先行，实现在后续提交）。
+    /// 能写 `voided_at` 的锁内写命令（enrollment 文件锁内原子判定与落盘）。
+    ///
+    /// 分支（顺序固定）：登记不存在 ⇒ `NotFound`（幂等——删工作项组时该
+    /// issue 没有登记是正常情况）；已作废 ⇒ `AlreadyVoided`（幂等返回，不
+    /// 重复追加账本）；登记未绑定被删 plan（`plan_id` 不一致或未绑定）⇒
+    /// `NotBoundToPlan`（不得作废别人的登记，零副作用）；成功 ⇒ 写
+    /// `voided_at`/`void_reason`、`policy_revision`+1、绑定前代进
+    /// `binding_history.previous`（current 换空占位新代，与 rebind/supersede
+    /// 的换代留痕同构；无 durable binding history 的旧代记录保持 None，不
+    /// 补造）、命令账本追加一条（命令身份带被删 plan_id，digest 覆盖
+    /// reason）。SHALL NOT 删除 `automation-enrollment.json`；SHALL NOT 改写
+    /// 既有 history/账本条目；`terminated_at` 与作废是独立维度，互不清除。
+    /// 锁内禁 await。
     pub fn void_enrollment_for_deleted_plan(
         &self,
         project_id: &str,
@@ -90,10 +102,54 @@ impl IssueAutomationStore {
         plan_id: &str,
         reason: &str,
     ) -> Result<VoidOutcome, EnrollmentError> {
-        let _ = (project_id, issue_id, plan_id, reason);
-        Err(EnrollmentError::Store(ProductStoreError::Io(
-            "void_enrollment_for_deleted_plan: red-phase stub, not implemented yet".to_string(),
-        )))
+        let path = self.enrollment_path(project_id, issue_id)?;
+        with_exclusive_lock(&path, || {
+            let Some(mut saved) = read_optional_enrollment(&path)? else {
+                return Ok(VoidOutcome::NotFound);
+            };
+            if saved.voided_at.is_some() {
+                return Ok(VoidOutcome::AlreadyVoided);
+            }
+            if saved.plan_id.as_deref() != Some(plan_id) {
+                return Ok(VoidOutcome::NotBoundToPlan);
+            }
+            let command_id = format!("void-enrollment-{plan_id}");
+            let digest = void_command_payload_digest(&command_id, plan_id, reason);
+            let now = now_rfc3339();
+            saved.voided_at = Some(now.clone());
+            saved.void_reason = Some(reason.to_string());
+            saved.policy_revision += 1;
+            saved.updated_at = now;
+            let mut binding_version = 0;
+            if let Some(history) = saved.binding_history.as_ref() {
+                binding_version = history.current.binding_version + 1;
+                let retired = history.current.clone();
+                let mut previous = history.previous.clone();
+                previous.push(retired.clone());
+                saved.binding_history = Some(EnrollmentBindingHistory {
+                    current: EnrollmentBindingIdentity {
+                        binding_version,
+                        enrollment_id: saved.enrollment_id.clone(),
+                        plan_id: String::new(),
+                        session_id: String::new(),
+                        source: retired.source,
+                        target: retired.target,
+                        author_provider: retired.author_provider,
+                        reviewer_provider: retired.reviewer_provider,
+                    },
+                    previous,
+                });
+            }
+            saved.command_ledger.push(EnrollmentCommandResult {
+                command_id,
+                payload_digest: digest,
+                state: OperationState::Accepted,
+                binding_version,
+            });
+            write_json(&path, &saved)?;
+            Ok(VoidOutcome::Voided(saved))
+        })
+        .map_err(EnrollmentError::from)
     }
 
     /// C1 Task 1（REQ-WIGA-01、REQ-C1-TARGET-01）：显式重绑/换代。在同一

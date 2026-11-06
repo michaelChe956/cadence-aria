@@ -163,6 +163,11 @@ impl IssueAutomationStore {
                 // 漂移仍拒；悬空源重授权维持逐字段相等——见其内部）。自动
                 // 路径无从构造显式 revision＋command_id 的 Enable，本分支
                 // 只可能由人工入口触达。
+                // REQ-WIGA-VOID-01（tasks 3.1）：已作废（随工作项组删除）且
+                // 非 enabled 的记录同样走本取代分支——作废记录视为无约束力
+                // 的历史记录，重新开启按换代语义放行全部漂移（见其内部的
+                // 前置判定）；enabled+作废是不可达的损坏组合，保持既有分支
+                // fail-closed（PayloadImmutable），不经本分支放宽。
                 (
                     Some(saved),
                     EnrollmentWriteCommand::Enable {
@@ -172,7 +177,9 @@ impl IssueAutomationStore {
                         options,
                         target,
                     },
-                ) if saved.terminated_at.is_some() => supersede_terminated_enrollment(
+                ) if saved.terminated_at.is_some()
+                    || (saved.voided_at.is_some() && !saved.enabled) =>
+                    supersede_terminated_enrollment(
                     &path,
                     saved,
                     SupersedeEnableRequest {

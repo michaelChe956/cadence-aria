@@ -613,6 +613,21 @@ fn enable_command_payload_digest(
     )
 }
 
+/// REQ-WIGA-VOID-01：作废命令的稳定 payload 摘要——被删 plan_id 与 reason
+/// 全部参与（`command_id` 由 plan_id 派生）；同一作废动作的 digest 稳定，
+/// 异 reason/异 plan 必然不同。
+fn void_command_payload_digest(command_id: &str, plan_id: &str, reason: &str) -> String {
+    let payload = serde_json::json!({
+        "command_id": command_id,
+        "plan_id": plan_id,
+        "reason": reason,
+    });
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(payload.to_string().as_bytes())
+    )
+}
+
 /// REQ-WIGA-09 修订：显式 `command_id` 的 Enable 账目（Accepted＋提交时
 /// 的 binding_version）；缺省 `None` 返回 `None`（旧客户端不进账本）。
 fn enable_ledger_entry(
@@ -725,26 +740,35 @@ fn supersede_terminated_enrollment(
     //  （REQ-DRG-18）。
     // 旧代无声明（legacy）按本次提交显式升级（与既有"旧 enrollment
     // 重开时显式升级 target"语义连续）。
+    // ★前置判定（REQ-WIGA-VOID-01，tasks 3.1）★：被取代的登记已作废
+    //（其工作项组已被删除）⇒ 视为无约束力的历史记录——options（含
+    // provider）/source/target 漂移全部放行，按换代语义走下方同一条取代
+    // 落盘（与 REQ-WIGA-SWAP-01 同路径）。仅未作废的登记进入下方分治
+    // 判定——未作废分支的逻辑逐字保持现状（回归锁：
+    // unvoided_terminated_drift_matrix_is_unchanged）。
+    let superseded_voided = saved.voided_at.is_some();
     let options_drifted = &saved.options != options;
     let target_drifted = saved
         .target
         .as_ref()
         .is_some_and(|declared| *declared != *target);
     let source_drifted = &saved.source != source;
-    // options 漂移仅在悬空源重授权路径构成拒绝条件（正常重开按换代放行）。
-    if options_drifted && original_source_dangling {
-        return Ok(CasResolution::Conflict {
-            current_revision: Some(saved.policy_revision),
-            kind: ConflictKind::DefensiveStateMismatch,
-        });
-    }
-    // target 漂移在两条路径上都构成拒绝条件；source 漂移仅在正常重开
-    // 路径构成拒绝条件。
-    if target_drifted || (source_drifted && !original_source_dangling) {
-        return Ok(CasResolution::Conflict {
-            current_revision: Some(saved.policy_revision),
-            kind: ConflictKind::SourceTargetDrift,
-        });
+    if !superseded_voided {
+        // options 漂移仅在悬空源重授权路径构成拒绝条件（正常重开按换代放行）。
+        if options_drifted && original_source_dangling {
+            return Ok(CasResolution::Conflict {
+                current_revision: Some(saved.policy_revision),
+                kind: ConflictKind::DefensiveStateMismatch,
+            });
+        }
+        // target 漂移在两条路径上都构成拒绝条件；source 漂移仅在正常重开
+        // 路径构成拒绝条件。
+        if target_drifted || (source_drifted && !original_source_dangling) {
+            return Ok(CasResolution::Conflict {
+                current_revision: Some(saved.policy_revision),
+                kind: ConflictKind::SourceTargetDrift,
+            });
+        }
     }
 
     let now = now_rfc3339();
@@ -760,6 +784,11 @@ fn supersede_terminated_enrollment(
     next.terminated_at = None;
     next.policy_revision += 1;
     next.updated_at = now;
+    // REQ-WIGA-VOID-01：作废属于被取代的旧代（其工作项组已删除）——新代
+    // 登记未作废（后续删除→作废、终止→重新开启的判定按未作废语义走）；
+    // 旧代的作废事实由 binding previous 与命令账本只读留痕。
+    next.voided_at = None;
+    next.void_reason = None;
     next.plan_id = None;
     next.session_id = None;
     next.attention_facts = Vec::new();
