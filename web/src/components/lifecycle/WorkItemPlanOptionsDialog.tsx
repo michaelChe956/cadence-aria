@@ -39,7 +39,9 @@ export type WorkItemPlanOptionsFormValue = {
   author_provider?: WorkspaceProviderName;
   /** REQ-PPS-01：创建请求携带的 reviewer provider 快照；缺省表示沿用服务端兼容默认。 */
   reviewer_provider?: WorkspaceProviderName;
-  /** P1 WIGA：缺省「不自动化」；仅在已确认 Design 上可选 automatic。 */
+  /** REQ-WIGA-01 修订：已确认 Design（工作项组生成路径）的弹窗提交恒为
+   * automatic（由组件按 automationAvailable 派生）；automation_mode 字段
+   * 仅为未确认 design 的既有 manual 链路保留（缺省「不自动化」）。 */
   automation_mode: AutomationMode;
 };
 
@@ -57,7 +59,8 @@ export function WorkItemPlanOptionsDialog({
   onClose,
 }: {
   defaultOptions: WorkItemPlanOptionsFormValue;
-  /** P1 WIGA：仅已确认 Design 显示自动化模式选择（缺省手动，人工链路不变）。 */
+  /** REQ-WIGA-01 修订：已确认 Design（工作项组生成路径）恒为托管自动化，
+   * 不提供「手动」选项；未确认 Design 不渲染生成模式区块（人工链路逐字不变）。 */
   automationAvailable: boolean;
   /** C5 Task 7：automatic 模式的 automation-target 投影身份（project+issue）；
    * manual 模式不请求 target，缺省 null 时 automatic 提交 fail-closed。 */
@@ -80,8 +83,10 @@ export function WorkItemPlanOptionsDialog({
   );
   const providerOptions = getProviderOptions(providerSnapshot);
 
-  const automatic = options.automation_mode === "automatic";
-  const targetScope = automationAvailable && automatic ? automationTargetScope : null;
+  // REQ-WIGA-01 修订：已确认 Design 的弹窗不提供「手动」——生成模式恒为
+  // 托管自动化，由 automationAvailable 派生，与 options.automation_mode 无关。
+  const automatic = automationAvailable;
+  const targetScope = automatic ? automationTargetScope : null;
   // 批 2 T4（REQ-WIGA-09 修订）：已终止的 enrollment 上，本次提交是「重新
   // 开启」——payload 原样回传终止记录（不顺便改写授权），因此不依赖新的
   // target 投影：入口不被终止态阻断，表单里的参数改动也不生效（置灰）。
@@ -226,7 +231,11 @@ export function WorkItemPlanOptionsDialog({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onConfirm(options);
+      // REQ-WIGA-01 修订：工作项组生成路径发出归一化后的 automatic mode
+      // （表单缺省可能仍是 manual）；未确认 design 维持表单原值（manual）。
+      await onConfirm(
+        automatic ? { ...options, automation_mode: "automatic" } : options,
+      );
     } catch (reason) {
       // C5 Task 3：role-chain 预检错误保留 ApiRequestError.code/details，
       // 逐角色渲染 role/provider/reason；不包装为普通 Error 语义。
@@ -257,12 +266,6 @@ export function WorkItemPlanOptionsDialog({
   ) {
     const provider = workspaceProviderName(value) ?? undefined;
     setOptions((current) => ({ ...current, [key]: provider }));
-    setSubmitError(null);
-  }
-
-  // P1 WIGA：模式切换不落 enrollment，只改本地表单；提交才走 PUT。
-  function updateAutomationMode(mode: AutomationMode) {
-    setOptions((current) => ({ ...current, automation_mode: mode }));
     setSubmitError(null);
   }
 
@@ -300,8 +303,8 @@ export function WorkItemPlanOptionsDialog({
             onChange={() => updateOption("require_execution_plan_confirm")}
           />
           {/* B2-P1 F2（REQ-WIGA-02）：automatic 下后端冻结一律压 false，
-              勾选无效——置灰＋固定关闭显示并说明；不篡改表单值，切回
-              手动即恢复用户原勾选（manual 行为不变）。 */}
+              勾选无效——置灰＋固定关闭显示并说明；不篡改表单值（REQ-WIGA-01
+              修订后无「手动」可切回；未确认 design 的 manual 行为不变）。 */}
           {automatic ? (
             <p
               data-testid="plan-approval-auto-note"
@@ -330,7 +333,9 @@ export function WorkItemPlanOptionsDialog({
             disabled={submitting}
             onChange={(value) => updateProvider("reviewer_provider", value)}
           />
-          {/* P1 WIGA：仅已确认 Design 提供显式自动化选择；缺省手动，人工链路原样。 */}
+          {/* REQ-WIGA-01 修订：已确认 Design（工作项组生成路径）恒为托管
+              自动化——仅呈现固定的「自动化」单选项，不提供「手动」；未确认
+              Design 不渲染本区块（人工链路逐字不变）。 */}
           {automationAvailable ? (
             <fieldset className="rounded-md border border-[var(--aria-line)] px-3 py-2">
               <legend className="px-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
@@ -341,19 +346,9 @@ export function WorkItemPlanOptionsDialog({
                   <input
                     type="radio"
                     name="automation-mode"
-                    checked={!automatic}
-                    disabled={submitting}
-                    onChange={() => updateAutomationMode("manual")}
-                  />
-                  手动
-                </label>
-                <label className="flex items-center gap-1.5 text-sm text-[var(--aria-ink)]">
-                  <input
-                    type="radio"
-                    name="automation-mode"
                     checked={automatic}
                     disabled={submitting}
-                    onChange={() => updateAutomationMode("automatic")}
+                    onChange={() => undefined}
                   />
                   自动化
                 </label>

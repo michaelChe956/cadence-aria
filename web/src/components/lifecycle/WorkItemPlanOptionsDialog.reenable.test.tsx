@@ -185,8 +185,13 @@ describe("WorkItemPlanOptionsDialog：terminated 态的自动化入口", () => {
     expect(
       within(dialog).getByRole("checkbox", { name: "强制前后端拆分" }),
     ).toBeDisabled();
-    // 生成模式仍可切回手动（手动链路不经 enrollment）。
-    expect(within(dialog).getByRole("radio", { name: "手动" })).toBeEnabled();
+    // REQ-WIGA-01 修订：工作项组生成路径不提供「手动」——单选项「自动化」保留可用。
+    expect(
+      within(dialog).queryByRole("radio", { name: "手动" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("radio", { name: "自动化" }),
+    ).toBeEnabled();
     // provider 是契约允许更换的（一次提交完成换代）——选择器保持可用。
     expect(within(dialog).getByLabelText("Author Provider")).toBeEnabled();
     expect(within(dialog).getByLabelText("Reviewer Provider")).toBeEnabled();

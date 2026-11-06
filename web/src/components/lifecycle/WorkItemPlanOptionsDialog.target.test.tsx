@@ -96,8 +96,7 @@ afterEach(() => {
 });
 
 describe("WorkItemPlanOptionsDialog automation target projection", () => {
-  it("fetches the target projection when automatic is selected and gates submit until ready", async () => {
-    const user = userEvent.setup();
+  it("fetches the target projection on open and gates submit until ready", async () => {
     const pending = deferred<Response>();
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -106,19 +105,8 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderDialog();
 
-    // manual 缺省不请求 target。
-    await user.click(
-      screen.getByRole("button", { name: "创建并打开 Workspace" }),
-    );
-    expect(
-      fetchMock.mock.calls.some(([url]) =>
-        String(url).includes("/automation-target"),
-      ),
-    ).toBe(false);
-
-    // 打开对话框重新进入 automatic：radio 切换触发 GET automation-target。
-    const dialog = screen.getByRole("dialog", { name: "Work Item Plan 配置" });
-    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    // REQ-WIGA-01 修订：已确认 design 的弹窗打开即恒为托管自动化——挂载即
+    // GET automation-target（不再有「manual 缺省不请求」的前置态）。
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([url]) =>
@@ -131,6 +119,7 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
       expect.anything(),
     );
 
+    const dialog = screen.getByRole("dialog", { name: "Work Item Plan 配置" });
     // loading 中禁止 stale automatic submit。
     const submit = within(dialog).getByRole("button", {
       name: "启用自动化",
@@ -228,36 +217,56 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     await waitFor(() => expect(submit).toBeEnabled());
   });
 
-  it("does not request the target in manual mode and manual submit stays available after a target failure", async () => {
+  it("不提供手动绕过：target GET 失败后提交保持禁用且无「创建并打开 Workspace」", async () => {
     const user = userEvent.setup();
     const onConfirm = vi.fn(async () => undefined);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(
-          { code: "web_client_error", message: "target GET failed", details: {} },
-          500,
-        ),
+    // 按 URL 分派：automatic 下弹窗还会读一次 enrollment 只读投影。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/automation-enrollment")) {
+        return jsonResponse(null);
+      }
+      return jsonResponse(
+        {
+          code: "web_client_error",
+          message: "target GET failed",
+          details: {},
+        },
+        500,
       );
+    });
     vi.stubGlobal("fetch", fetchMock);
     renderDialog({ onConfirm });
 
     const dialog = screen.getByRole("dialog", { name: "Work Item Plan 配置" });
-    // automatic GET 失败后切回 manual：不因 target 失败阻断人工链路。
+    // D2（已终裁为 (b)）：automatic GET 失败后无手动绕过——如实报错、提交
+    // 保持禁用、可重试；不提供「创建并打开 Workspace」替代提交，也不发起
+    // 人工 prepare 请求。
     await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
-    await within(dialog).findByRole("alert");
-    await user.click(within(dialog).getByRole("radio", { name: "手动" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(/自动化目标加载失败/);
     const submit = within(dialog).getByRole("button", {
-      name: "创建并打开 Workspace",
+      name: "启用自动化",
     });
-    await waitFor(() => expect(submit).toBeEnabled());
-    await user.click(submit);
-    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(submit).toBeDisabled();
+    expect(
+      within(dialog).queryByRole("radio", { name: "手动" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "创建并打开 Workspace" }),
+    ).toBeNull();
+    expect(
+      within(dialog).getByTestId("automation-target-retry"),
+    ).toBeEnabled();
+    expect(onConfirm).not.toHaveBeenCalled();
     expect(
       fetchMock.mock.calls.filter(([url]) =>
         String(url).includes("/automation-target"),
       ),
     ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes("prepare")),
+    ).toBe(false);
   });
 
   it("renders every role-chain violation from ApiRequestError details without wrapping it", async () => {
