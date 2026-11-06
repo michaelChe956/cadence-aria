@@ -3680,14 +3680,12 @@ fn r2_write_collection_enrollment_with_session(
     )
     .unwrap();
 }
-
 /// 批 2 R4/E1 ④（终止负例）：顶层 session 留空的集合 enrollment——该负例
 /// 不驱动任何真实 n3 会话；带合成 session 会让终止的引擎侧收口读会话失败
 /// 而落 cleanup_required（负例期望 terminated）。
 pub(super) fn e1_write_unbound_collection_enrollment(fixture: &N3Fixture, policy_revision: u64) {
     r2_write_collection_enrollment_with_session(fixture, true, policy_revision, None);
 }
-
 /// 把指定 target 桶的 attempt 冻结策略改写为 AutoStartOnce（模拟 enrolled
 /// advance split 落盘后的真实策略形状；经真实 store 写回）。
 fn r2_freeze_auto_start_policy(
