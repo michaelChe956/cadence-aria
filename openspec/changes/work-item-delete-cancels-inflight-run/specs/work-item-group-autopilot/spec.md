@@ -44,7 +44,7 @@
 
 run 被取消（中止）时，其时间线节点 SHALL **NOT** 以「失败」表述「中止」：节点 `status` SHALL NOT 为 `failed`，SHALL 使用与既有词汇一致、可与失败区分的「中止」表达（既有 `ProviderStatus` / `ExecutionEventStatus` 已使用 `aborted`，SHALL NOT 另造冲突词汇）；节点 `summary` SHALL 表达「已中止」而非失败原因。
 
-节点的 `stage` 与 `status` SHALL **相互一致**：进入终态的节点 SHALL NOT 仍以进行中阶段表述（SHALL NOT 出现「`stage=running` + 终态语义」这类自相矛盾的组合）。终态节点的 `completed_at` SHALL 落盘。
+带 provider agent 的 provider run 节点进入终态（中止 / 失败 / 完成 / 跳过）时，其 `stage` SHALL NOT 仍为进行中阶段 `running`，SHALL 归一为终态阶段 `completed`；不带 provider agent 的工作流节点（compile、门卡、上下文类）的 `stage` SHALL 继续表示其所属工作流阶段，SHALL NOT 因本 requirement 被改写，既有断言逐字不变。
 
 #### Scenario: 中止后的节点不表述为失败
 
@@ -53,11 +53,10 @@ run 被取消（中止）时，其时间线节点 SHALL **NOT** 以「失败」�
 - **AND** `summary` SHALL 表达「已中止」，SHALL NOT 表述为失败原因
 - **AND** `completed_at` SHALL 落盘
 
-#### Scenario: 节点的 stage 与 status 相互一致
+#### Scenario: 被中止的 run 只额外约束 status 与 summary 的表达
 
-- **WHEN** 某个 run 节点进入终态（中止 / 失败 / 完成）
-- **THEN** 该节点的 `stage` SHALL NOT 仍以进行中阶段（如 `running`）表述
-- **AND** `stage` 与 `status` SHALL 相互一致，不得出现「阶段仍在进行、状态已终态」的组合
+- **WHEN** 某个 run 被取消（中止）并收口
+- **THEN** 本 requirement 对被中止的 run 只额外约束 `status` 与 `summary` 的表达：`status` SHALL NOT 为 `failed`，`summary` SHALL 表达「已中止」。
 
 #### Scenario: 真实失败仍表述为失败
 
