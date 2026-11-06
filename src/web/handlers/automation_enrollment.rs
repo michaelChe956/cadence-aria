@@ -661,6 +661,7 @@ pub(crate) fn automation_ownership_for_attempt(
                 enabled: enrollment.enabled,
                 plan_id: enrollment.plan_id,
                 terminated_at: enrollment.terminated_at,
+                voided_at: enrollment.voided_at,
             },
         ))
 }

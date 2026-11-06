@@ -482,6 +482,10 @@ fn apply_revision_and_write(
                 // 写入归 T1 终止 CAS。
                 terminated_at: None,
                 attention_facts: Vec::new(),
+                // REQ-WIGA-VOID-01：首次 Enable 未作废；voided_at/void_reason
+                // 写入归「删除工作项组」的作废命令独占。
+                voided_at: None,
+                void_reason: None,
             }
         }
         // 重开（disabled 后换 payload 的启用）：保留 enrollment 身份与既有

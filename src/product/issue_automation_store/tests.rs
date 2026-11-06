@@ -913,3 +913,4 @@ fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
 include!("attention_termination_tests.inc.rs");
 include!("target_union_rebind_tests.inc.rs");
 include!("attention_termination_supersede_tests.inc.rs");
+include!("void_enrollment_tests.inc.rs");

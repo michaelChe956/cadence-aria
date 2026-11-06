@@ -434,6 +434,8 @@ fn bound_enrollment(
         command_ledger: Vec::new(),
         terminated_at: None,
         attention_facts: Vec::new(),
+        voided_at: None,
+        void_reason: None,
     }
 }
 

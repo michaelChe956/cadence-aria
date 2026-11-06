@@ -3668,6 +3668,8 @@ fn r2_write_collection_enrollment_with_session(
         command_ledger: Vec::new(),
         terminated_at: None,
         attention_facts: Vec::new(),
+        voided_at: None,
+        void_reason: None,
     };
     crate::product::json_store::write_json(
         &fixture

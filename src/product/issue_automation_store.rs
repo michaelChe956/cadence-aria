@@ -652,6 +652,7 @@ impl IssueAutomationStore {
                         enabled: enrollment.enabled,
                         plan_id: enrollment.plan_id.clone(),
                         terminated_at: enrollment.terminated_at.clone(),
+                        voided_at: enrollment.voided_at.clone(),
                     }
                 }
                 _ => crate::product::models::automation::AutomationOwnership::client_default(),

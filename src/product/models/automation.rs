@@ -124,6 +124,47 @@ pub struct IssueAutomationEnrollment {
     /// （P3/P4/R2/T3），N1 只读；写/清经 store 精确绑定互证。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attention_facts: Vec<AutomationAttentionFact>,
+    /// REQ-WIGA-VOID-01：登记随工作项组删除作废的时刻（RFC3339）。非空即
+    /// 该登记已作废——视为无约束力的历史记录，不再约束该 issue 上的新
+    /// 工作项组（重新开启按换代放行 options/source/target 全部漂移）。
+    /// 写入由「删除工作项组」的作废命令独占；旧 JSON 缺字段按未作废读。
+    /// 与 `terminated_at` 是两个独立维度，SHALL NOT 互相推导。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voided_at: Option<String>,
+    /// REQ-WIGA-VOID-01：作废原因机器码（如 `work_item_group_deleted`）；
+    /// 只追加不改写，旧 JSON 缺字段按未作废读。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub void_reason: Option<String>,
+}
+
+/// REQ-WIGA-VOID-01（tasks 1.2）：enrollment 的状态投影。终止
+/// （`terminated_at`）与作废（`voided_at`）是两个独立维度——「已终止且已
+/// 作废」是合法并存态（删除路径先终止再作废的正常终态）；投影按两个
+/// 维度的四种组给出确定值，SHALL NOT 只靠 `terminated_at` 布尔判断。
+/// `enabled` 是独立的授权开关，不参与这四态判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationEnrollmentState {
+    /// 在跑：无终止标记也无作废标记。
+    Running,
+    /// 已终止（终止维度独占；未作废）。
+    Terminated,
+    /// 已作废（工作项组删除所致；未终止——如先 Disable 再随组删除）。
+    Voided,
+    /// 已终止且已作废。
+    TerminatedAndVoided,
+}
+
+impl IssueAutomationEnrollment {
+    /// REQ-WIGA-VOID-01：四态投影（两维度四种组各有确定值）。
+    pub fn automation_state(&self) -> AutomationEnrollmentState {
+        match (self.terminated_at.is_some(), self.voided_at.is_some()) {
+            (false, false) => AutomationEnrollmentState::Running,
+            (true, false) => AutomationEnrollmentState::Terminated,
+            (false, true) => AutomationEnrollmentState::Voided,
+            (true, true) => AutomationEnrollmentState::TerminatedAndVoided,
+        }
+    }
 }
 
 /// 自动化归属：仅 server 端 enrollment 可代表授权（REQ-WIGA-08）。
@@ -148,6 +189,11 @@ pub struct AutomationOwnership {
     pub plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminated_at: Option<String>,
+    /// REQ-WIGA-VOID-01：作废事实（随工作项组删除）同源披露——读侧据此
+    /// 区分「已终止」与「已作废」（两者独立维度，作废优先呈现）；serde
+    /// 缺省 None 兼容旧 wire/旧客户端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voided_at: Option<String>,
 }
 
 impl AutomationOwnership {
@@ -161,6 +207,7 @@ impl AutomationOwnership {
             enabled: false,
             plan_id: None,
             terminated_at: None,
+            voided_at: None,
         }
     }
 }
