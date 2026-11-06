@@ -415,6 +415,14 @@ export type IssueAutomationEnrollment = {
    * 该 enrollment 已被终止——人工可显式重新开启（Enable 取代），自动路径
    * 不得复活。旧投影缺字段按未终止读。 */
   terminated_at?: string | null;
+  /** REQ-WIGA-VOID-01：登记随工作项组删除作废的时间（RFC3339）。非空即该
+   * 登记已作废——视为无约束力的历史记录，不再约束该 issue 上的新工作项组
+   *（重新开启按换代放行 provider/source/target 全部漂移）。与 terminated_at
+   * 是两个独立维度；旧投影缺字段按未作废读。 */
+  voided_at?: string | null;
+  /** REQ-WIGA-VOID-01：作废原因机器码（如 work_item_group_deleted）；只追加
+   * 不改写。 */
+  void_reason?: string | null;
 };
 
 export type AutomationEnrollmentEnableCommand = {

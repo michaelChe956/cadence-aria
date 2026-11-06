@@ -189,8 +189,7 @@ export function CodingWorkspacePage({
     )
       ? store.planTermination.terminated
       : null;
-  const terminationTerminatedAt =
-    store.automation?.terminated_at ?? terminationReceipt?.terminatedAt ?? null;
+  const terminationTerminatedAt = store.automation?.terminated_at ?? terminationReceipt?.terminatedAt ?? null;
   const openAutomationTermination = () => {
     useCodingWorkspaceStore.getState().openTerminationConfirm({
       projectId: store.projectId ?? address.projectId,
@@ -1053,6 +1052,7 @@ export function CodingWorkspacePage({
       {terminationTerminatedAt !== null ? (
         <AutomationTerminatedBanner
           terminatedAt={terminationTerminatedAt}
+          voidedAt={store.automation?.voided_at ?? null}
           outcome={terminationReceipt?.outcome ?? null}
         />
       ) : null}

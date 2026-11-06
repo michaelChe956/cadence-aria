@@ -90,16 +90,28 @@ export function WorkItemPlanOptionsDialog({
     enrollmentProjection.enrollment?.terminated_at
       ? enrollmentProjection.enrollment
       : null;
-  const reenablePending = automatic && terminatedEnrollment !== null;
+  // REQ-WIGA-VOID-01：作废态优先于终止态呈现（连组一起没了，更贴近 owner
+  // 心智）；两态可区分——作废态显示作废文案、不冒充终止态，终止态文案
+  // 逐字保持原样。作废记录的重新开启同样不被阻断（后端放行全部漂移）。
+  const voidedEnrollment =
+    enrollmentProjection.status === "ready" &&
+    enrollmentProjection.enrollment?.voided_at
+      ? enrollmentProjection.enrollment
+      : null;
+  const reenableRecord = voidedEnrollment ?? terminatedEnrollment;
+  const reenablePending = automatic && reenableRecord !== null;
   // 重新开启时「实际会用的 provider」：当前生效＝enrollment 的生效 options
   // （不是表单里未生效的值）；本次将应用＝表单本次选择（未选＝沿用原授权）。
   // 两者不一致＝本次会换 provider（一次提交完成换代，会先删除现有工作项组）。
-  const effectiveProviders = terminatedEnrollment
-    ? {
-        author_provider: terminatedEnrollment.options?.author_provider,
-        reviewer_provider: terminatedEnrollment.options?.reviewer_provider,
-      }
-    : null;
+  // REQ-WIGA-VOID-01：作废态不展示该对比——旧授权已随工作项组删除作废、
+  // 无「当前生效」可言（作废文案已说明重新开启可自由选择）。
+  const effectiveProviders =
+    terminatedEnrollment && voidedEnrollment === null
+      ? {
+          author_provider: terminatedEnrollment.options?.author_provider,
+          reviewer_provider: terminatedEnrollment.options?.reviewer_provider,
+        }
+      : null;
   const appliedProviders = effectiveProviders
     ? {
         author_provider:
@@ -122,7 +134,7 @@ export function WorkItemPlanOptionsDialog({
   // 用的那个 target」：重新开启＝终止记录的 target（缺失才回退新投影），
   // 常规启用＝新投影的 target——与提交链路同一口径。
   const enrollmentTargetForSubmit: EnrollmentTarget | null = reenablePending
-    ? (terminatedEnrollment?.target ??
+    ? (reenableRecord?.target ??
       (targetProjection.status === "ready"
         ? targetProjection.target.enrollment_target
         : null))
@@ -358,8 +370,8 @@ export function WorkItemPlanOptionsDialog({
                 className="text-xs text-[var(--aria-ink-muted)]"
               >
                 自动化目标：
-                {terminatedEnrollment?.target
-                  ? enrollmentTargetLabel(terminatedEnrollment.target)
+                {reenableRecord?.target
+                  ? enrollmentTargetLabel(reenableRecord.target)
                   : "—"}
               </p>
             ) : (
@@ -406,16 +418,28 @@ export function WorkItemPlanOptionsDialog({
             )}
             {/* 批 2 T4（REQ-WIGA-09 修订）：terminated 态入口仍可用——人工
                 点「启用自动化」即显式重新开启（生成新的自动化授权）；此处
-                只说明事实，不阻断提交，也不代替服务端的最终判定。 */}
-            {terminatedEnrollment ? (
-              <p
-                role="status"
-                data-testid="automation-terminated-notice"
-                className="text-xs text-[var(--aria-ink-muted)]"
-              >
-                该 issue 的自动化已于 {terminatedEnrollment.terminated_at} 终止；
-                确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。
-              </p>
+                只说明事实，不阻断提交，也不代替服务端的最终判定。
+                REQ-WIGA-VOID-01：作废态优先呈现（两态文案可区分）。 */}
+            {reenableRecord ? (
+              voidedEnrollment ? (
+                <p
+                  role="status"
+                  data-testid="automation-voided-notice"
+                  className="text-xs text-[var(--aria-ink-muted)]"
+                >
+                  该 issue 的自动化登记已随旧工作项组删除作废；确认后将重新开启
+                  （可自由选择 provider，原自动化不恢复）。
+                </p>
+              ) : (
+                <p
+                  role="status"
+                  data-testid="automation-terminated-notice"
+                  className="text-xs text-[var(--aria-ink-muted)]"
+                >
+                  该 issue 的自动化已于 {terminatedEnrollment.terminated_at} 终止；
+                  确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。
+                </p>
+              )
             ) : null}
             {/* 发起侧载体收窄（方案 A）：legacy 单仓载体仍只读展示，但不得
                 再发起 Enable/Rebind——禁用提交并说明下一步。 */}

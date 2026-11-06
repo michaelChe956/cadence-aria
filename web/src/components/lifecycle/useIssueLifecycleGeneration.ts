@@ -73,6 +73,11 @@ const AUTOMATION_CLEANUP_REQUIRED_MESSAGE =
 const AUTOMATION_CONFLICT_CODE = "automation_enrollment_conflict";
 const AUTOMATION_REENABLE_CONFLICT_MESSAGE =
   "重新开启的自动化授权与终止记录不一致（原授权源仍有效但与当前不同）：请先通过自动化控制面执行「换代 / 重新绑定（rebind）」更新授权源，或恢复原授权源后再重新开启";
+// REQ-WIGA-VOID-01：作废态（随工作项组删除作废）下的 409 不再指引 rebind
+// ——旧登记已作废，无「与终止记录一致」的约束，重新开启即可自由选择
+// provider（后端已按换代放行全部漂移）。
+const AUTOMATION_VOIDED_REENABLE_CONFLICT_MESSAGE =
+  "该 issue 的自动化登记已随旧工作项组删除作废：重新开启即可自由选择 provider";
 // 运行中不许改授权内容：指引到既有的「终止整个自动化」确认面——该入口只在
 // 「当前会话 + server 托管 + workspace_type === work_item_plan + 未终止」的
 // 落屏可见，所以文案写明具体落点，不作全局可见的承诺。
@@ -99,9 +104,15 @@ const AUTOMATION_SWAP_INTERRUPTED_MESSAGE =
  *
  * `reenable` 是**语义开关**（不是「是否显示中文」的开关）：旧冲突码的 rebind
  * 文案描述的是「重新开启的授权与终止记录不一致」，只在这条路径上成立；常规
- * 启用保留原始 ApiRequestError，不发散成不成立的下一步。
+ * 启用保留原始 ApiRequestError，不发散成不成立的下一步。`voided`
+ *（REQ-WIGA-VOID-01）：重新开启的对象已随工作项组删除作废——旧冲突码改指
+ * 「重新开启即可自由选择 provider」，MUST NOT 出现 rebind 文案。
  */
-function automationEnrollmentFailure(reason: unknown, reenable = false): Error {
+function automationEnrollmentFailure(
+  reason: unknown,
+  reenable = false,
+  voided = false,
+): Error {
   if (reason instanceof ApiRequestError) {
     const wrap = (message: string) =>
       new ApiRequestError({
@@ -117,7 +128,13 @@ function automationEnrollmentFailure(reason: unknown, reenable = false): Error {
       case AUTOMATION_CLEANUP_REQUIRED_CODE:
         return wrap(AUTOMATION_CLEANUP_REQUIRED_MESSAGE);
       case AUTOMATION_CONFLICT_CODE:
-        return reenable ? wrap(AUTOMATION_REENABLE_CONFLICT_MESSAGE) : reason;
+        return reenable
+          ? wrap(
+              voided
+                ? AUTOMATION_VOIDED_REENABLE_CONFLICT_MESSAGE
+                : AUTOMATION_REENABLE_CONFLICT_MESSAGE,
+            )
+          : reason;
       default:
         return reason;
     }
@@ -409,7 +426,7 @@ export function useIssueLifecycleGeneration({
         // 重新开启路径在此完成分诊（唯一包装函数 + reenable 上下文）；外层
         // catch 再走一遍是幂等的（已是 Error 的保持原文案，ApiRequestError
         // 原样上抛），不产生第二次改写。
-        throw automationEnrollmentFailure(reason, true);
+        throw automationEnrollmentFailure(reason, true, enrollment.voided_at != null);
       }
       return;
     }
