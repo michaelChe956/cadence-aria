@@ -1,4 +1,6 @@
 import { lazy, Suspense } from "react";
+// ★必须先于 @monaco-editor/react 初始化 loader（见 monaco-local-setup.ts 的说明）★
+import "./monaco-local-setup";
 import { useSystemMonacoTheme } from "./monaco-theme";
 
 const DiffEditor = lazy(() =>
