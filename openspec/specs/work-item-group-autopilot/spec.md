@@ -7,12 +7,33 @@
 ## Requirements
 
 ### Requirement: 人工 design 确认后的显式授权与范围（REQ-WIGA-01）
-系统 SHALL 保持 story/design 的生成和确认由人完成，并仅在 design 经人工确认后提供自动化模式选择。
+系统 SHALL 保持 story/design 的生成和确认由人完成，并仅在 design 经人工确认后提供自动化模式选择。**「工作项组生成路径」SHALL 指：用户在已确认 design 上经 Work Item Plan 配置弹窗提交的工作项组生成。design 尚未确认时该弹窗不提供任何生成模式选择（既无「自动化」亦无「手动」），其提交不属于工作项组生成路径。在工作项组生成路径上 SHALL NOT 提供手动模式选择——已确认 design 的 Work Item Plan 配置弹窗 SHALL NOT 呈现「手动」选项，该路径的提交 SHALL 恒走托管自动化，其产物 SHALL 为托管自动化的工作项组。工作项组生成路径之外的既有行为 SHALL 逐字不变。**
 
 #### Scenario: 未选自动化默认关闭
 
-- **WHEN** design 经人工确认后用户未选择自动化模式
-- **THEN** 默认 SHALL 为不自动化。
+- **WHEN** design 经人工确认后用户在**工作项组生成路径之外**未选择自动化模式
+- **THEN** 默认 SHALL 为不自动化。**在工作项组生成路径上 SHALL NOT 出现「未选自动化」：生成模式 SHALL 恒为托管自动化。**
+
+#### Scenario: 工作项组生成路径不提供手动模式
+
+- **WHEN** 用户在已确认 design 上经 Work Item Plan 配置弹窗提交一次工作项组生成
+- **THEN** 界面 SHALL NOT 呈现「手动」模式选项
+- **AND** 该次提交 SHALL 走托管自动化路径：SHALL 创建自动化 enrollment 并绑定其 plan/session，工作项组 SHALL 由服务端编排推进（REQ-WIGA-03），界面 SHALL 如实呈现托管事实
+- **AND** 该次提交 SHALL NOT 改为人工推进的 workspace 会话，SHALL NOT 静默降级为手动生成
+- **AND** 提交形态 SHALL 为「启用自动化」，SHALL NOT 出现「创建并打开 Workspace」
+
+#### Scenario: 托管目标不可得时不得静默降级
+
+- **WHEN** 用户在工作项组生成路径上提交，但托管自动化所需的授权目标不可得（目标投影读取失败或授权载体不受支持）
+- **THEN** 界面 SHALL 如实告知该事实并给出可执行的下一步
+- **AND** SHALL NOT 静默改为手动生成，SHALL NOT 伪造已启用自动化的状态
+- **AND** 提交 SHALL 保持禁用；目标投影读取失败时 SHALL 提供重试；弹窗 SHALL NOT 提供任何以人工推进 workspace 会话创建工作项组的替代提交（含「创建并打开 Workspace」），且 SHALL NOT 发起人工 prepare 请求；用户 SHALL 可取消退出
+
+#### Scenario: 工作项组生成路径之外的既有行为逐字不变
+
+- **WHEN** 某次生成不经已确认 design 的 Work Item Plan 配置弹窗（story/design 的人工生成与人工确认入口、既有人工推进的工作项组上的确认／换代／重绑），**或 design 尚未确认因而该弹窗不呈现「生成模式」选择**
+- **THEN** 既有手动生成与人工确认流程 SHALL 逐字不变（入口、文案与提交载荷）
+- **AND** 托管化后的人工门、AI choice 与最终确认 SHALL 仍然保留（REQ-WIGA-03 / REQ-WIGA-05），SHALL NOT 因本 requirement 被取消
 
 #### Scenario: 身份合同精确持久化
 
@@ -57,7 +78,7 @@
 #### Scenario: 手动缺省与非法拒绝
 
 - **WHEN** 未选自动化、旧数据缺少 enrollment、单成员身份不明确或 target 非法
-- **THEN** 未选自动化、旧数据缺少 enrollment 或单成员身份不明确时 SHALL 保持既有手动流程；零 target、空集、非法 UUID、错 LC、跨载体或身份不一致 SHALL fail-closed 拒绝自动授权。
+- **THEN** 未选自动化、旧数据缺少 enrollment 或单成员身份不明确时 SHALL 保持既有手动流程；零 target、空集、非法 UUID、错 LC、跨载体或身份不一致 SHALL fail-closed 拒绝自动授权。**「未选自动化 ⇒ 保持既有手动流程」这一条在工作项组生成路径上 SHALL NOT 适用——该路径不存在未选自动化的手动入口；旧数据缺少 enrollment、单成员身份不明确等其余情形 SHALL 保持既有手动流程不变。**
 
 #### Scenario: design 确认前不出现自动授权
 
@@ -66,8 +87,8 @@
 
 #### Scenario: 默认不自动化
 
-- **WHEN** 用户在 design 确认后选择不自动化或旧 issue 不含 enrollment
-- **THEN** plan 准备、生成、advance 和 coding 启动仍按原有手动行为执行，不因自动化补偿扫描产生动作
+- **WHEN** 用户在 design 确认后**在工作项组生成路径之外**选择不自动化，或旧 issue 不含 enrollment
+- **THEN** plan 准备、生成、advance 和 coding 启动仍按原有手动行为执行，不因自动化补偿扫描产生动作。**工作项组生成路径上 SHALL NOT 出现「选择不自动化」这一选项。**
 
 #### Scenario: 集合授权覆盖全部有效成员
 
@@ -916,3 +937,165 @@
 
 - **WHEN** 终止确认面遇到授权版本冲突并触发既有自愈流程
 - **THEN** 该流程 SHALL 继续使用其原有稳定码与原有行为，MUST NOT 因本次错误码细分而失效
+
+### Requirement: 删除工作项组时的终止必须取消该实体绑定的在途 run（REQ-WIGA-15）
+
+删除工作项组时，删除路径终止该实体绑定的自动化登记后，SHALL 同时**取消该实体绑定的 workspace session 的在途 run，并等待该 run 的真实收口（真实 completion）**，使删除独占可获得；删除 SHALL NOT 因**该实体自身**的在途 run 而以 `entity_busy` 长期阻塞。
+
+取消 SHALL 沿用既有的非 WebSocket 取消入口，SHALL NOT 新造第二套终止语义或只摘除 run 登记而不等收口。取消范围 SHALL **严格限定**在该实体绑定的 session（按 `entity_id` 精确匹配）。
+
+该实体**没有**在途 run 时，删除行为 SHALL 与既有语义**完全一致**（不引入额外等待、不引入额外副作用、不改变删除结果与既有错误码）。
+
+#### Scenario: 删除时先取消在途 run 再删
+
+- **WHEN** owner 删除一个工作项组，而该实体绑定的 workspace session 上存在一个在途 provider run
+- **THEN** 删除路径 SHALL 先取消该 run 并等待其真实收口，随后 SHALL 取得删除独占并完成删除
+- **AND** 该次删除 SHALL NOT 以 `entity_busy`（或同义占用错误）失败
+- **AND** 取消后 SHALL NOT 出现该 run 继续向 provider 输出
+
+#### Scenario: 取消范围不越界
+
+- **WHEN** 删除某实体，且同一 issue 下另一个实体（或另一个 session）上存在在途 run
+- **THEN** 该 run SHALL 保持运行、SHALL NOT 被取消
+- **AND** 取消动作 SHALL 仅作用于 `entity_id` 与被删实体精确匹配的 session
+
+#### Scenario: 没有在途 run 时删除语义不变
+
+- **WHEN** owner 删除一个工作项组，且该实体绑定的 session 上没有在途 run
+- **THEN** 删除行为 SHALL 与本 requirement 引入前完全一致（不额外等待、不产生额外副作用、结果与错误码不变）
+
+#### Scenario: 取消未收口时如实报占用者
+
+- **WHEN** 删除路径已发出取消，但该 run 在兜底超时内仍未收口
+- **THEN** 删除 SHALL 返回明确指出占用者的可诊断错误，SHALL NOT 假称 run 已停止
+- **AND** SHALL NOT 在该 run 仍在跑时开始破坏性清理
+
+#### Scenario: 既有终止与删除前置语义不被弱化
+
+- **WHEN** 删除路径执行本 requirement 的取消动作
+- **THEN** SHALL NOT 写入 enrollment、不新建 plan/session、不启动 provider、不复活被终止的 plan（故与 REQ-WIGA-09「绑定实体删除流程再次运行 ⇒ 零副作用」不冲突）
+- **AND** SHALL NOT 物理删除 enrollment 记录（REQ-DRG-18、REQ-WIGA-VOID-01）
+- **AND** SHALL NOT 改动人工终止路径（REST terminate / WebSocket abort）的既有行为、顺序与文案
+- **AND** SHALL NOT 新增或放宽任何删除前置条件；owner 既有裁决「执行中禁删保持现状」仍成立——run 在跑时不得删，本 requirement 只是让终止**先把 run 停掉**
+
+### Requirement: 被中止的 run 不得表述为失败，且其 stage 归一为终态阶段（REQ-WIGA-16）
+
+run 被取消（中止）时，其时间线节点 SHALL **NOT** 以「失败」表述「中止」：节点 `status` SHALL NOT 为 `failed`，SHALL 使用与既有词汇一致、可与失败区分的「中止」表达（既有 `ProviderStatus` / `ExecutionEventStatus` 已使用 `aborted`，SHALL NOT 另造冲突词汇）；节点 `summary` SHALL 表达「已中止」而非失败原因。
+
+带 provider agent 的 provider run 节点进入终态（中止 / 失败 / 完成 / 跳过）时，其 `stage` SHALL NOT 仍为进行中阶段 `running`，SHALL 归一为终态阶段 `completed`；不带 provider agent 的工作流节点（compile、门卡、上下文类）的 `stage` SHALL 继续表示其所属工作流阶段，SHALL NOT 因本 requirement 被改写，既有断言逐字不变。
+
+#### Scenario: 中止后的节点不表述为失败
+
+- **WHEN** 某个 run 被取消（中止）并收口
+- **THEN** 其时间线节点的 `status` SHALL NOT 为 `failed`，SHALL 表达为「中止」
+- **AND** `summary` SHALL 表达「已中止」，SHALL NOT 表述为失败原因
+- **AND** `completed_at` SHALL 落盘
+
+#### Scenario: 被中止的 run 只额外约束 status 与 summary 的表达
+
+- **WHEN** 某个 run 被取消（中止）并收口
+- **THEN** 本 requirement 对被中止的 run 只额外约束 `status` 与 `summary` 的表达：`status` SHALL NOT 为 `failed`，`summary` SHALL 表达「已中止」。
+
+#### Scenario: 真实失败仍表述为失败
+
+- **WHEN** 某个 run 因真实错误（provider 失败、权限超时等）收口，或某个与 run 中止无关的时间线节点被更新
+- **THEN** 该节点 SHALL 继续按既有判定与既有文案表达，既有失败/跳过/完成三态语义与断言 SHALL 逐字不变
+- **AND** 本 requirement SHALL NOT 改动 run 的收口顺序与完成度信号语义
+
+### Requirement: 取消与取锁的时序保证及取消结果不得谎称（REQ-WIGA-17）
+
+取消完成后删除独占 SHALL 最终取得成功；取消与取锁之间的锁释放时序 SHALL 由实现保证，SHALL NOT 依赖未验证的时序假设。
+
+取消调用 SHALL 检查其返回值：返回「无活跃 run」属正常结果；返回「已取消」而该 run 实际未收口（兜底超时）时，删除 SHALL NOT 谎称已取消该 run，SHALL NOT 因此阻塞删除。
+
+#### Scenario: 取消后删除独占必须最终取得成功
+
+- **WHEN** 取消已发出且该 run 已真实收口
+- **THEN** 删除独占 SHALL 最终取得成功，删除 SHALL NOT 仍以 `entity_busy` 失败
+- **AND** 取消与取锁之间的锁释放时序 SHALL 由实现保证，SHALL NOT 依赖未验证的时序假设：completion 信号已到而 scope 共享锁尚未释放的尾隙，SHALL 以**有界**短退避补足——每轮一次「取删除独占并立即释放」的探测（探测不保留 lease、不触碰任何破坏性清理），Busy/Deleting 才重试，至多 10 轮、每轮间隔 50ms（合计 ≤500ms），SHALL NOT 无限等待或长挂起
+
+#### Scenario: 取消未真正收口时不得谎称已取消
+
+- **WHEN** 取消调用返回「已取消」但该 run 并未真正收口（兜底超时）
+- **THEN** 删除 SHALL NOT 宣称已取消该 run、SHALL NOT 记录任何与之矛盾的「已停止」事实
+- **AND** 删除 SHALL NOT 因此阻塞删除（仍按既有独占判定推进；拿不到独占时按既有语义报出占用者）
+- **AND** 取消调用返回「无活跃 run」SHALL 属正常结果，SHALL NOT 被当作失败
+
+### Requirement: 删除工作项组时自动化登记一并作废（REQ-WIGA-VOID-01）
+
+删除工作项组时，该 issue 的自动化登记 SHALL 被标成【已作废】（`voided_at` + `void_reason`），SHALL NOT 物理删除该登记；作废 SHALL 以**账本追加一条**的方式留痕，绑定前代 SHALL 进历史。**已作废的登记 SHALL NOT 再约束该 issue 上的新工作项组**：新工作项组重新启用时，`options`（含 provider）、`source`、`target` SHALL NOT 再被逐字段相等拒绝。
+
+**未作废的登记 SHALL 继续按既有语义处理**（REQ-WIGA-02 的 fail-closed / REQ-WIGA-SWAP-01 的换代 / REQ-DRG-18 的悬空只放行 source）。作废 SHALL 只由「删除工作项组」这一条路径产生，MUST NOT 由其它路径顺带产生。
+
+#### Scenario: 删除工作项组使其自动化登记作废
+
+- **WHEN** owner 删除一个工作项组，且该 issue 存在自动化登记
+- **THEN** 该登记 SHALL 被标成已作废（带时间与原因），其终止态与作废态 SHALL 可区分
+- **AND** 该登记 SHALL NOT 被物理删除
+
+#### Scenario: 已作废的登记不再约束新工作项组
+
+- **WHEN** owner 在同一 issue 上新建工作项组并以不同 provider 启用自动化，而该 issue 的旧登记已作废
+- **THEN** 系统 SHALL 接受该次启用并完成换代，MUST NOT 因 provider / source / target 与旧记录不同而拒绝
+
+#### Scenario: 作废以留痕方式表达，不抹掉历史
+
+- **WHEN** 自动化登记被标成已作废
+- **THEN** 命令账本 SHALL 追加一条作废条目；既有绑定与历史 SHALL 保留，MUST NOT 被清空或改写
+
+#### Scenario: 未作废的登记语义不变
+
+- **WHEN** 自动化登记未作废，且 owner 提交带不同 provider 的启用命令
+- **THEN** 既有判定 SHALL 保持不变（REQ-WIGA-02 的 fail-closed、REQ-WIGA-SWAP-01 的换代放行、REQ-DRG-18 的悬空只放行 source）
+
+#### Scenario: 界面如实显示已作废
+
+- **WHEN** 某 issue 的自动化登记已作废
+- **THEN** 界面 SHALL 显示「已随该工作项组删除作废」这一事实，MUST NOT 一律显示为「已于 X 终止」
+
+### Requirement: 终止回执的身份限定与换代失效（REQ-WIGA-14）
+
+终止回执 SHALL 携带**计划身份**（`plan_id`；绑定世代 `binding_version` 若响应可得 SHALL 一并携带），SHALL NOT 仅以 `(project_id, issue_id)` 为身份。
+
+展示终止横幅前 SHALL 校验回执身份与当前计划/会话一致；不一致 ⇒ 不展示。
+
+enrollment **换代**（supersede）后**旧代**回执 SHALL 立即失效，新代界面 SHALL NOT 叠加它。
+
+回执**缺失计划身份**时 ⇒ SHALL **fail-closed 不展示**。
+
+身份源 SHALL 在**终止态仍可得**（终止会清空停点形态投影）⇒ SHALL NOT 以停点形态为唯一身份源；**本计划被终止时其横幅 SHALL 仍渲染**；旧代 `outcome` 不得叠加到新代横幅。
+
+既有终止语义与文案不变；本 requirement 只约束不得跨计划/跨世代复用回执，SHALL NOT 削弱 REQ-WIGA-09 或推翻 DRG 的「销账 MUST NOT 删除 enrollment 记录」。
+
+#### Scenario: 同 issue 的旧回执不得叠加到新计划
+
+- **WHEN** 某 issue 上先有一次 work item 自动化被终止并留下终止回执，随后同 issue 新建了另一个 work item 自动化
+- **THEN** 新计划的界面 SHALL NOT 渲染旧回执对应的「自动化已终止」横幅
+- **AND** 新计划的终止语义 SHALL 与旧计划互不影响
+
+#### Scenario: 回执缺计划身份时不展示
+
+- **WHEN** 终止回执缺失 `plan_id` 或 `binding_version`
+- **THEN** 界面 SHALL fail-closed 不展示终止横幅
+- **AND** SHALL NOT 由此推断当前计划已终止
+
+#### Scenario: 换代后旧回执立即失效
+
+- **WHEN** enrollment 换代（换绑新 plan/session、清空 `terminated_at`）后，旧代终止回执仍存在于客户端存储
+- **THEN** 旧代回执 SHALL 不再用于任何界面判定
+- **AND** 新代界面 SHALL 按新代身份独立判定
+
+#### Scenario: 终止语义本身不被弱化
+
+- **WHEN** 当前计划的终止回执身份与当前界面一致
+- **THEN** 终止横幅 SHALL 照既有文案渲染（含「本计划全部仓库已停止，不可继续；已产出文件保留。」与 `cleanup_required` 的管理员介入说明）
+
+#### Scenario: 本计划被终止时横幅仍然渲染
+
+- **WHEN** 当前计划自身被终止（其停点形态投影已被清空）
+- **THEN** 该计划的终止横幅 SHALL 仍然渲染，且文案与既有语义一致
+
+#### Scenario: 旧代 outcome 不得叠加到新代
+
+- **WHEN** 新一代计划的界面存在，而客户端存储里留有旧一代的终止回执（含 `cleanup_required`）
+- **THEN** 新一代界面 SHALL NOT 渲染旧一代回执的横幅，也 SHALL NOT 显示旧一代的 `outcome` 文案

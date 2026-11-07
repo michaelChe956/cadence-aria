@@ -526,6 +526,8 @@ reviewer 窗口簇的 L2 条件 MUST 由窗口记录自身可算的四条构成�
 
 自动化 enrollment 记录在 story/design 被删后 source 指向已删实体，属于在途变更覆盖的已知状态。巡检 MUST NOT 将其判为未归类；销账 MUST NOT 删除 enrollment 记录。系统 MUST NOT 重新裁定 enrollment 的重新授权语义。story/design 的悬空判定 MUST 只判存在性：实体仍在但版本或确认态漂移 MUST NOT 判为悬空。
 
+**工作项组被删除时，其自动化登记 SHALL 被标成【已作废】**（`voided_at`/`void_reason`），SHALL NOT 物理删除该登记（留痕与历史保留见 REQ-WIGA-VOID-01）。**已作废的登记视为无约束力的历史记录** ⇒ 其重新开启 SHALL NOT 再受 options/target 逐字段相等约束。**未作废的登记，其悬空态 SHALL 仍只放行 source 漂移。**
+
 「读取失败按未悬空处理」这条口径 MUST **只约束 enrollment 重新授权判定**，MUST NOT 被当作通用规则用于巡检或销账的证据判定。
 
 #### Scenario: enrollment 不判未归类
@@ -562,6 +564,12 @@ reviewer 窗口簇的 L2 条件 MUST 由窗口记录自身可算的四条构成�
 
 - **WHEN** 重新开启时终止记录的 source 已悬空，但 options 或 target 与本次提交不同
 - **THEN** 系统 MUST 拒绝该次重新开启，MUST NOT 因 source 悬空而放行 options 或 target 的漂移
+- **AND** ★例外：该登记已【作废】时，按 REQ-WIGA-VOID-01 的场景处理★
+
+#### Scenario: 已作废的登记放行全部漂移
+
+- **WHEN** 重新开启时该自动化登记已作废（工作项组被删除所致），而 options / source / target 与历史记录不同
+- **THEN** 系统 SHALL 接受该次重新开启并完成换代，MUST NOT 因逐字段相等而拒绝
 
 ### Requirement: 硬约束（REQ-DRG-19）
 

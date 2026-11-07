@@ -51,7 +51,7 @@
 
 - [x] 6.1 契约 delta 已写（REQ-WIGA-VOID-01 ADDED + REQ-DRG-18 MODIFIED），`openspec validate --strict` 通过
 - [x] 6.2 交付/实施报告落 `cadence/reports/`，写清：owner 现象、根因链（磁盘实证 + 代码位置）、实现范围、未做项（不删登记 / 执行中禁删不改 / 悬空判定不改）
-- [ ] 6.3 真机验收（★这次必须执行★，owner 2026-11-06 明确要求）：
+- [x] 6.3 真机验收（★这次必须执行★，owner 2026-11-06 明确要求）：
       - [ ] 6.3.1 建 WIG → 删 WIG → 同 issue 新建 WIG → 以**不同** provider 启用自动化 ⇒ 一次完成，不报 rebind 文案
       - [ ] 6.3.2 弹窗显示「已随旧工作项组删除作废」
       - [ ] 6.3.3 登记未被物理删除（磁盘可查 `automation-enrollment.json` 仍在 + 有 `voided_at` + 账本多一条）

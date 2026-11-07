@@ -106,3 +106,13 @@
       - 边界：**不改** `.cargo/config.toml` 的 `RUST_MIN_STACK = { value = "33554432", force = true }`（owner 裁决保留）；**不改** `rust` / `stack-2mib-gate` 两个既有 job 的任何步骤；无 `-j 1` / `--ignored` / skip / `allow` / `continue-on-error` / 无条件 true（release-only 越界必须能把 CI 打红）
       - 留痕位置：CI job 日志（`--nocapture` 打印）+ `$GITHUB_STEP_SUMMARY` + artifact `release-poll-frame-budget-evidence`
       - 落地报告：`cadence/reports/2026-11-06_实施_CI双profile常规门禁_v1.0.md`（含 22 个受门禁对象的**档位/预算表**、**debug 档逐对象实测值**、release 取证方式与「release 数字待 CI 取证」的明确声明）
+
+---
+
+## 归档说明（2026-11-07）
+
+★本 change 归档时**仍有 16 个条目未勾选** —— 这是**有意为之**：该 change 自建立起就是「**只记录不实施**」的收尾未完成项清单（`3eeba01c`），其未完成部分属**阶段 2 待办**⇒ ★**不是漏勾，是尚未实施**★。
+
+⇒ ★**归属**：`cadence/notes/2026-11-02_排期_全量问题清单与优先级排期_v1.0.md` **§8.4**（「中止语义全归一」等阶段 2 登记条目）★。
+⇒ 逐条：1.4 followups 接力 · 2.1 clippy `large_futures` 仓级启用 · 2.3 C 层 2 MiB 永不豁免 · 3.4 验收 · 4.1 发布检查单 · 4.2 回退候选先验证 · 4.3 容量观察 · 4.4 运维文档与 CHANGELOG · 6.1~6.3 收尾项 · 7.1~7.4 动态验收纪律与行数门禁 · 8.7 release profile 体积数字（CI 首次运行取证）。
+⇒ ★`release-profile-gates` CI job 已落地✓；★**release 实测体积数字待 CI 首跑取证**★。

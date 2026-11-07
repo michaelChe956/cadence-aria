@@ -81,3 +81,14 @@
 - [x] 5.2 更新 `cadence/notes/2026-11-06_交付说明_阶段1_爆栈根治与可用版_v1.0.md` 的 **§16**（新增一节「monaco 本地化」：二进制 +13.6 MB、用户 gzip +25.7 kB、构建 3 s → ~15 s、未验证项的最终状态、`monaco-editor` 升级须重跑验收判据 1~4）
 - [x] 5.3 交付报告：红测失败输出、绿测输出、门禁输出、4317 指纹自检输出、浏览器验收证据、仍未验证项（若有）
 - [x] 5.4 `monaco-editor` 升级提醒：升级时 worker 文件名随版本变 ⇒ 须同步 `monaco-local-setup.ts` 的 worker 路径与 `package.json` 版本，并**重跑验收判据 1~4**
+
+---
+
+## 归档说明（2026-11-07）
+
+★本 change 归档时 **4.2 / 4.4 / 4.5 仍未勾选**，且是**有意保留**（不是漏勾）★：
+- ★**4.2**：markdown 高亮已在 4317 发布态实测通过；★**json 高亮在发布态未触发**（本地实例无任何可显示 JSON 的界面 ⇒ Work Item Group 是草稿 0 个 Work Item、无 coding attempt、plan 会话产物版本为空）。
+  ⇒ ★**间接/补充证据（5173 dev server）**：`json` 语言已注册（`hasJson: true`）；json 完整依赖链**全部本地加载无一 CDN**（`json.contribution.js` / `jsonMode.js` / `tokenization.js` / `workerManager.js` / `webWorker.js` / `jsonContributionRegistry.js` / `jsonc-parser`）；**json 内容被真实分词着色**（18 个 token span，class `mtk1`/`mtk5`/`mtk7`/`mtk20`）；**consoleErrors = 0** ⇒ json worker 起得来。
+- ★**4.4**：编辑器 UI（查找 / 右键菜单 / 复制）**自动化点击未能送达 monaco 焦点 ⇒ 未逐项验证**。间接证据：diff 双栏（`diffEditor.contribution.js`）、markdown/json 高亮、本地 worker 起得来 ⇒ 三者均由 `editor.all.js` 的 contributions 提供 ⇒ `editor.all` 已生效。
+- ★**4.5**：① worker 起得来**已实测通过**；② json 运行时高亮的**发布态**部分见 4.2。
+⇒ ★**补验方式**：在有 `.json` 产物或 coding attempt 的环境打开对应产物视图；并手工点一次 Ctrl+F / 右键 / 复制★。
