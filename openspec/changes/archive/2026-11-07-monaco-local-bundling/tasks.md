@@ -86,9 +86,9 @@
 
 ## 归档说明（2026-11-07）
 
-★本 change 归档时 **4.2 / 4.4 / 4.5 仍未勾选**，且是**有意保留**（不是漏勾）★：
+★本 change 归档时 **4.2 / 4.4 / 4.5 仍未勾选**。**owner 2026-11-07 裁定：视为成功，不再补验** ⇒ ★故保留未勾，事实层面不作「已实测通过」的声明★。裁定依据（下方间接/补充证据）：
 - ★**4.2**：markdown 高亮已在 4317 发布态实测通过；★**json 高亮在发布态未触发**（本地实例无任何可显示 JSON 的界面 ⇒ Work Item Group 是草稿 0 个 Work Item、无 coding attempt、plan 会话产物版本为空）。
   ⇒ ★**间接/补充证据（5173 dev server）**：`json` 语言已注册（`hasJson: true`）；json 完整依赖链**全部本地加载无一 CDN**（`json.contribution.js` / `jsonMode.js` / `tokenization.js` / `workerManager.js` / `webWorker.js` / `jsonContributionRegistry.js` / `jsonc-parser`）；**json 内容被真实分词着色**（18 个 token span，class `mtk1`/`mtk5`/`mtk7`/`mtk20`）；**consoleErrors = 0** ⇒ json worker 起得来。
 - ★**4.4**：编辑器 UI（查找 / 右键菜单 / 复制）**自动化点击未能送达 monaco 焦点 ⇒ 未逐项验证**。间接证据：diff 双栏（`diffEditor.contribution.js`）、markdown/json 高亮、本地 worker 起得来 ⇒ 三者均由 `editor.all.js` 的 contributions 提供 ⇒ `editor.all` 已生效。
 - ★**4.5**：① worker 起得来**已实测通过**；② json 运行时高亮的**发布态**部分见 4.2。
-⇒ ★**补验方式**：在有 `.json` 产物或 coding attempt 的环境打开对应产物视图；并手工点一次 Ctrl+F / 右键 / 复制★。
+⇒ ★**owner 裁定（2026-11-07）：上述三项视为成功，不再补验**；★若将来需要，可在有 `.json` 产物或 coding attempt 的环境打开对应产物视图，并手工点一次 Ctrl+F / 右键 / 复制★。
