@@ -123,7 +123,9 @@ async fn cancelled_revision_turn_fails_durably_and_echoes_human_gate_turn_failed
         durable_turn.failure_class,
         Some(HumanGateTurnFailureClass::Cancelled)
     );
-    // 顺手项：取消同样收口修订 author 载体节点。
+    // 取消同样收口修订 author 载体节点——REQ-WIGA-16：被中止的 run，节点
+    // status SHALL NOT 为 failed；REQ-CG-10：summary 明说「选择未生效」。
+    // （旧断言钉死 Failed，与 REQ-WIGA-16 相抵触，本 change 订正。）
     {
         let engine = engine.lock().await;
         let node = engine
@@ -133,7 +135,11 @@ async fn cancelled_revision_turn_fails_durably_and_echoes_human_gate_turn_failed
             .expect("revision author node after cancel");
         assert_eq!(
             node.status,
-            crate::web::workspace_ws_types::TimelineNodeStatus::Failed
+            crate::web::workspace_ws_types::TimelineNodeStatus::Aborted
+        );
+        assert_eq!(
+            node.summary.as_deref(),
+            Some("运行已中止：修订被中断，你的选择未生效")
         );
     }
     // 回显化：取消必须发出 HumanGateTurnFailed 帧而非静默吞掉。
@@ -154,6 +160,86 @@ async fn cancelled_revision_turn_fails_durably_and_echoes_human_gate_turn_failed
         }
         other => panic!("expected text echo frame, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn cancelled_revision_turn_echo_frame_says_choice_not_effective() {
+    let (_root, _lifecycle, mut engine) = revision_cancel_fixture();
+    let session_id = engine.session().session_id.to_string();
+    let turn_id = open_running_revision_turn(&mut engine, "cmd_cancel_frame_copy").await;
+    let engine = Arc::new(Mutex::new(engine));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+
+    fail_cancelled_human_gate_revision_turn(&engine, &outbound_tx, &session_id, &turn_id).await;
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv())
+        .await
+        .expect("cancel echo frame within timeout")
+        .expect("outbound channel alive");
+    match frame {
+        OutboundControl::Text(json) => {
+            let value: serde_json::Value = serde_json::from_str(&json).expect("echo frame json");
+            assert!(
+                value["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("你的选择未生效")),
+                "cancel echo must say the choice did not take effect: {json}"
+            );
+        }
+        other => panic!("expected text echo frame, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn aborted_revision_node_is_not_rewritten_back_to_failed_by_cancelled_turn() {
+    let (_root, _lifecycle, mut engine) = revision_cancel_fixture();
+    let turn_id = open_running_revision_turn(&mut engine, "cmd_cancel_keeps_aborted").await;
+    let author_node_id = engine.begin_work_item_plan_human_gate_revision_run().await;
+    // 驱动取消臂先行：finish_aborted_run 把活动节点置 Aborted（REQ-WIGA-16）。
+    engine.finish_aborted_run().await;
+
+    engine
+        .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::Cancelled)
+        .await
+        .expect("terminalize the cancelled turn");
+
+    let node = engine
+        .timeline_nodes
+        .iter()
+        .find(|node| node.node_id == author_node_id)
+        .expect("revision author node");
+    assert_eq!(
+        node.status,
+        crate::web::workspace_ws_types::TimelineNodeStatus::Aborted,
+        "an aborted node must never be rewritten back to failed"
+    );
+    assert_eq!(
+        node.summary.as_deref(),
+        Some("运行已中止：修订被中断，你的选择未生效")
+    );
+}
+
+#[tokio::test]
+async fn provider_err_turn_still_closes_revision_node_as_failed() {
+    let (_root, _lifecycle, mut engine) = revision_cancel_fixture();
+    let turn_id = open_running_revision_turn(&mut engine, "cmd_provider_err_node").await;
+    let author_node_id = engine.begin_work_item_plan_human_gate_revision_run().await;
+
+    engine
+        .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+        .await
+        .expect("terminalize the failed turn");
+
+    let node = engine
+        .timeline_nodes
+        .iter()
+        .find(|node| node.node_id == author_node_id)
+        .expect("revision author node");
+    assert_eq!(
+        node.status,
+        crate::web::workspace_ws_types::TimelineNodeStatus::Failed
+    );
+    assert_eq!(node.summary.as_deref(), Some("人工修订失败，本轮反馈未采纳"));
 }
 
 #[tokio::test]

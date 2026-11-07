@@ -377,7 +377,7 @@ pub(super) async fn campaign_stage3_fixture(
 impl CampaignStage3Harness {
     /// 每条入站消息一个全新 context（context 按值消费），共享 harness 的
     /// outbound channel 与引擎。
-    pub(super) async fn send(&self, message: WsInMessage) {
+    async fn build_inbound_context(&self) -> WorkspaceInboundContext {
         let record = self.session_record().await;
         let workspace_runs = WorkspaceRunRegistry::default();
         let mut registry = ProviderRegistry::new();
@@ -385,7 +385,7 @@ impl CampaignStage3Harness {
             ProviderName::ClaudeCode,
             self.provider.clone() as Arc<dyn StreamingProviderAdapter>,
         );
-        let context = WorkspaceInboundContext {
+        WorkspaceInboundContext {
             app_state: WebAppState::new(
                 self.root.path().to_path_buf(),
                 crate::web::runtime::WebRuntime::new_fake(self.root.path().to_path_buf()),
@@ -394,8 +394,11 @@ impl CampaignStage3Harness {
             run_context: ProviderRunContext::test_fixture(Arc::new(registry), self.engine.clone(), workspace_runs.clone(), self.session_id.clone(), self.app_paths.clone(), record),
             outbound_tx: self.outbound_tx.clone(),
             session_id: self.session_id.clone(),
-        };
-        handle_workspace_inbound_message(context, message).await;
+        }
+    }
+
+    pub(super) async fn send(&self, message: WsInMessage) {
+        handle_workspace_inbound_message(self.build_inbound_context().await, message).await;
     }
 
     /// 模拟第二个 ws worker（独立 engine 实例，同一 durable session）：

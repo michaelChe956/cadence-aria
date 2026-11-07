@@ -456,13 +456,19 @@ where
             let full_output = match full_output_result {
                 Ok(output) => output,
                 Err(message) => {
+                    // REQ-CG-10：取消 / 终止导致的驱动错误归 Cancelled（节点 Aborted +
+                    // 「选择未生效」），真实 provider 失败仍 provider_err。
+                    let outcome =
+                        crate::product::workspace_engine::conversational_gate::cancel::revision_drive_error_outcome(
+                            &message,
+                            run_cancel.is_cancelled(),
+                        );
                     fail_plan_split_run(
                         plan_split_run.as_ref(),
                         &format!("provider session drive failed: {message}"),
                     );
                     let _ = boxed_child(|| {
-                        engine
-                            .fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr)
+                        engine.fail_human_gate_turn(&turn_id, outcome.failure_class.clone())
                     })
                     .await;
                     engine.mark_active_run_finished(run_label);
@@ -471,8 +477,8 @@ where
                         outbound_tx_for_task,
                         &WsOutMessage::HumanGateTurnFailed {
                             turn_id,
-                            failure_class: "provider_err".to_string(),
-                            message,
+                            failure_class: outcome.label.to_string(),
+                            message: outcome.frame_message,
                         },
                     )
                     .await;

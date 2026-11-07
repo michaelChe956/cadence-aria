@@ -16,3 +16,4 @@ use super::*;
 include!("campaign_stage3_interactive/harness.rs");
 include!("campaign_stage3_interactive/cases.rs");
 include!("campaign_stage3_interactive/human_action_http.rs");
+include!("campaign_stage3_interactive/revision_abort.rs");

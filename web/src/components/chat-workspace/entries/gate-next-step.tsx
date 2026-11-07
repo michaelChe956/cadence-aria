@@ -16,6 +16,7 @@ import type {
   WorkItemPlanHumanGateSnapshot,
   WorkspaceSessionStatus,
 } from "../../../api/types";
+import type { GateInflightPhase } from "../../../state/gate-card-state";
 import {
   gateActionBlockCopy,
   type GateActionBlockReason,
@@ -115,6 +116,15 @@ export const GATE_NEXT_STEP_REJECTED =
 
 export const GATE_NEXT_STEP_REVISION_RUNNING =
   "引擎正在按你的反馈修订并复评，请稍候；期间也可直接点「确认当前版本」用当前候选继续";
+
+/**
+ * REQ-WSC-27：刷新 / 重连后门内 run 在途（修订中 / 复评中）的顶部指引。锁态下反馈框
+ * 与确认按钮都不渲染，故不指向「确认当前版本」（区别于 live-turn 路径的上一条）。
+ */
+export const GATE_NEXT_STEP_INFLIGHT_REVISING =
+  "引擎正在按你的反馈修订，请稍候；完成后会自动复评";
+export const GATE_NEXT_STEP_INFLIGHT_REVIEWING =
+  "引擎正在复评修订后的版本，请稍候；结论出来后再决定";
 
 /**
  * REQ-WSC-18（owner 2026-10-31 意见 1/2）：候选编译不过态的顶部指引——
@@ -232,8 +242,10 @@ export type GateNextStepInput = {
   compileFailure: boolean;
   /** REQ-WSC-18：自动重写两阶段事实（后端权威投影；null=无该信息，不猜）。 */
   compileFailureAutoRewrite: GateCompileFailureAutoRewriteInput | null;
-  /** 修订进行中（typed turn busy/open）。 */
+  /** 修订进行中（typed turn busy/open，或刷新后由 activeRunId 派生）。 */
   revisionInProgress: boolean;
+  /** REQ-WSC-27：刷新后派生的在途形态（null=无；live-turn 路径恒 null）。 */
+  inflightPhase: GateInflightPhase | null;
   batchConfirm: boolean;
   contextBlocker: boolean;
   actionBlockReason: Exclude<GateActionBlockReason, null> | null;
@@ -284,6 +296,13 @@ export function gateNextStepGuidance(input: GateNextStepInput): string | null {
   // 先于一切把「确认当前版本/终止此门」当出路的分支：终态会话里那些出路是假的。
   if (input.staleCompleted) {
     return GATE_STALE_COMPLETED_COPY;
+  }
+  // REQ-WSC-27：在途锁态先于编译失败 / 被拒分支——此时反馈框与确认按钮都不渲染，
+  // 「改写后重新提交 / 点确认继续」的出路失真。
+  if (input.inflightPhase !== null) {
+    return input.inflightPhase === "revising"
+      ? GATE_NEXT_STEP_INFLIGHT_REVISING
+      : GATE_NEXT_STEP_INFLIGHT_REVIEWING;
   }
   // REQ-WSC-18：先于 rejected——被拒分支把「确认当前版本」当出路，而本态
   // 确认不放行（平台侧 fail-closed），那句出路在此失真。

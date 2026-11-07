@@ -29,6 +29,16 @@ import {
   gateWhyCompileFailureRewriteRunningCopy,
   gateWhyCompileFailureRewriteStoppedCopy,
 } from "../../../state/gate-prompt-copy";
+import {
+  GATE_RESOLVED_TITLE_BATCH,
+  GATE_RESOLVED_TITLE_DEFAULT,
+  GATE_RESOLVED_TITLE_TRIAGE,
+  gateResolutionNote,
+} from "../../../state/gate-prompt-copy";
+import {
+  hasInterruptedRevisionEvidence,
+  selectGateInflightPhase,
+} from "../../../state/gate-card-state";
 import type { WorkspaceWsState } from "../../../state/workspace-ws-store-types";
 import { useWorkspaceStore } from "../../../state/workspace-ws-store";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
@@ -258,11 +268,19 @@ export function GatePromptEntry({
   // F-50 裁决 1（单标题制）：默认「需要人工确认」，仅 triage intent 门保留
   // 「需要判断 reviewer 意图」——标题回答「现在要做什么」，原因与建议交给
   // gate-why 单一原因行，不再三层同义。
-  const title = isBatchConfirmGate
-    ? gateBatchConfirmTitle()
-    : requiresTriage
-      ? "需要判断 reviewer 意图"
-      : "需要人工确认";
+  // REQ-WSC-26：已收口门卡用陈述式标题（不再是命令式「需要…」），避免已终止的
+  // 卡读成待办；活门卡标题逐字不变。
+  const title = isResolved
+    ? isBatchConfirmGate
+      ? GATE_RESOLVED_TITLE_BATCH
+      : requiresTriage
+        ? GATE_RESOLVED_TITLE_TRIAGE
+        : GATE_RESOLVED_TITLE_DEFAULT
+    : isBatchConfirmGate
+      ? gateBatchConfirmTitle()
+      : requiresTriage
+        ? "需要判断 reviewer 意图"
+        : "需要人工确认";
   // F-50 裁决 2：gate-why = 单一原因行（含下一步建议）。triage 门给 intent
   // 原因行；候选编译不过（REQ-WSC-18）先于 findings 分级——此态原因行绝
   // 不说「可直接确认」，与顶部指引/状态行同一份事实；无 findings 不猜。
@@ -338,7 +356,7 @@ export function GatePromptEntry({
       ? state.humanGateTurn.status
       : null,
   );
-  const revisionProgressCopy =
+  const liveRevisionProgressCopy =
     liveTurnStatus === "open" || liveTurnStatus === "busy"
       ? GATE_REVISION_RUNNING_NOTE
       : liveTurnStatus === "awaiting_confirm"
@@ -349,6 +367,34 @@ export function GatePromptEntry({
   const rawGateIdentity = (entry.metadata as Record<string, unknown> | undefined)
     ?.gate_identity;
   const gateKey = typeof rawGateIdentity === "string" ? rawGateIdentity : entry.id;
+  // REQ-WSC-27：刷新 / 重连后 store 的 humanGateTurn 为 null，live-turn 判据失明——
+  // 在途态改由 activeRunId + 活动节点类型派生（仅当前门卡、未收口、无 live turn）。
+  const inflightPhase = useWorkspaceStore((state) =>
+    !isResolved &&
+    liveRevisionProgressCopy === null &&
+    selectGateProjection(state)?.key === gateKey
+      ? selectGateInflightPhase(state)
+      : null,
+  );
+  const inflightLocked = inflightPhase !== null;
+  const revisionProgressCopy =
+    liveRevisionProgressCopy ??
+    (inflightPhase === "revising"
+      ? GATE_REVISION_RUNNING_NOTE
+      : inflightPhase === "reviewing"
+        ? GATE_REVISION_REVIEWING_NOTE
+        : null);
+  // REQ-WSC-26：时间线存在被中断修订的证据时，已终止说明明说「修订被中断」。
+  const interruptedRevision = useWorkspaceStore((state) =>
+    hasInterruptedRevisionEvidence(state.timelineNodes),
+  );
+  const resolutionNote =
+    isResolved &&
+    (entry.resolution === "confirm" ||
+      entry.resolution === "request-change" ||
+      entry.resolution === "terminate")
+      ? gateResolutionNote(entry.resolution, interruptedRevision)
+      : null;
 
   const handleFeedbackSubmit = (value: string) => {
     // REQ-WSC-15 失败兜底归因：记录「本卡最近一次本地门动作」——后续到达的
@@ -437,6 +483,7 @@ export function GatePromptEntry({
     compileFailure: confirmBlockedByCompileFailure,
     compileFailureAutoRewrite: candidateCompileFailure?.autoRewrite ?? null,
     revisionInProgress: revisionProgressCopy !== null,
+    inflightPhase,
     batchConfirm: isBatchConfirmGate,
     contextBlocker: isContextBlockerGate,
     actionBlockReason,
@@ -522,7 +569,7 @@ export function GatePromptEntry({
             </button>
           </div>
         ) : null}
-        {ownerGuidance ? <ReviewOwnerGuidanceBlock guidance={ownerGuidance} /> : null}
+        {ownerGuidance && !isResolved ? <ReviewOwnerGuidanceBlock guidance={ownerGuidance} /> : null}
         {findings.length > 0 && !isResolved ? (
           <details
             data-testid="gate-findings"
@@ -602,7 +649,8 @@ export function GatePromptEntry({
             （编译面自动重写账本）· 人工返修还可做 M 次（门预算账本）· 两处
             账本尚未合并。不合成共享余额；旧数据缺 gate-local 事实 → 预算
             历史不可用（不补默认值、不读成当前授权）。 */}
-        {quotaPresentation.lines.length > 0 ? (
+        {quotaPresentation.lines.length > 0 &&
+        !(isResolved && entry.resolution !== "superseded") ? (
           <p data-testid="gate-meta" className={`text-xs ${GATE_META_TEXT_CLASS}`}>
             {[...quotaPresentation.lines, quotaPresentation.note]
               .filter((part): part is string => part !== null)
@@ -681,7 +729,17 @@ export function GatePromptEntry({
                 {archiveNote}
               </div>
             ) : null}
-            <ResolutionBadge resolution={entry.resolution} />
+            <div className="flex flex-wrap items-center gap-2">
+              <ResolutionBadge resolution={entry.resolution} />
+              {resolutionNote ? (
+                <span
+                  data-testid="gate-resolution-note"
+                  className={`text-xs ${GATE_META_TEXT_CLASS}`}
+                >
+                  {resolutionNote}
+                </span>
+              ) : null}
+            </div>
           </div>
         ) : terminateBlockReason === null && actions ? (
           // F-21：终止放行即渲染动作位——phase_mismatch 的 plan 门（context
@@ -693,7 +751,7 @@ export function GatePromptEntry({
                 与当前阶段不一致」提示行退役（0009 现场误导）。owner 2026-10-30：
                 阻断必须有可见原因——本行给人话原因（phase 用陈述事实的措辞），
                 与下方禁用的确认按钮 title 同源。 */}
-            {confirmBlockedByCompileFailure && !staleCompleted ? (
+            {inflightLocked ? null : confirmBlockedByCompileFailure && !staleCompleted ? (
               // REQ-WSC-18：候选编译不过——确认禁用的可见原因（含出路），
               // 优先于通用阻断原因（本态是更具体的事实）。
               <p
@@ -721,7 +779,7 @@ export function GatePromptEntry({
                 )}
               </p>
             ) : null}
-            {actionFacade === "typed" && actionBlockReason === null ? (
+            {actionFacade === "typed" && actionBlockReason === null && !inflightLocked ? (
               <>
                 {/* F-50 裁决 3：反馈与确认并行——帮助文案明示反馈可选；修订
                     进行中隐藏静态指导（§2.3-5）。context blocker 门有自己的
@@ -754,7 +812,7 @@ export function GatePromptEntry({
                 {GATE_FEEDBACK_SUBMITTED_NOTE}
               </p>
             ) : null}
-            {typedGateAwaitingCommand && actionBlockReason === null ? (
+            {typedGateAwaitingCommand && actionBlockReason === null && !inflightLocked ? (
               <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
                 未同步门命令，将以新命令提交
               </p>
@@ -763,7 +821,7 @@ export function GatePromptEntry({
               {/* owner 2026-10-30 反馈（不知道怎么继续）：确认按钮不再无声消失——
                   阻断时以禁用态留在卡上（title 与上方原因行给人话原因）；反馈
                   被拒时它是明确出路，保持可点并给后果说明。 */}
-              {isContextBlockerGate ? null : (
+              {isContextBlockerGate || inflightLocked ? null : (
                 // C2（REQ-HGC-02）：批次门确认=HTTP confirmBatch（发布语义）；
                 // 候选修订门维持 WS confirm（确认当前版本）。
                 <button
@@ -800,7 +858,8 @@ export function GatePromptEntry({
               {rejectionInfo &&
               actionBlockReason === null &&
               !isBatchConfirmGate &&
-              !confirmBlockedByCompileFailure ? (
+              !confirmBlockedByCompileFailure &&
+              !inflightLocked ? (
                 <span
                   data-testid="gate-confirm-consequence"
                   className={`text-xs ${GATE_META_TEXT_CLASS}`}
@@ -856,7 +915,7 @@ export function GatePromptEntry({
               </p>
             )}
             <div className="flex flex-wrap items-center justify-end gap-2">
-              {isContextBlockerGate ? null : (
+              {isContextBlockerGate || inflightLocked ? null : (
                 <button
                   type="button"
                   data-testid="gate-confirm-button"

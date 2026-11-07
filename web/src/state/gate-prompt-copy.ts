@@ -339,3 +339,35 @@ export function gateAdoptFindingsFeedback(
     .filter((line) => line !== "；");
   return `${GATE_ADOPT_FINDINGS_LEAD}${items.join("")}${GATE_ADOPT_FINDINGS_TRAIL}`;
 }
+
+// ── REQ-WSC-26 / REQ-CG-10（gate-card-resolved-and-inflight-state）──────────
+
+/**
+ * 修订被中断的明说句。与后端 `conversational_gate::cancel::REVISION_INTERRUPTED_SENTENCE`
+ * 逐字相同：后端把它写进被中止节点的 summary（durable），前端据此识别证据并在对话流明说。
+ */
+export const REVISION_INTERRUPTED_SENTENCE = "修订被中断，你的选择未生效";
+
+/** D1：已收口门卡的陈述式标题（不再是命令式「需要判断…/需要人工确认」）。 */
+export const GATE_RESOLVED_TITLE_TRIAGE = "本轮分诊已结束";
+export const GATE_RESOLVED_TITLE_BATCH = "本轮发布确认已结束";
+export const GATE_RESOLVED_TITLE_DEFAULT = "本轮人工确认已结束";
+
+/**
+ * D1：决定收口（confirm / request-change / terminate）的徽章旁说明。
+ * `interrupted`=时间线存在被中断修订的证据（terminate 专用；无证据不宣称）。
+ */
+export function gateResolutionNote(
+  resolution: "confirm" | "request-change" | "terminate",
+  interrupted: boolean,
+): string {
+  if (resolution === "confirm") {
+    return "已按当前版本确认，这一轮无需再操作";
+  }
+  if (resolution === "request-change") {
+    return "已要求修改，这一轮已结束，无需再操作";
+  }
+  return interrupted
+    ? `这一轮${REVISION_INTERRUPTED_SENTENCE}，无需再操作`
+    : "这一轮已终止，之前的选择未生效，无需再操作";
+}

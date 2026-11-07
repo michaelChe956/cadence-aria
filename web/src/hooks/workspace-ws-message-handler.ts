@@ -29,6 +29,7 @@ import {
   type TimelineNode,
   type TimelineNodeStatus,
 } from "../state/workspace-ws-store";
+import { interruptedRevisionEntry, isInterruptedRevisionNode } from "../state/gate-card-state";
 import { workItemPlanArtifactUpdateSummary } from "../state/work-item-plan-artifact-summary";
 import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
@@ -341,14 +342,22 @@ const store = useWorkspaceStore.getState();
     case "timeline_node_created":
       store.addTimelineNode(msg.node as TimelineNode);
       break;
-    case "timeline_node_updated":
+    case "timeline_node_updated": {
       store.updateTimelineNode(
         msg.node_id as string,
         msg.status as TimelineNodeStatus,
         msg.summary as string | null | undefined,
         msg.completed_at as string | null | undefined,
       );
+      // REQ-CG-10：被中断修订的节点在对话流明说（与 rebuild 同 id，重复投递不叠双）。
+      const updatedNode = useWorkspaceStore
+        .getState()
+        .timelineNodes.find((node) => node.node_id === msg.node_id);
+      if (updatedNode && isInterruptedRevisionNode(updatedNode)) {
+        store.appendChatEntry(interruptedRevisionEntry(updatedNode));
+      }
       break;
+    }
     case "review_complete":
       {
         const findings = Array.isArray(msg.findings) ? msg.findings : [];

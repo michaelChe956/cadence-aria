@@ -100,9 +100,8 @@ pub(crate) async fn fail_cancelled_human_gate_revision_turn(
                 &WsOutMessage::HumanGateTurnFailed {
                     turn_id: turn_id.to_string(),
                     failure_class: "cancelled".to_string(),
-                    message:
-                        "修订运行已取消（被新命令取代或连接中止），本轮反馈未执行；请重新提交反馈"
-                            .to_string(),
+                    message: crate::product::workspace_engine::conversational_gate::cancel::REVISION_CANCELLED_FRAME_MESSAGE
+                        .to_string(),
                 },
             )
             .await;
