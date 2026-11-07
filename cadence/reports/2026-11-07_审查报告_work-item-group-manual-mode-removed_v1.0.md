@@ -256,3 +256,5 @@ controller 通知：原相关用例 8 failed／63 passed；`5a3323e2` 修后定�
 ## 补充：6.4 真机未验说明（2026-11-08）
 
 ★**6.4（目标投影不可得 ⇒ 界面如实告知并给出可执行下一步）本轮真机未验**（本地实例无该场景）⇒ 与 `openspec/changes/archive/2026-11-07-work-item-group-manual-mode-removed/tasks.md` 的保留未勾一致。本报告此前的覆盖结论仅限单测层面。
+
+★**编号限定语（2026-11-08 补充）**：上句的「6.4」= ★**⑤ 的 6.4**★（`work-item-group-manual-mode-removed` tasks 6.4：目标投影不可得 ⇒ 界面如实告知并给出可执行下一步）★；验收卡 `cadence/reports/2026-11-07_验收卡_bug1与八条问题复验_v1.0.md` **§B 的 6.4**（bug1「被取消的 provider run 节点显示中止」）是**另一处** ⇒ ★**两处编号不同源、互不冲突**，见该卡 §B 6.4 / §B.1 与 §D 5.2 / 5.4★。
