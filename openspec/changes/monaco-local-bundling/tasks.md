@@ -69,7 +69,7 @@
 
 ## 5. 文档收口
 
-- [ ] 5.1 更新 `cadence/reports/2026-11-07_验收卡_bug1与八条问题复验_v1.0.md` 的 **§D 5.4**（monaco 本地化的实测结果：0 个 CDN 请求、markdown/json 高亮、diff 双栏、UI 能力；以及 json 运行时高亮与 worker 起得来的实测结论）
-- [ ] 5.2 更新 `cadence/notes/2026-11-06_交付说明_阶段1_爆栈根治与可用版_v1.0.md` 的 **§16**（新增一节「monaco 本地化」：二进制 +13.6 MB、用户 gzip +25.7 kB、构建 3 s → ~15 s、未验证项的最终状态、`monaco-editor` 升级须重跑验收判据 1~4）
-- [ ] 5.3 交付报告：红测失败输出、绿测输出、门禁输出、4317 指纹自检输出、浏览器验收证据、仍未验证项（若有）
-- [ ] 5.4 `monaco-editor` 升级提醒：升级时 worker 文件名随版本变 ⇒ 须同步 `monaco-local-setup.ts` 的 worker 路径与 `package.json` 版本，并**重跑验收判据 1~4**
+- [x] 5.1 更新 `cadence/reports/2026-11-07_验收卡_bug1与八条问题复验_v1.0.md` 的 **§D 5.4**（monaco 本地化的实测结果：0 个 CDN 请求、markdown/json 高亮、diff 双栏、UI 能力；以及 json 运行时高亮与 worker 起得来的实测结论）
+- [x] 5.2 更新 `cadence/notes/2026-11-06_交付说明_阶段1_爆栈根治与可用版_v1.0.md` 的 **§16**（新增一节「monaco 本地化」：二进制 +13.6 MB、用户 gzip +25.7 kB、构建 3 s → ~15 s、未验证项的最终状态、`monaco-editor` 升级须重跑验收判据 1~4）
+- [x] 5.3 交付报告：红测失败输出、绿测输出、门禁输出、4317 指纹自检输出、浏览器验收证据、仍未验证项（若有）
+- [x] 5.4 `monaco-editor` 升级提醒：升级时 worker 文件名随版本变 ⇒ 须同步 `monaco-local-setup.ts` 的 worker 路径与 `package.json` 版本，并**重跑验收判据 1~4**
