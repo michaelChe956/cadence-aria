@@ -101,8 +101,12 @@ pub(super) async fn split_advance_fixture_with_target_count(
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let coding_store = CodingAttemptStore::new(paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, SPLIT_PLAN_ID, None)
+        // 基座 attempt 带冻结快照 ⇒ 桶键 Some(logical_repository_id)，
+        // None 桶检索落空 ⇒ 桶无关取数（见 group.rs `attempt_target_bucket`）。
+        .list_attempts_for_work_item_group(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, SPLIT_PLAN_ID)
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store
         .delete_attempt(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, &seeded_attempt.id)

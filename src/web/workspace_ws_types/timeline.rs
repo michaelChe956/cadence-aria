@@ -50,6 +50,8 @@ pub enum TimelineNodeStatus {
     Paused,
     Completed,
     Failed,
+    /// 中止态（REQ-WIGA-16）：run 被取消（中止）后收口，节点不得表述为失败。
+    Aborted,
     Skipped,
 }
 

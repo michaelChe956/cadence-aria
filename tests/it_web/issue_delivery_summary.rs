@@ -11,7 +11,8 @@
 //! 再保存显式 codebase selection（两个成员），使多仓 attempt 的 push 路由通过
 //! fail-closed 校验。fake push 通过真实 `git push` 到每仓各自 bare remote 注入：
 //! 成功场景 remote 正常；partial failure 场景给其中一个 remote 注入拒绝 pre-receive hook。
-//! Legacy 单仓场景保持未迁移，验证单仓全推回归红线。
+//! 单成员 LC 场景验证单仓全推回归红线（REQ-ROUTE-01 去单仓入口后，
+//! 「未迁移的单仓 issue」形态不可达，单仓红线改由单成员 LC 承载）。
 
 use std::collections::HashSet;
 use std::fs;
@@ -41,6 +42,7 @@ use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::lifecycle_store::{
     CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::logical_codebase::{
     IdentityMigrationExecutor, IssueCodebaseSelection, IssueCodebaseSelectionStore,
     LogicalCodebaseStore, LogicalRepositoryId,
@@ -143,12 +145,12 @@ struct DeliveryFixture {
 /// 交付全链 fixture 构建器。
 ///
 /// `repo_dirs` 与 `work_item_ids` 一一对应；按序注册为 `repository_0001`、`repository_0002`…
-/// `migrate=true` 时把 issue 迁移为逻辑代码库并保存显式 selection（多仓）；
+/// 夹具一律把 issue 迁移为逻辑代码库并保存显式 selection（REQ-ROUTE-01：
+/// issue 归属必填，单仓入口已删除 ⇒ 无 LC 权威的形态不可达）；
 /// `reject_push_repo_dir` 指定某个 repo dir 的 bare remote 注入拒绝 push 的 hook。
 async fn build_delivery_fixture(
     repo_dirs: &[&str],
     work_item_ids: &[&str],
-    migrate: bool,
     reject_push_repo_dir: Option<&str>,
 ) -> DeliveryFixture {
     assert_eq!(repo_dirs.len(), work_item_ids.len());
@@ -165,7 +167,7 @@ async fn build_delivery_fixture(
     // 正向播种（4749a1fc 起 bootstrap 行恒 Unknown）：交付链（逻辑多仓/单仓皆
     // 可）经 provider gateway 启动 claude_code，必须显式物化「已探测」事实，
     // 否则 launch 分格 fail-closed 为 provider_capability_launch_not_confirmed。
-    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, PROJECT_ID, None);
+    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, PROJECT_ID);
 
     let mut repository_ids = Vec::new();
     for (index, repo_dir) in repo_dirs.iter().enumerate() {
@@ -193,7 +195,7 @@ async fn build_delivery_fixture(
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(repository_ids[0].clone()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id(PROJECT_ID),
             title: "交付状态聚合验收".to_string(),
             description: None,
             change_id: None,
@@ -236,29 +238,27 @@ async fn build_delivery_fixture(
             .expect("confirm work item session");
     }
 
-    if migrate {
-        IdentityMigrationExecutor::new(app_paths.clone())
-            .ensure_identity_schema(PROJECT_ID)
-            .expect("migrate fixture to logical codebase");
-        let members = LogicalCodebaseStore::new(app_paths.clone())
-            .list_members(PROJECT_ID)
-            .expect("logical members");
-        assert_eq!(members.len(), repo_dirs.len());
-        let logical_ids: Vec<LogicalRepositoryId> = members
-            .iter()
-            .map(|member| member.logical_repository_id)
-            .collect();
-        IssueCodebaseSelectionStore::new(app_paths.clone())
-            .save(&IssueCodebaseSelection::explicit(
-                PROJECT_ID,
-                ISSUE_ID,
-                logical_ids.clone(),
-                Vec::new(),
-                logical_ids,
-                None,
-            ))
-            .expect("issue codebase selection includes all members");
-    }
+    IdentityMigrationExecutor::new(app_paths.clone())
+        .ensure_identity_schema(PROJECT_ID)
+        .expect("migrate fixture to logical codebase");
+    let members = LogicalCodebaseStore::new(app_paths.clone())
+        .list_members(PROJECT_ID)
+        .expect("logical members");
+    assert_eq!(members.len(), repo_dirs.len());
+    let logical_ids: Vec<LogicalRepositoryId> = members
+        .iter()
+        .map(|member| member.logical_repository_id)
+        .collect();
+    IssueCodebaseSelectionStore::new(app_paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            PROJECT_ID,
+            ISSUE_ID,
+            logical_ids.clone(),
+            Vec::new(),
+            logical_ids,
+            None,
+        ))
+        .expect("issue codebase selection includes all members");
 
     if let Some(reject_dir) = reject_push_repo_dir {
         inject_rejecting_hook(&root.path().join(format!("{reject_dir}-remote.git")));
@@ -414,7 +414,6 @@ async fn multi_repo_all_work_items_pushed_marks_issue_completed_all_pushed() {
     let fixture = build_delivery_fixture(
         &["repo_alpha", "repo_beta"],
         &["work_item_0001", "work_item_0002"],
-        true,
         None,
     )
     .await;
@@ -446,7 +445,6 @@ async fn multi_repo_partial_push_failure_keeps_issue_open_and_reports_partial() 
     let fixture = build_delivery_fixture(
         &["repo_alpha", "repo_beta"],
         &["work_item_0001", "work_item_0002"],
-        true,
         Some("repo_beta"),
     )
     .await;
@@ -482,11 +480,19 @@ async fn multi_repo_partial_push_failure_keeps_issue_open_and_reports_partial() 
     assert!(!push_error.is_empty(), "push_error must be non-empty");
 }
 
-/// 场景 3（Legacy 单仓全推）：单仓 issue 全推 → issue `Completed`（单仓红线回归）。
+/// 场景 3（单成员 LC 全推）：单仓 issue 全推 → issue `Completed`（单仓红线回归）。
+///
+/// REQ-ROUTE-01（去单仓入口）后「未迁移的单仓 issue」形态不可达——issue 归属
+/// 必填（`logical_codebase_id`），无 LC 权威时 routing fail-closed、coding
+/// attempt 创建被拒（REQ-ROUTE-02/03）。旧断言钉的「单仓全推 ⇒ issue
+/// Completed + DTO all_pushed」红线本身未失效，只是其承载形态从「未迁移的
+/// Legacy 单仓」换成 REQ-ROUTE-01 明文要求的**单成员 LC**：
+/// 「单成员 LC SHALL 走完全相同的解析路径，MUST NOT 因其成员数为 1 而短路」。
+/// 断言逐字不变。
 #[tokio::test]
-async fn legacy_single_repo_all_pushed_marks_issue_completed() {
+async fn single_member_lc_all_pushed_marks_issue_completed() {
     let _guard = DELIVERY_WS_TEST_LOCK.lock().await;
-    let fixture = build_delivery_fixture(&["repo_alpha"], &["work_item_0001"], false, None).await;
+    let fixture = build_delivery_fixture(&["repo_alpha"], &["work_item_0001"], None).await;
 
     drive_all_work_items(&fixture).await;
 

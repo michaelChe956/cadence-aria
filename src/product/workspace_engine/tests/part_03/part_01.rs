@@ -466,7 +466,7 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
     engine.event_tx = tx;
     engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(Vec::new()),
+            outline: test_work_item_plan_outline(Vec::new(), None),
             design_context_gaps: vec![],
             validator_findings: vec![],
             context_blockers: vec![],

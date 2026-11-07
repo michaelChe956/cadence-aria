@@ -164,7 +164,7 @@ impl WorkspaceEngine {
             let repository = RepositoryStore::new(paths.clone())
                 .resolve_logical_repository_for_issue_codebase(
                     &input.project_id,
-                    lc_id.as_deref(),
+                    Some(lc_id.as_str()),
                     target,
                 )
                 .map(|(_, _, repository)| repository)
@@ -209,7 +209,7 @@ impl WorkspaceEngine {
                         &paths,
                         &input.project_id,
                         target,
-                        lc_id.as_deref(),
+                        Some(lc_id.as_str()),
                     )
                     .map_err(|error| format!("capture advance target snapshot failed: {error}"))?,
                 ));

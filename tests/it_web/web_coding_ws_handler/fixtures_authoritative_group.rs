@@ -21,6 +21,13 @@ fn seed_authoritative_group_plan_fixture(
     let mut bindings = std::collections::BTreeMap::new();
     let mut work_item_projections = std::collections::BTreeMap::new();
     let mut projection_bundle_refs = Vec::new();
+    // 迁移档补件：validate_group_single_target 的 Logical 分支要求全部 unit
+    // 的 target 同源且等于 attempt 冻结快照的成员——draft candidate 的
+    // target_repository_id 从 None 补为快照成员（同源，不另造身份）。
+    let member_target = attempt
+        .target_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.logical_repository_id);
     for (logical_id, revision_id) in [
         ("work_item_0001", "work_item_revision_0001"),
         ("work_item_0002", "work_item_revision_0002"),
@@ -111,7 +118,7 @@ fn seed_authoritative_group_plan_fixture(
                 generation_mode: WorkItemGenerationMode::Serial,
                 generation_diagnostics: None,
                 candidate: WorkItemDraftCandidate {
-                    target_repository_id: None,
+                    target_repository_id: member_target,
                     outline_id: format!("outline_{revision_id}"),
                     logical_work_item_id: logical.id.clone(),
                     canonical_contract_candidate: revision.canonical_contract.clone(),

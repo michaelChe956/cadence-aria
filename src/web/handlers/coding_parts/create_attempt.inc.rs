@@ -29,14 +29,34 @@ pub async fn create_coding_attempt(
     }
     if let Some(active_attempt) = active_attempts.into_iter().next() {
         if active_attempt.scope == CodingAttemptScope::WorkItem {
-            lifecycle
-                .bind_issue_worktree_lock_to_attempt(
-                    &project_id,
-                    &issue_id,
-                    &work_item_id,
-                    &active_attempt.id,
-                )
-                .map_err(product_store_api_error)?;
+            // 按活跃 attempt 的路由分派 bind（REQ-COD-03 三元键）：仓维路由
+            // （target_snapshot 冻结）的锁事实在 shared-worktrees/{repository}
+            // 三元键记录，legacy issue 维文件在该路由下不存在，误读会把契约
+            // 要求的 409 coding_attempt_active 吞成 500（与下方 :279 的创建后
+            // bind 分派同一形状）。
+            match IssueWorktreeRoute::from_target_snapshot(&active_attempt.target_snapshot) {
+                IssueWorktreeRoute::Repository { repository_id } => {
+                    lifecycle
+                        .bind_repo_worktree_lock_to_attempt(
+                            &project_id,
+                            &issue_id,
+                            repository_id,
+                            &work_item_id,
+                            &active_attempt.id,
+                        )
+                        .map_err(product_store_api_error)?;
+                }
+                IssueWorktreeRoute::Legacy => {
+                    lifecycle
+                        .bind_issue_worktree_lock_to_attempt(
+                            &project_id,
+                            &issue_id,
+                            &work_item_id,
+                            &active_attempt.id,
+                        )
+                        .map_err(product_store_api_error)?;
+                }
+            }
         }
         return Err(ApiError::runtime(
             "coding_attempt_active",

@@ -1299,7 +1299,7 @@ fn t5_trust_waiting_ws_fixture(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: Some(lc_id.clone()),
+            logical_codebase_id: lc_id.clone(),
             base_branch: None,
             title: "t5 ws trust waiting fixture".to_string(),
             description: None,

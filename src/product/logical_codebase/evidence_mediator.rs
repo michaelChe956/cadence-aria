@@ -27,7 +27,8 @@ use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{AttemptTargetSnapshot, CodingExecutionAttempt};
 use crate::product::json_store::{read_json, write_json};
 use crate::product::logical_codebase::aggregate_index::{
-    AggregateIndexRecord, AggregateIndexStore, CodeGraphCli,
+    AggregateIndexRecord, AggregateIndexStore, CodeGraphCli, codegraph_library_dir,
+    codegraph_library_present,
 };
 use crate::product::logical_codebase::evidence_audit::{
     EvidenceAuditRecord, append_evidence_audit,
@@ -127,10 +128,7 @@ fn handle_evidence_query_with_runner(
         .ok_or(EvidenceError::NotAvailable)?;
     // v1.3：按 issue 所属代码库把 manifest/member/index 全部解析到 lc_id 子树。
     let lc_id = attempt_logical_codebase_id(paths, &attempt)?;
-    let logical = match lc_id.as_deref() {
-        Some(lc_id) => LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
-        None => LogicalCodebaseStore::new(paths.clone()),
-    };
+    let logical = LogicalCodebaseStore::for_lc(paths.clone(), lc_id.as_str());
     let target_member_dir = resolve_target_member_dir(&logical, &attempt, snapshot)?;
 
     // ③ ACL：manifest 成员集合 + 成员目录名（排除本仓/非成员）。
@@ -165,8 +163,28 @@ fn handle_evidence_query_with_runner(
     );
 
     // ④ 快照钉住：首查写 pin，后续读钉住 record；stale 两方向判定。
-    let pinned = load_or_pin_index(paths, &attempt, &manifest, lc_id.as_deref())?;
+    let pinned = load_or_pin_index(paths, &attempt, &manifest, lc_id.as_str())?;
     let index_stale = is_index_stale(snapshot, &pinned);
+
+    // ④b 库目录守卫（owner 裁定 2026-11-04）：durable 索引在册（含已 pin）
+    // 但聚合根 `.codegraph` 库目录缺失 ⇒ fail-closed 为
+    // `evidence_index_unavailable`（索引不可用家族，与 ④ 的 active=None
+    // 同码不同 message）。codegraph 1.6.2（^1.6 支持区间内最新发布版）对
+    // 未建库根 `query --json` 恒 exit 0 + `[]`，不守卫会把「索引坏了」误报
+    // 成 200 空结果（读作「没有证据」，方向性误导）。库目录判据复用
+    // `codegraph_cli::codegraph_library_present`（诊断路径同源
+    // `codegraph_library_dir`），不内联第二份 `.codegraph` 字面量；
+    // 只区分库目录缺失——库目录在册而查询无命中仍是合法空结果（200 不变）。
+    if !codegraph_library_present(&manifest.provider_context_root) {
+        return Err(EvidenceError::QueryFailed {
+            code: "evidence_index_unavailable",
+            message: format!(
+                "aggregate index {} is pinned but its codegraph library directory is missing at {}",
+                pinned.aggregate_index_id,
+                codegraph_library_dir(&manifest.provider_context_root).display(),
+            ),
+        });
+    }
 
     // ⑤ 查询 + 渲染 + 单次 12k 截断 + 累计配额（Exhausted→evidence_budget_exhausted/429）。
     let hits = index_query.query(&input.query)?;
@@ -888,7 +906,7 @@ fn load_or_pin_index(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
     manifest: &LogicalCodebaseManifest,
-    lc_id: Option<&str>,
+    lc_id: &str,
 ) -> Result<AggregateIndexRecord, EvidenceError> {
     let pin_path = attempt_pin_path(paths, attempt);
     if pin_path.exists() {
@@ -925,12 +943,9 @@ fn load_pinned_index(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
     pinned_id: &str,
-    lc_id: Option<&str>,
+    lc_id: &str,
 ) -> Result<AggregateIndexRecord, EvidenceError> {
-    let store = match lc_id {
-        Some(lc_id) => AggregateIndexStore::for_lc(paths.clone(), lc_id),
-        None => AggregateIndexStore::new(paths.clone()),
-    };
+    let store = AggregateIndexStore::for_lc(paths.clone(), lc_id);
     store
         .get(&attempt.project_id, pinned_id)?
         .ok_or_else(|| EvidenceError::QueryFailed {
@@ -939,11 +954,12 @@ fn load_pinned_index(
         })
 }
 
-/// 从 attempt 反查 issue 唯一归属的 lc_id（v1.3）；issue 不存在/单仓返回 None。
+/// 从 attempt 反查 issue 唯一归属的 lc_id（v1.3）；归属字段必填，issue
+/// 不存在/不可读时上浮 store 错误。
 fn attempt_logical_codebase_id(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
-) -> Result<Option<String>, EvidenceError> {
+) -> Result<String, EvidenceError> {
     crate::product::logical_codebase::resolve_issue_logical_codebase_id(
         paths,
         &attempt.project_id,

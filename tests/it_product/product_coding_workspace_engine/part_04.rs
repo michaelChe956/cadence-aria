@@ -62,23 +62,41 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Pi,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
 
     let seen_modes = Arc::new(Mutex::new(Vec::new()));
-    let provider = CountingProvider {
-        starts: Arc::new(AtomicUsize::new(0)),
-        seen_modes: Arc::clone(&seen_modes),
-        fail_on_start: false,
-    };
+    let provider = Arc::new(crate::context_builder::GatewayExactInputAdapter {
+        inner: Arc::new(CountingProvider {
+            starts: Arc::new(AtomicUsize::new(0)),
+            seen_modes: Arc::clone(&seen_modes),
+            fail_on_start: false,
+        }),
+    });
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::Pi,
+        tx,
+    );
 
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
@@ -95,7 +113,7 @@ async fn pi_role_with_supervised_mode_normalized_to_auto() {
         .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
         .expect("write pi config");
     engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -112,21 +130,33 @@ async fn pi_failure_does_not_trigger_fresh_retry() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Pi,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
 
     let pi_starts = Arc::new(AtomicUsize::new(0));
-    let provider = CountingProvider {
-        starts: Arc::clone(&pi_starts),
-        seen_modes: Arc::new(Mutex::new(Vec::new())),
-        fail_on_start: true,
-    };
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(CountingProvider {
+            starts: Arc::clone(&pi_starts),
+            seen_modes: Arc::new(Mutex::new(Vec::new())),
+            fail_on_start: true,
+        }),
+        provider_type: ProviderType::Pi,
+    });
     let config = CodingRoleProviderConfigSnapshot {
         coder: ProviderName::Pi,
         code_reviewer: Some(ProviderName::ClaudeCode),
@@ -138,10 +168,17 @@ async fn pi_failure_does_not_trigger_fresh_retry() {
         .update_role_provider_config_snapshot("project_0001", "issue_0001", &attempt.id, config)
         .expect("write pi config");
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::Pi,
+        tx,
+    );
 
     let result = engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await;
 
     assert!(result.is_err(), "Pi startup failure must return an error");
@@ -157,11 +194,20 @@ async fn coding_prompt_includes_rework_fix_hints() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
@@ -180,14 +226,24 @@ async fn coding_prompt_includes_rework_fix_hints() {
         })
         .expect("save rework instruction");
     let captured_prompt = Arc::new(Mutex::new(None));
-    let provider = PromptCapturingProvider {
-        prompt: Arc::clone(&captured_prompt),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(PromptCapturingProvider {
+            prompt: Arc::clone(&captured_prompt),
+        }),
+        ProviderType::ClaudeCode,
+    ));
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -212,11 +268,20 @@ async fn execute_coding_includes_unconsumed_context_notes_and_consumes_them() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let mut attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     attempt = crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
@@ -236,14 +301,24 @@ async fn execute_coding_includes_unconsumed_context_notes_and_consumes_them() {
         )
         .expect("new context note");
     let captured_prompt = Arc::new(Mutex::new(None));
-    let provider = PromptCapturingProvider {
-        prompt: Arc::clone(&captured_prompt),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(PromptCapturingProvider {
+            prompt: Arc::clone(&captured_prompt),
+        }),
+        ProviderType::ClaudeCode,
+    ));
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -270,11 +345,20 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     store
@@ -293,15 +377,25 @@ async fn execute_coding_emits_prompt_for_coder_provider() {
         .expect("set role provider snapshot");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let captured_input = Arc::new(Mutex::new(None));
-    let provider = InputCapturingProvider {
-        input: Arc::clone(&captured_input),
-        output: "done".to_string(),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(InputCapturingProvider {
+            input: Arc::clone(&captured_input),
+            output: "done".to_string(),
+        }),
+        ProviderType::Codex,
+    ));
     let (tx, mut rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::Codex,
+        tx,
+    );
 
     engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -325,11 +419,20 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::Codex),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     store
@@ -347,12 +450,22 @@ async fn execute_coding_forwards_provider_execution_and_tool_events() {
         )
         .expect("set role provider snapshot");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = EventEmittingCodingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(EventEmittingCodingProvider),
+        provider_type: ProviderType::Codex,
+    });
     let (tx, mut rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::Codex,
+        tx,
+    );
 
     engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -408,20 +521,39 @@ async fn execute_coding_persists_coder_role_run_and_full_output_chat_entry() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = FileWritingStreamingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(FileWritingStreamingProvider),
+        ProviderType::ClaudeCode,
+    ));
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -477,7 +609,10 @@ async fn execute_coding_persists_coder_role_run_and_full_output_chat_entry() {
     assert_eq!(entry.content.as_deref(), Some("done"));
     let metadata = entry.metadata.as_ref().expect("entry metadata");
     assert_eq!(metadata["source"], "coding");
-    assert_eq!(metadata["provider"], "fake");
+    // gateway 只支持四家真实 provider（Fake 恒 `provider_unsupported_for_gateway_launch`）
+    // ⇒ Main 授权把替身改挂真实 provider；本断言钉的是「chat entry 记录实际跑的那个
+    // provider」，随夹具同步（语义不变）。
+    assert_eq!(metadata["provider"], "claude_code");
     assert_eq!(metadata["role_run_id"].as_str(), Some(role_run.id.as_str()));
     assert_eq!(metadata["run_no"], 1);
     assert_eq!(metadata["raw_provider_output_ref"], "provider-raw/coding/coder_output_0001.txt");
@@ -493,20 +628,39 @@ async fn execute_coding_forwards_provider_permission_choice_and_status_events() 
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = ControlEventCodingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(ControlEventCodingProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, mut rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let error = engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect_err("unresolved provider choice should block completion");
     assert_eq!(
@@ -572,22 +726,41 @@ async fn execute_coding_forwards_permission_responses_to_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = PermissionAwaitingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(PermissionAwaitingProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let (command_tx, mut command_rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        event_tx,
+    );
     let context = CodingExecutionContext::default();
 
     let execute =
-        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+        engine.execute_coding_with_commands(&attempt, provider.as_ref(), &context, &mut command_rx);
     tokio::pin!(execute);
     let mut saw_permission_request = false;
 
@@ -623,22 +796,41 @@ async fn execute_coding_persists_provider_choice_and_resumes_after_response() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = ChoiceAwaitingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(ChoiceAwaitingProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let (command_tx, mut command_rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        event_tx,
+    );
     let context = CodingExecutionContext::default();
 
     let execute =
-        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+        engine.execute_coding_with_commands(&attempt, provider.as_ref(), &context, &mut command_rx);
     tokio::pin!(execute);
     let mut saw_choice_request = false;
 
@@ -701,20 +893,39 @@ async fn execute_coding_blocks_when_provider_completes_before_choice_response() 
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = ControlEventCodingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(ControlEventCodingProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let error = engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect_err("provider cannot complete with unresolved choice");
 
@@ -743,20 +954,39 @@ async fn execute_coding_blocks_later_permission_before_choice_response() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = ChoiceThenPermissionProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(ChoiceThenPermissionProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, mut rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let error = engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect_err("provider cannot request permission with unresolved choice");
 
@@ -794,22 +1024,41 @@ async fn execute_coding_stops_forwarding_provider_events_after_abort_command() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = PermissionAwaitingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(PermissionAwaitingProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (event_tx, mut event_rx) = mpsc::channel(16);
     let (command_tx, mut command_rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        event_tx,
+    );
     let context = CodingExecutionContext::default();
 
     let execute =
-        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+        engine.execute_coding_with_commands(&attempt, provider.as_ref(), &context, &mut command_rx);
     tokio::pin!(execute);
     let mut abort_sent = false;
 

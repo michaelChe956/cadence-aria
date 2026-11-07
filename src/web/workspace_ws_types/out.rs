@@ -747,6 +747,13 @@ pub enum WsOutMessage {
         /// 对外帧由 manager 以 durable 事实覆盖。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         automation: Option<crate::product::models::automation::AutomationOwnership>,
+        /// REQ-HGC-04：本页底部「继续自动化」入口的服务端权威事实（与 HTTP
+        /// control 投影的 `allowed_actions` 含 `continue_plan` **同源**）。
+        /// `Some(true)`=此刻确有该入口；`Some(false)`=此刻确定没有；
+        /// `None`=服务端未能判定（读取失败 / 非 work_item_plan 会话）——前端按
+        /// 「无真实续跑入口」处理，不得给假指引。缺席（未注入/旧帧）省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_continue_available: Option<bool>,
         /// A1c（Task 2.2）：durable LC 恢复纯投影（waiting/fresh/resolved 主
         /// 状态＋last_operation）；空/旧 wire 缺省省略。resolved 保留证据供
         /// Replay；allowed_actions 在 B 波接齐前恒空（A/B 发布纪律）。
@@ -896,6 +903,7 @@ mod tests {
             publication_provenance_ref: Some("provenance-ref".to_string()),
             pending_choice_requests: Vec::new(),
             automation: None,
+            plan_continue_available: None,
             lc_resume_recovery: None,
             structural_governance: None,
         }

@@ -290,9 +290,8 @@ fn logical_revision_fixture_with(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: Some(
+            logical_codebase_id:
                 crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
-            ),
             title: "logical revision fixture issue".to_string(),
             description: Some("task 2.3 revision root cwd".to_string()),
             change_id: None,
@@ -1292,9 +1291,8 @@ fn logical_design_revision_fixture() -> LogicalDesignRevisionFixture {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repositories[0].id.clone()),
-            logical_codebase_id: Some(
+            logical_codebase_id:
                 crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
-            ),
             title: "logical design revision fixture issue".to_string(),
             description: Some("design revision anchor".to_string()),
             change_id: None,

@@ -11,13 +11,12 @@ async fn advance_checkpoint_recovery_reuses_prepared_attempt_and_unit_ids() {
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
+        // 基座 attempt 带冻结快照 ⇒ 桶键 Some(logical_repository_id)，
+        // None 桶检索落空 ⇒ 桶无关取数（见 group.rs `attempt_target_bucket`）。
+        .list_attempts_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store
         .delete_attempt("project_0001", "issue_plan_0001", &seeded_attempt.id)
@@ -53,7 +52,21 @@ async fn advance_checkpoint_recovery_reuses_prepared_attempt_and_unit_ids() {
                     review_rounds: 1,
                     permission_modes: Default::default(),
                 },
-                target_snapshot: None,
+                // REQ-CS-05 成员单 target 纪律：seed 注册 LC 权威后 group
+                // admission 的 routing 恒 Logical，`validate_group_single_target`
+                // 要求 attempt 冻结 target snapshot（None 必拒
+                // mixed_target_group_rejected——旧 FailClosed 时代被跳过）。
+                target_snapshot: Some(
+                    crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+                        &app_paths,
+                        "project_0001",
+                        repository
+                            .logical_repository_id
+                            .expect("seed repository logical id"),
+                        None,
+                    )
+                    .expect("advance fixture target snapshot"),
+                ),
                 max_auto_rework: 2,
                 start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             },
@@ -157,13 +170,10 @@ async fn advance_checkpoint_recovery_reuses_materialized_units_without_duplicate
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
+        .list_attempts_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store
         .delete_attempt("project_0001", "issue_plan_0001", &seeded_attempt.id)
@@ -192,7 +202,21 @@ async fn advance_checkpoint_recovery_reuses_materialized_units_without_duplicate
             review_rounds: 1,
             permission_modes: Default::default(),
         },
-        target_snapshot: None,
+        target_snapshot: Some(
+            crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot(
+                &app_paths,
+                "project_0001",
+                crate::product::repository_store::RepositoryStore::new(app_paths.clone())
+                    .list("project_0001")
+                    .unwrap()
+                    .into_iter()
+                    .find(|record| record.id == "repository_0001")
+                    .and_then(|record| record.logical_repository_id)
+                    .expect("seed repository logical id"),
+                None,
+            )
+            .expect("advance fixture target snapshot"),
+        ),
         max_auto_rework: 2,
         start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
     };

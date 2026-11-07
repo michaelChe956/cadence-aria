@@ -1,4 +1,5 @@
 import type {
+  EnrollmentCarrierTarget,
   EnrollmentOptions,
   EnrollmentSource,
   EnrollmentTarget,
@@ -48,3 +49,41 @@ export function sameProviderChoice(
     left.reviewer_provider === right.reviewer_provider
   );
 }
+
+/**
+ * 发起侧载体守卫（REQ-ROUTE-C5-TARGET 前端侧）：把**投影侧**三变体的
+ * enrollment target 收敛成**命令侧**两变体（逻辑代码库）。
+ *
+ * - `logical_codebase` / `logical_codebase_members` → 原样透传；
+ * - `single_repository`（**仅 legacy 只读**）→ `null`。
+ *
+ * `null` 的语义是「这条记录不能作为命令载体」：调用方**禁用提交并给出提示**
+ * （需重建为逻辑代码库授权）——MUST NOT 静默降级、MUST NOT 猜一个 LC。
+ */
+export function carrierTargetFromEnrollmentTarget(
+  target: EnrollmentTarget,
+): EnrollmentCarrierTarget | null {
+  switch (target.kind) {
+    case "logical_codebase":
+      return {
+        kind: "logical_codebase",
+        logical_codebase_id: target.logical_codebase_id,
+        logical_repository_id: target.logical_repository_id,
+      };
+    case "logical_codebase_members":
+      return {
+        kind: "logical_codebase_members",
+        logical_codebase_id: target.logical_codebase_id,
+        logical_repository_ids: target.logical_repository_ids,
+      };
+    case "single_repository":
+      // legacy 只读载体：不得再作为命令载体。
+      return null;
+    default:
+      return null;
+  }
+}
+
+/** legacy 单仓载体不可再发起命令时的用户可见提示（唯一文案来源）。 */
+export const LEGACY_CARRIER_BLOCKED_MESSAGE =
+  "该自动化的授权载体是旧版单仓载体，无法重新开启或提交：需重建为逻辑代码库授权。";

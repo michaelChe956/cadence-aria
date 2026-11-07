@@ -253,6 +253,53 @@ async fn group_remainder_selector_resumes_skipped_successor_unit() {
     let attempt = store
         .get_attempt("project_0001", "issue_0001", "coding_attempt_0001")
         .expect("attempt");
+    // 夹具补件：多仓完成/推进链 fail-closed 读 shared-worktrees/{member}.json
+    //（生产由 WorktreePrepare 落盘；本用例直接驱动 advance，按同款 upsert 补种）。
+    LifecycleStore::new(store.paths())
+        .upsert_repo_shared_worktree(
+            cadence_aria::product::lifecycle_store::UpsertRepoSharedWorktreeInput {
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                repository_id: attempt
+                    .target_snapshot
+                    .as_ref()
+                    .expect("group fixture snapshot")
+                    .logical_repository_id,
+                branch_name: attempt.branch_name.clone(),
+                worktree_path: attempt
+                    .worktree_path
+                    .clone()
+                    .expect("group fixture worktree"),
+                base_branch: attempt.base_branch.clone(),
+            },
+        )
+        .expect("seed repo shared worktree");
+    LifecycleStore::new(store.paths())
+        .try_acquire_repo_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            attempt
+                .target_snapshot
+                .as_ref()
+                .expect("group fixture snapshot")
+                .logical_repository_id,
+            "work_item_0001",
+            "repo_worktree_lease_fixture_0001",
+        )
+        .expect("acquire repo worktree lease");
+    LifecycleStore::new(store.paths())
+        .bind_repo_worktree_lock_to_attempt(
+            &attempt.project_id,
+            &attempt.issue_id,
+            attempt
+                .target_snapshot
+                .as_ref()
+                .expect("group fixture snapshot")
+                .logical_repository_id,
+            "work_item_0001",
+            &attempt.id,
+        )
+        .expect("bind repo worktree lease");
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
     let engine = cadence_aria::product::coding_workspace_engine::CodingWorkspaceEngine::new(

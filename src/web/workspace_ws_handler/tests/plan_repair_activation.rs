@@ -16,6 +16,28 @@ use tokio_tungstenite::tungstenite::Message;
 type TestWsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// 取基座 plan 级 group attempt。
+///
+/// 用 `list_attempts_for_work_item_group`（`group.rs:106`，public）而**不是**
+/// `get_attempt_for_work_item_group(..., target)`：后者按
+/// `attempt_target_bucket(attempt) == target` 过滤，而
+/// `attempt_target_bucket`（`group.rs:132-140`）在**快照在场时取
+/// `logical_repository_id`**——本夹具给 attempt 补上与权威一致的冻结快照后
+/// 桶从 `None` 变 `Some(logical_repository_id)`，写死 `None` 的查找口径
+/// 就会落空（第二层 `unwrap()` panic）。`list_attempts_for_work_item_group`
+/// 只按 `work_item_group_id` 过滤、不看桶 ⇒ 与「该 attempt 有没有快照」解耦，
+/// 两种形态都命中同一条基座 attempt（基座只创建这一条 group attempt）。
+fn plan_repair_attempt(
+    store: &CodingAttemptStore,
+) -> crate::product::coding_models::CodingExecutionAttempt {
+    store
+        .list_attempts_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
+        .expect("plan repair attempt list")
+        .into_iter()
+        .next()
+        .expect("plan repair attempt must exist")
+}
+
 async fn receive_json(ws: &mut TestWsStream, phase: &str) -> Value {
     loop {
         match timeout(Duration::from_secs(3), ws.next()).await {
@@ -37,6 +59,93 @@ async fn receive_type(ws: &mut TestWsStream, expected_type: &str) -> Value {
     }
 }
 
+/// REQ-ROUTE-01 两态化：plan_repair 基座夹具（`test_controls/plan_repair/seed.rs`）
+/// 已落 project/repository_0001/issue_plan_0001 **与完整 LC 权威**（manifest +
+/// member + 主 checkout + selection + policy + repos.json 逻辑归属回填）。
+/// child WS attach 的 workspace context 另缺三段：
+/// ① 别名位 `record.json`（authority resolver 的 LC 存在性凭证；`ProjectStore::get`
+/// 内置的幂等 `migrate_legacy` 会把项目级 legacy 布局落成别名 LC record）；
+/// ② active(→Degraded) 聚合索引（planning context 链路的 `active_required` 前置）；
+/// ③ **attempt 的冻结 `target_snapshot`** —— 基座 attempt 以 `target_snapshot: None`
+/// 落盘；路由既已是 Logical，`classify_worktree_lease_for_attempt` 便要求快照
+/// （无快照 ⇒ evidence `target_snapshot_missing_for_logical` ⇒ `LeaseUnknown`
+/// fail-closed ⇒ amendment 投递面起不来）。
+/// ⇒ 这里只补这三段，**不重写权威**（重写会与基座 manifest 的
+/// `logical_codebase_id` 冲突 ⇒ `IdentityMismatch`）。
+///
+/// ⚠️ ③ 的**副作用**：快照落盘后该 attempt 的 target 桶从 `None` 变为
+/// `Some(logical_repository_id)`（`attempt_target_bucket`，`group.rs:132-140`）
+/// ⇒ 此后取这条 attempt 必须用**不看桶**的 `list_attempts_for_work_item_group`
+/// （见 [`plan_repair_attempt`]），写死 `None` 桶的
+/// `get_attempt_for_work_item_group` 会落空。
+fn seed_lc_authority_for_plan_repair(root: &std::path::Path) {
+    let app_paths = ProductAppPaths::new(root.join(".aria"));
+    // 幂等触发 migrate_legacy：项目级 legacy 布局 → 别名 LC record.json。
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .get("project_0001")
+        .expect("plan repair project record");
+    super::lc_fixture_support::ensure_planning_index_and_policy(&app_paths, "project_0001");
+    // ③ 与权威一致的冻结快照：权威的 checkout / manifest / policy 事实逐字取自
+    // store（`snapshot_for`），故 `validate_snapshot_fields` 必然通过。
+    let store = crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
+    let attempt = plan_repair_attempt(&store);
+    let logical = crate::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone());
+    let manifest = logical
+        .load_manifest("project_0001")
+        .expect("plan repair manifest")
+        .expect("plan repair manifest must exist");
+    let member_id = *manifest
+        .member_ids
+        .first()
+        .expect("plan repair manifest must reference a member");
+    let checkout_id = logical
+        .list_checkouts("project_0001")
+        .expect("plan repair checkouts")
+        .into_iter()
+        .find(|checkout| checkout.logical_repository_id == member_id)
+        .map(|checkout| checkout.checkout_id)
+        .expect("plan repair member must have a recorded checkout");
+    let snapshot = crate::product::logical_codebase::logical_test_fixture::snapshot_for(
+        &app_paths,
+        "project_0001",
+        member_id,
+        checkout_id,
+    );
+    let mut attempt = attempt;
+    attempt.target_snapshot = Some(snapshot);
+    store
+        .write_coding_attempt_for_test(&attempt)
+        .expect("plan repair attempt snapshot");
+    // 带快照的 attempt 只按**仓维**分类租约（`run_exclusion.rs`
+    // `classify_worktree_lease_for_attempt`）：仓维记录缺失 ⇒ evidence
+    // `worktree record not found for attempt route` ⇒ 虽不拦截（无租约事实），
+    // 但 advance / amendment 推进面要「仓维锁已绑定到本 attempt」这一事实 ⇒
+    // 这里按 advance 预绑定语义建仓维记录并把锁绑到该 attempt。
+    let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
+    let worktree_path = attempt
+        .worktree_path
+        .clone()
+        .expect("plan repair attempt worktree path");
+    crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+        &lifecycle,
+        "project_0001",
+        "issue_plan_0001",
+        member_id,
+        &worktree_path,
+    );
+    crate::product::logical_codebase::logical_test_fixture::bind_repo_lock_to_attempt(
+        &lifecycle,
+        "project_0001",
+        "issue_plan_0001",
+        member_id,
+        &attempt
+            .current_work_item_id
+            .clone()
+            .expect("plan repair attempt current work item"),
+        &attempt.id,
+    );
+}
+
 #[tokio::test]
 async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_application() {
     let root = tempfile::tempdir().unwrap();
@@ -47,6 +156,7 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
     .await
     .unwrap();
     let identity = runtime.drive_until_awaiting_confirmation().await.unwrap();
+    seed_lc_authority_for_plan_repair(root.path());
     let state = WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
@@ -56,15 +166,7 @@ async fn repeated_confirmation_recovers_delivery_mark_failure_without_duplicate_
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
-        .unwrap()
-        .unwrap();
+    let attempt = plan_repair_attempt(&store);
     crate::web::coding_ws_handler::build_coding_session_state(&store, attempt.clone())
         .expect("plan repair fixture must build the initial coding websocket state");
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
@@ -171,6 +273,7 @@ async fn zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_deliv
     .await
     .unwrap();
     let identity = runtime.drive_until_awaiting_confirmation().await.unwrap();
+    seed_lc_authority_for_plan_repair(root.path());
     let state = WebAppState::new(
         root.path().to_path_buf(),
         WebRuntime::new_fake(root.path().to_path_buf()),
@@ -182,15 +285,7 @@ async fn zero_socket_plan_amendment_activation_resumes_attempt_with_unsent_deliv
         axum::serve(listener, app).await.unwrap();
     });
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
-        .unwrap()
-        .unwrap();
+    let attempt = plan_repair_attempt(&store);
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
 
     // 全程不连接 coding WS：只从 workspace 子会话确认。

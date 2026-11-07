@@ -1,9 +1,65 @@
+// 本片段通过 `include!` 进入 `aggregate_initialization` 模块；自带 `use`
+// 以免改动父模块文件（片5 独占本片段）。
+use crate::product::cadence_skills::CadenceSkillsError;
+use crate::product::logical_codebase::environment_probe::{
+    AggregateEnvironmentProbe, CodeGraphEnvironmentProbe,
+};
+use crate::product::logical_codebase::root_recipe_receipt::RootRecipeSnapshotEntry;
+
 /// Adapts the shared Cadence skills manager to the aggregate coordinator's
 /// durable machine-skills step. The manager owns source cloning/updating and
 /// all three managed link layers; this adapter only records deterministic
 /// evidence for the operation.
 struct CadenceAggregateSkillsPreparation {
     manager: Arc<CadenceSkillsManager>,
+}
+
+/// 把 `CadenceSkillsError` 的结构化 `stage` / `layer` 映射成稳定子码
+/// `cause`，避免失败面只剩一句不可行动的自然语言。`reason_code` 仍是
+/// `aggregate_machine_skills_failed`（与旧 `SkillsPreparation` 共用同一臂）。
+///
+/// task 7.8：三类确定性失败都必须保留结构化来源 ——
+/// `skills_unavailable_{stage}` / `skills_update_failed_{stage}` /
+/// `skills_sync_failed_{layer}`，**不得**压成通用串。
+fn skills_preparation_error(
+    error: CadenceSkillsError,
+    home: Option<&str>,
+) -> AggregateInitializationError {
+    let cause = match &error {
+        CadenceSkillsError::Unavailable { stage, .. } => format!("skills_unavailable_{stage}"),
+        CadenceSkillsError::UpdateFailed { stage, .. } => format!("skills_update_failed_{stage}"),
+        CadenceSkillsError::SyncFailed { layer, .. } => format!("skills_sync_failed_{layer}"),
+    };
+    AggregateInitializationError::SkillsPreparationDiagnosed {
+        // 确定性失败的 detail 可能夹带 CLI 输出/绝对路径：统一走全仓唯一
+        // 「清洗 → 密钥脱敏 → 路径降级 → 限长」入口（REQ-BOOT-13）。
+        reason: crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
+            &error.to_string(),
+            &crate::cross_cutting::diagnostic_redaction::RedactionContext::new(home, None),
+        ),
+        retryable: true,
+        cause,
+    }
+}
+
+/// skills 失败面里的 HOME 前缀（由 `<home>/.agents/Cadence-skills` 反推），
+/// 交给 `sanitize_diagnostic` 把绝对路径降级成 `~`。
+fn skills_home_prefix(paths: &CadenceSkillsPaths) -> Option<String> {
+    paths
+        .repository_root()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(|home| home.to_string_lossy().into_owned())
+}
+
+/// skills 证据摘要（源目录 / 三层链接）失败：不是 provider 问题，仍按
+/// machine_skills 失败上报，`cause` 统一为 `skills_digest_failed`。
+fn skills_digest_error(stage: &str, error: impl std::fmt::Display) -> AggregateInitializationError {
+    AggregateInitializationError::SkillsPreparationDiagnosed {
+        reason: format!("skill {stage} digest failed: {error}"),
+        retryable: true,
+        cause: "skills_digest_failed".to_string(),
+    }
 }
 
 #[async_trait::async_trait]
@@ -14,24 +70,16 @@ impl AggregateSkillsPreparation for CadenceAggregateSkillsPreparation {
         _operation_id: &str,
         cancellation: CancellationToken,
     ) -> Result<MachineSkillsPreparation, AggregateInitializationError> {
-        let result = self.manager.prepare(cancellation).await.map_err(|error| {
-            AggregateInitializationError::SkillsPreparation {
-                reason: error.to_string(),
-                retryable: true,
-            }
-        })?;
-        let source_digest = digest_tree(self.manager.paths().source_root()).map_err(|error| {
-            AggregateInitializationError::SkillsPreparation {
-                reason: format!("skill source digest failed: {error}"),
-                retryable: true,
-            }
-        })?;
-        let link_digest = digest_link_layers(self.manager.paths()).map_err(|error| {
-            AggregateInitializationError::SkillsPreparation {
-                reason: format!("skill link digest failed: {error}"),
-                retryable: true,
-            }
-        })?;
+        let home = skills_home_prefix(self.manager.paths());
+        let result = self
+            .manager
+            .prepare(cancellation)
+            .await
+            .map_err(|error| skills_preparation_error(error, home.as_deref()))?;
+        let source_digest = digest_tree(self.manager.paths().source_root())
+            .map_err(|error| skills_digest_error("source", error))?;
+        let link_digest = digest_link_layers(self.manager.paths())
+            .map_err(|error| skills_digest_error("link", error))?;
         Ok(MachineSkillsPreparation {
             source_digest,
             link_digest,
@@ -70,6 +118,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
             step,
             preflight,
             lc_id,
+            provider,
             bootstrap,
             cancellation,
         } = request;
@@ -126,7 +175,19 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 reason: format!("logical codebase gateway factory build failed: {error}"),
                 retryable: true,
             })?;
-        // C4 Task 10 / Task 1.4：经 claude_code_with_admission 组装——
+        // 片4（REQ-BOOT-07）：driver 按 request.provider 构造——经 C-2 集中
+        // 映射 `ProviderRef::from_provider_name`（四家显式、Fake fail-closed、
+        // 无 `_ =>` 静默回退），provider 不进 driver 字段（state 级单例）。
+        let provider_ref = crate::product::logical_codebase::ProviderRef::from_provider_name(
+            provider,
+            "cap_managed_snapshot",
+        )
+        .map_err(|error| AggregateInitializationError::ProviderTurn {
+            step,
+            reason: format!("aggregate recipe provider {provider:?} is not launchable: {error}"),
+            retryable: false,
+        })?;
+        // C4 Task 10 / Task 1.4：经 with_provider_and_admission 组装——
         // provider turn 前先做实际成员规则/policy/capability 的 admission
         // 预检（Task 8），缺失/漂移时 fail-closed，provider 保持零启动。
         // Task 1.8（D2/BOOT-03）：paths + lc_id 齐备的生产面再叠加 root
@@ -139,9 +200,9 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
         if let (Some(lc_id), Some(paths)) = (lc_id, self.paths.as_ref()) {
             let watches = begin_root_recipe_command_watches(operation_id, step, preflight)
                 .map_err(|error| root_recipe_audit_failure(step, error))?;
-            let driver = GatewayBackedAggregateProviderTurnDriver::claude_code_with_admission(
+            let driver = GatewayBackedAggregateProviderTurnDriver::with_provider_and_admission(
                 Arc::new(gateway),
-                "cap_managed_snapshot",
+                provider_ref.clone(),
                 paths.clone(),
             );
             let summary = driver
@@ -153,12 +214,19 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                     lc_id: Some(lc_id),
                     bootstrap,
                     cancellation,
+                    provider,
                 })
                 .await?;
             // 命令未执行完成（turn 失败/取消）不落 receipt：无执行即无证据，
             // 重试窗口重新审计；同 index 同内容重放幂等。
-            complete_root_recipe_command_receipts(paths, lc_id, project_id, watches)
-                .map_err(|error| root_recipe_audit_failure(step, error))?;
+            complete_root_recipe_command_receipts(
+                paths,
+                lc_id,
+                project_id,
+                watches,
+                step,
+                provider,
+            )?;
             if step_owns_final_recipe_command(step) {
                 // Task 4：末命令唯一收口（先审计后发布——发布产物
                 // policy/** 不进任何命令审计窗口）。中断 seam 仅测试编译。
@@ -186,9 +254,9 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
             }
             return Ok(summary);
         }
-        let driver = GatewayBackedAggregateProviderTurnDriver::claude_code(
+        let driver = GatewayBackedAggregateProviderTurnDriver::with_provider(
             Arc::new(gateway),
-            "cap_managed_snapshot",
+            provider_ref,
         );
         driver
             .run_turn(AggregateProviderTurnRequest {
@@ -199,6 +267,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 lc_id,
                 bootstrap,
                 cancellation,
+                provider,
             })
             .await
     }
@@ -249,72 +318,6 @@ mod root_policy_test_faults {
         armed.remove(position);
         true
     }
-}
-
-/// Task 1.8（D2）：本 step 在固定 root recipe 命令索引中的命令
-/// （全局 index + 命令文本）。确定性 step 无命令（空表）。
-fn root_recipe_step_commands(step: AggregateInitializationStepKind) -> Vec<(usize, &'static str)> {
-    crate::product::logical_codebase::aggregate_initialization_store::root_recipe_command_index()
-        .into_iter()
-        .filter(|(command_step, _, _)| *command_step == step)
-        .map(|(_, command_index, command)| (command_index, command))
-        .collect()
-}
-
-/// 末命令判定：本 step 持有全局最大 command index（固定顺序下即
-/// OpenspecAndExamples 的命令 4）——最终 receipt 的 finalize 挂点。
-fn step_owns_final_recipe_command(step: AggregateInitializationStepKind) -> bool {
-    let step_max = root_recipe_step_commands(step)
-        .iter()
-        .map(|(command_index, _)| *command_index)
-        .max();
-    let global_max = crate::product::logical_codebase::aggregate_initialization_store::root_recipe_command_index()
-        .iter()
-        .map(|(_, command_index, _)| *command_index)
-        .max();
-    step_max.is_some_and(|step_max| Some(step_max) == global_max)
-}
-
-/// 命令审计窗口开启：canonical root 冻结 + before 全量快照。IO/命令身份
-/// 漂移 fail-closed 为可重试 ProviderTurn 失败（不可观测绝不静默）。
-fn begin_root_recipe_command_watches(
-    operation_id: &str,
-    step: AggregateInitializationStepKind,
-    preflight: &AggregatePreflightSnapshot,
-) -> Result<
-    Vec<crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandWatch>,
-    crate::product::json_store::ProductStoreError,
-> {
-    let auditor =
-        crate::product::logical_codebase::root_recipe_receipt::RootRecipeFilesystemAuditor::new();
-    let canonical_root = std::path::PathBuf::from(&preflight.aggregate_root);
-    root_recipe_step_commands(step)
-        .into_iter()
-        .map(|(command_index, command)| {
-            auditor.before_command(operation_id, &canonical_root, step, command_index, command)
-        })
-        .collect()
-}
-
-/// 命令成功后逐条落 per-command receipt（拒绝也 durable 保留证据）。
-/// 同 index 同内容重放幂等；同 index 不同内容冲突不覆盖（fail-closed）。
-fn complete_root_recipe_command_receipts(
-    paths: &ProductAppPaths,
-    lc_id: &str,
-    project_id: &str,
-    watches: Vec<crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandWatch>,
-) -> Result<(), crate::product::json_store::ProductStoreError> {
-    let auditor =
-        crate::product::logical_codebase::root_recipe_receipt::RootRecipeFilesystemAuditor::new();
-    let store = crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
-        paths.clone(),
-        lc_id.to_string(),
-    );
-    for watch in watches {
-        let receipt = auditor.after_command(watch, chrono::Utc::now().to_rfc3339())?;
-        store.append_command(project_id, receipt)?;
-    }
-    Ok(())
 }
 
 /// 固定命令索引中的末命令（全局最大 command index——固定顺序下即
@@ -683,6 +686,21 @@ fn can_resume_audited_final_command(
     Ok(true)
 }
 
+/// 恢复分支「旧摘要无法复验」专用 record kind：重试无用 ⇒ `retryable: false`。
+const LEGACY_DIGEST_UNVERIFIABLE_KIND: &str = "aggregate_policy_publication_legacy_digest";
+
+/// 旧 receipt（改造前口径：文件条目带内容摘要）与新快照（元数据口径：
+/// `content_digest` 恒 `None`）之间摘要**不可比**：其余元数据一致的条目既
+/// 不能判「已变更」（把存量 operation 的恢复一律误报），也不能判「没变」。
+fn legacy_content_digest_unverifiable(old: &RootRecipeSnapshotEntry, fresh: &RootRecipeSnapshotEntry) -> bool {
+    if old.content_digest.is_none() || fresh.content_digest.is_some() {
+        return false;
+    }
+    let mut without_digest = old.clone();
+    without_digest.content_digest = None;
+    without_digest == *fresh
+}
+
 /// Task 4：恢复分支的全树复验——重新拍当前 canonical root 快照，与末条
 /// Allowed 审计的 after snapshot 比较；只有由 I1 不可变输出证明的精确
 /// policy locator 及其新增目录可扣除，其余任何新增/删除/变更都拒绝。
@@ -738,19 +756,13 @@ fn verify_resume_against_final_audit(
             deductible.push(prefix.clone());
         }
     }
-    let old: std::collections::BTreeMap<
-        &str,
-        &crate::product::logical_codebase::root_recipe_receipt::RootRecipeSnapshotEntry,
-    > = audit
+    let old: std::collections::BTreeMap<&str, &RootRecipeSnapshotEntry> = audit
         .after_snapshot
         .entries
         .iter()
         .map(|entry| (entry.path.as_str(), entry))
         .collect();
-    let current: std::collections::BTreeMap<
-        &str,
-        &crate::product::logical_codebase::root_recipe_receipt::RootRecipeSnapshotEntry,
-    > = fresh
+    let current: std::collections::BTreeMap<&str, &RootRecipeSnapshotEntry> = fresh
         .entries
         .iter()
         .map(|entry| (entry.path.as_str(), entry))
@@ -761,6 +773,16 @@ fn verify_resume_against_final_audit(
         }
         match old.get(path) {
             Some(old_entry) if *old_entry == *entry => {}
+            Some(old_entry) if legacy_content_digest_unverifiable(old_entry, entry) => {
+                return Err(crate::product::json_store::ProductStoreError::InvalidRecord {
+                    kind: LEGACY_DIGEST_UNVERIFIABLE_KIND,
+                    reason: format!(
+                        "path {path} of the audited final command of {operation_id} carries a legacy \
+                         content digest that the metadata-only audit cannot re-verify; re-run the \
+                         audited final command to record a fresh audit snapshot, then resume"
+                    ),
+                });
+            }
             Some(_) => {
                 return Err(invalid(format!(
                     "path {path} changed since the audited final command of {operation_id}"
@@ -799,14 +821,20 @@ fn root_recipe_audit_failure(
 /// Task 4（REQ-BOOT-05）：末命令发布/收口失败 → 可重试 ProviderTurn
 /// 失败（operation 落 durable Failed，保留显式 Continue/Retry 恢复面；
 /// 发布失败不签发最终 receipt、不投影为根规则/政策已完成）。
+/// 例外：恢复分支的「旧摘要无法复验」重试无用（必须先重新审计）⇒ 不可重试。
 fn root_recipe_publication_failure(
     step: AggregateInitializationStepKind,
     error: crate::product::json_store::ProductStoreError,
 ) -> AggregateInitializationError {
+    let retryable = !matches!(
+        &error,
+        crate::product::json_store::ProductStoreError::InvalidRecord { kind, .. }
+            if *kind == LEGACY_DIGEST_UNVERIFIABLE_KIND
+    );
     AggregateInitializationError::ProviderTurn {
         step,
         reason: format!("root recipe policy publication failed: {error}"),
-        retryable: true,
+        retryable,
     }
 }
 
@@ -861,12 +889,22 @@ impl AggregateInitializationDependencies {
             .map(|path| std::collections::BTreeMap::from([("PATH".to_string(), path)]))
             .unwrap_or_default();
         let manager = Arc::new(CadenceSkillsManager::with_dependencies(
-            home,
+            home.clone(),
             state.command_runner.clone(),
             environment,
         ));
         let skills: Arc<dyn AggregateSkillsPreparation> =
             Arc::new(CadenceAggregateSkillsPreparation { manager });
+        // REQ-BOOT-09 / D-16：探针与索引操作共用**同一份 CLI 配置**（同一个
+        // `state.command_runner` + 同一个 executable 名 `"codegraph"`，与下方
+        // `AggregateIndexOperation` 的构造逐字一致）。⚠️ 不是同一个实例：
+        // `AggregateIndexOperation` 按值持有 `CodeGraphCli`，真共享要改
+        // `aggregate_index/**`（本片禁碰，`Degraded` 语义要求不动）。
+        let environment_probe: Arc<dyn AggregateEnvironmentProbe> =
+            Arc::new(CodeGraphEnvironmentProbe::new(
+                state.command_runner.clone(),
+                "codegraph".to_string(),
+            ));
         let preflight: Arc<dyn AggregatePreflightService> =
             Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
         let provider: Arc<dyn AggregateProviderTurnDriver> =
@@ -894,7 +932,11 @@ impl AggregateInitializationDependencies {
             // 四条命令，只发布聚合政策并签发跳过式 receipt。
             .with_policy_publication(Arc::new(SkippedAggregatePolicyPublisher {
                 paths: paths.clone(),
-            })),
+            }))
+            // REQ-BOOT-09：codegraph 冷启动前置探测（失败 step: None）。
+            .with_environment_probe(environment_probe)
+            // 四条命令的链接层校验与 skills manager 的 HOME 同源。
+            .with_skills_home(home),
         );
         let index = Arc::new(AggregateIndexOperation::new(
             paths.clone(),
@@ -976,4 +1018,121 @@ fn hash_tree(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod skills_preparation_diagnosis_tests {
+    use super::*;
+
+    /// `CadenceSkillsError::Unavailable{stage}` → `skills_unavailable_<stage>`：
+    /// 失败面能给出「拉取/更新哪一步坏了」，而不是一句 provider 未登录。
+    #[test]
+    fn unavailable_stage_becomes_structured_cause() {
+        let error = skills_preparation_error(
+            CadenceSkillsError::unavailable(
+                "clone",
+                "cannot reach the Cadence-skills remote",
+                "check the network and rerun the aggregate initialization",
+            ),
+            None,
+        );
+        assert!(
+            matches!(
+                &error,
+                AggregateInitializationError::SkillsPreparationDiagnosed { cause, retryable, .. }
+                    if cause == "skills_unavailable_clone" && *retryable
+            ),
+            "expected skills_unavailable_clone, got {error:?}"
+        );
+    }
+
+    /// `CadenceSkillsError::SyncFailed{layer}` → `skills_sync_failed_<layer>`。
+    #[test]
+    fn sync_failure_layer_becomes_structured_cause() {
+        let error = skills_preparation_error(
+            CadenceSkillsError::sync_failed(
+                "claude",
+                "pre-check",
+                "/home/tester/.claude/skills/pre-check",
+                "unrelated symlink",
+            ),
+            Some("/home/tester"),
+        );
+        assert!(
+            matches!(
+                &error,
+                AggregateInitializationError::SkillsPreparationDiagnosed { cause, .. }
+                    if cause == "skills_sync_failed_claude"
+            ),
+            "expected skills_sync_failed_claude, got {error:?}"
+        );
+    }
+
+    /// task 7.8：`CadenceSkillsError::UpdateFailed{stage}` **不丢 stage** ——
+    /// 更新失败要能看出是准备/下载/安装哪一步坏，而不是通用串。
+    #[test]
+    fn update_failure_stage_becomes_structured_cause() {
+        let error = skills_preparation_error(
+            CadenceSkillsError::update_failed(
+                "fetch",
+                "git fetch exited with 128",
+                "check the upstream remote and retry",
+            ),
+            None,
+        );
+        assert!(
+            matches!(
+                &error,
+                AggregateInitializationError::SkillsPreparationDiagnosed { cause, reason, .. }
+                    if cause == "skills_update_failed_fetch"
+                        && reason.contains("fetch")
+                        && reason.contains("cadence_skills_update_failed")
+            ),
+            "expected skills_update_failed_fetch carrying the stage, got {error:?}"
+        );
+    }
+
+    /// task 7.8 的 detail 必须脱敏：HOME 前缀降级为 `~`，密钥形态被替换；
+    /// 用户读到的诊断里不得出现明文 home 绝对路径与令牌。
+    #[test]
+    fn skills_failure_detail_is_redacted_and_localized() {
+        let error = skills_preparation_error(
+            CadenceSkillsError::update_failed(
+                "fetch",
+                "/home/alice/.agents/Cadence-skills: Authorization: Bearer \
+                 ghp_012345678901234567890123456789012345 rejected",
+                "check the upstream remote and retry",
+            ),
+            Some("/home/alice"),
+        );
+        let AggregateInitializationError::SkillsPreparationDiagnosed { reason, .. } = &error else {
+            panic!("expected SkillsPreparationDiagnosed, got {error:?}");
+        };
+        assert!(
+            !reason.contains("/home/alice"),
+            "HOME 绝对前缀必须降级为 `~`，实际: {reason}"
+        );
+        assert!(
+            !reason.contains("ghp_012345678901234567890123456789012345"),
+            "令牌必须被脱敏，实际: {reason}"
+        );
+        assert!(
+            reason.contains("~/"),
+            "路径降级后应留下 `~/` 形态，实际: {reason}"
+        );
+    }
+
+    /// 证据摘要失败（源目录 / 三层链接）统一 `skills_digest_failed`。
+    #[test]
+    fn digest_failure_uses_digest_cause() {
+        let error = skills_digest_error("source", std::io::Error::other("permission denied"));
+        assert!(
+            matches!(
+                &error,
+                AggregateInitializationError::SkillsPreparationDiagnosed { cause, reason, .. }
+                    if cause == "skills_digest_failed" && reason.contains("permission denied")
+            ),
+            "expected skills_digest_failed with the io reason, got {error:?}"
+        );
+    }
 }

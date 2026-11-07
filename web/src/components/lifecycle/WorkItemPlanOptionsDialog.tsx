@@ -21,7 +21,11 @@ import {
   enrollmentTargetMemberCountText,
   enrollmentTargetPlaceholder,
 } from "../../state/enrollment-target-labels";
-import { sameProviderChoice } from "./automation-reenable";
+import {
+  carrierTargetFromEnrollmentTarget,
+  LEGACY_CARRIER_BLOCKED_MESSAGE,
+  sameProviderChoice,
+} from "./automation-reenable";
 import { DialogShell } from "../shared/DialogShell";
 
 export type AutomationMode = "manual" | "automatic";
@@ -35,7 +39,9 @@ export type WorkItemPlanOptionsFormValue = {
   author_provider?: WorkspaceProviderName;
   /** REQ-PPS-01：创建请求携带的 reviewer provider 快照；缺省表示沿用服务端兼容默认。 */
   reviewer_provider?: WorkspaceProviderName;
-  /** P1 WIGA：缺省「不自动化」；仅在已确认 Design 上可选 automatic。 */
+  /** REQ-WIGA-01 修订：已确认 Design（工作项组生成路径）的弹窗提交恒为
+   * automatic（由组件按 automationAvailable 派生）；automation_mode 字段
+   * 仅为未确认 design 的既有 manual 链路保留（缺省「不自动化」）。 */
   automation_mode: AutomationMode;
 };
 
@@ -53,7 +59,8 @@ export function WorkItemPlanOptionsDialog({
   onClose,
 }: {
   defaultOptions: WorkItemPlanOptionsFormValue;
-  /** P1 WIGA：仅已确认 Design 显示自动化模式选择（缺省手动，人工链路不变）。 */
+  /** REQ-WIGA-01 修订：已确认 Design（工作项组生成路径）恒为托管自动化，
+   * 不提供「手动」选项；未确认 Design 不渲染生成模式区块（人工链路逐字不变）。 */
   automationAvailable: boolean;
   /** C5 Task 7：automatic 模式的 automation-target 投影身份（project+issue）；
    * manual 模式不请求 target，缺省 null 时 automatic 提交 fail-closed。 */
@@ -76,8 +83,10 @@ export function WorkItemPlanOptionsDialog({
   );
   const providerOptions = getProviderOptions(providerSnapshot);
 
-  const automatic = options.automation_mode === "automatic";
-  const targetScope = automationAvailable && automatic ? automationTargetScope : null;
+  // REQ-WIGA-01 修订：已确认 Design 的弹窗不提供「手动」——生成模式恒为
+  // 托管自动化，由 automationAvailable 派生，与 options.automation_mode 无关。
+  const automatic = automationAvailable;
+  const targetScope = automatic ? automationTargetScope : null;
   // 批 2 T4（REQ-WIGA-09 修订）：已终止的 enrollment 上，本次提交是「重新
   // 开启」——payload 原样回传终止记录（不顺便改写授权），因此不依赖新的
   // target 投影：入口不被终止态阻断，表单里的参数改动也不生效（置灰）。
@@ -86,16 +95,28 @@ export function WorkItemPlanOptionsDialog({
     enrollmentProjection.enrollment?.terminated_at
       ? enrollmentProjection.enrollment
       : null;
-  const reenablePending = automatic && terminatedEnrollment !== null;
+  // REQ-WIGA-VOID-01：作废态优先于终止态呈现（连组一起没了，更贴近 owner
+  // 心智）；两态可区分——作废态显示作废文案、不冒充终止态，终止态文案
+  // 逐字保持原样。作废记录的重新开启同样不被阻断（后端放行全部漂移）。
+  const voidedEnrollment =
+    enrollmentProjection.status === "ready" &&
+    enrollmentProjection.enrollment?.voided_at
+      ? enrollmentProjection.enrollment
+      : null;
+  const reenableRecord = voidedEnrollment ?? terminatedEnrollment;
+  const reenablePending = automatic && reenableRecord !== null;
   // 重新开启时「实际会用的 provider」：当前生效＝enrollment 的生效 options
   // （不是表单里未生效的值）；本次将应用＝表单本次选择（未选＝沿用原授权）。
-  // 两者不一致＝本次会换 provider（契约路径：重新开启 → 关闭 → 再开启）。
-  const effectiveProviders = terminatedEnrollment
-    ? {
-        author_provider: terminatedEnrollment.options?.author_provider,
-        reviewer_provider: terminatedEnrollment.options?.reviewer_provider,
-      }
-    : null;
+  // 两者不一致＝本次会换 provider（一次提交完成换代，会先删除现有工作项组）。
+  // REQ-WIGA-VOID-01：作废态不展示该对比——旧授权已随工作项组删除作废、
+  // 无「当前生效」可言（作废文案已说明重新开启可自由选择）。
+  const effectiveProviders =
+    terminatedEnrollment && voidedEnrollment === null
+      ? {
+          author_provider: terminatedEnrollment.options?.author_provider,
+          reviewer_provider: terminatedEnrollment.options?.reviewer_provider,
+        }
+      : null;
   const appliedProviders = effectiveProviders
     ? {
         author_provider:
@@ -111,11 +132,32 @@ export function WorkItemPlanOptionsDialog({
   // C5 Task 7：automatic 提交必须有就绪的 target 投影——loading/GET 失败/
   // 身份（scope）缺失都禁止 stale automatic submit；manual 分支不受影响。
   // 重新开启（terminated）例外：payload 取终止记录，投影只用于展示。
+  //
+  // 发起侧载体收窄（方案 A，REQ-ROUTE-C5-TARGET 前端侧）：命令侧只接受
+  // 逻辑代码库两变体。**legacy 单仓载体只读展示，但不得再发起命令**——
+  // 禁用提交并给出提示（不静默降级、不猜一个 LC）。目标取「本次提交实际会
+  // 用的那个 target」：重新开启＝终止记录的 target（缺失才回退新投影），
+  // 常规启用＝新投影的 target——与提交链路同一口径。
+  const enrollmentTargetForSubmit: EnrollmentTarget | null = reenablePending
+    ? (reenableRecord?.target ??
+      (targetProjection.status === "ready"
+        ? targetProjection.target.enrollment_target
+        : null))
+    : targetProjection.status === "ready"
+      ? targetProjection.target.enrollment_target
+      : null;
+  const submitCarrierTarget =
+    enrollmentTargetForSubmit === null
+      ? null
+      : carrierTargetFromEnrollmentTarget(enrollmentTargetForSubmit);
+  const legacyCarrierBlocked =
+    enrollmentTargetForSubmit !== null && submitCarrierTarget === null;
   const automaticSubmitBlocked =
     automatic &&
     automationAvailable &&
-    !reenablePending &&
-    (targetScope === null || targetProjection.status !== "ready");
+    ((!reenablePending &&
+      (targetScope === null || targetProjection.status !== "ready")) ||
+      legacyCarrierBlocked);
 
   // C5 Task 7：打开自动模式先取 automation-target 投影（无 query：身份
   // 投影与 provider options 无关，展示 target.kind 与双级身份）；scope
@@ -189,13 +231,18 @@ export function WorkItemPlanOptionsDialog({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onConfirm(options);
+      // REQ-WIGA-01 修订：工作项组生成路径发出归一化后的 automatic mode
+      // （表单缺省可能仍是 manual）；未确认 design 维持表单原值（manual）。
+      await onConfirm(
+        automatic ? { ...options, automation_mode: "automatic" } : options,
+      );
     } catch (reason) {
       // C5 Task 3：role-chain 预检错误保留 ApiRequestError.code/details，
       // 逐角色渲染 role/provider/reason；不包装为普通 Error 语义。
       setSubmitError({
         message:
           reason instanceof Error ? reason.message : "创建 Work Item Plan 失败",
+        code: reason instanceof ApiRequestError ? reason.code : null,
         roleChainViolations: roleChainViolationsOf(reason),
       });
     } finally {
@@ -219,12 +266,6 @@ export function WorkItemPlanOptionsDialog({
   ) {
     const provider = workspaceProviderName(value) ?? undefined;
     setOptions((current) => ({ ...current, [key]: provider }));
-    setSubmitError(null);
-  }
-
-  // P1 WIGA：模式切换不落 enrollment，只改本地表单；提交才走 PUT。
-  function updateAutomationMode(mode: AutomationMode) {
-    setOptions((current) => ({ ...current, automation_mode: mode }));
     setSubmitError(null);
   }
 
@@ -262,8 +303,8 @@ export function WorkItemPlanOptionsDialog({
             onChange={() => updateOption("require_execution_plan_confirm")}
           />
           {/* B2-P1 F2（REQ-WIGA-02）：automatic 下后端冻结一律压 false，
-              勾选无效——置灰＋固定关闭显示并说明；不篡改表单值，切回
-              手动即恢复用户原勾选（manual 行为不变）。 */}
+              勾选无效——置灰＋固定关闭显示并说明；不篡改表单值（REQ-WIGA-01
+              修订后无「手动」可切回；未确认 design 的 manual 行为不变）。 */}
           {automatic ? (
             <p
               data-testid="plan-approval-auto-note"
@@ -275,8 +316,9 @@ export function WorkItemPlanOptionsDialog({
           {/* REQ-PPS-01：创建即快照 provider，不再依赖创建后页面补发选择；
               不可用项置灰禁选，缺省项沿用服务端兼容默认。
               重新开启（terminated）时 provider 选择器保持可用——换 provider 是
-              契约允许的（先重新开启，再走既有 Disable→Enable 路径），本次
-              选择会真正生效（下方如实展示当前生效与本次将应用的取值）。 */}
+              契约允许的（一次提交完成换代：先删除现有工作项组再按新 provider
+              重建），本次选择会真正生效（下方如实展示当前生效与本次将应用的
+              取值）。 */}
           <ProviderSelect
             label="Author Provider"
             value={options.author_provider}
@@ -291,7 +333,9 @@ export function WorkItemPlanOptionsDialog({
             disabled={submitting}
             onChange={(value) => updateProvider("reviewer_provider", value)}
           />
-          {/* P1 WIGA：仅已确认 Design 提供显式自动化选择；缺省手动，人工链路原样。 */}
+          {/* REQ-WIGA-01 修订：已确认 Design（工作项组生成路径）恒为托管
+              自动化——仅呈现固定的「自动化」单选项，不提供「手动」；未确认
+              Design 不渲染本区块（人工链路逐字不变）。 */}
           {automationAvailable ? (
             <fieldset className="rounded-md border border-[var(--aria-line)] px-3 py-2">
               <legend className="px-1 text-xs font-semibold text-[var(--aria-ink-muted)]">
@@ -302,19 +346,9 @@ export function WorkItemPlanOptionsDialog({
                   <input
                     type="radio"
                     name="automation-mode"
-                    checked={!automatic}
-                    disabled={submitting}
-                    onChange={() => updateAutomationMode("manual")}
-                  />
-                  手动
-                </label>
-                <label className="flex items-center gap-1.5 text-sm text-[var(--aria-ink)]">
-                  <input
-                    type="radio"
-                    name="automation-mode"
                     checked={automatic}
                     disabled={submitting}
-                    onChange={() => updateAutomationMode("automatic")}
+                    onChange={() => undefined}
                   />
                   自动化
                 </label>
@@ -331,8 +365,8 @@ export function WorkItemPlanOptionsDialog({
                 className="text-xs text-[var(--aria-ink-muted)]"
               >
                 自动化目标：
-                {terminatedEnrollment?.target
-                  ? enrollmentTargetLabel(terminatedEnrollment.target)
+                {reenableRecord?.target
+                  ? enrollmentTargetLabel(reenableRecord.target)
                   : "—"}
               </p>
             ) : (
@@ -379,20 +413,44 @@ export function WorkItemPlanOptionsDialog({
             )}
             {/* 批 2 T4（REQ-WIGA-09 修订）：terminated 态入口仍可用——人工
                 点「启用自动化」即显式重新开启（生成新的自动化授权）；此处
-                只说明事实，不阻断提交，也不代替服务端的最终判定。 */}
-            {terminatedEnrollment ? (
+                只说明事实，不阻断提交，也不代替服务端的最终判定。
+                REQ-WIGA-VOID-01：作废态优先呈现（两态文案可区分）。 */}
+            {reenableRecord ? (
+              voidedEnrollment ? (
+                <p
+                  role="status"
+                  data-testid="automation-voided-notice"
+                  className="text-xs text-[var(--aria-ink-muted)]"
+                >
+                  该 issue 的自动化登记已随旧工作项组删除作废；确认后将重新开启
+                  （可自由选择 provider，原自动化不恢复）。
+                </p>
+              ) : (
+                <p
+                  role="status"
+                  data-testid="automation-terminated-notice"
+                  className="text-xs text-[var(--aria-ink-muted)]"
+                >
+                  该 issue 的自动化已于 {terminatedEnrollment?.terminated_at} 终止；
+                  确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。
+                </p>
+              )
+            ) : null}
+            {/* 发起侧载体收窄（方案 A）：legacy 单仓载体仍只读展示，但不得
+                再发起 Enable/Rebind——禁用提交并说明下一步。 */}
+            {legacyCarrierBlocked ? (
               <p
-                role="status"
-                data-testid="automation-terminated-notice"
-                className="text-xs text-[var(--aria-ink-muted)]"
+                role="alert"
+                data-testid="automation-legacy-carrier-notice"
+                className="text-xs text-[var(--aria-danger)]"
               >
-                该 issue 的自动化已于 {terminatedEnrollment.terminated_at} 终止；
-                确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。
+                {LEGACY_CARRIER_BLOCKED_MESSAGE}
               </p>
             ) : null}
             {/* 「实际会用的 provider」如实取自 enrollment 的生效 options——不取
                 表单里未生效的值，杜绝静默陷阱；本次改了 provider 时同时展示
-                本次将应用的取值（重新开启 → 关闭 → 再开启后生效）。 */}
+                本次将应用的取值（换 provider 会先删除现有工作项组，其余参数
+                按原授权）。 */}
             {effectiveProviders && appliedProviders ? (
               <p
                 role="status"
@@ -402,7 +460,7 @@ export function WorkItemPlanOptionsDialog({
                 当前生效的 provider：
                 {`Author ${effectiveProviders.author_provider ?? "—"}、Reviewer ${effectiveProviders.reviewer_provider ?? "—"}`}
                 {providerChangePending
-                  ? `；本次将应用：Author ${appliedProviders.author_provider ?? "—"}、Reviewer ${appliedProviders.reviewer_provider ?? "—"}（重新开启后关闭再开启生效，其余参数按原授权）`
+                  ? `；本次将应用：Author ${appliedProviders.author_provider ?? "—"}、Reviewer ${appliedProviders.reviewer_provider ?? "—"}（换 provider 会先删除现有工作项组，其余参数按原授权）`
                   : "；本次按原授权重新开启（其余参数不变）。"}
               </p>
             ) : null}
@@ -420,7 +478,17 @@ export function WorkItemPlanOptionsDialog({
             role="alert"
             className="mt-3 text-sm font-semibold text-[var(--aria-danger)]"
           >
-            <p>{submitError.message}</p>
+            <p data-testid="submit-error-message">{submitError.message}</p>
+            {/* REQ-WIGA-SWAP-02：机器码只作次要信息（弱化小字），MUST NOT
+                充当主文案。 */}
+            {submitError.code ? (
+              <p
+                data-testid="submit-error-code"
+                className="mt-1 text-xs font-normal text-[var(--aria-ink-muted)]"
+              >
+                机器码：{submitError.code}
+              </p>
+            ) : null}
             {submitError.roleChainViolations ? (
               <>
                 <ul className="mt-1 list-disc pl-5 text-xs font-normal">
@@ -480,6 +548,9 @@ type AutomationEnrollmentProjectionState =
 
 type SubmitErrorState = {
   message: string;
+  /** REQ-WIGA-SWAP-02：机器码（ApiRequestError.code）只作次要信息展示；
+   * 非 ApiRequestError（已包装成中文主文案）时为 null。 */
+  code: string | null;
   /** C5 Task 3：automation_role_chain_unsupported 的逐角色违规
    *（ApiRequestError.details 原样派生，非该错误时为 null）。 */
   roleChainViolations: RoleChainViolation[] | null;
@@ -527,9 +598,13 @@ function roleChainViolationsOf(reason: unknown): RoleChainViolation[] | null {
 
 /** C5 Task 1：双载体 enrollment target 的展示身份（单仓=物理仓，
  * LC=双级身份）；多成员 LC 展示成员数量。任何分支都不得输出
- * undefined/null/[object Object]，缺字段用「—」占位。 */
+ * undefined/null/[object Object]，缺字段用「—」占位。
+ * ⚠ 三变体全覆盖：`single_repository` 分支**仅 legacy 只读**（老单仓记录
+ * 仍要显示，不退化为「target 未知」）；新投影不再产出它，命令侧也不接受
+ * （见 `carrierTargetFromEnrollmentTarget`）。 */
 function enrollmentTargetLabel(target: EnrollmentTarget): string {
   switch (target.kind) {
+    // legacy 只读：仅供老单仓 enrollment 记录展示。
     case "single_repository":
       return `single_repository ${enrollmentTargetPlaceholder(target.repository_id)}`;
     case "logical_codebase":

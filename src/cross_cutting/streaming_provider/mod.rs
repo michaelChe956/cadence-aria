@@ -14,8 +14,7 @@ use crate::protocol::contracts::{AdapterInput, AdapterRole, ProviderType};
 
 /// Test-only fake provider launch input wrapper.
 ///
-/// `FakeStreamingProviderInput` 把 `StreamingProviderInput` 包裹起来,使其只能在
-/// 测试中通过 `for_test` 构造,且必须声明 `ProviderType::Fake`。这是「Fake 经过
+/// `FakeStreamingProviderInput` 把 `StreamingProviderInput` 包裹起来,使其只能在测试中通过 `for_test` 构造,且必须声明 `ProviderType::Fake`。这是「Fake 经过
 /// registry/编译期隔离」契约在 type 层的体现:逻辑代码库真实 provider 启动路径
 /// (`LogicalCodebaseProviderGateway`/`ValidatedStreamingProviderInput`)不接受
 /// 裸 `StreamingProviderInput`,而测试侧的 Fake 启动用此 wrapper 明确标记为隔离,
@@ -45,6 +44,7 @@ impl FakeStreamingProviderInput {
     }
 }
 
+pub mod bootstrap_marker;
 pub mod fake;
 
 #[cfg(test)]

@@ -27,15 +27,23 @@ async fn plan_coding_workspaces_delete_route_idempotent_success_on_clean_plan() 
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
-    request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues",
-        json!({"title":"H4GroupDelete","description":"描述","repository_id":"repository_0001"}),
-    )
-    .await;
-
+    // 块3 夹具顺序：issue 经 store 建并携带确定性 legacy 别名 LC 归属（HTTP
+    // 创建要求 LC 权威先在，会把「work item 先建、迁移回填 target」顺序倒过来）。
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    cadence_aria::product::issue_store::IssueStore::new(app_paths.clone())
+        .create(cadence_aria::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id:
+                cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
+            title: "H4GroupDelete".to_string(),
+            description: Some("描述".to_string()),
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create issue");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
@@ -70,6 +78,9 @@ async fn plan_coding_workspaces_delete_route_idempotent_success_on_clean_plan() 
             validator_findings: Vec::new(),
         })
         .expect("create legacy confirmed plan");
+    cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(app_paths)
+        .ensure_identity_schema("project_0001")
+        .expect("migrate fixture repository into logical codebase authority");
 
     let uri = "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_work_item_plan_0001/coding-workspaces?command_id=plan_delete_ui_itweb&confirmed=true";
     let response = app

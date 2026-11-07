@@ -48,21 +48,28 @@
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
 
-        let first = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        // REQ-WIGA-09 修订：Enable 携带稳定 `command_id` 进命令账本——
+        // 幂等/分歧判定走账本重放面（同 id 同 payload → 200 重放首次
+        // durable 结果；同 id 异 payload/异 revision → 409
+        // CommandLedgerPayloadMismatch，HTTP 层回落旧码
+        // automation_enrollment_conflict 并在 details 携带当前 revision）。
+        let mut enable = enrollment_body(&fixture, 1, 1);
+        enable["command"]["command_id"] = serde_json::json!("enrollment_put_divergence_1");
+        let first = put_enrollment(&app, enable.clone()).await;
         assert_eq!(first.status(), StatusCode::OK);
         let first_body = response_json(first).await;
         assert_eq!(first_body["policy_revision"], 1);
         assert!(first_body["enabled"].as_bool().unwrap());
 
         // 同键同 payload 重发：200，同 enrollment_id/revision。
-        let second = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        let second = put_enrollment(&app, enable.clone()).await;
         assert_eq!(second.status(), StatusCode::OK);
         let second_body = response_json(second).await;
         assert_eq!(second_body["enrollment_id"], first_body["enrollment_id"]);
         assert_eq!(second_body["policy_revision"], 1);
 
         // 异 options + 旧 revision → 409，details 携带当前 revision。
-        let mut divergent = enrollment_body(&fixture, 1, 1);
+        let mut divergent = enable;
         divergent["command"]["options"]["review_rounds"] = serde_json::json!(2);
         divergent["expected_revision"] = serde_json::json!(99);
         let response = put_enrollment(&app, divergent).await;
@@ -114,8 +121,18 @@
 
     #[tokio::test]
     async fn automation_enrollment_http_put_rejects_zero_target_and_mismatched_member_set() {
-        // 0 logical member（无 manifest/selection → Legacy 路由）→ 422。
+        // 0 logical member：归属 LC 的 canonical 候选（manifest∩selection）
+        // 为空 → Enable 的 canonical target 校验 422（单仓/Legacy 载体已删
+        // REQ-ROUTE-01；批 2 R1：授权 target 至少一个成员），零写入。
         let fixture = seed_fixture(0, true);
+        // seed_fixture(0) 不落任何 LC 布局——issue 归属的 legacy 别名 LC
+        // 无 record，载体解析在 routing 层即 404（到不了被测校验）；补
+        // 0 成员权威布局（manifest/selection 均空集）把请求带到
+        // canonical target 校验层。
+        super::super::automation_enrollment_test_support::seed_logical_codebase(
+            &fixture.paths,
+            &[],
+        );
         let app = fixture.router();
         let response = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);

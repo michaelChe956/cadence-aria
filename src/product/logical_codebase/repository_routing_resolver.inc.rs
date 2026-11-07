@@ -31,7 +31,7 @@ impl RepositoryAuthorityResolver {
         let issue_record = crate::product::issue_store::IssueStore::new(self.paths.clone())
             .get(project_id, issue_id);
         let (issue_exists, attributed) = match issue_record {
-            Ok(issue) => (true, issue.logical_codebase_id),
+            Ok(issue) => (true, Some(issue.logical_codebase_id)),
             Err(ProductStoreError::NotFound { .. }) => (false, None),
             Err(error) => return Err(error),
         };
@@ -97,7 +97,7 @@ impl RepositoryAuthorityResolver {
         if let Some(issue_id) = request.issue_id.as_deref() {
             let issue = crate::product::issue_store::IssueStore::new(self.paths.clone())
                 .get(&request.project_id, issue_id)?;
-            attributed_lc = issue.logical_codebase_id.clone();
+            attributed_lc = Some(issue.logical_codebase_id.clone());
         }
 
         match request.kind {

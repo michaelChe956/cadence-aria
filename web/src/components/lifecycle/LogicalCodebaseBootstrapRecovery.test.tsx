@@ -7,7 +7,7 @@
 // - ChatCockpitPage 的 sendLcBootstrapAction 接线（CockpitInbox 的
 //   LcBootstrapCard → facade → 页面 REST 发送器）在 c1-recovery 同款页面
 //   级测试模式中覆盖，本文件聚焦生命周期等待卡的产品行为。
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LogicalCodebaseBootstrapCard } from "./LogicalCodebaseBootstrapCard";
@@ -174,6 +174,23 @@ describe("LogicalCodebaseBootstrapCard recovery surface", () => {
     expect(screen.getByTestId("lc-bootstrap-notice-member_index")).toBeTruthy();
     // 失败原因与可能副作用来自 durable notice，不是前端乐观态。
     expect(screen.getAllByText(/aggregate_pre_check_failed/).length).toBeGreaterThan(0);
+    // 片2 新渲染：失败面由唯一实现呈现——机器码在次要行，原始诊断折叠。
+    const failure = within(
+      screen.getByTestId("lc-bootstrap-step-member_index"),
+    ).getByTestId("lc-bootstrap-failure");
+    expect(failure).toBeTruthy();
+    expect(
+      within(failure).getByTestId("lc-bootstrap-failure-machine-line")
+        .textContent,
+    ).toContain("aggregate_pre_check_failed");
+    expect(
+      within(failure).getByTestId("lc-bootstrap-failure-detail").tagName,
+    ).toBe("DETAILS");
+    // notice 主次反转：机器码降级为独立次要行，summary 成为主文案。
+    expect(
+      screen.getByTestId("lc-bootstrap-notice-machine-line-member_index")
+        .textContent,
+    ).toBe("aggregate_pre_check_failed");
     expect(
       screen.getByText(/可能副作用：aggregate_initialization_provider_turn/),
     ).toBeTruthy();

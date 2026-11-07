@@ -620,7 +620,7 @@ describe("gate prompt read-only truth", () => {
     ["native_human_required", "引擎自动评审拿不准，需要你来定"],
     ["repeated_fingerprint", "同一问题又出现了，需要你来定"],
     ["verification_new_findings", "复验又发现新问题，需要你来定"],
-    ["repair_budget_exhausted", "自动修复次数已用完，需要你来定"],
+    ["repair_budget_exhausted", "本轮评审自动返修已停止，需要你决定下一步。"],
   ] as const;
 
   const gateEntry = (metadata: Record<string, unknown>): ChatEntry =>
@@ -645,8 +645,9 @@ describe("gate prompt read-only truth", () => {
     render(<GatePromptEntry entry={gateEntry({ remaining_budget: 1 })} />);
 
     const meta = screen.getByTestId("gate-meta");
-    expect(meta).toHaveTextContent("还可自动修复 1 次");
+    expect(meta).toHaveTextContent("人工返修还可做 1 次");
     expect(meta.textContent).not.toContain("剩余修复轮次");
+    expect(meta.textContent).not.toContain("还可自动修复");
   });
 
   it("renders the turn failure inline while the gate stays visible", () => {

@@ -486,7 +486,7 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     );
 
     // outline 分支。
-    let outline_payload = work_item_plan_outline_artifact();
+    let outline_payload = work_item_plan_outline_artifact(None);
     let ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate } = outline_payload
     else {
         panic!("expected outline candidate artifact");
@@ -505,6 +505,7 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
     let draft_payload = work_item_draft_artifact_payload(
+        &lifecycle,
         &plan_id,
         "outline_a",
         "draft_a",

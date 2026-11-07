@@ -633,11 +633,16 @@
             );
         }
 
-        // 固定 Claude Code、真实命令超时（非 1s 占位）、canonical 聚合根 cwd。
+        // 片4（REQ-BOOT-07）：启动 provider == operation 冻结的 input.provider
+        //（真实命令超时非 1s 占位、canonical 聚合根 cwd 的前置不变）。
+        let frozen = crate::product::logical_codebase::provider_selection::provider_from_wire(
+            &fixture.recipe_input.provider,
+        )
+        .expect("fixture provider wire name must decode");
         assert!(
             inputs.iter().all(|input| input.provider_type
-                == crate::protocol::contracts::ProviderType::ClaudeCode),
-            "aggregate recipe provider must stay fixed to Claude Code"
+                == crate::protocol::contracts::ProviderType::from(frozen.clone())),
+            "aggregate recipe provider must equal operation.input.provider"
         );
         assert_eq!(
             inputs[0].timeout_secs,

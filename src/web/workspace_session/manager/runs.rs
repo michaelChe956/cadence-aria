@@ -9,6 +9,36 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ActiveRun, WorkspaceSessionManager};
 use crate::web::workspace_ws_handler::{ProviderCommand, ProviderRunKind};
+/// REQ-WIGA-17：取消结果三态——区分「无活跃 run」「已真实收口」「兜底
+/// 超时未收口」。删除路径按三态如实分支：超时（`TimedOut`）只表示「取消
+/// 已发出但未观察到收口」，不得被表述为「已取消」；无活跃 run（
+/// `NoActiveRun`）是正常结果，不视为失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunAbortOutcome {
+    /// 无活跃 run（既有 `false` 返回语义，改名不改义）。
+    NoActiveRun,
+    /// 已观察到真实 completion 信号（含「无 completion 登记视作已完成」的
+    /// 既有语义）。
+    Completed,
+    /// 兜底时长内未观察到 completion（任务收口失联）；取消已发出，但
+    /// 不得谎称已收口。
+    TimedOut,
+}
+
+impl RunAbortOutcome {
+    /// REQ-WIGA-17 三态谓词：`manager` 为 `workspace_session` 的私有子模块，
+    /// 枚举名无法进入删除路径所在模块的作用域——删除路径经谓词按三态
+    /// 如实分支（不引入第二套终止语义）。
+    pub fn is_completed(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    /// 见 [`RunAbortOutcome::is_completed`]。
+    pub fn is_timed_out(self) -> bool {
+        matches!(self, Self::TimedOut)
+    }
+}
+
 /// test-only 竞态注入点（k3 审 Task 5 竞态收口的可证伪测试基建）：在
 /// 「run 登记完成、scratch 复核/准备之前」同步触发，供竞态测试在该窗口内
 /// 确定性插入 supersede 启动（复现「A 的迟到 prepare 删掉 B 的 scratch」）。
@@ -230,12 +260,16 @@ impl WorkspaceSessionManager {
         self.maybe_recycle().await;
     }
 
-    /// 批 2 T2（REQ-WIGA-09）：取消当前活跃 run 并等待**真实 completion**——
-    /// 只有该 run 任务自身的收口点（`finish_run` 按 token 发信号）才解除
-    /// 等待；`is_active_run()==false` 只是状态摘除，不构成完成证据。取消在
-    /// 状态锁内完成、等待在锁外（不持 engine 锁）；无活跃 run 直接返回
-    /// false。30s 兜底超时防任务失联（打点后放行，终止收口继续）。
-    pub async fn abort_active_run_and_wait_completion(&self) -> bool {
+    /// 批 2 T2（REQ-WIGA-09）＋REQ-WIGA-17：取消当前活跃 run 并等待**真实
+    /// completion**——只有该 run 任务自身的收口点（`finish_run` 按 token 发
+    /// 信号）才解除等待；`is_active_run()==false` 只是状态摘除，不构成完成
+    /// 证据。取消在状态锁内完成、等待在锁外（不持 engine 锁）。返回三态
+    /// `RunAbortOutcome`：无活跃 run → `NoActiveRun`（既有 false 语义，
+    /// 改名不改义）；观察到 completion（含无 completion 登记的既有「视作
+    /// 已完成」分支）→ `Completed`；兜底时长内未收口 → `TimedOut`（打点后
+    /// 放行，终止收口继续，不得谎称已取消）。兜底时长可经
+    /// `set_run_completion_wait_timeout` 注入，生产默认 30s。
+    pub async fn abort_active_run_and_wait_completion(&self) -> RunAbortOutcome {
         let (completion, stale_choice_ids) = {
             let mut state = self
                 .state
@@ -264,13 +298,19 @@ impl WorkspaceSessionManager {
             self.resolve_stale_plan_choice_facts(&stale_choice_ids);
         }
         let Some((token, completion_rx)) = completion else {
-            return false;
+            return RunAbortOutcome::NoActiveRun;
         };
         let Some(mut completion_rx) = completion_rx else {
             // 无 completion 登记（旧 fixture/已被收口）：视作已完成。
-            return true;
+            return RunAbortOutcome::Completed;
         };
-        let waited = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        // REQ-WIGA-17：兜底时长可注入（生产默认 30s，
+        // `set_run_completion_wait_timeout` 仅供测试注入可测时长）。
+        let wait_timeout = std::time::Duration::from_millis(
+            self.run_completion_wait_timeout_millis
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let waited = tokio::time::timeout(wait_timeout, async {
             loop {
                 if *completion_rx.borrow() {
                     break;
@@ -285,8 +325,9 @@ impl WorkspaceSessionManager {
             eprintln!(
                 "[aria-termination] workspace run completion wait timed out run_token={token}"
             );
+            return RunAbortOutcome::TimedOut;
         }
-        true
+        RunAbortOutcome::Completed
     }
 
     pub async fn abort_active_run(&self) -> bool {
@@ -573,7 +614,9 @@ mod termination_tests {
             .await
             .expect("completion wait must not deadlock on the engine lock")
             .expect("wait task alive");
-        assert!(had_run);
+        // REQ-WIGA-17：真实收口（finish_run 发 completion）⇒ 三态 Completed
+        //（bool `true` 语义的忠实升格断言）。
+        assert_eq!(had_run, super::RunAbortOutcome::Completed);
         let _ = holder.await;
     }
 }

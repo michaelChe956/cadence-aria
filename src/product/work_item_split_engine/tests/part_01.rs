@@ -47,7 +47,8 @@ fn split_prompt_fixture() -> (GenerateWorkItemsRequest, IssueRecord, RepositoryR
         id: "issue_0001".to_string(),
         project_id: "project_0001".to_string(),
         repo_id: None,
-        logical_codebase_id: None,
+        logical_codebase_id:
+            crate::product::logical_codebase::legacy_logical_codebase_id("project_0001"),
         title: "Test Issue".to_string(),
         description: None,
         change_id: "change_0001".to_string(),
@@ -97,7 +98,8 @@ fn build_split_prompt_includes_revision_feedback() {
         id: "issue_0001".to_string(),
         project_id: "project_0001".to_string(),
         repo_id: None,
-        logical_codebase_id: None,
+        logical_codebase_id:
+            crate::product::logical_codebase::legacy_logical_codebase_id("project_0001"),
         title: "Test Issue".to_string(),
         description: None,
         change_id: "change_0001".to_string(),
@@ -249,7 +251,8 @@ fn build_outline_revision_prompt_is_delta_only() {
         id: "issue_0001".to_string(),
         project_id: "project_0001".to_string(),
         repo_id: None,
-        logical_codebase_id: None,
+        logical_codebase_id:
+            crate::product::logical_codebase::legacy_logical_codebase_id("project_0001"),
         title: "Test Issue".to_string(),
         description: None,
         change_id: "change_0001".to_string(),

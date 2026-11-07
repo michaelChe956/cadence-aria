@@ -4,12 +4,16 @@ pub mod aggregate_initialization;
 pub mod aggregate_initialization_coordinator;
 pub mod aggregate_initialization_store;
 pub mod bootstrap;
+pub mod capability_rejection;
+pub mod capability_revalidate_batch;
+pub mod environment_probe;
 pub mod evidence_audit;
 pub mod evidence_budget;
 pub mod evidence_index;
 pub mod evidence_injection;
 pub mod evidence_mediator;
 pub mod evidence_token;
+pub mod failure_copy;
 pub mod feature;
 pub mod identity_repair;
 pub mod issue_selection;
@@ -30,6 +34,7 @@ pub mod provider_capability_revalidate;
 pub mod provider_capability_store;
 pub mod provider_gateway;
 pub mod provider_projection;
+pub mod provider_selection;
 pub mod provider_trust;
 pub mod provider_trust_adapters;
 pub mod provider_trust_store;
@@ -45,12 +50,14 @@ pub mod types;
 
 pub use aggregate_initialization::{
     AGGREGATE_INITIALIZATION_LAYOUT_VERSION, AGGREGATE_INITIALIZATION_OPERATION_KIND,
-    AggregateCancellationRecord, AggregateInitializationActionRecord,
-    AggregateInitializationErrorRecord, AggregateInitializationIdempotencyIdentity,
-    AggregateInitializationOperation, AggregateInitializationOperationInput,
-    AggregateInitializationOperationStatus, AggregateInitializationProfile,
-    AggregateInitializationStepKind, AggregateInitializationStepRecord,
-    AggregateInitializationStepStatus, RepositoryTypeEvidence,
+    AGGREGATE_PROVIDER_NOT_REQUIRED, AggregateCancellationRecord,
+    AggregateInitializationActionRecord, AggregateInitializationErrorRecord,
+    AggregateInitializationIdempotencyIdentity, AggregateInitializationOperation,
+    AggregateInitializationOperationInput, AggregateInitializationOperationStatus,
+    AggregateInitializationProfile, AggregateInitializationStepKind,
+    AggregateInitializationStepRecord, AggregateInitializationStepStatus,
+    AggregateProviderCandidate, AggregateProviderRequirement, AggregateProviderSelection,
+    RepositoryTypeEvidence, resolve_aggregate_provider_requirement,
 };
 pub use aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError,
@@ -137,7 +144,7 @@ pub use provider_boundary_probe::{
 pub use provider_capability_probe::{ProviderCapabilityProbeError, ProviderCapabilityProbeService};
 pub use provider_capability_store::{
     CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
-    ProviderCapabilityStore, RootRecipeEvidence,
+    ProviderCapabilityStore,
 };
 pub use provider_gateway::{
     GatewayRunAudit, GatewayRunAuditEntry, GatewayRunStack, LaunchTrustFailureClassification,
@@ -206,3 +213,6 @@ pub use types::{
     LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
     RepositorySourceIdentity, RepositoryType,
 };
+
+#[cfg(test)]
+pub(crate) mod logical_test_fixture;

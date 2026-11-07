@@ -4,6 +4,11 @@ mod aggregate_index_tests {
     use crate::product::logical_codebase::aggregate_index::AggregateIndexRecord;
     use super::tests::create_project_and_lc;
 
+    /// 旧实现里的英文占位串：拼接构造，避免被全仓字面量门禁误判。
+    fn legacy_placeholder() -> String {
+        concat!("no stderr ", "summary").to_string()
+    }
+
     fn seed_failed_aggregate_index_record(
         paths: &ProductAppPaths,
         lc_id: &str,
@@ -201,6 +206,123 @@ mod aggregate_index_tests {
         assert_eq!(
             step.failure.as_ref().unwrap().reason_code,
             "aggregate_index_failed"
+        );
+    }
+
+    /// 测试点 #15（REQ-LAYOUT-01 链路 A 稳定码）：`warning` 里的布局码
+    /// 必须投影成**自己的**稳定 reason_code（不是通用 `aggregate_index_failed`），
+    /// 且 copy.action_zh 是该布局码的精确动作（不是「重试」兜底）；
+    /// 覆盖不足码既有行为不回归；其它 warning 仍是通用码。
+    #[test]
+    fn aggregate_index_layout_unsupported_projects_its_own_stable_code() {
+        use crate::product::logical_codebase::failure_copy::describe_code;
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        let store = AggregateIndexStore::for_lc(paths.clone(), &lc_id);
+        store
+            .create(
+                "project_0001",
+                AggregateIndexRecord::building(
+                    "aggregate_index_layout_failed_0001".to_string(),
+                    "project_0001".to_string(),
+                    2,
+                    Vec::new(),
+                    chrono::Utc::now().to_rfc3339(),
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_layout_failed_0001",
+                AggregateIndexStatus::Failed,
+                Some(
+                    "aggregate_index_failed:aggregate_index_layout_unsupported: checkout root \
+                     name of member api is not a single path segment"
+                        .to_string(),
+                ),
+            )
+            .unwrap();
+
+        let projection = LogicalCodebaseBootstrapProjector::new(paths.clone())
+            .project("project_0001", &lc_id)
+            .unwrap();
+        let step = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::AggregateIndexActive)
+            .unwrap();
+        assert_eq!(step.status, LogicalCodebaseBootstrapStepStatus::Failed);
+        let failure = step.failure.as_ref().expect("layout failure detail");
+        assert_eq!(
+            failure.reason_code, "aggregate_index_layout_unsupported",
+            "布局码必须投影成自己的稳定码，不能被压成 aggregate_index_failed"
+        );
+        let copy = failure.copy.as_ref().expect("链路 A 必须带同源成品文案");
+        assert_eq!(copy.machine_line, "aggregate_index_layout_unsupported");
+        assert_eq!(
+            copy.action_zh,
+            describe_code("aggregate_index_layout_unsupported", None).action_zh,
+            "copy.action_zh 必须是布局码的精确动作"
+        );
+        assert!(
+            copy.reason_zh.contains("一层直接子目录"),
+            "布局码必须给出具体规则依据：{}",
+            copy.reason_zh
+        );
+        // triage 只从 copy.triage 派生。
+        assert_eq!(failure.triage.as_deref(), Some("environment"));
+        // 索引链的 `detail` 是**脱敏后的原始诊断**（内层 warning 全文）：三段中文
+        // 由 `copy` 承载并已在上面逐条断言，这里不再要求 detail 重复一份序列化
+        // 结果（Plan §3.1 只要求 record 链的两处用 render_detail）。
+        assert!(
+            failure.detail.contains("aggregate_index_layout_unsupported"),
+            "detail 必须保留内层稳定码：{}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains("not a single path segment"),
+            "detail 必须保留原始诊断正文：{}",
+            failure.detail
+        );
+        assert!(!failure.detail.contains(&legacy_placeholder()));
+    }
+
+    /// 测试点 #12（兼容）：`BootstrapFailure` 旧响应没有 `triage`/`copy` 键
+    /// 时反序列化成功且为 None；带值时原样透出（triage 来自 copy）。
+    #[test]
+    fn bootstrap_failure_deserializes_without_triage_and_copy() {
+        let legacy: BootstrapFailure = serde_json::from_value(serde_json::json!({
+            "reason_code": "aggregate_pre_check_failed",
+            "detail": "stage aggregate_initialization: legacy record",
+            "retryable": true,
+            "external_side_effect": "aggregate_initialization_provider_turn",
+        }))
+        .expect("旧响应必须仍可反序列化");
+        assert_eq!(legacy.triage, None);
+        assert_eq!(legacy.copy, None);
+
+        let copy = crate::product::logical_codebase::failure_copy::describe_code(
+            "aggregate_root_is_git",
+            None,
+        );
+        let current = BootstrapFailure::with_copy(
+            "aggregate_root_is_git".to_string(),
+            "问题：逻辑代码库根目录不能是 git 仓库".to_string(),
+            false,
+            "none".to_string(),
+            copy.clone(),
+        );
+        assert_eq!(current.triage.as_deref(), Some("environment"));
+        assert_eq!(current.copy.as_ref(), Some(&copy));
+        let round_tripped: BootstrapFailure =
+            serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        assert_eq!(round_tripped, current);
+        assert_eq!(
+            round_tripped.copy.as_ref().map(|copy| copy.reason_zh.as_str()),
+            Some(copy.reason_zh.as_str())
         );
     }
 

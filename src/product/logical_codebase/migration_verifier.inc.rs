@@ -117,7 +117,9 @@ impl IdentityMigrationVerifier {
             &self.paths.project_root(project_id).join("issues"),
             Some("issue.json"),
         )? {
-            let issue: IssueRecord = read_json(&issue_path)?;
+            // 宽容投影：校验面同样必须能读「尚无 logical_codebase_id」的存量记录
+            //（迁移期间它们尚未回填，见 LegacyIssueProjection）。
+            let issue: LegacyIssueProjection = read_json(&issue_path)?;
             validate_relative_id(&issue.id)?;
             if issue.project_id != project_id {
                 return Err(ProductStoreError::IdentityMismatch {
@@ -346,7 +348,9 @@ impl IdentityMigrationVerifier {
             &self.paths.project_root(project_id).join("issues"),
             Some("issue.json"),
         )? {
-            let issue: IssueRecord = read_json(&issue_path)?;
+            // 宽容投影（同 verify_issue_projections）：迁移期间 issue 记录可能
+            // 尚未回填 logical_codebase_id，校验面不得在读之前失败。
+            let issue: LegacyIssueProjection = read_json(&issue_path)?;
             let root = self
                 .paths
                 .issue_root(project_id, &issue.id)

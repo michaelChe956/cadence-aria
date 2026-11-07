@@ -116,9 +116,8 @@ mod advance_tests {
 
         // 根规则入口 + 真正文政策（与根配方发布同构，非自举桩）。
         std::fs::write(
-            aggregate_root.join(
-                crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE,
-            ),
+            aggregate_root
+                .join(crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE),
             "# aggregate root rules\n",
         )
         .unwrap();
@@ -276,6 +275,8 @@ mod advance_tests {
                     stderr_summary: Some("provider probe failed".to_string()),
                     retryable: true,
                     action: "retry_provider_turn".to_string(),
+                    cause: None,
+                    provider: None,
                 },
                 "2026-10-03T00:02:30Z".to_string(),
             )
@@ -297,23 +298,21 @@ mod advance_tests {
         let rule_digest = fixture.rule_digest.clone();
         let index_store = AggregateIndexStore::for_lc(fixture.paths.clone(), fixture.lc_id.clone());
         LogicalCodebaseBootstrapService::new(paths.clone())
-            .with_root_recipe_prepare(Arc::new(
-                move |_request: &BootstrapPrepareRequest| {
-                    prepare_calls.fetch_add(1, Ordering::SeqCst);
-                    if let Some(delay) = prepare_delay {
-                        std::thread::sleep(delay);
-                    }
-                    materialize_root_recipe(
-                        &paths,
-                        &lc_id,
-                        &aggregate_root,
-                        &manifest,
-                        &policy,
-                        &rule_digest,
-                    );
-                    BootstrapPrepareOutcome::Started
-                },
-            ))
+            .with_root_recipe_prepare(Arc::new(move |_request: &BootstrapPrepareRequest| {
+                prepare_calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(delay) = prepare_delay {
+                    std::thread::sleep(delay);
+                }
+                materialize_root_recipe(
+                    &paths,
+                    &lc_id,
+                    &aggregate_root,
+                    &manifest,
+                    &policy,
+                    &rule_digest,
+                );
+                BootstrapPrepareOutcome::Started
+            }))
             .with_aggregate_index_rebuild(Arc::new(
                 move |project_id: &str, command_id: &str, expected_revision: u64| {
                     let mut record = AggregateIndexRecord::building(
@@ -584,5 +583,239 @@ mod advance_tests {
         assert!(!sanitized.contains(".."));
         crate::product::json_store::validate_relative_id(&sanitized)
             .expect("derived command id must stay path safe");
+    }
+
+    /// ⑤（2026-11-04 真机缺陷）：prepare 被拒（provider 选择门/信任门同
+    /// 路径）⇒ 停止解释成为 durable 事实——GET 同构投影透出 `advance_stop`
+    /// 并合成恰好一条通知；绝不创建 operation；放行后推进到 PlanningReady
+    /// 时清除记录。
+    #[tokio::test]
+    async fn advance_waiting_stop_record_is_durable_and_cleared_on_planning_ready() {
+        let fixture = advance_fixture();
+        let rejected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let service = service_with_rejection(
+            &fixture,
+            prepare_calls.clone(),
+            rejected.clone(),
+            "aggregate_initialization_provider_needs_verification",
+            "no provider carries verified capability evidence",
+        );
+
+        let first = service.advance(advance_request(&fixture)).await.unwrap();
+        assert_eq!(
+            first.stopped,
+            BootstrapAdvanceStop::WaitingForHuman {
+                step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                reason_code: "aggregate_initialization_provider_needs_verification".to_string(),
+                detail: Some(
+                    "no provider carries verified capability evidence".to_string()
+                ),
+            }
+        );
+        assert!(first.advanced_steps.is_empty());
+        assert!(
+            first.projection.advance_stop.is_some(),
+            "the advance response projection must carry the stop record"
+        );
+        // 拒绝不改写 durable 事实：根配方 operation 仍不存在。
+        assert!(operations(&fixture).list(PROJECT_ID).unwrap().is_empty());
+
+        // GET 同构投影：步骤仍 not_started，但带上 stop 记录 + 恰好一条通知。
+        let projection = LogicalCodebaseBootstrapProjector::new(fixture.paths.clone())
+            .project(PROJECT_ID, &fixture.lc_id)
+            .unwrap();
+        let record = projection
+            .advance_stop
+            .as_ref()
+            .expect("stop record must be projected");
+        assert_eq!(record.step, LogicalCodebaseBootstrapStep::RulesPolicy);
+        assert_eq!(record.reason, "waiting_for_human");
+        assert_eq!(
+            record.reason_code,
+            "aggregate_initialization_provider_needs_verification"
+        );
+        assert_eq!(
+            record.detail.as_deref(),
+            Some("no provider carries verified capability evidence")
+        );
+        let rules = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::RulesPolicy)
+            .unwrap();
+        assert_eq!(rules.status, LogicalCodebaseBootstrapStepStatus::NotStarted);
+        let stop_notices: Vec<_> = projection
+            .notices
+            .iter()
+            .filter(|notice| notice.key.starts_with("bootstrap:advance-stop:"))
+            .collect();
+        assert_eq!(stop_notices.len(), 1, "{:?}", projection.notices);
+        assert_eq!(
+            stop_notices[0].reason_code,
+            "aggregate_initialization_provider_needs_verification"
+        );
+        assert!(!stop_notices[0].summary.is_empty());
+        assert_eq!(stop_notices[0].step, LogicalCodebaseBootstrapStep::RulesPolicy);
+
+        // 放行后再次 advance → PlanningReady；停止解释被清除。
+        rejected.store(false, Ordering::SeqCst);
+        let second = service.advance(advance_request(&fixture)).await.unwrap();
+        assert_eq!(second.stopped, BootstrapAdvanceStop::PlanningReady);
+        assert!(second.projection.planning_ready);
+        assert!(second.projection.advance_stop.is_none());
+        assert!(second.projection.notices.iter().all(|notice| {
+            !notice.key.starts_with("bootstrap:advance-stop:")
+        }));
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// ⑥（2026-11-04）：rules_policy 的手动「准备」与自动推进同一条派发
+    /// 链：被拒 ⇒ 落 stop 记录并返回 waiting_for_human（响应投影携带解
+    /// 释，而不是无声等待）；放行 ⇒ 真正跑起根配方（Accepted）并清除旧
+    /// 记录。
+    #[tokio::test]
+    async fn manual_prepare_on_rules_policy_routes_the_root_recipe_dispatcher() {
+        let fixture = advance_fixture();
+        let rejected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let service = service_with_rejection(
+            &fixture,
+            prepare_calls.clone(),
+            rejected.clone(),
+            "aggregate_initialization_trust_waiting",
+            "trust not ready for this provider",
+        );
+        let projection = LogicalCodebaseBootstrapProjector::new(fixture.paths.clone())
+            .project(PROJECT_ID, &fixture.lc_id)
+            .unwrap();
+        let rules = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::RulesPolicy)
+            .unwrap()
+            .clone();
+        assert_eq!(rules.status, LogicalCodebaseBootstrapStepStatus::NotStarted);
+        assert_eq!(rules.allowed_actions, vec![BootstrapActionKind::Prepare]);
+
+        let rejected_result = service
+            .apply(BootstrapActionRequest {
+                command_id: "manual-prepare-rules-policy-0001".to_string(),
+                project_id: PROJECT_ID.to_string(),
+                logical_codebase_id: fixture.lc_id.clone(),
+                step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                action: BootstrapActionKind::Prepare,
+                expected_revision: projection.membership_revision,
+                expected_object_id: rules.object_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(rejected_result.outcome, BootstrapActionOutcome::WaitingForHuman);
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+        let stop = rejected_result
+            .projection
+            .advance_stop
+            .as_ref()
+            .expect("the rejection must be visible in the response projection");
+        assert_eq!(stop.reason, "waiting_for_human");
+        assert_eq!(stop.reason_code, "aggregate_initialization_trust_waiting");
+        assert_eq!(
+            stop.detail.as_deref(),
+            Some("trust not ready for this provider")
+        );
+
+        rejected.store(false, Ordering::SeqCst);
+        let started = service
+            .apply(BootstrapActionRequest {
+                command_id: "manual-prepare-rules-policy-0002".to_string(),
+                project_id: PROJECT_ID.to_string(),
+                logical_codebase_id: fixture.lc_id.clone(),
+                step: LogicalCodebaseBootstrapStep::RulesPolicy,
+                action: BootstrapActionKind::Prepare,
+                expected_revision: projection.membership_revision,
+                expected_object_id: rules.object_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.outcome, BootstrapActionOutcome::Accepted);
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 2);
+        let rules_after = started
+            .projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::RulesPolicy)
+            .unwrap();
+        assert_eq!(
+            rules_after.status,
+            LogicalCodebaseBootstrapStepStatus::Completed
+        );
+        assert!(started.projection.advance_stop.is_none());
+        assert!(started
+            .projection
+            .notices
+            .iter()
+            .all(|notice| !notice.key.starts_with("bootstrap:advance-stop:")));
+    }
+
+    /// ⑤/⑥ 共用：先拒（携带稳定码 + detail）、放行后物化根配方的派发器。
+    fn service_with_rejection(
+        fixture: &AdvanceFixture,
+        prepare_calls: Arc<AtomicUsize>,
+        rejected: Arc<std::sync::atomic::AtomicBool>,
+        reason_code: &'static str,
+        detail: &'static str,
+    ) -> LogicalCodebaseBootstrapService {
+        let paths = fixture.paths.clone();
+        let lc_id = fixture.lc_id.clone();
+        let aggregate_root = fixture.aggregate_root.clone();
+        let manifest = fixture.manifest.clone();
+        let policy = fixture.policy.clone();
+        let rule_digest = fixture.rule_digest.clone();
+        let index_store = AggregateIndexStore::for_lc(fixture.paths.clone(), fixture.lc_id.clone());
+        LogicalCodebaseBootstrapService::new(paths.clone())
+            .with_root_recipe_prepare(Arc::new(
+            move |_request: &BootstrapPrepareRequest| {
+                prepare_calls.fetch_add(1, Ordering::SeqCst);
+                if rejected.load(Ordering::SeqCst) {
+                    return BootstrapPrepareOutcome::WaitingForHuman {
+                        reason_code: reason_code.to_string(),
+                        detail: Some(detail.to_string()),
+                    };
+                }
+                materialize_root_recipe(
+                    &paths,
+                    &lc_id,
+                    &aggregate_root,
+                    &manifest,
+                    &policy,
+                    &rule_digest,
+                );
+                BootstrapPrepareOutcome::Started
+            },
+        ))
+        // 与 service_with 相同的索引重建派发面：放行后的 advance 会继续
+        // 推进到 aggregate_index_active。
+        .with_aggregate_index_rebuild(Arc::new(
+            move |project_id: &str, command_id: &str, expected_revision: u64| {
+                let mut record = AggregateIndexRecord::building(
+                    ADVANCE_INDEX_ID.to_string(),
+                    project_id.to_string(),
+                    expected_revision,
+                    Vec::new(),
+                    "2026-11-04T00:07:00Z".to_string(),
+                );
+                record.command_id = Some(command_id.to_string());
+                record.config_digest = "sha256:advance-index-config".to_string();
+                index_store
+                    .create(project_id, record)
+                    .expect("seed the building index generation");
+                index_store.mark_status(
+                    project_id,
+                    ADVANCE_INDEX_ID,
+                    AggregateIndexStatus::Active,
+                    None,
+                )
+            },
+        ))
     }
 }

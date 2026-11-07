@@ -150,7 +150,25 @@ fn lc_group_running_attempt() -> LcGroupFixture {
     let head = git_stdout(&worktree, &["rev-parse", "HEAD"])
         .trim()
         .to_string();
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：跨仓越界基线采集按 issue 的 LC 归属寻址
+    // （`resolve_issue_logical_codebase_id`）；issue 缺失即
+    // `cross_target_store_failure`。issue 必须先于任何 selection 目录创建，
+    // 否则顺序 id 漂移。
+    crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                "project_0001",
+            ),
+            title: "worktree discipline issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("worktree discipline issue");
+    let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),

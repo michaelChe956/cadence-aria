@@ -60,7 +60,11 @@ pub(super) fn create_large_workspace_fixture(
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),
         repo_id: Some(repository.id.clone()),
-        logical_codebase_id: None,
+        // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+        // 默认作用域（legacy 别名代码库 id）。
+        logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+            &project.id,
+        ),
         title: "Large Workspace Memory Issue".to_string(),
         description: Some("验证大型 workspace 的按需内容加载".to_string()),
         change_id: None,
@@ -303,7 +307,11 @@ fn create_coding_role_run_fixture(
     let issue = IssueStore::new(app_paths.clone()).create(CreateProductIssueInput {
         project_id: project.id.clone(),
         repo_id: Some(repository.id.clone()),
-        logical_codebase_id: None,
+        // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+        // 默认作用域（legacy 别名代码库 id）。
+        logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+            &project.id,
+        ),
         title: "Coding Role Run Issue".to_string(),
         description: Some("Issue for role run history E2E".to_string()),
         change_id: None,

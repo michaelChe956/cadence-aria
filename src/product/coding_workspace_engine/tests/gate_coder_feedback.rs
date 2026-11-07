@@ -2,7 +2,17 @@ use super::*;
 
 #[tokio::test]
 async fn code_review_blocked_gate_accepts_manual_feedback_without_findings() {
-    let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：返修/门响应链要解析 issue 归属与 LC 权威（无归属一律
+    // fail-closed），本用例验证的是「无 findings 的 code_review_blocked 门仍接受
+    // 人工反馈」，故须先补出合法归属与冻结快照。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths);
     let mut attempt = store
         .create_attempt(CreateCodingAttemptInput {
@@ -18,7 +28,7 @@ async fn code_review_blocked_gate_accepts_manual_feedback_without_findings() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("create attempt");

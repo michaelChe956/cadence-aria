@@ -79,8 +79,9 @@ function automationTargetResponse(url: string): unknown {
   const query = new URL(url, "http://localhost").searchParams;
   return {
     enrollment_target: {
-      kind: "single_repository",
-      repository_id: "00000000-0000-0000-0000-000000000001",
+      kind: "logical_codebase",
+      logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+      logical_repository_id: "00000000-0000-0000-0000-000000000001",
     },
     resolved_options: {
       author_provider: query.get("author_provider") ?? "codex",
@@ -220,6 +221,11 @@ describe("useIssueLifecycleGeneration plan_approval（B2-P1 前端段）", () =>
     const options = captured.enableBodies[0].command.options;
     // 红测锚点：GET 投影 resolved_options 恒 manual，入口必须覆盖为 auto。
     expect(options.plan_approval).toBe("auto");
+    // 发起侧载体收窄（方案 A）：Enable 命令的 target 只有逻辑代码库两变体，
+    // 线上载荷不得出现 legacy 单仓载体。
+    const target = captured.enableBodies[0].command.target as { kind?: string };
+    expect(target.kind).not.toBe("single_repository");
+    expect(target.kind).toBe("logical_codebase");
     // 其余字段仍取服务端投影原样（前端不猜默认、不丢字段）。
     expect(options).toEqual({
       author_provider: "codex",

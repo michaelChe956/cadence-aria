@@ -826,7 +826,10 @@ impl WorkspaceEngine {
                 ),
             )
         })?;
-        if current_issue_lc != issue_lc_id {
+        let frozen_issue_lc = issue_lc_id.clone().unwrap_or_else(|| {
+            crate::product::logical_codebase::legacy_logical_codebase_id(&project_id)
+        });
+        if current_issue_lc != frozen_issue_lc {
             return Err(context_waiting(
                 "confirmation_trust_scope_changed",
                 format!(
@@ -989,7 +992,10 @@ impl WorkspaceEngine {
                         )
                     },
                 )?;
-            if current_issue_lc != issue_lc_id {
+            let frozen_issue_lc = issue_lc_id
+                .clone()
+                .unwrap_or_else(|| legacy_logical_codebase_id(&project_id));
+            if current_issue_lc != frozen_issue_lc {
                 return Err(context_waiting(
                     "trust_registration_scope_changed",
                     format!(

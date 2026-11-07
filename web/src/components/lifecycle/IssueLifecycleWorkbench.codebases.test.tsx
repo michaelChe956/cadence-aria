@@ -43,7 +43,7 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
     ).toBeEnabled();
   });
 
-  it("无逻辑代码库时登记成员禁用；单仓库模式走既有添加对话框", async () => {
+  it("无逻辑代码库时登记成员禁用；添加代码库对话框无单仓入口且默认多仓表单", async () => {
     vi.stubGlobal(
       "fetch",
       lifecycleFetch({
@@ -66,12 +66,17 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
     expect(
       screen.getByRole("dialog", { name: "添加代码库" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /单仓库/ })).toBeChecked();
-
-    await user.click(screen.getByRole("button", { name: "继续添加单仓库" }));
-    await waitFor(() =>
-      expect(screen.getByRole("dialog", { name: "添加代码库" })).toBeInTheDocument(),
-    );
+    // REQ-REG-16：单仓入口消失——无「单仓库」radio、无「继续添加单仓库」按钮。
+    expect(screen.queryByRole("radio", { name: /单仓库/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "继续添加单仓库" }),
+    ).not.toBeInTheDocument();
+    // 默认即多仓表单（聚合根 + 名称），不需先选模式。
+    expect(screen.getByLabelText("聚合根目录")).toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "创建逻辑代码库" }),
+    ).toBeInTheDocument();
   });
 
   it("多仓库模式：创建 LC 后同一弹窗内登记成员（复用聚合根自动发现）", async () => {
@@ -122,7 +127,6 @@ describe("IssueLifecycleWorkbench codebases 混合列表与添加弹窗", () => 
     render(<IssueLifecycleWorkbench />);
 
     await user.click(await screen.findByRole("button", { name: "添加代码库" }));
-    await user.click(screen.getByRole("radio", { name: /多仓库逻辑代码库/ }));
     await user.type(screen.getByLabelText("聚合根目录"), "/root");
     expect(screen.getByLabelText("名称")).toHaveValue("root");
     await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));

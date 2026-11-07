@@ -16,18 +16,12 @@ type CodingWsStream =
 /// 引擎里，收到 `ProviderCommand::ChoiceResponse` 才完成本轮 coding。
 struct F43ChoiceAwaitingProvider;
 
-#[async_trait::async_trait]
-impl cadence_aria::cross_cutting::streaming_provider::StreamingProviderAdapter
-    for F43ChoiceAwaitingProvider
-{
-    async fn start(
-        &self,
-        _input: cadence_aria::cross_cutting::streaming_provider::StreamingProviderInput,
-        _cancel: CancellationToken,
-    ) -> Result<
-        cadence_aria::cross_cutting::streaming_provider::ProviderSession,
-        cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError,
-    > {
+impl F43ChoiceAwaitingProvider {
+    /// choice 会话本体：`start`（单仓 direct）与 `start_validated`（LC gateway
+    /// 槽位分发）共用——行为与 input 无关（先抛 choice，收到
+    /// `ProviderCommand::ChoiceResponse` 才完成本轮 coding）。
+    fn spawn_choice_session(
+    ) -> cadence_aria::cross_cutting::streaming_provider::ProviderSession {
         use cadence_aria::cross_cutting::streaming_provider::{
             ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, ProviderCommand,
             ProviderCompletion, ProviderEvent, ProviderSession,
@@ -86,44 +80,88 @@ impl cadence_aria::cross_cutting::streaming_provider::StreamingProviderAdapter
                 }
             }
         });
-        Ok(ProviderSession {
+        ProviderSession {
             native_session_id: None,
             events: event_rx,
             commands: command_tx,
-        })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl cadence_aria::cross_cutting::streaming_provider::StreamingProviderAdapter
+    for F43ChoiceAwaitingProvider
+{
+    async fn start(
+        &self,
+        _input: cadence_aria::cross_cutting::streaming_provider::StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<
+        cadence_aria::cross_cutting::streaming_provider::ProviderSession,
+        cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        Ok(Self::spawn_choice_session())
+    }
+
+    /// 夹具直驱引擎注入 LC gateway 后，coder 的 validated 启动经
+    /// `LogicalCodebaseProviderGateway::start_streaming` → registry
+    /// ClaudeCode 槽位分发到本方法（生产 runner 同构：`build_readonly_for_lc`
+    /// + `with_logical_provider_gateway`，见下方夹具注释）。
+    async fn start_validated(
+        &self,
+        _validated: cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<
+        cadence_aria::cross_cutting::streaming_provider::ProviderSession,
+        cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError,
+    > {
+        Ok(Self::spawn_choice_session())
     }
 }
 
 fn app_and_state_with_pending_choice(
     root_path: &std::path::Path,
-) -> (axum::Router, WebAppState, CodingExecutionAttempt) {
+) -> (
+    axum::Router,
+    WebAppState,
+    CodingExecutionAttempt,
+    std::sync::Arc<cadence_aria::product::logical_codebase::LogicalCodebaseProviderGateway>,
+) {
     let app_paths = ProductAppPaths::new(root_path.join(".aria"));
     let repo = root_path.join("repo");
     init_simple_git_repo(&repo);
-    let worktree = root_path.join("worktree");
-    std::fs::create_dir_all(&worktree).expect("create worktree fixture");
+    // LC gateway 的 spawn 复验要求 target worktree 携真实 git 身份
+    // （`revalidate_git_dir_identity`）——与 part_07 夹具同形态，attempt
+    // worktree 直接指向主 checkout（repo 本身），不再另建裸 worktree 目录。
     let repository = RepositoryStore::new(app_paths.clone())
         .create(CreateRepositoryInput {
             project_id: "project_0001".to_string(),
             name: "repo".to_string(),
-            path: repo,
+            path: repo.clone(),
             default_policy_preset: Some("manual-write".to_string()),
             default_provider_mode: Some("fake".to_string()),
             idempotency_key: "coding-ws-part18-pending-choice-repository".to_string(),
         })
         .expect("create repository");
+    ensure_legacy_issue_before_lifecycle_writes(&app_paths, &repository.id);
     LifecycleStore::new(app_paths.clone())
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
+            repository_id: repository.id.clone(),
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "Coding work item".to_string(),
             ..Default::default()
         })
         .expect("create work item");
-    let store = CodingAttemptStore::new(app_paths);
+    // 迁移档：补 issue 与 LC 权威 + 冻结快照。快照形态下 provider 必须经 LC
+    // gateway validated 启动——本夹具与生产 runner（runner/task.rs）同构：
+    // registry ClaudeCode 槽位承载替身 + `build_readonly_for_lc` 组装 gateway，
+    // 由用例经 `with_logical_provider_gateway` 注入直驱引擎（Fake 不经
+    // gateway，provider snapshot 随迁移档切到 ClaudeCode）。
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
+    let store = CodingAttemptStore::new(app_paths.clone());
     create_legacy_coding_attempt_fixture(
         &store,
         CreateCodingAttemptInput {
@@ -132,15 +170,15 @@ fn app_and_state_with_pending_choice(
             work_item_id: "work_item_0001".to_string(),
             base_branch: "main".to_string(),
             branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
-            worktree_path: Some(worktree),
+            worktree_path: Some(repo),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes:
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
@@ -154,7 +192,31 @@ fn app_and_state_with_pending_choice(
         root_path.to_path_buf(),
         WebRuntime::new_fake(root_path.to_path_buf()),
     );
-    (build_web_router(state.clone()), state, attempt)
+    // gateway 组装复用 web_coding_ws_handler 共享助手层（registry 槽位 +
+    // always-available gate + 同步 adapter 桩，同 `coding_ws_state_with_gateway`），
+    // 并按生产 runner 形态以 issue 的 LC 作用域 `build_readonly_for_lc` 组装。
+    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, "project_0001");
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, Arc::new(F43ChoiceAwaitingProvider));
+    let gateway = Arc::new(
+        LogicalCodebaseGatewayFactory::new(
+            app_paths.clone(),
+            Arc::new(registry),
+            Arc::new(CodingWsStubSyncAdapter),
+            always_available_provider_gate(),
+        )
+        .build_readonly_for_lc(
+            "project_0001",
+            Some(legacy_logical_codebase_id("project_0001").as_str()),
+        )
+        .expect("build pending choice fixture gateway"),
+    );
+    (
+        build_web_router(state.clone()),
+        state,
+        attempt,
+        gateway,
+    )
 }
 
 /// 引擎已挂起 choice 的落盘态（`WaitingForHuman` + choice-gates 下一条 Open gate）；
@@ -220,7 +282,7 @@ async fn recv_coding_choice_request(ws: &mut CodingWsStream) -> serde_json::Valu
 async fn coding_ws_new_connection_receives_and_answers_pending_choice() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
-    let (app, state, attempt) = app_and_state_with_pending_choice(root.path());
+    let (app, state, attempt, gateway) = app_and_state_with_pending_choice(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
 
@@ -237,7 +299,8 @@ async fn coding_ws_new_connection_receives_and_answers_pending_choice() {
         store.clone(),
         cadence_aria::product::git_workspace_service::GitWorkspaceService::new(),
         engine_event_tx,
-    );
+    )
+    .with_logical_provider_gateway(gateway);
     let provider = F43ChoiceAwaitingProvider;
     let context = cadence_aria::product::coding_workspace_engine::CodingExecutionContext::default();
     let execute =
@@ -358,7 +421,7 @@ async fn coding_ws_new_connection_receives_and_answers_pending_choice() {
 async fn coding_ws_new_connection_does_not_resend_answered_choice() {
     let _guard = WS_TEST_LOCK.lock().await;
     let root = tempdir().expect("root");
-    let (app, state, attempt) = app_and_state_with_pending_choice(root.path());
+    let (app, state, attempt, _gateway) = app_and_state_with_pending_choice(root.path());
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let waiting = seed_pending_choice_gate(&store, &attempt);
     store

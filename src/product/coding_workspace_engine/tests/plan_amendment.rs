@@ -510,6 +510,15 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
     std::fs::create_dir_all(&worktree).unwrap();
     init_test_git_repo(&worktree);
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：admission/恢复的唯一凭证是「LC 权威 + 冻结
+    // target_snapshot」。无快照 attempt 在恢复进 Running 时只会命中
+    // `repository_target_missing` fail-closed，测到的不再是 amendment 语义。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths.clone());
     let initial = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -526,12 +535,28 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .unwrap();
     seed_group_attempt_fixture(&store, &initial, true, false);
+    // 单仓语义在 LC 模型下就是「全部 work item 归属唯一成员仓」：
+    // `validate_group_single_target` 对 Logical 路由要求每个权威 unit 都带
+    // `target_repository_id` 且与 attempt 快照一致。共享夹具写入的 draft 仍是
+    // 无归属形态，这里按同一不变量补齐（不改变任何断言事实）。
+    let plan_store = WorkItemPlanStore::new(paths.clone());
+    for mut draft in plan_store
+        .list_draft_records("project_0001", "issue_0001", "work_item_plan_0001")
+        .expect("fixture draft records")
+    {
+        if draft.candidate.target_repository_id.is_none() {
+            draft.candidate.target_repository_id = Some(logical.member_id);
+            plan_store
+                .put_draft_record(&draft)
+                .expect("fixture draft target");
+        }
+    }
     let revision_store = WorkItemRevisionStore::new(paths.clone());
     let plan = revision_store
         .get_plan_lineage("project_0001", "issue_0001", "work_item_plan_0001")
@@ -674,7 +699,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
         .put_work_item_revision(&plan, &revised)
         .unwrap();
     // 补 amended revision 的 source draft record：validate_group_single_target 拒绝任何
-    // source_draft_error，Legacy 单仓 unit 的 target 仍为 None。
+    // source_draft_error；单仓语义 = 唯一 LC 成员仓（与 attempt 快照同一 target）。
     WorkItemPlanStore::new(paths.clone())
         .put_draft_record(&WorkItemDraftRecord {
             project_id: "project_0001".to_string(),
@@ -689,7 +714,7 @@ async fn amendment_fixture_with_resume_mode(resume_mode: AmendmentResumeMode) ->
             generation_mode: WorkItemGenerationMode::Serial,
             generation_diagnostics: None,
             candidate: WorkItemDraftCandidate {
-                target_repository_id: None,
+                target_repository_id: Some(logical.member_id),
                 outline_id: "outline_0101".to_string(),
                 logical_work_item_id: revised.logical_work_item_id.clone(),
                 canonical_contract_candidate: revised.canonical_contract.clone(),

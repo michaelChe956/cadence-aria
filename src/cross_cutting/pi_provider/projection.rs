@@ -29,7 +29,8 @@ use crate::cross_cutting::pi_provider::{
 use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
 use crate::cross_cutting::streaming_provider::{
     ProviderPermissionMode, ProviderToolPolicy, TOOL_POLICY_APPROVAL_POLICY_VERSION,
-    adapter_role_text, canonical_tool_policy, tool_policy_digest,
+    ToolPolicyIntent, adapter_role_text, bootstrap_marker::bootstrap_marker_canonical_digest,
+    canonical_tool_policy, tool_policy_digest,
 };
 use crate::product::logical_codebase::policy::{
     ProviderDialect, ProviderWireDialect, SessionPolicyAction, SessionPolicyEnvelope,
@@ -52,26 +53,46 @@ const SESSION_DIGEST_SCHEMA: &str = "lc-pi-session-v1";
 /// boundary 计划内容引用的 schema 前缀。
 const BOUNDARY_PLAN_REF_SCHEMA: &str = "lc-pi-boundary-plan-v1";
 
+/// RootRecipe 相位 BootstrapExecutorMarker 的 canonical 序列化 schema 前缀
+/// (REQ-BOOT-15:与 claude 的 marker canonical 化同语义、同一共享实现,
+/// schema 前缀按 provider 独立冻结)。
+const BOOTSTRAP_MARKER_DIGEST_SCHEMA: &str = "lc-pi-bootstrap-marker-v1";
+
 /// 固定 role×policy 映射的冻结快照(批2 Task 11 与 `validate_tool_policy_for_role`
 /// 同源:DenyFileWriteBuiltins 仅为 Author 岗位纪律的物理投影,由受信装配
 /// 铸造;Coder/Reviewer/规划族 wire 面全开;BootstrapExecutorMarker 是
 /// root-recipe 例外,不进 LC profile)。
 const PI_LC_ROLE_POLICY_MAP: &str = "author=deny_file_write_builtins;orchestrator=none;work_item_splitter=none;reviewer=none;executor=none;handoff=none";
 
-/// Pi LC projector:构造时冻结已实测 exact version。真实 version 未知
-/// (空串)时 `project` fail-closed 拒绝,不产出投影。
+/// Pi LC projector:构造时冻结已实测 exact version 与相位。真实 version
+/// 未知(空串)时 `project` fail-closed 拒绝;`root_recipe_phase` 来自
+/// validated policy 的冻结相位——`BootstrapExecutorMarker` 只在 RootRecipe
+/// 相位可 canonical 化(REQ-BOOT-15:root recipe 相位对 provider 无关;
+/// Normal 相位的 marker 由 T7 guard 先拦,projector 的 canonical 层再独立
+/// 拒绝,双层防线)。
 #[derive(Debug, Clone)]
 pub struct PiPolicyProjector {
     exact_version: String,
+    root_recipe_phase: bool,
 }
 
 impl PiPolicyProjector {
-    /// 以已解析的 provider exact version 构造 projector(registry 装配/测试
-    /// seam;version 解析本身由 adapter 侧 supplier/CLI 探测承担)。
+    /// 以已解析的 provider exact version 构造 Normal 相位 projector
+    /// (registry 装配/测试 seam;version 解析本身由 adapter 侧 supplier/CLI
+    /// 探测承担)。
     pub fn new(exact_version: impl Into<String>) -> Self {
         Self {
             exact_version: exact_version.into(),
+            root_recipe_phase: false,
         }
+    }
+
+    /// 冻结 RootRecipe 相位(REQ-BOOT-15):adapter 的 `start_validated`/
+    /// `prepare_lc_facts` 以 validated policy 的真实相位构造,marker 才能
+    /// 进入 canonical 化。
+    pub fn with_root_recipe_phase(mut self, root_recipe_phase: bool) -> Self {
+        self.root_recipe_phase = root_recipe_phase;
+        self
     }
 }
 
@@ -162,20 +183,43 @@ fn boundary_mode_text(mode: ProviderBoundaryMode) -> &'static str {
     }
 }
 
-/// LC 会话的 tool-policy canonical digest:`Some(deny)` 沿既有 canonical
-/// 形态;`None`(无通用策略角色)使用空 token 序列的 canonical 形态——digest
-/// 仍非空且稳定,统一 launch audit 不以 `tool_policy=None` 跳过。
+/// LC 会话的 tool-policy canonical digest:`Some(deny)`/`Some(reviewer
+/// window)` 沿既有 canonical 形态;`None`(无通用策略角色)使用空 token
+/// 序列的 canonical 形态——digest 仍非空且稳定,统一 launch audit 不以
+/// `tool_policy=None` 跳过。`Some(BootstrapExecutorMarker)` 仅在 RootRecipe
+/// 相位可 canonical 化(REQ-BOOT-15:root recipe 相位对 provider 无关,与
+/// claude 同语义):确定性 marker digest 供会话投影/统一 launch audit 落盘;
+/// Normal 相位的 marker 在 canonical 层独立拒绝(普通 Coder 不可借 marker,
+/// 与 T7 guard 相位门构成双层防线)。
 pub(crate) fn lc_tool_policy_canonical_digest(
     policy: Option<&ProviderToolPolicy>,
+    root_recipe_phase: bool,
 ) -> Result<String, ProviderProjectionError> {
     match policy {
-        Some(policy) => canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
-            .map(|canonical| canonical.digest)
-            .map_err(|error| {
-                ProviderProjectionError::Invalid(format!(
-                    "pi lc tool policy is not canonicalizable: {error}"
+        Some(policy) => match &policy.intent {
+            ToolPolicyIntent::DenyFileWriteBuiltins | ToolPolicyIntent::ReviewerVerify { .. } => {
+                canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
+                    .map(|canonical| canonical.digest)
+                    .map_err(|error| {
+                        ProviderProjectionError::Invalid(format!(
+                            "pi lc tool policy is not canonicalizable: {error}"
+                        ))
+                    })
+            }
+            ToolPolicyIntent::BootstrapExecutorMarker(marker) => {
+                if !root_recipe_phase {
+                    return Err(ProviderProjectionError::Invalid(
+                        "pi lc tool policy is not canonicalizable: bootstrap executor marker requires the root recipe phase; ordinary coder launches must not carry it"
+                            .to_string(),
+                    ));
+                }
+                Ok(bootstrap_marker_canonical_digest(
+                    BOOTSTRAP_MARKER_DIGEST_SCHEMA,
+                    TOOL_POLICY_PROVIDER_NAME,
+                    marker,
                 ))
-            }),
+            }
+        },
         None => Ok(tool_policy_digest(
             TOOL_POLICY_PROVIDER_NAME,
             &[],
@@ -344,7 +388,8 @@ impl ProviderPolicyProjector for PiPolicyProjector {
         // 2) 会话全投影摘要:profile 摘要 + 当前 role/permission/cwd/target/
         //    roots/trust/config/policy/authority + 实际 tool policy。分层
         //    包含 profile 摘要(先算 profile 再算 session,单向无递归)。
-        let session_tool_digest = lc_tool_policy_canonical_digest(input.tool_policy())?;
+        let session_tool_digest =
+            lc_tool_policy_canonical_digest(input.tool_policy(), self.root_recipe_phase)?;
         let cwd = envelope.working_directory.to_string_lossy().into_owned();
         let authority = envelope.authority_root.to_string_lossy().into_owned();
         let mut target_field = String::new();

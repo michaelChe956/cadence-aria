@@ -42,7 +42,7 @@ fn app_with_group_full_chain_attempt_fixture(
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id("project_0001"),
             title: "coding ws group fixture".to_string(),
             description: None,
             change_id: None,
@@ -89,6 +89,7 @@ fn app_with_group_full_chain_attempt_fixture(
         .expect("create work item plan session");
     seed_group_revision_history_fixture(&lifecycle, &plan_session.id);
 
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths);
     let attempt = create_legacy_group_coding_attempt_fixture(
         &store,
@@ -101,16 +102,75 @@ fn app_with_group_full_chain_attempt_fixture(
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: use_existing_worktree.then_some(repo),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
             start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         },
     );
+    // 夹具补件：生产 group 创建 handler 会 upsert 仓维 shared worktree 记录
+    //（group.rs:116-129 + worktree_route.rs:181，路径 = 快照 canonical 下
+    // .worktrees/aria-issues/<issue>）；夹具直建 attempt 绕过了该步，完成/
+    // 推进链 fail-closed 读 shared-worktrees/{member}.json 会 Io 落空。按
+    // 生产同款形状补种（不另造路径）。
+    LifecycleStore::new(store.paths())
+        .upsert_repo_shared_worktree(
+            cadence_aria::product::lifecycle_store::UpsertRepoSharedWorktreeInput {
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                repository_id: attempt
+                    .target_snapshot
+                    .as_ref()
+                    .expect("group fixture snapshot")
+                    .logical_repository_id,
+                branch_name: attempt.branch_name.clone(),
+                worktree_path: attempt
+                    .target_snapshot
+                    .as_ref()
+                    .expect("group fixture snapshot")
+                    .canonical_path
+                    .join(".worktrees")
+                    .join("aria-issues")
+                    .join(&attempt.issue_id),
+                base_branch: attempt.base_branch.clone(),
+            },
+        )
+        .expect("seed group repo shared worktree");
+    // 生产 create handler 同款锁收口（worktree_route.rs:190-198 + bind）：
+    // 先按当前 unit 的 work item 取仓维租约，再绑定 attempt——StartCoding/
+    // 推进链会 fail-closed 复验 lock owner。
+    let member_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("group fixture snapshot")
+        .logical_repository_id;
+    let current_work_item_id = attempt
+        .current_work_item_id
+        .clone()
+        .expect("group fixture current work item");
+    let lifecycle_locks = LifecycleStore::new(store.paths());
+    lifecycle_locks
+        .try_acquire_repo_worktree_lock(
+            &attempt.project_id,
+            &attempt.issue_id,
+            member_id,
+            &current_work_item_id,
+            "repo_worktree_lease_fixture_0001",
+        )
+        .expect("acquire group repo worktree lease");
+    lifecycle_locks
+        .bind_repo_worktree_lock_to_attempt(
+            &attempt.project_id,
+            &attempt.issue_id,
+            member_id,
+            &current_work_item_id,
+            &attempt.id,
+        )
+        .expect("bind group repo worktree lease");
     seed_authoritative_group_plan_fixture(&store, &attempt, false);
     store
         .create_coding_unit(CreateCodingExecutionUnitInput {
@@ -140,10 +200,13 @@ fn app_with_group_full_chain_attempt_fixture(
         .expect("create coding unit 2");
 
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, provider);
-    build_web_router(WebAppState::with_provider_registry(
-        root_path.to_path_buf(),
-        WebRuntime::new_fake(root_path.to_path_buf()),
+    registry.register(
+        ProviderName::ClaudeCode,
+        GatewayDialectStreamingStub::wrapping(provider),
+    );
+    build_web_router(coding_ws_state_with_gateway(
+        root_path,
+        &store.paths(),
         registry,
     ))
 }
@@ -378,8 +441,11 @@ fn materialize_running_unit_run_for_logical(store: &CodingAttemptStore, logical_
     let bundle = revision_store
         .get_work_item_projection_bundle(&lineage, &revision.work_item_projection_bundle_id)
         .expect("projection bundle");
+    // 夹具 attempt 的 provider 已迁移为 ClaudeCode（REQ-COD-03：冻结快照
+    // attempt 恒经 gateway validated 启动，Fake 非网关方言）——unit run 的
+    // renderer 版本随 providers.coder/code_reviewer 锁步。
     let renderer_version = cadence_aria::product::work_item_projection::renderer_for(
-        &ProviderName::Fake,
+        &ProviderName::ClaudeCode,
     )
     .renderer_version()
     .to_string();

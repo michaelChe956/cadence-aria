@@ -124,6 +124,47 @@ pub struct IssueAutomationEnrollment {
     /// （P3/P4/R2/T3），N1 只读；写/清经 store 精确绑定互证。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attention_facts: Vec<AutomationAttentionFact>,
+    /// REQ-WIGA-VOID-01：登记随工作项组删除作废的时刻（RFC3339）。非空即
+    /// 该登记已作废——视为无约束力的历史记录，不再约束该 issue 上的新
+    /// 工作项组（重新开启按换代放行 options/source/target 全部漂移）。
+    /// 写入由「删除工作项组」的作废命令独占；旧 JSON 缺字段按未作废读。
+    /// 与 `terminated_at` 是两个独立维度，SHALL NOT 互相推导。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voided_at: Option<String>,
+    /// REQ-WIGA-VOID-01：作废原因机器码（如 `work_item_group_deleted`）；
+    /// 只追加不改写，旧 JSON 缺字段按未作废读。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub void_reason: Option<String>,
+}
+
+/// REQ-WIGA-VOID-01（tasks 1.2）：enrollment 的状态投影。终止
+/// （`terminated_at`）与作废（`voided_at`）是两个独立维度——「已终止且已
+/// 作废」是合法并存态（删除路径先终止再作废的正常终态）；投影按两个
+/// 维度的四种组给出确定值，SHALL NOT 只靠 `terminated_at` 布尔判断。
+/// `enabled` 是独立的授权开关，不参与这四态判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationEnrollmentState {
+    /// 在跑：无终止标记也无作废标记。
+    Running,
+    /// 已终止（终止维度独占；未作废）。
+    Terminated,
+    /// 已作废（工作项组删除所致；未终止——如先 Disable 再随组删除）。
+    Voided,
+    /// 已终止且已作废。
+    TerminatedAndVoided,
+}
+
+impl IssueAutomationEnrollment {
+    /// REQ-WIGA-VOID-01：四态投影（两维度四种组各有确定值）。
+    pub fn automation_state(&self) -> AutomationEnrollmentState {
+        match (self.terminated_at.is_some(), self.voided_at.is_some()) {
+            (false, false) => AutomationEnrollmentState::Running,
+            (true, false) => AutomationEnrollmentState::Terminated,
+            (false, true) => AutomationEnrollmentState::Voided,
+            (true, true) => AutomationEnrollmentState::TerminatedAndVoided,
+        }
+    }
 }
 
 /// 自动化归属：仅 server 端 enrollment 可代表授权（REQ-WIGA-08）。
@@ -148,6 +189,11 @@ pub struct AutomationOwnership {
     pub plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminated_at: Option<String>,
+    /// REQ-WIGA-VOID-01：作废事实（随工作项组删除）同源披露——读侧据此
+    /// 区分「已终止」与「已作废」（两者独立维度，作废优先呈现）；serde
+    /// 缺省 None 兼容旧 wire/旧客户端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voided_at: Option<String>,
 }
 
 impl AutomationOwnership {
@@ -161,6 +207,7 @@ impl AutomationOwnership {
             enabled: false,
             plan_id: None,
             terminated_at: None,
+            voided_at: None,
         }
     }
 }
@@ -299,6 +346,20 @@ pub struct EnrollmentTerminationResult {
     pub state: OperationState,
     pub terminated_at: String,
     pub enrollment: IssueAutomationEnrollment,
+}
+
+/// REQ-WIGA-VOID-01（tasks 2.1）：`void_enrollment_for_deleted_plan` 的结果。
+/// `NotFound`＝该 issue 无登记（幂等成功——删工作项组时没有登记是正常
+/// 情况，不报错）；`AlreadyVoided`＝已作废（幂等返回，不重复追加账本）；
+/// `NotBoundToPlan`＝登记未绑定被删 plan（不得作废别人的登记，零副作用）；
+/// `Voided`＝本次锁内落盘作废（携带最新投影）。作废只由「删除工作项组」
+/// 这一条路径产生。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoidOutcome {
+    NotFound,
+    AlreadyVoided,
+    NotBoundToPlan,
+    Voided(Box<IssueAutomationEnrollment>),
 }
 
 // ─── C1 Task 6：租约三态与确认接管（REQ-WIGA-03）───
@@ -546,16 +607,79 @@ pub struct AutomationAttentionFact {
     pub gate_id: Option<String>,
 }
 
+/// 冲突原因判别位（REQ-WIGA-SWAP-02）。
+///
+/// 同一个 409 承载 9 类互斥语义；判别位让 HTTP 层把「运行中不能换
+/// payload」（该先终止）与「版本号过期」（该等一下重试）分成两个稳定码，
+/// 其余 7 类落回旧码 `automation_enrollment_conflict`——旧码被终止自愈
+/// 逻辑钉住（`automationTerminationConflict.tsx`），**不得改名**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// 运行中改 payload：enabled 状态下异 payload 的 Enable（换 provider）。
+    PayloadImmutable,
+    /// 版本过期：`expected_revision` 与当前 `policy_revision` 不符。
+    RevisionStale,
+    /// 命令账本 payload 不匹配：同 `command_id` 异 payload。
+    CommandLedgerPayloadMismatch,
+    /// 绑定身份互斥：plan/session 半绑定或绑定冲突。
+    BindingIdentityMismatch,
+    /// 授权源 / 载体漂移：`source` / `target` 与既有记录不等。
+    SourceTargetDrift,
+    /// 生成意图冲突：prepared intent 冲突或内容不匹配。
+    GenerationIntentMismatch,
+    /// attention 事实写入冲突：绑定互证失败。
+    AttentionFactConflict,
+    /// 生成阶段 / 计划判定冲突。
+    PlanPhaseConflict,
+    /// 防御性 / 状态重读不一致（重读失败、重读后身份变化等）。
+    DefensiveStateMismatch,
+}
+
+impl ConflictKind {
+    /// 判别位的稳定字符串（进 `details.kind`；机器可读，不做 i18n）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PayloadImmutable => "payload_immutable",
+            Self::RevisionStale => "revision_stale",
+            Self::CommandLedgerPayloadMismatch => "command_ledger_payload_mismatch",
+            Self::BindingIdentityMismatch => "binding_identity_mismatch",
+            Self::SourceTargetDrift => "source_target_drift",
+            Self::GenerationIntentMismatch => "generation_intent_mismatch",
+            Self::AttentionFactConflict => "attention_fact_conflict",
+            Self::PlanPhaseConflict => "plan_phase_conflict",
+            Self::DefensiveStateMismatch => "defensive_state_mismatch",
+        }
+    }
+}
+
 /// enrollment 写入失败语义：HTTP 层按 Conflict→409 / InvalidScope→422 /
 /// NotFound→404 / Store→fail-closed 其余映射。
 #[derive(Debug, thiserror::Error)]
 pub enum EnrollmentError {
     #[error("automation_enrollment_conflict: current_revision={current_revision:?}")]
-    Conflict { current_revision: Option<u64> },
+    Conflict {
+        current_revision: Option<u64>,
+        /// 冲突原因判别位（REQ-WIGA-SWAP-02）：HTTP 层按它分流稳定码；
+        /// 旧码语义（其余 7 类）逐字不变。
+        kind: ConflictKind,
+    },
     #[error("automation_enrollment_invalid_scope: {0}")]
     InvalidScope(String),
     #[error("automation_enrollment_not_found")]
     NotFound,
     #[error(transparent)]
     Store(#[from] ProductStoreError),
+}
+
+impl EnrollmentError {
+    /// 零余量文件 `gates.rs::lease_takeover_store_error` 用：不展开穷举模式
+    /// 即可取 revision（large_file_guard 对该文件锁定上限，任何净增即红）。
+    pub(crate) fn conflict_revision(&self) -> Option<u64> {
+        match self {
+            EnrollmentError::Conflict {
+                current_revision, ..
+            } => *current_revision,
+            _ => None,
+        }
+    }
 }

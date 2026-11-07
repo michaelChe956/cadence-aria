@@ -115,18 +115,12 @@ pub async fn issue_lifecycle(
         })
         .collect::<ApiResult<Vec<_>>>()?;
     let mut coding_attempts = Vec::new();
-    // 方案 X 阶段1：按 RepositoryRouting 三态分流。Logical（多仓）不要求 issue.repo_id，
-    // 后续经 manifest/selection 解析（聚合视野）；Legacy（单仓）保持原无条件要求 repo_id，
-    // 向后兼容；FailClosed 由下游解析按稳定错误码 repository_routing_* 报错（阶段A已实现）。
+    // 按 RepositoryRouting 两态分流。Logical（多仓）不要求 issue.repo_id，后续经
+    // manifest/selection 解析（聚合视野）；FailClosed 由下游解析按稳定错误码
+    // repository_routing_* 报错（阶段A已实现）。
     let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
         .map_err(product_store_api_error)?;
     let repository_id = match routing {
-        RepositoryRouting::Legacy { .. } => issue.repo_id.clone().ok_or_else(|| {
-            product_store_api_error(ProductStoreError::NotFound {
-                kind: "issue_repository",
-                id: issue.id.clone(),
-            })
-        })?,
         RepositoryRouting::Logical { .. } | RepositoryRouting::FailClosed { .. } => {
             // Logical 不要求 repo_id（manifest/selection 权威）；FailClosed 在后续解析时报稳定错误码。
             issue.repo_id.clone().unwrap_or_default()
@@ -370,7 +364,7 @@ pub async fn issue_lifecycle(
     let issue_lc_id = crate::product::issue_store::IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .ok()
-        .and_then(|issue| issue.logical_codebase_id);
+        .map(|issue| issue.logical_codebase_id);
     for record in &persisted_work_items {
         if let Some(target) = record.target_repository_id {
             if member_index.contains_key(&target) {
@@ -562,28 +556,16 @@ pub async fn generate_story_specs(
         &*state.provider_availability,
     )?;
     let app_paths = product_app_paths(&state);
-    let issue = IssueStore::new(app_paths.clone())
+    IssueStore::new(app_paths.clone())
         .get(&project_id, &issue_id)
         .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    // 方案 X 阶段1：按 RepositoryRouting 三态分流。Legacy（单仓）保持原 repository_id 校验 +
-    // find_repository；Logical（多仓）接 PlanningContextResolver + 草稿态聚合视野
-    // （aggregate_codebase=Some，involved 空由 AI 自决，create 跳过 repository_id 校验）；
-    // FailClosed 报稳定错误码 repository_routing_*。
+    // 方案 X 阶段1收敛后（两态）：Logical（多仓）接 PlanningContextResolver + 草稿态
+    // 聚合视野（aggregate_codebase=Some，involved 空由 AI 自决，create 跳过
+    // repository_id 校验）；FailClosed 报稳定错误码 repository_routing_*。
     let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
         .map_err(product_store_api_error)?;
     let (repository_id, aggregate_codebase) = match routing {
-        RepositoryRouting::Legacy { .. } => {
-            reject_aggregate_scope_on_legacy_project(
-                request.involved_repository_ids.is_some(),
-                false,
-            )?;
-            let repository_id = issue.repo_id.clone().ok_or_else(|| {
-                ApiError::validation("repository_required", "repository_id is required")
-            })?;
-            find_repository(&app_paths, &project_id, &repository_id)?;
-            (repository_id, None)
-        }
         RepositoryRouting::Logical { manifest, .. } => {
             // Omission remains the existing AI-undetermined draft behavior. When
             // a fake/gateway test supplies targets, validate them against the
@@ -677,19 +659,12 @@ pub async fn generate_design_specs(
         .map_err(product_store_api_error)?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     validate_confirmed_story_specs(&lifecycle, &project_id, &issue_id, &request.story_spec_ids)?;
-    // 方案 X 阶段1：Logical（多仓）接 PlanningContextResolver + 草稿态聚合视野
-    // （aggregate_codebase=Some，involved/change_order 空由 AI 自决）；Legacy 保持现状
-    // （aggregate_codebase=None）；FailClosed 报稳定错误码 repository_routing_*。
+    // 方案 X 阶段1收敛后（两态）：Logical（多仓）接 PlanningContextResolver + 草稿态
+    // 聚合视野（aggregate_codebase=Some，involved/change_order 空由 AI 自决）；
+    // FailClosed 报稳定错误码 repository_routing_*。
     let routing = RepositoryRouting::load_for_issue(&app_paths, &project_id, &issue_id)
         .map_err(product_store_api_error)?;
     let aggregate_codebase = match routing {
-        RepositoryRouting::Legacy { .. } => {
-            reject_aggregate_scope_on_legacy_project(
-                request.involved_repository_ids.is_some(),
-                request.change_order.is_some(),
-            )?;
-            None
-        }
         RepositoryRouting::Logical {
             manifest,
             selection,

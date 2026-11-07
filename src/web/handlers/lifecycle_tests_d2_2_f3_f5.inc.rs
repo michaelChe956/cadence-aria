@@ -50,6 +50,8 @@ fn f3_enable_automation(
         command_ledger: Vec::new(),
         terminated_at: None,
         attention_facts: Vec::new(),
+        voided_at: None,
+        void_reason: None,
     };
     crate::product::json_store::write_json(
         &paths

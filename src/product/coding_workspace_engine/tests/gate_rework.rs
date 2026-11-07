@@ -3,7 +3,15 @@ use crate::product::coding_models::FindingSeverity;
 
 #[tokio::test]
 async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_context() {
-    let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：admission 续跑要求 issue 归属 LC 且 attempt 携带冻结快照。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(
@@ -21,7 +29,7 @@ async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_cont
                     permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
                     ),
                 },
-                target_snapshot: None,
+                target_snapshot: Some(logical.snapshot(&store.paths())),
                 max_auto_rework: 2,
             },
         )
@@ -112,7 +120,15 @@ async fn manual_continue_persists_quality_bypass_audit_and_injects_reviewer_cont
 
 #[tokio::test]
 async fn send_to_coder_after_review_limit_uses_latest_code_review_without_quality_bypass() {
-    let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：admission 要求 issue 归属 LC 且 attempt 携带冻结快照。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
@@ -128,7 +144,7 @@ async fn send_to_coder_after_review_limit_uses_latest_code_review_without_qualit
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -271,7 +287,15 @@ async fn send_to_coder_after_review_limit_uses_latest_code_review_without_qualit
 
 #[tokio::test]
 async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review() {
-    let paths = ProductAppPaths::new(tempdir().expect("tempdir").path().join(".aria"));
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：admission 要求 issue 归属 LC 且 attempt 携带冻结快照。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
@@ -287,7 +311,7 @@ async fn send_to_coder_after_review_limit_accepts_actionable_blocked_code_review
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -442,8 +466,15 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
         )
         .expect("code review stage");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = super::provider_driven::ReviewerDrivenReworkProvider::default();
+    let provider =
+        std::sync::Arc::new(super::provider_driven::ReviewerDrivenReworkProvider::default());
+    // 快照 attempt 的 provider 只能经 LogicalCodebaseProviderGateway 启动。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let updated = engine
@@ -451,7 +482,7 @@ async fn rework_instruction_claim_binds_render_before_consumption() {
             &attempt,
             &super::provider_driven::review_report_requesting_changes(&attempt),
             &CodingExecutionContext::default(),
-            &provider,
+            provider.as_ref(),
             &mut command_rx,
         )
         .await
@@ -614,15 +645,22 @@ async fn interrupted_rework_claim_is_force_replayed_on_recovery_redrive() {
         )
         .expect("code review stage");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = super::provider_driven::ReviewerDrivenReworkProvider::default();
+    let provider =
+        std::sync::Arc::new(super::provider_driven::ReviewerDrivenReworkProvider::default());
+    // 快照 attempt 的 provider 只能经 LogicalCodebaseProviderGateway 启动。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     engine
         .execute_coder_fix_from_review(
             &attempt,
             &super::provider_driven::review_report_requesting_changes(&attempt),
             &CodingExecutionContext::default(),
-            &provider,
+            provider.as_ref(),
             &mut command_rx,
         )
         .await

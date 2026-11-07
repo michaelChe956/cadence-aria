@@ -486,6 +486,7 @@ mod tests {
     use crate::product::coding_attempt_store::CreateCodingAttemptInput;
     use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
     use crate::product::json_store::validate_relative_id;
+    use crate::product::logical_codebase::legacy_logical_codebase_id;
     use crate::product::models::automation::OperationState;
     use crate::web::handlers::coding::scope::CodingAttemptRoutePath;
     use crate::web::handlers::coding::verification_surface::*;
@@ -512,7 +513,9 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: None,
+                // 夹具无 per-LC 权威记录 ⇒ issue 归属 project 默认作用域
+                //（legacy 别名代码库 id，REQ-ROUTE-01 归属必填）。
+                logical_codebase_id: legacy_logical_codebase_id(PROJECT_ID),
                 title: "verification surface issue".to_string(),
                 description: None,
                 change_id: None,

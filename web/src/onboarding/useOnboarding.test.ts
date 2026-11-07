@@ -31,8 +31,8 @@ describe("useOnboarding", () => {
     const { result } = renderHook(() => useOnboarding());
     expect(result.current.open).toBe(true);
     expect(result.current.index).toBe(0);
-    expect(result.current.total).toBe(13);
-    expect(result.current.current?.id).toBe("create-project");
+    expect(result.current.total).toBe(14);
+    expect(result.current.current?.id).toBe("manage-providers");
   });
 
   it("已读记录存在时不再自动展示", () => {
@@ -75,7 +75,7 @@ describe("useOnboarding", () => {
     for (let i = 0; i < 20; i += 1) {
       act(() => result.current.next());
     }
-    expect(result.current.index).toBe(12);
+    expect(result.current.index).toBe(13);
     expect(result.current.current?.id).toBe("coding-progress-complete");
   });
 

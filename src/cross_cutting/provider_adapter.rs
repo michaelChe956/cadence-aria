@@ -205,7 +205,7 @@ impl ProviderAdapterError {
         )
     }
 
-    fn with_output(
+    pub fn with_output(
         code: ProviderErrorCode,
         details: impl Into<String>,
         stdout: impl Into<String>,

@@ -2,6 +2,7 @@
 mod tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
+    use crate::product::audit_snapshot_budget::AuditSnapshotBudgetFailure;
     use crate::product::json_store::{ProductStoreError, read_json};
     use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
     use crate::product::logical_codebase::aggregate_initialization_store::root_recipe_command_index;
@@ -84,6 +85,15 @@ mod tests {
             .find(|change| change.path == path)
             .unwrap_or_else(|| panic!("no observed change for {path}"));
         (&change.classification, change.allowed)
+    }
+
+    /// 从 `ProductStoreError` 里取出结构化的审计预算失败载荷（块2 片1 的
+    /// `AuditSnapshotBudgetExceeded` 变体）。
+    fn budget_failure_of(error: &ProductStoreError) -> AuditSnapshotBudgetFailure {
+        match error {
+            ProductStoreError::AuditSnapshotBudgetExceeded(failure) => failure.clone(),
+            other => panic!("expected an audit snapshot budget failure, got {other:?}"),
+        }
     }
 
     #[test]
@@ -227,12 +237,30 @@ mod tests {
             // before/after 快照 + digest 均被冻结。
             assert!(!receipt.before_snapshot.entries.is_empty());
             assert!(!receipt.after_snapshot.entries.is_empty());
+            // `.git` 子树不进快照观测面（REQ-AUD-02，2026-11-03 块2）：成员仓
+            // 的 `.git/HEAD` 既不在条目里，其字节也不计入预算。
+            assert!(
+                !receipt
+                    .before_snapshot
+                    .entries
+                    .iter()
+                    .any(|entry| entry.path == "members/repo-a/.git"
+                        || entry.path.starts_with("members/repo-a/.git/")),
+                "member .git subtree must stay out of the snapshot: {:?}",
+                receipt
+                    .before_snapshot
+                    .entries
+                    .iter()
+                    .map(|entry| entry.path.as_str())
+                    .collect::<Vec<&str>>()
+            );
             assert!(
                 receipt
                     .before_snapshot
                     .entries
                     .iter()
-                    .any(|entry| entry.path == "members/repo-a/.git/HEAD")
+                    .any(|entry| entry.path == "members/repo-a/README.md"),
+                "member content stays observable"
             );
             assert!(
                 receipt
@@ -709,57 +737,45 @@ mod tests {
         assert_eq!(current.policy_digest, "sha256:user-edited");
     }
 
-    /// Task 1.5 carry → Task 3.4：快照全量递归规模预算门。条目/字节超限
-    /// 必须 fail-closed 报错（绝不静默截断观测面），且对 before/after 两次
-    /// 快照对称生效；预算内不改变审计语义。
+    /// Task 1.5 carry → Task 3.4 → 块2 片6（REQ-AUD-01）：快照规模预算门。
+    /// **口径改为「本次变更量」**：两遍扫描只记元数据，预算只对**进入变更
+    /// 清单的路径**计（bytes 与 entries 都是）。因此：
+    /// - 存量体量（哪怕远超上限）在窗口内零改动时**不失败**；
+    /// - 窗口内写入超限内容才 fail-closed，且失败面是结构化载荷
+    ///   （上限 / 累计字节 / 越线路径 / 大项分组 / 成员仓贡献）。
     #[test]
-    fn receipt_snapshot_budget_gate_fails_closed_beyond_entry_and_byte_caps() {
+    fn receipt_snapshot_budget_gate_charges_only_this_windows_change_volume() {
         let fixture = ReceiptFixture::new();
         let (step, command) = command_spec(1);
 
-        // 条目上限：预算 4 条 < fixture 实际条目数（root/.aria/members 与
-        // 成员仓文件等）→ before_command fail-closed。
+        // 条目上限：预算 1 条 < 窗口内实际变更条目数 → after_command
+        // fail-closed（结构化载荷）。
         let tight_entries =
             RootRecipeFilesystemAuditor::with_snapshot_budget(RootRecipeSnapshotBudget {
-                max_entries: 4,
+                max_entries: 1,
                 max_bytes: u64::MAX,
             });
-        let error = tight_entries
+        let watch = tight_entries
             .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        // 存量体量不触发：before_command 在零改动下从不失败。
+        std::fs::write(fixture.root.join(".aria/aggregate/a.txt"), "a\n").unwrap();
+        std::fs::write(fixture.root.join(".aria/aggregate/b.txt"), "b\n").unwrap();
+        let error = tight_entries
+            .after_command(watch, RECORDED_AT.to_string())
             .unwrap_err();
-        let message = format!("{error:?}");
-        assert!(message.contains("snapshot budget"), "{message}");
-        assert!(message.contains("max_entries"), "{message}");
+        let failure = budget_failure_of(&error);
+        assert_eq!(failure.max_entries, 1);
+        assert!(failure.cumulative_entries > failure.max_entries);
+        assert!(failure.max_bytes == u64::MAX);
 
-        // 字节上限：预算 8 字节 < 成员 .git/HEAD（17 字节）→ fail-closed。
+        // 字节上限：窗口内写入 128 字节、预算 64 字节 → fail-closed。
         let tight_bytes =
             RootRecipeFilesystemAuditor::with_snapshot_budget(RootRecipeSnapshotBudget {
                 max_entries: usize::MAX,
-                max_bytes: 8,
+                max_bytes: 64,
             });
-        let error = tight_bytes
-            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
-            .unwrap_err();
-        let message = format!("{error:?}");
-        assert!(message.contains("snapshot budget"), "{message}");
-        assert!(message.contains("max_bytes"), "{message}");
-
-        // 预算内：同一 fixture 上默认 auditor 正常产出 Allowed receipt，
-        // 预算门不改变观测语义；默认预算非零可经 snapshot_budget() 复核。
-        let auditor = RootRecipeFilesystemAuditor::new();
-        let budget = auditor.snapshot_budget();
-        assert!(budget.max_entries > 0, "default budget must pin entries");
-        assert!(budget.max_bytes > 0, "default budget must pin bytes");
-        let receipt = fixture.run_allowed_command(&auditor, 2, "budget-ok.txt", "ok\n");
-        assert_eq!(receipt.verdict, RootRecipeCommandVerdict::Allowed);
-
-        // 命令前预算内、命令后超出（写入超预算大文件）→ after_command 同样
-        // fail-closed——预算门对前后两次快照对称生效。
-        let growing = RootRecipeFilesystemAuditor::with_snapshot_budget(RootRecipeSnapshotBudget {
-            max_entries: usize::MAX,
-            max_bytes: 64,
-        });
-        let watch = growing
+        let watch = tight_bytes
             .before_command(OPERATION_ID, &fixture.root, step, 1, command)
             .unwrap();
         std::fs::write(
@@ -767,12 +783,23 @@ mod tests {
             vec![b'x'; 128],
         )
         .unwrap();
-        let error = growing
+        let error = tight_bytes
             .after_command(watch, RECORDED_AT.to_string())
             .unwrap_err();
-        let message = format!("{error:?}");
-        assert!(message.contains("snapshot budget"), "{message}");
-        assert!(message.contains("max_bytes"), "{message}");
+        let failure = budget_failure_of(&error);
+        assert_eq!(failure.max_bytes, 64);
+        assert!(failure.cumulative_bytes > failure.max_bytes);
+        assert_eq!(failure.over_line_path, ".aria/aggregate/oversize.txt");
+
+        // 预算内：默认 auditor 正常产出 Allowed receipt，预算门不改变观测
+        // 语义；默认预算非零可经 snapshot_budget() 复核（数值不变：
+        // 20 000 条目 / 64 MiB）。
+        let auditor = RootRecipeFilesystemAuditor::new();
+        let budget = auditor.snapshot_budget();
+        assert_eq!(budget.max_entries, 20_000);
+        assert_eq!(budget.max_bytes, 64 * 1024 * 1024);
+        let receipt = fixture.run_allowed_command(&auditor, 2, "budget-ok.txt", "ok\n");
+        assert_eq!(receipt.verdict, RootRecipeCommandVerdict::Allowed);
     }
 
     // ---- Bug2(2026-10-16):审计快照 gitignore 感知 -------------------------
@@ -898,11 +925,9 @@ mod tests {
             !paths.iter().any(|path| path.starts_with("busi/target")),
             "member .git/info/exclude must keep target/ out: {paths:?}"
         );
-        // gitignore/exclude 自身与成员 .git 面保持可观测(仅忽略其规则覆盖面)。
+        // gitignore/exclude 自身与成员源码保持可观测(仅忽略其规则覆盖面)。
         for observable in [
             "frontend/.gitignore",
-            "frontend/.git/HEAD",
-            "busi/.git/info/exclude",
             "busi/pom.xml",
             "frontend/src/main.js",
         ] {
@@ -911,8 +936,20 @@ mod tests {
                 "{observable} must stay observable: {paths:?}"
             );
         }
+        // `.git` 子树不进快照观测面(REQ-AUD-02,2026-11-03 块2):成员仓的
+        // `.git/HEAD` 与 `.git/info/exclude` 都不在条目里、不计预算。规则
+        // 本身仍然生效(`.git/info/exclude` 照常被读取,故 `busi/target` 出局)。
+        for hidden in ["frontend/.git/HEAD", "busi/.git/info/exclude"] {
+            assert!(
+                !paths.contains(&hidden),
+                "{hidden} must stay out of the snapshot: {paths:?}"
+            );
+        }
     }
 
+    /// 预算超限的失败面（REQ-AUD-04，块2 片6）：结构化载荷带上限、累计
+    /// 字节、越线路径、大项分组与成员仓贡献；且 `.git` 永不入列。
+    /// 口径改为「本次变更量」后，超限只可能由**窗口内**的变更触发。
     #[test]
     fn snapshot_budget_error_on_unignored_oversize_carries_actionable_hint() {
         let fixture = GitignoreFixture::new(|root| {
@@ -923,16 +960,44 @@ mod tests {
         });
         let auditor = GitignoreFixture::byte_capped_auditor(2048);
         let (step, command) = command_spec(1);
-        let error = auditor
+        // 存量 4 KiB 未忽略文件**不触发**预算（窗口内零改动 → 零计费）。
+        auditor
             .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        // 窗口内写入超限内容 → 结构化预算失败。
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        std::fs::create_dir_all(fixture.root.join("pms/target")).unwrap();
+        std::fs::write(fixture.root.join("pms/target/app.jar"), vec![0u8; 4096]).unwrap();
+        let error = auditor
+            .after_command(watch, RECORDED_AT.to_string())
             .unwrap_err();
-        let message = format!("{error:?}");
-        assert!(message.contains("snapshot budget"), "{message}");
-        assert!(message.contains("max_bytes"), "{message}");
-        // 可操作提示:被忽略路径已不计入,剩余面可清理或入 .gitignore。
+        let failure = budget_failure_of(&error);
+        assert_eq!(failure.max_bytes, 2048);
+        assert!(failure.cumulative_bytes > failure.max_bytes, "{failure:?}");
+        assert_eq!(failure.over_line_path, "pms/target/app.jar");
+        // 大项分组：键为 `<成员仓目录名>/<一级目录>`，且 `.git` 永不入列。
         assert!(
-            message.contains(".gitignore"),
-            "budget error must point at the gitignore-aware remedy: {message}"
+            failure
+                .top_groups
+                .iter()
+                .any(|group| group.key == "pms/target" && group.bytes == 4096),
+            "{failure:?}"
+        );
+        assert!(
+            !failure
+                .top_groups
+                .iter()
+                .any(|group| group.key.contains(".git")),
+            ".git must never enter the group ranking: {failure:?}"
+        );
+        assert!(
+            failure
+                .member_summaries
+                .iter()
+                .any(|member| member.member == "pms" && member.bytes == 4096),
+            "{failure:?}"
         );
     }
 
@@ -1018,6 +1083,9 @@ mod tests {
         assert_eq!(receipt.observed_changes[0].path, ".aria/aggregate/change.txt");
     }
 
+    /// 无 `.gitignore` 时观测面不缩水的**变更**仍全额计费：窗口内写入的
+    /// 未忽略大文件照样撞线（REQ-AUD-01 口径：预算只对本次变更量计，但
+    /// 「变更」本身不被忽略规则打折）。
     #[test]
     fn snapshot_without_gitignore_keeps_counting_everything() {
         let fixture = GitignoreFixture::new(|root| {
@@ -1025,12 +1093,17 @@ mod tests {
         });
         let auditor = GitignoreFixture::byte_capped_auditor(1024);
         let (step, command) = command_spec(1);
-        let error = auditor
+        let watch = auditor
             .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        std::fs::write(fixture.root.join("payload.bin"), vec![0u8; 8192]).unwrap();
+        let error = auditor
+            .after_command(watch, RECORDED_AT.to_string())
             .unwrap_err();
-        let message = format!("{error:?}");
-        assert!(message.contains("snapshot budget"), "{message}");
-        assert!(message.contains("max_bytes"), "{message}");
+        let failure = budget_failure_of(&error);
+        assert_eq!(failure.max_bytes, 1024);
+        assert!(failure.cumulative_bytes > failure.max_bytes, "{failure:?}");
+        assert_eq!(failure.over_line_path, "payload.bin");
     }
 
     /// /tmp 真实量级 fixture(复刻 2026-10-16 现场:node_modules >64MiB、
@@ -1076,4 +1149,6 @@ mod tests {
         assert!(paths.contains(&"frontend/src/main.js"));
         assert!(paths.contains(&"busi/pom.xml"));
     }
+
+    include!("root_recipe_receipt_snapshot_tests.inc.rs");
 }

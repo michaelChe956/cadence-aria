@@ -7,6 +7,7 @@ use crate::product::plan_repair::{PlanDefectFinding, PlanDefectSeverity};
 use crate::web::coding_ws_handler::start_plan_repair_for_execution_outcome_if_needed;
 use std::fs;
 
+#[derive(Clone)]
 struct PlanDefectOutputProvider {
     output: String,
 }
@@ -49,6 +50,9 @@ async fn coding_plan_repair_coder_outcome_preserves_report_and_starts_repair() {
     let provider = PlanDefectOutputProvider {
         output: serde_json::json!({"plan_defect_findings": [finding]}).to_string(),
     };
+    // 快照 attempt 只能经 LC gateway 启动 provider ⇒ fake adapter 装进夹具的
+    // gateway 槽位（引擎不再直连裸 adapter）。
+    fixture.provider.install(Arc::new(provider.clone()));
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let outcome = fixture
@@ -87,6 +91,9 @@ async fn coding_plan_repair_coder_rework_outcome_preserves_report_and_starts_rep
     let provider = PlanDefectOutputProvider {
         output: serde_json::json!({"plan_defect_findings": [finding]}).to_string(),
     };
+    // 快照 attempt 只能经 LC gateway 启动 provider ⇒ fake adapter 装进夹具的
+    // gateway 槽位（引擎不再直连裸 adapter）。
+    fixture.provider.install(Arc::new(provider.clone()));
     let review = plan_defect_report(plan_defect_finding("review_rework"));
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
@@ -144,6 +151,9 @@ async fn coding_invalid_plan_defect_output_opens_human_triage_gate() {
         })
         .to_string(),
     };
+    // 快照 attempt 只能经 LC gateway 启动 provider ⇒ fake adapter 装进夹具的
+    // gateway 槽位（引擎不再直连裸 adapter）。
+    fixture.provider.install(Arc::new(provider.clone()));
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let outcome = fixture
@@ -214,6 +224,9 @@ async fn coding_unresolvable_plan_defect_route_opens_human_triage_gate() {
         })
         .to_string(),
     };
+    // 快照 attempt 只能经 LC gateway 启动 provider ⇒ fake adapter 装进夹具的
+    // gateway 槽位（引擎不再直连裸 adapter）。
+    fixture.provider.install(Arc::new(provider.clone()));
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let outcome = fixture
@@ -272,6 +285,9 @@ async fn coding_rework_invalid_plan_defect_output_opens_human_triage_gate() {
         })
         .to_string(),
     };
+    // 快照 attempt 只能经 LC gateway 启动 provider ⇒ fake adapter 装进夹具的
+    // gateway 槽位（引擎不再直连裸 adapter）。
+    fixture.provider.install(Arc::new(provider.clone()));
     let review = plan_defect_report(plan_defect_finding("review_rework"));
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 

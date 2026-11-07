@@ -559,7 +559,7 @@ mod t20b_f1_plan_window_target {
             .create(CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: None,
-                logical_codebase_id: Some(legacy_lc.to_string()),
+                logical_codebase_id: legacy_lc.to_string(),
                 base_branch: None,
                 title: "t20b f1".to_string(),
                 description: None,

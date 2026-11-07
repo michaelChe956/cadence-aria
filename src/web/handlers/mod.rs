@@ -96,11 +96,13 @@ pub mod image_create;
 pub(crate) mod lifecycle;
 mod logical_codebase_bootstrap;
 mod logical_codebase_capabilities;
+mod logical_codebase_capability_batch;
 mod logical_codebase_members;
 mod logical_codebase_registration;
 mod pointer_publication;
 mod pointer_publish_error_mapping;
 mod product_resources;
+pub mod provider_installation;
 mod providers;
 mod repository_registration;
 mod runtime;
@@ -159,6 +161,9 @@ pub use logical_codebase_bootstrap::{
     post_lc_bootstrap_advance, post_logical_codebase_bootstrap_action,
 };
 pub use logical_codebase_capabilities::{get_lc_capabilities, post_lc_capability_revalidate};
+pub use logical_codebase_capability_batch::{
+    get_lc_capability_revalidate_all_job, post_lc_capability_revalidate_all,
+};
 pub use logical_codebase_members::{
     list_lc_logical_codebase_members, list_logical_codebase_members,
 };
@@ -169,6 +174,7 @@ pub use logical_codebase_registration::{
     resume_logical_codebase_registration, submit_lc_registration,
     submit_logical_codebase_registration,
 };
+pub use provider_installation::{get_install_job, get_install_targets, post_provider_install};
 pub use providers::{providers_recheck, providers_status};
 #[rustfmt::skip]
 pub use lifecycle::{confirm_gate, delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan, generate_design_specs, generate_story_specs, issue_lifecycle, prepare_work_item_plan, request_gate_change, terminate_gate};

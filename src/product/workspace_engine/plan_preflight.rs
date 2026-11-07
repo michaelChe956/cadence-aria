@@ -196,15 +196,13 @@ fn plan_baseline_repository_path(
         paths, project_id, issue_id,
     )
     .map_err(|error| format!("resolve plan baseline codebase failed: {error}"))?;
-    if let Some(lc) = lc_id.as_deref()
-        && lc != crate::product::logical_codebase::legacy_logical_codebase_id(project_id)
-    {
+    if lc_id != crate::product::logical_codebase::legacy_logical_codebase_id(project_id) {
         let _authority =
-            crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), lc);
+            crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), &lc_id);
         let store = crate::product::repository_store::RepositoryStore::new(paths.clone());
         if let Ok(Some(record)) = store.resolve_physical_repository_in_issue_codebase(
             project_id,
-            lc_id.as_deref(),
+            Some(lc_id.as_str()),
             repo_id,
         ) {
             return Ok(record.path);
@@ -538,7 +536,9 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some(repository.id.clone()),
-                logical_codebase_id: None,
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
                 base_branch: base_branch.map(str::to_string),
                 title: "Plan baseline".to_string(),
                 description: None,
@@ -651,7 +651,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: None,
-                logical_codebase_id: Some("lc_0001".to_string()),
+                logical_codebase_id: "lc_0001".to_string(),
                 base_branch: None,
                 title: "Repoless".to_string(),
                 description: None,

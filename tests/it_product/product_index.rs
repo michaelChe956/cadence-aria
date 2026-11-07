@@ -2,6 +2,7 @@ use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::id::repo_hash_for_path;
 use cadence_aria::product::issue_store::{CreateProductIssueInput, IssueStore};
 use cadence_aria::product::json_store::{read_json, write_json};
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::models::{IssuePhase, IssueStatus, ProjectRecord};
 use cadence_aria::product::project_store::{CreateProjectInput, ProjectStore};
 use cadence_aria::product::repository_store::{CreateRepositoryInput, RepositoryStore};
@@ -117,7 +118,7 @@ fn creates_project_repository_issue_and_runtime_binding() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id(&project.id),
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,
@@ -182,7 +183,7 @@ fn find_by_repo_and_task_returns_error_for_corrupt_binding_json() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id(&project.id),
             title: "Add project workbench".to_string(),
             description: Some("Manage issues".to_string()),
             change_id: None,

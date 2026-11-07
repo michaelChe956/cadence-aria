@@ -53,7 +53,8 @@
             .id;
 
         let mut policy = None;
-        let mut logical_codebase_id = None;
+        let mut logical_codebase_id =
+            crate::product::logical_codebase::legacy_logical_codebase_id(&project_id);
         if with_lc {
             let root = tmp.path().join("aggregate-root");
             std::fs::create_dir_all(&root).unwrap();
@@ -86,20 +87,33 @@
                 .save(&project_id, &artifact)
                 .unwrap();
             policy = Some(artifact);
-            logical_codebase_id = Some(lc.id);
+            logical_codebase_id = lc.id;
         }
 
-        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
-            .create(crate::product::issue_store::CreateProductIssueInput {
-                project_id: project_id.clone(),
-                repo_id: None,
-                logical_codebase_id,
-                title: "policy issue".to_string(),
-                description: None,
-                change_id: None,
-                base_branch: None,
-            })
-            .unwrap();
+        // REQ-ROUTE-01：`logical_codebase_id` 已收敛为必填 `String`，「无归属」不再
+        // 能用 `None` 表达。`with_lc == false` 的用例要的是 **resolver 不可用**
+        //（`PolicyAccessError::ResolverUnavailable`），因此这里不落 issue 记录：
+        // 唯一 authority resolver 对「issue 不存在 + 无 legacy 别名 LC」返回
+        // `Ok(None)`（宽容读），才是「不可用」；若落一条归属到不存在的 LC 的
+        // issue，resolver 会返回 `Err(NotFound{kind:"logical_codebase"})`，
+        // 那是**数据损坏**而不是「不可用」，会把用例的判别对象换掉。
+        let issue = with_lc.then(|| {
+            crate::product::issue_store::IssueStore::new(paths.clone())
+                .create(crate::product::issue_store::CreateProductIssueInput {
+                    project_id: project_id.clone(),
+                    repo_id: None,
+                    logical_codebase_id,
+                    title: "policy issue".to_string(),
+                    description: None,
+                    change_id: None,
+                    base_branch: None,
+                })
+                .unwrap()
+        });
+        let issue_id = issue
+            .as_ref()
+            .map(|issue| issue.id.clone())
+            .unwrap_or_else(|| "issue_0001".to_string());
 
         let artifact = policy.unwrap_or_else(|| {
             AggregatePolicyArtifact::bootstrap(
@@ -117,7 +131,7 @@
         let attempt = CodingExecutionAttempt {
             id: "coding_attempt_policy".to_string(),
             project_id: project_id.clone(),
-            issue_id: issue.id.clone(),
+            issue_id: issue_id.clone(),
             work_item_id: "work_item_policy".to_string(),
             attempt_no: 1,
             scope: CodingAttemptScope::WorkItem,
@@ -128,7 +142,7 @@
             admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
             stage: CodingExecutionStage::Coding,
             base_branch: "main".to_string(),
-            branch_name: format!("aria/issues/{}", issue.id),
+            branch_name: format!("aria/issues/{}", issue_id),
             worktree_path: with_worktree.then(|| worktree.clone()),
             provider_config_snapshot: ProviderConfigSnapshot {
                 author: ProviderName::Fake,
@@ -165,7 +179,7 @@
         };
         write_json(
             &paths
-                .issue_lifecycle_root(&project_id, &issue.id)
+                .issue_lifecycle_root(&project_id, &issue_id)
                 .join("coding-attempts")
                 .join(format!("{}.json", attempt.id)),
             &attempt,
@@ -176,7 +190,7 @@
             _tmp: tmp,
             paths,
             project_id,
-            issue_id: issue.id,
+            issue_id,
             attempt,
             policy: artifact,
             worktree,
@@ -442,7 +456,7 @@
         let version_rejected = handle_policy_reauthorization(
             &fx.paths,
             &fx.project_id,
-&fx.issue_id,
+            &fx.issue_id,
             &PolicyReauthorizationRequest {
                 command_id: "cmd_policy_reauth_0005".to_string(),
                 attempt_id: fx.attempt.id.clone(),

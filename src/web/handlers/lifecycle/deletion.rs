@@ -8,6 +8,7 @@ use crate::product::entity_operation_store::{
     SharedResourceKey,
 };
 use crate::product::models::{DeletionConfirmation, DeletionConfirmationReason};
+use crate::web::workspace_session::RunAbortOutcome;
 
 /// DELETE /{story-specs|design-specs|work-item-plans}/{id} 的确认参数（plan §0.2）：
 /// 默认 URL 无 query；仅前端确认弹窗同意后显式传 `?confirmed=true`。query 布尔
@@ -138,7 +139,14 @@ async fn cascade_delete_entity(
         .get(&scope)
         .map_err(product_store_api_error)?
     {
-        Some(record) if record.phase == DeletionPhase::Deleted => return Ok(()),
+        Some(record) if record.phase == DeletionPhase::Deleted => {
+            // REQ-WIGA-VOID-01：该删除早已成功收口——补一次作废（收敛
+            // 「complete 与作废之间」的崩溃窗口）；尽力收口不阻断幂等成功。
+            if kind == DeletionEntityKind::Plan {
+                void_enrollment_after_plan_deletion(&app_paths, project_id, issue_id, entity_id);
+            }
+            return Ok(());
+        }
         Some(_) => true,
         None => false,
     };
@@ -150,6 +158,59 @@ async fn cascade_delete_entity(
     //     复用与人工终止/autopilot 自愈同源的 terminate CAS；失败 → 明确
     //     automation_termination_failed，删除不执行（未取锁、零落盘）。
     let terminated_automation = terminate_automation_bound_to_entity(&app_paths, &store, &scope)?;
+
+    // ①.6 REQ-WIGA-15（场景 1）：终止自动化登记后、取删除独占前，先取消该
+    //     实体绑定 session 的在途 run 并等其真实收口——provider run 全程持
+    //     scope 共享 flock（acquire_run），不先收口则删除独占永远抢不到
+    //     （entity_busy 长期阻塞）。复用非 WebSocket 取消入口（等真实
+    //     completion，内部 30s 兜底）；只遍历 ⓪ 已按 entity_id 精确收集的
+    //     session_ids，取消不越界。registry 无该 session 的 manager（进程
+    //     重启后不在内存）时零动作，删除继续按既有独占判定走——既有行为
+    //     的自然延伸。
+    let mut run_cancel_settled = false;
+    for session_id in &session_ids {
+        if let Some(manager) = state.workspace_sessions.get(session_id).await {
+            // REQ-WIGA-17：按取消结果三态如实分支——NoActiveRun 属正常结果，
+            // 零副作用、不打任何「取消」字样；Completed 只打事实性打点；
+            // TimedOut 只打「取消未在兜底内收口」的事实（不谎称已取消/已
+            // 停止），且不因此阻塞删除（按既有独占判定推进）。
+            match manager.abort_active_run_and_wait_completion().await {
+                RunAbortOutcome::NoActiveRun => {}
+                RunAbortOutcome::Completed => {
+                    eprintln!(
+                        "[aria-cancellation] entity delete cancelled in-flight run session_id={session_id}"
+                    );
+                    run_cancel_settled = true;
+                }
+                RunAbortOutcome::TimedOut => {
+                    eprintln!(
+                        "[aria-cancellation] entity delete run cancel did not settle within completion wait timeout session_id={session_id}"
+                    );
+                }
+            }
+        }
+    }
+    if run_cancel_settled {
+        // REQ-WIGA-17 时序尾隙补足：completion 信号已到 ≠ scope 共享 flock
+        // 已释放（run 收口点与释锁点的先后无契约保证，不得依赖未验证时序
+        // 假设）。有界短退避：≤10 轮、每轮间隔 50ms（合计 ≤500ms），每轮
+        // 一次「取删除独占并立即释放」的探测——探测成功即说明共享锁已释放
+        // （探测不保留 lease、不触碰任何破坏性清理）；Busy/Deleting 退避
+        // 重试，Deleted/Store 交给下方既有循环按既有分支处理；不得无限
+        // 等待或长挂起。
+        for _ in 0..10 {
+            match operations.try_acquire_delete(&scope) {
+                Ok(probe) => {
+                    drop(probe);
+                    break;
+                }
+                Err(EntityOperationError::Busy | EntityOperationError::Deleting) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(EntityOperationError::Deleted | EntityOperationError::Store(_)) => break,
+            }
+        }
+    }
 
     // ② try 删除独占（非阻塞）：争用/同 scope 运行 writer → entity_busy；
     //    已删竞态 → 幂等成功。刚终止过自动化时给在途短写一个有限排空窗口
@@ -305,6 +366,12 @@ async fn cascade_delete_entity(
     deletion_store
         .complete(&lease)
         .map_err(product_store_api_error)?;
+    // ⑩.5 REQ-WIGA-VOID-01：工作项组删除已完整收口（complete 在前——失败
+    //     路径在上方已 return Err，不会到达这里）⇒ 绑定该 plan 的自动化
+    //     登记一并作废。作废在删除成功之后：失败不回滚、只 warn 留诊断。
+    if kind == DeletionEntityKind::Plan {
+        void_enrollment_after_plan_deletion(&app_paths, project_id, issue_id, entity_id);
+    }
     // ⑪ 内存面驱逐（v37 反馈 #3）：删除已完成 → 驱逐该实体的 workspace
     //    session manager。`manifest.session_ids` 覆盖 reentry（pending 原始
     //    全量 ∪ 重新采集）与 Plan 归属的子 work item 会话；与 ⓪ 的删除前
@@ -790,6 +857,56 @@ fn invalidate_automation_referencing_entity(app_paths: &ProductAppPaths, scope: 
                 return;
             }
         }
+    }
+}
+
+/// REQ-WIGA-VOID-01（tasks 4.1/4.2）：工作项组删除成功之后，把该 issue 绑定
+/// 被删 plan 的自动化登记标成已作废（锁内命令：voided_at/void_reason、
+/// revision+1、绑定前代进 previous、账本追加一条；不物理删除登记）。
+///
+/// 尽力收口：作废失败 MUST NOT 回滚已完成的删除（owner 裁决「删了就是
+/// 全部都删了」），但 MUST NOT 静默吞掉——按结果记录可诊断日志（失败
+/// warn、成功 info、无事可做 debug）。NotFound/AlreadyVoided/NotBoundToPlan
+/// 都是幂等正常态（删 WIG 时无登记、重复删除重入、登记属于别的 plan）。
+fn void_enrollment_after_plan_deletion(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) {
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::models::automation::VoidOutcome;
+    match IssueAutomationStore::new(app_paths.clone()).void_enrollment_for_deleted_plan(
+        project_id,
+        issue_id,
+        plan_id,
+        "work_item_group_deleted",
+    ) {
+        Ok(VoidOutcome::Voided(enrollment)) => tracing::info!(
+            automation_enrollment_id = %enrollment.enrollment_id,
+            plan_id = %plan_id,
+            voided_at = enrollment.voided_at.as_deref().unwrap_or_default(),
+            "automation enrollment voided after work item group deletion"
+        ),
+        Ok(VoidOutcome::NotFound) | Ok(VoidOutcome::AlreadyVoided) => tracing::debug!(
+            project_id = %project_id,
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            "no enrollment to void after work item group deletion (idempotent)"
+        ),
+        Ok(VoidOutcome::NotBoundToPlan) => tracing::debug!(
+            project_id = %project_id,
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            "enrollment bound to another plan; not voided"
+        ),
+        Err(error) => tracing::warn!(
+            project_id = %project_id,
+            issue_id = %issue_id,
+            plan_id = %plan_id,
+            error = %error,
+            "自动化登记未能随工作项组删除作废（删除已完成，不回滚）"
+        ),
     }
 }
 

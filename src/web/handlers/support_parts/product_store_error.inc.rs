@@ -24,10 +24,13 @@ pub(crate) fn aggregate_root_api_error(
         "aggregate_root_invalid_project_id" => "invalid_project_id",
         _ => "aggregate_root_internal_error",
     };
+    // 链路 B 的文案出口：code/message/details.reason 保持既有契约不动，
+    // 另加同源成品 copy（五字段），登记向导据此呈现中文三段。
+    let copy = error.copy();
     ApiError::runtime(
         code,
         "aggregate root preflight rejected",
-        json!({ "reason": error.message() }),
+        json!({ "reason": error.message(), "copy": copy }),
     )
 }
 
@@ -246,6 +249,17 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
                 json!({ "kind": kind, "reason": reason }),
             )
         }
+        // 块3 片1（REQ-ROUTE-01）：老 issue 记录缺 logical_codebase_id 归属
+        // → 稳定码 issue_not_bound_to_logical_codebase（error.rs 400），
+        // 不落 500 兜底。
+        ProductStoreError::InvalidRecord {
+            kind: "issue_not_bound_to_logical_codebase",
+            reason,
+        } => ApiError::validation_with_details(
+            "issue_not_bound_to_logical_codebase",
+            "issue is not bound to a logical codebase",
+            json!({ "kind": "issue_not_bound_to_logical_codebase", "reason": reason }),
+        ),
         ProductStoreError::InvalidRecord { kind, reason } => {
             if let Some(code) = routing_error_code_from_reason(kind, &reason) {
                 repository_routing_api_error(
@@ -416,6 +430,9 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
                 ProductStoreError::Io(message)
                 | ProductStoreError::Json(message)
                 | ProductStoreError::PathEscape(message) => json!({ "message": message }),
+                ProductStoreError::AuditSnapshotBudgetExceeded(failure) => {
+                    json!({ "message": failure.to_string() })
+                }
             };
             ApiError::runtime(
                 "product_store_error",

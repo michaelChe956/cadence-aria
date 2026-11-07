@@ -1,5 +1,6 @@
 use super::*;
 use crate::product::work_item_projection::{CoderExecutionEnvelope, renderer_for};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context() {
@@ -9,6 +10,12 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
     init_test_git_repo(&worktree);
     let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -24,7 +31,7 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -37,13 +44,24 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
     attempt.stage = CodingExecutionStage::Coding;
     store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let initial = super::provider_execution_context::CapturingProjectionProvider::new(
-        "initial coding complete",
+    let initial = Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            "initial coding complete",
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        initial.clone(),
     );
 
     let coded = engine
-        .execute_coding(&attempt, &initial, &CodingExecutionContext::default())
+        .execute_coding(
+            &attempt,
+            initial.as_ref(),
+            &CodingExecutionContext::default(),
+        )
         .await
         .unwrap();
     let run_before = store.get_active_unit_run(&coded).unwrap();
@@ -55,17 +73,26 @@ async fn coding_plan_repair_group_rework_uses_bound_authoritative_coder_context(
             CodingExecutionStage::CodeReview,
         )
         .unwrap();
-    let rework = super::provider_execution_context::CapturingProjectionProvider::new(
-        "coder fixed reviewer findings",
+    let rework = Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            "coder fixed reviewer findings",
+        ),
+    );
+    let (tx, _rx) = mpsc::channel(64);
+    let rework_engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        rework.clone(),
     );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
-    let updated = engine
+    let updated = rework_engine
         .execute_coder_fix_from_review(
             &coded,
             &super::provider_driven::review_report_requesting_changes(&coded),
             &CodingExecutionContext::default(),
-            &rework,
+            rework.as_ref(),
             &mut command_rx,
         )
         .await
@@ -118,6 +145,12 @@ async fn coding_restart_after_unconsumed_rerun_instruction_keeps_frozen_context_
     init_test_git_repo(&worktree);
     let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -128,12 +161,14 @@ async fn coding_restart_after_unconsumed_rerun_instruction_keeps_frozen_context_
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: Some(worktree.clone()),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                // REQ-ROUTE-01：gateway 的 provider ref 映射不含 Fake；夹具用
+                // 真实 provider 名承载同一 CapturingProjectionProvider 行为。
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -146,13 +181,24 @@ async fn coding_restart_after_unconsumed_rerun_instruction_keeps_frozen_context_
     attempt.stage = CodingExecutionStage::Coding;
     store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let initial = super::provider_execution_context::CapturingProjectionProvider::new(
-        super::provider_execution_context::current_plan_defect_output(),
+    let initial = Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            super::provider_execution_context::current_plan_defect_output(),
+        ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        initial.clone(),
     );
 
     let coded = engine
-        .execute_coding(&attempt, &initial, &CodingExecutionContext::default())
+        .execute_coding(
+            &attempt,
+            initial.as_ref(),
+            &CodingExecutionContext::default(),
+        )
         .await
         .unwrap();
     let run_before = store.get_active_unit_run(&coded).unwrap();
@@ -188,11 +234,24 @@ async fn coding_restart_after_unconsumed_rerun_instruction_keeps_frozen_context_
         )
         .unwrap();
 
-    let restart = super::provider_execution_context::CapturingProjectionProvider::new(
-        super::provider_execution_context::current_plan_defect_output(),
+    let restart = Arc::new(
+        super::provider_execution_context::CapturingProjectionProvider::new(
+            super::provider_execution_context::current_plan_defect_output(),
+        ),
     );
-    let updated = engine
-        .execute_coding(&rerun_attempt, &restart, &CodingExecutionContext::default())
+    let (tx, _rx) = mpsc::channel(64);
+    let restart_engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        restart.clone(),
+    );
+    let updated = restart_engine
+        .execute_coding(
+            &rerun_attempt,
+            restart.as_ref(),
+            &CodingExecutionContext::default(),
+        )
         .await
         .expect("rerun restart must not hit frozen-context identity mismatch");
 

@@ -79,7 +79,10 @@ impl ClaudeRepositoryInitializer {
     ) -> Result<Vec<RepositoryInitializationCommandSummary>, RepositoryRegistrationError> {
         let commands = RepositoryInitializationStepKind::ALL
             .into_iter()
-            .filter_map(|step| step.command().map(|command| (step, command)));
+            .filter_map(|step| {
+                step.command_for(ProviderName::ClaudeCode)
+                    .map(|command| (step, command))
+            });
         let mut summaries = Vec::with_capacity(4);
         for (offset, (step, command)) in commands.enumerate() {
             let command_index = offset + 1;
@@ -91,7 +94,7 @@ impl ClaudeRepositoryInitializer {
                         "repository_init_provider_gate",
                         error.code(),
                         command_index,
-                        command,
+                        &command,
                         Some(sanitize_and_truncate(error.reason(), self.output_limit)),
                         true,
                         "Restore Claude Code availability, then retry repository initialization.",
@@ -105,7 +108,7 @@ impl ClaudeRepositoryInitializer {
                         "repository_init_provider_lookup",
                         "provider_unavailable",
                         command_index,
-                        command,
+                        &command,
                         Some("Claude Code provider is not registered".to_string()),
                         true,
                         "Register the gated Claude Code provider, then retry.",
@@ -132,7 +135,7 @@ impl ClaudeRepositoryInitializer {
                     adapter,
                     input,
                     command_index,
-                    command,
+                    &command,
                     command_timeout,
                     cancellation.clone(),
                 )
@@ -430,52 +433,9 @@ impl LimitedOutput {
     }
 }
 
-fn sanitize_and_truncate(value: &str, limit: usize) -> String {
-    let mut cleaned = String::new();
-    let mut in_escape = false;
-    for character in value.chars() {
-        if in_escape {
-            if character.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-            continue;
-        }
-        if character == '\u{1b}' {
-            in_escape = true;
-            continue;
-        }
-        if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
-            continue;
-        }
-        if cleaned.len() + character.len_utf8() > limit {
-            cleaned.push_str("…[truncated]");
-            break;
-        }
-        cleaned.push(character);
-    }
-    redact_sensitive_assignments(&cleaned)
-}
-
-fn redact_sensitive_assignments(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(|token| {
-            let Some((key, _)) = token.split_once('=') else {
-                return token.to_string();
-            };
-            let upper = key.to_ascii_uppercase();
-            if ["KEY", "TOKEN", "SECRET", "PASSWORD"]
-                .iter()
-                .any(|marker| upper.contains(marker))
-            {
-                format!("{key}=[REDACTED]")
-            } else {
-                token.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+// 脱敏/截断的唯一实现在 `crate::cross_cutting::diagnostic_redaction`
+// （失败面诊断与仓库初始化输出共用一份，7 条密钥规则 + 4096 字节/40 行上限）。
+use crate::cross_cutting::diagnostic_redaction::sanitize_and_truncate;
 
 #[cfg(test)]
 mod tests;

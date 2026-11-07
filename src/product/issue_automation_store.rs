@@ -15,11 +15,11 @@ use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::EnrollmentTarget;
 use crate::product::models::automation::{
-    AutomationAttentionFact, EnrollmentBindingHistory, EnrollmentBindingIdentity,
+    AutomationAttentionFact, ConflictKind, EnrollmentBindingHistory, EnrollmentBindingIdentity,
     EnrollmentCommandResult, EnrollmentError, EnrollmentOptions, EnrollmentRebindRequest,
     EnrollmentRebindResult, EnrollmentSource, EnrollmentTerminationRequest,
     EnrollmentTerminationResult, EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState,
-    PlanGenerationIntent, PlanGenerationPhase, PreparedPlanIntent,
+    PlanGenerationIntent, PlanGenerationPhase, PreparedPlanIntent, VoidOutcome,
 };
 use crate::product::termination_command_ledger::{
     TerminationLedgerVerdict, record_termination_ledger_accept, termination_ledger_verdict,
@@ -38,8 +38,12 @@ enum CasResolution {
     Unchanged(IssueAutomationEnrollment),
     /// 首次写入/重开/绑定：已原子落盘。
     Applied(IssueAutomationEnrollment),
-    /// revision 不匹配或绑定互斥；携带当前 revision 供 HTTP details。
-    Conflict { current_revision: Option<u64> },
+    /// revision 不匹配或绑定互斥；携带当前 revision 供 HTTP details 与
+    /// 冲突原因判别位（REQ-WIGA-SWAP-02）。
+    Conflict {
+        current_revision: Option<u64>,
+        kind: ConflictKind,
+    },
     /// 目标 enrollment 不存在（Disable/绑定的前置失败）。
     Missing,
     /// REQ-WIGA-09 修订：terminated 人工重新开启缺稳定 command_id（422 面，
@@ -84,7 +88,8 @@ impl IssueAutomationStore {
     /// 以 `expected_revision` 线性化 enrollment 修订：`None` 仅对「无记录时的首次
     /// Enable」或「同键同 payload 幂等重试」合法；其余与当前 revision 不符即冲突。
     /// 语义与 `compare_and_set_reenable(..., original_source_dangling=false)` 等价
-    /// （terminated 重新开启维持 source/options/target 逐字段相等）。
+    /// （terminated 正常重开按换代放行 options 漂移，source/target 漂移仍拒；
+    /// 悬空源重授权路径才维持 options 逐字段相等——块1 片2 REQ-WIGA-SWAP-01）。
     pub fn compare_and_set(
         &self,
         project_id: &str,
@@ -98,8 +103,10 @@ impl IssueAutomationStore {
     /// 悬空源重授权专用 CAS（terminated 人工重新开启）：`original_source_dangling`
     /// 由调用方核实「终止记录的原 source 引用实体已被级联删除」后置真——
     /// 此时仅放行 source 与终止记录的漂移（原授权失效，按本次提交的当前
-    /// 已确认 source 显式重新授权）；options/target 仍逐字段相等。其余判定
-    /// 与 `compare_and_set` 完全一致（账本重放/revision 线性化/幂等）。
+    /// 已确认 source 显式重新授权）；options/target 仍逐字段相等。账本
+    /// 重放/revision 线性化/幂等与 `compare_and_set` 一致；差异仅在 options
+    /// 漂移的分路径——本 CAS（悬空源重授权）仍拒 options 漂移，
+    /// `compare_and_set` 的正常重开路径按换代放行 options 漂移。
     pub fn compare_and_set_reenable(
         &self,
         project_id: &str,
@@ -151,10 +158,16 @@ impl IssueAutomationStore {
             let resolution = match (&existing, &command) {
                 // REQ-WIGA-09 修订：terminated 的人工显式 Enable 取代——
                 // 判定与落盘见 `supersede_terminated_enrollment`（命令账本
-                // 先判、稳定 command_id、revision 线性化、授权 payload
-                // 逐字段相等——悬空源重授权的例外见其内部）。自动路径无从
-                // 构造显式 revision＋command_id 的 Enable，本分支只可能由
-                // 人工入口触达。
+                // 先判、稳定 command_id、revision 线性化、授权 payload 按
+                // 路径分治：正常重开按换代放行 options 漂移，source/target
+                // 漂移仍拒；悬空源重授权维持逐字段相等——见其内部）。自动
+                // 路径无从构造显式 revision＋command_id 的 Enable，本分支
+                // 只可能由人工入口触达。
+                // REQ-WIGA-VOID-01（tasks 3.1）：已作废（随工作项组删除）且
+                // 非 enabled 的记录同样走本取代分支——作废记录视为无约束力
+                // 的历史记录，重新开启按换代语义放行全部漂移（见其内部的
+                // 前置判定）；enabled+作废是不可达的损坏组合，保持既有分支
+                // fail-closed（PayloadImmutable），不经本分支放宽。
                 (
                     Some(saved),
                     EnrollmentWriteCommand::Enable {
@@ -164,24 +177,29 @@ impl IssueAutomationStore {
                         options,
                         target,
                     },
-                ) if saved.terminated_at.is_some() => supersede_terminated_enrollment(
-                    &path,
-                    saved,
-                    SupersedeEnableRequest {
-                        command_id: command_id.as_deref(),
-                        selection_key,
-                        source,
-                        options,
-                        target,
-                        expected_revision,
-                        original_source_dangling,
-                    },
-                )?,
+                ) if saved.terminated_at.is_some()
+                    || (saved.voided_at.is_some() && !saved.enabled) =>
+                {
+                    supersede_terminated_enrollment(
+                        &path,
+                        saved,
+                        SupersedeEnableRequest {
+                            command_id: command_id.as_deref(),
+                            selection_key,
+                            source,
+                            options,
+                            target,
+                            expected_revision,
+                            original_source_dangling,
+                        },
+                    )?
+                }
                 // 批 2 T1（REQ-WIGA-09）：terminated 对其余写命令（含缺
                 // 门禁的 Enable——由取代分支内部拒绝）一律 Conflict 零副
                 // 作用；终止命令重放只走 terminate_plan 的账本分支。
                 (Some(saved), _) if saved.terminated_at.is_some() => CasResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::DefensiveStateMismatch,
                 },
                 // REQ-WIGA-09 修订：Enable 命令身份的账本重放面——同
                 // command_id 命中命令账本时先判：同 payload（含
@@ -221,6 +239,7 @@ impl IssueAutomationStore {
                     } else {
                         CasResolution::Conflict {
                             current_revision: Some(saved.policy_revision),
+                            kind: ConflictKind::CommandLedgerPayloadMismatch,
                         }
                     }
                 }
@@ -264,11 +283,13 @@ impl IssueAutomationStore {
                 {
                     CasResolution::Conflict {
                         current_revision: Some(saved.policy_revision),
+                        kind: ConflictKind::PayloadImmutable,
                     }
                 }
                 (Some(saved), _) if expected_revision != Some(saved.policy_revision) => {
                     CasResolution::Conflict {
                         current_revision: Some(saved.policy_revision),
+                        kind: ConflictKind::RevisionStale,
                     }
                 }
                 (Some(saved), EnrollmentWriteCommand::Disable) if !saved.enabled => {
@@ -302,11 +323,13 @@ impl IssueAutomationStore {
             if expected_revision != saved.policy_revision {
                 return Ok(CasResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::BindingIdentityMismatch,
                 });
             }
             if !saved.enabled {
                 return Ok(CasResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::BindingIdentityMismatch,
                 });
             }
             bind_plan_ids_locked(&path, saved, plan_id, session_id)
@@ -365,6 +388,7 @@ impl IssueAutomationStore {
             if !saved.enabled || saved.enrollment_id != enrollment_id {
                 return Ok(EnsurePlanResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::PlanPhaseConflict,
                 });
             }
             // C5 Task 1：旧代 enrollment（无显式 target）不能驱动自动链——
@@ -385,11 +409,13 @@ impl IssueAutomationStore {
                     PreparedPlanIntentRead::LegacyUnbound { .. } => {
                         return Ok(EnsurePlanResolution::Conflict {
                             current_revision: Some(saved.policy_revision),
+                            kind: ConflictKind::GenerationIntentMismatch,
                         });
                     }
                     PreparedPlanIntentRead::Current(existing) if existing != intent => {
                         return Ok(EnsurePlanResolution::Conflict {
                             current_revision: Some(saved.policy_revision),
+                            kind: ConflictKind::GenerationIntentMismatch,
                         });
                     }
                     PreparedPlanIntentRead::Current(_) => {}
@@ -416,6 +442,7 @@ impl IssueAutomationStore {
                 (Some(_), _) | (_, Some(_)) => {
                     return Ok(EnsurePlanResolution::Conflict {
                         current_revision: Some(saved.policy_revision),
+                        kind: ConflictKind::PlanPhaseConflict,
                     });
                 }
                 (None, None) => {}
@@ -427,11 +454,13 @@ impl IssueAutomationStore {
             let Some(reloaded) = read_optional_enrollment(&path)? else {
                 return Ok(EnsurePlanResolution::Conflict {
                     current_revision: None,
+                    kind: ConflictKind::DefensiveStateMismatch,
                 });
             };
             if reloaded.enrollment_id != saved.enrollment_id {
                 return Ok(EnsurePlanResolution::Conflict {
                     current_revision: Some(reloaded.policy_revision),
+                    kind: ConflictKind::DefensiveStateMismatch,
                 });
             }
             // P1 WIGA Task 10：测试注入的绑定 session 落盘中窗（enrollment
@@ -468,6 +497,7 @@ impl IssueAutomationStore {
             if !saved.enabled || saved.enrollment_id != enrollment_id {
                 return Ok(GenerationResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::PlanPhaseConflict,
                 });
             }
             let (Some(plan_id), Some(session_id)) =
@@ -504,12 +534,14 @@ impl IssueAutomationStore {
                     PlanGenerationIntentRead::LegacyUnbound { .. } => {
                         return Ok(GenerationResolution::Conflict {
                             current_revision: Some(saved.policy_revision),
+                            kind: ConflictKind::GenerationIntentMismatch,
                         });
                     }
                     PlanGenerationIntentRead::Current(existing) => {
                         if !existing.same_identity(&derived) {
                             return Ok(GenerationResolution::Conflict {
                                 current_revision: Some(saved.policy_revision),
+                                kind: ConflictKind::GenerationIntentMismatch,
                             });
                         }
                         return Ok(GenerationResolution::Ready(existing));
@@ -538,6 +570,7 @@ impl IssueAutomationStore {
             if !saved.enabled || saved.enrollment_id != enrollment_id {
                 return Ok(GenerationResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::PlanPhaseConflict,
                 });
             }
             let intent_path = path.with_file_name("automation-generation-intent.json");
@@ -581,6 +614,7 @@ impl IssueAutomationStore {
             if !existing.same_identity(&derived) {
                 return Ok(GenerationResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
+                    kind: ConflictKind::PlanPhaseConflict,
                 });
             }
             existing.phase = phase;
@@ -627,6 +661,7 @@ impl IssueAutomationStore {
                         enabled: enrollment.enabled,
                         plan_id: enrollment.plan_id.clone(),
                         terminated_at: enrollment.terminated_at.clone(),
+                        voided_at: enrollment.voided_at.clone(),
                     }
                 }
                 _ => crate::product::models::automation::AutomationOwnership::client_default(),

@@ -813,6 +813,33 @@ describe("automation ownership projection (P0 1.2)", () => {
   });
 });
 
+describe("REQ-HGC-04 observer 镜像：plan_continue_available", () => {
+  // observer 镜像是「最易漏的一处」：driver 落位而观察态不落位 ⇒ 观察者看到
+  // 的门卡与驾驶者不同（一份说有入口、一份说没有）。
+  it("projects the continue fact verbatim (true)", () => {
+    const state = observerStateFromSessionState({
+      ...sessionStateFrame("session_obs_continue", 1),
+      plan_continue_available: true,
+    } as never);
+    expect(state.planContinueAvailable).toBe(true);
+  });
+
+  it("keeps the continue fact unknown (null) when the field is absent", () => {
+    const state = observerStateFromSessionState(
+      sessionStateFrame("session_obs_continue_absent", 1) as never,
+    );
+    expect(state.planContinueAvailable).toBeNull();
+  });
+
+  it("projects an explicit false (server says no entry) as false", () => {
+    const state = observerStateFromSessionState({
+      ...sessionStateFrame("session_obs_continue_false", 1),
+      plan_continue_available: false,
+    } as never);
+    expect(state.planContinueAvailable).toBe(false);
+  });
+});
+
 describe("anchor_t19 observer authoritative lc resume recovery", () => {
   it("anchor_t19_driver_observer_recovery_projection_and_resolved_clear", () => {
     // 全量帧（重连/首连同一入口）：observerStateFromSessionState 显式落

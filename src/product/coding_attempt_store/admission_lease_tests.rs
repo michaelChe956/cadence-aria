@@ -60,7 +60,7 @@
 
         // ── 活跃：owner attempt 活跃 → ActiveWait；第二 try_acquire 不改
         //    owner/attempt。
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         let lifecycle = lease_worktree_and_bind_attempt(&fixture);
         let engine = lease_engine(&fixture);
         let decision = engine.classify_worktree_lease(PROJECT_ID, ISSUE_ID);
@@ -105,7 +105,7 @@
         assert_eq!(decision.disposition, LeaseDisposition::DeadNeedsTakeover);
 
         // ── 未知（owner 是未绑定 attempt 的瞬态 lease）→ 绝不抢占。
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         let lifecycle = lease_worktree(&fixture);
         lifecycle
             .try_acquire_issue_worktree_lock(
@@ -119,7 +119,7 @@
         assert_eq!(decision.disposition, LeaseDisposition::UnknownNeedsHuman);
 
         // ── 未知（记录缺失）：无 worktree 证据 → UnknownNeedsHuman。
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         let decision = lease_engine(&fixture).classify_worktree_lease(PROJECT_ID, ISSUE_ID);
         assert_eq!(decision.disposition, LeaseDisposition::UnknownNeedsHuman);
     }
@@ -187,7 +187,7 @@
             LeaseTakeoverRequest, LeaseTakeoverResult, OperationState,
         };
 
-        let fixture = legacy_fixture();
+        let fixture = unbound_fixture();
         let lifecycle = lease_worktree_and_bind_attempt(&fixture);
         seed_attempt_status(&fixture, CodingAttemptStatus::Failed);
         let binding = lease_enrollment_binding(&fixture);
@@ -296,36 +296,43 @@
 
     // ─── C2 Task 2（REQ-CRO-02）：最小编码互斥、接管判别与 attempt 命令账本 ───
 
-    /// 第二个 kick 撞上活跃租约（另一活跃 attempt 持有）：admission 必须
-    /// `AlreadyRunning`（通知"已在运行／请等待"），不抢租约、不启动 provider；
-    /// 命令账本记录首次 durable 结果，同 command 同 payload 重放同一结论，
-    /// 同 command 异 payload fail-closed。
+    /// 第二个 kick 撞上活跃租约（另一活跃 attempt 持有同仓租约）：admission
+    /// 必须 `AlreadyRunning`（通知"已在运行／请等待"），不抢租约、不启动
+    /// provider；命令账本记录首次 durable 结果，同 command 同 payload 重放
+    /// 同一结论，同 command 异 payload fail-closed。
+    ///
+    /// REQ-ROUTE-01 两态化后租约只按 attempt 自身冻结快照的**仓维**路由
+    /// 分类（issue 维单仓租约随 `Legacy` 变体删除），故夹具使用带快照的
+    /// attempt + 仓维 worktree 锁。
     #[test]
     fn second_kick_on_active_lease_returns_already_running() {
         use crate::product::coding_attempt_store::CodingRunExclusionDecision;
         use crate::product::models::automation::LeaseDisposition;
 
-        let fixture = legacy_fixture();
-        // 第二个 kick 的目标：同 issue 下另一 attempt B。B 必须在 A 活跃前
-        // 创建（active_coding_attempt 不变式），创建后停留在 Created——双 kick
-        // 撞活跃租约的现场形态。
+        let fixture = multi_repo_lease_fixture();
+        // 第二个 kick 的目标：同 issue、同仓路由下另一 attempt B。B 必须在
+        // A 活跃前创建（active_coding_attempt 不变式），创建后停留在
+        // Created——双 kick 撞活跃租约的现场形态。
         let attempt_b = fixture
             .store
             .create_attempt(CreateCodingAttemptInput {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
-                work_item_id: "work_item_0002".to_string(),
+                work_item_id: "work_item_0003".to_string(),
                 base_branch: "main".to_string(),
                 branch_name: "aria/attempt-b".to_string(),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
-                target_snapshot: None,
+                target_snapshot: Some(multi_repo_snapshot(fixture.own_repo, "0001")),
                 max_auto_rework: 0,
             })
             .unwrap();
-        // 活跃持有者：attempt A（Running）绑定 issue worktree 租约。
-        seed_attempt_status(&fixture, CodingAttemptStatus::Running);
-        let lifecycle = lease_worktree_and_bind_attempt(&fixture);
+        // 活跃持有者：attempt A（Running）绑定同仓 worktree 租约。
+        let holder = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
+            .unwrap();
+        bind_repo_lock_to_attempt(&fixture, fixture.own_repo, WORK_ITEM_ID, &holder.id);
         let decision = fixture
             .store
             .admit_coding_run_exclusive(&attempt_b, "cmd-kick-b-1", "digest-b-1")
@@ -333,18 +340,19 @@
         match &decision {
             CodingRunExclusionDecision::AlreadyRunning { lease } => {
                 assert_eq!(lease.disposition, LeaseDisposition::ActiveWait);
-                assert_eq!(lease.lease_id, fixture.attempt.id);
+                assert_eq!(lease.lease_id, holder.id);
             }
             other => panic!("expected AlreadyRunning, got {other:?}"),
         }
         // 租约事实未被抢占：owner 仍是 attempt A。
-        let record = lifecycle
-            .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        let record = fixture
+            .lifecycle
+            .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, fixture.own_repo)
             .expect("record")
             .expect("present");
         assert_eq!(
             record.current_lock_owner_id.as_deref(),
-            Some(fixture.attempt.id.as_str())
+            Some(holder.id.as_str())
         );
         // 不启动 provider：attempt B 无任何 role run。
         assert!(
@@ -390,32 +398,45 @@
     }
 
     /// 死亡租约 → `TakeoverRequired`（未确认不继续）；接管清出后同请求
-    /// 继续 → `Allowed`；证据缺失/瞬态 owner → `LeaseUnknown` 停等。
+    /// 继续 → `Allowed`；瞬态 owner → `LeaseUnknown` 停等；无租约事实与
+    /// 自持活跃租约是合法续跑。
+    ///
+    /// REQ-ROUTE-01 两态化后租约只按 attempt 自身冻结快照的**仓维**路由
+    /// 分类（issue 维单仓租约随 `Legacy` 变体删除），夹具统一使用带快照的
+    /// attempt + 仓维 worktree 锁。
     #[test]
     fn coding_run_admission_takeover_and_unknown_lease() {
         use crate::product::coding_attempt_store::CodingRunExclusionDecision;
         use crate::product::models::automation::LeaseDisposition;
 
         // ── 死亡（owner attempt 终态）：TakeoverRequired，未确认不继续。
-        let fixture = legacy_fixture();
+        let fixture = multi_repo_lease_fixture();
         let attempt_b = fixture
             .store
             .create_attempt(CreateCodingAttemptInput {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
-                work_item_id: "work_item_0002".to_string(),
+                work_item_id: "work_item_0003".to_string(),
                 base_branch: "main".to_string(),
                 branch_name: "aria/attempt-b".to_string(),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
-                target_snapshot: None,
+                target_snapshot: Some(multi_repo_snapshot(fixture.own_repo, "0001")),
                 max_auto_rework: 0,
             })
             .unwrap();
-        seed_attempt_status(&fixture, CodingAttemptStatus::Running);
-        let lifecycle = lease_worktree_and_bind_attempt(&fixture);
-        // 持有者 attempt A 转终态 → 租约死亡。
-        seed_attempt_status(&fixture, CodingAttemptStatus::Failed);
+        // 持有者 attempt A 先活跃绑定同仓锁，随后转终态 → 租约死亡。
+        let holder = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
+            .unwrap();
+        bind_repo_lock_to_attempt(&fixture, fixture.own_repo, WORK_ITEM_ID, &holder.id);
+        let mut failed_holder = holder.clone();
+        failed_holder.status = CodingAttemptStatus::Failed;
+        fixture
+            .store
+            .write_coding_attempt_for_test(&failed_holder)
+            .expect("seed terminal holder");
         let decision = fixture
             .store
             .admit_coding_run_exclusive(&attempt_b, "cmd-takeover-1", "digest-t-1")
@@ -427,8 +448,14 @@
             other => panic!("expected TakeoverRequired, got {other:?}"),
         }
         // 用户确认接管（复用 C1 owner CAS 清出）后，同请求继续 → Allowed。
-        lifecycle
-            .release_issue_worktree_lock_by_owner(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+        fixture
+            .lifecycle
+            .release_repo_worktree_lock_by_owner(
+                PROJECT_ID,
+                ISSUE_ID,
+                fixture.own_repo,
+                &holder.id,
+            )
             .expect("takeover cleared the dead owner");
         let decision = fixture
             .store
@@ -436,36 +463,41 @@
             .expect("classify after takeover");
         assert!(matches!(
             decision,
-            CodingRunExclusionDecision::Allowed(ref admitted)
+            CodingRunExclusionDecision::Allowed(admitted)
                 if admitted.id == attempt_b.id
         ));
 
         // ── 未知（瞬态 lease owner，未绑定 attempt）：LeaseUnknown 停等。
-        let fixture = legacy_fixture();
+        let fixture = multi_repo_lease_fixture();
         let attempt_b = fixture
             .store
             .create_attempt(CreateCodingAttemptInput {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
-                work_item_id: "work_item_0002".to_string(),
+                work_item_id: "work_item_0003".to_string(),
                 base_branch: "main".to_string(),
                 branch_name: "aria/attempt-b2".to_string(),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
-                target_snapshot: None,
+                target_snapshot: Some(multi_repo_snapshot(fixture.own_repo, "0001")),
                 max_auto_rework: 0,
             })
             .unwrap();
-        seed_attempt_status(&fixture, CodingAttemptStatus::Running);
-        let lifecycle = lease_worktree(&fixture);
-        lifecycle
-            .try_acquire_issue_worktree_lock(
+        fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
+            .unwrap();
+        let lease = fixture
+            .lifecycle
+            .try_acquire_repo_worktree_lock(
                 PROJECT_ID,
                 ISSUE_ID,
+                fixture.own_repo,
                 WORK_ITEM_ID,
-                "issue_worktree_lease_transient",
+                "repo_worktree_lease_transient",
             )
             .expect("acquire transient lease");
+        assert!(lease.acquired);
         let decision = fixture
             .store
             .admit_coding_run_exclusive(&attempt_b, "cmd-unknown-1", "digest-u-1")
@@ -478,28 +510,28 @@
         }
         // 无租约事实（未启动过 worktree 锁）不得拦截既有链路：自持活跃租约的
         // 阶段续跑（self re-entry）照常 Allowed。
-        let fixture = legacy_fixture();
+        let fixture = multi_repo_lease_fixture();
         let running = fixture
             .store
-            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.attempt.id)
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
             .unwrap();
         let decision = fixture
             .store
             .admit_coding_run_exclusive(&running, "cmd-self-1", "digest-s-1")
-            .expect("no lease facts must not block legacy attempts");
+            .expect("no lease facts must not block admitted attempts");
         assert!(matches!(
             decision,
-            CodingRunExclusionDecision::Allowed(ref admitted) if admitted.id == running.id
+            CodingRunExclusionDecision::Allowed(admitted) if admitted.id == running.id
         ));
         // 自持活跃租约（owner == 本 attempt）也是合法续跑。
-        lease_worktree_and_bind_attempt(&fixture);
+        bind_repo_lock_to_attempt(&fixture, fixture.own_repo, WORK_ITEM_ID, &running.id);
         let decision = fixture
             .store
             .admit_coding_run_exclusive(&running, "cmd-self-2", "digest-s-2")
             .expect("self-held active lease is legitimate re-entry");
         assert!(matches!(
             decision,
-            CodingRunExclusionDecision::Allowed(ref admitted) if admitted.id == running.id
+            CodingRunExclusionDecision::Allowed(admitted) if admitted.id == running.id
         ));
     }
 
@@ -550,6 +582,22 @@
             .create(CreateProjectInput {
                 name: "project".to_string(),
                 description: None,
+            })
+            .unwrap();
+        // REQ-ROUTE-01：routing 只从 issue 的持久归属解析；issue 记录缺失时
+        // `load_for_issue` 按 T1.2 契约返回 `NotFound`（不是静默 FailClosed），
+        // 故夹具必须落一条归属 legacy 别名 LC 的 issue——该别名子树与项目级
+        // legacy 布局字节等价（`store::lc_scope_root` 契约）。
+        crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id:
+                    crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+                title: "multi repo lease fixture issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
             })
             .unwrap();
         let own_repo = LogicalRepositoryId(Uuid::from_u128(2));

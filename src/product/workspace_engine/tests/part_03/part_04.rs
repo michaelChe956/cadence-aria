@@ -12,8 +12,8 @@ fn compile_rejects_draft_without_target_and_does_not_publish_partial_items() {
         .expect("load previous plan");
     let api = LogicalRepositoryId(Uuid::from_u128(1));
     let web = LogicalRepositoryId(Uuid::from_u128(2));
-    let draft_a = target_draft(&plan_id, "outline_a", "draft_a", Some(api));
-    let draft_b = target_draft(&plan_id, "outline_b", "draft_b", None);
+    let draft_a = target_draft(&lifecycle, &plan_id, "outline_a", "draft_a", Some(api));
+    let draft_b = target_draft(&lifecycle, &plan_id, "outline_b", "draft_b", None);
     let targets = BTreeMap::from([
         (api, "repository_api".to_string()),
         (web, "repository_web".to_string()),
@@ -53,9 +53,9 @@ fn compile_allows_same_target_across_items_but_rejects_target_outside_selection(
     let web = LogicalRepositoryId(Uuid::from_u128(2));
     let removed = LogicalRepositoryId(Uuid::from_u128(3));
     let drafts = [
-        target_draft(&plan_id, "outline_a", "draft_a", Some(api)),
-        target_draft(&plan_id, "outline_b", "draft_b", Some(api)),
-        target_draft(&plan_id, "outline_c", "draft_c", Some(removed)),
+        target_draft(&lifecycle, &plan_id, "outline_a", "draft_a", Some(api)),
+        target_draft(&lifecycle, &plan_id, "outline_b", "draft_b", Some(api)),
+        target_draft(&lifecycle, &plan_id, "outline_c", "draft_c", Some(removed)),
     ];
     let targets = BTreeMap::from([
         (api, "repository_api".to_string()),
@@ -98,8 +98,8 @@ fn compile_publishes_distinct_targets_in_single_transaction() {
     let api = LogicalRepositoryId(Uuid::from_u128(1));
     let web = LogicalRepositoryId(Uuid::from_u128(2));
     let drafts = [
-        target_draft(&plan_id, "outline_a", "draft_a", Some(api)),
-        target_draft(&plan_id, "outline_b", "draft_b", Some(web)),
+        target_draft(&lifecycle, &plan_id, "outline_a", "draft_a", Some(api)),
+        target_draft(&lifecycle, &plan_id, "outline_b", "draft_b", Some(web)),
     ];
     let targets = BTreeMap::from([
         (api, "repository_api".to_string()),
@@ -123,12 +123,14 @@ fn compile_publishes_distinct_targets_in_single_transaction() {
 }
 
 fn target_draft(
+    lifecycle: &LifecycleStore,
     plan_id: &str,
     outline_id: &str,
     draft_id: &str,
     target_repository_id: Option<LogicalRepositoryId>,
 ) -> WorkItemDraftRecord {
     let mut draft = test_work_item_draft_record(
+        lifecycle,
         plan_id,
         outline_id,
         draft_id,
@@ -200,7 +202,7 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
                     from_outline_id: "outline_b".to_string(),
                     to_outline_id: "outline_c".to_string(),
                 },
-            ]),
+            ], Some(fixture_logical_member_id(&lifecycle))),
             design_context_gaps: vec![],
             validator_findings: vec![],
             context_blockers: vec![],
@@ -212,6 +214,7 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
         .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
         .expect("load previous plan");
     let draft_a = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_a",
         "draft_a",
@@ -220,6 +223,7 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
         None,
     );
     let mut draft_b = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_b",
         "draft_b",
@@ -237,6 +241,7 @@ fn final_compile_projects_plan_dependency_graph_from_accepted_drafts() {
         .input_contracts
         .push(input_a.clone());
     let mut draft_c = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_c",
         "draft_c",
@@ -316,7 +321,10 @@ fn final_compile_projects_source_draft_context_into_work_items() {
         make_work_item_plan_engine_with_draft_candidate("sess_wip_compile_source_context");
     engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(vec![]),
+            outline: test_work_item_plan_outline(
+                vec![],
+                Some(fixture_logical_member_id(&lifecycle)),
+            ),
             design_context_gaps: vec![],
             validator_findings: vec![],
             context_blockers: vec![],
@@ -328,6 +336,7 @@ fn final_compile_projects_source_draft_context_into_work_items() {
         .get_issue_work_item_plan("project_0001", "issue_0001", &plan_id)
         .expect("load previous plan");
     let draft_a = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_a",
         "draft_a",
@@ -376,6 +385,7 @@ async fn work_item_plan_compile_failure_updates_artifact_with_failed_compile_rep
     let store = engine.work_item_plan_store().expect("work item plan store");
     let now = chrono::Utc::now().to_rfc3339();
     let mut draft_a = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_a",
         "draft_outline_a",
@@ -385,6 +395,7 @@ async fn work_item_plan_compile_failure_updates_artifact_with_failed_compile_rep
     );
     draft_a.candidate.verification_plan.checks[0].command = Some("rm -rf /".to_string());
     let draft_b = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_b",
         "draft_outline_b",
@@ -393,6 +404,7 @@ async fn work_item_plan_compile_failure_updates_artifact_with_failed_compile_rep
         None,
     );
     let draft_c = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_c",
         "draft_outline_c",

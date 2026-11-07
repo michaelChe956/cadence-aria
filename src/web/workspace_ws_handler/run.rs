@@ -41,6 +41,24 @@ pub(crate) use provider_run::{
 pub(crate) use provider_run::{
     deliver_attempt2_frozen_prompt, fail_cancelled_human_gate_revision_turn,
 };
+// S0 体积基线 raw 构造点窄再导出（stack_budget 专用；库构建不经此处）。
+// P2（任务3）追加：ArmExit（basic_sc_arm_cases 直驱断言）与 SC child
+// `run_single_candidate_author`（先测该 child，超 131072 才在调用点 box——
+// brief task-3 Step 3）；P3（任务4）追加 legacy outline 臂
+// `drive_legacy_outline_arm`（legacy_outline_cases 量测/直驱）；仍限
+// cfg(test) 窄导出，不做公共 API。
+#[cfg(test)]
+pub(crate) use provider_run::{
+    ArmDrive, ArmExit, PROVIDER_RUN_TASK_BODY_CONSTRUCTIONS, drive_author_arm,
+    drive_author_choice_followup_arm, drive_human_gate_sc_revision_arm, drive_legacy_outline_arm,
+    drive_plan_batch_arm, drive_plan_draft_arm, drive_review_only_arm, drive_revision_arm,
+    drive_single_candidate_author_arm, drive_until_cancelled_settles, provider_run_drive_body,
+    provider_run_task, provider_run_task_body,
+};
+#[cfg(test)]
+pub(crate) use single_candidate::{
+    SingleCandidateAuthorRecoveryEntry, run_single_candidate_author,
+};
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);
 

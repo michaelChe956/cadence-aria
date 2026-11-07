@@ -162,11 +162,6 @@ impl ProviderCapabilitySource for StaticCapabilitySource {
     ) -> Result<ProviderCapability, ProviderGatewayError> {
         // 测试 double:固定 Claude recipe 事实的基础形态(durable 重核验归
         // StoreBacked source 的 for_lc 通道,由 admission 侧测试覆盖)。
-        if provider.provider_type != ProviderRefType::ClaudeCode {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE.to_string(),
-            ));
-        }
         Ok(self.capability(provider, SessionPolicyAction::PlanningReadOnly))
     }
 }

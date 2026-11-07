@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::io;
 use std::pin::Pin;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
@@ -20,9 +18,9 @@ use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionAttempt,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
-use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
+use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{AmendmentResumeMode, AmendmentResumeTarget, PlanAmendmentManifest};
-use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+use crate::product::repository_store::RepositoryStore;
 use crate::web::app::build_web_router;
 use crate::web::coding_ws_handler::delivery_ack::register_plan_amendment_socket_write;
 use crate::web::coding_ws_handler::runner::{
@@ -425,49 +423,31 @@ fn seed_http_attempt_with_lease() -> (
         .write_coding_attempt_for_test(&attempt)
         .expect("persist HTTP attempt fixture");
 
-    let repository_path = tmp.path().join("repository");
-    fs::create_dir_all(&repository_path).expect("repository directory");
-    assert!(
-        Command::new("git")
-            .args(["init", "--initial-branch=main"])
-            .arg(&repository_path)
-            .status()
-            .expect("git init")
-            .success(),
-        "git init must succeed"
-    );
+    // 共享夹具（`seed_complete`）已在 `repos.json` 播种物理仓投影
+    // （`repository_0001` → 成员主 checkout，真实 git 仓）。此处复用该记录，
+    // 不再新建——新建会因既有投影而分配 `repository_0002`。
     let repository = RepositoryStore::new(app_paths.clone())
-        .create(CreateRepositoryInput {
-            project_id: attempt.project_id.clone(),
-            name: "repository".to_string(),
-            path: repository_path,
-            default_policy_preset: None,
-            default_provider_mode: Some("fake".to_string()),
-            idempotency_key: "runner-cleanup-repository".to_string(),
-        })
-        .expect("repository record");
+        .list(attempt.project_id.as_str())
+        .expect("repository projection")
+        .into_iter()
+        .find(|record| record.id == "repository_0001")
+        .expect("seeded repository projection");
     assert_eq!(repository.id, "repository_0001");
 
+    // REQ-ROUTE-01 两态化：带冻结快照的 attempt 的 worktree 路由是**仓维**，
+    // issue 维 `issue-shared-worktree.json` 在场会被判
+    // `legacy_shared_worktree_present` fail-closed（HTTP 409）。仓维记录与
+    // 锁已由共享夹具（`seed_compiled_work_item_fixture`）按 attempt 播种，
+    // 此处不再另建 issue 维记录（`assert_issue_lease_released` 允许 issue 维
+    // 记录不存在——视为已彻底释放）。
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            repository_id: repository.id,
-            branch_name: attempt.branch_name.clone(),
-            worktree_path: tmp.path().join("missing-shared-worktree"),
-            base_branch: attempt.base_branch.clone(),
-        })
-        .expect("shared worktree");
-    let lease = lifecycle
-        .try_acquire_issue_worktree_lock(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.work_item_id,
-            &attempt.id,
-        )
-        .expect("attempt worktree lease");
-    assert!(lease.acquired);
+    assert!(
+        lifecycle
+            .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+            .expect("issue shared worktree lookup")
+            .is_none(),
+        "快照 attempt 不得留 issue 维 shared worktree 记录"
+    );
 
     let state = WebAppState::new(
         tmp.path().to_path_buf(),

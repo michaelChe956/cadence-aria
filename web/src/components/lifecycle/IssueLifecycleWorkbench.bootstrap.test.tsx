@@ -168,9 +168,8 @@ describe("IssueLifecycleWorkbench 冷启动投影刷新链", () => {
 
     render(<IssueLifecycleWorkbench />);
 
-    // 合并流：添加代码库 → 多仓库 → 创建 LC → 弹窗内嵌登记向导。
+    // 合并流：添加代码库 → 建逻辑代码库 → 弹窗内嵌登记向导。
     await user.click(await screen.findByRole("button", { name: "添加代码库" }));
-    await user.click(screen.getByRole("radio", { name: /多仓库逻辑代码库/ }));
     await user.type(screen.getByLabelText("聚合根目录"), "/root");
     await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
     expect(

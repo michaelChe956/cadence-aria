@@ -1859,25 +1859,6 @@ async fn materialize_parked_plan_attempt(
         })?;
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let transfer_result: Result<(), ProductStoreError> = match route {
-        crate::product::coding_workspace_engine::IssueSharedWorktreeRoute::Legacy => {
-            if lifecycle
-                .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
-                .map_err(product_store_api_error)?
-                .is_some()
-            {
-                lifecycle
-                    .transfer_issue_worktree_lock(
-                        &attempt.project_id,
-                        &attempt.issue_id,
-                        &from_work_item_id,
-                        &unit.logical_work_item_id,
-                        &attempt.id,
-                    )
-                    .map(|_| ())
-            } else {
-                Ok(())
-            }
-        }
         crate::product::coding_workspace_engine::IssueSharedWorktreeRoute::Repository {
             repository_id,
         } => lifecycle
@@ -2341,7 +2322,7 @@ pub(crate) fn build_plan_coding_progress(
         let repository_name = plan_target_repository_display_name(
             paths,
             project_id,
-            issue.logical_codebase_id.as_deref(),
+            Some(issue.logical_codebase_id.as_str()),
             &facts.binding.target_repository_id,
         )?;
         let latest_review_request = match &facts.attempt {

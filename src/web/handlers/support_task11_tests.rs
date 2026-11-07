@@ -74,6 +74,22 @@ fn t11_repo_worktree_input(
 fn t11_logical_routing_fixture() -> (tempfile::TempDir, ProductAppPaths, LogicalRepositoryId) {
     let root = tempdir().expect("tempdir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // 两态路由：issue 记录必填 lc_id。manifest/selection 写在项目级根 ⇒ 取
+    // legacy 项目默认作用域 id（lc_scope_root 恰落回项目级根），routing 判定 Logical。
+    crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: T11_PROJECT_ID.to_string(),
+            repo_id: None,
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                    T11_PROJECT_ID,
+                ),
+            title: "t11 logical routing fixture".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("seed issue");
     let logical_id = LogicalRepositoryId(Uuid::new_v4());
     LogicalCodebaseStore::new(paths.clone())
         .save_manifest(
@@ -220,35 +236,6 @@ fn cleanup_shared_worktree_by_routing_enumerates_all_repo_worktrees_for_logical(
             .expect("list repo worktrees")
             .is_empty(),
         "多仓 issue 删除必须枚举 shared-worktrees/ 并全清"
-    );
-}
-
-/// 单仓 issue/group plan 删除走老逻辑：清 issue-shared-worktree.json（不变）。
-#[test]
-fn cleanup_shared_worktree_by_routing_keeps_legacy_cleanup_for_legacy_routing() {
-    let root = tempdir().expect("tempdir");
-    let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let lifecycle = LifecycleStore::new(paths.clone());
-    lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: T11_PROJECT_ID.to_string(),
-            issue_id: T11_ISSUE_ID.to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "legacy-worktree".to_string(),
-            worktree_path: PathBuf::from("/tmp/legacy-worktree"),
-            base_branch: "main".to_string(),
-        })
-        .expect("seed legacy worktree");
-
-    cleanup_shared_worktree_by_routing(&paths, T11_PROJECT_ID, T11_ISSUE_ID)
-        .expect("cleanup by routing");
-
-    assert!(
-        lifecycle
-            .get_issue_shared_worktree(T11_PROJECT_ID, T11_ISSUE_ID)
-            .expect("read legacy worktree")
-            .is_none(),
-        "单仓 issue 删除必须继续走老 delete_issue_shared_worktree 逻辑"
     );
 }
 

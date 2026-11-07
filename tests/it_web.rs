@@ -3,6 +3,17 @@ use tower::ServiceExt;
 
 static TEST_CONTROLS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// 块3 夹具的 codegraph 串行化：**仍走真实 codegraph 的夹具**（其它模块的
+/// rebuild / 本模块 generate 的读侧刷新）会触发 codegraph sync，而 codegraph
+/// 的数据库锁是进程外全局文件（/tmp/.codegraph/codegraph.lock）；并行测试
+/// 同时触碰 ⇒ codegraph_sync_failed 422（aggregate_index_unavailable）。
+/// 夹具经此 crate 级互斥串行化（it_core workspace_ws_integration 同款先例）。
+///
+/// 注：`web_coding_attempt_api` 的夹具已改走**假 CodeGraph CLI**
+/// （`aggregate_index_fixture`），不再触发真实 sync ⇒ 不再占这把锁。
+pub(crate) static CODEGRAPH_FIXTURE_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 pub(crate) struct TestControlsEnvGuard {
     _guard: tokio::sync::MutexGuard<'static, ()>,
 }
@@ -106,6 +117,8 @@ pub(crate) async fn create_repository_and_wait(
     panic!("repository initialization did not reach a terminal state: {last_snapshot}");
 }
 
+#[path = "support/aggregate_index_fixture.rs"]
+mod aggregate_index_fixture;
 #[path = "it_web/candidate_attempt_metrics_api.rs"]
 mod candidate_attempt_metrics_api;
 #[path = "it_web/evidence_query.rs"]
@@ -118,6 +131,8 @@ mod pointer_publication;
 mod provider_capability_fixture;
 #[path = "it_web/provider_gateway_envelope.rs"]
 mod provider_gateway_envelope;
+#[path = "it_web/web_aggregate_index_api.rs"]
+mod web_aggregate_index_api;
 #[path = "it_web/web_api_handlers.rs"]
 mod web_api_handlers;
 #[path = "it_web/web_cli.rs"]
@@ -157,10 +172,14 @@ mod web_node_context;
 mod web_policy_runtime;
 #[path = "it_web/web_product_api.rs"]
 mod web_product_api;
+#[path = "it_web/web_project_delete_confirmation.rs"]
+mod web_project_delete_confirmation;
 #[path = "it_web/web_projection.rs"]
 mod web_projection;
 #[path = "it_web/web_provider_availability.rs"]
 mod web_provider_availability;
+#[path = "it_web/web_provider_capabilities_machine_level.rs"]
+mod web_provider_capabilities_machine_level;
 #[path = "it_web/web_provider_execution_events.rs"]
 mod web_provider_execution_events;
 #[path = "it_web/web_provider_health_api.rs"]

@@ -84,8 +84,14 @@ fn complete_work_item_artifact(goal: &str) -> String {
     )
 }
 
+/// `logical_target`：REQ-PLN-02 draft_target 铁律下 outline 与 draft 的
+/// `target_repository_id` 必须同源——进 draft 校验链（split validator 逐
+/// WI 比对 outline/draft target）的调用点传
+/// `Some(fixture_logical_member_id(&lifecycle))`；纯内存消费（拓扑排序、
+/// review 输入投影等不触及 draft 校验的链路）保持 `None`。
 fn test_work_item_plan_outline(
     dependency_graph: Vec<WorkItemOutlineDependencyEdge>,
+    logical_target: Option<crate::product::logical_codebase::LogicalRepositoryId>,
 ) -> WorkItemPlanOutline {
     WorkItemPlanOutline {
         id: "outline_001".to_string(),
@@ -96,7 +102,7 @@ fn test_work_item_plan_outline(
         strategy_summary: "test strategy".to_string(),
         work_item_outlines: vec![
             WorkItemOutline {
-                target_repository_id: None,
+                target_repository_id: logical_target,
                 outline_id: "outline_a".to_string(),
                 logical_work_item_id: "wi_a".to_string(),
                 title: "A".to_string(),
@@ -116,7 +122,7 @@ fn test_work_item_plan_outline(
                 handoff_notes: "handoff A".to_string(),
             },
             WorkItemOutline {
-                target_repository_id: None,
+                target_repository_id: logical_target,
                 outline_id: "outline_b".to_string(),
                 logical_work_item_id: "wi_b".to_string(),
                 title: "B".to_string(),
@@ -136,7 +142,7 @@ fn test_work_item_plan_outline(
                 handoff_notes: "handoff B".to_string(),
             },
             WorkItemOutline {
-                target_repository_id: None,
+                target_repository_id: logical_target,
                 outline_id: "outline_c".to_string(),
                 logical_work_item_id: "wi_c".to_string(),
                 title: "C".to_string(),
@@ -174,7 +180,7 @@ fn work_item_plan_outline_topological_order_keeps_original_order_for_ready_items
             from_outline_id: "outline_b".to_string(),
             to_outline_id: "outline_c".to_string(),
         },
-    ]);
+    ], None);
     outline.work_item_outlines[2].depends_on =
         vec!["outline_a".to_string(), "outline_b".to_string()];
 
@@ -192,7 +198,7 @@ fn work_item_plan_outline_topological_order_keeps_original_order_for_ready_items
 
 #[test]
 fn work_item_plan_outline_topological_order_uses_depends_on_as_source() {
-    let mut outline = test_work_item_plan_outline(Vec::new());
+    let mut outline = test_work_item_plan_outline(Vec::new(), None);
     outline.work_item_outlines[2].depends_on =
         vec!["outline_a".to_string(), "outline_b".to_string()];
     outline.work_item_outlines.rotate_right(1);
@@ -220,7 +226,7 @@ fn work_item_plan_outline_topological_order_rejects_cycles() {
             from_outline_id: "outline_b".to_string(),
             to_outline_id: "outline_a".to_string(),
         },
-    ]);
+    ], None);
     outline.work_item_outlines[0].depends_on = vec!["outline_b".to_string()];
     outline.work_item_outlines[1].depends_on = vec!["outline_a".to_string()];
 

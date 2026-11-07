@@ -225,85 +225,12 @@ fn latest_failed_timeline_node(
 }
 
 // ─── 批 2 P4（REQ-WIGA-10/12）：plan 阶段失败继续与只读 control 投影 ───
+//
+// 停点分类（`PlanStop` / `resolve_plan_stop` / `plan_stop_key`）与 control
+// 事实派生已**纯移动**到 `crate::web::plan_stop`（零行为变化）：HTTP control
+// 与 WS `plan_continue_available` 两面共用同一份 durable 事实判定。
 
-/// durable 事实派生的 plan 停点分类：continue-plan 按此分支，stop_key 按
-/// 同一分类派生（continue 与 control 同源，防把旧说明送给新停点）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PlanStop {
-    /// 会话 durable Failed（SC phase Failed；provider 失败收敛）。
-    FailedProvider,
-    /// 评审超限/人工停点（StoppedNeedsHuman + resumable 门快照）。
-    StoppedHumanGate,
-    /// 生成检查点派发前失败（intent NeedsHuman、无活 run）。
-    GenerationNeedsHuman,
-    /// 既有 choice/门等待（照旧走既有端点，continue 不受理）。
-    WaitingExisting,
-    /// 无可继续停点（活跃/终态/未停）。
-    None,
-}
-
-fn resolve_plan_stop(
-    record: &crate::product::models::WorkspaceSessionRecord,
-    intent_phase: Option<crate::product::models::automation::PlanGenerationPhase>,
-) -> PlanStop {
-    if record.workspace_type != WorkspaceType::WorkItemPlan {
-        return PlanStop::None;
-    }
-    match record.status {
-        WorkspaceSessionStatus::Failed => {
-            if record.single_candidate_phase == Some(SingleCandidatePhase::Failed) {
-                PlanStop::FailedProvider
-            } else {
-                PlanStop::None
-            }
-        }
-        WorkspaceSessionStatus::StoppedNeedsHuman => {
-            if record
-                .human_gate_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.resumable)
-            {
-                PlanStop::StoppedHumanGate
-            } else {
-                PlanStop::None
-            }
-        }
-        WorkspaceSessionStatus::WaitingForHuman | WorkspaceSessionStatus::ChangeRequested => {
-            PlanStop::WaitingExisting
-        }
-        _ => {
-            if intent_phase
-                == Some(crate::product::models::automation::PlanGenerationPhase::NeedsHuman)
-            {
-                PlanStop::GenerationNeedsHuman
-            } else {
-                PlanStop::None
-            }
-        }
-    }
-}
-
-fn plan_stop_key(
-    stop: &PlanStop,
-    enrollment_id: &str,
-    binding: &crate::product::models::automation::EnrollmentBindingIdentity,
-) -> Option<String> {
-    match stop {
-        PlanStop::FailedProvider => Some(crate::web::plan_generation::plan_failed_node_fact_key(
-            &binding.session_id,
-        )),
-        PlanStop::StoppedHumanGate => Some(crate::web::plan_generation::plan_gate_fact_key(
-            &binding.session_id,
-        )),
-        PlanStop::GenerationNeedsHuman => Some(
-            crate::web::plan_generation::plan_generation_failed_fact_key(
-                enrollment_id,
-                &binding.plan_id,
-            ),
-        ),
-        PlanStop::WaitingExisting | PlanStop::None => None,
-    }
-}
+use crate::web::plan_stop::{PlanStop, plan_stop_key, resolve_plan_stop};
 
 fn continue_status(
     request_command_id: &str,
@@ -768,7 +695,6 @@ pub async fn get_automation_enrollment_control(
     else {
         return Ok(Json(unmanaged()));
     };
-    let terminated_at = enrollment.terminated_at.clone();
     let binding = if enrollment.enabled {
         crate::web::advance_plan::load_current_enrollment_binding(&enrollment).ok()
     } else {
@@ -787,69 +713,21 @@ pub async fn get_automation_enrollment_control(
         }
         Err(other) => return Err(product_store_api_error(other)),
     };
-    let intent_phase = crate::web::plan_generation::generation_intent(&state, &enrollment)
-        .ok()
-        .flatten()
-        .and_then(|read| match read {
-            crate::product::issue_automation_store::PlanGenerationIntentRead::Current(intent) => {
-                Some(intent.phase)
-            }
-            crate::product::issue_automation_store::PlanGenerationIntentRead::LegacyUnbound {
-                ..
-            } => None,
-        });
-    let stop = resolve_plan_stop(&record, intent_phase);
-    let stop_key = plan_stop_key(&stop, &enrollment.enrollment_id, &binding);
-    let (stage, allowed_actions, context_required) = if terminated_at.is_some() {
-        ("terminated".to_string(), Vec::new(), false)
-    } else {
-        match &stop {
-            PlanStop::FailedProvider => (
-                "failed".to_string(),
-                vec!["continue_plan".to_string()],
-                false,
-            ),
-            PlanStop::StoppedHumanGate => (
-                "stopped_needs_human".to_string(),
-                vec!["continue_plan".to_string()],
-                true,
-            ),
-            PlanStop::GenerationNeedsHuman => (
-                "generation_needs_human".to_string(),
-                vec!["continue_plan".to_string()],
-                false,
-            ),
-            PlanStop::WaitingExisting => (
-                "waiting_for_human".to_string(),
-                vec![
-                    "choice_response".to_string(),
-                    "human_gate_feedback".to_string(),
-                    "human_gate_close".to_string(),
-                ],
-                false,
-            ),
-            PlanStop::None => (serde_stage(&record.status), Vec::new(), false),
-        }
-    };
+    let intent_phase = crate::web::plan_stop::generation_intent_phase(&paths, &enrollment);
+    // control 事实与 WS `plan_continue_available` **同源**（同一
+    // `plan_control_facts` 派生）——两面不可能互相矛盾。
+    let facts = crate::web::plan_stop::plan_control_facts(Some(&enrollment), &record, intent_phase);
     Ok(Json(crate::web::types::AutomationControlStatus {
-        managed: true,
-        binding: Some(binding),
-        plan_id: enrollment.plan_id.clone(),
-        session_id: enrollment.session_id.clone(),
-        terminated_at,
-        stop_key,
-        stage,
-        allowed_actions,
-        context_required,
+        managed: facts.managed,
+        binding: facts.binding,
+        plan_id: facts.plan_id,
+        session_id: facts.session_id,
+        terminated_at: facts.terminated_at,
+        stop_key: facts.stop_key,
+        stage: facts.stage,
+        allowed_actions: facts.allowed_actions,
+        context_required: facts.context_required,
     }))
-}
-
-/// `WorkspaceSessionStatus` 的稳定 stage 投影（与 wire snake_case 同口径）。
-fn serde_stage(status: &WorkspaceSessionStatus) -> String {
-    serde_json::to_value(status)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(test)]

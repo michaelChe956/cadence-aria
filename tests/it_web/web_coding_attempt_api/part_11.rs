@@ -278,10 +278,17 @@ fn assert_creation_winner_state(
         assert_eq!(journal.attempt.id, winner_attempt_id);
     }
 
+    // 仓维路由（REQ-COD-03）：组 attempt 冻结 target 快照后租约在
+    // shared-worktrees/{repository} 三元键记录。
+    let winner_repo = active_attempts[0]
+        .target_snapshot
+        .as_ref()
+        .expect("winner target snapshot")
+        .logical_repository_id;
     let shared = LifecycleStore::new(app_paths)
-        .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("issue shared worktree")
-        .expect("issue shared worktree");
+        .get_repo_shared_worktree("project_0001", "issue_0001", winner_repo)
+        .expect("repo shared worktree")
+        .expect("repo shared worktree");
     assert_eq!(
         shared.current_active_work_item_id.as_deref(),
         Some("work_item_0001")

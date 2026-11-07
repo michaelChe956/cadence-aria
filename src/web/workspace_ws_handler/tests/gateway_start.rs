@@ -10,10 +10,6 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
-use crate::cross_cutting::provider_availability_gate::{
-    ProviderAvailabilityGate, ProviderHealthSource,
-};
-use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::streaming_provider::{
     ProviderPermissionMode, ProviderSession, StreamingProviderInput,
 };
@@ -83,42 +79,6 @@ impl StreamingProviderAdapter for CountingStreamingAdapter {
     }
 }
 
-fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
-    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
-
-    impl ProviderHealthSource for AlwaysHealthy {
-        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
-            self.0.clone()
-        }
-
-        fn degraded(&self) -> bool {
-            false
-        }
-    }
-
-    let checked_at = chrono::Utc::now();
-    let snapshot = Arc::new(ProviderHealthSnapshot {
-        schema_version: 1,
-        generation: 1,
-        checked_at,
-        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-            .into_iter()
-            .map(|provider| ProviderHealthEntry {
-                provider,
-                command: "stub".to_string(),
-                available: true,
-                version: Some("1.0".to_string()),
-                reason_code: None,
-                reason: None,
-                checked_at,
-            })
-            .collect(),
-    });
-    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
-        snapshot,
-    ))))
-}
-
 struct GatewayFixture {
     _temp: tempfile::TempDir,
     paths: ProductAppPaths,
@@ -151,7 +111,7 @@ fn gateway_fixture_with_adapter(adapter: Arc<dyn StreamingProviderAdapter>) -> G
         paths.clone(),
         Arc::new(registry),
         Arc::new(StubSyncAdapter),
-        always_available_gate(),
+        crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
     );
 
     let aggregate_root = root.path().join("aggregate-root");

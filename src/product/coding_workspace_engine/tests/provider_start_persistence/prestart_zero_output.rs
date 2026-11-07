@@ -16,9 +16,17 @@ async fn modern_start_io_invocation_keeps_typed_error_without_empty_raw_ref() {
         )
         .expect("role run");
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
-    let provider = StartIoInvocationProvider::default();
+    let provider = std::sync::Arc::new(StartIoInvocationProvider::default());
+    // REQ-ROUTE-01：快照 attempt 的 provider run 只经 gateway 启动。
+    let engine = super::super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        event_tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (legacy_input, input) = provider_invocation_inputs(&attempt);
+    let (input, validated_input) =
+        super::prepare_coder_validated_launch(&engine, &store, &attempt, input);
     let provider_name = ProviderName::Codex;
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
@@ -27,7 +35,7 @@ async fn modern_start_io_invocation_keeps_typed_error_without_empty_raw_ref() {
             attempt: &attempt,
             node_id: "coding_invocation_start_io",
             role_run: Some(&role_run),
-            provider: &provider,
+            provider: provider.as_ref(),
             legacy_input: &legacy_input,
             input,
             provider_name: &provider_name,
@@ -37,7 +45,7 @@ async fn modern_start_io_invocation_keeps_typed_error_without_empty_raw_ref() {
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
-            validated_input: None,
+            validated_input: Some(validated_input),
         })
         .await;
 

@@ -152,6 +152,8 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         automation: Some(
             cadence_aria::product::models::automation::AutomationOwnership::client_default(),
         ),
+        // REQ-HGC-04：「继续自动化」入口事实——引擎自建帧不判定，缺省=未知。
+        plan_continue_available: None,
         // A1c（Task 2.2）：无恢复时省略，roundtrip 保持 None。
         lc_resume_recovery: None,
         structural_governance: None,

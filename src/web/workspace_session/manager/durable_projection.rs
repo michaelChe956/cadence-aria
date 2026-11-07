@@ -173,6 +173,17 @@ pub(crate) fn load_durable_workspace_projection(
             *automation = None;
         }
     }
+    // REQ-HGC-04：durable 投影（第 12 处注入点）同样携带「继续自动化」入口
+    // 事实——否则 observer 重建 / 刷新路径发 None，门卡变假指引。
+    let plan_continue_available =
+        crate::web::plan_stop::plan_continue_available_for_record(app_paths, &latest_record);
+    if let WsOutMessage::SessionState {
+        plan_continue_available: slot,
+        ..
+    } = &mut session_state
+    {
+        *slot = plan_continue_available;
+    }
     Ok(DurableWorkspaceProjection {
         session_state,
         pending_choice: engine.pending_author_choice_request_message(),

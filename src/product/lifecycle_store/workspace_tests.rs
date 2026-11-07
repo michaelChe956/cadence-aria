@@ -187,13 +187,15 @@ fn strip_review_identity_field(session_path: &std::path::Path) {
 }
 
 /// 建一个多仓（lc）issue 并返回其 id：形态判据是
-/// `IssueRecord.logical_codebase_id == Some(_)`。
+/// `IssueRecord.logical_codebase_id` 归属非 legacy 别名逻辑代码库。
 fn create_logical_codebase_issue(paths: &ProductAppPaths) -> String {
     crate::product::issue_store::IssueStore::new(paths.clone())
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: Some("logical_codebase_0001".to_string()),
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                "project_0001",
+            ),
             base_branch: None,
             title: "logical issue".to_string(),
             description: None,

@@ -120,22 +120,21 @@ async fn build_workspace_context_message(
         WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
     }
     let issue = IssueStore::new(app_paths.clone()).get(&session.project_id, &session.issue_id)?;
-    // 方案 X 阶段1：按 RepositoryRouting 分流。Logical（聚合代码库）Story/Design 无单一
-    // 物理仓库，以聚合根 cwd 为仓库上下文并注入聚合视野 prompt；Legacy（单仓）保持原
-    // 物理仓库解析，向后兼容；FailClosed 提前拦截报稳定错误码 repository_routing_*。
+    // 方案 X 阶段1收敛后（两态）：Logical（聚合代码库）Story/Design 无单一
+    // 物理仓库，以聚合根 cwd 为仓库上下文并注入聚合视野 prompt；无归属且无
+    // legacy 别名 record 的旧数据 → FailClosed（稳定码 repository_routing_*），
+    // 绝不静默回退物理仓库。
     // C1 修复：routing 判定在 workspace_entity_context 之前，Logical Story/Design 传
     // logical_aggregate 标志（Design 分支不再依赖 issue.repo_id，多仓 issue 可达）。
     // Task 7 扩展：WorkItemPlan 同样走聚合视野（无单一物理仓库，entity 用空串占位，
     // prompt 注入 target 集合），解决“WorkItemPlan+Logical 仍依赖 issue.repo_id”遗留。
     // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy 布局
-    // 冲突 fail-closed）；无归属且无 legacy 别名 record 的旧数据回退 Legacy 兼容
-    // 分支，判定仍复用 `RepositoryRouting::classify`（单元语义不变）。
+    // 冲突 fail-closed）；resolver 无归属解析（None）统一走 `unbound_issue()`
+    // fail-closed 形态，判定仍复用 `RepositoryRouting::classify`（单元语义不变）。
     let routing = match RepositoryAuthorityResolver::new(app_paths.clone())
         .resolve_for_issue(&session.project_id, &session.issue_id)?
     {
-        None => RepositoryRouting::Legacy {
-            repository_id: String::new(),
-        },
+        None => RepositoryRouting::unbound_issue(),
         Some(resolution) => RepositoryRouting::classify(resolution.manifest, resolution.selection),
     };
     let aggregate_planning = match &routing {

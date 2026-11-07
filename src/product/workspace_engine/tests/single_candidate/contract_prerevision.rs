@@ -85,8 +85,8 @@ mod contract_prerevision {
         let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 missing_contract_candidate(1),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -187,8 +187,8 @@ mod contract_prerevision {
         engine
             .complete_single_candidate_work_item_plan_author(
                 clean_candidate(),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -226,8 +226,8 @@ mod contract_prerevision {
         engine
             .complete_single_candidate_work_item_plan_author(
                 missing_contract_candidate(1),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await
@@ -243,8 +243,8 @@ mod contract_prerevision {
         engine
             .complete_single_candidate_work_item_plan_author(
                 missing_contract_candidate(2),
-                "repo_fixture".to_string(),
-                None,
+                fixture_sc_target(&engine),
+                fixture_sc_member_targets(&engine),
                 false,
             )
             .await

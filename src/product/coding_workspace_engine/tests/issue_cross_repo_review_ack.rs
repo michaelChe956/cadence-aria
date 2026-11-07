@@ -322,7 +322,7 @@ fn cross_repo_group_readiness_fixture() -> super::group_final_readiness_support:
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: Some(CROSS_REPO_LC_ID.to_string()),
+            logical_codebase_id: CROSS_REPO_LC_ID.to_string(),
             title: "issue".to_string(),
             description: None,
             change_id: None,

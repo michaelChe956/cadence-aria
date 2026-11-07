@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
@@ -25,6 +26,7 @@ use cadence_aria::cross_cutting::streaming_provider::{
     ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::logical_codebase::environment_probe::AGGREGATE_SKILL_COMMANDS;
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
@@ -105,18 +107,35 @@ impl BoundedCommandRunner for P0CommandRunner {
 const ROOT_POLICY_TEST_AGENTS: &str =
     "# aggregate root rules\n\n- 根入口规则：成员仓统一遵守语言与工程规范。\n";
 const ROOT_POLICY_TEST_LANGUAGE: &str = "# 语言规则\n\n- 必须使用中文回答。\n";
+/// `/project-rules-examples` 的真实落盘面（`cadence/project-rules/examples`
+/// ——见 `ROOT_RECIPE_ALLOWLIST` 的实测证据）。
+const ROOT_POLICY_TEST_EXAMPLES: &str = "# 根规则示例\n\n- 示例：成员仓统一遵守根规则。\n";
 
 /// #8（aggregate-policy-root-publication）Task 5：P0 链路的生产同构 provider。
 ///
 /// 末命令（`OpenspecAndExamples`）发布收口要求聚合根落盘根政策正文
 /// （根 `AGENTS.md` + `.claude/rules/language.md`）；P0 fixture 的 fake
 /// provider 不生成材料会使 publication fail-closed（operation Failed）。
-/// 这里照 `trust_route`/`root_safety` 先例，在真正执行 RuleAndMcpConfig
-/// 命令的时机（prompt 含 `/rule-config --no-interrupt`）向聚合根落盘规则
-/// 材料，其余行为原样委托默认 fake streaming provider——注入口只存在于
-/// 测试依赖图。
+///
+/// REQ-BOOT-17（root recipe turn 零变更 ⇒ 该 step 判失败）：本 fixture 按
+/// **真实四命令的落盘面**同构——每个 provider turn 都必须产生真实文件变更，
+/// 落盘面取自 `ROOT_RECIPE_ALLOWLIST` 的实测证据：
+/// - pre_check → `.claude/settings.json`（真实 pre-check 写 `.claude/**`）；
+/// - rule_config → 根规则材料 `AGENTS.md` + `.claude/rules/language.md`
+///   （真实 rule-config 写 `AGENTS.md` / `.claude/rules`）；
+/// - mcp_configuration → `.mcp.json`（真实 mcp-configuration 写 `.mcp.json`）；
+/// - project_rules_examples → `cadence/project-rules/examples`。
+///
+/// turn 的识别按 **prompt 里的真实 recipe 命令**（命令文本取自
+/// `RepositoryInitializationStepKind::command()`，不硬编码），落盘位置用
+/// provider 自己的 spawn cwd（= canonical 聚合根，与命令审计面同源），内容带
+/// turn 序号 ⇒ 同一 turn 重复执行（重试/续跑）也是真实变更，夹具绝不产出
+/// 「零变更」turn。其余行为原样委托默认 fake streaming provider——注入口只
+/// 存在于测试依赖图。
 struct RootRecipePublishingProvider {
     inner: Arc<dyn StreamingProviderAdapter>,
+    /// provider turn 计数（内容带序号 ⇒ 重复执行仍是真实变更）。
+    turns: AtomicUsize,
 }
 
 #[async_trait]
@@ -126,41 +145,72 @@ impl StreamingProviderAdapter for RootRecipePublishingProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        publish_root_recipe_materials(&input.working_dir, &input.prompt);
+        let turn = self.turns.fetch_add(1, Ordering::SeqCst);
+        publish_root_recipe_materials(&input.working_dir, &input.prompt, turn);
         self.inner.start(input, cancel).await
     }
 
     /// 逻辑代码库（LC）路径：gateway `start_streaming` 只经 validated 分发。
-    /// 先用启动事实投影复刻 root recipe 材料发布（RuleAndMcpConfig 时机的
-    /// recipe 命令），再恒等透传 validated 载体给 inner（fake 语义不变）。
+    /// 先用启动事实投影复刻 root recipe 材料发布（按 prompt 里的真实命令
+    /// 识别当前 turn），再恒等透传 validated 载体给 inner（fake 语义不变）。
     async fn start_validated(
         &self,
         validated: ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let view = validated.launch_view();
-        publish_root_recipe_materials(view.working_dir, view.prompt);
+        let turn = self.turns.fetch_add(1, Ordering::SeqCst);
+        publish_root_recipe_materials(view.working_dir, view.prompt, turn);
         self.inner.start_validated(validated, cancel).await
     }
 }
 
-/// RuleAndMcpConfig 时机由 provider 生成的聚合根政策材料（本 target 的
-/// 受控 fixture：内容固定，发布时机与生产同构）。
-fn publish_root_recipe_materials(root: &Path, prompt: &str) {
+/// 真实四命令的落盘面（REQ-BOOT-17 同构）：每个 provider turn 都必须产生真实
+/// 文件变更；内容带 turn 序号——同一 turn 重复执行（重试/续跑）也是真实变更。
+fn publish_root_recipe_materials(root: &Path, prompt: &str, turn: usize) {
     use cadence_aria::product::repository_store::RepositoryInitializationStepKind as RepoStep;
-    if !RepoStep::RuleConfig
-        .command()
-        .is_some_and(|command| prompt.contains(command))
-    {
-        return;
+    let runs = |kind: RepoStep| {
+        kind.command()
+            .is_some_and(|command| prompt.contains(command))
+    };
+    if runs(RepoStep::PreCheck) {
+        let claude_dir = root.join(".claude");
+        fs::create_dir_all(&claude_dir).expect("create root .claude dir");
+        fs::write(
+            claude_dir.join("settings.json"),
+            format!("{{\"pre_check_turn\":{turn}}}\n"),
+        )
+        .expect("write root claude settings");
     }
-    fs::write(root.join("AGENTS.md"), ROOT_POLICY_TEST_AGENTS).expect("write root AGENTS.md");
-    fs::create_dir_all(root.join(".claude").join("rules")).expect("create root rules dir");
-    fs::write(
-        root.join(".claude").join("rules").join("language.md"),
-        ROOT_POLICY_TEST_LANGUAGE,
-    )
-    .expect("write root language rule");
+    if runs(RepoStep::RuleConfig) {
+        fs::write(
+            root.join("AGENTS.md"),
+            format!("{ROOT_POLICY_TEST_AGENTS}\n- fixture provider turn {turn}.\n"),
+        )
+        .expect("write root AGENTS.md");
+        fs::create_dir_all(root.join(".claude").join("rules")).expect("create root rules dir");
+        fs::write(
+            root.join(".claude").join("rules").join("language.md"),
+            format!("{ROOT_POLICY_TEST_LANGUAGE}\n- fixture provider turn {turn}.\n"),
+        )
+        .expect("write root language rule");
+    }
+    if runs(RepoStep::McpConfiguration) {
+        fs::write(
+            root.join(".mcp.json"),
+            format!("{{\"mcp_configuration_turn\":{turn}}}\n"),
+        )
+        .expect("write root .mcp.json");
+    }
+    if runs(RepoStep::ProjectRulesExamples) {
+        let examples = root.join("cadence").join("project-rules").join("examples");
+        fs::create_dir_all(&examples).expect("create project rules examples dir");
+        fs::write(
+            examples.join("examples.md"),
+            format!("{ROOT_POLICY_TEST_EXAMPLES}\n- fixture provider turn {turn}.\n"),
+        )
+        .expect("write project rules examples");
+    }
 }
 
 /// P0 production-entrypoint fixture: after the real filesystem/Git setup every
@@ -215,8 +265,19 @@ impl P0HttpFixture {
         // production WebAppState then supplies its normal aggregate
         // coordinator/index/gateway wiring; its fake runtime routes provider
         // turns through the existing fake registry without external calls.
-        fs::create_dir_all(root.join(".agents/Cadence-skills/cadence-init/skills/p0-http-chain"))
+        let skills_source = root.join(".agents/Cadence-skills/cadence-init/skills");
+        fs::create_dir_all(skills_source.join("p0-http-chain"))
             .expect("seed local Cadence skills source");
+        // machine_skills 后的链接层校验（ensure_skills_commands_linked）要求
+        // shared/codex/claude 三层都能解析四条聚合命令——同步器从本地源建链,
+        // 源里缺任一命令即在 member_index 前以 skills_commands_missing 阻断
+        // （与 it_web provider_capability_fixture::seed_local_skills_source 同构）。
+        for command in AGGREGATE_SKILL_COMMANDS {
+            let command_source = skills_source.join(command);
+            fs::create_dir_all(&command_source).expect("seed aggregate skill source dir");
+            fs::write(command_source.join("SKILL.md"), format!("# {command}\n"))
+                .expect("write aggregate skill SKILL.md");
+        }
         let command_runner: Arc<dyn BoundedCommandRunner> = Arc::new(P0CommandRunner {
             inner: TokioBoundedCommandRunner,
         });
@@ -247,7 +308,10 @@ impl P0HttpFixture {
             if name == ProviderName::ClaudeCode {
                 registry.register(
                     name,
-                    Arc::new(RootRecipePublishingProvider { inner: provider }),
+                    Arc::new(RootRecipePublishingProvider {
+                        inner: provider,
+                        turns: AtomicUsize::new(0),
+                    }),
                 );
             } else {
                 registry.register(name, provider);
@@ -286,6 +350,15 @@ impl P0HttpFixture {
             .as_str()
             .expect("project id")
             .to_string();
+        // 创建期 provider 选择门（判定前移）要求被选 provider 能力已
+        // Confirmed ⇒ 夹具显式物化「已探测」事实（capability 记录作用域 =
+        // 项目级全局）。本夹具走**生产接线**的初始化链：root-recipe 相位
+        // 只接受固定 Claude provider，故只种 ClaudeCode（四家全 Confirmed
+        // 会让选择器按 owner 序选中 Pi 并在 recipe 相位被拒）。
+        crate::capability_fixture::seed_confirmed_claude_capability(
+            &ProductAppPaths::new(self.root.join(".aria")),
+            &project_id,
+        );
         let (status, codebase) = request(
             &self.app,
             Method::POST,

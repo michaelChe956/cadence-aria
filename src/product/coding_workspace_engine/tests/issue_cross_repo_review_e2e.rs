@@ -118,7 +118,7 @@ fn three_repo_delivery_fixture() -> (
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: None,
-            logical_codebase_id: Some("logical_codebase_t19_e2e".to_string()),
+            logical_codebase_id: "logical_codebase_t19_e2e".to_string(),
             title: "三仓公告管理升级".to_string(),
             description: None,
             change_id: None,

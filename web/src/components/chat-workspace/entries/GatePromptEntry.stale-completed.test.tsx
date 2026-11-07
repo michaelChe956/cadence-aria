@@ -7,7 +7,13 @@
 // 本文件钉住过期门卡文案的两条分流：
 // 1. 会话已成功完成 → 「已确认完成/历史记录/无需处理」，无「终止此门」「重新发起」
 //    「不再接收操作」，「确认当前版本」仍禁用（不得把已完成误判成可操作）。
-// 2. 其余过期情形（阶段已推进/会话失败）→ 既有措辞一字不改。
+// 2. 其余过期情形（阶段已推进/会话失败）→ REQ-HGC-04 起按 **durable 状态**
+//    分流（推进到别的门 → 以最新门卡为准；本轮失败 → 指向「继续自动化」
+//    重试），旧措辞「只能终止此门后重新发起」退役。
+//    ⚠️ 本文件原属 C-3「不得改」清单（保护的是上面第 1 条已确认完成场景——
+//    该场景的断言**逐字未动**）；第 2 条的两条文案断言因 REQ-HGC-04 的分流
+//    文案（Plan 5-D 分流表 + 5-E 消费点）必然失效，按 Plan 要求的文案变更
+//    更新（详见交付说明的「既有测试断言变更」小节）。
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatEntry } from "../../../state/chat-entries";
@@ -90,7 +96,7 @@ describe("过期门卡文案：会话已成功完成 → 直说无需处理", ()
     expect(gateActions.terminate).not.toHaveBeenCalled();
   });
 
-  it("会话未完成（仍在等人工）时，过期门卡沿用既有措辞", () => {
+  it("会话未完成（仍在等人工）时，过期门卡按 durable 分流指向最新门卡", () => {
     useWorkspaceStore.setState({
       workspaceType: "work_item_plan",
       flowKind: "single_candidate",
@@ -104,16 +110,21 @@ describe("过期门卡文案：会话已成功完成 → 直说无需处理", ()
 
     render(<GatePromptEntry entry={staleRoundOneGateEntry()} actions={actions()} />);
 
+    // REQ-HGC-04：推进到别的门 → 以页面最新的一张门卡为准；终止保留为**可选**
+    // 出口（按钮仍在），但不得表述为唯一出路（旧措辞退役）。
     expect(screen.getByTestId("gate-confirm-blocked-reason")).toHaveTextContent(
-      "会话已进入下一阶段，这扇门不再接收操作；可终止此门后重新发起",
+      "暂不可确认：会话已进入下一阶段，这扇门不再接收操作",
     );
     expect(screen.getByTestId("gate-next-step")).toHaveTextContent(
-      "会话已进入下一阶段，这扇门不再接收操作；此时只能终止此门后重新发起",
+      "以页面最新的一张门卡为准",
+    );
+    expect(screen.getByTestId("gate-next-step")).not.toHaveTextContent(
+      "只能终止此门后重新发起",
     );
     expect(screen.getByRole("button", { name: "终止此门" })).toBeVisible();
   });
 
-  it("会话失败时，过期门卡沿用既有措辞", () => {
+  it("会话失败时，过期门卡按 durable 分流指向「继续自动化」重试", () => {
     useWorkspaceStore.setState({
       workspaceType: "work_item_plan",
       flowKind: "single_candidate",
@@ -128,10 +139,14 @@ describe("过期门卡文案：会话已成功完成 → 直说无需处理", ()
     render(<GatePromptEntry entry={staleRoundOneGateEntry()} actions={actions()} />);
 
     expect(screen.getByTestId("gate-confirm-blocked-reason")).toHaveTextContent(
-      "会话已进入下一阶段，这扇门不再接收操作；可终止此门后重新发起",
+      "暂不可确认：会话已进入下一阶段，这扇门不再接收操作",
     );
     expect(screen.getByTestId("gate-next-step")).toHaveTextContent(
-      "此时只能终止此门后重新发起",
+      "这一轮自动化跑失败了",
+    );
+    expect(screen.getByTestId("gate-next-step")).toHaveTextContent("继续自动化");
+    expect(screen.getByTestId("gate-next-step")).not.toHaveTextContent(
+      "只能终止此门后重新发起",
     );
   });
 });

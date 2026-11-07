@@ -208,20 +208,26 @@ async fn workspace_ws_provider_selection_persists_across_reconnect() {
 #[tokio::test]
 async fn workspace_ws_start_generation_includes_context_note_in_author_prompt() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture_with_providers(&root, "fake", "fake", 1).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）；
+    // 本用例 review 未启用，reviewer 永不启动。
+    create_workspace_session_fixture_with_providers(&root, "claude_code", "fake", 1).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ScriptedStreamingProvider::new(
             [VALID_STORY_SPEC],
             author_prompts.clone(),
         )),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -244,7 +250,7 @@ async fn workspace_ws_start_generation_includes_context_note_in_author_prompt() 
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
+                author: ProviderName::ClaudeCode,
                 reviewer: None,
                 review_rounds: 0,
                 permission_modes:
@@ -372,12 +378,16 @@ async fn workspace_ws_start_generation_on_confirmed_session_is_rejected_without_
 async fn http_confirm_without_with_review_finalizes_directly_when_review_enabled() {
     for with_review_field in [None, Some(false)] {
         let root = tempdir().expect("root");
-        create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+        // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+        // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+        // reviewer 侧保持 Codex：本用例断言「未显式送审不得启动 reviewer」，
+        // reviewer 永不启动，故不进 gateway。
+        create_workspace_session_fixture_with_providers(&root, "claude_code", "codex", 1).await;
         let author_prompts = Arc::new(Mutex::new(Vec::new()));
         let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
         let mut registry = ProviderRegistry::new();
         registry.register(
-            ProviderName::Fake,
+            ProviderName::ClaudeCode,
             Arc::new(ScriptedStreamingProvider::new(
                 [VALID_STORY_SPEC],
                 author_prompts,
@@ -390,10 +400,13 @@ async fn http_confirm_without_with_review_finalizes_directly_when_review_enabled
                 reviewer_prompts.clone(),
             )),
         );
-        let app = build_web_router(WebAppState::with_provider_registry(
-            root.path().to_path_buf(),
-            WebRuntime::new_fake(root.path().to_path_buf()),
-            registry,
+        let app = build_web_router(with_available_provider_health(
+            WebAppState::with_provider_registry(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+                registry,
+            ),
+            root.path(),
         ));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
@@ -409,7 +422,7 @@ async fn http_confirm_without_with_review_finalizes_directly_when_review_enabled
             &mut ws,
             &WsInMessage::StartGeneration {
                 provider_config: ProviderConfigSnapshot {
-                    author: ProviderName::Fake,
+                    author: ProviderName::ClaudeCode,
                     reviewer: Some(ProviderName::Codex),
                     review_rounds: 1,
                     permission_modes:
@@ -493,28 +506,37 @@ async fn http_confirm_without_with_review_finalizes_directly_when_review_enabled
 #[tokio::test]
 async fn http_confirm_on_story_author_confirm_starts_reviewer_then_finalizes() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）；
+    // reviewer 侧由 Codex 改挂 Pi：gateway 对 Codex/KimiCode 强制**用户级
+    // workspace trust**（`provider_trust::requires_workspace_trust`，读真实
+    // HOME 的 ~/.codex/config.toml），集成测试无法（也不应）写用户 home；
+    // Pi 无该前置，且 reviewer 替身与 author 替身仍能各自独立注册。
+    create_workspace_session_fixture_with_providers(&root, "claude_code", "pi", 1).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
     let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ScriptedStreamingProvider::new(
             [VALID_STORY_SPEC],
             author_prompts,
         )),
     );
     registry.register(
-        ProviderName::Codex,
+        ProviderName::Pi,
         Arc::new(ScriptedStreamingProvider::new(
             ["审核通过。\n```json\n{\"verdict\":\"pass\",\"summary\":\"可进入人工确认\"}\n```"],
             reviewer_prompts.clone(),
         )),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -530,8 +552,8 @@ async fn http_confirm_on_story_author_confirm_starts_reviewer_then_finalizes() {
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Codex),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Pi),
                 review_rounds: 1,
                 permission_modes:
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
@@ -620,12 +642,16 @@ async fn http_confirm_on_story_author_confirm_starts_reviewer_then_finalizes() {
 #[tokio::test]
 async fn http_confirm_on_story_without_reviewer_finalizes_without_review_node() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    // reviewer 侧保持 Codex：本用例断言 review 未启用时不得启动 reviewer，
+    // reviewer 永不启动，故不进 gateway。
+    create_workspace_session_fixture_with_providers(&root, "claude_code", "codex", 1).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
     let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ScriptedStreamingProvider::new(
             [VALID_STORY_SPEC],
             author_prompts,
@@ -638,10 +664,13 @@ async fn http_confirm_on_story_without_reviewer_finalizes_without_review_node() 
             reviewer_prompts.clone(),
         )),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -657,7 +686,7 @@ async fn http_confirm_on_story_without_reviewer_finalizes_without_review_node() 
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
+                author: ProviderName::ClaudeCode,
                 reviewer: None,
                 review_rounds: 0,
                 permission_modes:
@@ -757,22 +786,30 @@ async fn http_confirm_on_story_without_reviewer_finalizes_without_review_node() 
 #[tokio::test]
 async fn http_confirm_during_cross_review_is_rejected_without_finalizing() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）；
+    // reviewer 侧由 Codex 改挂 Pi：gateway 对 Codex/KimiCode 强制**用户级
+    // workspace trust**（读真实 HOME 的 ~/.codex/config.toml），集成测试
+    // 无法（也不应）写用户 home；Pi 无该前置。
+    create_workspace_session_fixture_with_providers(&root, "claude_code", "pi", 1).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ScriptedStreamingProvider::new(
             [VALID_STORY_SPEC],
             author_prompts,
         )),
     );
     // 评审 provider 挂起不返回：把第二次 confirm 钉在「评审在途」窗口内。
-    registry.register(ProviderName::Codex, Arc::new(HangingStreamingProvider));
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    registry.register(ProviderName::Pi, Arc::new(HangingStreamingProvider));
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -788,8 +825,8 @@ async fn http_confirm_during_cross_review_is_rejected_without_finalizing() {
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Codex),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Pi),
                 review_rounds: 1,
                 permission_modes:
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
@@ -898,20 +935,28 @@ async fn http_confirm_during_cross_review_is_rejected_without_finalizing() {
 #[tokio::test]
 async fn http_confirm_after_fake_reviewer_skip_finalizes_through_engine() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture_with_providers(&root, "fake", "fake", 1).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    // reviewer 侧**必须保持 Fake**：本用例锚的正是生产 `start_review` 的
+    // Fake 快速路径（`decisions.rs`：reviewer==Fake ⇒ ReviewerRun=Skipped
+    // → HumanConfirm），该路径根本不启动 provider、不经 gateway。
+    create_workspace_session_fixture_with_providers(&root, "claude_code", "fake", 1).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ScriptedStreamingProvider::new(
             [VALID_STORY_SPEC],
             author_prompts,
         )),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -927,7 +972,7 @@ async fn http_confirm_after_fake_reviewer_skip_finalizes_through_engine() {
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
+                author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes:

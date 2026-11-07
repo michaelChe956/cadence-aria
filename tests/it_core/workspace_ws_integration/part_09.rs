@@ -33,20 +33,27 @@ async fn recv_stage_fail_on_protocol_error(
 #[tokio::test]
 async fn story_author_confirm_request_revision_runs_revision_and_returns_to_gate() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）。
+    // reviewer 侧保持 Fake：本用例走「作者反馈修订」分流，评审永不启动，
+    // 故 reviewer 不进 gateway。
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ScriptedStreamingProvider::new(
             [VALID_STORY_SPEC, VALID_STORY_SPEC],
             author_prompts.clone(),
         )),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -62,7 +69,7 @@ async fn story_author_confirm_request_revision_runs_revision_and_returns_to_gate
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
+                author: ProviderName::ClaudeCode,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
                 permission_modes:
@@ -160,28 +167,36 @@ async fn story_author_confirm_request_revision_runs_revision_and_returns_to_gate
 #[tokio::test]
 async fn post_review_request_revision_uses_author_feedback_prompt_not_reviewer_repair() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture_with_providers(&root, "fake", "codex", 1).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此）——
+    // author 侧改挂 ClaudeCode 名 + start_validated 复刻（族C/族D 已验证手法）；
+    // reviewer 侧由 Codex 改挂 Pi：gateway 对 Codex/KimiCode 强制**用户级
+    // workspace trust**（读真实 HOME 的 ~/.codex/config.toml），集成测试
+    // 无法（也不应）写用户 home；Pi 无该前置。
+    create_workspace_session_fixture_with_providers(&root, "claude_code", "pi", 1).await;
     let author_prompts = Arc::new(Mutex::new(Vec::new()));
     let reviewer_prompts = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(ScriptedStreamingProvider::new(
             [VALID_STORY_SPEC, VALID_STORY_SPEC],
             author_prompts.clone(),
         )),
     );
     registry.register(
-        ProviderName::Codex,
+        ProviderName::Pi,
         Arc::new(ScriptedStreamingProvider::new(
             ["审核意见：第二段缺少冲突。\n```json\n{\"verdict\":\"revise\",\"summary\":\"需要返修\"}\n```"],
             reviewer_prompts.clone(),
         )),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -197,8 +212,8 @@ async fn post_review_request_revision_uses_author_feedback_prompt_not_reviewer_r
         &mut ws,
         &WsInMessage::StartGeneration {
             provider_config: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Codex),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::Pi),
                 review_rounds: 1,
                 permission_modes:
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),

@@ -1,4 +1,6 @@
 import { lazy, Suspense } from "react";
+// ★必须先于 @monaco-editor/react 初始化 loader（见 monaco-local-setup.ts 的说明）★
+import "./monaco-local-setup";
 import { useSystemMonacoTheme } from "./monaco-theme";
 
 const Editor = lazy(() =>
@@ -50,6 +52,8 @@ function ViewerSkeleton({ height }: { height: string }) {
       data-testid="monaco-viewer-skeleton"
       style={{ height }}
       className="animate-pulse rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)]"
-    />
+    >
+      <span className="px-3 py-2 text-sm text-[var(--aria-ink-muted)]">正在加载内容…</span>
+    </div>
   );
 }

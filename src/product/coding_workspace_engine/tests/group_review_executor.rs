@@ -72,6 +72,7 @@ impl StreamingProviderAdapter for GroupReviewCancellationProvider {
 
 fn executor_fixture(
     cancellation: Option<CancellationToken>,
+    provider: Arc<dyn StreamingProviderAdapter>,
 ) -> (
     tempfile::TempDir,
     CodingWorkspaceEngine,
@@ -83,6 +84,14 @@ fn executor_fixture(
     fs::create_dir_all(&worktree).expect("worktree");
     init_test_git_repo(&worktree);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：逻辑 target 的 provider run 只能经 LC provider
+    // gateway 启动，凭证是「LC 权威 + 冻结 target_snapshot」。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let mut attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -97,7 +106,7 @@ fn executor_fixture(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -122,7 +131,12 @@ fn executor_fixture(
         )
         .expect("role run");
     let (event_tx, _event_rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), event_tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        event_tx,
+        "project_0001",
+        provider,
+    );
     let engine = match cancellation {
         Some(cancellation) => engine.with_cancellation(cancellation),
         None => engine,
@@ -132,16 +146,20 @@ fn executor_fixture(
 
 #[tokio::test]
 async fn real_group_review_executor_returns_provider_full_output() {
-    let (_root, engine, attempt, role_run) = executor_fixture(None);
-    let provider = GroupReviewOutputProvider;
+    let provider = Arc::new(GroupReviewOutputProvider);
+    let (_root, engine, attempt, role_run) = executor_fixture(None, provider.clone());
     let executor = RealGroupReviewExecutor::new(
         &engine,
         attempt,
-        &provider,
+        provider.as_ref(),
         "group_review_node".to_string(),
         role_run,
         ProviderName::Codex,
-    );
+    )
+    // LC gateway spawn 前守卫:Reviewer 是策略角色,必须携带 ReviewerVerify
+    // 窗口合同(无窗 legacy 路径不伪铸 policy,由启动检查拒绝——fake
+    // provider 场景下即被通用守卫拦下)。夹具按生产语义绑定评审窗口。
+    .with_review_window_id("w-group-review-executor-fixture");
 
     let result = executor.execute("shard prompt").await.expect("execute");
 
@@ -152,19 +170,21 @@ async fn real_group_review_executor_returns_provider_full_output() {
 #[tokio::test]
 async fn real_group_review_executor_maps_engine_cancellation_to_user_cancelled() {
     let cancellation = CancellationToken::new();
-    let (_root, engine, attempt, role_run) = executor_fixture(Some(cancellation.clone()));
     let probe = Arc::new(GroupReviewCancellationProbe::default());
-    let provider = GroupReviewCancellationProvider {
+    let provider = Arc::new(GroupReviewCancellationProvider {
         probe: probe.clone(),
-    };
+    });
+    let (_root, engine, attempt, role_run) =
+        executor_fixture(Some(cancellation.clone()), provider.clone());
     let executor = RealGroupReviewExecutor::new(
         &engine,
         attempt,
-        &provider,
+        provider.as_ref(),
         "group_review_node".to_string(),
         role_run,
         ProviderName::Codex,
-    );
+    )
+    .with_review_window_id("w-group-review-executor-fixture");
 
     let execute = executor.execute("cancel prompt");
     let cancel = async {

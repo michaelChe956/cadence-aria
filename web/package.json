@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "lint": "pnpm dlx oxlint@1.90.0 src",
     "test": "vitest --run",
     "test:e2e": "playwright test"
   },

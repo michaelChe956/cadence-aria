@@ -1,5 +1,6 @@
 use axum::http::{Method, StatusCode};
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::product::issue_store::IssueStore;
 use cadence_aria::product::json_store::write_json;
 use cadence_aria::product::logical_codebase::{
     CodebaseMemberRecord, LogicalCodebaseManifest, LogicalCodebaseRecord, LogicalCodebaseStore,
@@ -71,10 +72,10 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
     logical
         .save_member("project_0001", &member(id, "api"))
         .unwrap();
-    // PIB（REQ-PIB-01）：legacy 单仓 issue 创建经 REST 锁定基准分支（默认链
-    // main→master；git 仓库不可用 fail-closed 422）——夹具须为可解析的真实
-    // git 仓库，同 planning.rs LegacyPlanningHttpFixture / it_web
-    // git_repo_with_branches 同构。
+    // 单仓形态夹具：project_0002 只有 repos.json 物理仓投影（指向真实 git
+    // 仓库，与 planning.rs LegacyPlanningHttpFixture 同构），无任何 LC 权威
+    // 记录（REQ-PIB-01 的创建期分支锁定已随单仓创建入口移除，git 仓库仅
+    // 保持投影形状真实）。
     let legacy_root = root.path().join("legacy");
     std::fs::create_dir_all(&legacy_root).unwrap();
     crate::planning::git(&legacy_root, &["init", "-q", "-b", "main"]);
@@ -176,22 +177,32 @@ async fn single_repo_rejects_logical_codebase_routes_without_persisting_artifact
         "single-repo guard must run before any manifest, batch, index, or operation is persisted"
     );
 
-    let (status, issue) = request(
-        &app,
-        Method::POST,
-        "/api/projects/project_0002/issues",
-        json!({
-            "repository_id": "repository_legacy",
-            "title": "legacy issue"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "legacy issue response: {issue}");
+    // REQ-ROUTE-02（块3 4.4③）：单仓 issue 创建入口已删除——缺
+    // `logical_codebase_id` 的提交在 HTTP 面被稳定码
+    // `issue_not_bound_to_logical_codebase`（400）拒绝，不落 serde 通用 422。
+    // 与改造前「legacy 单仓创建成功且不写 codebase-selection.json」同钉
+    // 「单仓形态不产出逻辑代码库工件」红线；改造后更强——issue 本身也
+    // 不落盘（fail-closed 早于任何 store 写入）。
+    assert_error(
+        request(
+            &app,
+            Method::POST,
+            "/api/projects/project_0002/issues",
+            json!({
+                "repository_id": "repository_legacy",
+                "title": "legacy issue"
+            }),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "issue_not_bound_to_logical_codebase",
+    );
     assert!(
-        !paths
-            .codebase_selection_path("project_0002", issue["issue_id"].as_str().unwrap())
-            .exists(),
-        "single-repository issue creation must not write codebase-selection.json"
+        IssueStore::new(paths.clone())
+            .list("project_0002")
+            .unwrap()
+            .is_empty(),
+        "rejected single-repository creation must not persist any issue record"
     );
 }
 

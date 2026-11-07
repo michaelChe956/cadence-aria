@@ -364,7 +364,7 @@ fn two_repo_lc_fixture() -> TwoRepoLcFixture {
         .create(CreateProductIssueInput {
             project_id: project_id.clone(),
             repo_id: None,
-            logical_codebase_id: Some(legacy_lc),
+            logical_codebase_id: legacy_lc,
             base_branch: None,
             title: "公告管理升级（跨 member-a / member-b）".to_string(),
             description: Some("两仓协同的公告管理升级需求".to_string()),

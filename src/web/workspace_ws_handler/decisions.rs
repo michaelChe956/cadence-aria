@@ -127,6 +127,8 @@ pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
             //（裸帧携带引擎缺省 client/off 会让前端 automationManaged
             // 误判、重现接管死路，见真实链 2026-10-24）。
             manager.project_automation_ownership(&mut state);
+            // REQ-HGC-04：修订确认/取消后的补帧同样携带「继续自动化」入口事实。
+            manager.project_plan_continue_available(&mut state);
             let _ = send_json_outbound(&outbound_tx, &state).await;
         }
         Ok(None) => {
@@ -166,6 +168,8 @@ pub(crate) async fn handle_plan_amendment_cancel_from_handler(
             //（裸帧携带引擎缺省 client/off 会让前端 automationManaged
             // 误判、重现接管死路，见真实链 2026-10-24）。
             manager.project_automation_ownership(&mut state);
+            // REQ-HGC-04：修订确认/取消后的补帧同样携带「继续自动化」入口事实。
+            manager.project_plan_continue_available(&mut state);
             let _ = send_json_outbound(&outbound_tx, &state).await;
         }
         Err(error) => {

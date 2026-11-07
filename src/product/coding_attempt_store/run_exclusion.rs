@@ -345,10 +345,10 @@ impl super::CodingAttemptStore {
 
     /// attempt 作用域租约分类（多仓热修）：只看 attempt 自身路由的锁
     /// 记录，不跨仓扫描。有冻结 `target_snapshot` → 只分类该 logical
-    /// repository 的仓维记录；无 snapshot 且 issue 路由为 Legacy → 只读
-    /// 旧 issue 维记录（不落入仓扫描回退）；无 snapshot 但路由为
-    /// Logical/FailClosed → fail-closed；新旧 worktree 记录混在场 →
-    /// fail-closed。兄弟仓的合法预绑定锁不构成本 attempt 的冲突事实；
+    /// repository 的仓维记录；无 snapshot 且路由为 Logical/FailClosed
+    /// （含无归属旧数据）→ fail-closed，不落入仓扫描回退；新旧 worktree
+    /// 记录混在场 → fail-closed。兄弟仓的合法预绑定锁不构成本 attempt 的
+    /// 冲突事实；
     /// 同仓异主活跃仍按 `ActiveWait` 停等。
     pub fn classify_worktree_lease_for_attempt(
         &self,
@@ -399,26 +399,6 @@ impl super::CodingAttemptStore {
             &attempt.project_id,
             &attempt.issue_id,
         ) {
-            Ok(RepositoryRouting::Legacy { .. }) => {
-                // 单仓老路径只读旧 issue 维记录，不落入仓扫描回退；仓维
-                // 记录混在场 → fail-closed（新旧冲突）。
-                match lifecycle.list_repo_shared_worktrees(&attempt.project_id, &attempt.issue_id) {
-                    Ok(repos) if !repos.is_empty() => unknown(vec![format!(
-                        "repo_shared_worktree_present_for_legacy_route: {}/{}",
-                        attempt.project_id, attempt.issue_id
-                    )]),
-                    Ok(_) => match lifecycle
-                        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
-                    {
-                        Ok(Some(record)) => self.classify_worktree_record(&record),
-                        Ok(None) => {
-                            unknown(vec!["worktree record not found for issue".to_string()])
-                        }
-                        Err(error) => unknown(vec![format!("issue worktree read failed: {error}")]),
-                    },
-                    Err(error) => unknown(vec![format!("list repo worktrees failed: {error}")]),
-                }
-            }
             Ok(RepositoryRouting::Logical { .. }) => unknown(vec![
                 "target_snapshot_missing_for_logical".to_string(),
                 format!("{}/{}", attempt.project_id, attempt.issue_id),

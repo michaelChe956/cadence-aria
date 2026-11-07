@@ -48,7 +48,9 @@ fn setup_store() -> (TempDir, CodingAttemptStore) {
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: "issue".to_string(),
             description: None,
             change_id: None,
@@ -1161,7 +1163,7 @@ fn set_issue_logical_codebase(store: &CodingAttemptStore, lc_id: &str) {
         .issue_root(PROJECT_ID, ISSUE_ID)
         .join("issue.json");
     let mut record: IssueRecord = read_json(&path).unwrap();
-    record.logical_codebase_id = Some(lc_id.to_string());
+    record.logical_codebase_id = lc_id.to_string();
     write_json(&path, &record).unwrap();
 }
 

@@ -638,7 +638,13 @@ function shouldKeepTimelineNode(current: TimelineNode, next: TimelineNode) {
 }
 
 function isTerminalTimelineStatus(status: TimelineNode["status"]) {
-  return status === "completed" || status === "failed" || status === "skipped";
+  // `aborted`（中止）同属终态：快照 reconcile 与节点更新都不得把它回改成别的状态。
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "skipped" ||
+    status === "aborted"
+  );
 }
 
 function timelineNodeTimestamp(node: TimelineNode) {
@@ -761,6 +767,8 @@ function codingTimelineStatus(status: TimelineNode["status"]): CodingTimelineNod
       return "completed";
     case "failed":
       return "failed";
+    case "aborted":
+      return "aborted";
   }
 }
 

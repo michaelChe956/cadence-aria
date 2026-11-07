@@ -20,6 +20,7 @@ export type {
 } from "./workspace-cockpit-gate-projection";
 export {
   GATE_TRIGGER_LABELS,
+  currentGateRemainingBudget,
   isAdvanceReplayCode,
   terminalGateClosure,
   gateKindOf,

@@ -1,0 +1,246 @@
+// 票3「一键核验全部」批量作业（REQ-PCR-03/04/05/06 的前端面）。
+//
+// - 「一键核验全部」按钮挂在**能力卡头部**（块3 design 决策 6.6「前端：能力卡
+//   头部『一键核验全部』按钮」；主 spec REQ-PCR-06「能力卡 SHALL 提供『一键
+//   核验全部』按钮」）。owner 2026-11-04 裁定：按钮放在上面、不要放在下面
+//   ⇒ 作业状态由本模块的 hook 持有，按钮与逐项结果拆成两个可分别摆放的组件；
+// - 按钮 → POST 发起异步作业（立即拿到 job_id），按钮变「核验中（N/4）」并
+//   禁用；2.5s 轮询 durable 作业；
+// - 逐项结果（已确认 / 核验中 / 核验失败 / 跳过（CLI 不可用）/ 超时）、失败项
+//   【重试】与跳过项【安装】入口，全部由能力卡的**行级列表**承载（owner
+//   2026-11-04 裁定：只保留一组行级列表）⇒ 原 `ProviderCapabilityBatchResults`
+//   逐项结果组件已删除；本模块只提供作业状态（hook）与逐项状态文案
+//   （`capabilityBatchStatusLabel`）供行级列表渲染；
+// - 失败项【重试】走既有单 provider 端点（不重跑整批）；
+// - 跳过项【安装】入口由能力卡行内复用块2 的 `ProviderInstallActionButton`
+//   （本模块不自建安装实现、不自判版本、不写安装文案）；
+// - 终态停轮询；job_id 记在 localStorage，刷新后按 job_id 继续（durable）。
+import { useCallback, useEffect, useState } from "react";
+import { ApiRequestError } from "../../api/client";
+import {
+  getCapabilityRevalidateBatchJob,
+  startCapabilityRevalidateBatch,
+} from "../../api/capability-revalidate-batch";
+import { postProviderCapabilityRevalidate } from "../../api/provider-capability";
+import type {
+  CapabilityRevalidateBatchItemDto,
+  CapabilityRevalidateBatchJobDto,
+} from "../../api/types/capability-revalidate-batch";
+import type { ProviderCapabilityType } from "../../api/types/provider-capability";
+
+const POLL_INTERVAL_MS = 2_500;
+const BATCH_SIZE = 4;
+
+const STATUS_LABELS: Record<CapabilityRevalidateBatchItemDto["status"], string> = {
+  running: "核验中",
+  confirmed: "已确认",
+  failed: "核验失败",
+  // 跳过 ≠ 核验失败：CLI 不在场时引导安装，不谎报失败也不谎报已确认。
+  skipped: "跳过（CLI 不可用）",
+  timeout: "超时（该项未完成，未确认）",
+};
+
+/** 逐项状态文案（能力面板的行级列表复用同一份标签，不两处各写一份）。 */
+export function capabilityBatchStatusLabel(
+  status: CapabilityRevalidateBatchItemDto["status"],
+): string {
+  return STATUS_LABELS[status];
+}
+
+/** 机器级作业的 job_id 持久化键：机器同一时刻只有一份事实 ⇒ 单键即可
+ *  （不再按项目/逻辑代码库分键）。 */
+const STORAGE_KEY = "aria:capability-batch";
+
+function readStoredJobId(): string | null {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeJobId(jobId: string | null): void {
+  try {
+    if (jobId === null) {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(STORAGE_KEY, jobId);
+    }
+  } catch {
+    // localStorage 不可用只影响「刷新续轮询」，不影响核验本身。
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof ApiRequestError) {
+    return `${error.code}：${error.message}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** 批量作业状态（作业面 + 触发/重试动作）。能力卡按需摆放按钮与逐项结果
+ *  （逐项结果渲染在能力卡的行级列表里）。 */
+export type ProviderCapabilityBatchState = {
+  /** 逐项结果（作业未发起时为 null）。 */
+  job: CapabilityRevalidateBatchJobDto | null;
+  /** 作业进行中（含刚发起、还没拿到首帧结果的窗口）。 */
+  running: boolean;
+  /** 已出结果的家数（按钮上的 N/4）。 */
+  done: number;
+  /** 发起请求在途（按钮禁用）。 */
+  starting: boolean;
+  /** 某家单项重试在途。 */
+  retrying: ProviderCapabilityType | null;
+  /** 作业面错误（发起/轮询/重试失败如实呈现）。 */
+  error: string | null;
+  /** 发起整批作业。 */
+  start: () => Promise<void>;
+  /** 失败项单独重试（走单 provider 端点，不重跑整批）。 */
+  retry: (providerType: ProviderCapabilityType) => Promise<void>;
+  /** 重读当前作业（安装/更新完成后刷新逐项结果）。 */
+  refresh: () => Promise<void>;
+};
+
+/**
+ * 批量核验作业的持有者：job_id 持久化在 localStorage，2.5s 轮询 durable 作业，
+ * 终态停轮询。机器级作业（不绑定项目/逻辑代码库，机器同一时刻一份事实）。
+ */
+export function useProviderCapabilityBatch(): ProviderCapabilityBatchState {
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [job, setJob] = useState<CapabilityRevalidateBatchJobDto | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [retrying, setRetrying] = useState<ProviderCapabilityType | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // 首次挂载：按 localStorage 的 job_id 续读 durable 作业（刷新不丢进度）。
+  useEffect(() => {
+    setJob(null);
+    setError(null);
+    setJobId(readStoredJobId());
+  }, []);
+
+  const refreshById = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        const next = await getCapabilityRevalidateBatchJob(id);
+        setJob(next);
+        setError(null);
+      } catch (caught) {
+        setError(errorMessage(caught));
+        // 未知 / 过期 job_id：停止续轮询（不无限打 404）。
+        storeJobId(null);
+        setJobId(null);
+      }
+    },
+    [],
+  );
+
+  const running = jobId !== null && (job === null || job.status === "running");
+  const done = job === null
+    ? 0
+    : job.results.filter((item) => item.status !== "running").length;
+
+  // 2.5s 轮询；终态后不再排下一拍（不无限轮询）。
+  useEffect(() => {
+    if (!running || jobId === null) {
+      return;
+    }
+    const delay = job === null ? 0 : POLL_INTERVAL_MS;
+    const timer = setTimeout(() => {
+      void refreshById(jobId);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [running, jobId, job, refreshById]);
+
+  const start = useCallback(async (): Promise<void> => {
+    setStarting(true);
+    setError(null);
+    try {
+      const started = await startCapabilityRevalidateBatch();
+      storeJobId(started.job_id);
+      setJob(null);
+      setJobId(started.job_id);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setStarting(false);
+    }
+  }, []);
+
+  // 失败项单独重试：走既有单 provider 端点（不重跑整批），随后刷新作业。
+  const retry = useCallback(
+    async (providerType: ProviderCapabilityType): Promise<void> => {
+      setRetrying(providerType);
+      setError(null);
+      try {
+        await postProviderCapabilityRevalidate(providerType);
+        if (jobId !== null) {
+          await refreshById(jobId);
+        }
+      } catch (caught) {
+        setError(errorMessage(caught));
+      } finally {
+        setRetrying(null);
+      }
+    },
+    [jobId, refreshById],
+  );
+
+  const refresh = useCallback(async (): Promise<void> => {
+    if (jobId === null) {
+      return;
+    }
+    await refreshById(jobId);
+  }, [jobId, refreshById]);
+
+  return {
+    job,
+    running,
+    done,
+    starting,
+    retrying,
+    error,
+    start,
+    retry,
+    refresh,
+  };
+}
+
+/**
+ * 「一键核验全部」按钮（能力卡头部）。进行中禁用并显示「核验中（N/4）」。
+ */
+export function ProviderCapabilityBatchStartButton({
+  state,
+}: {
+  state: ProviderCapabilityBatchState;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="capability-batch-start"
+      disabled={state.running || state.starting}
+      onClick={() => {
+        void state.start();
+      }}
+      className="rounded-xl border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 py-1.5 text-xs font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:opacity-60"
+    >
+      {state.running ? `核验中（${state.done}/${BATCH_SIZE}）` : "一键核验全部"}
+    </button>
+  );
+}
+
+/**
+ * 按钮区的作用域与成本说明（REQ-PCR-06「按钮区域 SHALL 说明：**机器级**
+ * （核验只核验一次，机器一份事实，与项目、逻辑代码库无关）/ 真实探测 /
+ * 消耗额度 / 可能几分钟」）。紧贴按钮渲染，不藏进折叠区。
+ */
+export function ProviderCapabilityBatchScope() {
+  return (
+    <p
+      data-testid="capability-batch-scope"
+      className="mt-1 text-[11px] text-[var(--aria-ink-muted)]"
+    >
+      机器级核验：核验只核验一次，机器一份事实；会真实跑一次探测，可能几分钟，消耗 provider 额度。
+    </p>
+  );
+}

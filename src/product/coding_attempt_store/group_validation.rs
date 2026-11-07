@@ -256,15 +256,13 @@ impl super::CodingAttemptStore {
         let (stored, authoritative, units) = self.validate_group_attempt_structure(attempt)?;
         let routing =
             // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（conflict
-            // fail-closed）；旧数据无归属/无别名 record 时回退 Legacy。
+            // fail-closed）；无 LC 归属的旧数据一律 unbound_issue()（fail-closed）。
             match crate::product::logical_codebase::RepositoryAuthorityResolver::new(
                 self.paths.clone(),
             )
             .resolve_for_issue(&stored.project_id, &stored.issue_id)?
             {
-                None => RepositoryRouting::Legacy {
-                    repository_id: String::new(),
-                },
+                None => RepositoryRouting::unbound_issue(),
                 Some(resolution) => RepositoryRouting::classify(
                     resolution.manifest,
                     resolution.selection,
@@ -555,14 +553,13 @@ pub(super) fn incomplete_group_attempt(attempt_id: &str, reason: &str) -> Produc
 /// REQ-COD-04：routing-aware 的 group 单目标校验（创建/恢复/replay 三处调同一函数）。
 ///
 /// 堵 v1.0 的 `Some(A)+None` 绕过（`filter_map` 让 None 消失）与 snapshot 漂移：
-/// - Legacy：所有 unit target 必须全 `None`，出现任何 `Some` → 拒。
 /// - Logical：所有 unit target 必须全 `Some` 且互相同，且与 attempt snapshot 的
 ///   `logical_repository_id` 一致 → 通过；任何 `None` / ≥2 不同 `Some` / 与 snapshot
 ///   不一致 → 拒。
 /// - 拒绝任何 `source_draft_error`（draft 溯源已出错，不应进 group）。
 ///
 /// `RepositoryRouting::FailClosed` 是路由失败态（非 mixed-target），由调用方在进入本
-/// 函数前处理，此处不重复判定。
+/// 函数前处理，此处不重复判定（单仓 `Legacy` 臂已随变体删除，无归属即 FailClosed）。
 pub fn validate_group_single_target(
     routing: &RepositoryRouting,
     unit_bindings: &[AuthoritativeCodingUnitBinding],
@@ -575,15 +572,6 @@ pub fn validate_group_single_target(
         return Err(StableCode::MixedTargetGroupRejected);
     }
     match routing {
-        RepositoryRouting::Legacy { .. } => {
-            if unit_bindings
-                .iter()
-                .any(|unit| unit.target_repository_id.is_some())
-            {
-                return Err(StableCode::MixedTargetGroupRejected);
-            }
-            Ok(())
-        }
         RepositoryRouting::Logical { .. } => {
             let Some(first) = unit_bindings
                 .first()
@@ -691,10 +679,8 @@ mod tests {
         }
     }
 
-    fn legacy_routing() -> RepositoryRouting {
-        RepositoryRouting::Legacy {
-            repository_id: "repository_0001".to_string(),
-        }
+    fn unbound_routing() -> RepositoryRouting {
+        RepositoryRouting::unbound_issue()
     }
 
     fn logical_routing(member_ids: Vec<LogicalRepositoryId>) -> RepositoryRouting {
@@ -713,23 +699,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_all_none_is_accepted() {
+    fn unbound_routing_defers_single_target_validation_to_caller() {
+        // 无 LC 归属 → routing 为 FailClosed(TargetMissing)；单目标校验不重复
+        // 判定路由失败态（由调用方处置），source_draft_error 前置校验仍在。
         let units = vec![unit("work_item_0001", None), unit("work_item_0002", None)];
         assert_eq!(
-            validate_group_single_target(&legacy_routing(), &units, None),
+            validate_group_single_target(&unbound_routing(), &units, None),
             Ok(())
-        );
-    }
-
-    #[test]
-    fn legacy_any_some_is_rejected() {
-        let units = vec![
-            unit("work_item_0001", None),
-            unit("work_item_0002", Some(logical_id(0x0001))),
-        ];
-        assert_eq!(
-            validate_group_single_target(&legacy_routing(), &units, None),
-            Err(StableCode::MixedTargetGroupRejected)
         );
     }
 

@@ -42,7 +42,11 @@ fn seed_issue_and_work_items(lifecycle: &LifecycleStore, paths: &ProductAppPaths
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(REPOSITORY_ID.to_string()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：seed_logical_codebase 写 project 级根
+            //（legacy 布局）⇒ issue 归属 project 的 legacy 别名代码库。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: "分组视图测试".to_string(),
             description: None,
             change_id: None,
@@ -314,7 +318,11 @@ fn seed_prepare_work_item_plan_fixture(
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(REPOSITORY_ID.to_string()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：seed_logical_codebase 写 project 级根
+            //（legacy 布局）⇒ issue 归属 project 的 legacy 别名代码库。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: "preflight issue".to_string(),
             description: None,
             change_id: None,
@@ -373,14 +381,17 @@ fn seed_prepare_work_item_plan_fixture(
     (lifecycle, story.id, design.id)
 }
 
-/// 播种普通单物理仓项目：没有 logical codebase manifest/selection，issue 只通过
-/// 唯一的 repo_id 归属物理 RepositoryRecord。
-fn seed_single_physical_prepare_work_item_plan_fixture(
+/// 播种**单成员 LC** 项目：issue 归属 legacy 别名代码库，该 LC 落成可解析
+/// 权威（manifest/member/checkout/selection + 聚合索引 + 聚合 policy）。
+///
+/// REQ-ROUTE-01 两态化（去单仓入口）后 prepare 面只认 issue 归属的 LC：
+/// 缺权威 ⇒ `issue_not_bound_to_logical_codebase` fail-closed（HTTP 422）。
+fn seed_single_member_lc_prepare_work_item_plan_fixture(
     paths: &ProductAppPaths,
 ) -> (LifecycleStore, String, String) {
     ProjectStore::new(paths.clone())
         .create(CreateProjectInput {
-            name: "single physical preflight project".to_string(),
+            name: "single member lc preflight project".to_string(),
             description: None,
         })
         .unwrap();
@@ -388,35 +399,21 @@ fn seed_single_physical_prepare_work_item_plan_fixture(
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(REPOSITORY_ID.to_string()),
-            logical_codebase_id: None,
-            title: "single physical preflight issue".to_string(),
+            // 归属必填（REQ-ROUTE-01）：issue 归属 project 默认作用域
+            // （legacy 别名代码库 id），其权威由下方 LC 夹具落成。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
+            title: "single member lc preflight issue".to_string(),
             description: None,
             change_id: None,
             base_branch: None,
         })
         .unwrap();
-    let now = "2026-08-27T00:00:00Z".to_string();
-    crate::product::json_store::write_json(
-        &paths.project_root(PROJECT_ID).join("repos.json"),
-        &vec![RepositoryRecord {
-            id: REPOSITORY_ID.to_string(),
-            project_id: PROJECT_ID.to_string(),
-            name: "single physical repository".to_string(),
-            path: paths.root().join("single-physical-repository"),
-            repo_hash: "sha256:single-physical-repository".to_string(),
-            runtime_root: paths
-                .root()
-                .join("single-physical-repository/.aria/runtime"),
-            default_policy_preset: "manual-write".to_string(),
-            default_provider_mode: "fake".to_string(),
-            created_at: now.clone(),
-            logical_repository_id: None,
-            primary_checkout_id: None,
-            identity_schema_version: 0,
-            updated_at: now,
-        }],
-    )
-    .unwrap();
+    crate::web::handlers::automation_enrollment_test_support::seed_single_member_logical_codebase(
+        paths,
+        "checkout-single-member-lc",
+    );
 
     let lifecycle = LifecycleStore::new(paths.clone());
     let story = lifecycle
@@ -519,16 +516,18 @@ fn data_root_files(root: &std::path::Path) -> std::collections::BTreeSet<String>
 }
 
 #[tokio::test]
-async fn prepare_single_physical_repository_uses_rollout_flow_snapshot_without_logical_manifest() {
+async fn prepare_single_member_logical_codebase_uses_rollout_flow_snapshot() {
     // L2 重钉（T5/REQ-WSC-08）：新会话一律 SingleCandidate——rollout 快照
     // 不再切换 flow，也不门控 preflight（fix round 1 后 flag 仅随会话
     // 持久化作历史记录，无行为分支）。
+    // REQ-ROUTE-01 两态化后 prepare 只认 issue 归属的 LC（单成员 LC 与
+    // 多成员同一路径），故夹具落成单成员 LC 而非「无 LC 权威」。
     for rollout_enabled in [true, false] {
         let expected_flow_kind = WorkItemPlanFlowKind::SingleCandidate;
         let root = TempDir::new().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let (lifecycle, story_spec_id, design_spec_id) =
-            seed_single_physical_prepare_work_item_plan_fixture(&paths);
+            seed_single_member_lc_prepare_work_item_plan_fixture(&paths);
         let state = WebAppState::new(
             root.path().to_path_buf(),
             WebRuntime::new_fake(root.path().to_path_buf()),
@@ -890,7 +889,11 @@ async fn issue_lifecycle_returns_plan_group_projection_with_three_valued_overall
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some(REPOSITORY_ID.to_string()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：seed_logical_codebase 写 project 级根
+            //（legacy 布局）⇒ issue 归属 project 的 legacy 别名代码库。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: "聚合投影测试".to_string(),
             description: None,
             change_id: None,
@@ -1178,3 +1181,5 @@ include!("lifecycle_tests_d2_2.inc.rs");
 // 同 D2.2 拆分片段：失败重入/owned-index 与 F3/F5 占用级联（行数红线，纯移动）。
 include!("lifecycle_tests_d2_2_reentry.inc.rs");
 include!("lifecycle_tests_d2_2_f3_f5.inc.rs");
+// REQ-WIGA-VOID-01：删除工作项组 ⇒ 自动化登记一并作废（tasks 4.1/4.2）。
+include!("lifecycle_tests_wiga_void.inc.rs");

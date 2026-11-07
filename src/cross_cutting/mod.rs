@@ -11,6 +11,7 @@ pub mod choice_delivery;
 pub mod claude_code_provider;
 pub mod cli_adapter;
 pub mod codex_provider;
+pub mod diagnostic_redaction;
 pub mod document_ops;
 pub mod git_command;
 // Task 1b 段①:LC 专用 validated sync bridge(streaming→sync,专用 OS 线程
@@ -46,6 +47,7 @@ pub mod provider_run;
 #[cfg(test)]
 pub(crate) mod real_provider_e2e;
 pub mod runtime_event_log;
+pub mod semver;
 pub mod session_launch;
 pub mod streaming_provider;
 pub mod structured_output;

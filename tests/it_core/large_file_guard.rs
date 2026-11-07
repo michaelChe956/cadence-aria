@@ -68,9 +68,11 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/cross_cutting/streaming_provider/mod.rs", 2062),
     ("src/cross_cutting/streaming_provider/tests.rs", 2388),
     ("src/product/advance_store.rs", 1369),
+    // 2026-11-03（块3 片1 类型收敛）：`logical_codebase_id` 必填 String 后
+    // 夹具改 legacy lc_id 需换行，1216→1217（唯一字段取值，无新增用例）。
     (
         "src/product/coding_attempt_store/tests/issue_delivery.rs",
-        1216,
+        1218,
     ),
     ("src/product/coding_plan_run.rs", 2872),
     ("src/product/coding_workspace_engine/code_review.rs", 1817),
@@ -89,7 +91,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ),
     (
         "src/product/coding_workspace_engine/tests/git_operation_reconcile.rs",
-        1338,
+        1349,
     ),
     (
         "src/product/coding_workspace_engine/tests/group_completion_authority.rs",
@@ -97,23 +99,23 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ),
     (
         "src/product/coding_workspace_engine/tests/group_completion_recovery.rs",
-        1617,
+        1686,
     ),
     (
         "src/product/coding_workspace_engine/tests/provider_failure_recovery.rs",
-        1557,
+        1689,
     ),
     (
         "src/product/coding_workspace_engine/tests/provider_failure_recovery/provider_idle_stall.rs",
-        1214,
+        1329,
     ),
     (
         "src/product/coding_workspace_engine/tests/provider_start_persistence.rs",
-        1350,
+        1376,
     ),
     (
         "src/product/coding_workspace_engine/tests/verification_triage_gates.rs",
-        1598,
+        1606,
     ),
     ("src/product/lifecycle_store/plan.rs", 1683),
     ("src/product/lifecycle_store/tests.rs", 2893),
@@ -140,7 +142,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ),
     (
         "src/product/logical_codebase/provider_boundary_probe.rs",
-        2645,
+        2646,
     ),
     (
         "src/product/logical_codebase/provider_capability_store.rs",
@@ -171,9 +173,11 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/work_item_split_engine/tests/engine_gateway_guard.rs",
         1486,
     ),
+    // 2026-11-03（块3 片1 类型收敛）：issue 夹具 `logical_codebase_id` 必填
+    // String 后取 legacy lc_id 换行，1666→1667。
     (
         "src/product/work_item_split_engine/tests/prompt_contract.rs",
-        1666,
+        1667,
     ),
     ("src/product/work_item_split_validator/tests.rs", 1259),
     ("src/product/workspace_engine/compile.rs", 1651),
@@ -197,7 +201,11 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/workspace_engine/prompts/human_gate_revision.rs",
         1464,
     ),
-    ("src/product/workspace_engine/review/drive.rs", 2559),
+    // 2026-11-03（块3 片1 类型收敛）：3 处 issue 夹具 `logical_codebase_id`
+    // 改 legacy lc_id 各 +1 行，2559→2562。
+    // 2026-11-06（Task 14b 治本）：review/drive.rs 已按职责拆入
+    // review/drive_parts/*.inc.rs（261 行），降至 ≤1200 ⇒ 按仓规删除其祖父
+    // 登记项（不给将来重新长回 2645 行留暗门）。
     ("src/product/workspace_engine/review/drive_tests.rs", 1379),
     ("src/product/workspace_engine/review/routing.rs", 1391),
     ("src/product/workspace_engine/session_state.rs", 1457),
@@ -232,26 +240,30 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/web/advance_plan.rs", 1644),
     ("src/web/app.rs", 2222),
     ("src/web/coding_start.rs", 1256),
-    ("src/web/coding_ws_handler/runner.rs", 2817),
+    ("src/web/coding_ws_handler/runner.rs", 2921),
     ("src/web/coding_ws_handler/socket.rs", 1295),
     (
         "src/web/coding_ws_handler/tests/failed_review_recovery/runner.rs",
         1242,
     ),
     (
+        // 2026-11-03（REQ-ROUTE-01 归属字段必填清扫）：issue 归属字段由
+        // Option<String> 收敛为必填 String，夹具补「归属必填」注释 + 别名 id
+        // 调用（rustfmt 规范形态，多行）⇒ +6 行。
         "src/web/coding_ws_handler/tests/runner_recovery/startup_window_compensation.rs",
-        1828,
+        2047,
     ),
     ("src/web/handlers/automation_gateway_preflight.rs", 1217),
     ("src/web/handlers/coding.rs", 1321),
     ("src/web/handlers/coding/plan_start.rs", 2565),
-    ("src/web/handlers/coding/plan_start_tests.rs", 4001),
+    ("src/web/handlers/coding/plan_start_tests.rs", 4130),
     ("src/web/handlers/support.rs", 1204),
     ("src/web/handlers/support_parts/coding_cleanup.inc.rs", 1572),
     ("src/web/wiga_gate_fixture.rs", 1764),
-    ("src/web/workspace_session/tests/part_01.rs", 1580),
+    // 2026-11-03（REQ-ROUTE-01 归属字段必填清扫）：2 处 issue 归属补
+    // 「归属必填」注释 + 别名 id 调用（多行）⇒ +8 行。
+    ("src/web/workspace_session/tests/part_01.rs", 1619),
     ("src/web/workspace_session/tests/part_07.rs", 1272),
-    ("src/web/workspace_ws_handler/run/provider_run.rs", 1678),
     // 2026-10-30（REQ-WSC-10，待 owner 裁决）：运行期预校验接线成员 checkout
     // 前缀表装载（共享门控，单块调用）+8。
     ("src/web/workspace_ws_handler/run/single_candidate.rs", 1666),
@@ -265,12 +277,10 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         2050,
     ),
     (
+        // 2026-11-03（REQ-ROUTE-01 归属字段必填清扫）：issue 归属补「归属必填」
+        // 注释 + 别名 id 调用（rustfmt 规范形态，多行）⇒ +5 行。
         "src/web/workspace_ws_handler/tests/planning_resume.rs",
-        2444,
-    ),
-    (
-        "src/web/workspace_ws_handler/tests/provider_run_events.rs",
-        1257,
+        2458,
     ),
     (
         "src/web/workspace_ws_handler/tests/single_candidate_lc_admission.rs",
@@ -280,7 +290,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/web/workspace_ws_handler/tests/single_candidate_provider_run.rs",
         1508,
     ),
-    ("tests/it_web/provider_gateway_envelope.rs", 1589),
+    ("tests/it_web/provider_gateway_envelope.rs", 1624),
     (
         "tests/it_web/web_lc_gateway_multi_provider/harness.rs",
         14966,

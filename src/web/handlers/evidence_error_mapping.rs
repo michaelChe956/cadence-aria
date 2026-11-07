@@ -33,11 +33,33 @@ pub(crate) fn evidence_api_error(error: &EvidenceError) -> ApiError {
         EvidenceError::InvalidQuery { reason } => {
             ApiError::validation(evidence_error_code(error), reason.clone())
         }
-        EvidenceError::QueryFailed { code, message } => ApiError::runtime(
-            evidence_error_code(error),
-            message.clone(),
-            json!({ "reason_code": code }),
-        ),
+        EvidenceError::QueryFailed { code, message } => {
+            // 索引不可用有共享中文成品（失败文案表是唯一来源）：message 换成三段成品
+            // （问题/原因/怎么做 + 机器码），原始诊断脱敏后另存 details.detail。
+            // 外层稳定码、details.reason_code 与 HTTP 状态码一律不变；其余内层码
+            // 的既有形态也不变。
+            if *code == "evidence_index_unavailable" {
+                let copy =
+                    crate::product::logical_codebase::failure_copy::describe_code(code, None);
+                let diagnostic = crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
+                    message,
+                    &crate::cross_cutting::diagnostic_redaction::RedactionContext::default(),
+                );
+                return ApiError::runtime(
+                    evidence_error_code(error),
+                    crate::product::logical_codebase::failure_copy::render_detail(
+                        &copy,
+                        Some(&diagnostic),
+                    ),
+                    json!({ "reason_code": code, "detail": diagnostic, "copy": copy }),
+                );
+            }
+            ApiError::runtime(
+                evidence_error_code(error),
+                message.clone(),
+                json!({ "reason_code": code }),
+            )
+        }
         EvidenceError::Io { message } => {
             ApiError::runtime(evidence_error_code(error), message.clone(), json!({}))
         }

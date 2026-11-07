@@ -37,6 +37,28 @@ export function AggregateIndexCard({
   onRebuild,
 }: AggregateIndexCardProps) {
   const isRebuilding = rebuilding || index.state === "rebuilding";
+  // 索引不可用时的成品（问题/原因/怎么做/机器码）由后端渲染，前端不另写中文。
+  const evidenceCopy = index.evidence_copy ?? null;
+
+  // 「重建索引」按钮只有一处：索引不可用时随失败面一起给（失败面自带上动作，
+  // 用户不必回到面板顶部找入口），其余状态留在标题行。
+  const rebuildButton = (
+    <button
+      type="button"
+      disabled={isRebuilding}
+      onClick={onRebuild}
+      className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
+    >
+      {isRebuilding ? (
+        <LoaderCircle
+          data-testid="aggregate-index-spinner"
+          className="mr-1 h-4 w-4 animate-spin"
+          aria-hidden="true"
+        />
+      ) : null}
+      重建索引
+    </button>
+  );
 
   return (
     <section
@@ -59,22 +81,25 @@ export function AggregateIndexCard({
             {STATE_LABELS[index.state]}
           </span>
         </div>
-        <button
-          type="button"
-          disabled={isRebuilding}
-          onClick={onRebuild}
-          className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
-        >
-          {isRebuilding ? (
-            <LoaderCircle
-              data-testid="aggregate-index-spinner"
-              className="mr-1 h-4 w-4 animate-spin"
-              aria-hidden="true"
-            />
-          ) : null}
-          重建索引
-        </button>
+        {evidenceCopy ? null : rebuildButton}
       </div>
+
+      {evidenceCopy ? (
+        <div
+          data-testid="aggregate-index-evidence-unavailable"
+          className="mt-2 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-xs text-[var(--aria-danger)]"
+        >
+          <p data-testid="aggregate-index-evidence-title" className="font-semibold">
+            {evidenceCopy.title_zh}
+          </p>
+          <p className="mt-1">原因：{evidenceCopy.reason_zh}</p>
+          <p className="mt-1">怎么做：{evidenceCopy.action_zh}</p>
+          <p className="mt-1 font-mono opacity-80">
+            机器码：{evidenceCopy.machine_line}
+          </p>
+          <div className="mt-2">{rebuildButton}</div>
+        </div>
+      ) : null}
 
       {index.revision !== null && index.revision !== undefined ? (
         <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">

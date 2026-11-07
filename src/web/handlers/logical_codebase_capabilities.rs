@@ -1,22 +1,25 @@
-//! add-provider-revalidate-probe：LC provider capability 的用户显式重
-//! 验证 HTTP 面（canonical v1.3 路由）。
+//! add-provider-revalidate-probe：provider capability 的用户显式重验证
+//! HTTP 面（**机器级**路由，REQ-PCR-08）。
 //!
-//! - `GET /logical-codebases/{lc_id}/capabilities`：只读投影四家 durable
-//!   capability 行（零探针、零写入）。
-//! - `POST /logical-codebases/{lc_id}/capability-revalidate`：对该
-//!   provider 执行一次真实现场探针并原子导入 durable Confirmed（产品层
+//! provider 是**平台公用能力**：能力是本机 provider CLI 的事实 ⇒ 能力面
+//! **不再按项目 / 逻辑代码库定位**（一个项目都没有也必须可用）。
+//!
+//! - `GET /api/providers/capabilities`：只读投影四家 durable capability 行
+//!   （零探针、零写入）。
+//! - `POST /api/providers/capabilities/revalidate`：对该 provider 执行一次
+//!   真实现场探针并原子导入 durable Confirmed（产品层
 //!   `ProviderCapabilityRevalidateService` owner；同步等待——与 aggregate
 //!   index rebuild 分钟级同步动作同先例）。全行已验证同版本秒回
 //!   `already_confirmed`；Fake/未知 provider 稳定 422；探针失败如实
 //!   `provider_capability_probe_failed`。
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use super::support::{product_app_paths, product_store_api_error, require_logical_codebase};
+use super::support::{product_app_paths, product_store_api_error};
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::product::logical_codebase::SessionPolicyAction;
 use crate::product::logical_codebase::provider_capability_revalidate::{
@@ -71,15 +74,11 @@ fn provider_type_name(snapshot: &ProviderCapabilityProviderSnapshot) -> &'static
     }
 }
 
-/// GET `/logical-codebases/{lc_id}/capabilities`：只读 durable 投影。
-pub async fn get_lc_capabilities(
-    State(state): State<WebAppState>,
-    Path((project_id, logical_codebase_id)): Path<(String, String)>,
-) -> ApiResult<Response> {
-    let paths = product_app_paths(&state);
-    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+/// GET `/api/providers/capabilities`：只读 durable 投影（机器级；无项目 /
+/// 逻辑代码库前置）。
+pub async fn get_lc_capabilities(State(state): State<WebAppState>) -> ApiResult<Response> {
     let providers = capability_service(&state)
-        .capability_snapshot(&project_id, &logical_codebase_id)
+        .capability_snapshot()
         .map_err(product_store_api_error)?;
     let providers: Vec<Value> = providers
         .iter()
@@ -103,10 +102,10 @@ pub async fn get_lc_capabilities(
     Ok(Json(json!({ "providers": providers })).into_response())
 }
 
-/// POST `/logical-codebases/{lc_id}/capability-revalidate`：显式重验证。
+/// POST `/api/providers/capabilities/revalidate`：显式重验证（机器级；无项目 /
+/// 逻辑代码库前置）。
 pub async fn post_lc_capability_revalidate(
     State(state): State<WebAppState>,
-    Path((project_id, logical_codebase_id)): Path<(String, String)>,
     Json(request): Json<CapabilityRevalidateRequestDto>,
 ) -> ApiResult<Response> {
     let provider_type = request.provider_type.trim();
@@ -128,13 +127,8 @@ pub async fn post_lc_capability_revalidate(
             ));
         }
     };
-    let paths = product_app_paths(&state);
-    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
     let service = capability_service(&state);
-    match service
-        .revalidate(&project_id, &logical_codebase_id, provider)
-        .await
-    {
+    match service.revalidate(provider).await {
         Ok(outcome) => Ok((
             StatusCode::OK,
             Json(match outcome {

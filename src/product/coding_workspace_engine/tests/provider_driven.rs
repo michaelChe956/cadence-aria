@@ -218,8 +218,16 @@ async fn reviewer_driven_rework_increments_rework_count_and_resumes_coder() {
         )
         .expect("code review stage");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ReviewerDrivenReworkProvider::default();
+    let provider = Arc::new(ReviewerDrivenReworkProvider::default());
+    // REQ-ROUTE-01 两态化：逻辑 target（running_attempt_with_worktree 已播种
+    // 快照）的 provider run 只能经 gateway 启动；adapter 同时交给引擎方法
+    // （行为面）与 registry（spawn 面）。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let updated = engine
@@ -227,7 +235,7 @@ async fn reviewer_driven_rework_increments_rework_count_and_resumes_coder() {
             &attempt,
             &review_report_requesting_changes(&attempt),
             &CodingExecutionContext::default(),
-            &provider,
+            provider.as_ref(),
             &mut command_rx,
         )
         .await
@@ -383,10 +391,17 @@ async fn blocked_code_review_without_structured_findings_accepts_manual_feedback
         .clone();
     init_test_git_repo(&worktree);
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = Arc::new(NonJsonCodeReviewProvider);
+    // 逻辑 target（已播种快照）的 reviewer run 必须经 gateway 启动。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        "project_0001",
+        provider.clone(),
+    );
 
     let report = engine
-        .execute_code_review(&attempt, &NonJsonCodeReviewProvider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("code review blocks on non-json output");
 

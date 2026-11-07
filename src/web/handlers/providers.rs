@@ -84,22 +84,22 @@ fn provider_dto(entry: &ProviderHealthEntry) -> ProviderStatusDto {
         ProviderName::ClaudeCode => (
             "claude_code",
             "Claude Code",
-            "Install Claude Code CLI and ensure `claude` is available on PATH.",
+            "Install Claude Code CLI via npm (`npm i -g @anthropic-ai/claude-code`; default mirror https://registry.npmmirror.com, override with NPM_REGISTRY) and ensure `claude` is on PATH.",
         ),
         ProviderName::Codex => (
             "codex",
             "Codex",
-            "Install Codex CLI and ensure `codex` is available on PATH.",
+            "Install Codex CLI via npm (`npm i -g @openai/codex`; default mirror https://registry.npmmirror.com, override with NPM_REGISTRY) and ensure `codex` is on PATH.",
         ),
         ProviderName::Pi => (
             "pi",
             "Pi",
-            "Install Pi CLI and ensure `pi` is available on PATH.",
+            "Install Pi CLI via npm (`npm i -g @earendil-works/pi-coding-agent`; default mirror https://registry.npmmirror.com, override with NPM_REGISTRY) and ensure `pi` is on PATH.",
         ),
         ProviderName::KimiCode => (
             "kimi_code",
             "Kimi Code",
-            "Install Kimi Code CLI and ensure `kimi` is available on PATH.",
+            "Install Kimi Code via the official script (`curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`; not distributed as an npm package) and ensure `kimi` is on PATH.",
         ),
         ProviderName::Fake => unreachable!("Fake provider is not part of real health status"),
     };
@@ -273,7 +273,7 @@ mod tests {
         assert!(kimi.available);
         assert_eq!(
             kimi.install_hint,
-            "Install Kimi Code CLI and ensure `kimi` is available on PATH."
+            "Install Kimi Code via the official script (`curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`; not distributed as an npm package) and ensure `kimi` is on PATH."
         );
     }
 

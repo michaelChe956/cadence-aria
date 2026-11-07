@@ -21,22 +21,19 @@ use crate::product::logical_codebase::provider_gateway::{
     PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE,
-    PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT, PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE,
 };
+use crate::product::logical_codebase::provider_selection as selection;
 use crate::product::logical_codebase::{
     LogicalCodebaseFeature, LogicalRepositoryId, PolicyTargetResolver, ProviderCapability,
-    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, ProviderRefType,
-    SessionLaunchRequest,
+    ProviderCapabilitySource, ProviderGatewayError, ProviderRef, SessionLaunchRequest,
 };
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 
 /// 生产 target resolver:按请求 project 构造 `RepositoryStore` 以在启动前重新解析三层身份。
-///
-/// v1.3（R9 fix round 1）：`lc_id = Some` 时 checkout 目标改从
-/// `logical-codebases/{lc_id}/` 子树权威记录解析（与
-/// `RepositoryStore::resolve_logical_repository_for_issue_codebase` 语义一致）；
-/// `lc_id = None`（单仓/legacy）保持既有 project 级 `for_project` + strict 行为不变。
+/// v1.3（R9 fix round 1）：`lc_id = Some` 时 checkout 目标改从 `logical-codebases/{lc_id}/`
+/// 子树权威记录解析（与 `RepositoryStore::resolve_logical_repository_for_issue_codebase`
+/// 语义一致）；`lc_id = None`（单仓/legacy）保持既有 project 级 `for_project` + strict 行为不变。
 pub struct ProductionPolicyTargetResolver {
     paths: ProductAppPaths,
     lc_id: Option<String>,
@@ -56,10 +53,9 @@ impl ProductionPolicyTargetResolver {
         }
     }
 
-    /// C4 Task 2：当前请求的有效 lc 作用域：显式 `for_lc` 优先；无显式作用域
-    /// 但 legacy 别名 LC record 存在（旧 project 级布局）时返回别名 id（其子树
-    /// 与旧布局字节等价），使别名路径同样经过 authority resolver 冲突校验；
-    /// 两者皆无 → `None`（单仓兼容路径）。
+    /// C4 Task 2：当前请求的有效 lc 作用域：显式 `for_lc` 优先；无显式作用域但 legacy
+    /// 别名 LC record 存在（旧 project 级布局）时返回别名 id（其子树与旧布局字节等价），
+    /// 使别名路径同样经过 authority resolver 冲突校验；两者皆无 → `None`（单仓兼容路径）。
     fn effective_lc_id(&self, project_id: &str) -> Option<String> {
         if let Some(lc_id) = self.lc_id.as_deref() {
             return Some(lc_id.to_string());
@@ -187,52 +183,49 @@ impl PolicyTargetResolver for ProductionPolicyTargetResolver {
     }
 }
 
-/// 生产 capability source:store-backed,持有 `ProviderCapabilityStore` 与目标
-/// project id。Task 2b 起 capability 组装消费 record v2(wire dialect、逐 action
+/// 生产 capability source:store-backed,持有 `ProviderCapabilityStore`。
+/// Task 2b 起 capability 组装消费 record v2(wire dialect、逐 action
 /// 三态行、trust),并按相位分流:正常会话走 action row 分格门(`require_supported`
 /// launch / `require_write_boundary` / `require_resume_supported`),root-recipe
-/// 相位走 `require_root_recipe_supported`(凭据每次重验 durable Running,不推
-/// normal Confirmed)。顺序 fail-closed:记录缺失 → Codex 硬阻断 → snapshot
-/// 不一致 → 分格不满足。
+/// 相位走 `require_root_recipe_supported`。顺序 fail-closed:记录缺失 →
+/// snapshot 不一致 → 分格不满足。capability 记录的作用域唯一
+/// (**机器级**,REQ-PCR-07)。
 pub struct StoreBackedProviderCapabilitySource {
+    /// capability 记录:**机器级**(唯一作用域,REQ-PCR-07)。
     store: ProviderCapabilityStore,
-    project_id: String,
-    /// root-recipe 凭据的 durable Running 重核验通道(`for_lc` 构造时可用;
-    /// `new`/`with_store` 无通道,root-recipe 相位 fail-closed 拒绝)。
+    /// root-recipe 凭据的 durable Running 重核验通道(**按 lc**;`new`/`with_store` 无通道 ⇒ root-recipe 相位 fail-closed 拒绝)。
     recipe_recheck: Option<RootRecipeCredentialRecheck>,
 }
 
-/// root-recipe 凭据重核验通道:durable operation store(lc 作用域)+ 核验 LC。
+/// root-recipe 凭据重核验通道:durable operation store(按 lc 作用域)+ 核验 LC;与 capability 的**机器级**作用域不同(operation 本身是 per-lc 的事实,REQ-PCR-09)。
 struct RootRecipeCredentialRecheck {
     operations: crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore,
     lc_id: String,
 }
 
 impl StoreBackedProviderCapabilitySource {
-    pub fn new(paths: ProductAppPaths, project_id: String) -> Self {
+    pub fn new(paths: ProductAppPaths) -> Self {
         Self {
             store: ProviderCapabilityStore::new(paths),
-            project_id,
             recipe_recheck: None,
         }
     }
 
-    /// v1.3:接受已按 lc_id 作用域的 `ProviderCapabilityStore`,使 gateway 的
-    /// capability 读取落在 issue 所属代码库子树。
-    pub fn with_store(store: ProviderCapabilityStore, project_id: String) -> Self {
+    /// v1.3:接受已构造的 `ProviderCapabilityStore`(作用域唯一 = 机器级)。
+    pub fn with_store(store: ProviderCapabilityStore) -> Self {
         Self {
             store,
-            project_id,
             recipe_recheck: None,
         }
     }
 
-    /// Task 2b:按 lc 作用域构造,并同时建立 root-recipe 凭据的 durable
-    /// Running 重核验通道(capability store 与 operation store 同一 lc 子树)。
-    pub fn for_lc(paths: ProductAppPaths, project_id: String, lc_id: String) -> Self {
+    /// **机器级 capability 记录 + 按 lc 的 root-recipe 凭据重核验通道**——两个作用域
+    /// 刻意不同:capability 记录是**机器级**(一次核验整机可用,REQ-PCR-07);
+    /// root-recipe 通道**按 lc**(operation 是 per-lc 的事实,REQ-PCR-09)。
+    /// 旧构造器 `for_lc` 曾把两件事捆在一起,已删除。
+    pub fn global_capability_with_lc_recipe_recheck(paths: ProductAppPaths, lc_id: String) -> Self {
         Self {
-            store: ProviderCapabilityStore::for_lc(paths.clone(), &lc_id),
-            project_id,
+            store: ProviderCapabilityStore::new(paths.clone()),
             recipe_recheck: Some(RootRecipeCredentialRecheck {
                 operations:
                     crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore::for_lc(
@@ -244,7 +237,7 @@ impl StoreBackedProviderCapabilitySource {
     }
 
     /// 载入记录并施加公共硬门(缺记录 → Codex 阻断 → snapshot 不一致)。
-    fn load_record(
+    pub(crate) fn load_record(
         &self,
         provider: &ProviderRef,
     ) -> Result<
@@ -253,7 +246,7 @@ impl StoreBackedProviderCapabilitySource {
     > {
         let record = self
             .store
-            .get(&self.project_id, provider.provider_type)
+            .get(provider.provider_type)
             .map_err(ProviderGatewayError::policy)?
             .ok_or_else(|| {
                 // Task 3(6b carry 重钉):Pi/Kimi 已是 1a 合法映射,缺 durable
@@ -298,11 +291,10 @@ impl StoreBackedProviderCapabilitySource {
 }
 
 impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
-    /// 正常 action row 的 launch 分格门(T10/DEV-01):仅 `Confirmed` 放行;
-    /// v1→v2 过渡桥(Unknown + 旧 allow 列表)已退役——旧 allow 列表在
-    /// launch 分格无放行效力,`Denied`(真实负向证据)与 `Unknown` 一律
-    /// fail-closed 拒绝(稳定判别码),等待真实 probe(2d)写入 Confirmed
-    /// 行后才可启动。
+    /// 正常 action row 的 launch 分格门(T10/DEV-01):仅 `Confirmed` 放行;v1→v2 过渡桥
+    /// (Unknown + 旧 allow 列表)已退役——旧 allow 列表在 launch 分格无放行效力,
+    /// `Denied`(真实负向证据)与 `Unknown` 一律 fail-closed 拒绝(稳定判别码),等待
+    /// 真实 probe(2d)写入 Confirmed 行后才可启动。
     fn require_supported(
         &self,
         provider: &ProviderRef,
@@ -310,11 +302,9 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
     ) -> Result<ProviderCapability, ProviderGatewayError> {
         let record = self.load_record(provider)?;
         let row = record.action_matrix.row(&action);
-        match &row.launch {
-            ProviderCapabilityEvidence::Confirmed => Ok(Self::capability_from_record(&record, row)),
-            other => Err(ProviderGatewayError::UnsupportedCapability(format!(
-                "{PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED}: {action:?} launch cell is {other:?}"
-            ))),
+        match selection::launch_cell_state_from_record(&record, action) {
+            selection::LaunchCellState::Confirmed => Ok(Self::capability_from_record(&record, row)),
+            other => Err(selection::launch_rejection_error(action, &other)),
         }
     }
 
@@ -353,23 +343,21 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
         }
     }
 
-    /// root-recipe 相位:仅现有固定 Claude recipe 事实放行——provider 必须
-    /// 是固定 Claude recipe provider、记录在场且 snapshot 一致;凭据是
-    /// durable Running operation 派生的 opaque 相位证明(类型面保证),每次
-    /// 重验由 `for_lc` 通道/GREEN 第二段接入。返回的 capability 只镜像
-    /// durable normal 状态(行不因 recipe 事实铸造 Confirmed),不推 normal
-    /// Confirmed(隔离契约)。
+    /// root-recipe 相位:**对 provider 无关**(REQ-BOOT-15)——记录在场且
+    /// snapshot 一致即过第一关;凭据是 durable Running operation 派生的 opaque
+    /// 相位证明(类型面保证),每次重验由 `for_lc` 通道/GREEN 第二段接入。
+    /// 返回的 capability 只镜像 durable normal 状态(行不因 recipe 事实铸造
+    /// Confirmed),不推 normal Confirmed(隔离契约)。
+    ///
+    /// **凭据重核验门一条不减**:① 重核验通道在场 ② 凭据对 durable
+    /// Running operation 重核验通过。root-recipe 交付事实按 LC 归属
+    /// (REQ-PCR-09),不在机器级 capability 记录里,由凭据对 per-LC
+    /// durable operation 的重核验承载。
     fn require_root_recipe_supported(
         &self,
         provider: &ProviderRef,
         credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        if provider.provider_type != ProviderRefType::ClaudeCode {
-            return Err(ProviderGatewayError::UnsupportedCapability(format!(
-                "{PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE}: got {:?}",
-                provider.provider_type
-            )));
-        }
         // 凭据重核验通道:durable Running 重验是 recipe 相位的硬前置;
         // 无通道(new/with_store 构造)fail-closed,绝不在无凭据重验下放行。
         let Some(recheck) = &self.recipe_recheck else {
@@ -378,16 +366,6 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
             ));
         };
         let record = self.load_record(provider)?;
-        // 已交付 recipe 证据钉定版本与记录版本漂移 → fail-closed(旧证据
-        // 不跨 CLI 版本沿用,等待重新交付)。
-        if let crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::Delivered { version, .. } =
-            &record.root_recipe_evidence
-            && version != &record.version {
-                return Err(ProviderGatewayError::UnsupportedCapability(format!(
-                    "{PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT}: evidence pins {version}, record has {}",
-                    record.version
-                )));
-            }
         // 凭据每次重验 durable Running:operation 终态/step 推进/digest 或
         // root 漂移 → 凭据失效,fail-closed(稳定码 + admission reason_code)。
         if let Err(denied) =
@@ -534,8 +512,9 @@ mod tests {
     use crate::product::logical_codebase::policy::SessionPolicyAction;
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-        ProviderActionMatrix, ProviderCapabilityRecord, RootRecipeEvidence,
+        ProviderActionMatrix, ProviderCapabilityRecord,
     };
+    use crate::product::logical_codebase::provider_gateway::ProviderRefType;
     use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
     use crate::product::logical_codebase::provider_gateway::{
         PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
@@ -1004,13 +983,13 @@ mod tests {
 
     /// 构造一个已 bootstrap 的 store-backed capability source。TempDir 由调用方
     /// 保持存活,确保 capability 文件在测试期间存在。
-    fn store_backed_source(project_id: &str) -> (TempDir, StoreBackedProviderCapabilitySource) {
+    fn store_backed_source() -> (TempDir, StoreBackedProviderCapabilitySource) {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         ProviderCapabilityStore::new(paths.clone())
-            .ensure_bootstrap(project_id)
+            .ensure_bootstrap()
             .expect("bootstrap capabilities");
-        let source = StoreBackedProviderCapabilitySource::new(paths, project_id.to_string());
+        let source = StoreBackedProviderCapabilitySource::new(paths);
         (root, source)
     }
 
@@ -1020,7 +999,7 @@ mod tests {
     /// 稳定判别码。
     #[test]
     fn store_backed_capability_bootstrap_unknown_rejected_under_dev01() {
-        let (_root, source) = store_backed_source("project_0001");
+        let (_root, source) = store_backed_source();
 
         let launch_error = source
             .require_supported(
@@ -1051,7 +1030,7 @@ mod tests {
     ///(不进本 gateway)。
     #[test]
     fn store_backed_capability_codex_probe_confirmed_row_passes() {
-        let (root, source) = store_backed_source("project_0001");
+        let (root, source) = store_backed_source();
         // 种一枚探针签发的 planning Confirmed 行(2d import 形态)。
         let store =
             crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore::new(
@@ -1083,17 +1062,12 @@ mod tests {
                 trust: ProviderCapabilityEvidence::Unknown,
                 probed_at: Some("2026-10-07T00:00:00Z".to_string()),
                 probe_artifact_ref: Some("probe-evidence".to_string()),
-                root_recipe_evidence: RootRecipeEvidence::None,
                 execution_semantics:
                     crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                         .to_string(),
             };
         store
-            .import_verified_probe_row(
-                "project_0001",
-                &verified,
-                SessionPolicyAction::PlanningReadOnly,
-            )
+            .import_verified_probe_row(&verified, SessionPolicyAction::PlanningReadOnly)
             .expect("import probe row");
 
         let capability = source
@@ -1127,7 +1101,7 @@ mod tests {
     fn store_backed_capability_missing_record_is_unsupported() {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
-        let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
+        let source = StoreBackedProviderCapabilitySource::new(paths);
 
         let error = source
             .require_supported(
@@ -1143,7 +1117,7 @@ mod tests {
 
     #[test]
     fn store_backed_capability_snapshot_mismatch_is_unsupported() {
-        let (_root, source) = store_backed_source("project_0001");
+        let (_root, source) = store_backed_source();
 
         let error = source
             .require_supported(
@@ -1162,10 +1136,9 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let store = ProviderCapabilityStore::new(paths.clone());
-        store.ensure_bootstrap("project_0001").unwrap();
+        store.ensure_bootstrap().unwrap();
         store
             .upsert(
-                "project_0001",
                 // 2a 的 FRU 过渡桩已整体替换:显式新字段构造(v2 全字段),
                 // 行为与旧桩一致(矩阵全 Unknown),语义由 v2 分格门接管。
                 &ProviderCapabilityRecord {
@@ -1182,12 +1155,11 @@ mod tests {
                     trust: ProviderCapabilityEvidence::Unknown,
                     probed_at: None,
                     probe_artifact_ref: None,
-                    root_recipe_evidence: RootRecipeEvidence::None,
                     execution_semantics: String::new(),
                 },
             )
             .unwrap();
-        let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
+        let source = StoreBackedProviderCapabilitySource::new(paths);
 
         let error = source
             .require_supported(
@@ -1242,7 +1214,6 @@ mod tests {
             trust: ProviderCapabilityEvidence::Confirmed,
             probed_at: Some("2026-10-03T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://artifact-0001".to_string()),
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics:
                 crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string(),
@@ -1257,14 +1228,11 @@ mod tests {
     ) -> StoreBackedProviderCapabilitySource {
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let store = ProviderCapabilityStore::new(paths.clone());
-        store.ensure_bootstrap("project_0001").unwrap();
+        store.ensure_bootstrap().unwrap();
         store
-            .upsert(
-                "project_0001",
-                &lcg_t02_v2_record(matrix, supported_actions),
-            )
+            .upsert(&lcg_t02_v2_record(matrix, supported_actions))
             .unwrap();
-        StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string())
+        StoreBackedProviderCapabilitySource::new(paths)
     }
 
     #[test]
@@ -1444,7 +1412,7 @@ mod tests {
     #[test]
     fn lcg_t02_v1_legacy_actions_are_rejected_without_confirmed_cells() {
         let root = tempfile::tempdir().expect("temporary product root");
-        let dir = root.path().join("projects/project_0001/logical-codebase");
+        let dir = root.path().join("provider-capabilities");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("capabilities.json"),
@@ -1460,7 +1428,7 @@ mod tests {
         )
         .unwrap();
         let paths = ProductAppPaths::new(root.path());
-        let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
+        let source = StoreBackedProviderCapabilitySource::new(paths);
 
         let launch_error = source
             .require_supported(

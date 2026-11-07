@@ -616,8 +616,20 @@ fn make_work_item_plan_engine_with_draft_candidate(
     // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸目录无 git 仓库
     // 会令基线解析 fail-closed——author 上下文/门内修订/运行期预校验三面共用）。
     init_fixture_git_repo(&repository_path);
+    // rep4 WI-003 第二成员的独立物理仓（main 分支+初始提交，与主仓同构）：
+    // member/checkout/repos.json 投影三面都指向它，与主成员物理隔离。
+    let integration_repository_path = tmp.path().join("repository-integration");
+    std::fs::create_dir(&integration_repository_path).unwrap();
+    init_fixture_git_repo(&integration_repository_path);
 
-    let repository = crate::product::repository_store::RepositoryStore::new(lifecycle.app_paths())
+    // REQ-ROUTE-01 两态化：admission/租约/规划目标解析的唯一凭证是「LC 权威」。
+    // 启用 LC 特性创建仓 ⇒ 自动落 manifest + 本仓 member + 主 checkout（legacy
+    // 项目级布局），规划侧的 `resolve issue logical codebase` 才解析得到。
+    let repository =
+        crate::product::repository_store::RepositoryStore::with_logical_codebase_feature(
+            lifecycle.app_paths(),
+            crate::product::logical_codebase::LogicalCodebaseFeature::enabled(),
+        )
         .create(crate::product::repository_store::CreateRepositoryInput {
             project_id: project_id.to_string(),
             name: "Workspace Engine Fixture Repository".to_string(),
@@ -627,7 +639,149 @@ fn make_work_item_plan_engine_with_draft_candidate(
             idempotency_key: "workspace-engine-fixture-repository".to_string(),
         })
         .unwrap();
-    let repository_id = repository.id.clone();
+    // REQ-PLN-02（SC 链候选契约）：`work-item-plan-rep4.md` 等候选 fixture 按
+    // 单仓时代约定声明物理仓 `repo-levels`；LC 时代物理 id 由 identity 分配
+    // （`repository_<uuid>`），成员表反查（`reverse_member_logical`/结构门/
+    // Final Compile lowering）会把候选的 single_repository 归属判成非成员而
+    // fail-closed。rep4.md 被编译器字段矩阵测试（STRUCTURED_KEYS）钉死不可
+    // 改，因此把权威（member/checkout）与兼容投影（repos.json）的物理 id
+    // 统一改写为该契约值——逻辑 id / checkout id 不动，下游（story/issue/
+    // work item/候选归属解析）全部按同一物理仓 id 消费。
+    const FIXTURE_MEMBER_PHYSICAL_REPOSITORY_ID: &str = "repo-levels";
+    let authority =
+        crate::product::logical_codebase::LogicalCodebaseStore::new(lifecycle.app_paths());
+    let member_logical_id = repository
+        .logical_repository_id
+        .expect("LC create registers a logical member");
+    let main_checkout_id = repository
+        .primary_checkout_id
+        .expect("LC create registers a main checkout");
+    let mut member = authority
+        .load_member(project_id, member_logical_id)
+        .unwrap()
+        .expect("fixture member record");
+    member.physical_repository_id = FIXTURE_MEMBER_PHYSICAL_REPOSITORY_ID.to_string();
+    authority.save_member(project_id, &member).unwrap();
+    let mut checkout = authority
+        .load_checkout(project_id, main_checkout_id)
+        .unwrap()
+        .expect("fixture checkout record");
+    checkout.physical_repository_id = FIXTURE_MEMBER_PHYSICAL_REPOSITORY_ID.to_string();
+    authority.save_checkout(project_id, &checkout).unwrap();
+
+    // REQ-PLN-02（rep4 WI-003 固定逻辑归属）：`work-item-plan-rep4.md` 的
+    // WI-003 声明 `intent_target_logical_repo:
+    // 00000000-0000-4000-8000-000000000003`（固定 uuid，与建仓随机分配的
+    // 成员 id 恒不相等）。该 fixture 被编译器 STRUCTURED_KEYS 矩阵测试钉死
+    // 不可改，因此在 LC 权威注册该 uuid 的第二成员，lowering 的成员表反查
+    // （`resolve_item_target_repository_id` → `physical_by_logical`）才能
+    // 命中。⚠️ 其物理 id 必须独立（`repo-levels-integration` + 独立
+    // checkout）：与主成员共用物理 id 会让 `reverse_member_logical` 等按
+    // 物理仓反查的链路撞同物理双成员 Ambiguous。manifest.member_ids 变更
+    // 必须伴随 membership_revision +1（save_manifest 单调校验）。
+    const REP4_WI003_PHYSICAL_REPOSITORY_ID: &str = "repo-levels-integration";
+    let rep4_wi003_logical_id = crate::product::logical_codebase::LogicalRepositoryId(
+        uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0003),
+    );
+    let rep4_wi003_checkout_id =
+        crate::product::logical_codebase::RepositoryCheckoutId(uuid::Uuid::new_v4());
+    let rep4_wi003_source_identity =
+        crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+            &integration_repository_path,
+            integration_repository_path.join(".git"),
+            None,
+        );
+    let rep4_wi003_created_at = chrono::Utc::now().to_rfc3339();
+    let mut fixture_manifest = authority
+        .load_manifest(project_id)
+        .unwrap()
+        .expect("fixture logical codebase manifest");
+    fixture_manifest.member_ids.push(rep4_wi003_logical_id);
+    fixture_manifest.membership_revision += 1;
+    authority
+        .save_manifest(project_id, &fixture_manifest)
+        .unwrap();
+    authority
+        .save_member(
+            project_id,
+            &crate::product::logical_codebase::CodebaseMemberRecord {
+                logical_repository_id: rep4_wi003_logical_id,
+                physical_repository_id: REP4_WI003_PHYSICAL_REPOSITORY_ID.to_string(),
+                alias: "Workspace Engine Fixture Integration Repository".to_string(),
+                role: "repository".to_string(),
+                ordinal: 2,
+                source_identity: rep4_wi003_source_identity.clone(),
+                repo_type: crate::product::logical_codebase::RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![rep4_wi003_checkout_id],
+                status: crate::product::logical_codebase::MemberStatus::Active,
+                created_at: rep4_wi003_created_at.clone(),
+                updated_at: rep4_wi003_created_at.clone(),
+            },
+        )
+        .unwrap();
+    authority
+        .save_checkout(
+            project_id,
+            &crate::product::logical_codebase::RepositoryCheckoutRecord {
+                checkout_id: rep4_wi003_checkout_id,
+                logical_repository_id: rep4_wi003_logical_id,
+                physical_repository_id: REP4_WI003_PHYSICAL_REPOSITORY_ID.to_string(),
+                kind: crate::product::logical_codebase::CheckoutKind::Main,
+                canonical_path: integration_repository_path.clone(),
+                checkout_path_hash: crate::product::id::repo_hash_for_path(
+                    &integration_repository_path.to_string_lossy(),
+                ),
+                git_dir_identity: rep4_wi003_source_identity.git_dir_identity(),
+                revision: None,
+                availability: crate::product::logical_codebase::CheckoutAvailability::Available,
+                observed_at: rep4_wi003_created_at.clone(),
+                created_at: rep4_wi003_created_at.clone(),
+                updated_at: rep4_wi003_created_at.clone(),
+            },
+        )
+        .unwrap();
+    let mut repositories = crate::product::repository_store::RepositoryStore::new(
+        lifecycle.app_paths(),
+    )
+    .list(project_id)
+    .unwrap();
+    for record in repositories.iter_mut() {
+        record.id = FIXTURE_MEMBER_PHYSICAL_REPOSITORY_ID.to_string();
+    }
+    // 第二成员的兼容投影（repos.json）：strict 解析链
+    // （`resolve_logical_repository_strict`）要求权威 member/checkout 与
+    // repos.json 投影配对一致（含 identity_schema_version=1），追加放在
+    // 主成员 id 改写之后，不被上面的循环连带改写。
+    repositories.push(crate::product::models::RepositoryRecord {
+        id: REP4_WI003_PHYSICAL_REPOSITORY_ID.to_string(),
+        project_id: project_id.to_string(),
+        name: "Workspace Engine Fixture Integration Repository".to_string(),
+        path: integration_repository_path.clone(),
+        repo_hash: crate::product::id::repo_hash_for_path(
+            &integration_repository_path.to_string_lossy(),
+        ),
+        runtime_root: integration_repository_path.join(".aria/runtime"),
+        default_policy_preset: "manual-write".to_string(),
+        default_provider_mode: String::new(),
+        created_at: rep4_wi003_created_at.clone(),
+        logical_repository_id: Some(rep4_wi003_logical_id),
+        primary_checkout_id: Some(rep4_wi003_checkout_id),
+        identity_schema_version: 1,
+        updated_at: rep4_wi003_created_at,
+    });
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .project_root(project_id)
+            .join("repos.json"),
+        &repositories,
+    )
+    .unwrap();
+    let repository_id = FIXTURE_MEMBER_PHYSICAL_REPOSITORY_ID.to_string();
     let now = chrono::Utc::now().to_rfc3339();
     crate::product::json_store::write_json(
         &lifecycle
@@ -637,8 +791,9 @@ fn make_work_item_plan_engine_with_draft_candidate(
         &crate::product::models::IssueRecord {
             id: issue_id.to_string(),
             project_id: project_id.to_string(),
-            repo_id: Some(repository.id),
-            logical_codebase_id: None,
+            repo_id: Some(repository_id.clone()),
+            logical_codebase_id:
+                crate::product::logical_codebase::legacy_logical_codebase_id(project_id),
             title: "Workspace Engine Fixture Issue".to_string(),
             description: Some("RuntimeBinding Final Compile fixture".to_string()),
             change_id: "workspace_engine_fixture".to_string(),
@@ -652,6 +807,18 @@ fn make_work_item_plan_engine_with_draft_candidate(
     )
     .unwrap();
 
+    // REQ-ROUTE-01：routing 的 (manifest, selection) 必须成对；manifest 由上面
+    // 启用 LC 特性的建仓产生，这里补该 issue 的 selection（全成员）。
+    // ⚠️ 顺序：issue 记录已在上方落盘，此处的 selection store 才建
+    // `issues/<id>/` 目录，不会把 issue id 顶掉。
+    crate::product::logical_codebase::IssueCodebaseSelectionStore::new(lifecycle.app_paths())
+        .save(&crate::product::logical_codebase::IssueCodebaseSelection::all_members(
+            project_id,
+            issue_id,
+            None,
+        ))
+        .unwrap();
+
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
             project_id: project_id.to_string(),
@@ -661,14 +828,35 @@ fn make_work_item_plan_engine_with_draft_candidate(
             aggregate_codebase: None,
         })
         .unwrap();
+    // 聚合 Design 视野（REQ-TGT-04）：注册第二成员后 selection(all_members)
+    // 的有效成员为 2，plan 会话的 business repository 解析为聚合根视图 ⇒
+    // compile 的确定性回落（fallback_physical_id）改按 confirmed Design 的
+    // change_order 首成员取值（r62 首仓兜底先例）。夹具 design 必须带聚合
+    // 视野并 Confirmed，否则无 Plan Intent 的内存 draft（wi_a/wi_b/wi_c）
+    // 在 Final Compile 以 work_item_target_missing fail-closed。
     let design = lifecycle
         .create_design_spec(CreateDesignSpecInput {
             project_id: project_id.to_string(),
             issue_id: issue_id.to_string(),
             story_spec_ids: vec![story.id.clone()],
             title: "Design".to_string(),
-            aggregate_codebase: None,
+            aggregate_codebase: Some(
+                crate::product::lifecycle_store::inputs::AggregateDesignSpecScope {
+                    logical_codebase_ref: fixture_manifest.logical_codebase_id,
+                    effective_member_ids: vec![member_logical_id, rep4_wi003_logical_id],
+                    involved_repository_ids: vec![member_logical_id, rep4_wi003_logical_id],
+                    change_order: vec![member_logical_id, rep4_wi003_logical_id],
+                },
+            ),
         })
+        .unwrap();
+    lifecycle
+        .update_spec_confirmation_status(
+            project_id,
+            issue_id,
+            &design.id,
+            crate::product::models::LifecycleConfirmationStatus::Confirmed,
+        )
         .unwrap();
 
     let plan = lifecycle
@@ -923,211 +1111,6 @@ pub(crate) fn init_fixture_git_repo(repo: &std::path::Path) {
     }
 }
 
-#[tokio::test]
-async fn drive_work_item_plan_provider_session_idle_watchdog_aborts_silent_provider() {
-    // r29 问题2 根修锚点(r28 现场):SC 门修订 turn 的 provider 流式 1min 后
-    // 静默挂死——本驱动循环此前缺 F-19 零活动看门狗(主驱动
-    // drive_provider_session 有 600s),挂死 provider 永不收口,harness 侧
-    // 90min 空等。修:同构补看门狗(test cfg 150ms)——静默超限即 Abort+
-    // cancel+失败节点+Error 事件+finish_failed_run,有界返回 Err。
-    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
-        make_work_item_plan_engine_with_draft_candidate("sess_wip_idle_watchdog");
-    engine.session.session_id = _lifecycle
-        .list_workspace_sessions("project_0001", "issue_0001")
-        .expect("workspace sessions")
-        .into_iter()
-        .find(|session| session.workspace_type == WorkspaceType::WorkItemPlan)
-        .expect("work item plan session")
-        .id;
-    let node_id = engine.begin_work_item_plan_author_run().await;
-    let (provider_event_tx, provider_event_rx) = mpsc::channel(8);
-    let (provider_command_tx, _provider_command_rx) = mpsc::channel(8);
-    // 一段真实流式后永久静默(事件通道保持打开=provider 未退出也未产出)。
-    provider_event_tx
-        .send(ProviderEvent::TextDelta {
-            content: "partial draft then silence\n".to_string(),
-        })
-        .await
-        .expect("send text delta");
-    let mut command_rx = empty_provider_commands();
-
-    let drive = engine.drive_work_item_plan_provider_session_to_output(
-        Ok(ProviderSession {
-            native_session_id: None,
-            events: provider_event_rx,
-            commands: provider_command_tx,
-        }),
-        &mut command_rx,
-        node_id.clone(),
-        ProviderName::ClaudeCode,
-    );
-    // 有界观测:修前裸 await 永挂(此处 5s 上界即 RED);修后看门狗
-    // (test 150ms)触发,秒级返回带稳定原因码的 Err。
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), drive).await;
-    let result = outcome.expect("看门狗必须在有界时间内收口(修前=永挂 90min)");
-    assert!(result.is_err(), "静默 provider 必须按失败收口,不得返回输出");
-    let message = result.expect_err("watchdog failure");
-    assert!(
-        message.contains("provider_idle_watchdog"),
-        "失败原因必须携带稳定原因码 provider_idle_watchdog,got: {message}"
-    );
-}
-
-/// B2b1(Task 5.2,anchor_t14,设计 §4.2.4/§5.4):old map missing → waiting——
-/// fullmap 纪元激活(同 provider/role 存在 map 记录)后,conversation-only
-/// native(不在任何 Active map 绑定)不得 resume 也不得出生 fresh,typed
-/// FrozenBindingUnavailable 上浮、零 provider start;绑定一致 native 正常
-/// 续接(纪元不误伤);无 gateway 的 direct 形态(纪元之前)维持既有恢复
-/// 行为(plan None 分支原样)。
-#[test]
-fn anchor_t14_plan_resume_without_trusted_map_waits_not_fresh() {
-    use crate::product::models::{
-        LogicalLaunchBasis, LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState,
-        ProviderConversationRef, ProviderConversationRole,
-    };
-
-    let (_tmp, _checkpoint, lifecycle, _plan_id, engine_plain) =
-        make_work_item_plan_engine_with_draft_candidate("sess_t14_epoch");
-    let worktree = _tmp.path().join("repository").to_string_lossy().to_string();
-
-    // direct 对照(纪元之前):无 gateway,conversation-only native 原样续接。
-    let plain_engine = engine_plain;
-    let session_id = plain_engine.session.session_id.clone();
-    seed_t14_epoch_record(
-        &lifecycle,
-        &session_id,
-        "native-conv-only",
-        Some("native-map-bound"),
-    );
-    let resumed = plain_engine
-        .build_work_item_plan_streaming_input(
-            crate::protocol::contracts::ProviderType::ClaudeCode,
-            "anchor t14 prompt".to_string(),
-            worktree.clone(),
-            ProviderName::ClaudeCode,
-            crate::product::workspace_engine::PlanAuthorOutputContract::Structured,
-        )
-        .expect("纪元之前(direct)conversation-only resume 维持既有行为");
-    assert_eq!(
-        resumed.resume_provider_session_id.as_deref(),
-        Some("native-conv-only")
-    );
-
-    // 纪元激活:gateway 在场 + 同 (role,provider) 存在 map 记录,conversation
-    // native 未命中 Active 绑定 → typed 等待,零 fresh 出生。
-    let engine = plain_engine.with_logical_provider_gateway(t14_epoch_gateway(
-        &lifecycle,
-        _tmp.path().join("t14-authority-root"),
-    ));
-    let error = engine
-        .build_work_item_plan_streaming_input(
-            crate::protocol::contracts::ProviderType::ClaudeCode,
-            "anchor t14 prompt".to_string(),
-            worktree.clone(),
-            ProviderName::ClaudeCode,
-            crate::product::workspace_engine::PlanAuthorOutputContract::Structured,
-        )
-        .expect_err("unbound conversation native must wait, not resume or rebirth");
-    assert!(
-        error.contains("native_resume_candidate_frozen_binding_unavailable"),
-        "typed FrozenBindingUnavailable 必须上浮,got: {error}"
-    );
-
-    // 绑定一致对照:conversation native == Active map 绑定 → 正常续接。
-    seed_t14_epoch_record(
-        &lifecycle,
-        &session_id,
-        "native-map-bound",
-        Some("native-map-bound"),
-    );
-    let resumed = engine
-        .build_work_item_plan_streaming_input(
-            crate::protocol::contracts::ProviderType::ClaudeCode,
-            "anchor t14 prompt".to_string(),
-            worktree,
-            ProviderName::ClaudeCode,
-            crate::product::workspace_engine::PlanAuthorOutputContract::Structured,
-        )
-        .expect("map-bound native resumes");
-    assert_eq!(
-        resumed.resume_provider_session_id.as_deref(),
-        Some("native-map-bound")
-    );
-
-    fn seed_t14_epoch_record(
-        lifecycle: &LifecycleStore,
-        session_id: &str,
-        conversation_native: &str,
-        map_native: Option<&str>,
-    ) {
-        let mut record = lifecycle
-            .get_workspace_session(session_id)
-            .expect("session record");
-        record.provider_conversations = vec![ProviderConversationRef {
-            role: ProviderConversationRole::Author,
-            provider: ProviderName::ClaudeCode,
-            provider_session_id: conversation_native.to_string(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            last_node_id: Some("timeline_node_prev".to_string()),
-        }];
-        record.logical_launch_fingerprints = vec![LogicalLaunchFingerprintRecord {
-            schema_version: 1,
-            basis: LogicalLaunchBasis::FullLcProjectionV2,
-            role: ProviderConversationRole::Author,
-            provider: ProviderName::ClaudeCode,
-            role_run_seq: 7,
-            node_id: "timeline_node_007".to_string(),
-            native_session_id: map_native.map(str::to_string),
-            fingerprint_digest: "sha256:t14-epoch".to_string(),
-            planning_access_fingerprint: "sha256:t14-epoch".to_string(),
-            state: LogicalLaunchFingerprintState::Active,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-        }];
-        crate::product::json_store::write_json(
-            &lifecycle
-                .workspace_sessions_root("project_0001", "issue_0001")
-                .join(format!("{session_id}.json")),
-            &record,
-        )
-        .expect("seed epoch record");
-    }
-
-    fn t14_epoch_gateway(
-        lifecycle: &LifecycleStore,
-        worktree: std::path::PathBuf,
-    ) -> std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway> {
-        std::fs::create_dir_all(&worktree).expect("authority root dir");
-        let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
-            "project_0001",
-            worktree.clone(),
-            Vec::new(),
-        );
-        let policy_store = crate::product::logical_codebase::AggregatePolicyArtifactStore::new(
-            lifecycle.app_paths(),
-        );
-        policy_store
-            .ensure_bootstrap(&manifest)
-            .expect("bootstrap aggregate policy");
-        let mut registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
-        registry.register(
-            ProviderName::ClaudeCode,
-            std::sync::Arc::new(ReviewVerdictStreamingProvider {
-                output: "t14",
-                provider_type: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                prompt: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            }),
-        );
-        std::sync::Arc::new(
-            crate::product::logical_codebase::LogicalCodebaseProviderGateway::new(
-                policy_store,
-                std::sync::Arc::new(ReviewStaticCapabilitySource::default()),
-                std::sync::Arc::new(ReviewPassThroughTargetResolver),
-                std::sync::Arc::new(registry),
-                std::sync::Arc::new(ReviewStubSyncAdapter),
-                review_always_available_gate(),
-                worktree,
-            ),
-        )
-    }
-}
+// part_09 拆分（large_file_guard 1200 行上限）：两个用例族经 include! 挂载，与本文档同一模块作用域，测试路径与行为零变化（纯移动）。
+include!("part_09/provider_session_watchdog.rs");
+include!("part_09/anchor_t14_plan_resume.rs");

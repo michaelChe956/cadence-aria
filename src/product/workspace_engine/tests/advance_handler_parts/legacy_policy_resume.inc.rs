@@ -26,13 +26,12 @@ async fn legacy_record_without_policy_field_resumes_with_journal_authority() {
     let coding_store =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let seeded_attempt = coding_store
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
+        // 基座 attempt 带冻结快照 ⇒ 桶键 Some(logical_repository_id)，
+        // None 桶检索落空 ⇒ 桶无关取数（见 group.rs `attempt_target_bucket`）。
+        .list_attempts_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store
         .delete_attempt("project_0001", "issue_plan_0001", &seeded_attempt.id)
@@ -152,13 +151,10 @@ async fn legacy_record_without_policy_field_resumes_with_journal_authority() {
     let coding_store_c =
         crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths_c.clone());
     let seeded_c = coding_store_c
-        .get_attempt_for_work_item_group(
-            "project_0001",
-            "issue_plan_0001",
-            "work_item_plan_0001",
-            None,
-        )
+        .list_attempts_for_work_item_group("project_0001", "issue_plan_0001", "work_item_plan_0001")
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded group attempt");
     coding_store_c
         .delete_attempt("project_0001", "issue_plan_0001", &seeded_c.id)

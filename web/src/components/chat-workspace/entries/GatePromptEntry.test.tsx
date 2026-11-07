@@ -257,8 +257,10 @@ describe("GatePromptEntry actionability", () => {
     const confirm = screen.getByRole("button", { name: "确认当前版本" });
     expect(confirm).toBeDisabled();
     expect(confirm).toHaveAttribute("title", "会话已进入下一阶段，这扇门不再接收操作");
+    // 片5（REQ-HGC-04）：过期门卡不再出现「；可终止此门后重新发起」拼接
+    // （那会把 owner 引向会作废这一轮的动作），原因行由分流单一事实源给出。
     expect(screen.getByTestId("gate-confirm-blocked-reason")).toHaveTextContent(
-      "会话已进入下一阶段，这扇门不再接收操作；可终止此门后重新发起",
+      "暂不可确认：会话已进入下一阶段，这扇门不再接收操作",
     );
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
 
@@ -709,7 +711,7 @@ describe("GatePromptEntry actionability", () => {
 
       const meta = screen.getByTestId("gate-meta");
       expect(meta).toHaveTextContent("为什么找你：引擎自动评审拿不准，需要你来定");
-      expect(meta).toHaveTextContent("还可自动修复 3 次");
+      expect(meta).toHaveTextContent("人工返修还可做 3 次");
       expect(meta.className).not.toContain("aria-chip");
       expect(screen.queryByTestId("gate-trigger-label")).toBeNull();
       expect(screen.queryByTestId("gate-budget")).toBeNull();
@@ -999,10 +1001,17 @@ describe("C2 gate accepted feedback turns budget line", () => {
   installWorkspaceStoreTestHooks();
 
   function turnsEntry(): ChatEntry {
+    // 块1 片6：B1 平台自动重写账本（编译面）与 B2 人工返修账本（门预算）
+    // 同时在场——meta 行须分别呈现两个账面事实。
     return gateEntry(null, "turn_turns", {
       turn_id: "turn_turns",
       gate_trigger: "native_human_required",
       remaining_budget: 3,
+      candidate_compile_failure: {
+        code: "final_compile_failed",
+        message: "候选 Final Compile 未通过",
+        auto_rewrite: { phase: "stopped", remaining: 2, repeated: 1 },
+      },
     });
   }
 
@@ -1021,35 +1030,44 @@ describe("C2 gate accepted feedback turns budget line", () => {
     };
   }
 
-  it("有反馈轮次时预算行呈现「你已回复过 N 轮」与剩余预算同行", () => {
+  it("有反馈轮次时呈现「你已说明 N 轮」与两个账面事实＋未对齐说明", () => {
     useWorkspaceStore.setState({
       workspaceType: "work_item_plan",
+      flowKind: "legacy",
       humanGateSnapshot: planSnapshot(2),
     });
 
     render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
 
     const meta = screen.getByTestId("gate-meta");
-    expect(meta).toHaveTextContent("你已回复过 2 轮");
-    expect(meta).toHaveTextContent("还可自动修复 3 次");
+    expect(meta).toHaveTextContent("你已说明 2 轮");
+    expect(meta).toHaveTextContent("人工返修还可做 3 次");
+    expect(meta).toHaveTextContent("平台自动重写还可做 2 次");
+    // 两个账面事实分别标注来源，且不合成共享余额。
+    expect(meta).toHaveTextContent("门预算账本");
+    expect(meta).toHaveTextContent("编译面自动重写账本");
+    expect(meta).toHaveTextContent("两处账本尚未合并");
+    expect(meta.textContent).not.toContain("共享余额");
   });
 
-  it("零轮次与旧会话缺席都维持既有预算行（不渲染已反馈段）", () => {
+  it("零轮次维持既有预算行；旧会话缺席呈现预算历史不可用而非默认满额", () => {
     useWorkspaceStore.setState({
       workspaceType: "work_item_plan",
+      flowKind: "legacy",
       humanGateSnapshot: planSnapshot(0),
     });
     const { unmount } = render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
     const meta = screen.getByTestId("gate-meta");
-    expect(meta).toHaveTextContent("还可自动修复 3 次");
-    expect(meta).not.toHaveTextContent("回复过");
+    expect(meta).toHaveTextContent("人工返修还可做 3 次");
+    expect(meta).not.toHaveTextContent("你已说明");
     unmount();
 
     useWorkspaceStore.setState({ humanGateSnapshot: planSnapshot() });
     render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
     const metaAbsent = screen.getByTestId("gate-meta");
-    expect(metaAbsent).toHaveTextContent("还可自动修复 3 次");
-    expect(metaAbsent).not.toHaveTextContent("回复过");
+    expect(metaAbsent).toHaveTextContent("预算历史不可用");
+    expect(metaAbsent.textContent).not.toContain("还可做 3 次");
+    expect(metaAbsent.textContent).not.toContain("回复过");
   });
 });
 

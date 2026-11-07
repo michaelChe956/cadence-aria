@@ -9,7 +9,7 @@ use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
 use crate::product::logical_codebase::production_policy_resolvers::StoreBackedProviderCapabilitySource;
 use crate::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
-    ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore, RootRecipeEvidence,
+    ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
 };
 use crate::product::logical_codebase::provider_gateway::ProviderRefType;
 use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
@@ -28,7 +28,7 @@ impl T10StoreFixture {
         let root = tempfile::tempdir().expect("temporary product root");
         let paths = ProductAppPaths::new(root.path());
         let store = ProviderCapabilityStore::new(paths.clone());
-        store.ensure_bootstrap("project_0001").expect("bootstrap");
+        store.ensure_bootstrap().expect("bootstrap");
         Self {
             _root: root,
             paths,
@@ -39,9 +39,7 @@ impl T10StoreFixture {
     }
 
     fn upsert(&self, record: &ProviderCapabilityRecord) {
-        self.store
-            .upsert("project_0001", record)
-            .expect("upsert capability record");
+        self.store.upsert(record).expect("upsert capability record");
     }
 
     fn gateway(&self) -> LogicalCodebaseProviderGateway {
@@ -59,10 +57,7 @@ impl T10StoreFixture {
             std::fs::canonicalize(manifest.provider_context_root).expect("authority root");
         LogicalCodebaseProviderGateway::with_audit(
             AggregatePolicyArtifactStore::new(self.paths.clone()),
-            Arc::new(StoreBackedProviderCapabilitySource::new(
-                self.paths.clone(),
-                "project_0001".to_string(),
-            )),
+            Arc::new(StoreBackedProviderCapabilitySource::new(self.paths.clone())),
             Arc::new(MutableTargetResolver::new(
                 self.paths.root().join("baseline.git"),
             )),
@@ -115,7 +110,6 @@ fn record(
         trust: ProviderCapabilityEvidence::Confirmed,
         probed_at: Some("2026-10-17T00:00:00Z".to_string()),
         probe_artifact_ref: Some("probe://t10-artifact".to_string()),
-        root_recipe_evidence: RootRecipeEvidence::None,
         execution_semantics:
             crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                 .to_string(),

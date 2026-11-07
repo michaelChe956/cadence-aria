@@ -221,4 +221,162 @@ describe("CodingWorkspacePage automation termination（T4）", () => {
     await user.click(abortButton);
     expect(api.abortAttempt).toHaveBeenCalledTimes(1);
   });
+
+  // 2026-11-06 陈旧回执修复：同 issue「终止 → 删 work item → 新建」后
+  // enrollment 换绑新 plan/session——前端内存残留的旧回执不得盖在新会话上
+  // 呈现「自动化已终止」。当前 plan 身份取 automation.plan_id（WS 快照同源
+  // 投影）；回执缺 planId 或当前身份不可得均 fail-closed 不展示。
+  function seedTerminationReceipt(planId: string | null) {
+    useCodingWorkspaceStore.setState({
+      planTermination: {
+        pending: null,
+        submitting: false,
+        error: null,
+        terminated: {
+          projectId: "project_0001",
+          issueId: "issue_0001",
+          planId,
+          terminatedAt: "2026-10-16T06:00:00Z",
+          outcome: "terminated",
+        },
+      },
+    });
+  }
+
+  it("同 issue 旧回执（planId=旧 plan）+ 当前是新 plan ⇒ 横幅不渲染，终止入口恢复", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      automation: { ...MANAGED_AUTOMATION, plan_id: "plan_0002" },
+    });
+    seedTerminationReceipt("plan_0001");
+
+    renderCodingPage();
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+    // 新 plan 未终止 ⇒ 统一终止入口恢复（不再被陈旧回执压住）。
+    expect(screen.getByTestId("automation-termination-entry")).toBeInTheDocument();
+  });
+
+  it("回执缺 planId（旧响应/回放）⇒ 横幅不渲染（fail-closed）", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      automation: MANAGED_AUTOMATION,
+    });
+    seedTerminationReceipt(null);
+
+    renderCodingPage();
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+    expect(screen.getByTestId("automation-termination-entry")).toBeInTheDocument();
+  });
+
+  it("当前 plan 身份不可得（automation.plan_id 缺省）⇒ 横幅不渲染（fail-closed）", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "running",
+      stage: "coding",
+      automation: { ...MANAGED_AUTOMATION, plan_id: null },
+    });
+    seedTerminationReceipt("plan_0001");
+
+    renderCodingPage();
+
+    expect(screen.queryByTestId("automation-terminated-banner")).toBeNull();
+  });
+
+  // r2（Important 1 / REQ-WIGA-14「旧代 outcome 不得叠加到新代」）：横幅
+  // outcome 与 terminatedAt 同走身份门——服务端主源（automation.
+  // terminated_at）渲染横幅时，旧代回执（planId 不匹配）的 cleanup_required
+  // 文案不得叠加到新代横幅上。
+  it("主源终止态下旧代回执的 cleanup_required 文案不得叠加（outcome 同走身份门）", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "aborted",
+      stage: "coding",
+      // 终止后形态：主源 terminated_at 渲染横幅；plan_id=本（新）plan。
+      automation: {
+        ...MANAGED_AUTOMATION,
+        enabled: false,
+        terminated_at: "2026-10-16T07:00:00Z",
+      },
+    });
+    // 旧代回执：planId≠当前 plan，且带 cleanup_required。
+    useCodingWorkspaceStore.setState({
+      planTermination: {
+        pending: null,
+        submitting: false,
+        error: null,
+        terminated: {
+          projectId: "project_0001",
+          issueId: "issue_0001",
+          planId: "plan_0000",
+          terminatedAt: "2026-10-16T06:00:00Z",
+          outcome: "cleanup_required",
+        },
+      },
+    });
+
+    renderCodingPage();
+
+    const banner = screen.getByTestId("automation-terminated-banner");
+    // 主源时间戳照常（终止语义本体不弱化）。
+    expect(banner).toHaveTextContent("2026-10-16T07:00:00Z");
+    expect(banner).toHaveTextContent("本计划全部仓库已停止，不可继续；已产出文件保留。");
+    // 旧代回执的时间戳与 cleanup_required 文案均不叠加。
+    expect(banner).not.toHaveTextContent("2026-10-16T06:00:00Z");
+    expect(banner).not.toHaveTextContent("清理未完成");
+    expect(banner).not.toHaveTextContent("需管理员介入");
+  });
+
+  it("主源终止态 + 本 plan 回执 cleanup_required ⇒ 管理员介入文案照常（不弱化）", () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      attemptId: "coding_attempt_0001",
+      status: "aborted",
+      stage: "coding",
+      automation: {
+        ...MANAGED_AUTOMATION,
+        enabled: false,
+        terminated_at: "2026-10-16T07:00:00Z",
+      },
+    });
+    useCodingWorkspaceStore.setState({
+      planTermination: {
+        pending: null,
+        submitting: false,
+        error: null,
+        terminated: {
+          projectId: "project_0001",
+          issueId: "issue_0001",
+          planId: "plan_0001",
+          terminatedAt: "2026-10-16T06:00:00Z",
+          outcome: "cleanup_required",
+        },
+      },
+    });
+
+    renderCodingPage();
+
+    const banner = screen.getByTestId("automation-terminated-banner");
+    expect(banner).toHaveTextContent("清理未完成");
+    expect(banner).toHaveTextContent("需管理员介入");
+  });
 });

@@ -52,17 +52,14 @@ fn running_attempt_with_reviewer(
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    IssueStore::new(paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
-            title: "issue".to_string(),
-            description: None,
-            change_id: None,
-            base_branch: None,
-        })
-        .expect("issue");
+    // REQ-ROUTE-01：admission 的唯一凭证是「LC 权威 + 冻结 snapshot」，缺一
+    // 即租约未知（failing closed 早于本用例要测的 reviewer 缺配置门）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
@@ -78,7 +75,7 @@ fn running_attempt_with_reviewer(
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -99,17 +96,12 @@ fn running_group_attempt_with_reviewer(
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    IssueStore::new(paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
-            title: "issue".to_string(),
-            description: None,
-            change_id: None,
-            base_branch: None,
-        })
-        .expect("issue");
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_group_attempt(
@@ -128,7 +120,7 @@ fn running_group_attempt_with_reviewer(
                     permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
                     ),
                 },
-                target_snapshot: None,
+                target_snapshot: Some(logical.snapshot(&store.paths())),
                 max_auto_rework: 2,
                 start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             },

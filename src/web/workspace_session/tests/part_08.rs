@@ -204,7 +204,11 @@ async fn d21a_manager_fixture(tag: &str) -> D21aManagerFixture {
         .create(CreateProductIssueInput {
             project_id: project_id.clone(),
             repo_id: None,
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                &project_id,
+            ),
             title: format!("d2.1a manager issue {tag}"),
             description: None,
             change_id: None,
@@ -314,13 +318,21 @@ fn d21a_rest_fixture(tag: &str) -> (ProductAppPaths, EntityScope, WorkspaceSessi
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                &project.id,
+            ),
             title: format!("d2.1a rest issue {tag}"),
             description: None,
             change_id: None,
             base_branch: None,
         })
-        .expect("d2.1a rest issue");
+        .expect("d21a rest issue");
+    // REQ-ROUTE-01 两态化夹具前置：REST 面 `run_next` 经
+    // `workspace_repository_for_session` 解析 issue 归属的 LC——缺权威即
+    // fail-closed，provider 永不启动（用例表现为 d21a wait timeout）。
+    seed_single_member_logical_codebase(&app_paths, "checkout-d2-1a-rest");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
@@ -844,13 +856,20 @@ async fn cascade_d2_1a_registry_recreate_refuses_purging_session() {
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                &project.id,
+            ),
             title: "d2.1a recreate issue".to_string(),
             description: None,
             change_id: None,
             base_branch: None,
         })
         .expect("issue");
+    // REQ-ROUTE-01 两态化夹具前置：issue 归属的 legacy 别名 LC 必须落成可解析
+    // 权威，否则 manager create 直接 fail-closed。
+    seed_single_member_logical_codebase(&app_paths, "checkout-d2-1a-recreate");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {

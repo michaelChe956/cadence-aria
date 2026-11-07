@@ -24,6 +24,7 @@ use super::*;
 
 mod ask_extension_atomic;
 mod b1_resources;
+mod bootstrap_marker;
 mod empty_output;
 mod policy_session;
 mod usage_observability;

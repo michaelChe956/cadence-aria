@@ -1,11 +1,11 @@
 use super::dto::*;
 use super::support::*;
 use super::*;
-use crate::product::issue_baseline::resolve_effective_base_branch;
 use crate::product::logical_codebase::{
     IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore, LogicalRepositoryId,
     MemberStatus,
 };
+use axum::extract::rejection::JsonRejection;
 
 pub async fn list_workspaces(
     State(state): State<WebAppState>,
@@ -82,10 +82,34 @@ pub async fn open_project(
     Ok(Json(project_dto(project)))
 }
 
+/// DELETE /api/projects/{project_id} 的确认参数（对齐级联删除 D2.3 的
+/// `DeleteEntityQuery` 口径）：默认 URL 无 query；仅前端确认弹窗同意后
+/// 显式传 `?confirmed=true`。query 布尔不是安全授权——门禁由本端点强制。
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DeleteProjectQuery {
+    confirmed: Option<bool>,
+}
+
+/// 项目删除二次确认（2026-11-05 真机事故回归）：侧栏垃圾桶一次点击曾直接
+/// 硬删整个项目工作区（项目 + 全部逻辑代码库 + 成员登记 + capability 记录）。
+/// 未携带显式确认意图（`?confirmed=true`）MUST 以稳定码
+/// `deletion_confirmation_required`（409）拒绝且零副作用——沿用既有码，
+/// 不新造；确认门禁先于存在性判定，拒绝路径绝不触碰 store。
 pub async fn delete_project(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
+    Query(query): Query<DeleteProjectQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if query.confirmed != Some(true) {
+        return Err(ApiError::runtime(
+            "deletion_confirmation_required",
+            "删除 Project 前需要二次确认：将删除整个项目及其全部逻辑代码库、成员登记与 capability 记录，且不可恢复。",
+            json!({
+                "entity_kind": "project",
+                "entity_id": project_id,
+            }),
+        ));
+    }
     let store = ProjectStore::new(product_app_paths(&state));
     store.delete(&project_id).map_err(product_store_api_error)?;
     Ok(Json(json!({"status":"deleted"})))
@@ -155,14 +179,54 @@ pub async fn list_product_issues(
     }))
 }
 
+/// REQ-ROUTE-02：单仓创建入口已删除——issue 只能归属逻辑代码库创建。
+/// 块3 4.4③：缺 `logical_codebase_id` 的提交必须在 HTTP 面被稳定码
+/// `issue_not_bound_to_logical_codebase` 拒绝（error.rs → 400；中文文案
+/// 唯一来源是块2 码表），不落 serde 通用 422；其余反序列化拒绝按 axum
+/// 原样透传，保持既有行为。
 pub async fn create_product_issue(
     State(state): State<WebAppState>,
     Path(project_id): Path<String>,
-    Json(request): Json<CreateProductIssueRequest>,
+    payload: Result<Json<CreateProductIssueRequest>, JsonRejection>,
+) -> Response {
+    let Json(request) = match payload {
+        Ok(payload) => payload,
+        Err(rejection) => {
+            return if rejection_is_missing_logical_codebase_id(&rejection) {
+                ApiError::validation(
+                    "issue_not_bound_to_logical_codebase",
+                    "logical_codebase_id is required; single-repository issue creation was \
+                     removed, assign the issue to a logical codebase first",
+                )
+                .into_response()
+            } else {
+                rejection.into_response()
+            };
+        }
+    };
+    match create_product_issue_inner(&state, &project_id, &request) {
+        Ok(response) => response.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// serde 缺字段错误只认 `logical_codebase_id`：类型不匹配等其它 Data
+/// 拒绝不冒充稳定码（保持 axum 通用 422）。
+fn rejection_is_missing_logical_codebase_id(rejection: &JsonRejection) -> bool {
+    matches!(rejection, JsonRejection::JsonDataError(_))
+        && rejection
+            .body_text()
+            .contains("missing field `logical_codebase_id`")
+}
+
+fn create_product_issue_inner(
+    state: &WebAppState,
+    project_id: &str,
+    request: &CreateProductIssueRequest,
 ) -> ApiResult<Json<ProductIssueDto>> {
-    let app_paths = product_app_paths(&state);
+    let app_paths = product_app_paths(state);
     ProjectStore::new(app_paths.clone())
-        .get(&project_id)
+        .get(project_id)
         .map_err(product_store_api_error)?;
 
     let repository_id = request
@@ -170,40 +234,14 @@ pub async fn create_product_issue(
         .as_deref()
         .ok_or_else(|| ApiError::validation("repository_required", "repository_id is required"))?;
 
-    match request.logical_codebase_id.as_deref() {
-        Some(logical_codebase_id) => create_logical_codebase_issue(
-            &state,
-            &app_paths,
-            &project_id,
-            logical_codebase_id,
-            repository_id,
-            &request,
-        ),
-        None => {
-            // 单仓路径保持 legacy create 语义，绝不写 codebase-selection.json，
-            // 也绝不触碰 LC store（for_project 过渡语义已移除）。
-            let repository = find_repository(&app_paths, &project_id, repository_id)?;
-            // REQ-PIB-01：基准分支创建时解析并锁定（默认链 main→master；皆无且
-            // 未显式选择即 fail-closed 拒绝；显式选择须本地存在）。逻辑代码库
-            // issue（多仓非目标）不经此分支，保持无基线语义。
-            let base_branch =
-                resolve_effective_base_branch(&repository.path, request.base_branch.as_deref())
-                    .map_err(issue_baseline_api_error)?;
-            let store = IssueStore::new(app_paths);
-            let issue = store
-                .create_with_repository(CreateProductIssueWithRepositoryInput {
-                    project_id,
-                    repo_id: repository_id.to_string(),
-                    logical_codebase_id: None,
-                    base_branch: Some(base_branch),
-                    title: request.title,
-                    description: request.description,
-                    change_id: request.change_id,
-                })
-                .map_err(product_store_api_error)?;
-            Ok(Json(product_issue_dto(issue, None)))
-        }
-    }
+    create_logical_codebase_issue(
+        state,
+        &app_paths,
+        project_id,
+        &request.logical_codebase_id,
+        repository_id,
+        request,
+    )
 }
 
 /// REQ-PIB-01 分支列表端点：默认仓库全部本地分支（refs/heads，不隐式 fetch）
@@ -275,7 +313,7 @@ fn create_logical_codebase_issue(
         .create_with_repository(CreateProductIssueWithRepositoryInput {
             project_id: project_id.to_string(),
             repo_id: repository_id.to_string(),
-            logical_codebase_id: Some(logical_codebase_id.to_string()),
+            logical_codebase_id: logical_codebase_id.to_string(),
             // 多仓差异基线为 Non-Goal：逻辑代码库 issue 不设置基准分支。
             base_branch: None,
             title: request.title.clone(),
@@ -531,5 +569,95 @@ pub(super) mod create_repository_tests {
             git_finalize_warning: None,
             completed_at: "2026-07-14T00:01:00Z".to_string(),
         }
+    }
+}
+
+/// 块3 4.4③（REQ-ROUTE-01）：创建链缺 LC 提交的稳定码契约。
+#[cfg(test)]
+mod create_product_issue_tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    use super::{create_product_issue, list_product_issues};
+    use crate::web::runtime::WebRuntime;
+    use crate::web::state::WebAppState;
+
+    fn issue_routes(root: &std::path::Path) -> Router {
+        let state = WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()));
+        Router::new()
+            .route(
+                "/api/projects/{project_id}/issues",
+                get(list_product_issues).post(create_product_issue),
+            )
+            .with_state(state)
+    }
+
+    async fn post_issues(app: &Router, body: &str) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/project_0001/issues")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        // axum 通用拒绝的响应体是纯文本，不是 JSON。
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// 缺 `logical_codebase_id` 的提交 → 稳定码 400，不是 serde 通用 422
+    ///（error.rs 映射；中文文案唯一来源是块2 码表，测试名含 failure_copy
+    /// 以便窄跑 `cargo test --lib failure_copy` 一并覆盖）。
+    #[tokio::test]
+    async fn create_product_issue_missing_lc_yields_failure_copy_registered_stable_code() {
+        let root = tempfile::tempdir().expect("root");
+        let app = issue_routes(root.path());
+        let (status, body) =
+            post_issues(&app, r#"{"title":"t","repository_id":"repository_0001"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "unexpected body: {body}");
+        assert_eq!(
+            body["code"], "issue_not_bound_to_logical_codebase",
+            "unexpected body: {body}"
+        );
+    }
+
+    /// 其余反序列化拒绝不冒充稳定码：缺 title 保持 axum 通用 422；
+    /// LC 在场时照旧进入 handler（未知项目 → 稳定 404）。
+    #[tokio::test]
+    async fn create_product_issue_other_rejections_keep_generic_behavior() {
+        let root = tempfile::tempdir().expect("root");
+        let app = issue_routes(root.path());
+        let (status, body) = post_issues(
+            &app,
+            r#"{"repository_id":"repository_0001","logical_codebase_id":"lc_0001"}"#,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unexpected body: {body}"
+        );
+
+        let (status, body) = post_issues(
+            &app,
+            r#"{"title":"t","repository_id":"repository_0001","logical_codebase_id":"lc_0001"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "unexpected body: {body}");
+        assert_eq!(body["code"], "project_not_found", "unexpected body: {body}");
     }
 }

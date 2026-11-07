@@ -341,8 +341,13 @@ export type EnrollmentOptions = {
   plan_options: EnrollmentPlanOptions;
 };
 
-export type EnrollmentTarget =
-  | { kind: "single_repository"; repository_id: string }
+/**
+ * 发起侧载体（Enable / Rebind 命令的 target）：**只有逻辑代码库两变体**。
+ * 后端载体判定不再产出单仓载体（REQ-ROUTE-C5-TARGET）⇒ 命令侧不得再接受
+ * `single_repository`；转换守卫见 `automation-reenable.ts` 的
+ * `carrierTargetFromEnrollmentTarget`。
+ */
+export type EnrollmentCarrierTarget =
   | {
       kind: "logical_codebase";
       logical_codebase_id: string;
@@ -355,6 +360,16 @@ export type EnrollmentTarget =
       logical_codebase_id: string;
       logical_repository_ids: string[];
     };
+
+/**
+ * 投影侧载体（服务端持久化投影的类型）：**三变体保留**。
+ * ⚠ 第三变体 `single_repository` **仅 legacy 只读**——老单仓 enrollment 记录
+ * 仍要能显示与反序列化（老记录不退化为「target 未知」）；但**新投影不再
+ * 产出**它，命令侧也不接受它（命令 target 用 `EnrollmentCarrierTarget`）。
+ */
+export type EnrollmentTarget =
+  | { kind: "single_repository"; repository_id: string }
+  | EnrollmentCarrierTarget;
 
 export type EnrollmentBindingIdentity = {
   binding_version: number;
@@ -400,6 +415,14 @@ export type IssueAutomationEnrollment = {
    * 该 enrollment 已被终止——人工可显式重新开启（Enable 取代），自动路径
    * 不得复活。旧投影缺字段按未终止读。 */
   terminated_at?: string | null;
+  /** REQ-WIGA-VOID-01：登记随工作项组删除作废的时间（RFC3339）。非空即该
+   * 登记已作废——视为无约束力的历史记录，不再约束该 issue 上的新工作项组
+   *（重新开启按换代放行 provider/source/target 全部漂移）。与 terminated_at
+   * 是两个独立维度；旧投影缺字段按未作废读。 */
+  voided_at?: string | null;
+  /** REQ-WIGA-VOID-01：作废原因机器码（如 work_item_group_deleted）；只追加
+   * 不改写。 */
+  void_reason?: string | null;
 };
 
 export type AutomationEnrollmentEnableCommand = {
@@ -411,8 +434,10 @@ export type AutomationEnrollmentEnableCommand = {
   selection_key: string;
   source: EnrollmentSource;
   options: EnrollmentOptions;
-  /** C1：服务端 automation-target 投影原样回传（必填，前端不拼凑）。 */
-  target: EnrollmentTarget;
+  /** C1：服务端 automation-target 投影原样回传（必填，前端不拼凑）。
+   * ⚠ 发起侧载体只有逻辑代码库两变体：legacy `single_repository` 投影不得
+   * 进命令（守卫 `carrierTargetFromEnrollmentTarget` 返回 null ⇒ 禁用提交）。 */
+  target: EnrollmentCarrierTarget;
 };
 
 export type AutomationEnrollmentDisableCommand = {
@@ -432,7 +457,8 @@ export type AutomationEnrollmentRebindRequest = {
     plan_id: string;
     session_id: string;
     source: EnrollmentSource;
-    target: EnrollmentTarget;
+    /** 发起侧载体只有逻辑代码库两变体（legacy 单仓载体不得进命令）。 */
+    target: EnrollmentCarrierTarget;
     author_provider: WorkspaceProviderName;
     reviewer_provider: WorkspaceProviderName;
   };

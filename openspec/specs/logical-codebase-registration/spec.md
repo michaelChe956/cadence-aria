@@ -381,7 +381,7 @@ preflight MUST NOT 因聚合根已存在 `AGENTS.md` / `CLAUDE.md` / `.claude/ru
 
 #### Scenario: 有效 provider 集与免登记会话
 
-- **WHEN** 合法确认读取本会话已锁定的 author/effective reviewer，包含同 provider、禁用 reviewer、provisional reviewer、Claude/Pi/Fake，或无 LC gateway 的单仓会话
+- **WHEN** 合法确认读取本会话已锁定的 author/effective reviewer，包含同 provider、禁用 reviewer、provisional reviewer、Claude/Pi/Fake
 - **THEN** 系统 SHALL 仅为有效且需要 trust 的 Codex/Kimi 去重登记，不采信建联陈旧快照、前端 root/provider、默认配置或安装列表；禁用/provisional reviewer 与无需 trust/非 LC 会话 SHALL 零 home/ownership/trust audit 调用，不改变 recipe 的 Claude-only 选择
 
 #### Scenario: 冻结身份缺失或漂移等待
@@ -510,3 +510,60 @@ preflight MUST NOT 因聚合根已存在 `AGENTS.md` / `CLAUDE.md` / `.claude/ru
 
 - **WHEN** 用户 home 下的 trust 配置不可写、格式冲突或撤销无法核验
 - **THEN** 系统 SHALL fail-closed 停等并展示外部副作用说明；不得启动依赖该登记的 provider，也不得覆盖无关配置
+
+### Requirement: 统一多仓入口（REQ-REG-16）
+
+系统 SHALL 使新建项目的产品流程只有多仓一条：**创建项目 → 建逻辑代码库（选聚合根 + 登记成员仓 + 聚合初始化）→ 创建 issue（选该 LC）**。前端 MUST NOT 提供单仓代码库的创建入口（模式选择中的「单仓库」radio、「继续添加单仓库」按钮，及其类型变体与消费分支）。
+
+「建逻辑代码库」SHALL 是多仓流程中的**独立步骤**，MUST NOT 被塞进「创建项目」表单 —— 它包含独立的多仓登记流程（聚合根选择、成员登记、聚合初始化），塞入创建项目会让该流程无处安放。该步骤 SHALL 复用既有「添加代码库」对话框（去掉单仓分支后即为其形态），MUST NOT 为它新造页面。
+
+#### Scenario: 新建项目界面直接是多仓
+
+- **WHEN** 用户进入新建项目/添加代码库流程
+- **THEN** 界面 SHALL 直接呈现多仓形态（聚合根 + 成员登记）；MUST NOT 出现「单仓库」选项或「继续添加单仓库」按钮
+
+#### Scenario: 建逻辑代码库是独立步骤
+
+- **WHEN** 用户完成项目创建
+- **THEN** 「建逻辑代码库」SHALL 作为独立步骤可进入（选聚合根 → 登记成员 → 聚合初始化）；MUST NOT 要求在建项目的同一张表单里完成成员登记
+
+#### Scenario: 创建 issue 必须落在某个 LC 上
+
+- **WHEN** 用户在新建项目里创建 issue
+- **THEN** 系统 SHALL 要求先选定该项目的某个 LC；MUST NOT 提供不带 LC 的 issue 创建路径
+
+#### Scenario: 既有对话框改造后即为建 LC 入口
+
+- **WHEN** 用户打开既有「添加代码库」对话框
+- **THEN** 该对话框 SHALL 只保留多仓库形态并直接充当「建逻辑代码库」的入口；MUST NOT 引入第二个并行的建 LC 页面
+
+### Requirement: 1 成员与 N 成员同一套路径（REQ-REG-17）
+
+系统 MUST NOT 禁止只有 1 个 active 成员的逻辑代码库。成员数 SHALL 只是参数：1 成员与 N 成员 MUST 走**完全同一套**登记、首建、索引、编码与验收代码路径。
+
+代码中 MUST NOT 出现「成员数为 1」的专门分支；多仓专属机制在 1 成员时 SHALL **自然退化**而非「跳过检查」：仓序（`change_order`）自动边因后仓集合为空而为零条、跨仓验收对象只有本仓、成员/聚合索引索引 1 个成员、写范围前缀 1 个。系统 MUST NOT 存在任何「至少 2 个成员才允许某操作」类门禁。
+
+#### Scenario: 1 成员 LC 登记并首建成功
+
+- **WHEN** 用户以单个真实 git 仓作为成员登记一个逻辑代码库并触发首建
+- **THEN** 系统 SHALL 正常登记该成员并按 identity → manifest/checkout → rules/policy → member index → aggregate index active 推进到 PlanningReady；MUST NOT 因成员数为 1 拒绝或短路
+
+#### Scenario: 仓序自动边自然为零条
+
+- **WHEN** 1 成员 LC 建立仓序（`change_order`）
+- **THEN** 自动边集合 SHALL 为空；MUST NOT 因「无后仓」而报错、跳过或降级为单仓语义
+
+#### Scenario: 不得存在成员数门禁
+
+- **WHEN** 任意操作（登记、聚合初始化、索引、group coding、跨仓验收）面对只有 1 个 active 成员的 LC
+- **THEN** 该操作 SHALL 与 N 成员时表现一致；MUST NOT 返回「至少 2 个成员」类拒绝
+
+#### Scenario: 不得存在 1 成员专属分支
+
+- **WHEN** 检查成员数相关判断（`members.len() == 1`、`member_count`、`require_multiple_members` 之类）
+- **THEN** 代码中 MUST NOT 存在以成员数为 1 为条件的生产分支；SHALL 由源码级断言锁死，防止回归
+
+#### Scenario: 成员数变化不需特殊流程
+
+- **WHEN** 某 LC 的成员数从 1 增到 N 或从 N 减到 1
+- **THEN** 系统 SHALL 按既有登记/投影机制自然反映新成员数；MUST NOT 需要专门的迁移步骤或「切回单仓」路径

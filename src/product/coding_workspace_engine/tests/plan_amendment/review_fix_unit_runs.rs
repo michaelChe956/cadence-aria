@@ -8,6 +8,17 @@ async fn revalidated_unit_completes_after_code_review_approval() {
         .apply_plan_amendment(&fixture.attempt, &fixture.manifest)
         .await
         .expect("apply revalidation amendment");
+    // 有快照的 attempt 租约只按仓维分类：恢复后的推进（complete → advance）
+    // 会按仓维三元键转移锁，缺记录即 fail-closed。这里补「同一仓、同一
+    // active work item、owner=本 attempt」的既有事实。
+    super::support::seed_repo_worktree_lease(
+        &fixture,
+        &resumed,
+        resumed
+            .current_work_item_id
+            .as_deref()
+            .expect("resumed attempt current work item"),
+    );
     let active_unit = fixture
         .store
         .get_active_coding_unit(&resumed.project_id, &resumed.issue_id, &resumed.id)

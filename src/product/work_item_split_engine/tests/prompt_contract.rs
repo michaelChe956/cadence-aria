@@ -1432,7 +1432,8 @@ fn outline_fresh_contract_fixture() -> OutlineFreshContractFixture {
         project_id: "project_0001".to_string(),
         repo_id: Some("repository_0001".to_string()),
         base_branch: None,
-        logical_codebase_id: None,
+        logical_codebase_id:
+            crate::product::logical_codebase::legacy_logical_codebase_id("project_0001"),
         title: "T15 计划".to_string(),
         description: Some("T15 描述".to_string()),
         change_id: "change_0001".to_string(),

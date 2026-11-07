@@ -32,7 +32,11 @@
                 .create(crate::product::issue_store::CreateProductIssueInput {
                     project_id: PROJECT_ID.to_string(),
                     repo_id: Some("repo-1".to_string()),
-                    logical_codebase_id: None,
+                    // 归属必填（REQ-ROUTE-01）：夹具经 seed_fixture 播种 project 级
+                    // LC（legacy 布局）⇒ issue 归属 project 的 legacy 别名代码库。
+                    logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                        PROJECT_ID,
+                    ),
                     title: "manual issue".to_string(),
                     description: None,
                     change_id: None,

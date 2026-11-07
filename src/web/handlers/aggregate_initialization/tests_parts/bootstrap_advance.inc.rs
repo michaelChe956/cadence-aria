@@ -369,3 +369,287 @@ async fn bootstrap_advance_rejects_an_unknown_logical_codebase() {
         "an unknown logical codebase must not start any operation"
     );
 }
+/// 真机缺陷（2026-11-04）：trust/选择链把根配方启动拒之门外时，advance
+/// 停在 rules_policy「等待人工」，该停止原因必须成为 durable 事实并进入
+/// GET 投影（`advance_stop` + 一条通知），手动「准备」也走同一条派发链。
+#[tokio::test]
+async fn bootstrap_advance_waiting_stop_exposes_the_reason_in_the_projection() {
+    let fixture = trust_route_fixture(true);
+    advance_seed_member(&fixture);
+    let base = format!(
+        "/api/projects/project_0001/logical-codebases/{}",
+        fixture.lc_id
+    );
+
+    // 现场：identity 与 manifest/checkout 已完成，rules_policy 仍是
+    // not_started + prepare（owner 截图状态）。
+    let (status, before) = get_json(&fixture.app, &format!("{base}/bootstrap")).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert_eq!(
+        bootstrap_step_status(&before, "identity"),
+        "completed",
+        "{before}"
+    );
+    assert_eq!(
+        bootstrap_step_status(&before, "manifest_checkout"),
+        "completed",
+        "{before}"
+    );
+    assert_eq!(
+        bootstrap_step_status(&before, "rules_policy"),
+        "not_started",
+        "{before}"
+    );
+
+    // 自动推进：trust 门未就绪 ⇒ 根配方不启动，advance 停在等待人工。
+    let (status, advanced) = advance_post(&fixture.app, &fixture.lc_id).await;
+    assert_eq!(status, StatusCode::OK, "{advanced}");
+    println!("REPRO ADVANCE RAW: {advanced:#}");
+    assert_eq!(advanced["stopped_reason"], "waiting_for_human", "{advanced}");
+    assert_eq!(advanced["stopped_step"], "rules_policy", "{advanced}");
+    assert_eq!(
+        advanced["stopped_reason_code"],
+        "aggregate_initialization_trust_waiting",
+        "{advanced}"
+    );
+    assert!(
+        advanced_step_names(&advanced).is_empty(),
+        "no step may claim durable progress while the recipe cannot start: {advanced}"
+    );
+    // 五步 operation 仍不创建（trust 门语义保持）。
+    assert!(
+        root_policy_operations(&fixture)
+            .list("project_0001")
+            .expect("operation list")
+            .is_empty(),
+        "a rejected prepare must not create the root recipe operation"
+    );
+
+    // GET 投影必须能解释「为什么停」：durable stop 记录 + 恰好一条通知。
+    let (status, after) = get_json(&fixture.app, &format!("{base}/bootstrap")).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    println!("REPRO GET RAW: {after:#}");
+    assert_eq!(
+        bootstrap_step_status(&after, "rules_policy"),
+        "not_started",
+        "{after}"
+    );
+    let stop = &after["advance_stop"];
+    assert_eq!(stop["step"], "rules_policy", "{after}");
+    assert_eq!(stop["reason"], "waiting_for_human", "{after}");
+    assert_eq!(
+        stop["reason_code"],
+        "aggregate_initialization_trust_waiting",
+        "{after}"
+    );
+    assert!(
+        stop["detail"].as_str().is_some_and(|detail| !detail.is_empty()),
+        "the stop record must carry the rejection detail: {after}"
+    );
+    let stop_notices: Vec<_> = after["notices"]
+        .as_array()
+        .expect("notices array")
+        .iter()
+        .filter(|notice| {
+            notice["key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("bootstrap:advance-stop:"))
+        })
+        .collect();
+    assert_eq!(stop_notices.len(), 1, "{after}");
+    assert_eq!(
+        stop_notices[0]["reason_code"],
+        "aggregate_initialization_trust_waiting",
+        "{after}"
+    );
+    assert!(
+        stop_notices[0]["summary"]
+            .as_str()
+            .is_some_and(|summary| !summary.is_empty()),
+        "the notice must render actionable copy: {after}"
+    );
+
+    // 手动「准备」与自动推进同一条派发链：trust 仍拒 ⇒ 响应携带解释，
+    // 而不是一个无声的 waiting_for_human。
+    let expected_object_id = after["steps"]
+        .as_array()
+        .expect("steps array")
+        .iter()
+        .find(|step| step["step"] == "rules_policy")
+        .expect("rules_policy step")["object_id"]
+        .as_str()
+        .expect("object id")
+        .to_string();
+    let (status, manual) = response_json(
+        post_json(
+            &fixture.app,
+            &format!("{base}/bootstrap/actions"),
+            serde_json::json!({
+                "command_id": "manual-prepare-rules-policy-0001",
+                "step": "rules_policy",
+                "action": "prepare",
+                "expected_object_id": expected_object_id,
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{manual}");
+    assert_eq!(manual["outcome"], "waiting_for_human", "{manual}");
+    assert_eq!(
+        manual["projection"]["advance_stop"]["reason_code"],
+        "aggregate_initialization_trust_waiting",
+        "{manual}"
+    );
+
+    // trust 就绪后，同一条手动「准备」真正把根配方跑起来（下一步可做）。
+    fixture.gate.set_ready();
+    let (status, resumed) = response_json(
+        post_json(
+            &fixture.app,
+            &format!("{base}/bootstrap/actions"),
+            serde_json::json!({
+                "command_id": "manual-prepare-rules-policy-0002",
+                "step": "rules_policy",
+                "action": "prepare",
+                "expected_object_id": expected_object_id,
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["outcome"], "accepted", "{resumed}");
+    let operations = root_policy_operations(&fixture);
+    let operation_id = sole_operation_id(&fixture);
+    let operation = root_policy_poll_terminal(&operations, &operation_id).await;
+    assert_eq!(
+        operation.status,
+        crate::product::logical_codebase::AggregateInitializationOperationStatus::Completed,
+        "{:?}",
+        operation.error
+    );
+    let (status, ready) = get_json(&fixture.app, &format!("{base}/bootstrap")).await;
+    assert_eq!(status, StatusCode::OK, "{ready}");
+    assert_eq!(
+        bootstrap_step_status(&ready, "rules_policy"),
+        "completed",
+        "{ready}"
+    );
+    assert!(
+        ready["advance_stop"].is_null(),
+        "a completed step must not keep a stale stop record: {ready}"
+    );
+}
+
+/// owner 2026-11-04 现场同构（闸门① provider 选择门）：四家 provider 能力
+/// 证据全未核验 ⇒ 创建期拦下根配方、不创建 operation（REQ-BOOT-07）。
+/// advance 的停止原因必须落盘并进入 GET 投影，且与闸门②（trust 门，
+/// `aggregate_initialization_trust_waiting`）的稳定码可区分。
+#[tokio::test]
+async fn bootstrap_advance_provider_selection_stop_is_exposed_and_distinguishable() {
+    let fixture = trust_route_fixture_unverified_providers();
+    advance_seed_member(&fixture);
+    let base = format!(
+        "/api/projects/project_0001/logical-codebases/{}",
+        fixture.lc_id
+    );
+
+    let (status, advanced) = advance_post(&fixture.app, &fixture.lc_id).await;
+    assert_eq!(status, StatusCode::OK, "{advanced}");
+    assert_eq!(advanced["stopped_reason"], "waiting_for_human", "{advanced}");
+    assert_eq!(advanced["stopped_step"], "rules_policy", "{advanced}");
+    // 闸门①的稳定码：与闸门②（aggregate_initialization_trust_waiting）可区分。
+    assert_eq!(
+        advanced["stopped_reason_code"],
+        "aggregate_initialization_provider_needs_verification",
+        "{advanced}"
+    );
+    // 停止上下文携带选择门 details（候选表/单家核验入口）。
+    assert!(
+        advanced["stopped_detail"]
+            .as_str()
+            .is_some_and(|detail| !detail.is_empty()),
+        "{advanced}"
+    );
+    // 选择期失败零写入：五步 operation 仍不创建（不绕门）。
+    assert!(
+        root_policy_operations(&fixture)
+            .list("project_0001")
+            .expect("operation list")
+            .is_empty(),
+        "the provider selection gate must keep the five-step operation uncreated"
+    );
+
+    // GET 投影解释为什么停：stop 记录 + 恰好一条通知（成品 copy 指引
+    // 「先核验第一家已安装的 provider；通过后重试本步」）。
+    let (status, after) = get_json(&fixture.app, &format!("{base}/bootstrap")).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(
+        bootstrap_step_status(&after, "rules_policy"),
+        "not_started",
+        "{after}"
+    );
+    assert_eq!(after["advance_stop"]["reason"], "waiting_for_human", "{after}");
+    assert_eq!(
+        after["advance_stop"]["reason_code"],
+        "aggregate_initialization_provider_needs_verification",
+        "{after}"
+    );
+    let stop_notices: Vec<_> = after["notices"]
+        .as_array()
+        .expect("notices array")
+        .iter()
+        .filter(|notice| {
+            notice["key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("bootstrap:advance-stop:"))
+        })
+        .collect();
+    assert_eq!(stop_notices.len(), 1, "{after}");
+    assert!(
+        stop_notices[0]["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("核验")),
+        "the notice must render the verification guidance: {after}"
+    );
+
+    // 手动「准备」同链同因：被拒且解释进响应投影（不是无声等待）。
+    let expected_object_id = after["steps"]
+        .as_array()
+        .expect("steps array")
+        .iter()
+        .find(|step| step["step"] == "rules_policy")
+        .expect("rules_policy step")["object_id"]
+        .as_str()
+        .expect("object id")
+        .to_string();
+    let (status, manual) = response_json(
+        post_json(
+            &fixture.app,
+            &format!("{base}/bootstrap/actions"),
+            serde_json::json!({
+                "command_id": "manual-prepare-selection-gate-0001",
+                "step": "rules_policy",
+                "action": "prepare",
+                "expected_object_id": expected_object_id,
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{manual}");
+    assert_eq!(manual["outcome"], "waiting_for_human", "{manual}");
+    assert_eq!(
+        manual["projection"]["advance_stop"]["reason_code"],
+        "aggregate_initialization_provider_needs_verification",
+        "{manual}"
+    );
+    assert!(
+        root_policy_operations(&fixture)
+            .list("project_0001")
+            .expect("operation list")
+            .is_empty(),
+        "a rejected manual prepare must not create the operation either"
+    );
+}

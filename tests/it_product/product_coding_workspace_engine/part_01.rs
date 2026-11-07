@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
+use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
     ChoiceOptionData, ChoiceRequestData, ChoiceRequestSource, PermissionRequestData, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -46,16 +47,44 @@ use cadence_aria::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, WsExecutionEventKind,
     WsExecutionEventStatus,
 };
+use crate::context_builder::LogicalAuthority;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+// ── 本文件夹具：LC 权威 + 冻结 `target_snapshot` ────────────────────────────
+//
+// REQ-ROUTE-01 两态化（去单仓入口）后，无 LC 归属的 issue 一律 fail-closed
+// （`RepositoryRouting::unbound_issue()`）：admission 报
+// `target_snapshot_identity_drifted`，工作项范围/跨目标基线报
+// `product_store_not_found: issue issue_0001`，provider run 报
+// `coding_run_lease_unknown`。故本文件的用例必须先经共享夹具建出
+// 「LC 权威 + 冻结快照」，否则测到的是 fail-closed 而不是原不变量。
+
+/// 在 `paths` 下建出 LC 权威现场（project + 真多仓 LC + 归属 issue + 成员/
+/// checkout/selection/policy/聚合索引），返回权威句柄。
+fn seed_lc_authority(paths: &ProductAppPaths, root: &Path) -> LogicalAuthority {
+    crate::context_builder::seed_logical_authority(paths, "project_0001", "issue_0001", root)
+}
+
+/// 复用共享 `create_input()`，挂上与权威一致的冻结 `target_snapshot`。
+fn create_input_with_snapshot(
+    paths: &ProductAppPaths,
+    authority: &LogicalAuthority,
+) -> CreateCodingAttemptInput {
+    let mut input = create_input();
+    input.target_snapshot = Some(authority.snapshot(paths));
+    input
+}
+
 #[tokio::test]
 async fn start_attempt_moves_to_worktree_prepare_and_creates_timeline_node() {
     let root = tempdir().expect("root");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
-        .create_attempt(create_input())
+        .create_attempt(create_input_with_snapshot(&paths, &authority))
         .expect("create attempt");
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -139,9 +168,11 @@ async fn execute_worktree_prepare_creates_git_worktree_and_completes_timeline_no
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     init_repo(&repo);
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
-        .create_attempt(create_input())
+        .create_attempt(create_input_with_snapshot(&paths, &authority))
         .expect("create attempt");
     let (tx, mut rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -214,34 +245,84 @@ async fn worktree_prepare_uses_issue_shared_worktree_path_for_issue_branch() {
     );
 }
 
-#[tokio::test]
-async fn final_confirm_releases_issue_shared_worktree_lock() {
-    let root = tempdir().expect("root");
-    let paths = ProductAppPaths::new(root.path().join(".aria"));
+// ── P2 改指：issue 维 shared worktree → 仓维 shared worktree ──────────────
+//
+// 块3（`fd0b9a8`）删掉了 `IssueSharedWorktreeRoute::Legacy` 臂 ⇒ 引擎只按
+// attempt 冻结快照里的 logical repository 读写**仓维**记录
+// （`shared-worktrees/{repository_id}.json`），issue 维记录不再被引擎读写。
+// ⇒ 本文件这些用例的锁事实与断言同改仓维；**语义不变**（谁持锁 / 锁何时释放 /
+// 脏工作区是否阻断），只是锁事实的存放维度从 issue 维换成仓维。
+//
+// 仓维键里的 logical repository 取 attempt 冻结快照的 `logical_repository_id`
+// （= 夹具权威的 member_id），与引擎 `route_issue_shared_worktree` 同口径。
+//
+// 注：本目录所有 part_XX.rs 被 `include!` 进**同一个**模块 ⇒ `use` 是模块级的；
+// 这里用类型别名而非 `use`，避免与 part_13 的同名 `use` 撞 E0252。
+type RepoSharedWorktreeInput = cadence_aria::product::lifecycle_store::UpsertRepoSharedWorktreeInput;
+type RepoLockRepositoryId = cadence_aria::product::logical_codebase::LogicalRepositoryId;
+
+/// 仓维 shared worktree 三元键里的 logical repository（= 冻结快照的仓 id）。
+fn repo_shared_worktree_repository_id(
+    attempt: &CodingExecutionAttempt,
+) -> RepoLockRepositoryId {
+    attempt
+        .target_snapshot
+        .as_ref()
+        .expect("attempt target snapshot")
+        .logical_repository_id
+}
+
+/// 建**仓维** shared worktree 记录（issue 维记录块3 后不再被引擎读写）。
+fn seed_repo_shared_worktree(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+    worktree_path: PathBuf,
+) -> LifecycleStore {
     let lifecycle = LifecycleStore::new(paths.clone());
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: root.path().join("repo/.worktrees/aria-issues/issue_0001"),
-            base_branch: "main".to_string(),
+        .upsert_repo_shared_worktree(RepoSharedWorktreeInput {
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            repository_id: repo_shared_worktree_repository_id(attempt),
+            branch_name: attempt.branch_name.clone(),
+            worktree_path,
+            base_branch: attempt.base_branch.clone(),
         })
-        .expect("shared worktree");
+        .expect("upsert repo shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock(
+}
+
+#[tokio::test]
+async fn final_confirm_releases_repo_shared_worktree_lock() {
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let (store, attempt) = final_confirm_attempt(paths.clone(), "work_item_0001");
+    let attempt = crate::context_builder::attach_target_snapshot(
+        &store,
+        &attempt,
+        authority.snapshot(&paths),
+    );
+    // 锁事实建在**仓维**三元键上（issue 维记录块3 后不再被引擎读写）。
+    let lifecycle = seed_repo_shared_worktree(
+        &paths,
+        &attempt,
+        root.path().join("repo/.worktrees/aria-issues/issue_0001"),
+    );
+    lifecycle
+        .try_acquire_repo_worktree_lock(
             "project_0001",
             "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
             "work_item_0001",
-            "issue_worktree_lease_final_confirm",
+            "repo_worktree_lease_final_confirm",
         )
         .expect("lock");
-    let (store, attempt) = final_confirm_attempt(paths.clone(), "work_item_0001");
     lifecycle
-        .bind_issue_worktree_lock_to_attempt(
+        .bind_repo_worktree_lock_to_attempt(
             "project_0001",
             "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
             "work_item_0001",
             &attempt.id,
         )
@@ -255,7 +336,11 @@ async fn final_confirm_releases_issue_shared_worktree_lock() {
         .expect("final confirm");
 
     let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree(
+            "project_0001",
+            "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
+        )
         .expect("load shared")
         .expect("shared exists");
     assert_eq!(shared.current_active_work_item_id, None);
@@ -269,29 +354,27 @@ fn transferred_group_shared_worktree_lock(
     paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
 ) -> LifecycleStore {
-    let lifecycle = LifecycleStore::new(paths.clone());
+    // 块3 后引擎只读写仓维记录 ⇒ 锁事实（先取 work_item_0001、再转移到
+    // work_item_0002、owner 为本 attempt）改建在仓维三元键上，语义不变。
+    let lifecycle = seed_repo_shared_worktree(
+        paths,
+        attempt,
+        attempt.worktree_path.clone().expect("group worktree"),
+    );
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: attempt.project_id.clone(),
-            issue_id: attempt.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: attempt.branch_name.clone(),
-            worktree_path: attempt.worktree_path.clone().expect("group worktree"),
-            base_branch: attempt.base_branch.clone(),
-        })
-        .expect("upsert shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             &attempt.project_id,
             &attempt.issue_id,
+            repo_shared_worktree_repository_id(attempt),
             "work_item_0001",
             &attempt.id,
         )
         .expect("acquire first unit lock");
     lifecycle
-        .transfer_issue_worktree_lock(
+        .transfer_repo_worktree_lock(
             &attempt.project_id,
             &attempt.issue_id,
+            repo_shared_worktree_repository_id(attempt),
             "work_item_0001",
             "work_item_0002",
             &attempt.id,
@@ -309,6 +392,7 @@ fn running_group_engine_with_two_units_for_terminal_lock_tests() -> (
 ) {
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
     seed_group_work_items_and_plan(&paths);
     let store = CodingAttemptStore::new(paths.clone());
     let worktree = root.path().join("group-worktree");
@@ -329,7 +413,7 @@ fn running_group_engine_with_two_units_for_terminal_lock_tests() -> (
                 permission_modes:
                     cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(authority.snapshot(&paths)),
             max_auto_rework: 2,
             start_run_policy: cadence_aria::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -372,7 +456,11 @@ fn assert_group_shared_worktree_lock_released(
     attempt: &CodingExecutionAttempt,
 ) {
     let shared = lifecycle
-        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .get_repo_shared_worktree(
+            &attempt.project_id,
+            &attempt.issue_id,
+            repo_shared_worktree_repository_id(attempt),
+        )
         .expect("reload shared worktree")
         .expect("shared worktree exists");
     assert_eq!(shared.current_active_work_item_id, None);
@@ -446,7 +534,11 @@ async fn dirty_group_delete_keeps_transferred_shared_worktree_lock() {
         CodingAttemptStatus::Running
     );
     let shared = lifecycle
-        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .get_repo_shared_worktree(
+            &attempt.project_id,
+            &attempt.issue_id,
+            repo_shared_worktree_repository_id(&attempt),
+        )
         .expect("reload shared worktree")
         .expect("shared worktree exists");
     assert_eq!(
@@ -462,9 +554,10 @@ async fn group_final_confirm_releases_transferred_shared_worktree_lock_by_owner(
     let (_root, paths, _store, engine, attempt) = group_attempt_waiting_for_final_confirm();
     let lifecycle = LifecycleStore::new(paths.clone());
     lifecycle
-        .release_issue_worktree_lock(
+        .release_repo_worktree_lock(
             &attempt.project_id,
             &attempt.issue_id,
+            repo_shared_worktree_repository_id(&attempt),
             "work_item_0002",
             &attempt.id,
         )
@@ -597,47 +690,53 @@ async fn single_work_item_delete_rejects_same_owner_lock_for_another_work_item()
 }
 
 #[tokio::test]
-async fn failed_attempt_releases_issue_shared_worktree_lock() {
+async fn failed_attempt_releases_repo_shared_worktree_lock() {
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let lifecycle = LifecycleStore::new(paths.clone());
+    let authority = seed_lc_authority(&paths, root.path());
+    let (store, attempt) = failed_attempt(paths.clone(), "work_item_0001");
+    let attempt = crate::context_builder::attach_target_snapshot(
+        &store,
+        &attempt,
+        authority.snapshot(&paths),
+    );
+    // 锁事实建在**仓维**三元键上（issue 维记录块3 后不再被引擎读写）。
+    let lifecycle = seed_repo_shared_worktree(
+        &paths,
+        &attempt,
+        root.path().join("repo/.worktrees/aria-issues/issue_0001"),
+    );
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: root.path().join("repo/.worktrees/aria-issues/issue_0001"),
-            base_branch: "main".to_string(),
-        })
-        .expect("shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             "project_0001",
             "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
             "work_item_0001",
-            "issue_worktree_lease_failed_attempt",
+            "repo_worktree_lease_failed_attempt",
         )
         .expect("lock");
-    let (store, attempt) = failed_attempt(paths.clone(), "work_item_0001");
     lifecycle
-        .bind_issue_worktree_lock_to_attempt(
+        .bind_repo_worktree_lock_to_attempt(
             "project_0001",
             "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
             "work_item_0001",
             &attempt.id,
         )
         .expect("bind lock to attempt");
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-
     engine
         .handle_attempt_failed("project_0001", "issue_0001", &attempt.id)
         .await
         .expect("handle failed");
 
     let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree(
+            "project_0001",
+            "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
+        )
         .expect("load shared")
         .expect("shared exists");
     assert_eq!(shared.current_active_work_item_id, None);
@@ -647,33 +746,32 @@ async fn failed_attempt_releases_issue_shared_worktree_lock() {
 async fn dirty_shared_worktree_blocks_lock_release_and_next_work_item() {
     let root = tempdir().expect("root");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    let lifecycle = LifecycleStore::new(paths.clone());
+    let authority = seed_lc_authority(&paths, root.path());
     let shared_path = root.path().join("repo/.worktrees/aria-issues/issue_0001");
     git_repo_in(&shared_path);
     std::fs::write(shared_path.join("dirty.txt"), "uncommitted").expect("dirty file");
+    let (store, attempt) = dirty_failed_attempt(paths.clone(), "work_item_0001");
+    let attempt = crate::context_builder::attach_target_snapshot(
+        &store,
+        &attempt,
+        authority.snapshot(&paths),
+    );
+    // 锁事实建在**仓维**三元键上（issue 维记录块3 后不再被引擎读写）。
+    let lifecycle = seed_repo_shared_worktree(&paths, &attempt, shared_path);
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            repository_id: "repository_0001".to_string(),
-            branch_name: "aria/issues/issue_0001".to_string(),
-            worktree_path: shared_path,
-            base_branch: "main".to_string(),
-        })
-        .expect("shared worktree");
-    lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             "project_0001",
             "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
             "work_item_0001",
-            "issue_worktree_lease_dirty_attempt",
+            "repo_worktree_lease_dirty_attempt",
         )
         .expect("lock");
-    let (store, attempt) = dirty_failed_attempt(paths.clone(), "work_item_0001");
     lifecycle
-        .bind_issue_worktree_lock_to_attempt(
+        .bind_repo_worktree_lock_to_attempt(
             "project_0001",
             "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
             "work_item_0001",
             &attempt.id,
         )
@@ -688,7 +786,11 @@ async fn dirty_shared_worktree_blocks_lock_release_and_next_work_item() {
 
     assert_eq!(failed.status, CodingAttemptStatus::Failed);
     let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree(
+            "project_0001",
+            "issue_0001",
+            repo_shared_worktree_repository_id(&attempt),
+        )
         .expect("load shared")
         .expect("shared exists");
     assert_eq!(
@@ -702,20 +804,46 @@ async fn execute_coding_runs_provider_in_worktree_and_streams_timeline_events() 
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree.clone()),
-            ..create_input()
+            // gateway 不支持 Fake（`provider_unsupported_for_gateway_launch`），
+            // 故 author 改挂 ClaudeCode（it_web 同款手法）。
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
+    // 逻辑 target（带冻结快照）的 provider run 唯一经 LC gateway 启动（否则
+    // `logical_provider_gateway_required` fail-closed）：测试 adapter 必须同时
+    // 交给引擎方法（断言捕获面）与 gateway registry（真实 spawn 面），两处
+    // 指向同一实例。
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(FileWritingStreamingProvider),
+        ProviderType::ClaudeCode,
+    ));
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
+    );
     let (tx, mut rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = FileWritingStreamingProvider;
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     let updated = engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("execute coding");
 
@@ -789,7 +917,9 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree.clone()),
@@ -799,26 +929,42 @@ async fn coding_coder_run_resumes_previous_coder_provider_session() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            ..create_input()
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动；本替身断言
+    // `StreamingProviderInput` 的**真实**字段（permission_mode / timeout_secs /
+    // resume_provider_session_id）⇒ 必须用逐字透传真实 input 的 exact 桥
+    // （A1：`ValidatedStreamingProviderInput::into_parts` 已是 pub）。
+    let capturing = Arc::new(SessionInputCapturingProvider::default());
+    let provider = Arc::new(crate::context_builder::GatewayExactInputAdapter {
+        inner: capturing.clone(),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
+    );
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::default();
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     let first = engine
-        .execute_coding(&attempt, &provider, &CodingExecutionContext::default())
+        .execute_coding(&attempt, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("first coding run");
     let second = engine
-        .execute_coding(&first, &provider, &CodingExecutionContext::default())
+        .execute_coding(&first, provider.as_ref(), &CodingExecutionContext::default())
         .await
         .expect("second coding run");
 
     assert_eq!(second.stage, CodingExecutionStage::Coding);
-    let inputs = provider.inputs.lock().expect("inputs lock");
+    let inputs = capturing.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 2);
     assert_eq!(
         inputs[0].permission_mode,
@@ -842,7 +988,9 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
@@ -852,7 +1000,7 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            ..create_input()
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
@@ -867,17 +1015,31 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
     };
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::with_outputs(
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动；本替身断言
+    // `StreamingProviderInput` 的**真实**字段 ⇒ 用逐字透传真实 input 的 exact 桥。
+    let capturing = Arc::new(SessionInputCapturingProvider::with_outputs(
         ["first coding done", "second coding done"],
         [
             Some("coder-session-1".to_string()),
             Some("coder-session-1".to_string()),
         ],
+    ));
+    let provider = Arc::new(crate::context_builder::GatewayExactInputAdapter {
+        inner: capturing.clone(),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::Codex, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
     );
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     let first = engine
-        .execute_coding(&attempt, &provider, &context)
+        .execute_coding(&attempt, provider.as_ref(), &context)
         .await
         .expect("first coding run");
     store
@@ -896,11 +1058,11 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
         .expect("save rework instruction");
 
     engine
-        .execute_coding(&first, &provider, &context)
+        .execute_coding(&first, provider.as_ref(), &context)
         .await
         .expect("second coding run");
 
-    let inputs = provider.inputs.lock().expect("inputs lock");
+    let inputs = capturing.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 2);
     let second_input = &inputs[1];
     assert_eq!(
@@ -926,15 +1088,40 @@ async fn coding_coder_rework_with_resume_uses_delta_prompt() {
 
 #[tokio::test]
 async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() {
-    let (_root, _paths, store, _engine, attempt) = group_engine_with_last_running_unit();
+    let (root, paths, store, _engine, attempt) = group_engine_with_last_running_unit();
+    let authority = seed_lc_authority(&paths, root.path());
     seed_authoritative_group_coder_fixture(&store, &attempt);
+    let attempt = crate::context_builder::attach_target_snapshot(
+        &store,
+        &attempt,
+        authority.snapshot(&paths),
+    );
     let attempt = crate::seed_coding_attempt_running(&store, &attempt.project_id, &attempt.issue_id, &attempt.id);
+    // gateway 拒 Fake（`provider_unsupported_for_gateway_launch`，设计如此）⇒
+    // role provider 改挂真实 provider（ClaudeCode）。这是**夹具改动**：用例要验的
+    // 是「上一 unit 的会话不被恢复」，不是「Fake 替身能不能用」；故下方 seed 的
+    // 上一 unit 会话也同步挂 ClaudeCode —— provider 两侧一致，**保持原语义**
+    // （provider 相同仍不跨 unit 恢复）。
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::ClaudeCode,
+                code_reviewer: None,
+                internal_reviewer: None,
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes::default(),
+            },
+        )
+        .expect("override coder role provider to a gateway-supported provider");
     let attempt = store
         .replace_attempt_provider_conversations(
             &attempt,
             vec![ProviderConversationRef {
                 role: ProviderConversationRole::Coder,
-                provider: ProviderName::Fake,
+                provider: ProviderName::ClaudeCode,
                 provider_session_id: "coder-session-from-unit-1".to_string(),
                 updated_at: "2026-07-08T00:00:00Z".to_string(),
                 last_node_id: Some("coding_node_0002".to_string()),
@@ -948,20 +1135,34 @@ async fn group_next_work_item_coder_run_does_not_resume_previous_unit_session() 
         ),
         verification_commands: vec!["cargo test --locked --lib provider_metadata".to_string()],
     };
-    let (tx, mut rx) = mpsc::channel(64);
-    tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-    let provider = SessionInputCapturingProvider::with_outputs(
+    // 逻辑 target 的 provider run 唯一经 LC gateway 启动；本替身断言
+    // `StreamingProviderInput` 的**真实**字段 ⇒ 用逐字透传真实 input 的 exact 桥。
+    let capturing = Arc::new(SessionInputCapturingProvider::with_outputs(
         ["unit 2 coding done"],
         [Some("coder-session-unit-2".to_string())],
+    ));
+    let provider = Arc::new(crate::context_builder::GatewayExactInputAdapter {
+        inner: capturing.clone(),
+    });
+    let mut registry = ProviderRegistry::new();
+    registry.register(ProviderName::ClaudeCode, provider.clone());
+    let gateway = crate::context_builder::build_gateway(
+        &paths,
+        "project_0001",
+        &authority.logical_codebase_id,
+        Arc::new(registry),
     );
+    let (tx, mut rx) = mpsc::channel(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
 
     engine
-        .execute_coding(&attempt, &provider, &context)
+        .execute_coding(&attempt, provider.as_ref(), &context)
         .await
         .expect("execute second unit coding");
 
-    let inputs = provider.inputs.lock().expect("inputs lock");
+    let inputs = capturing.inputs.lock().expect("inputs lock");
     assert_eq!(inputs.len(), 1);
     let input = &inputs[0];
     assert_eq!(input.resume_provider_session_id, None);

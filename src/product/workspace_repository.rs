@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
 use crate::product::app_paths::ProductAppPaths;
-use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::{
@@ -88,10 +87,6 @@ fn resolve_work_item_repository_context(
 ) -> Result<WorkspaceRepositoryContext, ProductStoreError> {
     WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
     match RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)? {
-        RepositoryRouting::Legacy { .. } => {
-            let repository = resolve_issue_repository_record(app_paths, session)?;
-            Ok(same_anchor_context(repository))
-        }
         RepositoryRouting::Logical {
             manifest,
             selection,
@@ -122,20 +117,6 @@ fn resolve_work_item_repository_context(
         }
         RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
     }
-}
-
-fn resolve_issue_repository_record(
-    app_paths: &ProductAppPaths,
-    session: &WorkspaceSessionRecord,
-) -> Result<RepositoryRecord, ProductStoreError> {
-    let physical_repository_id = IssueStore::new(app_paths.clone())
-        .get(&session.project_id, &session.issue_id)?
-        .repo_id
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "repository",
-            id: format!("issue:{}:repo_id", session.issue_id),
-        })?;
-    resolve_legacy_physical_repository(app_paths, &session.project_id, &physical_repository_id)
 }
 
 /// 批2 Task 20b 修复轮 1(F1):实体四事实(engine `WorkspaceSession` 与
@@ -174,14 +155,6 @@ pub fn resolve_workspace_repository_context_for_entity(
                     id: session.entity_id.to_string(),
                 })?;
             match routing {
-                RepositoryRouting::Legacy { .. } => {
-                    let repository = resolve_legacy_physical_repository(
-                        app_paths,
-                        session.project_id,
-                        &story.repository_id,
-                    )?;
-                    Ok(same_anchor_context(repository))
-                }
                 RepositoryRouting::Logical {
                     manifest,
                     selection,
@@ -229,10 +202,6 @@ pub fn resolve_workspace_repository_context_for_entity(
                     id: session.entity_id.to_string(),
                 })?;
             match routing {
-                RepositoryRouting::Legacy { .. } => {
-                    let repository = resolve_issue_repository(app_paths, &session)?;
-                    Ok(same_anchor_context(repository))
-                }
                 RepositoryRouting::Logical {
                     manifest,
                     selection,
@@ -257,10 +226,6 @@ pub fn resolve_workspace_repository_context_for_entity(
                 session.entity_id,
             )?;
             match routing {
-                RepositoryRouting::Legacy { .. } => {
-                    let repository = resolve_issue_repository(app_paths, &session)?;
-                    Ok(same_anchor_context(repository))
-                }
                 RepositoryRouting::Logical {
                     manifest,
                     selection,
@@ -418,7 +383,7 @@ fn resolve_selected_logical_repository(
     )?;
     let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
     RepositoryStore::for_project(app_paths.clone(), &project)
-        .resolve_logical_repository_for_issue_codebase(project_id, lc_id.as_deref(), logical_id)
+        .resolve_logical_repository_for_issue_codebase(project_id, Some(lc_id.as_str()), logical_id)
         .map(|(_, _, repository)| repository)
 }
 
@@ -441,28 +406,6 @@ fn selection_context_guards(
             format!("invalid issue codebase selection: {error}"),
         )
     })
-}
-
-fn resolve_legacy_physical_repository(
-    app_paths: &ProductAppPaths,
-    project_id: &str,
-    physical_repository_id: &str,
-) -> Result<RepositoryRecord, ProductStoreError> {
-    let project = ProjectStore::new(app_paths.clone()).get(project_id)?;
-    let store = RepositoryStore::for_project(app_paths.clone(), &project);
-    if let Ok((_, _, repository)) =
-        store.resolve_legacy_physical_repository_if_dual(project_id, physical_repository_id)
-    {
-        return Ok(repository);
-    }
-    store
-        .list(project_id)?
-        .into_iter()
-        .find(|repository| repository.id == physical_repository_id)
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "repository",
-            id: physical_repository_id.to_string(),
-        })
 }
 
 /// B1 铁律：聚合根视图 id 前缀。视图仅供 attach/launch 锚定用途，
@@ -505,20 +448,6 @@ fn aggregate_root_view(
         identity_schema_version: 0,
         updated_at: String::new(),
     }
-}
-
-fn resolve_issue_repository(
-    app_paths: &ProductAppPaths,
-    session: &EntityFacts<'_>,
-) -> Result<RepositoryRecord, ProductStoreError> {
-    let physical_repository_id = IssueStore::new(app_paths.clone())
-        .get(session.project_id, session.issue_id)?
-        .repo_id
-        .ok_or_else(|| ProductStoreError::NotFound {
-            kind: "repository",
-            id: format!("issue:{}:repo_id", session.issue_id),
-        })?;
-    resolve_legacy_physical_repository(app_paths, session.project_id, &physical_repository_id)
 }
 
 fn unique_ids(ids: Vec<LogicalRepositoryId>) -> BTreeSet<LogicalRepositoryId> {

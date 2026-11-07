@@ -2,8 +2,12 @@
 // Filesystem auditor
 // ---------------------------------------------------------------------------
 
-/// Root recipe 文件系统审计器：命令前后对 canonical root 做全量快照并
-/// diff。对 root 只读；任何 IO 失败（不可观测）fail-closed 报错。
+/// Root recipe 文件系统审计器：命令前后对 canonical root 做**全量两遍**
+/// 扫描并 diff。对 root 只读；任何 IO 失败（不可观测）fail-closed 报错。
+///
+/// 口径（REQ-AUD-01/02/03，详见 root_recipe_snapshot.inc.rs）：两遍都**只
+/// 记元数据**（路径 + 大小 + mtime）不读内容；差分出变更清单后**只对变更
+/// 文件**流式读内容算哈希；`.git` 子树整棵跳过；预算只对本次变更量计。
 #[derive(Debug, Clone)]
 pub struct RootRecipeFilesystemAuditor {
     allowlist: Vec<String>,
@@ -43,8 +47,9 @@ impl RootRecipeFilesystemAuditor {
         self.budget
     }
 
-    /// 命令执行前：冻结 canonical root 并做全量快照。root 不存在、不可
-    /// 读或命令身份不符合固定命令索引时 fail-closed。
+    /// 命令执行前：冻结 canonical root 并做**第一遍全量元数据扫描**（不读
+    /// 文件内容）。root 不存在、不可读或命令身份不符合固定命令索引时
+    /// fail-closed。
     pub fn before_command(
         &self,
         operation_id: &str,
@@ -67,7 +72,10 @@ impl RootRecipeFilesystemAuditor {
                 canonical.display()
             )));
         }
-        let before = snapshot_root(&canonical, &self.budget)?;
+        // 第一遍：**只记元数据**（路径 + 大小 + mtime），不读文件内容
+        // （REQ-AUD-01）。`.git` 子树在遍历时整棵跳过（REQ-AUD-02）。
+        let before_meta = scan_meta(&canonical)?;
+        let before = snapshot_from_meta(&canonical, &before_meta);
         Ok(RootRecipeCommandWatch {
             operation_id: operation_id.to_string(),
             canonical_root: canonical,
@@ -75,13 +83,15 @@ impl RootRecipeFilesystemAuditor {
             command_index,
             command: command.to_string(),
             before,
+            before_meta,
         })
     }
 
-    /// 命令执行后：再次快照并 diff。拒绝不报错——拒绝事实（verdict=
+    /// 命令执行后：**第二遍全量元数据扫描**并与第一遍差分；只对变更清单
+    /// 里的文件流式读内容算哈希。拒绝不报错——拒绝事实（verdict=
     /// `Rejected`、rejection_reason、逐变更证据、逃逸证据）随返回的
     /// receipt 保留，由调用方 durable append；只有不可观测的 IO/身份
-    /// 漂移才 fail-closed 报错。
+    /// 漂移与预算超限才 fail-closed 报错。
     pub fn after_command(
         &self,
         watch: RootRecipeCommandWatch,
@@ -109,55 +119,13 @@ impl RootRecipeFilesystemAuditor {
                 ),
             });
         }
-        let after = snapshot_root(&canonical, &self.budget)?;
-
-        let before_map: BTreeMap<&str, &RootRecipeSnapshotEntry> = watch
-            .before
-            .entries
-            .iter()
-            .map(|entry| (entry.path.as_str(), entry))
-            .collect();
-        let after_map: BTreeMap<&str, &RootRecipeSnapshotEntry> = after
-            .entries
-            .iter()
-            .map(|entry| (entry.path.as_str(), entry))
-            .collect();
-        let mut paths: BTreeSet<&str> = before_map.keys().copied().collect();
-        paths.extend(after_map.keys().copied());
-
-        let mut observed_changes = Vec::new();
-        for path in paths {
-            let before_entry = before_map.get(path).copied();
-            let after_entry = after_map.get(path).copied();
-            let change_kind = match (before_entry, after_entry) {
-                (Some(_), None) => RootRecipeChangeKind::Removed,
-                (None, Some(_)) => RootRecipeChangeKind::Added,
-                (Some(before), Some(after_entry)) => {
-                    if entries_equivalent(before, after_entry) {
-                        continue;
-                    }
-                    RootRecipeChangeKind::Modified
-                }
-                (None, None) => continue,
-            };
-            let (classification, escapes_root, link_target) =
-                classify_change(path, before_entry, after_entry, &self.allowlist);
-            let allowed = classification == RootRecipeChangeClass::AllowlistedArtifact;
-            observed_changes.push(RootRecipeObservedChange {
-                path: path.to_string(),
-                change_kind,
-                classification,
-                allowed,
-                before_digest: before_entry.and_then(|entry| entry.content_digest.clone()),
-                after_digest: after_entry.and_then(|entry| entry.content_digest.clone()),
-                link_target: link_target.or_else(|| {
-                    before_entry
-                        .and_then(|entry| entry.link_target.clone())
-                        .or_else(|| after_entry.and_then(|entry| entry.link_target.clone()))
-                }),
-                escapes_root,
-            });
-        }
+        // 第二遍：同样**只记元数据**；两份元数据差分出变更清单，只有清单里
+        // 的文件才流式读内容算哈希（REQ-AUD-01/03）。全仓两遍扫描保留。
+        let after_meta = scan_meta(&canonical)?;
+        let after = snapshot_from_meta(&canonical, &after_meta);
+        let changes = diff_meta(&watch.before_meta, &after_meta);
+        let (observed_changes, _charge) =
+            describe_changes(&canonical, &changes, &self.budget, &self.allowlist)?;
 
         // allowlist 作用域内的逃逸 symlink（即使未变化）一律作为证据拒绝。
         let mut escape_evidence: BTreeSet<String> = BTreeSet::new();

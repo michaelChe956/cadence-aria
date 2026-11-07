@@ -256,7 +256,7 @@ pub(crate) fn validate_role_chain_for_enrollment(
     gateway: Option<&LogicalCodebaseProviderGateway>,
     author_provider: &ProviderName,
     reviewer_provider: &ProviderName,
-    carrier: &AutomationCarrierResolution,
+    _carrier: &AutomationCarrierResolution,
     gateway_required: bool,
     test_provider_enabled: bool,
 ) -> ApiResult<()> {
@@ -264,10 +264,8 @@ pub(crate) fn validate_role_chain_for_enrollment(
         gateway,
         author_provider,
         reviewer_provider,
-        matches!(
-            carrier,
-            AutomationCarrierResolution::SingleRepository { .. }
-        ),
+        // 单仓载体已删除（REQ-ROUTE-01）：载体恒 LC，无单仓豁免。
+        false,
         gateway_required,
         test_provider_enabled,
     )
@@ -301,7 +299,6 @@ pub(crate) fn validate_role_chain_for_declared_enrollment_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
     use crate::cross_cutting::provider_registry::ProviderRegistry;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
@@ -312,7 +309,6 @@ mod tests {
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
         ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
-        RootRecipeEvidence,
     };
     use crate::product::logical_codebase::provider_gateway::{
         LogicalCodebaseProviderGateway, PolicyTargetResolver, ProviderRefType, ResumeEvidenceState,
@@ -346,14 +342,6 @@ mod tests {
                     status: None,
                 },
             }),
-        }
-    }
-
-    fn single_repository_carrier() -> AutomationCarrierResolution {
-        AutomationCarrierResolution::SingleRepository {
-            target: EnrollmentTarget::SingleRepository {
-                repository_id: "repo-1".to_string(),
-            },
         }
     }
 
@@ -482,49 +470,6 @@ mod tests {
         }
     }
 
-    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
-        use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
-        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
-        use chrono::Utc;
-
-        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
-        impl ProviderHealthSource for AlwaysHealthy {
-            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
-                self.0.clone()
-            }
-            fn degraded(&self) -> bool {
-                false
-            }
-        }
-
-        let checked_at = Utc::now();
-        let snapshot = Arc::new(ProviderHealthSnapshot {
-            schema_version: 1,
-            generation: 1,
-            checked_at,
-            providers: [
-                ProviderName::ClaudeCode,
-                ProviderName::Codex,
-                ProviderName::Pi,
-                ProviderName::KimiCode,
-            ]
-            .into_iter()
-            .map(|provider| ProviderHealthEntry {
-                provider,
-                command: "stub".to_string(),
-                available: true,
-                version: Some("1.0".to_string()),
-                reason_code: None,
-                reason: None,
-                checked_at,
-            })
-            .collect(),
-        });
-        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
-            snapshot,
-        ))))
-    }
-
     /// capability 记录:`confirmed=true` 三 action 行全 Confirmed 且 trust
     /// Confirmed(证据完整);否则矩阵/边界/trust 全 Unknown(未探测,
     /// 「boundary Unknown/trust 缺失」的 action 证据缺失形态)。
@@ -582,7 +527,6 @@ mod tests {
             trust: evidence(confirmed),
             probed_at: None,
             probe_artifact_ref: None,
-            root_recipe_evidence: RootRecipeEvidence::None,
             execution_semantics: if confirmed {
                 crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
                     .to_string()
@@ -619,13 +563,10 @@ mod tests {
     fn role_chain_fixture(records: &[ProviderCapabilityRecord]) -> RoleChainFixture {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = ProductAppPaths::new(temp.path().to_path_buf());
-        let project_id = "project_t08".to_string();
         let lc_id = "lc_t08".to_string();
-        let capability_store = ProviderCapabilityStore::for_lc(paths.clone(), lc_id.clone());
+        let capability_store = ProviderCapabilityStore::new(paths.clone());
         for record in records {
-            capability_store
-                .upsert(&project_id, record)
-                .expect("upsert");
+            capability_store.upsert(record).expect("upsert");
         }
         let streaming_adapter = Arc::new(CountingStreamingAdapter::new());
         let mut registry = ProviderRegistry::new();
@@ -641,13 +582,15 @@ mod tests {
         std::fs::create_dir_all(&authority_root).expect("authority root");
         let gateway = LogicalCodebaseProviderGateway::new(
             AggregatePolicyArtifactStore::new(paths.clone()),
-            Arc::new(StoreBackedProviderCapabilitySource::for_lc(
-                paths, project_id, lc_id,
-            )),
+            Arc::new(
+                StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
+                    paths, lc_id,
+                ),
+            ),
             Arc::new(UnreachableTargetResolver),
             Arc::new(registry),
             Arc::new(StubSyncAdapter),
-            always_available_gate(),
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
             authority_root,
         );
         RoleChainFixture {
@@ -785,22 +728,6 @@ mod tests {
         );
         assert!(!lc_false_flag_verdict.is_empty());
         assert_eq!(lc_false_flag_verdict, lc_true_flag_verdict);
-    }
-
-    /// Task 8(断言组 408):SingleRepository 保留原跳过语义——LC 下
-    /// 全违规的组合在单仓载体下不误拒。
-    #[test]
-    fn lcg_t08_single_repository_skips_lc_predicates() {
-        let fixture = role_chain_fixture(&[]);
-        let single_repository_verdict = validate_role_chain_for_enrollment(
-            Some(&fixture.gateway),
-            &ProviderName::Pi,
-            &ProviderName::KimiCode,
-            &single_repository_carrier(),
-            true,
-            false,
-        );
-        assert!(single_repository_verdict.is_ok());
     }
 
     /// Task 8(断言组 409-410):GET 投影、PUT Enable 从同 carrier,rebind
@@ -972,30 +899,6 @@ mod tests {
                     .unwrap()
                     .contains(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED),
                 "{violation:?}"
-            );
-        }
-    }
-
-    /// 单仓载体整体跳过 gateway 谓词:LC 不支持但本机可用的组合不误拒
-    ///（Review Focus 5／A10）。
-    #[test]
-    fn role_chain_preflight_skips_gateway_predicates_for_single_repository() {
-        let fixture = role_chain_fixture(&[]);
-        for (author, reviewer) in [
-            (ProviderName::Pi, ProviderName::KimiCode),
-            (ProviderName::KimiCode, ProviderName::Pi),
-        ] {
-            assert!(
-                validate_role_chain_for_enrollment(
-                    Some(&fixture.gateway),
-                    &author,
-                    &reviewer,
-                    &single_repository_carrier(),
-                    true,
-                    false
-                )
-                .is_ok(),
-                "single-repository carrier must skip gateway predicates"
             );
         }
     }

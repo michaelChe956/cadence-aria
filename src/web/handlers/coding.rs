@@ -107,7 +107,8 @@ fn attempt_target_snapshot(
     issue_id: &str,
     work_item: &LifecycleWorkItemRecord,
 ) -> ApiResult<Option<AttemptTargetSnapshot>> {
-    // v1.3：按 issue 所属 lc_id 寻址（R9）；单仓/无 LC 回退 legacy project 级路径。
+    // 按 issue 所属 lc_id 寻址（R9）；lc_id 必填——无归属 issue 在 resolve 层
+    // 即报 NotFound，不再回退 project 级路径。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
         app_paths, project_id, issue_id,
     )
@@ -115,7 +116,6 @@ fn attempt_target_snapshot(
     match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
         .map_err(product_store_api_error)?
     {
-        RepositoryRouting::Legacy { .. } => Ok(None),
         RepositoryRouting::Logical { .. } => {
             let logical_repository_id = work_item.target_repository_id.ok_or_else(|| {
                 product_store_api_error(routing_error(
@@ -127,7 +127,7 @@ fn attempt_target_snapshot(
                 app_paths,
                 project_id,
                 logical_repository_id,
-                lc_id.as_deref(),
+                Some(lc_id.as_str()),
             )
             .map(Some)
             .map_err(target_snapshot_api_error)

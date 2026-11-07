@@ -434,9 +434,10 @@ fn bound_enrollment(
         command_ledger: Vec::new(),
         terminated_at: None,
         attention_facts: Vec::new(),
+        voided_at: None,
+        void_reason: None,
     }
 }
-
 async fn state_with_bound_enrollment(
     manager: &Arc<WorkspaceSessionManager>,
     _enrollment_id: &str,
@@ -462,7 +463,6 @@ async fn state_with_bound_enrollment(
         .unwrap();
     state
 }
-
 /// REQ-WIGA-03：自动认领面对活 run 只观察（AlreadyActive），绝不调用会
 /// supersede 的入口；run token/化身保持不变。
 #[tokio::test]

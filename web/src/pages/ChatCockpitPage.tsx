@@ -29,6 +29,7 @@ import {
   AutomationTerminatedBanner,
   AutomationTerminationConfirmSurface,
   AutomationTerminationEntryButton,
+  terminationReceiptBelongsToCurrentPlan,
 } from "../components/chat-workspace/cockpit/CockpitInboxWaitingCards";
 import {
   useCockpitObservedRecords,
@@ -110,7 +111,10 @@ import { useCockpitHotkeyActions } from "./useCockpitHotkeyActions";
 import { useCockpitNodeDetailHydration } from "./useCockpitNodeDetailHydration";
 import { useCockpitChoiceRespond } from "./useCockpitChoiceRespond";
 import { useCockpitWaitingActions } from "./useCockpitWaitingActions";
-import { useCockpitPlanContinueControl } from "./useCockpitPlanContinueControl";
+import {
+  useCockpitPlanContinueControl,
+  useCockpitTerminationIdentity,
+} from "./useCockpitPlanContinueControl";
 
 export function ChatCockpitPage({
   sessionId,
@@ -851,11 +855,25 @@ export function ChatCockpitPage({
   const cockpitPlanTermination = useCodingWorkspaceStore(
     (storeState) => storeState.planTermination,
   );
+  // 2026-11-06 陈旧回执修复（r2/REQ-WIGA-14）：当前 plan 身份改走 durable
+  // 会话记录（entity_id=plan_id，终止态仍可得）——不得用 planControl（停点
+  // 形态投影）：终止 CAS 恒写 enabled=false ⇒ planContinueEligible 翻 false
+  // ⇒ planControl 被清空 ⇒ 本计划自己的终止横幅会在终止态消失。回执需与
+  // 身份一致——同 issue 换绑新 plan（终止→删 work item→新建）后旧回执不再
+  // 盖在新会话上；回执缺 planId 或身份不可得（解析失败）均 fail-closed。
+  const cockpitTerminationIdentity = useCockpitTerminationIdentity({
+    receiptActive: cockpitPlanTermination.terminated !== null,
+    sessionId,
+  });
   const cockpitTerminatedAt =
-    planIssueAddress !== null &&
+    cockpitTerminationIdentity !== null &&
     cockpitPlanTermination.terminated !== null &&
-    cockpitPlanTermination.terminated.projectId === planIssueAddress.projectId &&
-    cockpitPlanTermination.terminated.issueId === planIssueAddress.issueId
+    cockpitPlanTermination.terminated.projectId === cockpitTerminationIdentity.projectId &&
+    cockpitPlanTermination.terminated.issueId === cockpitTerminationIdentity.issueId &&
+    terminationReceiptBelongsToCurrentPlan(
+      cockpitPlanTermination.terminated,
+      cockpitTerminationIdentity.planId,
+    )
       ? cockpitPlanTermination.terminated.terminatedAt
       : null;
   // F-11/F-28 二轮：裸 driver 抢走租约（STALE_DRIVER_LEASE）或本连接以

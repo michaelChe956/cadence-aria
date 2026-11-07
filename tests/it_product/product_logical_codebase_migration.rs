@@ -9,6 +9,7 @@ use cadence_aria::product::json_store::{ProductStoreError, read_json, write_json
 use cadence_aria::product::lifecycle_store::{
     CreateDesignSpecInput, CreateStorySpecInput, CreateWorkItemInput, LifecycleStore,
 };
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::logical_codebase::{
     IdentityMigrationJournalStore, LogicalCodebaseFeature, LogicalCodebaseStore, MemberStatus,
     SelectionPolicy,
@@ -75,7 +76,7 @@ impl LegacySingleRepositoryFixture {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some(LEGACY_REPOSITORY_ID.to_string()),
-                logical_codebase_id: None,
+                logical_codebase_id: legacy_logical_codebase_id("project_0001"),
                 title: "legacy issue".to_string(),
                 description: Some("stored before logical codebase migration".to_string()),
                 change_id: Some("legacy-change".to_string()),

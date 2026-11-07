@@ -167,10 +167,10 @@ pub use review::policy_routing::{
 };
 pub use types::{
     ArtifactUpdateEvent, EngineEvent, LinkedWorkspaceAmendmentTarget,
-    LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,
-    SessionMessage, WorkItemBatchDecisionOutcome, WorkItemDraftDecisionOutcome,
-    WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome, WorkspaceConfirmOutcome,
-    WorkspaceEngine, WorkspaceSession, WorkspaceStage,
+    LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ProviderRunKind,
+    ReviewDecisionOutcome, SessionMessage, WorkItemBatchDecisionOutcome,
+    WorkItemDraftDecisionOutcome, WorkItemPlanAuthorOutcome, WorkItemPlanCompileRecoveryOutcome,
+    WorkspaceConfirmOutcome, WorkspaceEngine, WorkspaceSession, WorkspaceStage,
 };
 
 pub(crate) use artifact_constraints::*;
@@ -220,7 +220,7 @@ pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, HttpConfirmDisposition, OutlineRevisionCrashPoint,
     OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanAuthorOutputContract,
-    PlanRepairCrashPoint, PlanningCompileFailure, PlanningCompileFailureKind, ProviderRunKind,
+    PlanRepairCrashPoint, PlanningCompileFailure, PlanningCompileFailureKind,
     ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
     StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
     WorkItemPlanOutlineRevisionSource,

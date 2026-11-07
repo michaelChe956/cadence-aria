@@ -108,6 +108,40 @@ impl RootRecipeReceiptStore {
         })
     }
 
+    /// REQ-BOOT-17：落盘**一个 provider turn** 的命令审计事实，并返回该
+    /// turn 的**零动作**判定（`Some(reason)` ⇒ 零动作，调用方须判该 step
+    /// 失败，后续 step 不再推进）。
+    ///
+    /// 零动作判据**复用**既有 receipt auditor 的事实：auditor 已把窗口内的
+    /// 每次落盘差异记成 `observed_changes`，零动作 ⇒ 变更清单为空——本方法
+    /// 不引入第二套「有无变更」判定，只消费 auditor 的结论。
+    ///
+    /// 有动作 ⇒ `Ok(None)`（照既有语义成功：审计事实照旧 durable 追加，
+    /// 拒绝证据同样保留）；零动作 ⇒ `Ok(Some(reason))`，reason 含
+    /// **provider / step / 零变更** 三项失败事实。
+    pub fn append_turn_receipts(
+        &self,
+        project_id: &str,
+        step: AggregateInitializationStepKind,
+        provider: &crate::product::models::ProviderName,
+        receipts: Vec<RootRecipeCommandReceipt>,
+    ) -> Result<Option<String>, ProductStoreError> {
+        let mut changed = false;
+        for receipt in receipts {
+            changed |= !receipt.observed_changes.is_empty();
+            self.append_command(project_id, receipt)?;
+        }
+        if changed {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "root recipe turn produced no workspace change \
+             (provider={}, step={}, zero_change=true)",
+            crate::product::logical_codebase::provider_trust::provider_wire_label(provider),
+            step.as_str()
+        )))
+    }
+
     /// Lists the operation's command audit facts, oldest command first.
     pub fn list_commands(
         &self,
@@ -638,13 +672,6 @@ fn classify_change<'a>(
     )
 }
 
-fn entries_equivalent(before: &RootRecipeSnapshotEntry, after: &RootRecipeSnapshotEntry) -> bool {
-    before.kind == after.kind
-        && before.content_digest == after.content_digest
-        && before.link_target == after.link_target
-        && before.special_type == after.special_type
-}
-
 fn rejection_summary(
     changes: &[RootRecipeObservedChange],
     escape_evidence: &BTreeSet<String>,
@@ -675,170 +702,6 @@ fn rejection_summary(
         ));
     }
     summary
-}
-
-fn snapshot_root(
-    canonical_root: &Path,
-    budget: &RootRecipeSnapshotBudget,
-) -> Result<RootRecipeFilesystemSnapshot, ProductStoreError> {
-    let mut entries = Vec::new();
-    let mut scale = SnapshotScale::default();
-    // gitignore 感知(Bug2 2026-10-16):遍历栈在进入目录时收集该目录的
-    // `.gitignore`/`.git/info/exclude` 规则,被忽略路径不计预算、不进快照。
-    let mut ignores = AuditIgnoreStack::default();
-    walk_root(
-        canonical_root,
-        canonical_root,
-        &mut entries,
-        budget,
-        &mut scale,
-        &mut ignores,
-    )?;
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    let snapshot_digest = digest_snapshot_entries(&entries);
-    Ok(RootRecipeFilesystemSnapshot {
-        canonical_root: canonical_root.to_path_buf(),
-        entries,
-        snapshot_digest,
-    })
-}
-
-/// 快照规模的累计计数（条目/字节），由 [`RootRecipeSnapshotBudget`] 施加
-/// 上限：超限即 fail-closed，绝不静默截断观测面。
-#[derive(Default)]
-struct SnapshotScale {
-    entries: usize,
-    bytes: u64,
-}
-
-impl SnapshotScale {
-    fn charge_entry(
-        &mut self,
-        budget: &RootRecipeSnapshotBudget,
-        path: &Path,
-    ) -> Result<(), ProductStoreError> {
-        self.entries += 1;
-        if self.entries > budget.max_entries {
-            return Err(ProductStoreError::Io(format!(
-                "audit snapshot budget exceeded at {}: {} entries > max_entries {} \
-                 (fail-closed; paths ignored by .gitignore/.git/info/exclude are \
-                 already excluded — clean up or gitignore remaining untracked \
-                 build outputs)",
-                path.display(),
-                self.entries,
-                budget.max_entries
-            )));
-        }
-        Ok(())
-    }
-
-    fn charge_bytes(
-        &mut self,
-        budget: &RootRecipeSnapshotBudget,
-        path: &Path,
-        len: u64,
-    ) -> Result<(), ProductStoreError> {
-        self.bytes = self.bytes.saturating_add(len);
-        if self.bytes > budget.max_bytes {
-            return Err(ProductStoreError::Io(format!(
-                "audit snapshot budget exceeded at {}: {} cumulative bytes > max_bytes {} \
-                 (fail-closed; paths ignored by .gitignore/.git/info/exclude are \
-                 already excluded — clean up or gitignore remaining untracked \
-                 build outputs)",
-                path.display(),
-                self.bytes,
-                budget.max_bytes
-            )));
-        }
-        Ok(())
-    }
-}
-
-/// 全量递归快照（gitignore-aware，Bug2 2026-10-16）：被审计根及各
-/// 嵌套目录的 `.gitignore`、git 元数据 `.git/info/exclude` 忽略的路径
-/// 不计入预算、不进快照、其变更不可观测（node_modules/target 等非版本
-/// 构建面）。其余观测语义不变：不跟随 symlink；目录不可读、文件不可读
-/// 均视为不可观测而 fail-closed 报错（绝不静默跳过）。非常规条目
-/// （Unix socket/fifo/device）是产品自管索引面（`.codegraph` daemon 等）
-/// 的运行时 IPC 产物：记为 special（路径+类型、无内容 digest）保持可
-/// 观测，不 fail-closed 断审（2026-10-02 E2E 缺陷回归）。快照规模受
-/// 预算门约束（Task 1.5 carry → Task 3.4），超限同样 fail-closed。
-fn walk_root(
-    root: &Path,
-    dir: &Path,
-    entries: &mut Vec<RootRecipeSnapshotEntry>,
-    budget: &RootRecipeSnapshotBudget,
-    scale: &mut SnapshotScale,
-    ignores: &mut AuditIgnoreStack,
-) -> Result<(), ProductStoreError> {
-    let pushed = ignores.enter_dir(root, dir)?;
-    let reader = std::fs::read_dir(dir)
-        .map_err(|error| ProductStoreError::Io(format!("audit read {}: {error}", dir.display())))?;
-    for entry in reader {
-        let entry = entry.map_err(|error| {
-            ProductStoreError::Io(format!("audit read {} entry: {error}", dir.display()))
-        })?;
-        let path = entry.path();
-        let relative = relative_audit_path(root, &path)?;
-        let file_type = entry.file_type().map_err(|error| {
-            ProductStoreError::Io(format!("audit stat {}: {error}", path.display()))
-        })?;
-        // 被忽略路径(含目录整体)不计条目/字节、不进快照、不下降。
-        // symlink 按非目录参与匹配(与 git 不跟随 symlink 一致)。
-        if ignores.is_ignored(&relative, file_type.is_dir()) {
-            continue;
-        }
-        scale.charge_entry(budget, &path)?;
-        if file_type.is_symlink() {
-            let target = std::fs::read_link(&path).map_err(|error| {
-                ProductStoreError::Io(format!("audit readlink {}: {error}", path.display()))
-            })?;
-            entries.push(RootRecipeSnapshotEntry {
-                path: relative,
-                kind: RootRecipeSnapshotEntryKind::Symlink,
-                content_digest: None,
-                link_target: Some(target.to_string_lossy().into_owned()),
-                special_type: None,
-                escapes_root: symlink_escapes_root(root, &path, &target),
-            });
-        } else if file_type.is_dir() {
-            entries.push(RootRecipeSnapshotEntry {
-                path: relative,
-                kind: RootRecipeSnapshotEntryKind::Dir,
-                content_digest: None,
-                link_target: None,
-                special_type: None,
-                escapes_root: false,
-            });
-            walk_root(root, &path, entries, budget, scale, ignores)?;
-        } else if file_type.is_file() {
-            let bytes = std::fs::read(&path).map_err(|error| {
-                ProductStoreError::Io(format!("audit read {}: {error}", path.display()))
-            })?;
-            scale.charge_bytes(budget, &path, bytes.len() as u64)?;
-            entries.push(RootRecipeSnapshotEntry {
-                path: relative,
-                kind: RootRecipeSnapshotEntryKind::File,
-                content_digest: Some(digest_bytes(&bytes)),
-                link_target: None,
-                special_type: None,
-                escapes_root: false,
-            });
-        } else {
-            // 非常规条目（socket/fifo/device）：可观测记录，不断审。
-            // 类型来自已成功 stat 的 dir entry file_type（无额外 syscall）。
-            entries.push(RootRecipeSnapshotEntry {
-                path: relative,
-                kind: RootRecipeSnapshotEntryKind::Special,
-                content_digest: None,
-                link_target: None,
-                special_type: Some(special_entry_kind(&file_type).to_string()),
-                escapes_root: false,
-            });
-        }
-    }
-    ignores.leave_dir(pushed);
-    Ok(())
 }
 
 /// special 条目的具体类型名（来自 dir entry 的 file_type，无额外 IO）。

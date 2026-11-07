@@ -35,17 +35,40 @@ fn workspace_runner_calls_provider_and_records_configured_review_rounds() {
             idempotency_key: "provider-workspace-runner-repository".to_string(),
         })
         .expect("repository");
+    // 块3 起「无 LC 归属的 issue」一律 fail-closed ⇒ 本用例必须给 issue 建真多仓 LC 权威：
+    // LC record → manifest → member → 主 checkout → issue 选型绑定。
+    // 聚合根 = 仓根本身（provider 的 worktree path 取聚合根，见下方断言）；
+    // 成员 checkout 必须是真实 git 仓（跨目标基线采样按真仓读 HEAD），
+    // 且是聚合根的直接子目录（`scope_member_prefix` 的 strip 前提）。
+    let aggregate_root = repo_root.path().to_path_buf();
+    let member_path = aggregate_root.join("repository_0001");
+    let revision = crate::context_builder::init_member_git_repo(&member_path);
+    let authority = crate::context_builder::seed_logical_authority(
+        &paths,
+        &project.id,
+        &member_path,
+        &aggregate_root,
+        &repository.id,
+        &revision,
+    );
     let issue = IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            logical_codebase_id: authority.logical_codebase_id.clone(),
             title: "会话过期".to_string(),
             description: Some("描述".to_string()),
             change_id: None,
             base_branch: None,
         })
         .expect("issue");
+    // issue 记录落盘后再绑定选型（绑定需要真实的 issue id）。
+    crate::context_builder::bind_issue_selection(
+        &paths,
+        &project.id,
+        &issue.id,
+        &authority.logical_codebase_id,
+    );
     let store = LifecycleStore::new(paths.clone());
     let story = store
         .create_story_spec(CreateStorySpecInput {

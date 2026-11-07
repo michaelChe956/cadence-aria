@@ -117,12 +117,6 @@ impl ProviderCapabilitySource for StaticCapabilitySource {
         provider: &ProviderRef,
         _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        if provider.provider_type != ProviderRefType::ClaudeCode {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                    .to_string(),
-            ));
-        }
         Ok(Self::capability(
             provider,
             SessionPolicyAction::PlanningReadOnly,
@@ -202,13 +196,24 @@ pub(super) fn build_gateway_with_registry(
     audit: Arc<GatewayRunAudit>,
 ) -> LogicalCodebaseProviderGateway {
     // Task 2.8（cwd authority 契约）：真实拓扑成员 worktree 位于聚合根之下；
-    // 本 fixture 的 worktree 在 workspace root（.aria 的父目录），manifest
+    // 本 fixture 的 worktree 在 workspace root（.aria 的父目录），authority
     // root 取该公共父目录，否则 cwd 会被 gateway authority 早门拒绝。
-    let manifest = LogicalCodebaseManifest::new(
-        project_id,
-        paths.root().parent().unwrap().to_path_buf(),
-        vec![],
-    );
+    //
+    // REQ-ROUTE-01 两态化后，夹具多用 `logical_test_fixture::seed_complete`
+    // 播种**完整 LC 权威**（manifest + 成员 + checkout + selection + policy）。
+    // 该权威已占用 manifest/policy 身份（`ensure_bootstrap` 对身份不一致直接
+    // `IdentityMismatch`），因此这里**复用已播种的 manifest**，只在权威缺失时
+    // 才新建——否则同一临时根上的两个随机 LC id 会互斥。
+    let manifest = LogicalCodebaseStore::new(paths.clone())
+        .load_manifest(project_id)
+        .expect("load manifest")
+        .unwrap_or_else(|| {
+            LogicalCodebaseManifest::new(
+                project_id,
+                paths.root().parent().expect("workspace root").to_path_buf(),
+                vec![],
+            )
+        });
     let policies = AggregatePolicyArtifactStore::new(paths.clone());
     policies
         .ensure_bootstrap(&manifest)
@@ -221,7 +226,11 @@ pub(super) fn build_gateway_with_registry(
         Arc::new(StubSyncAdapter),
         always_available_gate(),
         audit,
-        manifest.provider_context_root.clone(),
+        // authority root 恒取 workspace root，而非 manifest 里的聚合根：夹具的
+        // coding worktree 一律建在 `.aria` 的兄弟位置（workspace root 之下），
+        // 而 `seed_complete` 的成员 checkout 亦在 root 之下——两者都必须落在
+        // authority 之内。非播种分支里 `provider_context_root` 本就等于该值。
+        paths.root().parent().expect("workspace root").to_path_buf(),
     )
 }
 
@@ -266,11 +275,24 @@ pub(super) fn seed_logical_codebase_checkout(
     let logical_store = LogicalCodebaseStore::new(store.paths());
     let repository_id = LogicalRepositoryId(uuid::Uuid::nil());
     let worktree = attempt.worktree_path.clone().expect("worktree");
-    let manifest = LogicalCodebaseManifest::new(
-        &attempt.project_id,
-        store.paths().root().to_path_buf(),
-        vec![repository_id],
-    );
+    // LC 身份全局唯一:夹具链可能已用 `seed_complete` 播种 manifest,此时
+    // 新建 manifest(随机 lc_id)会被 `save_manifest` 以 `IdentityMismatch`
+    // 拒绝。复用已有 manifest 并把本用例的 nil target 成员并入成员集;
+    // 无权威时才新建(membership_revision 只需不减)。
+    let mut manifest = logical_store
+        .load_manifest(&attempt.project_id)
+        .expect("load manifest")
+        .unwrap_or_else(|| {
+            LogicalCodebaseManifest::new(
+                &attempt.project_id,
+                store.paths().root().to_path_buf(),
+                vec![],
+            )
+        });
+    if !manifest.member_ids.contains(&repository_id) {
+        manifest.member_ids.push(repository_id);
+        manifest.membership_revision += 1;
+    }
     logical_store
         .save_manifest(&attempt.project_id, &manifest)
         .expect("save manifest");
@@ -333,6 +355,74 @@ pub(super) fn engine(
         Some(gateway) => engine.with_logical_provider_gateway(Arc::new(gateway)),
         None => engine,
     }
+}
+
+/// 桥接「只实现裸 `start`」的测试 adapter 到 validated 启动路径。
+///
+/// LC（`attempt.target_snapshot.is_some()`）的 provider run 唯一经
+/// `LogicalCodebaseProviderGateway::start_streaming` 分发，而 gateway 只会调
+/// adapter 的 `start_validated`（trait 默认为 unsupported，**不回落**裸
+/// `start`）。既有 fake adapter 只实现 `start`，故夹具用本包装把它们接进
+/// validated 通道；行为与被包装的 adapter 逐个一致。
+pub(super) struct ValidatedPassthroughAdapter(pub Arc<dyn StreamingProviderAdapter>);
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ValidatedPassthroughAdapter {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.0.start(input, cancel).await
+    }
+
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.0.start(input, cancel).await
+    }
+}
+
+/// 把同一个 fake adapter 注册到全部 provider 名：夹具的 role provider 由
+/// attempt 的 `provider_config_snapshot` 决定（默认 author=Codex /
+/// reviewer=ClaudeCode），逐名注册免去每处重复映射。
+pub(super) fn register_fixture_adapter(
+    registry: &mut ProviderRegistry,
+    adapter: Arc<dyn StreamingProviderAdapter>,
+) {
+    let adapter: Arc<dyn StreamingProviderAdapter> = Arc::new(ValidatedPassthroughAdapter(adapter));
+    for name in [
+        ProviderName::ClaudeCode,
+        ProviderName::Codex,
+        ProviderName::Pi,
+        ProviderName::KimiCode,
+        ProviderName::Fake,
+    ] {
+        registry.register(name, adapter.clone());
+    }
+}
+
+/// 逻辑 target 的 engine 夹具：注入以已播种 LC 权威为基座的 gateway，并把
+/// `adapter` 注册为其 registry 的真实 adapter（spawn 唯一入口）。
+pub(super) fn engine_with_fixture_gateway(
+    store: &CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    project_id: &str,
+    adapter: Arc<dyn StreamingProviderAdapter>,
+) -> CodingWorkspaceEngine {
+    let mut registry = ProviderRegistry::new();
+    register_fixture_adapter(&mut registry, adapter);
+    let gateway = build_gateway_with_registry(
+        &store.paths(),
+        project_id,
+        Arc::new(registry),
+        Arc::new(GatewayRunAudit::new()),
+    );
+    CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+        .with_logical_provider_gateway(Arc::new(gateway))
 }
 
 /// 把 attempt 的 Coder role provider 覆盖为 ClaudeCode,避免 fixture 默认 author=Codex
@@ -527,13 +617,21 @@ async fn logical_internal_review_launches_through_gateway() {
 fn validated_streaming_input_for_role_returns_none_for_legacy_attempt() {
     let (root, store, attempt) = running_attempt_with_worktree();
     let _root = root;
+    // 两态化后共享夹具默认携带「LC 权威 + 冻结快照」;本用例钉的是
+    // 「无快照(legacy)attempt 不得产出 validated input」的分支,故显式
+    // 剥掉快照恢复 legacy 现场(与 `with_target_snapshot` 相对的构造)。
+    let mut legacy = attempt;
+    legacy.target_snapshot = None;
+    store
+        .write_coding_attempt_for_test(&legacy)
+        .expect("persist legacy attempt without snapshot");
+    let attempt = legacy;
     let gateway = build_gateway(&store.paths(), &attempt.project_id);
     let engine = engine(&store, Some(gateway));
     let input = streaming_input(
         attempt.worktree_path.clone().expect("worktree"),
         ProviderType::ClaudeCode,
     );
-
     let policy = engine
         .resolve_launch_policy_for_role(&attempt, CodingProviderRole::Coder, &input.working_dir)
         .expect("helper returns Ok");

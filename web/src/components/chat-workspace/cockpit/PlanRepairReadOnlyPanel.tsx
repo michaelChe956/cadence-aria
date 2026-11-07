@@ -38,8 +38,8 @@ export function PlanRepairReadOnlyPanel({ model }: PlanRepairReadOnlyPanelProps)
         </dl>
       </section>
 
-      <section aria-label="修复轮次">
-        <h3 className="text-xs font-semibold text-[var(--aria-ink-muted)]">修复轮次</h3>
+      <section aria-label="人工返修">
+        <h3 className="text-xs font-semibold text-[var(--aria-ink-muted)]">人工返修</h3>
         {model.rounds.length === 0 ? (
           <p data-testid="plan-repair-rounds-empty" className="mt-1 text-xs text-[var(--aria-ink-muted)]">
             本连接尚未观测到子会话轮次。
@@ -81,7 +81,7 @@ export function PlanRepairReadOnlyPanel({ model }: PlanRepairReadOnlyPanelProps)
           <p className="aria-mono mt-1 break-all text-xs">
             turn {model.feedbackTurn.turnId} · {model.feedbackTurn.status}
             {model.feedbackTurn.commandId ? ` · command ${model.feedbackTurn.commandId}` : ""}
-            <span className="aria-num"> · 剩余修复轮次 {model.feedbackTurn.remainingBudget}</span>
+            <span className="aria-num"> · 人工返修还可做 {model.feedbackTurn.remainingBudget} 次</span>
           </p>
         ) : (
           <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">

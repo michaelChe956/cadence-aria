@@ -508,8 +508,8 @@ const PLAN_CONTINUE_NARRATIVE: Record<string, { title: string; body: string }> =
     body: "Provider 运行失败，自动化停在原点。可直接「继续自动化」重试，也可先写一两句说明（可选）一并带给 AI。",
   },
   stopped_needs_human: {
-    title: "人工说明次数已用尽",
-    body: "评审轮的人工说明预算已耗尽。请在下方写一两句补充说明后「继续自动化」——只开启一个新的说明回合，历史不清零。",
+    title: "自动化停在等你说明",
+    body: "自动化在这一轮停下来了，需要你的说明才能继续。请在下方写一两句说明后「继续自动化」——它会带上你的说明接着跑，不用重新开始。",
   },
   generation_needs_human: {
     title: "计划生成停在人工分诊点",

@@ -155,96 +155,8 @@ pub(crate) fn valid_split_output() -> Value {
     })
 }
 
-pub(crate) fn valid_outline_output() -> Value {
-    json!({
-        "outline": {
-            "id": "outline_0001",
-            "project_id": "project_0001",
-            "issue_id": "issue_0001",
-            "source_story_spec_ids": ["story_spec_0001"],
-            "source_design_spec_ids": ["design_spec_0001"],
-            "strategy_summary": "先实现后端会话 API，再补前端过期提示，最后补集成测试。",
-            "work_item_outlines": [
-                {
-                    "outline_id": "outline_backend_session",
-                    "logical_work_item_id": "wi_backend_session",
-                    "title": "实现后端登录会话 API",
-                    "kind": "backend",
-                    "goal": "提供登录会话过期检测与刷新相关 API。",
-                    "scope": ["src/product/session.rs", "src/web/session_handlers.rs"],
-                    "non_goals": ["不实现前端 UI"],
-                    "estimated_context_tokens": 9000,
-                    "session_fit": "fits_single_agent_session",
-                    "source_story_spec_ids": ["story_spec_0001"],
-                    "source_design_spec_ids": ["design_spec_0001"],
-                    "exclusive_write_scopes": ["src/product/session.rs", "src/web/session_handlers.rs"],
-                    "forbidden_write_scopes": ["web/**"],
-                    "depends_on": [],
-                    "verification_intent": ["cargo test --locked --lib session"],
-                    "trusted_verification_commands": [{
-                        "command": "cargo test --locked --lib session",
-                        "cwd": ".",
-                        "purpose": "验证后端会话逻辑",
-                        "source_ref": "design_spec_0001#verification"
-                    }],
-                    "handoff_notes": "输出会话状态 DTO 与错误语义。"
-                },
-                {
-                    "outline_id": "outline_frontend_expiry",
-                    "logical_work_item_id": "wi_frontend_expiry",
-                    "title": "实现前端会话过期提示",
-                    "kind": "frontend",
-                    "goal": "在前端展示会话过期提示并触发重新登录入口。",
-                    "scope": ["web/src/session/**"],
-                    "non_goals": ["不修改后端 API"],
-                    "estimated_context_tokens": 8000,
-                    "session_fit": "fits_single_agent_session",
-                    "source_story_spec_ids": ["story_spec_0001"],
-                    "source_design_spec_ids": ["design_spec_0001"],
-                    "exclusive_write_scopes": ["web/src/session/**"],
-                    "forbidden_write_scopes": ["src/product/**"],
-                    "depends_on": ["outline_backend_session"],
-                    "verification_intent": ["pnpm -C web test"],
-                    "trusted_verification_commands": [{
-                        "command": "pnpm -C web test",
-                        "cwd": ".",
-                        "purpose": "验证前端会话过期提示",
-                        "source_ref": "design_spec_0001#verification"
-                    }],
-                    "handoff_notes": "消费后端会话状态 DTO。"
-                },
-                {
-                    "outline_id": "outline_integration_session",
-                    "logical_work_item_id": "wi_integration_session",
-                    "title": "集成测试：会话过期端到端",
-                    "kind": "integration",
-                    "goal": "覆盖会话过期到前端提示的贯通路径。",
-                    "scope": ["tests/session/**"],
-                    "non_goals": ["不新增业务功能"],
-                    "estimated_context_tokens": 7000,
-                    "session_fit": "fits_single_agent_session",
-                    "source_story_spec_ids": ["story_spec_0001"],
-                    "source_design_spec_ids": ["design_spec_0001"],
-                    "exclusive_write_scopes": ["tests/session/**"],
-                    "forbidden_write_scopes": [],
-                    "depends_on": ["outline_frontend_expiry"],
-                    "verification_intent": ["cargo test --locked --test it_web session"],
-                    "trusted_verification_commands": [{
-                        "command": "cargo test --locked --test it_web session",
-                        "cwd": ".",
-                        "purpose": "验证会话过期端到端流程",
-                        "source_ref": "design_spec_0001#verification"
-                    }],
-                    "handoff_notes": "验证前后端协议一致性。"
-                }
-            ],
-            "risks": ["前后端错误码需要保持一致"],
-            "handoff_strategy": "后端先定义稳定 DTO，前端和集成测试逐步消费。",
-            "status": "draft"
-        },
-        "context_blockers": []
-    })
-}
+// 退役留档（T5/REQ-RET-02）：valid_outline_output 夹具为 outline 族测试专用，随消息族
+// 退役（下游消费面 app_with_confirmed_story_and_design_and_streaming_outputs 一并退役）。
 
 // 退役留档（T5/REQ-RET-02）：context_blocker_outline_output 夹具（ContextBlocker 面已随 L2 删除）随消息族退役。
 
@@ -314,16 +226,6 @@ impl QueuedSplitStreamingProvider {
         Self {
             outputs: Arc::new(Mutex::new(VecDeque::from(outputs))),
             captured_prompts: None,
-        }
-    }
-
-    pub(crate) fn new_recording(
-        outputs: Vec<Value>,
-        captured_prompts: Arc<Mutex<Vec<String>>>,
-    ) -> Self {
-        Self {
-            outputs: Arc::new(Mutex::new(VecDeque::from(outputs))),
-            captured_prompts: Some(captured_prompts),
         }
     }
 }
@@ -490,14 +392,51 @@ async fn bootstrap_project_repo_issue_and_specs(
     let repository_id = completed["result"]["repository"]["repository_id"]
         .as_str()
         .expect("bootstrap initialized repository id");
-    let (status, response) = request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues",
-        json!({"title":"登录会话过期","description":"描述","repository_id":repository_id}),
-    )
-    .await;
-    assert!(status.is_success(), "bootstrap issue failed: {response}");
+    // 块3（remove-single-repository-path）：issue 必须挂 logical_codebase_id 归属。
+    // 按生产 v1.2→v1.3 身份迁移把 repository 升成 LC 权威，再经**生产聚合索引操作
+    // + 假 CodeGraph CLI**（`aggregate_index_fixture`）建 active 聚合索引（generate
+    // 经 PlanningContextResolver 读取）；story/design generate 显式钉 involved
+    // （REQ-PLN-04 确认门）。夹具不真跑 `codegraph sync .`（本机重活：抢全局
+    // `/tmp/.codegraph` 锁 + 吃 30s 增量预算 ⇒ 422 codegraph_timeout）；假 CLI 只替换
+    // CLI 应答，真实 git 成员快照 / 成员覆盖校验 / durable 世代落盘 / active 投影全
+    // 走生产链路。rebuild 端点本身的行为覆盖由 `web_aggregate_index_api` 承担。
+    let bootstrap_root = {
+        let _codegraph_guard = crate::CODEGRAPH_FIXTURE_LOCK.lock().await;
+        let (status, info) =
+            request_json(app.clone(), Method::GET, "/api/runtime-info", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{info}");
+        let workspace_root =
+            std::path::PathBuf::from(info["workspace_root"].as_str().expect("workspace_root"));
+        let app_paths =
+            cadence_aria::product::app_paths::ProductAppPaths::new(workspace_root.join(".aria"));
+        cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(app_paths.clone())
+            .ensure_identity_schema("project_0001")
+            .expect("migrate fixture repository into logical codebase authority");
+        let lc_id = cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+            "project_0001",
+        );
+        crate::aggregate_index_fixture::seed_active_aggregate_index(
+            &app_paths,
+            "project_0001",
+            &lc_id,
+        );
+        let involved: Vec<String> =
+            cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(app_paths)
+                .list_members("project_0001")
+                .expect("list fixture logical members")
+                .into_iter()
+                .map(|member| member.logical_repository_id.0.to_string())
+                .collect();
+        let (status, response) = request_json(
+            app.clone(),
+            Method::POST,
+            "/api/projects/project_0001/issues",
+            json!({"title":"登录会话过期","description":"描述","repository_id":repository_id,"logical_codebase_id":lc_id}),
+        )
+        .await;
+        assert!(status.is_success(), "bootstrap issue failed: {response}");
+        involved
+    };
 
     let (status, response) = request_json(
         app.clone(),
@@ -505,6 +444,7 @@ async fn bootstrap_project_repo_issue_and_specs(
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
         json!({
             "title":"登录会话过期提示",
+            "involved_repository_ids":bootstrap_root,
             "author_provider":"fake",
             "reviewer_provider":"codex",
             "review_rounds":3,
@@ -536,6 +476,24 @@ async fn bootstrap_project_repo_issue_and_specs(
         json!({
             "title":"会话过期后端设计",
             "story_spec_ids":["story_spec_0001"],
+            "involved_repository_ids":cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(
+                cadence_aria::product::app_paths::ProductAppPaths::new(
+                    std::path::PathBuf::from(
+                        request_json(app.clone(), Method::GET, "/api/runtime-info", json!({}))
+                            .await
+                            .1["workspace_root"]
+                            .as_str()
+                            .expect("workspace_root")
+                            .to_string(),
+                    )
+                    .join(".aria"),
+                ),
+            )
+            .list_members("project_0001")
+            .expect("list fixture logical members")
+            .into_iter()
+            .map(|member| member.logical_repository_id.0.to_string())
+            .collect::<Vec<String>>(),
             "author_provider":"codex",
             "reviewer_provider":"claude_code",
             "review_rounds":2,
@@ -571,6 +529,10 @@ pub(crate) async fn app_with_confirmed_story_and_design(
     std::fs::create_dir_all(&repo).expect("create repo dir");
     // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
     // 会令基线解析 fail-closed）。
+    // 聚合索引布局规则：每成员至少 1 个可索引源码文件
+    // （aggregate_index_member_coverage_failed），空提交不算。
+    std::fs::create_dir_all(repo.join("src")).expect("repo src dir");
+    std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").expect("repo source");
     let status = Command::new("git")
         .args(["init", "-b", "main"])
         .current_dir(&repo)
@@ -580,7 +542,8 @@ pub(crate) async fn app_with_confirmed_story_and_design(
     for args in [
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Test User"],
-        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+        vec!["add", "."],
+        vec!["commit", "-m", "fixture baseline"],
     ] {
         let status = Command::new("git")
             .args(&args)
@@ -615,6 +578,10 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_revision_o
     std::fs::create_dir_all(&repo).expect("create repo dir");
     // REQ-PIB-02：夹具对齐生产不变量（main 分支+初始提交，裸 init 无分支
     // 会令基线解析 fail-closed）。
+    // 聚合索引布局规则：每成员至少 1 个可索引源码文件
+    // （aggregate_index_member_coverage_failed），空提交不算。
+    std::fs::create_dir_all(repo.join("src")).expect("repo src dir");
+    std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").expect("repo source");
     let status = Command::new("git")
         .args(["init", "-b", "main"])
         .current_dir(&repo)
@@ -624,7 +591,8 @@ pub(crate) async fn app_with_confirmed_story_and_design_and_streaming_revision_o
     for args in [
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "user.name", "Test User"],
-        vec!["commit", "--allow-empty", "-m", "fixture baseline"],
+        vec!["add", "."],
+        vec!["commit", "-m", "fixture baseline"],
     ] {
         let status = Command::new("git")
             .args(&args)

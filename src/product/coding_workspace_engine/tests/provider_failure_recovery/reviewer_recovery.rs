@@ -93,12 +93,17 @@ async fn assert_non_transport_reviewer_failure_cannot_start_recovery(
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = NonTransportReviewerFailureProvider { failure };
+    let provider = std::sync::Arc::new(NonTransportReviewerFailureProvider { failure });
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let _ = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await;
 
     let runs_before = store
@@ -199,12 +204,20 @@ async fn exhausted_reviewer_transport_cycle_can_start_a_linked_manual_cycle_with
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let exhausted_provider = TransportFailuresThenSuccessProvider::new(usize::MAX, "unused");
+    let exhausted_provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
+        usize::MAX,
+        "unused",
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        exhausted_provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let first_cycle_error = engine
-        .execute_code_review_with_commands(&attempt, &exhausted_provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, exhausted_provider.as_ref(), &mut command_rx)
         .await
         .expect_err("third transport failure opens reviewer gate");
     assert!(matches!(
@@ -275,12 +288,21 @@ async fn exhausted_reviewer_transport_cycle_can_start_a_linked_manual_cycle_with
         CodingRoleRunStatus::Failed
     );
 
-    let recovery_provider = TransportFailuresThenSuccessProvider::new(
+    let recovery_provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
         2,
         r#"{"verdict":"approve","summary":"manual retry completed","findings":[]}"#,
+    ));
+    // 第二个 adapter 需要自己的 registry：gateway 按 provider 名从 registry
+    // 取 spawn 目标，同一 engine 只能指向一个实例。
+    let (recovery_tx, _recovery_rx) = mpsc::channel(32);
+    let recovery_engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        recovery_tx,
+        PROJECT_ID,
+        recovery_provider.clone(),
     );
-    let report = engine
-        .execute_code_review_with_commands(&running, &recovery_provider, &mut command_rx)
+    let report = recovery_engine
+        .execute_code_review_with_commands(&running, recovery_provider.as_ref(), &mut command_rx)
         .await
         .expect("manual cycle succeeds after two automatic retries");
     assert_eq!(report.verdict, ReviewVerdict::Approve);
@@ -339,11 +361,19 @@ async fn exhausted_reviewer_recovery_rejects_non_transport_terminal_reason() {
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TransportFailuresThenSuccessProvider::new(usize::MAX, "unused");
+    let provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
+        usize::MAX,
+        "unused",
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let _ = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("transport failures open reviewer gate");
     let failed = store
@@ -426,11 +456,17 @@ async fn pre_start_zero_output_reviewer_failure_recovers_via_reserved_retry_revi
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = std::sync::Arc::new(StartRefusedReviewerProvider);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let first_cycle_error = engine
-        .execute_code_review_with_commands(&attempt, &StartRefusedReviewerProvider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("pre-start refusal opens reviewer gate");
     assert!(matches!(
@@ -499,12 +535,19 @@ async fn pre_start_zero_output_reviewer_failure_recovers_via_reserved_retry_revi
 
     // 恢复轮 fresh spawn 成功:即使首轮曾记录 reviewer 会话,
     // 契约(仅 Coder resume)下第二轮评审也不 resume。
-    let recovery_provider = TransportFailuresThenSuccessProvider::new(
+    let recovery_provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
         0,
         r#"{"verdict":"approve","summary":"reserved retry completed","findings":[]}"#,
+    ));
+    let (recovery_tx, _recovery_rx) = mpsc::channel(16);
+    let recovery_engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        recovery_tx,
+        PROJECT_ID,
+        recovery_provider.clone(),
     );
-    let report = engine
-        .execute_code_review_with_commands(&running, &recovery_provider, &mut command_rx)
+    let report = recovery_engine
+        .execute_code_review_with_commands(&running, recovery_provider.as_ref(), &mut command_rx)
         .await
         .expect("reserved retry cycle succeeds");
     assert_eq!(report.verdict, ReviewVerdict::Approve);

@@ -732,12 +732,6 @@ impl ProviderCapabilitySource for SplitRootCwdCapabilitySource {
         provider: &ProviderRef,
         _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, ProviderGatewayError> {
-        if provider.provider_type != ProviderRefType::ClaudeCode {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                    .to_string(),
-            ));
-        }
         Ok(self.capability(provider, SessionPolicyAction::PlanningReadOnly))
     }
 }

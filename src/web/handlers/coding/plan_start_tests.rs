@@ -426,8 +426,12 @@ pub(super) async fn n3_fixture() -> N3Fixture {
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let coding_store = CodingAttemptStore::new(paths.clone());
     let seeded = coding_store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        // 基座 attempt 带冻结快照 ⇒ 桶键 Some(logical_repository_id)，
+        // None 桶检索落空 ⇒ 桶无关取数（见 group.rs `attempt_target_bucket`）。
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .unwrap()
+        .into_iter()
+        .next()
         .expect("seeded legacy group attempt");
     coding_store
         .delete_attempt(PROJECT_ID, ISSUE_ID, &seeded.id)
@@ -470,10 +474,48 @@ pub(super) async fn n3_fixture() -> N3Fixture {
         );
     }
     let [busi, web, gateway, frontend] = [targets[0], targets[1], targets[2], targets[3]];
+    // 多仓 scope 路径域前提（REQ-COD 写入范围门禁）：成员 checkout 必须在 LC
+    // 聚合根**之下**——`scope_member_prefix` 以聚合根为基准解释多仓 scope 路径
+    // （scope 写 `busi/src/a.ts`，git 事实是仓内 `src/a.ts`），成员不在聚合根
+    // 下一律 fail-closed（`work_item_scope_domain_unresolved`）。基座夹具
+    // （PlanRepair）把聚合根取成其单仓 `root/worktree`，n3 的四个多仓成员在
+    // 其之外 ⇒ 聚合根上提到夹具根目录，全部成员成为聚合根的直接子目录
+    // （与 aggregate index「成员须为聚合根直接子目录」口径一致）。成员集合、
+    // membership_revision、logical_codebase_id 一律不动（快照按
+    // membership_revision 校验）。
+    let authority = LogicalCodebaseStore::new(paths.clone());
+    let mut manifest = authority
+        .load_manifest(PROJECT_ID)
+        .unwrap()
+        .expect("manifest");
+    manifest.provider_context_root = root.path().to_path_buf();
+    authority.save_manifest(PROJECT_ID, &manifest).unwrap();
     let manifest = LogicalCodebaseStore::new(paths.clone())
         .load_manifest(PROJECT_ID)
         .unwrap()
         .expect("manifest");
+    // 上提聚合根的同时必须同步上提**登记投影**：legacy 别名 LC 的
+    // `record.aggregate_root` 由 `migrate_legacy` 在基座播种期冻结为基座单仓
+    // `root/worktree`。REQ-ENV-10 四路根投影一致性断言（gateway 工厂组装，
+    // gateway_factory.rs `build_scoped`）要求 record 的 aggregate_root 与
+    // manifest 根 canonical 相等，任一不一致 fail-closed
+    // `provider_gateway_target_mismatch: registration_root`——coding runner
+    // 的 LC 作用域 gateway 组装即中止（attempt 停留 created/prepare_context，
+    // provider 零启动）。与基座夹具回填 repos.json 同类的投影对齐。
+    let alias_record_path = paths
+        .logical_codebase_record_root(
+            PROJECT_ID,
+            &crate::product::logical_codebase::store::legacy_logical_codebase_id(PROJECT_ID),
+        )
+        .join("record.json");
+    if alias_record_path.try_exists().unwrap_or(false) {
+        let mut alias_record = crate::product::json_store::read_json::<
+            crate::product::logical_codebase::store::LogicalCodebaseRecord,
+        >(&alias_record_path)
+        .unwrap();
+        alias_record.aggregate_root = root.path().to_path_buf();
+        crate::product::json_store::write_json(&alias_record_path, &alias_record).unwrap();
+    }
     AggregatePolicyArtifactStore::new(paths.clone())
         .ensure_bootstrap(&manifest)
         .unwrap();
@@ -3383,11 +3425,16 @@ async fn plan_coding_delete_sweeps_via_repos_json_fallback_when_checkouts_missin
     }
 }
 
-/// Bug1 fix-loop r2(owner 硬约束):单仓(Legacy)布局零扰动——无
-/// manifest/selection 的项目里 sweep 安全返回,不触碰任何目录、不报错
-/// (与修复前行为一致;空仓根仅新增 warn 日志)。
+/// 块3（去单仓入口）迁移：原「单仓(Legacy)布局上 sweep 是 benign no-op」
+/// 形态**已作废**——REQ-ROUTE-01 删掉了 `RepositoryRouting::Legacy` 变体，
+/// REQ-ROUTE-02 规定创建 issue 必须携带 LC 归属，REQ-ROUTE-03 规定
+/// 「无归属不回退物理仓」。故本用例改断**新不变量**：
+///
+/// 旧形态（只有 project 目录 + 物理仓目录、没有 issue 记录）如今必须
+/// **fail-closed**（稳定码 `issue_not_found`），不再被当成「单仓布局」
+/// 静默空转——原用例正是靠这个「没有 issue ⇒ 什么也不做」的巧合通过的。
 #[tokio::test]
-async fn plan_coding_sweep_is_benign_noop_on_legacy_single_repo_layout() {
+async fn plan_coding_sweep_fails_closed_when_issue_record_is_absent() {
     let root = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     std::fs::create_dir_all(
@@ -3398,8 +3445,7 @@ async fn plan_coding_sweep_is_benign_noop_on_legacy_single_repo_layout() {
     )
     .unwrap();
 
-    // 单仓布局:无 manifest/selection → Routing=Legacy(repository_id 为空,
-    // 由实体取);repos.json 即使在场也解析不到仓根 → 零候选零动作。
+    // 旧单仓布局的残留现场：物理仓在场、issue 记录缺失。
     let repo_root = root.path().join("single-repo");
     std::fs::create_dir_all(&repo_root).unwrap();
     let residue = repo_root
@@ -3410,16 +3456,99 @@ async fn plan_coding_sweep_is_benign_noop_on_legacy_single_repo_layout() {
     std::fs::create_dir_all(&residue).unwrap();
     std::fs::write(residue.join("leftover.txt"), "residue").unwrap();
 
-    crate::web::handlers::support::sweep_issue_worktree_residue(
+    let error = crate::web::handlers::support::sweep_issue_worktree_residue(
         &paths,
         "project_0001",
         "issue_0001",
     )
     .await
-    .expect("sweep on a legacy single-repo layout is a benign no-op");
+    .expect_err("the removed single-repository layout must fail closed, not silently no-op");
+    assert_eq!(
+        error.code, "issue_not_found",
+        "fail-closed must use the stable issue_not_found code"
+    );
     assert!(
         residue.exists(),
-        "legacy layout directories must be untouched by the sweep"
+        "a failed-closed sweep must not touch any directory"
+    );
+}
+
+/// 块3（去单仓入口）迁移后的**新不变量**：issue 存在但**没有 LC 权威**
+/// （无 manifest/selection）时，routing 落 `FailClosed(TargetMissing)`
+/// （`issue_not_bound_to_logical_codebase` 语义）——单仓回退已删除。
+/// sweep 对 FailClosed 依契约「仅告警跳过、不阻断已完成删除」零动作收尾：
+/// 物理仓**已登记且可解析**（repos.json 在场）也不得被回退去清扫，
+/// 其 issue worktree 残留必须原封不动。
+#[tokio::test]
+async fn plan_coding_sweep_is_benign_noop_when_issue_has_no_logical_codebase_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    std::fs::create_dir_all(
+        root.path()
+            .join(".aria")
+            .join("projects")
+            .join("project_0001"),
+    )
+    .unwrap();
+
+    // 物理仓已登记：若实现仍按单仓语义回退物理仓，下面的残留会被清扫。
+    let repo_root = root.path().join("single-repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let repository = RepositoryStore::new(paths.clone())
+        .create(CreateRepositoryInput {
+            project_id: PROJECT_ID.to_string(),
+            name: "Single Repository".to_string(),
+            path: repo_root.clone(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+            idempotency_key: "sweep-unbound-issue".to_string(),
+        })
+        .unwrap();
+
+    // issue 持久归属一个**没有 manifest/selection** 的 LC ⇒ (None, None)
+    // ⇒ 两态 routing 落 FailClosed（不再是 Legacy）。
+    let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some(repository.id.clone()),
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
+            title: "issue without logical codebase authority".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .unwrap();
+
+    let residue = repo_root
+        .join(".worktrees")
+        .join("aria-issues")
+        .join(&issue.id)
+        .join("uuid-leftover");
+    std::fs::create_dir_all(&residue).unwrap();
+    std::fs::write(residue.join("leftover.txt"), "residue").unwrap();
+
+    // 新不变量（前半）：两态 routing 只有 Logical/FailClosed，单仓形态已不可达。
+    let routing = crate::product::logical_codebase::RepositoryRouting::load_for_issue(
+        &paths, PROJECT_ID, &issue.id,
+    )
+    .expect("routing resolution");
+    assert!(
+        matches!(
+            routing,
+            crate::product::logical_codebase::RepositoryRouting::FailClosed { .. }
+        ),
+        "an issue without logical codebase authority must fail closed"
+    );
+
+    // 新不变量（后半）：FailClosed ⇒ 零动作；物理仓已登记也不得被回退清扫。
+    crate::web::handlers::support::sweep_issue_worktree_residue(&paths, PROJECT_ID, &issue.id)
+        .await
+        .expect("sweep must be a benign no-op when repository routing fails closed");
+    assert!(
+        residue.exists(),
+        "an issue without logical codebase authority must not be swept through the physical repository"
     );
 }
 
@@ -3539,6 +3668,8 @@ fn r2_write_collection_enrollment_with_session(
         command_ledger: Vec::new(),
         terminated_at: None,
         attention_facts: Vec::new(),
+        voided_at: None,
+        void_reason: None,
     };
     crate::product::json_store::write_json(
         &fixture
@@ -3549,14 +3680,12 @@ fn r2_write_collection_enrollment_with_session(
     )
     .unwrap();
 }
-
 /// 批 2 R4/E1 ④（终止负例）：顶层 session 留空的集合 enrollment——该负例
 /// 不驱动任何真实 n3 会话；带合成 session 会让终止的引擎侧收口读会话失败
 /// 而落 cleanup_required（负例期望 terminated）。
 pub(super) fn e1_write_unbound_collection_enrollment(fixture: &N3Fixture, policy_revision: u64) {
     r2_write_collection_enrollment_with_session(fixture, true, policy_revision, None);
 }
-
 /// 把指定 target 桶的 attempt 冻结策略改写为 AutoStartOnce（模拟 enrolled
 /// advance split 落盘后的真实策略形状；经真实 store 写回）。
 fn r2_freeze_auto_start_policy(

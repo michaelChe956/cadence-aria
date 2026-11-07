@@ -35,15 +35,22 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::audit_snapshot_budget::AUDIT_BUDGET_EXCEEDED_REASON_CODE;
 use crate::product::json_store::{ProductStoreError, validate_relative_id};
 use crate::product::logical_codebase::aggregate_initialization::{
     AggregateCancellationRecord, AggregateInitializationErrorRecord,
     AggregateInitializationOperation, AggregateInitializationOperationInput,
     AggregateInitializationOperationStatus, AggregateInitializationProfile,
-    AggregateInitializationStepKind, AggregateInitializationStepStatus,
+    AggregateInitializationStepKind, AggregateInitializationStepStatus, AggregateProviderSelection,
     AggregateSkillsInitialization, RepositoryTypeEvidence,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
+use crate::product::logical_codebase::capability_rejection::{
+    CapabilityLaunchRejection, REASON_CODE_CAPABILITY_DENIED,
+    REASON_CODE_CAPABILITY_EVIDENCE_STALE, REASON_CODE_CAPABILITY_UNVERIFIED,
+    classify_capability_launch_rejection,
+};
+use crate::product::logical_codebase::environment_probe::AggregateEnvironmentProbe;
 use crate::product::logical_codebase::legacy_logical_codebase_id;
 use crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential;
 use crate::product::logical_codebase::provider_trust::{
@@ -52,6 +59,7 @@ use crate::product::logical_codebase::provider_trust::{
 use crate::product::logical_codebase::registration::AggregateRootPreflight;
 use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
 use crate::product::logical_codebase::types::{CodebaseMemberRecord, RepositoryCheckoutRecord};
+use crate::product::models::ProviderName;
 
 /// Errors surfaced by aggregate-initialization coordinator operations. Every
 /// variant carries enough context for the operation record to be marked failed
@@ -68,6 +76,15 @@ pub enum AggregateInitializationError {
     },
     #[error("aggregate skills preparation failed: {reason}")]
     SkillsPreparation { reason: String, retryable: bool },
+    /// 带结构化成因的 skills 准备失败。`cause` 是结构化子码
+    /// （`skills_unavailable_<stage>` / `skills_sync_failed_<layer>` /
+    /// `skills_digest_failed`），`reason` 仍是人读的原始原因。
+    #[error("aggregate skills preparation failed: {reason}")]
+    SkillsPreparationDiagnosed {
+        reason: String,
+        retryable: bool,
+        cause: String,
+    },
     #[error("aggregate preflight failed: {reason}")]
     Preflight { reason: String, retryable: bool },
     #[error("aggregate policy publication failed: {reason}")]
@@ -78,12 +95,47 @@ pub enum AggregateInitializationError {
         reason: String,
         retryable: bool,
     },
+    /// 带诊断的 provider turn 失败。与 [`Self::ProviderTurn`] 共用同一
+    /// `reason_code` / `action` 映射，只是额外带上 provider 名与诊断
+    /// （成因子码 + 被丢弃的输出）。
+    #[error("provider turn {step:?} failed: {reason}")]
+    ProviderTurnDiagnosed {
+        step: AggregateInitializationStepKind,
+        reason: String,
+        retryable: bool,
+        provider: Option<String>,
+        diagnostic: TurnDiagnostic,
+    },
+    /// 环境前置失败。`code` **就是**最终的 `reason_code`
+    /// （`codegraph_missing` / `codegraph_version_mismatch` /
+    /// `aggregate_root_not_writable` / `skills_commands_missing`）。
+    #[error("aggregate environment precondition failed: {code}: {reason}")]
+    EnvironmentPrecondition {
+        code: String,
+        reason: String,
+        retryable: bool,
+    },
     #[error("provider trust gate is waiting before the recipe may start")]
     TrustWaiting { waiting: Box<ProviderTrustWaiting> },
     #[error("cancellation requested")]
     Cancelled,
     #[error("aggregate initialization store error: {0}")]
     Store(#[from] ProductStoreError),
+}
+
+/// The structured diagnostic carried by a diagnosed provider-turn failure.
+///
+/// `cause` is a machine sub-code (e.g. `capability_unverified`), `output` is
+/// the bounded, already-redacted provider output that the failure branches
+/// used to drop on the floor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnDiagnostic {
+    /// The machine sub-code of the failure, when one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// The bounded provider output, when one was captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 impl AggregateInitializationError {
@@ -108,61 +160,174 @@ impl AggregateInitializationError {
     /// Borrowing form of [`Self::into_error_record`]: persists a failure as a
     /// terminal record while the caller still returns the original error to
     /// its caller.
-    fn error_record(&self) -> AggregateInitializationErrorRecord {
-        let (reason_code, retryable, action) = match self {
-            Self::NotFound { .. } | Self::Store(_) => (
+    pub(crate) fn error_record(&self) -> AggregateInitializationErrorRecord {
+        let (reason_code, retryable, action, cause, provider, stderr_summary) = match self {
+            Self::NotFound { .. } => (
                 "aggregate_initialization_store_failed".to_string(),
                 true,
                 "The aggregate initialization state could not be persisted; query the operation after recovery.".to_string(),
+                None,
+                None,
+                None,
+            ),
+            Self::Store(ProductStoreError::AuditSnapshotBudgetExceeded(failure)) => (
+                AUDIT_BUDGET_EXCEEDED_REASON_CODE.to_string(),
+                false,
+                AUDIT_BUDGET_EXCEEDED_REASON_CODE.to_string(),
+                Some(AUDIT_BUDGET_EXCEEDED_REASON_CODE.to_string()),
+                None,
+                Some(failure.diagnostic()),
+            ),
+            Self::Store(_) => (
+                "aggregate_initialization_store_failed".to_string(),
+                true,
+                "The aggregate initialization state could not be persisted; query the operation after recovery.".to_string(),
+                None,
+                None,
+                None,
             ),
             Self::StateRejected { retryable, .. } => (
                 "aggregate_initialization_state_rejected".to_string(),
                 *retryable,
                 "The aggregate initialization state machine rejected the transition; review the operation and resubmit.".to_string(),
+                None,
+                None,
+                None,
             ),
             Self::SkillsPreparation { retryable, reason } => (
                 "aggregate_machine_skills_failed".to_string(),
                 *retryable,
                 reason.clone(),
+                None,
+                None,
+                None,
+            ),
+            Self::SkillsPreparationDiagnosed {
+                retryable,
+                reason,
+                cause,
+            } => (
+                "aggregate_machine_skills_failed".to_string(),
+                *retryable,
+                reason.clone(),
+                Some(cause.clone()),
+                None,
+                None,
             ),
             Self::Preflight { retryable, reason } => (
                 "aggregate_preflight_failed".to_string(),
                 *retryable,
                 reason.clone(),
+                None,
+                None,
+                None,
             ),
             Self::PolicyPublication { retryable, reason } => (
                 "aggregate_policy_publication_failed".to_string(),
                 *retryable,
                 reason.clone(),
+                None,
+                None,
+                None,
             ),
             Self::ProviderTurn {
                 step,
                 reason,
                 retryable,
+            } => {
+                let (reason_code, action) = provider_turn_failure_code(*step, reason);
+                (
+                    reason_code,
+                    *retryable,
+                    action,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            Self::ProviderTurnDiagnosed {
+                step,
+                reason,
+                retryable,
+                provider,
+                diagnostic,
+            } => {
+                let (reason_code, action) = provider_turn_failure_code(*step, reason);
+                (
+                    reason_code,
+                    *retryable,
+                    action,
+                    diagnostic.cause.clone(),
+                    provider.clone(),
+                    diagnostic.output.clone(),
+                )
+            }
+            Self::EnvironmentPrecondition {
+                code,
+                reason,
+                retryable,
             } => (
-                format!("aggregate_{}_failed", step.as_str()),
+                code.clone(),
                 *retryable,
                 reason.clone(),
+                None,
+                None,
+                None,
             ),
             Self::TrustWaiting { waiting } => (
                 "aggregate_initialization_trust_waiting".to_string(),
                 true,
                 waiting.retry_action.clone(),
+                None,
+                None,
+                None,
             ),
             Self::Cancelled => (
                 "aggregate_initialization_cancelled".to_string(),
                 false,
                 "The aggregate initialization was cancelled.".to_string(),
+                None,
+                None,
+                None,
             ),
         };
         AggregateInitializationErrorRecord {
             stage: "aggregate_initialization".to_string(),
             reason_code,
-            stderr_summary: None,
+            stderr_summary,
             retryable,
             action,
+            cause,
+            provider,
         }
     }
+}
+
+/// Map a provider-turn failure onto its machine code and action text.
+///
+/// The two provider-turn variants share this single mapping, so
+/// `ProviderTurn` and `ProviderTurnDiagnosed` can never drift apart. A
+/// detail that matches none of the capability rules keeps the pre-existing
+/// `aggregate_{step}_failed` code and the raw reason as action, byte for
+/// byte.
+fn provider_turn_failure_code(
+    step: AggregateInitializationStepKind,
+    reason: &str,
+) -> (String, String) {
+    let reason_code = match classify_capability_launch_rejection(reason) {
+        Some(CapabilityLaunchRejection::Unverified { .. }) => REASON_CODE_CAPABILITY_UNVERIFIED,
+        Some(CapabilityLaunchRejection::Denied { .. }) => REASON_CODE_CAPABILITY_DENIED,
+        Some(CapabilityLaunchRejection::EvidenceStale { .. }) => {
+            REASON_CODE_CAPABILITY_EVIDENCE_STALE
+        }
+        None => {
+            return (
+                format!("aggregate_{}_failed", step.as_str()),
+                reason.to_string(),
+            );
+        }
+    };
+    (reason_code.to_string(), reason.to_string())
 }
 
 type Clock = dyn Fn() -> String + Send + Sync;
@@ -248,6 +413,10 @@ pub struct AggregateProviderTurnRequest<'a> {
     pub lc_id: Option<&'a str>,
     pub bootstrap: BootstrapPhaseCredential,
     pub cancellation: CancellationToken,
+    /// 片4（REQ-BOOT-07，provider 走 request）：本轮实际使用的 provider
+    ///（wire 语义的 `ProviderName`，由 durable `operation.input.provider`
+    /// 解出）。MUST NOT 存进 driver 字段——driver 是 state 级单例。
+    pub provider: &'a ProviderName,
 }
 
 /// 跳过式聚合初始化（聚合根已完成 Cadence-skills 初始化，四条命令没
@@ -315,13 +484,20 @@ pub struct AggregatePreflightMemberProjection {
 /// Immutable snapshot written to `preflight.json` by the `aggregate_preflight`
 /// step. The canonical aggregate root, every member's main checkout identity
 /// and the index-exclusion marker are all byte-stable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AggregatePreflightSnapshot {
     pub aggregate_root: String,
     pub index_excludes_assets: bool,
     pub members: Vec<AggregatePreflightMemberProjection>,
     pub manifest_revision: u64,
     pub manifest_digest: String,
+    /// REQ-BOOT-09：`advance_remaining` 的 codegraph 前置探测结果落 durable
+    /// 预检快照。旧记录缺省 `false`（未探测），不伪造成可用。
+    #[serde(default)]
+    pub codegraph_available: bool,
+    /// 实测 CLI 版本（`codegraph --version`）。未探测时为 `None`。
+    #[serde(default)]
+    pub codegraph_version: Option<String>,
 }
 
 /// Orchestrates the five-step aggregate initialization state machine. The
@@ -345,13 +521,23 @@ pub struct AggregateInitializationCoordinator {
     /// `None` 表示该依赖图没有发布面：一旦判定要跳过就 fail-closed，绝不
     /// 静默跳过政策发布。
     policy: Option<Arc<dyn AggregatePolicyPublication>>,
+    /// 环境前置探测（REQ-BOOT-09）：`advance_remaining` 开头调用，失败即
+    /// 以 `step: None` 让 operation 失败。`None` 表示该依赖图未装配探针
+    /// （测试默认），生产由 `production_dependencies` 注入
+    /// [`crate::product::logical_codebase::environment_probe::CodeGraphEnvironmentProbe`]。
+    environment_probe: Option<Arc<dyn AggregateEnvironmentProbe>>,
+    /// skills 链接层校验的 HOME 依据（与生产 skills manager 同源）。`None`
+    /// 表示未装配：跳过链接层校验（既有测试构造点零迁移）。
+    skills_home: Option<PathBuf>,
 }
 
 // 以下各职责模块通过文本包含(`include!`)进入此文件,保持模块命名空间与公开 API 不变。
 // 拆分仅为满足 large_file_guard 的 1200 行上限,不改变任何行为。
 
-include!("coordinator_lifecycle.inc.rs");
+include!("coordinator_frozen_provider.inc.rs");
 include!("coordinator_provider_turn.inc.rs");
+include!("coordinator_lifecycle.inc.rs");
+include!("coordinator_lifecycle_provider_setup.inc.rs");
 include!("coordinator_preflight.inc.rs");
 include!("coordinator_profile.inc.rs");
 include!("coordinator_tests.inc.rs");

@@ -17,6 +17,7 @@ use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 // 路径消费（mod.rs 的 types 重导出清单不在本 change 写面内）。
 pub(crate) use super::types::{ConfirmationTrustContext, ConfirmationTrustWaiting};
 
+pub(crate) mod cancel;
 mod story_terminate;
 
 #[derive(Debug)]
@@ -428,30 +429,33 @@ impl super::WorkspaceEngine {
             return Ok(false);
         }
         turn.status = HumanGateTurnStatus::Failed;
+        let saved_failure_class = failure_class.clone();
         turn.failure_class = Some(failure_class);
         turn.updated_at = Utc::now().to_rfc3339();
         let saved = store
             .update_human_gate_turn(&expected, turn)
             .map_err(|error| error.to_string())?;
         self.session.provider_start_ledger = saved.provider_start_ledger;
-        self.close_revision_author_node_after_turn_failure().await;
+        self.close_revision_author_node_after_turn_failure(&saved_failure_class)
+            .await;
         Ok(true)
     }
 
     /// 失败收口：活动节点是修订 author 载体（AuthorRun）时置 Failed。门节点
     /// 载体（历史直驱形态）保持 Active——门仍开着，收口归 enter_human_confirm
     /// 与终态 compile。
-    async fn close_revision_author_node_after_turn_failure(&mut self) {
-        use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
+    async fn close_revision_author_node_after_turn_failure(
+        &mut self,
+        failure_class: &crate::product::models::HumanGateTurnFailureClass,
+    ) {
+        use crate::web::workspace_ws_types::TimelineNodeType;
         if self.active_node_type() == Some(TimelineNodeType::AuthorRun)
             && let Some(node_id) = self.active_node_id.clone()
         {
-            self.update_timeline_node(
-                &node_id,
-                TimelineNodeStatus::Failed,
-                Some("人工修订失败，本轮反馈未采纳".to_string()),
-            )
-            .await;
+            // REQ-CG-10：Cancelled ⇒ Aborted（含「选择未生效」），其余 ⇒ 既有 Failed。
+            let (status, summary) = cancel::revision_node_closure(failure_class);
+            self.update_timeline_node(&node_id, status, Some(summary.to_string()))
+                .await;
         }
     }
 }

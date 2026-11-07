@@ -1,10 +1,21 @@
 #[tokio::test]
 async fn handle_abort_marks_attempt_aborted_and_closes_active_timeline_node() {
     let root = tempdir().expect("root");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(create_input())
-        .expect("create attempt");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）：admission / shared worktree 路由的唯一凭证是
+    // 「LC 权威 + 冻结 target_snapshot」。无归属的 attempt 在
+    // `route_issue_shared_worktree` 上无条件 fail-closed
+    // （`target_snapshot_identity_drifted`），测不到「中止即关闭活动时间线节点」本体。
+    let authority = crate::context_builder::seed_logical_authority(
+        &paths,
+        "project_0001",
+        "issue_0001",
+        root.path(),
+    );
+    let store = CodingAttemptStore::new(paths.clone());
+    let mut input = create_input();
+    input.target_snapshot = Some(authority.snapshot(&paths));
+    let attempt = store.create_attempt(input).expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .update_attempt_stage(

@@ -18,6 +18,7 @@ pub mod plan_confirmed_info;
 #[path = "plan_confirmed_info_c1_tests.rs"]
 mod plan_confirmed_info_c1_tests;
 pub mod plan_generation;
+pub mod plan_stop;
 pub mod provider_availability;
 pub mod provider_probe;
 pub mod recent_completion_info;

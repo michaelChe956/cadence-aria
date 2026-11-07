@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use cadence_aria::product::logical_codebase::planning_context_set::PLANNING_MATERIAL_MAX_BYTES;
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 
 const MEMBER_COUNT: usize = 50;
 const BUDGET_QUERY: &str = "budget_boundary_symbol";
@@ -327,7 +328,7 @@ async fn fifty_member_planning_query_returns_all_unique_member_ids_and_aliases()
         .create(cadence_aria::product::issue_store::CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: legacy_logical_codebase_id(PROJECT_ID),
             title: "50 member planning query".to_string(),
             description: None,
             change_id: None,

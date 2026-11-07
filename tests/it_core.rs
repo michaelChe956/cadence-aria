@@ -1,4 +1,6 @@
 //! 集成测试入口：核心域（artifact/spec/plan/design/openspec/cli/runtime 等）。
+#[path = "support/aggregate_index_fixture.rs"]
+mod aggregate_index_fixture;
 #[path = "it_core/approval_gate_handlers.rs"]
 mod approval_gate_handlers;
 #[path = "it_core/artifact_schema_min_fields.rs"]
@@ -33,6 +35,8 @@ mod phase1_profile;
 mod plan_projection;
 #[path = "it_core/policy_override_degrade.rs"]
 mod policy_override_degrade;
+#[path = "it_core/provider_run_runtime_entry.rs"]
+mod provider_run_runtime_entry;
 #[path = "it_core/risk_registry_minimal.rs"]
 mod risk_registry_minimal;
 #[path = "it_core/runtime_prompt_routing.rs"]
@@ -41,6 +45,10 @@ mod runtime_prompt_routing;
 mod runtime_snapshot_schema;
 #[path = "it_core/runtime_units.rs"]
 mod runtime_units;
+#[path = "it_core/single_member_lc_lifecycle.rs"]
+mod single_member_lc_lifecycle;
+#[path = "it_core/single_member_path_guard.rs"]
+mod single_member_path_guard;
 #[path = "it_core/spec_projection.rs"]
 mod spec_projection;
 #[path = "it_core/superseded_artifact_refs.rs"]

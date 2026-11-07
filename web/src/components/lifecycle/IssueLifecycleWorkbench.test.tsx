@@ -504,7 +504,11 @@ describe("IssueLifecycleWorkbench base workflow", () => {
   });
 
   it("opens the work item plan options from the empty work item stage panel via the latest design card", async () => {
-    const fetchMock = lifecycleFetch({ workItemPlans: [] });
+    // ⑤ 之后已确认 design 的弹窗恒为「启用自动化」；人工 prepare 路径只剩未确认 design。
+    const fetchMock = lifecycleFetch({
+      designDraftInitially: true,
+      workItemPlans: [],
+    });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const onOpenWorkspace = vi.fn();

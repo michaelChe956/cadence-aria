@@ -112,10 +112,11 @@ impl LogicalCodebaseGatewayFactory {
         self.build_scoped(project_id, lc_id, true)
     }
 
-    /// v1.3:按 issue 所属代码库构造 gateway——lc_id Some 时 policy/
-    /// capability/manifest 全部解析到 `logical-codebases/{lc_id}/` 子树
-    /// (C4 Task 2 legacy 别名统一走 `for_lc`)。Task 3b:`ensure_stores`
-    /// 区分只读组装与 material prep(写 ensure_bootstrap)。
+    /// v1.3:按 issue 所属代码库构造 gateway——lc_id Some 时 policy/manifest
+    /// 解析到 `logical-codebases/{lc_id}/` 子树 (C4 Task 2 legacy 别名统一走
+    /// `for_lc`)；**capability 记录是机器级**（REQ-PCR-07：一次核验整机
+    /// 可用 ⇒ 不随 LC/项目分叉）。
+    /// Task 3b:`ensure_stores` 区分只读组装与 material prep(写 ensure_bootstrap)。
     fn build_scoped(
         &self,
         project_id: &str,
@@ -141,12 +142,13 @@ impl LogicalCodebaseGatewayFactory {
             policies.ensure_bootstrap(&manifest)?;
         }
 
-        let capabilities = match lc_id.as_deref() {
-            Some(lc_id) => ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id),
-            None => ProviderCapabilityStore::new(self.paths.clone()),
-        };
+        // capability 记录的唯一作用域 = **机器级**（REQ-PCR-07）：
+        // 自举占位行整机一份，不随项目/LC 分叉。
+        let capabilities = ProviderCapabilityStore::new(self.paths.clone());
         if ensure_stores {
-            capabilities.ensure_bootstrap(project_id)?;
+            // material prep(#8/recipe):允许写 recipe 材料;readonly 组装
+            // 绝不在读取路径上物化自举桩。
+            capabilities.ensure_bootstrap()?;
         }
 
         // 权威根 = manifest.provider_context_root(聚合根 cwd)。若为相对路径,
@@ -174,19 +176,18 @@ impl LogicalCodebaseGatewayFactory {
 
         Ok(LogicalCodebaseProviderGateway::with_audit(
             policies,
-            // Task 1c-factory(carry③):LC 作用域用 `for_lc` 构造 capability
-            // source——同时建立 root-recipe 凭据的 durable Running 重核验
-            // 通道(capability store 与 operation store 同一 lc 子树);无
-            // LC 作用域(legacy)保持 `with_store` 原语义。
+            // Task 1c-factory(carry③):LC 作用域装配 **机器级 capability 记录 +
+            // 按 LC 的 root-recipe 凭据重核验通道**（capability 作用域是机器级；
+            // root-recipe 通道重验的是本 LC 的聚合初始化 operation，仍按
+            // LC）；无 LC 作用域(legacy)保持 `with_store` 原语义（无通道）。
             Arc::new(match lc_id.as_deref() {
-                Some(lc_id) => StoreBackedProviderCapabilitySource::for_lc(
-                    self.paths.clone(),
-                    project_id.to_string(),
-                    lc_id.to_string(),
-                ),
-                None => {
-                    StoreBackedProviderCapabilitySource::with_store(capabilities, project_id.to_string())
+                Some(lc_id) => {
+                    StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck(
+                        self.paths.clone(),
+                        lc_id.to_string(),
+                    )
                 }
+                None => StoreBackedProviderCapabilitySource::with_store(capabilities),
             }),
             Arc::new(match lc_id.as_deref() {
                 // R9 fix round 1【Important-1】：resolver 同步按 lc_id 作用域解析 checkout
@@ -222,22 +223,20 @@ impl LogicalCodebaseGatewayFactory {
         ))
     }
 
-    /// Task 2d:durable probe writer 注入(owner 门 §0.3)。按 `build_for_lc`
-    /// 同一 LC 作用域解析构造 `ProviderCapabilityProbeService::with_durable_
-    /// writer`,使「已通过三方一致性校验的 evidence 导入 durable
-    /// Confirmed」写入的子树与 gateway 读取的 capability store 完全同源。
+    /// Task 2d:durable probe writer 注入(owner 门 §0.3)。构造
+    /// `ProviderCapabilityProbeService::with_durable_writer`,使「已通过三方
+    /// 一致性校验的 evidence 导入 durable Confirmed」写入的**机器级**
+    /// capability store 与 gateway 读取的 capability store 完全同源
+    /// (REQ-PCR-07)。
     /// 导入通道本身不重新 probe、不 spawn(provider spawn count 恒 0);
     /// Task 3 admission 消费本通道。
+    ///
+    /// **无 project_id / 无 lc_id**：写入目标是机器级唯一作用域 ⇒ 不要求
+    /// 选中项目、不要求存在逻辑代码库。
     pub fn durable_probe_writer_for_lc(
         &self,
-        project_id: &str,
-        lc_id: Option<&str>,
     ) -> Result<ProviderCapabilityProbeService, ProviderGatewayError> {
-        let lc_id = self.resolve_lc_scope(project_id, lc_id)?;
-        let capabilities = match lc_id.as_deref() {
-            Some(lc_id) => ProviderCapabilityStore::for_lc(self.paths.clone(), lc_id),
-            None => ProviderCapabilityStore::new(self.paths.clone()),
-        };
+        let capabilities = ProviderCapabilityStore::new(self.paths.clone());
         Ok(ProviderCapabilityProbeService::with_durable_writer(
             capabilities,
         ))
@@ -369,14 +368,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use chrono::Utc;
     use tempfile::tempdir;
 
     use crate::cross_cutting::provider_adapter::ProviderAdapter;
-    use crate::cross_cutting::provider_availability_gate::{
-        ProviderAvailabilityGate, ProviderHealthSource,
-    };
-    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
     use crate::cross_cutting::provider_registry::ProviderRegistry;
     use crate::cross_cutting::streaming_provider::{
         ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
@@ -451,42 +445,6 @@ mod tests {
         Arc::new(registry)
     }
 
-    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
-        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
-
-        impl ProviderHealthSource for AlwaysHealthy {
-            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
-                self.0.clone()
-            }
-
-            fn degraded(&self) -> bool {
-                false
-            }
-        }
-
-        let checked_at = Utc::now();
-        let snapshot = Arc::new(ProviderHealthSnapshot {
-            schema_version: 1,
-            generation: 1,
-            checked_at,
-            providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-                .into_iter()
-                .map(|provider| ProviderHealthEntry {
-                    provider,
-                    command: "stub".to_string(),
-                    available: true,
-                    version: Some("1.0".to_string()),
-                    reason_code: None,
-                    reason: None,
-                    checked_at,
-                })
-                .collect(),
-        });
-        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
-            snapshot,
-        ))))
-    }
-
     fn factory_fixture() -> (
         tempfile::TempDir,
         ProductAppPaths,
@@ -498,7 +456,7 @@ mod tests {
             paths.clone(),
             fake_registry(),
             Arc::new(StubSyncAdapter),
-            always_available_gate(),
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
         ));
         (root, paths, factory)
     }
@@ -513,11 +471,10 @@ mod tests {
     /// 迁移桥退役(4749a1fc)后 `ensure_bootstrap` 写出的能力行恒为 Unknown,
     /// 正向 validate 必须在自举之后显式物化「已探测」Confirmed 行;产品侧
     /// fail-closed 语义不变(需 Unknown 的负向用例不调用本 helper)。
-    fn seed_confirmed_claude(paths: &ProductAppPaths, lc_id: Option<&str>) {
+    fn seed_confirmed_claude(paths: &ProductAppPaths) {
         crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
             paths,
             "project_0001",
-            lc_id,
             &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
         );
     }
@@ -528,7 +485,7 @@ mod tests {
         register_manifest(&paths, "project_0001");
 
         let gateway = factory.build("project_0001").unwrap();
-        seed_confirmed_claude(&paths, None);
+        seed_confirmed_claude(&paths);
 
         let audit = factory.audit();
         assert!(Arc::ptr_eq(&audit, &gateway.audit()));
@@ -561,8 +518,11 @@ mod tests {
         ));
     }
 
+    /// manifest/policy 仍按 LC 作用域；**capability 落项目级全局**
+    /// （owner 2026-11-04 决策 1：一次核验全项目可用 ⇒ LC 子树下不得再有
+    /// capability 记录文件）。
     #[test]
-    fn build_for_lc_scopes_policy_and_capability_to_lc_subtree() {
+    fn build_for_lc_scopes_policy_to_lc_subtree_and_capability_to_project_scope() {
         let (_root, paths, factory) = factory_fixture();
         let lc_id = "lc_second";
 
@@ -573,28 +533,37 @@ mod tests {
             .save_manifest("project_0001", &manifest)
             .expect("save lc manifest");
 
-        // 按 lc_id 构建成功（policy/capability 解析到 lc 子树）。
+        // 按 lc_id 构建成功（policy 解析到 lc 子树，capability 解析到项目级）。
         let gateway = factory
             .build_for_lc("project_0001", Some(lc_id))
             .expect("build lc gateway");
-        seed_confirmed_claude(&paths, Some(lc_id));
+        seed_confirmed_claude(&paths);
 
         // legacy（None）路径无 manifest → PolicyMissing，证明未串扰到 project 级。
         let legacy = factory.build_for_lc("project_0001", None);
         assert!(matches!(
-            legacy,
-            Err(ProviderGatewayError::PolicyMissing(ref id)) if id == "project_0001"
+            &legacy,
+            Err(ProviderGatewayError::PolicyMissing(id)) if id == "project_0001"
         ));
 
-        // policy/capability 落盘在 lc 子树，而非 legacy project 级。
+        // manifest/policy 落盘在 lc 子树，而非 legacy project 级。
         let lc_root = paths.logical_codebases_root("project_0001").join(lc_id);
         assert!(lc_root.join("manifest.json").is_file());
         assert!(lc_root.join("aggregate-policy.json").is_file());
-        assert!(lc_root.join("capabilities.json").is_file());
         let legacy_root = paths.logical_codebase_root("project_0001");
         assert!(!legacy_root.join("manifest.json").exists());
         assert!(!legacy_root.join("aggregate-policy.json").exists());
+
+        // capability 落**机器级**唯一作用域，且项目/LC 子树下**不存在**
+        // capability 记录（唯一作用域：出现即为缺陷）。
+        assert!(
+            paths
+                .provider_capabilities_root()
+                .join("capabilities.json")
+                .is_file()
+        );
         assert!(!legacy_root.join("capabilities.json").exists());
+        assert!(!lc_root.join("capabilities.json").exists());
 
         // gateway 可用：validate 通过并回读 lc 子树 policy revision。
         let aggregate_root = paths.root().join("aggregate");
@@ -611,7 +580,8 @@ mod tests {
     }
 
     /// Task 1c-factory(lcg_t01,carry③):`build_for_lc` 的 LC 作用域组装注入
-    /// root-recipe 凭据重核验通道(`StoreBackedProviderCapabilitySource::for_lc`)
+    /// root-recipe 凭据重核验通道(
+    /// `StoreBackedProviderCapabilitySource::global_capability_with_lc_recipe_recheck`)
     /// ——root recipe 相位的 gateway 校验不再 fail-closed 于
     /// `root_recipe_credential_recheck_unavailable`,而是真实消费 durable 凭据
     /// 重核验(无 Running operation → denied)。
@@ -676,11 +646,11 @@ mod tests {
         let factory = LogicalCodebaseGatewayFactory::with_lc_sync_bridge(
             paths.clone(),
             fake_registry(),
-            always_available_gate(),
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
         );
         register_manifest(&paths, "project_0001");
         let gateway = factory.build("project_0001").expect("build gateway");
-        seed_confirmed_claude(&paths, None);
+        seed_confirmed_claude(&paths);
 
         let aggregate_root = paths.root().join("aggregate");
         std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");
@@ -737,7 +707,7 @@ mod tests {
             ProductAppPaths::new(root.path().join(".aria")),
             fake_registry(),
             Arc::new(StubSyncAdapter),
-            always_available_gate(),
+            crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
         ));
         let state = state.with_gateway_factory(injected.clone());
         assert!(Arc::ptr_eq(
@@ -924,7 +894,7 @@ mod tests {
                 paths.clone(),
                 fake_registry(),
                 Arc::new(StubSyncAdapter),
-                always_available_gate(),
+                crate::web::handlers::automation_enrollment_test_support::always_available_gate(),
             );
             let home_before = t7_factory_snapshot_tree(home.path());
             let aria_before = t7_factory_snapshot_tree(&workspace.path().join(".aria"));

@@ -106,18 +106,23 @@ async fn reviewer_material_collected_only_after_baseline_persisted() {
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = BaselineProbeProvider {
+    let provider = std::sync::Arc::new(BaselineProbeProvider {
         starts: AtomicUsize::new(0),
         flags: Mutex::new(Vec::new()),
         window_root: root.path().join(".aria").join("reviewer-windows"),
         snapshot_root: root.path().join(".aria").join("reviewer-snapshots"),
         output: APPROVE_OUTPUT.to_string(),
-    };
+    });
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect("review completes");
 
@@ -139,12 +144,18 @@ async fn reviewer_transport_failure_rotates_clean_window_within_budget() {
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TransportFailuresThenSuccessProvider::new(1, APPROVE_OUTPUT);
+    let provider =
+        std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(1, APPROVE_OUTPUT));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect("retry within budget succeeds");
 
@@ -195,18 +206,23 @@ async fn reviewer_violation_blocks_retry_and_keeps_manual_gate_lock() {
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     // 首轮 provider:违规直写 Git 域后 transport 失败;若错误地发生重试,
     // 第二轮输出 approve(以 starts 计数证伪)。
-    let provider = ViolationThenTransportFailProvider {
+    let provider = std::sync::Arc::new(ViolationThenTransportFailProvider {
         starts: AtomicUsize::new(0),
         git_config: worktree.join(".git/config"),
         output_after_violation: APPROVE_OUTPUT.to_string(),
-    };
+    });
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("violation must abort retry rotation");
 
@@ -334,17 +350,22 @@ async fn invalidated_report_content_approve_never_drives_progression() {
     let worktree = attempt.worktree_path.clone().expect("worktree");
     init_test_git_repo(&worktree);
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     // provider:违规直写 Git 域,随后输出 approve 内容——报告即使内容
     // approve,采信也必须是 Invalidated 并落人工门。
-    let provider = ViolatingApproveProvider {
+    let provider = std::sync::Arc::new(ViolatingApproveProvider {
         git_config: worktree.join(".git/config"),
         output: APPROVE_OUTPUT.to_string(),
-    };
+    });
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect("review completes with violation");
 
@@ -444,14 +465,19 @@ async fn reviewer_history_session_never_resumes_but_shares_window_lifecycle() {
         .write_coding_attempt_for_test(&resumed)
         .expect("persist resumed attempt");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ResumeCapturingProvider {
+    let provider = std::sync::Arc::new(ResumeCapturingProvider {
         inner: TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT),
-    };
+    });
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&resumed, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&resumed, provider.as_ref(), &mut command_rx)
         .await
         .expect("resume review completes");
 
@@ -501,12 +527,18 @@ async fn code_review_post_run_persist_failure_releases_window_no_deadlock() {
     fs::create_dir_all(&raw_root).expect("raw root");
     fs::write(raw_root.join("code_review"), "collision").expect("stage dir collision");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT);
+    let provider =
+        std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("persist failure must surface");
     assert!(
@@ -595,12 +627,18 @@ async fn internal_pr_review_persist_failure_releases_window_no_deadlock() {
     fs::create_dir_all(&raw_root).expect("raw root");
     fs::write(raw_root.join("internal_pr_review"), "collision").expect("stage dir collision");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT);
+    let provider =
+        std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_internal_pr_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_internal_pr_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("persist failure must surface");
     assert!(

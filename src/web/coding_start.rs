@@ -815,38 +815,17 @@ fn verify_current_enrollment(
         Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
             repository_id,
         }) => {
-            // 单仓 enrollment：attempt 携带任何 LC target snapshot 即跨载体
-            // 漂移拒绝；无 snapshot 时要求当前 authority 载体仍解析为同一
-            // 物理仓（错仓/改属 LC 即 fail-closed，等待项提示重新绑定）。
-            if let Some(snapshot) = &attempt.target_snapshot {
-                return Err(StartCodingError::new(
-                    "coding_start_enrollment_mismatch",
-                    format!(
-                        "attempt target snapshot points at logical repository {:?} but the \
-                         enrollment authorizes the single physical repository {repository_id}",
-                        snapshot.logical_repository_id
-                    ),
-                ));
-            }
-            let carrier_matches = match current_carrier {
-                crate::web::handlers::AutomationCarrierResolution::SingleRepository {
-                    target:
-                        crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
-                            repository_id: current_repository,
-                        },
-                } => current_repository == repository_id,
-                _ => false,
-            };
-            if !carrier_matches {
-                return Err(StartCodingError::new(
-                    "coding_start_enrollment_mismatch",
-                    format!(
-                        "single-repository enrollment carrier drift: enrollment authorizes \
-                         repository {repository_id} but the issue's current authority resolves \
-                         elsewhere; re-bind the automation target"
-                    ),
-                ));
-            }
+            // REQ-ROUTE-01：单仓载体已删除——老单仓 enrollment 的自动
+            // StartCoding 一律载体漂移 fail-closed（等待项语义，提示重新
+            // 绑定；不静默跳过、不改绑 LC）。
+            return Err(StartCodingError::new(
+                "coding_start_enrollment_mismatch",
+                format!(
+                    "single-repository enrollment carrier drift: enrollment authorizes \
+                     repository {repository_id} but single-repository carriers no longer \
+                     resolve; re-bind the automation target"
+                ),
+            ));
         }
         Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
             logical_repository_id,
@@ -903,7 +882,6 @@ fn verify_current_enrollment(
                     .manifest
                     .as_ref()
                     .map(|manifest| manifest.logical_codebase_id.to_string()),
-                _ => None,
             };
             if carrier_lc.as_deref() != Some(logical_codebase_id.as_str()) {
                 return Err(StartCodingError::new(
@@ -1243,7 +1221,7 @@ fn resolve_set_enrollment_member(
             crate::product::repository_store::RepositoryStore::new(paths.clone())
                 .resolve_logical_repository_for_issue_codebase(
                     project_id,
-                    scoped_lc.as_deref(),
+                    Some(scoped_lc.as_str()),
                     logical_repository_id,
                 )
                 .map_err(|_| uuid_error)

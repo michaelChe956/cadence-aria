@@ -243,7 +243,9 @@ fn logical_routing_fixture() -> (TempDir, CodingAttemptStore, Vec<String>) {
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: project.id.clone(),
             repo_id: None,
-            logical_codebase_id: None,
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                &project.id,
+            ),
             title: "group split target issue".to_string(),
             description: None,
             change_id: None,

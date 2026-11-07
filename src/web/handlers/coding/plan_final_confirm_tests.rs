@@ -516,10 +516,14 @@ async fn plan_final_confirm_post_confirms_chinese_evidence_commit_end_to_end() {
     }
 
     let result = post_final_confirm(&fixture.state).await.unwrap();
-    assert_eq!(result.outcome, "all_confirmed");
+    assert_eq!(
+        result.outcome, "all_confirmed",
+        "per-target confirmation results: {:?}",
+        result.results
+    );
     assert_eq!(result.results.len(), 4);
     for item in &result.results {
-        assert_eq!(item.status, "confirmed");
+        assert_eq!(item.status, "confirmed", "failed target: {item:?}");
         assert!(item.error_code.is_none());
     }
 

@@ -2,6 +2,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AddCodebaseDialog } from "./AddCodebaseDialog";
+import addCodebaseDialogSource from "./AddCodebaseDialog.tsx?raw";
+import layoutTreeSource from "./LogicalCodebaseLayoutTree.tsx?raw";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -10,32 +12,43 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe("AddCodebaseDialog", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("默认单仓库模式：选择单仓库后走既有添加对话框流程", async () => {
+  it("无单仓入口：查不到「单仓库」radio，也查不到「继续添加单仓库」按钮", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const onChooseSingle = vi.fn();
-    const onClose = vi.fn();
-    const user = userEvent.setup();
 
     render(
       <AddCodebaseDialog
         projectId="project_0001"
-        onChooseSingle={onChooseSingle}
         onCreatedLogical={vi.fn()}
-        onClose={onClose}
+        onClose={vi.fn()}
       />,
     );
 
+    expect(screen.queryByRole("radio", { name: /单仓库/ })).toBeNull();
     expect(
-      screen.getByRole("radio", { name: /单仓库/ }),
-    ).toBeChecked();
-    await user.click(screen.getByRole("button", { name: "继续添加单仓库" }));
-
-    expect(onChooseSingle).toHaveBeenCalledTimes(1);
+      screen.queryByRole("button", { name: "继续添加单仓库" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/单仓库/)).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("多仓库模式：创建成功后同弹窗进入登记，复用聚合根自动发现", async () => {
+  it("默认直接渲染多仓表单（聚合根 + 名称），不需先选模式", async () => {
+    render(
+      <AddCodebaseDialog
+        projectId="project_0001"
+        onCreatedLogical={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("聚合根目录")).toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "创建逻辑代码库" }),
+    ).toBeInTheDocument();
+  });
+
+  it("创建成功后同弹窗进入登记，复用聚合根自动发现（建 LC 入口不新造页面）", async () => {
     const calls: Array<{ input: string; init?: RequestInit }> = [];
     vi.stubGlobal(
       "fetch",
@@ -47,24 +60,29 @@ describe("AddCodebaseDialog", () => {
             preflight_id: "preflight_0001",
             created_at: "2026-08-19T00:00:00Z",
             items: [
-              { path: "/repos/monorepo/api", class: "eligible", reason: null },
+              {
+                path: "/repos/monorepo/api",
+                class: "eligible",
+                reason: null,
+              },
             ],
           });
         }
-        if (url.endsWith("/registrations")) {
+        if (
+          url === "/api/projects/project_0001/logical-codebases" &&
+          init?.method === "POST"
+        ) {
           return jsonResponse({
-            batch_id: "batch_0001",
-            status: "completed",
-            items: [
-              { path: "/repos/monorepo/api", status: "completed", failure_reason: null },
-            ],
+            id: "lc_0001",
+            name: "monorepo",
+            aggregate_root: "/repos/monorepo",
+            created_at: "2026-08-19T00:00:00Z",
           });
         }
         return jsonResponse({
-          id: "lc_0001",
-          name: "monorepo",
-          aggregate_root: "/repos/monorepo",
-          created_at: "2026-08-19T00:00:00Z",
+          batch_id: "batch_0001",
+          status: "completed",
+          items: [],
         });
       }),
     );
@@ -75,14 +93,12 @@ describe("AddCodebaseDialog", () => {
     render(
       <AddCodebaseDialog
         projectId="project_0001"
-        onChooseSingle={vi.fn()}
         onCreatedLogical={onCreatedLogical}
         onRegistrationCompleted={onRegistrationCompleted}
         onClose={vi.fn()}
       />,
     );
 
-    await user.click(screen.getByRole("radio", { name: /多仓库逻辑代码库/ }));
     await user.type(screen.getByLabelText("聚合根目录"), "/repos/monorepo");
     expect(screen.getByLabelText("名称")).toHaveValue("monorepo");
     await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
@@ -125,6 +141,43 @@ describe("AddCodebaseDialog", () => {
     );
   });
 
+  it("创建前给出目录布局说明（复用同一处布局文案源，不另抄一份）", () => {
+    render(
+      <AddCodebaseDialog
+        projectId="project_0001"
+        onCreatedLogical={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const tree = screen.getByTestId("lc-layout-tree");
+    // LC 根是普通空目录（不是 git 仓）；成员仓是直接子目录。
+    expect(tree).toHaveTextContent("my-lc-root/");
+    expect(tree).toHaveTextContent("不是 git 仓");
+    expect(
+      screen.getByTestId("lc-layout-tree-member-backend"),
+    ).toHaveTextContent("直接子目录");
+    expect(
+      screen.getByTestId("lc-layout-tree-member-frontend"),
+    ).toHaveTextContent("直接子目录");
+    // 可索引范围说明（只在 .worktrees/ 下的代码不可被索引）。
+    expect(screen.getByTestId("lc-layout-tree-note")).toHaveTextContent(
+      "只在 .worktrees/ 下的代码不可被索引",
+    );
+
+    // 文案同源：弹窗源码里不含第二份布局文案，只引用同一组件。
+    expect(addCodebaseDialogSource).toContain("LogicalCodebaseLayoutTree");
+    for (const marker of [
+      "my-lc-root/",
+      "逻辑代码库根",
+      "直接子目录",
+      "不可被索引",
+    ]) {
+      expect(addCodebaseDialogSource).not.toContain(marker);
+      expect(layoutTreeSource).toContain(marker);
+    }
+  });
+
   it("name 手工输入后不被聚合根目录覆盖；创建失败展示错误", async () => {
     let fail = true;
     vi.stubGlobal(
@@ -144,13 +197,11 @@ describe("AddCodebaseDialog", () => {
     render(
       <AddCodebaseDialog
         projectId="project_0001"
-        onChooseSingle={vi.fn()}
         onCreatedLogical={vi.fn()}
         onClose={vi.fn()}
       />,
     );
 
-    await user.click(screen.getByRole("radio", { name: /多仓库逻辑代码库/ }));
     await user.type(screen.getByLabelText("聚合根目录"), "/repos/monorepo");
     await user.clear(screen.getByLabelText("名称"));
     await user.type(screen.getByLabelText("名称"), "custom-name");

@@ -47,3 +47,179 @@ jobs:
         run: cargo check --locked
       - name: Run tests
         run: cargo test --locked
+
+  # 2 MiB 栈回归门禁（owner 2026-11-06 裁决：仓级 32 MiB force 保留，另加本专项 job）。
+  #
+  # 为什么必须独立：仓级 `.cargo/config.toml` 的
+  # `RUST_MIN_STACK = { value = "33554432", force = true }` 让**所有测试线程**
+  # 都拿 32 MiB 栈 ⇒ 栈类缺陷在常规 CI 里永远测不出来 ⇒ 「provider run 爆栈
+  # 打死整个服务」这类回归会再次悄悄进来。
+  #
+  # 为什么不需要覆盖环境变量：C 层门禁**自带显式 2 MiB runtime**
+  # （`tests/it_core/workspace_ws_integration/provider_run_small_stack.rs`
+  # 的 `run_ws_child_scenario_with_stack` → `.worker_threads(1)
+  # .thread_stack_size(stack_bytes)`）⇒ 显式栈值覆盖环境变量 ⇒ 仓级
+  # 32 MiB force 对这批用例无影响 ⇒ 本 job 不改 RUST_MIN_STACK。
+  stack-2mib-gate:
+    name: 2 MiB stack regression gate (C-layer real WS)
+    runs-on: ubuntu-latest
+    # 三条门禁各带 240~300s 墙钟上限（用例内隔离器自带），整 job 留足余量。
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      # 前端必须先构建：aria 通过 rust-embed 在编译期嵌入 web/dist，
+      # build.rs 在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
+      - name: Build frontend
+        run: pnpm -C web install --frozen-lockfile && pnpm -C web build
+      # C 层真实 WS 夹具走生产 aggregate-index rebuild 端点，该端点 shell out
+      # 到真实 `codegraph` CLI（src/web/handlers/aggregate_initialization/
+      # production_dependencies.inc.rs 装配 CodeGraphCli，executable="codegraph"）
+      # ⇒ runner 上没有该工具时夹具直接失败。钉版本安装（与本地、rust job 一致）。
+      - name: Install codegraph (C-layer real WS fixtures need the real CLI)
+        run: npm install -g @colbymchenry/codegraph@1.6.2
+      # 门禁本体：真实 WS 深链走到 ReviewOnly 送审轮，在显式 2 MiB worker 上
+      # 必须跑完并留下四条件证据。栈回归 ⇒ 本步红。
+      - name: "2 MiB stack gate: real WS review round"
+        run: flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_review_round_gate -- --nocapture
+      # 2 MiB 下的真实 WS 场景矩阵（story_author / plan_relay / sc_manual_gate）。
+      - name: "2 MiB stack gate: real WS scenario matrix"
+        run: flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_2mib_real_ws_matrix -- --nocapture
+      # 对照面（8 MiB worker，同一送审轮场景）：证明上面 2 MiB 的红确实落在
+      # 栈深上，而不是「场景根本没走到送审轮」的假阳性。门禁判据永远是 2 MiB 那条。
+      - name: "8 MiB control: real WS review round (proves the 2 MiB red is stack-depth-caused)"
+        run: flock /tmp/aria-cargo.lock cargo test --locked --test it_core provider_run_8mib_ws_review_round_control_gate -- --nocapture
+
+  # release profile 门禁（A 体积 / B 小栈 / C 真实 WS）。
+  #
+  # 为什么必须有：release 与 debug 的 codegen 完全不同（release 是
+  # `opt-level="s"` + `lto=true` + `codegen-units=1`）⇒ 同一份源码在两个
+  # profile 下的 poll 帧预留**不是同一个数**，debug 的数字不能冒充 release。
+  # 盘点实测（`cadence/reports/2026-11-06_盘点_全仓大future清单_v1.0.md`）：
+  # debug 口径 >16,384 B 的有 79 行，release 实测 >16,384 B 的只有 5 行；
+  # 且 `spawn_engine_event_forward_task` 在 debug 仅 4,096 B、release 73,728 B
+  # ⇒ **只跑 debug 的门禁看不到 release-only 的越界** ⇒ 双 profile 是必需的。
+  #
+  # 边界（owner 2026-11-06 裁决）：
+  # - **不改** `.cargo/config.toml` 的 `RUST_MIN_STACK = { value = "33554432", force = true }`；
+  # - **不改**现有两个 job（`rust` / `stack-2mib-gate`）的任何步骤；
+  # - 无 `-j 1` / `--ignored` / skip / allow / `continue-on-error` / 无条件 true
+  #   ⇒ 门禁红了就是红了（release-only 越界必须能把 CI 打红）。
+  release-profile-gates:
+    name: Release profile gates (A volume / B 2 MiB worker / C real WS)
+    runs-on: ubuntu-latest
+    # release 构建慢（LTO + codegen-units=1，每个测试二进制链接都是重活），
+    # 且 C 层真实 WS 场景自带 240~300s 墙钟上限 ⇒ 整 job 留足余量（≥60 min）。
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      # 前端必须先构建：aria 通过 rust-embed 在编译期嵌入 web/dist，
+      # build.rs 在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
+      - name: Build frontend
+        run: pnpm -C web install --frozen-lockfile && pnpm -C web build
+      # C 层真实 WS 夹具走生产 aggregate-index rebuild 端点，该端点 shell out
+      # 到真实 `codegraph` CLI（executable="codegraph"）⇒ runner 上没有该工具
+      # 时夹具直接失败。钉版本安装（与本地、另两个 job 一致）。
+      - name: Install codegraph (C-layer real WS fixtures need the real CLI)
+        run: npm install -g @colbymchenry/codegraph@1.6.2
+      # release 产物先编出来（release profile 的体积数字必须来自 release 二进制）。
+      - name: "Build release artifacts"
+        run: flock /tmp/aria-cargo.lock cargo build --release --locked
+      # A 层（体积）：poll 帧预留逐对象实测（22 个受门禁对象）。
+      # ★`--nocapture` 是硬要求：门禁逐对象用 println! 打印实测字节，不加
+      #   `--nocapture` 会被 libtest 吞掉 ⇒ release 的体积数字无处可查。
+      # ★本步同时把逐对象实测字节写进 job summary：**门禁红的时候恰恰最需要
+      #   留下数字做归因** ⇒ 总结写在「cargo 跑完之后、退出码回传之前」，
+      #   无论 cargo 红绿都会写；**本步退出码 = cargo 的退出码**，
+      #   没有任何条件豁免 ⇒ 门禁红了就是红了。
+      - name: "A layer: release poll frame budget (per-object measured bytes)"
+        shell: bash
+        run: |
+          # 显式关掉 errexit（GitHub 的 `shell: bash` 默认带 -e）：本步要自己
+          # 回传 cargo 的退出码，不能在 cargo 失败时提前退出而丢掉总结。
+          set +e
+          set -uo pipefail
+          dir=/tmp/aria-release-evidence
+          mkdir -p "$dir"
+          log="$dir/poll-frame-budget.log"
+          tc="$dir/toolchain.txt"
+          : > "$log"
+          rustc -vV > "$tc"
+          flock /tmp/aria-cargo.lock cargo test --release --locked --lib poll_frame_budget -- --nocapture 2>&1 | tee "$log"
+          cargo_status=${PIPESTATUS[0]}
+          {
+            echo '## Release profile —— poll 帧预留逐对象实测字节'
+            echo
+            echo '- profile: `release`'
+            echo "- target: \`$(grep '^host:' "$tc" 2>/dev/null | cut -d' ' -f2-)\`"
+            echo "- rustc: \`$(grep '^release:' "$tc" 2>/dev/null | cut -d' ' -f2-)\`"
+            echo '- 命令: `flock /tmp/aria-cargo.lock cargo test --release --locked --lib poll_frame_budget -- --nocapture`'
+            echo '- 用途: 解除交付说明 U1/U2/U-b（release 档帧值此前未实测）'
+            echo "- cargo 退出码: \`$cargo_status\`"
+            echo
+            echo '```text'
+            if [ -f "$log" ] && grep -F '[poll-frame-budget]' "$log"; then
+              :
+            else
+              echo '(日志内无 [poll-frame-budget] 行：门禁在量测阶段即失败，详见同 job 日志)'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo '--- release poll frame budget (逐对象实测字节) ---'
+          if [ -f "$log" ] && grep -F '[poll-frame-budget]' "$log"; then
+            :
+          else
+            echo '(日志内无 [poll-frame-budget] 行)'
+          fi
+          exit "$cargo_status"
+      # B 层（小栈）：显式 2 MiB worker runtime（`.worker_threads(1)`
+      # `.thread_stack_size(2*1024*1024)`）——显式栈值覆盖 RUST_MIN_STACK，
+      # 与仓级 32 MiB force 无关。两条：worker 矩阵 + 三守卫/新旧 run 隔离。
+      - name: "B layer: release explicit 2 MiB worker matrix"
+        run: flock /tmp/aria-cargo.lock cargo test --release --locked --lib provider_run_2mib_worker_matrix -- --nocapture
+      - name: "B layer: release explicit 2 MiB three-guards / new-vs-old run isolation"
+        run: flock /tmp/aria-cargo.lock cargo test --release --locked --lib real_run_guards_keep_depth_lease_and_new_token -- --nocapture
+      # C 层（真实 WS 送审轮）：显式 2 MiB worker 上跑真实 WS 深链到 ReviewOnly
+      # 送审轮 ⇒ 栈回归必红。判据永远是 2 MiB 那条（matrix 是同口径的场景矩阵）。
+      - name: "C layer: release real WS review round on explicit 2 MiB worker"
+        run: flock /tmp/aria-cargo.lock cargo test --release --locked --test it_core provider_run_2mib_real_ws_review_round_gate -- --nocapture
+      - name: "C layer: release real WS scenario matrix on explicit 2 MiB worker"
+        run: flock /tmp/aria-cargo.lock cargo test --release --locked --test it_core provider_run_2mib_real_ws_matrix -- --nocapture
+      # release 的体积数字必须留在 CI 里可追溯（job summary 由上面的 A 层步骤
+      # 自己写；此处再留一份 artifact），用途是解除交付说明 U1/U2/U-b
+      #（「release 帧值未实测」）。
+      # ★本步只做证据上传，**不参与门禁判定**；`if: always()` 的唯一作用是
+      #   「门禁红的时候也把数字留下来做归因」——门禁步骤本身没有任何条件豁免，
+      #   也没有 continue-on-error / skip / allow / 无条件 true。
+      - name: Upload release volume evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-poll-frame-budget-evidence
+          path: /tmp/aria-release-evidence
+          if-no-files-found: warn

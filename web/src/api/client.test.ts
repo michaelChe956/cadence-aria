@@ -561,6 +561,33 @@ describe("api client", () => {
     ]);
   });
 
+  it("project delete carries explicit confirmation intent only when confirmed", async () => {
+    // 2026-11-05 真机事故回归：项目删除对齐级联删除 D2.3 确认口径——默认
+    // URL 无 query（后端 409 拒绝）；仅确认弹窗同意后显式 confirmed=true。
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        calls.push(String(input));
+        return new Response(JSON.stringify({ status: "deleted" }), {
+          status: 200,
+        });
+      }),
+    );
+
+    await deleteProject("project_0001");
+    await deleteProject("project_0001", {});
+    await deleteProject("project_0001", { confirmed: false });
+    await deleteProject("project_0001", { confirmed: true });
+
+    expect(calls).toEqual([
+      "/api/projects/project_0001",
+      "/api/projects/project_0001",
+      "/api/projects/project_0001",
+      "/api/projects/project_0001?confirmed=true",
+    ]);
+  });
+
   it("cascade_d2_3: delete errors surface ApiRequestError code without automatic retry", async () => {
     // ApiRequestError code/details 为权威；普通 4xx/5xx 不自动重试（二次删除
     // 只能来自用户确认，不来自客户端自动循环）。

@@ -53,13 +53,46 @@ async fn invalid_query_returns_422_and_uninitialized_index_returns_503() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["code"], "evidence_invalid_query");
 
-    // 503：聚合根未建 codegraph 索引 → 真实 `codegraph query` 非零退出 → QueryFailed。
+    // 503：聚合索引未建立（durable manifest 无 active 索引、无索引记录、
+    // 聚合根未建 CLI 库）→ `load_or_pin_index` fail-closed 为
+    // evidence_index_unavailable → QueryFailed。前提事实：codegraph 1.6.2
+    // （^1.6 支持区间内最新发布版）对未建索引根的 `query --json` 实测
+    // exit 0 + `[]`，「未建索引 ⇒ CLI 非零退出 ⇒ 503」不可由退出码达成；
+    // 产品对「未建索引」的判定在 durable 层，故经该层触发同一 503 契约。
     let fx_no_index = seed_evidence_fixture_with_options(EvidenceSourceSeed::Standard, false);
+    deactivate_aggregate_index(&fx_no_index);
     let app_no_index = fx_no_index.app();
     let (status, body) = evidence_query(app_no_index, &fx_no_index.token, "coder", "cross_repo_symbol").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "evidence_query_failed");
-    assert_eq!(body["details"]["reason_code"], "codegraph_query_failed");
+    assert_eq!(body["details"]["reason_code"], "evidence_index_unavailable");
+
+    // 503（库缺失方向）：durable 索引在册（active=Some、record 在）但聚合根
+    // `.codegraph` 库目录缺失 → mediator ④b 库目录守卫 fail-closed 为
+    // evidence_index_unavailable。codegraph 1.6.2 对该形态 `query --json`
+    // 恒 exit 0 + `[]`（实测），不守卫会误报 200 空结果（读作「没有证据」）。
+    let fx_lib_missing = seed_evidence_fixture_with_options(EvidenceSourceSeed::Standard, false);
+    let app_lib_missing = fx_lib_missing.app();
+    let (status, body) = evidence_query(app_lib_missing, &fx_lib_missing.token, "coder", "cross_repo_symbol").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "evidence_query_failed");
+    assert_eq!(body["details"]["reason_code"], "evidence_index_unavailable");
+}
+
+// ---- ⑩b 库在册而查询无命中：合法空结果仍 200（库目录守卫不得误伤） ----
+#[tokio::test]
+async fn indexed_library_present_but_no_hits_returns_200_empty() {
+    // 环境门：依赖真实 codegraph（标准 fixture 真实建索引）。
+    if skip_without_codegraph("indexed_library_present_but_no_hits_returns_200_empty") {
+        return;
+    }
+    let fx = seed_evidence_fixture();
+    let app = fx.app();
+    let (status, body) = evidence_query(app, &fx.token, "coder", "zzz_no_such_symbol_qq").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["text"], json!(""));
+    assert_eq!(body["index_stale"], json!(false));
+    assert_eq!(body["truncated"], json!(false));
 }
 
 // ---- ⑪ issue 级 worktree 复用：令牌重写（旧令牌 401、新令牌 200） ----

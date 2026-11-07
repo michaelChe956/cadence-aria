@@ -151,7 +151,8 @@ pub(crate) fn transition_to_terminal(
 impl CodingAttemptStore {
     /// 在 attempt 级文件锁内重新校验路由、快照身份和 policy，再生成持久化 ticket。
     ///
-    /// `Legacy + None` 保留原来的单仓路径；任何 logical 状态中的缺失或漂移均 fail-closed。
+    /// 无归属（`FailClosed`）与任何 logical 状态的缺失/漂移一律 fail-closed；
+    /// 单仓 `Legacy` 路径已随变体删除，不再以 legacy digest 放行。
     pub(crate) fn admit_attempt_for_execution(
         &self,
         attempt_id: &str,
@@ -568,15 +569,13 @@ impl CodingAttemptStore {
             )));
         }
         // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy
-        // 布局冲突 fail-closed）；lc 子树与 routing 判定同源。无归属且无 legacy
-        // 别名 record 的旧数据回退 Legacy 兼容分支（classify 单元语义不变）。
+        // 布局冲突 fail-closed）；lc 子树与 routing 判定同源。无 LC 归属的旧数据
+        // 一律 `unbound_issue()`（FailClosed/TargetMissing），不再回退单仓兼容分支。
         let authority =
             crate::product::logical_codebase::RepositoryAuthorityResolver::new(self.paths.clone())
                 .resolve_for_issue(&attempt.project_id, &attempt.issue_id)?;
         let routing = match &authority {
-            None => RepositoryRouting::Legacy {
-                repository_id: String::new(),
-            },
+            None => RepositoryRouting::unbound_issue(),
             Some(resolution) => RepositoryRouting::classify(
                 resolution.manifest.clone(),
                 resolution.selection.clone(),
@@ -588,7 +587,6 @@ impl CodingAttemptStore {
             .as_ref()
             .and_then(|resolution| resolution.target.logical_codebase_id.clone());
         let snapshot_digest = match (routing, attempt.target_snapshot.as_ref()) {
-            (RepositoryRouting::Legacy { .. }, None) => legacy_snapshot_digest(&attempt),
             (RepositoryRouting::Logical { .. }, None) => {
                 return Err(ProductStoreError::Io(
                     TARGET_SNAPSHOT_MISSING_FOR_LOGICAL.to_string(),
@@ -612,8 +610,7 @@ impl CodingAttemptStore {
                 }
                 snapshot_digest(snapshot)
             }
-            (RepositoryRouting::Legacy { .. }, Some(_))
-            | (RepositoryRouting::FailClosed { .. }, _) => {
+            (RepositoryRouting::FailClosed { .. }, _) => {
                 return Err(ProductStoreError::Io(
                     TARGET_SNAPSHOT_IDENTITY_DRIFTED.to_string(),
                 ));
@@ -783,13 +780,6 @@ fn ticket_expired(ticket: &AdmissionTicketRecord) -> Result<bool, ProductStoreEr
 fn snapshot_digest(snapshot: &crate::product::coding_models::AttemptTargetSnapshot) -> String {
     let encoded = serde_json::to_vec(snapshot).expect("AttemptTargetSnapshot must serialize");
     format!("sha256:{:x}", Sha256::digest(encoded))
-}
-
-fn legacy_snapshot_digest(attempt: &CodingExecutionAttempt) -> String {
-    format!(
-        "legacy:{}:{}:{}",
-        attempt.project_id, attempt.issue_id, attempt.id
-    )
 }
 
 /// F-44：终态重开的 durable 前置门。重开后 runner 会在既有阶段链上按

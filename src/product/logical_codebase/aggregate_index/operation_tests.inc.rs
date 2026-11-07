@@ -1081,4 +1081,63 @@ mod tests {
         assert_eq!(assessed.status, AggregateIndexStatus::Degraded);
         assert!(assessed.reason.contains("cli exploded during refresh"));
     }
+
+    #[test]
+    fn activation_writes_back_manifest_active_aggregate_index_pointer() {
+        let fixture = aggregate_index_fixture();
+        // 前置＝生产缺口形态：激活成功前 manifest 指针为 None。
+        let before = fixture
+            .logical
+            .load_manifest("project_0001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.active_aggregate_index_id, None);
+
+        // 首次激活：指针在该世代成为 active 的那一刻回写为它的 id。
+        let first = fixture.persist_active_index();
+        let after_first = fixture
+            .logical
+            .load_manifest("project_0001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_first.active_aggregate_index_id.as_deref(),
+            Some(first.aggregate_index_id.as_str())
+        );
+        // 回写不动成员面：membership_revision / member_ids 原样。
+        assert_eq!(after_first.membership_revision, before.membership_revision);
+        assert_eq!(after_first.member_ids, before.member_ids);
+
+        // rebuild 换代：旧世代被翻 Superseded，指针随最新 active 更新，
+        // 与 durable active 世代一致（patrol 引用巡检口径可解析）。
+        fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
+        for query in EXCLUDED_QUERIES {
+            fixture.cli.query_returns(query, serde_json::json!([]));
+        }
+        let second = fixture.operation().rebuild("project_0001").unwrap();
+        assert_eq!(second.status, AggregateIndexStatus::Active);
+        assert_ne!(second.aggregate_index_id, first.aggregate_index_id);
+        assert_eq!(
+            second.supersedes_aggregate_index_id.as_deref(),
+            Some(first.aggregate_index_id.as_str())
+        );
+        let after_second = fixture
+            .logical
+            .load_manifest("project_0001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_second.active_aggregate_index_id.as_deref(),
+            Some(second.aggregate_index_id.as_str())
+        );
+        assert_eq!(
+            fixture
+                .store
+                .active("project_0001")
+                .unwrap()
+                .unwrap()
+                .aggregate_index_id,
+            second.aggregate_index_id
+        );
+    }
 }

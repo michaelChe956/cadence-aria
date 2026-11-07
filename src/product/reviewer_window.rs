@@ -571,7 +571,7 @@ fn capture_or_adopt_baseline(
     identity: &ReviewWorktreeLockIdentity,
     primary: &QuiescentScope,
     takeover: bool,
-) -> Result<BaselineFacts, BaselineFailure> {
+) -> Result<BaselineFacts, Box<BaselineFailure>> {
     let capture = || CaptureRequest {
         window_id: request.window_id,
         attempt_id: request.attempt_id,
@@ -595,11 +595,11 @@ fn capture_or_adopt_baseline(
                     )),
                     Err(error) => {
                         let detail = error.to_string();
-                        Err(BaselineFailure {
+                        Err(Box::new(BaselineFailure {
                             error: ReviewerWindowError::Snapshot(error),
                             reason: "reviewer_window_manifest_unreadable",
                             detail,
-                        })
+                        }))
                     }
                 };
             }
@@ -635,21 +635,21 @@ fn capture_or_adopt_baseline(
                                 }
                                 Err(error) => {
                                     let detail = error.to_string();
-                                    return Err(BaselineFailure {
+                                    return Err(Box::new(BaselineFailure {
                                         error: ReviewerWindowError::Snapshot(error),
                                         reason: "reviewer_window_snapshot_failed",
                                         detail,
-                                    });
+                                    }));
                                 }
                             }
                         }
                         let detail =
                             "已发布 manifest 归属不符(window/attempt/run/identity)".to_string();
-                        return Err(BaselineFailure {
+                        return Err(Box::new(BaselineFailure {
                             error: ReviewerWindowError::IdentityDrift(detail.clone()),
                             reason: "reviewer_window_manifest_owner_mismatch",
                             detail,
-                        });
+                        }));
                     }
                     BaselineVerdict::Broken(error) => {
                         if takeover && !archived {
@@ -660,32 +660,32 @@ fn capture_or_adopt_baseline(
                                 }
                                 Err(archive_error) => {
                                     let detail = archive_error.to_string();
-                                    return Err(BaselineFailure {
+                                    return Err(Box::new(BaselineFailure {
                                         error: ReviewerWindowError::Snapshot(archive_error),
                                         reason: "reviewer_window_snapshot_failed",
                                         detail,
-                                    });
+                                    }));
                                 }
                             }
                         }
                         // blob 缺失/损坏或 manifest 不可读:停等,不绑定
                         // 不可恢复基线。
                         let detail = error.to_string();
-                        return Err(BaselineFailure {
+                        return Err(Box::new(BaselineFailure {
                             error: ReviewerWindowError::Snapshot(error),
                             reason: "reviewer_window_snapshot_failed",
                             detail,
-                        });
+                        }));
                     }
                 }
             }
             Err(error) => {
                 let detail = error.to_string();
-                return Err(BaselineFailure {
+                return Err(Box::new(BaselineFailure {
                     error: ReviewerWindowError::Snapshot(error),
                     reason: "reviewer_window_snapshot_failed",
                     detail,
-                });
+                }));
             }
         }
     }

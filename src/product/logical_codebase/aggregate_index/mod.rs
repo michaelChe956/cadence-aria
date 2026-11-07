@@ -8,7 +8,7 @@ pub mod types;
 
 pub use codegraph_cli::{
     AggregateIndexError, CODEGRAPH_MAX_VERSION_EXCLUSIVE, CODEGRAPH_MIN_VERSION, CodeGraphCli,
-    CodeGraphCommandResult, CodeGraphStatus,
+    CodeGraphCommandResult, CodeGraphStatus, codegraph_library_dir, codegraph_library_present,
 };
 pub use exclude::{CodeGraphConfig, CodeGraphExcludeGenerator};
 pub use freshness::{

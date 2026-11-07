@@ -1,10 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import type {
-  ProviderHealthResponse,
-  RepositoryInitializationOperationSnapshot,
-} from "../../api/types";
+import type { ProviderHealthResponse } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 import { cascadeDeleteConfirmationFetch } from "./IssueLifecycleWorkbench.test-data";
@@ -21,7 +18,6 @@ import {
   lifecycleFetch,
   projectRecord,
   projectsBody,
-  repositoryRecord,
 } from "./IssueLifecycleWorkbench.test-utils";
 
 vi.mock("../shared/MonacoViewer", () => ({
@@ -67,162 +63,6 @@ function setRepositoryProviderHealth() {
   useProviderAvailabilityStore.setState({ snapshot, loadStatus: "loaded" });
 }
 
-function repositoryOperationSnapshot(
-  status: RepositoryInitializationOperationSnapshot["status"],
-  overrides?: Partial<RepositoryInitializationOperationSnapshot>,
-): RepositoryInitializationOperationSnapshot {
-  return {
-    operation_id: "repository_initialization_0001",
-    status,
-    steps: [
-      { step_id: "cadence_skills", status: "completed" },
-      {
-        step_id: "pre_check",
-        status:
-          status === "failed"
-            ? "failed"
-            : status === "completed"
-              ? "completed"
-              : "running",
-      },
-      {
-        step_id: "rule_config",
-        status: status === "completed" ? "completed" : "pending",
-      },
-      {
-        step_id: "mcp_configuration",
-        status: status === "completed" ? "completed" : "pending",
-      },
-      {
-        step_id: "project_rules_examples",
-        status: status === "completed" ? "completed" : "pending",
-      },
-    ],
-    current_step: status === "completed" ? null : "pre_check",
-    failed_step: status === "failed" ? "pre_check" : null,
-    result: null,
-    error: null,
-    created_at: "2026-07-14T00:00:00Z",
-    updated_at: "2026-07-14T00:00:00Z",
-    completed_at: null,
-    ...overrides,
-  };
-}
-
-function repositoryOperationFetch({
-  operationSnapshots,
-}: {
-  operationSnapshots: RepositoryInitializationOperationSnapshot[];
-}) {
-  const baseFetch = lifecycleFetch({
-    repositoriesByProject: { project_0001: [] },
-  });
-  const repository = repositoryRecord({
-    name: "New Repo",
-    path: "/tmp/new-repo",
-  });
-  let operationFetchCount = 0;
-  let completed = false;
-
-  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    const requestUrl = url.replace(/\/$/u, "");
-    if (
-      init?.method === "POST" &&
-      requestUrl === "/api/projects/project_0001/repositories"
-    ) {
-      return new Response(
-        JSON.stringify(repositoryOperationSnapshot("created")),
-        { status: 202 },
-      );
-    }
-    if (requestUrl.includes("repository-initializations")) {
-      const snapshot = operationSnapshots[operationFetchCount];
-      operationFetchCount += 1;
-      if (!snapshot) {
-        throw new Error("unexpected repository initialization fetch");
-      }
-      completed ||= snapshot.status === "completed";
-      return new Response(
-        JSON.stringify(snapshot),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-    if (
-      requestUrl === "/api/projects/project_0001/repositories" &&
-      init?.method !== "POST"
-    ) {
-      if (completed) {
-        return new Response(
-          JSON.stringify({ repositories: [repository] }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(
-        JSON.stringify({ repositories: [] }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-    if (
-      requestUrl === "/api/projects/project_0001/codebases" &&
-      init?.method !== "POST"
-    ) {
-      if (completed) {
-        return new Response(
-          JSON.stringify({
-            codebases: [
-              {
-                id: repository.repository_id,
-                name: repository.name,
-                kind: "single_repo",
-                repository_id: repository.repository_id,
-                logical_codebase_id: null,
-                member_count: null,
-              },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(JSON.stringify({ codebases: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    return baseFetch(input, init);
-  });
-}
-
-function repositoryFailureFetch() {
-  return repositoryOperationFetch({
-    operationSnapshots: [
-      repositoryOperationSnapshot("failed", {
-        error: {
-          code: "repository_init_command_failed",
-          message: "repository registration failed",
-          details: {
-            reason: "初始化命令执行失败",
-            stage: "repository_init_command",
-            provider: "claude_code",
-            command: "/rule-config",
-            reason_code: "repository_init_command_failed",
-            stderr_summary: "permission denied",
-            changed_paths: [".claude/rules/project.md"],
-            retryable: true,
-            action: "修复权限后重试",
-          },
-        },
-      }),
-    ],
-  });
-}
-
-async function flushAsyncWork() {
-  await act(async () => {
-    await Promise.resolve();
-  });
-}
-
 describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
   installIssueLifecycleWorkbenchTestHooks();
   beforeEach(() => {
@@ -234,154 +74,114 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     useProviderAvailabilityStore.getState().reset();
   });
 
-  it("only refreshes repositories after the initialization operation completes", async () => {
-    const completed = repositoryOperationSnapshot("completed", {
-      result: {
-        repository: repositoryRecord({
-          name: "New Repo",
-          path: "/tmp/new-repo",
-        }),
-        initialization: {
-          source: "offline",
-          commands: [
-            {
-              index: 1,
-              command: "/cadence-init:pre-check",
-              status: "completed",
-            },
-          ],
-          warnings: ["cadence_skills_conflict:<path>"],
-          changed_paths: [".claude/rules/project.md"],
-          git_finalize_warning: null,
-          completed_at: "2026-07-14T00:01:00Z",
-        },
+  it("添加代码库只走多仓入口：登记完成后才刷新代码库列表", async () => {
+    const calls: string[] = [];
+    const fetchMock = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      repositoriesByProject: { project_0001: [] },
+      registrationPreflight: {
+        preflight_id: "preflight_0001",
+        created_at: "2026-08-19T00:00:00Z",
+        items: [{ path: "/root/api", class: "eligible", reason: null }],
       },
-      completed_at: "2026-07-14T00:01:00Z",
+      registrationSubmit: {
+        batch_id: "batch_0001",
+        status: "completed",
+        items: [{ path: "/root/api", status: "completed", failure_reason: null }],
+      },
     });
-    const fetchMock = repositoryOperationFetch({
-      operationSnapshots: [repositoryOperationSnapshot("running"), completed],
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    vi.useFakeTimers();
-
-    render(<IssueLifecycleWorkbench />);
-    await act(async () => {
-      await vi.runAllTimersAsync();
-    });
-    fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
-    fireEvent.click(screen.getByRole("button", { name: "继续添加单仓库" }));
-    const dialog = screen.getByRole("dialog", { name: "添加代码库" });
-    fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
-      target: { value: "New Repo" },
-    });
-    fireEvent.change(within(dialog).getByLabelText("本地路径"), {
-      target: { value: "/tmp/new-repo" },
-    });
-    fireEvent.submit(within(dialog).getByLabelText("代码库名称").closest("form")!);
-    await flushAsyncWork();
-
-    expect(screen.getByText("还没有代码库")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeDisabled();
-    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
-      "正在初始化，请保持此窗口打开",
-    );
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
-    });
-    await flushAsyncWork();
-    await vi.runAllTimersAsync();
-    await flushAsyncWork();
-    expect(
-      fetchMock.mock.calls.filter(
-        ([input, init]) =>
-          input === "/api/projects/project_0001/repositories" &&
-          init?.method !== "POST",
-      ),
-    ).toHaveLength(2);
-
-    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
-      "代码库初始化完成",
-    );
-    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
-      "offline",
-    );
-    expect(screen.getByText("New Repo")).toBeInTheDocument();
-    const operationFetches = fetchMock.mock.calls.filter(
-      ([input]) =>
-        input ===
-        "/api/projects/project_0001/repository-initializations/repository_initialization_0001",
-    );
-    expect(operationFetches).toHaveLength(2);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001/repository-initializations/repository_initialization_0001",
-      expect.objectContaining({
-        headers: expect.objectContaining({ "content-type": "application/json" }),
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+        return fetchMock(input, init);
       }),
     );
-    expect(
-      fetchMock.mock.calls.filter(
-        ([input, init]) =>
-          input === "/api/projects/project_0001/repositories" &&
-          init?.method !== "POST",
-      ),
-    ).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "新建 Issue" })).toBeEnabled();
-    expect(screen.getByRole("dialog", { name: "添加代码库" })).toHaveTextContent(
-      "cadence_skills_conflict:<path>",
-    );
-    fireEvent.click(
-      within(screen.getByRole("dialog", { name: "添加代码库" })).getByRole(
-        "button",
-        { name: "完成" },
-      ),
-    );
-    expect(
-      screen.queryByRole("dialog", { name: "添加代码库" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("keeps repositories empty and preserves recovery details when initialization fails", async () => {
-    const fetchMock = repositoryFailureFetch();
-    vi.stubGlobal("fetch", fetchMock);
-    vi.useFakeTimers();
+    const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
-    await act(async () => {
-      await vi.runAllTimersAsync();
+
+    await user.click(await screen.findByRole("button", { name: "添加代码库" }));
+    // REQ-REG-16：无单仓入口——对话框直接是建逻辑代码库（选聚合根）。
+    expect(
+      screen.queryByRole("button", { name: "继续添加单仓库" }),
+    ).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("聚合根目录"), "/root");
+    await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
+
+    // 登记在同弹窗内完成；登记批完成后才再拉一次代码库列表。
+    await user.click(await screen.findByRole("button", { name: "提交登记" }));
+    expect(
+      calls.filter(
+        (call) =>
+          call ===
+          "POST /api/projects/project_0001/logical-codebases/lc_0001/registrations",
+      ),
+    ).toHaveLength(1);
+    const codebasesGets = () =>
+      calls.filter((call) => call === "GET /api/projects/project_0001/codebases")
+        .length;
+    await waitFor(() =>
+      expect(codebasesGets()).toBeGreaterThanOrEqual(2),
+    );
+    expect(screen.getByRole("region", { name: "登记结果" })).toHaveTextContent(
+      "completed",
+    );
+  });
+
+  it("登记失败时保留错误详情且不刷新代码库列表", async () => {
+    const calls: string[] = [];
+    const baseFetch = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Aria")],
+      repositoriesByProject: { project_0001: [] },
+      registrationPreflight: {
+        preflight_id: "preflight_0001",
+        created_at: "2026-08-19T00:00:00Z",
+        items: [{ path: "/root/api", class: "eligible", reason: null }],
+      },
     });
-    fireEvent.click(screen.getByRole("button", { name: "添加代码库" }));
-    fireEvent.click(screen.getByRole("button", { name: "继续添加单仓库" }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        if (url.endsWith("/registrations") && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              code: "aggregate_root_member_outside_root",
+              message: "登记成员不在聚合根内",
+              details: { reason: "成员目录 /root/api 不在聚合根内" },
+            }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          );
+        }
+        return baseFetch(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await screen.findByRole("button", { name: "添加代码库" }));
+    await user.type(screen.getByLabelText("聚合根目录"), "/root");
+    await user.click(screen.getByRole("button", { name: "创建逻辑代码库" }));
+    const codebasesGetsBefore = calls.filter(
+      (call) => call === "GET /api/projects/project_0001/codebases",
+    ).length;
+
+    await user.click(await screen.findByRole("button", { name: "提交登记" }));
+
     const dialog = screen.getByRole("dialog", { name: "添加代码库" });
-    fireEvent.change(within(dialog).getByLabelText("代码库名称"), {
-      target: { value: "New Repo" },
-    });
-    fireEvent.change(within(dialog).getByLabelText("本地路径"), {
-      target: { value: "/tmp/new-repo" },
-    });
-    fireEvent.submit(within(dialog).getByLabelText("代码库名称").closest("form")!);
-    await flushAsyncWork();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "成员目录 /root/api 不在聚合根内",
+    );
+    // 登记失败不刷新代码库列表，也不产生代码库条目。
     expect(
-      fetchMock.mock.calls.filter(
-        ([input, init]) =>
-          input === "/api/projects/project_0001/repositories" &&
-          init?.method !== "POST",
+      calls.filter(
+        (call) => call === "GET /api/projects/project_0001/codebases",
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(codebasesGetsBefore);
     expect(screen.getByText("还没有代码库")).toBeInTheDocument();
-    const alert = screen.getByRole("alert");
-    expect(
-      fetchMock.mock.calls.filter(
-        ([input, init]) =>
-          input === "/api/projects/project_0001/repositories" &&
-          init?.method !== "POST",
-      ),
-    ).toHaveLength(1);
-    expect(alert).toHaveTextContent("repository registration failed");
-    expect(alert).toHaveTextContent("repository_init_command");
-    expect(alert).toHaveTextContent(".claude/rules/project.md");
-    expect(alert).toHaveTextContent("修复权限后重试");
-    expect(alert).toHaveTextContent("系统未执行破坏性回滚");
-    expect(screen.getByRole("dialog", { name: "添加代码库" })).toBeInTheDocument();
   });
 
   it("deletes project repositories and lifecycle issues from the lifecycle workbench", async () => {
@@ -420,10 +220,14 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       ).not.toBeInTheDocument(),
     );
 
+    // 2026-11-05：删除 Project 先过二次确认；确认后 DELETE 带确认意图
+    //（未确认路径见 IssueLifecycleWorkbench.project-delete.test.tsx）。
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     await user.click(screen.getByRole("button", { name: "删除 Project Aria" }));
 
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/projects/project_0001",
+      "/api/projects/project_0001?confirmed=true",
       expect.objectContaining({ method: "DELETE" }),
     );
     expect(await screen.findByText("还没有 Project")).toBeInTheDocument();
@@ -503,8 +307,15 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     confirmSpy.mockRestore();
   });
 
-  it("requires repository when creating issue", async () => {
-    vi.stubGlobal("fetch", lifecycleFetch());
+  it("requires logical codebase when creating issue", async () => {
+    // C5：新建 Issue 的门已收窄为「必须存在含 active 成员的 LC」——该夹具补一条
+    // 有成员的 LC 才能进入对话框；本用例断言的是对话框内的必选校验，不是门本身。
+    vi.stubGlobal(
+      "fetch",
+      lifecycleFetch({
+        logicalCodebases: [{ id: "lc_0001", name: "platform", member_count: 1 }],
+      }),
+    );
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
@@ -520,11 +331,15 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       within(dialog).getByRole("button", { name: "创建 Issue" }),
     );
 
-    expect(within(dialog).getByText("请选择代码库")).toBeInTheDocument();
+    // REQ-MRE-01：issue 必须落在某个逻辑代码库上（单仓路径已下线）。
+    expect(within(dialog).getByText("请选择逻辑代码库")).toBeInTheDocument();
   });
 
   it("keeps a durably created issue searchable while the list index is stale", async () => {
-    const baseFetch = lifecycleFetch();
+    const baseFetch = lifecycleFetch({
+      // REQ-MRE-01：issue 只能挂在逻辑代码库上（单仓创建入口已下线）。
+      logicalCodebases: [{ id: "lc_0001", name: "platform", member_count: 1 }],
+    });
     const createdIssue = {
       issue_id: "issue_0277",
       project_id: "project_0001",
@@ -563,7 +378,13 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     await user.click(await screen.findByRole("button", { name: "新建 Issue" }));
     const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
     await user.type(within(dialog).getByLabelText("Issue 标题"), "P1 补丁批");
-    await user.selectOptions(within(dialog).getByLabelText("代码库"), "repo:repository_0001");
+    await user.selectOptions(within(dialog).getByLabelText("代码库"), "lc_0001");
+    const memberGroup = await within(dialog).findByRole("group", {
+      name: "成员",
+    });
+    await user.click(
+      within(memberGroup).getByRole("checkbox", { name: /api · repository_0001/ }),
+    );
     await user.click(within(dialog).getByRole("button", { name: "创建 Issue" }));
 
     expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();
@@ -573,7 +394,10 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
   });
 
   it("keeps a durably created issue visible across later stale refreshes", async () => {
-    const baseFetch = lifecycleFetch();
+    const baseFetch = lifecycleFetch({
+      // REQ-MRE-01：issue 只能挂在逻辑代码库上（单仓创建入口已下线）。
+      logicalCodebases: [{ id: "lc_0001", name: "platform", member_count: 1 }],
+    });
     const createdIssue = {
       issue_id: "issue_0277",
       project_id: "project_0001",
@@ -612,7 +436,13 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     await user.click(await screen.findByRole("button", { name: "新建 Issue" }));
     const dialog = screen.getByRole("dialog", { name: "新建 Issue" });
     await user.type(within(dialog).getByLabelText("Issue 标题"), "P1 补丁批");
-    await user.selectOptions(within(dialog).getByLabelText("代码库"), "repo:repository_0001");
+    await user.selectOptions(within(dialog).getByLabelText("代码库"), "lc_0001");
+    const memberGroup = await within(dialog).findByRole("group", {
+      name: "成员",
+    });
+    await user.click(
+      within(memberGroup).getByRole("checkbox", { name: /api · repository_0001/ }),
+    );
     await user.click(within(dialog).getByRole("button", { name: "创建 Issue" }));
 
     expect(await screen.findByRole("button", { name: "选择 Issue P1 补丁批" })).toBeVisible();

@@ -30,19 +30,20 @@ async fn story_spec_delete_evicts_cached_runtime_manager_and_regenerate_starts_c
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"Evict","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"Evict","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
 
-    let (status, first) = request_json(
+    let (status, first) = lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-        json!({"title":"Evict story","author_provider":"fake"}),
+        json!({"title":"Evict story","author_provider":"fake","involved_repository_ids":legacy_lc_involved_repository_ids(root.path())}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -84,9 +85,8 @@ async fn story_spec_delete_evicts_cached_runtime_manager_and_regenerate_starts_c
 
     // 重新生成：磁盘 json 已删 → 序号回退复用 workspace_session_0001，
     // 必须得到全新 manager 而非删除前的旧运行时状态。
-    let (status, second) = request_json(
+    let (status, second) = lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
         json!({"title":"Evict story again","author_provider":"fake"}),
     )
@@ -151,11 +151,13 @@ async fn work_item_plan_delete_rejects_zero_mutation_when_any_work_item_has_atte
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"EvictPartial","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"EvictPartial","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
 
@@ -326,19 +328,20 @@ async fn design_spec_delete_evicts_cached_runtime_manager() {
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"EvictDesign","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"EvictDesign","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
 
-    let (status, _) = request_json(
+    let (status, _) = lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-        json!({"title":"Evict design story","author_provider":"fake"}),
+        json!({"title":"Evict design story","author_provider":"fake","involved_repository_ids":legacy_lc_involved_repository_ids(root.path())}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -351,14 +354,14 @@ async fn design_spec_delete_evicts_cached_runtime_manager() {
     )
     .await;
 
-    let (status, design) = request_json(
+    let (status, design) = lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
         json!({
             "title":"Evict design",
             "author_provider":"fake",
-            "story_spec_ids":["story_spec_0001"]
+            "story_spec_ids":["story_spec_0001"],
+            "involved_repository_ids":legacy_lc_involved_repository_ids(root.path())
         }),
     )
     .await;
@@ -420,11 +423,13 @@ async fn work_item_plan_delete_evicts_cached_runtime_manager() {
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"EvictPlan","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"EvictPlan","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
 
@@ -522,19 +527,20 @@ async fn story_spec_delete_rejected_by_gate_keeps_cached_runtime_manager() {
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    let lc_id = migrate_repository_to_lc_and_rebuild(&app, root.path()).await;
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"EvictGate","description":"描述","repository_id":"repository_0001"}),
+        json!({"title":"EvictGate","description":"描述","repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
 
-    let (status, story) = request_json(
+    let (status, story) = lc_generate_json(
         app.clone(),
-        Method::POST,
         "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
-        json!({"title":"Evict gate story","author_provider":"fake"}),
+        json!({"title":"Evict gate story","author_provider":"fake","involved_repository_ids":legacy_lc_involved_repository_ids(root.path())}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

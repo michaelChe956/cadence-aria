@@ -185,6 +185,34 @@ pub(super) fn scope_test_context(
 ) {
     let root = tempfile::tempdir().expect("tempdir");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：SC 入站链先经 routing/上下文解析，issue+LC 权威
+    // 必须在场（legacy 单仓形态已删除）；ping/abort 用例不消费权威本身。
+    super::seed_legacy_project(&app_paths);
+    let repo_dir = root.path().join("aggregate-root").join("member");
+    std::fs::create_dir_all(&repo_dir).expect("member checkout dir");
+    let repository = crate::product::repository_store::RepositoryStore::new(app_paths.clone())
+        .create(crate::product::repository_store::CreateRepositoryInput {
+            project_id: "project_0001".to_string(),
+            name: "Scope test repository".to_string(),
+            path: repo_dir.clone(),
+            default_policy_preset: None,
+            default_provider_mode: None,
+            idempotency_key: "scope-test-repository".to_string(),
+        })
+        .expect("create repository");
+    crate::product::issue_store::IssueStore::new(app_paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some(repository.id.clone()),
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
+            title: "Scope test issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create issue");
+    super::lc_fixture_support::register_legacy_direct_authority(&app_paths, &repository, &repo_dir);
     let session_record = WorkspaceSessionRecord {
         id: "workspace_scope_test".to_string(),
         project_id: "project_0001".to_string(),

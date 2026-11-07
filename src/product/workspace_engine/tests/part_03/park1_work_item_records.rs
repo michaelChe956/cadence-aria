@@ -41,11 +41,14 @@ async fn initial_plan_compile_finalize_persists_per_target_work_item_records() {
         .get("wi_b")
         .expect("finalize must persist work item record for logical `wi_b`");
 
-    // Legacy 单仓：story 仓归属，无逻辑仓 target。
+    // LC（REQ-ROUTE-01 两态化后夹具恒走 Logical 路由）：repository_id=成员
+    // 物理仓（与 story 同源），target_repository_id=夹具唯一逻辑成员——
+    // 旧「Legacy 单仓：无逻辑仓 target」断言随单仓入口删除作废。
+    let fixture_member = fixture_logical_member_id(&lifecycle);
     assert_eq!(wi_a.repository_id, story.repository_id);
-    assert_eq!(wi_a.target_repository_id, None);
+    assert_eq!(wi_a.target_repository_id, Some(fixture_member));
     assert_eq!(wi_b.repository_id, story.repository_id);
-    assert_eq!(wi_b.target_repository_id, None);
+    assert_eq!(wi_b.target_repository_id, Some(fixture_member));
     // 派生自 compiled canonical contract（fixture 契约：outline_a draft）。
     assert_eq!(wi_a.title, "outline_a draft");
     assert_eq!(wi_a.kind, WorkItemKind::Backend);

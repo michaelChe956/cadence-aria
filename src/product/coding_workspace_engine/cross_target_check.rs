@@ -126,10 +126,7 @@ fn resolve_active_member_main_checkouts(
         &attempt.issue_id,
     )
     .map_err(|_| StableCode::CrossTargetStoreFailure)?;
-    let authority = match lc_id.as_deref() {
-        Some(lc_id) => LogicalCodebaseStore::for_lc(paths.clone(), lc_id),
-        None => LogicalCodebaseStore::new(paths.clone()),
-    };
+    let authority = LogicalCodebaseStore::for_lc(paths.clone(), lc_id.as_str());
     let manifest = authority
         .load_manifest(&attempt.project_id)
         .map_err(|_| StableCode::CrossTargetStoreFailure)?
@@ -529,6 +526,24 @@ mod tests {
 
         let attempt = logical_attempt(PROJECT_ID, ISSUE_ID, ATTEMPT_ID, &checkout_a);
 
+        // REQ-ROUTE-01：cross-target 窗口按 attempt 所属 issue 的持久归属寻址
+        //（`resolve_issue_logical_codebase_id`），issue 记录缺失会直接
+        // fail-closed 成 `CrossTargetStoreFailure`。归属填 legacy 别名 id：
+        // 本夹具的 manifest/member/checkout 写在项目级 legacy 布局，而
+        // `for_lc(legacy_logical_codebase_id(project))` 与该布局字节等价。
+        crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id:
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(PROJECT_ID),
+                title: "cross target fixture issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+
         Fixture {
             _temp: temp,
             paths,
@@ -927,7 +942,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: Some(lc_id),
+                logical_codebase_id: lc_id,
                 title: "new lc issue".to_string(),
                 description: None,
                 change_id: None,

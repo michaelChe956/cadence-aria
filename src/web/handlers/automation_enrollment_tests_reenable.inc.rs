@@ -161,8 +161,7 @@
 
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
-        let enabled =
-            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let enabled = response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
         let revision = enabled["policy_revision"].as_u64().unwrap();
         let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
         let bound = response_json(
@@ -296,8 +295,7 @@
 
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
-        let enabled =
-            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let enabled = response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
         let revision = enabled["policy_revision"].as_u64().unwrap();
         let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
         let bound = response_json(
@@ -395,8 +393,7 @@
     async fn terminated_reenable_after_clean_termination_succeeds_and_replays() {
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
-        let enabled =
-            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let enabled = response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
         let revision = enabled["policy_revision"].as_u64().unwrap();
         let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
         let bound = response_json(
@@ -488,8 +485,7 @@
 
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
-        let enabled =
-            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let enabled = response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
         let revision = enabled["policy_revision"].as_u64().unwrap();
         let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
         let bound = response_json(
@@ -567,3 +563,211 @@
         assert!(payload["terminated_at"].is_null());
     }
 
+    // ─── REQ-WIGA-SWAP-02：冲突原因判别位 + HTTP 分流（块1 片3）────────
+    //
+    // 同一个 409 承载 9 类语义；判别位把「运行中不能换 payload」（该先终止）
+    // 与「版本号过期」（该刷新后重试）分成两个稳定码，其余 7 类落回旧码
+    // `automation_enrollment_conflict`（旧码被终止自愈逻辑钉住，不得改名）。
+
+    /// 统一终止 REST 的 POST helper（与 automation_enrollment_conflict.rs 同形）。
+    async fn post_terminate_request(
+        app: &axum::Router,
+        body: &serde_json::Value,
+    ) -> axum::http::Response<axum::body::Body> {
+        use tower::ServiceExt;
+
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment/terminate"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// 播种一个已 enable 的 enrollment，返回 (fixture, app, enrollment, revision)。
+    async fn seed_enabled_enrollment() -> (
+        crate::web::handlers::automation_enrollment_test_support::Fixture,
+        axum::Router,
+        serde_json::Value,
+        u64,
+    ) {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        let enrollment = response_json(enable).await;
+        let revision = enrollment["policy_revision"].as_u64().unwrap();
+        (fixture, app, enrollment, revision)
+    }
+
+    /// 换 provider（claude_code）的写入必须先过 Enable 前的角色链同源预检；
+    /// 夹具默认 Fake 豁免，换 provider 需物化「已探测」的 Confirmed 行（与
+    /// automation_reenable_supersede_tests 同构），否则 422
+    /// `automation_role_chain_unsupported` 拦在 CAS 冲突判定之前。
+    fn seed_claude_code_launch_capability(
+        fixture: &crate::web::handlers::automation_enrollment_test_support::Fixture,
+    ) {
+        let paths = fixture.paths.clone();
+        crate::product::logical_codebase::ProviderCapabilityStore::new(paths.clone())
+            .ensure_bootstrap()
+            .expect("capability bootstrap");
+        super::super::automation_enrollment_test_support::seed_confirmed_capability_records(
+            &paths,
+            PROJECT_ID,
+            &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+        );
+    }
+
+
+    /// ① 运行中改 payload（换 author provider）必须落到「运行态限制」稳定码，
+    /// 而不是笼统的 `automation_enrollment_conflict`——两者对应完全不同的
+    /// 用户动作（该先终止自动化 vs 该刷新后重试）。
+    #[tokio::test]
+    async fn enrollment_write_with_changed_provider_while_running_reports_payload_immutable() {
+        let (fixture, app, _enrollment, revision) = seed_enabled_enrollment().await;
+        seed_claude_code_launch_capability(&fixture);
+
+        let mut body = enrollment_body(&fixture, 1, 1);
+        body["expected_revision"] = serde_json::json!(revision);
+        body["command"]["options"]["author_provider"] = serde_json::json!("claude_code");
+
+        let response = put_enrollment(&app, body).await;
+        let status = response.status();
+        let payload = response_json(response).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+        assert_eq!(
+            payload["code"], "automation_enrollment_payload_immutable",
+            "运行中改 payload 必须分流到运行态限制码：{payload}"
+        );
+    }
+
+    /// ② 版本号过期必须落到「可重试」稳定码 `automation_enrollment_revision_stale`。
+    #[tokio::test]
+    async fn enrollment_write_with_stale_revision_reports_revision_stale() {
+        let (fixture, app, _enrollment, revision) = seed_enabled_enrollment().await;
+
+        let mut body = enrollment_body(&fixture, 1, 1);
+        body["expected_revision"] = serde_json::json!(revision + 1);
+
+        let response = put_enrollment(&app, body).await;
+        let status = response.status();
+        let payload = response_json(response).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+        assert_eq!(
+            payload["code"], "automation_enrollment_revision_stale",
+            "版本过期必须分流到可重试码：{payload}"
+        );
+    }
+
+    /// ③ 两条路径必须返回**不同**的稳定码（否则分流没生效，等于仍是一个 409）。
+    #[tokio::test]
+    async fn payload_immutable_and_revision_stale_report_distinct_codes() {
+        let (fixture, app, _enrollment, revision) = seed_enabled_enrollment().await;
+        seed_claude_code_launch_capability(&fixture);
+
+        let mut changed_provider = enrollment_body(&fixture, 1, 1);
+        changed_provider["expected_revision"] = serde_json::json!(revision);
+        changed_provider["command"]["options"]["author_provider"] = serde_json::json!("claude_code");
+        let first = put_enrollment(&app, changed_provider).await;
+        let first_status = first.status();
+        let first_payload = response_json(first).await;
+
+        let mut stale_revision = enrollment_body(&fixture, 1, 1);
+        stale_revision["expected_revision"] = serde_json::json!(revision + 1);
+        let second = put_enrollment(&app, stale_revision).await;
+        let second_status = second.status();
+        let second_payload = response_json(second).await;
+
+        assert_eq!(first_status, StatusCode::CONFLICT, "{first_payload}");
+        assert_eq!(second_status, StatusCode::CONFLICT, "{second_payload}");
+        assert_ne!(
+            first_payload["code"], second_payload["code"],
+            "运行中改 payload 与版本过期必须落到不同稳定码：{first_payload} / {second_payload}"
+        );
+    }
+
+    /// ④ 其余 7 类冲突必须**落回旧码** `automation_enrollment_conflict`
+    /// （旧码被终止自愈逻辑钉住，改名会静默失效）。本例走绑定面的
+    /// 「绑定身份/版本不符」类。
+    #[tokio::test]
+    async fn binding_write_conflict_keeps_legacy_conflict_code() {
+        let (fixture, app, _enrollment, revision) = seed_enabled_enrollment().await;
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+
+        let bound = post_binding(
+            &app,
+            serde_json::json!({
+                "expected_revision": revision + 1,
+                "plan_id": plan_id,
+                "session_id": session_id,
+            }),
+        )
+        .await;
+        let status = bound.status();
+        let payload = response_json(bound).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+        assert_eq!(
+            payload["code"], "automation_enrollment_conflict",
+            "非运行态限制/非版本过期的冲突必须落回旧码：{payload}"
+        );
+    }
+
+    /// ⑤ 终止确认面遇到授权版本冲突 → 仍是旧码 `automation_enrollment_conflict`
+    /// （终止自愈仍生效；终止路径不按判别位分流）。
+    #[tokio::test]
+    async fn terminate_confirm_with_stale_revision_keeps_legacy_conflict_code() {
+        let (_fixture, app, enrollment, revision) = seed_enabled_enrollment().await;
+
+        let response = post_terminate_request(
+            &app,
+            &serde_json::json!({
+                "command_id": "cmd-terminate-stale-revision",
+                "expected_enrollment_id": enrollment["enrollment_id"],
+                "expected_policy_revision": revision + 1,
+                "confirmed": true,
+            }),
+        )
+        .await;
+        let status = response.status();
+        let payload = response_json(response).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+        assert_eq!(
+            payload["code"], "automation_enrollment_conflict",
+            "终止确认面必须仍是旧码（终止自愈依赖旧码）：{payload}"
+        );
+    }
+
+    /// ⑥ 判别位**没被吃掉**：`CasResolution` → `EnrollmentError` 这一跳必须
+    /// 保住原因；判别位一旦丢失，两条路径都会退回旧码（断言即红）。
+    #[tokio::test]
+    async fn conflict_kind_survives_the_store_to_http_hop() {
+        let (fixture, app, _enrollment, revision) = seed_enabled_enrollment().await;
+        seed_claude_code_launch_capability(&fixture);
+
+        let mut changed_provider = enrollment_body(&fixture, 1, 1);
+        changed_provider["expected_revision"] = serde_json::json!(revision);
+        changed_provider["command"]["options"]["author_provider"] = serde_json::json!("claude_code");
+        let first = put_enrollment(&app, changed_provider).await;
+        let first_payload = response_json(first).await;
+
+        let mut stale_revision = enrollment_body(&fixture, 1, 1);
+        stale_revision["expected_revision"] = serde_json::json!(revision + 1);
+        let second = put_enrollment(&app, stale_revision).await;
+        let second_payload = response_json(second).await;
+
+        assert_eq!(
+            first_payload["code"], "automation_enrollment_payload_immutable",
+            "判别位在 store→HTTP 途中被吃掉：{first_payload}"
+        );
+        assert_eq!(
+            second_payload["code"], "automation_enrollment_revision_stale",
+            "判别位在 store→HTTP 途中被吃掉：{second_payload}"
+        );
+    }

@@ -7,6 +7,42 @@ use crate::product::work_item_projection::{
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+/// 逻辑 target engine 夹具：以已播种 LC 权威为基座注入 gateway，并按 provider
+/// 名注册 adapter（同一实例既作引擎方法的捕获面，又作 gateway registry 的真实
+/// spawn 面）。
+///
+/// REQ-ROUTE-01 两态化后 `target_snapshot.is_some()` 的 provider run 只能经
+/// `LogicalCodebaseProviderGateway::start_streaming` 启动（否则
+/// `logical_provider_gateway_required` fail-closed），而 gateway 从自己的
+/// registry 取 adapter；单 adapter 场景可直接用
+/// `provider_gateway_validated_input::engine_with_fixture_gateway`，多角色
+/// （Coder/Reviewer 不同 provider 名）场景用本夹具逐个注册。
+pub(super) fn engine_with_fixture_gateway_roles(
+    store: &CodingAttemptStore,
+    event_tx: mpsc::Sender<CodingWsOutMessage>,
+    project_id: &str,
+    adapters: Vec<(ProviderName, Arc<dyn StreamingProviderAdapter>)>,
+) -> CodingWorkspaceEngine {
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::logical_codebase::GatewayRunAudit;
+
+    let mut registry = ProviderRegistry::new();
+    for (name, adapter) in adapters {
+        registry.register(
+            name,
+            Arc::new(super::provider_gateway_validated_input::ValidatedPassthroughAdapter(adapter)),
+        );
+    }
+    let gateway = super::provider_gateway_validated_input::build_gateway_with_registry(
+        &store.paths(),
+        project_id,
+        Arc::new(registry),
+        Arc::new(GatewayRunAudit::new()),
+    );
+    CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+        .with_logical_provider_gateway(Arc::new(gateway))
+}
+
 #[derive(Clone)]
 pub(super) struct CapturingProjectionProvider {
     output: String,
@@ -95,7 +131,16 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
     fs::create_dir_all(&worktree).unwrap();
     init_test_git_repo(&worktree);
     let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：准入/租约/provider 启动的唯一凭证是「LC 权威 +
+    // 冻结 target_snapshot」；seed_complete 先建 issue 再建权威（顺序不可反）。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
+    let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -111,7 +156,7 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -124,11 +169,22 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
     attempt.stage = CodingExecutionStage::Coding;
     store.write_coding_attempt_for_test(&attempt).unwrap();
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let coder = CapturingProjectionProvider::new(current_plan_defect_output());
+    let coder = Arc::new(CapturingProjectionProvider::new(
+        current_plan_defect_output(),
+    ));
+    let reviewer = Arc::new(CapturingProjectionProvider::new(review_plan_defect_output()));
+    let engine = engine_with_fixture_gateway_roles(
+        &store,
+        tx,
+        "project_0001",
+        vec![
+            (ProviderName::Codex, coder.clone()),
+            (ProviderName::ClaudeCode, reviewer.clone()),
+        ],
+    );
 
     let coded = engine
-        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .execute_coding(&attempt, coder.as_ref(), &CodingExecutionContext::default())
         .await
         .unwrap();
     let run = store
@@ -165,12 +221,16 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
         &bundle.coder_projection.write_policy.exclusive_scopes,
         &bundle.coder_projection.write_policy.forbidden_scopes,
     );
+    // r54 越界根修:LC attempt(target_snapshot 在场)的 coder prompt 在
+    // write_scope 段之后、host_check 之前硬钉 worktree 纪律段(coding.rs
+    // `attempt.target_snapshot.is_some()` 分支);期望公式按同一单源构造。
     assert_eq!(
         coder.input().prompt,
         format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             expected_coder.text,
             expected_write_scope,
+            crate::product::coding_workspace_engine::worktree_discipline_section(&worktree),
             host_coding_check_contract(),
             platform_directives_section()
         )
@@ -200,8 +260,10 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
     assert_eq!(run.plan_repair_count, 0);
 
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
-    let reviewer = CapturingProjectionProvider::new(review_plan_defect_output());
-    let report = engine.execute_code_review(&coded, &reviewer).await.unwrap();
+    let report = engine
+        .execute_code_review(&coded, reviewer.as_ref())
+        .await
+        .unwrap();
     assert_eq!(report.verdict, ReviewVerdict::Blocked);
     assert_eq!(
         report.findings[0].plan_defect_evidence[0].kind,
@@ -284,6 +346,12 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -294,12 +362,16 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: Some(worktree.clone()),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                // REQ-ROUTE-01：逻辑 target 的 provider run 只经 gateway 启动，
+                // 而 gateway 的 provider ref 映射不含 Fake——夹具改用真实
+                // provider 名承载同一 CapturingProjectionProvider 行为，
+                // 渲染器期望同步换用 ClaudeCode。
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
@@ -357,7 +429,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
             "work_item_plan_0001",
         )
         .unwrap();
-    let renderer_version = renderer_for(&ProviderName::Fake)
+    let renderer_version = renderer_for(&ProviderName::ClaudeCode)
         .renderer_version()
         .to_string();
     let mut units = store
@@ -429,8 +501,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
     }
 
     let (tx, _rx) = mpsc::channel(64);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = CapturingProjectionProvider::new(
+    let provider = Arc::new(CapturingProjectionProvider::new(
         serde_json::json!({
             "verdict": "approve",
             "summary": "group review ok",
@@ -440,10 +511,16 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
             "commit_message_suggestion": "feat: group changes"
         })
         .to_string(),
+    ));
+    let engine = engine_with_fixture_gateway_roles(
+        &store,
+        tx,
+        "project_0001",
+        vec![(ProviderName::ClaudeCode, provider.clone())],
     );
 
     engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .unwrap();
 
@@ -468,7 +545,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
         })
         .collect::<Vec<_>>();
     let retry_context = engine
-        .prepare_group_reviewer_context(&attempt, &ProviderName::Fake)
+        .prepare_group_reviewer_context(&attempt, &ProviderName::ClaudeCode)
         .unwrap();
     let runs_after_retry = units
         .iter()
@@ -502,7 +579,7 @@ async fn coding_plan_repair_group_final_reviewer_uses_all_authoritative_unit_con
         let bundle = revision_store
             .get_work_item_projection_bundle(&lineage, &revision.work_item_projection_bundle_id)
             .unwrap();
-        let expected = renderer_for(&ProviderName::Fake)
+        let expected = renderer_for(&ProviderName::ClaudeCode)
             .render_reviewer(
                 &bundle.reviewer_projection,
                 &ReviewerExecutionEnvelope {
@@ -578,6 +655,12 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
     init_test_git_repo(&worktree);
     let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -593,7 +676,7 @@ async fn coding_unit_run_provider_execution_context_dependency_handoff_mismatch_
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })

@@ -1,11 +1,12 @@
 #[tokio::test]
 async fn work_item_plan_item_required_revision_feedback_includes_findings() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_item_required_review_feedback");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
     engine
         .update_artifact(work_item_draft_artifact_payload(
+            &lifecycle,
             &plan_id,
             "outline_a",
             "draft_a",
@@ -117,6 +118,7 @@ async fn anchor_t16_draft_fresh_builder_and_node_rebuild_keep_generation() {
     let store = engine.work_item_plan_store().expect("work item plan store");
     store
         .put_draft_record(&test_work_item_draft_record(
+            &lifecycle,
             &plan_id,
             "outline_a",
             "draft_outline_a",
@@ -222,7 +224,7 @@ async fn anchor_t16_draft_fresh_builder_and_node_rebuild_keep_generation() {
 
 #[tokio::test]
 async fn anchor_t16_batch_fresh_builder_and_node_rebuild_keep_batch() {
-    let (_tmp, _checkpoint_store, _lifecycle, plan_id, mut engine) =
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_anchor_t16_batch");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     let store = engine.work_item_plan_store().expect("work item plan store");
@@ -233,6 +235,7 @@ async fn anchor_t16_batch_fresh_builder_and_node_rebuild_keep_batch() {
         let draft_id = format!("draft_{outline_id}");
         store
             .put_draft_record(&test_work_item_draft_record(
+                &lifecycle,
                 &plan_id,
                 outline_id,
                 &draft_id,

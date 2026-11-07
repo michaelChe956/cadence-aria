@@ -148,7 +148,7 @@ impl WorkspaceEngine {
                     self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
                     let _ = self.flush_stream_buffer(&node_id).await;
                     self.finish_aborted_run().await;
-                    return Err("provider run aborted".to_string());
+                    return Err(crate::product::workspace_engine::conversational_gate::cancel::PROVIDER_RUN_ABORTED_MESSAGE.to_string());
                 }
                 command = command_rx.recv(), if commands_open => {
                     // F-19 同构:任何命令活动(含人工权限/选择应答)重置看门狗。
@@ -168,7 +168,7 @@ impl WorkspaceEngine {
                             self.emit_work_item_plan_display_chunk(&node_id, display_content).await;
                             let _ = self.flush_stream_buffer(&node_id).await;
                             self.finish_aborted_run().await;
-                            return Err("provider run aborted".to_string());
+                            return Err(crate::product::workspace_engine::conversational_gate::cancel::PROVIDER_RUN_ABORTED_MESSAGE.to_string());
                         }
                         Some(ProviderCommand::PermissionResponse {
                             id,
@@ -437,7 +437,7 @@ impl WorkspaceEngine {
         let _ = self.flush_stream_buffer(&node_id).await;
         if full_content.is_empty() {
             self.finish_empty_assistant_output().await;
-            Err("provider completed without output".to_string())
+            Err(crate::product::workspace_engine::conversational_gate::cancel::PROVIDER_EMPTY_OUTPUT_MESSAGE.to_string())
         } else {
             Ok(full_content)
         }

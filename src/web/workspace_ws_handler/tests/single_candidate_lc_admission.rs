@@ -107,15 +107,6 @@ impl ProviderCapabilitySource for LcStaticCapabilitySource {
         provider: &ProviderRef,
         _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
-        use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
-        if provider.provider_type
-            != crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode
-        {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                    .to_string(),
-            ));
-        }
         Ok(Self::capability(
             provider,
             SessionPolicyAction::PlanningReadOnly,
@@ -170,40 +161,6 @@ impl ProviderAdapter for LcStubSyncAdapter {
             timeout_status: TimeoutStatus::NotTimedOut,
         })
     }
-}
-
-fn lc_always_available_gate() -> Arc<ProviderAvailabilityGate> {
-    struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
-    impl ProviderHealthSource for AlwaysHealthy {
-        fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
-            self.0.clone()
-        }
-        fn degraded(&self) -> bool {
-            false
-        }
-    }
-
-    let checked_at = chrono::Utc::now();
-    let snapshot = Arc::new(ProviderHealthSnapshot {
-        schema_version: 1,
-        generation: 1,
-        checked_at,
-        providers: [ProviderName::ClaudeCode, ProviderName::Codex]
-            .into_iter()
-            .map(|provider| ProviderHealthEntry {
-                provider,
-                command: "stub".to_string(),
-                available: true,
-                version: Some("1.0".to_string()),
-                reason_code: None,
-                reason: None,
-                checked_at,
-            })
-            .collect(),
-    });
-    Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
-        snapshot,
-    ))))
 }
 
 /// 记录输入并输出预置 markdown 的 author provider（gateway registry 与
@@ -498,7 +455,9 @@ pub(super) fn register_alias_logical_codebase_with_extras(
     let capability_source: Arc<dyn ProviderCapabilitySource> = extras
         .capability
         .unwrap_or_else(|| Arc::new(LcStaticCapabilitySource));
-    let availability_gate = extras.availability.unwrap_or_else(lc_always_available_gate);
+    let availability_gate = extras.availability.unwrap_or_else(
+        crate::web::handlers::automation_enrollment_test_support::always_available_gate,
+    );
     let mut gateway_registry = ProviderRegistry::new();
     gateway_registry.register(ProviderName::ClaudeCode, gateway_author);
     let gateway = LogicalCodebaseProviderGateway::with_audit(
@@ -1242,15 +1201,6 @@ impl ProviderCapabilitySource for LcDialectCapabilitySource {
         provider: &ProviderRef,
         _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
     ) -> Result<ProviderCapability, crate::product::logical_codebase::ProviderGatewayError> {
-        use crate::product::logical_codebase::provider_gateway::ProviderGatewayError;
-        if provider.provider_type
-            != crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode
-        {
-            return Err(ProviderGatewayError::UnsupportedCapability(
-                crate::product::logical_codebase::provider_gateway::PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE
-                    .to_string(),
-            ));
-        }
         Ok(Self::capability(
             provider,
             SessionPolicyAction::PlanningReadOnly,

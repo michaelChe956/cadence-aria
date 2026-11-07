@@ -44,6 +44,20 @@ export const AUTOMATION_MODE_ANCHOR = "onboarding-anchor-automation-mode";
 
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   {
+    // 2026-11-07：Provider 管理作为引导第一步。provider 能力是机器级能力
+    // （不挂项目），核验不到时生成弹窗会默认回落到 codex、失败面被误导，
+    // 后续 Story/Design 生成会因 provider 不可用而失败 ⇒ 先管能力面再走流程。
+    // 锚点复用侧栏既有入口 provider-management-open（零项目/未选中项目时同样
+    // 渲染，见 ProjectSidebar 的 Provider 分区），故不需要 lateBind。
+    id: "manage-providers",
+    order: 0,
+    title: "管理 Provider（先核验机器级能力）",
+    description:
+      "先在左侧「Provider」分区点「Provider 管理」，核验本机 provider 的可用能力（探针 / 核验 / 更新 / 安装 / 版本）。provider 能力核验不到时，生成弹窗会默认回落到 codex，失败面被误导；机器级能力不先管好，后面的 Story / Design 生成会因 provider 不可用而失败。",
+    visual: { kind: "diagram", alt: "侧栏 Provider 管理入口位置示意" },
+    anchorTestId: "provider-management-open",
+  },
+  {
     id: AUTOMATION_MODE_STEP_ID,
     order: 0,
     title: "选择运行模式",
@@ -71,21 +85,21 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
     anchorTestId: "onboarding-anchor-project-create",
   },
   {
-    id: "add-single-repository",
+    id: "add-logical-codebase",
     order: 2,
-    title: "添加代码库（仅单库）",
+    title: "建逻辑代码库（多仓）",
     description:
-      "选中 Project 后点击「添加代码库」，绑定一个物理代码库。本期引导只覆盖单库（单仓）路径；逻辑代码库可稍后按需组合。",
-    visual: { kind: "diagram", alt: "代码库添加按钮与单仓路径示意" },
+      "选中 Project 后点击「添加代码库」建逻辑代码库：先选聚合根目录，再登记成员仓（自动发现）。新建项目流程固定为：创建项目 → 建逻辑代码库（选聚合根 + 登记成员仓）→ 创建 issue。",
+    visual: { kind: "diagram", alt: "代码库添加按钮与多仓路径示意" },
     anchorTestId: "onboarding-anchor-codebase-add",
   },
   {
     id: "create-issue",
     order: 3,
-    title: "创建 Issue（含基准分支）",
+    title: "创建 Issue（绑定逻辑代码库）",
     description:
-      "点击头部「新建 Issue」，填写标题、绑定代码库，并选择基准分支。基准分支在创建时锁定，之后修改基线需要新建 Issue。",
-    visual: { kind: "diagram", alt: "新建 Issue 与基准分支选择示意" },
+      "点击头部「新建 Issue」，填写标题、选择该项目的逻辑代码库，并勾选参与本 Issue 的成员。Issue 必须落在某个逻辑代码库上。",
+    visual: { kind: "diagram", alt: "新建 Issue 与成员勾选示意" },
     anchorTestId: "onboarding-anchor-issue-create",
   },
   {

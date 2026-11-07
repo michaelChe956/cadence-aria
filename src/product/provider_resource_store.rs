@@ -415,6 +415,11 @@ impl ProductStoreError {
                 id: render(id),
             },
             Self::PathEscape(value) => Self::PathEscape(render(value)),
+            // 审计预算失败是结构化载荷：它自带稳定码与 `Display`，不做字符串
+            // 前缀渲染，直接透传。
+            Self::AuditSnapshotBudgetExceeded(failure) => {
+                Self::AuditSnapshotBudgetExceeded(failure)
+            }
         }
     }
 }

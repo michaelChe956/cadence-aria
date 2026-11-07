@@ -13,7 +13,14 @@ fn group_attempt_fixture(root: &std::path::Path) -> (CodingAttemptStore, CodingE
     let worktree = root.join("shared-worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
     super::init_test_git_repo(&worktree);
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.join(".aria")));
+    let paths = ProductAppPaths::new(root.join(".aria"));
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root,
+        "project_0001",
+        "issue_0001",
+    );
+    let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -29,13 +36,36 @@ fn group_attempt_fixture(root: &std::path::Path) -> (CodingAttemptStore, CodingE
                 review_rounds: 1,
                 permission_modes: Default::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     super::seed_group_attempt_fixture(&store, &attempt, true, false);
+    bind_single_target_drafts(&store, logical.member_id);
     (store, attempt)
+}
+
+/// 单仓语义在 LC 模型下 = 全部 work item 归属唯一成员仓：
+/// `validate_group_single_target` 对 Logical 路由要求每个权威 unit 都带
+/// `target_repository_id` 且与 attempt 快照一致。共享夹具写入的 draft 仍是
+/// 无归属形态，这里按同一不变量补齐（不改变任何断言事实）。
+fn bind_single_target_drafts(
+    store: &CodingAttemptStore,
+    member_id: crate::product::logical_codebase::LogicalRepositoryId,
+) {
+    let plan_store = WorkItemPlanStore::new(store.paths());
+    for mut draft in plan_store
+        .list_draft_records("project_0001", "issue_0001", "work_item_plan_0001")
+        .expect("fixture draft records")
+    {
+        if draft.candidate.target_repository_id.is_none() {
+            draft.candidate.target_repository_id = Some(member_id);
+            plan_store
+                .put_draft_record(&draft)
+                .expect("fixture draft target");
+        }
+    }
 }
 
 fn ready_record(attempt_id: &str, status: AdvanceStatus) -> AdvanceRecord {
@@ -175,7 +205,14 @@ async fn sc_advance_unmaterialized_worktree_falls_back_to_worktree_prepare() {
         !worktree_path.exists(),
         "fixture must keep worktree unmaterialized"
     );
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
+    let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -191,12 +228,13 @@ async fn sc_advance_unmaterialized_worktree_falls_back_to_worktree_prepare() {
                 review_rounds: 1,
                 permission_modes: Default::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     super::seed_group_attempt_fixture(&store, &attempt, true, false);
+    bind_single_target_drafts(&store, logical.member_id);
     let attempt = mark_sc_advance(&store, &attempt);
     AdvanceStore::new(store.paths())
         .put_record(&ready_record(&attempt.id, AdvanceStatus::Ready))

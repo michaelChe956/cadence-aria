@@ -6,6 +6,7 @@ import {
   WorkItemPlanOptionsDialog,
   type WorkItemPlanOptionsFormValue,
 } from "./WorkItemPlanOptionsDialog";
+import { carrierTargetFromEnrollmentTarget } from "./automation-reenable";
 
 // C5 Task 7：automatic 模式的 target projection 生命周期——打开自动模式先取
 // automation-target 投影（展示 target.kind 与双级身份），loading/error 禁止
@@ -95,8 +96,7 @@ afterEach(() => {
 });
 
 describe("WorkItemPlanOptionsDialog automation target projection", () => {
-  it("fetches the target projection when automatic is selected and gates submit until ready", async () => {
-    const user = userEvent.setup();
+  it("fetches the target projection on open and gates submit until ready", async () => {
     const pending = deferred<Response>();
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -105,19 +105,8 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderDialog();
 
-    // manual 缺省不请求 target。
-    await user.click(
-      screen.getByRole("button", { name: "创建并打开 Workspace" }),
-    );
-    expect(
-      fetchMock.mock.calls.some(([url]) =>
-        String(url).includes("/automation-target"),
-      ),
-    ).toBe(false);
-
-    // 打开对话框重新进入 automatic：radio 切换触发 GET automation-target。
-    const dialog = screen.getByRole("dialog", { name: "Work Item Plan 配置" });
-    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    // REQ-WIGA-01 修订：已确认 design 的弹窗打开即恒为托管自动化——挂载即
+    // GET automation-target（不再有「manual 缺省不请求」的前置态）。
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([url]) =>
@@ -130,6 +119,7 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
       expect.anything(),
     );
 
+    const dialog = screen.getByRole("dialog", { name: "Work Item Plan 配置" });
     // loading 中禁止 stale automatic submit。
     const submit = within(dialog).getByRole("button", {
       name: "启用自动化",
@@ -148,7 +138,7 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     await waitFor(() => expect(submit).toBeEnabled());
   });
 
-  it("shows a single-repository target with its physical repository identity", async () => {
+  it("legacy_single_repository_projection_renders_readonly", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn(async () =>
       jsonResponse(
@@ -166,8 +156,21 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     const projection = await within(dialog).findByTestId(
       "automation-target-projection",
     );
+    // legacy 只读渲染保留：老单仓记录仍显示物理仓身份，**不退化为「target
+    // 未知」**（存量数据不丢信息）。
     expect(projection).toHaveTextContent("single_repository");
     expect(projection).toHaveTextContent("repo_physical_c5");
+    expect(projection.textContent).not.toContain("undefined");
+
+    // 发起侧收窄：单仓载体不得再作为命令载体 ⇒ 提交禁用并给出提示。
+    const notice = await within(dialog).findByTestId(
+      "automation-legacy-carrier-notice",
+    );
+    expect(notice).toHaveTextContent("需重建为逻辑代码库授权");
+    const submit = within(dialog).getByRole("button", {
+      name: "启用自动化",
+    });
+    await waitFor(() => expect(submit).toBeDisabled());
   });
 
   it("keeps automatic submit disabled with a retryable error when the target GET fails", async () => {
@@ -214,36 +217,56 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     await waitFor(() => expect(submit).toBeEnabled());
   });
 
-  it("does not request the target in manual mode and manual submit stays available after a target failure", async () => {
+  it("不提供手动绕过：target GET 失败后提交保持禁用且无「创建并打开 Workspace」", async () => {
     const user = userEvent.setup();
     const onConfirm = vi.fn(async () => undefined);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(
-          { code: "web_client_error", message: "target GET failed", details: {} },
-          500,
-        ),
+    // 按 URL 分派：automatic 下弹窗还会读一次 enrollment 只读投影。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/automation-enrollment")) {
+        return jsonResponse(null);
+      }
+      return jsonResponse(
+        {
+          code: "web_client_error",
+          message: "target GET failed",
+          details: {},
+        },
+        500,
       );
+    });
     vi.stubGlobal("fetch", fetchMock);
     renderDialog({ onConfirm });
 
     const dialog = screen.getByRole("dialog", { name: "Work Item Plan 配置" });
-    // automatic GET 失败后切回 manual：不因 target 失败阻断人工链路。
+    // D2（已终裁为 (b)）：automatic GET 失败后无手动绕过——如实报错、提交
+    // 保持禁用、可重试；不提供「创建并打开 Workspace」替代提交，也不发起
+    // 人工 prepare 请求。
     await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
-    await within(dialog).findByRole("alert");
-    await user.click(within(dialog).getByRole("radio", { name: "手动" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(/自动化目标加载失败/);
     const submit = within(dialog).getByRole("button", {
-      name: "创建并打开 Workspace",
+      name: "启用自动化",
     });
-    await waitFor(() => expect(submit).toBeEnabled());
-    await user.click(submit);
-    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(submit).toBeDisabled();
+    expect(
+      within(dialog).queryByRole("radio", { name: "手动" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "创建并打开 Workspace" }),
+    ).toBeNull();
+    expect(
+      within(dialog).getByTestId("automation-target-retry"),
+    ).toBeEnabled();
+    expect(onConfirm).not.toHaveBeenCalled();
     expect(
       fetchMock.mock.calls.filter(([url]) =>
         String(url).includes("/automation-target"),
       ),
     ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes("prepare")),
+    ).toBe(false);
   });
 
   it("renders every role-chain violation from ApiRequestError details without wrapping it", async () => {
@@ -319,6 +342,7 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
       kind: "single_repository",
       repository_id: "repo_physical_c5",
     });
+    // legacy 只读渲染保留：仍显示「单仓 <物理仓>」，不退化为「target 未知」。
     expect(projection).toHaveTextContent("single_repository repo_physical_c5");
     expect(projection.textContent).not.toContain("undefined");
   });
@@ -335,7 +359,7 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
     expect(projection.textContent).not.toContain("undefined");
   });
 
-  it("labels a multi-member logical-codebase target with its member count", async () => {
+  it("target_label_renders_logical_codebase_members", async () => {
     const projection = await renderProjection({
       kind: "logical_codebase_members",
       logical_codebase_id: LC_ID,
@@ -345,6 +369,7 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
         "00000000-0000-0000-0000-000000000003",
       ],
     });
+    // 多成员 LC 的展示身份：逻辑代码库 id + 成员数量（N 个成员）。
     expect(projection).toHaveTextContent(
       `logical_codebase ${LC_ID}[3 个成员]`,
     );
@@ -370,5 +395,52 @@ describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
     expect(projection.textContent).not.toContain("null");
     expect(projection.textContent).not.toContain("[object Object]");
     expect(projection).toHaveTextContent("—");
+  });
+});
+
+// 发起侧载体收窄（方案 A，REQ-ROUTE-C5-TARGET 前端侧）：命令侧（Enable /
+// Rebind payload）的 target 只有逻辑代码库两变体——投影侧第三变体
+// `single_repository` 仅 legacy 只读，守卫把它收敛为 null（不可作载体）。
+// 断言**限定在守卫与命令构造处**（不扫整个组件的字面量——注释与用例名里也
+// 会出现该字样）。
+describe("命令侧载体守卫（automation-reenable）", () => {
+  const LC_ID = "11111111-1111-1111-1111-111111111111";
+
+  it("no_single_repository_in_carrier_commands", () => {
+    // legacy 单仓载体 → null：不得作为命令载体（调用方禁用提交并提示）。
+    expect(
+      carrierTargetFromEnrollmentTarget({
+        kind: "single_repository",
+        repository_id: "repo_physical_c5",
+      }),
+    ).toBeNull();
+
+    // 逻辑代码库两变体原样透传，且**任何情况下都不产出单仓载体**。
+    const carriers = [
+      carrierTargetFromEnrollmentTarget({
+        kind: "logical_codebase",
+        logical_codebase_id: LC_ID,
+        logical_repository_id: "00000000-0000-0000-0000-000000000001",
+      }),
+      carrierTargetFromEnrollmentTarget({
+        kind: "logical_codebase_members",
+        logical_codebase_id: LC_ID,
+        logical_repository_ids: ["00000000-0000-0000-0000-000000000001"],
+      }),
+    ];
+    for (const carrier of carriers) {
+      expect(carrier).not.toBeNull();
+      expect(carrier?.kind).not.toBe("single_repository");
+    }
+    expect(carriers[0]).toEqual({
+      kind: "logical_codebase",
+      logical_codebase_id: LC_ID,
+      logical_repository_id: "00000000-0000-0000-0000-000000000001",
+    });
+    expect(carriers[1]).toEqual({
+      kind: "logical_codebase_members",
+      logical_codebase_id: LC_ID,
+      logical_repository_ids: ["00000000-0000-0000-0000-000000000001"],
+    });
   });
 });

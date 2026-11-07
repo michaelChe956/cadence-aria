@@ -36,8 +36,16 @@ async fn group_initialization_recovers_bind_before_phase_advance_after_restart()
         CodingGroupInitializationPhase::AttemptPersisted
     );
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    // 仓维路由（REQ-COD-03）：Bound 阶段租约在 shared-worktrees/{repository}
+    // 三元键记录；issue 维 legacy 文件在该路由下不存在。
+    let bound_repo = journal
+        .attempt
+        .target_snapshot
+        .as_ref()
+        .expect("journal target snapshot")
+        .logical_repository_id;
     let bound = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", bound_repo)
         .expect("bound shared worktree")
         .expect("bound shared worktree");
     assert_eq!(
@@ -104,8 +112,16 @@ async fn single_does_not_bind_unfinished_group_attempt_before_group_retry() {
         CodingGroupInitializationPhase::AttemptPersisted
     );
     let lifecycle = LifecycleStore::new(app_paths);
+    // 仓维路由（REQ-COD-03）：persist-before-bind 中断的组租约在
+    // shared-worktrees/{repository} 三元键记录。
+    let pending_repo = journal
+        .attempt
+        .target_snapshot
+        .as_ref()
+        .expect("journal target snapshot")
+        .logical_repository_id;
     let pending = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", pending_repo)
         .expect("pending shared worktree")
         .expect("pending shared worktree");
     assert_eq!(
@@ -128,7 +144,7 @@ async fn single_does_not_bind_unfinished_group_attempt_before_group_retry() {
     assert_eq!(single_status, StatusCode::CONFLICT, "{single}");
     assert_eq!(single["code"], "coding_attempt_active");
     let after_single = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", pending_repo)
         .expect("shared worktree after single conflict")
         .expect("shared worktree after single conflict");
     assert_eq!(
@@ -142,7 +158,7 @@ async fn single_does_not_bind_unfinished_group_attempt_before_group_retry() {
     assert_eq!(retry_status, StatusCode::OK, "{retry}");
     assert_eq!(retry["attempt_id"], journal.attempt.id);
     let recovered = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
+        .get_repo_shared_worktree("project_0001", "issue_0001", pending_repo)
         .expect("recovered shared worktree")
         .expect("recovered shared worktree");
     assert_eq!(

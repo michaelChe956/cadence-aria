@@ -40,8 +40,14 @@ async fn multi_repo_attempt_persists_frozen_target_snapshot() {
     );
 }
 
+/// 断言迁移（REQ-COD-02 + REQ-ROUTE-01）：HTTP 创建入口在迁移后的 Logical
+/// 路由下恒冻结 target 快照（`attempt_target_snapshot` 两态：Logical→Some，
+/// FailClosed→Err）。旧用例钉「单仓 legacy 创建 target_snapshot 保持 None」，
+/// 其路由前提（无 manifest/selection 的单仓世界）已随 remove-single-repository-
+/// path 整体消失——无归属/不成对在 routing 层 fail-closed，None 形态经 HTTP
+/// 创建不可达。按 Main 通则②迁移为钉「None 不可达 + 冻结成员身份」。
 #[tokio::test]
-async fn legacy_attempt_target_snapshot_remains_none() {
+async fn migrated_issue_http_create_never_leaves_target_snapshot_none() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let app = build_web_router(WebAppState::new(
@@ -60,10 +66,20 @@ async fn legacy_attempt_target_snapshot_remains_none() {
 
     assert_eq!(status, StatusCode::OK, "response: {created}");
     let attempt_id = assert_global_attempt_id(&created);
-    let persisted = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")))
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let persisted = CodingAttemptStore::new(app_paths.clone())
         .get_attempt("project_0001", "issue_0001", &attempt_id)
         .expect("persisted attempt");
-    assert_eq!(persisted.target_snapshot, None);
+    let snapshot = persisted
+        .target_snapshot
+        .expect("HTTP create on a migrated issue must freeze a target snapshot");
+    let logical_repository_id = LogicalCodebaseStore::new(app_paths)
+        .load_manifest("project_0001")
+        .expect("load logical manifest")
+        .expect("logical manifest")
+        .member_ids[0];
+    assert_eq!(snapshot.logical_repository_id, logical_repository_id);
+    assert_eq!(snapshot.capture_source, "coding_attempt_create");
 }
 
 #[tokio::test]
@@ -98,20 +114,24 @@ async fn multi_repo_work_item_attempt_uses_target_repo_worktree_not_primary() {
     )
     .await;
     assert_eq!(target["repository_id"], "repository_0002");
-    request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues",
-        json!({
-            "title": "多仓工作项",
-            "description": "target 在 repository_0002",
-            "repository_id": "repository_0001"
-        }),
-    )
-    .await;
-
+    // 块3 夹具顺序：issue 经 store 建并携带确定性 legacy 别名 LC 归属（HTTP
+    // 创建要求 LC 权威先在，会把「work item 先建、迁移回填 target」顺序倒过来）。
     // WorkItem 绑定 target 仓；确认 plan 后经迁移获得 target_repository_id。
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id:
+                cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
+            title: "多仓工作项".to_string(),
+            description: Some("target 在 repository_0002".to_string()),
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create issue");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
@@ -429,15 +449,18 @@ async fn seed_logical_fixture_multi_target(app: &axum::Router) {
     let target_two = LogicalRepositoryId(uuid::Uuid::from_u128(2));
     let logical_store = LogicalCodebaseStore::new(app_paths.clone());
     let aggregate_root = app_paths.root().join("aggregate-root");
+    // 迁移后权威 manifest 已在（legacy 别名 lc_id）：保留其身份、仅把成员集
+    // 换成新造的多 target（随机 lc_id 的新 manifest 会被 save_manifest 以
+    // IdentityMismatch 拒绝）。membership_revision 单调 +1 满足校验。
+    let migrated = logical_store
+        .load_manifest("project_0001")
+        .expect("load migrated manifest")
+        .expect("migrated manifest");
+    let mut manifest = migrated.clone();
+    manifest.member_ids = vec![target_one, target_two];
+    manifest.membership_revision = migrated.membership_revision + 1;
     logical_store
-        .save_manifest(
-            "project_0001",
-            &LogicalCodebaseManifest::new(
-                "project_0001",
-                aggregate_root.clone(),
-                vec![target_one, target_two],
-            ),
-        )
+        .save_manifest("project_0001", &manifest)
         .expect("logical manifest");
     for (logical_repository_id, physical_repository_id, alias) in [
         (target_one, "repository_0001", "backend"),
@@ -612,6 +635,11 @@ async fn new_lc_attempt_persists_frozen_target_snapshot_from_lc_subtree() {
     bootstrap_confirmed_work_item(app.clone(), repo.path()).await;
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
 
+    // 迁移已把 repo（repository_0001）的 git 身份登记进 identity registry；
+    // 新 LC 成员必须用独立物理仓——复用 repo.path() 会因同一 git_dir_identity
+    // 双登记被 IdentityRegistryStore 以 IdentityMismatch 拒绝。
+    let member_repo = git_repo();
+
     // 新 LC：权威记录只落在 logical-codebases/{lc_id}/ 子树。
     let record = LogicalCodebaseStore::new(app_paths.clone())
         .create(
@@ -627,7 +655,7 @@ async fn new_lc_attempt_persists_frozen_target_snapshot_from_lc_subtree() {
     let logical_id = LogicalRepositoryId(Uuid::new_v4());
     let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
     let physical_id = format!("repository_{}", Uuid::new_v4().simple());
-    let canonical_path = repo.path().to_path_buf();
+    let canonical_path = member_repo.path().to_path_buf();
     let manifest = LogicalCodebaseManifest::new(
         "project_0001",
         root.path().join("aggregate-root"),
@@ -699,7 +727,7 @@ async fn new_lc_attempt_persists_frozen_target_snapshot_from_lc_subtree() {
     // issue 归属 + selection + work item 目标仓（测试内直接落盘权威记录）。
     let issue_path = app_paths.issue_root("project_0001", "issue_0001").join("issue.json");
     let mut issue: IssueRecord = read_json(&issue_path).expect("read issue");
-    issue.logical_codebase_id = Some(lc_id.clone());
+    issue.logical_codebase_id = lc_id.clone();
     write_json(&issue_path, &issue).expect("write issue attribution");
     IssueCodebaseSelectionStore::for_lc(app_paths.clone(), lc_id.clone())
         .save(&IssueCodebaseSelection::all_members(

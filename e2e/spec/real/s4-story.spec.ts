@@ -63,7 +63,7 @@ async function revalidateCodexCapability(
   workbench: WorkbenchPage,
   page: Page,
 ): Promise<void> {
-  await workbench.expandLogicalCodebasePanel();
+  await workbench.openProviderManagementPanel();
   const card = page.getByTestId("provider-capability-card");
   await expect(card).toBeVisible({ timeout: 30_000 });
   const codex = card.getByTestId("provider-capability-provider-codex");

@@ -15,11 +15,16 @@
 // ============================================================================
 
 fn git_repo_with_feature_branch() -> tempfile::TempDir {
-    let dir = tempdir().expect("repo");
+    // 成员仓落在专属底座内（底座 = 聚合根，见 part_05 的 member_repo_base）。
+    let dir = member_repo_dir();
     run_git(dir.path(), &["init", "-b", "main"]);
     run_git(dir.path(), &["config", "user.email", "aria@example.com"]);
     run_git(dir.path(), &["config", "user.name", "Aria Test"]);
     fs::write(dir.path().join("README.md"), "# repo\n").expect("seed readme");
+    // 成员仓须含可索引源码文件（aggregate_index_member_coverage_failed 布局
+    // 规则：README/JSON/HTML 不算源码；夹具迁移段的 rebuild 先行，缺源码即 422）。
+    fs::create_dir_all(dir.path().join("src")).expect("seed src dir");
+    fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("seed source file");
     run_git(dir.path(), &["add", "."]);
     run_git(dir.path(), &["commit", "-m", "initial"]);
     run_git(dir.path(), &["checkout", "-b", "feature/x"]);
@@ -84,12 +89,26 @@ async fn coding_attempt_forks_from_issue_base_branch_not_current_checkout() {
     assert_eq!(attempt["branch_name"], "aria/issues/issue_0001");
     assert_eq!(attempt["base_branch"], "feature/x");
 
-    // 共享 worktree 登记与 attempt 同基线（fork 契约两面同源）。
+    // 共享 worktree 登记与 attempt 同基线（fork 契约两面同源）。仓维路由
+    // （REQ-COD-03）：迁移后 attempt 冻结 target 快照，worktree 登记在
+    // shared-worktrees/{repository} 三元键记录。
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    let registered = CodingAttemptStore::new(app_paths.clone())
+        .get_attempt(
+            "project_0001",
+            "issue_0001",
+            &assert_global_attempt_id(&attempt),
+        )
+        .expect("stored attempt for repo route");
+    let attempt_repo = registered
+        .target_snapshot
+        .as_ref()
+        .expect("repo-scoped attempt snapshot")
+        .logical_repository_id;
     let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("read shared worktree")
-        .expect("shared worktree registered");
+        .get_repo_shared_worktree("project_0001", "issue_0001", attempt_repo)
+        .expect("read repo shared worktree")
+        .expect("repo shared worktree registered");
     assert_eq!(shared.base_branch, "feature/x");
 
     // 生产 fork 原语（engine execute_worktree_prepare 同款 create_branch）按
@@ -147,12 +166,24 @@ async fn group_coding_attempt_forks_from_issue_base_branch_not_current_checkout(
     assert_eq!(attempt["branch_name"], "aria/issues/issue_0001");
     assert_eq!(attempt["base_branch"], "feature/x");
 
-    // 组入口共享 worktree 登记同基线。
+    // 组入口共享 worktree 登记同基线。仓维路由（REQ-COD-03）：迁移后组
+    // attempt 冻结 target 快照，登记在 shared-worktrees/{repository} 记录。
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    let group_repo = CodingAttemptStore::new(app_paths)
+        .get_attempt(
+            "project_0001",
+            "issue_0001",
+            &assert_global_attempt_id(&attempt),
+        )
+        .expect("stored group attempt for repo route")
+        .target_snapshot
+        .as_ref()
+        .expect("repo-scoped group attempt snapshot")
+        .logical_repository_id;
     let shared = lifecycle
-        .get_issue_shared_worktree("project_0001", "issue_0001")
-        .expect("read shared worktree")
-        .expect("shared worktree registered");
+        .get_repo_shared_worktree("project_0001", "issue_0001", group_repo)
+        .expect("read repo shared worktree")
+        .expect("repo shared worktree registered");
     assert_eq!(shared.base_branch, "feature/x");
 }
 

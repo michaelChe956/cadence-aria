@@ -30,11 +30,15 @@ fn aggregate_init_test_app() -> axum::Router {
 
     let runtime_root = root_path.clone();
     let factory = fake_registry_gateway_factory(ProductAppPaths::new(root_path.join(".aria")));
-    let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(runtime_root))
-        .with_aggregate_initialization_dependencies(build_test_dependencies(
-            root_path,
-            Some(factory),
-        ));
+    let state = with_selector_defaulting_to_claude(
+        WebAppState::new(root_path.clone(), WebRuntime::new_fake(runtime_root)),
+        &root_path,
+        &ProductAppPaths::new(root_path.join(".aria")),
+            )
+    .with_aggregate_initialization_dependencies(build_test_dependencies(
+        root_path,
+        Some(factory),
+    ));
     // Leak the temp dir for the test duration so the manifest stays on disk.
     std::mem::forget(root);
     build_web_router(state)
@@ -367,14 +371,17 @@ async fn aggregate_initialization_provider_turn_launches_through_gateway_factory
     crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
         &paths,
         "project_0001",
-        None,
         &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
     );
 
-    let factory = fake_registry_gateway_factory(paths);
+    let factory = fake_registry_gateway_factory(paths.clone());
     let dependencies = build_test_dependencies(root_path.clone(), Some(factory.clone()));
-    let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
-        .with_aggregate_initialization_dependencies(dependencies.clone());
+    let state = with_selector_defaulting_to_claude(
+        WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone())),
+        &root_path,
+        &paths,
+            )
+    .with_aggregate_initialization_dependencies(dependencies.clone());
     std::mem::forget(root);
     let app = build_web_router(state);
 
@@ -1110,6 +1117,11 @@ async fn event_is_published_after_durable_failure_and_contains_action_context() 
 
 include!("tests_parts/trust_route.inc.rs");
 include!("tests_parts/root_policy_publication.inc.rs");
+include!("tests_parts/root_recipe_zero_change.inc.rs");
 include!("tests_parts/root_safety.inc.rs");
 include!("tests_parts/skip_skills.inc.rs");
 include!("tests_parts/bootstrap_advance.inc.rs");
+include!("tests_parts/selection_failure.inc.rs");
+include!("tests_parts/l2_global_capability.inc.rs");
+include!("tests_parts/resume_legacy_compat.inc.rs");
+include!("tests_parts/selector_seed.inc.rs");

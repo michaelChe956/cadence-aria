@@ -302,11 +302,14 @@ async fn coding_ws_start_coding_waits_at_stage_gate_and_confirm_resumes_runner()
     let gate = wait_for_stage_gate(&mut ws, CodingExecutionStage::Coding).await;
     assert_eq!(gate.kind, CodingGateKind::StageGate);
     assert_eq!(gate.role, Some(CodingProviderRole::Coder));
+    // 断言迁移（REQ-COD-03「LC 权威 + 冻结快照」唯一凭证）：夹具 attempt 已
+    // 迁移为 ClaudeCode 方言（Fake 非网关方言、无法经 gateway validated 启动），
+    // 阶段门快照回声随之锁步——断言语义仍是「门携带 attempt 配置的 coder」。
     assert_eq!(
         gate.provider_snapshot
             .as_ref()
             .map(|snapshot| &snapshot.coder),
-        Some(&ProviderName::Fake)
+        Some(&ProviderName::ClaudeCode)
     );
     assert!(
         store

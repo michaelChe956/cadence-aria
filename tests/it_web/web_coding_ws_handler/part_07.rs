@@ -56,12 +56,13 @@ fn app_with_coding_attempt(
             idempotency_key: "coding-ws-part07-hanging-repository".to_string(),
         })
         .expect("create repository");
+    ensure_legacy_issue_before_lifecycle_writes(&app_paths, &repository.id);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: repository.id,
+            repository_id: repository.id.clone(),
             story_spec_ids: Vec::new(),
             design_spec_ids: Vec::new(),
             title: "实现爬楼梯".to_string(),
@@ -76,6 +77,7 @@ fn app_with_coding_attempt(
             WorkItemPlanStatus::Confirmed,
         )
         .expect("confirm work item");
+    let target_snapshot = migrate_and_freeze_coding_ws_fixture(&app_paths, &repository.id);
     let store = CodingAttemptStore::new(app_paths.clone());
     create_legacy_coding_attempt_fixture(
         &store,
@@ -87,21 +89,24 @@ fn app_with_coding_attempt(
             branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
             worktree_path: Some(repo),
             provider_config_snapshot: ProviderConfigSnapshot {
-                author: ProviderName::Fake,
-                reviewer: Some(ProviderName::Fake),
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
                 review_rounds: 1,
                 permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(target_snapshot),
             max_auto_rework: 2,
         },
     );
 
     let mut registry = ProviderRegistry::new();
-    registry.register(ProviderName::Fake, provider);
-    let router = build_web_router(WebAppState::with_provider_registry(
-        root_path.to_path_buf(),
-        WebRuntime::new_fake(root_path.to_path_buf()),
+    registry.register(
+        ProviderName::ClaudeCode,
+        GatewayDialectStreamingStub::wrapping(provider),
+    );
+    let router = build_web_router(coding_ws_state_with_gateway(
+        root_path,
+        &app_paths,
         registry,
     ));
     (router, store)

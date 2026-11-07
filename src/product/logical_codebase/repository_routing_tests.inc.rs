@@ -13,10 +13,18 @@ mod tests {
     }
 
     #[test]
-    fn none_none_routes_to_legacy() {
-        // (None, None) → Legacy；不读任何文件，纯判定
+    fn classify_none_none_fails_closed_without_legacy_arm() {
+        // REQ-ROUTE-01 两态中枢：(None, None) → FailClosed(TargetMissing)，
+        // 稳定码 repository_routing_target_missing；单仓 Legacy 变体整体移除，
+        // 枚举只剩 Logical / FailClosed 两个变体（不再有第三种形态）。
         let routing = RepositoryRouting::classify(None, None);
-        assert!(matches!(routing, RepositoryRouting::Legacy { .. }));
+        match routing {
+            RepositoryRouting::FailClosed { code, .. } => {
+                assert_eq!(code, RepositoryRoutingErrorCode::TargetMissing);
+                assert_eq!(code.stable_code(), "repository_routing_target_missing");
+            }
+            _ => panic!("(None, None) must fail closed without a legacy arm"),
+        }
     }
 
     #[test]
@@ -52,7 +60,93 @@ mod tests {
     }
 
     #[test]
-    fn resolve_issue_logical_codebase_id_reads_persisted_attribution() {
+    fn authority_resolver_accepts_project_level_legacy_layout() {
+        // 双定（夹具口径）：把 manifest/selection 写在**项目级 legacy 布局**
+        //（`LogicalCodebaseStore::new` / `IssueCodebaseSelectionStore::new`）+
+        // 一条归属 legacy 别名 id 的 issue，就足以让唯一 authority resolver 解析
+        // 成功——不需要另建 `logical-codebases/{lc_id}/` 子树：
+        // `ProjectStore::get` 的幂等 `migrate_legacy` 会按 legacy manifest 生成
+        // 别名 LC record 并复制子树，而 `lc_scope_root` 让
+        // `for_lc(legacy_logical_codebase_id(project))` 与项目级根字节等价。
+        //
+        // 该形态是「生产前 R3 布局 + 夹具」的唯一兼容点；无 manifest/无 selection
+        // 仍一律 FailClosed（见 classify_none_none_fails_closed_without_legacy_arm）。
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path().join(".aria"));
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "legacy-alias".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let manifest = LogicalCodebaseManifest::new(
+            "project_0001",
+            temp.path().join("aggregate-root"),
+            Vec::new(),
+        );
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest)
+            .unwrap();
+        IssueCodebaseSelectionStore::new(paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                "project_0001",
+                "issue_0001",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            ))
+            .unwrap();
+        let legacy_lc_id =
+            crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
+        let issue =
+            crate::product::issue_store::IssueStore::new(paths.clone())
+                .create(crate::product::issue_store::CreateProductIssueInput {
+                    project_id: "project_0001".to_string(),
+                    repo_id: Some("repository_0001".to_string()),
+                    logical_codebase_id: legacy_lc_id.clone(),
+                    title: "legacy alias issue".to_string(),
+                    description: None,
+                    change_id: None,
+                    base_branch: None,
+                })
+                .expect("create legacy alias issue");
+        // selection 用**实际 issue id**（`next_sequential_id_in_directory` 的产物，
+        // 不假定字面量）：routing 的两条入口都必须能在同一 (project, issue) 上成对。
+        IssueCodebaseSelectionStore::new(paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                "project_0001",
+                &issue.id,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            ))
+            .unwrap();
+
+        let resolution = RepositoryAuthorityResolver::new(paths.clone())
+            .resolve_for_issue("project_0001", &issue.id)
+            .expect("legacy alias layout must resolve")
+            .expect("issue has an LC attribution");
+        assert_eq!(
+            resolution.target.logical_codebase_id.as_deref(),
+            Some(legacy_lc_id.as_str())
+        );
+        assert_eq!(
+            resolution.target.canonical_path,
+            manifest.provider_context_root,
+            "无成员解析时锚定聚合根"
+        );
+        assert!(matches!(
+            RepositoryRouting::load_for_issue(&paths, "project_0001", &issue.id).unwrap(),
+            RepositoryRouting::Logical { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_issue_logical_codebase_id_returns_string_for_bound_issue() {
+        // REQ-ROUTE-01：归属解析返回 String（IssueRecord.logical_codebase_id
+        // 必填）；issue 不存在 → NotFound 错误（不是 Ok(None)）。
         let temp = tempfile::tempdir().unwrap();
         let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
         let store = crate::product::issue_store::IssueStore::new(paths.clone());
@@ -60,7 +154,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: Some("logical_codebase_0001".to_string()),
+                logical_codebase_id: "logical_codebase_0001".to_string(),
                 title: "logical issue".to_string(),
                 description: None,
                 change_id: None,
@@ -68,7 +162,13 @@ mod tests {
             })
             .unwrap();
         let lc_id = resolve_issue_logical_codebase_id(&paths, "project_0001", &issue.id).unwrap();
-        assert_eq!(lc_id.as_deref(), Some("logical_codebase_0001"));
+        assert_eq!(lc_id, "logical_codebase_0001");
+        match resolve_issue_logical_codebase_id(&paths, "project_0001", "issue_9999") {
+            Err(crate::product::json_store::ProductStoreError::NotFound { kind, .. }) => {
+                assert_eq!(kind, "issue");
+            }
+            other => panic!("missing issue must surface NotFound, got {other:?}"),
+        }
     }
 
     #[test]
@@ -82,7 +182,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: Some(lc_id.to_string()),
+                logical_codebase_id: lc_id.to_string(),
                 title: "logical issue".to_string(),
                 description: None,
                 change_id: None,
@@ -118,6 +218,42 @@ mod tests {
                 assert_eq!(selection.logical_codebase_id.as_deref(), Some(lc_id));
             }
             _ => panic!("must resolve Logical from lc subtree"),
+        }
+    }
+
+    #[test]
+    fn issue_codebase_stores_scopes_to_lc_subtree() {
+        // REQ-ROUTE-01：issue_codebase_stores 只接受真实 lc_id——manifest/
+        // selection 一律读 for_lc 子树，project 级 store 的 None 回退已删除。
+        // 子树无记录即 (None, None) → FailClosed，绝不回退 project 级布局
+        // （project 根写有 manifest 也不得被读作该 issue 的路由事实）。
+        let temp = tempfile::tempdir().unwrap();
+        let paths = crate::product::app_paths::ProductAppPaths::new(temp.path());
+        let lc_id = "logical_codebase_0001";
+        let store = crate::product::issue_store::IssueStore::new(paths.clone());
+        let issue = store
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: lc_id.to_string(),
+                title: "logical issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+        // project 级（旧根）写一个 manifest：不得成为该 issue 的路由事实。
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest("project_0001", &manifest_fixture())
+            .unwrap();
+        let routing = RepositoryRouting::load_for_issue(&paths, "project_0001", &issue.id).unwrap();
+        match routing {
+            RepositoryRouting::FailClosed { code, .. } => {
+                assert_eq!(code.stable_code(), "repository_routing_target_missing");
+            }
+            RepositoryRouting::Logical { .. } => {
+                panic!("lc subtree scoping must fail closed, got Logical")
+            }
         }
     }
 
@@ -256,7 +392,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: None,
-                logical_codebase_id: Some(lc_a.id.clone()),
+                logical_codebase_id: lc_a.id.clone(),
                 title: "alpha issue".to_string(),
                 description: None,
                 change_id: None,
@@ -422,7 +558,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: None,
-                logical_codebase_id: Some(lc.id.clone()),
+                logical_codebase_id: lc.id.clone(),
                 title: "policy read issue".to_string(),
                 description: None,
                 change_id: None,
@@ -597,7 +733,7 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: project_id.clone(),
                 repo_id: None,
-                logical_codebase_id: Some(lc.id.clone()),
+                logical_codebase_id: lc.id.clone(),
                 title: "gamma issue".to_string(),
                 description: None,
                 change_id: None,

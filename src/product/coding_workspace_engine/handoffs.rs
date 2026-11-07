@@ -173,12 +173,6 @@ impl CodingWorkspaceEngine {
                 self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
                 let lifecycle = LifecycleStore::new(self.store.paths());
                 match self.route_issue_shared_worktree(&current)? {
-                    IssueSharedWorktreeRoute::Legacy => lifecycle
-                        .get_issue_shared_worktree(project_id, issue_id)?
-                        .and_then(|shared| shared.current_active_work_item_id)
-                        .unwrap_or_else(|| {
-                            self.active_work_item_id_for_attempt(&current).to_string()
-                        }),
                     IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
                         .get_repo_shared_worktree(project_id, issue_id, repository_id)?
                         .and_then(|shared| shared.current_active_work_item_id)
@@ -376,10 +370,21 @@ impl CodingWorkspaceEngine {
 
         let lifecycle = LifecycleStore::new(self.store.paths());
         let active_work_item_id = match scope {
-            CodingAttemptScope::WorkItemGroup => lifecycle
-                .get_issue_shared_worktree(project_id, issue_id)?
-                .and_then(|shared| shared.current_active_work_item_id)
-                .unwrap_or(attempt_work_item_id),
+            CodingAttemptScope::WorkItemGroup => {
+                // 两态化后 group attempt 的 worktree 事实只在仓维:active
+                // 指针必须从 route 解析出的仓维记录读,与下方
+                // `ensure_issue_shared_worktree_clean` 的 route 口径对齐
+                // (同函数内两个分支不得各用一个维度)。此前读 issue 维
+                // 记录恒缺失,active 回退到 attempt 自身指针,使 clean
+                // 检查因 active 不匹配被跳过,失败收尾把他人/已转移的锁
+                // 一并释放。
+                match self.route_issue_shared_worktree(&updated)? {
+                    IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
+                        .get_repo_shared_worktree(project_id, issue_id, repository_id)?
+                        .and_then(|shared| shared.current_active_work_item_id)
+                        .unwrap_or(attempt_work_item_id),
+                }
+            }
             CodingAttemptScope::WorkItem => attempt_work_item_id,
         };
         if let Err(error) = self
@@ -438,9 +443,6 @@ impl CodingWorkspaceEngine {
                     self.validate_attempt_issue_shared_worktree_owner_if_present(&current)?;
                     let shared_active_work_item_id =
                         match self.route_issue_shared_worktree(&current)? {
-                            IssueSharedWorktreeRoute::Legacy => lifecycle
-                                .get_issue_shared_worktree(project_id, issue_id)?
-                                .and_then(|shared| shared.current_active_work_item_id),
                             IssueSharedWorktreeRoute::Repository { repository_id } => lifecycle
                                 .get_repo_shared_worktree(project_id, issue_id, repository_id)?
                                 .and_then(|shared| shared.current_active_work_item_id),
@@ -776,7 +778,7 @@ mod termination_finalize_tests {
     use crate::product::coding_attempt_store::{
         CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
     };
-    use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
+    use crate::product::lifecycle_store::LifecycleStore;
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
     const PROJECT_ID: &str = "project_0001";
@@ -805,11 +807,11 @@ mod termination_finalize_tests {
         CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
     }
 
-    /// 红测现场：WorkItem scope attempt + issue 级 shared worktree（Legacy
-    /// 路由，`target_snapshot=None`），与生产单仓终止现场同构。刻意不用
-    /// group attempt：group 非终态收口会触发 plan projection bundle 深链
-    /// （`coding_group_attempt_incomplete`），与本两例要验证的 clean 门/
-    /// 关门语义无关；WorkItem + issue 级 worktree 走同一
+    /// 红测现场：WorkItem scope attempt + **仓维** shared worktree（LC 快照
+    /// 路由，`target_snapshot=Some(..)`），与生产逻辑仓终止现场同构。
+    /// 刻意不用 group attempt：group 非终态收口会触发 plan projection
+    /// bundle 深链（`coding_group_attempt_incomplete`），与本两例要验证的
+    /// clean 门/关门语义无关；WorkItem + 仓维 worktree 走同一
     /// `ensure_issue_shared_worktree_clean` 门，复现同一对照红锚。
     fn terminated_work_item_attempt_with_dirty_issue_worktree() -> (
         tempfile::TempDir,
@@ -821,6 +823,16 @@ mod termination_finalize_tests {
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let store = CodingAttemptStore::new(paths.clone());
+        // REQ-ROUTE-01 两态化：worktree 事实/租约只按仓维路由（issue 维记录
+        // 对有快照 attempt 判 `legacy_shared_worktree_present`），准入凭证是
+        // 「LC 权威 + 冻结快照」；handle_abort 的 issue 归属解析还要求 issue
+        // 记录在场（`seed_complete` 先建 issue 再建权威，顺序不可颠倒）。
+        let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+            &paths,
+            root.path(),
+            PROJECT_ID,
+            ISSUE_ID,
+        );
         let attempt = store
             .create_attempt(CreateCodingAttemptInput {
                 project_id: PROJECT_ID.to_string(),
@@ -830,7 +842,7 @@ mod termination_finalize_tests {
                 branch_name: "aria/issues/issue_0001".to_string(),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
-                target_snapshot: None,
+                target_snapshot: Some(logical.snapshot(&store.paths())),
                 max_auto_rework: 1,
             })
             .unwrap();
@@ -847,21 +859,25 @@ mod termination_finalize_tests {
         let dirty_file = worktree_root.join("dirty.txt");
         std::fs::write(&dirty_file, "dirty\n").unwrap();
         let lifecycle = LifecycleStore::new(paths.clone());
-        lifecycle
-            .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
-                project_id: PROJECT_ID.to_string(),
-                issue_id: ISSUE_ID.to_string(),
-                repository_id: "repository_0001".to_string(),
-                branch_name: attempt.branch_name.clone(),
-                worktree_path: worktree_root,
-                base_branch: attempt.base_branch.clone(),
-            })
+        // 仓维 shared worktree 记录 + 以 attempt 为 owner 的仓维锁（与生产
+        // acquire+bind 语义等价，少一次 lease 中转）。
+        crate::product::logical_codebase::logical_test_fixture::upsert_repo_worktree(
+            &lifecycle,
+            PROJECT_ID,
+            ISSUE_ID,
+            logical.member_id,
+            &worktree_root,
+        );
+        let lease = lifecycle
+            .try_acquire_repo_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                logical.member_id,
+                "work_item_0001",
+                &attempt.id,
+            )
             .unwrap();
-        // 一步获取锁并直接以 attempt 为 owner（与生产 acquire+bind 语义
-        // 等价，少一次 lease 中转）。
-        lifecycle
-            .try_acquire_issue_worktree_lock(PROJECT_ID, ISSUE_ID, "work_item_0001", &attempt.id)
-            .unwrap();
+        assert!(lease.acquired, "fixture must hold the repo worktree lock");
         (root, paths, store, attempt, dirty_file)
     }
 

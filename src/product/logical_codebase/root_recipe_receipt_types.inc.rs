@@ -39,9 +39,15 @@ pub const ROOT_RECIPE_ALLOWLIST: &[&str] = &[
 /// 差异不得制造伪漂移）。
 pub const ROOT_RULE_ENTRY_FILE: &str = "AGENTS.md";
 
-/// Task 1.5 carry → Task 3.4：全量递归快照的规模预算（条目/字节上限）。
-/// 超限 fail-closed 报错——绝不静默截断观测面，也绝不让 receipt 体积随
-/// root 规模无界增长；预算内的审计语义与无预算时完全一致。
+/// Task 1.5 carry → Task 3.4：快照规模的预算（条目/字节上限）。超限
+/// fail-closed 报错——绝不静默截断观测面，也绝不让 receipt 体积随 root
+/// 规模无界增长；预算内的审计语义与无预算时完全一致。
+///
+/// **口径（REQ-AUD-01，2026-11-03 块2）**：预算计的是**本次变更量**，不是
+/// 整仓存量——两遍扫描只记元数据，差分出变更清单后，`entries` 与 `bytes`
+/// **都只对进入变更清单的路径**计；未变化路径与 `.git` 子树（整棵跳过，
+/// REQ-AUD-02）一律不计。存量体量不再压垮预检（未被忽略的构建产物再多，
+/// 窗口内零改动即零计费）。
 ///
 /// 默认值钉定依据 Task 3.4 大 LC 实测（36 成员 fixture：1776 条目/
 /// 1.02 MiB），按 ≥10× 条目/≥60× 字节余量取整：数十成员 LC 及其常规
@@ -49,11 +55,12 @@ pub const ROOT_RULE_ENTRY_FILE: &str = "AGENTS.md";
 /// 即被阻断（见验收报告 2026-10-01_验收报告_LC根初始化大LC与写边界）。
 /// Bug2（2026-10-16）：预算只对 gitignore 观测面生效——被 `.gitignore`
 /// （含嵌套成员仓）与 `.git/info/exclude` 忽略的路径不计条目/字节。
+/// **数值不变**（20 000 条目 / 64 MiB）——口径变了，阈值没变。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RootRecipeSnapshotBudget {
-    /// 快照条目（目录/文件/symlink）总数上限。
+    /// 变更清单条目（目录/文件/symlink）总数上限。
     pub max_entries: usize,
-    /// 快照累计读取字节上限（仅按被哈希的文件内容计）。
+    /// 变更清单累计读取字节上限（仅按被哈希的文件内容计）。
     pub max_bytes: u64,
 }
 
@@ -102,6 +109,11 @@ impl RootRecipeSnapshotEntryKind {
 
 /// canonical root 下一个路径的快照事实：canonical 相对路径（正斜杠）、
 /// 类型、内容 digest（文件）或链接目标（symlink）。
+///
+/// **新快照不再填内容摘要**（REQ-AUD-01，2026-11-03 块2）：两遍扫描只记
+/// 元数据，内容哈希只对**变更清单**里的文件计算并落在
+/// [`RootRecipeObservedChange::after_digest`]。本字段保留（旧 receipt 仍
+/// 带内容摘要，反序列化必须继续成功）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootRecipeSnapshotEntry {
     pub path: String,
@@ -152,6 +164,10 @@ pub enum RootRecipeChangeClass {
 }
 
 /// 单个变更的完整证据：路径、前后 digest、链接目标与分类。
+///
+/// **口径（REQ-AUD-01，2026-11-03 块2）**：元数据差分法只对变更清单里的
+/// 文件读「现在」的内容 → `after_digest` 有值（新增/修改的文件），
+/// `before_digest` 恒为 `None`（读旧内容就得读完整个仓，等于退回旧口径）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootRecipeObservedChange {
     pub path: String,
@@ -181,6 +197,10 @@ pub enum RootRecipeCommandVerdict {
 
 /// `before_command` 返回的命令观察句柄：冻结 operation/root/step/command
 /// 与 before 快照，`after_command` 消费它产出 receipt。
+///
+/// `before_meta` 是第一遍全量扫描的**元数据**（路径 + 大小 + mtime）——
+/// 第二遍扫描后与它差分出变更清单（REQ-AUD-01）。它不落盘（watch 不
+/// 序列化），只在审计窗口内传递。
 #[derive(Debug, Clone)]
 pub struct RootRecipeCommandWatch {
     pub operation_id: String,
@@ -189,6 +209,7 @@ pub struct RootRecipeCommandWatch {
     pub command_index: usize,
     pub command: String,
     pub before: RootRecipeFilesystemSnapshot,
+    pub before_meta: Vec<SnapshotMeta>,
 }
 
 /// 单条 root recipe 命令的审计事实。拒绝也产出 receipt（verdict=

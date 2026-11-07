@@ -142,7 +142,7 @@ describe("ChatCockpitPage", () => {
     const inbox = screen.getByTestId("cockpit-inbox");
     expect(within(inbox).getByText("需要人工确认")).toBeInTheDocument();
     expect(within(inbox).getByText(/复验发现新问题/)).toBeInTheDocument();
-    expect(within(inbox).getByText(/剩余修复轮次 1/)).toBeInTheDocument();
+    expect(within(inbox).getByText(/人工返修还可做 1 次/)).toBeInTheDocument();
   });
 
   it("renders one observed gate through inbox and action card", () => {

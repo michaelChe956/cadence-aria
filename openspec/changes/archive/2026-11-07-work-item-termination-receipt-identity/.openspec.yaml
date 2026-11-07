@@ -1,0 +1,15 @@
+schema: spec-driven
+created: 2026-11-06
+goal: 补上「终止回执的身份限定」——终止回执与终止横幅必须按 plan/binding 身份限定，enrollment 换代后旧回执立即失效，不得叠加到新一代界面
+x-tracker-status: draft
+x-owner-decisions:
+  - id: receipt-identity-gap
+    decided: 2026-11-06
+    decision: 终止回执必须绑定 plan 身份（plan_id / binding_version），enrollment 换代（supersede）后旧回执失效；回执缺身份时 fail-closed 不展示
+    reason: owner 真机复现「终止 → 删除 work item → 新建 ⇒ 新 work item 显示旧的『自动化已终止』横幅」，被误读为『卡住不动』；审计（2026-11-06）判定这是【设计缺口】——全部 specs 与两份 11-03 归档 delta 检索「终止回执/横幅」零命中，条款不存在本身即缺口；后端三处（deletion.rs 终止保留 tombstone / gate.rs 按 plan_id 比对 / store 无 delete 接口）逐条比对均忠于设计
+    consequence: 不改动 REQ-WIGA-09（终止后删除流程零副作用）与 dangling-reference-governance 的「销账 MUST NOT 删除 enrollment 记录」条款；tombstone 语义保持
+  - id: no-physical-enrollment-delete
+    decided: 2026-11-06
+    decision: 不走「删除时物理删 enrollment」路线
+    reason: 与 dangling-reference-governance/spec.md:527「MUST NOT 删除 enrollment 记录」正面冲突；且后端已证不泄漏（磁盘零命中、terminated_at 已清、已换绑新 plan/session）
+    consequence: 修法只落在回执/展示层（前端 3 文件 + 测试）

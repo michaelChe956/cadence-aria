@@ -32,7 +32,8 @@ fn anchor_t17_prompt_fixture() -> (
         id: "issue_0001".to_string(),
         project_id: "project_0001".to_string(),
         repo_id: None,
-        logical_codebase_id: None,
+        logical_codebase_id:
+            crate::product::logical_codebase::legacy_logical_codebase_id("project_0001"),
         title: "Test Issue".to_string(),
         description: None,
         change_id: "change_0001".to_string(),

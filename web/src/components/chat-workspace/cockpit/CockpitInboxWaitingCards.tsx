@@ -79,13 +79,38 @@ export function AutomationTerminationEntryButton({
   );
 }
 
+/**
+ * 2026-11-06 陈旧回执修复：终止回执是否属于当前 plan——渲染「自动化已终止」
+ * 横幅前的展示门（两页共用）。fail-closed：回执缺 planId（旧响应/旧缓存/
+ * 回放）或当前 plan 身份不可得（旧帧/读取失败）均判不属于（不展示横幅），
+ * 宁可少显示不可错显示。终止语义本体不变（全部仓库停止、已产出文件保留、
+ * cleanup_required 管理员介入说明），只是不再跨 plan/work item 复用回执。
+ */
+export function terminationReceiptBelongsToCurrentPlan(
+  receipt: { planId: string | null } | null,
+  currentPlanId: string | null | undefined,
+): boolean {
+  if (receipt === null || receipt.planId === null || receipt.planId === "") {
+    return false;
+  }
+  if (currentPlanId === null || currentPlanId === undefined || currentPlanId === "") {
+    return false;
+  }
+  return receipt.planId === currentPlanId;
+}
+
 /** 终止态呈现（terminated_at＋不可逆说明）；视觉与 P5 托管卡同源
  *（琥珀指引底，`stopped-managed-hint` 同族）。 */
 export function AutomationTerminatedBanner({
   terminatedAt,
+  voidedAt = null,
   outcome = null,
 }: {
   terminatedAt: string;
+  /** REQ-WIGA-VOID-01：非空＝该登记已随工作项组删除作废——横幅优先呈现
+   * 作废事实（作废优先），终止时间作为并存的独立维度如实保留；缺省
+   * null 时终止文案逐字不变。 */
+  voidedAt?: string | null;
   outcome?: string | null;
 }) {
   return (
@@ -94,9 +119,21 @@ export function AutomationTerminatedBanner({
       role="status"
       className="flex shrink-0 flex-wrap items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-4 text-amber-900"
     >
-      <span className="font-semibold">自动化已终止</span>
-      <span className="font-mono">{terminatedAt}</span>
-      <span>本计划全部仓库已停止，不可继续；已产出文件保留。</span>
+      {voidedAt === null ? (
+        <>
+          <span className="font-semibold">自动化已终止</span>
+          <span className="font-mono">{terminatedAt}</span>
+          <span>本计划全部仓库已停止，不可继续；已产出文件保留。</span>
+        </>
+      ) : (
+        <>
+          <span className="font-semibold">自动化登记已随工作项组删除作废</span>
+          <span className="font-mono">{voidedAt}</span>
+          <span>
+            原自动化已于 {terminatedAt} 终止；重新开启即可自由选择 provider。
+          </span>
+        </>
+      )}
       {outcome === "cleanup_required" ? (
         // k3 波5 F2（P3）：如实说明需管理员介入——前端无重试入口，且
         // terminate 每次重读 expected_policy_revision（终止后已 +1），真
@@ -170,6 +207,9 @@ export function AutomationTerminationConfirmSurface() {
       setResult({
         projectId: request.projectId,
         issueId: request.issueId,
+        // 2026-11-06 陈旧回执修复：回执带上 plan 身份（响应本就含 plan_id），
+        // 供展示守卫与当前 plan 比对；缺省 null 由消费方 fail-closed。
+        planId: response.plan_id ?? null,
         terminatedAt: response.terminated_at,
         outcome: response.outcome,
       });

@@ -22,8 +22,7 @@ use crate::protocol::contracts::AdapterInput;
 use crate::web::coding_ws_handler::{
     should_resume_runner_after_gate_response, spawn_coding_runner_reserved,
 };
-use crate::web::runtime::WebRuntime;
-use crate::web::state::{CodingAttemptRunKey, WebAppState};
+use crate::web::state::CodingAttemptRunKey;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProviderStreamMode {
@@ -158,6 +157,46 @@ impl StreamingProviderAdapter for RecoveryReviewerProvider {
             })
             .expect("queue legacy provider completion");
         Ok(chunk_rx)
+    }
+
+    /// REQ-ROUTE-01 两态化后，带冻结快照的 attempt 的 provider **只能**经
+    /// LC gateway 启动 ⇒ 启动面是 `start_validated`（裸 `start` 与 legacy
+    /// `run_streaming` 回退对逻辑 target 已被强制关闭：逻辑 target 的
+    /// `allow_legacy_stream_fallback` 恒 false，legacy 面不再可达）。
+    /// validated 面按 mode 走各自的产物面：modern 面与裸 `start` 同路径；
+    /// legacy 面沿用 legacy `run_streaming` 的产物与 ProviderStart 故障注入点
+    /// （chunk 流折成 validated 会话事件，输出正文逐字不变）。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        match self.mode {
+            ProviderStreamMode::Modern => self.start(input, cancel).await,
+            ProviderStreamMode::Legacy => {
+                self.poison_provider_start_event();
+                let output = recovered_reviewer_plan_defect_output();
+                let (event_tx, event_rx) = mpsc::channel(2);
+                event_tx
+                    .try_send(ProviderEvent::TextDelta {
+                        content: output.clone(),
+                    })
+                    .expect("queue legacy provider text");
+                event_tx
+                    .try_send(ProviderEvent::Completed(ProviderCompletion::plain(
+                        output,
+                        Some("provider-start-recovery-legacy".to_string()),
+                    )))
+                    .expect("queue legacy provider completion");
+                let (command_tx, _command_rx) = mpsc::channel(2);
+                Ok(ProviderSession {
+                    native_session_id: None,
+                    events: event_rx,
+                    commands: command_tx,
+                })
+            }
+        }
     }
 }
 
@@ -371,12 +410,9 @@ async fn run_recovered_reviewer(
 ) {
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, provider);
-    let mut state = WebAppState::new(
-        fixture._tmp.path().to_path_buf(),
-        WebRuntime::new_fake(fixture._tmp.path().to_path_buf()),
-    );
-    state.provider_registry = Arc::new(registry);
-    state.test_provider_enabled = true;
+    // runner 路径的 provider 只能经 LC gateway 启动 ⇒ registry 与 gateway
+    // factory 必须同源（见 `support::runner_state_with_provider`）。
+    let state = super::support::runner_state_with_provider(fixture._tmp.path(), registry);
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     let reservation = state
         .coding_runs

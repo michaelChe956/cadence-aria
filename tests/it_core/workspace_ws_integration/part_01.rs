@@ -1,7 +1,12 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::claude_code_provider::ClaudeCodeProvider;
-use cadence_aria::cross_cutting::provider_adapter::ProviderAdapterError;
+use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
+use cadence_aria::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use cadence_aria::cross_cutting::provider_availability_gate::ProviderHealthSource;
+use cadence_aria::cross_cutting::provider_health::{
+    ProviderHealthEntry, ProviderHealthSnapshot,
+};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
 use cadence_aria::cross_cutting::streaming_provider::{
     ProviderStatus,
@@ -10,11 +15,25 @@ use cadence_aria::cross_cutting::streaming_provider::{
     StreamingProviderAdapter, StreamingProviderInput,
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
+use cadence_aria::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN;
+use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+use cadence_aria::product::logical_codebase::LogicalCodebaseStore;
+use cadence_aria::product::logical_codebase::IdentityMigrationExecutor;
+use cadence_aria::product::logical_codebase::policy::{
+    ProviderDialect, ProviderWireDialect, SessionPolicyAction,
+};
+use cadence_aria::product::logical_codebase::provider_capability_store::{
+    CapabilityEvidence, ProviderActionCapability, ProviderActionMatrix, ProviderCapabilityRecord,
+    ProviderCapabilityStore, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+};
+use cadence_aria::product::logical_codebase::provider_gateway::{ProviderRefType, ResumeEvidenceState};
+use cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::product::models::{AgentRole, NodeDetail, ProviderSnapshot};
-use cadence_aria::protocol::contracts::{AdapterInput};
+use cadence_aria::protocol::contracts::{AdapterInput, AdapterOutput, TimeoutStatus};
 use cadence_aria::web::app::build_web_router;
+use cadence_aria::web::gateway_factory::LogicalCodebaseGatewayFactory;
 use cadence_aria::web::runtime::WebRuntime;
 use cadence_aria::web::state::WebAppState;
 use cadence_aria::web::test_controls::TestControls;
@@ -103,19 +122,25 @@ async fn workspace_ws_replaces_legacy_context_with_generation_brief() {
 #[tokio::test]
 async fn workspace_ws_runs_provider_from_repository_path() {
     let root = tempdir().expect("root");
-    let repo = create_workspace_session_fixture(&root).await;
+    // 块3 后 LC 会话必经 gateway：Fake 不被 gateway 支持（设计如此），替身
+    // 改挂 ClaudeCode 名 + start_validated 从 launch_view 复刻 working_dir
+    // 观察点（族C/族D 已验证手法）。
+    let repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let observed_working_dir = Arc::new(Mutex::new(None));
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(WorkingDirRecordingStreamingProvider {
             observed_working_dir: observed_working_dir.clone(),
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");

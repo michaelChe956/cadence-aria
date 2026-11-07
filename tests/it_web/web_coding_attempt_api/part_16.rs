@@ -30,19 +30,17 @@ async fn logical_group_create_manifest_without_selection_is_fail_closed_4xx() {
         WebRuntime::new_fake(root.path().to_path_buf()),
     ));
     bootstrap_confirmed_work_item_plan_group(app.clone(), repo.path()).await;
-    // 叠加 manifest 但故意不写 selection → (Some, None)
+    // 构造 (Some, None)：迁移后的权威 manifest 已在（legacy 别名 lc_id），保留
+    // 它、删除迁移回填的 selection 记录。旧写法（随机 lc_id 的新 manifest 覆盖）
+    // 在迁移后会被 save_manifest 以 IdentityMismatch 拒绝，且从未构造出
+    // (Some, None) 路由状态。
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
-    let aggregate_root = app_paths.root().join("aggregate-root");
-    LogicalCodebaseStore::new(app_paths)
-        .save_manifest(
-            "project_0001",
-            &LogicalCodebaseManifest::new(
-                "project_0001",
-                aggregate_root,
-                vec![LogicalRepositoryId(uuid::Uuid::from_u128(1))],
-            ),
-        )
-        .expect("manifest without selection");
+    fs::remove_file(
+        app_paths
+            .issue_root("project_0001", "issue_0001")
+            .join("codebase-selection.json"),
+    )
+    .expect("remove migrated selection to model manifest-without-selection");
 
     let (status, body) = request_json(
         app,

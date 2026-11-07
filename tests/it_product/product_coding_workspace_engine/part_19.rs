@@ -15,10 +15,20 @@ async fn rejected_push_with_verified_missing_remote_ref_records_failed_review_re
         &repo,
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(create_input())
-        .expect("create attempt");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）：push / review request 链的准入凭证是
+    // 「LC 权威 + 冻结 target_snapshot」——无归属的 attempt 在 admission 上
+    // fail-closed（`target_snapshot_identity_drifted`），测不到 push 事实本体。
+    let authority = crate::context_builder::seed_logical_authority(
+        &paths,
+        "project_0001",
+        "issue_0001",
+        root.path(),
+    );
+    let store = CodingAttemptStore::new(paths.clone());
+    let mut input = create_input();
+    input.target_snapshot = Some(authority.snapshot(&paths));
+    let attempt = store.create_attempt(input).expect("create attempt");
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let started = engine
@@ -140,10 +150,20 @@ async fn nonzero_push_with_authoritatively_updated_remote_records_pushed_review_
         probe_remote.status.success(),
         "nonzero client exit must still update the remote ref"
     );
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(create_input())
-        .expect("create attempt");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）：push / review request 链的准入凭证是
+    // 「LC 权威 + 冻结 target_snapshot」——无归属的 attempt 在 admission 上
+    // fail-closed（`target_snapshot_identity_drifted`），测不到 push 事实本体。
+    let authority = crate::context_builder::seed_logical_authority(
+        &paths,
+        "project_0001",
+        "issue_0001",
+        root.path(),
+    );
+    let store = CodingAttemptStore::new(paths.clone());
+    let mut input = create_input();
+    input.target_snapshot = Some(authority.snapshot(&paths));
+    let attempt = store.create_attempt(input).expect("create attempt");
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let started = engine
@@ -201,10 +221,20 @@ async fn ambiguous_push_with_initial_old_ref_converges_after_remote_updates_late
         &repo,
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-    let attempt = store
-        .create_attempt(create_input())
-        .expect("create attempt");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化（去单仓入口）：push / review request 链的准入凭证是
+    // 「LC 权威 + 冻结 target_snapshot」——无归属的 attempt 在 admission 上
+    // fail-closed（`target_snapshot_identity_drifted`），测不到 push 事实本体。
+    let authority = crate::context_builder::seed_logical_authority(
+        &paths,
+        "project_0001",
+        "issue_0001",
+        root.path(),
+    );
+    let store = CodingAttemptStore::new(paths.clone());
+    let mut input = create_input();
+    input.target_snapshot = Some(authority.snapshot(&paths));
+    let attempt = store.create_attempt(input).expect("create attempt");
     let (tx, mut rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     let started = engine

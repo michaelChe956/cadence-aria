@@ -162,7 +162,7 @@ impl super::CodingAttemptStore {
 
             let repository_name = self.resolve_plan_target_repository_name(
                 project_id,
-                issue.logical_codebase_id.as_deref(),
+                Some(issue.logical_codebase_id.as_str()),
                 *target,
             )?;
             entries.push(PlanTargetEntry {

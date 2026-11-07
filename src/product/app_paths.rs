@@ -39,6 +39,13 @@ impl ProductAppPaths {
         self.root.join("state")
     }
 
+    /// provider capability 记录的**机器级唯一作用域**（REQ-PCR-07）：
+    /// 能力是本机 provider CLI 的事实 ⇒ 整机一份记录，与项目/逻辑代码库无关。
+    /// 记录文件 `capabilities.json` 与探针证据 `evidence/` 同落此根下。
+    pub fn provider_capabilities_root(&self) -> PathBuf {
+        self.root.join("provider-capabilities")
+    }
+
     pub fn last_project_path(&self) -> PathBuf {
         self.state_root().join("last-project.json")
     }
@@ -197,6 +204,22 @@ impl ProductAppPaths {
         self.issue_root(project_id, issue_id)
             .join("planning-context-snapshot.json")
     }
+
+    /// v1.3/块2 片7A：provider / codegraph 安装能力的 durable 分区
+    ///（异步作业 JSON 与 24h 版本缓存；状态根下全局唯一，不随项目走）。
+    pub fn provider_installation_root(&self) -> PathBuf {
+        self.state_root().join("provider-installation")
+    }
+
+    pub fn provider_installation_job_path(&self, job_id: &str) -> PathBuf {
+        self.provider_installation_root()
+            .join("jobs")
+            .join(format!("{job_id}.json"))
+    }
+
+    pub fn provider_version_cache_path(&self) -> PathBuf {
+        self.provider_installation_root().join("version-cache.json")
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +306,35 @@ mod tests {
             std::path::PathBuf::from(
                 "/tmp/aria/projects/project_0001/logical-codebase/.provider-trust.lock"
             )
+        );
+    }
+
+    /// 块2 片7A：安装作业/版本缓存落在状态根下的全局分区。
+    #[test]
+    fn provider_installation_paths_are_state_scoped() {
+        let paths = ProductAppPaths::new("/tmp/aria");
+        assert_eq!(
+            paths.provider_installation_root(),
+            std::path::PathBuf::from("/tmp/aria/state/provider-installation")
+        );
+        assert_eq!(
+            paths.provider_installation_job_path("job-0001"),
+            std::path::PathBuf::from("/tmp/aria/state/provider-installation/jobs/job-0001.json")
+        );
+        assert_eq!(
+            paths.provider_version_cache_path(),
+            std::path::PathBuf::from("/tmp/aria/state/provider-installation/version-cache.json")
+        );
+    }
+
+    /// REQ-PCR-07：provider capability 记录落**机器级**根（不按项目/逻辑代码库
+    /// 分叉）。
+    #[test]
+    fn provider_capability_paths_are_machine_scoped() {
+        let paths = ProductAppPaths::new("/tmp/aria");
+        assert_eq!(
+            paths.provider_capabilities_root(),
+            std::path::PathBuf::from("/tmp/aria/provider-capabilities")
         );
     }
 }

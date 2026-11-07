@@ -1,0 +1,15 @@
+schema: spec-driven
+created: 2026-11-05
+goal: 让 Kimi Code 也能承担聚合初始化准备阶段（root recipe）—— 当前它在 LC 策略会话启动层就拒绝该角色，是「root recipe 对 provider 无关」契约的唯一缺口
+x-tracker-status: draft
+x-owner-decisions:
+  - id: kimi-deferred
+    decided: 2026-11-05
+    decision: Kimi 暂时不支持聚合初始化准备阶段；先把这个问题记录在案，后续另开 change 解决
+    reason: owner 明确「暂时不支持」；本 change 先记录事实与方案，不在当前批次实施
+    consequence: `root-recipe-provider-agnostic` 的 REQ-BOOT-15 增补 Kimi 例外；provider 优先级顺序同时调整为 Pi > Claude Code > Codex（去掉 Kimi）
+  - id: kimi-approach-a
+    decided: 2026-11-05
+    decision: 后续实施走「方案 a」：marker 通道放行 + 宿主侧授权等价表达
+    reason: Kimi 的 CLI 没有「禁用内置写工具」的物理开关（四层核实：argv / ACP wire / config / 官方文档），只能走它已有的受信岗位授权（TrustedDutyGrant）通道；放行后的隔离强度与「Pi 无黑名单的 Coding 会话」同级，不弱于已被接受的现状，真实兜底是 receipt/filesystem auditor（对四家同等生效）
+    consequence: 最小改动约 4~5 个文件（见 design.md）

@@ -41,6 +41,8 @@ impl AggregateInitializationCoordinator {
             clock,
             trust: None,
             policy: None,
+            environment_probe: None,
+            skills_home: None,
         }
     }
 
@@ -89,6 +91,8 @@ impl AggregateInitializationCoordinator {
             clock: Arc::clone(&self.clock),
             trust: self.trust.clone(),
             policy: self.policy.clone(),
+            environment_probe: self.environment_probe.clone(),
+            skills_home: self.skills_home.clone(),
         }
     }
 
@@ -107,7 +111,7 @@ impl AggregateInitializationCoordinator {
         project_id: &str,
         input: AggregateInitializationOperationInput,
     ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
-        self.begin_with(operation_id, project_id, input, false)
+        self.begin_with(operation_id, project_id, input, None, false)
     }
 
     /// owner 2026-10-29：「重新初始化（聚合）」入口——创建期冻结「强制跑
@@ -119,7 +123,7 @@ impl AggregateInitializationCoordinator {
         project_id: &str,
         input: AggregateInitializationOperationInput,
     ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
-        self.begin_with(operation_id, project_id, input, true)
+        self.begin_with(operation_id, project_id, input, None, true)
     }
 
     fn begin_with(
@@ -127,6 +131,7 @@ impl AggregateInitializationCoordinator {
         operation_id: String,
         project_id: &str,
         input: AggregateInitializationOperationInput,
+        selection: Option<AggregateProviderSelection>,
         full_recipe_requested: bool,
     ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
         validate_relative_id(project_id).map_err(|error| {
@@ -147,7 +152,8 @@ impl AggregateInitializationCoordinator {
             input,
             (self.clock)(),
         )
-        .with_full_recipe_requested(full_recipe_requested);
+        .with_full_recipe_requested(full_recipe_requested)
+        .with_provider_selection(selection);
         self.operations
             .create_idempotent(operation)
             .map_err(AggregateInitializationError::from)
@@ -329,6 +335,32 @@ impl AggregateInitializationCoordinator {
                 .is_some_and(|step| step.status == AggregateInitializationStepStatus::Completed)
         };
 
+        // codegraph 环境前置（REQ-BOOT-09）：在任何确定性步骤之前探测一次。
+        // 失败以 `step: None` 落 Failed —— 所有 step 保持 Pending，`pre_check`
+        // 从未启动（因此不存在 `aggregate_pre_check_failed`），索引构建也不
+        // 触发（handler 只在 `execute` 返回 Ok 后 spawn）。
+        let codegraph_version = match self.environment_probe.as_ref() {
+            Some(probe) => match probe.ensure_codegraph() {
+                Ok(version) => version,
+                Err(error) => {
+                    tracing::warn!(
+                        project_id,
+                        operation_id,
+                        error = %error,
+                        "aggregate initialization failed during the codegraph environment probe"
+                    );
+                    return Err(self.persist_execution_failure(
+                        project_id,
+                        operation_id,
+                        None,
+                        error,
+                    ));
+                }
+            },
+            // 未装配探针的依赖图不探测，也不伪造版本（快照记 available=false）。
+            None => String::new(),
+        };
+
         // machine_skills: deterministic, never a provider turn.
         if !step_completed(AggregateInitializationStepKind::MachineSkills)
             && let Err(error) = self
@@ -352,7 +384,28 @@ impl AggregateInitializationCoordinator {
             return self.fail_interrupted(project_id, operation_id);
         }
 
-        // aggregate_preflight: deterministic, never a provider turn. 续跑时
+        // machine_skills 成功后校验四条命令的链接层：machine_skills 是确定性
+        // 代码、不跑 provider，缺链接层**绝不能**归因为「provider 未登录」。
+        if let Some(home) = self.skills_home.as_deref()
+            && let Err(error) =
+                crate::product::logical_codebase::environment_probe::ensure_skills_commands_linked(
+                    home,
+                )
+        {
+            tracing::warn!(
+                project_id,
+                operation_id,
+                error = %error,
+                "aggregate initialization failed during the skills link-layer check"
+            );
+            return Err(self.persist_execution_failure(
+                project_id,
+                operation_id,
+                None,
+                error,
+            ));
+        }
+
         // 直接复用 durable checkpoint 的 member projections 快照。
         let preflight = if step_completed(AggregateInitializationStepKind::AggregatePreflight) {
             match self.load_persisted_preflight(operation_id) {
@@ -379,7 +432,13 @@ impl AggregateInitializationCoordinator {
                 }
             }
         } else {
-            match self.run_aggregate_preflight(project_id, operation_id, &manifest, cancellation) {
+            match self.run_aggregate_preflight(
+                project_id,
+                operation_id,
+                &manifest,
+                &codegraph_version,
+                cancellation,
+            ) {
                 Ok(preflight) => preflight,
                 Err(error) => {
                     tracing::warn!(
@@ -762,6 +821,7 @@ impl AggregateInitializationCoordinator {
         project_id: &str,
         operation_id: &str,
         manifest: &LogicalCodebaseManifest,
+        codegraph_version: &str,
         cancellation: &CancellationToken,
     ) -> Result<AggregatePreflightSnapshot, AggregateInitializationError> {
         let step = AggregateInitializationStepKind::AggregatePreflight;
@@ -772,7 +832,10 @@ impl AggregateInitializationCoordinator {
             &format!("manifest:{}", manifest.membership_revision),
         );
         self.start_step(project_id, operation_id, step, &input_digest)?;
-        let snapshot = self.preflight.inspect(project_id, manifest, cancellation)?;
+        let snapshot = self
+            .preflight
+            .inspect(project_id, manifest, cancellation)?
+            .with_codegraph_evidence(codegraph_version);
         let output_ref = self.preflight_output_ref(operation_id);
         self.checkpoint_output(project_id, operation_id, step, output_ref)?;
         self.persist_preflight(operation_id, &snapshot)?;
@@ -788,6 +851,10 @@ impl AggregateInitializationCoordinator {
         preflight: &AggregatePreflightSnapshot,
         cancellation: &CancellationToken,
     ) -> Result<(), AggregateInitializationError> {
+        // 片4（REQ-BOOT-07「重试不换人」）：provider 只从 durable 记录解出
+        // （未知串与 Fake fail-closed，绝不回落默认 provider），选择器永不
+        // 在 execute/retry 路径重跑；start_step 之前解码即 fail-closed。
+        let provider = self.frozen_provider(project_id, operation_id, step)?;
         let input_digest = self.input_digest(project_id, operation_id, step, "provider:v1");
         self.start_step(project_id, operation_id, step, &input_digest)?;
         // Task 1.4（REQ-BOOT-04）：root recipe 的每个 provider turn 都在自举
@@ -848,6 +915,7 @@ impl AggregateInitializationCoordinator {
                 lc_id: self.lc_id.as_deref(),
                 bootstrap,
                 cancellation: cancellation_token,
+                provider: &provider,
             })
             .await
         {

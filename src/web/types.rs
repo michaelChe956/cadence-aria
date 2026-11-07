@@ -359,8 +359,8 @@ pub use repository_initialization::{
 mod aggregate_initialization;
 pub use aggregate_initialization::{
     AggregateCancellationDto, AggregateInitializationOperationDto, AggregateInitializationStepDto,
-    AggregateMemberProjectionDto, CancelAggregateInitializationRequest,
-    CreateAggregateInitializationRequest,
+    AggregateMemberProjectionDto, AggregateProviderCandidateDto, AggregateProviderSelectionDto,
+    CancelAggregateInitializationRequest, CreateAggregateInitializationRequest,
 };
 
 mod logical_codebase;
@@ -378,9 +378,9 @@ pub use logical_codebase_registration::{
 mod logical_codebase_bootstrap;
 pub use logical_codebase_bootstrap::{
     BootstrapActionRequestDto, BootstrapActionResultDto, BootstrapAdvanceResultDto,
-    BootstrapCheckpointDto, BootstrapFailureDto, BootstrapPolicyReferenceDto,
-    BootstrapStepProjectionDto, LogicalCodebaseBootstrapNoticeDto,
-    LogicalCodebaseBootstrapProjectionDto,
+    BootstrapAdvanceStopDto, BootstrapCheckpointDto, BootstrapFailureDto,
+    BootstrapPolicyReferenceDto, BootstrapStepProjectionDto, FailureCopyDto,
+    LogicalCodebaseBootstrapNoticeDto, LogicalCodebaseBootstrapProjectionDto,
 };
 
 mod identity_repair;
@@ -465,9 +465,9 @@ pub struct CreateProductIssueRequest {
     /// main→master 解析，皆无且未指定即 422。逻辑代码库 issue 忽略本字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
-    /// v1.3：逻辑代码库归属；Some 时创建逻辑 issue（repository_id 须为其 active primary）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logical_codebase_id: Option<String>,
+    /// 逻辑代码库归属（REQ-ROUTE-01）：必填——单仓创建入口已删除；
+    /// repository_id 须为其 active primary。
+    pub logical_codebase_id: String,
     /// REQ-MRE-01：LC 成员勾选集（logical_repository_id 复数）。非空 → selection 以
     /// Explicit 策略落盘（include=focus=勾选集，授权上界=勾选集原样）；缺省/空 →
     /// 维持存量 AllMembers（存量兼容）。仅逻辑代码库 issue 消费本字段。

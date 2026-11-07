@@ -648,6 +648,15 @@ async fn start_attempt_enters_running_through_admission_ticket() {
         .trim()
         .to_string();
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    // REQ-ROUTE-01 两态化：`start_attempt` 的准入凭证是「LC 权威 + 冻结
+    // target_snapshot」——无快照/无归属一律 `FailClosed(TargetMissing)`，
+    // 这里补完整 LC（含 issue 记录）让签票路径真正被执行。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &store.paths(),
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -663,12 +672,28 @@ async fn start_attempt_enters_running_through_admission_ticket() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     seed_group_attempt_fixture(&store, &attempt, true, false);
+    // 单仓语义在 LC 模型下 = 全部 work item 归属唯一成员仓:
+    // `validate_group_single_target` 对 Logical 路由要求每个权威 draft 都带
+    // 与 attempt 快照一致的 `target_repository_id`,共享夹具写入的 draft 仍是
+    // 无归属形态,这里按同一不变量补齐(不改变任何断言事实)。
+    let plan_store = WorkItemPlanStore::new(store.paths());
+    for mut draft in plan_store
+        .list_draft_records("project_0001", "issue_0001", "work_item_plan_0001")
+        .expect("fixture draft records")
+    {
+        if draft.candidate.target_repository_id.is_none() {
+            draft.candidate.target_repository_id = Some(logical.member_id);
+            plan_store
+                .put_draft_record(&draft)
+                .expect("fixture draft target");
+        }
+    }
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -865,19 +890,20 @@ fn running_attempt_with_worktree() -> (
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree dir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    // complete 路径新增的落盘判定会读 issue 聚合（T3），fixture 补齐 issue 记录。
-    IssueStore::new(paths.clone())
-        .create(CreateProductIssueInput {
-            project_id: "project_0001".to_string(),
-            repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
-            title: "issue".to_string(),
-            description: None,
-            change_id: None,
-            base_branch: None,
-        })
-        .expect("issue");
+    // REQ-ROUTE-01 两态化（去单仓入口）：admission / 租约 / 完成链的唯一凭证是
+    // 「LC 权威 + 冻结 target_snapshot」。无快照的 attempt 在
+    // `gates::route_issue_shared_worktree` 与
+    // `run_exclusion::classify_worktree_lease_for_attempt` 里**无条件** fail-closed
+    //（与 routing 是 Logical 还是 FailClosed 无关），故夹具必须建完整 LC
+    //（manifest + member + checkout + selection + issue）并派生快照。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        "project_0001",
+        "issue_0001",
+    );
     let store = CodingAttemptStore::new(paths);
+    let target_snapshot = Some(logical.snapshot(&store.paths()));
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: "project_0001".to_string(),
@@ -892,7 +918,7 @@ fn running_attempt_with_worktree() -> (
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot,
             max_auto_rework: 2,
         })
         .expect("create attempt");
@@ -984,7 +1010,9 @@ fn delivery_fixture() -> (tempfile::TempDir, CodingAttemptStore, CodingWorkspace
         .create(CreateProductIssueInput {
             project_id: DELIVERY_PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                DELIVERY_PROJECT_ID,
+            ),
             title: "issue".to_string(),
             description: None,
             change_id: None,

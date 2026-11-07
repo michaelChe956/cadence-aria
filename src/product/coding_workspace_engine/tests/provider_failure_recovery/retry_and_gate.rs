@@ -6,14 +6,22 @@ async fn coder_retries_once_then_succeeds_with_two_auditable_runs() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TransportFailuresThenSuccessProvider::new(1, "coder retry completed");
+    let provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
+        1,
+        "coder retry completed",
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let completed = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext {
                 work_item_markdown: Some("# Retry work item\n\nKeep the full context.".to_string()),
                 verification_commands: vec!["cargo test --locked --lib retry".to_string()],
@@ -82,16 +90,23 @@ async fn reviewer_three_transport_failures_open_one_human_gate_after_third_run()
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TransportFailuresThenSuccessProvider::new(usize::MAX, "unused")
-        .with_first_failure_worktree_update(
-            worktree.join("reviewed.rs"),
-            "pub fn reviewed_after_retry() {}\n",
-        );
+    let provider = std::sync::Arc::new(
+        TransportFailuresThenSuccessProvider::new(usize::MAX, "unused")
+            .with_first_failure_worktree_update(
+                worktree.join("reviewed.rs"),
+                "pub fn reviewed_after_retry() {}\n",
+            ),
+    );
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("the third transport failure opens the existing reviewer gate");
 
@@ -207,15 +222,20 @@ async fn reviewer_retries_once_then_succeeds_with_two_auditable_runs() {
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = TransportFailuresThenSuccessProvider::new(
+    let provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
         1,
         r#"{"verdict":"approve","summary":"retry review completed","findings":[]}"#,
+    ));
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
     );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect("second fresh reviewer invocation succeeds");
 
@@ -480,23 +500,32 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
     fs::write(shared_worktree.join("dirty.txt"), "uncommitted\n").expect("dirty worktree");
 
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01：有冻结快照的 attempt 只按仓维分类租约/路由。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        PROJECT_ID,
+        ISSUE_ID,
+    );
     let lifecycle = LifecycleStore::new(paths.clone());
+    let repository_id = logical.member_id;
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
-            repository_id: "repository_0001".to_string(),
+            repository_id,
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: shared_worktree.clone(),
             base_branch: "HEAD".to_string(),
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             PROJECT_ID,
             ISSUE_ID,
+            repository_id,
             WORK_ITEM_ID,
-            "issue_worktree_lease_provider_failure",
+            "repo_worktree_lease_provider_failure",
         )
         .expect("shared worktree lock");
 
@@ -516,13 +545,19 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
             start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         })
         .expect("group attempt");
     lifecycle
-        .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, &attempt.id)
+        .bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            repository_id,
+            WORK_ITEM_ID,
+            &attempt.id,
+        )
         .expect("bind shared worktree lock");
     let active_unit = store
         .create_coding_unit(CreateCodingExecutionUnitInput {
@@ -653,7 +688,7 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
     assert_eq!(persisted_unit.status, CodingExecutionUnitStatus::Running);
 
     let shared = lifecycle
-        .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, repository_id)
         .expect("load shared worktree")
         .expect("shared worktree exists");
     assert_eq!(
@@ -744,7 +779,15 @@ async fn code_review_provider_failure_blocks_attempt_without_cleaning_shared_wor
 async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
     let root = tempdir().expect("tempdir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // 先播种 LC 权威（issue id 依赖 issues/ 目录序），再建 work item 与仓维锁。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        PROJECT_ID,
+        ISSUE_ID,
+    );
     let lifecycle = LifecycleStore::new(paths.clone());
+    let repository_id = logical.member_id;
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some(WORK_ITEM_ID.to_string()),
@@ -757,17 +800,23 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
         })
         .expect("work item");
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
-            repository_id: "repository_0001".to_string(),
+            repository_id,
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: root.path().join("shared-worktree"),
             base_branch: "HEAD".to_string(),
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, "coding_attempt_other")
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            repository_id,
+            WORK_ITEM_ID,
+            "coding_attempt_other",
+        )
         .expect("conflicting owner lock");
 
     let store = CodingAttemptStore::new(paths);
@@ -785,7 +834,7 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -820,7 +869,7 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
         .list_work_items(PROJECT_ID, ISSUE_ID)
         .expect("work items before");
     let lease_before = lifecycle
-        .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, repository_id)
         .expect("lease before")
         .expect("lease before");
     let (tx, mut rx) = mpsc::channel(8);
@@ -834,7 +883,7 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
     assert!(matches!(
         error,
         CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
-            kind: "issue_worktree_lock_owner",
+            kind: "repo_worktree_lock_owner",
             ..
         })
     ));
@@ -858,7 +907,7 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
     );
     assert_eq!(
         lifecycle
-            .get_issue_shared_worktree(PROJECT_ID, ISSUE_ID)
+            .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, repository_id)
             .expect("lease after")
             .expect("lease after"),
         lease_before
@@ -869,7 +918,16 @@ async fn provider_failure_owner_conflict_is_zero_write_at_production_entry() {
 #[tokio::test]
 async fn abort_during_provider_failure_prewrite_pause_is_stable() {
     let root = tempdir().expect("tempdir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01：fail_provider_stream 的入口校验按路由读租约；有快照
+    // 的 attempt 必须先播种 LC 权威，否则 route 先于暂停点 fail-closed。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        PROJECT_ID,
+        ISSUE_ID,
+    );
+    let store = CodingAttemptStore::new(paths);
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             project_id: PROJECT_ID.to_string(),
@@ -884,7 +942,7 @@ async fn abort_during_provider_failure_prewrite_pause_is_stable() {
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("attempt");
@@ -997,201 +1055,5 @@ async fn abort_during_provider_failure_prewrite_pause_is_stable() {
     );
 }
 
-#[tokio::test]
-async fn internal_review_blocked_gates_use_triage_actions_without_coder_rework() {
-    for reason_code in [
-        "group_final_review_blocked",
-        "internal_review_blocked",
-        "internal_review_change_requested",
-        "internal_review_verification_incomplete",
-        "internal_review_human_triage",
-        "internal_review_operational_blocker",
-    ] {
-        let root = tempdir().expect("tempdir");
-        let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
-        let attempt = store
-            .create_attempt(CreateCodingAttemptInput {
-                project_id: PROJECT_ID.to_string(),
-                issue_id: ISSUE_ID.to_string(),
-                work_item_id: WORK_ITEM_ID.to_string(),
-                base_branch: "HEAD".to_string(),
-                branch_name: "aria/issues/issue_0001".to_string(),
-                worktree_path: None,
-                provider_config_snapshot: ProviderConfigSnapshot {
-                    author: ProviderName::Codex,
-                    reviewer: Some(ProviderName::ClaudeCode),
-                    review_rounds: 1,
-                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
-                    ),
-                },
-                target_snapshot: None,
-                max_auto_rework: 2,
-            })
-            .expect("attempt");
-        let attempt = store
-            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
-            .expect("running attempt");
-        let attempt = store
-            .update_attempt_stage(
-                PROJECT_ID,
-                ISSUE_ID,
-                &attempt.id,
-                CodingExecutionStage::InternalPrReview,
-            )
-            .expect("internal review stage");
-        let (tx, _rx) = mpsc::channel(8);
-        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-
-        engine
-            .create_review_blocked_gate(ReviewBlockedGateInput {
-                attempt: &attempt,
-                node_id: "coding_node_0010",
-                stage: CodingExecutionStage::InternalPrReview,
-                role: CodingProviderRole::InternalReviewer,
-                title: "Internal PR review blocked".to_string(),
-                description: "review interrupted".to_string(),
-                reason_code,
-                evidence_refs: Vec::new(),
-                raw_provider_output_ref: None,
-            })
-            .await
-            .expect("internal review blocked gate");
-
-        let persisted = store
-            .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
-            .expect("blocked attempt");
-        assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
-        let gate = store
-            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &attempt.id)
-            .expect("open gates")
-            .into_iter()
-            .next()
-            .expect("internal review gate");
-        assert_eq!(gate.reason_code.as_deref(), Some(reason_code));
-        assert_eq!(
-            gate.available_actions
-                .iter()
-                .map(|action| action.action_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["retry_internal_review", "manual_continue", "abort"]
-        );
-        assert_eq!(gate.available_actions[0].label, "重试 Internal Review");
-    }
-}
-
-#[tokio::test]
-async fn retry_coding_gate_clears_latest_coder_provider_conversation() {
-    let (_root, store, attempt) = running_attempt_with_worktree();
-    let mut role_provider_config = store
-        .get_role_provider_config_snapshot(&attempt.project_id, &attempt.issue_id, &attempt.id)
-        .expect("role provider config");
-    role_provider_config.coder = ProviderName::ClaudeCode;
-    store
-        .update_role_provider_config_snapshot(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            role_provider_config,
-        )
-        .expect("update role provider config");
-    let attempt = store
-        .replace_attempt_provider_conversations(
-            &attempt,
-            vec![
-                ProviderConversationRef {
-                    role: ProviderConversationRole::Coder,
-                    provider: ProviderName::Codex,
-                    provider_session_id: "old-codex-coder-thread".to_string(),
-                    updated_at: "2026-07-13T00:00:00Z".to_string(),
-                    last_node_id: Some("coding_node_0001".to_string()),
-                },
-                ProviderConversationRef {
-                    role: ProviderConversationRole::Coder,
-                    provider: ProviderName::ClaudeCode,
-                    provider_session_id: "latest-claude-coder-thread".to_string(),
-                    updated_at: "2026-07-13T00:00:01Z".to_string(),
-                    last_node_id: Some("coding_node_0002".to_string()),
-                },
-                ProviderConversationRef {
-                    role: ProviderConversationRole::CodeReviewer,
-                    provider: ProviderName::ClaudeCode,
-                    provider_session_id: "review-thread".to_string(),
-                    updated_at: "2026-07-13T00:00:02Z".to_string(),
-                    last_node_id: Some("coding_node_0003".to_string()),
-                },
-            ],
-        )
-        .expect("seed provider conversations");
-    let attempt = store
-        .update_attempt_stage(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingExecutionStage::Coding,
-        )
-        .expect("coding stage");
-    let attempt = store
-        .update_attempt_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            CodingAttemptStatus::Blocked,
-        )
-        .expect("blocked attempt");
-    let gate = store
-        .create_blocked_gate(
-            &attempt,
-            CreateBlockedGateInput {
-                attempt_id: attempt.id.clone(),
-                stage: CodingExecutionStage::Coding,
-                node_id: Some("coding_node_0002".to_string()),
-                role: Some(CodingProviderRole::Coder),
-                title: "Coder 执行中断".to_string(),
-                description: "provider interrupted".to_string(),
-                reason_code: Some("coder_provider_interrupted".to_string()),
-                evidence_refs: Vec::new(),
-                raw_provider_output_ref: None,
-                available_actions: vec![
-                    coding_gate_action_for_id("retry_coding").expect("retry coding action"),
-                    coding_gate_action_for_id("abort").expect("abort action"),
-                ],
-            },
-        )
-        .expect("coder recovery gate");
-    let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-
-    let resumed = engine
-        .handle_blocked_gate_response(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &gate.gate_id,
-            "retry_coding",
-            None,
-        )
-        .await
-        .expect("retry coding gate response");
-
-    assert_eq!(resumed.status, CodingAttemptStatus::Running);
-    assert_eq!(resumed.stage, CodingExecutionStage::Coding);
-    assert!(resumed.provider_conversations.iter().any(|conversation| {
-        conversation.role == ProviderConversationRole::Coder
-            && conversation.provider == ProviderName::Codex
-            && conversation.provider_session_id == "old-codex-coder-thread"
-    }));
-    assert!(resumed.provider_conversations.iter().all(|conversation| {
-        !(conversation.role == ProviderConversationRole::Coder
-            && conversation.provider == ProviderName::ClaudeCode)
-    }));
-    assert!(resumed.provider_conversations.iter().any(|conversation| {
-        conversation.role == ProviderConversationRole::CodeReviewer
-            && conversation.provider_session_id == "review-thread"
-    }));
-    assert!(
-        store
-            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("resolved gate")
-            .is_empty()
-    );
-}
+// retry_and_gate 拆分（large_file_guard 1200 行上限）：两个门禁用例族经 include! 挂载，与本文档同一模块作用域，测试路径与行为零变化（纯移动）。
+include!("blocked_gate_recovery.rs");

@@ -303,8 +303,9 @@ describe("cockpit generation status identity and boundaries", () => {
   });
 
   it.each([
-    ["completed", "生成完成"],
-    ["skipped", "生成已跳过"],
+  ["completed", "生成完成"],
+  ["skipped", "生成已跳过"],
+  ["aborted", "生成已中止"],
   ] as const)(
     "reports a %s timeline node over the stale starting prefix (F-04)",
     (nodeStatus, label) => {
@@ -331,6 +332,30 @@ describe("cockpit generation status identity and boundaries", () => {
       expect(status).toHaveTextContent("已用 4:51");
     },
   );
+
+  it("reports an aborted timeline node as 生成已中止 without falling back to skipped (F-04)", () => {
+    const workspaceWs = mockWorkspaceWs();
+    useWorkspaceStore.setState({
+      providerStatus: "starting",
+      stage: "prepare_context",
+      activeNodeId: "author-1",
+      timelineNodes: [
+        timelineNode({
+          node_id: "author-1",
+          status: "aborted",
+          started_at: new Date("2026-09-18T06:29:01Z").toISOString(),
+          completed_at: new Date("2026-09-18T06:33:52Z").toISOString(),
+        }),
+      ],
+    });
+
+    renderCockpitWith(workspaceWs);
+
+    const status = screen.getByTestId("cockpit-generation-status");
+    expect(status).toHaveTextContent("生成已中止");
+    expect(status).not.toHaveTextContent("生成已跳过");
+    expect(status).not.toHaveTextContent("生成失败");
+  });
   // #4：会话完成（stage=completed/session confirmed）后引擎落「流程完成」标记
   // 节点（completed_at/duration_ms 均空）——状态行与执行流行都不得再随墙钟计时。
   it("freezes every visible timer once the session completes (#4)", () => {

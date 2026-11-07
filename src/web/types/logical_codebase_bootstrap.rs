@@ -19,6 +19,32 @@ pub struct BootstrapCheckpointDto {
     pub completed_at: Option<String>,
 }
 
+/// 失败面三段成品（REQ-BOOT-08 / REQ-LAYOUT-02）的 HTTP 形态。
+///
+/// 五字段与 `product::logical_codebase::failure_copy::FailureCopy` 一一对应，
+/// **全部必填非 null**：`reason_zh` 不是 `Option`，前端不得把缺失当降级路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FailureCopyDto {
+    pub title_zh: String,
+    pub reason_zh: String,
+    pub action_zh: String,
+    pub triage: String,
+    pub machine_line: String,
+}
+
+impl From<&crate::product::logical_codebase::failure_copy::FailureCopy> for FailureCopyDto {
+    fn from(copy: &crate::product::logical_codebase::failure_copy::FailureCopy) -> Self {
+        Self {
+            title_zh: copy.title_zh.clone(),
+            reason_zh: copy.reason_zh.clone(),
+            action_zh: copy.action_zh.clone(),
+            triage: copy.triage.as_str().to_string(),
+            machine_line: copy.machine_line.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BootstrapFailureDto {
@@ -26,6 +52,10 @@ pub struct BootstrapFailureDto {
     pub detail: String,
     pub retryable: bool,
     pub external_side_effect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<FailureCopyDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +83,21 @@ pub struct LogicalCodebaseBootstrapNoticeDto {
     pub created_at: String,
 }
 
+/// A（REQ-REG-10）：最近一次 advance/手动「准备」的可解释停止。仅当被停
+/// 步骤仍 `not_started` 时出现；`reason_code` 与 failure_copy 同码表
+/// （provider 选择门/信任门/配方终态等各有稳定码），`detail` 是已脱敏的
+/// 原始拒绝上下文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BootstrapAdvanceStopDto {
+    pub step: String,
+    pub reason: String,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub stopped_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct LogicalCodebaseBootstrapProjectionDto {
@@ -64,6 +109,8 @@ pub struct LogicalCodebaseBootstrapProjectionDto {
     pub steps: Vec<BootstrapStepProjectionDto>,
     pub planning_ready: bool,
     pub notices: Vec<LogicalCodebaseBootstrapNoticeDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advance_stop: Option<BootstrapAdvanceStopDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +166,9 @@ impl From<&Projection> for LogicalCodebaseBootstrapProjectionDto {
                         detail: failure.detail.clone(),
                         retryable: failure.retryable,
                         external_side_effect: failure.external_side_effect.clone(),
+                        triage: failure.triage.clone(),
+                        // 纯搬运：后端已渲染好，前端不再自拼文案。
+                        copy: failure.copy.as_ref().map(FailureCopyDto::from),
                     }),
                     allowed_actions: step
                         .allowed_actions
@@ -127,6 +177,15 @@ impl From<&Projection> for LogicalCodebaseBootstrapProjectionDto {
                         .collect(),
                 })
                 .collect(),
+            advance_stop: projection.advance_stop.as_ref().map(|stop| {
+                BootstrapAdvanceStopDto {
+                    step: stop.step.as_str().to_string(),
+                    reason: stop.reason.clone(),
+                    reason_code: stop.reason_code.clone(),
+                    detail: stop.detail.clone(),
+                    stopped_at: stop.stopped_at.clone(),
+                }
+            }),
             planning_ready: projection.planning_ready,
             notices: projection
                 .notices
@@ -213,6 +272,10 @@ pub struct BootstrapAdvanceResultDto {
     pub stopped_step: Option<String>,
     /// 停住步骤的稳定原因码（来自既有投影 failure 或推进器自身稳定码）。
     pub stopped_reason_code: Option<String>,
+    /// 停住步骤的可读上下文（已脱敏；等待人工停止时携带，如根配方启动链
+    /// 被拒的具体原因——provider 选择门/信任门各自的可区分原因）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_detail: Option<String>,
     pub projection: LogicalCodebaseBootstrapProjectionDto,
 }
 
@@ -229,6 +292,7 @@ impl From<&crate::product::logical_codebase::BootstrapAdvanceResult> for Bootstr
             stopped_reason: result.stopped.reason().to_string(),
             stopped_step: result.stopped.step().map(|step| step.as_str().to_string()),
             stopped_reason_code: result.stopped.reason_code().map(str::to_string),
+            stopped_detail: result.stopped.detail().map(str::to_string),
             projection: LogicalCodebaseBootstrapProjectionDto::from(&result.projection),
         }
     }

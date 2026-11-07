@@ -463,10 +463,7 @@ impl ProviderRef {
     /// (错误信息含稳定判别码 `PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH` 与
     /// provider 名)。🔴 禁止 `_ => claude_code` 之类的静默回退:用户配置的
     /// provider 不允许被悄悄换成 Claude 或其它 provider 启动。match 保持无
-    /// `_` 分支的穷举形态——未来新增 `ProviderName` 变体时编译期即强制补
-    /// 显式映射决策。Codex 的 danger-full-access 路由阻断(REQ-ENV-05)由
-    /// gateway 路由级硬门施加,与本映射正交——Codex 配置=显式阻断错误而非
-    /// 被改成 Claude。
+    /// `_` 分支的穷举形态——未来新增 `ProviderName` 变体时编译期即强制补显式映射决策。
     pub fn from_provider_name(
         provider: &ProviderName,
         capability_snapshot_ref: impl Into<String>,
@@ -2978,10 +2975,6 @@ pub const PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED: &str =
 pub const PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED: &str =
     "provider_capability_write_boundary_not_confirmed";
 
-/// root-recipe 相位仅接受固定 Claude recipe provider 的稳定判别码。
-pub const PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE: &str =
-    "root_recipe_requires_fixed_claude_provider";
-
 /// root-recipe 凭据对 durable Running operation 重核验失败时的稳定判别码。
 pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED: &str =
     "root_recipe_credential_recheck_denied";
@@ -2989,9 +2982,6 @@ pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED: &str =
 /// source 未携带 durable 重核验通道(无 paths/lc scope)时的稳定判别码。
 pub const PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE: &str =
     "root_recipe_credential_recheck_unavailable";
-
-/// 已交付 recipe evidence 钉定版本与当前记录版本漂移时的稳定判别码。
-pub const PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT: &str = "root_recipe_evidence_version_drift";
 
 /// 把 gateway 校验错误映射为 admission waiting 事实(与 preflight `check`
 /// 的映射同型;early verdict 只读,不产生 store 错误面)。

@@ -17,6 +17,7 @@ use crate::product::models::{
 };
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
+mod admission_ready_fixture;
 mod advance_attempt_isolation;
 mod attempt_creation_concurrency;
 mod coding_start_claim;
@@ -67,6 +68,13 @@ fn setup() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
         })
         .unwrap();
     (tmp, store, attempt)
+}
+
+/// admission 就绪夹具（project + LC 权威 + 冻结快照）：REQ-ROUTE-01 两态化后
+/// admission 的唯一凭证是「LC 权威 + 冻结快照」，[`setup`]（无任何归属）只
+/// 适合不触达 admission/routing 的用例。
+fn setup_admission_ready() -> (TempDir, CodingAttemptStore, CodingExecutionAttempt) {
+    admission_ready_fixture::setup_admission_ready()
 }
 
 #[test]
@@ -197,7 +205,7 @@ fn update_attempt_non_status_fields_preserves_status_and_frozen_admission_fields
 
 #[test]
 fn status_machine_rejects_direct_blocked_to_running_and_manual_recovery_only_to_abort() {
-    let (_tmp, store, attempt) = setup();
+    let (_tmp, store, attempt) = setup_admission_ready();
     let running = store
         .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("start attempt");
@@ -392,18 +400,20 @@ fn provider_run_rejected_when_running_attempt_lacks_admission_marker() {
 }
 
 #[test]
-fn provider_run_allowed_after_admission_transition_for_legacy_attempt() {
-    // Legacy attempt（无 target_snapshot）经 admit→transition 进入 Running 后，
-    // ensure_provider_run_allowed 必须放行；admission marker 是 provider run 的前置条件。
-    let (_tmp, store, attempt) = setup();
-    assert!(attempt.target_snapshot.is_none());
+fn provider_run_allowed_after_admission_transition_for_logical_attempt() {
+    // 逻辑代码库 attempt（带冻结 target_snapshot）经 admit→transition 进入
+    // Running 后，ensure_provider_run_allowed 必须放行；admission marker 是
+    // provider run 的前置条件。原「无快照的 legacy attempt 也能准入」断言随
+    // 单仓入口删除（REQ-ROUTE-01 两态）作废：无归属现在一律 fail-closed。
+    let (_tmp, store, attempt) = setup_admission_ready();
+    assert!(attempt.target_snapshot.is_some());
     let running = store
         .admit_and_transition_attempt_to_executable(
             &attempt.project_id,
             &attempt.issue_id,
             &attempt.id,
         )
-        .expect("legacy admission via legacy digest path");
+        .expect("logical admission via frozen target snapshot");
     assert_eq!(running.status, CodingAttemptStatus::Running);
     assert!(running.admission_ticket_consumed_at.is_some());
     let allowed = store
@@ -429,7 +439,7 @@ fn leaving_running_clears_admission_marker_on_every_controlled_exit() {
         CodingAttemptStatus::Aborted,
     ];
     for target in targets {
-        let (_tmp, store, attempt) = setup();
+        let (_tmp, store, attempt) = setup_admission_ready();
         let running = store
             .admit_and_transition_attempt_to_executable(
                 &attempt.project_id,

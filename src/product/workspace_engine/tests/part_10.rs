@@ -1026,7 +1026,7 @@ fn work_item_plan_review_reports_invalid_outline_reference() {
     session.workspace_type = WorkspaceType::WorkItemPlan;
     session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
         outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
-            outline: test_work_item_plan_outline(Vec::new()),
+            outline: test_work_item_plan_outline(Vec::new(), None),
             design_context_gaps: Vec::new(),
             validator_findings: Vec::new(),
             context_blockers: Vec::new(),

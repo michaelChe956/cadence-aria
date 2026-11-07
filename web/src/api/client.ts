@@ -32,7 +32,6 @@ import type {
   RepositoryRegistrationErrorDetails,
   RepositoryDeletionReceipt,
   RepositoryInitializationOperationSnapshot,
-  RepositoryBranchListResponse,
   RepositoryListResponse,
   RetryFailedScRunStatus,
   TakeoverResponse,
@@ -322,9 +321,15 @@ export function createProject(payload: {
   });
 }
 
-export function deleteProject(projectId: string): Promise<{ status: string }> {
+export function deleteProject(
+  projectId: string,
+  options?: DeleteLifecycleEntityOptions,
+): Promise<{ status: string }> {
+  // 2026-11-05 真机事故回归：项目删除必须携带显式确认意图（后端 409
+  // deletion_confirmation_required 强制）；默认 URL 无 query，与级联删除
+  // D2.3 同式——仅确认弹窗同意后显式 confirmed=true。
   return requestJson<{ status: string }>(
-    `/api/projects/${encodeURIComponent(projectId)}`,
+    `/api/projects/${encodeURIComponent(projectId)}${deleteLifecycleEntityQueryString(options)}`,
     {
       method: "DELETE",
     },
@@ -407,14 +412,9 @@ export function createProductIssue(
 }
 
 /// REQ-PIB-01：仓库本地分支列表（服务端默认链；UI 不自行推导默认值）。
-export function listRepositoryBranches(
-  projectId: string,
-  repositoryId: string,
-): Promise<RepositoryBranchListResponse> {
-  return requestJson<RepositoryBranchListResponse>(
-    `/api/projects/${encodeURIComponent(projectId)}/repositories/${encodeURIComponent(repositoryId)}/branches`,
-  );
-}
+/// 前端已无调用方（唯一调用方 CreateLifecycleIssueDialog 的单仓入口随
+/// 「去单仓入口」下线）⇒ 死导出已删除；后端端点 `list_repository_branches`
+/// （src/web/app.rs → handlers/product_resources.rs）保留不动。
 
 export function deleteProductIssue(
   projectId: string,
@@ -881,26 +881,18 @@ export function postAutomationEnrollmentTerminate(
 export async function findWorkspaceSessionIssueAddress(
   sessionId: string,
 ): Promise<{ projectId: string; issueId: string } | null> {
-  try {
-    const { projects } = await listProjects();
-    for (const project of projects) {
-      const listed = await listProductIssues(project.project_id);
-      for (const issue of listed.issues) {
-        const lifecycle = await getIssueLifecycle(issue.issue_id, project.project_id);
-        if (
-          lifecycle.workspace_sessions.some(
-            (session) => session.workspace_session_id === sessionId,
-          )
-        ) {
-          return { projectId: project.project_id, issueId: issue.issue_id };
-        }
-      }
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  const record = await findWorkspaceSessionRecord(sessionId);
+  return record === null
+    ? null
+    : { projectId: record.projectId, issueId: record.issueId };
 }
+// 2026-11-06 陈旧回执修复（r3）：终止回执身份解析已抽出至
+// ./terminationReceiptIdentity（large_file_guard：本文件登记上限 1313 行），
+// 此处 re-export 维持既有导入路径（调用方与 vi.mock("../api/client") 不变）。
+export {
+  findWorkspaceSessionAutomationIdentity,
+} from "./terminationReceiptIdentity";
+import { findWorkspaceSessionRecord } from "./terminationReceiptIdentity";
 
 export function createCodingAttempt(
   projectId: string,

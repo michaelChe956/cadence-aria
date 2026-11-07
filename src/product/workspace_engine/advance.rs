@@ -702,7 +702,7 @@ impl WorkspaceEngine {
         };
         let lc_id = resolve_issue_logical_codebase_id(paths, &input.project_id, &input.issue_id)
             .map_err(|error| format!("resolve advance target codebase failed: {error}"))?;
-        build_attempt_target_snapshot(paths, &input.project_id, logical_id, lc_id.as_deref())
+        build_attempt_target_snapshot(paths, &input.project_id, logical_id, Some(lc_id.as_str()))
             .map(Some)
             .map_err(|error| format!("capture advance target snapshot failed: {error}"))
     }
@@ -1064,30 +1064,9 @@ impl WorkspaceEngine {
         input: &AdvanceInput,
         authoritative: &AuthoritativeGroupPlanBinding,
     ) -> Result<crate::product::models::RepositoryRecord, String> {
-        let issue = IssueStore::new(paths.clone())
-            .get(&input.project_id, &input.issue_id)
-            .map_err(|error| format!("load advance issue failed: {error}"))?;
         match RepositoryRouting::load_for_issue(paths, &input.project_id, &input.issue_id)
             .map_err(|error| format!("load advance repository routing failed: {error}"))?
         {
-            RepositoryRouting::Legacy { .. } => {
-                let repository_id = issue.repo_id.ok_or("advance issue has no repository")?;
-                let project = crate::product::project_store::ProjectStore::new(paths.clone())
-                    .get(&input.project_id)
-                    .map_err(|error| format!("load advance project failed: {error}"))?;
-                let store = RepositoryStore::for_project(paths.clone(), &project);
-                store
-                    .resolve_legacy_physical_repository_if_dual(&input.project_id, &repository_id)
-                    .map(|(_, _, repository)| repository)
-                    .or_else(|_| {
-                        store
-                            .list(&input.project_id)
-                            .map_err(|error| format!("list advance repositories failed: {error}"))?
-                            .into_iter()
-                            .find(|repository| repository.id == repository_id)
-                            .ok_or_else(|| "advance repository not found".to_string())
-                    })
-            }
             RepositoryRouting::Logical {
                 manifest,
                 selection,
@@ -1108,7 +1087,7 @@ impl WorkspaceEngine {
                 RepositoryStore::new(paths.clone())
                     .resolve_logical_repository_for_issue_codebase(
                         &input.project_id,
-                        lc_id.as_deref(),
+                        Some(lc_id.as_str()),
                         logical_id,
                     )
                     .map(|(_, _, repository)| repository)

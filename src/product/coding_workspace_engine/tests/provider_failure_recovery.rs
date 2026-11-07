@@ -1,5 +1,5 @@
 use super::*;
-use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+use crate::product::lifecycle_store::UpsertRepoSharedWorktreeInput;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -168,18 +168,28 @@ impl StreamingProviderAdapter for RetryBoundaryMutationProvider {
                         .expect("enter plan repair during provider run");
                 }
                 RetryBoundaryMutation::OwnerChange { lifecycle, attempt } => {
+                    // 有冻结快照的 attempt 只按仓维分类租约：owner 变更事实
+                    // 也必须写在同维度上，否则 issue 维旧记录会被判成
+                    // `legacy_shared_worktree_present` 而非 owner 冲突。
+                    let repository_id = attempt
+                        .target_snapshot
+                        .as_ref()
+                        .expect("retry boundary attempt carries a frozen target snapshot")
+                        .logical_repository_id;
                     lifecycle
-                        .release_issue_worktree_lock(
+                        .release_repo_worktree_lock(
                             &attempt.project_id,
                             &attempt.issue_id,
+                            repository_id,
                             &attempt.work_item_id,
                             &attempt.id,
                         )
                         .expect("release original owner");
                     lifecycle
-                        .try_acquire_issue_worktree_lock(
+                        .try_acquire_repo_worktree_lock(
                             &attempt.project_id,
                             &attempt.issue_id,
+                            repository_id,
                             &attempt.work_item_id,
                             "coding_attempt_other",
                         )
@@ -289,20 +299,26 @@ fn configure_dirty_shared_worktree(
     init_test_git_repo(worktree);
     fs::write(worktree.join("dirty.rs"), "pub fn dirty() {}\n").expect("dirty shared worktree");
     let lifecycle = LifecycleStore::new(store.paths());
+    let repository_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("attempt carries a frozen target snapshot")
+        .logical_repository_id;
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
             project_id: attempt.project_id.clone(),
             issue_id: attempt.issue_id.clone(),
-            repository_id: "repository_0001".to_string(),
+            repository_id,
             branch_name: attempt.branch_name.clone(),
             worktree_path: worktree.clone(),
             base_branch: attempt.base_branch.clone(),
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             &attempt.project_id,
             &attempt.issue_id,
+            repository_id,
             &attempt.work_item_id,
             &attempt.id,
         )
@@ -342,16 +358,22 @@ fn assert_cancelled_provider_run_has_no_gate(
             .is_empty()
     );
     let lifecycle = LifecycleStore::new(store.paths());
+    let repository_id = attempt
+        .target_snapshot
+        .as_ref()
+        .expect("attempt carries a frozen target snapshot")
+        .logical_repository_id;
     let shared = lifecycle
-        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)
         .expect("shared worktree")
         .expect("shared worktree exists");
     assert_eq!(shared.current_active_work_item_id, None);
     assert_eq!(shared.current_lock_owner_id, None);
     let replacement = lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             &attempt.project_id,
             &attempt.issue_id,
+            repository_id,
             "work_item_0002",
             "coding_attempt_after_cancel",
         )
@@ -371,14 +393,19 @@ fn assert_cancelled_provider_run_has_no_gate(
 async fn coder_permission_timeout_keeps_existing_failure_gate_without_retrying() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = PermissionTimeoutProvider::default();
+    let provider = std::sync::Arc::new(PermissionTimeoutProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -428,12 +455,17 @@ async fn reviewer_permission_timeout_keeps_existing_failure_gate_without_retryin
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = PermissionTimeoutProvider::default();
+    let provider = std::sync::Arc::new(PermissionTimeoutProvider::default());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect_err("permission timeout stays on the existing reviewer failure path");
 
@@ -476,16 +508,21 @@ async fn reviewer_permission_timeout_keeps_existing_failure_gate_without_retryin
 #[tokio::test]
 async fn cancelled_coder_run_finalizes_current_run_and_node_without_retry_or_gate() {
     let (_root, store, attempt) = running_attempt_with_worktree();
-    let provider = CancelledProvider::new();
+    let provider = std::sync::Arc::new(CancelledProvider::new());
     let (tx, _rx) = mpsc::channel(16);
     let cancellation = CancellationToken::new();
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
-        .with_cancellation(cancellation.clone());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    )
+    .with_cancellation(cancellation.clone());
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let context = CodingExecutionContext::default();
 
     let execute =
-        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+        engine.execute_coding_with_commands(&attempt, provider.as_ref(), &context, &mut command_rx);
     let cancel = async {
         tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
             .await
@@ -532,14 +569,20 @@ async fn cancelled_reviewer_run_finalizes_current_run_and_node_without_retry_or_
     let worktree = attempt.worktree_path.clone().expect("worktree");
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
-    let provider = CancelledProvider::new();
+    let provider = std::sync::Arc::new(CancelledProvider::new());
     let (tx, _rx) = mpsc::channel(16);
     let cancellation = CancellationToken::new();
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
-        .with_cancellation(cancellation.clone());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    )
+    .with_cancellation(cancellation.clone());
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
-    let execute = engine.execute_code_review_with_commands(&attempt, &provider, &mut command_rx);
+    let execute =
+        engine.execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx);
     let cancel = async {
         tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
             .await
@@ -581,16 +624,21 @@ async fn cancelled_reviewer_run_finalizes_current_run_and_node_without_retry_or_
 async fn cancelled_coder_run_with_dirty_shared_worktree_finalizes_without_manual_gate() {
     let (root, store, attempt) = running_attempt_with_worktree();
     configure_dirty_shared_worktree(&root, &store, &attempt);
-    let provider = CancelledProvider::new();
+    let provider = std::sync::Arc::new(CancelledProvider::new());
     let (tx, _rx) = mpsc::channel(16);
     let cancellation = CancellationToken::new();
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
-        .with_cancellation(cancellation.clone());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    )
+    .with_cancellation(cancellation.clone());
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let context = CodingExecutionContext::default();
 
     let execute =
-        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+        engine.execute_coding_with_commands(&attempt, provider.as_ref(), &context, &mut command_rx);
     let cancel = async {
         tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
             .await
@@ -611,14 +659,20 @@ async fn cancelled_reviewer_run_with_dirty_shared_worktree_finalizes_without_man
     let (root, store, attempt) = running_attempt_with_worktree();
     configure_dirty_shared_worktree(&root, &store, &attempt);
     let worktree = attempt.worktree_path.clone().expect("worktree");
-    let provider = CancelledProvider::new();
+    let provider = std::sync::Arc::new(CancelledProvider::new());
     let (tx, _rx) = mpsc::channel(16);
     let cancellation = CancellationToken::new();
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
-        .with_cancellation(cancellation.clone());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    )
+    .with_cancellation(cancellation.clone());
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
-    let execute = engine.execute_code_review_with_commands(&attempt, &provider, &mut command_rx);
+    let execute =
+        engine.execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx);
     let cancel = async {
         tokio::time::timeout(Duration::from_millis(250), provider.started.notified())
             .await
@@ -644,19 +698,25 @@ async fn cancelled_reviewer_run_with_dirty_shared_worktree_finalizes_without_man
 #[tokio::test]
 async fn automatic_retry_role_run_create_failure_leaves_no_orphan_timeline_node() {
     let (_root, store, attempt) = running_attempt_with_worktree();
-    let provider =
-        RetryBoundaryMutationProvider::new(RetryBoundaryMutation::RoleRunCreateFailure {
+    let provider = std::sync::Arc::new(RetryBoundaryMutationProvider::new(
+        RetryBoundaryMutation::RoleRunCreateFailure {
             store: store.clone(),
             attempt: attempt.clone(),
-        });
+        },
+    ));
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -718,13 +778,21 @@ async fn reviewer_transport_failure_then_invalid_structured_output_stops_without
             }],
         )
         .expect("seed reviewer conversation");
-    let provider = TransportFailuresThenSuccessProvider::new(1, "not structured review output");
+    let provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
+        1,
+        "not structured review output",
+    ));
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let report = engine
-        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .execute_code_review_with_commands(&attempt, provider.as_ref(), &mut command_rx)
         .await
         .expect("invalid structured output blocks review without a third retry");
 
@@ -760,18 +828,25 @@ async fn reviewer_transport_failure_then_invalid_structured_output_stops_without
 #[tokio::test]
 async fn abort_during_transport_failure_creates_no_automatic_retry_records() {
     let (_root, store, attempt) = running_attempt_with_worktree();
-    let provider = RetryBoundaryMutationProvider::new(RetryBoundaryMutation::Abort {
-        store: store.clone(),
-        attempt: attempt.clone(),
-    });
+    let provider = std::sync::Arc::new(RetryBoundaryMutationProvider::new(
+        RetryBoundaryMutation::Abort {
+            store: store.clone(),
+            attempt: attempt.clone(),
+        },
+    ));
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let _ = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -811,18 +886,25 @@ async fn abort_during_transport_failure_creates_no_automatic_retry_records() {
 #[tokio::test]
 async fn plan_repair_during_transport_failure_creates_no_automatic_retry_records() {
     let (_root, store, attempt) = running_attempt_with_worktree();
-    let provider = RetryBoundaryMutationProvider::new(RetryBoundaryMutation::PlanRepair {
-        store: store.clone(),
-        attempt: attempt.clone(),
-    });
+    let provider = std::sync::Arc::new(RetryBoundaryMutationProvider::new(
+        RetryBoundaryMutation::PlanRepair {
+            store: store.clone(),
+            attempt: attempt.clone(),
+        },
+    ));
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let _ = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -866,14 +948,22 @@ async fn plan_repair_after_retry_preflight_creates_no_retry_records_or_provider_
         store.paths().root(),
         CodingMutationTestPoint::ProviderFailure,
     );
-    let provider = TransportFailuresThenSuccessProvider::new(usize::MAX, "unused");
+    let provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
+        usize::MAX,
+        "unused",
+    ));
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let context = CodingExecutionContext::default();
 
     let execute =
-        engine.execute_coding_with_commands(&attempt, &provider, &context, &mut command_rx);
+        engine.execute_coding_with_commands(&attempt, provider.as_ref(), &context, &mut command_rx);
     let enter_plan_repair = async {
         tokio::time::timeout(Duration::from_millis(250), reached)
             .await
@@ -933,23 +1023,33 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
     let worktree = root.path().join("shared-worktree");
     fs::create_dir_all(&worktree).expect("shared worktree");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01：admission/租约唯一凭证是「LC 权威 + 冻结快照」，故本
+    // 用例按共享夹具播种完整 LC 并以仓维记录/锁表达 owner 事实。
+    let logical = crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &paths,
+        root.path(),
+        PROJECT_ID,
+        ISSUE_ID,
+    );
     let lifecycle = LifecycleStore::new(paths.clone());
+    let repository_id = logical.member_id;
     lifecycle
-        .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
             project_id: PROJECT_ID.to_string(),
             issue_id: ISSUE_ID.to_string(),
-            repository_id: "repository_0001".to_string(),
+            repository_id,
             branch_name: "aria/issues/issue_0001".to_string(),
             worktree_path: worktree.clone(),
             base_branch: "HEAD".to_string(),
         })
         .expect("shared worktree");
     lifecycle
-        .try_acquire_issue_worktree_lock(
+        .try_acquire_repo_worktree_lock(
             PROJECT_ID,
             ISSUE_ID,
+            repository_id,
             WORK_ITEM_ID,
-            "issue_worktree_lease_retry_boundary",
+            "repo_worktree_lease_retry_boundary",
         )
         .expect("initial owner");
     let store = CodingAttemptStore::new(paths);
@@ -967,28 +1067,41 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
                 review_rounds: 1,
                 permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             },
-            target_snapshot: None,
+            target_snapshot: Some(logical.snapshot(&store.paths())),
             max_auto_rework: 2,
         })
         .expect("attempt");
     lifecycle
-        .bind_issue_worktree_lock_to_attempt(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID, &attempt.id)
+        .bind_repo_worktree_lock_to_attempt(
+            PROJECT_ID,
+            ISSUE_ID,
+            repository_id,
+            WORK_ITEM_ID,
+            &attempt.id,
+        )
         .expect("bind owner");
     let attempt = store
         .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &attempt.id)
         .expect("running attempt");
-    let provider = RetryBoundaryMutationProvider::new(RetryBoundaryMutation::OwnerChange {
-        lifecycle,
-        attempt: attempt.clone(),
-    });
+    let provider = std::sync::Arc::new(RetryBoundaryMutationProvider::new(
+        RetryBoundaryMutation::OwnerChange {
+            lifecycle,
+            attempt: attempt.clone(),
+        },
+    ));
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let error = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )
@@ -998,7 +1111,7 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
     assert!(matches!(
         error,
         CodingWorkspaceEngineError::Store(ProductStoreError::Conflict {
-            kind: "issue_worktree_lock_owner",
+            kind: "repo_worktree_lock_owner",
             ..
         })
     ));
@@ -1130,17 +1243,22 @@ async fn t14_cancelled_coder_run(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
 ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
-    let provider = CancelledProvider::new();
+    let provider = std::sync::Arc::new(CancelledProvider::new());
     let (tx, _rx) = mpsc::channel(16);
     let cancellation = CancellationToken::new();
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
-        .with_cancellation(cancellation.clone());
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    )
+    .with_cancellation(cancellation.clone());
     let (_command_tx, mut command_rx) = mpsc::channel(1);
     let execute = async {
         engine
             .execute_coding_with_commands(
                 attempt,
-                &provider,
+                provider.as_ref(),
                 &CodingExecutionContext::default(),
                 &mut command_rx,
             )
@@ -1285,19 +1403,26 @@ async fn coder_technical_retry_rotates_scope_within_original_budget_and_keeps_in
 {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
-    let provider = TransportFailuresThenSuccessProvider::new(1, "coder retry completed")
-        .with_first_failure_worktree_update(
-            worktree.join("interrupted.rs"),
-            "pub fn interrupted_change() {}\n",
-        );
+    let provider = std::sync::Arc::new(
+        TransportFailuresThenSuccessProvider::new(1, "coder retry completed")
+            .with_first_failure_worktree_update(
+                worktree.join("interrupted.rs"),
+                "pub fn interrupted_change() {}\n",
+            ),
+    );
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let completed = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext {
                 work_item_markdown: Some("# Retry work item\n\nKeep the full context.".to_string()),
                 verification_commands: vec!["cargo test --locked --lib retry".to_string()],
@@ -1398,15 +1523,23 @@ async fn stale_coder_scope_registered_artifacts_recovered_on_next_run() {
     fs::create_dir_all(&unregistered).expect("unregistered temp dir");
     fs::write(unregistered.join("keep.txt"), "user temp\n").expect("user temp artifact");
     let scratch = t14_scratch_dir(&store, &attempt);
-    let provider = TransportFailuresThenSuccessProvider::new(0, "coder fresh after crash");
+    let provider = std::sync::Arc::new(TransportFailuresThenSuccessProvider::new(
+        0,
+        "coder fresh after crash",
+    ));
     let (tx, _rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        tx,
+        PROJECT_ID,
+        provider.clone(),
+    );
     let (_command_tx, mut command_rx) = mpsc::channel(1);
 
     let completed = engine
         .execute_coding_with_commands(
             &attempt,
-            &provider,
+            provider.as_ref(),
             &CodingExecutionContext::default(),
             &mut command_rx,
         )

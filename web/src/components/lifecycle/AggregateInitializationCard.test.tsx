@@ -154,7 +154,14 @@ describe("AggregateInitializationCard", () => {
       "data-status",
       "failed",
     );
-    expect(screen.getByRole("alert")).toHaveTextContent("初始化命令执行失败");
+    // 2026-11-05：卡片常驻「聚合初始化 provider 顺序」红条同为 alert，
+    // 原 getByRole("alert") 单元素假设不再成立 ⇒ 断言错误信息出现在 alert 之中。
+    expect(
+      screen
+        .getAllByRole("alert")
+        .map((alert) => alert.textContent ?? "")
+        .join("\n"),
+    ).toContain("初始化命令执行失败");
     expect(
       screen.getByRole("button", { name: "重新初始化" }),
     ).toBeEnabled();
@@ -358,5 +365,124 @@ describe("AggregateInitializationCard", () => {
     for (const hint of hints) {
       expect(hint.getAttribute("title")).toContain("跳过");
     }
+  });
+
+  it("renders the frozen provider selection summary when provider_selection exists", () => {
+    render(
+      <AggregateInitializationCard
+        operation={operation("completed", {
+          provider_selection: {
+            selected: "pi",
+            candidates: [
+              { provider: "pi", display_name: "Pi", cli_available: true, cli_reason_code: null, capability_state: "confirmed", skipped_reason: null, action_hint: "直接使用" },
+              { provider: "kimi_code", display_name: "Kimi", cli_available: true, cli_reason_code: null, capability_state: "unverified", skipped_reason: "needs_verification", action_hint: "核验 Kimi" },
+              { provider: "claude_code", display_name: "Claude Code", cli_available: false, cli_reason_code: "command_missing", capability_state: "not_installed", skipped_reason: "cli_unavailable", action_hint: "安装 Claude Code" },
+              { provider: "codex", display_name: "Codex", cli_available: true, cli_reason_code: null, capability_state: "confirmed", skipped_reason: null, action_hint: "直接使用" },
+            ],
+            rule_version: "v1",
+            decided_at: "2026-11-03T00:00:00Z",
+          },
+        })}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+
+    const summary = screen.getByTestId("aggregate-initialization-provider-selection");
+    expect(summary.textContent).toContain("本次使用 Pi");
+    expect(summary.textContent).toContain("跳过：Kimi（未核验）、Claude Code（未安装）");
+    // 未被跳过的候选（codex）不进入跳过清单。
+    expect(summary.textContent).not.toContain("Codex");
+  });
+
+  it("does not render the provider selection summary when provider_selection is null", () => {
+    render(
+      <AggregateInitializationCard
+        operation={operation("completed", { provider_selection: null })}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByTestId("aggregate-initialization-provider-selection"),
+    ).not.toBeInTheDocument();
+  });
+
+  // 停止原因可见化（owner 2026-11-04）：点「启动聚合初始化」失败时，卡片上
+  // 必须能看到「卡在哪一步、为什么、属于哪道闸门」——不是一个无解释的按钮。
+  it("renders the advance stop reason next to the start button", () => {
+    render(
+      <AggregateInitializationCard
+        operation={null}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+        advanceStop={{
+          step: "rules_policy",
+          reason: "waiting_for_human",
+          reason_code: "aggregate_initialization_provider_needs_verification",
+          detail: "provider 能力未核验",
+          stopped_at: "2026-11-04T00:00:00Z",
+        }}
+      />,
+    );
+
+    const stop = screen.getByTestId("aggregate-initialization-advance-stop");
+    const headline = screen.getByTestId(
+      "aggregate-initialization-advance-stop-headline",
+    );
+    // 停在哪一步（中文口径，与冷启动卡片同一套标签）。
+    expect(headline.textContent).toContain("规则/政策");
+    // 为什么（停止枚举的中文口径）。
+    expect(headline.textContent).toContain("等待人工处理");
+    // 属于哪道闸门（稳定机器码 → 短标签）。
+    expect(
+      screen.getByTestId("aggregate-initialization-advance-stop-gate").textContent,
+    ).toContain("需先核验 provider");
+    // 机器码本身不重复渲染（由 bootstrap 通知卡承担）。
+    expect(stop.textContent).not.toContain(
+      "aggregate_initialization_provider_needs_verification",
+    );
+  });
+
+  it("does not render the advance stop block when advanceStop is absent", () => {
+    render(
+      <AggregateInitializationCard
+        operation={null}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByTestId("aggregate-initialization-advance-stop"),
+    ).not.toBeInTheDocument();
+  });
+  it("renders the aggregate initialization provider order notice without Kimi Code", () => {
+    render(
+      <AggregateInitializationCard
+        operation={operation("running")}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("aggregate-initialization-aggregate-order-notice"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("aggregate-initialization-aggregate-order-notice")
+        .textContent,
+    ).toBe(
+      "聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。",
+    );
   });
 });

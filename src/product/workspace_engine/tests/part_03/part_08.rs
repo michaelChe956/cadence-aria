@@ -2,10 +2,13 @@ pub(crate) fn make_work_item_plan_engine_with_accepted_contract_drafts()
 -> (TempDir, LifecycleStore, String, WorkspaceEngine) {
     let (tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_initial_plan_revision_compile");
-    let mut outline = test_work_item_plan_outline(vec![WorkItemOutlineDependencyEdge {
-        from_outline_id: "outline_a".to_string(),
-        to_outline_id: "outline_b".to_string(),
-    }]);
+    let mut outline = test_work_item_plan_outline(
+        vec![WorkItemOutlineDependencyEdge {
+            from_outline_id: "outline_a".to_string(),
+            to_outline_id: "outline_b".to_string(),
+        }],
+        Some(fixture_logical_member_id(&lifecycle)),
+    );
     outline.work_item_outlines.truncate(2);
     outline.work_item_outlines[1].depends_on = vec!["outline_a".to_string()];
     engine.session.artifact = Some(ArtifactPayload::WorkItemPlanOutlineCandidate {
@@ -21,6 +24,7 @@ pub(crate) fn make_work_item_plan_engine_with_accepted_contract_drafts()
 
     let store = engine.work_item_plan_store().expect("work item plan store");
     let draft_a = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_a",
         "draft_outline_a",
@@ -29,6 +33,7 @@ pub(crate) fn make_work_item_plan_engine_with_accepted_contract_drafts()
         None,
     );
     let mut draft_b = test_work_item_draft_record(
+        &lifecycle,
         &plan_id,
         "outline_b",
         "draft_outline_b",

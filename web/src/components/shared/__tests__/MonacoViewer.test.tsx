@@ -3,6 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import { MonacoViewer } from "../MonacoViewer";
 
 vi.mock("@monaco-editor/react", () => ({
+  // ★`monaco-local-setup.ts` 会在模块加载期调用 `loader.config`（本地 monaco 装配）
+  //   ⇒ mock 必须同时提供 `loader`，否则收集阶段抛
+  //   「No "loader" export is defined on the "@monaco-editor/react" mock」。
+  loader: {
+    config: vi.fn(),
+  },
   Editor: ({
     value,
     language,
@@ -35,6 +41,17 @@ describe("MonacoViewer", () => {
     render(<MonacoViewer value="# Story" height="240px" />);
 
     expect(screen.getByTestId("monaco-viewer-skeleton")).toHaveStyle({ height: "240px" });
+  });
+  it("shows visible loading text while the editor module is loading", async () => {
+    // 动态 import 属例外：需全新的 lazy 闭包才能重新走到 Suspense 骨架分支（静态导入的模块缓存已被首个用例解析）
+    vi.resetModules();
+    const { MonacoViewer } = await import("../MonacoViewer");
+
+    render(<MonacoViewer value="# Story" height="240px" />);
+
+    const skeleton = screen.getByTestId("monaco-viewer-skeleton");
+    expect(skeleton.textContent?.trim()).not.toBe("");
+    expect(skeleton.textContent).toMatch(/加载|Loading/);
   });
 
   it("renders a read-only markdown editor with viewer options", async () => {

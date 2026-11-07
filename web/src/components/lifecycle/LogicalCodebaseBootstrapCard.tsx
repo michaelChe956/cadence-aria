@@ -12,6 +12,13 @@
 // 推进失败后的兼底入口——幂等端点，重复调用不重复推进。
 // 规则漂移（policy/rule/reference digest 漂移）另给一条显眼提示：provider
 // 启动会被 PolicyDrift 拒，必须显式「重新生成政策」。
+//
+// 2026-11-04（冷启动停止原因可见化）：投影的 `advance_stop`（后端落盘的
+// 最近一次可解释停止——停在哪一步 + 稳定机器码 + 原始拒绝上下文）只渲染
+// 通知卡**没有**的那部分：停在哪一步 + 属于哪道闸门（provider 选择门 /
+// trust 门各一个短标签）。机器码与原始诊断由通知卡（`bootstrap:advance-stop:*`，
+// 通用渲染）承担——它的 summary 已含「机器码：…」与「诊断：…」，另有自己的
+// 机器码次要行——同一份信息只呈现一次（真机复核结论，2026-11-04）。
 import { useState } from "react";
 import {
   postLogicalCodebaseBootstrapAction,
@@ -21,6 +28,9 @@ import type {
   BootstrapActionName,
   LogicalCodebaseBootstrapProjection,
 } from "../../api/types";
+import { BootstrapFailureLine } from "./BootstrapFailureLine";
+import { CodegraphInstallEntry, isCodegraphInstallCode } from "./CodegraphInstallEntry";
+import { LogicalCodebaseLayoutTree } from "./LogicalCodebaseLayoutTree";
 
 const STEP_LABELS: Record<string, string> = {
   identity: "身份",
@@ -56,6 +66,17 @@ const ADVANCE_STOP_LABELS: Record<string, string> = {
   waiting_for_human: "等待人工处理",
   no_actionable_step: "没有可推进的步骤",
   iteration_limit: "已达单次推进上限",
+};
+
+// 冷启动停止原因的两道闸门区分键（后端稳定码）——通知 summary 已给成品
+// 三段（问题/原因/怎么做），这里只补一个**短标签**让用户一眼看出该去
+// 核验 provider 还是去完成信任确认（不重复渲染通知里的整段文案）：
+// - aggregate_initialization_provider_needs_verification：provider 选择门
+//   （provider 装了但还没核验能力证据）；
+// - aggregate_initialization_trust_waiting：trust 门（还没拿到这台机器的信任）。
+const ADVANCE_STOP_GATE_LABELS: Record<string, string> = {
+  aggregate_initialization_provider_needs_verification: "需先核验 provider",
+  aggregate_initialization_trust_waiting: "需先完成信任确认",
 };
 
 // 规则漂移（provider 启动会被 PolicyDrift 拒）的三种稳定 failure.reason_code
@@ -130,6 +151,11 @@ export function LogicalCodebaseBootstrapCard({
     return null;
   }
   const current = projection;
+  // 最近一次可解释的停止（被停步骤仍「未开始」时才有；就绪后后端清除）。
+  const advanceStop = current.advance_stop ?? null;
+  const advanceStopGateLabel = advanceStop
+    ? (ADVANCE_STOP_GATE_LABELS[advanceStop.reason_code] ?? null)
+    : null;
 
   // 同一步骤的动作去重：同一 (step, action) 只渲染一个按钮。
   // 优先级：显眼提示（规则漂移）> notice（带失败原因与副作用说明）> 步骤行。
@@ -265,6 +291,7 @@ export function LogicalCodebaseBootstrapCard({
           {projection.planning_ready ? "PlanningReady" : "冷启动未完成"}
         </span>
       </div>
+      <LogicalCodebaseLayoutTree className="mt-1.5" />
       {ruleDrift ? (
         <div
           data-testid="lc-bootstrap-rule-drift"
@@ -312,17 +339,9 @@ export function LogicalCodebaseBootstrapCard({
               {STATUS_LABELS[step.status] ?? step.status}
             </span>
             {step.failure ? (
-              <span className="text-[var(--aria-danger)]">
-                原因 {step.failure.reason_code}：{step.failure.detail}
-              </span>
-            ) : null}
-            {step.status === "failed" || step.status === "waiting_for_human" ? (
-              <span>
-                {step.failure?.external_side_effect &&
-                step.failure.external_side_effect !== "none"
-                  ? `可能副作用：${step.failure.external_side_effect}`
-                  : null}
-              </span>
+              // 失败面唯一实现：主行中文问题、次行原因/怎么做、机器码降到次要行、
+              // 原始诊断收进折叠区。块3 的 LayoutFailureAction 挂在这行之后。
+              <BootstrapFailureLine failure={step.failure} />
             ) : null}
             {stepActions(step).length > 0 ? (
               <div
@@ -348,6 +367,31 @@ export function LogicalCodebaseBootstrapCard({
           </li>
         ))}
       </ul>
+      {advanceStop ? (
+        // 冷启动为什么停在这一步：**只给通知卡没有的东西**——停在哪一步、
+        // 属于哪道闸门。机器码与原始诊断由通知卡（`bootstrap:advance-stop:*`，
+        // 通用渲染）承担：它的 summary 已含「机器码：…」与「诊断：…」，另有
+        // 自己的机器码次要行——同一份信息只呈现一次（真机复核结论）。
+        <div
+          data-testid="lc-bootstrap-advance-stop"
+          className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs leading-snug"
+        >
+          <p
+            className="text-slate-700"
+            data-testid="lc-bootstrap-advance-stop-headline"
+          >
+            {`冷启动停在「${STEP_LABELS[advanceStop.step] ?? advanceStop.step}」：${ADVANCE_STOP_LABELS[advanceStop.reason] ?? advanceStop.reason}`}
+            {advanceStopGateLabel ? (
+              <span
+                className="ml-1 rounded bg-amber-200 px-1.5 py-0.5 text-[11px] font-semibold text-amber-900"
+                data-testid="lc-bootstrap-advance-stop-gate"
+              >
+                {advanceStopGateLabel}
+              </span>
+            ) : null}
+          </p>
+        </div>
+      ) : null}
       {projection.notices.length > 0 ? (
         <div className="mt-2 space-y-2">
           {projection.notices.map((notice) => (
@@ -356,10 +400,17 @@ export function LogicalCodebaseBootstrapCard({
               data-testid={`lc-bootstrap-notice-${notice.step}`}
               className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5"
             >
-              <p className="text-xs font-semibold text-amber-800">
+              {/* 主次反转（REQ-BOOT-08）：中文三段（服务端 render_detail 成品）
+                  是主文案，机器码降级为次要行；whitespace-pre-line 保留服务端换行。 */}
+              <p className="whitespace-pre-line text-xs text-slate-700">
+                {notice.summary}
+              </p>
+              <p
+                className="mt-0.5 font-mono text-[11px] text-slate-500"
+                data-testid={`lc-bootstrap-notice-machine-line-${notice.step}`}
+              >
                 {notice.reason_code}
               </p>
-              <p className="mt-0.5 text-xs text-slate-600">{notice.summary}</p>
               {notice.external_side_effect &&
               notice.external_side_effect !== "none" ? (
                 <p className="mt-0.5 text-xs text-[var(--aria-danger)]">
@@ -370,6 +421,17 @@ export function LogicalCodebaseBootstrapCard({
                 <p className="mt-0.5 text-xs text-slate-500">
                   下一步：{STEP_LABELS[notice.next_step] ?? notice.next_step}
                 </p>
+              ) : null}
+              {/* 块2 11.10：codegraph 环境前置被阻断（`bootstrap:codegraph:*`
+                  通知，allowed_actions 为空——索引根本没开始）时给【安装】
+                  入口：用户装完 codegraph 才能重试聚合索引。 */}
+              {isCodegraphInstallCode(notice.reason_code) ? (
+                <div
+                  className="mt-1.5"
+                  data-testid="lc-bootstrap-notice-codegraph-install"
+                >
+                  <CodegraphInstallEntry />
+                </div>
               ) : null}
               {noticeActions(notice).length > 0 ? (
                 <div className="mt-1.5 flex flex-wrap gap-2">

@@ -1,16 +1,29 @@
 import { ApiRequestError } from "../../api/client";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   preflightLogicalCodebaseRegistration,
   resumeLogicalCodebaseRegistration,
   submitLogicalCodebaseRegistration,
 } from "../../api/logical-codebase-registration";
+import { getInstallTargets } from "../../api/provider-install";
 import type {
+  FailureCopyDto,
+  FailureCopyTriage,
+  InstallTargetView,
   RegistrationBatchDto,
   RegistrationPreflightItemDto,
   RegistrationPreflightResponse,
 } from "../../api/types";
 import { DialogShell } from "../shared/DialogShell";
+import { LogicalCodebaseLayoutTree } from "./LogicalCodebaseLayoutTree";
+import { ProviderInstallActionButton } from "./ProviderInstallActionButton";
 
 const PREFLIGHT_CLASSES = [
   "eligible",
@@ -22,20 +35,95 @@ const PREFLIGHT_CLASSES = [
   "outside_root",
 ] as const;
 
-function formatError(reason: unknown, fallback: string): string {
+/** 需要引导到安装/更新入口的环境前置码（H3：入口一律走块2 组件）。 */
+const CODEGRAPH_INSTALL_CODES = [
+  "codegraph_missing",
+  "codegraph_version_mismatch",
+] as const;
+
+const TRIAGE_VALUES = ["environment", "product_defect", "retry_only"] as const;
+
+function isFailureCopyTriage(value: unknown): value is FailureCopyTriage {
+  return TRIAGE_VALUES.some((candidate) => candidate === value);
+}
+
+/**
+ * 失败面呈现模型：
+ * - `details.copy` 存在 → 主行中文问题 + 原因 / 怎么做分段 + 机器码次要行；
+ * - 缺失 → 回落既有单行行为（`details.reason` → `code: message` → 兜底串）。
+ */
+type WizardFailure = {
+  title: string;
+  reason?: string;
+  action?: string;
+  machineLine?: string;
+  /** 对外稳定码：安装入口判定的唯一依据。 */
+  code: string | null;
+};
+
+function isNonEmptyText(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** 读取后端下发的中文三段成品。字段不全 ⇒ `null`（仅损坏响应的防崩路径）。 */
+function readFailureCopy(details: unknown): FailureCopyDto | null {
+  if (typeof details !== "object" || details === null || !("copy" in details)) {
+    return null;
+  }
+  const raw = details.copy;
+  if (typeof raw !== "object" || raw === null) {
+    return null;
+  }
+  if (
+    !("title_zh" in raw) ||
+    !("reason_zh" in raw) ||
+    !("action_zh" in raw) ||
+    !("machine_line" in raw) ||
+    !("triage" in raw)
+  ) {
+    return null;
+  }
+  const { title_zh, reason_zh, action_zh, machine_line, triage } = raw;
+  if (
+    !isNonEmptyText(title_zh) ||
+    !isNonEmptyText(reason_zh) ||
+    !isNonEmptyText(action_zh) ||
+    !isNonEmptyText(machine_line) ||
+    !isFailureCopyTriage(triage)
+  ) {
+    return null;
+  }
+  return { title_zh, reason_zh, action_zh, machine_line, triage };
+}
+
+function formatError(reason: unknown, fallback: string): WizardFailure {
   if (reason instanceof ApiRequestError) {
+    // REQ-LAYOUT-02：优先渲染后端同源成品（不在此自拼中文）。
+    const copy = readFailureCopy(reason.details);
+    if (copy) {
+      return {
+        title: copy.title_zh,
+        reason: copy.reason_zh,
+        action: copy.action_zh,
+        machineLine: copy.machine_line,
+        code: reason.code,
+      };
+    }
     // 服务端把预检被拒的具体原因放在 details.reason（如 ownership_conflict 的处置指引），
     // 优先展示它，避免用户只看到笼统的 "aggregate root preflight rejected"。
     const detailReason = reason.details?.reason;
     if (typeof detailReason === "string" && detailReason.trim() !== "") {
-      return `${fallback}：${detailReason}`;
+      return { title: `${fallback}：${detailReason}`, code: reason.code };
     }
     if (reason.message) {
-      return `${reason.code}: ${reason.message}`;
+      return { title: `${reason.code}: ${reason.message}`, code: reason.code };
     }
-    return fallback;
+    return { title: fallback, code: reason.code };
   }
-  return reason instanceof Error ? reason.message : fallback;
+  return {
+    title: reason instanceof Error ? reason.message : fallback,
+    code: null,
+  };
 }
 
 function displayReason(item: RegistrationPreflightItemDto): string {
@@ -69,9 +157,31 @@ export function LogicalCodebaseRegistrationWizard({
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
   const [batch, setBatch] = useState<RegistrationBatchDto | null>(null);
   const [busyAction, setBusyAction] = useState<"preflight" | "submit" | "resume" | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<WizardFailure | null>(null);
+  const [codegraphTarget, setCodegraphTarget] = useState<InstallTargetView | null>(null);
   const busyRef = useRef(false);
   const autoStartRef = useRef(false);
+
+  // 安装入口只读块2 的安装目标面；拉取失败不渲染入口（不凭空断言本机未安装）。
+  const refreshCodegraphTarget = useCallback(async () => {
+    try {
+      const targets = await getInstallTargets();
+      setCodegraphTarget(
+        targets.find((target) => target.target === "codegraph") ?? null,
+      );
+    } catch {
+      setCodegraphTarget(null);
+    }
+  }, []);
+
+  const needsCodegraphInstall =
+    error !== null &&
+    CODEGRAPH_INSTALL_CODES.some((code) => code === error.code);
+
+  useEffect(() => {
+    if (!needsCodegraphInstall) return;
+    void refreshCodegraphTarget();
+  }, [needsCodegraphInstall, refreshCodegraphTarget]);
 
   const paths = useMemo(
     () => candidatePaths.split(/\r?\n/).map((path) => path.trim()).filter(Boolean),
@@ -119,7 +229,7 @@ export function LogicalCodebaseRegistrationWizard({
     event.preventDefault();
     const root = aggregateRoot.trim();
     if (!root) {
-      setError("请输入聚合根目录");
+      setError({ title: "请输入聚合根目录", code: null });
       return;
     }
     await runPreflight(root);
@@ -145,7 +255,7 @@ export function LogicalCodebaseRegistrationWizard({
   async function handleSubmit() {
     if (busyRef.current || !preflight) return;
     if (confirmedPaths.length === 0) {
-      setError("没有可提交的成员");
+      setError({ title: "没有可提交的成员", code: null });
       return;
     }
     busyRef.current = true;
@@ -193,6 +303,7 @@ export function LogicalCodebaseRegistrationWizard({
 
   const body = (
     <>
+        <LogicalCodebaseLayoutTree className="mb-3" />
         <form onSubmit={handlePreflight} className="space-y-3">
           <label className="block text-sm font-semibold text-[var(--aria-ink)]">
             聚合根目录
@@ -384,9 +495,55 @@ export function LogicalCodebaseRegistrationWizard({
         ) : null}
 
         {error ? (
-          <p role="alert" className="mt-3 text-sm font-semibold text-[var(--aria-danger)]">
-            {error}
-          </p>
+          <div
+            role="alert"
+            data-testid="lc-registration-error"
+            className="mt-3 space-y-0.5 text-sm"
+          >
+            <p
+              data-testid="lc-registration-error-title"
+              className="font-semibold text-[var(--aria-danger)]"
+            >
+              {error.title}
+            </p>
+            {error.reason ? (
+              <p
+                data-testid="lc-registration-error-reason"
+                className="text-[var(--aria-ink)]"
+              >
+                原因：{error.reason}
+              </p>
+            ) : null}
+            {error.action ? (
+              <p
+                data-testid="lc-registration-error-action"
+                className="text-[var(--aria-ink)]"
+              >
+                怎么做：{error.action}
+              </p>
+            ) : null}
+            {error.machineLine ? (
+              <p
+                data-testid="lc-registration-error-machine-line"
+                className="font-mono text-xs text-[var(--aria-ink-muted)]"
+              >
+                机器码：{error.machineLine}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {needsCodegraphInstall && codegraphTarget ? (
+          <div data-testid="lc-registration-install-entry" className="mt-2">
+            <ProviderInstallActionButton
+              target="codegraph"
+              cliAvailable={codegraphTarget.cli_available}
+              localVersion={codegraphTarget.local_version}
+              latestVersion={codegraphTarget.latest_version}
+              capabilityConfirmed={true}
+              onSettled={() => void refreshCodegraphTarget()}
+            />
+          </div>
         ) : null}
     </>
   );

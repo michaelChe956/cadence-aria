@@ -5,15 +5,12 @@ import {
   createGroupCodingAttempt,
   createProject,
   createProductIssue,
-  createRepository,
   deleteProject,
   deleteRepository,
   getIssueLifecycle,
   getPlanCodingProgress,
-  getRepositoryInitialization,
   listProductIssues,
   listProjects,
-  listRepositoryBranches,
   listRepositories,
   startPlanCoding,
 } from "../../api/client";
@@ -40,8 +37,6 @@ import type {
   ProductIssue,
   Project,
   Repository,
-  CreateRepositoryRequest,
-  RepositoryInitializationOperationSnapshot,
   WorkItemRepositoryGroup,
 } from "../../api/types";
 import {
@@ -57,7 +52,6 @@ import {
   type CreateProjectPayload,
 } from "./CreateProjectDialog";
 import { AddCodebaseDialog } from "./AddCodebaseDialog";
-import { CreateRepositoryDialog } from "./CreateRepositoryDialog";
 import {
   CreateLifecycleIssueDialog,
   type CreateLifecycleIssuePayload,
@@ -169,7 +163,6 @@ export function IssueLifecycleWorkbench({
   const [deletingCardKey, setDeletingCardKey] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
-  const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
   const [registrationDialogOpen, setRegistrationDialogOpen] = useState(false);
   // R8：逻辑代码库选中态（多 LC 并存时面板按选中 LC 分区）。
   const [selectedLogicalCodebaseId, setSelectedLogicalCodebaseId] = useState<
@@ -873,13 +866,10 @@ export function IssueLifecycleWorkbench({
       change_id: null,
       repository_id: payload.repository_id,
       logical_codebase_id: payload.logical_codebase_id,
+      // §0.6：base_branch 字段保留（语义不变）；多仓路径恒传 null。
       base_branch: payload.base_branch,
-      // REQ-MRE-01：LC 勾选集透传；单仓 null → undefined（key 不进请求体，
-      // 服务端维持存量语义）。
-      focus_repository_ids:
-        payload.focus_repository_ids && payload.focus_repository_ids.length > 0
-          ? payload.focus_repository_ids
-          : undefined,
+      // REQ-MRE-01：LC 勾选集透传（多仓路径恒非空）。
+      focus_repository_ids: payload.focus_repository_ids,
     });
     createdIssuesRef.current = [
       ...createdIssuesRef.current.filter((issue) => issue.issue_id !== createdIssue.issue_id),
@@ -889,42 +879,10 @@ export function IssueLifecycleWorkbench({
     await refresh(selectedProjectId, [createdIssue]);
   }
 
-  function handleChooseSingleCodebase() {
-    setAddCodebaseDialogOpen(false);
-    setRepositoryDialogOpen(true);
-  }
-
-
   async function handleCreateProject(payload: CreateProjectPayload) {
     const project = await createProject(payload);
     setProjectDialogOpen(false);
     await refresh(project.project_id);
-  }
-
-  async function handleStartRepositoryInitialization(
-    payload: CreateRepositoryRequest,
-  ): Promise<RepositoryInitializationOperationSnapshot> {
-    if (!selectedProjectId) {
-      const message = "缺少 Project";
-      setError(message);
-      throw new Error(message);
-    }
-
-    return createRepository(selectedProjectId, payload);
-  }
-
-  async function handleFetchRepositoryInitialization(operationId: string) {
-    if (!selectedProjectId) {
-      throw new Error("缺少 Project");
-    }
-
-    return getRepositoryInitialization(selectedProjectId, operationId);
-  }
-
-  async function handleRepositoryInitializationCompleted() {
-    if (selectedProjectId) {
-      await refresh(selectedProjectId);
-    }
   }
 
 
@@ -960,7 +918,6 @@ export function IssueLifecycleWorkbench({
       {addCodebaseDialogOpen && selectedProjectId ? (
         <AddCodebaseDialog
           projectId={selectedProjectId}
-          onChooseSingle={handleChooseSingleCodebase}
           onCreatedLogical={() => {
             // 合并流：LC 创建后登记在弹窗内完成，这里只刷新列表（不再打开独立登记向导）。
             if (selectedProjectId) void refresh(selectedProjectId);
@@ -1002,22 +959,9 @@ export function IssueLifecycleWorkbench({
           onClose={() => setRegistrationDialogOpen(false)}
         />
       ) : null}
-      {repositoryDialogOpen ? (
-        <CreateRepositoryDialog
-          onCreate={handleStartRepositoryInitialization}
-          onFetchOperation={handleFetchRepositoryInitialization}
-          onInitializationCompleted={handleRepositoryInitializationCompleted}
-          onClose={() => setRepositoryDialogOpen(false)}
-        />
-      ) : null}
       {dialogOpen ? (
         <CreateLifecycleIssueDialog
-          projectId={selectedProjectId}
-          repositories={repositories}
           codebases={codebases}
-          listBranches={(projectId, repositoryId) =>
-            listRepositoryBranches(projectId, repositoryId)
-          }
           listMembers={(logicalCodebaseId) =>
             selectedProjectId
               ? listLogicalCodebaseMembers(

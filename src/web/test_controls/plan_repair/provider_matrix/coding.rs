@@ -33,11 +33,14 @@ pub(super) async fn run_coding_provider_roles(
     root: &Path,
     provider: ProviderName,
     adapter: Arc<MatrixStreamingProvider>,
+    gateway: Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
 ) -> Result<CodingMatrixOutcome, PlanRepairFixtureError> {
     let store = CodingAttemptStore::new(fixture_paths(root));
     let attempt = store
-        .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .list_attempts_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .map_err(fixture_error)?
+        .into_iter()
+        .next()
         .ok_or_else(|| fixture_error("provider matrix coding attempt is missing"))?;
     let placeholder_run = store.get_active_unit_run(&attempt).map_err(fixture_error)?;
     store
@@ -63,7 +66,11 @@ pub(super) async fn run_coding_provider_roles(
         .map_err(fixture_error)?;
 
     let (event_tx, _event_rx) = mpsc::channel(128);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+        // 逻辑 target（attempt 带冻结快照）的 provider 启动恒经 gateway：
+        // 无 gateway 时 `logical_provider_gateway_required` fail-closed
+        // （provider_stream.rs:415-421）。
+        .with_logical_provider_gateway(gateway);
     let (_coder_command_tx, mut coder_command_rx) = mpsc::channel::<CodingRunnerCommand>(1);
     let coder_outcome = engine
         .execute_coding_with_commands_outcome(

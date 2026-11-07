@@ -3,19 +3,22 @@
 #[tokio::test]
 async fn workspace_session_manager_recycled_after_terminal_without_subscribers() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let state = WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let state = with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     );
     let app = build_web_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -83,19 +86,22 @@ async fn workspace_session_manager_recycled_after_terminal_without_subscribers()
 #[tokio::test]
 async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -169,19 +175,22 @@ async fn workspace_ws_lease_takeover_and_stale_write_rejection() {
 async fn workspace_ws_driver_close_revokes_lease_run_completes() {
     let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let state = WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let state = with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     );
     let controls = state.test_controls.clone();
     let app = build_web_router(state);
@@ -239,19 +248,22 @@ async fn workspace_ws_driver_close_revokes_lease_run_completes() {
 #[tokio::test]
 async fn workspace_ws_observer_connection_does_not_take_over_lease() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -304,19 +316,22 @@ async fn workspace_ws_observer_connection_does_not_take_over_lease() {
 async fn workspace_ws_dangling_lease_self_heals_on_first_write() {
     let (_lock, _controls_env) = ConnectionDiagnosticTestControlsGuard::enable().await;
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let state = WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let state = with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     );
     let controls = state.test_controls.clone();
     let app = build_web_router(state);
@@ -524,19 +539,22 @@ fn workspace_timelines_root(aria_root: &std::path::Path) -> std::path::PathBuf {
 #[tokio::test]
 async fn workspace_ws_fanout_events_have_shared_monotonic_event_seq() {
     let root = tempdir().expect("root");
-    let _repo = create_workspace_session_fixture(&root).await;
+    let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(SignalledCompletionStreamingProvider {
             complete: complete.clone(),
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -600,22 +618,25 @@ async fn workspace_ws_fanout_events_have_shared_monotonic_event_seq() {
 #[tokio::test]
 async fn workspace_ws_slow_subscriber_degrades_without_backpressure() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let step = Arc::new(Notify::new());
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(GatedChunkStreamingProvider {
             step: step.clone(),
             complete: complete.clone(),
             chunk_bytes: 0,
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -722,22 +743,25 @@ async fn workspace_ws_slow_subscriber_degrades_without_backpressure() {
 #[tokio::test]
 async fn matrix4_observer_close_zero_impact_on_driver_run() {
     let root = tempdir().expect("root");
-    create_workspace_session_fixture(&root).await;
+    create_workspace_session_fixture_with_author(&root, "claude_code").await;
     let step = Arc::new(Notify::new());
     let complete = Arc::new(Notify::new());
     let mut registry = ProviderRegistry::new();
     registry.register(
-        ProviderName::Fake,
+        ProviderName::ClaudeCode,
         Arc::new(GatedChunkStreamingProvider {
             step: step.clone(),
             complete: complete.clone(),
             chunk_bytes: 0,
         }),
     );
-    let app = build_web_router(WebAppState::with_provider_registry(
-        root.path().to_path_buf(),
-        WebRuntime::new_fake(root.path().to_path_buf()),
-        registry,
+    let app = build_web_router(with_available_provider_health(
+        WebAppState::with_provider_registry(
+            root.path().to_path_buf(),
+            WebRuntime::new_fake(root.path().to_path_buf()),
+            registry,
+        ),
+        root.path(),
     ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -873,19 +897,22 @@ async fn matrix3_non_idle_closes_during_run_keep_business_terminal() {
         Matrix3ClientCloseKind::TcpDrop,
     ] {
         let root = tempdir().expect("root");
-        let _repo = create_workspace_session_fixture(&root).await;
+        let _repo = create_workspace_session_fixture_with_author(&root, "claude_code").await;
         let complete = Arc::new(Notify::new());
         let mut registry = ProviderRegistry::new();
         registry.register(
-            ProviderName::Fake,
+            ProviderName::ClaudeCode,
             Arc::new(SignalledCompletionStreamingProvider {
                 complete: complete.clone(),
             }),
         );
-        let state = WebAppState::with_provider_registry(
-            root.path().to_path_buf(),
-            WebRuntime::new_fake(root.path().to_path_buf()),
-            registry,
+        let state = with_available_provider_health(
+            WebAppState::with_provider_registry(
+                root.path().to_path_buf(),
+                WebRuntime::new_fake(root.path().to_path_buf()),
+                registry,
+            ),
+            root.path(),
         );
         let controls = state.test_controls.clone();
         let app = build_web_router(state);

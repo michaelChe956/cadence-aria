@@ -1,0 +1,28 @@
+schema: spec-driven
+created: 2026-11-03
+goal: 把单仓这条路径整个拆掉，只留多仓一条；1 成员与 N 成员走完全同一套代码路径；布局错误给出可执行动作；provider 能力核验一键化
+x-tracker-status: draft
+x-owner-decisions:
+  - id: legacy-layout-vs-single-repo
+    decided: 2026-11-03
+    decision: legacy 布局（logical-codebase/ 目录、migrate_legacy、旧别名仓双路扫描、布局冲突判定）是多仓数据的物理落点，保留、一个字不动；只删单仓语义（RepositoryRouting::Legacy 变体、resolve_issue_logical_codebase_id 的 None 分支、单仓入口）
+    reason: 该目录下挂着 aggregate_indexes_root / aggregate_policy_artifact_path / aggregate_initializations_root / provider_trust_root 等十几个生产路径，删掉等于删掉当前所有多仓数据
+  - id: one-member-lc
+    decided: 2026-11-02
+    decision: 不禁止 1 成员 LC；1 成员与 N 成员走完全同一套代码路径，不存在 1 成员专属流程
+  - id: no-dead-code
+    decided: 2026-11-02
+    decision: 单仓相关的能去掉都去掉，不保留死代码；同时保证 LC 仓的全流程不受影响
+    reason: owner 2026-11-03 追加强调「保证多仓流程是没问题和现在保持一致的」
+  - id: new-project-ui
+    decided: 2026-11-02
+    decision: 新建项目界面直接就是多仓；「建逻辑代码库」是多仓流程里的独立步骤，不塞进「创建项目」
+  - id: member-count-gates
+    decided: 2026-11-02
+    decision: 「至少 2 个成员」类门禁一律移除
+  - id: no-stock-data
+    decided: 2026-11-02
+    decision: 默认没有任何存量单仓数据，不做数据迁移脚本；老记录（logical_codebase_id 缺失）必须给出明确错误，不得静默回退单仓
+  - id: ticket3-async
+    decided: 2026-11-03
+    decision: 票3 一键核验采用异步作业 + 轮询（同步分钟级会被代理超时截断）

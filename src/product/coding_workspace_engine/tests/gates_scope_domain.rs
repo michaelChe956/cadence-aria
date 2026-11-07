@@ -56,6 +56,25 @@ fn lc_gate_fixture(
 ) -> LcGateFixture {
     let root = tempdir().expect("tempdir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // REQ-ROUTE-01 两态化：`scope_member_prefix` 经 issue 归属解析 LC
+    //（`resolve_issue_logical_codebase_id`）；无 issue 记录时一律 fail-closed 成
+    // `WorkItemScopeDomainUnresolved`，用例就测不到前缀解析本体。夹具的
+    // manifest 写在项目级 legacy 布局，故 issue 归属 legacy 别名 LC。
+    // （须在任何 selection 目录产生之前建 issue，见 `IssueStore::create` 的
+    // 目录序 id 分配。）
+    IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
+            title: "scope domain issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("issue");
     let store = CodingAttemptStore::new(paths.clone());
     let aggregate = root.path().join("aggregate");
     let member = if member_dir_in_root {

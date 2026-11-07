@@ -8,7 +8,7 @@ export function StageChangeEntry({ entry }: { entry: ChatEntry }) {
   const label = stage ? workspaceStageLabel(stage) : entry.content;
 
   return (
-    <ChatEntryContainer role="system" title="阶段变更">
+    <ChatEntryContainer role="system" title={titleFromEntry(entry)}>
       <div className="flex items-center gap-2 text-sm text-[var(--aria-ink)]">
         <GitBranch className="h-4 w-4 shrink-0 text-[var(--aria-primary)]" />
         <div className="flex min-w-0 items-center gap-2">
@@ -29,4 +29,10 @@ function stageFromEntry(entry: ChatEntry) {
 
   const match = entry.content.match(/->\s*([a-z0-9_]+)/i);
   return match?.[1] ?? null;
+}
+
+// REQ-CG-10：条目可自带标题（如被中断修订的「运行已中止」）；缺省仍是「阶段变更」。
+function titleFromEntry(entry: ChatEntry) {
+  const title = entry.metadata?.title;
+  return typeof title === "string" && title.length > 0 ? title : "阶段变更";
 }

@@ -45,11 +45,42 @@ mod tests {
         web_checkout_id: RepositoryCheckoutId,
     }
 
+    /// REQ-ROUTE-01：evidence mediator 经唯一 authority resolver 冻结 issue 归属，
+    /// 故夹具必须落 project 记录 + 一条归属 legacy 别名 LC 的 issue。该别名子树
+    /// 与本夹具已写在项目级根的 manifest/member/checkout 字节等价
+    ///（`store::lc_scope_root` 契约），`ProjectStore::get` 的幂等
+    /// `migrate_legacy` 负责补别名 LC record。
+    fn seed_issue_authority(paths: &ProductAppPaths) {
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "evidence-mediator".to_string(),
+                description: None,
+            })
+            .expect("create project");
+        crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id:
+                    crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+                title: "evidence mediator issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .expect("create issue");
+    }
+
     fn setup() -> Fixture {
         let tmp = TempDir::new().expect("tempdir");
         let paths = ProductAppPaths::new(tmp.path().join(".aria"));
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
+        // 真实世界已建索引的聚合根必有 `.codegraph` 库目录（codegraph init
+        // 产物）；mediator 查询前置库目录守卫（④b）按此判「索引不可用」。
+        // fake-runner 夹具不跑真实 CLI，显式物化该目录以对齐已建索引形态。
+        std::fs::create_dir_all(repo.join(".codegraph")).expect("create codegraph library dir");
+        seed_issue_authority(&paths);
 
         let api_id = LogicalRepositoryId(Uuid::new_v4());
         let web_id = LogicalRepositoryId(Uuid::new_v4());
@@ -341,8 +372,13 @@ mod tests {
         let mut fx = setup();
 
         // 首次：按 manifest.active_aggregate_index_id 写 pin 并返回该 record。
-        let first =
-            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest, None).expect("first pin load");
+        let first = load_or_pin_index(
+            &fx.paths,
+            &fx.attempt,
+            &fx.manifest,
+            &crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+        )
+        .expect("first pin load");
         assert_eq!(first.aggregate_index_id, fx.aggregate_index_id);
 
         let pin: EvidenceIndexPinRecord =
@@ -374,8 +410,13 @@ mod tests {
             .expect("save manifest with new active id");
 
         // 二次查询读钉住值（第一代 record），不重写 pin。
-        let second =
-            load_or_pin_index(&fx.paths, &fx.attempt, &fx.manifest, None).expect("second pin load");
+        let second = load_or_pin_index(
+            &fx.paths,
+            &fx.attempt,
+            &fx.manifest,
+            &crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+        )
+        .expect("second pin load");
         assert_eq!(second.aggregate_index_id, fx.aggregate_index_id);
 
         let pin: EvidenceIndexPinRecord =
@@ -840,6 +881,43 @@ mod tests {
         assert!(
             attempt_partition_file(&fx.paths, &attempt_b.id, EVIDENCE_INDEX_PIN_FILE).is_file()
         );
+    }
+
+    #[test]
+    fn write_back_active_pointer_unblocks_first_query_from_503() {
+        let mut fx = setup();
+        // 生产缺口形态：索引在册（Active）但 manifest.active_aggregate_index_id
+        // 恒 None（回写缺失）⇒ 首次检索必 503，且 pin 文件无从生成。
+        fx.manifest.active_aggregate_index_id = None;
+        LogicalCodebaseStore::new(fx.paths.clone())
+            .save_manifest(PROJECT_ID, &fx.manifest)
+            .expect("save manifest without active pointer");
+        let hits_json = serde_json::json!([
+            {"node": {"name": "usedByWeb", "filePath": "web/src/app.ts", "startLine": 10}},
+        ]);
+        let runner = Arc::new(FakeCodeGraphRunner::with_stdout(&hits_json.to_string()));
+        let input = query_input(&fx.token, EvidenceRole::Coder, "usedByWeb");
+
+        let denied = handle_evidence_query_with_runner(&fx.paths, &input, runner.clone())
+            .expect_err("missing pointer fails closed");
+        assert!(matches!(
+            denied,
+            EvidenceError::QueryFailed { code, .. } if code == "evidence_index_unavailable"
+        ));
+        assert!(!pin_file_path(&fx.paths).exists());
+
+        // 激活落点回写（apply_index 在 replace_active 之后经
+        // set_active_aggregate_index 落盘的同一条通道）后：首查 200、pin
+        // 生成并钉住该 active 世代。
+        LogicalCodebaseStore::new(fx.paths.clone())
+            .set_active_aggregate_index(PROJECT_ID, &fx.aggregate_index_id)
+            .expect("write back active pointer");
+        let response = handle_evidence_query_with_runner(&fx.paths, &input, runner)
+            .expect("first query after write-back");
+        assert_eq!(response.text, "web/src/app.ts:10 usedByWeb\n");
+        let pin: EvidenceIndexPinRecord =
+            read_json(&pin_file_path(&fx.paths)).expect("pin written on first success");
+        assert_eq!(pin.pinned_aggregate_index_id, fx.aggregate_index_id);
     }
 
     // C2 政策读取测试段拆入子 include,共享 mod tests 作用域

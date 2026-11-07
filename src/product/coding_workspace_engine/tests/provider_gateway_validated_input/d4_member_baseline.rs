@@ -33,15 +33,24 @@ fn seed_d4_member_codebase(
     init_test_git_repo(&repo_b);
     init_test_git_repo(&repo_c);
 
-    logical_store
-        .save_manifest(
-            &attempt.project_id,
-            &LogicalCodebaseManifest::new(
+    // LC 身份全局唯一:`running_attempt_with_worktree` 已用 `seed_complete`
+    // 播种 manifest,新建 manifest(随机 lc_id)会被 `save_manifest` 以
+    // `IdentityMismatch` 拒绝。复用已播种 manifest 并把成员集替换为本用例
+    // 的三成员现场(D4 全员基线按 manifest active 成员采样)。
+    let mut manifest = logical_store
+        .load_manifest(&attempt.project_id)
+        .expect("load manifest")
+        .unwrap_or_else(|| {
+            LogicalCodebaseManifest::new(
                 &attempt.project_id,
                 store.paths().root().to_path_buf(),
-                vec![member_a, member_b, removed_member],
-            ),
-        )
+                vec![],
+            )
+        });
+    manifest.member_ids = vec![member_a, member_b, removed_member];
+    manifest.membership_revision += 1;
+    logical_store
+        .save_manifest(&attempt.project_id, &manifest)
         .expect("save manifest");
 
     let now = "2026-10-01T00:00:00Z".to_string();

@@ -39,11 +39,30 @@ export type BootstrapCheckpointDto = {
   completed_at: string | null;
 };
 
+/**
+ * 失败面三段成品（REQ-BOOT-08 / REQ-LAYOUT-02）——与 Rust `FailureCopyDto`
+ * 逐字段同构。五个字段**全部必填**：`reason_zh` 不是可选，前端不得把缺失
+ * 当降级路径（只有非法/损坏响应才可能缺，那种情况按防崩处理）。
+ */
+export type FailureCopyTriage = "environment" | "product_defect" | "retry_only";
+
+export type FailureCopyDto = {
+  title_zh: string;
+  reason_zh: string;
+  action_zh: string;
+  triage: FailureCopyTriage;
+  machine_line: string;
+};
+
 export type BootstrapFailureDto = {
   reason_code: string;
   detail: string;
   retryable: boolean;
   external_side_effect: string;
+  /** 只由后端 copy.triage 派生（兼容旧响应才缺省）。 */
+  triage?: FailureCopyTriage | null;
+  /** 后端已渲染好的同源成品，前端不再自拼中文。 */
+  copy?: FailureCopyDto | null;
 };
 
 export type BootstrapStepProjectionDto = {
@@ -74,6 +93,27 @@ export type BootstrapPolicyReferenceDto = {
   artifact_root: string;
 };
 
+/**
+ * 冷启动推进的停止原因（advance / 手动「准备」被拒时落盘，GET 投影透出）。
+ * 仅当被停步骤仍是 `not_started` 时出现——PlanningReady 或链启动后清除。
+ * `reason_code` 与失败面同码表，两道闸门的区分键：
+ * `aggregate_initialization_provider_needs_verification`（provider 选择门：
+ * 装了但还没核验）与 `aggregate_initialization_trust_waiting`（trust 门：
+ * 还没拿到这台机器的信任）。
+ */
+export type BootstrapAdvanceStopDto = {
+  /** 停住的步骤（依赖顺序里的那一步）。 */
+  step: LogicalCodebaseBootstrapStepName;
+  /** 停止枚举（waiting_for_human / failed / no_actionable_step …），不是中文文案。 */
+  reason: string;
+  /** 稳定机器码——两道闸门的区分键。 */
+  reason_code: string;
+  /** 已脱敏的原始拒绝上下文（拒绝 message + details），可空。 */
+  detail?: string | null;
+  /** 停止时间。 */
+  stopped_at: string;
+};
+
 export type LogicalCodebaseBootstrapProjection = {
   project_id: string;
   logical_codebase_id: string;
@@ -83,6 +123,8 @@ export type LogicalCodebaseBootstrapProjection = {
   steps: BootstrapStepProjectionDto[];
   planning_ready: boolean;
   notices: LogicalCodebaseBootstrapNoticeDto[];
+  /** 最近一次可解释的停止（被停步骤仍「未开始」时才有；就绪后清除）。 */
+  advance_stop?: BootstrapAdvanceStopDto | null;
 };
 
 export type BootstrapActionResult = {
@@ -120,6 +162,8 @@ export type BootstrapAdvanceResult = {
   stopped_step?: LogicalCodebaseBootstrapStepName | null;
   /** 停住步骤的稳定原因码（既有投影 failure 或推进器稳定码）。 */
   stopped_reason_code?: string | null;
+  /** 停住步骤的原始拒绝上下文（已脱敏的拒绝 message + details），可空。 */
+  stopped_detail?: string | null;
   /** 推进后的最新投影（与 GET .../bootstrap 同构）。 */
   projection: LogicalCodebaseBootstrapProjection;
 };

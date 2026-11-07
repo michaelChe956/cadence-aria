@@ -1,0 +1,16 @@
+schema: spec-driven
+created: 2026-11-03
+goal: 让 author 重写额度真正共用一个池 —— 平台自动重写改扣 max_manual_repairs（B 池），B1/B2 合并为一个真实余额，并定义「编译成功时两个字段谁清」
+x-tracker-status: draft
+x-owner-decisions:
+  - id: quota-pool-option
+    decided: 2026-11-03
+    decision: 选项 A —— 契约不动、代码改：平台自动重写改扣 max_manual_repairs（B 池），B1/B2 合并为一个真实余额，并定义「编译成功时两个字段谁清」
+    rejected: 选项 B —— 接受现状（实际最多 6 次）并改契约与呈现；等于撤销 owner 2026-10-31 的「3 次共用」裁定
+  - id: quota-pool-compile-success-clear
+    decided: 2026-11-03
+    decision: 编译成功清「编译链上的平台自动重写段」（B1 诊断计数 + 其在预算域里对应的已计费消费），不清门反馈段（B2）
+    reason: 整池清零会静默推翻 REQ-HGC-01（同门 carry-forward、不得每轮重置回默认）与 REQ-CG-02（预留 / 结算 / 退款）；若要整池清零必须显式修改那两条契约，不在本 change 内暗改
+  - id: quota-pool-contract-unchanged
+    decided: 2026-11-03
+    decision: REQ-WSC-21 的「扣同一个池」表述逐字保留；delta 只补「谁清」与可验收场景；主 specs 由归档时 delta 自动同步，本 change 不改主 specs

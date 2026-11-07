@@ -147,7 +147,11 @@ fn create_plain_issue(paths: &crate::product::app_paths::ProductAppPaths, title:
             repo_id: Some(
                 crate::web::handlers::automation_enrollment_test_support::REPOSITORY_ID.to_string(),
             ),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                PROJECT_ID,
+            ),
             title: title.to_string(),
             description: None,
             change_id: None,

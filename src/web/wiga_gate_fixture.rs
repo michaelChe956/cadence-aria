@@ -21,8 +21,7 @@ use crate::product::workspace_engine::tests::single_candidate_recovery::single_c
 use crate::web::autopilot_orchestrator::{AutopilotOrchestrator, ReconcileOutcome};
 pub(crate) use crate::web::handlers::automation_enrollment_test_support::{ISSUE_ID, PROJECT_ID};
 use crate::web::handlers::automation_enrollment_test_support::{
-    put_enrollment, response_json, seed_fixture, seed_single_repository_fixture,
-    single_repository_enable_body,
+    put_enrollment, response_json, seed_fixture,
 };
 use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
 use crate::web::state::WebAppState;
@@ -38,7 +37,6 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 mod p2_campaign;
-pub(crate) use p2_campaign::c5_single_repository_campaign_fixture;
 pub(crate) use p2_campaign::p2_enrolled_campaign_fixture;
 use p2_campaign::{init_real_main_checkout, normalize_checkout_revision_to_unobserved};
 
@@ -251,12 +249,9 @@ impl EnrolledGateFixture {
             )
             .ensure_bootstrap(&seed_manifest)
             .expect("seed aggregate policy artifact");
-            crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
-                inner.paths.clone(),
-                &runner_lc_id,
-            )
-            .ensure_bootstrap(PROJECT_ID)
-            .expect("seed capability record");
+            crate::product::logical_codebase::ProviderCapabilityStore::new(inner.paths.clone())
+                .ensure_bootstrap()
+                .expect("seed capability record");
             // 迁移桥退役（4749a1fc）后 bootstrap 行恒为 Unknown：正向路径
             // 必须在自举之后物化「已探测」Confirmed 行，Enable 预检与
             // coding run 才能通过 capability 门（产品 fail-closed 语义不变，
@@ -264,7 +259,6 @@ impl EnrolledGateFixture {
             crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
                 &inner.paths,
                 PROJECT_ID,
-                Some(&runner_lc_id),
                 &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
             );
         }
@@ -331,61 +325,6 @@ impl EnrolledGateFixture {
             .expect("bound session manager");
         // 已派发的生成 run：manager 唯一 run 面真实注册；provider 等待者
         // 持续消费 command 通道（choice 应答 Delivered 的真实对端）。
-        let (_run_id, token, _cancel, command_rx, _node) = manager
-            .start_run(ProviderRunKind::WorkItemPlanSingleCandidateAuthor, None)
-            .await
-            .expect("in-flight generation run");
-        let incarnation = manager.active_run_incarnation().expect("run incarnation");
-        tokio::spawn(deliver_choice_receipts(command_rx));
-        Self {
-            inner,
-            state,
-            lifecycle,
-            plan_id,
-            session_id,
-            manager,
-            token,
-            incarnation,
-            gate_id: None,
-        }
-    }
-
-    /// C5 Task 4：单仓 enrolled 链 fixture——issue.repo_id 指向真实 git
-    /// 物理仓（main 基线 + 空提交 + 本地 origin，满足 advance fork 基线
-    /// 三面同源解析），enrollment target 为 SingleRepository；plan/session
-    /// 绑定与生成 run 注册与 `new` 同源（仅载体与 Enable body 不同）。
-    pub(crate) async fn new_single_repository() -> Self {
-        let inner = seed_single_repository_fixture();
-        init_real_main_checkout(&inner._root.path().join("repo-1"));
-        let root_path = inner._root.path().to_path_buf();
-        let state = fake_state_with_gateway(root_path.clone());
-        let app = crate::web::app::build_web_router(state.clone());
-        let mut body = single_repository_enable_body(&inner);
-        // gate outline 无 integration 工作项：与 LC fixture 同口径关闭
-        // include_integration_tests（编译严格校验会拒绝缺项计划）。
-        body["command"]["options"]["plan_options"]["include_integration_tests"] =
-            serde_json::json!(false);
-        let enable = put_enrollment(&app, body).await;
-        assert_eq!(enable.status(), StatusCode::OK);
-        assert!(response_json(enable).await["enabled"].as_bool().unwrap());
-
-        let lifecycle = LifecycleStore::new(inner.paths.clone());
-        let store = IssueAutomationStore::new(inner.paths.clone());
-        let enrollment = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
-        ensure_enrolled_plan(&state, &enrollment)
-            .await
-            .expect("ensure enrolled plan");
-        let bound = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
-        let plan_id = bound.plan_id.expect("bound plan");
-        let session_id = bound.session_id.expect("bound session");
-
-        let manager = state
-            .workspace_sessions
-            .get_or_create(&session_id, || {
-                WorkspaceSessionManager::create(&state, &session_id)
-            })
-            .await
-            .expect("bound session manager");
         let (_run_id, token, _cancel, command_rx, _node) = manager
             .start_run(ProviderRunKind::WorkItemPlanSingleCandidateAuthor, None)
             .await
@@ -561,12 +500,9 @@ impl EnrolledGateFixture {
             )
             .ensure_bootstrap(&seed_manifest)
             .expect("seed aggregate policy artifact");
-            crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
-                inner.paths.clone(),
-                &runner_lc_id,
-            )
-            .ensure_bootstrap(PROJECT_ID)
-            .expect("seed capability record");
+            crate::product::logical_codebase::ProviderCapabilityStore::new(inner.paths.clone())
+                .ensure_bootstrap()
+                .expect("seed capability record");
             // 迁移桥退役（4749a1fc）后 bootstrap 行恒为 Unknown：正向路径
             // 必须在自举之后物化「已探测」Confirmed 行，Enable 预检与
             // coding run 才能通过 capability 门（产品 fail-closed 语义不变，
@@ -574,7 +510,6 @@ impl EnrolledGateFixture {
             crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
                 &inner.paths,
                 PROJECT_ID,
-                Some(&runner_lc_id),
                 &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
             );
         }

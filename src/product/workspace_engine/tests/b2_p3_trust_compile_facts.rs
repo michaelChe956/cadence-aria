@@ -17,10 +17,9 @@ use super::*;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::logical_codebase::{
-    AggregatePolicyArtifactStore, EnrollmentTarget, LogicalCodebaseManifest,
-    LogicalCodebaseProviderGateway, LogicalCodebaseStore, LogicalRepositoryId,
-    ProviderTrustPrecondition, ProviderTrustPreparationResult, ProviderTrustWaiting,
-    legacy_logical_codebase_id,
+    AggregatePolicyArtifactStore, EnrollmentTarget, LogicalCodebaseProviderGateway,
+    LogicalCodebaseStore, LogicalRepositoryId, ProviderTrustPrecondition,
+    ProviderTrustPreparationResult, ProviderTrustWaiting, legacy_logical_codebase_id,
 };
 use crate::product::models::automation::{
     AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage, EnrollmentOptions,
@@ -117,12 +116,19 @@ fn b2_p3_trust_engine(policy: RunPolicy) -> B2P3TrustFixture {
     let worktree = root.path().join("b2-p3-aggregate-root");
     std::fs::create_dir_all(&worktree).expect("create aggregate root");
     let registry_lc_id = legacy_logical_codebase_id("project_0001");
-    LogicalCodebaseStore::for_lc(app_paths.clone(), registry_lc_id)
-        .save_manifest(
-            "project_0001",
-            &LogicalCodebaseManifest::new("project_0001", worktree.clone(), Vec::new()),
-        )
-        .expect("save legacy-scope LC manifest");
+    // 冻结根改为 b2-p3 专属聚合根（confirm trust 要求同 scope manifest root
+    // 与 gateway 冻结根同源）；成员集保持引擎夹具原样——REQ-PLN-02 下
+    // Final Compile 要求 accepted draft 的 target 落在有效成员集内，历史上
+    // 覆写成空成员清单会让 compile 必然 fail-closed。
+    let authority = LogicalCodebaseStore::for_lc(app_paths.clone(), registry_lc_id);
+    let mut manifest = authority
+        .load_manifest("project_0001")
+        .expect("load engine fixture manifest")
+        .expect("engine fixture registers a logical codebase manifest");
+    manifest.provider_context_root = worktree.clone();
+    authority
+        .save_manifest("project_0001", &manifest)
+        .expect("re-root legacy-scope LC manifest");
 
     // 会话重写：author=Codex（需要 workspace trust 的 provider）、reviewer 置
     // 空、目标 run policy 落 durable，再以持有事件接收端的引擎重建。

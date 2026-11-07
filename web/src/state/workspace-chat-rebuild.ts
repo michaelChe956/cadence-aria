@@ -5,6 +5,7 @@ import type {
   GateEntryMetadata,
 } from "./chat-entries";
 import { actionFacadeForFlowKind } from "./cockpit-action-routing";
+import { interruptedRevisionEntry, isInterruptedRevisionNode } from "./gate-card-state";
 import { workItemPlanArtifactUpdateSummary } from "./work-item-plan-artifact-summary";
 import { selectGateProjection } from "./workspace-cockpit-projection";
 import { chatRoleForTimelineNode } from "./workspace-ws-store-helpers";
@@ -275,6 +276,22 @@ export function buildChatEntries(state: WorkspaceWsState): ChatEntry[] {
     if (verdictEntry) {
       entries.push(verdictEntry);
     }
+  }
+
+  // REQ-CG-10：被中断修订的节点在对话流明说「修订被中断，你的选择未生效」——
+  // 来自 durable 节点 summary，刷新 / 重连后仍在；紧随该节点已有条目之后。
+  for (const node of state.timelineNodes) {
+    if (retriedNodeIds.has(node.node_id) || !isInterruptedRevisionNode(node)) {
+      continue;
+    }
+    let insertAt = entries.length;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      if (entries[index].node_id === node.node_id) {
+        insertAt = index + 1;
+        break;
+      }
+    }
+    entries.splice(insertAt, 0, interruptedRevisionEntry(node));
   }
 
   const gatePrompt = buildGatePromptEntry(state, entries);

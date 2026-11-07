@@ -983,6 +983,81 @@ describe("anchor_t19 driver/observer authoritative lc resume recovery", () => {
     expect(observer.lcResumeRecovery).toEqual(useWorkspaceStore.getState().lcResumeRecovery);
   });
 
+  it("REQ-HGC-04：driver store 落位「继续自动化」入口事实（缺席=未知 null）", () => {
+    const store = useWorkspaceStore.getState();
+    // 缺席：服务端未判定（读取失败/非 plan 会话/旧帧）→ null（前端按「无真实
+    // 续跑入口」处理，不得给假指引）。
+    store.setSessionState({
+      session_id: "session_continue_absent",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      session_status: "stopped_needs_human",
+      flow_kind: "single_candidate",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: null },
+    });
+    expect(useWorkspaceStore.getState().planContinueAvailable).toBeNull();
+
+    // 在场：true = 此刻确有「继续自动化」入口（与 HTTP control 同源）。
+    store.setSessionState({
+      session_id: "session_continue_true",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      session_status: "stopped_needs_human",
+      flow_kind: "single_candidate",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: null },
+      plan_continue_available: true,
+    });
+    expect(useWorkspaceStore.getState().planContinueAvailable).toBe(true);
+
+    // 在场 false：此刻确定没有该入口。
+    store.setSessionState({
+      session_id: "session_continue_false",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      session_status: "stopped_needs_human",
+      flow_kind: "single_candidate",
+      run_policy: "interactive",
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 0,
+        transitions_used: 0,
+        initial_review_count: 0,
+        verification_review_count: 0,
+      },
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "fake", reviewer: null },
+      plan_continue_available: false,
+    });
+    expect(useWorkspaceStore.getState().planContinueAvailable).toBe(false);
+  });
+
   it("anchor_t19 driver keeps the previous authoritative recovery when a wire payload is malformed", () => {
     const valid = lcResumeRecoveryFixture();
     useWorkspaceStore

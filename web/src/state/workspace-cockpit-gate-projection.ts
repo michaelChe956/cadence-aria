@@ -17,7 +17,7 @@ export const GATE_TRIGGER_LABELS: Record<WorkItemPlanHumanGateSnapshot["trigger"
   native_human_required: "引擎判定需人工",
   repeated_fingerprint: "同一问题重复出现",
   verification_new_findings: "复验发现新问题",
-  repair_budget_exhausted: "修复轮次已用尽",
+  repair_budget_exhausted: "本轮评审自动返修已停止，需要你决定下一步。",
 };
 
 const ADVANCE_REPLAY_CODES = new Set([
@@ -480,4 +480,28 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
     action_block_reason: actionBlockReason,
     terminate_block_reason: terminateBlockReason,
   };
+}
+
+/**
+ * REQ-HGC-01「卡片刷新」：当前门卡的重建 / 重连 SHALL 刷新同门当前事实；旧卡
+ * 只读历史事实，SHALL NOT 呈现为当前授权。
+ *
+ * 给定门卡的门身份，返回**当前门**的 B2 人工返修余量（durable snapshot / turn
+ * 真值经 selectGateProjection 派生——门以新快照重建后取新预算，见上方
+ * snapshotSupersedesTurnBudget 判据）。该卡不是当前门（门身份与当前门投影不
+ * 一致）或当前门没有预算事实时返回 null：调用方据此回落到卡片自带的创建时快
+ * 照（旧卡只读历史，不得读成当前授权）。
+ */
+export function currentGateRemainingBudget(
+  state: WorkspaceWsState,
+  gateIdentity: string | null,
+): number | null {
+  if (gateIdentity === null) {
+    return null;
+  }
+  const projection = selectGateProjection(state);
+  if (projection === null || projection.key !== gateIdentity) {
+    return null;
+  }
+  return projection.remaining_budget;
 }

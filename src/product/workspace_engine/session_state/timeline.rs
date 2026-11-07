@@ -131,9 +131,11 @@ impl WorkspaceEngine {
 
     pub(crate) async fn finish_aborted_run(&mut self) {
         if let Some(node_id) = self.active_node_id.clone() {
+            // REQ-WIGA-16：中止不是失败——节点落「中止」态（Aborted），不得以
+            // failed 表述「中止」；summary 沿用既有文案逐字不变。
             self.update_timeline_node(
                 &node_id,
-                TimelineNodeStatus::Failed,
+                TimelineNodeStatus::Aborted,
                 Some("运行已中止".to_string()),
             )
             .await;
@@ -404,12 +406,14 @@ impl WorkspaceEngine {
         status: TimelineNodeStatus,
         summary: Option<String>,
     ) {
-        let completed_at = if matches!(
+        let is_terminal_status = matches!(
             status,
             TimelineNodeStatus::Completed
                 | TimelineNodeStatus::Failed
                 | TimelineNodeStatus::Skipped
-        ) {
+                | TimelineNodeStatus::Aborted
+        );
+        let completed_at = if is_terminal_status {
             Some(chrono::Utc::now().to_rfc3339())
         } else {
             None
@@ -421,6 +425,19 @@ impl WorkspaceEngine {
             .find(|node| node.node_id == node_id)
         {
             node.status = status.clone();
+            // REQ-WIGA-16：stage 与 status 必须相互一致——provider run 节点进入
+            // 终态后不得仍以进行中阶段（running）表述。WorkspaceStage 值域中不存在
+            // 「失败/中止」终态 stage，复用唯一终态 stage Completed（不新增对外取值）。
+            //
+            // 收敛（既有契约不得被本修法改写）：只归一「provider run 节点」——
+            // 带 provider agent 的节点记录的是一次在途 provider 执行，其 stage=Running
+            // 与终态 status 自相矛盾；无 agent 的工作流节点（如 WorkItemPlanCompile）
+            // 的 stage 是「该节点所属的工作流阶段」历史标签（既有断言：compile 节点
+            // 收口后仍记 running），不是执行态，不得改写。
+            if is_terminal_status && node.agent.is_some() && node.stage == WsWorkspaceStage::Running
+            {
+                node.stage = ws_stage(&WorkspaceStage::Completed);
+            }
             if summary.is_some() {
                 node.summary = summary.clone();
             }
@@ -641,5 +658,77 @@ mod t3_termination_tests {
             lifecycle.get_workspace_session(&session_id).unwrap().status,
             WorkspaceSessionStatus::Open,
         );
+    }
+
+    /// REQ-WIGA-16：被中止的 run 不得以「失败」表述——节点 status 落「中止」态、
+    /// summary 表达「已中止」、stage 与 status 一致（终态节点不得仍停留在
+    /// running）、completed_at 落盘；回归：真实失败路径仍表述为失败。
+    #[tokio::test]
+    async fn aborted_run_node_is_not_failed_and_stage_matches_status() {
+        let root = tempfile::tempdir().unwrap();
+        let (lifecycle, mut engine) =
+            persistent_engine_with_status(root.path(), WorkspaceSessionStatus::Open);
+        let session_id = engine.session.session_id.clone();
+
+        let aborted_node_id = engine
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::AuthorRun,
+                agent: Some(ProviderName::Fake),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "生成正文".to_string(),
+                summary: None,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+
+        engine.finish_aborted_run().await;
+
+        let nodes = lifecycle.load_timeline_nodes(&session_id).unwrap();
+        let aborted = nodes
+            .iter()
+            .find(|node| node.node_id == aborted_node_id)
+            .expect("aborted timeline node persisted");
+        assert_ne!(
+            aborted.status,
+            TimelineNodeStatus::Failed,
+            "被中止的 run 不得表述为失败（REQ-WIGA-16）"
+        );
+        assert_eq!(aborted.status, TimelineNodeStatus::Aborted);
+        assert_eq!(aborted.summary.as_deref(), Some("运行已中止"));
+        assert_ne!(
+            aborted.stage,
+            WsWorkspaceStage::Running,
+            "终态节点不得仍以进行中阶段表述（stage 与 status 必须一致）"
+        );
+        assert_eq!(aborted.stage, WsWorkspaceStage::Completed);
+        assert!(
+            aborted.completed_at.is_some(),
+            "中止态节点的 completed_at 必须落盘"
+        );
+
+        // 回归：真实失败路径仍表述为失败（既有 failed 语义逐字不变）。
+        let failed_node_id = engine
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::AuthorRun,
+                agent: Some(ProviderName::Fake),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "生成正文".to_string(),
+                summary: None,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+        engine
+            .finish_active_run_with_failed_node("provider 真实失败")
+            .await;
+
+        let nodes = lifecycle.load_timeline_nodes(&session_id).unwrap();
+        let failed = nodes
+            .iter()
+            .find(|node| node.node_id == failed_node_id)
+            .expect("failed timeline node persisted");
+        assert_eq!(failed.status, TimelineNodeStatus::Failed);
+        assert_eq!(failed.summary.as_deref(), Some("provider 真实失败"));
     }
 }

@@ -28,6 +28,7 @@ use sha2::{Digest as ShaDigest, Sha256};
 use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
 use crate::cross_cutting::streaming_provider::{
     ProviderPermissionMode, ProviderToolPolicy, ToolPolicyIntent, adapter_role_text,
+    bootstrap_marker::bootstrap_marker_canonical_digest,
 };
 use crate::product::logical_codebase::policy::{
     ProviderDialect, ProviderWireDialect, SessionPolicyAction, SessionPolicyEnvelope,
@@ -58,6 +59,10 @@ const SESSION_DIGEST_SCHEMA: &str = "lc-codex-session-v2";
 const BOUNDARY_PLAN_REF_SCHEMA: &str = "lc-codex-boundary-plan-v1";
 /// LC tool-policy 独立 canonical 摘要的 schema 前缀。
 const LC_TOOL_POLICY_DIGEST_SCHEMA: &str = "lc-codex-tool-policy-v1";
+/// RootRecipe 相位 BootstrapExecutorMarker 的 canonical 序列化 schema 前缀
+/// (REQ-BOOT-15:与 claude 的 marker canonical 化同语义、同一共享实现,
+/// schema 前缀按 provider 独立冻结)。
+const BOOTSTRAP_MARKER_DIGEST_SCHEMA: &str = "lc-codex-bootstrap-marker-v1";
 
 /// 固定 role×policy 映射的冻结快照(T11 公共角色矩阵:deny 是 Author 岗位
 /// 纪律的物理投影,仅 Author 可承载角色合法;Reviewer/Coder/Handoff 全开)。
@@ -147,20 +152,35 @@ impl CodexSandboxProjection {
     }
 }
 
-/// Codex LC projector:构造时冻结已实测 exact version。真实 version 未知
-/// (空串)时 `project` fail-closed 拒绝,不产出投影。
+/// Codex LC projector:构造时冻结已实测 exact version 与相位。真实 version
+/// 未知(空串)时 `project` fail-closed 拒绝,不产出投影;`root_recipe_phase`
+/// 来自 validated policy 的冻结相位——`BootstrapExecutorMarker` 只在
+/// RootRecipe 相位可 canonical 化(REQ-BOOT-15:root recipe 相位对 provider
+/// 无关;Normal 相位的 marker 由 T7 guard 先拦,projector 的 canonical 层
+/// 再独立拒绝,双层防线)。
 #[derive(Debug, Clone)]
 pub struct CodexPolicyProjector {
     exact_version: String,
+    root_recipe_phase: bool,
 }
 
 impl CodexPolicyProjector {
-    /// 以已解析的 provider exact version 构造 projector(registry 装配/测试
-    /// seam;version 解析本身由 adapter 侧 supplier/CLI 探测承担)。
+    /// 以已解析的 provider exact version 构造 Normal 相位 projector
+    /// (registry 装配/测试 seam;version 解析本身由 adapter 侧 supplier/CLI
+    /// 探测承担)。
     pub fn new(exact_version: impl Into<String>) -> Self {
         Self {
             exact_version: exact_version.into(),
+            root_recipe_phase: false,
         }
+    }
+
+    /// 冻结 RootRecipe 相位(REQ-BOOT-15):adapter 的 `start_lc_validated_
+    /// with_phase`/`prepare_lc_facts` 以 validated policy 的真实相位构造,
+    /// marker 才能进入 canonical 化。
+    pub fn with_root_recipe_phase(mut self, root_recipe_phase: bool) -> Self {
+        self.root_recipe_phase = root_recipe_phase;
+        self
     }
 
     /// 由全投影派生 codex danger sandbox 投影(单一来源;wire 参数与
@@ -274,10 +294,14 @@ fn lc_roots_field(roots: &[PathBuf]) -> String {
 /// 会话的 `canonical_tool_policy`/`tool_policy_digest` 共用函数或冻结序列。
 /// `Some(DenyFileWriteBuiltins)`(Author 岗位纪律投影)与 `None`(全开
 /// 角色)都走 LC 冻结 schema,digest 恒非空且稳定(统一 launch audit 不以
-/// `tool_policy=None` 跳过);其余 intent(marker)对 codex LC 不合法,
-/// fail-closed 拒绝(root recipe 自举通道要求固定 Claude provider)。
+/// `tool_policy=None` 跳过)。`Some(BootstrapExecutorMarker)` 仅在 RootRecipe
+/// 相位可 canonical 化(REQ-BOOT-15:root recipe 相位对 provider 无关,与
+/// claude 同语义,替代旧「marker 对 codex LC 不合法」硬拒);Normal 相位的
+/// marker 在 canonical 层独立拒绝(普通 Coder 不可借 marker,与 T7 guard
+/// 相位门构成双层防线)。
 pub(crate) fn lc_tool_policy_canonical_digest(
     policy: Option<&ProviderToolPolicy>,
+    root_recipe_phase: bool,
 ) -> Result<String, ProviderProjectionError> {
     let (intent, window) = match policy.map(|policy| &policy.intent) {
         None => ("none", None),
@@ -287,10 +311,17 @@ pub(crate) fn lc_tool_policy_canonical_digest(
         Some(ToolPolicyIntent::ReviewerVerify { window_id }) => {
             ("reviewer_verify_window", Some(window_id.as_str()))
         }
-        Some(ToolPolicyIntent::BootstrapExecutorMarker(_)) => {
-            return Err(ProviderProjectionError::Invalid(
-                "codex lc tool policy digest: bootstrap executor markers are not codex LC policies"
-                    .to_string(),
+        Some(ToolPolicyIntent::BootstrapExecutorMarker(marker)) => {
+            if !root_recipe_phase {
+                return Err(ProviderProjectionError::Invalid(
+                    "codex lc tool policy is not canonicalizable: bootstrap executor marker requires the root recipe phase; ordinary coder launches must not carry it"
+                        .to_string(),
+                ));
+            }
+            return Ok(bootstrap_marker_canonical_digest(
+                BOOTSTRAP_MARKER_DIGEST_SCHEMA,
+                super::session::TOOL_POLICY_PROVIDER_NAME,
+                marker,
             ));
         }
     };
@@ -494,7 +525,8 @@ impl ProviderPolicyProjector for CodexPolicyProjector {
         //    roots/trust/config/policy/authority + 实际 tool policy。分层包含
         //    profile 摘要(先算 profile 再算 session,单向无递归);codex 的
         //    双 cwd(process/protocol)都纳入。
-        let session_tool_digest = lc_tool_policy_canonical_digest(input.tool_policy())?;
+        let session_tool_digest =
+            lc_tool_policy_canonical_digest(input.tool_policy(), self.root_recipe_phase)?;
         let process_cwd = envelope.working_directory.to_string_lossy().into_owned();
         let protocol_cwd_field = protocol_cwd.to_string_lossy().into_owned();
         let authority = envelope.authority_root.to_string_lossy().into_owned();
@@ -764,7 +796,7 @@ mod tests {
 
         // (a) tool-policy 摘要与 direct canonical 序列不同源、不共用函数产物。
         let lc_policy_digest =
-            lc_tool_policy_canonical_digest(Some(&deny)).expect("lc tool policy digest");
+            lc_tool_policy_canonical_digest(Some(&deny), false).expect("lc tool policy digest");
         let direct_digest = canonical_tool_policy(
             crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
             &deny,
@@ -777,7 +809,7 @@ mod tests {
             format!("sha256:{direct_digest}"),
             "lc digest must not be a prefix-wrapped reuse of the direct canonical digest"
         );
-        let lc_none_digest = lc_tool_policy_canonical_digest(None).expect("none digest");
+        let lc_none_digest = lc_tool_policy_canonical_digest(None, false).expect("none digest");
         assert!(lc_none_digest.starts_with("sha256:"));
         assert_ne!(lc_none_digest, lc_policy_digest);
 
@@ -847,5 +879,140 @@ mod tests {
             .expect("planning projection no longer re-refuses writable roots at the projector");
         assert_eq!(planning.sandbox(), "danger-full-access");
         assert!(planning.boundary_evidence_ref().is_empty());
+    }
+
+    /// REQ-BOOT-15(root recipe 相位对 provider 无关):RootRecipe 相位的
+    /// BootstrapExecutorMarker 在 Codex 侧可确定性 canonical 化(与 claude
+    /// 同语义的共享 digest 实现,替代旧「marker 对 codex LC 不合法」硬拒);
+    /// Normal 相位的 marker 在 canonical 层独立拒绝(T7 guard 相位门之外的
+    /// 二层防线,普通 Coder 不可借 marker);deny/None 的既有 LC 冻结摘要
+    /// 与相位无关,零回归。
+    #[test]
+    fn lc_root_recipe_marker_canonicalization_is_deterministic_and_phase_gated() {
+        use crate::cross_cutting::streaming_provider::ToolPolicyIntent;
+        use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepKind;
+        use crate::product::logical_codebase::provider_admission_preflight::{
+            BootstrapExecutorMarker, BootstrapPhaseCredential,
+        };
+
+        fn t10_bootstrap_marker_policy(
+            operation_id: &str,
+            receipt_context: &str,
+        ) -> ProviderToolPolicy {
+            let canonical_root = PathBuf::from("/lc/bootstrap-root");
+            let credential = BootstrapPhaseCredential::for_test(
+                "project_0001",
+                "logical_codebase_0001",
+                operation_id,
+                AggregateInitializationStepKind::PreCheck,
+                "sha256:test-input-digest",
+                canonical_root.clone(),
+            );
+            let marker = BootstrapExecutorMarker::new(
+                credential,
+                SessionPolicyAction::CodingTargetWrite,
+                canonical_root,
+                receipt_context,
+            )
+            .expect("complete bootstrap executor marker");
+            ProviderToolPolicy {
+                intent: ToolPolicyIntent::BootstrapExecutorMarker(marker),
+            }
+        }
+
+        // 1) RootRecipe 相位:可翻译且确定性(sha256: 前缀 + 64 位小写 hex)。
+        let marker_policy = t10_bootstrap_marker_policy(
+            "aggregate_initialization_0001",
+            "root-recipe:pre_check:command-1",
+        );
+        let canonical = lc_tool_policy_canonical_digest(Some(&marker_policy), true)
+            .expect("root recipe phase marker must canonicalize");
+        assert!(canonical.starts_with("sha256:"));
+        assert_eq!(canonical.len(), 71);
+        assert_eq!(
+            canonical,
+            lc_tool_policy_canonical_digest(Some(&marker_policy), true)
+                .expect("canonicalization is deterministic")
+        );
+
+        // 2) 漂移敏感:凭据 operation id / receipt context 任一变化 → digest 变化。
+        let drifted_operation = t10_bootstrap_marker_policy(
+            "aggregate_initialization_0002",
+            "root-recipe:pre_check:command-1",
+        );
+        let drifted_receipt = t10_bootstrap_marker_policy(
+            "aggregate_initialization_0001",
+            "root-recipe:rule_and_mcp_config:command-2",
+        );
+        assert_ne!(
+            canonical,
+            lc_tool_policy_canonical_digest(Some(&drifted_operation), true)
+                .expect("drifted operation still canonicalizes")
+        );
+        assert_ne!(
+            canonical,
+            lc_tool_policy_canonical_digest(Some(&drifted_receipt), true)
+                .expect("drifted receipt still canonicalizes")
+        );
+
+        // 3) canonical 层防线:Normal 相位不可传 marker,拒绝文案与 claude
+        //    同形(provider 名替换)。
+        let rejected = lc_tool_policy_canonical_digest(Some(&marker_policy), false)
+            .expect_err("normal phase marker must be rejected at the canonical layer");
+        let rejected_text = rejected.to_string();
+        assert!(
+            rejected_text.contains("codex lc tool policy is not canonicalizable"),
+            "unexpected rejection: {rejected_text}"
+        );
+        assert!(
+            rejected_text.contains("root recipe phase"),
+            "unexpected rejection: {rejected_text}"
+        );
+
+        // 4) deny/None 与相位无关(既有 LC 冻结摘要零回归)。
+        let deny = ProviderToolPolicy::deny_file_write_builtins();
+        assert_eq!(
+            lc_tool_policy_canonical_digest(Some(&deny), true)
+                .expect("deny canonicalizes in root recipe phase"),
+            lc_tool_policy_canonical_digest(Some(&deny), false)
+                .expect("deny canonicalizes in normal phase")
+        );
+        assert_eq!(
+            lc_tool_policy_canonical_digest(None, true).expect("none in root recipe"),
+            lc_tool_policy_canonical_digest(None, false).expect("none in normal")
+        );
+
+        // 5) projector 层:RootRecipe 相位投影成功且确定性;Normal 相位的
+        //    projector 独立 fail-closed。
+        let marker_input = t12_coding_input(
+            AdapterRole::Executor,
+            ProviderPermissionMode::Auto,
+            Some(marker_policy.clone()),
+            vec![t12_target()],
+        );
+        let root_recipe_projector =
+            CodexPolicyProjector::new("codex 0.124.0-t12").with_root_recipe_phase(true);
+        let projected = root_recipe_projector
+            .project(&marker_input)
+            .expect("root recipe projector accepts the bootstrap marker");
+        assert!(projected.tool_policy().is_some());
+        assert_eq!(
+            projected.projection_digest(),
+            root_recipe_projector
+                .project(&marker_input)
+                .expect("projection is deterministic")
+                .projection_digest()
+        );
+
+        let normal_projector = CodexPolicyProjector::new("codex 0.124.0-t12");
+        let rejected_projection = normal_projector
+            .project(&marker_input)
+            .expect_err("normal phase projector must refuse the marker");
+        assert!(
+            rejected_projection
+                .to_string()
+                .contains("root recipe phase"),
+            "unexpected projection rejection: {rejected_projection:?}"
+        );
     }
 }

@@ -23,7 +23,8 @@ use crate::cross_cutting::claude_code_provider::{
 use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
 use crate::cross_cutting::streaming_provider::{
     ProviderPermissionMode, ProviderToolPolicy, TOOL_POLICY_APPROVAL_POLICY_VERSION,
-    ToolPolicyIntent, adapter_role_text, canonical_tool_policy, tool_policy_digest,
+    ToolPolicyIntent, adapter_role_text, bootstrap_marker::bootstrap_marker_canonical_digest,
+    canonical_tool_policy, tool_policy_digest,
 };
 use crate::product::logical_codebase::policy::{
     ProviderDialect, ProviderWireDialect, SessionPolicyAction, SessionPolicyEnvelope,
@@ -221,37 +222,14 @@ pub(crate) fn lc_tool_policy_canonical_digest(
                             .to_string(),
                     ));
                 }
-                Ok(bootstrap_marker_canonical_digest(marker))
+                Ok(bootstrap_marker_canonical_digest(
+                    BOOTSTRAP_MARKER_DIGEST_SCHEMA,
+                    TOOL_POLICY_PROVIDER_NAME,
+                    marker,
+                ))
             }
         },
     }
-}
-
-/// RootRecipe 相位 marker 的确定性 canonical digest(Task 10 fix):固定
-/// 字段序 + 长度分隔 + schema 前缀,序列化 marker 公开承载面的完整凭据
-/// operation/receipt 上下文(provider、写权限 action、operation id、自举
-/// step、凭据 canonical root、marker canonical root、receipt context)。
-/// 凭据的 project/lc 身份与 input digest 由 prepare 侧
-/// `validate_root_recipe_request` 对 durable Running operation 重核验承载,
-/// 不在此重复序列化;禁止 Debug 文本与递归哈希。
-fn bootstrap_marker_canonical_digest(
-    marker: &crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker,
-) -> String {
-    let credential = marker.credential();
-    let credential_root = credential.canonical_root().to_string_lossy();
-    let marker_root = marker.canonical_root().to_string_lossy();
-    lc_digest(
-        BOOTSTRAP_MARKER_DIGEST_SCHEMA,
-        &[
-            TOOL_POLICY_PROVIDER_NAME,
-            action_text(marker.action()),
-            credential.operation_id(),
-            credential.step().as_str(),
-            &credential_root,
-            &marker_root,
-            marker.receipt_context(),
-        ],
-    )
 }
 
 /// 由 gateway 冻结的 envelope 派生不可伪造 boundary plan(Coding 恰一个可写

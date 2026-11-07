@@ -382,7 +382,10 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
   });
 
   it("分仓 Plan 抽屉删除整组后关闭并恢复重新生成入口", async () => {
-    const fetchMock = repositoryGroupedLifecycleFetch();
+    // ⑤ 之后已确认 design 的弹窗恒为「启用自动化」；人工 prepare 路径只剩未确认 design。
+    const fetchMock = repositoryGroupedLifecycleFetch({
+      designDraftInitially: true,
+    });
     vi.stubGlobal("fetch", fetchMock);
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();

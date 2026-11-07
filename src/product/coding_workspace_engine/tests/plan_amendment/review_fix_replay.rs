@@ -140,6 +140,15 @@ async fn coding_amendment_completed_replay_accepts_group_completion_head_evoluti
         .await
         .unwrap();
     settle_amendment_delivery(&fixture, &applied).await;
+    // 完成 → 推进按仓维三元键转移共享工作树锁；补齐既有仓维租约事实。
+    super::support::seed_repo_worktree_lease(
+        &fixture,
+        &applied,
+        applied
+            .current_work_item_id
+            .as_deref()
+            .expect("resumed attempt current work item"),
+    );
     let materialized = fixture
         .store
         .list_unit_runs_by_logical_id(&applied, "work_item_0001")

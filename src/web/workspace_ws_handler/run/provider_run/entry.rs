@@ -1,3 +1,4 @@
+use super::task_body::boxed_child;
 use super::*;
 
 pub(crate) async fn spawn_provider_run_from_event(
@@ -44,7 +45,9 @@ pub(crate) async fn spawn_provider_run_from_event(
         }
     }
 
-    let outcome = spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx).await;
+    let outcome =
+        boxed_child(|| spawn_provider_run_from_handler(run_context.clone(), run_kind, outbound_tx))
+            .await;
     if let Err(message) = &outcome {
         // F2（REQ-WIGA-05，0018 现场）：无附件 relay spawn 失败/被拒此前只回丢弃
         // 通道（outbound 无订阅者）——错误既不回 REST 也不落 durable，委托态会话
@@ -64,12 +67,14 @@ pub(crate) async fn spawn_provider_run_claiming_idle(
     run_kind: ProviderRunKind,
     outbound_tx: mpsc::Sender<OutboundControl>,
 ) -> Result<bool, String> {
-    spawn_provider_run_with_start_mode(
-        run_context,
-        run_kind,
-        outbound_tx,
-        ProviderRunStartMode::ClaimIfIdle,
-    )
+    boxed_child(|| {
+        spawn_provider_run_with_start_mode(
+            run_context,
+            run_kind,
+            outbound_tx,
+            ProviderRunStartMode::ClaimIfIdle,
+        )
+    })
     .await
 }
 
@@ -79,12 +84,14 @@ pub(crate) async fn spawn_provider_run_from_handler(
     run_kind: ProviderRunKind,
     outbound_tx: mpsc::Sender<OutboundControl>,
 ) -> Result<(), String> {
-    spawn_provider_run_with_start_mode(
-        run_context,
-        run_kind,
-        outbound_tx,
-        ProviderRunStartMode::SupersedeFromAttachment,
-    )
+    boxed_child(|| {
+        spawn_provider_run_with_start_mode(
+            run_context,
+            run_kind,
+            outbound_tx,
+            ProviderRunStartMode::SupersedeFromAttachment,
+        )
+    })
     .await
     .map(|_| ())
 }

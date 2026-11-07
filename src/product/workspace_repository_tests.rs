@@ -16,12 +16,63 @@ fn write_manifest_fixture(paths: &ProductAppPaths, project_id: &str) {
         .unwrap();
 }
 
+/// 落一条归属 legacy 别名逻辑代码库的 issue 记录。
+///
+/// REQ-ROUTE-01：routing 只从 issue 的持久归属解析 LC——issue 记录缺失时
+/// `load_for_issue` 按 T1.2 契约返回 `NotFound`（不是静默路由/回退）。归属填
+/// legacy 别名 id：这些夹具的 manifest/member/selection 写在项目级 legacy
+/// 布局，而 `for_lc(legacy_logical_codebase_id(project))` 与该布局字节等价
+///（`store::lc_scope_root` 明文契约），故解析命中的是同一份权威数据。
+fn write_legacy_aliased_issue(paths: &ProductAppPaths, project_id: &str, title: &str) {
+    crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: project_id.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id),
+            title: title.to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .unwrap();
+}
+
 #[test]
-fn load_routing_none_none_is_legacy() {
+fn routing_without_manifest_and_selection_fails_closed() {
+    // REQ-ROUTE-01 两态中枢：issue 已归属 LC 但子树无 manifest/selection
+    //（(None, None)）→ FailClosed + 稳定码 repository_routing_target_missing，
+    // 不再回退 Legacy 单仓路由；issue 不存在则按 T1.2 契约返回 NotFound
+    // 错误（非 Ok(Legacy)）。
     let temp = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(temp.path());
-    let routing = RepositoryRouting::load_for_issue(&paths, "project_0001", "issue_0001").unwrap();
-    assert!(matches!(routing, RepositoryRouting::Legacy { .. }));
+    let lc_id = crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
+    let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: lc_id,
+            title: "unrouted issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .unwrap();
+    let routing = RepositoryRouting::load_for_issue(&paths, "project_0001", &issue.id).unwrap();
+    match routing {
+        RepositoryRouting::FailClosed { code, .. } => {
+            assert_eq!(code.stable_code(), "repository_routing_target_missing");
+        }
+        RepositoryRouting::Logical { .. } => {
+            panic!("(None, None) must fail closed, got Logical")
+        }
+    }
+    match RepositoryRouting::load_for_issue(&paths, "project_0001", "issue_9999") {
+        Err(crate::product::json_store::ProductStoreError::NotFound { kind, .. }) => {
+            assert_eq!(kind, "issue");
+        }
+        _ => panic!("missing issue must surface NotFound, not a silent route"),
+    }
 }
 
 #[test]
@@ -29,6 +80,9 @@ fn load_routing_some_none_is_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(temp.path());
     write_manifest_fixture(&paths, "project_0001");
+    // 不变量：(manifest, selection) 不成对（Some, None）⇒ FailClosed。
+    // issue 记录须在场，否则先撞 T1.2 契约的 NotFound 而非本不变量。
+    write_legacy_aliased_issue(&paths, "project_0001", "manifest-only issue");
     let routing = RepositoryRouting::load_for_issue(&paths, "project_0001", "issue_0001").unwrap();
     assert!(matches!(routing, RepositoryRouting::FailClosed { .. }));
 }
@@ -255,6 +309,13 @@ impl LcStoryRoutingFixture {
             .load_manifest("project_0001")
             .unwrap()
             .expect("manifest auto-created by member registration");
+        // REQ-ROUTE-01：routing 只从 issue 的持久归属解析 LC——issue 记录缺失
+        // 时 `load_for_issue` 按 T1.2 契约返回 NotFound（不是静默路由/回退）。
+        // ⚠️ 必须在写 selection **之前**建 issue：selection store 会生成
+        // `issues/issue_0001/` 目录，而 `next_sequential_id_in_directory` 据目录数
+        // 分配序号，先写 selection 会把 issue 顶成 `issue_0002`，与夹具里到处
+        // 硬编码的 `issue_0001` 全部错位。
+        write_legacy_aliased_issue(&paths, "project_0001", "lc routing fixture issue");
         crate::product::logical_codebase::IssueCodebaseSelectionStore::new(paths.clone())
             .save(&IssueCodebaseSelection::all_members(
                 "project_0001",
@@ -776,7 +837,7 @@ fn per_lc_issue_member_resolution_synthesizes_record_from_lc_authority() {
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
-            logical_codebase_id: Some(record.id.clone()),
+            logical_codebase_id: record.id.clone(),
             title: "per-lc issue".to_string(),
             description: None,
             change_id: None,
@@ -810,7 +871,11 @@ fn per_lc_issue_member_resolution_synthesizes_record_from_lc_authority() {
 /// 三类 LC 规划会话（Story/Design/WorkItemPlan，PlanningReadOnly）的 native
 /// launch anchor 恒聚合根（path=canonical root、primary_checkout_id=None），
 /// scope 回写（focus/involved）不迁移锚；聚合视图逻辑身份不与成员混同；
-/// direct（Legacy 路由）与 WorkItem/Coding 的 native 与业务同锚同错。
+/// 单仓形态（单成员 LC）与 WorkItem/Coding 的 native 与业务同锚同错。
+///
+/// ⚠️ REQ-ROUTE-01 两态化后「无 LC manifest 的单仓项目」不再是可路由形态
+/// （(manifest, selection) 不成对 ⇒ FailClosed，(None,None) 亦不回退物理仓），
+/// 故单仓场景改由「单成员 LC」表达——见本文件 direct 块的说明。
 #[test]
 fn anchor_t01_native_anchor_stays_root_after_scope_writeback() {
     let fixture = LcStoryRoutingFixture::new();
@@ -873,55 +938,28 @@ fn anchor_t01_native_anchor_stays_root_after_scope_writeback() {
         .expect("focused story business repository resolves the member");
     assert_eq!(business.path, fixture.member_path);
 
-    // direct（Legacy 路由，无 LC manifest 的单仓项目）：native 与业务同锚=原目录。
-    let legacy_dir = fixture._temp.path().join("legacy-direct");
-    std::fs::create_dir_all(&legacy_dir).unwrap();
-    for args in [
-        vec!["init", "--quiet"],
-        vec!["config", "user.email", "anchor-t01@example.test"],
-        vec!["config", "user.name", "Anchor T01 Fixture"],
-    ] {
-        let status = std::process::Command::new("git")
-            .args(&args)
-            .current_dir(&legacy_dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {:?} failed", args);
-    }
-    std::fs::write(legacy_dir.join("README.md"), "# legacy-direct\n").unwrap();
-    for args in [
-        vec!["add", "README.md"],
-        vec!["commit", "--quiet", "-m", "initial commit"],
-    ] {
-        let status = std::process::Command::new("git")
-            .args(&args)
-            .current_dir(&legacy_dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {:?} failed", args);
-    }
-    crate::product::project_store::ProjectStore::new(fixture.paths.clone())
-        .create(crate::product::project_store::CreateProjectInput {
-            name: "anchor-t01-legacy-direct".to_string(),
-            description: None,
-        })
-        .unwrap();
-    let legacy_repo =
-        crate::product::repository_store::RepositoryStore::new(fixture.paths.clone())
-            .create(crate::product::repository_store::CreateRepositoryInput {
-                project_id: "project_0002".to_string(),
-                name: "legacy-direct".to_string(),
-                path: legacy_dir.clone(),
-                default_policy_preset: None,
-                default_provider_mode: None,
-                idempotency_key: "anchor-t01-legacy-direct".to_string(),
-            })
-            .unwrap();
+    // direct 形态（单仓项目）：native 与业务同锚=原目录。
+    //
+    // ⚠️ REQ-ROUTE-01 两态化后「无 LC manifest 的单仓项目」不再是可路由形态：
+    // (manifest, selection) 不成对 ⇒ FailClosed（(None,None) 也不再回退物理
+    // 仓）。故本块把同一不变量落到当前唯一合法的单仓形态上——**单成员 LC、
+    // 聚合根=原目录**：native 与业务仍同锚于该原目录（聚合根视图），断言逐
+    // 字不变。夹具用共享夹具 seed_complete 建权威（issue 先建、selection
+    // 后写由其内部保证）。
+    let legacy_root = fixture._temp.path().join("legacy-root");
+    let legacy_dir = legacy_root.join("aggregate-root");
+    crate::product::logical_codebase::logical_test_fixture::seed_complete(
+        &fixture.paths,
+        &legacy_root,
+        "project_0002",
+        "issue_0001",
+    );
     let legacy_story = lifecycle
         .create_story_spec(crate::product::lifecycle_store::CreateStorySpecInput {
             project_id: "project_0002".to_string(),
             issue_id: "issue_0001".to_string(),
-            repository_id: legacy_repo.id.clone(),
+            repository_id: crate::product::logical_codebase::logical_test_fixture::FIXTURE_PHYSICAL_REPOSITORY_ID
+                .to_string(),
             title: "legacy direct story".to_string(),
             aggregate_codebase: None,
         })

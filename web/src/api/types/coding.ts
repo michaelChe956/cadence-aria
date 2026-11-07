@@ -116,7 +116,7 @@ export type CodingAttempt = {
   updated_at: string;
 };
 
-export type CodingTimelineNodeStatus = "pending" | "running" | "completed" | "failed" | "blocked";
+export type CodingTimelineNodeStatus = "pending" | "running" | "completed" | "failed" | "blocked" | "aborted";
 export type CodingAgentRole = "author" | "reviewer" | "git" | "system";
 export type CodingProviderRole = "coder" | "code_reviewer" | "internal_reviewer";
 export type CodingProviderSelectRole =
@@ -846,6 +846,10 @@ export type CodingSessionAutomation = {
   enabled: boolean;
   plan_id?: string | null;
   terminated_at?: string | null;
+  /** REQ-WIGA-VOID-01：作废事实（随工作项组删除）——读侧据此区分「已终止」
+   * 与「已作废」（两者独立维度，作废优先呈现）；旧帧缺省 undefined 按未
+   * 作废读。 */
+  voided_at?: string | null;
 };
 
 

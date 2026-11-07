@@ -30,6 +30,24 @@ fn seed_legacy_project(app_paths: &ProductAppPaths) {
         .expect("create project");
 }
 
+/// REQ-ROUTE-01 两态化（去单仓入口）夹具前置：把 issue 归属的 legacy 别名 LC
+/// 落成**可解析的完整权威**（manifest + member + checkout + selection +
+/// 聚合索引 + 聚合 policy artifact）。
+///
+/// 缺这段时 authority resolver 直读 `logical-codebases/{alias}/record.json`
+/// （不经 `migrate_legacy`）落空 ⇒ `NotFound { kind: "logical_codebase" }`；
+/// 有 manifest 无 selection ⇒ `RepositoryRouting::classify` 判
+/// `issue_not_bound_to_logical_codebase` fail-closed。
+///
+/// ⚠️ 必须在 issue 创建**之后**调用（selection 落 `issues/<issue_id>/`，
+/// 先建目录会让 `IssueStore::create` 的顺序 id 漂移）。
+fn seed_legacy_alias_authority(app_paths: &ProductAppPaths) {
+    crate::web::handlers::automation_enrollment_test_support::seed_single_member_logical_codebase(
+        app_paths,
+        "checkout-workspace-context",
+    );
+}
+
 #[test]
 fn all_workspace_artifact_outputs_require_artifact_fence() {
     for workspace_type in [
@@ -450,13 +468,17 @@ async fn claude_code_story_context_requires_structured_ask_user_question() {
         .create(CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: Some(repository.id.clone()),
-            logical_codebase_id: None,
+            // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+            // 默认作用域（legacy 别名代码库 id）。
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             title: "爬楼梯问题".to_string(),
             description: Some("使用 Python 实现 climb_stairs".to_string()),
             change_id: None,
             base_branch: None,
         })
         .expect("issue");
+    seed_legacy_alias_authority(&app_paths);
 
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let story = lifecycle

@@ -367,13 +367,29 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
         json!({"name":"Repo","path":repo.path()}),
     )
     .await;
+    // 块3：issue 必须挂 logical_codebase_id 归属（LC 权威由迁移建立，非假 id）。
+    cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(app_paths.clone())
+        .ensure_identity_schema("project_0001")
+        .expect("migrate fixture repository into logical codebase authority");
+    let lc_id =
+        cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
     request_json(
         app.clone(),
         Method::POST,
         "/api/projects/project_0001/issues",
-        json!({"title":"Gate","description":null,"repository_id":"repository_0001"}),
+        json!({"title":"Gate","description":null,"repository_id":"repository_0001","logical_codebase_id":lc_id}),
     )
     .await;
+    // 块3：迁移回填必须在 issue / work item 落地【之后】再跑一次——
+    // issue 的 codebase selection 与 work item 的 logical target 都是迁移
+    // 的回填面（migration_executor_backfill：write_issue_selection /
+    // backfill_work_items）。缺 logical target 的 work item 走 SingleRepo
+    // 形状 ⇒ 对 LC 归属 issue 被 resolver 以 kind_mismatch 409 拒
+    // （REQ-ROUTE-01/02：统一分流不回退物理仓）⇒ 会在 provider 门之前
+    // 遮蔽本用例要钉的 500 provider_unavailable。迁移幂等（REQ-ROUTE-04）。
+    cadence_aria::product::logical_codebase::IdentityMigrationExecutor::new(app_paths.clone())
+        .ensure_identity_schema("project_0001")
+        .expect("backfill issue selection and work item logical target");
     let (status, lifecycle_error) = request_json(
         app.clone(),
         Method::POST,
@@ -384,7 +400,7 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(lifecycle_error["code"], "provider_unavailable");
 
-    let lifecycle = LifecycleStore::new(app_paths);
+    let lifecycle = LifecycleStore::new(app_paths.clone());
     lifecycle
         .create_work_item(CreateWorkItemInput {
             id: Some("work_item_0001".to_string()),
@@ -396,6 +412,28 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
             ..Default::default()
         })
         .expect("work item");
+    // work item 的 logical target 回填（迁移的 backfill 面）：缺 target 的
+    // work item 走 SingleRepo 形状 ⇒ 对 LC 归属 issue 被 resolver 以
+    // kind_mismatch 409 拒，在 provider 门之前遮蔽本用例要钉的 500
+    // provider_unavailable（REQ-ROUTE-01/02：统一分流不回退物理仓）。
+    // 迁移 journal 幂等（重跑不回填），故此处按权威 member 直接回填。
+    let member_id =
+        cadence_aria::product::logical_codebase::LogicalCodebaseStore::new(app_paths.clone())
+            .list_members("project_0001")
+            .expect("list logical members")
+            .into_iter()
+            .next()
+            .expect("migrated logical member")
+            .logical_repository_id;
+    let work_item_path = app_paths
+        .issue_lifecycle_root("project_0001", "issue_0001")
+        .join("work-items")
+        .join("work_item_0001.json");
+    let mut work_item: cadence_aria::product::models::LifecycleWorkItemRecord =
+        cadence_aria::product::json_store::read_json(&work_item_path).expect("read work item");
+    work_item.target_repository_id = Some(member_id);
+    cadence_aria::product::json_store::write_json(&work_item_path, &work_item)
+        .expect("backfill work item logical target");
     let session = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "project_0001".to_string(),

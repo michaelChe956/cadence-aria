@@ -54,19 +54,23 @@ async fn bootstrap_multi_repo_two_work_items(
     )
     .await;
     assert_eq!(target["repository_id"], "repository_0002");
-    request_json(
-        app.clone(),
-        Method::POST,
-        "/api/projects/project_0001/issues",
-        json!({
-            "title": "多仓并发验收",
-            "description": "REQ-COD-03 并发验收",
-            "repository_id": "repository_0001"
-        }),
-    )
-    .await;
-
+    // 块3 夹具顺序：issue 经 store 建并携带确定性 legacy 别名 LC 归属（HTTP
+    // 创建要求 LC 权威先在，会把「work item 先建、迁移回填 target」顺序倒过来）。
     let app_paths = ProductAppPaths::new(root.join(".aria"));
+    IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id:
+                cadence_aria::product::logical_codebase::store::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
+            title: "多仓并发验收".to_string(),
+            description: Some("REQ-COD-03 并发验收".to_string()),
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create issue");
     let lifecycle = LifecycleStore::new(app_paths.clone());
     for (work_item_id, repository_id, title) in [
         ("work_item_0001", item_one_physical_repo, "实现爬楼梯"),

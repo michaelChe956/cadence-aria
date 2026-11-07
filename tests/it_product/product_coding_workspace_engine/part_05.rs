@@ -4,23 +4,42 @@ async fn execute_code_review_forwards_provider_execution_events() {
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = EventThenCompletedProvider {
-        output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(EventThenCompletedProvider {
+            output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
+        }),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, mut rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 
@@ -33,23 +52,42 @@ async fn execute_code_review_persists_role_run_events_while_forwarding_realtime_
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = EventThenCompletedProvider {
-        output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(EventThenCompletedProvider {
+            output: r#"{"verdict":"approve","summary":"review ok","findings":[]}"#.to_string(),
+        }),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, mut rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 
@@ -84,21 +122,40 @@ async fn execute_code_review_persists_provider_control_and_tool_event_payloads()
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = ReviewControlEventProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(ReviewControlEventProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, mut rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 
@@ -166,21 +223,40 @@ async fn execute_code_review_records_permission_timeout_as_timeout_event() {
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
-    let provider = ReviewPermissionTimeoutProvider;
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(ReviewPermissionTimeoutProvider),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, _rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let error = engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect_err("permission timeout should fail code review");
 
@@ -214,26 +290,45 @@ async fn execute_internal_pr_review_forwards_provider_execution_events() {
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     store
         .save_review_request(&attempt, &sample_review_request(&attempt.id))
         .expect("save review request");
-    let provider = EventThenCompletedProvider {
-        output: r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#.to_string(),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayValidatedStartAdapter {
+        inner: Arc::new(EventThenCompletedProvider {
+            output: r#"{"verdict":"approve","summary":"internal review ok","findings":[],"impact_scope":["src"],"pr_description":"实现 work item","commit_message_suggestion":"feat: implement work item"}"#.to_string(),
+        }),
+        provider_type: ProviderType::ClaudeCode,
+    });
     let (tx, mut rx) = mpsc::channel(16);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     engine
-        .execute_internal_pr_review(&attempt, &provider)
+        .execute_internal_pr_review(&attempt, provider.as_ref())
         .await
         .expect("execute internal review");
 
@@ -246,21 +341,40 @@ async fn execute_code_review_persists_report_and_emits_review_events() {
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, mut rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = ReviewStreamingProvider;
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(ReviewStreamingProvider),
+        ProviderType::ClaudeCode,
+    ));
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let report = engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 
@@ -365,20 +479,29 @@ async fn parses_real_provider_review_finding_aliases() {
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store, GitWorkspaceService::new(), tx);
-    let provider = InputCapturingProvider {
-        input: Arc::new(Mutex::new(None)),
-        output: r#"{
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(InputCapturingProvider {
+            input: Arc::new(Mutex::new(None)),
+            output: r#"{
             "verdict": "request_changes",
             "summary": "范围污染",
             "findings": [
@@ -392,10 +515,20 @@ async fn parses_real_provider_review_finding_aliases() {
             ]
         }"#
         .to_string(),
-    };
+        }),
+        ProviderType::ClaudeCode,
+    ));
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let report = engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 
@@ -418,24 +551,43 @@ async fn review_payload_parse_failure_records_blocked_reviewer_evidence() {
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
     fs::write(worktree.join("src.txt"), "hello\nreviewed\n").expect("modify file");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let authority = seed_lc_authority(&paths, root.path());
+    let store = CodingAttemptStore::new(paths.clone());
     let attempt = store
         .create_attempt(CreateCodingAttemptInput {
             worktree_path: Some(worktree),
             base_branch: "HEAD".to_string(),
-            ..create_input()
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::ClaudeCode,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            ..create_input_with_snapshot(&paths, &authority)
         })
         .expect("create attempt");
     crate::seed_coding_attempt_running(&store, "project_0001", "issue_0001", &attempt.id);
     let (tx, _rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider = InputCapturingProvider {
-        input: Arc::new(Mutex::new(None)),
-        output: "review output without valid json".to_string(),
-    };
+    let provider = Arc::new(crate::context_builder::GatewayBridgedAdapter::new(
+        Arc::new(InputCapturingProvider {
+            input: Arc::new(Mutex::new(None)),
+            output: "review output without valid json".to_string(),
+        }),
+        ProviderType::ClaudeCode,
+    ));
+    let engine = p3_engine_with_logical_gateway(
+        store.clone(),
+        &paths,
+        &authority,
+        provider.clone(),
+        ProviderName::ClaudeCode,
+        tx,
+    );
 
     let report = engine
-        .execute_code_review(&attempt, &provider)
+        .execute_code_review(&attempt, provider.as_ref())
         .await
         .expect("execute code review");
 

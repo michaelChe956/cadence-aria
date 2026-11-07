@@ -98,8 +98,8 @@ async fn compile_failure_fixture(
     engine
         .complete_single_candidate_work_item_plan_author(
             clean_candidate(),
-            "repo_fixture".to_string(),
-            None,
+            fixture_sc_target(&engine),
+            fixture_sc_member_targets(&engine),
             false,
         )
         .await

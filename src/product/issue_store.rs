@@ -10,7 +10,9 @@ use crate::product::models::{IssuePhase, IssueRecord, IssueStatus};
 pub struct CreateProductIssueInput {
     pub project_id: String,
     pub repo_id: Option<String>,
-    pub logical_codebase_id: Option<String>,
+    /// Issue 唯一归属的代码库（REQ-ROUTE-01）：必填 lc_id——单仓入口已
+    /// 删除，创建时不再接受「无归属」表达。
+    pub logical_codebase_id: String,
     /// 基准分支（REQ-PIB-01）：由 REST 层解析锁定后传入（Some）；逻辑代码库
     /// issue（多仓非目标）与测试缺省 None。
     pub base_branch: Option<String>,
@@ -23,7 +25,7 @@ pub struct CreateProductIssueInput {
 pub struct CreateProductIssueWithRepositoryInput {
     pub project_id: String,
     pub repo_id: String,
-    pub logical_codebase_id: Option<String>,
+    pub logical_codebase_id: String,
     pub base_branch: Option<String>,
     pub title: String,
     pub description: Option<String>,
@@ -63,7 +65,7 @@ impl IssueStore {
 
         let mut issues = Vec::with_capacity(issue_files.len());
         for issue_file in issue_files {
-            issues.push(read_json(&issue_file)?);
+            issues.push(read_issue_record(&issue_file)?);
         }
         Ok(issues)
     }
@@ -78,7 +80,7 @@ impl IssueStore {
                 id: issue_id.to_string(),
             });
         }
-        read_json(&issue_path)
+        read_issue_record(&issue_path)
     }
 
     /// 更新 issue 状态并落盘。
@@ -108,9 +110,7 @@ impl IssueStore {
         if let Some(repo_id) = input.repo_id.as_deref() {
             validate_relative_id(repo_id)?;
         }
-        if let Some(lc_id) = input.logical_codebase_id.as_deref() {
-            validate_relative_id(lc_id)?;
-        }
+        validate_relative_id(&input.logical_codebase_id)?;
         let issues_root = self.paths.project_root(&input.project_id).join("issues");
         let id = next_sequential_id_in_directory("issue", &issues_root).map_err(|error| {
             ProductStoreError::Io(format!("read {}: {error}", issues_root.display()))
@@ -181,6 +181,27 @@ impl IssueStore {
     }
 }
 
+/// 读取 issue 记录，并对「先于归属字段写入的存量记录」显式报错
+/// （REQ-ROUTE-01/H4）：`logical_codebase_id` 缺失或为空串一律
+/// `InvalidRecord(issue_not_bound_to_logical_codebase)`——不默认空串、
+/// 不推导物理仓、不静默回退。
+fn read_issue_record(path: &std::path::Path) -> Result<IssueRecord, ProductStoreError> {
+    let raw: serde_json::Value = read_json(path)?;
+    if !raw
+        .get("logical_codebase_id")
+        .is_some_and(|value| value.as_str().is_some_and(|lc_id| !lc_id.is_empty()))
+    {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "issue_not_bound_to_logical_codebase",
+            reason: format!(
+                "issue record at {} predates logical codebase attribution",
+                path.display()
+            ),
+        });
+    }
+    serde_json::from_value(raw).map_err(|error| ProductStoreError::Json(error.to_string()))
+}
+
 fn slugify(value: &str) -> String {
     value
         .to_ascii_lowercase()
@@ -211,7 +232,8 @@ mod tests {
             .create(CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: None,
+                logical_codebase_id:
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(PROJECT_ID),
                 title: "issue".to_string(),
                 description: None,
                 change_id: None,
@@ -282,7 +304,8 @@ mod tests {
         CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id:
+                crate::product::logical_codebase::store::legacy_logical_codebase_id(PROJECT_ID),
             title: "issue".to_string(),
             description: None,
             change_id: None,
@@ -291,9 +314,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_issue_json_without_base_branch_parses_as_none() {
-        // 存量兼容（REQ-PIB-01 场景 6）：本功能之前的 issue.json 无 base_branch
-        // 字段——serde 缺省解析为 None（零迁移），读取不失败。
+    fn old_issue_record_without_lc_id_reports_explicit_error() {
+        // REQ-ROUTE-01（H4）：老 issue 记录（先于逻辑代码库归属写入）缺
+        // logical_codebase_id → 读取必须显式报 InvalidRecord(
+        // issue_not_bound_to_logical_codebase)：不得默认空串、不得静默推导
+        // 物理仓。原「缺 base_branch 解析为 None」的零迁移读取语义随归属
+        // 字段必填一并收口（该测试即其改写，见实施报告）。
         let (tmp, store) = setup_store();
         let issue_root = tmp
             .path()
@@ -321,9 +347,12 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-
-        let issue = store.get(PROJECT_ID, "issue_0001").unwrap();
-        assert_eq!(issue.base_branch, None);
+        match store.get(PROJECT_ID, "issue_0001") {
+            Err(ProductStoreError::InvalidRecord { kind, .. }) => {
+                assert_eq!(kind, "issue_not_bound_to_logical_codebase");
+            }
+            other => panic!("expected explicit unbound error, got {other:?}"),
+        }
     }
 
     #[test]

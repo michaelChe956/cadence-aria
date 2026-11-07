@@ -138,9 +138,10 @@ pub struct IssueRecord {
     /// None=存量记录（零迁移），消费时按默认链 main→master 解析、皆无 fail-closed。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
-    /// Issue 唯一归属的代码库（v1.3）：Some 表示逻辑代码库 lc_id；None 表示单仓代码库。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logical_codebase_id: Option<String>,
+    /// Issue 唯一归属的代码库（REQ-ROUTE-01）：必填 lc_id。缺失（先于归属
+    /// 字段的老记录）由读取层显式报 `issue_not_bound_to_logical_codebase`，
+    /// 不静默回退（H4：不得 default 成空串）。
+    pub logical_codebase_id: String,
     pub title: String,
     pub description: Option<String>,
     pub change_id: String,

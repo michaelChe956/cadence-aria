@@ -66,6 +66,18 @@ export class WorkbenchPage {
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
   }
 
+  /** provider 能力核验卡已从「逻辑代码库」抽屉搬出 ⇒ 改由侧栏「Provider 管理」
+   *  入口进独立的 Provider 管理抽屉（2026-11-04 owner 裁定：能力核验已全局化，
+   *  provider 的所有操作不该寄居在 LC 仓抽屉里）。卡片自身的 testid 不变。 */
+  async openProviderManagementPanel(): Promise<void> {
+    const entry = this.page.getByTestId("provider-management-open");
+    await expect(entry).toBeVisible();
+    await entry.click();
+    await expect(
+      this.page.getByTestId("provider-capability-card"),
+    ).toBeVisible({ timeout: 30_000 });
+  }
+
   /** 阶段面板切换:单阶段工作区同一时刻只渲染当前 stage 的卡,而默认
    * 阶段=「需要动作的最早阶段」(无 Story→story;有 Story 无 Design→design;
    * 其余→work_item),进入工作台时未必停在目标卡所在 stage——取卡前先切。 */

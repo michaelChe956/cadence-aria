@@ -1,3 +1,6 @@
+// Provider capability 能力面（2026-11-05 机器级化，REQ-PCR-08）：provider 是
+// 平台公用能力，与项目、逻辑代码库无关 ⇒ 四条端点全部按机器级路由定位，
+// 不再携带 project/logical-codebase 标识。
 import { ApiRequestError, normalizeApiError } from "./client";
 import type {
   CapabilityRevalidateResult,
@@ -23,19 +26,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-function logicalCodebasePath(projectId: string, logicalCodebaseId: string): string {
-  return `/api/projects/${encodeURIComponent(
-    projectId,
-  )}/logical-codebases/${encodeURIComponent(logicalCodebaseId)}`;
-}
-
-/** 只读 durable capability 投影（零写入、零探针触发）。 */
-export function getLogicalCodebaseCapabilities(
-  projectId: string,
-  logicalCodebaseId: string,
-): Promise<ProviderCapabilitiesResponse> {
+/** 只读 durable capability 投影（零写入、零探针触发）。机器一份事实。 */
+export function getProviderCapabilities(): Promise<ProviderCapabilitiesResponse> {
   return requestJson<ProviderCapabilitiesResponse>(
-    `${logicalCodebasePath(projectId, logicalCodebaseId)}/capabilities`,
+    "/api/providers/capabilities",
   );
 }
 
@@ -45,13 +39,11 @@ export function getLogicalCodebaseCapabilities(
  * `provider_capability_probe_unsupported`（422）/ `provider_capability_probe_failed`
  * （503，details.detail 携带 action 与原始错误）。
  */
-export function postLogicalCodebaseCapabilityRevalidate(
-  projectId: string,
-  logicalCodebaseId: string,
+export function postProviderCapabilityRevalidate(
   providerType: ProviderCapabilityType,
 ): Promise<CapabilityRevalidateResult> {
   return requestJson<CapabilityRevalidateResult>(
-    `${logicalCodebasePath(projectId, logicalCodebaseId)}/capability-revalidate`,
+    "/api/providers/capabilities/revalidate",
     {
       method: "POST",
       body: JSON.stringify({ provider_type: providerType }),

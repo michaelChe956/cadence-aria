@@ -415,6 +415,30 @@ async fn provider_drive_design_run_rejects_write_back_outside_resolved_bound() {
     let member_b = LogicalRepositoryId(Uuid::from_u128(0xbbbb));
     let effective_member_ids = vec![member_a, member_b];
 
+    // REQ-ROUTE-01：回写边界经 issue 归属路由解析（(manifest, selection) 成对
+    // 判 Logical）。⚠️ issue 必须先于 selection store 落盘——selection 会建
+    // `issues/<id>/` 目录，而 IssueStore::create 的 id 按 `issues/` 目录数分配，
+    // 顺序颠倒会让 issue id 漂移、与下方硬编码 `issue_0001` 错位。
+    crate::product::project_store::ProjectStore::new(app_paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "provider drive writeback fixture".to_string(),
+            description: None,
+        })
+        .expect("fixture project");
+    crate::product::issue_store::IssueStore::new(app_paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                "project_0001",
+            ),
+            title: "provider drive writeback fixture issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("fixture issue");
+
     // manifest + selection(include=[a,b],focus=[a])→ load_for_issue 判 Logical,
     // 上界=focus 原集 [a](resolved_upper_bound 同源)。
     let aggregate_root = tmp.path().join("aggregate-root");

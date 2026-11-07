@@ -255,7 +255,10 @@ mod tests {
 
     #[test]
     fn repository_path_legacy_single_repo_without_selection_uses_physical() {
-        // 无 manifest、无 selection 的单仓 attempt → 物理 repository path，不因 selection 缺失报错。
+        // REQ-ROUTE-01 两态化（去单仓入口）后，「无 manifest、无 selection」
+        // 已不再是可解析形态（路由恒 fail-closed，绝不回退物理仓）。故夹具
+        // 播种完整 LC 权威 + 与权威逐字一致的冻结快照：解析结果仍是成员的
+        // 物理 checkout 路径（不因归属解析失败而报错）。
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         crate::product::project_store::ProjectStore::new(paths.clone())
@@ -264,8 +267,9 @@ mod tests {
                 description: None,
             })
             .unwrap();
-        let repository_path = root.path().join("repository_0001");
-        write_repository_projection(&paths, &repository_path, None, None);
+        seed_issue_fixture(&paths);
+        let (logical_repository_id, checkout_id, canonical_path, git_dir_identity) =
+            write_logical_authority_fixture(&paths, root.path());
         LifecycleStore::new(paths.clone())
             .create_work_item(CreateWorkItemInput {
                 id: Some("work_item_0001".to_string()),
@@ -276,8 +280,20 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        let attempt = attempt_fixture(Some(AttemptTargetSnapshot {
+            logical_repository_id,
+            checkout_id,
+            physical_repository_id: "repository_0001".to_string(),
+            canonical_path: canonical_path.clone(),
+            git_dir_identity,
+            revision: Some("abcdef".to_string()),
+            policy_digest: String::new(),
+            membership_revision: 1,
+            captured_at: "2026-08-11T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        }));
 
-        let path = repository_path_for_attempt(&paths, &attempt_fixture(None)).unwrap();
+        let path = repository_path_for_attempt(&paths, &attempt).unwrap();
 
         assert!(path.ends_with("repository_0001"));
     }
@@ -293,6 +309,9 @@ mod tests {
                 description: None,
             })
             .unwrap();
+        // issue 记录必须在场：REQ-ROUTE-01 后归属解析是路由的唯一入口，
+        // 缺 issue 直接 `NotFound{issue}`，测不到快照不一致的 fail-closed。
+        seed_issue_fixture(&paths);
         let (logical_repository_id, checkout_id, canonical_path, git_dir_identity) =
             write_logical_authority_fixture(&paths, root.path());
         let attempt = attempt_fixture(Some(AttemptTargetSnapshot {
@@ -317,6 +336,25 @@ mod tests {
                 .to_string()
                 .contains("repository_routing_inconsistent")
         );
+    }
+
+    /// 播种归属 issue 记录（REQ-ROUTE-01：归属必填，legacy 别名 id 表达
+    /// 项目默认作用域）。
+    fn seed_issue_fixture(paths: &ProductAppPaths) {
+        crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id:
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                        "project_0001",
+                    ),
+                title: "coding context issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
     }
 
     fn attempt_fixture(target_snapshot: Option<AttemptTargetSnapshot>) -> CodingExecutionAttempt {

@@ -31,7 +31,11 @@ mod c2_gate_response_rest_tests {
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id: None,
+                // 归属必填（REQ-ROUTE-01）：夹具无 per-LC 权威记录 ⇒ issue 归属 project
+                // 默认作用域（legacy 别名代码库 id）。
+                logical_codebase_id: crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                    "project_0001",
+                ),
                 title: "gate response issue".to_string(),
                 description: None,
                 change_id: None,

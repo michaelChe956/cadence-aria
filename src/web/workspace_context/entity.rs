@@ -301,7 +301,7 @@ pub(super) fn repository_for(
     let store = crate::product::repository_store::RepositoryStore::new(app_paths.clone());
     if let Some(record) = store.resolve_physical_repository_in_issue_codebase(
         project_id,
-        lc_id.as_deref(),
+        Some(lc_id.as_str()),
         repository_id,
     )? {
         return Ok(record);

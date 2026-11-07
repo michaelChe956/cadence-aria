@@ -62,11 +62,14 @@ function baseOptions(
   };
 }
 
-function renderDialog(defaultOptions: WorkItemPlanOptionsFormValue): HTMLElement {
+function renderDialog(
+  defaultOptions: WorkItemPlanOptionsFormValue,
+  automationAvailable = true,
+): HTMLElement {
   render(
     <WorkItemPlanOptionsDialog
       defaultOptions={defaultOptions}
-      automationAvailable
+      automationAvailable={automationAvailable}
       automationTargetScope={SCOPE}
       onConfirm={vi.fn(async () => undefined)}
       onClose={vi.fn()}
@@ -80,46 +83,37 @@ afterEach(() => {
 });
 
 describe("WorkItemPlanOptionsDialog automatic 模式的执行前确认复选框（B2-P1 F2）", () => {
-  it("disables the checkbox with a fixed-off note in automatic mode and restores it in manual mode", async () => {
-    const user = userEvent.setup();
+  it("disables the checkbox with a fixed-off note in automatic mode and offers no manual restore", async () => {
     stubTargetFetch();
-    // 表单值保持 true：证明 automatic 下是「固定关闭显示」，不篡改表单值，
-    // 切回手动即恢复用户原勾选。
+    // 表单值保持 true：证明 automatic 下是「固定关闭显示」，不篡改表单值
+    // （REQ-WIGA-01 修订：已确认 design 的弹窗打开即 automatic，无「手动」可切）。
     const dialog = renderDialog(baseOptions(true));
     const checkbox = () =>
       within(dialog).getByRole("checkbox", {
         name: CONFIRM_CHECKBOX_NAME,
       });
 
-    expect(checkbox()).toBeEnabled();
-    expect(checkbox()).toBeChecked();
-    expect(
-      within(dialog).queryByTestId("plan-approval-auto-note"),
-    ).toBeNull();
-
-    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
-    await within(dialog).findByTestId("automation-target-projection");
-
     // 红测锚点：automatic 下置灰＋固定关闭＋说明可见。
+    await within(dialog).findByTestId("automation-target-projection");
     expect(checkbox()).toBeDisabled();
     expect(checkbox()).not.toBeChecked();
     const note = within(dialog).getByTestId("plan-approval-auto-note");
     expect(note).toHaveTextContent(/自动化模式/);
     expect(note).toHaveTextContent(/自动批准/);
 
-    // 切回手动：复选框恢复可用与原勾选，说明消失（manual 不变）。
-    await user.click(within(dialog).getByRole("radio", { name: "手动" }));
-    expect(checkbox()).toBeEnabled();
-    expect(checkbox()).toBeChecked();
+    // 工作项组生成路径不提供「手动」⇒ 复选框无法恢复、说明持续可见。
     expect(
-      within(dialog).queryByTestId("plan-approval-auto-note"),
-    ).toBeNull();
+      within(dialog).queryByRole("radio", { name: "手动" }),
+    ).not.toBeInTheDocument();
+    expect(note).toBeInTheDocument();
   });
 
   it("keeps the checkbox editable per its form value in manual mode without any note", async () => {
     const user = userEvent.setup();
     stubTargetFetch();
-    const dialog = renderDialog(baseOptions(true));
+    // 未确认 design（automationAvailable=false）：不渲染生成模式区块，
+    // manual 行为逐字不变（D3 = 保持现状）。
+    const dialog = renderDialog(baseOptions(true), false);
 
     const checkbox = within(dialog).getByRole("checkbox", {
       name: CONFIRM_CHECKBOX_NAME,

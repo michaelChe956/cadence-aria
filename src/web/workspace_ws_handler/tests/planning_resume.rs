@@ -75,6 +75,8 @@ impl PlanningResumeFixture {
     /// 写入单成员 selection + active aggregate index；物理仓库存在时复用迁移生成的
     /// 权威 manifest/member/checkout，纯 resolver fixture 则写入原有最小权威记录。
     fn write_logical_codebase(&self) {
+        // REQ-ROUTE-01 两态化：归属解析要求 issue 记录在场（先于 selection 落盘）。
+        super::lc_fixture_support::seed_attributed_issue(&self.paths);
         let store = LogicalCodebaseStore::new(self.paths.clone());
         let manifest = if self.physical_repository_id.is_some() {
             store.load_manifest("project_0001").unwrap().unwrap()
@@ -273,14 +275,24 @@ impl StreamingProviderAdapter for RebuildRecordingProvider {
 }
 
 #[tokio::test]
-async fn planning_resume_decision_is_none_for_legacy_single_repo_path() {
+async fn planning_resume_without_lc_authority_fails_closed() {
+    // REQ-ROUTE-01 两态化：无 LC 权威（无 manifest/selection）不再回退 legacy
+    // 单仓（旧契约 Ok(None) 已作废）——一律 fail-closed，携带稳定码与
+    // issue_not_bound 原因。
     let fixture = PlanningResumeFixture::new();
-    // 无 manifest/selection：传统单仓路径不校验，不受影响。
-    let decision =
+    super::lc_fixture_support::seed_attributed_issue(&fixture.paths);
+    let error =
         planning_resume_decision_with_fresh_index(&fixture.paths, "project_0001", "issue_0001")
             .await
-            .unwrap();
-    assert!(decision.is_none());
+            .unwrap_err();
+    assert!(
+        error.contains("repository_routing_target_missing"),
+        "{error}"
+    );
+    assert!(
+        error.contains("issue_not_bound_to_logical_codebase"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -288,16 +300,8 @@ async fn planning_resume_fail_closed_when_manifest_without_selection() {
     // 有 manifest、无 selection → 与 compile 一致 fail-closed（返回稳定错误码 repository_routing_target_missing）。
     let root = tempfile::tempdir().unwrap();
     let paths = ProductAppPaths::new(root.path().join(".aria"));
-    LogicalCodebaseStore::new(paths.clone())
-        .save_manifest(
-            "project_0001",
-            &LogicalCodebaseManifest::new(
-                "project_0001",
-                paths.root().join("aggregate-root"),
-                Vec::new(),
-            ),
-        )
-        .unwrap();
+    // REQ-ROUTE-01 两态化：归属解析要求 issue 在场，经共享夹具补 project+issue。
+    super::lc_fixture_support::seed_unpaired_manifest_with_attributed_issue(&paths);
 
     let error = planning_resume_decision_with_fresh_index(&paths, "project_0001", "issue_0001")
         .await
@@ -307,17 +311,22 @@ async fn planning_resume_fail_closed_when_manifest_without_selection() {
 }
 
 #[tokio::test]
-async fn planning_resume_legacy_when_none_none() {
-    // 无 manifest、无 selection → Ok(None)，传统单仓不受影响。
+async fn planning_resume_bare_workspace_without_issue_fails_closed() {
+    // 无 project/issue/manifest/selection 的裸现场：两态化后不再 Ok(None)
+    // 静默放行（旧 legacy 契约已作废）——issue 缺失即 fail-closed。
     let root = tempfile::tempdir().unwrap();
-    let result = planning_resume_decision_with_fresh_index(
+    let error = planning_resume_decision_with_fresh_index(
         &ProductAppPaths::new(root.path().join(".aria")),
         "project_0001",
         "issue_0001",
     )
-    .await;
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none());
+    .await
+    .unwrap_err();
+    assert!(error.contains("load repository routing failed"), "{error}");
+    assert!(
+        error.contains("product_store_not_found: issue issue_0001"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -558,7 +567,12 @@ impl AnchorT13PlanFixture {
             .create(CreateProductIssueInput {
                 project_id: "project_0001".to_string(),
                 repo_id: Some(repository.id.clone()),
-                logical_codebase_id: None,
+                // 归属必填（REQ-ROUTE-01）：夹具 LC 权威记录写 project 级根
+                //（legacy 布局）⇒ issue 归属 project 的 legacy 别名代码库。
+                logical_codebase_id:
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                        "project_0001",
+                    ),
                 title: "Anchor T13 planning".to_string(),
                 description: None,
                 change_id: None,

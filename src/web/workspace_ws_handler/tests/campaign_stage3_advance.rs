@@ -117,6 +117,18 @@ fn seed_accepted_source_drafts(harness: &CampaignStage3Harness) {
         .into_iter()
         .map(|record| record.draft_id)
         .collect::<std::collections::BTreeSet<_>>();
+    // ⚠️ 每条 accepted draft 的 `target_repository_id` 必须落**权威成员**
+    // （REQ-CS-05 成员单 target 纪律）：group 权威单元的 target 取自 source
+    // draft 的 `candidate.target_repository_id`（`group_validation.rs`），
+    // 缺 target ⇒ advance 派生不出冻结快照 ⇒ 无法绑定 issue 共享 worktree。
+    let logical_member =
+        crate::product::repository_store::RepositoryStore::new(harness.app_paths.clone())
+            .list(&harness.project_id)
+            .expect("campaign repos.json projection")
+            .into_iter()
+            .find(|record| record.id == "repo-levels")
+            .and_then(|record| record.logical_repository_id)
+            .expect("campaign main member (repo-levels) is registered");
     for (logical_id, revision_id) in &revision.work_item_bindings {
         let work_item_revision = revision_store
             .get_work_item_revision(&lineage, logical_id, revision_id)
@@ -137,7 +149,7 @@ fn seed_accepted_source_drafts(harness: &CampaignStage3Harness) {
             generation_mode: WorkItemGenerationMode::Serial,
             generation_diagnostics: None,
             candidate: WorkItemDraftCandidate {
-                target_repository_id: None,
+                target_repository_id: Some(logical_member),
                 outline_id: format!("outline_{logical_id}"),
                 logical_work_item_id: logical_id.clone(),
                 canonical_contract_candidate: work_item_revision.canonical_contract.clone(),
@@ -182,12 +194,46 @@ fn provider_ledger_snapshot(harness: &CampaignStage3Harness) -> Vec<Vec<u8>> {
     snapshots
 }
 
-fn shared_worktree(harness: &CampaignStage3Harness) -> crate::product::models::IssueSharedWorktree {
+/// 读取 durable worktree 记录：**仓维优先**，未命中回落 legacy issue 维。
+///
+/// REQ-ROUTE-01 两态化后的生产不变量：attempt 带 `target_snapshot` ⇒ worktree
+/// 事实落**仓维** `shared-worktrees/{repository_id}.json`
+/// （`workspace_engine/advance_parts/initialize_inner.inc.rs` 的
+/// `if let Some(snapshot)` 分支）；不带快照的纯物理单 target 才落 legacy
+/// `issue-shared-worktree.json`。⇒ 断言必须按**同一口径**读，否则读到的恒为空
+/// （"advance must bind the issue shared worktree"）。
+///
+/// ⚠️ 仓维优先**不是弱化**：两种生产形态都被覆盖（带快照⇒仓维、无快照⇒issue 维），
+/// 且调用点仍必须断言 `current_lock_owner_id == attempt_id`（锁 owner 就是本 attempt）。
+fn durable_shared_worktree(
+    harness: &CampaignStage3Harness,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+) -> Option<crate::product::models::IssueSharedWorktree> {
+    if let Some(logical_id) = attempt
+        .target_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.logical_repository_id)
+        && let Some(worktree) = harness
+            .lifecycle
+            .get_repo_shared_worktree(&harness.project_id, &harness.issue_id, logical_id)
+            .expect("repo shared worktree lookup")
+    {
+        return Some(worktree);
+    }
     harness
         .lifecycle
         .get_issue_shared_worktree(&harness.project_id, &harness.issue_id)
-        .expect("shared worktree lookup")
-        .expect("advance must bind the issue shared worktree")
+        .expect("issue shared worktree lookup")
+}
+
+/// advance 绑定的 durable worktree 记录（仓维优先；必须存在）。
+fn shared_worktree(
+    harness: &CampaignStage3Harness,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+) -> crate::product::models::IssueSharedWorktree {
+    durable_shared_worktree(harness, attempt).expect(
+        "advance must bind the shared worktree (repo-dimension when the attempt freezes a target snapshot)",
+    )
 }
 
 /// 从 durable coding store 重开读取 campaign attempt 事实(唯一权威)。
@@ -331,7 +377,13 @@ async fn campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start(
     );
 
     // worktree lease:lock owner 绑定到同一 attempt。
-    let worktree = shared_worktree(&harness);
+    // 断言迁移（REQ-ROUTE-01 两态化）：advance attempt 冻结 target_snapshot ⇒
+    // worktree 事实落**仓维** `shared-worktrees/{repository_id}.json`，不再写
+    // legacy `issue-shared-worktree.json`（coding 引擎 §4.2.6 preflight 对带
+    // snapshot 的 attempt 见 legacy issue 维文件即 fail-closed
+    // `legacy_shared_worktree_present`）⇒ 只读 issue 维的断言恒空。
+    // **不变量不变**：锁 owner 仍必须是本 attempt。
+    let worktree = shared_worktree(&harness, &attempt);
     assert_eq!(
         worktree.current_lock_owner_id.as_deref(),
         Some(attempt_id.as_str())
@@ -541,11 +593,10 @@ fn advance_durable_counts(harness: &CampaignStage3Harness) -> AdvanceDurableCoun
                 .len()
         })
         .unwrap_or(0);
-    let lock_owner = harness
-        .lifecycle
-        .get_issue_shared_worktree(&harness.project_id, &harness.issue_id)
-        .expect("worktree lookup")
-        .and_then(|worktree| worktree.current_lock_owner_id);
+    let lock_owner = attempts.last().and_then(|attempt| {
+        durable_shared_worktree(harness, attempt)
+            .and_then(|worktree| worktree.current_lock_owner_id)
+    });
     AdvanceDurableCounts {
         attempts: attempts.len(),
         units,

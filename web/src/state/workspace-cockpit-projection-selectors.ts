@@ -32,7 +32,7 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
         ? (recoveryReason ?? "中断原因未同步（只读诊断）")
         : null,
       findingsCount > 0 ? `findings ${findingsCount} 条` : null,
-      gate.remaining_budget !== null ? `剩余修复轮次 ${gate.remaining_budget}` : null,
+      gate.remaining_budget !== null ? `人工返修还可做 ${gate.remaining_budget} 次` : null,
       gate.turn?.status === "failed" && gate.turn.failure_message
         ? `失败：${gate.turn.failure_class ?? "unknown"} · ${gate.turn.failure_message}`
         : null,

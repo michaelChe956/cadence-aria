@@ -88,10 +88,15 @@ export interface AutomationTerminationRequest {
   policyRevision: number | null;
 }
 
-/** 批 2 T4：终止成功后的 durable 结果投影（terminated_at/outcome）。 */
+/** 批 2 T4：终止成功后的 durable 结果投影（terminated_at/outcome）。
+ * 2026-11-06 陈旧回执修复：补 planId（REST 响应 plan_id）作为回执的 plan
+ * 身份——同 issue 换绑新 plan（终止→删 work item→新建）后，展示守卫按它
+ * 与当前 plan 比对，旧回执不再跨 work item 复用。 */
 export interface AutomationTerminationResult {
   projectId: string;
   issueId: string;
+  /** 终止命中的 plan 身份；旧响应/回放缺省 null（消费方 fail-closed）。 */
+  planId: string | null;
   terminatedAt: string;
   outcome: string;
 }

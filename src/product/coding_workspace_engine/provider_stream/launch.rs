@@ -110,14 +110,25 @@ fn provider_adapter_error_from_gateway(
 ) -> ProviderAdapterError {
     use crate::protocol::contracts::TimeoutStatus;
     use crate::protocol::provider_errors::ProviderErrorCode;
-    ProviderAdapterError {
-        code: ProviderErrorCode::ProviderUnavailable,
-        details: error.to_string(),
-        stdout: String::new(),
-        stderr: String::new(),
-        exit_code: None,
-        timeout_status: TimeoutStatus::NotTimedOut,
-        duration_ms: 0,
+    // 真实 adapter 的启动/运行失败(Adapter(inner))**保留 inner 的结构化
+    // 字段**(code/stdout/stderr/exit_code/timeout/duration):transport 分类
+    // (provider_retry::classify_transport_message 的 message 拼接含
+    // stdout/stderr)依赖这些字段携带的关键词("text file busy"/"connection"
+    // 等);此前拍平成 ProviderUnavailable+Display 会丢掉全部证据,使 LC
+    // 路径一切 stderr 关键词型 transport 失败被误判 non_retryable。其余
+    // gateway 自身的 fail-closed 门(政策/复验/registry/可用性)保持既有
+    // 映射不变。
+    match error {
+        crate::product::logical_codebase::ProviderGatewayError::Adapter(inner) => inner.clone(),
+        other => ProviderAdapterError {
+            code: ProviderErrorCode::ProviderUnavailable,
+            details: other.to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            timeout_status: TimeoutStatus::NotTimedOut,
+            duration_ms: 0,
+        },
     }
 }
 

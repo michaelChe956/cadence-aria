@@ -35,6 +35,13 @@ export function cockpitFlowState(node: TimelineNode, awaitingTriage: boolean): C
       return "failed";
     case "skipped":
       return "pending";
+    case "aborted":
+      // 中止是终态：行已收尾、不再进行中，落终态 "done"（不得被当作仍在推进）。
+      // 六态词汇暂无独立的 aborted 态——新增需同步 coding-dashboard-projection.ts
+      // 的穷举标签 Record 与 styles.css 的 --aria-topo-node-aborted-* token，均不
+      // 在本次改动范围；窄栏因此显示「已完成」，与主状态行「生成已中止」的措辞
+      // 差异属审查报告未决问题 4，待 owner 裁决（此处只固化「中止＝终态」）。
+      return "done";
     default:
       return "done";
   }

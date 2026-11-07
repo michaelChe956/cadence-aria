@@ -48,6 +48,17 @@ fn group_attempt_with_committed_unit_changes(
     CodingExecutionAttempt,
 ) {
     let (root, paths, store, engine, attempt) = group_engine_with_last_running_unit();
+    // REQ-ROUTE-01 两态化（去单仓入口）：group 完成门禁链的路由凭证是「LC 权威 +
+    // 冻结 target_snapshot」——无归属的 group attempt 在 shared worktree 路由上
+    // fail-closed（`target_snapshot_identity_drifted`），测不到「写入范围门禁按
+    // git 事实判定」本体。权威现场在 attempt 落盘后补建，快照在全部夹具写盘
+    // 完成后挂载（避免中途写入触发 Logical 路由下的 group 归属校验）。
+    let authority = crate::context_builder::seed_logical_authority(
+        &paths,
+        "project_0001",
+        "issue_0001",
+        root.path(),
+    );
     let lifecycle = LifecycleStore::new(paths.clone());
     let worktree = attempt
         .worktree_path
@@ -165,6 +176,8 @@ fn group_attempt_with_committed_unit_changes(
         .expect("set head commit");
 
     write_complete_group_final_readiness_snapshot(&store, &attempt);
+    let attempt =
+        crate::context_builder::attach_target_snapshot(&store, &attempt, authority.snapshot(&paths));
     (root, paths, store, engine, attempt)
 }
 

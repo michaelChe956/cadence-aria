@@ -96,6 +96,29 @@ describe("TimelineNodeList", () => {
     expect(summary).toHaveClass("break-words");
     expect(summary).not.toHaveClass("truncate");
   });
+
+  it("labels an aborted node in Chinese instead of the raw status value", () => {
+    render(
+      <TimelineNodeList
+        nodes={[
+          timelineNode({
+            node_id: "run-aborted",
+            node_type: "author_run",
+            title: "Story Spec 生成",
+            status: "aborted",
+            completed_at: "2026-05-21T10:05:00Z",
+          }),
+        ]}
+        activeNodeId={null}
+        selectedNodeId={null}
+        onSelectNode={vi.fn()}
+      />,
+    );
+
+    const node = screen.getByTestId("timeline-node-author_run");
+    expect(node).toHaveTextContent("已中止");
+    expect(node).not.toHaveTextContent("aborted");
+  });
 });
 
 function timelineNode(overrides: Partial<TimelineNode> = {}): TimelineNode {

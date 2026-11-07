@@ -597,8 +597,9 @@ const PROVIDER_TRUST_MISSING_WAITING_REASON: &str = "provider_trust_missing";
 ///   不枚举全部 active 成员作 SC 文件门）；
 /// - 存储/路由错误：与其它 pre-run 装载失败同形（`Message`，不改写
 ///   durable phase）；
-/// - LC 归属缺失（gateway 已注入但 issue 无 logical_codebase_id）：持久
-///   状态不一致，fail-closed `Message`，绝不静默跳过预检回落 legacy 行为。
+/// - LC 归属读取失败（含老记录缺归属——读取层显式报
+///   `issue_not_bound_to_logical_codebase`）：持久状态不一致，fail-closed
+///   `Message`，绝不静默跳过预检回落 legacy 行为。
 ///
 /// 预检通过返回 `Ok(())`：后续仍由调用方读取同一实际文件（无 fallback）。
 #[allow(clippy::result_large_err)] // 同上:运行收尾 typed 出口。
@@ -616,12 +617,6 @@ fn preflight_lc_member_rules_before_author_run(
         SingleCandidateProviderRunError::Message(format!(
             "resolve logical codebase for admission preflight failed: {error}"
         ))
-    })?
-    .ok_or_else(|| {
-        SingleCandidateProviderRunError::Message(
-            "logical session has no logical codebase attribution; admission preflight cannot run"
-                .to_string(),
-        )
     })?;
     let request = launch.planning_request().map_err(|error| {
         SingleCandidateProviderRunError::Message(format!(
@@ -923,7 +918,10 @@ pub(crate) async fn run_single_candidate_author(
     let repository_structure =
         crate::product::work_item_split_engine::context::summarize_repository_structure(
             &repository.path,
-            issue.logical_codebase_id.is_some(),
+            // REQ-ROUTE-01：归属必填后「真多仓 LC」以非 legacy 别名判定（同
+            // issue_is_cross_repo_shape 口径）。
+            issue.logical_codebase_id
+                != crate::product::logical_codebase::legacy_logical_codebase_id(&issue.project_id),
         );
     let author_provider = engine.session().author_provider.clone();
     // B2b1(Task 5.2,REQ-PLN-08):envelope target 恒聚合根锚(E native

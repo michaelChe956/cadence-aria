@@ -511,23 +511,21 @@ impl CodingWorkspaceEngine {
         self.resolve_issue_cross_repo_review_provider(project_id, issue_id, &latest_attempt)
     }
 
-    /// issue 形态判定（REQ-GFR-CR-03 触发口径）：`logical_codebase_id.is_some()`
-    /// 即多仓逻辑代码库 issue——多仓 issue 的全部 work item 落在同一仓、或
-    /// attempt 快照缺失（旧记录）时仍必须评审；仅单仓 issue（`Ok(None)`，含
-    /// issue 记录缺失）不评审。**不**以 attempt 快照的去重仓数判形态。
+    /// issue 形态判定（REQ-GFR-CR-03 触发口径）：issue 归属非 legacy 别名
+    /// 逻辑代码库即多仓逻辑代码库 issue——多仓 issue 的全部 work item 落在
+    /// 同一仓、或 attempt 快照缺失（旧记录）时仍必须评审；legacy 别名单仓
+    /// 布局不评审。**不**以 attempt 快照的去重仓数判形态。
     fn issue_is_cross_repo_shape(
         &self,
         project_id: &str,
         issue_id: &str,
     ) -> Result<bool, ProductStoreError> {
-        Ok(
-            crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-                &self.store.paths(),
-                project_id,
-                issue_id,
-            )?
-            .is_some(),
-        )
+        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.store.paths(),
+            project_id,
+            issue_id,
+        )?;
+        Ok(lc_id != crate::product::logical_codebase::legacy_logical_codebase_id(project_id))
     }
 
     /// 「全部开发完成」判定（触发前置，设计 B §七 E + controller 裁定）。

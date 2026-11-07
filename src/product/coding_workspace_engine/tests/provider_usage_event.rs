@@ -92,18 +92,45 @@ async fn usage_report_maps_to_coding_usage_execution_events() {
         )
         .expect("role run");
     let (event_tx, mut event_rx) = mpsc::channel(32);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
-    let provider = UsageReportingProvider;
-    let (legacy_input, input) = usage_test_invocation_inputs(&attempt);
+    let provider = std::sync::Arc::new(UsageReportingProvider);
+    // REQ-ROUTE-01：快照 attempt 的 provider run 只能经 gateway 启动；adapter
+    // 同时交给引擎方法（断言面）与 registry（真实 spawn 面）。
+    let engine = super::provider_gateway_validated_input::engine_with_fixture_gateway(
+        &store,
+        event_tx,
+        "project_0001",
+        provider.clone(),
+    );
     let provider_name = ProviderName::Codex;
     let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let (legacy_input, mut input) = usage_test_invocation_inputs(&attempt);
+    let worktree = attempt.worktree_path.clone().expect("worktree path");
+    // LC validated 启动的 cwd 冻结为 gateway authority root（target 仍是
+    // worktree）；spawn 前复验要求 effective cwd 与 envelope 一致。
+    input.working_directory = Some(
+        store
+            .paths()
+            .root()
+            .parent()
+            .expect("workspace root")
+            .to_path_buf(),
+    );
+    let validated_input = engine
+        .prepare_streaming_launch_for_role(
+            &attempt,
+            CodingProviderRole::Coder,
+            &worktree,
+            input.clone(),
+        )
+        .expect("prepare lc launch")
+        .expect("logical attempt with gateway must prepare");
 
     let outcome = engine
         .run_provider_stream_invocation(CodingProviderStreamRun {
             attempt: &attempt,
             node_id: "coding_usage_event",
             role_run: Some(&role_run),
-            provider: &provider,
+            provider: provider.as_ref(),
             legacy_input: &legacy_input,
             input,
             provider_name: &provider_name,
@@ -113,7 +140,7 @@ async fn usage_report_maps_to_coding_usage_execution_events() {
             timeout: None,
             timeout_reason_code: None,
             suppress_failure_side_effects: false,
-            validated_input: None,
+            validated_input: Some(validated_input),
         })
         .await;
 

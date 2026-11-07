@@ -49,16 +49,15 @@ impl WorkspaceEngine {
 /// 解析 issue 的 logical work item plan 仓库 target 映射（REQ-PLN-02 消费点）。
 /// 独立为自由函数以便无 engine 的单元测试直接验证 target 有效性校验。
 /// 成对判定复用 RepositoryRouting（Task 11），避免与 resume 入口漂移：
-/// Legacy → Ok(None)；Logical → 既有 target map 构建逻辑；
-/// FailClosed → Err 带稳定错误码（repository_routing_*，B3）供 HTTP 映射识别。
+/// Logical → 既有 target map 构建逻辑；FailClosed（含无归属旧数据）→ Err 带
+/// 稳定错误码（repository_routing_*，B3）供 HTTP 映射识别。
 pub(crate) fn resolve_logical_work_item_plan_repository_targets(
     lifecycle: &LifecycleStore,
     plan: &IssueWorkItemPlan,
 ) -> Result<Option<std::collections::BTreeMap<LogicalRepositoryId, String>>, String> {
     let paths = lifecycle.app_paths();
     // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy
-    // 布局冲突 fail-closed）；无归属且无 legacy 别名 record 的旧数据保留
-    // project 级兼容分支。
+    // 布局冲突 fail-closed）；无归属旧数据不再有 project 级兼容分支。
     let lc_id = crate::product::logical_codebase::RepositoryAuthorityResolver::new(paths.clone())
         .resolve_for_issue(&plan.project_id, &plan.issue_id)
         .map_err(|error| format!("resolve issue logical codebase failed: {error}"))?
@@ -80,8 +79,6 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
         .load(&plan.project_id, &plan.issue_id)
         .map_err(|error| format!("load issue codebase selection failed: {error}"))?;
     let (manifest, _selection) = match RepositoryRouting::classify(manifest, selection) {
-        // (None, None)：无 manifest 且无 selection → 传统单仓，target map 为空。
-        RepositoryRouting::Legacy { .. } => return Ok(None),
         // (Some, Some)：逻辑代码库 → 继续按既有 target map 构建逻辑。
         RepositoryRouting::Logical {
             manifest,
@@ -196,7 +193,9 @@ pub(crate) fn resolve_logical_work_item_plan_repository_targets(
 
 /// B1 铁律（多仓 plan 聚合视图缺口，session_0003 现场）：plan 会话
 /// IR/compile 写入点的 per-WI 成员归属目标表。
-/// - Legacy（单仓，target map 为空）→ `Ok(None)`：既有单 target 语义零变化；
+/// - 单仓 `Legacy`（target map 为空）已随变体删除：无归属/不成对 →
+///   `Err`（稳定错误码），不再返回 `Ok(None)`（调用方 `Ok(None)` 分支
+///   现不可达，防御性保留）；
 /// - LC → `Ok(Some)`：`physical_by_logical` 与 Final Compile 的 logical_targets
 ///   同源（`resolve_logical_work_item_plan_repository_targets`）；确定性回落
 ///   `fallback_physical_id` 按既有规则——成员锚定会话（唯一 target/唯一

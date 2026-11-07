@@ -1,6 +1,7 @@
 pub mod advance_store;
 pub mod app_paths;
 pub mod artifact_extraction;
+pub mod audit_snapshot_budget;
 pub mod cadence_skills;
 pub mod checkpoint_store;
 pub mod coding_attempt_repository;
@@ -34,6 +35,7 @@ pub mod plan_repair;
 pub mod planning_failure;
 pub mod product_data_schema;
 pub mod project_store;
+pub mod provider_installation;
 pub mod provider_resource_store;
 pub mod provider_workspace_runner;
 pub mod repository_store;

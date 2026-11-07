@@ -43,6 +43,11 @@ pub(crate) use lease_diagnostics::lease_diagnostics_path;
 mod lease_diagnostics;
 mod runs;
 
+pub use runs::RunAbortOutcome;
+
+/// REQ-WIGA-17：取消等待 completion 的兜底时长生产默认（30s，毫秒）。
+const DEFAULT_RUN_COMPLETION_WAIT_TIMEOUT_MILLIS: u64 = 30_000;
+
 pub(super) struct Attachment {
     pub(super) outbound_tx: mpsc::Sender<OutboundControl>,
     /// 一旦直播通道溢出，该连接只能通过重连回到一致状态；此后 router 不再向其投递。
@@ -136,6 +141,10 @@ pub struct WorkspaceSessionManager {
     /// （start_run 族）与 attach 检查面消费；registry 驱逐后的重建面由
     /// `create` 的墓碑检查拒绝。
     invalidated_for_deletion: AtomicBool,
+    /// REQ-WIGA-17：`abort_active_run_and_wait_completion` 等 completion 的
+    /// 兜底时长（毫秒）——生产默认 30s；`set_run_completion_wait_timeout`
+    /// 仅供测试注入可测时长（锁无关读取，Relaxed 足够）。
+    run_completion_wait_timeout_millis: AtomicU64,
     pub session_id: String,
     pub session_record: WorkspaceSessionRecord,
     pub app_paths: ProductAppPaths,
@@ -196,6 +205,9 @@ impl WorkspaceSessionManager {
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
             invalidated_for_deletion: AtomicBool::new(false),
+            run_completion_wait_timeout_millis: AtomicU64::new(
+                DEFAULT_RUN_COMPLETION_WAIT_TIMEOUT_MILLIS,
+            ),
             registry: WorkspaceSessionRegistry::default(),
         })
     }
@@ -248,6 +260,9 @@ impl WorkspaceSessionManager {
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
             invalidated_for_deletion: AtomicBool::new(false),
+            run_completion_wait_timeout_millis: AtomicU64::new(
+                DEFAULT_RUN_COMPLETION_WAIT_TIMEOUT_MILLIS,
+            ),
             session_id: session_id.to_string(),
             session_record,
             app_paths,
@@ -345,6 +360,25 @@ impl WorkspaceSessionManager {
             }
         }
         self.stamp_pending_choice_run_ids(frame);
+    }
+
+    /// REQ-HGC-04：本页底部「继续自动化」入口的服务端权威事实（WS
+    /// `SessionState.plan_continue_available`）——与 HTTP control 投影的
+    /// `allowed_actions` 含 `continue_plan` **同源**（同一
+    /// `crate::web::plan_stop` 判定），两面不可能互相矛盾。
+    ///
+    /// 读取失败（会话记录 / enrollment 读不到）→ `None`（**不猜**）：前端按
+    /// 「无真实续跑入口」处理，不得给假指引。
+    pub(crate) fn project_plan_continue_available(&self, frame: &mut WsOutMessage) {
+        let available =
+            crate::web::plan_stop::plan_continue_available(&self.app_paths, &self.session_id);
+        if let WsOutMessage::SessionState {
+            plan_continue_available,
+            ..
+        } = frame
+        {
+            *plan_continue_available = available;
+        }
     }
 
     /// P0 1.3（REQ-WIGA-05）：pending choice 投影注入当前 run 化身（引擎/
@@ -454,7 +488,7 @@ impl WorkspaceSessionManager {
                 .gateway_factory()
                 .ok_or_else(|| "logical gateway factory unavailable".to_string())?;
             let gateway = factory
-                .build_readonly_for_lc(&session_record.project_id, lc_id.as_deref())
+                .build_readonly_for_lc(&session_record.project_id, Some(lc_id.as_str()))
                 .map_err(|error| format!("logical gateway build failed: {error}"))?;
             // T4.3（REQ-REG-15/D2）：在已解析 project/issue/LC 并构造只读
             // gateway 的现有段注入确认 trust 冻结上下文——复用同一
@@ -473,7 +507,7 @@ impl WorkspaceSessionManager {
                 engine_workspace =
                     engine_workspace.with_confirmation_trust_context(ConfirmationTrustContext {
                         precondition,
-                        issue_lc_id: lc_id.clone(),
+                        issue_lc_id: Some(lc_id.clone()),
                         frozen_root,
                     });
             }
@@ -514,10 +548,24 @@ impl WorkspaceSessionManager {
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
             invalidated_for_deletion: AtomicBool::new(false),
+            run_completion_wait_timeout_millis: AtomicU64::new(
+                DEFAULT_RUN_COMPLETION_WAIT_TIMEOUT_MILLIS,
+            ),
         });
         manager.spawn_event_router(engine_rx, state.workspace_runs.clone());
         manager.recover_on_creation().await;
         Ok(manager)
+    }
+
+    /// 仅供测试注入（REQ-WIGA-17）：把 `abort_active_run_and_wait_completion`
+    /// 等 completion 的兜底时长缩到可测级（毫秒，原子写）。生产默认 30s，
+    /// 生产代码不调用（集成测试在库外无法使用 `#[cfg(test)]` 项，故为 pub）。
+    #[doc(hidden)]
+    pub fn set_run_completion_wait_timeout(&self, timeout: std::time::Duration) {
+        self.run_completion_wait_timeout_millis.store(
+            timeout.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// 构造所有 run 调用方共享的上下文；run 所有权仅存在于本 manager。
@@ -674,6 +722,9 @@ impl WorkspaceSessionManager {
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
             invalidated_for_deletion: AtomicBool::new(false),
+            run_completion_wait_timeout_millis: AtomicU64::new(
+                DEFAULT_RUN_COMPLETION_WAIT_TIMEOUT_MILLIS,
+            ),
             registry: WorkspaceSessionRegistry::default(),
         });
         manager.spawn_event_router(
@@ -734,7 +785,9 @@ pub(crate) async fn terminate_plan_engine_side(
     // ③取消 plan session 活跃 run（真实 completion 等待）＋CAS Terminated。
     if let Some(session_id) = bound_session_id {
         if let Some(manager) = session_registry.get(session_id).await {
-            manager.abort_active_run_and_wait_completion().await;
+            // REQ-WIGA-17：返回类型升格为 RunAbortOutcome；人工终止路径的
+            // 既有语义是丢弃取消结果（行为、顺序、文案不变）。
+            let _ = manager.abort_active_run_and_wait_completion().await;
         }
         let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
         for _ in 0..3 {
