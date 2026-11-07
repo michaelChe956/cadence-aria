@@ -33,7 +33,7 @@
 - [x] 1.4 **改** `web/tsconfig.json`
       - 做什么：加 `"types": ["vite/client"]`（C2：`?worker` import 的类型声明，缺了报 TS2307）
       - 通过：`cd web && pnpm tsc -b` 无 TS2307
-- [x] 1.5 **绿测**：`cd web && pnpm vitest --run src/components/shared/monaco-local-setup.test.ts` ⇒ 全绿（0.1 的三条断言均通过）
+- [x] 1.5 **绿测**：`cd web && pnpm vitest --run src/components/shared/monaco-local-setup.test.ts` ⇒ 全绿（0.1 的四条断言均通过）
 - [x] 1.6 **自检（范围）**：`git diff --stat` 只含上述 4 处 + 0.1 的测试文件；`package.json` / `pnpm-lock.yaml` / `src/**` 零改动；`web/dist` 结构不变
 
 ## 2. 全量门禁
