@@ -30,6 +30,12 @@ jobs:
       # 前端必须先构建：aria 通过 rust-embed 在编译期嵌入 web/dist，
       # build.rs 会在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
       - name: Build frontend
+        # ★monaco 本地化后前端产物显著变大（dist 约 15 MB，主 chunk 约 5 MB）⇒
+        #   vite 的 rollup 图分析与压缩阶段需要更大 Node 堆；默认上限（约 4 GB）会 OOM
+        #   （release 2026-11-08 实测：darwin-x64 构建 exit 134 / heap out of memory）。
+        #   runner 内存 14 GB，故给 8 GB 堆；只影响构建期，不改变产物。
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: pnpm -C web install --frozen-lockfile && pnpm -C web build
       # 证据检索链路的验收用例（tests/it_web/evidence_query）依赖真实
       # `codegraph` CLI 建索引与查询（npm 包 @colbymchenry/codegraph）。
@@ -83,6 +89,12 @@ jobs:
       # 前端必须先构建：aria 通过 rust-embed 在编译期嵌入 web/dist，
       # build.rs 在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
       - name: Build frontend
+        # ★monaco 本地化后前端产物显著变大（dist 约 15 MB，主 chunk 约 5 MB）⇒
+        #   vite 的 rollup 图分析与压缩阶段需要更大 Node 堆；默认上限（约 4 GB）会 OOM
+        #   （release 2026-11-08 实测：darwin-x64 构建 exit 134 / heap out of memory）。
+        #   runner 内存 14 GB，故给 8 GB 堆；只影响构建期，不改变产物。
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: pnpm -C web install --frozen-lockfile && pnpm -C web build
       # C 层真实 WS 夹具走生产 aggregate-index rebuild 端点，该端点 shell out
       # 到真实 `codegraph` CLI（src/web/handlers/aggregate_initialization/
@@ -141,6 +153,12 @@ jobs:
       # 前端必须先构建：aria 通过 rust-embed 在编译期嵌入 web/dist，
       # build.rs 在 web/dist 缺失时硬失败（web/dist 不在版本控制中）。
       - name: Build frontend
+        # ★monaco 本地化后前端产物显著变大（dist 约 15 MB，主 chunk 约 5 MB）⇒
+        #   vite 的 rollup 图分析与压缩阶段需要更大 Node 堆；默认上限（约 4 GB）会 OOM
+        #   （release 2026-11-08 实测：darwin-x64 构建 exit 134 / heap out of memory）。
+        #   runner 内存 14 GB，故给 8 GB 堆；只影响构建期，不改变产物。
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: pnpm -C web install --frozen-lockfile && pnpm -C web build
       # C 层真实 WS 夹具走生产 aggregate-index rebuild 端点，该端点 shell out
       # 到真实 `codegraph` CLI（executable="codegraph"）⇒ runner 上没有该工具

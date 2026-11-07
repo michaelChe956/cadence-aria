@@ -54,6 +54,12 @@ jobs:
 
       # 强制顺序：前端先于二进制（rust-embed 嵌入 web/dist；build.rs 硬校验兜底）
       - name: Build frontend
+        # ★monaco 本地化后前端产物显著变大（dist 约 15 MB，主 chunk 约 5 MB）⇒
+        #   vite 的 rollup 图分析与压缩阶段需要更大 Node 堆；默认上限（约 4 GB）会 OOM
+        #   （release 2026-11-08 实测：darwin-x64 构建 exit 134 / heap out of memory）。
+        #   runner 内存 14 GB，故给 8 GB 堆；只影响构建期，不改变产物。
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: pnpm -C web install --frozen-lockfile && pnpm -C web build
 
       - name: Build release binary
