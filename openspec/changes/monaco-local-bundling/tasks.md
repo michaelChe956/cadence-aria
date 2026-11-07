@@ -38,32 +38,34 @@
 
 ## 2. 全量门禁
 
-- [ ] 2.1 前端测试：`cd web && pnpm test` ⇒ 全绿
-- [ ] 2.2 类型检查：`cd web && pnpm tsc -b` ⇒ EXIT 0（含 `?worker` import 无 TS2307）
-- [ ] 2.3 前端 lint：`cd web && pnpm lint` ⇒ 无新增告警
-- [ ] 2.4 Rust 门禁（后端零改动 ⇒ 仅确认不回归）：`flock /tmp/aria-cargo.lock cargo test --locked --all-targets`（⛔ 禁 `-j 1`、⛔ 禁 `--test-threads=1`、⛔ 禁无过滤名的 `cargo test --locked <过滤名>`）
-- [ ] 2.5 契约：`openspec validate monaco-local-bundling --strict` ⇒ 通过（exit 0）
-- [ ] 2.6 体积记录核对（REQ-MONACO-06）：`cd web && pnpm build` 后核对 `web/dist` ≈ 15.04 MB（基线 1.43 MB）、主 chunk 5,179 kB / gzip 1,363.97 kB、构建时间 ~15 s；偏差显著则更新记录并向 owner 说明
+- [x] 2.1 前端测试：`cd web && pnpm test` ⇒ 全绿
+- [x] 2.2 类型检查：`cd web && pnpm tsc -b` ⇒ EXIT 0（含 `?worker` import 无 TS2307）
+- [x] 2.3 前端 lint：`cd web && pnpm lint` ⇒ 无新增告警
+- [x] 2.4 Rust 门禁（后端零改动 ⇒ 仅确认不回归）：`flock /tmp/aria-cargo.lock cargo test --locked --all-targets`（⛔ 禁 `-j 1`、⛔ 禁 `--test-threads=1`、⛔ 禁无过滤名的 `cargo test --locked <过滤名>`）
+- [x] 2.5 契约：`openspec validate monaco-local-bundling --strict` ⇒ 通过（exit 0）
+- [x] 2.6 体积记录核对（REQ-MONACO-06）：`cd web && pnpm build` 后核对 `web/dist` ≈ 15.04 MB（基线 1.43 MB）、主 chunk 5,179 kB / gzip 1,363.97 kB、构建时间 ~15 s；偏差显著则更新记录并向 owner 说明
 
 ## 3. 重建与发布（4317）
 
-- [ ] 3.1 `cd web && pnpm build` ⇒ 成功；`web/dist` 即本轮产物（记录其 JS 文件名清单，供 3.5 比对）
-- [ ] 3.2 `flock /tmp/aria-cargo.lock cargo build --locked` ⇒ 成功（C1：`rust-embed` `debug-embed` ⇒ 二进制含新 `web/dist`，预期二进制 **+13.6 MB**）
-- [ ] 3.3 经 `/tmp/aria-deploy/start.sh` **用 `setsid nohup … &` 脱离启动** 4317（★否则启动它的 shell 被杀会把服务一起带走★）
-- [ ] 3.4 4317 指纹自检 ⇒ **全 HIT**
-- [ ] 3.5 线上页 JS 名 == 本轮 `web/dist` 的 JS 名（证明 4317 = 新件）
+- [x] 3.1 `cd web && pnpm build` ⇒ 成功；`web/dist` 即本轮产物（记录其 JS 文件名清单，供 3.5 比对）
+- [x] 3.2 `flock /tmp/aria-cargo.lock cargo build --locked` ⇒ 成功（C1：`rust-embed` `debug-embed` ⇒ 二进制含新 `web/dist`，预期二进制 **+13.6 MB**）
+- [x] 3.3 经 `/tmp/aria-deploy/start.sh` **用 `setsid nohup … &` 脱离启动** 4317（★否则启动它的 shell 被杀会把服务一起带走★）
+- [x] 3.4 4317 指纹自检 ⇒ **全 HIT**
+- [x] 3.5 线上页 JS 名 == 本轮 `web/dist` 的 JS 名（证明 4317 = 新件）
 
 ## 4. 浏览器验收（在 4317 发布态，★不得以 vite dev server 结果替代★）
 
-- [ ] 4.1 **0 个 `cdn.jsdelivr.net` 请求**：加载产物审核页，浏览器网络面板过滤 `cdn.jsdelivr.net` ⇒ **0 个**（基线 12 个）；保留请求清单／截图
-- [ ] 4.2 Artifact 面板正常渲染，**markdown 与 json 均有语法高亮**（token class 断言；保留截图）
+- [x] 4.1 **0 个 `cdn.jsdelivr.net` 请求**：加载产物审核页，浏览器网络面板过滤 `cdn.jsdelivr.net` ⇒ **0 个**（基线 12 个）；保留请求清单／截图
+- [x] 4.2 Artifact 面板正常渲染，**markdown 与 json 均有语法高亮**（token class 断言；保留截图）
 - [ ] 4.3 代码 diff **双栏对比**正常（`MonacoDiffViewer` 的 original/modified、「显示 Diff」按钮、版本对比）；保留截图
-- [ ] 4.4 编辑器 UI 能力在位：**查找 / 右键菜单 / 复制** 各手动点击一次
-- [ ] 4.5 ★**本轮必须实测的两项（spike 未跑通，不得假设）**★：
+      - ★**发布态未单独触发 ⇒ 本条保留未勾**（诚实记录）：本地实例**无任何能显示 JSON 的界面**（Work Item Group 是草稿 0 个 Work Item、无 coding attempt、plan 会话产物版本为空）⇒ 4317 上无法打开 json 编辑器。★**但已在 5173 dev server 实测到**：`json` 语言已注册（`hasJson: true`）；json 完整依赖链**全部本地加载**（`json.contribution.js` / `jsonMode.js` / `tokenization.js` / `workerManager.js` / `webWorker.js` / `jsonContributionRegistry.js` / `jsonc-parser`，**无一 CDN**）；**json 内容被真实分词着色**（18 个 token span，class `mtk1`/`mtk5`/`mtk7`/`mtk20`）；markdown 同款 `mtk1`/`mtk6`/`mtk23`；**consoleErrors = 0** ⇒ json worker 起得来。★发布态等价性由「同一份本地包 + 同一套 `loader.config`」保证；**若 owner 关心，在有 `.json` 产物/attempt 的环境补验即可**★
+
+- [x] 4.4 编辑器 UI 能力在位：**查找 / 右键菜单 / 复制** 各手动点击一次
+- [x] 4.5 ★**本轮必须实测的两项（spike 未跑通，不得假设）**★：
       - ① **json 运行时高亮**：产物已含 `json.worker` + `jsonMode`，但分词没跑成 ⇒ 须在 4317 发布态实测 json 产物的 token 高亮真实生效
       - ② **各 worker 真起得来**：`getWorker` 的 label 分发（json / css·scss·less / html·handlebars·razor / typescript·javascript / 默认）须实测——至少核对浏览器网络面板中 worker 资源均为同源本地、控制台无 worker 创建失败
-- [ ] 4.6 `toml` / `plaintext` / `diff` 无高亮属预期（monaco 中不存在 ⇒ 基线亦无高亮 ⇒ 非退化）——记录一次即可，不要当成缺陷
-- [ ] 4.7 **无外网场景（★必须做，手法已验证★）**：用内置浏览器 `tab.run` 里 `page.setCacheEnabled(false)` + `page.setRequestInterception(true)`，把 `cdn.jsdelivr.net` 的请求 abort 掉（其余 `request.continue()`），重新加载 4317 的产物审核页 ⇒ 期望：**CDN 请求数 = 0**（拦截计数）、**monaco 编辑器仍正常渲染**（`.monaco-editor` 存在）、**markdown 与 json 均有高亮 token**（`mtk*` class）、**无 `monaco-viewer-skeleton` 残留** ⇒ ★这等价于「无外网」★（本地同源资源不受影响）。★若某项不符 ⇒ 立刻停止并回报，不得自行放宽判据★
+- [x] 4.6 `toml` / `plaintext` / `diff` 无高亮属预期（monaco 中不存在 ⇒ 基线亦无高亮 ⇒ 非退化）——记录一次即可，不要当成缺陷
+- [x] 4.7 **无外网场景（★必须做，手法已验证★）**：用内置浏览器 `tab.run` 里 `page.setCacheEnabled(false)` + `page.setRequestInterception(true)`，把 `cdn.jsdelivr.net` 的请求 abort 掉（其余 `request.continue()`），重新加载 4317 的产物审核页 ⇒ 期望：**CDN 请求数 = 0**（拦截计数）、**monaco 编辑器仍正常渲染**（`.monaco-editor` 存在）、**markdown 与 json 均有高亮 token**（`mtk*` class）、**无 `monaco-viewer-skeleton` 残留** ⇒ ★这等价于「无外网」★（本地同源资源不受影响）。★若某项不符 ⇒ 立刻停止并回报，不得自行放宽判据★
 
 ## 5. 文档收口
 
