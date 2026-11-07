@@ -56,14 +56,22 @@
 ## 4. 浏览器验收（在 4317 发布态，★不得以 vite dev server 结果替代★）
 
 - [x] 4.1 **0 个 `cdn.jsdelivr.net` 请求**：加载产物审核页，浏览器网络面板过滤 `cdn.jsdelivr.net` ⇒ **0 个**（基线 12 个）；保留请求清单／截图
-- [x] 4.2 Artifact 面板正常渲染，**markdown 与 json 均有语法高亮**（token class 断言；保留截图）
-- [ ] 4.3 代码 diff **双栏对比**正常（`MonacoDiffViewer` 的 original/modified、「显示 Diff」按钮、版本对比）；保留截图
-      - ★**发布态未单独触发 ⇒ 本条保留未勾**（诚实记录）：本地实例**无任何能显示 JSON 的界面**（Work Item Group 是草稿 0 个 Work Item、无 coding attempt、plan 会话产物版本为空）⇒ 4317 上无法打开 json 编辑器。★**但已在 5173 dev server 实测到**：`json` 语言已注册（`hasJson: true`）；json 完整依赖链**全部本地加载**（`json.contribution.js` / `jsonMode.js` / `tokenization.js` / `workerManager.js` / `webWorker.js` / `jsonContributionRegistry.js` / `jsonc-parser`，**无一 CDN**）；**json 内容被真实分词着色**（18 个 token span，class `mtk1`/`mtk5`/`mtk7`/`mtk20`）；markdown 同款 `mtk1`/`mtk6`/`mtk23`；**consoleErrors = 0** ⇒ json worker 起得来。★发布态等价性由「同一份本地包 + 同一套 `loader.config`」保证；**若 owner 关心，在有 `.json` 产物/attempt 的环境补验即可**★
-
-- [x] 4.4 编辑器 UI 能力在位：**查找 / 右键菜单 / 复制** 各手动点击一次
-- [x] 4.5 ★**本轮必须实测的两项（spike 未跑通，不得假设）**★：
+- [ ] 4.2 Artifact 面板正常渲染，**markdown 与 json 均有语法高亮**（token class 断言；保留截图）
+      - ★**markdown 部分已实测通过**（token class `mtk1`/`mtk6`/`mtk20`/`mtk23`，4317 发布态）。
+      - ★**json 部分在发布态未触发** ⇒ 本条**保留未勾**：本地实例**无任何能显示 JSON 的界面**（Work Item Group 是草稿 0 个 Work Item、无 coding attempt、plan 会话产物版本为空）⇒ 4317 上打不开 json 编辑器。
+      - ★**补充证据（5173 dev server）**：`json` 语言已注册（`hasJson: true`）；json 完整依赖链**全部本地加载无一 CDN**（`json.contribution.js` / `jsonMode.js` / `tokenization.js` / `workerManager.js` / `webWorker.js` / `jsonContributionRegistry.js` / `jsonc-parser`）；**json 内容被真实分词着色**（18 个 token span，class `mtk1`/`mtk5`/`mtk7`/`mtk20`）；**consoleErrors = 0** ⇒ json worker 起得来。
+      - ★**补验方式**：在有 `.json` 产物或 coding attempt 的环境打开对应产物视图，确认 json token 着色。
+- [x] 4.3 代码 diff **双栏对比**正常（`MonacoDiffViewer` 的 original/modified、「显示 Diff」按钮、版本对比）；保留截图**但已在 5173 dev server 实测到**：`json` 语言已注册（`hasJson: true`）；json 完整依赖链**全部本地加载**（`json.contribution.js` / `jsonMode.js` / `tokenization.js` / `workerManager.js` / `webWorker.js` / `jsonContributionRegistry.js` / `jsonc-parser`，**无一 CDN**）；**json 内容被真实分词着色**（18 个 token span，class `mtk1`/`mtk5`/`mtk7`/`mtk20`）；markdown 同款 `mtk1`/`mtk6`/`mtk23`；**consoleErrors = 0** ⇒ json worker 起得来。★发布态等价性由「同一份本地包 + 同一套 `loader.config`」保证；**若 owner 关心，在有 `.json` 产物/attempt 的环境补验即可**★
+      - ★**实测已通过**：`.monaco-diff-editor` 存在，同页 3 个编辑器（双栏 + 原版），diff 视图内高亮同为 `mtk*`；「显示 Diff」按钮点击后确实切出 diff 视图。
+- [ ] 4.4 编辑器 UI 能力在位：**查找 / 右键菜单 / 复制** 各手动点击一次
+      - ★**本条保留未勾（未逐项验证）**：自动化点击**未能送达 monaco 焦点** ⇒ 查找 / 右键菜单 / 复制三项未逐项点过。
+      - ★**间接证据**：diff 双栏（`diffEditor.contribution.js`）、markdown/json 高亮（`monaco.contribution`）、本地 worker 起得来 ⇒ 三者**均由 `editor.all.js` 的 contributions 提供** ⇒ **`editor.all` 已生效**；但交互点击本身未验。
+      - ★**补验方式**：在页面上手工点一次「查找」(Ctrl+F) / 右键菜单 / 复制。
+- [ ] 4.5 ★**本轮必须实测的两项（spike 未跑通，不得假设）**★：
       - ① **json 运行时高亮**：产物已含 `json.worker` + `jsonMode`，但分词没跑成 ⇒ 须在 4317 发布态实测 json 产物的 token 高亮真实生效
       - ② **各 worker 真起得来**：`getWorker` 的 label 分发（json / css·scss·less / html·handlebars·razor / typescript·javascript / 默认）须实测——至少核对浏览器网络面板中 worker 资源均为同源本地、控制台无 worker 创建失败
+      - ★**① worker 起得来：已实测通过** —— 页面请求 `/assets/editor.worker-DyuDvpVp.js`（**同源非 blob**），线上 200 且体积 7,021,318 B 与 dist 一致；json worker 侧在 5173 上亦实测加载（`webWorker.js`）+ consoleErrors = 0。
+      - ★**② json 运行时高亮：发布态未触发** —— 见 4.2 的说明（本地无可显示 JSON 的界面）⇒ 本条**保留未勾**，发布态等价性由「同一份本地包 + 同一套 `loader.config`」保证。
 - [x] 4.6 `toml` / `plaintext` / `diff` 无高亮属预期（monaco 中不存在 ⇒ 基线亦无高亮 ⇒ 非退化）——记录一次即可，不要当成缺陷
 - [x] 4.7 **无外网场景（★必须做，手法已验证★）**：用内置浏览器 `tab.run` 里 `page.setCacheEnabled(false)` + `page.setRequestInterception(true)`，把 `cdn.jsdelivr.net` 的请求 abort 掉（其余 `request.continue()`），重新加载 4317 的产物审核页 ⇒ 期望：**CDN 请求数 = 0**（拦截计数）、**monaco 编辑器仍正常渲染**（`.monaco-editor` 存在）、**markdown 与 json 均有高亮 token**（`mtk*` class）、**无 `monaco-viewer-skeleton` 残留** ⇒ ★这等价于「无外网」★（本地同源资源不受影响）。★若某项不符 ⇒ 立刻停止并回报，不得自行放宽判据★
 
