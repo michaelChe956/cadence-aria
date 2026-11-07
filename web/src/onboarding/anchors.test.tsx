@@ -46,6 +46,34 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
     expect(screen.getByTestId("onboarding-anchor-codebase-add")).toHaveTextContent("添加代码库");
   });
 
+  it("Provider 管理入口是机器级能力：零项目、未选中项目时同样渲染出引导第一步锚点", () => {
+    render(
+      <ProjectSidebar
+        projects={[]}
+        codebases={[]}
+        deletedLogicalCodebases={[]}
+        repositories={[]}
+        selectedProjectId={null}
+        issueCount={0}
+        busy={false}
+        onSelectProject={() => {}}
+        onCreateProject={() => {}}
+        onAddCodebase={() => {}}
+        onOpenProviderManagement={() => {}}
+        onDeleteProject={() => {}}
+        onDeleteRepository={() => {}}
+        onDeleteLogicalCodebase={() => {}}
+        onRestoreLogicalCodebase={() => {}}
+        onPurgeLogicalCodebase={() => {}}
+      />,
+    );
+    const openButton = screen.getByTestId("provider-management-open");
+    expect(openButton).toHaveTextContent("Provider 管理");
+    expect(openButton).toBeEnabled();
+    // 引导第一步锚点契约：与 steps.ts 的第 0 项一致（故高亮必然有目标）。
+    expect(getEnabledOnboardingSteps()[0]?.anchorTestId).toBe("provider-management-open");
+  });
+
   it("工作台头部暴露新建 Issue 锚点", () => {
     render(
       <IssueLifecycleWorkbenchHeader
@@ -170,13 +198,13 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
     vi.unstubAllGlobals();
   });
 
-  it("配置引用的锚点全部为稳定非空字符串，且手动 13 步互不重复（复用的 Coding 入口除外）", () => {
+  it("配置引用的锚点全部为稳定非空字符串，且手动 14 步互不重复（复用的 Coding 入口除外）", () => {
     const steps = getEnabledOnboardingSteps();
     const anchors = steps.map((step) => step.anchorTestId);
     expect(anchors.every((anchor) => typeof anchor === "string" && anchor.length > 0)).toBe(true);
     const duplicated = anchors.filter((anchor, index) => anchors.indexOf(anchor) !== index);
     expect(duplicated).toEqual([]);
-    expect(ONBOARDING_STEPS.length).toBeGreaterThanOrEqual(14);
+    expect(ONBOARDING_STEPS.length).toBeGreaterThanOrEqual(15);
     expect(AUTOMATION_MODE_ANCHOR.length).toBeGreaterThan(0);
   });
 

@@ -10,7 +10,12 @@ import {
   type OnboardingStep,
 } from "./steps";
 
-const EXPECTED_IDS = [
+/** 新增第一步：Provider 管理（机器级能力核验）。 */
+const PROVIDER_STEP_ID = "manage-providers";
+const PROVIDER_STEP_ANCHOR = "provider-management-open";
+
+/** 既有 13 步的 id 序列（逐字保留：新增步骤不得改动既有步骤的顺序与编号）。 */
+const EXISTING_IDS = [
   "create-project",
   "add-logical-codebase",
   "create-issue",
@@ -26,7 +31,13 @@ const EXPECTED_IDS = [
   "coding-progress-complete",
 ];
 
+/** 既有 13 步的 order 序列（逐字保留：新增步骤只能零位移插入，不得重排既有编号）。 */
+const EXISTING_ORDERS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+
+const EXPECTED_IDS = [PROVIDER_STEP_ID, ...EXISTING_IDS];
+
 const EXPECTED_ANCHORS = [
+  PROVIDER_STEP_ANCHOR,
   "onboarding-anchor-project-create",
   "onboarding-anchor-codebase-add",
   "onboarding-anchor-issue-create",
@@ -43,13 +54,31 @@ const EXPECTED_ANCHORS = [
 ];
 
 describe("onboarding 步骤配置", () => {
-  it("手动模式提供 13 个按顺序启用的步骤", () => {
+  it("手动模式提供 14 个按顺序启用的步骤：Provider 管理是第一步", () => {
     const steps = getEnabledOnboardingSteps();
-    expect(steps).toHaveLength(13);
+    expect(steps).toHaveLength(14);
     expect(steps.map((step) => step.id)).toEqual(EXPECTED_IDS);
-    expect(steps.map((step) => step.order)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-    ]);
+    expect(steps.map((step) => step.order)).toEqual([0, ...EXISTING_ORDERS]);
+  });
+
+  it("第一步是 Provider 管理步，锚点为 provider-management-open", () => {
+    const steps = getEnabledOnboardingSteps();
+    const first = steps[0];
+    expect(first?.id).toBe(PROVIDER_STEP_ID);
+    expect(first?.order).toBe(0);
+    expect(first?.anchorTestId).toBe(PROVIDER_STEP_ANCHOR);
+    // 文案必须讲清「为什么第一步」：先核验机器级 provider 能力，否则后续生成失败。
+    expect(first?.title).toContain("Provider");
+    expect(first?.description).toContain("provider");
+    expect(first?.description).toContain("核验");
+    expect(first?.visual.kind).toBe("diagram");
+  });
+
+  it("既有 13 步的 id 与 order 序列逐字未变（新增步骤零位移插入）", () => {
+    const steps = getEnabledOnboardingSteps();
+    const existing = steps.filter((step) => step.id !== PROVIDER_STEP_ID);
+    expect(existing.map((step) => step.id)).toEqual(EXISTING_IDS);
+    expect(existing.map((step) => step.order)).toEqual(EXISTING_ORDERS);
   });
 
   it("每个步骤都带标题、说明与锚点契约", () => {
@@ -95,7 +124,7 @@ describe("onboarding 步骤配置", () => {
 
     const steps = getEnabledOnboardingSteps();
     expect(steps.some((step) => step.id === AUTOMATION_MODE_STEP_ID)).toBe(false);
-    expect(steps).toHaveLength(13);
+    expect(steps).toHaveLength(14);
     // 其余手动步骤顺序不因禁用自动化步骤而改变。
     expect(steps.map((step) => step.id)).toEqual(EXPECTED_IDS);
   });
@@ -107,7 +136,7 @@ describe("onboarding 步骤配置", () => {
 
     it("锚点缺失时即使 feature 开启也被过滤", () => {
       const steps = getEnabledOnboardingSteps({ features: { [AUTOMATION_MODE_FEATURE]: true } });
-      expect(steps).toHaveLength(13);
+      expect(steps).toHaveLength(14);
       expect(steps.some((step) => step.id === AUTOMATION_MODE_STEP_ID)).toBe(false);
     });
 
@@ -117,9 +146,11 @@ describe("onboarding 步骤配置", () => {
       document.body.appendChild(anchor);
 
       const steps = getEnabledOnboardingSteps({ features: { [AUTOMATION_MODE_FEATURE]: true } });
-      expect(steps).toHaveLength(14);
-      expect(steps[0]?.id).toBe(AUTOMATION_MODE_STEP_ID);
-      expect(steps.slice(1).map((step) => step.id)).toEqual(EXPECTED_IDS);
+      expect(steps).toHaveLength(15);
+      // Provider 管理恒为第 0 项（与同为 order 0 的自动化步骤并存时不抢位）。
+      expect(steps[0]?.id).toBe(PROVIDER_STEP_ID);
+      expect(steps[1]?.id).toBe(AUTOMATION_MODE_STEP_ID);
+      expect(steps.slice(2).map((step) => step.id)).toEqual(EXISTING_IDS);
     });
   });
 

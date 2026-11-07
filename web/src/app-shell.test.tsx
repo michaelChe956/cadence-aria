@@ -69,8 +69,9 @@ describe("AppShell 操作引导", () => {
   it("首次进入（无已读）展示引导并从第一个启用步骤开始", () => {
     renderShell();
     expect(screen.getByTestId("onboarding-wizard")).toBeInTheDocument();
-    expect(screen.getByTestId("onboarding-step-title")).toHaveTextContent("添加 Project");
-    expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 13 步");
+    // 2026-11-07：引导第一步改为「Provider 管理」（机器级能力核验），总步数 13 → 14。
+    expect(screen.getByTestId("onboarding-step-title")).toHaveTextContent("管理 Provider");
+    expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 14 步");
   });
 
   it("同一设备再次进入不自动展示引导，且重开入口经 props 下传工作台（旧左下位置消失）", () => {
@@ -100,7 +101,7 @@ describe("AppShell 操作引导", () => {
 
     await user.click(screen.getByTestId("workbench-stub-onboarding-reopen"));
     expect(screen.getByTestId("onboarding-wizard")).toBeInTheDocument();
-    expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 13 步");
+    expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 14 步");
     expect(window.localStorage.getItem(ONBOARDING_SEEN_KEY)).toBe("1");
     // 工作台业务面照常存在，重开引导未改变它。
     expect(screen.getByTestId("workbench-stub")).toBeInTheDocument();

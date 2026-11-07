@@ -44,6 +44,20 @@ export const AUTOMATION_MODE_ANCHOR = "onboarding-anchor-automation-mode";
 
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   {
+    // 2026-11-07：Provider 管理作为引导第一步。provider 能力是机器级能力
+    // （不挂项目），核验不到时生成弹窗会默认回落到 codex、失败面被误导，
+    // 后续 Story/Design 生成会因 provider 不可用而失败 ⇒ 先管能力面再走流程。
+    // 锚点复用侧栏既有入口 provider-management-open（零项目/未选中项目时同样
+    // 渲染，见 ProjectSidebar 的 Provider 分区），故不需要 lateBind。
+    id: "manage-providers",
+    order: 0,
+    title: "管理 Provider（先核验机器级能力）",
+    description:
+      "先在左侧「Provider」分区点「Provider 管理」，核验本机 provider 的可用能力（探针 / 核验 / 更新 / 安装 / 版本）。provider 能力核验不到时，生成弹窗会默认回落到 codex，失败面被误导；机器级能力不先管好，后面的 Story / Design 生成会因 provider 不可用而失败。",
+    visual: { kind: "diagram", alt: "侧栏 Provider 管理入口位置示意" },
+    anchorTestId: "provider-management-open",
+  },
+  {
     id: AUTOMATION_MODE_STEP_ID,
     order: 0,
     title: "选择运行模式",
