@@ -252,3 +252,7 @@ controller 通知：原相关用例 8 failed／63 passed；`5a3323e2` 修后定�
 - **非本次新缺陷**：draft 抽屉原本无「生成 Work Item」；真实 draft prepare 被 `design_spec_not_confirmed` 拒绝；旧人工 prepare API 与现存人工组仍保留。
 - **交付 concern**：文字修订为并发在途，controller 应保证落入最终提交集；测试运行证据由 controller 提供，owner 真机与发布验收不由本报告替代。
 - **操作边界**：本审查未改其它文件，未运行 cargo／npm／pnpm，未暂存或提交；报告由 controller 接收并决定纳入交付。
+
+## 补充：6.4 真机未验说明（2026-11-08）
+
+★**6.4（目标投影不可得 ⇒ 界面如实告知并给出可执行下一步）本轮真机未验**（本地实例无该场景）⇒ 与 `openspec/changes/archive/2026-11-07-work-item-group-manual-mode-removed/tasks.md` 的保留未勾一致。本报告此前的覆盖结论仅限单测层面。
