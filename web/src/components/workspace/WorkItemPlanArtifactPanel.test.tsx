@@ -8,6 +8,12 @@ import type {
 import { WorkItemPlanArtifactPanel } from "./WorkItemPlanArtifactPanel";
 
 vi.mock("@monaco-editor/react", () => ({
+  // ★`monaco-local-setup.ts` 会在模块加载期调用 `loader.config`（本地 monaco 装配）
+  //   ⇒ mock 必须同时提供 `loader`，否则收集阶段抛
+  //   「No "loader" export is defined on the "@monaco-editor/react" mock」。
+  loader: {
+    config: vi.fn(),
+  },
   Editor: ({
     value,
     language,
