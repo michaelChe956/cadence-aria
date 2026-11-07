@@ -7,33 +7,34 @@
 
 ## 0. 红测先行（★第一步必须是失败测试★）
 
-- [ ] 0.1 **新建** `loader.config` 契约测试（落在 `web/src/components/shared/` 下，文件名 `monaco-local-setup.test.ts`；沿用该目录既有测试的写法）：
+- [x] 0.1 **新建** `loader.config` 契约测试（落在 `web/src/components/shared/` 下，文件名 `monaco-local-setup.test.ts`；沿用该目录既有测试的写法）：
       - mock `@monaco-editor/react` 的 `loader`（`vi.mock("@monaco-editor/react", ...)`，`loader.config` 为 `vi.fn()`）
-      - 动态 import `./monaco-local-setup`（副作用模块）
+      - **静态 import** `./monaco-local-setup`（副作用模块）—— ★不用 `await import()`★：本测试断言的正是「模块被加载时的副作用」，静态 import 让失败发生在**加载期**而非运行时，并顺带引入该模块的 `declare global` 类型声明（本仓风格规则 `ts-no-dynamic-import` 要求字面量路径用静态 import）
       - **断言 1**：`loader.config` **被调用**
       - **断言 2**：传入的 `monaco` 来自**本地 `monaco-editor` 包**（与 `import * as monaco from "monaco-editor"` 的模块对象同一引用／同一来源，不是 CDN 路径）
       - **断言 3**：所有 `loader.config` 调用实参里**没有任何外部 `paths.vs`**（未被设为任何 `http(s)://` 地址）
+      - **断言 4**：`window.MonacoEnvironment.getWorker` 按 label 分发（json 与 editor 必须走**不同** worker 类 ⇒ 证明不是一律同一个）
       - ★**红线：不得断言源码文本**——不得 `readFileSync` 读 `.ts/.tsx` 做字符串匹配，不得对 import 语句 / 配置字面量做 grep 式断言；只允许行为断言（mock 的调用与实参）
       - 通过判据：断言 1~3 均为行为断言，审查时找不到任何对源码文本的读取
-- [ ] 0.2 **先见红**：实施前运行 `cd web && pnpm vitest --run src/components/shared/monaco-local-setup.test.ts` ⇒ **失败**（`monaco-local-setup` 尚不存在，`loader.config` 未被调用）；把失败输出贴进交付报告
-- [ ] 0.3 纪律：红测单独一次提交（先红后绿可追溯），再进入 §1（⛔ 本 change 的 commit 由 controller 在交付时统一执行；实施者仅按 controller 指令提交）
+- [x] 0.2 **先见红**：实施前运行 `cd web && pnpm vitest --run src/components/shared/monaco-local-setup.test.ts` ⇒ **失败**（`monaco-local-setup` 尚不存在，`loader.config` 未被调用）；把失败输出贴进交付报告
+- [x] 0.3 纪律：红测单独一次提交（先红后绿可追溯），再进入 §1（⛔ 本 change 的 commit 由 controller 在交付时统一执行；实施者仅按 controller 指令提交）
 
 ## 1. 实现（4 处改动）
 
-- [ ] 1.1 **新增** `web/src/components/shared/monaco-local-setup.ts`
+- [x] 1.1 **新增** `web/src/components/shared/monaco-local-setup.ts`
       - 做什么：写入 `import * as monaco from "monaco-editor"` + `import { loader } from "@monaco-editor/react"` + 5 类 worker 的 `?worker` 导入（`monaco-editor/esm/vs/editor/editor.worker?worker`、`.../language/json/json.worker?worker`、`.../language/css/css.worker?worker`、`.../language/html/html.worker?worker`、`.../language/typescript/ts.worker?worker`）+ `window.MonacoEnvironment = { getWorker: (_: unknown, label: string) => ... }`（json ⇒ JsonWorker；css/scss/less ⇒ CssWorker；html/handlebars/razor ⇒ HtmlWorker；typescript/javascript ⇒ TsWorker；默认 ⇒ EditorWorker）+ `loader.config({ monaco })`；代码形态逐字见 `proposal.md` §What Changes.1
       - 通过：文件存在且形态与 `proposal.md` 一致；`window.MonacoEnvironment` 的类型可通过 `pnpm tsc -b`（若 `window.MonacoEnvironment` 缺类型声明，只在本文件内就地补最小声明，不得波及其它文件）
-- [ ] 1.2 **改** `web/src/components/shared/MonacoViewer.tsx`
+- [x] 1.2 **改** `web/src/components/shared/MonacoViewer.tsx`
       - 做什么：加 `import "./monaco-local-setup";`，**必须放在** `lazy(() => import("@monaco-editor/react"))` **之前**（放在最前）
       - 通过：该 import 位于文件最前，先于 `lazy(...)`；`MonacoViewer` 的 props 与渲染逐字不变
-- [ ] 1.3 **改** `web/src/components/shared/MonacoDiffViewer.tsx`
+- [x] 1.3 **改** `web/src/components/shared/MonacoDiffViewer.tsx`
       - 做什么：同 1.2——加 `import "./monaco-local-setup";`，**必须放在** `lazy(() => import("@monaco-editor/react"))` **之前**
       - 通过：同 1.2；`MonacoDiffViewer` 的 props 与渲染逐字不变
-- [ ] 1.4 **改** `web/tsconfig.json`
+- [x] 1.4 **改** `web/tsconfig.json`
       - 做什么：加 `"types": ["vite/client"]`（C2：`?worker` import 的类型声明，缺了报 TS2307）
       - 通过：`cd web && pnpm tsc -b` 无 TS2307
-- [ ] 1.5 **绿测**：`cd web && pnpm vitest --run src/components/shared/monaco-local-setup.test.ts` ⇒ 全绿（0.1 的三条断言均通过）
-- [ ] 1.6 **自检（范围）**：`git diff --stat` 只含上述 4 处 + 0.1 的测试文件；`package.json` / `pnpm-lock.yaml` / `src/**` 零改动；`web/dist` 结构不变
+- [x] 1.5 **绿测**：`cd web && pnpm vitest --run src/components/shared/monaco-local-setup.test.ts` ⇒ 全绿（0.1 的三条断言均通过）
+- [x] 1.6 **自检（范围）**：`git diff --stat` 只含上述 4 处 + 0.1 的测试文件；`package.json` / `pnpm-lock.yaml` / `src/**` 零改动；`web/dist` 结构不变
 
 ## 2. 全量门禁
 
