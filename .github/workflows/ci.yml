@@ -188,15 +188,16 @@ jobs:
           tc="$dir/toolchain.txt"
           : > "$log"
           rustc -vV > "$tc"
-          flock /tmp/aria-cargo.lock cargo test --release --locked --lib poll_frame_budget -- --nocapture 2>&1 | tee "$log"
+          flock /tmp/aria-cargo.lock cargo test --profile release-ci-gate --locked --lib poll_frame_budget -- --nocapture 2>&1 | tee "$log"
           cargo_status=${PIPESTATUS[0]}
           {
             echo '## Release profile —— poll 帧预留逐对象实测字节'
             echo
-            echo '- profile: `release`'
+            echo '- profile: `release-ci-gate`（继承 `release`：opt-level="s"，仅 strip=false / lto=false / codegen-units=16，保留符号表供 nm/objdump 量测）'
+            echo '- 发布件: 仍走 `release` profile（strip=true / lto=true / codegen-units=1），不受本门禁 profile 影响'
             echo "- target: \`$(grep '^host:' "$tc" 2>/dev/null | cut -d' ' -f2-)\`"
             echo "- rustc: \`$(grep '^release:' "$tc" 2>/dev/null | cut -d' ' -f2-)\`"
-            echo '- 命令: `flock /tmp/aria-cargo.lock cargo test --release --locked --lib poll_frame_budget -- --nocapture`'
+            echo '- 命令: `flock /tmp/aria-cargo.lock cargo test --profile release-ci-gate --locked --lib poll_frame_budget -- --nocapture`'
             echo '- 用途: 解除交付说明 U1/U2/U-b（release 档帧值此前未实测）'
             echo "- cargo 退出码: \`$cargo_status\`"
             echo

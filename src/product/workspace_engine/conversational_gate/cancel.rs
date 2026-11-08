@@ -15,9 +15,6 @@ pub(crate) const PROVIDER_RUN_ABORTED_MESSAGE: &str = "provider run aborted";
 /// 事件通道先于取消臂关闭时驱动返回的消息（abort 杀 provider 进程的另一条竞态
 /// 出口）；仅在 run 已被取消时才按取消归类。
 pub(crate) const PROVIDER_EMPTY_OUTPUT_MESSAGE: &str = "provider completed without output";
-/// 对话流 / 节点 summary / 回显帧共用的明说句（前端 `REVISION_INTERRUPTED_SENTENCE`
-/// 逐字相同，两侧各有断言钉住）。
-pub(crate) const REVISION_INTERRUPTED_SENTENCE: &str = "修订被中断，你的选择未生效";
 /// 取消导致的修订失败：载体节点落 `Aborted` 的 summary（含 REQ-WIGA-16 要求的
 /// 「已中止」表述 + 明说句）。
 pub(crate) const REVISION_ABORTED_NODE_SUMMARY: &str = "运行已中止：修订被中断，你的选择未生效";
@@ -78,6 +75,11 @@ pub(crate) fn revision_node_closure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 对话流 / 节点 summary / 回显帧共用的明说句（前端 `REVISION_INTERRUPTED_SENTENCE`
+    /// 逐字相同，两侧各有断言钉住）。生产常量均为字面量（无法在 const 中拼接），
+    /// 故本句只作为测试内的一致性锚点，钉住节点 summary 与回显帧文案。
+    const REVISION_INTERRUPTED_SENTENCE: &str = "修订被中断，你的选择未生效";
 
     #[test]
     fn abort_sentinel_is_cancelled_regardless_of_token_state() {
@@ -143,5 +145,6 @@ mod tests {
         }
         assert!(REVISION_ABORTED_NODE_SUMMARY.contains("已中止"));
         assert!(REVISION_ABORTED_NODE_SUMMARY.ends_with(REVISION_INTERRUPTED_SENTENCE));
+        assert!(REVISION_CANCELLED_FRAME_MESSAGE.starts_with(REVISION_INTERRUPTED_SENTENCE));
     }
 }

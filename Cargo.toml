@@ -65,3 +65,13 @@ strip = true
 lto = true
 opt-level = "s"
 codegen-units = 1
+
+# CI 门禁专用：poll 帧门禁要用 `nm`/`objdump` 读**测试二进制**的符号表，
+# 而 `[profile.release] strip = true` 会把符号表剥掉 ⇒ 门禁在 release 下
+# 必然 fail-closed（CI 实证：Release profile gates job 因 [missing-symbol] 失败）。
+# ⇒ 只给**门禁那次构建**开一个保留符号的 profile；发布件仍走 [profile.release]，
+#    **产物字节数与发布体积门禁完全不受影响**。
+[profile.release-ci-gate]
+inherits = "release"
+strip = false
+debug = 1
