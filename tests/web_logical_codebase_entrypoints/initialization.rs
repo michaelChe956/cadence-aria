@@ -1,9 +1,18 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
+use cadence_aria::cross_cutting::aria_state_paths::AriaStatePaths;
+use cadence_aria::cross_cutting::bounded_command_runner::{
+    BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+    TokioBoundedCommandRunner,
+};
+use cadence_aria::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+use cadence_aria::cross_cutting::provider_health::{
+    ProviderHealthService, SystemProviderHealthClock,
+};
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::{
     AggregateInitializationCoordinator, AggregateInitializationError, AggregatePreflightService,
@@ -22,6 +31,84 @@ use cadence_aria::web::state::{InitializationRunRegistry, WebAppState};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+/// 四家 provider 的版本探测一律成功的 fake 命令 runner。
+///
+/// 只认「provider 可执行文件 + `--version`」这一种组合 ⇒ 其它命令（codegraph、
+/// git 等）原样委托生产 runner ⇒ 夹具的执行路径与注入前完全一致。
+struct AllProvidersAvailableRunner {
+    inner: TokioBoundedCommandRunner,
+}
+
+#[async_trait]
+impl BoundedCommandRunner for AllProvidersAvailableRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        // 版本取各家最低兼容版本（与 lib 侧 `selector_seed.inc.rs` 的 stub 同款），
+        // 避免「低于最低版本」把可用性改写（kimi 的最低版本是 0.34.0）。
+        let version = match (
+            request.executable.as_str(),
+            request.argv.first().map(String::as_str),
+        ) {
+            ("claude", Some("--version")) => "1.0",
+            ("codex", Some("--version")) => "2.0",
+            ("pi", Some("--version")) => "0.83.0",
+            ("kimi", Some("--version")) => "0.34.0",
+            _ => return self.inner.run(request).await,
+        };
+        Ok(BoundedCommandResult {
+            exit_code: Some(0),
+            stdout: format!("{version}\n"),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            duration_ms: 0,
+        })
+    }
+}
+
+/// 夹具专用的 provider health 注入：让「provider 命令可用」成为**夹具的显式事实**。
+///
+/// 生产同构的创建期 provider 选择门（`select_aggregate_provider`，REQ-BOOT-07）
+/// 有两层判据：L1 = provider health 快照的 `available`（真机上跑
+/// `claude`/`codex`/`pi`/`kimi --version` 的**真实**探测）、L2 = capability
+/// 记录的 launch 分格（由 `capability_fixture::seed_confirmed_capabilities`
+/// 物化）。`WebAppState::new` 注入的是真实探测服务 ⇒ 夹具的 L1 结论取决于
+/// **宿主 PATH 上装没装 provider CLI**：CI runner 上四家全不可用 ⇒ 创建期
+/// 500 `aggregate_initialization_no_provider_available`（202 变 500）。
+///
+/// 本 helper 把 L1 也变成夹具的显式事实：注入带 fake runner 的
+/// `ProviderHealthService`（四家版本探测一律成功）⇒ 选择结论与宿主环境无关
+/// （hermetic），与 L2 的显式播种同款做法。
+///
+/// 先例（照抄，不自创写法）：
+/// - `tests/web_logical_codebase_entrypoints/planning_p0.rs`（`P0CommandRunner`
+///   + `ProviderHealthService::with_dependencies` + `state.with_provider_health(...)`）；
+/// - `src/web/handlers/aggregate_initialization/tests_parts/selector_seed.inc.rs`
+///   （lib 侧同款 `with_provider_health_all_available`：stub runner 让四家版本
+///   探测全部成功）。
+///
+/// 与先例的**有意差别**：先例的 stub 只回 `claude`/`codex`，`pi`/`kimi` 仍落
+/// 真实执行 ⇒ 「pi 是否可用」仍取决于宿主 PATH；本 helper 让**四家**版本探测
+/// 一律成功 ⇒ 候选表的 `cli_available` 与宿主环境完全无关。
+pub(crate) fn with_provider_health_all_available(state: WebAppState, root: &Path) -> WebAppState {
+    let runner: Arc<dyn BoundedCommandRunner> = Arc::new(AllProvidersAvailableRunner {
+        inner: TokioBoundedCommandRunner,
+    });
+    let health = Arc::new(ProviderHealthService::with_dependencies(
+        AriaStatePaths::from_workspace_root(root),
+        runner.clone(),
+        Arc::new(SystemProviderHealthClock),
+        Duration::from_secs(1),
+        4096,
+    ));
+    let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
+    state.with_provider_health(health, gate, runner)
+}
 
 struct NoopSkills;
 
@@ -147,6 +234,11 @@ impl AggregateInitializationHttpFixture {
         );
         let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()))
             .with_aggregate_initialization_dependencies(dependencies);
+        // 创建期 provider 选择门（判定前移）的 L1 判据是 provider health 快照的
+        // `available` ⇒ 默认（真实探测）会让夹具结论取决于宿主 PATH 上装没装
+        // provider CLI ⇒ 显式注入 fake provider health，让「四家 provider 都可用」
+        // 成为夹具的显式事实（先例与理由见 `with_provider_health_all_available`）。
+        let state = with_provider_health_all_available(state, &root);
         Self {
             _temp: temp,
             root,
