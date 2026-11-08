@@ -92,10 +92,16 @@ mod tests {
     #[test]
     fn empty_output_is_cancelled_only_when_the_run_was_cancelled() {
         let cancelled = revision_drive_error_outcome(PROVIDER_EMPTY_OUTPUT_MESSAGE, true);
-        assert_eq!(cancelled.failure_class, HumanGateTurnFailureClass::Cancelled);
+        assert_eq!(
+            cancelled.failure_class,
+            HumanGateTurnFailureClass::Cancelled
+        );
 
         let genuine = revision_drive_error_outcome(PROVIDER_EMPTY_OUTPUT_MESSAGE, false);
-        assert_eq!(genuine.failure_class, HumanGateTurnFailureClass::ProviderErr);
+        assert_eq!(
+            genuine.failure_class,
+            HumanGateTurnFailureClass::ProviderErr
+        );
         assert_eq!(genuine.label, "provider_err");
         assert_eq!(genuine.frame_message, PROVIDER_EMPTY_OUTPUT_MESSAGE);
     }
