@@ -239,7 +239,10 @@ async fn provider_err_turn_still_closes_revision_node_as_failed() {
         node.status,
         crate::web::workspace_ws_types::TimelineNodeStatus::Failed
     );
-    assert_eq!(node.summary.as_deref(), Some("人工修订失败，本轮反馈未采纳"));
+    assert_eq!(
+        node.summary.as_deref(),
+        Some("人工修订失败，本轮反馈未采纳")
+    );
 }
 
 #[tokio::test]

@@ -439,13 +439,19 @@ impl PlanningHttpFixture {
                 Arc::new(NoopProvider),
                 Arc::new(|| "2026-08-18T00:00:00Z".to_string()),
             );
-            state.with_aggregate_initialization_dependencies(
+            let state = state.with_aggregate_initialization_dependencies(
                 AggregateInitializationDependencies::with_index(
                     Arc::new(coordinator),
                     InitializationRunRegistry::default(),
                     index.expect("initialization fixture index operation"),
                 ),
-            )
+            );
+            // 创建期 provider 选择门（判定前移）的 L1 判据是 provider health
+            // 快照的 `available` ⇒ 默认（真实探测）会让夹具结论取决于宿主 PATH
+            // 上装没装 provider CLI ⇒ 显式注入 fake provider health，让「四家
+            // provider 都可用」成为夹具的显式事实（先例与理由见
+            // `crate::initialization::with_provider_health_all_available`）。
+            crate::initialization::with_provider_health_all_available(state, &root)
         } else {
             state
         };

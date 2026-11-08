@@ -87,6 +87,22 @@ const GATED_POLL_SYMBOLS: &[(&str, usize)] = &[
     ("complete_review", P1_ENGINE_BUDGET),
 ];
 
+/// **release 口径已知盲区**（owner 知情的技术事实，非临时 opt-out，故为代码内
+/// 显式常量而非环境变量）：release（`opt-level="s"` + `lto=true`）下这些 async fn
+/// 的 poll 体被内联进调用方，符号表（`nm -C`，已用 `release-ci-gate` 保留符号实测）
+/// 里只剩 `drop_glue` / `boxed_child` 包装形态，没有以 `{closure#0}` 结尾的独立
+/// poll 符号可量测。关掉 LTO / 放宽过滤到 `Pin<Box<..>>::poll` 形态均已实测无效或
+/// 会让数字失真，故显式登记。它们仍保留在 `GATED_POLL_SYMBOLS` 内：debug 口径
+/// 照常量测并硬断言，release 口径只在这里豁免「符号缺失」，且每次运行逐条打印
+/// `[release-blind-spot]` 行（覆盖面被削弱的清单可见，不静默）。
+const RELEASE_BLIND_SPOTS: &[&str] =
+    &["provider_run_task_body", "spawn_provider_run_claiming_idle"];
+
+/// `needle` 符号缺失是否可被豁免：仅「release 口径 + 在盲区清单内」。
+fn missing_is_excused(needle: &str, release: bool) -> bool {
+    release && RELEASE_BLIND_SPOTS.contains(&needle)
+}
+
 /// 显式 opt-in 开关：**仅当**该环境变量被设为 `"1"` 时，工具缺失才允许跳过
 /// （默认＝失败）。失败信息必须写明该开关名（不得「偷偷跳过」）。
 pub(crate) const ALLOW_MISSING_TOOLS_ENV: &str = "ARIA_POLL_FRAME_BUDGET_ALLOW_MISSING_TOOLS";
@@ -272,13 +288,21 @@ fn measure_gated(binary: &Path, tools: &ToolPaths) -> Result<Vec<(String, usize,
     let mut measured: Vec<(String, usize, usize)> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     for (needle, budget) in GATED_POLL_SYMBOLS {
-        // 只认 async fn 的 poll 体（`…::{closure#0}`），避免误测同名普通函数。
+        // 只认 async fn 的 poll 体（`…::{closure#0}`），避免误测同名普通函数；
+        // `drop_glue::<…{closure#0}>` / `boxed_child::<…>` 等包装形态不以 `{closure#0}` 结尾，不会命中。
         let matched: Vec<(u64, String)> = symbols
             .iter()
             .filter(|(_, name)| name.contains(needle) && name.ends_with("{closure#0}"))
             .cloned()
             .collect();
         if matched.is_empty() {
+            if missing_is_excused(needle, !cfg!(debug_assertions)) {
+                // 显式盲区：不静默——逐条打印，job summary 里也能看到。
+                println!(
+                    "[poll-frame-budget] [release-blind-spot] {needle}: release 口径下无独立 poll 符号（poll 体已内联进调用方），本次未量测；debug 口径照常量测"
+                );
+                continue;
+            }
             missing.push(needle);
             continue;
         }
@@ -386,6 +410,28 @@ mod fail_closed_guard_tests {
         assert!(
             error.contains("symbol_x"),
             "失败信息必须点名量测失败的符号：{error}"
+        );
+    }
+
+    #[test]
+    fn release_blind_spots_are_gated_symbols_and_only_excused_in_release() {
+        for needle in RELEASE_BLIND_SPOTS {
+            assert!(
+                GATED_POLL_SYMBOLS.iter().any(|(gated, _)| gated == needle),
+                "盲区对象必须仍在 GATED_POLL_SYMBOLS 内（debug 口径照常量测）：{needle}"
+            );
+            assert!(
+                missing_is_excused(needle, true),
+                "release 口径下盲区对象可豁免：{needle}"
+            );
+            assert!(
+                !missing_is_excused(needle, false),
+                "debug 口径下盲区对象缺失必须失败：{needle}"
+            );
+        }
+        assert!(
+            !missing_is_excused("provider_run_task", true),
+            "非盲区对象在 release 下缺失仍须失败"
         );
     }
 }
