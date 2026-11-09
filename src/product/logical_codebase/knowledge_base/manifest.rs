@@ -14,8 +14,8 @@
 //! 由 skill 机器生成、含嵌套映射与「对象列表」两种结构，完整 YAML 解析
 //! 的正确性优于任何手写子集。这里只提取本模块需要的字段：
 //! `schema_version` / `generated_at` / `coverage.initialization.*` /
-//! `scope.{configurations,api,pages}.status` / `update.last_change_package`
-//! 与 `update.processed_packages` 是否存在，其余字段一律不读。
+//! `scope.{configurations,api,pages}.status`，以及 `update.last_change_package`
+//! 映射与 `update.processed_packages` 列表是否非空（内容判定），其余一律不读。
 
 use std::path::Path;
 
@@ -69,22 +69,22 @@ pub struct KnowledgeBaseSkippedStage {
 /// IO 故障才返回 `Err`。
 pub fn read_manifest(kb_root: &Path) -> Result<KnowledgeBaseManifestSnapshot, ProductStoreError> {
     let manifest_path = kb_root.join("manifest.yaml");
-    if !manifest_path.exists() {
-        return Ok(KnowledgeBaseManifestSnapshot::default());
-    }
-    let raw = match std::fs::read_to_string(&manifest_path) {
-        Ok(text) => text,
+    // 不做 exists() 预检：stat 故障（如 EACCES）不能被误报成「无知识库」，
+    // 统一在读取处分流——NotFound（含读取间隙被删）归「无知识库」。
+    match std::fs::read_to_string(&manifest_path) {
+        Ok(raw) => Ok(parse_manifest(&raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(KnowledgeBaseManifestSnapshot::default())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-            return Ok(degraded_snapshot());
+            // 非 UTF-8：文件在但读不出合法内容，按版本未知降级。
+            Ok(degraded_snapshot())
         }
-        Err(error) => {
-            return Err(ProductStoreError::Io(format!(
-                "read {}: {error}",
-                manifest_path.display()
-            )));
-        }
-    };
-    Ok(parse_manifest(&raw))
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "read {}: {error}",
+            manifest_path.display()
+        ))),
+    }
 }
 
 /// 判定 `coverage.initialization` 的八项结构不变量，返回违规描述列表
@@ -143,7 +143,7 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
 
     // ④ skipped_stages：只有 stage+reason、stage 只能 api/pages、reason 非空、
     //    不与 completed_stages 重叠。
-    for skipped in &snapshot.skipped_stages {
+    for (index, skipped) in snapshot.skipped_stages.iter().enumerate() {
         if !SKIPPABLE_STAGES.contains(&skipped.stage.as_str()) {
             violations.push(format!(
                 "`coverage.initialization.skipped_stages` 含非法阶段：{}（只允许 api 或 pages）",
@@ -156,6 +156,15 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
                 skipped.stage
             ));
         }
+        if snapshot.skipped_stages[..index]
+            .iter()
+            .any(|prev| prev.stage == skipped.stage)
+        {
+            violations.push(format!(
+                "`coverage.initialization.skipped_stages` 含重复阶段：{}",
+                skipped.stage
+            ));
+        }
         if completed.iter().any(|stage| stage == &skipped.stage) {
             violations.push(format!(
                 "`coverage.initialization.skipped_stages` 的 {} 同时出现在 completed_stages",
@@ -164,15 +173,31 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
         }
     }
 
-    // ⑤ 不适用领域只能出现在 skipped_stages（api / pages 同理）。
+    // ⑤ scope 与 completed/skipped 的一致性：不区分 status（scope 缺失按适用
+    //    从严）——「不适用 ⇒ 必须且只能在 skipped_stages」「适用 ⇒ 不得跳过」。
     for (domain, scope) in [
         ("api", &snapshot.api_scope),
         ("pages", &snapshot.pages_scope),
     ] {
-        if scope.as_deref() == Some(NOT_APPLICABLE) && completed.iter().any(|stage| stage == domain)
-        {
+        let done = completed.iter().any(|stage| stage == domain);
+        let skipped = snapshot
+            .skipped_stages
+            .iter()
+            .any(|item| item.stage == domain);
+        if scope.as_deref() == Some(NOT_APPLICABLE) {
+            if done {
+                violations.push(format!(
+                    "`scope.{domain}.status` 为「不适用」，但 {domain} 出现在 `completed_stages`"
+                ));
+            }
+            if !skipped {
+                violations.push(format!(
+                    "`scope.{domain}.status` 为「不适用」，但 {domain} 未记录在 `skipped_stages`"
+                ));
+            }
+        } else if skipped {
             violations.push(format!(
-                "`scope.{domain}.status` 为「不适用」，但 {domain} 出现在 completed_stages"
+                "`scope.{domain}.status` 非「不适用」，但 {domain} 出现在 `skipped_stages`（适用领域不得跳过）"
             ));
         }
     }
@@ -189,6 +214,12 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
                         .to_string(),
                 );
             }
+            if snapshot.global_validation.as_deref() == Some("passed") {
+                violations.push(
+                    "`status` 为 in_progress，但 `global_validation` 已是 passed（只允许 pending 或 failed）"
+                        .to_string(),
+                );
+            }
         }
         Some("complete") => {
             for required in ["base-info", "overview", "global-validation"] {
@@ -202,24 +233,13 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
                 ("api", &snapshot.api_scope),
                 ("pages", &snapshot.pages_scope),
             ] {
-                let done = completed.iter().any(|stage| stage == domain);
-                let skipped = snapshot
-                    .skipped_stages
-                    .iter()
-                    .any(|item| item.stage == domain);
-                if scope.as_deref() == Some(NOT_APPLICABLE) {
-                    if !done && !skipped {
-                        violations.push(format!(
-                            "`status` 为 complete，但「不适用」领域 {domain} 未记录在 `skipped_stages`"
-                        ));
-                    }
-                } else if !done {
+                // 「不适用 ⇒ 必须且只能在 skipped_stages」「适用 ⇒ 不得跳过」
+                // 已由 ⑤ 无条件判定；complete 下只需补「适用 ⇒ 必须完成」。
+                if scope.as_deref() != Some(NOT_APPLICABLE)
+                    && !completed.iter().any(|stage| stage == domain)
+                {
                     violations.push(format!(
-                        "`status` 为 complete，但适用领域 {domain} 未出现在 `completed_stages`"
-                    ));
-                } else if skipped {
-                    violations.push(format!(
-                        "`status` 为 complete，但适用领域 {domain} 出现在 `skipped_stages`"
+                        "`status` 为 complete，但适用领域 {domain} 未出现在 completed_stages"
                     ));
                 }
             }
@@ -267,17 +287,15 @@ fn parse_manifest(raw: &str) -> KnowledgeBaseManifestSnapshot {
         completed_stages: string_list_at(
             &root,
             &["coverage", "initialization", "completed_stages"],
-        )
-        .unwrap_or_default(),
-        skipped_stages: skipped_stages_at(&root, &["coverage", "initialization", "skipped_stages"])
-            .unwrap_or_default(),
+        ),
+        skipped_stages: skipped_stages_at(&root, &["coverage", "initialization", "skipped_stages"]),
         completed_at: scalar_at(&root, &["coverage", "initialization", "completed_at"]),
         configurations_scope: scalar_at(&root, &["scope", "configurations", "status"]),
         api_scope: scalar_at(&root, &["scope", "api", "status"]),
         pages_scope: scalar_at(&root, &["scope", "pages", "status"]),
         generated_at: scalar_at(&root, &["generated_at"]),
-        has_last_change_package: key_exists(&root, &["update", "last_change_package"]),
-        has_processed_packages: key_exists(&root, &["update", "processed_packages"]),
+        has_last_change_package: non_empty_mapping_at(&root, &["update", "last_change_package"]),
+        has_processed_packages: non_empty_sequence_at(&root, &["update", "processed_packages"]),
     }
 }
 
@@ -287,43 +305,69 @@ fn scalar_at(root: &Value, path: &[&str]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// 判断嵌套映射路径上的 key 是否存在（值是什么不关心）。
-fn key_exists(root: &Value, path: &[&str]) -> bool {
-    node_at(root, path).is_some()
+/// 判断嵌套映射路径上的映射是否非空（key 存在且映射至少含一个键）。
+///
+/// skill 模板固定写 `update.last_change_package: {}`，key 存在性对每个真实
+/// manifest 恒为 true，因此按内容判定，全新知识库不会误报为「有变更包」。
+fn non_empty_mapping_at(root: &Value, path: &[&str]) -> bool {
+    node_at(root, path)
+        .and_then(Value::as_mapping)
+        .is_some_and(|mapping| !mapping.is_empty())
 }
 
-/// 取嵌套映射路径上的字符串列表（序列里的非字符串项被忽略）。
-fn string_list_at(root: &Value, path: &[&str]) -> Option<Vec<String>> {
-    let sequence = node_at(root, path)?.as_sequence()?;
-    Some(
-        sequence
-            .iter()
-            .filter_map(|item| item.as_str().map(str::to_string))
-            .collect(),
-    )
+/// 判断嵌套映射路径上的序列是否非空（`update.processed_packages: []` 同理）。
+fn non_empty_sequence_at(root: &Value, path: &[&str]) -> bool {
+    node_at(root, path)
+        .and_then(Value::as_sequence)
+        .is_some_and(|sequence| !sequence.is_empty())
 }
 
-/// 取嵌套映射路径上的 skipped_stages 列表；缺 stage/reason 的残缺项
-/// 以空串入列，交给不变量判定去报。
-fn skipped_stages_at(root: &Value, path: &[&str]) -> Option<Vec<KnowledgeBaseSkippedStage>> {
-    let sequence = node_at(root, path)?.as_sequence()?;
-    Some(
-        sequence
-            .iter()
-            .map(|item| KnowledgeBaseSkippedStage {
-                stage: item
-                    .get("stage")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                reason: item
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            })
-            .collect(),
-    )
+/// 取嵌套映射路径上的字符串列表。路径缺失按空列表；key 存在但非序列
+/// （含 null）折叠为单个空串、序列内非字符串项转为字符串形态入列——两者
+/// 都注定过不了不变量 ③ 的已知阶段判定，损坏不会被静默吞掉。
+fn string_list_at(root: &Value, path: &[&str]) -> Vec<String> {
+    let Some(value) = node_at(root, path) else {
+        return Vec::new();
+    };
+    let Some(sequence) = value.as_sequence() else {
+        return vec![String::new()];
+    };
+    sequence
+        .iter()
+        .map(|item| match item.as_str() {
+            Some(text) => text.to_string(),
+            None => serde_yaml::to_string(item)
+                .map(|text| text.trim().to_string())
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// 取嵌套映射路径上的 skipped_stages 列表。路径缺失按空列表；key 存在但
+/// 非序列（含 null）折叠为单个残缺项；缺 stage/reason 或取值非字符串的
+/// 残缺项以空串入列——都交给不变量 ④ 报违规，不静默吞掉。
+fn skipped_stages_at(root: &Value, path: &[&str]) -> Vec<KnowledgeBaseSkippedStage> {
+    let Some(value) = node_at(root, path) else {
+        return Vec::new();
+    };
+    let Some(sequence) = value.as_sequence() else {
+        return vec![KnowledgeBaseSkippedStage::default()];
+    };
+    sequence
+        .iter()
+        .map(|item| KnowledgeBaseSkippedStage {
+            stage: item
+                .get("stage")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            reason: item
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect()
 }
 
 /// 沿嵌套映射路径下钻到目标节点。
@@ -341,6 +385,7 @@ mod tests {
         KnowledgeBaseManifestSnapshot, KnowledgeBaseSkippedStage, manifest_invariants,
         read_manifest,
     };
+    use crate::product::json_store::ProductStoreError;
     use std::path::PathBuf;
 
     /// 一份合法的 complete 状态 manifest（skill 机器管理的固定形状）。
@@ -369,9 +414,14 @@ scope:
   pages:
     status: 不适用
 update:
-  last_change_package: CHANGE-20261109-0001
+  last_change_package:
+    change_package_id: CHANGE-20261109-0001
+    idempotency_key: CHANGE-20261109-0001
+    processed_at: \"2026-11-09T00:10:00Z\"
   processed_packages:
-    - CHANGE-20261109-0001
+    - change_package_id: CHANGE-20261109-0001
+      idempotency_key: CHANGE-20261109-0001
+      processed_at: \"2026-11-09T00:10:00Z\"
 ";
 
     /// 结构合法但缺 schema_version 的 manifest（解析为「版本未知」降级快照）。
@@ -384,8 +434,23 @@ coverage:
     completed_stages: [base-info, api]
 ";
 
+    /// 全新知识库（bootstrap 模板原样）：update 两键存在但内容为空。
+    const FRESH_KB_FIXTURE: &str = "\
+schema_version: \"4.0\"
+coverage:
+  initialization:
+    status: in_progress
+    global_validation: pending
+    completed_stages: []
+    skipped_stages: []
+    completed_at: \"\"
+update:
+  last_change_package: {}
+  processed_packages: []
+";
+
     /// 测试夹具只允许落 /tmp：每个用例独占一个目录，写入 manifest.yaml。
-    fn write_manifest_fixture(name: &str, content: &str) -> PathBuf {
+    fn write_manifest_fixture(name: &str, content: impl AsRef<[u8]>) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("cadence-kb-manifest-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -534,5 +599,206 @@ coverage:
         let kb_root = write_manifest_fixture("legal-complete", COMPLETE_FIXTURE);
         let snapshot = read_manifest(&kb_root).expect("读取夹具 manifest");
         assert!(manifest_invariants(&snapshot).is_empty());
+    }
+
+    #[test]
+    fn manifest_snapshot_reports_fresh_update_block_as_no_change() {
+        let kb_root = write_manifest_fixture("fresh", FRESH_KB_FIXTURE);
+        let snapshot = read_manifest(&kb_root).expect("读取全新知识库 manifest");
+        assert!(snapshot.exists);
+        // skill 模板固定写 last_change_package: {} / processed_packages: []：
+        // key 存在不算数，内容为空 ⇒ 没有待处理变更包。
+        assert!(!snapshot.has_last_change_package);
+        assert!(!snapshot.has_processed_packages);
+    }
+
+    #[test]
+    fn manifest_snapshot_treats_non_utf8_as_version_unknown() {
+        let kb_root = write_manifest_fixture("non-utf8", &[0xff_u8, 0xfe, 0x00, 0xd8]);
+        let snapshot = read_manifest(&kb_root).expect("读取非 UTF-8 manifest 不应报错");
+        assert!(snapshot.exists);
+        assert_eq!(snapshot.schema_version, None);
+        assert_eq!(snapshot.initialization_status, None);
+    }
+
+    #[test]
+    fn manifest_snapshot_reports_io_error_when_manifest_unreadable() {
+        let dir = std::env::temp_dir().join(format!(
+            "cadence-kb-manifest-{}-not-readable",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        // manifest.yaml 处放一个目录：read_to_string 得到 EISDIR 之类的
+        // 环境 IO 故障，应报 Err(Io)，不得折叠成「无知识库」或降级快照。
+        std::fs::create_dir_all(dir.join("manifest.yaml")).expect("创建目录型夹具");
+        let result = read_manifest(&dir);
+        assert!(
+            matches!(result, Err(ProductStoreError::Io(_))),
+            "期望 Io 错误，实际：{result:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_flag_non_sequence_completed_stages() {
+        // key 存在但不是序列：损坏必须可见，不得折叠为空列表后静默过门禁。
+        let kb_root = write_manifest_fixture(
+            "completed-scalar",
+            "coverage:\n  initialization:\n    status: in_progress\n    global_validation: pending\n    completed_stages: base-info\n",
+        );
+        let snapshot = read_manifest(&kb_root).expect("读取类型损坏 manifest");
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("completed_stages")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_flag_non_string_stage_items() {
+        let kb_root = write_manifest_fixture(
+            "stage-number",
+            "coverage:\n  initialization:\n    status: in_progress\n    global_validation: pending\n    completed_stages: [base-info, 42]\n",
+        );
+        let snapshot = read_manifest(&kb_root).expect("读取含数字阶段的 manifest");
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations.iter().any(|item| item.contains("未知阶段")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_flag_non_sequence_skipped_stages() {
+        let kb_root = write_manifest_fixture(
+            "skipped-scalar",
+            "coverage:\n  initialization:\n    status: in_progress\n    global_validation: pending\n    skipped_stages: api\n",
+        );
+        let snapshot = read_manifest(&kb_root).expect("读取类型损坏 manifest");
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("skipped_stages")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_invalid_global_validation() {
+        let mut snapshot = base_snapshot();
+        snapshot.global_validation = Some("bogus".to_string());
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("global_validation")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_na_domain_in_completed_stages() {
+        let mut snapshot = base_snapshot();
+        snapshot.api_scope = Some("不适用".to_string());
+        snapshot.completed_stages = vec!["base-info".to_string(), "api".to_string()];
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("不适用") && item.contains("completed_stages")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_in_progress_with_completed_at() {
+        let mut snapshot = base_snapshot();
+        snapshot.completed_at = Some("2026-11-09T00:05:00Z".to_string());
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations.iter().any(|item| item.contains("completed_at")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_in_progress_with_global_validation_stage() {
+        let mut snapshot = base_snapshot();
+        snapshot.completed_stages = vec![
+            "base-info".to_string(),
+            "overview".to_string(),
+            "global-validation".to_string(),
+        ];
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("global-validation")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_in_progress_with_passed_validation() {
+        let mut snapshot = base_snapshot();
+        snapshot.global_validation = Some("passed".to_string());
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("in_progress") && item.contains("passed")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_duplicate_skipped_stages() {
+        let mut snapshot = base_snapshot();
+        snapshot.api_scope = Some("不适用".to_string());
+        snapshot.skipped_stages = vec![
+            KnowledgeBaseSkippedStage {
+                stage: "api".to_string(),
+                reason: "接口领域不适用".to_string(),
+            },
+            KnowledgeBaseSkippedStage {
+                stage: "api".to_string(),
+                reason: "接口领域不适用".to_string(),
+            },
+        ];
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations.iter().any(|item| item.contains("重复")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_na_domain_missing_from_skipped_in_progress() {
+        let mut snapshot = base_snapshot();
+        snapshot.api_scope = Some("不适用".to_string());
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("未记录在 `skipped_stages`")),
+            "violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_invariants_reject_applicable_domain_skipped_in_progress() {
+        let mut snapshot = base_snapshot();
+        snapshot.api_scope = Some("指定".to_string());
+        snapshot.skipped_stages = vec![KnowledgeBaseSkippedStage {
+            stage: "api".to_string(),
+            reason: "不该跳过".to_string(),
+        }];
+        let violations = manifest_invariants(&snapshot);
+        assert!(
+            violations.iter().any(|item| item.contains("不得跳过")),
+            "violations: {violations:?}"
+        );
     }
 }
