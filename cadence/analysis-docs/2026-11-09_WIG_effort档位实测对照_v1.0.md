@@ -141,6 +141,52 @@ Spearman rho(thinking 深度, 越界率) = **-0.056**（≈0）。
 （实测两档都高频：xhigh 49 处 / high 61 处），
 直接造成「验收标准定义了却无人验证」。**A 包修不了它，effort 降档也压不掉它** ⇒ 需独立归属。
 
+## 5.9 【2026-11-09 追加 · 装置级结论已降级，产品级复测进行中】
+
+本报告 §4/§5 的数据来自**装置级**对照（手工把平台的 author prompt 喂给 claude CLI）。
+用产品跑同一案例后查明，**该装置不是产品的忠实代理**，故 §5 的结论**降级**为
+「装置条件下的方向性观察」，**不能代表产品效果**：
+
+| 维度 | 装置级（§4 的数据） | 产品级（真实） | 影响 |
+|---|---|---|---|
+| **prompt** | 与产品**逐字相同**（32,609 字符，sha256 一致） | 同 | 无差异 ✅ |
+| **cwd** | `/tmp/aria-verify/agg`（聚合视图） | `/home/michaelche/workspace/test-folder/test-center-java`（**真实成员仓根**） | **探索面不同** ❌ |
+| **codegraph** | **无** —— fixture 的 `permissions.allow` 因目录未 trust 被忽略（stderr 每次都提示） | **有** —— 靠 **cwd 的 `.claude/settings.json`**（`permissions.allow: ["mcp__codegraph__*"]` + `UserPromptSubmit: codegraph prompt-hook`）生效 | **工具面不同** ❌ |
+| **reviewer** | **无**（只跑 author） | **有**（codex reviewer，平台自动驱动） | **流程不完整** ❌ |
+| **编译 / IR 校验 / 重驱链** | **无**（我手工判的越界） | **有**（平台 compiler + IR 教学重驱） | **流程不完整** ❌ |
+
+### 产品流程的机制发现（供实施参考）
+
+1. **平台的 `--allowedTools` 只列内建只读工具**：`Read,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite`
+   （`projection::CLAUDE_LC_ALLOWED_TOOLS`），**不含 MCP**。
+   ⇒ **产品里的 codegraph 不是靠平台 argv 授权的**，而是靠 **cwd 的 `.claude/settings.json`**
+   （`permissions.allow` + `codegraph prompt-hook`）—— 这也解释了为何手工在 `agg` 里跑会被 trust 门挡住。
+2. **autopilot 每 2 秒一 tick**（`src/web/autopilot_orchestrator.rs`），对 enabled enrollment 调
+   `ensure_enrolled_plan`，生成的 plan id 为 **`issue_work_item_plan_auto_{prepare_intent_id}`**
+   —— 原运行那个 `auto_` 前缀就是这么来的。
+3. **重跑的产品路径**：`prepare` 会先删旧 plan（单 plan 不变量）⇒ enrollment 转入 `terminated`；
+   此时 `PUT .../automation-enrollment` 带 `{"type":"enable", command_id:<新 uuid>}` 走
+   「terminated 记录的人工重新开启」⇒ **轮换 `prepare_intent_id`** ⇒ autopilot 跑出新 plan。
+   （注意 `command` 是 `#[serde(tag="type", rename_all="snake_case")]` 内部标签枚举，变体名小写 `enable`。）
+
+### 产品级 n=1 并发对照（**有 proxy 资源竞争，仅作记录，不作结论**）
+
+两个实例**同时**跑在同一个 magpie proxy 上 ⇒ 存在资源竞争；且 high 侧当时未收尾。
+
+| | xhigh | high |
+|---|---|---|
+| 墙钟合计 | 762.4s | 843.9s |
+| input token | 110,098 | 124,183 |
+| output token | 29,367 | 30,959 |
+| cache_read | 282,913 | 338,315 |
+| codegraph 调用 | 5 | 6 |
+| **作者轮次（含 IR 重驱）** | **2** | **2** |
+| reviewer findings | 2 | 3 |
+
+**唯一可用的观察：两档都触发了 IR 教学重驱** ⇒ **effort 档位不改变 IR 失败/重驱** ——
+这与装置级「质量方向无差异」的结论一致，且这次是在**产品全流程**上观察到的。
+其余数字因并发竞争与 n=1，**不可作结论**；已改为**串行交替 xhigh→high→high→xhigh（n=2/档）**复测。
+
 ## 6. 局限（必须随结论一起引用）
 
 1. **样本量**：owner 授权的 10 次/档**已跑满**（见 §4 表头 n=10/10）。**但同档内方差极大**
