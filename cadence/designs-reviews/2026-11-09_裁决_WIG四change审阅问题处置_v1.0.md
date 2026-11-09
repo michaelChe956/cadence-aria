@@ -421,8 +421,52 @@ auto_repair_permitted = requires_closure
 - 主方案 `:922` 与 `:937` 改为：「E-1/E-4 的 MODIFIED REQ-WSC-06 delta **当前无 owner**；方案 E 的**裁剪部分**在另立 change 承载该 delta 前**不可先行**；E-3（字段白名单对齐 schema）仍可先行。」
 - 主方案新增一行登记该待办（**不得**新建 change 目录，本次只订正归属与门禁）。
 - 同时订正 `:950` 中「E-1/E-4 另需 MODIFIED REQ-WSC-06」的排序结论：明确「E-1/E-4 排在 WSC-06 delta 承载方之后」。
+- **（2026-11-11 已消解）**：`rework-prompt-input-surface` 已建立并**独占**承载 MODIFIED REQ-WSC-06
+  （同时承接 G-4 / G-5 与「返修轮不逐字节重发首轮全文」）；主规格 REQ-WSC-06 的 28 个原场景逐字保全，
+  delta 追加 7 个场景，描述段 460 字符。承载方确立后，**任何其它 change 不得再 MODIFIED 该
+  requirement**。详见 §8 与主方案 v1.5。
 
-## 8. 验收口径（每个工作包必跑，真实输出写入报告）
+## 8. owner 修订与授权记录（2026-11-11）
+
+owner 在 2026-11-11 就本轮遗留的三项未决与两个开放项作出裁定，**本节是这三项的最终口径**，
+与 §2.1 / §3.15 并行有效。
+
+### 8.1 三项未决的处置（主方案 §10.3 / §10.4 / §6.4 / §6.5）
+
+| 项 | owner 裁定 | 落点 |
+|---|---|---|
+| **effort=high 的真实提速量级与质量影响** | **测「high 是否达标」，不测「比 low 快多少」** —— `low` 已由裁决 §3.3 否决，默认档无论测出多少倍都是 high ⇒ 测提速量级**无决策价值**。范围 = 1 个真实多仓需求，`high` 与基线档各 **10 次首次输出**（10/10，不计自动修复）；**判据** = IR 首次通过率（基线：run1 **15 条 `unknown_done_when_ref`、cross-WI 15/15 ⇒ 首次通过 0**）+ 真实语义缺陷 + 越权回归，三项均不劣化；**时长与 input/cache 只作观测量**。**前置依赖 = 方案 F（`fix-usage-and-timing-metrics`）先落地**（否则 input/cache 与首次通过率测不准 —— 主方案 §10.2）。**不承诺**任何提速量级（裁决 §3.2）；跨模型/跨环境复现性须标注为未验证 | 主方案 §6.6 G-1 行 / §10.3；`explicit-sc-author-effort` tasks W.1 + design「边界 3」；`fix-usage-and-timing-metrics` tasks W1 |
+| **TTL 1h 的真实缓存收益与净价差** | **本期不设**。方向性推理（**非结论**）：重驱场景净收益为正（省一次全量重发 > 抬一次 write 档的代价）、短间隔场景净亏（5 分钟内连续调用本就命中 5m 缓存，1h 只抬 write 单价）；净效果取决于**调用间隔分布**，本地算不出（`cache_creation` 恒为 0）。**决策条件 = 方案 F 落地后** `cache_read`/`cache_creation` 真实计数可观测 ⇒ 才具备核算条件。契约侧 G-6 工作包**保留**（注入点与冻结语义已就位），本期**不启用**该变量 | 主方案 §6.5 / §6.6 G-6 行 / §10.3；`explicit-sc-author-effort` design「决策 6-a」 |
+| **`Read` 输出上限（`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`）** | **本期不设，且不单独实测** —— Read 读的是权威门禁正文 42 KB，截断会让模型读不全门禁 ⇒ 直接诱发 REQ-WSC-06 场景所述「按教学应通过而 canonical 判 `required_capability_missing`」口径分叉。**让位给 G-5**：L1/L2 直供后模型**根本不需要 Read 政策正文** ⇒ Read 量自然下降。只有 G-5 落地后 Read 仍是主要 token 来源，才回头实测 | 主方案 §6.4 的 env 表 / §10.4 |
+
+### 8.2 真实 provider 调用授权（R-2）
+
+**已授权**：1 个真实多仓需求，`high` 与基线档各 10 次首次输出。**授权范围之外**：`low` 是否可成为
+默认（另行立项）、任何**提速量级**承诺、真实 provider 调用的其他用途。**前置依赖**：方案 F 先落地。
+
+### 8.3 「当前无任何存量内容」（R-3）
+
+owner 确认当前环境**没有任何存量内容**（无历史 workspace session / plan / IR / 评审 / 发布记录）。
+处置口径（**已落进 `isolate-plan-criterion-namespace` 的 design Context 对照表与 tasks 前言**）：
+
+| 机制 | 对象 | 处置 |
+|---|---|---|
+| 双前缀只读兼容 | **legacy JSON outline/draft/batch 路径**（仍产出 `AC-`） | **仍必须实现**（对象不是存量） |
+| 指纹/摘要代际按会话固定 | **同一 session 内跨轮**的 seen/original 一致性 | **仍必须实现**（对象不是存量） |
+| v2 配方与兼容读路径 | 已存在的旧 `RunHistory` / 旧 scope 摘要 | **运行时无对象**（不被触发、验收用例无对象）；但**配方与读路径仍须逐字保留** —— 契约「缺省即 v2」「未知取值按状态损坏拒收」的**必要条件**（`deny_unknown_fields` 下必须靠自定义反序列化区分「缺字段」与「未知值」） |
+| `LegacyPreserved` 态 / 缺省 v2 分支 | 存量 lineage / 旧记录 | **运行时无对象**；判定逻辑**整体保留**（成本近零），本期实际只落到 `WicV1` 与「未知」两态 |
+| 存量实体迁移（WIC→AC 反写 / 批量改前缀 / 全历史指纹重算 / 旧算法退役） | 存量 | **本期不立项**（原为决策 §9 的后续数据迁移项目）—— 这是**唯一真正不做**的一项 |
+
+⇒ **无存量不改变任何 change 的契约条款与实现要求**，只改变**哪些条款运行时会被触发**与
+**哪些验收格无对象**。上述条款**不得**被宣称成「已实现存量兼容」，也**不得**被当作风险项或阻塞项。
+
+### 8.4 「reviewer 反复失败耗尽预算」的根因（R-4）
+
+**挂起待材料**（durable history / 路由记录未提供）。拿到后再定根因。在此之前：本轮只修**已证实**
+的免阻断（X3），**不解释**该现象（裁决 §9：「不能用当前单次 review Pass 样本替其定根因」），
+**不阻塞**任何 change 的实施。
+
+## 9. 验收口径（每个工作包必跑，真实输出写入报告）
 
 ```bash
 cd /home/michaelche/workspace/github/cadence-aria/.worktrees/feat-wig-optimize-11-08
@@ -444,7 +488,7 @@ EOF
 # 3) 归档后主规格 strict 校验（关键门禁）
 cp -r openspec /tmp/arch-<change>/ && cd /tmp/arch-<change>/openspec \
   && openspec archive <change-name> --yes >/dev/null 2>&1 \
-  && openspec validate --specs --strict   # 必须 79 passed, 0 failed
+  && openspec validate --specs --strict   # 必须全绿；八个 change 联合归档后为 80 passed, 0 failed
 ```
 
 **硬性通过条件**：

@@ -5,6 +5,14 @@
 > `specs/work-item-typed-outcome-policy/spec.md`（MODIFIED `REQ-TOP-04` / `REQ-TOP-05`）；
 > 架构边界与共享面排序见 `design.md`。
 > **排序前提**：`design.md`「共享面与排序」已声明的串行链（决策六纯拆分 → mechanicalize 的 prompt 瘦身与其 fixture/断言、typed 判据 → bound → effort → 本 change 的 WIC 措辞与 fixture、`forged_done_when` 删除 → 守卫接线 → close 消费版本化 scope）必须被遵守；指纹代际与命名策略元数据面（`work_item_plan_policy/**` 除 `classify.rs` / `types.rs` 外）无文件重叠，可先行。
+>
+> **owner 2026-11-11：当前无任何存量内容** ⇒ 见 `design.md` Context 的对照表。**本 change 的契约与实现要求
+> 一律不变**；只是下列**仅与存量相关**的验收格**本期无对象**（不会被触发，可标注为「无对象」而非
+> 「未实现」）：① 1.1 的旧代际 fixture 哈希锚点固化、② 2.4 的「既有存量 source 逐字不变」、
+> ③ 3.4 / 6.3 的 `LegacyPreserved` 保基线 ID 与存量矩阵格、④ 7.2 的「旧 lineage 修订可用 /
+> 旧 session 恢复命中旧重复」。**v2 配方与读路径本身仍须逐字保留**（契约「缺省即 v2」「未知取值
+> 拒收」的必要条件），只是运行时不被触发。**真正不做**的是**存量实体迁移**（WIC→AC 反写、
+> 批量改前缀、全历史指纹重算、旧算法退役）—— 本期不立项。
 
 ## 0. 前置：大文件不涨线与模块落位（决策六先落）
 

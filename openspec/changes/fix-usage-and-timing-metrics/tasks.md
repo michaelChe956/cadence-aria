@@ -67,9 +67,9 @@
 - [ ] 6.2 归档演练：`/tmp` 副本归档后 `openspec validate --specs --strict` 全绿；主规格 `usage-transparency` 的**原有 2 条 requirement 的 4 个场景标题与正文逐字仍在**；三条 requirement 的描述段均 ≤500 字符。
 - [ ] 6.3 排序与边界登记复核：本 change 与其它 change 无写面重叠（design「共享面与排序」逐文件表）；**X7 未被重复承接**（本 change 目录内对 WSC-25 族 requirement 编号与候选尝试流水文件名的引用零命中）。
 
-## Workflow follow-up / 需 owner 另授权后（**不阻归档**）
+## Workflow follow-up / 需真实 provider 调用（**owner 已授权；不阻归档**）
 
-- [ ] W1 真实 provider 调用与修复后收益量化：须 owner 另行授权后执行；本 change 不授权任何真实调用，**不承诺**任何 token / 耗时降幅。
+- [ ] W1 **真实 provider 调用与修复后收益量化（owner 2026-11-11 已授权）**：owner 已授权真实 provider 调用做质量 / 耗时对照，范围与判据见 `explicit-sc-author-effort` 的 `tasks.md` W.1（1 个真实多仓需求，`high` 与基线档各 10 次首次输出；判据 = IR 首次通过率 + 真实语义缺陷 + 越权回归，时长与 input/cache 作观测量）。**本 change 是该对照的计量前置**：F 修好后 `input/cache` 与首次通过率才测得准（主方案 §10.2）。本 change **不承诺**任何 token / 耗时降幅 —— 修复后的收益量级须以修复后重跑的实测为准，**不得**用修复前的低估倍数（6.06× / 2.85× / 4.95×）冒充修复后收益。
 - [ ] W2 claude 侧 CLI `result.usage` 原文取得与范围判定：取得原文后另行立项；在此之前保持未判定。
 - [ ] W3 coding 引擎侧独立 usage 事件映射实现是否存在同类覆盖式问题：超出本 change 范围，待独立评估（design Open Questions #4）。
 
