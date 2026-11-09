@@ -6,8 +6,8 @@
 //   已安装已核验但版本落后      → 【更新】+ 当前版本 vs 最新版本
 //   已安装且已是最新            → 不渲染任何按钮（返回 null）
 // Kimi Code 走远程安装脚本：点击安装前必须告知「将执行来自 code.kimi.com 的
-// 安装脚本」，确认后才发 POST（acknowledge_remote_script=true）；且 Kimi 不做
-// 版本判定，永不出现「更新」（REQ-PCI-01 / REQ-PCI-04）。
+// 安装脚本」，确认后才发 POST（acknowledge_remote_script=true）；且 Kimi 的
+// 版本来源是 npm 包 `@moonshot-ai/kimi-code` ⇒ 同样显示「更新」（REQ-PCI-01 / REQ-PCI-07）。
 // 安装是异步作业：POST 立即返回 job_id，组件自带轮询（durable），终态后回调
 // onSettled 让父级重读 health（安装 ≠ 核验，REQ-PCI-05）。
 import { useEffect, useRef, useState } from "react";

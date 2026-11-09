@@ -1,4 +1,4 @@
-//! 通用 semver 精确比较（REQ-PCI-04 / tasks 11.3）。
+//! 通用 semver 精确比较（REQ-PCI-07 / tasks 11.3）。
 //!
 //! `major.minor.patch` 三段数字 + 可选预发布后缀（`1.5.0-rc.1`）；预发布
 //! 版本视为**低于**对应正式版本。只做语义比较——不做字符串前缀或浮点
@@ -83,7 +83,7 @@ pub fn compare_semver(a: &str, b: &str) -> Ordering {
     }
     match (&a.pre_release, &b.pre_release) {
         (None, None) => Ordering::Equal,
-        // 预发布 < 正式（REQ-PCI-04）。
+        // 预发布 < 正式（REQ-PCI-07）。
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (Some(left), Some(right)) => left.cmp(right),

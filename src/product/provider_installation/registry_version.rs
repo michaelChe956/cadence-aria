@@ -1,9 +1,10 @@
 //! registry `dist-tags.latest` 查询 + 24h durable 版本缓存
-//!（REQ-PCI-04 / tasks 11.3、11.4）。
+//!（REQ-PCI-07 / tasks 11.3、11.4）。
 //!
 //! 缓存条目记录包名、最新版本与查询时间戳；durable（磁盘 JSON，跨进程
-//! 重启可复用）。Kimi Code 非 npm 包，不进入本模块（调用方按
-//! `npm_package.is_none()` 直接跳过版本判定）。
+//! 重启可复用）。本模块按**版本来源包名**工作（`InstallSourceRow::version_package`），
+//! 与安装来源相互独立 —— Kimi Code 的安装源是官方脚本，但版本来源是 npm 包
+//! `@moonshot-ai/kimi-code`，同样经本模块判定「有新版」（REQ-PCI-07）。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-/// 缓存有效期：24 小时（REQ-PCI-04）。
+/// 缓存有效期：24 小时（REQ-PCI-07）。
 pub const VERSION_CACHE_TTL: Duration = Duration::hours(24);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

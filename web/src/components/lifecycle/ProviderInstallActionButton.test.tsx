@@ -4,7 +4,8 @@
 //   （不显示安装）；版本落后 → 【更新】+ 当前 vs 最新；最新 → 不渲染任何按钮。
 // - REQ-PCI-01：Kimi Code 走官方脚本，点击前必须告知「将执行来自 code.kimi.com
 //   的安装脚本」；未确认不得调 API（POST 带 acknowledge_remote_script=true）。
-// - REQ-PCI-04：Kimi 不做版本判定 → 永不出现「更新」。
+// - REQ-PCI-07：Kimi 的版本来源是 npm 包 `@moonshot-ai/kimi-code` ⇒ 版本落后时
+//   同样出现「更新」（安装源仍是官方脚本 ⇒ 仍先告知来源并确认）。
 // - REQ-PCI-05：POST 立即返回 job_id → 立刻显示运行中；轮询到终态后回调
 //   onSettled 并停止轮询（作业状态是 durable 的，刷新不丢）。
 // - REQ-PCI-06：失败作业如实展示分类提示 + 手动命令。
@@ -197,7 +198,7 @@ describe("ProviderInstallActionButton 显示规则（REQ-PCI-02）", () => {
   });
 });
 
-describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-04）", () => {
+describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-07）", () => {
   it("latestVersion 为 null 时不出现「更新」", () => {
     installFetchRouter({ target: "kimi_code" });
     const { container } = renderButton({

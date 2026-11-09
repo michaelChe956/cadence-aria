@@ -547,7 +547,7 @@ mod tests {
         );
         // 预置缓存：claude=1.0.0（最新）、codex=2.0.0（无关，缺装）、
         // pi=1.5.0（落后）、codegraph=1.6.2（无关，缺装）。
-        // pi 的「落后」必须是**精确 semver 下真落后**（REQ-PCI-04）：
+        // pi 的「落后」必须是**精确 semver 下真落后**（REQ-PCI-07）：
         // 本地 0.85.0（devbox pin）vs latest 1.5.0（块2 技术方案
         // §3.6.9 未验证项 1 实测的 registry latest）⇒ 0.85.0 < 1.5.0。
         // （旧的 0.9.0 在 semver 下**新于** 0.85.0 —— minor 9 < 85。）
