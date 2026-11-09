@@ -559,7 +559,7 @@ fn lint_configuration_scope(
             .get(CONFIGURATION_CHANGE)
             .and_then(|per_document| per_document.get("变更状态"));
         if let Some(status) = status {
-            if single_choice(status, &CHANGE_STATUSES) == Some(CHANGE_STATUSES[0]) {
+            if single_choice(status, &CHANGE_STATUSES) != Some(CHANGE_STATUSES[1]) {
                 violations.push(mk(
                     "scope_mismatch",
                     Some(CONFIGURATION_CHANGE),
@@ -744,6 +744,9 @@ fn parse_line_fields(
             let Some((name, value)) = split_field_colon(rest) else {
                 continue;
             };
+            // 容忍「- 」后、字段名前的多余空白（如「-  变更目的：x」），
+            // 避免纯空白差异把合法字段行判成「模板行不存在」。
+            let name = name.trim();
             let Some(spec) = FIELD_TABLE.iter().find(|(doc, field, kind)| {
                 doc == document && field == &name && !matches!(kind, FieldKind::TableRow)
             }) else {
@@ -831,7 +834,10 @@ enum NotApplicableFill {
 }
 
 /// 判定「不适用」取值是否带具体原因：模板要求 `不适用（具体原因）`，
-/// 括号内为空或仍是占位词「具体原因」都视为未填原因；裸「不适用」同理。
+/// 括号内为空或仍是占位词「具体原因」都视为未填原因；裸「不适用」与
+/// 未闭合括号同理。`不适用` 后随**非括号**文字（如「不适用于存量数据」
+/// 「不适用：无数据变更」）是自然语言写法而非模板形态，返回 NotUsed，
+/// 不按不适用取值参与缺原因与快照形态判定。
 fn classify_not_applicable(value: &str) -> NotApplicableFill {
     let trimmed = value.trim();
     let Some(rest) = trimmed.strip_prefix(NOT_APPLICABLE) else {
@@ -841,6 +847,10 @@ fn classify_not_applicable(value: &str) -> NotApplicableFill {
         body.find('）').map(|end| &body[..end])
     } else if let Some(body) = rest.strip_prefix('(') {
         body.find(')').map(|end| &body[..end])
+    } else if !rest.is_empty() {
+        // 「不适用」后随非括号文字：自然语言写法，不是「不适用（原因）」
+        // 模板形态，不判为不适用取值（避免误报缺原因 / 快照形态不符）。
+        return NotApplicableFill::NotUsed;
     } else {
         None
     };

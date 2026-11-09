@@ -339,6 +339,30 @@ mod tests {
     }
 
     #[test]
+    fn lint_tolerates_extra_whitespace_before_field_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let code_doc = valid_code_change(&sha, &sha).replace(
+            "- 源分支：feat/export-pagination",
+            "-   源分支：feat/export-pagination",
+        );
+        let dir = write_package(temp.path(), &sha, &sha, &[("code-change.md", code_doc)]);
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
+        assert!(
+            !lint.violations.iter().any(|violation| violation.code == code("field_empty")
+                && violation.field.as_deref() == Some("源分支")),
+            "字段名前的多余空白不应把合法行判成模板行不存在：{:?}",
+            lint.violations
+        );
+        assert!(
+            lint.fields.iter().any(|status| status.document == "code-change.md"
+                && status.field == "源分支"
+                && status.filled),
+            "双空格写法的源分支应被正常解析并标记为已填"
+        );
+    }
+
+    #[test]
     fn lint_rejects_empty_required_field() {
         let temp = tempfile::tempdir().unwrap();
         let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
@@ -428,6 +452,44 @@ mod tests {
                 .iter()
                 .any(|violation| violation.code == code("reason_missing")
                     && violation.field.as_deref() == Some("逻辑表"))
+        );
+    }
+
+    #[test]
+    fn lint_accepts_natural_language_not_applicable() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let db_doc = valid_database_change().replace(
+            "- 逻辑表：不适用（本次无数据模型变更）",
+            "- 逻辑表：不适用于存量数据",
+        );
+        let config_doc = valid_configuration_change().replace(
+            "- 基线快照标识：snap-base-001",
+            "- 基线快照标识：不适用：旧环境无配置快照",
+        );
+        let dir = write_package(
+            temp.path(),
+            &sha,
+            &sha,
+            &[
+                ("database-change.md", db_doc),
+                ("configuration-change.md", config_doc),
+            ],
+        );
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
+        assert!(
+            !has_code(&lint, &code("reason_missing")),
+            "「不适用于…」是自然语言写法，不应误报缺原因：{:?}",
+            lint.violations
+        );
+        assert!(
+            !lint
+                .violations
+                .iter()
+                .any(|violation| violation.code == code("scope_mismatch")
+                    && violation.field.as_deref() == Some("基线快照标识")),
+            "「不适用：…」非模板形态，全量分支不得追加 scope_mismatch：{:?}",
+            lint.violations
         );
     }
 
@@ -633,6 +695,33 @@ mod tests {
                 .iter()
                 .any(|violation| violation.code == code("scope_mismatch")
                     && violation.field.as_deref() == Some("变更状态"))
+        );
+    }
+
+    #[test]
+    fn lint_rejects_off_enum_status_under_not_applicable_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let config_doc = valid_configuration_change()
+            .replace(
+                "- Manifest 配置领域状态：全量",
+                "- Manifest 配置领域状态：不适用",
+            )
+            .replace("- 变更状态：无变更\n", "- 变更状态：不适用\n");
+        let dir = write_package(
+            temp.path(),
+            &sha,
+            &sha,
+            &[("configuration-change.md", config_doc)],
+        );
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("不适用"), &members(repo));
+        assert!(
+            lint.violations
+                .iter()
+                .any(|violation| violation.code == code("scope_mismatch")
+                    && violation.field.as_deref() == Some("变更状态")),
+            "不适用分支的变更状态填表外取值也应报 scope_mismatch：{:?}",
+            lint.violations
         );
     }
 
