@@ -1,0 +1,100 @@
+================================================================================================================
+产品 WIG 全流程 —— 串行交替对照（唯一变量 = effort 档位；同一真实案例 + codegraph + reviewer + 编译重驱链）
+================================================================================================================
+
+--- high  (run-high-4322)  session=workspace_session_auto_5c38cad8-3a11-495
+    timeline_node_001: author_run             completed  dur=    579.9s cmds= 22 codegraph=1
+    timeline_node_002: reviewer_run           completed  dur=     75.4s cmds= 14 codegraph=4
+    timeline_node_003: work_item_plan_compile completed  dur=      1.2s cmds=  0 codegraph=0
+    合计: 墙钟=656.4s 作者轮次=1(含重写0) reviewer轮次=1 compile=1 codegraph=5 cmds=36
+    usage: in=63,057 out=19,903 cache_read=181,120
+    IR 判定（平台 compiler）: [('passed', 'final')]
+    session 终态=confirmed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=confirmed WIs=['WI-001', 'WI-002', 'WI-003', 'WI-004'] validator=[('warning', 'integration_or_e2e_skipped_risk')]
+    最终 source: source-dc1024819822ba0c.json | WI=4 criterion=6 refs=19 **cross-WI=0**
+    reviewer finding [reviewer_run]: disposition=advisory class_hint=advisory category=verification_unattributable field=verification_checks
+        前端脚本化校验在计划指定的环境里跑不起来：所要求的 jsdom 并不在前端依赖中，而 frontend/package.json 在本项与 WI-004 的写入范围里都被禁止改动；加上脚本放在 /tmp，容器内也解析不到挂载在 /works
+    reviewer finding [reviewer_run]: disposition=advisory class_hint=advisory category=completeness field=output_contracts
+        对外承诺的「公告存在时删除返回 204 且物理删除记录」这一条能力，在本项里没有任何验收标准承接：验收标准只有 404 中文契约那一条，两个删除相关任务的完成条件也都指向同一条 404 标准。任务描述里虽然提到了 204 与物理删除，但缺少
+    reviewer finding [reviewer_run]: disposition=advisory class_hint=advisory category=completeness field=output_contracts
+        网关对外承诺的第三条能力（/v3/api-docs 暴露删除端点与「删除公告」摘要）没有验收标准承接，只挂在构建校验任务的描述里；一旦构建校验任务的完成判定只看用例全绿与 Checkstyle，OpenAPI 契约是否真的被文档化就缺少明确
+
+--- high  (run-high-4323)  session=workspace_session_auto_3cfd75a6-eee6-490
+    timeline_node_002: reviewer_run           completed  dur=      0.1s cmds=  0 codegraph=0
+    timeline_node_001: author_run             completed  dur=    661.8s cmds= 12 codegraph=0
+    timeline_node_004: author_run             completed  dur=    152.4s cmds=  0 codegraph=0
+    timeline_node_005: reviewer_run           completed  dur=    106.9s cmds= 15 codegraph=2
+    合计: 墙钟=921.3s 作者轮次=2(含重写1) reviewer轮次=2 compile=0 codegraph=2 cmds=27
+    usage: in=63,386 out=22,034 cache_read=292,387
+    IR 判定（平台 compiler）: []
+    session 终态=stopped_needs_human policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=1
+    preflight 机械校验码: ['acceptance_path_not_in_baseline']
+    plan: status=draft WIs=[] validator=[]
+    最终 source: source-5bab8e30e797d4f4.json | WI=4 criterion=6 refs=14 **cross-WI=0**
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.acceptance_path_not_in_baseline
+        [acceptance_path_not_in_baseline] work item WI-004 的验收标准/验证计划引用路径 [tests/integration/notice-delete-e2e.mjs] 不存在于 plan 基线
+    reviewer finding [reviewer_run]: disposition=actionable class_hint=human_required category=contract_gap field=plan_preflight.acceptance_path_not_in_baseline
+        端到端验收所依赖的断言产物仍落在基线之外：WI-004 的两条检查分别执行 /tmp/notice-delete-assert.mjs（CHECK-007）与 /tmp/notice-delete-e2e.mjs（CHECK-010），这两
+    reviewer finding [reviewer_run]: disposition=advisory class_hint=advisory category=completeness field=
+        机械报告仍带一条 e2e 跳过风险提示（integration_or_e2e_skipped_risk，work_item_ids 为空）。本计划已用 CHECK-008 的人工页面核对与 CHECK-011 的 curl 断言覆盖了端到端
+
+--- xhigh  (run-xhigh-4321)  session=workspace_session_auto_eeb1e869-9f26-4e8
+    timeline_node_001: author_run             completed  dur=    358.1s cmds= 25 codegraph=0
+    timeline_node_002: reviewer_run           completed  dur=    124.6s cmds= 14 codegraph=2
+    timeline_node_003: work_item_plan_compile completed  dur=      1.0s cmds=  0 codegraph=0
+    合计: 墙钟=483.7s 作者轮次=1(含重写0) reviewer轮次=1 compile=1 codegraph=2 cmds=39
+    usage: in=78,127 out=25,236 cache_read=155,120
+    IR 判定（平台 compiler）: [('passed', 'final')]
+    session 终态=confirmed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=confirmed WIs=['WI-001', 'WI-002', 'WI-003', 'WI-004'] validator=[('warning', 'integration_or_e2e_skipped_risk')]
+    最终 source: source-f51ed86e33af15f4.json | WI=4 criterion=6 refs=21 **cross-WI=0**
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=verification_unattributable field=verification_checks
+        WI-003 的三条验收标准都要求 non_zero_test_execution 证据，但唯一对应的 CHECK-005 命令字段为空、断言脚本又落在仓库外的 /tmp 目录下，该验收证据无法由他人复跑复现。
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=completeness field=output_contracts
+        网关侧被要求输出 timestamp/status/error/message/path 五字段错误体，但上游 busi 的输出契约只声明了「message 为中文『公告不存在』」，两侧契约粒度不对称，网关的五字段要求实际依赖 busi 的
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=other field=output_contracts
+        固定的 404 文案「公告不存在」与项目后端规范「异常信息须包含业务标识」存在张力：规范强调可定位性，而当前对外文案不含公告 id。
+
+--- xhigh  (run-xhigh-4324)  session=workspace_session_auto_18302df2-0826-477
+    timeline_node_002: reviewer_run           completed  dur=      0.1s cmds=  0 codegraph=0
+    timeline_node_001: author_run             completed  dur=    420.2s cmds= 11 codegraph=1
+    timeline_node_004: author_run             completed  dur=     26.4s cmds=  0 codegraph=0
+    timeline_node_005: reviewer_run           completed  dur=    111.2s cmds= 10 codegraph=2
+    合计: 墙钟=558.0s 作者轮次=2(含重写1) reviewer轮次=2 compile=0 codegraph=3 cmds=21
+    usage: in=124,436 out=23,353 cache_read=234,302
+    IR 判定（平台 compiler）: []
+    session 终态=stopped_needs_human policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=1
+    preflight 机械校验码: ['intent_unexecutable']
+    plan: status=draft WIs=[] validator=[]
+    最终 source: source-21c01e3a8c35e42b.json | WI=4 criterion=6 refs=25 **cross-WI=0**
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=human_required category=contract_gap field=plan_preflight.intent_unexecutable
+        这是上一轮同一问题的重复出现，上一轮的处置没能解决它，原因是本轮输入的产物与上一轮完全相同（修订引用与内容哈希都没变），所以自动修订没有可改的对象、只能反复报同一批未解决项。重复体现在：(1) 前端两条端到端检查命令在容器内根本执行不了——
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=scope_conflict field=write_policy.forbidden_scopes
+        机械检测报出的写入范围重叠经核对是守卫而非真冲突，不需要为本次交付改动：上层集成工作项把前端源码目录整体列为禁止改动，而它自己的全部任务都不写该目录，页面与接口文件仍由前端工作项独占改动。
+
+================================================================================================================
+=== 对照（xhigh n=2 vs high n=2）
+================================================================================================================
+指标                                  xhigh             high        差(high-xhigh)        置换p
+墙钟合计 s                              520.8            788.8               +268.0 ( +51.5%)     0.3393
+input token                     101,281.5         63,221.5            -38,060.0 ( -37.6%)     0.3393
+output token                     24,294.5         20,968.5             -3,326.0 ( -13.7%)     0.3393
+cache_read token                194,711.0        236,753.5            +42,042.5 ( +21.6%)     0.6691
+codegraph 调用                          2.5              3.5                 +1.0 ( +40.0%)     1.0000
+作者轮次(含重写)                             1.5              1.5                 +0.0 (  +0.0%)     1.0000
+reviewer 轮次                           1.5              1.5                 +0.0 (  +0.0%)     1.0000
+重写轮次                                  0.5              0.5                 +0.0 (  +0.0%)     1.0000
+IR 校验失败次数                             0.0              0.0                 +0.0 (  +0.0%)     1.0000
+需人工介入次数                               0.5              0.5                 +0.0 (  +0.0%)     1.0000
+preflight 机械校验失败                      0.5              0.5                 +0.0 (  +0.0%)     1.0000
+编译次数                                  0.5              0.5                 +0.0 (  +0.0%)     1.0000
+reviewer findings 合计                    9                6                   -3
+最终 plan cross-WI 越界               0/46             0/33   
