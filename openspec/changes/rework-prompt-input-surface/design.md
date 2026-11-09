@@ -113,6 +113,78 @@ L1/L2 **不再依赖模型自行 Read/Glob 补事实**；模型拿到的 prompt 
 - 保留逐字节复用、只加一句「请勿探索」 → 否决，探索成本在**工具往返**里，不在措辞里；且 32KB 静态规范面每轮重付与 `cache_read_tokens=128` 的事实不变。
 - 只删 few-shot、保留 grammar → 否决，grammar 是「输出必须合法」的硬约束面，删掉会让返修产出不可解析。
 
+### D5 · 基线树事实注入：事前清单 + 事后最近候选
+
+**问题（现场证据）**：作者 prompt 里有**纪律**、没有**事实**。
+
+- 纪律已在场：`work_item_split_engine/prompts.rs:347` 逐字写着「AC 与验证计划引用的仓库内文件路径必须存在于 plan 基线树…缺失 → `acceptance_path_not_in_baseline` Error；修复动作：{repair action}」。
+- 事实不在场：首轮 prompt 32,609 字符、重驱 prompt 34,173 字符，**两者都不含**基线树路径清单（`base_tree` / `tree_paths` / `available_paths` / `existing_paths` 全无命中）；prompt 里出现的仓库路径是来自 issue/story/design 的**零散示例**，不是清单。
+- 后果（实测）：作者写 `frontend/tests/integration/notice-delete-e2e.mjs` 与 `/tmp/notice-delete-e2e.mjs`，而真实案例 frontend 基线树**只有 11 个路径且完全没有 `tests/` 目录** ⇒ 必然越界 ⇒ preflight Error ⇒ 教学重驱。
+
+**教学单靠不足**：本 change 已有的 Scenario「验收路径基线纪律」（教学义务）与「AC 基线教学生效」**都已在代码里**，实测仍 50% 命中越界（2/4 run）。因此本决策**不是**再加一段教学，而是**把事实给出去**。
+
+**事前：作者轮前装载并注入清单（走上下文面，不动固定面）**
+
+| 项 | 内容 |
+|---|---|
+| 数据源 | `workspace_engine::plan_preflight::plan_baseline_tree(lifecycle, project_id, issue_id)`（`git ls-tree -r --name-only refs/heads/<base_branch>`，**与校验器同源**，不新造第二套口径） |
+| 装载时点 | **作者轮启动前**（`web/workspace_ws_handler/run/single_candidate.rs` 生产构造点）。注意：Evaluate 阶段也调同一函数（`single_candidate.rs:591`），但**Evaluate 在作者轮之后**，故作者轮前需另载一次（同一函数、同一来源，非第二套实现） |
+| 注入位置 | `[confirmed_context]` 新增 `baseline:` 段（**上下文面**，非固定规范面） |
+| 注入形态 | 按成员仓分组的可用路径清单；成员仓优先排序（与 D3 同序） |
+| 容量 | 真实案例 43 路径 / 1,774 B；上下文面预算 32,000 B，真实占用 24,146 B ⇒ **余量 7,854 B ⇒ 装得下，零提额** |
+
+**为什么不放固定规范面**：固定规范面质量预算 `WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES` = 23,500 B，实测余量仅 **18~40 B**（红线：任何 SC author 教学变更必须先提额到整百级）。把 1,774 B 塞进固定面**必然要提额**，直接违反本 change 的 Non-Goal「不 bump 任何预算常量」。故清单必须落在**上下文面**。
+
+**事后：越界报错附最近候选路径（走既有教学重驱通道）**
+
+- 落点：`work_item_plan_compiler/validate.rs` 生成 `acceptance_path_not_in_baseline` finding 处 —— **该处已在 `baseline_tree` 参数作用域内**，无需新增装载。
+- 形态：报错 message 追加「基线树中同前缀最近的现存路径：X、Y、Z」（无同前缀候选时如实说明无可用候选，不臆造）。
+- 目的：给重驱一个**具体修改对象**。实测两次重驱的工具调用均为 **0**（26.4s / 152.4s）⇒ 重驱阶段模型不查仓库、只能盲改 ⇒ 「修复动作」是纪律、没有对象。
+
+**边界与失败语义**
+
+- 基线树不可得（`Ok(None)`，无仓 issue）⇒ **不注入**，零回归。
+- 基线树装载失败（`Err`，如基线分支不存在）⇒ **不阻断作者轮**，记诊断；既有 fail-closed 点仍在 Evaluate 阶段（`plan_baseline_tree` 的 `Err` 在 Evaluate 原样上抛）⇒ **不新增阻断点**，失败位置与现状一致。
+
+*备选与否决*：
+- 只做事前清单、不做事后候选 → 否决：重驱阶段仍无具体修改对象（实测重驱 0 工具调用），盲改命中率不变。
+- 只做事后候选、不做事前清单 → 否决：事后救不防首发越界，且首轮作者多付 6~11 分钟探索代价。
+- 把清单做成作者可调用的平台工具 → 否决：实测作者探索期已 9~17 次工具往返、275.4 秒，再加工具调用只会加剧往返；且失败时仍无候选路径。
+- 把清单做成固定面教学 → 否决：必然触发提额，违反本 change Non-Goal（见上）。
+
+### D6 · 前轮 finding 状态：内容身份求交 + 去重 + 分区注入
+
+**问题（现场证据）**：前轮清单只给「身份」，不给「本轮是否仍存在」⇒ reviewer 被上一轮锚定，对**已修好**的产物重复报错 ⇒ 升级 `human_required`。
+
+实测（`xhigh-4324`）：
+
+1. 重驱**确实修好了**：`intent_target_codebase` 从 `lc_aggregate_root_view_7cb8c0b4-…` 改为 `7cb8c0b4-…`（授权逻辑代码库 ID）；两个 source revision 哈希不同（`aa45c70f` → `21c01e3a`）。
+2. **机械侧已清零**：第二版机械报告绑定 `source-21c01e3a`，findings 只剩 1 条 warning，`intent_unexecutable` **消失**。
+3. **评审却重复报 4 条同码 must_fix**：第二轮评审 prompt 引用的是**新** revision、机械报告里也没有该码，但输出 4 条 `plan_preflight.intent_unexecutable`。
+4. 原因：prompt 的 `### Previous Review Round Findings` 把上一轮 finding 原样列为待办，**不含**「本轮是否仍存在」⇒ 评审只能靠自由文本判断「是否已解决」⇒ 锚定。
+
+**求交键必须是内容身份，不能是 message 派生指纹**
+
+`FindingFingerprint::identity_for_finding(category, class, &message, contract_field)` **含 message**。而机械报告的 message 与评审输出的 message **不同**（评审会加 `[code]` 前缀）⇒ 按完整指纹求交**恒不相交**，机制必然失效。求交键取 **`contract_field` 与机械报告 `code`**（机械报告 code 形如 `intent_unexecutable`，评审 finding 的 `contract_field` 形如 `plan_preflight.intent_unexecutable` ⇒ 平台侧按 `plan_preflight.` 前缀构造同一身份）。**fingerprint 仍保留**，但只用于「同一 identity 重现」的重复标注，不再承担求交职责。
+
+**同一码对多 WI 重复登记 ⇒ 清单自带噪声**：实测前轮 4 条 finding 的 fingerprint **完全相同**（同一 preflight 码对 4 个 WI 各登记一次）⇒ 清单里 4 条一模一样的待办本身即「重复报」的放大器。
+
+**做法**
+
+1. **求交**：加载当前候选的机械报告（`session.mechanical_report_ref`，Evaluate 阶段落盘）→ 取其 findings 的内容身份 → 与前轮非 advisory findings 的内容身份求交。
+2. **去重**：同一内容身份只保留一条（保留首条），重复条目折叠为计数。
+3. **分区注入**：
+   - `unresolved_findings`（**待办**）：本轮机械报告**仍存在**同内容身份 ⇒ 附 `required_action` 与 `contract_field`。
+   - `resolved_findings`（**已关闭**）：本轮机械报告**已无**该内容身份 ⇒ 附 `resolved_by`（本轮 revision 身份）事实，**不得**再要求作者修改。
+4. 评审 prompt 的重复判定纪律段改写为：重复标注以**平台给出的分区事实**为准（`resolved_findings` 不得再作为待办重复上报），模型不靠自由文本记忆判断。
+
+**数据可达性**：当前轮机械报告 ref 在 `session.mechanical_report_ref`（Evaluate 阶段 `compare_and_save_single_candidate_evaluation` 落盘）⇒ 评审 prompt 组装时（`prompts/review_context.rs`）可直接装载。
+
+*备选与否决*：
+- 只标 `resolved_in_current_revision`、不去重不分区 → 否决：前轮清单里 4 条同 fingerprint 的重复噪声保留，评审看到的是「4 条一模一样的待办」。
+- 已解决项完全不进 prompt → 否决：与本 change 既有 Scenario「注入前轮结构化清单」的字面义务冲突（该场景要求注入前轮非 advisory findings 的 canonical identity）。
+- 让评审自己判断是否已解决 → 否决：**这正是现状**，且已被实测证伪为失败路径。
+
 ## 共享面与排序
 
 按全局串行表（处置裁决 §2.2，唯一权威），本 change 排在**序 7（最后）**。**这些 change 目录本 change 一律不改**，仅在此登记共写文件与相对次序。
@@ -124,8 +196,13 @@ L1/L2 **不再依赖模型自行 Read/Glob 补事实**；模型拿到的 prompt 
 | `src/product/work_item_split_engine/tests/prompt_contract*.rs`（`prompt_contract.rs`、`prompt_contract_weak_model.rs`、`prompt_contract_sc_revision.rs`） | `mechanicalize-plan-compile-repair`（按新契约更新既有断言，不许删测试） | **mechanicalize → isolate → 本 change** | 本 change 更新作者 prompt 与返修 prompt 的契约断言（直供段存在性、返修轮不带首轮全文）；两个 change 的断言合并在同一提交内落地，避免同一断言被两处改写 |
 | `src/product/workspace_engine/prompts/review.rs` | `close-contract-findings-before-pass`（序 6：单候选 reviewer prompt 装配与呈现口径） | **close → 本 change** | 本 change 改单候选 reviewer 的投影**呈现段**（`single_candidate_input.inc.rs`）；**不改** close 的有效必关闭判定与呈现口径，二者是不同物 |
 | `src/product/work_item_split_engine/prompts/sc_revision.rs` | `close-contract-findings-before-pass`（序 6：`:147` 的返修轮呈现口径 —— 重开后仍为 `suggestion` 的契约缺口按有效必关闭呈现） | **close → 本 change** | 本 change 改 `:27` 的**prompt 构造口径**（停止逐字节复用首轮全文）；**不改** close 在 `:147` 的 severity/呈现口径 |
+| `src/product/work_item_plan_compiler/validate.rs`、`types.rs` | `mechanicalize-plan-compile-repair`（序 1：REQ-WSC-09 唯一持有者，`types.rs:61-80` 加 `lowering_fault` 字段；`types.rs:121` 的 `ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION` 常量在其改动面内） | **mechanicalize → 本 change** | 本 change（D5 事后）只在 `acceptance_path_not_in_baseline` 的 finding message 上**追加**「基线树中同前缀最近路径」；**不改**四类 typed IR 诊断的资格清单、不改 `REPAIR_ACTION` 常量逐字文本、不改机械化判定口径 |
+| `src/product/workspace_engine/prompts/review_context.rs` | `close-contract-findings-before-pass`（序 6：`:557`「评审上下文构建入口的作用域」已在其改动面内） | **close → 本 change** | 本 change（D6）只在前轮 findings 清单内**增补**内容身份求交状态、去重与分区；**不改** close 的有效必关闭判定、severity 呈现与 owner 排除口径 |
+| `src/web/workspace_ws_handler/run/single_candidate.rs` | `mechanicalize`（序 1）/ `bound`（序 4）/ `isolate`（序 5）/ `effort` / `fix-usage-and-timing-metrics` 多方共写 | **本 change 序 7 在其后** | 本 change（D5 事前）只在该生产构造点**装载基线树并向 prompt context 传参**；**不改**教学资格判据、effort 出口、usage/timing 埋点与任何 provider 调度 |
 
 **排序结论**：决策六纯拆分 → `mechanicalize`（prompt 瘦身与其 fixture/断言）→ `isolate`（WIC ID 纪律）→ `bound` → `effort` → `close`（返修轮呈现口径）→ **本 change**（序 7，最后）。本 change 落在最后，是因为它的三处写入面（`prompts.rs:395`、`sc_revision.rs:27`、reviewer 投影呈现）都已被前序 change 改过 —— 在前序语义未稳定时并发改同一文件，会让「哪条语义变化导致了验收结果变化」无法归因。
+
+**D5 / D6 不改变全局次序**：二者是本 change 内部的增补决策，其新增写入面（`work_item_plan_compiler/validate.rs`、`prompts/review_context.rs`、`web/.../run/single_candidate.rs`）分别已被 `mechanicalize`（序 1）与 `close`（序 6）改过，而本 change 恒在序 7 ⇒ **D5 事后排在 mechanicalize 之后、D6 排在 close 之后**这一相对次序**由既有全局序天然满足**，无需新立 change、无需改串行表。D5 事前只**读** `plan_baseline_tree`（不改其判定语义），与 `single_candidate.rs:591` 的 Evaluate 期调用**同函数同来源**，不构成第二套基线口径。
 
 **无双 MODIFIED 声明**：本 change **只 MODIFIED REQ-WSC-06 一条 requirement**。与其它 active change **无同一 requirement 被双 MODIFIED**：
 
@@ -149,7 +226,10 @@ L1/L2 **不再依赖模型自行 Read/Glob 补事实**；模型拿到的 prompt 
 | **G-3** Bash 输出截断（`BASH_MAX_OUTPUT_LENGTH`） | SC author 出口 env 层 | **只登记，不夹带** |
 | **G-6** 缓存 TTL 1h（`CLAUDE_CODE_PROMPT_CACHE_TTL`） | SC author 出口 env 层 | **只登记，不夹带** |
 | G-1 effort 档位（默认 `high`） | `explicit-sc-author-effort` | 不涉及 |
+| **方案 A（引用域统一 / cross-WI）** | `isolate-plan-criterion-namespace`（REQ-WSC-06 之外的命名域隔离 owner，其 delta 已有「`done_when_refs` 引用另一 WI 的 criterion ⇒ 拒绝」场景） | **不承载**；只登记相邻关系与本次实测事实（见下） |
 | 探索预算硬约束（`[exploration_budget]` 段，方案 §6.7） | 主方案标为「次级项」，非本 change 契约 | 不引入 |
+
+**相邻关系登记（方案 A / cross-WI 实测校准）**：本次产品全流程实测（4 run，同一案例、同一份 32,609 字符 author prompt）产出 cross-WI 越界 **0/79**，而历史 run1 同一份 prompt 产出 **15 条**（`unknown_done_when_ref` 15/15 全为 cross-WI）⇒ 该失败模式在同输入下**偶发**，方案 A 的「必然触发」因果链**未被支持**。方案 A 的代码侧（结构硬检把偶发变不可能）**仍值得做**，但其优先级**不应高于**本 change 的 D5 / D6。本 change **不 MODIFIED** 方案 A 的任何 requirement，只在此登记该事实；因果链与优先级的校准落在**方案文档**（`cadence/designs/2026-11-08_技术方案_WIG生成加速与收敛性加固_v1.0.md`）与实测分析报告（`cadence/analysis-docs/2026-11-09_分析报告_WIG产品流程实测与根因锁定_v1.0.md` §5.0）。
 
 **相邻关系登记（env 层）**：G-2 / G-3 / G-6 的注入点是 **SC author 出口的 env 构造**（`explicit-sc-author-effort` 负责该出口的 env 装配机制，注入点为 `workspace_engine/prompts/sc_author_input.rs` 与 `sc_launch_policy.rs`）。本 change 改的是 **prompt 内容面**（`work_item_split_engine/prompts.rs` 的上下文供给、`sc_revision.rs` 的返修构造、reviewer 投影呈现），与 env 层**不同物**。两者唯一的耦合点是「本 change 让 prompt 变小 ⇒ 同样的探索预算下更少触发压缩」，这属**收益方向**，不构成实现耦合，也不得被写成已测结论。
 
@@ -166,6 +246,11 @@ L1/L2 **不再依赖模型自行 Read/Glob 补事实**；模型拿到的 prompt 
 | **返修轮不再重发首轮全文 ⇒ 模型忘记输出语法** | 返修轮仍须输出**完整 markdown source**，因此**输出语法面不可省**。口径是「只带与本轮相关的既有上下文」而非「零上下文」；实现上以「与本轮相关」为准绳保留必要格式约束，验收项须证明返修轮产出仍可被 parser 解析 |
 | **G-4 排序修正动到单仓路径** | 改动只在多仓分层分支；单仓分支 `entries.sort()` + `truncate(30)` 逐字不动，REQ-PLN-17 的「单仓摘要逐字不变」场景作为既有门禁持续生效 |
 | **与 close 的返修轮呈现口径互相覆盖** | 两者不同物：close 改 `:147` 的**severity 呈现**（哪些 finding 必须修），本 change 改 `:27` 的**prompt 构造**（带哪些内容）。串行次序 close → 本 change，且本 change 不改 `:147` 的语义 |
+| **D5 事前清单把上下文面顶破 32,000 B** | 真实占用 24,146 B，余量 7,854 B；清单实测 1,774 B（43 路径）⇒ 单案例装得下。但**大仓会溢出** ⇒ 清单须有**上限与成员仓保底截断**（成员仓优先，与 D3 同序），并由「作者 prompt 上下文面字节仍在既有预算内」作验收项 |
+| **D5 事后追加的候选路径可能是错的** | 候选路径来自**同一棵基线树**（校验器同源），按同前缀最近匹配给出、并列时全部列出、无匹配时如实说明无可用候选；**不得**由平台臆造路径（臆造即制造新的越界引用） |
+| **D6 求交键选错 ⇒ 恒不相交** | 指纹含 `message`，机械报告 message 与评审 message 不同 ⇒ **必须**按 `contract_field`/code 求交；delta 以独立场景把「求交键为内容身份而非 message 派生指纹」写成义务，防止实现踩坑 |
+| **D6 误把已解决项判为待办 ⇒ 仍会重复报** | 求交的数据源是**当前候选**的机械报告（`session.mechanical_report_ref`，Evaluate 阶段落盘）⇒ 与评审输入同代；同代校验既有 `ir_adapter.rs` 的 `mechanical_report_ref` 一致性检查兜底 |
+| **D5/D6 的收益未实测** | 现场证据是**现状基线**（n=2/档，preflight 失败 2/4、需人工介入 2/4），不是方案效果。所有收益数字一律标注为**待复测**，不得写成达成承诺（与「Open Questions」第 4 条同口径） |
 
 ## Migration Plan
 
@@ -175,8 +260,12 @@ L1/L2 **不再依赖模型自行 Read/Glob 补事实**；模型拿到的 prompt 
 4. **G-5 直供**：改 `budget_markdown_context` 签名与调用点，把 L1（成员仓摘要）与 L2（依赖图事实）作为平台直供段注入；L3 分配口径不变。
 5. **返修 prompt 瘦身**：改 `sc_revision.rs:27` 的构造口径（带本轮 delta + 本轮相关既有上下文，不再逐字节重发首轮全文）；同步更新 `prompt_contract_sc_revision.rs` 断言。
 6. **教学与断言合并提交**：`sc_author_teaching.rs` 与 `prompt_contract*.rs` 的改动与前序 change 的合并在同一提交内落地（见「共享面与排序」）。
+7. **D5 事后（基线树最近候选回灌）**：`work_item_plan_compiler/validate.rs` 的 `acceptance_path_not_in_baseline` finding message 追加最近候选路径；`types.rs:121` 的 `REPAIR_ACTION` 常量**逐字不动**；断言覆盖「有同前缀候选 / 无候选」两分支。
+8. **D5 事前（基线树清单直供）**：作者轮生产构造点装载基线树 → `WorkItemPlanMarkdownAuthorContext` 新增字段 → `[confirmed_context]` 新增 `baseline:` 段；**上下文面**字节仍在 32,000 B 内、**固定规范面**字节仍在 23,500 B 内（后者不应因本项变动）；无仓 issue（`Ok(None)`）不注入。
+9. **D6（前轮 finding 状态）**：`prompts/review_context.rs` 的前轮清单改为「内容身份求交 → 去重 → 分区注入」；断言覆盖「本轮仍存在 ⇒ 进待办」「本轮已消失 ⇒ 进已关闭且不得要求修改」「同身份多条 ⇒ 折叠为一条」「求交键为内容身份而非 message 指纹」。
+10. **复测**：按同一装置（串行交替、独立工作区与端口、`prepare`→等 terminated 落盘→`Enable`）复测 n≥4/臂，指标为 preflight 失败率、需人工介入率、重写轮次、墙钟、usage；**基线数字取本次实测**（preflight 失败 2/4、需人工介入 2/4、墙钟中位数 520.8s / 788.8s）。
 
-**回退**：可逐项回退（G-4 排序、G-5 直供、返修 prompt 构造、投影裁剪互相独立）。回退只回到「作者 prompt 更大 / reviewer 投影更全」的既有形态，**不得**回退到「投影静默裁剪且无 delta」或「返修轮逐字节重发且无对账」的状态 —— 那两个形态本 change 的存在理由正是要消除它们。
+**回退**：可逐项回退（G-4 排序、G-5 直供、返修 prompt 构造、投影裁剪、**D5 事前 / D5 事后 / D6** 互相独立）。回退只回到「作者 prompt 更大 / reviewer 投影更全」的既有形态，**不得**回退到「投影静默裁剪且无 delta」或「返修轮逐字节重发且无对账」的状态 —— 那两个形态本 change 的存在理由正是要消除它们。D5 / D6 的回退**各自独立**：D5 事后回退不牵连 D5 事前（一个是报错 message，一个是 prompt 内容），D6 回退不影响前轮清单的注入义务（只回到「不给状态、不去重」的现状）。
 
 ## Open Questions
 

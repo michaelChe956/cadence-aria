@@ -21,6 +21,29 @@
 
 本 change 即承载方。
 
+### 缺口三：作者拿不到 plan 基线树的事实（纪律已在，事实不在）
+
+**产品全流程实测**（4 run，同一真实案例、串行交替、独立工作区与端口；证据见 `cadence/analysis-docs/2026-11-09_分析报告_WIG产品流程实测与根因锁定_v1.0.md`）：
+
+- 作者 prompt **有纪律、无事实**：首轮 32,609 字符 / 重驱 34,173 字符，**两者都不含**基线树路径清单（`base_tree` / `tree_paths` / `available_paths` 全无命中）；prompt 里的仓库路径只是来自 issue/story/design 的零散示例。
+- 真实案例 frontend 基线树**只有 11 个路径且完全没有 `tests/` 目录**，作者却写了 `frontend/tests/integration/notice-delete-e2e.mjs` 与 `/tmp/notice-delete-e2e.mjs` ⇒ **必然**越界。
+- 越界被 preflight 机械校验拦下（`acceptance_path_not_in_baseline`）⇒ 教学重驱；实测 **2/4 run** 命中，其中 **1/4 最终升级 `human_required`**（自动预算耗尽，等人工）。
+- 教学重驱本身**没有修改对象**：实测两次重驱的工具调用均为 **0**（26.4s / 152.4s）⇒ 模型不查仓库、只能盲改。
+
+⇒ 既有 Scenario「验收路径基线纪律」（教学义务）**已在代码里**（`work_item_split_engine/prompts.rs:347`），**教学单靠不足** ⇒ 需要**把事实给出去**，而不是再加一段教学。
+
+### 缺口四：前轮 findings 清单不含「本轮是否仍存在」，重复报错升级人工
+
+实测（`xhigh-4324`）：
+
+1. 重驱**确实修好了**（`intent_target_codebase` 改为授权逻辑代码库 ID，两个 source revision 哈希不同）；
+2. **机械侧已清零**（第二版机械报告绑定新 revision，`intent_unexecutable` 消失）；
+3. 评审却**重复报 4 条同码 must_fix** ⇒ 平台自带的「不要无限第 N 次 revise」纪律被动触发 ⇒ 改判 `human_required` ⇒ session 终态 `stopped_needs_human`（**等人工介入**）。
+
+原因：`### Previous Review Round Findings` 把上一轮 finding 原样列为待办，**不含**「本轮是否仍存在」的机械事实 ⇒ 评审只能靠自由文本判断「是否已解决」⇒ 被上一轮锚定。既有 Scenario「重复判定不靠记忆」要求 reviewer **依据注入清单**判重，但清单里**没有**可判的事实。
+
+⇒ 两个缺口的共同形状：**平台已持有事实（基线树 / 当前机械报告），但没把它交给需要它的那一环**。这与本 change 既有主题（"prompt 承载什么、由谁供给"）**同构**，故一并由本 change 承载，不另立。
+
 ## What Changes
 
 - **reviewer 投影最小内容重定义（X2）**：只读契约覆盖投影的呈现内容收窄为四类 —— 能力覆盖缺口（gaps-only）、handoff 消费闭环、**同仓**写范围冲突、Projection Validation Report；显式收窄主规格 `:377` 的无仓限定措辞并写明收窄理由，不以「信息仍可从 CCC 推导」代替收窄。
@@ -28,6 +51,10 @@
 - **成员仓摘要排序修正（G-4）**：`work_item_split_engine/context.rs:233-234` 改为成员仓优先，成员仓不得再被点文件/点目录条目挤掉；单仓摘要口径维持 REQ-PLN-17 的逐字不变义务。
 - **返修 prompt 不复用首轮全文**：返修轮只带**本轮 delta + 与本轮相关的既有上下文**，MUST NOT 逐字节重发首轮完整 prompt；本轮 findings 回灌与逐条硬性修复指令保持注入，findings 的 `required_action` 所指向的 section 与其依赖上下文在返修轮仍须可得。
 - **规格落点**：以上四项写成一个 **MODIFIED REQ-WSC-06**（`work-item-plan-single-candidate`）：主规格该 requirement 的**原有场景标题与正文逐字保留**，只追加场景 + 改写描述段。
+- **【新增 · 缺口三】基线树事实直供（事前）+ 越界报错回灌最近候选（事后）**：
+  - **事前**：作者轮启动前由平台从**校验器同源**的 plan 基线树装载可用路径清单，作为 **L1 的扩展**注入 `[confirmed_context]`（落在**上下文面**，不动固定规范面预算常量）；无仓 issue 不注入；装载失败**不阻断**作者轮（既有 fail-closed 点仍在 Evaluate 阶段）；返修轮携带**同一份**清单。
+  - **事后**：`acceptance_path_not_in_baseline` 的 Error finding message 追加**基线树中同前缀最近的现存路径**（无候选时如实说明），给教学重驱一个具体修改对象；`ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION` 常量**逐字不动**。
+- **【新增 · 缺口四】前轮 findings 清单附本轮机械复算状态并分区**：平台以**内容身份**（`contract_field` vs 机械报告 `code`）对当前候选机械报告求交 → 同内容身份去重 → 清单分「待办 / 已关闭」两区注入；**「是否已解决」的判定主体从模型移到平台**（模型不得依据清单文本自行推断）；fingerprint 仍保留但只承担重复标注职责。
 
 ## Non-Goals（本 change 明确不做）
 
@@ -38,6 +65,8 @@
 - 不 bump 任何预算常量（author prompt 质量预算 23,500 B、`WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES` 等）；新增直供内容须在既有预算内成立。
 - 不触碰 `isolate-plan-criterion-namespace` 的命名域与指纹代际面，不触碰 `close-contract-findings-before-pass` 的有效必关闭判定面。
 - 本轮**只出规划产物**，不改 `src/**`。
+- **不做方案 A（引用域统一 / cross-WI）** —— 该缺口由 `isolate-plan-criterion-namespace` 承载；本次实测（同输入下 cross-WI **0/79**，而历史 run1 同一份 prompt 产出 15 条）说明其「必然触发」因果链**未被支持**，属**优先级校准**，不属本 change 范围（事实登记见 `design.md`「不承载什么」与实测分析报告 §5.0）。
+- **不改 effort 档位判定** —— 实测 n=2/档未观测到收敛性或产物质量差异（收敛性各项计数差值为 0），故 effort 档**不作为本轮优化杠杆**；该事实只登记，不改 `explicit-sc-author-effort` 的任何条款。
 
 ## Capabilities
 
@@ -56,5 +85,6 @@
 - **author 输入面**：`work_item_split_engine/context.rs`（成员仓摘要排序）、`work_item_split_engine/prompts.rs`（`budget_markdown_context` 签名与调用点）、`work_item_split_engine/prompts/sc_revision.rs`（返修 prompt 构造）。
 - **reviewer 输入面**：`workspace_engine/prompts/review_parts/single_candidate_input.inc.rs`（投影与供给/需求段的呈现面）、`workspace_engine/prompts/review.rs`（单候选 reviewer prompt 装配）。
 - **规格面**：`openspec/specs/work-item-plan-single-candidate/spec.md` 的 REQ-WSC-06（归档后生效）；`REQ-PLN-17` 的单仓逐字不变义务**保持不变**、不被本 change 修改。
+- **【新增写入面】**（D5 / D6，见 `design.md`「共享面与排序」的补登记行）：`src/product/work_item_plan_compiler/validate.rs`（D5 事后）、`src/product/workspace_engine/prompts/review_context.rs`（D6）、`src/web/workspace_ws_handler/run/single_candidate.rs`（D5 事前装载点）、`src/product/work_item_split_engine/prompts.rs` 的 `WorkItemPlanMarkdownAuthorContext`（D5 事前新增可选字段）。四者分别排在 `mechanicalize`（序 1）与 `close`（序 6）之后 —— 本 change 恒在序 7 ⇒ 相对次序由既有全局序天然满足。
 - **共享文件与串行次序**：见 `design.md`「共享面与排序」—— 本 change 排在全局序 **7（最后）**；与 `isolate-plan-criterion-namespace` 共享 `work_item_split_engine/prompts.rs`（isolate `:185,:306` 的 WIC 命名纪律 ↔ 本 change `:395` 的上下文供给），次序 **isolate → 本 change**；与 `mechanicalize-plan-compile-repair` 共享 `sc_author_teaching.rs` 与 `prompt_contract*.rs` fixtures，次序 **mechanicalize → isolate → 本 change**；与 `close-contract-findings-before-pass` 共享 `prompts/review.rs` 与 `sc_revision.rs`（close `:147` 的呈现口径 ↔ 本 change `:27` 的 prompt 复用），次序 **close → 本 change**。
 - **不在本 change 范围内**：G-2 / G-3 / G-6（SC author 出口 env 层）、G-1（effort 档位）、教学窗口与机械处置面（`bound-sc-generation-teaching` / `mechanicalize-plan-compile-repair`）、契约类 finding 免阻断闭环（`close-contract-findings-before-pass`）。

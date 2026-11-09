@@ -4,7 +4,7 @@
 
 ### Requirement: prompt 分层职责（REQ-WSC-06）
 
-系统 SHALL 使 workitem author/reviewer prompt 仅承载产物规格（任务上下文、输出语法、边界约束、判例 few-shot），SHALL NOT 重复目标仓库已注入的通用行为教学（Superpowers/OpenSpec/项目规则）。reviewer 复评前获得的只读契约覆盖投影 SHALL 以最小内容交付：能力覆盖缺口（gaps-only）、handoff 消费闭环、同仓写范围冲突与 PVR；写范围冲突事实 SHALL 限于同一目标仓内（跨仓 forbidden/exclusive 在 multi-repo 场景为假阳性，实测 29 条中 27 条）。author 上下文 SHALL 分级供给：L1 成员仓摘要与 L2 依赖图事实由平台直接注入 prompt，MUST NOT 依赖模型自行 Read/Glob 补事实；L3 维持既有预算约束。返修轮 prompt SHALL 只携带本轮 delta 与本轮相关既有上下文，MUST NOT 逐字节重发首轮完整 prompt。
+系统 SHALL 使 workitem author/reviewer prompt 仅承载产物规格（任务上下文、输出语法、边界约束、判例 few-shot），SHALL NOT 重复目标仓库已注入的通用行为教学（Superpowers/OpenSpec/项目规则）。reviewer 复评前获得的只读契约覆盖投影 SHALL 以最小内容交付：能力覆盖缺口（gaps-only）、handoff 消费闭环、同仓写范围冲突与 PVR；写范围冲突事实 SHALL 限于同一目标仓内（跨仓 forbidden/exclusive 在 multi-repo 场景为假阳性，实测 29 条中 27 条）。author 上下文 SHALL 分级供给：L1 成员仓摘要与 L2 依赖图事实由平台直接注入 prompt，MUST NOT 依赖模型自行 Read/Glob 补事实；L3 维持既有预算约束。**L1 SHALL 进一步包含 plan 基线树可用路径清单**（由平台在校验器同源的基线树上装载后直供），MUST NOT 以纪律文案替代该事实 —— 实测纪律已在 prompt 内而越界率仍达 50%（作者引用了基线树内不存在的目录）。返修轮 prompt SHALL 只携带本轮 delta 与本轮相关既有上下文，MUST NOT 逐字节重发首轮完整 prompt。**复评前轮 findings 清单 SHALL 附本轮机械复算状态并按内容身份去重分区**（待办 / 已关闭）：判定主体 SHALL 为平台对当前候选机械报告的复算，SHALL NOT 交由模型依据自由文本判断某前轮 finding 是否仍存在。
 
 #### Scenario: 弱模型借助判例避免已知矛盾
 
@@ -139,12 +139,12 @@
 #### Scenario: 注入前轮结构化清单
 
 - **WHEN** reviewer prompt（单候选复评）组装
-- **THEN** reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每轮注入前一轮非 advisory findings 的 canonical identity（结构化 key/fingerprint）、category、required_action 与当前候选 revision
+- **THEN** reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每轮注入前一轮非 advisory findings 的 canonical identity（结构化 key/fingerprint）、category、required_action 与当前候选 revision；**并 SHALL 附本轮机械复算状态**（该 finding 在当前候选是否仍存在）**且按内容身份去重**（同一内容身份只保留一条，重复条目折叠为计数）
 
 #### Scenario: 重复判定不靠记忆
 
 - **WHEN** reviewer 复评遇到同 identity 重现的 finding
-- **THEN** reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆
+- **THEN** reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆；**「该前轮 finding 在本轮是否仍存在」SHALL 以平台给出的复算分区事实为准**，SHALL NOT 由模型依据清单文本自行推断
 
 #### Scenario: 投影最小内容为缺口与消费闭环
 
@@ -180,3 +180,33 @@
 
 - **WHEN** 返修轮 prompt 携带上一版 source 与本轮 reviewer findings
 - **THEN** findings 的 required_action 所指向的 section 及其依赖上下文 SHALL 在返修轮可得，MUST NOT 因不再重发首轮完整 prompt 而使修复动作失去可执行对象
+
+#### Scenario: 基线树事实直供
+
+- **WHEN** 平台构造单候选 author prompt（首轮与返修轮均适用）
+- **THEN** 平台 SHALL 在**作者轮启动前**从校验器同源的 plan 基线树（`git ls-tree -r --name-only refs/heads/<基线分支>`）装载可用路径清单并作为 L1 的一部分注入 prompt；清单 SHALL 按成员仓分组、成员仓优先；**基线树不可得（无仓 issue）时该段 SHALL 缺席**且零回归；**基线树装载失败 SHALL NOT 阻断作者轮**（既有 fail-closed 点仍在 Evaluate 阶段）
+
+#### Scenario: 基线树清单不得占用固定规范面预算
+
+- **WHEN** 注入基线树可用路径清单
+- **THEN** 清单 SHALL 落在**上下文面**（既有 `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES` 分配口径内），MUST NOT 挤占固定规范面质量预算（`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES`，实测余量仅 18~40 B）；清单超上限时 SHALL 按成员仓保底截断，MUST NOT 使上下文面超预算
+
+#### Scenario: 越界路径回灌最近候选
+
+- **WHEN** 平台判定某验收标准引用的仓库内路径不存在于 plan 基线树
+- **THEN** 该 Error 级 finding 的 message SHALL 附**基线树中同前缀最近的现存路径**（并列时全部列出；无同前缀候选时如实说明无可用候选）；候选路径 MUST 取自同一棵基线树，MUST NOT 由平台臆造路径
+
+#### Scenario: 前轮 finding 状态求交按内容身份
+
+- **WHEN** 平台为复评 prompt 计算前轮 findings 的本轮状态
+- **THEN** 求交 SHALL 以**内容身份**（前轮 finding 的 `contract_field` 与当前候选机械报告 finding 的 `code`）为键，MUST NOT 以含 `message` 的指纹为键（机械报告 message 与评审输出 message 不同，按指纹求交恒不相交）；求交数据源 SHALL 为**当前候选**的机械报告（与评审输入同代）
+
+#### Scenario: 前轮 finding 分区注入
+
+- **WHEN** reviewer prompt（单候选复评）注入前轮 findings 清单
+- **THEN** 清单 SHALL 分为**待办**（当前候选机械报告仍存在同内容身份，附 `required_action` 与 `contract_field`）与**已关闭**（当前候选机械报告已无该内容身份，附关闭依据）两区；**已关闭区条目 MUST NOT 要求作者再次修改**，SHALL NOT 触发「无可改对象」式的重复上报
+
+#### Scenario: 前轮清单同身份去重
+
+- **WHEN** 前轮非 advisory findings 含多条同内容身份条目（同一机械码对多个 Work Item 各登记一次）
+- **THEN** 清单 SHALL 只保留一条并折叠为计数；MUST NOT 以多条重复条目呈现（实测同一 preflight 码曾产生 4 条完全相同的待办）
