@@ -53,12 +53,19 @@ PATH 上生效的命令若不来自本次安装的前缀，提示「把 `<prefix
 
 ## 3. 验证
 
-- 后端：`cargo test --lib provider_installation`（含新增回归用例：
-  安装必须落到 PATH 上生效的 CLI 所在前缀）。
-- 前端：`pnpm vitest --run`（ProviderCapabilityCard / ProviderInstallActionButton
-  新增布局契约用例）。
+- 后端：`cargo test --lib provider_installation`（43 项全绿，含新增回归用例：
+  安装必须落到 PATH 上生效的 CLI 所在前缀）；`cargo test --lib` 全量
+  6071 项全绿。
+- 前端：`pnpm vitest --run`（272 文件 / 2779 项全绿，含 3 条新布局契约用例）。
 - 界面：vite 预览 + Playwright 截图核对（修复前「核验」与「更新」顶边相差
-  13px；修复后同一 y=160）。
-- 真实更新：按解析出的生效前缀执行
-  `npm install -g --prefix <fnm installation> @anthropic-ai/claude-code@latest`
-  ⇒ `claude --version` 由 2.1.307 变为 2.1.319。
+  13px；修复后同一 y=160，状态文案落在按钮左缘）。
+- 真实端到端（`aria web` 真服务 + 真 HTTP）：
+  - `POST /api/providers/codex/install` → 作业 `completed`，
+    `installed_version=0.167.0`、`path_hint=null`；
+    `codex --version` 由 0.166.0 变 0.167.0；随后
+    `GET /api/providers/install-targets` 显示 codex `action=none`（更新按钮消失）。
+  - `POST /api/providers/pi/install` → `installed_version=1.5.0`；
+    `pi --version` 由 1.3.0 变 1.5.0。
+  - `claude` 按解析出的生效前缀实跑
+    `npm install -g --prefix <fnm installation> @anthropic-ai/claude-code@latest`
+    ⇒ `claude --version` 由 2.1.307 变 2.1.319。
