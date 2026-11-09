@@ -125,6 +125,9 @@ mod candidate_attempt_metrics_api;
 mod evidence_query;
 #[path = "it_web/issue_delivery_summary.rs"]
 mod issue_delivery_summary;
+// 知识库 HTTP 面（LC 知识库模块 Task 7）。
+#[path = "it_web/knowledge_base_http.rs"]
+mod knowledge_base_http;
 #[path = "it_web/pointer_publication.rs"]
 mod pointer_publication;
 #[path = "it_web/provider_capability_fixture.rs"]
