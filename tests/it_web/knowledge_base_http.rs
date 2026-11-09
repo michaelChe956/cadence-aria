@@ -588,8 +588,7 @@ async fn create_bootstrap_operation_returns_pollable_operation() {
     .await
     .expect("knowledge base operation must settle within 10s");
     assert!(
-        ["completed", "failed", "cancelled"]
-            .contains(&settled.as_str().unwrap_or_default()),
+        ["completed", "failed", "cancelled"].contains(&settled.as_str().unwrap_or_default()),
         "unexpected terminal status: {settled}"
     );
 }

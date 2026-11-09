@@ -540,33 +540,32 @@ fn lint_configuration_scope(
     let declared = values
         .get(CONFIGURATION_CHANGE)
         .and_then(|per_document| per_document.get("Manifest 配置领域状态"));
-    if let Some(declared) = declared {
-        if let Some(choice) = single_choice(declared, &CONFIGURATION_SCOPE_STATUSES) {
-            if choice != actual {
-                violations.push(mk(
-                    "scope_mismatch",
-                    Some(CONFIGURATION_CHANGE),
-                    Some("Manifest 配置领域状态"),
-                    format!(
-                        "变更包声明为「{choice}」，Manifest scope.configurations.status 为「{actual}」"
-                    ),
-                ));
-            }
-        }
+    if let Some(declared) = declared
+        && let Some(choice) = single_choice(declared, &CONFIGURATION_SCOPE_STATUSES)
+        && choice != actual
+    {
+        violations.push(mk(
+            "scope_mismatch",
+            Some(CONFIGURATION_CHANGE),
+            Some("Manifest 配置领域状态"),
+            format!(
+                "变更包声明为「{choice}」，Manifest scope.configurations.status 为「{actual}」"
+            ),
+        ));
     }
     if actual == NOT_APPLICABLE {
         let status = values
             .get(CONFIGURATION_CHANGE)
             .and_then(|per_document| per_document.get("变更状态"));
-        if let Some(status) = status {
-            if single_choice(status, &CHANGE_STATUSES) != Some(CHANGE_STATUSES[1]) {
-                violations.push(mk(
-                    "scope_mismatch",
-                    Some(CONFIGURATION_CHANGE),
-                    Some("变更状态"),
-                    "Manifest 配置领域为「不适用」时变更状态必须为「无变更」".to_string(),
-                ));
-            }
+        if let Some(status) = status
+            && single_choice(status, &CHANGE_STATUSES) != Some(CHANGE_STATUSES[1])
+        {
+            violations.push(mk(
+                "scope_mismatch",
+                Some(CONFIGURATION_CHANGE),
+                Some("变更状态"),
+                "Manifest 配置领域为「不适用」时变更状态必须为「无变更」".to_string(),
+            ));
         }
         let reason = values
             .get(CONFIGURATION_CHANGE)

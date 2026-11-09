@@ -523,6 +523,9 @@ impl KnowledgeBaseCoordinator {
     /// 确认 provider 已停止 ⇒ 审计标记为不确定（下界），由取消收口按
     /// fail-closed 留痕。后快照本身失败时，成功 turn fail-closed，失败/取消
     /// turn 保留原始原因。
+    // 错误变体承载失败明细（主错误 + 越界路径 + 审计可信度），体积偏大；
+    // 与仓内既有错误类型一致的处理方式，按值上抛不做装箱。
+    #[allow(clippy::result_large_err)]
     async fn drive(
         &self,
         operation: &KnowledgeBaseOperation,

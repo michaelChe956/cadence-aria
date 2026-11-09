@@ -614,7 +614,7 @@ update:
 
     #[test]
     fn manifest_snapshot_treats_non_utf8_as_version_unknown() {
-        let kb_root = write_manifest_fixture("non-utf8", &[0xff_u8, 0xfe, 0x00, 0xd8]);
+        let kb_root = write_manifest_fixture("non-utf8", [0xff_u8, 0xfe, 0x00, 0xd8]);
         let snapshot = read_manifest(&kb_root).expect("读取非 UTF-8 manifest 不应报错");
         assert!(snapshot.exists);
         assert_eq!(snapshot.schema_version, None);

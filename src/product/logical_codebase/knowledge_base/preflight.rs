@@ -268,10 +268,10 @@ fn domain_status(domain: &str, text: &str) -> Option<String> {
             in_section = heading.starts_with(domain);
         } else if in_section {
             let trimmed = line.trim_start_matches('-').trim();
-            if let Some(rest) = trimmed.strip_prefix("状态") {
-                if let Some(value) = rest.strip_prefix('：').or_else(|| rest.strip_prefix(':')) {
-                    return Some(value.trim().to_string());
-                }
+            if let Some(rest) = trimmed.strip_prefix("状态")
+                && let Some(value) = rest.strip_prefix('：').or_else(|| rest.strip_prefix(':'))
+            {
+                return Some(value.trim().to_string());
             }
         }
     }

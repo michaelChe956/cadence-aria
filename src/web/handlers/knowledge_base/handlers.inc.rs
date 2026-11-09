@@ -778,7 +778,7 @@ pub async fn lint_knowledge_base_change_package(
     let fields = lint
         .fields
         .iter()
-        .map(|field| change_package_field_status_dto(field))
+        .map(change_package_field_status_dto)
         .collect::<Vec<_>>();
     Ok(Json(json!({
         "violations": lint.violations.iter().map(change_package_violation_dto).collect::<Vec<_>>(),
