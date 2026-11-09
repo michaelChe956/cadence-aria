@@ -156,6 +156,7 @@
   - **4317 只做发布态回归**：开发期问题全部测完后，owner 用 4317 再走一遍，验证「重建 dist → 内嵌资源 → origin 白名单 → 生效栈」这条发布链。
   - 构建顺序不可颠倒：`pnpm -C web build` → `cargo build` → 只经 `/tmp/aria-deploy/start.sh` 重启；顺序错了就内嵌旧 dist ⇒ 表现为「两套 UI」。
   - 两端口 UI 不一致时**先取证再下结论**：取 4317 内嵌资源名（`curl -s http://127.0.0.1:4317/ | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js'`）与 `ls web/dist/assets/` 比对 ⇒ 不一致 = dist 过期，不是代码错。
+  - 🔴 **开发期 hooks 错位（`Rendered more hooks than during the previous render`）是 Fast Refresh 产物**：同一 worktree 里其它会话改动经 HMR 热替换进已挂载组件（增删 hooks 时）⇒ 旧实例 hook 列表前后不一致。**处置 = 硬刷新（Ctrl+Shift+R）**，不改代码、不重建 dist、不重发二进制；取证看 vite 日志的 `hmr update` + 「新开标签是否复现」。硬刷新后仍复现才按真实缺陷排查。
   - 汇报/取证/缺陷单必须写清是哪个端口。完整规则见 `cadence/project-rules/dev-test-port-policy.md`。
 
 - **本地服务部署与启动规则（4317 共享实例）（强制）**
