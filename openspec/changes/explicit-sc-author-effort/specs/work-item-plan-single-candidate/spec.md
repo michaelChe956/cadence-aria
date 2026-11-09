@@ -72,6 +72,13 @@
 - **THEN** 该首次生成即**真实新生成**，SHALL 适用当前部署默认（本期为 `high`）；MUST NOT 被追溯适用于既有 session record 上的重臂或恢复
 
 #### Scenario: 冻结策略的 policy_version 不可识别时零启动
-
 - **WHEN** 冻结策略引用的 policy_version 在当前部署不可识别
 - **THEN** 平台 SHALL 零 provider 启动并保留原记录，MUST NOT 回落当前部署默认或宿主继承继续启动，MUST NOT 改写原记录中的冻结事实
+
+#### Scenario: 上下文与缓存控制变量同属冻结策略且只作用于 SC author 出口
+- **WHEN** 平台为同一原运行装配 `MAX_MCP_OUTPUT_TOKENS`、`BASH_MAX_OUTPUT_LENGTH` 与 `CLAUDE_CODE_PROMPT_CACHE_TTL`
+- **THEN** 三者 SHALL 与 effort 档位同属该原运行的**冻结执行策略**，初轮、compile/IR/structure 教学、native resume/fresh 共用**同一组取值**，MUST NOT 每次启动重读宿主或平台新默认；该组变量 SHALL 只在 Claude SingleCandidate author 出口生效，其它出口（Story/Design 通用 author、Story/Design 修订、reviewer、coding）MUST NOT 设定；`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` 本期 MUST NOT 设定
+
+#### Scenario: 控制变量取值变更只对新生成授权生效
+- **WHEN** 平台调整了输出上限或缓存 TTL 的取值
+- **THEN** 变更 SHALL 只对**新的合法生成授权**（新建 session record）生效，在途运行的既有取值 MUST NOT 被改写，MUST NOT 借此重置预算或清空预留

@@ -41,7 +41,13 @@ WIG（Work Item Generation）链路的 Claude SingleCandidate author 目前**没
 |---|---|
 | `work-item-plan-single-candidate` | **ADDED** REQ-WSC-29（SC author 显式 effort 冻结策略：默认 high、作用域收窄、冻结贯穿教学/resume/fresh、存量未知披露、requested/effective 分离；含「原运行 vs 真实新生成」界定与 policy_version 不可识别时的零启动 fail-closed） |
 | `workspace-session-resume-recovery` | **MODIFIED**「明确 fresh 只换 native 会话」（内部执行策略亦按原运行冻结；fresh 不换 effort、不重置授权/预算；存量无冻结事实不追溯改档，下一次真实新生成才用新默认；兼容例外写入） |
-| `session-policy-envelope` | **MODIFIED** REQ-ENV-HOST-01（追加**受信执行策略变量例外**：provider 官方声明的单一档位变量 MAY 在**调用方显式 env map 覆盖层**内设定为受控值；其余环境、凭据、隔离与网络命名空间不受影响。主规格原文与既有场景逐字保留） |
+| `session-policy-envelope` | **MODIFIED** REQ-ENV-HOST-01（追加**受信 provider 控制变量例外**：provider 官方声明的推理档位 / 工具输出上限 / 缓存 TTL 三类 MAY 在**调用方显式 env map 覆盖层**内设定为受控值；档位类不依模型标签或宿主设置重算、输出上限类只收紧、缓存 TTL 类不短于内置默认；凭据、隔离、网络命名空间、宿主路径、模型与账号选择、代理与路由、遥测开关一律不获例外。主规格原文与既有场景逐字保留） |
+
+## G-2 / G-3 / G-6：上下文膨胀与缓存 TTL（并入本 change 的 SC author 出口 env 策略）
+
+- **G-2** `MAX_MCP_OUTPUT_TOKENS=4000`、**G-3** `BASH_MAX_OUTPUT_LENGTH=8000`、**G-6** `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`，与 effort 档位**共用同一注入点**（`prompts/sc_launch_policy.rs`）与**同一冻结来源**（该原运行的冻结执行策略），故并入本 change，不另立。
+- **只压 MCP + Bash**：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` 本期**不设**（默认值与截断行为未确认）；**reviewer 出口本期不设**（reviewer 走 codex 不吃 claude CLI 的 env，其真实消耗被低估 6.06× ⇒ 先修 F-2）；Story/Design 通用 author、Story/Design 修订、coding 出口一律不设。
+- **收益不作承诺**：TTL 1h 的价差无法从本地数据核算（`cache_creation_input_tokens` 恒为 0）；G-2/G-3 的字符数是基线对照值，实施后须复测。
 
 ## 注入点事实（供主方案对齐）
 

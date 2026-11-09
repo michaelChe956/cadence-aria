@@ -110,7 +110,7 @@
 
 ### 决策 6：env 注入点
 
-- **注入点 = SC author 出口模块**：新增 `src/product/workspace_engine/prompts/sc_author_input.rs`（承接 `prompts.rs:464-548` 的 SC author 段）与 `src/product/workspace_engine/prompts/sc_launch_policy.rs`（把冻结策略转成 caller env，即 `CLAUDE_CODE_EFFORT_LEVEL=high`），由 SC author 出口在装配 `StreamingProviderInput.env_vars` 时写入。
+- **注入点 = SC author 出口模块**：新增 `src/product/workspace_engine/prompts/sc_author_input.rs`（承接 `prompts.rs:464-548` 的 SC author 段）与 `src/product/workspace_engine/prompts/sc_launch_policy.rs`（把冻结策略转成 caller env：`CLAUDE_CODE_EFFORT_LEVEL=high` 与 G-2/G-3/G-6 三变量，见决策 8），由 SC author 出口在装配 `StreamingProviderInput.env_vars` 时写入。
 - **注入点不是** `src/cross_cutting/claude_code_provider/mod.rs`（adapter 硬编码路径，裁决 §3.3 明文否决，会静默影响所有 Claude 角色/使用者）；**注入点也不是** `src/product/workspace_engine/prompts.rs:545`（那是**共用 builder 的空 env 现状位置**，是本 change 要**被替换/分离**的对象，不是注入实现位置）。
 - 注入**只发生在 SC author 出口**；其它出口 env 保持空。
 - 不改 adapter：`gateway_start.rs:648-678` / `provider_gateway.rs:1998-2001` 已保证 caller env 原样透传为显式覆盖层；Claude direct / validated spawn 已消费 `input.env_vars`。
@@ -118,17 +118,49 @@
 - **本期不改的既有出口**（防止扩大 G 范围）：`prompts.rs:419`（其它 author 出口）、`prompts/review_parts/single_candidate_input.inc.rs:315`（reviewer 出口）、`coding_models/provider_config.rs:90-106`（coding 转换），以及**新增** `src/product/workspace_engine/prompts/revision.rs:96`（Story/Design 修订出口，同样是 `env_vars: BTreeMap::new()`）。
 - **retry 继承原出口**：`src/product/workspace_engine/provider_drive/artifact_retry.rs:248-263` 的 `build_artifact_retry_input` 以 `base_input.clone()` 为基底改写 prompt，**不重建 env**，因此 retry 轮继承原出口已装配的 env（含冻结策略变量），MUST NOT 另行注入或清空。
 
+### 决策 6-a：G-2 / G-3 / G-6 —— 上下文膨胀与缓存 TTL（主方案 §6.4 / §6.5）
+
+三项与 G-1 共用**同一个注入点**（决策 6 的 `prompts/sc_launch_policy.rs`），故并入本 change，不另立。
+
+| 项 | 变量与取值 | 依据（主方案） | 收益（**须复测**，非已测结论） |
+|---|---|---|---|
+- 本 change **新增** delta `specs/session-policy-envelope/spec.md`，以 `## MODIFIED Requirements` 修改 REQ-ENV-HOST-01，**追加**显式例外（**主规格原文与既有 3 个场景逐字保留**；例外类已按 G-2/G-3/G-6 的并入从「单一档位变量」扩为有界类「受信 provider 控制变量」，见决策 8）：
+
+  > 受信 provider 控制变量（provider 官方声明的推理档位、单次工具输出上限或前缀缓存 TTL 变量）MAY 由平台仅在调用方显式 env map 覆盖层内设定为该 provider 的受控值；MUST NOT 构造或覆盖其余子进程环境，MUST NOT 涉及凭据、隔离、网络命名空间、宿主路径、模型与账号选择、代理与路由、遥测开关；档位类 MUST NOT 依模型标签或宿主设置重算，输出上限类 MUST 只收紧，缓存 TTL 类 MUST NOT 短于 provider 内置默认。原「平台不构造、不覆盖」义务对该类以外环境不变。
+
+- 同步新增场景：「受信执行策略变量只在覆盖层内设定」（WHEN/THEN 扩展覆盖三类变量与三类约束）、「受信 provider 控制变量清单与三类约束」、「输出上限只收紧不放宽」、「缓存 TTL 不得短于内置默认」，以及凭据 / 隔离 / 网络命名空间 / 宿主路径 / 模型与账号选择 / 代理与路由 / 遥测开关**各一条拒绝场景**；「运行环境与清理边界」场景的最小收窄括注（「受信执行策略变量除外」）沿用上一轮原文，不回退。
+- 描述段合规（处置裁决 §2.1）：主规格原文段（222 字符，逐字保留）+ 例外段合计 ≤500 字符（现 492）；例外类细则全部下沉场景，MUST 约束零删减。
+
+1. **只压 MCP + Bash**：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`（Read 上限）**本期不设** —— 默认值与截断行为**未确认**，标为**待实测**（Read 读的是政策正文 42 KB，截断可能让模型读不全）。
+2. **reviewer 链路本期不设**：reviewer 走 codex（不吃 claude CLI 的 env），实测 4m12s、**未触发压缩**；其真实消耗被低估 6.06× ⇒ **先修 F-2 再谈优化**。即便将来要设，落点是 `prompts/review_parts/single_candidate_input.inc.rs:315`，**不是** `prompts.rs:419`。
+3. **不误伤其它出口**：Story/Design 通用 author（`prompts.rs:419`）、Story/Design 修订（`prompts/revision.rs:96`）、coding 转换（`coding_models/provider_config.rs:90-106`）**一律不设**（决策 6 的「本期不改的既有出口」清单）。
+4. **收益不得写成确定事实**：TTL 1h 的 cache write 单价高于 5m，且本次 `cache_creation_input_tokens` **恒为 0**（该 provider 未透传 cache write 计数）⇒ **价差无法从本地数据核算，净收益需实测**。G-2/G-3 的字符数同理是**基线对照值**，实施后须复测。
+
+**冻结语义（与 G-1 同源）**：这三项 env 属裁决 §1.5 的**冻结执行策略摘要**范畴 ⇒ 同一原运行的初轮、compile/IR/structure 教学、native resume/fresh **共用同一组 env**（裁决 §3.4「由冻结配置生成 env……不是每次启动重新读取宿主或平台新默认」）。**改这三项的值只对新的合法生成授权生效**，不改在途运行、不借改档重置预算。
+
+**例外类的有界扩写**：这三项变量不是「档位变量」，注入它们需要把主规格 REQ-ENV-HOST-01 的例外从「单一档位变量」扩为有界类「**受信 provider 控制变量**」（推理档位 / 工具输出上限 / 缓存 TTL 三类）。扩写已在 `specs/session-policy-envelope/spec.md` 落地：三类各自的约束（档位类不依模型标签或宿主设置重算、输出上限类**只收紧**、缓存 TTL 类**不短于** provider 内置默认）、以及凭据/隔离/网络命名空间/宿主路径/模型与账号选择/代理与路由/遥测开关**一律不获例外**。原「平台不构造、不覆盖子进程环境」的义务对其余环境保持不变。
+
+**备选与否决**：
+
+| 备选 | 否决理由 |
+|---|---|
+| 在 adapter（`claude_code_provider/mod.rs`）硬编码这三个 env | 静默影响所有 Claude 角色/使用者，破坏作用域与回退粒度（裁决 §3.3 同口径否决） |
+| 把三项 env 放进公共 `ProviderConfigSnapshot` | 会波及 Rust wire、两份 TS 快照、coding 转换、session 持久与恢复比较（裁决 §3.3「扩 ProviderConfigSnapshot」已否决） |
+| 一并设 Read 上限（`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`） | 默认值与截断行为**未确认**，且 Read 读的是权威门禁正文，截断可能让模型读不全 ⇒ 须先实测 |
+| 一并设 reviewer 出口 env | reviewer 走 codex 不吃 claude CLI 的 env；其真实消耗被低估 6.06× ⇒ **先修 F-2** |
+
 ### 决策 7：对主规格 REQ-ENV-HOST-01 的**显式修订**（走 OpenSpec delta，不静默违反）
 
 主规格 `openspec/specs/session-policy-envelope/spec.md` 的 **REQ-ENV-HOST-01**（`### Requirement: 统一宿主执行与受信环境（REQ-ENV-HOST-01）`）正文写明「平台不构造、不覆盖子进程环境（调用方显式 env map 仅作覆盖层）」，其「运行环境与清理边界」场景写明「平台不注入」。本 change 要在 SC author 出口设定 `CLAUDE_CODE_EFFORT_LEVEL`，与该字面义务**冲突**。
 
 **处置：走 OpenSpec 显式裁决，不静默违反。**
 
-- 本 change **新增** delta `specs/session-policy-envelope/spec.md`，以 `## MODIFIED Requirements` 修改 REQ-ENV-HOST-01，**追加**一句显式例外（**主规格原文与既有 3 个场景逐字保留**）：
+- 本 change **新增** delta `specs/session-policy-envelope/spec.md`，以 `## MODIFIED Requirements` 修改 REQ-ENV-HOST-01，**追加**一句显式例外（**主规格原文与既有 3 个场景逐字保留**；唯一例外是「运行环境与清理边界」场景的**最小收窄**，加括注指向本例外）：
 
-  > 受信执行策略变量（provider 官方声明的单一档位变量，如 `CLAUDE_CODE_EFFORT_LEVEL`）MAY 由平台在**调用方显式 env map 覆盖层**内设定为该 provider 的受控值；该例外 MUST NOT 构造或覆盖其余子进程环境、MUST NOT 涉及凭据、隔离或网络命名空间、且 MUST NOT 依模型标签或宿主设置重算。原「平台不构造、不覆盖子进程环境」的义务对本变量以外的环境保持不变。
+  > 受信 provider 控制变量（provider 官方声明的推理档位、工具输出上限或缓存 TTL 变量）MAY 由平台在调用方显式 env map 覆盖层内设定为该 provider 的受控值；该例外 MUST NOT 构造或覆盖其余子进程环境，MUST NOT 涉及凭据、隔离、网络命名空间、宿主路径、模型与账号选择、代理与路由、遥测开关；推理档位类 MUST NOT 依模型标签或宿主设置重算，输出上限类 MUST 只收紧，缓存 TTL 类 MUST NOT 短于 provider 内置默认。本变量以外仍适用「平台不构造、不覆盖子进程环境」的义务。
 
-- 同步新增一条场景「受信执行策略变量只在覆盖层内设定」，承载「平台设定受信执行策略变量不得影响其余环境继承」。
+- 同步新增场景承载三类约束与两类拒绝（清单与三类约束 / 输出上限只收紧 / 缓存 TTL 不短于内置默认 / 不涉及凭据隔离网络命名空间与宿主路径 / 不涉及模型账号代理路由与遥测开关 / 非单候选作者出口不适用），并把「受信执行策略变量只在覆盖层内设定」改名「受信 provider 控制变量只在覆盖层内设定」以与类名一致。
+- **例外类由「单一档位变量」扩为「受信 provider 控制变量」的依据**：G-2/G-3/G-6 的变量（输出上限、缓存 TTL）**不是**档位变量，若不扩类则注入它们**违反**该条字面义务（决策 6-a）。扩写保持**有界**：三类白名单 + 每类的收紧方向约束 + 七类禁止项，其余环境义务不变。
 - **可达性依据**（裁决 §3.1(2) / §3.2）：caller 注入**有可达路径，不用改全局 adapter 默认** —— `run/gateway_start.rs:648-678` 原样透传 caller env；`provider_gateway.rs:1998-2001` 保留 caller 显式覆盖；Claude direct / validated 的真实 spawn 消费 `input.env_vars`。因此本例外落在**既有 caller 显式覆盖层**语义内，而非新增平台 env 构造能力。
 - **禁止**直接改 `openspec/specs/**`（主规格由归档时的 delta 自动同步）；**禁止**把该例外做成「仅本 change 的实现细节」而不进规格。
 

@@ -45,8 +45,18 @@
 
 映射 requirement：REQ-ENV-HOST-01（`session-policy-envelope`，MODIFIED）
 
-- [ ] 4.1 delta 已新增 `specs/session-policy-envelope/spec.md`，以 `## MODIFIED Requirements` 追加**受信执行策略变量例外**（provider 官方声明的单一档位变量，如 `CLAUDE_CODE_EFFORT_LEVEL`）并新增场景「受信执行策略变量只在覆盖层内设定」；主规格原文与既有场景逐字保留（仅「运行环境与清理边界」场景做**最小收窄**：加「受信执行策略变量除外」括注）
-- [ ] 4.2 归档前核对：`openspec/specs/**` **零改动**（主规格由 delta 归档时自动同步）；例外 MUST NOT 构造或覆盖其余子进程环境、MUST NOT 涉及凭据、隔离或网络命名空间、MUST NOT 依模型标签或宿主设置重算
+- [ ] 4.1 delta 已新增 `specs/session-policy-envelope/spec.md`，以 `## MODIFIED Requirements` 追加**受信 provider 控制变量例外**（有界类：provider 官方声明的推理档位 / 工具输出上限 / 缓存 TTL 三类），并新增场景「受信 provider 控制变量只在覆盖层内设定」「受信 provider 控制变量清单与三类约束」「输出上限只收紧不放宽」「缓存 TTL 不得短于内置默认」「例外不涉及凭据隔离网络命名空间与宿主路径」「例外不涉及模型账号代理路由与遥测开关」；主规格原文与既有场景逐字保留（仅「运行环境与清理边界」场景做**最小收窄**：加「受信 provider 控制变量除外」括注并指向新场景名）
+- [ ] 4.2 归档前核对：`openspec/specs/**` **零改动**（主规格由 delta 归档时自动同步）；例外 MUST NOT 构造或覆盖其余子进程环境，MUST NOT 涉及凭据、隔离、网络命名空间、宿主路径、模型与账号选择、代理与路由、遥测开关；推理档位类 MUST NOT 依模型标签或宿主设置重算，输出上限类 MUST 只收紧，缓存 TTL 类 MUST NOT 短于 provider 内置默认
+
+## 4-a. G-2 / G-3 / G-6：上下文膨胀与缓存 TTL（并入本 change 的 SC author 出口 env 策略）
+
+映射 requirement：REQ-WSC-29（`work-item-plan-single-candidate`，ADDED 的「上下文与缓存控制变量同属冻结策略且只作用于 SC author 出口」「控制变量取值变更只对新生成授权生效」两场景）+ REQ-ENV-HOST-01（`session-policy-envelope`，MODIFIED 的三类约束场景）
+
+- [ ] 4-a.1 在 `prompts/sc_launch_policy.rs` 的冻结策略转 env 处接入三项控制变量：`MAX_MCP_OUTPUT_TOKENS=4000`、`BASH_MAX_OUTPUT_LENGTH=8000`、`CLAUDE_CODE_PROMPT_CACHE_TTL=1h`；三项取值**只**来自该原运行的冻结事实，与 effort 档位同源，**不**在每次启动时重读宿主或平台新默认（验证：初轮 / compile-IR-structure 教学 / native resume / fresh 四路装配出的 env **逐字节一致**）
+- [ ] 4-a.2 **显式排除**用例（每条一条）：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` **本期不设**（默认值与截断行为未确认）；`prompts.rs:419`（Story/Design 通用 author）、`prompts/revision.rs:96`（Story/Design 修订）、`prompts/review_parts/single_candidate_input.inc.rs:315`（reviewer）、`coding_models/provider_config.rs:90-106`（coding）**均不设**；`provider_drive/artifact_retry.rs:248-263` 的 retry **继承原出口**已装配的 env，MUST NOT 另行注入或清空（验证：以上各出口的 env 均为空 map 或与原出口逐字节相同）
+- [ ] 4-a.3 **拒绝**用例：把输出上限类变量设为**高于** provider 内置默认 → 被拒；把缓存 TTL 类设为**短于** provider 内置默认 → 被拒；把凭据 / 隔离 / 网络命名空间 / 宿主路径 / 模型与账号选择 / 代理与路由 / 遥测开关类变量经该例外设定 → 被拒（验证：每次拒绝都有明确原因，**不静默忽略**）
+- [ ] 4-a.4 **取值变更边界**：调整输出上限或缓存 TTL 的取值只对**新的合法生成授权**（新建 session record）生效；在途运行的既有取值 MUST NOT 被改写，MUST NOT 借此重置预算或清空预留（验证：一条在途运行 + 一次取值变更 ⇒ 在途 env 不变；一条新建 session ⇒ 取新值）
+- [ ] 4-a.5 **不确定性落纸**（说明项）：TTL 1h 的 cache write 单价高于 5m，且本次 `cache_creation_input_tokens` **恒为 0**（该 provider 未透传 cache write 计数）⇒ **价差无法从本地数据核算，净收益需实测**；G-2/G-3 的字符数（MCP 36,589 → ~16,000；Bash 18,121 → ~8,000）为**基线对照值**，实施后须复测，MUST NOT 写成已测结论
 
 ## 5. 跨 change 共享面与排序登记（**说明项 / 协调项** —— 不作为本 change 的可验收产出，不阻归档）
 
