@@ -15,6 +15,9 @@
 - [ ] 2.3 实现：教学资格判据由 `TEACHABLE_PARSE_FAILURE_CODES`（`run/single_candidate.rs:84-100`）改为「fault 在场且 field+行+期望形态齐全」；重驱 prompt 直接渲染 typed payload
 - [ ] 2.4 不变量：同一 candidate 总重驱次数恒 ≤1（既有单槽不变），加断言
 - [ ] 2.5 回归：无 fault 的 lowering 仍按既有终态；既有 parse 教学重驱用例全绿
+- [ ] 2.6 实现：四类 typed IR 诊断 producer（裁决 §1.5）——`src/product/work_item_contract/validation.rs:245-312` 与拆出的 handler 预检产 `unknown_done_when_ref`、`unknown_reviewer_check_ref`、`acceptance_criterion_without_reviewer_check`、`unknown_requirement_ref`；新增内部 `src/product/work_item_plan_compiler/ir_fault.rs` 承载 typed payload（WI、task/check/criterion、错误 ref、本 WI 合法集合或真实 spec 集合、原行——无行即「不可定位」、所需字段形态）；MUST NOT 从现 `:265-267` message 反解析 task ID
+- [ ] 2.7 先红：数据库/基线/成员解析失败（原 handler `:288-357`）判 Operational——MUST NOT 复用「Some(reasons) 即重驱」；失败集合混合 operational 与可教类时零重驱（禁止 `any(可教)` 放行）；「恰好一次」以前置授权、合法 provider 与剩余机会为条件
+- [ ] 2.8 不变量：新增可教类别必须显式进入规格/typed 白名单（负向测试：`code` 前缀或「缺少」措辞不自动获权）；其余结构 kind 复用 `planning_failure.rs` 事实完整性规则
 
 ## 3. 止血：可观测性最小版（REQ-WSC-25）
 
@@ -48,13 +51,22 @@
 - [ ] 7.2 按清单删/压：重复 trusted command 段、未知 key 白名单、Plan Intent 分支复述与 `lowering_error` 引文、模板枚举展开、few-shot 11 条 → 3 条、成环预防段各留 1 处
 - [ ] 7.3 回归：既有 prompt 契约测试按新契约更新（不许删测试）；本包**单独提交**
 
-## 8. 收口
+## 8. O1 落地：内容 autorepair 迁原授权 author（REQ-CRP-01 收窄；裁决 §2.2/§2.3/§2.4）
 
-- [ ] 8.1 `openspec validate mechanicalize-plan-compile-repair --strict` exit 0
-- [ ] 8.2 全量门禁（fmt / clippy -D / check / test）绿；预存基线按名对照
-- [ ] 8.3 把 `REQ-SG-02A`×`contract_autorepair` 撞线的 A/B 裁决提交 owner
+> O1 已由 owner 裁决（2026-11-08 §2.2/§2.3）：**不改 `REQ-SG-02A`，内容 autorepair 迁原授权 author**。规划裁决完成不等于代码完成，以下工作包均未实施（不预勾）。
 
-## 9. 待验证假设（不改契约，取证后再决定是否追加 requirement）
+- [ ] 8.1 移除八轮 source mutation 收敛及其私有 apply/rewrite 死代码：`src/product/workspace_engine/contract_autorepair.rs:54-104,630-702`；四类 producer 按裁决 §2.2 收窄，不保同名旧行为 shim
+- [ ] 8.2 `contract_autorepair.rs:105-267,416-625` 与 `contract_prerevision.rs:353-356`：把「本地收敛消费」注释与接口清切为 author 指令——`required_capability_missing` 取消自动追加 capability；`unconsumed_required_handoff` 取消删 ref 或替换为 `[]`；`unknown_structured_key` 不再按诊断行删业务承载行，只生成「保留内容、迁往合法字段」的指令；重复 trusted command 取消本地删 command/整 check
+- [ ] 8.3 两个生产 caller 同时切到 compile/typed 诊断→原授权指令链：`src/web/workspace_ws_handler/run/single_candidate.rs:1214-1219`、`src/product/workspace_engine/single_candidate.rs:465-479`——不能只改 handler 而 completion 又二次暗修
+- [ ] 8.4 测试迁移：新 `src/product/workspace_engine/contract_autorepair_tests.rs`（承接原 `contract_autorepair.rs:1008-1315` 对应测试与 `contract_prerevision.rs:1733-1848` 调用测试，搬出避免 1651 行 cap 增长）：旧「自动补/删成功」断言改为 source 不变、指令完整、author 新产物及复验
+- [ ] 8.5 验收（裁决 §2.5）：四类规则各测成功指令与拒绝场景——source 字节不变；持久/已 review 产物不改；原 author 身份及同一剩余 attempt；新产物全量复验；未知 key 携业务正文不得消失，整 check 不得无故消失
 
-- [ ] 9.1 现场 #3「reviewer 连报三轮」归因：①`single_candidate_consecutive_repeated_finding_count`（`src/product/workspace_engine/review/routing_scope.rs:815-849`）要求相邻两轮非 advisory 指纹集合**完全相等**，任一增减 finding 即不触发，且仅比较相邻两轮；②指纹由 category/class/message/contract_field 组成（定义 `work_item_plan_policy/fingerprint.rs:73 identity_for_finding`，调用点 `classify.rs:141-146`），无 category 时措辞敏感；③owner 排除 key=`sha256(severity+message)`（REQ-WSC-13，`web/workspace_ws_types/review.rs:157-159`），换措辞即新 key。用现场三轮 verdict 回放核对哪个生效，结论写入 designs 文档后再决定是否新增「finding 身份稳定性」requirement
-- [ ] 9.2 `outbound_queue_full`：另开工单（不在本 change），工单引用 `src/web/workspace_session/manager/degraded_diagnostics.rs:101`
+## 9. 收口
+
+- [ ] 9.1 `openspec validate mechanicalize-plan-compile-repair --strict` exit 0
+- [ ] 9.2 全量门禁（fmt / clippy -D / check / test）绿；预存基线按名对照
+
+## 10. 待验证假设（不改契约，取证后再决定是否追加 requirement）
+
+- [ ] 10.1 现场 #3「reviewer 连报三轮」归因：①`single_candidate_consecutive_repeated_finding_count`（`src/product/workspace_engine/review/routing_scope.rs:815-849`）要求相邻两轮非 advisory 指纹集合**完全相等**，任一增减 finding 即不触发，且仅比较相邻两轮；②指纹由 category/class/message/contract_field 组成（定义 `work_item_plan_policy/fingerprint.rs:73 identity_for_finding`，调用点 `classify.rs:141-146`），无 category 时措辞敏感；③owner 排除 key=`sha256(severity+message)`（REQ-WSC-13，`web/workspace_ws_types/review.rs:157-159`），换措辞即新 key。用现场三轮 verdict 回放核对哪个生效，结论写入 designs 文档后再决定是否新增「finding 身份稳定性」requirement
+- [ ] 10.2 `outbound_queue_full`：另开工单（不在本 change），工单引用 `src/web/workspace_session/manager/degraded_diagnostics.rs:101`
