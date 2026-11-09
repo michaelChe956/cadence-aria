@@ -156,7 +156,10 @@ export function useKnowledgeBaseWorkbench({
   // 启动失败，而后端其实在跑）。
   const revisionRef = useRef(0);
 
-  const refresh = useCallback(async () => {
+  // 取数失败的上报口径由 silent 决定：轮询路径静默重试（与聚合卡
+  // useLogicalCodebaseScopeData 一致，不刷工作台级错误横幅——横幅每 2s
+  // 重打会把真实报错淹没）；抽屉展开等单发取数仍如实上报。
+  const refresh = useCallback(async (options?: { silent?: boolean }) => {
     const projectId = selectedProjectId;
     const lcId = activeLogicalCodebaseId;
     if (!projectId || !lcId) {
@@ -183,7 +186,11 @@ export function useKnowledgeBaseWorkbench({
       if (revision !== revisionRef.current || scope !== scopeRef.current) {
         return;
       }
-      setError(`读取知识库状态失败：${errorMessage(reason, "未知错误")}`);
+      // 静默路径（轮询）失败不打横幅：下一次间隔重试；错误横幅只留给
+      // 用户主动触发的动作（初始化/更新/取消）失败时上报。
+      if (!options?.silent) {
+        setError(`读取知识库状态失败：${errorMessage(reason, "未知错误")}`);
+      }
     }
   }, [selectedProjectId, activeLogicalCodebaseId, scopeKey, setError]);
 
@@ -209,9 +216,11 @@ export function useKnowledgeBaseWorkbench({
 
   // operation 运行中每 2s 轮询（与聚合初始化卡同构）：卡片不得冻结在启动时的
   // running 快照——完成/失败/超时必须上屏，失败文案与取消按钮的显隐才能跟随
-  // 真实状态。响应过期守卫复用 refresh 内部的 revision + 作用域守卫；这里只
-  // 负责起停定时器与不并发（inFlight）。operation 进入终态、抽屉收起或卸载时
-  // 停止拉取。
+  // 真实状态。轮询失败静默重试（不 setError，与被镜像的聚合卡口径一致）：
+  // 错误横幅只留给用户主动触发的动作（初始化/更新/取消）失败时上报，避免
+  // 每 2s 重打横幅淹没真实报错。响应过期守卫复用 refresh 内部的 revision +
+  // 作用域守卫；这里只负责起停定时器与不并发（inFlight）。operation 进入
+  // 终态、抽屉收起或卸载时停止拉取。
   useEffect(() => {
     if (!panelExpanded || knowledgeBaseOperation?.status !== "running") {
       return;
@@ -223,7 +232,7 @@ export function useKnowledgeBaseWorkbench({
       }
       inFlight = true;
       try {
-        await refresh();
+        await refresh({ silent: true });
       } finally {
         inFlight = false;
       }

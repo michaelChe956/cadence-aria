@@ -91,8 +91,9 @@ const PREFLIGHT_FAILURE_LABELS: Record<string, string> = {
     "知识库预检未通过：manifest 版本不受支持。",
   knowledge_base_not_initialized: "知识库尚未初始化。",
   knowledge_base_change_package_invalid: "变更包未通过门禁检查。",
-  knowledge_base_change_package_path_invalid: "变更包路径不合法。",
   knowledge_base_change_package_missing_document: "变更包缺少文档。",
+  knowledge_base_provider_capability_denied:
+    "知识库预检未通过：provider 拒绝了知识库写入分格，需修复该 provider 的拒绝原因或改用其他 provider 后重试。",
 };
 
 /**

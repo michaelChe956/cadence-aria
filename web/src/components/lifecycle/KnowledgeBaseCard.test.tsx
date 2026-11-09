@@ -221,6 +221,22 @@ describe("KnowledgeBaseCard", () => {
     expect(failure.textContent).toContain("scope 字段未填写");
   });
 
+  it("precheck_failure_provider_capability_denied_shows_chinese_label", () => {
+    // 终审 Minor M1：该码在写分格双 Confirmed 门修复后首次可达，码表必须
+    // 登记中文标签——未知码会落英文 message 回退，与其余预检码口径不一致。
+    renderCard({
+      preflightFailure: {
+        code: "knowledge_base_provider_capability_denied",
+        message: "the selected provider denied the CodingTargetWrite capability cell",
+        details: null,
+      },
+    });
+    const failure = screen.getByTestId("knowledge-base-preflight-failure");
+    expect(failure).toHaveTextContent("provider 拒绝了知识库写入分格");
+    // 码表命中时不得再拼英文 message 回退。
+    expect(failure).not.toHaveTextContent("denied the CodingTargetWrite");
+  });
+
   it("create_bootstrap_inputs_button_appears_on_missing_inputs", async () => {
     const user = userEvent.setup();
     const onCreateBootstrapInputs = vi.fn();

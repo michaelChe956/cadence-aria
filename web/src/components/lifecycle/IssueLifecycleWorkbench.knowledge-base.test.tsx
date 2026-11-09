@@ -14,6 +14,8 @@
 //   8. 启动接口 200 + 异常载荷 → 不崩、卡片不挂脏 operation（形状守卫）。
 // 终审修复（C-2）补一条：
 //   9. operation 运行中每 2s 轮询（与聚合初始化卡同构）；到终态停止拉取。
+// 终审复审 Minor（M4）补一条：
+//  10. 轮询失败静默重试（不刷错误横幅）；用户主动动作（取消）失败仍报错。
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
@@ -103,6 +105,8 @@ interface KnowledgeBaseFetchOptions {
   startResponse?: () => Promise<Response>;
   /** 工作台里的逻辑代码库列表（默认只有 lc_0001）。 */
   logicalCodebases?: Array<{ id: string; name: string; member_count: number }>;
+  /** 取消接口响应（默认 200 + cancelled operation）。 */
+  cancelResponse?: () => Promise<Response>;
 }
 
 /** 知识库 HTTP 面：/api/projects/{p}/logical-codebases/{lc}/knowledge-base/... */
@@ -146,6 +150,12 @@ function installKnowledgeBaseFetch(options: KnowledgeBaseFetchOptions = {}) {
           return (
             options.startResponse?.() ??
             jsonResponse(knowledgeBaseOperation({ status: "running" }))
+          );
+        }
+        if (/^\/initializations\/[^/]+\/cancel$/u.test(rest) && method === "POST") {
+          return (
+            options.cancelResponse?.() ??
+            jsonResponse(knowledgeBaseOperation({ status: "cancelled" }))
           );
         }
         if (rest === "/bootstrap-inputs" && method === "POST") {
@@ -488,5 +498,70 @@ describe("IssueLifecycleWorkbench 知识库卡片宿主接线（Task 9.5）", ()
       vi.advanceTimersByTime(6_000);
     });
     expect(activeCallCount).toBe(completedBaseline);
+  });
+
+  it("轮询失败静默重试不刷错误横幅；主动动作失败仍报错", async () => {
+    // 终审复审 Minor M4：轮询里的取数失败不得每 2s 重打工作台级错误横幅
+    // （与被镜像的聚合卡口径一致，静默重试）；横幅只留给用户主动触发的
+    // 动作失败——用取消接口 500 证明。
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let statusCallCount = 0;
+    installKnowledgeBaseFetch({
+      statusByLc: {
+        [LC_ID]: () => {
+          statusCallCount += 1;
+          // 首次（抽屉展开的单发取数）成功，卡片进入 running；之后一律
+          // 500 ⇒ 轮询持续失败。
+          if (statusCallCount === 1) {
+            return jsonResponse(knowledgeBaseStatus());
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                code: "internal_error",
+                message: "知识库状态读取炸了",
+              }),
+              { status: 500 },
+            ),
+          );
+        },
+      },
+      // active 永远 running：轮询不停，失败由 status 侧制造。
+      activeByLc: {
+        [LC_ID]: () =>
+          jsonResponse(knowledgeBaseOperation({ status: "running" })),
+      },
+      // 取消接口 500：用户主动动作的失败必须如实上报。
+      cancelResponse: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ code: "internal_error", message: "取消失败" }),
+            { status: 500 },
+          ),
+        ),
+    });
+    renderWorkbench();
+
+    fireEvent.click(await screen.findByTestId("lc-summary-toggle"));
+    const card = await screen.findByTestId("knowledge-base-card");
+    await waitFor(() =>
+      expect(
+        within(card).getByTestId("knowledge-base-operation-status"),
+      ).toHaveAttribute("data-status", "running"),
+    );
+
+    // 快进 3 个轮询间隔：status 侧持续 500（轮询失败发生），但错误横幅
+    // 不得被反复刷出。
+    await act(async () => {
+      vi.advanceTimersByTime(6_000);
+    });
+    await waitFor(() => expect(statusCallCount).toBeGreaterThan(1));
+    expect(screen.queryByText(/读取知识库状态失败/)).toBeNull();
+
+    // 用户主动触发的动作（取消）失败 ⇒ 横幅必须如实上报。
+    fireEvent.click(
+      within(card).getByRole("button", { name: "取消知识库操作" }),
+    );
+    expect(await screen.findByText(/取消知识库操作失败/)).toBeInTheDocument();
   });
 });
