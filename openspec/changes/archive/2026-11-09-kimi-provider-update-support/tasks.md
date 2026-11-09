@@ -1,7 +1,7 @@
 # 任务清单：Kimi Code 也支持「更新」
 
 > 每个工作包独立可验收；实现走 TDD（先红后绿）。契约见 `specs/provider-cli-installation/spec.md`
-> （MODIFIED REQ-PCI-01 / REQ-PCI-04 / REQ-PCI-05），设计取舍见 `design.md`。
+> （MODIFIED REQ-PCI-01 / REQ-PCI-05；REMOVED REQ-PCI-04 + ADDED REQ-PCI-07），设计取舍见 `design.md`。
 
 ## 1. 契约与计划
 
@@ -40,5 +40,5 @@
 ## 5. 收尾
 
 - [x] 5.1 `cadence/notes/` 记录根因、实现与验收证据
-- [ ] 5.2 k3 审查（实现 + delta）并处置发现
-- [ ] 5.3 归档：sync 主规格 → archive change；提交并推送功能分支
+- [x] 5.2 k3 审查（实现 + delta）并处置发现（结论：无「必须先修」；F1-F4 四条 P3 文档一致性已随本 change 处置）
+- [x] 5.3 归档：sync 主规格 → archive change；提交并推送功能分支
