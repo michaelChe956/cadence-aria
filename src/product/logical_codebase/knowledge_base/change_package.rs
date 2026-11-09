@@ -652,34 +652,58 @@ fn scan_sensitive(document: &str, text: &str, violations: &mut Vec<ChangePackage
 const ATTACHMENT_SCAN_MAX_BYTES: u64 = 1024 * 1024;
 
 /// P6 附件半边：遍历 `package_dir/attachments/` 直下的常规文件，逐个按
-/// UTF-8 解码后复用 `scan_sensitive`。目录与符号链接（不跟随）跳过；
-/// 超 1 MiB、非 UTF-8 或不可读的文件无法逐行扫描——门禁⑧要求「变更包
-/// **与附件**不得含疑似明文凭证」，扫不动的附件无法证明合规，各记一条
-/// 说明性 `sensitive_content` 违规（fail-closed，不静默放行）。违规的
-/// `document` 统一填 `attachments/<相对路径>`，detail 不含附件内容。
+/// UTF-8 解码后复用 `scan_sensitive`。符号链接（不跟随）跳过；直下子目录
+/// 不递归扫描（`attachments/` 契约为扁平目录）、目录存在却不可枚举（如
+/// 权限不足）同样扫不动——门禁⑧要求「变更包**与附件**不得含疑似明文
+/// 凭证」，扫不动的附件无法证明合规，各记一条说明性 `sensitive_content`
+/// 违规（fail-closed，不静默放行）；超 1 MiB、非 UTF-8 或不可读的文件
+/// 同理（见 `note_unscannable_attachment`）。违规的 `document` 统一填
+/// `attachments/<相对路径>`，detail 不含附件内容。
 fn scan_attachments_sensitive(package_dir: &Path, violations: &mut Vec<ChangePackageViolation>) {
     let attachments_dir = package_dir.join("attachments");
-    // attachments/ 不是变更包必备目录：不存在或不可枚举时不产出违规。
-    let Ok(entries) = std::fs::read_dir(&attachments_dir) else {
-        return;
+    // attachments/ 不是变更包必备目录：整目录不存在时不产出违规；但目录
+    // 存在却枚举失败（如权限不足）时无法证明门禁⑧合规，记一条说明性违规。
+    let entries = match std::fs::read_dir(&attachments_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            violations.push(mk(
+                "sensitive_content",
+                Some("attachments/"),
+                None,
+                "附件目录存在但不可枚举（可能为权限不足），无法完成敏感内容检查，请检查目录权限后重新提交"
+                    .to_string(),
+            ));
+            return;
+        }
     };
-    let mut files: Vec<(String, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            // 只处理常规文件；目录与符号链接跳过（file_type 不跟随链接）。
-            entry
-                .file_type()
-                .is_ok_and(|file_type| file_type.is_file())
-                .then(|| {
-                    (
-                        entry.file_name().to_string_lossy().into_owned(),
-                        entry.path(),
-                    )
-                })
-        })
-        .collect();
-    // read_dir 返回顺序随平台/文件系统变化；按文件名排序让违规列表确定。
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut subdirectories: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        // 常规文件才逐行扫描；符号链接（file_type 不跟随链接）跳过。
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if file_type.is_file() {
+            files.push((name, entry.path()));
+        } else if file_type.is_dir() {
+            // 直下子目录不递归扫描：扫不动即无法证明合规，不静默放行。
+            subdirectories.push(name);
+        }
+    }
+    // read_dir 返回顺序随平台/文件系统变化；各自按名称排序让违规列表确定。
     files.sort();
+    subdirectories.sort();
+    for name in subdirectories {
+        violations.push(mk(
+            "sensitive_content",
+            Some(&format!("attachments/{name}/")),
+            None,
+            "附件是子目录，未能扫描其中内容（attachments/ 应为扁平目录），请把需要的文件移到 attachments/ 直下或删除该子目录后重新提交"
+                .to_string(),
+        ));
+    }
     for (name, path) in files {
         let document = format!("attachments/{name}");
         let oversized = std::fs::metadata(&path)

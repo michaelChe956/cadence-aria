@@ -709,6 +709,57 @@ mod tests {
     }
 
     #[test]
+    fn lint_reports_attachment_subdirectory_instead_of_skipping_silently() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let dir = write_package(temp.path(), &sha, &sha, &[]);
+        let attachments = dir.join("attachments");
+        std::fs::create_dir_all(attachments.join("nested")).expect("创建附件子目录");
+        // 子目录里放干净内容：说明性违规来自「子目录扫不动」本身，与内容
+        // 是否命中敏感模式无关。
+        std::fs::write(attachments.join("nested").join("inner.sql"), "-- 干净内容\n")
+            .expect("写子目录内文件");
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
+        let violation = first_with_code(&lint, &code("sensitive_content"));
+        assert_eq!(
+            violation.document.as_deref(),
+            Some("attachments/nested/"),
+            "附件直下子目录要记一条说明性违规（document 指向子目录）：{:?}",
+            lint.violations
+        );
+        assert!(
+            violation.detail.contains("子目录"),
+            "detail 要说明子目录未能扫描：{}",
+            violation.detail
+        );
+    }
+
+    #[test]
+    fn lint_reports_unenumerable_attachments_dir_instead_of_zero_violations() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let dir = write_package(temp.path(), &sha, &sha, &[]);
+        // attachments 是同名常规文件（而非目录）：read_dir 以非 NotFound 的
+        // 错误失败，等价于「目录存在但不可枚举」，不得吞成零违规（权限不足
+        // 走同一路径）。
+        std::fs::write(dir.join("attachments"), "not a directory").expect("写同名文件占位");
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
+        let violation = first_with_code(&lint, &code("sensitive_content"));
+        assert_eq!(
+            violation.document.as_deref(),
+            Some("attachments/"),
+            "附件目录不可枚举要记一条说明性违规：{:?}",
+            lint.violations
+        );
+        assert!(
+            violation.detail.contains("不可枚举"),
+            "detail 要说明目录不可枚举、无法完成敏感内容检查：{}",
+            violation.detail
+        );
+    }
+
+
+    #[test]
     fn lint_rejects_unresolvable_commit() {
         let temp = tempfile::tempdir().unwrap();
         let (repo, _sha) = member_repo_with_commit(temp.path(), "order-api");

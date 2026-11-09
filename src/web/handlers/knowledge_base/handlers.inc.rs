@@ -121,11 +121,18 @@ fn knowledge_base_preflight_api_error(failure: KnowledgeBasePreflightFailure) ->
         KnowledgeBasePreflightFailure::ProviderSelection(outcome) => {
             knowledge_base_selection_api_error(&outcome)
         }
-        KnowledgeBasePreflightFailure::CapabilityDenied { provider } => ApiError::runtime(
-            CODE_PROVIDER_CAPABILITY_DENIED,
-            "the selected provider denied the CodingTargetWrite capability cell",
-            json!({ "provider": provider }),
-        ),
+        KnowledgeBasePreflightFailure::CapabilityDenied { provider } => {
+            // message 走失败文案单一来源 failure_copy 的中文成品标题（码表已
+            // 登记该码三段），不再手写英文——与选择期失败码
+            // `knowledge_base_selection_api_error` 同款做法；被拒 provider
+            // 仍放 details 供前端点名。
+            use crate::product::logical_codebase::failure_copy::{describe, FailureInput};
+            ApiError::runtime(
+                CODE_PROVIDER_CAPABILITY_DENIED,
+                describe(FailureInput::new(CODE_PROVIDER_CAPABILITY_DENIED)).title_zh,
+                json!({ "provider": provider }),
+            )
+        }
         KnowledgeBasePreflightFailure::OtherKnowledgeBaseRunning { operation_id } => {
             ApiError::runtime(
                 CODE_OTHER_RUNNING,
@@ -875,4 +882,27 @@ fn resolve_change_package_dir(kb: &StdPath, path: &str) -> ApiResult<PathBuf> {
         ));
     }
     Ok(kb.join(path))
+}
+
+// ───────────────────────── 单元测试 ─────────────────────────
+
+#[cfg(test)]
+mod preflight_failure_copy_tests {
+    use super::*;
+
+    /// 终审 Minor M1：CapabilityDenied 的 message 必须走失败文案单一来源
+    /// failure_copy 的中文成品标题（码表已登记该码三段），不得手写英文——
+    /// 与选择期失败码 `knowledge_base_selection_api_error` 同款做法。
+    #[test]
+    fn capability_denied_message_uses_chinese_failure_copy() {
+        let error = knowledge_base_preflight_api_error(
+            KnowledgeBasePreflightFailure::CapabilityDenied {
+                provider: "kimi".to_string(),
+            },
+        );
+        assert_eq!(error.code, CODE_PROVIDER_CAPABILITY_DENIED);
+        assert_eq!(error.message, "provider 拒绝了知识库写入分格");
+        // 被拒 provider 仍在 details 明细里供前端点名。
+        assert_eq!(error.details["provider"], json!("kimi"));
+    }
 }
