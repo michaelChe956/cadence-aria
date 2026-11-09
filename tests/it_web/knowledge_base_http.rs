@@ -159,15 +159,30 @@ impl BoundedCommandRunner for AllAvailableRunner {
     }
 }
 
-fn with_available_provider_health(state: WebAppState, root: &Path) -> WebAppState {
+async fn with_available_provider_health(state: WebAppState, root: &Path) -> WebAppState {
     let runner: Arc<dyn BoundedCommandRunner> = Arc::new(AllAvailableRunner);
     let health = Arc::new(ProviderHealthService::with_dependencies(
         AriaStatePaths::from_workspace_root(root),
         runner.clone(),
         Arc::new(SystemProviderHealthClock),
-        std::time::Duration::from_secs(1),
+        // 修复轮 1：TTL 从 1s 放宽到 600s。1 秒 TTL 让几乎每次 provider
+        // 选择都在请求期刷新 health——刷新持 refresh 锁跨 tokio::fs 落盘
+        // 让出，与「注册提交自动推进任务同步 join 选择线程」（见
+        // aggregate_initialization/handlers.inc.rs 的
+        // select_aggregate_provider_blocking）在单线程测试 runtime 上构成
+        // 三元死锁：请求任务持锁等调度、选择线程等锁、测试线程被 join
+        // 占死。并行高并发下窗口稳定张开 ⇒ 集成测试永久挂住。
+        std::time::Duration::from_secs(600),
         4096,
     ));
+    // 预刷：构造后在任何请求之前把快照刷新鲜（stub 探测 + 一次落盘）。
+    // 此后 600 秒内知识库选择链（status/create/preflight）与聚合初始化
+    // 自动推进的选择线程全部命中新鲜快照、零刷新、零锁竞争，死锁三
+    // 要素全部断开。回归见 concurrent_status_and_create_do_not_deadlock。
+    health
+        .refresh(tokio_util::sync::CancellationToken::new())
+        .await
+        .expect("prefetch provider health snapshot");
     let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
     state.with_provider_health(health, gate, runner)
 }
@@ -364,7 +379,8 @@ impl KnowledgeBaseFixture {
                 EventHub::new(),
             ),
             root.path(),
-        );
+        )
+        .await;
         let app = build_web_router(state);
 
         let (status, _) = request_json(
@@ -915,4 +931,90 @@ async fn bootstrap_inputs_create_templates() {
     let created = body["created"].as_array().expect("created");
     assert!(!created.is_empty());
     assert!(created.contains(&json!("user-input/base-info.md")));
+}
+
+/// 修复轮 1（Important）：GET 未知 operation_id ⇒ 404 +
+/// code == knowledge_base_operation_not_found（此前经 product_store_api_error
+/// 落 500，违反稳定码契约——同 patch 的 active/cancel 与聚合面均为 404）。
+#[tokio::test]
+async fn get_unknown_operation_returns_404() {
+    let fixture = KnowledgeBaseFixture::new().await;
+
+    let (status, body) = request_json(
+        &fixture.app,
+        Method::GET,
+        &fixture.kb_uri("/initializations/op_unknown_0001"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "knowledge_base_operation_not_found");
+}
+
+/// 修复轮 1（Minor）：cancel 端点此前是 12 个端点里唯一零覆盖的。
+/// 种子 Running operation → POST cancel → 200 + cancelled 终态；
+/// 终态再 cancel ⇒ 409 knowledge_base_operation_running（IdentityMismatch
+/// 的既有映射语义）。
+#[tokio::test]
+async fn cancel_transitions_running_operation_to_cancelled() {
+    let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_running_operation();
+    let operation_id =
+        cadence_aria::product::logical_codebase::knowledge_base::operation::derive_operation_id(
+            PROJECT_ID,
+            &fixture.lc_id,
+            "seed",
+        );
+    let cancel_uri = fixture.kb_uri(&format!("/initializations/{operation_id}/cancel"));
+
+    let (status, body) = request_json(&fixture.app, Method::POST, &cancel_uri, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["operation_id"], operation_id.as_str());
+    assert_eq!(body["status"], "cancelled");
+
+    // 终态 operation 再取消：状态机拒绝（非 Running ⇒ IdentityMismatch）。
+    let (status, body) = request_json(&fixture.app, Method::POST, &cancel_uri, json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "knowledge_base_operation_running");
+}
+
+/// 修复轮 1（阻塞级回归）：并发的只读 status 与 create 请求不得互相卡死。
+///
+/// 修复前的并行挂死机理：注册提交自动推进的后台任务在测试 runtime 上
+/// 同步 join provider 选择线程，而请求侧 provider health 刷新（快照 TTL
+/// 1 秒 ⇒ 几乎每次选择都刷新）持 refresh 锁跨 tokio::fs 落盘让出——
+/// 请求任务持锁等待调度、选择线程等锁、测试线程被 join 占死，三元死锁。
+/// 本用例把「同一 fixture 上并发走选择链的请求」钉进回归：若夹具重新
+/// 引入请求期刷新竞争（TTL 过短 / 未预刷），本用例在并行模式下挂住
+/// 直至 request_json 的 30 秒有界等待失败。
+#[tokio::test]
+async fn concurrent_status_and_create_do_not_deadlock() {
+    let fixture = KnowledgeBaseFixture::new().await;
+    let app = fixture.app.clone();
+    let status_uri = fixture.kb_uri("/status");
+    let create_uri = fixture.kb_uri("/initializations");
+
+    let (status, create) = tokio::join!(
+        request_json(&app, Method::GET, &status_uri, json!({})),
+        request_json(
+            &app,
+            Method::POST,
+            &create_uri,
+            json!({"kind":"bootstrap","idempotency_key":"kb-concurrent-1"}),
+        ),
+    );
+    assert_eq!(status.0, StatusCode::OK, "{:?} {status:?}", status.0);
+    assert_eq!(status.1["exists"], false);
+    // 未种聚合初始化 ⇒ 预检失败稳定码（4xx），且不创建 operation。
+    assert!(
+        create.0.is_client_error(),
+        "expected 4xx, got {}: {:?}",
+        create.0,
+        create.1
+    );
+    assert_eq!(
+        create.1["code"], "knowledge_base_requires_aggregate_initialization",
+        "{:?}",
+        create.1
+    );
 }

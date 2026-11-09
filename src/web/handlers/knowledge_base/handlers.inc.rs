@@ -550,7 +550,7 @@ pub async fn get_knowledge_base_initialization(
     let (_, _, store) = knowledge_base_read_context(&state, &project_id, &lc_id)?;
     let operation = store
         .get(&project_id, &operation_id)
-        .map_err(product_store_api_error)?;
+        .map_err(knowledge_base_store_api_error)?;
     Ok(Json(knowledge_base_operation_dto(&operation)).into_response())
 }
 
