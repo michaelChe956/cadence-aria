@@ -1,0 +1,52 @@
+# Tasks: isolate-plan-criterion-namespace
+
+> 纪律：每个工作包先固化/先红再改实现（TDD）；精确文件、命令、提交步骤由 `writing-plans` 写进 `cadence/plans/`，本文件只给高层可验收工作包。
+> 契约来源：`specs/work-item-plan-single-candidate/spec.md`（ADDED `REQ-WSC-30` / `REQ-WSC-31`）、
+> `specs/work-item-typed-outcome-policy/spec.md`（MODIFIED `REQ-TOP-04` / `REQ-TOP-05`）；
+> 架构边界与共享面排序见 `design.md`。
+> **排序前提**：`design.md`「共享面与排序」已声明的串行链（决策六纯拆分 → mechanicalize prompt 瘦身与其 fixture/断言 → 本 change 的 WIC 措辞与 fixture → 守卫接线）必须被遵守；指纹代际与 scope 版本部分无文件重叠，可先行。
+
+## 1. 基线锚定（先于一切算法改动）
+
+- [ ] 1.1 在**未改实现**的状态下固化旧代际的原始 fixture 哈希锚点（既有 fixture 上产出的 finding identity 与 review scope digest 逐位值），登记为回归基线。验证：基线登记完成且可重复复现同一逐位值
+- [ ] 1.2 盘点既有以 `AC-` 为例的编译器 fixture 与 prompt 契约断言，产出「迁 `WIC-` 的新生成例子」与「保留为历史兼容用例」两份清单。验证：清单逐条指明归属，两份清单无交集
+
+## 2. plan 域双前缀只读兼容与命名域守卫（REQ-WSC-30）
+
+- [ ] 2.1 编译器 criterion 分支改为接受 `WIC-` 与 `AC-` 双前缀，标识符词法（固定前缀 + 非空 ASCII 数字）逐字保留；两前缀共享**同一次**唯一性去重。验证：双前缀样例通过、`WAC-` / 大小写变体 / 空后缀 / 非数字后缀仍被拒、重复标识符仍被拒
+- [ ] 2.2 新增命名域守卫（新模块），在候选编译与提升边界、以及人工修订边界接入同一规则：新 `WicV1` lineage 的交付出现 plan 域 `AC-` criterion 时拒收并出可教学的类型化诊断。验证：新生 lineage 的 `AC-` 交付被拒、合法 `WIC-` 交付通过、存量 lineage 不受影响
+- [ ] 2.3 在教学材料中显式区分 spec 域（`REQ-*` / `NFR-*` / `AC-*` → Traceability 与 `requirement_refs`）与 plan 域（criterion / `done_when_refs` / `reviewer_check_refs`），并把「spec 域 `AC-*` 不得充当本 WI criterion」写成可验收断言。验证：断言矩阵覆盖「spec AC 冒充 criterion」「他 WI 的 `WIC-` 被引用」两类负向用例且均被拒
+- [ ] 2.4 回归：双前缀引入后，全 plan criterion 唯一性与本 WI 成员关系判据与引入前等价，既有存量 source 逐字不变、内容寻址不漂移。验证：既有编译与成员校验用例全绿、存量 source 字节与哈希未变
+
+## 3. 服务端命名策略与准入冻结（REQ-WSC-31）
+
+- [ ] 3.1 新增 server-only 命名策略元数据（`WicV1` / `LegacyPreserved`），以可缺省形态挂在 plan lineage 实体记录上；判定按「无历史事实且有新生事实 ⇒ `WicV1`；有历史事实 ⇒ `LegacyPreserved`；缺证据 ⇒ 不判新生并披露未知」三态。验证：三态判定各有可验收用例，未知历史不得落到 `WicV1`
+- [ ] 3.2 在真实 SC 首次生成准入以 CAS 冻结命名策略；创建 / ensure / 重入 / 接管路径共同保持该字段，已冻结值不被覆盖。验证：重复准入与接管后策略不变、CAS 冲突走既有重读重评
+- [ ] 3.3 客户端声明（legacy / 关闭守卫一类入参）被服务端忽略，策略只以已冻结事实为准。验证：携带绕过声明的请求不改变判定结果
+- [ ] 3.4 存量保 ID 与禁止「仅前缀升级」：`LegacyPreserved` 修订保留基线既有 criterion ID，新增必须 `WIC-`，同编号前缀替换（`AC-00x` → `WIC-00x`）被拒收。验证：保留 / 新增 / 前缀升级三类用例分别得到预期结论
+
+## 4. 指纹代际隔离（REQ-TOP-04、REQ-TOP-05）
+
+- [ ] 4.1 把现有 v2 身份配方与 scope 摘要配方**逐字**保留为「旧代际」，引入代际分发点；默认解析结果仍为旧代际，既有行为零变化。验证：第 1 组固化的原始 fixture 哈希逐位不变
+- [ ] 4.2 新增代际的稳定 ID 前缀集合（含 `WIC-`）与带 token 边界的 token 扫描：抽取与删除共用同一扫描逻辑、最长前缀先、token 前后不得紧连字母 / 数字 / 下划线。验证：`WIC-` 与 `AC-` 产出不同身份、`WAC-` 不被抽成 `AC-`、同一字符串的取与删结果一致
+- [ ] 4.3 `RunHistory` 增可缺省的指纹代际字段：缺省为旧代际，旧代际记录序列化时可省略该字段；新建受控会话显式写入新代际；接管沿用父代际。验证：旧记录读取不报错且行为不变、新会话显式写入、接管后子会话代际与父一致
+- [ ] 4.4 所有消费面（finding identity、original / seen 集合比较、scope 构造与校验）显式从当前 `RunHistory` 取代代际，无任何「最新默认」路径。验证：存在静默走默认值的调用点时该用例失败
+
+## 5. scope 版本绑定与代际一致性（REQ-TOP-04、REQ-TOP-05）
+
+- [ ] 5.1 review scope 增可缺省版本：旧代际 scope 摘要配方逐字不变，新代际 scope 的摘要输入额外绑定代际版本与 original 集合。验证：既有 scope 摘要仍可校验通过、新代际 scope 在版本或 original 集合变化时摘要变化
+- [ ] 5.2 scope 代际与 session 代际不一致、或摘要与所声明代际不匹配时按既有结构性协议错误 `Fatal(ProtocolViolation)` 失败关闭，不重算摘要、不降级为人工门、不触发自动返修。验证：该场景进入 durable failed 且不出现人工门或返修调用
+- [ ] 5.3 缺证据或未知代际的处置：未知代际按状态损坏拒收；缺可比对的基线事实时走既有等待或人工处理路径。验证：既有 history 集合与任何预算余额在该路径下均未被清空、未被充值，重复闸门未被跳过
+
+## 6. 教学材料与 fixture 更新（共享面，串行）
+
+- [ ] 6.1 按 `design.md`「共享面与排序」，在 `mechanicalize` 的 prompt 瘦身与其断言更新**之后**修改 SC author 教学与人工修订教学：ID 纪律例子改 `WIC-`，并给出「新生 WIC」与「legacy 修订保留 AC」两条分支。验证：两条分支各有可验收断言，且教学块体量门禁仍绿
+- [ ] 6.2 按第 1 组的清单更新编译器 fixture 与 prompt 契约断言：新生成例子迁 `WIC-`，真实历史 `AC-` fixture 保留为兼容用例，不做全仓替换。验证：兼容用例仍按旧域通过、新用例按新域通过，两类并存
+- [ ] 6.3 新增命名 / 修订矩阵 fixture（覆盖双前缀、存量保 ID、前缀升级拒绝、spec 域与 plan 域分界）。验证：矩阵每格都有对应断言且全部通过
+
+## 7. 验收与收口
+
+- [ ] 7.1 契约级验收：`REQ-WSC-30` / `REQ-WSC-31` 与 MODIFIED `REQ-TOP-04` / `REQ-TOP-05` 的每个场景各有可执行断言或可观察行为证据。验证：场景清单逐条对账无遗漏项
+- [ ] 7.2 兼容级验收：旧 lineage 修订可用且既有 ID 不变、旧 session 恢复后仍命中旧重复与原复评、新会话从首次 finding 起全程新代际、不因新前缀重置计数。验证：跨代际兼容用例全绿
+- [ ] 7.3 版本级验收：旧 `compiler_version` 的 IR 仍可读 / 复验 / 合法发布，不同 `compiler_version` 仍按既有 freshness 拒绝。验证：既有 freshness 用例未被放宽
+- [ ] 7.4 变更收口：`openspec validate isolate-plan-criterion-namespace --strict` 通过，且本 change 的 spec delta 不与 `mechanicalize` 的 MODIFIED `REQ-WSC-09` 重复。验证：strict 校验 exit 0，重复性逐条核对无交集
