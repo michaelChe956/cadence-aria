@@ -1097,6 +1097,42 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     ).toHaveTextContent("1.0.1");
   });
 
+  // 2026-11-09 bug 修复：操作区里的「核验」与「更新」两个按钮错位。
+  // 根因：操作区用 items-center 垂直居中，而安装块是多行（按钮行 +
+  // 状态文案行）⇒ 「核验」按钮被整块高度居中，顶边与「更新」按钮不齐。
+  // 断言：操作区顶端对齐（items-start），安装块可收缩（min-w-0）且不
+  // 撑出卡片（max-w-full）——长状态文案折行而不是把整行拉宽。
+  it("keeps the operation buttons on one top edge and keeps the install block inside the row", async () => {
+    installFetchRouter(() => confirmedCodexProjection(), undefined, {
+      targets: [
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: true,
+          local_version: "0.44.0",
+          latest_version: "1.0.1",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "update",
+        },
+      ],
+    });
+
+    renderProviderManagement();
+
+    const operations = await screen.findByTestId(
+      "provider-capability-operations-codex",
+    );
+    expect(operations.className).toContain("items-start");
+    expect(operations.className).not.toContain("items-center");
+
+    const installAction = within(operations).getByTestId(
+      "provider-install-action-codex",
+    );
+    expect(installAction.className).toContain("min-w-0");
+    expect(installAction.className).toContain("max-w-full");
+  });
+
   // owner 2026-11-04 裁定：codegraph 不是 provider，不展示在「Provider 能力核验」
   // 面板里 ⇒ 断言【不出现】，不是「可选」。
   it("does not show codegraph in the provider capability panel", async () => {

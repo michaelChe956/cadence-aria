@@ -274,6 +274,38 @@ describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-0
   });
 });
 
+// 2026-11-09 bug 修复：安装块是多行（按钮行 + 状态文案行），在能力卡的
+// 操作区里把「核验」按钮顶歪；长状态文案还把整行撑出卡片。断言：安装块
+// 可收缩且不撑宽（min-w-0 / max-w-full），状态文案允许折行（break-words）。
+describe("安装块的布局契约（不撑宽、不顶歪操作区）", () => {
+  it("安装块可收缩且不撑出所在行", () => {
+    installFetchRouter({ target: "codex" });
+    renderButton({ cliAvailable: false, capabilityConfirmed: false });
+
+    const action = screen.getByTestId("provider-install-action-codex");
+    expect(action.className).toContain("min-w-0");
+    expect(action.className).toContain("max-w-full");
+  });
+
+  it("运行中状态文案允许折行（不把父行撑宽）", async () => {
+    vi.useFakeTimers();
+    installFetchRouter({
+      target: "codex",
+      jobIds: ["job_0001"],
+      jobs: [() => runningJob("job_0001", "codex")],
+    });
+    renderButton({ cliAvailable: false });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "安装" }));
+      await Promise.resolve();
+    });
+
+    const status = screen.getByTestId("provider-install-status-codex");
+    expect(status.className).toContain("break-words");
+  });
+});
+
 describe("异步安装作业（REQ-PCI-05 / REQ-PCI-06）", () => {
   it("点击后立刻显示运行中，轮询到 completed 后调 onSettled 并停止轮询", async () => {
     vi.useFakeTimers();

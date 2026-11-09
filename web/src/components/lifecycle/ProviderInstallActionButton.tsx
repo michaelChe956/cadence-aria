@@ -178,7 +178,7 @@ export function ProviderInstallActionButton({
   return (
     <div
       data-testid={`provider-install-action-${target}`}
-      className="mt-1 space-y-1"
+      className="mt-1 min-w-0 max-w-full space-y-1"
     >
       <div className="flex flex-wrap items-center gap-2">
         {showInstall ? (
@@ -232,7 +232,7 @@ export function ProviderInstallActionButton({
       {showInstall ? (
         <p
           data-testid={`provider-install-manual-command-${target}`}
-          className="text-xs text-[var(--aria-ink-muted)]"
+          className="break-words text-xs text-[var(--aria-ink-muted)]"
         >
           手动安装：
           <code className="ml-1 break-all rounded bg-[var(--aria-panel-muted)] px-1 py-0.5">
@@ -273,7 +273,7 @@ export function ProviderInstallActionButton({
       {running ? (
         <p
           data-testid={`provider-install-status-${target}`}
-          className="text-xs text-[var(--aria-ink-muted)]"
+          className="break-words text-xs text-[var(--aria-ink-muted)]"
         >
           安装中：正在执行安装命令，可能需要数分钟；作业状态是 durable 的，刷新页面不会丢。
         </p>
@@ -282,7 +282,7 @@ export function ProviderInstallActionButton({
       {!running && job?.status === "completed" ? (
         <p
           data-testid={`provider-install-status-${target}`}
-          className="text-xs text-[var(--aria-ink-muted)]"
+          className="break-words text-xs text-[var(--aria-ink-muted)]"
         >
           已安装
           {job.outcome?.installed_version
@@ -297,7 +297,7 @@ export function ProviderInstallActionButton({
       {!running && job?.status === "failed" ? (
         <div
           data-testid={`provider-install-status-${target}`}
-          className="text-xs text-[var(--aria-danger)]"
+          className="break-words text-xs text-[var(--aria-danger)]"
         >
           <p>
             {job.failure
@@ -318,7 +318,7 @@ export function ProviderInstallActionButton({
       {error ? (
         <p
           data-testid={`provider-install-error-${target}`}
-          className="text-xs text-[var(--aria-danger)]"
+          className="break-words text-xs text-[var(--aria-danger)]"
         >
           {error}
         </p>
