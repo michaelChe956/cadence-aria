@@ -27,6 +27,8 @@ const PACKAGE: &str = "cadence/knowledge-base/user-input/updates/CHANGE-x";
 enum Script {
     /// 在聚合根下写这些文件后正常完成。
     Writes(Vec<(&'static str, &'static str)>),
+    /// 删除指定文件后正常完成（provider 删除平台配置的场景）。
+    DeletesThenOk(&'static str),
     /// turn 失败。
     Fail { code: &'static str, retryable: bool },
     /// 先写这些文件再失败（provider 越界写后报错/超时）。
@@ -37,8 +39,26 @@ enum Script {
     },
     /// 先写这些文件，再由取消信号触发 Cancelled（provider 越界写后被取消）。
     WritesThenCancel(Vec<(&'static str, &'static str)>),
+    /// 先写这些文件再返回 CancelledStopUnconfirmed（Abort 后 provider 仍在跑）。
+    WritesThenCancelUnconfirmed(Vec<(&'static str, &'static str)>),
     /// 等取消信号后返回 Cancelled。
     WaitForCancel,
+    /// turn 开始即通知 `started`，等 `proceed` 放行后写文件并成功完成
+    /// （测试需要在 turn 进行中做动作时使用）。
+    GatedWrites {
+        files: Vec<(&'static str, &'static str)>,
+        started: Arc<tokio::sync::Notify>,
+        proceed: Arc<tokio::sync::Notify>,
+    },
+    /// turn 开始先写文件并通知 `started`，等 `proceed` 放行后返回失败
+    /// （模拟「取消 API 与失败 turn 并发」的交叉情形）。
+    GatedWritesThenFail {
+        files: Vec<(&'static str, &'static str)>,
+        code: &'static str,
+        retryable: bool,
+        started: Arc<tokio::sync::Notify>,
+        proceed: Arc<tokio::sync::Notify>,
+    },
 }
 
 fn write_files(root: &Path, files: &[(&'static str, &'static str)]) {
@@ -90,6 +110,10 @@ impl KnowledgeBaseTurnRunner for FakeRunner {
                 write_files(request.canonical_root, files);
                 Ok("turn ok".to_string())
             }
+            Script::DeletesThenOk(path) => {
+                std::fs::remove_file(request.canonical_root.join(path)).unwrap();
+                Ok("turn ok".to_string())
+            }
             Script::Fail { code, retryable } => Err(KnowledgeBaseTurnError::Failed {
                 reason_code: (*code).to_string(),
                 summary: "provider exploded".to_string(),
@@ -112,9 +136,40 @@ impl KnowledgeBaseTurnRunner for FakeRunner {
                 request.cancellation.cancel();
                 Err(KnowledgeBaseTurnError::Cancelled)
             }
+            Script::WritesThenCancelUnconfirmed(files) => {
+                write_files(request.canonical_root, files);
+                request.cancellation.cancel();
+                Err(KnowledgeBaseTurnError::CancelledStopUnconfirmed)
+            }
             Script::WaitForCancel => {
                 request.cancellation.cancelled().await;
                 Err(KnowledgeBaseTurnError::Cancelled)
+            }
+            Script::GatedWrites {
+                files,
+                started,
+                proceed,
+            } => {
+                started.notify_one();
+                proceed.notified().await;
+                write_files(request.canonical_root, files);
+                Ok("turn ok".to_string())
+            }
+            Script::GatedWritesThenFail {
+                files,
+                code,
+                retryable,
+                started,
+                proceed,
+            } => {
+                write_files(request.canonical_root, files);
+                started.notify_one();
+                proceed.notified().await;
+                Err(KnowledgeBaseTurnError::Failed {
+                    reason_code: (*code).to_string(),
+                    summary: "provider exploded".to_string(),
+                    retryable: *retryable,
+                })
             }
         }
     }
@@ -174,6 +229,8 @@ impl ProviderTrustPrecondition for FakeTrust {
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
+    /// 平台状态根（测试里用于构造聚合索引锁路径等平台视角路径）。
+    paths: ProductAppPaths,
     runner: Arc<FakeRunner>,
     trust: Arc<FakeTrust>,
     coordinator: KnowledgeBaseCoordinator,
@@ -199,8 +256,9 @@ fn fixture(script: Script, trust_waiting: bool) -> Fixture {
     let coordinator =
         KnowledgeBaseCoordinator::new(paths.clone(), runner.clone(), trust.clone(), clock)
             .for_lc(LC);
-    let store = KnowledgeBaseOperationStore::for_lc(paths, LC.to_string());
+    let store = KnowledgeBaseOperationStore::for_lc(paths.clone(), LC.to_string());
     Fixture {
+        paths,
         _temp: temp,
         root,
         runner,
@@ -628,10 +686,13 @@ async fn execute_settles_cancellation_even_if_cancel_api_raced_the_turn() {
         .store
         .cancel(PROJECT, &operation.operation_id, NOW.to_string())
         .unwrap();
-    let error =
-        fixture
-            .coordinator
-            .settle_cancelled(PROJECT, &operation.operation_id, "claude_code", &[]);
+    let error = fixture.coordinator.settle_cancelled(
+        PROJECT,
+        &operation.operation_id,
+        "claude_code",
+        &[],
+        false,
+    );
     assert!(matches!(error, KnowledgeBaseError::Cancelled));
 }
 
@@ -912,6 +973,7 @@ async fn consume_turn_returns_bounded_summary_on_completion() {
     let summary = GatewayKnowledgeBaseTurnRunner::consume_turn(
         session,
         std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
         CancellationToken::new(),
     )
     .await
@@ -922,11 +984,14 @@ async fn consume_turn_returns_bounded_summary_on_completion() {
 
 #[tokio::test]
 async fn consume_turn_maps_cancellation_to_cancelled_and_aborts_the_session() {
-    let (session, _tx, mut command_rx) = scripted_session(Vec::new());
+    // Abort 后事件流关闭 ⇒ provider 停止已确认 ⇒ 普通 Cancelled。
+    let (session, tx, mut command_rx) = scripted_session(Vec::new());
+    drop(tx);
     let cancellation = CancellationToken::new();
     cancellation.cancel();
     let result = GatewayKnowledgeBaseTurnRunner::consume_turn(
         session,
+        std::time::Duration::from_secs(5),
         std::time::Duration::from_secs(5),
         cancellation,
     )
@@ -936,10 +1001,31 @@ async fn consume_turn_maps_cancellation_to_cancelled_and_aborts_the_session() {
 }
 
 #[tokio::test]
+async fn consume_turn_maps_cancellation_to_stop_unconfirmed_when_stream_stays_open() {
+    // Abort 后宽限期内事件流未关闭 ⇒ provider 可能仍在写 ⇒ 停止未确认。
+    let (session, _tx, mut command_rx) = scripted_session(Vec::new());
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let result = GatewayKnowledgeBaseTurnRunner::consume_turn(
+        session,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(30),
+        cancellation,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(KnowledgeBaseTurnError::CancelledStopUnconfirmed)
+    ));
+    assert!(matches!(command_rx.try_recv(), Ok(ProviderCommand::Abort)));
+}
+
+#[tokio::test]
 async fn consume_turn_times_out_as_retryable_failure() {
     let (session, _tx, mut command_rx) = scripted_session(Vec::new());
     let result = GatewayKnowledgeBaseTurnRunner::consume_turn(
         session,
+        std::time::Duration::from_millis(30),
         std::time::Duration::from_millis(30),
         CancellationToken::new(),
     )
@@ -966,6 +1052,7 @@ async fn consume_turn_maps_provider_failure_stream_close_and_interaction() {
     let failed = GatewayKnowledgeBaseTurnRunner::consume_turn(
         session,
         std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
         CancellationToken::new(),
     )
     .await;
@@ -987,6 +1074,7 @@ async fn consume_turn_maps_provider_failure_stream_close_and_interaction() {
     drop(tx);
     let closed = GatewayKnowledgeBaseTurnRunner::consume_turn(
         session,
+        std::time::Duration::from_secs(5),
         std::time::Duration::from_secs(5),
         CancellationToken::new(),
     )

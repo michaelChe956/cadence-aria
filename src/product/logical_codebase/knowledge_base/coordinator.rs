@@ -8,9 +8,10 @@
 //! - 写入面审计：turn 前后对聚合根做快照差分，允许面之外的新增/修改/删除
 //!   一律使 operation 失败并记 `knowledge_base_write_scope_violation`。后快照
 //!   在 provider 停止后无条件执行（成功/失败/取消都审计），越界作为附加事实
-//!   并入失败/取消记录，不掩盖原始原因。平台自有状态（根 `.aria/`、
-//!   `.codegraph/`、`codegraph.json`）与成员仓 `.git/index` 不计入。
-//! - trust 前置门沿用聚合初始化口径（`ProviderTrustScenario::Recipe`）。
+//!   并入失败/取消记录，不掩盖原始原因；取消时若无法确认 provider 已停止，
+//!   审计按「不确定」fail-closed 留痕，不得静默当作干净取消。平台聚合索引
+//!   与 turn 运行期互斥（`coordinator_audit.inc.rs`），索引产物
+//!   路径不再豁免；仅 `**/.git/index` 与根层 `.aria/runtime/**` 不计入。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -26,7 +27,9 @@ use crate::cross_cutting::streaming_provider::{
     StreamingProviderInput,
 };
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
 use crate::product::json_store::ProductStoreError;
+use crate::product::logical_codebase::aggregate_index::AggregateIndexStore;
 use crate::product::logical_codebase::aggregate_initialization::{
     AggregateInitializationErrorRecord, AggregateProviderSelection,
 };
@@ -59,16 +62,16 @@ const DEFAULT_CAPABILITY_SNAPSHOT_REF: &str = "cap_managed_snapshot";
 const KNOWLEDGE_BASE_TURN_OUTPUT_LIMIT: usize = 4096;
 /// 单个 provider turn 的超时预算（与既有 root recipe 驱动一致）。
 const DEFAULT_TURN_TIMEOUT_SECS: u64 = 1800;
+/// Abort 后等待 provider 事件流关闭（确认停止）的默认宽限预算（秒）。
+const DEFAULT_CANCEL_STOP_GRACE_SECS: u64 = 10;
 /// 失败记录里最多列出的越界路径条数。
 const VIOLATION_SUMMARY_LIMIT: usize = 20;
 
-const REASON_WRITE_SCOPE_VIOLATION: &str = "knowledge_base_write_scope_violation";
-const REASON_TURN_FAILED: &str = "knowledge_base_provider_turn_failed";
-const REASON_INVALID_INPUT: &str = "knowledge_base_invalid_input";
-const REASON_INTERNAL: &str = "knowledge_base_internal_error";
+// 失败/取消记录映射与平台索引隔离见 `coordinator_audit.inc.rs`（1200 行
+// 门禁：非测试代码按仓内 `*.inc.rs` include 惯例拆分）。
 const REASON_CANCELLED: &str = "knowledge_base_cancelled";
-const REASON_TRUST_WAITING: &str = "aggregate_initialization_trust_waiting";
-const FAILURE_STAGE: &str = "knowledge_base";
+/// 取消时无法确认 provider 已停止：审计结果不确定（下界），fail-closed 留痕。
+const REASON_CANCEL_AUDIT_INDETERMINATE: &str = "knowledge_base_cancel_audit_indeterminate";
 
 /// 时钟：返回 RFC3339 时间戳。
 pub type Clock = dyn Fn() -> String + Send + Sync;
@@ -109,6 +112,10 @@ pub enum KnowledgeBaseError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeBaseTurnError {
     Cancelled,
+    /// 取消返回，但 runner 无法确认 provider 已停止（Abort 后事件流在宽限期内
+    /// 未关闭）：后快照只能当作审计下界，协调器按「审计不确定」fail-closed
+    /// 留痕。对调用方仍表现为 [`KnowledgeBaseError::Cancelled`]。
+    CancelledStopUnconfirmed,
     Failed {
         reason_code: String,
         summary: String,
@@ -120,6 +127,7 @@ impl From<KnowledgeBaseTurnError> for KnowledgeBaseError {
     fn from(error: KnowledgeBaseTurnError) -> Self {
         match error {
             KnowledgeBaseTurnError::Cancelled => Self::Cancelled,
+            KnowledgeBaseTurnError::CancelledStopUnconfirmed => Self::Cancelled,
             KnowledgeBaseTurnError::Failed {
                 reason_code,
                 summary,
@@ -367,15 +375,31 @@ impl KnowledgeBaseCoordinator {
             Err(DriveFailure {
                 error: KnowledgeBaseError::Cancelled,
                 violations,
-            }) => Err(self.settle_cancelled(project_id, operation_id, provider, &violations)),
-            Err(DriveFailure { error, violations }) => {
+                audit_indeterminate,
+            }) => Err(self.settle_cancelled(
+                project_id,
+                operation_id,
+                provider,
+                &violations,
+                audit_indeterminate,
+            )),
+            Err(DriveFailure {
+                error, violations, ..
+            }) => {
                 let record = error_record(&error, &violations, provider);
                 match store.finish_failed(project_id, operation_id, Some(step), record, self.now())
                 {
                     Ok(()) => Err(error),
-                    Err(store_error) => {
-                        Err(self.settle_store_conflict(project_id, operation_id, store_error))
-                    }
+                    // 「取消 API 已落盘 + runner 返回普通失败」的交叉情形：已算出
+                    // 的审计事实不得丢弃，改为附加到 Cancelled 记录上。
+                    Err(store_error) => Err(self.settle_failed_after_cancel_won(
+                        project_id,
+                        operation_id,
+                        &error,
+                        &violations,
+                        provider,
+                        store_error,
+                    )),
                 }
             }
         }
@@ -389,23 +413,25 @@ impl KnowledgeBaseCoordinator {
 
     /// 取消收口：operation 已被 cancel API 置为终态（`IdentityMismatch`）时同样
     /// 按已取消处理；取消前 provider 已越界写时，把越界事实附加到取消记录上
-    /// （状态仍为 `Cancelled`，不改写成失败）。返回值恒为错误（`Cancelled`
-    /// 或真实的 store 故障）。
+    /// （状态仍为 `Cancelled`，不改写成失败）；取消时无法确认 provider 已停止
+    /// ⇒ 审计按「不确定」fail-closed 留痕，不得静默当作干净取消。返回值恒为
+    /// 错误（`Cancelled` 或真实的 store 故障）。
     fn settle_cancelled(
         &self,
         project_id: &str,
         operation_id: &str,
         provider: &str,
         violations: &[String],
+        audit_indeterminate: bool,
     ) -> KnowledgeBaseError {
         let store = match self.store() {
             Ok(store) => store,
             Err(error) => return error,
         };
-        let result = if violations.is_empty() {
+        let result = if violations.is_empty() && !audit_indeterminate {
             store.cancel(project_id, operation_id, self.now())
         } else {
-            let record = error_record(&KnowledgeBaseError::Cancelled, violations, provider);
+            let record = cancelled_audit_record(provider, violations, audit_indeterminate);
             store.cancel_with_error(project_id, operation_id, record, self.now())
         };
         match result {
@@ -433,10 +459,70 @@ impl KnowledgeBaseCoordinator {
         error.into()
     }
 
-    /// 驱动一次 turn。provider 停止后（成功/失败/取消）无条件做后快照审计；
-    /// 成功 turn 的越界以 `WriteScopeViolation` 失败，失败/取消 turn 的越界
-    /// 作为 `violations` 附加，原始失败原因保持不变。后快照本身失败时，成功
-    /// turn fail-closed，失败/取消 turn 保留原始原因。
+    /// 失败收口撞上「取消 API 已先落盘」（`IdentityMismatch`）：若记录确已被
+    /// 并发取消，已算出的越界审计事实不得丢弃——把审计记录附加到 Cancelled
+    /// 记录上（状态保持 `Cancelled`）；无越界事实或非取消态冲突维持既有
+    /// 收口语义（`settle_store_conflict`）。
+    fn settle_failed_after_cancel_won(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        error: &KnowledgeBaseError,
+        violations: &[String],
+        provider: &str,
+        store_error: ProductStoreError,
+    ) -> KnowledgeBaseError {
+        if violations.is_empty()
+            || !matches!(store_error, ProductStoreError::IdentityMismatch { .. })
+        {
+            return self.settle_store_conflict(project_id, operation_id, store_error);
+        }
+        let Ok(store) = self.store() else {
+            return store_error.into();
+        };
+        match store.get(project_id, operation_id) {
+            Ok(current) if current.status == KnowledgeBaseOperationStatus::Cancelled => {
+                match store.cancel_with_error(
+                    project_id,
+                    operation_id,
+                    error_record(error, violations, provider),
+                    self.now(),
+                ) {
+                    // 附加成功，或他人已附加过（事实已在盘上）。
+                    Ok(()) | Err(ProductStoreError::IdentityMismatch { .. }) => {
+                        KnowledgeBaseError::Cancelled
+                    }
+                    Err(attach_error) => attach_error.into(),
+                }
+            }
+            _ => self.settle_store_conflict(project_id, operation_id, store_error),
+        }
+    }
+
+    /// 独占持有聚合索引锁直到返回的 guard drop（裁决 (b)：平台索引写入与
+    /// 知识库 turn 互斥）。等锁在 blocking 线程上进行，不占 async executor。
+    async fn acquire_index_isolation(
+        &self,
+        project_id: &str,
+    ) -> Result<AggregateIndexIsolation, KnowledgeBaseError> {
+        let lc_id = self.lc_id()?.to_string();
+        let lock_path = aggregate_index_lock_path(&self.paths, &lc_id, project_id)
+            .map_err(KnowledgeBaseError::Io)?;
+        tokio::task::spawn_blocking(move || AggregateIndexIsolation::acquire(lock_path))
+            .await
+            .map_err(|error| {
+                KnowledgeBaseError::Io(format!("index isolation task failed: {error}"))
+            })?
+            .map_err(KnowledgeBaseError::Io)
+    }
+
+    /// 驱动一次 turn。前后快照期间独占聚合索引锁（平台索引写入与 turn 互斥，
+    /// 索引产物路径无需豁免）；provider 停止后（成功/失败/取消）无条件做后
+    /// 快照审计：成功 turn 的越界以 `WriteScopeViolation` 失败，失败/取消
+    /// turn 的越界作为 `violations` 附加，原始失败原因保持不变。取消但无法
+    /// 确认 provider 已停止 ⇒ 审计标记为不确定（下界），由取消收口按
+    /// fail-closed 留痕。后快照本身失败时，成功 turn fail-closed，失败/取消
+    /// turn 保留原始原因。
     async fn drive(
         &self,
         operation: &KnowledgeBaseOperation,
@@ -454,6 +540,7 @@ impl KnowledgeBaseCoordinator {
                 &provider,
             ) => ready?,
         }
+        let isolation = self.acquire_index_isolation(&operation.project_id).await?;
         let before = snapshot_blocking(canonical_root).await?;
         let lc_id = self.lc_id()?;
         let turn = self
@@ -468,9 +555,13 @@ impl KnowledgeBaseCoordinator {
                 cancellation,
             })
             .await;
+        // runner 返回取消 ≠ provider 已停止：未确认停止时后快照只是审计下界。
+        let stop_unconfirmed =
+            matches!(turn, Err(KnowledgeBaseTurnError::CancelledStopUnconfirmed));
         let audit = snapshot_blocking(canonical_root)
             .await
             .map(|after| write_scope_violations(&before, &after));
+        drop(isolation);
         match (turn, audit) {
             (Ok(summary), Ok(violations)) if violations.is_empty() => Ok(summary),
             (Ok(_), Ok(paths)) => Err(KnowledgeBaseError::WriteScopeViolation { paths }.into()),
@@ -478,8 +569,21 @@ impl KnowledgeBaseCoordinator {
             (Err(turn_error), Ok(violations)) => Err(DriveFailure {
                 error: turn_error.into(),
                 violations,
+                audit_indeterminate: stop_unconfirmed,
             }),
-            (Err(turn_error), Err(_)) => Err(KnowledgeBaseError::from(turn_error).into()),
+            (Err(turn_error), Err(_)) => {
+                let cancelled = matches!(
+                    turn_error,
+                    KnowledgeBaseTurnError::Cancelled
+                        | KnowledgeBaseTurnError::CancelledStopUnconfirmed
+                );
+                Err(DriveFailure {
+                    error: KnowledgeBaseError::from(turn_error),
+                    violations: Vec::new(),
+                    // 取消 + 后快照失败 ⇒ 审计不可用，同样按不确定处理。
+                    audit_indeterminate: stop_unconfirmed || cancelled,
+                })
+            }
         }
     }
 }
@@ -518,10 +622,12 @@ fn resolve_turn(
     Ok((provider, command))
 }
 
-/// `drive` 的失败面：主错误 + 失败/取消 turn 期间发现的附加越界路径。
+/// `drive` 的失败面：主错误 + 失败/取消 turn 期间发现的附加越界路径 +
+/// 审计可信度（取消时无法确认 provider 已停止 ⇒ 结果只能当下界）。
 struct DriveFailure {
     error: KnowledgeBaseError,
     violations: Vec<String>,
+    audit_indeterminate: bool,
 }
 
 impl From<KnowledgeBaseError> for DriveFailure {
@@ -529,127 +635,36 @@ impl From<KnowledgeBaseError> for DriveFailure {
         Self {
             error,
             violations: Vec::new(),
+            audit_indeterminate: false,
         }
     }
 }
 
-const VIOLATION_ACTION: &str = "知识库只允许写 cadence/knowledge-base、cadence/project-rules 与根 CLAUDE.md/AGENTS.md；检查越界改动后重新发起";
+include!("coordinator_audit.inc.rs");
 
-fn describe_violations(paths: &[String]) -> String {
-    let mut listed = paths
-        .iter()
-        .take(VIOLATION_SUMMARY_LIMIT)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    if paths.len() > VIOLATION_SUMMARY_LIMIT {
-        listed.push_str(&format!(" 等共 {} 处", paths.len()));
-    }
-    listed
-}
-
-/// 把执行层错误映射为持久化失败记录；`violations` 非空时把越界事实并入：
-/// 顶层 `reason_code` 取越界码且不可重试（工作树已被污染，不能盲目重试），
-/// 原始失败原因保存在 `cause` 与 `stderr_summary`，不被掩盖。
-fn error_record(
-    error: &KnowledgeBaseError,
+/// 取消收口的附加记录：越界事实（如有）与审计可信度。取消时无法确认
+/// provider 已停止 ⇒ 后快照只能作为下界，按 fail-closed 记为「审计不确定」，
+/// 不得静默当作干净取消。
+fn cancelled_audit_record(
+    provider: &str,
     violations: &[String],
-    provider: &str,
+    audit_indeterminate: bool,
 ) -> AggregateInitializationErrorRecord {
-    let base = base_error_record(error, provider);
-    if violations.is_empty() {
-        return base;
+    let mut record = error_record(&KnowledgeBaseError::Cancelled, violations, provider);
+    if audit_indeterminate {
+        let note = "取消时无法确认 provider 已停止，写入面审计为下界，可能漏报";
+        record.stderr_summary = Some(match record.stderr_summary.take() {
+            Some(summary) => format!("{summary}；{note}"),
+            None => note.to_string(),
+        });
+        if record.reason_code == REASON_CANCELLED {
+            record.reason_code = REASON_CANCEL_AUDIT_INDETERMINATE.to_string();
+        }
+        record.retryable = false;
+        record.action =
+            "取消时无法确认 provider 已停止；人工检查聚合根工作树后重新发起".to_string();
     }
-    let original_cause = base
-        .cause
-        .as_deref()
-        .map(|cause| format!("（{cause}）"))
-        .unwrap_or_default();
-    let original = format!(
-        "原始失败 {}{original_cause}: {}",
-        base.reason_code,
-        base.stderr_summary.as_deref().unwrap_or_default()
-    );
-    AggregateInitializationErrorRecord {
-        reason_code: REASON_WRITE_SCOPE_VIOLATION.to_string(),
-        stderr_summary: Some(format!(
-            "越界写入 {}；{original}",
-            describe_violations(violations)
-        )),
-        retryable: false,
-        action: VIOLATION_ACTION.to_string(),
-        cause: Some(base.reason_code),
-        ..base
-    }
-}
-
-fn base_error_record(
-    error: &KnowledgeBaseError,
-    provider: &str,
-) -> AggregateInitializationErrorRecord {
-    let record = |reason_code: &str,
-                  summary: Option<String>,
-                  retryable: bool,
-                  action: &str,
-                  cause: Option<String>| AggregateInitializationErrorRecord {
-        stage: FAILURE_STAGE.to_string(),
-        reason_code: reason_code.to_string(),
-        stderr_summary: summary,
-        retryable,
-        action: action.to_string(),
-        cause,
-        provider: Some(provider.to_string()),
-    };
-    match error {
-        KnowledgeBaseError::TrustWaiting(waiting) => AggregateInitializationErrorRecord {
-            stage: FAILURE_STAGE.to_string(),
-            reason_code: REASON_TRUST_WAITING.to_string(),
-            stderr_summary: Some(waiting.message.clone()),
-            retryable: true,
-            action: waiting.retry_action.clone(),
-            cause: Some(waiting.reason_code.clone()),
-            provider: Some(provider_wire_label(&waiting.provider).to_string()),
-        },
-        KnowledgeBaseError::WriteScopeViolation { paths } => record(
-            REASON_WRITE_SCOPE_VIOLATION,
-            Some(describe_violations(paths)),
-            false,
-            VIOLATION_ACTION,
-            None,
-        ),
-        KnowledgeBaseError::TurnFailed {
-            reason_code,
-            summary,
-            retryable,
-        } => record(
-            REASON_TURN_FAILED,
-            Some(summary.clone()),
-            *retryable,
-            "查看 provider 输出摘要，处理后重新发起",
-            Some(reason_code.clone()),
-        ),
-        KnowledgeBaseError::InvalidInput(message) => record(
-            REASON_INVALID_INPUT,
-            Some(message.clone()),
-            false,
-            "修正输入后重新发起",
-            None,
-        ),
-        KnowledgeBaseError::Cancelled => record(
-            REASON_CANCELLED,
-            Some("操作已取消".to_string()),
-            false,
-            "确认工作树状态后重新发起",
-            None,
-        ),
-        other => record(
-            REASON_INTERNAL,
-            Some(other.to_string()),
-            false,
-            "检查服务端日志后重新发起",
-            None,
-        ),
-    }
+    record
 }
 
 // ───────────────────────── 写入面审计 ─────────────────────────
@@ -662,18 +677,14 @@ struct FileStamp {
 
 type TreeSnapshot = BTreeMap<String, FileStamp>;
 
-/// 平台自有状态（聚合根层）：`.aria/`（平台运行目录）、`.codegraph/` 与
-/// `codegraph.json`（既有聚合索引 init/sync 的产物，见
-/// `aggregate_index::exclude`）。它们由平台而非 provider 写入，合法的索引
-/// 重建/刷新可能与 KB turn 并发，不得归因成 provider 越界。仅根层精确匹配。
-const PLATFORM_OWNED_ROOT_ENTRIES: [&str; 3] = [".aria", ".codegraph", "codegraph.json"];
-
-/// 是否平台自有条目（含 `codegraph.json` 原子写产生的根层临时文件）。
-fn is_platform_owned(relative: &str) -> bool {
-    PLATFORM_OWNED_ROOT_ENTRIES.contains(&relative)
-        || (relative.starts_with(".codegraph.json.")
-            && relative.ends_with(".tmp")
-            && !relative.contains('/'))
+/// 平台运行时子树（聚合根层 `.aria/runtime/**`）：issue 运行绑定与任务
+/// 运行态（`IssueRuntimeBindingRecord.task_root` 直接落在该子树），由平台
+/// 任意时刻写入且不受跨进程锁保护，来源无法归因 ⇒ 不计入审计。`.aria` 下
+/// 其余内容与嵌套 `.aria` 照常审计：provider 的改动仍判越界。聚合索引产物
+/// （`codegraph.json`、`.codegraph/**`）不在此列——turn 与平台索引写入已由
+/// `.aggregate-index.lock` 运行期互斥，无需按路径豁免。
+fn is_platform_runtime(relative: &str) -> bool {
+    relative == ".aria/runtime" || relative.starts_with(".aria/runtime/")
 }
 
 /// 只读 git 命令（如 `git status`）会刷新 `index`：仅 `**/.git/index` 豁免，
@@ -682,8 +693,8 @@ fn is_git_index(relative: &str) -> bool {
     relative == ".git/index" || relative.ends_with("/.git/index")
 }
 
-/// 递归文件清单（路径 → 大小 + mtime）。平台自有条目与 `**/.git/index` 被
-/// 跳过；符号链接按链接自身记录，不跟随。
+/// 递归文件清单（路径 → 大小 + mtime）。根层 `.aria/runtime/**` 子树与
+/// `**/.git/index` 被跳过；符号链接按链接自身记录，不跟随。
 fn snapshot_aggregate_root(root: &Path) -> Result<TreeSnapshot, KnowledgeBaseError> {
     fn walk(root: &Path, dir: &Path, out: &mut TreeSnapshot) -> Result<(), KnowledgeBaseError> {
         let io = |path: &Path, error: std::io::Error| {
@@ -699,7 +710,7 @@ fn snapshot_aggregate_root(root: &Path) -> Result<TreeSnapshot, KnowledgeBaseErr
                 .map(|component| component.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join("/");
-            if is_platform_owned(&relative) {
+            if is_platform_runtime(&relative) {
                 continue;
             }
             let metadata = std::fs::symlink_metadata(&path).map_err(|error| io(&path, error))?;
@@ -769,6 +780,8 @@ pub struct GatewayKnowledgeBaseTurnRunner {
     paths: ProductAppPaths,
     capability_snapshot_ref: String,
     command_timeout: Duration,
+    /// Abort 后等待 provider 事件流关闭（确认停止）的宽限预算。
+    cancel_stop_grace: Duration,
 }
 
 impl GatewayKnowledgeBaseTurnRunner {
@@ -778,6 +791,7 @@ impl GatewayKnowledgeBaseTurnRunner {
             paths,
             capability_snapshot_ref: DEFAULT_CAPABILITY_SNAPSHOT_REF.to_string(),
             command_timeout: Duration::from_secs(DEFAULT_TURN_TIMEOUT_SECS),
+            cancel_stop_grace: Duration::from_secs(DEFAULT_CANCEL_STOP_GRACE_SECS),
         }
     }
 
@@ -785,6 +799,33 @@ impl GatewayKnowledgeBaseTurnRunner {
     pub fn with_command_timeout(mut self, command_timeout: Duration) -> Self {
         self.command_timeout = command_timeout;
         self
+    }
+
+    /// 注入取消/超时后等待 provider 停止的宽限预算（测试用短宽限）。
+    pub fn with_cancel_stop_grace(mut self, cancel_stop_grace: Duration) -> Self {
+        self.cancel_stop_grace = cancel_stop_grace;
+        self
+    }
+
+    /// Abort 后等待 provider 会话真正结束：事件流关闭（`recv` 返回 `None`）
+    /// 即管道断开、provider 停止输出，后快照才落在可信边界上。宽限期满
+    /// 仍未关闭 ⇒ 返回 `false`（停止未确认）。
+    async fn await_provider_stop(session: &mut ProviderSession, grace: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            let wait =
+                tokio::time::sleep(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            tokio::pin!(wait);
+            tokio::select! {
+                _ = &mut wait => return false,
+                event = session.events.recv() => {
+                    if event.is_none() {
+                        return true;
+                    }
+                    // 收尾期间的事件不进摘要：turn 结论已定为取消/超时/交互。
+                }
+            }
+        }
     }
 
     fn launch_request(
@@ -834,10 +875,13 @@ impl GatewayKnowledgeBaseTurnRunner {
         }
     }
 
-    /// 以单仓/聚合初始化同款语义消费会话：取消/超时共用预算，输出累积为有界摘要。
+    /// 以单仓/聚合初始化同款语义消费会话：取消/超时共用预算，输出累积为有界
+    /// 摘要。Abort 后在 `stop_grace` 内等待事件流关闭，确认 provider 停止再
+    /// 返回——取消路径的返回值区分「已确认停止」与「未确认」。
     async fn consume_turn(
         mut session: ProviderSession,
         remaining: Duration,
+        stop_grace: Duration,
         cancellation: CancellationToken,
     ) -> Result<String, KnowledgeBaseTurnError> {
         let mut output = BoundedOutput::default();
@@ -848,10 +892,16 @@ impl GatewayKnowledgeBaseTurnRunner {
                 biased;
                 _ = cancellation.cancelled() => {
                     best_effort_abort(&session);
-                    return Err(KnowledgeBaseTurnError::Cancelled);
+                    // provider 真正停止（事件流关闭）后才返回取消；宽限期内
+                    // 未关闭 ⇒ 停止未确认，交给协调器按「审计不确定」处理。
+                    if Self::await_provider_stop(&mut session, stop_grace).await {
+                        return Err(KnowledgeBaseTurnError::Cancelled);
+                    }
+                    return Err(KnowledgeBaseTurnError::CancelledStopUnconfirmed);
                 }
                 _ = &mut timeout => {
                     best_effort_abort(&session);
+                    let _ = Self::await_provider_stop(&mut session, stop_grace).await;
                     return Err(turn_failed("provider_turn_timed_out", "knowledge base turn timed out", &output, true));
                 }
                 event = session.events.recv() => event,
@@ -915,6 +965,7 @@ impl GatewayKnowledgeBaseTurnRunner {
                 Some(ProviderEvent::PermissionRequest(_))
                 | Some(ProviderEvent::ChoiceRequest(_)) => {
                     best_effort_abort(&session);
+                    let _ = Self::await_provider_stop(&mut session, stop_grace).await;
                     return Err(turn_failed(
                         "provider_interaction_required",
                         "provider interaction required",
@@ -1007,7 +1058,11 @@ impl KnowledgeBaseTurnRunner for GatewayKnowledgeBaseTurnRunner {
         tokio::pin!(timeout);
         let session = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return Err(KnowledgeBaseTurnError::Cancelled),
+            // start future 被 drop，无法确认 provider 子进程是否已 spawn：
+            // 停止未确认，按审计不确定收口。
+            _ = cancellation.cancelled() => {
+                return Err(KnowledgeBaseTurnError::CancelledStopUnconfirmed)
+            }
             _ = &mut timeout => {
                 return Err(launch_failed(
                     "provider_turn_timed_out",
@@ -1019,7 +1074,7 @@ impl KnowledgeBaseTurnRunner for GatewayKnowledgeBaseTurnRunner {
             })?,
         };
         let remaining = self.command_timeout.saturating_sub(started.elapsed());
-        Self::consume_turn(session, remaining, cancellation).await
+        Self::consume_turn(session, remaining, self.cancel_stop_grace, cancellation).await
     }
 }
 

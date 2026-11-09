@@ -213,61 +213,157 @@ async fn execute_succeeds_when_only_git_index_is_refreshed() {
         .expect("只读 git 命令刷新 index 不得判越界");
 }
 
-// ───────────────────────── I1：平台自有写入不归因给 provider ─────────────────────────
+// ───────── I1/R1：平台写入可信归因（聚合索引运行期隔离） ─────────
 
 #[tokio::test]
-async fn execute_does_not_attribute_platform_index_writes_to_the_provider() {
-    // 合法 KB turn 期间，平台聚合索引（init/sync）同时在聚合根写
-    // `.codegraph/**`、`codegraph.json`（含其原子写临时文件）与 `.aria/**`。
+async fn execute_mutually_excludes_platform_index_writes_behind_the_aggregate_index_lock() {
+    // 平台写入方是独立线程：真实持有 `.aggregate-index.lock` 并在其临界区内
+    // 写聚合索引产物（codegraph init/sync 的行为）——与假 runner（provider）
+    // 是两个来源，不再用同一个假 runner 冒充平台写入方。
+    use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
+    use crate::product::logical_codebase::aggregate_index::AggregateIndexStore;
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
     let fixture = fixture(
-        Script::Writes(vec![
-            ("cadence/knowledge-base/x.md", "kb"),
-            (".codegraph/index.db", "db"),
-            (".codegraph/daemon.sock.log", "log"),
-            ("codegraph.json", "{\"exclude\":[]}"),
-            (".codegraph.json.123.456.tmp", "tmp"),
-            (".aria/aggregate/state.json", "{}"),
-        ]),
+        Script::GatedWrites {
+            files: vec![("cadence/knowledge-base/x.md", "kb")],
+            started: started.clone(),
+            proceed: proceed.clone(),
+        },
         false,
     );
+    let lock_path = AggregateIndexStore::for_lc(fixture.paths.clone(), LC.to_string())
+        .lock_path(PROJECT)
+        .unwrap();
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let platform_root = fixture.root.clone();
+    let platform_thread = std::thread::spawn(move || {
+        // 平台索引重建：持锁期间写索引产物（含 write_json 的原子临时文件）。
+        with_exact_exclusive_lock(&lock_path, || {
+            write_files(
+                &platform_root,
+                &[
+                    ("codegraph.json", "{\"exclude\":[]}"),
+                    (".codegraph/index.db", "db"),
+                    (".codegraph.json.123.456.tmp", "tmp"),
+                ],
+            );
+            held_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .ok();
+            Ok(())
+        })
+        .unwrap();
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+
     let operation = begin_bootstrap(&fixture, "kb-key-0001").await.unwrap();
-    fixture
-        .coordinator
-        .execute(
-            PROJECT,
-            &operation.operation_id,
-            &fixture.root,
-            CancellationToken::new(),
-        )
+    let execute = {
+        let coordinator = fixture.coordinator.clone();
+        let operation_id = operation.operation_id.clone();
+        let root = fixture.root.clone();
+        tokio::spawn(async move {
+            coordinator
+                .execute(PROJECT, &operation_id, &root, CancellationToken::new())
+                .await
+        })
+    };
+
+    // 平台索引持锁期间 turn 不得启动：快照与 provider turn 都被隔离在锁外。
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        fixture.runner.calls().is_empty(),
+        "平台索引持锁期间 turn 不得启动（运行期隔离）"
+    );
+
+    // 释放平台锁：execute 获得隔离锁，平台产物已落进 before 快照（不进差分）。
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
         .await
-        .expect("平台自有状态写入不得判 provider 越界");
+        .expect("释放平台锁后 turn 应启动");
+    proceed.notify_one();
+    execute
+        .await
+        .unwrap()
+        .expect("平台索引写入不得归因给 provider");
+    platform_thread.join().unwrap();
     let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
     assert_eq!(stored.status, KnowledgeBaseOperationStatus::Completed);
 }
 
+#[tokio::test]
+async fn execute_allows_platform_runtime_writes_during_turn() {
+    // `.aria/runtime/**` 是平台运行时子树（issue 运行绑定/任务状态，无锁
+    // 保护、无法归因）：turn 进行中由平台（测试线程，非 runner）写入不算
+    // provider 越界；`.aria` 其余内容仍照常审计（见纯函数测试）。
+    let started = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    let fixture = fixture(
+        Script::GatedWrites {
+            files: vec![("cadence/knowledge-base/x.md", "kb")],
+            started: started.clone(),
+            proceed: proceed.clone(),
+        },
+        false,
+    );
+    let operation = begin_bootstrap(&fixture, "kb-key-0001").await.unwrap();
+    let execute = {
+        let coordinator = fixture.coordinator.clone();
+        let operation_id = operation.operation_id.clone();
+        let root = fixture.root.clone();
+        tokio::spawn(async move {
+            coordinator
+                .execute(PROJECT, &operation_id, &root, CancellationToken::new())
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("turn 应启动");
+    let runtime_state = fixture
+        .root
+        .join(".aria/runtime/tasks/binding-0001/state.json");
+    std::fs::create_dir_all(runtime_state.parent().unwrap()).unwrap();
+    std::fs::write(&runtime_state, "{}").unwrap();
+    proceed.notify_one();
+    execute
+        .await
+        .unwrap()
+        .expect("平台运行时写入不得判 provider 越界");
+    let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
+    assert_eq!(stored.status, KnowledgeBaseOperationStatus::Completed);
+    assert!(stored.error.is_none());
+}
+
 #[test]
-fn write_scope_audit_platform_exemption_is_root_level_and_exact() {
+fn write_scope_audit_platform_runtime_exemption_is_root_level_and_exact() {
     let (_temp, root) = audit_root();
     let before = snapshot_aggregate_root(&root).unwrap();
-    // 平台自有（根层）：不计入。
+    // 平台运行时子树（根层 `.aria/runtime/**`）：不计入。
     for path in [
-        ".aria/x",
-        ".codegraph/db",
-        "codegraph.json",
-        ".codegraph.json.1.2.tmp",
+        ".aria/runtime/state.json",
+        ".aria/runtime/tasks/binding-0001/state.json",
     ] {
         let target = root.join(path);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(target, "x").unwrap();
     }
-    // 对照：嵌套同名目录、近似名、其它根级配置仍是 provider 越界。
+    // 对照：聚合索引产物（turn 期间已由锁互斥，出现在差分即 provider 写）、
+    // `.aria` 其余内容、嵌套 `.aria/runtime`、近似名都判 provider 越界。
     for path in [
-        "alpha/.aria/x",
-        "alpha/.codegraph/db",
-        "alpha/codegraph.json",
+        "codegraph.json",
+        ".codegraph/index.db",
+        ".codegraph.json.1.2.tmp",
+        ".aria/evil.sh",
+        ".aria/runtime-evil/x",
+        "alpha/.aria/runtime/x",
         ".mcp.json",
-        "codegraph.json.bak",
-        ".codegraph.json.tmp.keep",
     ] {
         let target = root.join(path);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -277,12 +373,13 @@ fn write_scope_audit_platform_exemption_is_root_level_and_exact() {
     assert_eq!(
         write_scope_violations(&before, &after),
         vec![
-            ".codegraph.json.tmp.keep".to_string(),
+            ".aria/evil.sh".to_string(),
+            ".aria/runtime-evil/x".to_string(),
+            ".codegraph.json.1.2.tmp".to_string(),
+            ".codegraph/index.db".to_string(),
             ".mcp.json".to_string(),
-            "alpha/.aria/x".to_string(),
-            "alpha/.codegraph/db".to_string(),
-            "alpha/codegraph.json".to_string(),
-            "codegraph.json.bak".to_string(),
+            "alpha/.aria/runtime/x".to_string(),
+            "codegraph.json".to_string(),
         ]
     );
 }
@@ -393,4 +490,144 @@ async fn begin_waits_on_the_cross_process_lock_held_by_another_handle() {
         ),
         other => panic!("expected OtherKnowledgeBaseRunning, got {other:?}"),
     }
+}
+
+// ───────── R1：provider 改写聚合索引配置必须判越界 ─────────
+
+#[tokio::test]
+async fn execute_flags_provider_overwrite_of_root_codegraph_config() {
+    // 没有平台索引任务在跑（隔离锁空闲）：provider 覆盖根 `codegraph.json`
+    // 与 `.codegraph/**` 必须判越界——平台索引产物不再按路径免审。
+    let fixture = fixture(
+        Script::Writes(vec![
+            ("codegraph.json", "{\"exclude\":[\"provider/\"]}"),
+            (".codegraph/index.db", "provider-written db"),
+        ]),
+        false,
+    );
+    let (operation, error) = run_execute(&fixture, "kb-key-0001").await;
+    assert!(
+        matches!(&error, KnowledgeBaseError::WriteScopeViolation { paths }
+            if paths == &vec![".codegraph/index.db".to_string(), "codegraph.json".to_string()]),
+        "{error:?}"
+    );
+    let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
+    assert_eq!(stored.status, KnowledgeBaseOperationStatus::Failed);
+    assert_eq!(
+        stored.error.expect("失败记录").reason_code,
+        "knowledge_base_write_scope_violation"
+    );
+}
+
+#[tokio::test]
+async fn execute_flags_provider_deletion_of_root_codegraph_config() {
+    let fixture = fixture(Script::DeletesThenOk("codegraph.json"), false);
+    std::fs::write(fixture.root.join("codegraph.json"), "{\"exclude\":[]}").unwrap();
+    let (operation, error) = run_execute(&fixture, "kb-key-0001").await;
+    assert!(
+        matches!(&error, KnowledgeBaseError::WriteScopeViolation { paths }
+            if paths == &vec!["codegraph.json".to_string()]),
+        "{error:?}"
+    );
+    let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
+    assert_eq!(stored.status, KnowledgeBaseOperationStatus::Failed);
+}
+
+// ───────── C2：取消路径审计闭合（停止未确认 + 取消 API 交叉） ─────────
+
+#[tokio::test]
+async fn execute_preserves_audit_when_cancel_api_won_over_failed_turn() {
+    // 交叉情形：runner 返回普通失败、且取消 API 已把 operation 置为
+    // Cancelled——已算出的越界审计事实不得丢弃，须附加到取消记录上。
+    let started = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    let fixture = fixture(
+        Script::GatedWritesThenFail {
+            files: vec![("alpha/src/main.rs", "fn main() { /* touched */ }\n")],
+            code: "provider_turn_timed_out",
+            retryable: true,
+            started: started.clone(),
+            proceed: proceed.clone(),
+        },
+        false,
+    );
+    let operation = begin_bootstrap(&fixture, "kb-key-0001").await.unwrap();
+    let execute = {
+        let coordinator = fixture.coordinator.clone();
+        let operation_id = operation.operation_id.clone();
+        let root = fixture.root.clone();
+        tokio::spawn(async move {
+            coordinator
+                .execute(PROJECT, &operation_id, &root, CancellationToken::new())
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("turn 应启动");
+    // turn 进行中（违规文件已写）：取消 API 先落盘。
+    fixture
+        .coordinator
+        .cancel(PROJECT, &operation.operation_id)
+        .unwrap();
+    proceed.notify_one();
+    let error = execute.await.unwrap().unwrap_err();
+    assert!(matches!(error, KnowledgeBaseError::Cancelled));
+
+    let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
+    assert_eq!(stored.status, KnowledgeBaseOperationStatus::Cancelled);
+    let record = stored.error.expect("交叉情形不得丢弃已算出的审计事实");
+    assert_eq!(record.reason_code, "knowledge_base_write_scope_violation");
+    assert!(!record.retryable);
+    let summary = record.stderr_summary.expect("摘要");
+    assert!(summary.contains("alpha/src/main.rs"), "{summary}");
+    assert!(summary.contains("provider_turn_timed_out"), "{summary}");
+}
+
+#[tokio::test]
+async fn execute_records_indeterminate_audit_when_cancelled_with_unconfirmed_provider_stop() {
+    // 取消返回但 provider 停止未确认：即使算不出违规，也必须按「审计不确定」
+    // fail-closed 留痕，不得静默记成干净取消。
+    let fixture = fixture(
+        Script::WritesThenCancelUnconfirmed(vec![("cadence/knowledge-base/x.md", "kb")]),
+        false,
+    );
+    let (operation, error) = run_execute(&fixture, "kb-key-0001").await;
+    assert!(matches!(error, KnowledgeBaseError::Cancelled));
+    let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
+    assert_eq!(stored.status, KnowledgeBaseOperationStatus::Cancelled);
+    let record = stored.error.expect("停止未确认的取消不得记成干净取消");
+    assert_eq!(
+        record.reason_code,
+        "knowledge_base_cancel_audit_indeterminate"
+    );
+    assert!(!record.retryable);
+    assert!(
+        record
+            .stderr_summary
+            .as_deref()
+            .is_some_and(|text| text.contains("下界")),
+        "{record:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_appends_indeterminacy_note_when_unconfirmed_cancel_has_violations() {
+    // 停止未确认 + 已算出越界：越界事实照常留痕，并注明结果只是下界。
+    let fixture = fixture(
+        Script::WritesThenCancelUnconfirmed(vec![
+            ("alpha/src/main.rs", "fn main() { /* touched */ }\n"),
+            ("cadence/knowledge-base/x.md", "kb"),
+        ]),
+        false,
+    );
+    let (operation, error) = run_execute(&fixture, "kb-key-0001").await;
+    assert!(matches!(error, KnowledgeBaseError::Cancelled));
+    let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
+    assert_eq!(stored.status, KnowledgeBaseOperationStatus::Cancelled);
+    let record = stored.error.expect("越界事实必须留痕");
+    assert_eq!(record.reason_code, "knowledge_base_write_scope_violation");
+    let summary = record.stderr_summary.expect("摘要");
+    assert!(summary.contains("alpha/src/main.rs"), "{summary}");
+    assert!(summary.contains("下界"), "{summary}");
 }

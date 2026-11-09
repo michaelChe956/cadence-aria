@@ -266,6 +266,13 @@ impl KnowledgeBaseOperationStore {
     }
 
     /// 读取-变更-写回。终态转换方法都经由它执行，保证落盘前校验一致性。
+    ///
+    /// 整个读改写在 `<operation_id>.lock` 的跨进程排他锁内进行（与 begin 锁
+    /// 同机制）：JSON 原子替换只保证读者读到完整文件，挡不住「两个转换各自
+    /// 读到旧副本、后写者覆盖前写者」的丢失更新——普通 `cancel` 覆盖
+    /// `cancel_with_error` 附加的审计事实就是这种交错。锁文件不是 `.json`，
+    /// 不会被 `read_all` 当作 operation 读取；flock 对同进程内不同 fd 同样
+    /// 互斥。读者（`get` / `read_all`）不加锁，仍靠原子替换读到一致快照。
     fn update(
         &self,
         project_id: &str,
@@ -273,14 +280,19 @@ impl KnowledgeBaseOperationStore {
         update: impl FnOnce(&mut KnowledgeBaseOperation) -> Result<(), ProductStoreError>,
     ) -> Result<KnowledgeBaseOperation, ProductStoreError> {
         let path = self.operation_path(project_id, operation_id)?;
-        if !path.exists() {
-            return Err(not_found(operation_id));
-        }
-        let mut operation: KnowledgeBaseOperation = read_json(&path)?;
-        self.ensure_record_consistency(&operation)?;
-        update(&mut operation)?;
-        write_json(&path, &operation)?;
-        Ok(operation)
+        let lock_path = self
+            .operations_root(project_id)?
+            .join(format!("{operation_id}.lock"));
+        with_exact_exclusive_lock(&lock_path, || {
+            if !path.exists() {
+                return Err(not_found(operation_id));
+            }
+            let mut operation: KnowledgeBaseOperation = read_json(&path)?;
+            self.ensure_record_consistency(&operation)?;
+            update(&mut operation)?;
+            write_json(&path, &operation)?;
+            Ok(operation)
+        })
     }
 
     /// 记录自洽性：project / LC id 是合法相对 id；`operation_id` 与
@@ -804,5 +816,75 @@ mod tests {
             KnowledgeBaseOperationStore::for_lc(ProductAppPaths::new(temp.path()), LC_ALPHA.into());
         assert!(store.list_running(PROJECT).unwrap().is_empty());
         assert!(store.latest(PROJECT).unwrap().is_none());
+    }
+
+    #[test]
+    fn transition_updates_serialize_on_the_operation_level_lock() {
+        // R2：终态转换（cancel / cancel_with_error / finish_* / complete_step）
+        // 共享 `<operation_id>.lock` 的跨进程排他锁：外部持锁期间转换必须
+        // 等待，防止「普通取消用旧副本覆盖附加审计」的丢失更新交错。
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let paths = ProductAppPaths::new(temp.path());
+        let store = KnowledgeBaseOperationStore::for_lc(paths.clone(), LC_ALPHA.into());
+        let running = new_operation(
+            LC_ALPHA,
+            "kb-key-0001",
+            KnowledgeBaseOperationKind::Bootstrap,
+            CREATED_AT,
+        );
+        store.create(running.clone()).unwrap();
+        let op_lock = store
+            .operations_root(PROJECT)
+            .unwrap()
+            .join(format!("{}.lock", running.operation_id));
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder_path = op_lock.clone();
+        let holder = std::thread::spawn(move || {
+            with_exact_exclusive_lock(&holder_path, || {
+                held_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .ok();
+                Ok(())
+            })
+            .unwrap();
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+
+        // 外部持锁：cancel_with_error 必须阻塞在 operation 级锁上，不得进入
+        // 读改写（否则它可能读到旧副本并在释放后覆盖他人写入的事实）。
+        let contender_store = KnowledgeBaseOperationStore::for_lc(paths, LC_ALPHA.into());
+        let contender_op = running.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            let result = contender_store.cancel_with_error(
+                PROJECT,
+                &contender_op.operation_id,
+                error_record(),
+                FINISHED_AT.to_string(),
+            );
+            entered_tx.send(result).unwrap();
+        });
+        assert!(
+            entered_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "外部持锁期间终态转换不得进入读改写"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .expect("释放后转换应完成");
+        contender.join().unwrap();
+
+        let stored = store.get(PROJECT, &running.operation_id).unwrap();
+        assert_eq!(stored.status, KnowledgeBaseOperationStatus::Cancelled);
+        assert_eq!(stored.error, Some(error_record()));
     }
 }
