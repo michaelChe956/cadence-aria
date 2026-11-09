@@ -13,6 +13,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AggregateInitializationCard } from "./AggregateInitializationCard";
 import { ProviderManagementDrawer } from "./ProviderManagementDrawer";
 import { ProviderManagementPanel } from "./ProviderManagementPanel";
 import type {
@@ -201,5 +202,53 @@ describe("Provider 管理面板", () => {
     expect(notice.textContent).toBe(
       "聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi > Claude Code > Codex。",
     );
+  });
+
+  it("provider 顺序提示有内边距，且与聚合初始化卡里的同名提示视觉一致", async () => {
+    stubFetch();
+
+    render(
+      <>
+        <ProviderManagementDrawer open onClose={() => {}}>
+          <ProviderManagementPanel />
+        </ProviderManagementDrawer>
+        <AggregateInitializationCard
+          operation={null}
+          busy={false}
+          onStart={() => {}}
+          onCancel={() => {}}
+          onReinitialize={() => {}}
+        />
+      </>,
+    );
+
+    const panelNotice = await screen.findByTestId(
+      "provider-management-aggregate-order-notice",
+    );
+    const cardNotice = screen.getByTestId(
+      "aggregate-initialization-aggregate-order-notice",
+    );
+
+    const panelClasses = new Set(
+      panelNotice.className.split(/\s+/).filter(Boolean),
+    );
+    const cardClasses = new Set(
+      cardNotice.className.split(/\s+/).filter(Boolean),
+    );
+    // 两处提示的公共类集合（不硬编码整串 className，避免样式微调即破测试）。
+    const common = [...panelClasses].filter((name) => cardClasses.has(name));
+
+    expect(panelClasses.has("px-2")).toBe(true);
+    expect(panelClasses.has("py-1")).toBe(true);
+    for (const key of [
+      "rounded",
+      "border",
+      "border-[var(--aria-danger)]",
+      "bg-[var(--aria-danger-soft)]",
+      "px-2",
+      "py-1",
+    ]) {
+      expect(common).toContain(key);
+    }
   });
 });

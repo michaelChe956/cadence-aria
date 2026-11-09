@@ -18,7 +18,7 @@ export function ProviderManagementPanel() {
       </p>
       <p
         data-testid="provider-management-aggregate-order-notice"
-        className="mb-2 text-[11px] text-[var(--aria-danger)]"
+        className="mb-2 rounded border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-2 py-1 text-[11px] text-[var(--aria-danger)]"
       >
         聚合初始化准备阶段暂不支持 Kimi Code；该阶段 provider 顺序：Pi &gt; Claude Code &gt; Codex。
       </p>
