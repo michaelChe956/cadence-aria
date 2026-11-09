@@ -4,6 +4,7 @@
 pub mod change_package;
 pub mod manifest;
 pub mod operation;
+pub mod preflight;
 pub mod store;
 
 pub use operation::{

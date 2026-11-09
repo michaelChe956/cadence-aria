@@ -1104,4 +1104,92 @@ mod tests {
                     && reason.contains("launch cell is denied; reason: pi refuses this action")
         ));
     }
+
+    // ------------------------------------------------------------------
+    // Task 4：知识库写分格选择入口（`select_aggregate_provider_for_write`）
+    // ------------------------------------------------------------------
+
+    /// 两行能力矩阵：`PlanningReadOnly.launch = Confirmed` +
+    /// `CodingTargetWrite.launch = <write_launch>`。
+    fn dual_action_record(
+        provider: ProviderRefType,
+        write_launch: ProviderCapabilityEvidence,
+    ) -> ProviderCapabilityRecord {
+        ProviderCapabilityRecord {
+            provider_type: provider,
+            schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+            version: "1.0.0".to_string(),
+            adapter_dialect: adapter_dialect(provider),
+            wire_dialect: wire_dialect(provider),
+            capability_snapshot_ref: MANAGED_CAPABILITY_SNAPSHOT_REF.to_string(),
+            evidence: CapabilityEvidence::ProductionVerified,
+            resume_evidence: ResumeEvidenceState::Confirmed,
+            supported_actions: Vec::new(),
+            action_matrix: ProviderActionMatrix::from_rows(vec![
+                ProviderActionCapability {
+                    action: SessionPolicyAction::PlanningReadOnly,
+                    launch: confirmed(),
+                    resume: ProviderCapabilityEvidence::Unknown,
+                    write_boundary: ProviderCapabilityEvidence::Unknown,
+                    projection_digest: "projection-digest-planning".to_string(),
+                    evidence_ref: "probe://planning".to_string(),
+                },
+                ProviderActionCapability {
+                    action: SessionPolicyAction::CodingTargetWrite,
+                    launch: write_launch,
+                    resume: ProviderCapabilityEvidence::Unknown,
+                    write_boundary: ProviderCapabilityEvidence::Unknown,
+                    projection_digest: "projection-digest-write".to_string(),
+                    evidence_ref: "probe://write".to_string(),
+                },
+            ])
+            .expect("planning + write rows"),
+            trust: ProviderCapabilityEvidence::Confirmed,
+            probed_at: Some("2026-11-03T00:00:00Z".to_string()),
+            probe_artifact_ref: Some("probe://artifact".to_string()),
+            execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+        }
+    }
+
+    /// 只确认 `PlanningReadOnly` 行、未确认 `CodingTargetWrite` 行的记录：
+    /// 既有入口（读分格）应选中它；写分格入口必须以「需核验」结论返回，
+    /// 不得静默放行。
+    #[tokio::test]
+    async fn provider_selection_for_write_uses_coding_target_write_cell() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let now = Utc::now();
+        let (health, _runner) = health_service(root.path(), Vec::new(), now);
+        let store = ProviderCapabilityStore::new(paths.clone());
+        store
+            .upsert(&dual_action_record(ProviderRefType::Pi, unknown()))
+            .expect("upsert dual-action record");
+
+        // 对照：既有入口按 `PlanningReadOnly` 分格判定 ⇒ 选中 Pi。
+        let read_outcome = select_aggregate_provider_at(&paths, &health, "project_0001", now)
+            .await
+            .expect("read selection");
+        assert!(
+            matches!(read_outcome, ProviderSelectionOutcome::Selected(_)),
+            "planning-confirmed record must be selected by the read entry: {read_outcome:?}"
+        );
+
+        // 新入口按 `CodingTargetWrite` 分格判定 ⇒ 同一记录是「需核验」。
+        let write_outcome =
+            select_aggregate_provider_for_write_at(&paths, &health, "project_0001", now)
+                .await
+                .expect("write selection");
+        match write_outcome {
+            ProviderSelectionOutcome::NeedsVerification { suggested, .. } => {
+                assert_eq!(suggested, ProviderName::Pi);
+                assert_eq!(
+                    write_outcome.reason_code(),
+                    Some(REASON_CODE_PROVIDER_NEEDS_VERIFICATION)
+                );
+            }
+            other => {
+                panic!("write entry must fail closed on an unconfirmed write cell, got {other:?}")
+            }
+        }
+    }
 }
