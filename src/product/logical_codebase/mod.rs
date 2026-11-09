@@ -17,6 +17,7 @@ pub mod failure_copy;
 pub mod feature;
 pub mod identity_repair;
 pub mod issue_selection;
+pub mod knowledge_base;
 pub mod legacy_shared_worktree_migration;
 pub mod member_reality;
 pub mod migration;
