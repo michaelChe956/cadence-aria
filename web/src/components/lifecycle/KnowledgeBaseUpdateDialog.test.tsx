@@ -54,8 +54,8 @@ function renderDialog(overrides: Partial<KnowledgeBaseUpdateDialogProps> = {}) {
     onStart: vi.fn(),
     ...overrides,
   };
-  render(<KnowledgeBaseUpdateDialog {...props} />);
-  return props;
+  const { container } = render(<KnowledgeBaseUpdateDialog {...props} />);
+  return { props, container };
 }
 
 afterEach(() => {
@@ -147,5 +147,22 @@ describe("KnowledgeBaseUpdateDialog", () => {
       screen.queryByTestId("knowledge-base-update-dialog"),
     ).not.toBeInTheDocument();
     expect(listChangePackagesMock).not.toHaveBeenCalled();
+  });
+
+  // 修复轮 1 回归：外壳必须复用 shared/DialogShell——宿主链（面板 → 管理抽屉，
+  // 面板恒挂 translate-x-* transform）会劫持 fixed 包含块，自绘蒙层只盖抽屉列。
+  // jsdom 测不了视觉几何，但可证伪结构契约：卡片经 portal 挂 document.body
+  // （不在宿主容器内）、打开期间 body 滚动锁定、Esc 经外壳三路关闭只关本层。
+  it("update_dialog_uses_shared_shell_portal", async () => {
+    listChangePackagesMock.mockResolvedValue([]);
+    const { props, container } = renderDialog();
+
+    const card = await screen.findByTestId("knowledge-base-update-dialog");
+    expect(container.contains(card)).toBe(false);
+    expect(document.body.contains(card)).toBe(true);
+    expect(document.body.style.overflow).toBe("hidden");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 });
