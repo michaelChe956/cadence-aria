@@ -432,6 +432,15 @@ impl IntoResponse for ApiError {
             "knowledge_base_file_not_editable" => StatusCode::UNPROCESSABLE_ENTITY,
             "knowledge_base_file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
             "knowledge_base_provider_capability_denied" => StatusCode::FORBIDDEN,
+            // 聚合初始化 provider 选择失败族（4 码）：属用户可行动的前置失败
+            // （未安装 / 未核验 / 被拒绝 / 健康降级），与知识库初始化复用同一候选表，
+            // 一律 422（请求期产物、零副作用），绝不落默认 500。
+            "aggregate_initialization_provider_needs_verification"
+            | "aggregate_initialization_no_provider_available"
+            | "aggregate_initialization_provider_capability_denied"
+            | "aggregate_initialization_provider_health_degraded" => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -820,6 +829,28 @@ mod tests {
         for (code, expected) in cases {
             let response = ApiError::validation(code, "evidence contract").into_response();
             assert_eq!(response.status(), expected, "{code} status mapping");
+        }
+    }
+
+    #[test]
+    fn aggregate_provider_selection_failure_codes_map_to_4xx() {
+        // 聚合初始化 provider 选择失败族（4 码）：必须显式登记为 4xx，
+        // 不得经未知码默认路径落 500（用户可行动的前置失败）。
+        let cases = [
+            "aggregate_initialization_provider_needs_verification",
+            "aggregate_initialization_no_provider_available",
+            "aggregate_initialization_provider_capability_denied",
+            "aggregate_initialization_provider_health_degraded",
+        ];
+
+        for code in cases {
+            let response = ApiError::validation(code, "provider selection failed").into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{code} status mapping"
+            );
+            assert!(response.status().is_client_error(), "{code} must be 4xx");
         }
     }
 
