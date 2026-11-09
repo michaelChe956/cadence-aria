@@ -245,6 +245,169 @@ pub async fn select_aggregate_provider_at(
     decide_selection(&source, snapshot.as_ref(), now)
 }
 
+/// 知识库写面（Task 4）的 provider 选择入口：与既有
+/// [`select_aggregate_provider`] 完全相同的两层判据（L1 health、L2 launch
+/// 分格经 `launch_cell_state`，与 gateway 同源），唯一差异是 L2 判定所用
+/// action 从 `PlanningReadOnly` 换成 `CodingTargetWrite`——知识库 provider
+/// turn 走 Normal 相位 + `CodingTargetWrite`（target = canonical 聚合根），
+/// 让「选择期通过」与「起跑被 gateway 放行」落在同一行能力矩阵。
+///
+/// 候选顺序与四枚失败码与既有入口零差异；**不创建 operation**。
+pub async fn select_aggregate_provider_for_write(
+    paths: &ProductAppPaths,
+    health: &ProviderHealthService,
+    _project_id: &str,
+) -> Result<ProviderSelectionOutcome, ProductStoreError> {
+    select_aggregate_provider_for_write_at(paths, health, _project_id, Utc::now()).await
+}
+
+/// 写分格选择器(显式给出「当前时刻」,与 [`select_aggregate_provider_at`]
+/// 同理由:快照过期判定与 `decided_at` 必须同一时刻,测试要能固定这一刻)。
+pub async fn select_aggregate_provider_for_write_at(
+    paths: &ProductAppPaths,
+    health: &ProviderHealthService,
+    _project_id: &str,
+    now: DateTime<Utc>,
+) -> Result<ProviderSelectionOutcome, ProductStoreError> {
+    let snapshot = health.snapshot();
+    if health_snapshot_needs_refresh(snapshot.as_ref(), health.degraded(), now) {
+        // 刷新用的 token 与请求生命周期解耦:请求结束不取消正在进行的探测。
+        let token = CancellationToken::new();
+        if let Err(error) = health.refresh(token).await {
+            return Ok(ProviderSelectionOutcome::HealthDegraded {
+                detail: error.to_string(),
+            });
+        }
+    }
+    let snapshot = health.snapshot();
+    let source = StoreBackedProviderCapabilitySource::with_store(ProviderCapabilityStore::new(
+        paths.clone(),
+    ));
+    decide_selection_for_write(&source, snapshot.as_ref(), now)
+}
+
+/// [`decide_selection`] 的写分格镜像:流程逐字同源,唯一差异是 L2 判定的
+/// action 为 `CodingTargetWrite`(判定实现仍唯一经 `launch_cell_state`)。
+/// 既有 `decide_selection` 及其调用方一字不改。
+fn decide_selection_for_write(
+    source: &StoreBackedProviderCapabilitySource,
+    snapshot: &ProviderHealthSnapshot,
+    now: DateTime<Utc>,
+) -> Result<ProviderSelectionOutcome, ProductStoreError> {
+    let mut candidates: Vec<AggregateProviderCandidate> = Vec::new();
+    let mut selected: Option<ProviderName> = None;
+    let mut needs_verification: Option<ProviderName> = None;
+    let mut evidence_stale: Option<ProviderName> = None;
+
+    for provider in AGGREGATE_PROVIDER_CANDIDATE_ORDER {
+        let provider_wire = provider_wire_label(&provider).to_string();
+        let entry = snapshot.entry(&provider);
+        let cli_available = entry.is_some_and(|entry| entry.available);
+        let cli_reason_code = entry
+            .and_then(|entry| entry.reason_code)
+            .map(health_reason_code);
+        let display_name = provider_display_name(&provider);
+        let (capability_state, skipped_reason, action_hint, warning) = if cli_available {
+            let state =
+                match ProviderRef::from_provider_name(&provider, MANAGED_CAPABILITY_SNAPSHOT_REF) {
+                    Ok(provider_ref) => launch_cell_state(
+                        source,
+                        &provider_ref,
+                        SessionPolicyAction::CodingTargetWrite,
+                    )?,
+                    // 候选表里没有 Fake:映射失败说明候选表被改坏,fail-closed 当未核验。
+                    Err(error) => LaunchCellState::Unverified {
+                        detail: error.to_string(),
+                    },
+                };
+            match state {
+                LaunchCellState::Confirmed => (
+                    "confirmed".to_string(),
+                    None,
+                    format!("使用 {display_name} 执行本步(该候选已核验)"),
+                    None,
+                ),
+                LaunchCellState::Unverified { .. } => (
+                    "unverified".to_string(),
+                    Some("needs_verification".to_string()),
+                    format!(
+                        "先核验 {display_name} 在本逻辑代码库的能力(一次真实探测),通过后重试本步"
+                    ),
+                    None,
+                ),
+                LaunchCellState::Denied { reason } => (
+                    "denied".to_string(),
+                    Some("denied".to_string()),
+                    format!("改用下一家 provider,或按拒绝原因修好 {display_name} 后重新核验"),
+                    Some(reason),
+                ),
+                LaunchCellState::EvidenceStale { .. } => (
+                    "evidence_stale".to_string(),
+                    Some("evidence_stale".to_string()),
+                    format!("重新核验 {display_name} 的能力证据后重试本步"),
+                    None,
+                ),
+            }
+        } else {
+            (
+                "not_installed".to_string(),
+                Some("cli_unavailable".to_string()),
+                format!("装好 {display_name} 的命令行(命令要在 PATH 上)后重试本步"),
+                None,
+            )
+        };
+
+        if cli_available {
+            match capability_state.as_str() {
+                "confirmed" => {
+                    if selected.is_none() {
+                        selected = Some(provider);
+                    }
+                }
+                "unverified" => {
+                    if needs_verification.is_none() {
+                        needs_verification = Some(provider);
+                    }
+                }
+                "evidence_stale" if evidence_stale.is_none() => {
+                    evidence_stale = Some(provider);
+                }
+                _ => {}
+            }
+        }
+        candidates.push(AggregateProviderCandidate {
+            provider: provider_wire,
+            display_name: display_name.to_string(),
+            cli_available,
+            cli_reason_code,
+            capability_state,
+            skipped_reason,
+            action_hint,
+            warning,
+        });
+    }
+
+    let table = AggregateProviderSelection {
+        selected: selected
+            .as_ref()
+            .map(|provider| provider_wire_label(provider).to_string())
+            .unwrap_or_default(),
+        candidates,
+        rule_version: PROVIDER_SELECTION_RULE_VERSION.to_string(),
+        decided_at: now.to_rfc3339(),
+    };
+    if selected.is_some() {
+        return Ok(ProviderSelectionOutcome::Selected(table));
+    }
+    if !table.candidates.iter().any(|row| row.cli_available) {
+        return Ok(ProviderSelectionOutcome::NoCliAvailable(table));
+    }
+    if let Some(suggested) = needs_verification.or(evidence_stale) {
+        return Ok(ProviderSelectionOutcome::NeedsVerification { suggested, table });
+    }
+    Ok(ProviderSelectionOutcome::Denied { table })
+}
+
 /// 候选表 + 结论(判定部分全部经 `launch_cell_state`,与 gateway 同源)。
 fn decide_selection(
     source: &StoreBackedProviderCapabilitySource,
@@ -1179,13 +1342,14 @@ mod tests {
             select_aggregate_provider_for_write_at(&paths, &health, "project_0001", now)
                 .await
                 .expect("write selection");
+        // 失败码断言放在 match 前：match 会把 `suggested` 部分移动出值。
+        assert_eq!(
+            write_outcome.reason_code(),
+            Some(REASON_CODE_PROVIDER_NEEDS_VERIFICATION)
+        );
         match write_outcome {
             ProviderSelectionOutcome::NeedsVerification { suggested, .. } => {
                 assert_eq!(suggested, ProviderName::Pi);
-                assert_eq!(
-                    write_outcome.reason_code(),
-                    Some(REASON_CODE_PROVIDER_NEEDS_VERIFICATION)
-                );
             }
             other => {
                 panic!("write entry must fail closed on an unconfirmed write cell, got {other:?}")
