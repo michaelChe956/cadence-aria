@@ -20,6 +20,7 @@ import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
 import { WorkbenchOverlayHost } from "./components/lifecycle/WorkbenchOverlayHost";
 import type { CodingAttentionItemDto } from "./api/types";
 import { ImageCreatePage } from "./pages/ImageCreatePage";
+import { KnowledgeBasePage } from "./pages/KnowledgeBasePage";
 import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
 import { seedWorkbenchOverlayAddress } from "./state/workbench-overlay-store";
 import {
@@ -276,6 +277,20 @@ const codingPlanOverviewRoute = createRoute({
   component: CodingPlanOverviewRedirectRouteComponent,
 });
 
+// LC 知识库详情页（文件树 + 可写编辑器 + 预览 + 保存）。
+// 挂在 guardedWorkflowRoute 子树下，与 codingWorkspaceRoute 同风格：路由参数
+// 由 useParams 取出后透传给页面组件。
+function KnowledgeBaseRouteComponent() {
+  const { projectId, lcId } = useParams({ strict: false });
+  return <KnowledgeBasePage projectId={projectId} lcId={lcId} />;
+}
+
+const knowledgeBaseRoute = createRoute({
+  getParentRoute: () => guardedWorkflowRoute,
+  path: "/workbench/projects/$projectId/logical-codebases/$lcId/knowledge-base",
+  component: KnowledgeBaseRouteComponent,
+});
+
 // ── P1-c（REQ-MTG-12）+ UI-1：A1 待办 target 统一导航 ──
 // 契约 A1：attempt 走既有 coding 路由、plan 走 /workbench 总览抽屉
 // （overlay=plan-overview）、plan 问题走 workspace/$sessionId；
@@ -465,6 +480,7 @@ const guardedWorkflowTree = guardedWorkflowRoute.addChildren([
   codingWorkspaceRoute,
   codingPlanOverviewRoute,
   legacyCodingWorkspaceRoute,
+  knowledgeBaseRoute,
 ]);
 
 const routeTree = rootRoute.addChildren([
