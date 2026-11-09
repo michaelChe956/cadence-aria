@@ -24,6 +24,20 @@
 | 顺序 | 交错 **xhigh → high → high → xhigh**，对冲时间漂移 |
 | 授权面 | `--dangerously-skip-permissions` 仅作用于该 headless 会话（为绕开 fixture 的 trust 门），**未改全局配置** |
 
+## 2.5 判据的源码对齐（重要：口径必须按编译后的真实语义）
+
+初版测量用「该 WI 内所有 `- done_when_refs:` 行」计数，**与编译后的事实不符**。逐行核对源码后修正：
+
+- `src/product/work_item_plan_compiler/lower.rs:515-534` `lower_tasks`：
+  `"done_when_refs" => { entry.3 = split_value(...) }` —— **赋值覆盖**，重复 key **后者胜**，
+  且**既不报错也不产生诊断**；`requirement_refs` 同理。
+- `lower.rs:1032` `split_value`：按**逗号**切分、trim、丢空值与 `[]`。
+- `src/product/work_item_contract/validation.rs:245-312`：
+  `task.done_when_refs ∉ 本 contract 的 criterion_id` ⇒ **`unknown_done_when_ref`**；
+  criterion 无配对 `reviewer_check_refs` ⇒ `acceptance_criterion_without_reviewer_check`。
+
+⇒ 本报告的越界数**按「最后一个 `done_when_refs` 行生效」计算**，即**编译后的事实**。
+
 ## 3. 判据（复刻平台编译器，不是启发式）
 
 `src/product/work_item_contract/validation.rs:245-312` 的 plan 域成员校验：
@@ -89,10 +103,10 @@ xhigh 两次分别产生 **15 处**与 **13 处** `unknown_done_when_ref`（越�
 ## 7. 本实验给方案带来的新问题（须登记）
 
 **Q-1：档位对 IR 拒收风险的影响远大于对耗时的影响 —— 且方向与直觉相反。**
-本样本 n=2/档：xhigh 越界率 **65%**，high 越界率 **5%**；而耗时只差 **18%**（且方差主导）。
+xhigh 越界率 **33.9%**（n=6），high **2.4%**（n=5）；Fisher p=**9.7e-16**、OR=0.048。
 ⇒ **effort 档位首先是一个「质量杠杆」，其次才是「性能杠杆」。**
 这**改变了方案的收益排序**：方案 §9 把 effort 的收益表述为「时长/token 降幅」，而实测显示它对
-**IR 首次通过率**的影响更大（IR 错误直接触发重驱整轮，成本是 623.7 秒 + 一次压缩 + 一次 resume 上下文重建）。
+**IR 首次通过率**的影响更大（IR 错误直接触发重驱整轮 = 623.7 秒 + 一次压缩 + 一次 resume 上下文重建）。
 ⇒ 建议在方案 §9 的收益表里，把 G-1 的首要收益改写为「**降低 IR 拒收率 ⇒ 消除重驱整轮**」，
 时长/token 降幅作为次要收益且**待 n=10/档 复核**。
 
@@ -101,11 +115,44 @@ xhigh 两次分别产生 **15 处**与 **13 处** `unknown_done_when_ref`（越�
 ⇒ G-5 实施后**必须**复测 cross-WI 越界率，**不得**默认「直供越多越好」。
 
 **Q-3：装置保真度缺口使绝对数字不可与原现场比。**
-本次 4 次运行**没有 codegraph 工具**（fixture 的 trust 门挡掉了 `mcp__codegraph__*` 授权），
+本次运行**没有 codegraph 工具**（fixture 的 trust 门挡掉了 `mcp__codegraph__*` 授权），
 而原现场有 3 次 codegraph_explore、输出 36,589 字符（占工具输出 38.5%）。
 ⇒ 本装置的探索工具面**比原现场贫乏**，绝对耗时/token 不可与原现场直接比；
 **可比的只有「同装置、同输入、跨档位」的相对对照**。
 
-**Q-4：n=2 不足以支撑任何决策。**
-owner 已授权 10 次/档；本次先跑 2/档 试点，补跑的 16 次正在进行。
-**在 n=10/档 出结果前，不得据本次数据修改契约或默认档位。**
+**Q-4：n=2 不足以支撑任何决策（已被数据证实）。**
+n=2 时「high 快 51%、IR 零错误」；n=6/5 时 xhigh 出现一次 **1057.6 秒 / 141,010 output / $7.42 / 63 turns**
+的极端离群运行（且它**越界为 0**）⇒ 均值被单点主导，**结论必须用中位数与分布，不能用均值**。
+⇒ 任何决策须等 n=10/档；且**性能指标必须以中位数 + 极差报告**。
+
+**Q-5【新 · 平台侧缺陷】重复 key 静默覆盖 —— 与 effort、与命名域都无关。**
+`lower.rs:522` 的 `entry.3 = split_value(...)` 是**赋值覆盖**：模型在同一 task 里写多行
+`- done_when_refs:` / `- requirement_refs:` 时，**前面的值被静默丢弃**，**既不报错也不产生诊断**。
+实测两档都触发：**xhigh 41 处、high 19 处**（n=6/5）。
+⇒ 这是一个**平台侧的可观测缺口**（不是模型的错，也不是 effort 的错）：模型的一个常见写法，
+被平台静默接受成「只保留最后一行」，导致
+**① 该 task 声称要验证的验收标准凭空消失；② 落盘的 plan 与作者意图不一致**。
+⇒ 建议在 `mechanicalize-plan-compile-repair`（或一个新的小 delta）里把 **task 字段的重复 key
+判为诊断或错误**，而不是静默覆盖；并明确 `requirement_refs` 的**累积 vs 覆盖**语义
+（`lower.rs:1041` 注释说 `capabilities`/`required_capabilities` 是**累积**语义，
+而 `done_when_refs`/`requirement_refs` 是**覆盖**语义 —— 同一份 grammar 里两套语义，无文档说明）。
+
+**Q-6：孤儿 criterion 有两个独立成因，同一后果 —— 且 A 包只修得了一条。**
+「criterion 定义了却没有任何 task 验证」有两条互不相干的成因：
+① **越界**（task 引用了别的 WI 的 AC）⇒ 本 WI 的 AC 无人验证 —— 这是**命名域缺陷**，A 包可修；
+② **重复 key 覆盖**（Q-5）⇒ 被静默丢弃的那行 AC 无人验证 —— 这是**平台缺陷**，**A 包修不了**。
+
+实测个案（xhigh-1，逐 WI 核对编译后生效引用）：
+
+| WI | 声明的 criterion | 编译后生效引用 | 孤儿 | 成因 |
+|---|---|---|---|---|
+| WI-001 | AC-001, AC-002 | AC-003, AC-004, AC-006 | AC-001, AC-002 | ① 越界 |
+| WI-002 | AC-003, AC-004 | AC-003, AC-006 | **AC-004** | ② **重复 key 覆盖** |
+| WI-003 | AC-005~AC-008 | AC-002, AC-003, AC-005, AC-006 | AC-007, AC-008 | ① 越界 |
+| WI-004 | AC-009, AC-010 | AC-003~AC-006 | AC-009, AC-010 | ① 越界 |
+
+（WI-002 的 TASK-006 写了两行 `- done_when_refs:`（AC-004 / AC-006）与两行 `- requirement_refs:`
+（REQ-001 / REQ-002）⇒ 依 `lower.rs:522` 的赋值覆盖语义，**编译后只剩 AC-006，AC-004 被静默丢弃**。）
+
+⇒ **两条路径、同一后果：验收标准定义了却没人测**，而现状**没有任何机制报告这件事**。
+⇒ 结论：**只上 A 包不足以闭合验收闭环**，编译器侧的重复 key 诊断必须**并行**补上。

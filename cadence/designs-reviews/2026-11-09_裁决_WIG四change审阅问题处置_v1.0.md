@@ -482,7 +482,26 @@ owner 确认当前环境**没有任何存量内容**（无历史 workspace sessi
 
 **统一原则**：所有「防退化」验收项都要求**先在未改实现的状态下固化基线**，再改实现后逐条比对 —— 这是唯一能抓住「实现与旧行为不等价」的手段；场景保全与归档校验**抓不到**这一类。
 
-## 10. 验收口径（每个工作包必跑，真实输出写入报告）
+## 10. 装置级实测挖出的新缺口（2026-11-09）
+
+真实 provider 受控对照（详见 `cadence/analysis-docs/2026-11-09_WIG_effort档位实测对照_v1.0.md`）除验证 effort 档位外，**额外挖出一条此前无主的平台侧缺陷**：
+
+**Q-7：task 级重复字段的「静默末行覆盖」。**
+- **规格缺口**：主规格 REQ-WSC-02 的场景「禁止末行覆盖」字面范围是 **contract 级**的
+  `capabilities` / `required_capabilities`；**task 级**的 `done_when_refs` / `requirement_refs`
+  重复行**语义未规定**，而 prompt 的 grammar 要求 task 每字段**一行** ⇒ task 级重复行属格式违规。
+- **实现缺口**：`work_item_plan_compiler/lower.rs:522` 的 `entry.3 = split_value(...)`
+  是**赋值覆盖** ⇒ **后者胜、既不报错也不产生诊断**，模型多写的 AC 被**静默丢弃**。
+- **实测证据**：个案 `xhigh-1` 的 WI-002 / TASK-006 写两行 `done_when_refs`（AC-004 / AC-006），
+  编译后只剩 AC-006，**AC-004 静默消失**并成为「无人验证的孤儿 criterion」；
+  该写法在两档都高频出现（xhigh 41 处 / high 19 处）。
+- **归属**：`mechanicalize-plan-compile-repair`（编译器 owner）承接，或另立小 delta；
+  **不在 A / B / C / E / G 任何一个包的范围里** ⇒ **需 owner 决定归属**。
+- **修法建议**：① 规格侧补 task 级重复行语义，建议与 contract 级一致取**累积**（不丢数据）；
+  ② 若维持覆盖语义，须**落诊断**（与既有「归一化落诊断」场景一致）。
+- **注意**：该缺陷**独立于 effort 与命名域** —— A 包修不了它，effort 降档也压不掉它。
+
+## 11. 验收口径（每个工作包必跑，真实输出写入报告）
 
 ```bash
 cd /home/michaelche/workspace/github/cadence-aria/.worktrees/feat-wig-optimize-11-08
