@@ -509,6 +509,18 @@ mod knowledge_base_files_tests {
     }
 
     #[test]
+    fn read_rejects_file_over_size_limit() {
+        let (_fixture, aggregate_root) = kb_fixture();
+        let target = kb_root(&aggregate_root).join("big.md");
+        // 1 MiB 上限之上一个字节 ⇒ TooLarge。
+        std::fs::write(&target, vec![b'a'; 1024 * 1024 + 1]).expect("写超限文件");
+
+        let error =
+            read_knowledge_base_file(&aggregate_root, "big.md").expect_err("超限文件必须被拒绝");
+        assert_eq!(error, KnowledgeBaseFileError::TooLarge);
+    }
+
+    #[test]
     fn kb_root_points_at_canonical_aggregate_child() {
         assert_eq!(
             kb_root(std::path::Path::new("/tmp/aggregate")),
