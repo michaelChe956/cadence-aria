@@ -303,7 +303,11 @@ mod knowledge_base_files_tests {
         assert_eq!(error, KnowledgeBaseFileError::PathEscapes);
     }
 
-    /// Critical 3：预置的临时文件符号链接不得被跟随、其目标不得被截断。
+    /// Critical 3 + Minor 1：预置的临时文件符号链接不得被跟随、其目标不得被截断。
+    ///
+    /// 预置的是**当前实现实际使用的临时名**（`.notes.md.write-<pid>` 与
+    /// `.notes.md.write-<pid>-N`）⇒ 覆盖换名路径（旧版预置 `.tmp-<pid>-N`
+    /// 已不再被实现使用，覆盖不到调用链）。
     #[cfg(unix)]
     #[test]
     fn write_does_not_follow_preplaced_temporary_symlink() {
@@ -311,13 +315,20 @@ mod knowledge_base_files_tests {
         let root = kb_root(&aggregate_root);
         let victim = fixture.path().join("victim.md");
         std::fs::write(&victim, "重要内容").expect("写根外文件");
-        // 覆盖同族临时名（进程号 + 序号），确保任何按名打开的实现都会撞上。
-        for sequence in 0..64 {
-            std::os::unix::fs::symlink(
-                &victim,
-                root.join(format!(".notes.md.tmp-{}-{sequence}", std::process::id())),
-            )
-            .expect("预置临时符号链接");
+        // 覆盖实现的前四个候选名（无序号 + 序号 1..=3）⇒ 实际写入必须换名到
+        // 下一个候选名（`-4`）才成功。
+        let pid = std::process::id();
+        let preplaced: Vec<String> = (0..4)
+            .map(|attempt| {
+                if attempt == 0 {
+                    format!(".notes.md.write-{pid}")
+                } else {
+                    format!(".notes.md.write-{pid}-{attempt}")
+                }
+            })
+            .collect();
+        for name in &preplaced {
+            std::os::unix::fs::symlink(&victim, root.join(name)).expect("预置临时符号链接");
         }
 
         write_knowledge_base_file(&aggregate_root, "notes.md", "正常内容", None, false)
@@ -330,6 +341,93 @@ mod knowledge_base_files_tests {
         assert_eq!(
             std::fs::read_to_string(root.join("notes.md")).expect("读取写入结果"),
             "正常内容"
+        );
+        for name in &preplaced {
+            assert!(
+                root.join(name)
+                    .symlink_metadata()
+                    .expect("读取预置链接元数据")
+                    .file_type()
+                    .is_symlink(),
+                "预置的临时符号链接不得被替换：{name}"
+            );
+        }
+        // 除预置链接外不得留下任何临时文件 ⇒ 实现确实换名到了新候选名并清理。
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .expect("读取知识库根")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".write-") && !preplaced.contains(name))
+            .collect();
+        assert!(leftovers.is_empty(), "留下临时文件：{leftovers:?}");
+    }
+
+    /// Important 1：知识库内存在**没有写端的 FIFO** 时，读取必须立即返回
+    /// `NotFound`，不得永久阻塞在打开动作上。
+    #[cfg(unix)]
+    #[test]
+    fn read_rejects_fifo_without_blocking() {
+        let (_fixture, aggregate_root) = kb_fixture();
+        let root = kb_root(&aggregate_root);
+        let fifo = root.join("notes.md");
+        let fifo_path =
+            std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("路径不含 NUL");
+        assert_eq!(
+            unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o644) },
+            0,
+            "创建无写端 FIFO"
+        );
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader_root = aggregate_root.clone();
+        std::thread::spawn(move || {
+            let outcome = read_knowledge_base_file(&reader_root, "notes.md");
+            let _ = sender.send(outcome);
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("读取无写端 FIFO 必须在超时前返回（不得阻塞在 openat 上）");
+
+        assert_eq!(
+            outcome.expect_err("FIFO 不是常规文件，必须被拒绝"),
+            KnowledgeBaseFileError::NotFound
+        );
+    }
+
+    /// Important 1：写入侧打开目标（乐观并发摘要比对）同样不得阻塞在 FIFO 上。
+    #[cfg(unix)]
+    #[test]
+    fn write_does_not_block_on_fifo_target() {
+        let (_fixture, aggregate_root) = kb_fixture();
+        let root = kb_root(&aggregate_root);
+        let fifo = root.join("notes.md");
+        let fifo_path =
+            std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("路径不含 NUL");
+        assert_eq!(
+            unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o644) },
+            0,
+            "创建无写端 FIFO"
+        );
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let writer_root = aggregate_root.clone();
+        std::thread::spawn(move || {
+            let outcome = write_knowledge_base_file(
+                &writer_root,
+                "notes.md",
+                "内容",
+                Some("0000000000000000000000000000000000000000000000000000000000000000"),
+                false,
+            );
+            let _ = sender.send(outcome);
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("写入侧不得阻塞在无写端 FIFO 上");
+
+        assert!(
+            outcome.is_err(),
+            "无写端 FIFO 的摘要比对必须失败而不是挂住：{outcome:?}"
         );
     }
 

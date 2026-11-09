@@ -11,6 +11,10 @@
 //! 4. 读：必须是常规文件且不超过 1 MiB；写：白名单 = 全域 `*.md` +
 //!    `user-input/**` 下 `*.sql`。
 //!
+//! **非常规文件**：读取用 `O_NONBLOCK` 打开 ⇒ 没有写端的 FIFO 也能立即打开
+//! 成功（不阻塞在 `openat` 上），随后在**同一句柄**上核验文件类型
+//! （`fstat`）⇒ 非常规文件一律 `NotFound`。
+//!
 //! **锚定语义（消除授权检查与实际操作之间的路径替换窗口）**：所有实际文件
 //! 操作都通过知识库根的**目录 fd** 逐段 `openat` + `O_NOFOLLOW` 完成 ⇒ 授权
 //! 通过之后父目录被换成符号链接，读写也不会被导向根外（`ELOOP` ⇒ 拒绝）。
@@ -524,8 +528,13 @@ pub(crate) fn walk_dirs(
 }
 
 /// 在 `dir` 下只读打开文件（`O_NOFOLLOW` ⇒ 不跟随符号链接）。
+///
+/// `O_NONBLOCK` ⇒ **没有写端的 FIFO 也会立即打开成功**（`openat` 不阻塞），
+/// 随后的**同一句柄**元数据核验（`fstat` ⇒ `is_file()`）把它判为非常规文件
+/// ⇒ `NotFound`；修复前是「先 `openat` 后判类型」，遇到无写端 FIFO 会永久
+/// 阻塞在打开动作上，永远走不到类型检查。
 fn open_file_at(dir: &OwnedFd, name: &OsStr) -> std::io::Result<std::fs::File> {
-    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
     let fd = unsafe { libc::openat(dir.as_raw_fd(), cstr(name.as_bytes()).as_ptr(), flags) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
@@ -583,6 +592,31 @@ fn create_temporary_at(
         }
     }
     Err(KnowledgeBaseFileError::Conflict)
+}
+
+/// 目录内**不替换**改名（`renameat2(RENAME_NOREPLACE)`，同目录 ⇒ 原子提交）。
+///
+/// 目标已存在 ⇒ `EEXIST`（**不像 `renameat` 那样替换空目录**）⇒ 调用方可把
+/// 「已被并发发布」判成幂等成功，而不是并发竞态下的失败。
+///
+/// 内核或文件系统不支持该标志时返回 `ENOSYS` / `EINVAL`（由调用方降级）。
+pub(crate) fn rename_noreplace_at(dir: &OwnedFd, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
+    // 用 `syscall` 而非 `libc::renameat2`：后者只在部分 libc 目标（gnu/android）
+    // 上导出，`syscall(SYS_renameat2, …)` 在全部 Linux 目标可用。
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            dir.as_raw_fd(),
+            cstr(from.as_bytes()).as_ptr(),
+            dir.as_raw_fd(),
+            cstr(to.as_bytes()).as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// 目录内改名（`renameat`，同目录 ⇒ 原子提交）。

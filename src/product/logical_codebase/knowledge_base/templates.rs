@@ -18,8 +18,11 @@
 //!   「先看存在再复制」的窗口，也不会跟随悬空链接改写根外文件；
 //! - **目标树受根内约束**：目标目录逐段 `openat` + `O_NOFOLLOW` 打开 ⇒ 目标
 //!   侧若是指向根外的目录链接，模板不会复制到根外；
-//! - **变更包先暂存后发布**：先在独占暂存目录里完成复制再改名发布 ⇒ 复制失败
-//!   不留下会触发幂等分支的半成品变更包；
+//! - **变更包先暂存后发布**：先在独占暂存目录里完成复制，再**原子不替换**
+//!   发布（`renameat2(RENAME_NOREPLACE)`）⇒ 复制失败不留下会触发幂等分支的
+//!   半成品变更包；并发下别人先发布时按**幂等成功**处理（既有内容不被覆盖，
+//!   空目录也不被替换）；暂存名**与标识长度无关**（否则 255 字节的合法标识
+//!   会让暂存名超限）；
 //! - 变更包目录已存在时拒绝新建并返回既有目录（幂等、不覆盖既有内容）；
 //! - 变更包标识先做 `CHANGE-` 前缀归一，再校验只含 `[A-Za-z0-9._-]`（含路径
 //!   分隔符或 `..` 一律拒绝）。
@@ -32,7 +35,7 @@ use crate::product::json_store::ProductStoreError;
 
 use super::files::{
     KnowledgeBaseRoot, create_new_at, kb_root, mkdirat, openat_dir, remove_tree_at, rename_at,
-    walk_dirs,
+    rename_noreplace_at, unlink_at, walk_dirs,
 };
 
 /// 初始化输入模板所属 skill 名。
@@ -43,6 +46,8 @@ const UPDATE_SKILL: &str = "knowledge-base-update";
 const CHANGE_PACKAGE_PREFIX: &str = "CHANGE-";
 /// 知识库内变更包目录的父目录（相对知识库根）。
 const CHANGES_DIR: [&str; 2] = ["user-input", "updates"];
+/// 变更包暂存目录换名重试上限（暂存名撞名时重试）。
+const STAGING_NAME_ATTEMPTS: usize = 64;
 
 /// 把插件自带的初始化输入模板补到知识库的 `user-input/` 目录。
 ///
@@ -99,11 +104,7 @@ pub fn create_change_package_template(
     }
     // 独占暂存目录：复制全部完成后才改名发布 ⇒ 复制失败不留下会触发幂等
     // 分支的半成品变更包。
-    let staging = staging_name(&normalized);
-    mkdirat(&parent, OsStr::new(&staging))
-        .map_err(|error| ProductStoreError::Io(format!("创建变更包暂存目录失败：{error}")))?;
-    let staging_dir = openat_dir(&parent, OsStr::new(&staging))
-        .map_err(|error| ProductStoreError::Io(format!("打开变更包暂存目录失败：{error}")))?;
+    let (staging, staging_dir) = create_staging_dir(&parent)?;
     let prefix = format!("{}/{normalized}", CHANGES_DIR.join("/"));
     let mut created = Vec::new();
     if let Err(error) = copy_missing(&source, &staging_dir, &prefix, &mut created) {
@@ -111,15 +112,105 @@ pub fn create_change_package_template(
         return Err(error);
     }
     drop(staging_dir);
-    // 发布前复核：并发下别人先建好了 ⇒ 幂等返回既有目录，不覆盖其内容。
-    if openat_dir(&parent, OsStr::new(&normalized)).is_ok() {
-        let _ = remove_tree_at(&parent, OsStr::new(&staging));
-        return Ok(destination);
-    }
-    match rename_at(&parent, OsStr::new(&staging), OsStr::new(&normalized)) {
-        Ok(()) => Ok(destination),
+    // 原子不替换发布：并发下别人先发布 ⇒ 幂等成功（不覆盖其内容）；普通
+    // `rename` 会因目标非空而失败、空目标则被替换 ⇒ 不能用。
+    match publish_staging(&parent, &staging, &normalized) {
+        Ok(true) => Ok(destination),
+        Ok(false) => {
+            let _ = remove_tree_at(&parent, OsStr::new(&staging));
+            Ok(destination)
+        }
         Err(error) => {
             let _ = remove_tree_at(&parent, OsStr::new(&staging));
+            Err(error)
+        }
+    }
+}
+
+/// 在 `parent` 下创建**独占**暂存目录（撞名换名重试），返回 `(名字, 目录 fd)`。
+fn create_staging_dir(parent: &OwnedFd) -> Result<(String, OwnedFd), ProductStoreError> {
+    for _ in 0..STAGING_NAME_ATTEMPTS {
+        let name = staging_name();
+        match mkdirat(parent, OsStr::new(&name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "创建变更包暂存目录失败：{error}"
+                )));
+            }
+        }
+        let fd = openat_dir(parent, OsStr::new(&name))
+            .map_err(|error| ProductStoreError::Io(format!("打开变更包暂存目录失败：{error}")))?;
+        return Ok((name, fd));
+    }
+    Err(ProductStoreError::Io(
+        "创建变更包暂存目录失败：连续撞名".to_string(),
+    ))
+}
+
+/// 变更包暂存目录名（**与标识长度无关**的固定长度短名）。
+///
+/// 暂存名若带上标识，248 字节的合法标识（最终目录名 255 字节，已达单文件名
+/// 上限）会让暂存名必然超限 ⇒ `ENAMETOOLONG`，原本可创建的合法标识反而失败。
+/// 故暂存名只带进程号与自增序号，长度恒定。
+fn staging_name() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(".kb-staging-{}-{sequence}", std::process::id())
+}
+
+/// 发布暂存目录到最终目录（**原子不替换**）。
+///
+/// - `Ok(true)`：本次发布成功（目标此前不存在）。
+/// - `Ok(false)`：目标已被（并发）发布 ⇒ 幂等成功，调用方清理暂存目录并返回
+///   既有目录；既有内容不被覆盖。
+/// - `Err`：发布失败（调用方清理暂存目录并报错）。
+fn publish_staging(
+    parent: &OwnedFd,
+    staging: &str,
+    target: &str,
+) -> Result<bool, ProductStoreError> {
+    match rename_noreplace_at(parent, OsStr::new(staging), OsStr::new(target)) {
+        Ok(()) => Ok(true),
+        // 目标已存在（`RENAME_NOREPLACE` ⇒ `EEXIST`；部分实现给 `ENOTEMPTY`）
+        // ⇒ 并发已被发布 ⇒ 幂等成功。
+        Err(error) if is_target_exists(&error) => Ok(false),
+        // 内核/文件系统不支持 `RENAME_NOREPLACE` ⇒ 降级：先用 `mkdir` 原子占位
+        // （占位成功即说明这个名字归本次调用所有），再改名覆盖**自己的**占位
+        // 空目录（POSIX 允许改名到空目录），绝不动别人的目录。
+        Err(error)
+            if error.raw_os_error() == Some(libc::ENOSYS)
+                || error.raw_os_error() == Some(libc::EINVAL) =>
+        {
+            publish_staging_by_placeholder(parent, staging, target)
+        }
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "发布变更包目录失败：{error}"
+        ))),
+    }
+}
+
+/// 不支持 `RENAME_NOREPLACE` 时的降级发布：`mkdir` 原子占位 + 改名覆盖占位。
+fn publish_staging_by_placeholder(
+    parent: &OwnedFd,
+    staging: &str,
+    target: &str,
+) -> Result<bool, ProductStoreError> {
+    match mkdirat(parent, OsStr::new(target)) {
+        Ok(()) => {}
+        // 目标已存在 ⇒ 同样按「并发已被发布」处理（幂等成功）。
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => {
+            return Err(ProductStoreError::Io(format!(
+                "发布变更包目录失败：{error}"
+            )));
+        }
+    }
+    match rename_at(parent, OsStr::new(staging), OsStr::new(target)) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            let _ = unlink_at(parent, OsStr::new(target), true);
             Err(ProductStoreError::Io(format!(
                 "发布变更包目录失败：{error}"
             )))
@@ -127,11 +218,11 @@ pub fn create_change_package_template(
     }
 }
 
-/// 变更包暂存目录名（同父目录下的独占名字 ⇒ 撞名概率可忽略）。
-fn staging_name(normalized: &str) -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!(".{normalized}.staging-{}-{sequence}", std::process::id())
+/// 目标已存在（并发发布）判定。
+fn is_target_exists(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EEXIST)
+        || error.raw_os_error() == Some(libc::ENOTEMPTY)
+        || error.kind() == std::io::ErrorKind::AlreadyExists
 }
 
 /// 标识归一：先剥掉已有的 `CHANGE-` 前缀（大小写不敏感），再补规范前缀；
@@ -285,7 +376,9 @@ fn copy_missing(
 
 #[cfg(test)]
 mod knowledge_base_templates_tests {
-    use super::{create_bootstrap_input_templates, create_change_package_template};
+    use super::{
+        create_bootstrap_input_templates, create_change_package_template, publish_staging,
+    };
     use crate::product::json_store::ProductStoreError;
     use std::path::{Path, PathBuf};
 
@@ -624,5 +717,153 @@ mod knowledge_base_templates_tests {
                 "重试后变更包文档缺失：{name}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 修复轮 2 回归用例（Important 2 / Important 3）
+    // -----------------------------------------------------------------------
+
+    /// Important 2：发布必须**原子不替换** —— 目标已存在（含空目录）时不得被
+    /// 替换，且按「并发已被发布」判成幂等成功。
+    #[test]
+    fn publish_staging_does_not_replace_existing_target() {
+        use std::os::fd::OwnedFd;
+
+        let fixture = tempfile::TempDir::new().expect("创建 /tmp 夹具");
+        let parent_path = fixture.path().to_path_buf();
+        let parent_file = std::fs::File::open(&parent_path).expect("打开父目录");
+        let parent: OwnedFd = parent_file.into();
+
+        // 情形一：目标不存在 ⇒ 发布成功，内容落在目标目录。
+        std::fs::create_dir(parent_path.join("staging")).expect("建暂存目录");
+        std::fs::write(parent_path.join("staging/change-summary.md"), "变更包原文")
+            .expect("写暂存内容");
+        assert!(
+            publish_staging(&parent, "staging", "target").expect("发布不得报错"),
+            "目标不存在时必须发布成功"
+        );
+        assert!(
+            parent_path.join("target/change-summary.md").exists(),
+            "发布后内容必须落在目标目录"
+        );
+        assert!(
+            !parent_path.join("staging").exists(),
+            "发布成功后暂存目录必须消失"
+        );
+
+        // 情形二：目标已存在（**空目录**）⇒ 幂等成功，且目标不得被替换。
+        std::fs::create_dir(parent_path.join("staging2")).expect("建暂存目录");
+        std::fs::write(parent_path.join("staging2/change-summary.md"), "并发内容")
+            .expect("写暂存内容");
+        std::fs::create_dir(parent_path.join("target2")).expect("建已存在的空目标目录");
+        assert!(
+            !publish_staging(&parent, "staging2", "target2").expect("发布不得报错"),
+            "目标已存在时必须判成「并发已发布」（幂等）"
+        );
+        assert!(
+            parent_path
+                .join("target2")
+                .read_dir()
+                .expect("读取目标目录")
+                .next()
+                .is_none(),
+            "已存在的空目标目录不得被替换成暂存内容"
+        );
+        assert!(
+            parent_path.join("staging2").exists(),
+            "未发布的暂存目录必须保留（由调用方清理）"
+        );
+    }
+
+    /// Important 2：同一标识的并发创建都必须成功（幂等），不得因发布竞态报错。
+    #[test]
+    fn create_change_package_template_is_idempotent_under_concurrency() {
+        use std::sync::{Arc, Barrier};
+
+        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
+        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let skills_root = skills_root.clone();
+            let aggregate_root = aggregate_root.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
+            }));
+        }
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("创建线程结束"))
+            .collect();
+
+        for outcome in &outcomes {
+            assert!(
+                outcome.is_ok(),
+                "并发创建必须都成功（幂等），不得因发布竞态报错：{outcomes:?}"
+            );
+        }
+        let directories: Vec<&PathBuf> = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.as_ref().ok())
+            .collect();
+        assert_eq!(
+            directories[0], directories[1],
+            "并发创建必须返回同一目录：{outcomes:?}"
+        );
+        for name in CHANGE_PACKAGE_FILES {
+            assert!(
+                directories[0].join(name).exists(),
+                "并发创建后变更包文档缺失：{name}"
+            );
+        }
+        assert!(
+            staging_leftovers(&aggregate_root).is_empty(),
+            "并发创建不得留下暂存目录：{:?}",
+            staging_leftovers(&aggregate_root)
+        );
+    }
+
+    /// Important 3：暂存目录名不得随标识长度增长 ⇒ 255 字节（单文件名上限）的
+    /// 合法标识必须仍能创建变更包。
+    #[test]
+    fn create_change_package_template_accepts_maximum_length_identifier() {
+        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
+        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
+
+        // 248 字节标识 + `CHANGE-` 前缀 = 255 字节（正好是单文件名上限）。
+        let identifier = "a".repeat(248);
+        let directory = create_change_package_template(&aggregate_root, &skills_root, &identifier)
+            .expect("255 字节的合法标识必须能创建变更包（不得 ENAMETOOLONG）");
+
+        assert_eq!(
+            directory
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .map(|name| name.len()),
+            Some(255),
+            "最终目录名应为 255 字节"
+        );
+        for name in CHANGE_PACKAGE_FILES {
+            assert!(directory.join(name).exists(), "变更包文档缺失：{name}");
+        }
+        assert!(
+            staging_leftovers(&aggregate_root).is_empty(),
+            "不得留下暂存目录：{:?}",
+            staging_leftovers(&aggregate_root)
+        );
+    }
+
+    /// 变更包父目录下的暂存目录残留清单（暂存名以 `.kb-staging` 开头）。
+    fn staging_leftovers(aggregate_root: &Path) -> Vec<String> {
+        let changes = aggregate_root.join("cadence/knowledge-base/user-input/updates");
+        std::fs::read_dir(changes)
+            .expect("读取变更包父目录")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".kb-staging"))
+            .collect()
     }
 }
