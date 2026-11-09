@@ -12,15 +12,28 @@
 //! 都按既有目录探测，探测不到 ⇒ `ProductStoreError::Io`（由上层映射为
 //! skills 不可用）。
 //!
-//! 铁律：**只补缺失，绝不覆盖**（用户填的内容优先）；变更包目录已存在时
-//! 拒绝新建并返回既有目录（幂等）；变更包标识先做 `CHANGE-` 前缀归一，再
-//! 校验只含 `[A-Za-z0-9._-]`（含路径分隔符或 `..` 一律拒绝）。
+//! 铁律：
+//! - **只补缺失，绝不覆盖**（用户填的内容优先）：目标文件以
+//!   `O_CREAT|O_EXCL` 排他创建，已存在（含悬空符号链接）一律跳过 ⇒ 不存在
+//!   「先看存在再复制」的窗口，也不会跟随悬空链接改写根外文件；
+//! - **目标树受根内约束**：目标目录逐段 `openat` + `O_NOFOLLOW` 打开 ⇒ 目标
+//!   侧若是指向根外的目录链接，模板不会复制到根外；
+//! - **变更包先暂存后发布**：先在独占暂存目录里完成复制再改名发布 ⇒ 复制失败
+//!   不留下会触发幂等分支的半成品变更包；
+//! - 变更包目录已存在时拒绝新建并返回既有目录（幂等、不覆盖既有内容）；
+//! - 变更包标识先做 `CHANGE-` 前缀归一，再校验只含 `[A-Za-z0-9._-]`（含路径
+//!   分隔符或 `..` 一律拒绝）。
 
+use std::ffi::OsStr;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use crate::product::json_store::ProductStoreError;
 
-use super::files::kb_root;
+use super::files::{
+    KnowledgeBaseRoot, create_new_at, kb_root, mkdirat, openat_dir, remove_tree_at, rename_at,
+    walk_dirs,
+};
 
 /// 初始化输入模板所属 skill 名。
 const BOOTSTRAP_SKILL: &str = "knowledge-base-bootstrap";
@@ -40,13 +53,12 @@ pub fn create_bootstrap_input_templates(
     skills_source_root: &Path,
 ) -> Result<Vec<String>, ProductStoreError> {
     let source = skill_user_input_dir(skills_source_root, BOOTSTRAP_SKILL)?;
-    let root = kb_root(aggregate_root);
-    let destination = root.join("user-input");
-    std::fs::create_dir_all(&destination).map_err(|error| {
-        ProductStoreError::Io(format!("create {}: {error}", destination.display()))
-    })?;
+    let root = KnowledgeBaseRoot::open_or_create(aggregate_root)?;
+    // 目标目录同样受根内约束：`user-input` 若是符号链接 ⇒ 拒绝（不复制到根外）。
+    let destination = walk_dirs(&root.fd, &["user-input".to_string()], true)
+        .map_err(|error| ProductStoreError::Io(format!("准备 user-input 目录失败：{error}")))?;
     let mut created = Vec::new();
-    copy_missing(&source, &destination, &root, &mut created)?;
+    copy_missing(&source, &destination, "user-input", &mut created)?;
     Ok(created)
 }
 
@@ -60,22 +72,66 @@ pub fn create_change_package_template(
 ) -> Result<PathBuf, ProductStoreError> {
     let normalized = normalize_change_identifier(identifier)?;
     let source = skill_user_input_dir(skills_source_root, UPDATE_SKILL)?.join("change-package");
-    let root = kb_root(aggregate_root);
-    let mut destination = root.clone();
-    for component in CHANGES_DIR {
-        destination.push(component);
+    let root = KnowledgeBaseRoot::open_or_create(aggregate_root)?;
+    let parent_components: Vec<String> = CHANGES_DIR.iter().map(|name| name.to_string()).collect();
+    let parent = walk_dirs(&root.fd, &parent_components, true)
+        .map_err(|error| ProductStoreError::Io(format!("准备变更包父目录失败：{error}")))?;
+    let destination = kb_root(aggregate_root)
+        .join(CHANGES_DIR[0])
+        .join(CHANGES_DIR[1])
+        .join(&normalized);
+    match openat_dir(&parent, OsStr::new(&normalized)) {
+        Ok(_) => {
+            // 已存在 ⇒ 拒绝新建、不覆盖、不改动既有内容（幂等）。
+            return Ok(destination);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(ProductStoreError::Io(format!(
+                "变更包目录已存在但不是真实目录：{normalized}"
+            )));
+        }
+        Err(error) => {
+            return Err(ProductStoreError::Io(format!(
+                "检查变更包目录失败：{error}"
+            )));
+        }
     }
-    destination.push(&normalized);
-    if destination.exists() {
-        // 已存在 ⇒ 拒绝新建、不覆盖、不改动既有内容。
+    // 独占暂存目录：复制全部完成后才改名发布 ⇒ 复制失败不留下会触发幂等
+    // 分支的半成品变更包。
+    let staging = staging_name(&normalized);
+    mkdirat(&parent, OsStr::new(&staging))
+        .map_err(|error| ProductStoreError::Io(format!("创建变更包暂存目录失败：{error}")))?;
+    let staging_dir = openat_dir(&parent, OsStr::new(&staging))
+        .map_err(|error| ProductStoreError::Io(format!("打开变更包暂存目录失败：{error}")))?;
+    let prefix = format!("{}/{normalized}", CHANGES_DIR.join("/"));
+    let mut created = Vec::new();
+    if let Err(error) = copy_missing(&source, &staging_dir, &prefix, &mut created) {
+        let _ = remove_tree_at(&parent, OsStr::new(&staging));
+        return Err(error);
+    }
+    drop(staging_dir);
+    // 发布前复核：并发下别人先建好了 ⇒ 幂等返回既有目录，不覆盖其内容。
+    if openat_dir(&parent, OsStr::new(&normalized)).is_ok() {
+        let _ = remove_tree_at(&parent, OsStr::new(&staging));
         return Ok(destination);
     }
-    std::fs::create_dir_all(&destination).map_err(|error| {
-        ProductStoreError::Io(format!("create {}: {error}", destination.display()))
-    })?;
-    let mut created = Vec::new();
-    copy_missing(&source, &destination, &root, &mut created)?;
-    Ok(destination)
+    match rename_at(&parent, OsStr::new(&staging), OsStr::new(&normalized)) {
+        Ok(()) => Ok(destination),
+        Err(error) => {
+            let _ = remove_tree_at(&parent, OsStr::new(&staging));
+            Err(ProductStoreError::Io(format!(
+                "发布变更包目录失败：{error}"
+            )))
+        }
+    }
+}
+
+/// 变更包暂存目录名（同父目录下的独占名字 ⇒ 撞名概率可忽略）。
+fn staging_name(normalized: &str) -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(".{normalized}.staging-{}-{sequence}", std::process::id())
 }
 
 /// 标识归一：先剥掉已有的 `CHANGE-` 前缀（大小写不敏感），再补规范前缀；
@@ -150,10 +206,14 @@ fn skill_user_input_dir(
 }
 
 /// 只复制缺失的文件（已存在的一律保留用户内容），并记录新建的相对路径。
+///
+/// 目标侧全部走目录 fd（`openat` + `O_NOFOLLOW`）：目录逐段打开（符号链接
+/// 一律拒绝）、文件以 `O_CREAT|O_EXCL` 排他创建 ⇒ 不存在「先看存在再复制」
+/// 的窗口，悬空符号链接也不会被跟随。
 fn copy_missing(
     source: &Path,
-    destination: &Path,
-    root: &Path,
+    destination: &OwnedFd,
+    prefix: &str,
     created: &mut Vec<String>,
 ) -> Result<(), ProductStoreError> {
     if !source.is_dir() {
@@ -176,41 +236,51 @@ fn copy_missing(
         }
         let name = entry.file_name();
         let source_path = entry.path();
-        let destination_path = destination.join(&name);
         if file_type.is_dir() {
-            std::fs::create_dir_all(&destination_path).map_err(|error| {
-                ProductStoreError::Io(format!("create {}: {error}", destination_path.display()))
+            match mkdirat(destination, &name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(ProductStoreError::Io(format!(
+                        "create {}: {error}",
+                        source_path.display()
+                    )));
+                }
+            }
+            let child = openat_dir(destination, &name).map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "打开目标目录 {} 失败：{error}",
+                    source_path.display()
+                ))
             })?;
-            copy_missing(&source_path, &destination_path, root, created)?;
+            copy_missing(
+                &source_path,
+                &child,
+                &format!("{prefix}/{}", name.to_string_lossy()),
+                created,
+            )?;
             continue;
         }
         if !file_type.is_file() {
             continue;
         }
-        if destination_path.exists() {
-            // 已存在 ⇒ 绝不覆盖（用户填的内容优先）。
-            continue;
-        }
-        std::fs::copy(&source_path, &destination_path).map_err(|error| {
-            ProductStoreError::Io(format!(
-                "copy {} -> {}: {error}",
-                source_path.display(),
-                destination_path.display()
-            ))
+        let content = std::fs::read(&source_path).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", source_path.display()))
         })?;
-        created.push(relative_display(root, &destination_path));
+        match create_new_at(destination, &name, &content) {
+            Ok(()) => created.push(format!("{prefix}/{}", name.to_string_lossy())),
+            // 已存在（含悬空符号链接）⇒ 跳过，绝不覆盖用户内容。
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "copy {} -> {prefix}/{}: {error}",
+                    source_path.display(),
+                    name.to_string_lossy()
+                )));
+            }
+        }
     }
     Ok(())
-}
-
-/// 相对知识库根的展示路径（`/` 分隔）。
-fn relative_display(root: &Path, path: &Path) -> String {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 #[cfg(test)]
@@ -423,5 +493,136 @@ mod knowledge_base_templates_tests {
         let created =
             create_bootstrap_input_templates(&aggregate_root, &skills_root).expect("创建模板成功");
         assert!(!created.is_empty(), "应新建模板文件");
+    }
+
+    // -----------------------------------------------------------------------
+    // 修复轮 1 回归用例（Critical 4 + Important 6/7）
+    // -----------------------------------------------------------------------
+
+    /// Critical 4：目标 `user-input` 是指向根外的目录链接时，模板不得复制到根外。
+    #[cfg(unix)]
+    #[test]
+    fn create_bootstrap_input_templates_rejects_symlinked_target_dir() {
+        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
+        let (aggregate_fixture, aggregate_root) = aggregate_fixture();
+        let outside = aggregate_fixture.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("建根外目录");
+        let knowledge_base = aggregate_root.join("cadence/knowledge-base");
+        std::fs::create_dir_all(&knowledge_base).expect("建知识库根");
+        std::os::unix::fs::symlink(&outside, knowledge_base.join("user-input"))
+            .expect("创建越界目录链接");
+
+        let error = create_bootstrap_input_templates(&aggregate_root, &skills_root)
+            .expect_err("目标目录是越界符号链接时必须被拒绝");
+        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
+        assert_eq!(
+            std::fs::read_dir(&outside).expect("读取根外目录").count(),
+            0,
+            "模板不得复制到根外"
+        );
+    }
+
+    /// Critical 4：变更包父目录（`user-input`）是根外链接时，变更包不得落到根外。
+    #[cfg(unix)]
+    #[test]
+    fn create_change_package_template_rejects_symlinked_parent_dir() {
+        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
+        let (aggregate_fixture, aggregate_root) = aggregate_fixture();
+        let outside = aggregate_fixture.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("建根外目录");
+        let knowledge_base = aggregate_root.join("cadence/knowledge-base");
+        std::fs::create_dir_all(&knowledge_base).expect("建知识库根");
+        std::os::unix::fs::symlink(&outside, knowledge_base.join("user-input"))
+            .expect("创建越界目录链接");
+
+        let error = create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
+            .expect_err("父目录是越界符号链接时必须被拒绝");
+        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
+        assert!(!outside.join("updates").exists(), "变更包不得复制到根外");
+    }
+
+    /// Important 6：目标位置是悬空符号链接时不得跟随（不得在根外创建文件），
+    /// 且该链接不得被替换。
+    #[cfg(unix)]
+    #[test]
+    fn create_bootstrap_input_templates_does_not_follow_dangling_symlink() {
+        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
+        let (aggregate_fixture, aggregate_root) = aggregate_fixture();
+        let outside = aggregate_fixture.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("建根外目录");
+        let user_input = aggregate_root.join("cadence/knowledge-base/user-input");
+        std::fs::create_dir_all(&user_input).expect("建 user-input 目录");
+        let link = user_input.join("base-info.md");
+        std::os::unix::fs::symlink(outside.join("base-info.md"), &link).expect("预置悬空链接");
+
+        create_bootstrap_input_templates(&aggregate_root, &skills_root).expect("创建模板成功");
+
+        assert!(
+            link.symlink_metadata()
+                .expect("读取链接元数据")
+                .file_type()
+                .is_symlink(),
+            "悬空链接不得被替换成普通文件"
+        );
+        assert!(
+            !outside.join("base-info.md").exists(),
+            "不得跟随悬空链接在根外创建文件"
+        );
+    }
+
+    /// Important 7：复制失败不得留下半成品变更包目录；重试必须补齐全部文档。
+    #[cfg(unix)]
+    #[test]
+    fn create_change_package_template_leaves_no_partial_package_on_failure() {
+        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
+        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
+        let secret =
+            skills_root.join("knowledge-base-update/user-input/change-package/verification.md");
+        std::fs::set_permissions(
+            &secret,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o000),
+        )
+        .expect("设置源文件权限");
+        if unsafe { libc::geteuid() } == 0 {
+            // root 绕过权限位 ⇒ 无法注入复制失败，只验证正常路径。
+            std::fs::set_permissions(
+                &secret,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
+            )
+            .expect("恢复源文件权限");
+            return;
+        }
+
+        let error = create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
+            .expect_err("复制失败必须报错");
+        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
+        let changes = aggregate_root.join("cadence/knowledge-base/user-input/updates");
+        assert!(
+            !changes.join("CHANGE-login-refactor").exists(),
+            "失败后不得留下半成品变更包目录"
+        );
+        assert_eq!(
+            std::fs::read_dir(&changes)
+                .expect("读取变更包父目录")
+                .filter_map(|entry| entry.ok())
+                .count(),
+            0,
+            "失败后不得留下暂存目录"
+        );
+
+        std::fs::set_permissions(
+            &secret,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
+        )
+        .expect("恢复源文件权限");
+        let directory =
+            create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
+                .expect("重试必须成功");
+        for name in CHANGE_PACKAGE_FILES {
+            assert!(
+                directory.join(name).exists(),
+                "重试后变更包文档缺失：{name}"
+            );
+        }
     }
 }
