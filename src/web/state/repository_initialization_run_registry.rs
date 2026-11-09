@@ -16,7 +16,7 @@ pub enum InitializationOperationKind {
     Repository,
     /// Independent five-step aggregate initialization.
     Aggregate,
-    /// LC knowledge-base bootstrap / update operation.
+    /// LC 知识库的 bootstrap / update operation。
     KnowledgeBase,
 }
 

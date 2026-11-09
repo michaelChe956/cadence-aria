@@ -29,8 +29,24 @@ enum Script {
     Writes(Vec<(&'static str, &'static str)>),
     /// turn 失败。
     Fail { code: &'static str, retryable: bool },
+    /// 先写这些文件再失败（provider 越界写后报错/超时）。
+    WritesThenFail {
+        files: Vec<(&'static str, &'static str)>,
+        code: &'static str,
+        retryable: bool,
+    },
+    /// 先写这些文件，再由取消信号触发 Cancelled（provider 越界写后被取消）。
+    WritesThenCancel(Vec<(&'static str, &'static str)>),
     /// 等取消信号后返回 Cancelled。
     WaitForCancel,
+}
+
+fn write_files(root: &Path, files: &[(&'static str, &'static str)]) {
+    for (rel, content) in files {
+        let target = root.join(rel);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, content).unwrap();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,11 +87,7 @@ impl KnowledgeBaseTurnRunner for FakeRunner {
         });
         match &self.script {
             Script::Writes(files) => {
-                for (rel, content) in files {
-                    let target = request.canonical_root.join(rel);
-                    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-                    std::fs::write(target, content).unwrap();
-                }
+                write_files(request.canonical_root, files);
                 Ok("turn ok".to_string())
             }
             Script::Fail { code, retryable } => Err(KnowledgeBaseTurnError::Failed {
@@ -83,6 +95,23 @@ impl KnowledgeBaseTurnRunner for FakeRunner {
                 summary: "provider exploded".to_string(),
                 retryable: *retryable,
             }),
+            Script::WritesThenFail {
+                files,
+                code,
+                retryable,
+            } => {
+                write_files(request.canonical_root, files);
+                Err(KnowledgeBaseTurnError::Failed {
+                    reason_code: (*code).to_string(),
+                    summary: "provider exploded".to_string(),
+                    retryable: *retryable,
+                })
+            }
+            Script::WritesThenCancel(files) => {
+                write_files(request.canonical_root, files);
+                request.cancellation.cancel();
+                Err(KnowledgeBaseTurnError::Cancelled)
+            }
             Script::WaitForCancel => {
                 request.cancellation.cancelled().await;
                 Err(KnowledgeBaseTurnError::Cancelled)
@@ -404,6 +433,13 @@ async fn execute_runs_bootstrap_command_in_aggregate_root_and_completes() {
     let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
     assert_eq!(stored.status, KnowledgeBaseOperationStatus::Completed);
     assert!(stored.completed_at.is_some());
+    // 成功收口必须同时闭合步骤：状态、完成时间与输出摘要都落盘。
+    assert_eq!(stored.steps.len(), 1);
+    assert_eq!(stored.steps[0].step_id, KnowledgeBaseStepKind::Bootstrap);
+    assert_eq!(stored.steps[0].status, KnowledgeBaseStepStatus::Completed);
+    assert_eq!(stored.steps[0].completed_at.as_deref(), Some(NOW));
+    assert_eq!(stored.steps[0].output_summary.as_deref(), Some("turn ok"));
+    assert!(stored.error.is_none());
 }
 
 #[tokio::test]
@@ -592,9 +628,10 @@ async fn execute_settles_cancellation_even_if_cancel_api_raced_the_turn() {
         .store
         .cancel(PROJECT, &operation.operation_id, NOW.to_string())
         .unwrap();
-    let error = fixture
-        .coordinator
-        .settle_cancelled(PROJECT, &operation.operation_id);
+    let error =
+        fixture
+            .coordinator
+            .settle_cancelled(PROJECT, &operation.operation_id, "claude_code", &[]);
     assert!(matches!(error, KnowledgeBaseError::Cancelled));
 }
 
@@ -764,7 +801,7 @@ fn write_scope_audit_only_allows_root_level_entry_files_and_flags_deletions() {
 }
 
 #[test]
-fn write_scope_audit_ignores_git_metadata_and_unchanged_files() {
+fn write_scope_audit_ignores_git_index_refresh_and_unchanged_files() {
     let (_temp, root) = audit_root();
     std::fs::create_dir_all(root.join("alpha/.git")).unwrap();
     std::fs::write(root.join("alpha/.git/index"), "idx-1").unwrap();

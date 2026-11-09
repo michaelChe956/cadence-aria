@@ -6,12 +6,15 @@
 //!   `BootstrapPhaseCredential`（聚合初始化的凭据链保持冻结）。
 //! - 单飞：同一 LC 的 bootstrap 与 update 互斥，任一 operation 在跑时拒绝新启。
 //! - 写入面审计：turn 前后对聚合根做快照差分，允许面之外的新增/修改/删除
-//!   一律使 operation 失败并记 `knowledge_base_write_scope_violation`。
+//!   一律使 operation 失败并记 `knowledge_base_write_scope_violation`。后快照
+//!   在 provider 停止后无条件执行（成功/失败/取消都审计），越界作为附加事实
+//!   并入失败/取消记录，不掩盖原始原因。平台自有状态（根 `.aria/`、
+//!   `.codegraph/`、`codegraph.json`）与成员仓 `.git/index` 不计入。
 //! - trust 前置门沿用聚合初始化口径（`ProviderTrustScenario::Recipe`）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -63,14 +66,12 @@ const REASON_WRITE_SCOPE_VIOLATION: &str = "knowledge_base_write_scope_violation
 const REASON_TURN_FAILED: &str = "knowledge_base_provider_turn_failed";
 const REASON_INVALID_INPUT: &str = "knowledge_base_invalid_input";
 const REASON_INTERNAL: &str = "knowledge_base_internal_error";
+const REASON_CANCELLED: &str = "knowledge_base_cancelled";
 const REASON_TRUST_WAITING: &str = "aggregate_initialization_trust_waiting";
 const FAILURE_STAGE: &str = "knowledge_base";
 
 /// 时钟：返回 RFC3339 时间戳。
 pub type Clock = dyn Fn() -> String + Send + Sync;
-
-/// 进程内 begin 临界区：「查重 → 单飞检查 → 创建」不可被同进程并发打断。
-static BEGIN_LOCK: Mutex<()> = Mutex::new(());
 
 /// 知识库执行层错误。
 #[derive(Debug, thiserror::Error)]
@@ -288,43 +289,48 @@ impl KnowledgeBaseCoordinator {
         resolve_turn(kind, &input)?;
 
         let store = self.store()?;
-        let _guard = BEGIN_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match store.get(project_id, &operation_id) {
-            Ok(existing) => return Ok(existing),
-            Err(ProductStoreError::NotFound { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
-        if let Some(running) = self.other_running(project_id)? {
-            return Err(KnowledgeBaseError::Preflight(
+        // 「幂等重放 → 单飞检查 → 创建」放进 LC 作用域的跨进程排他锁：
+        // durable `list_running` 只是观察，不是占位，进程内互斥锁拦不住共享
+        // 同一 store 的另一进程。
+        let outcome = store.with_begin_lock(project_id, || {
+            match store.get(project_id, &operation_id) {
+                Ok(existing) => return Ok(Ok(existing)),
+                Err(ProductStoreError::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            if let Some(running) = store.list_running(project_id)?.into_iter().next() {
+                return Ok(Err(running.operation_id));
+            }
+            let now = self.now();
+            let operation = KnowledgeBaseOperation {
+                operation_id,
+                project_id: project_id.to_string(),
+                logical_codebase_id: lc_id.to_string(),
+                kind,
+                input,
+                status: KnowledgeBaseOperationStatus::Running,
+                steps: vec![KnowledgeBaseStepRecord {
+                    step_id: step_kind(kind),
+                    status: KnowledgeBaseStepStatus::Running,
+                    started_at: Some(now.clone()),
+                    completed_at: None,
+                    output_summary: None,
+                }],
+                provider_selection: Some(selection),
+                error: None,
+                created_at: now.clone(),
+                started_at: Some(now),
+                completed_at: None,
+            };
+            store.create(operation).map(Ok)
+        })?;
+        outcome.map_err(|running| {
+            KnowledgeBaseError::Preflight(
                 KnowledgeBasePreflightFailure::OtherKnowledgeBaseRunning {
                     operation_id: running,
                 },
-            ));
-        }
-        let now = self.now();
-        let operation = KnowledgeBaseOperation {
-            operation_id,
-            project_id: project_id.to_string(),
-            logical_codebase_id: lc_id.to_string(),
-            kind,
-            input,
-            status: KnowledgeBaseOperationStatus::Running,
-            steps: vec![KnowledgeBaseStepRecord {
-                step_id: step_kind(kind),
-                status: KnowledgeBaseStepStatus::Running,
-                started_at: Some(now.clone()),
-                completed_at: None,
-                output_summary: None,
-            }],
-            provider_selection: Some(selection),
-            error: None,
-            created_at: now.clone(),
-            started_at: Some(now),
-            completed_at: None,
-        };
-        Ok(store.create(operation)?)
+            )
+        })
     }
 
     /// 执行一个已 `begin` 的 operation：trust 复验 → turn 前快照 → provider
@@ -345,22 +351,27 @@ impl KnowledgeBaseCoordinator {
                 status: format!("{:?}", operation.status),
             });
         }
+        let step = step_kind(operation.kind);
+        let provider = operation.input.provider.as_str();
         match self.drive(&operation, canonical_root, cancellation).await {
-            Ok(()) => store
-                .finish_completed(project_id, operation_id, self.now())
-                .map_err(|error| self.settle_store_conflict(project_id, operation_id, error)),
-            Err(KnowledgeBaseError::Cancelled) => {
-                Err(self.settle_cancelled(project_id, operation_id))
-            }
-            Err(error) => {
-                let record = error_record(&error, &operation.input.provider);
-                match store.finish_failed(
+            // 成功：步骤、输出摘要与 operation 在同一次落盘里原子收口。
+            Ok(summary) => store
+                .complete_step(
                     project_id,
                     operation_id,
-                    Some(step_kind(operation.kind)),
-                    record,
+                    step,
+                    Some(sanitize_turn_output(&summary)),
                     self.now(),
-                ) {
+                )
+                .map_err(|error| self.settle_store_conflict(project_id, operation_id, error)),
+            Err(DriveFailure {
+                error: KnowledgeBaseError::Cancelled,
+                violations,
+            }) => Err(self.settle_cancelled(project_id, operation_id, provider, &violations)),
+            Err(DriveFailure { error, violations }) => {
+                let record = error_record(&error, &violations, provider);
+                match store.finish_failed(project_id, operation_id, Some(step), record, self.now())
+                {
                     Ok(()) => Err(error),
                     Err(store_error) => {
                         Err(self.settle_store_conflict(project_id, operation_id, store_error))
@@ -377,13 +388,27 @@ impl KnowledgeBaseCoordinator {
     }
 
     /// 取消收口：operation 已被 cancel API 置为终态（`IdentityMismatch`）时同样
-    /// 按已取消处理。返回值恒为错误（`Cancelled` 或真实的 store 故障）。
-    fn settle_cancelled(&self, project_id: &str, operation_id: &str) -> KnowledgeBaseError {
+    /// 按已取消处理；取消前 provider 已越界写时，把越界事实附加到取消记录上
+    /// （状态仍为 `Cancelled`，不改写成失败）。返回值恒为错误（`Cancelled`
+    /// 或真实的 store 故障）。
+    fn settle_cancelled(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        provider: &str,
+        violations: &[String],
+    ) -> KnowledgeBaseError {
         let store = match self.store() {
             Ok(store) => store,
             Err(error) => return error,
         };
-        match store.cancel(project_id, operation_id, self.now()) {
+        let result = if violations.is_empty() {
+            store.cancel(project_id, operation_id, self.now())
+        } else {
+            let record = error_record(&KnowledgeBaseError::Cancelled, violations, provider);
+            store.cancel_with_error(project_id, operation_id, record, self.now())
+        };
+        match result {
             Ok(()) | Err(ProductStoreError::IdentityMismatch { .. }) => {
                 KnowledgeBaseError::Cancelled
             }
@@ -408,16 +433,20 @@ impl KnowledgeBaseCoordinator {
         error.into()
     }
 
+    /// 驱动一次 turn。provider 停止后（成功/失败/取消）无条件做后快照审计；
+    /// 成功 turn 的越界以 `WriteScopeViolation` 失败，失败/取消 turn 的越界
+    /// 作为 `violations` 附加，原始失败原因保持不变。后快照本身失败时，成功
+    /// turn fail-closed，失败/取消 turn 保留原始原因。
     async fn drive(
         &self,
         operation: &KnowledgeBaseOperation,
         canonical_root: &Path,
         cancellation: CancellationToken,
-    ) -> Result<(), KnowledgeBaseError> {
+    ) -> Result<String, DriveFailure> {
         let (provider, command) = resolve_turn(operation.kind, &operation.input)?;
         tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return Err(KnowledgeBaseError::Cancelled),
+            _ = cancellation.cancelled() => return Err(KnowledgeBaseError::Cancelled.into()),
             ready = self.ensure_trust_ready(
                 &operation.project_id,
                 &operation.operation_id,
@@ -427,7 +456,8 @@ impl KnowledgeBaseCoordinator {
         }
         let before = snapshot_blocking(canonical_root).await?;
         let lc_id = self.lc_id()?;
-        self.runner
+        let turn = self
+            .runner
             .run_turn(KnowledgeBaseTurnRequest {
                 project_id: &operation.project_id,
                 operation_id: &operation.operation_id,
@@ -437,13 +467,19 @@ impl KnowledgeBaseCoordinator {
                 canonical_root,
                 cancellation,
             })
-            .await?;
-        let after = snapshot_blocking(canonical_root).await?;
-        let violations = write_scope_violations(&before, &after);
-        if violations.is_empty() {
-            Ok(())
-        } else {
-            Err(KnowledgeBaseError::WriteScopeViolation { paths: violations })
+            .await;
+        let audit = snapshot_blocking(canonical_root)
+            .await
+            .map(|after| write_scope_violations(&before, &after));
+        match (turn, audit) {
+            (Ok(summary), Ok(violations)) if violations.is_empty() => Ok(summary),
+            (Ok(_), Ok(paths)) => Err(KnowledgeBaseError::WriteScopeViolation { paths }.into()),
+            (Ok(_), Err(error)) => Err(error.into()),
+            (Err(turn_error), Ok(violations)) => Err(DriveFailure {
+                error: turn_error.into(),
+                violations,
+            }),
+            (Err(turn_error), Err(_)) => Err(KnowledgeBaseError::from(turn_error).into()),
         }
     }
 }
@@ -482,8 +518,75 @@ fn resolve_turn(
     Ok((provider, command))
 }
 
-/// 把执行层错误映射为持久化失败记录。
-fn error_record(error: &KnowledgeBaseError, provider: &str) -> AggregateInitializationErrorRecord {
+/// `drive` 的失败面：主错误 + 失败/取消 turn 期间发现的附加越界路径。
+struct DriveFailure {
+    error: KnowledgeBaseError,
+    violations: Vec<String>,
+}
+
+impl From<KnowledgeBaseError> for DriveFailure {
+    fn from(error: KnowledgeBaseError) -> Self {
+        Self {
+            error,
+            violations: Vec::new(),
+        }
+    }
+}
+
+const VIOLATION_ACTION: &str = "知识库只允许写 cadence/knowledge-base、cadence/project-rules 与根 CLAUDE.md/AGENTS.md；检查越界改动后重新发起";
+
+fn describe_violations(paths: &[String]) -> String {
+    let mut listed = paths
+        .iter()
+        .take(VIOLATION_SUMMARY_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > VIOLATION_SUMMARY_LIMIT {
+        listed.push_str(&format!(" 等共 {} 处", paths.len()));
+    }
+    listed
+}
+
+/// 把执行层错误映射为持久化失败记录；`violations` 非空时把越界事实并入：
+/// 顶层 `reason_code` 取越界码且不可重试（工作树已被污染，不能盲目重试），
+/// 原始失败原因保存在 `cause` 与 `stderr_summary`，不被掩盖。
+fn error_record(
+    error: &KnowledgeBaseError,
+    violations: &[String],
+    provider: &str,
+) -> AggregateInitializationErrorRecord {
+    let base = base_error_record(error, provider);
+    if violations.is_empty() {
+        return base;
+    }
+    let original_cause = base
+        .cause
+        .as_deref()
+        .map(|cause| format!("（{cause}）"))
+        .unwrap_or_default();
+    let original = format!(
+        "原始失败 {}{original_cause}: {}",
+        base.reason_code,
+        base.stderr_summary.as_deref().unwrap_or_default()
+    );
+    AggregateInitializationErrorRecord {
+        reason_code: REASON_WRITE_SCOPE_VIOLATION.to_string(),
+        stderr_summary: Some(format!(
+            "越界写入 {}；{original}",
+            describe_violations(violations)
+        )),
+        retryable: false,
+        action: VIOLATION_ACTION.to_string(),
+        cause: Some(base.reason_code),
+        ..base
+    }
+}
+
+fn base_error_record(
+    error: &KnowledgeBaseError,
+    provider: &str,
+) -> AggregateInitializationErrorRecord {
     let record = |reason_code: &str,
                   summary: Option<String>,
                   retryable: bool,
@@ -507,24 +610,13 @@ fn error_record(error: &KnowledgeBaseError, provider: &str) -> AggregateInitiali
             cause: Some(waiting.reason_code.clone()),
             provider: Some(provider_wire_label(&waiting.provider).to_string()),
         },
-        KnowledgeBaseError::WriteScopeViolation { paths } => {
-            let mut listed = paths
-                .iter()
-                .take(VIOLATION_SUMMARY_LIMIT)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            if paths.len() > VIOLATION_SUMMARY_LIMIT {
-                listed.push_str(&format!(" 等共 {} 处", paths.len()));
-            }
-            record(
-                REASON_WRITE_SCOPE_VIOLATION,
-                Some(listed),
-                false,
-                "知识库只允许写 cadence/knowledge-base、cadence/project-rules 与根 CLAUDE.md/AGENTS.md；检查越界改动后重新发起",
-                None,
-            )
-        }
+        KnowledgeBaseError::WriteScopeViolation { paths } => record(
+            REASON_WRITE_SCOPE_VIOLATION,
+            Some(describe_violations(paths)),
+            false,
+            VIOLATION_ACTION,
+            None,
+        ),
         KnowledgeBaseError::TurnFailed {
             reason_code,
             summary,
@@ -541,6 +633,13 @@ fn error_record(error: &KnowledgeBaseError, provider: &str) -> AggregateInitiali
             Some(message.clone()),
             false,
             "修正输入后重新发起",
+            None,
+        ),
+        KnowledgeBaseError::Cancelled => record(
+            REASON_CANCELLED,
+            Some("操作已取消".to_string()),
+            false,
+            "确认工作树状态后重新发起",
             None,
         ),
         other => record(
@@ -563,8 +662,28 @@ struct FileStamp {
 
 type TreeSnapshot = BTreeMap<String, FileStamp>;
 
-/// 递归文件清单（路径 → 大小 + mtime）。`.git` 元数据被跳过（只读 git 命令
-/// 也会刷新其内容）；符号链接按链接自身记录，不跟随。
+/// 平台自有状态（聚合根层）：`.aria/`（平台运行目录）、`.codegraph/` 与
+/// `codegraph.json`（既有聚合索引 init/sync 的产物，见
+/// `aggregate_index::exclude`）。它们由平台而非 provider 写入，合法的索引
+/// 重建/刷新可能与 KB turn 并发，不得归因成 provider 越界。仅根层精确匹配。
+const PLATFORM_OWNED_ROOT_ENTRIES: [&str; 3] = [".aria", ".codegraph", "codegraph.json"];
+
+/// 是否平台自有条目（含 `codegraph.json` 原子写产生的根层临时文件）。
+fn is_platform_owned(relative: &str) -> bool {
+    PLATFORM_OWNED_ROOT_ENTRIES.contains(&relative)
+        || (relative.starts_with(".codegraph.json.")
+            && relative.ends_with(".tmp")
+            && !relative.contains('/'))
+}
+
+/// 只读 git 命令（如 `git status`）会刷新 `index`：仅 `**/.git/index` 豁免，
+/// `.git` 下其余内容（config / hooks / refs / HEAD 等）保留审计。
+fn is_git_index(relative: &str) -> bool {
+    relative == ".git/index" || relative.ends_with("/.git/index")
+}
+
+/// 递归文件清单（路径 → 大小 + mtime）。平台自有条目与 `**/.git/index` 被
+/// 跳过；符号链接按链接自身记录，不跟随。
 fn snapshot_aggregate_root(root: &Path) -> Result<TreeSnapshot, KnowledgeBaseError> {
     fn walk(root: &Path, dir: &Path, out: &mut TreeSnapshot) -> Result<(), KnowledgeBaseError> {
         let io = |path: &Path, error: std::io::Error| {
@@ -572,15 +691,7 @@ fn snapshot_aggregate_root(root: &Path) -> Result<TreeSnapshot, KnowledgeBaseErr
         };
         for entry in std::fs::read_dir(dir).map_err(|error| io(dir, error))? {
             let entry = entry.map_err(|error| io(dir, error))?;
-            if entry.file_name() == ".git" {
-                continue;
-            }
             let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path).map_err(|error| io(&path, error))?;
-            if metadata.is_dir() {
-                walk(root, &path, out)?;
-                continue;
-            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|error| KnowledgeBaseError::Io(error.to_string()))?
@@ -588,6 +699,17 @@ fn snapshot_aggregate_root(root: &Path) -> Result<TreeSnapshot, KnowledgeBaseErr
                 .map(|component| component.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join("/");
+            if is_platform_owned(&relative) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| io(&path, error))?;
+            if metadata.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            if is_git_index(&relative) {
+                continue;
+            }
             out.insert(
                 relative,
                 FileStamp {
@@ -954,4 +1076,5 @@ fn best_effort_abort(session: &ProviderSession) {
 #[cfg(test)]
 mod tests {
     include!("coordinator_tests.inc.rs");
+    include!("coordinator_fix_tests.inc.rs");
 }

@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::aggregate_initialization::AggregateInitializationErrorRecord;
 use crate::product::logical_codebase::lc_scope_root;
@@ -136,6 +137,79 @@ impl KnowledgeBaseOperationStore {
             Ok(())
         })
         .map(|_| ())
+    }
+
+    /// 原子成功收口：把指定步骤置为 `Completed`（写完成时间与输出摘要），
+    /// 同时把 operation 置为 `Completed`；operation 必须处于 `Running`，
+    /// 且步骤必须存在。步骤与 operation 在同一次读改写中落盘，不会出现
+    /// 「operation 已完成、步骤仍运行」的中间态。
+    pub fn complete_step(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        step: KnowledgeBaseStepKind,
+        output_summary: Option<String>,
+        at: String,
+    ) -> Result<(), ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            if operation.status != KnowledgeBaseOperationStatus::Running {
+                return Err(identity_mismatch(operation_id));
+            }
+            let record = operation
+                .steps
+                .iter_mut()
+                .find(|record| record.step_id == step)
+                .ok_or_else(|| identity_mismatch(operation_id))?;
+            record.status = KnowledgeBaseStepStatus::Completed;
+            record.completed_at = Some(at.clone());
+            record.output_summary = output_summary;
+            operation.status = KnowledgeBaseOperationStatus::Completed;
+            operation.completed_at = Some(at);
+            Ok(())
+        })
+        .map(|_| ())
+    }
+
+    /// 取消并附带一条附加失败事实（如取消前 provider 已越界写）。
+    ///
+    /// - `Running`：置 `Cancelled`，写入 `error`；
+    /// - 已 `Cancelled` 且尚无 `error`：只补写 `error`，保留原完成时间；
+    /// - 其它状态（含已带 `error` 的 `Cancelled`）：`IdentityMismatch`。
+    pub fn cancel_with_error(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        error: AggregateInitializationErrorRecord,
+        at: String,
+    ) -> Result<(), ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            match operation.status {
+                KnowledgeBaseOperationStatus::Running => {
+                    operation.status = KnowledgeBaseOperationStatus::Cancelled;
+                    operation.completed_at = Some(at);
+                }
+                KnowledgeBaseOperationStatus::Cancelled if operation.error.is_none() => {}
+                _ => return Err(identity_mismatch(operation_id)),
+            }
+            operation.error = Some(error);
+            Ok(())
+        })
+        .map(|_| ())
+    }
+
+    /// 在当前 LC 的跨进程排他锁内执行 `critical`。
+    ///
+    /// 单飞的「查重 + 创建」必须放进同一临界区：durable `list_running` 只是
+    /// 观察，不是占位；两个共享本 store 的进程若各自先查后建，会同时放行。
+    /// 锁文件落在该 LC 的 operations 目录内（非 `.json`，不会被 `read_all`
+    /// 当作 operation 读取），flock 对同进程内不同 fd 同样互斥。
+    pub fn with_begin_lock<T>(
+        &self,
+        project_id: &str,
+        critical: impl FnOnce() -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
+        let lock_path = self.operations_root(project_id)?.join(".begin.lock");
+        with_exact_exclusive_lock(&lock_path, critical)
     }
 
     /// 取消：operation 必须处于 `Running`。
@@ -512,5 +586,223 @@ mod tests {
             .list_running(PROJECT)
             .expect("列出 running operation 失败");
         assert!(running_operations.is_empty());
+    }
+
+    fn error_record() -> AggregateInitializationErrorRecord {
+        AggregateInitializationErrorRecord {
+            stage: "knowledge_base".to_string(),
+            reason_code: "knowledge_base_write_scope_violation".to_string(),
+            stderr_summary: Some("alpha/src/main.rs".to_string()),
+            retryable: false,
+            action: "检查越界改动".to_string(),
+            cause: Some("knowledge_base_cancelled".to_string()),
+            provider: Some("pi".to_string()),
+        }
+    }
+
+    #[test]
+    fn complete_step_closes_step_and_operation_atomically() {
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let store =
+            KnowledgeBaseOperationStore::for_lc(ProductAppPaths::new(temp.path()), LC_ALPHA.into());
+        let operation = new_operation(
+            LC_ALPHA,
+            "kb-key-0001",
+            KnowledgeBaseOperationKind::Bootstrap,
+            CREATED_AT,
+        );
+        store.create(operation.clone()).unwrap();
+
+        store
+            .complete_step(
+                PROJECT,
+                &operation.operation_id,
+                KnowledgeBaseStepKind::Bootstrap,
+                Some("turn ok".to_string()),
+                FINISHED_AT.to_string(),
+            )
+            .unwrap();
+        let stored = store.get(PROJECT, &operation.operation_id).unwrap();
+        assert_eq!(stored.status, KnowledgeBaseOperationStatus::Completed);
+        assert_eq!(stored.completed_at.as_deref(), Some(FINISHED_AT));
+        assert_eq!(stored.steps[0].status, KnowledgeBaseStepStatus::Completed);
+        assert_eq!(stored.steps[0].completed_at.as_deref(), Some(FINISHED_AT));
+        assert_eq!(stored.steps[0].output_summary.as_deref(), Some("turn ok"));
+
+        // 已终态不可再收口。
+        assert!(matches!(
+            store.complete_step(
+                PROJECT,
+                &operation.operation_id,
+                KnowledgeBaseStepKind::Bootstrap,
+                None,
+                FINISHED_AT.to_string(),
+            ),
+            Err(ProductStoreError::IdentityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn complete_step_with_unknown_step_leaves_operation_untouched() {
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let store =
+            KnowledgeBaseOperationStore::for_lc(ProductAppPaths::new(temp.path()), LC_ALPHA.into());
+        let operation = new_operation(
+            LC_ALPHA,
+            "kb-key-0001",
+            KnowledgeBaseOperationKind::Bootstrap,
+            CREATED_AT,
+        );
+        store.create(operation.clone()).unwrap();
+        assert!(matches!(
+            store.complete_step(
+                PROJECT,
+                &operation.operation_id,
+                KnowledgeBaseStepKind::ApplyUpdate,
+                None,
+                FINISHED_AT.to_string(),
+            ),
+            Err(ProductStoreError::IdentityMismatch { .. })
+        ));
+        let stored = store.get(PROJECT, &operation.operation_id).unwrap();
+        assert_eq!(stored.status, KnowledgeBaseOperationStatus::Running);
+        assert_eq!(stored.steps[0].status, KnowledgeBaseStepStatus::Pending);
+    }
+
+    #[test]
+    fn cancel_with_error_attaches_failure_fact_to_cancelled_operation() {
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let store =
+            KnowledgeBaseOperationStore::for_lc(ProductAppPaths::new(temp.path()), LC_ALPHA.into());
+
+        // Running → Cancelled + error。
+        let running = new_operation(
+            LC_ALPHA,
+            "kb-key-0001",
+            KnowledgeBaseOperationKind::Bootstrap,
+            CREATED_AT,
+        );
+        store.create(running.clone()).unwrap();
+        store
+            .cancel_with_error(
+                PROJECT,
+                &running.operation_id,
+                error_record(),
+                FINISHED_AT.to_string(),
+            )
+            .unwrap();
+        let stored = store.get(PROJECT, &running.operation_id).unwrap();
+        assert_eq!(stored.status, KnowledgeBaseOperationStatus::Cancelled);
+        assert_eq!(stored.completed_at.as_deref(), Some(FINISHED_AT));
+        assert_eq!(stored.error, Some(error_record()));
+        // 已带 error 的 Cancelled 不可重复附加。
+        assert!(matches!(
+            store.cancel_with_error(
+                PROJECT,
+                &running.operation_id,
+                error_record(),
+                "later".to_string(),
+            ),
+            Err(ProductStoreError::IdentityMismatch { .. })
+        ));
+
+        // 已被 cancel API 取消（无 error）：只补 error，保留原完成时间。
+        let cancelled = new_operation(
+            LC_ALPHA,
+            "kb-key-0002",
+            KnowledgeBaseOperationKind::Bootstrap,
+            CREATED_AT,
+        );
+        store.create(cancelled.clone()).unwrap();
+        store
+            .cancel(PROJECT, &cancelled.operation_id, CREATED_AT.to_string())
+            .unwrap();
+        store
+            .cancel_with_error(
+                PROJECT,
+                &cancelled.operation_id,
+                error_record(),
+                FINISHED_AT.to_string(),
+            )
+            .unwrap();
+        let stored = store.get(PROJECT, &cancelled.operation_id).unwrap();
+        assert_eq!(stored.status, KnowledgeBaseOperationStatus::Cancelled);
+        assert_eq!(stored.completed_at.as_deref(), Some(CREATED_AT));
+        assert_eq!(stored.error, Some(error_record()));
+
+        // 其它终态拒绝。
+        let done = new_operation(
+            LC_ALPHA,
+            "kb-key-0003",
+            KnowledgeBaseOperationKind::Bootstrap,
+            CREATED_AT,
+        );
+        store.create(done.clone()).unwrap();
+        store
+            .finish_completed(PROJECT, &done.operation_id, FINISHED_AT.to_string())
+            .unwrap();
+        assert!(matches!(
+            store.cancel_with_error(
+                PROJECT,
+                &done.operation_id,
+                error_record(),
+                FINISHED_AT.to_string(),
+            ),
+            Err(ProductStoreError::IdentityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn begin_lock_is_exclusive_across_independent_handles_and_not_listed_as_operation() {
+        let temp = tempfile::tempdir().expect("创建临时目录失败");
+        let paths = ProductAppPaths::new(temp.path());
+        let holder = KnowledgeBaseOperationStore::for_lc(paths.clone(), LC_ALPHA.into());
+        let contender = KnowledgeBaseOperationStore::for_lc(paths, LC_ALPHA.into());
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder_thread = std::thread::spawn(move || {
+            holder
+                .with_begin_lock(PROJECT, || {
+                    held_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .ok();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+
+        // 持锁期间，另一个独立 store 句柄（等价于另一进程的新 fd）进不了临界区。
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let contender_thread = std::thread::spawn(move || {
+            contender
+                .with_begin_lock(PROJECT, || {
+                    entered_tx.send(()).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        assert!(
+            entered_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "持锁期间竞争者不得进入临界区"
+        );
+        release_tx.send(()).unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("释放后竞争者应进入临界区");
+        holder_thread.join().unwrap();
+        contender_thread.join().unwrap();
+
+        // 锁文件不是 `.json`，不会被当作 operation 记录读取。
+        let store =
+            KnowledgeBaseOperationStore::for_lc(ProductAppPaths::new(temp.path()), LC_ALPHA.into());
+        assert!(store.list_running(PROJECT).unwrap().is_empty());
+        assert!(store.latest(PROJECT).unwrap().is_none());
     }
 }
