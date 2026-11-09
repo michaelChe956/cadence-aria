@@ -53,6 +53,6 @@
 ## 边界（不替代其它规则）
 
 - 本规则只约束「**测哪个端口**」与「**何时做发布态回归**」。
-- 启动方式仍以 `cadence/project-rules/local-service-deploy.md` 为准（只经 `/tmp/aria-deploy/start.sh`，必须带 TTY）。
+- 启动方式仍以 `cadence/project-rules/local-service-deploy.md` 为准（只经 `/tmp/aria-deploy/start.sh`，必须带 TTY；该脚本的仓内源 = `scripts/aria-web-start.sh`）。
 - 界面验证方式仍以 `cadence/project-rules/browser-verification-only.md` 为准（内置浏览器、真实渲染 + 真实点击）。
-- origin 白名单仍以 `/tmp/aria-deploy/start.sh` 的 `DEFAULT_ORIGINS` 为唯一真源（改脚本，不改命令行）。
+- origin 白名单仍以 `scripts/aria-web-start.sh` 的 `DEFAULT_ORIGINS` 为唯一真源（改脚本，不改命令行）。

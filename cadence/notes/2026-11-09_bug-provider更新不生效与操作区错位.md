@@ -69,3 +69,22 @@ PATH 上生效的命令若不来自本次安装的前缀，提示「把 `<prefix
   - `claude` 按解析出的生效前缀实跑
     `npm install -g --prefix <fnm installation> @anthropic-ai/claude-code@latest`
     ⇒ `claude --version` 由 2.1.307 变 2.1.319。
+
+### 部署口径（2026-11-09 第二次同款故障的沉淀）
+
+- 本次修复最初「看起来没生效」，真因是**启动方式错了**：手工直起二进制 ⇒
+  `ARIA_API_TRUSTED_ORIGINS` 没进进程环境 ⇒ owner 访问报
+  `[request origin not allowed]`（端口在听但服务不可用）。
+- 正确口径（已固化，见 `cadence/project-rules/local-service-deploy.md`）：
+  1. `pnpm -C web build` → `CARGO_TARGET_DIR=/tmp/deploy-target cargo build --release --locked`
+  2. `install -m755 scripts/aria-web-start.sh /tmp/aria-deploy/start.sh`（仓内源即真源）
+  3. `bash /tmp/aria-deploy/start.sh`（TTY + 白名单 + 停旧实例；用 harness
+     具名长驻服务 + pty 托管）
+  4. `bash /tmp/aria-deploy/start.sh --check` → 6 项自检
+- 发布态实测（4317，`/tmp/deploy-target/release/aria`）：6 项自检全过；
+  `grep -a` 指纹「PATH 上生效的」「放到 PATH 前面」新件命中 1 / 回滚件命中 0；
+  内嵌资源名 `assets/index-BeP4oStK.js` 与 `web/dist/assets/` 一致；
+  owner 的访问路径（`arch-code:4317` / `localhost:4317` / 经 5173 代理）均 200。
+- 界面实测（harness 内置浏览器，4317）：「核验 Codex」与【更新】同顶边
+  （两者 y=367.5、height=36）；点【更新】⇒ codex 0.166.0 → 0.167.0，
+  「版本落后」标签与【更新】按钮随之消失。

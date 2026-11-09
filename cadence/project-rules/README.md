@@ -160,12 +160,14 @@
 
 - **本地服务部署与启动规则（4317 共享实例）（强制）**
   - **只经 `/tmp/aria-deploy/start.sh` 启动 4317**，禁止手工拼命令行直起二进制 —— 脚本内的 `ARIA_API_TRUSTED_ORIGINS` 一旦丢失，owner 访问即报 `[request origin not allowed]`（端口在听但服务不可用）。
-  - 必须带 TTY（`script -qfc`）：T1 鉴权 bootstrap token 只在 TTY 交付；启动日志首行应含 `TTY="/dev/pts/..."`。
+  - **启动脚本的仓内源是 `scripts/aria-web-start.sh`**：每次启动前先 `install -m755 scripts/aria-web-start.sh /tmp/aria-deploy/start.sh`（白名单真源在仓里，不在 /tmp）；`bash /tmp/aria-deploy/start.sh --check` 跑启动后 6 项自检。
+  - **必须带 TTY（`script -qfc`）**：T1 鉴权 bootstrap token 只在 TTY 交付；启动日志首行应含 `TTY="/dev/pts/..."`；⛔ 禁止用 `nohup`/`setsid` 手工后台起二进制（无 TTY ⇒ 鉴权 token 无法交付，且 `script` 在 stdin EOF 时会把子进程带走 ⇒ 实例秒退）。
+  - **二进制必须显式指向本轮开发的那份**（`ARIA_BIN=`）；⛔ 禁止沿用别的 worktree 的旧二进制（界面会看起来「修复没生效」）。
   - 构建顺序：`pnpm -C web build` → `CARGO_TARGET_DIR=/tmp/deploy-target cargo build --release --locked`（前端资源由 `rust-embed` 编译期嵌入，dist 未重建等于没发）。
   - 替换二进制**之前**先备份回滚件到 `/tmp/aria-rollback-<sha>`；重启前看 session 日志最后写入时间确认实例空闲（4317 与 owner 的端到端测试共用）。
   - 启动后必查 6 项：端口在听、`GET /` 与 `/api/health` 均 200、日志含 `governance_complete=true`、`/proc/<pid>/environ` 里 `ARIA_API_TRUSTED_ORIGINS` 非空、**跑的是新件**、新代码指纹在件里。
   - 指纹扫描用 `grep -a`（二进制安全），**不要用 `strings`**（只抽 ASCII，抽不到中文串）；且必须与回滚件对照（旧件应全部不命中）。
-  - 「端口在听」不等于「服务可用」；上述任一项缺失即视为部署未完成，不得声称已重发。完整规则与检查清单详见 `cadence/project-rules/local-service-deploy.md`。
+  - 「端口在听」不等于「服务可用」；上述任一项缺失即视为部署未完成，不得声称已重发。完整规则、故障签名对照表与检查清单详见 `cadence/project-rules/local-service-deploy.md`。
 
 - **浏览器验证规则（禁用 Playwright，只用 harness 内置浏览器）（强制）**
   - 🔴 **禁止使用 Playwright**：`pnpm test:e2e` / `pnpm exec playwright test` / 代码里 import `@playwright/test` 或 `playwright` / `pnpm exec playwright install` / 为跑通 Playwright 而临时改 `web/playwright.config.ts` 或新增临时配置 —— 全部禁止。
