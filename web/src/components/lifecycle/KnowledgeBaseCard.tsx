@@ -171,8 +171,12 @@ export function KnowledgeBaseCard({
   onDismissPreflightFailure,
 }: KnowledgeBaseCardProps) {
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-  // 更新按钮闸门：manifest 的 initialization_status 必须是 complete。
-  const updateReady = status?.initialization_status === "complete";
+  // 更新按钮闸门（与后端 update 预检口径一致）：initialization_status 必须是
+  // complete **且** global_validation 必须是 passed——少任何一条后端都会拒，
+  // 前端提前禁用，避免用户点了才被拒。
+  const updateReady =
+    status?.initialization_status === "complete" &&
+    status?.global_validation === "passed";
   const operationRunning = operation?.status === "running";
   const missingInputs = preflightFailure?.details?.missing ?? [];
   const preflightViolations = preflightFailure?.details?.violations ?? [];
@@ -277,7 +281,7 @@ export function KnowledgeBaseCard({
           data-testid="knowledge-base-update-hint"
           className="mt-2 text-xs text-[var(--aria-ink-muted)]"
         >
-          需先完成知识库初始化，才能执行知识库更新。
+          需先完成知识库初始化且全局校验通过，才能执行知识库更新。
         </p>
       ) : null}
 

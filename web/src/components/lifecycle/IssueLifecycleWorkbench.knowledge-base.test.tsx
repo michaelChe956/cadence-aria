@@ -12,7 +12,9 @@
 //   6. status 取数 500 → 错误横幅可见、页面不崩；
 //   7. 启动接口 4xx → 预检失败进卡片、错误横幅可见、页面不崩；
 //   8. 启动接口 200 + 异常载荷 → 不崩、卡片不挂脏 operation（形状守卫）。
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+// 终审修复（C-2）补一条：
+//   9. operation 运行中每 2s 轮询（与聚合初始化卡同构）；到终态停止拉取。
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   createMemoryHistory,
@@ -187,6 +189,7 @@ function renderWorkbench() {
 describe("IssueLifecycleWorkbench 知识库卡片宿主接线（Task 9.5）", () => {
   installIssueLifecycleWorkbenchTestHooks();
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -429,5 +432,61 @@ describe("IssueLifecycleWorkbench 知识库卡片宿主接线（Task 9.5）", ()
     expect(
       within(card).queryByTestId("knowledge-base-operation-status"),
     ).toBeNull();
+  });
+
+  it("operation 运行中每 2s 轮询；到终态停止拉取", async () => {
+    // shouldAdvanceTime：真实时间自动推进 fake clock，waitFor 的重试间隔可走；
+    // 轮询节奏用 advanceTimersByTime 快进驱动，不必真等 2s。
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // 受控响应序列：前两次 active 返回 running，之后返回 completed ⇒
+    // 终态上屏后轮询必须停止（不得再发起 active 请求）。
+    let activeCallCount = 0;
+    installKnowledgeBaseFetch({
+      activeByLc: {
+        [LC_ID]: () => {
+          activeCallCount += 1;
+          const status = activeCallCount <= 2 ? "running" : "completed";
+          return Promise.resolve(
+            jsonResponse(knowledgeBaseOperation({ status })),
+          );
+        },
+      },
+    });
+    renderWorkbench();
+
+    fireEvent.click(await screen.findByTestId("lc-summary-toggle"));
+    const card = await screen.findByTestId("knowledge-base-card");
+    await waitFor(() =>
+      expect(
+        within(card).getByTestId("knowledge-base-operation-status"),
+      ).toHaveAttribute("data-status", "running"),
+    );
+    expect(activeCallCount).toBeGreaterThanOrEqual(1);
+
+    // running ⇒ 每 2s 会再次拉取（卡片不得冻结在启动时的 running 快照）。
+    const runningBaseline = activeCallCount;
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    await waitFor(() =>
+      expect(activeCallCount).toBeGreaterThan(runningBaseline),
+    );
+
+    // 拉到 completed ⇒ 终态必须上屏。
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    await waitFor(() =>
+      expect(
+        within(card).getByTestId("knowledge-base-operation-status"),
+      ).toHaveAttribute("data-status", "completed"),
+    );
+
+    // 终态 ⇒ 停止拉取：再快进 6s（三个轮询间隔）不得再发起 active 请求。
+    const completedBaseline = activeCallCount;
+    await act(async () => {
+      vi.advanceTimersByTime(6_000);
+    });
+    expect(activeCallCount).toBe(completedBaseline);
   });
 });

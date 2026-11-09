@@ -21,11 +21,16 @@ vi.mock("@monaco-editor/react", () => ({
   Editor: ({
     value,
     onChange,
+    options,
   }: {
     value?: string;
     onChange?: (value: string | undefined) => void;
+    options?: { readOnly?: boolean };
   }) => (
-    <div data-testid="monaco-editor">
+    <div
+      data-testid="monaco-editor"
+      data-readonly={options?.readOnly ? "true" : "false"}
+    >
       <textarea
         data-testid="kb-editor"
         value={value ?? ""}
@@ -35,38 +40,43 @@ vi.mock("@monaco-editor/react", () => ({
   ),
 }));
 
+// 文件树夹具：path 一律是**知识库根相对**口径（与后端 files.rs / HTTP 层一致，
+// 如 base-info.md、user-input/...、manifest.yaml——不是聚合根相对）。
 const FILES = [
-  { path: "cadence/knowledge-base", is_dir: true, size: 0, editable: false },
-  { path: "cadence/knowledge-base/base-info.md", is_dir: false, size: 12, editable: true },
-  { path: "cadence/knowledge-base/product.md", is_dir: false, size: 12, editable: true },
-  { path: "cadence/knowledge-base/user-input", is_dir: true, size: 0, editable: false },
+  { path: "base-info.md", is_dir: false, size: 12, editable: true },
+  { path: "product.md", is_dir: false, size: 12, editable: true },
+  // 机器管理文件：editable=false ⇒ 只读呈现（编辑器只读 + 保存禁用 + 说明）。
+  { path: "manifest.yaml", is_dir: false, size: 48, editable: false },
+  { path: "evidence", is_dir: true, size: 0, editable: false },
   {
-    path: "cadence/knowledge-base/user-input/updates",
+    path: "evidence/relation-graph.yaml",
+    is_dir: false,
+    size: 64,
+    editable: false,
+  },
+  { path: "user-input", is_dir: true, size: 0, editable: false },
+  { path: "user-input/updates", is_dir: true, size: 0, editable: false },
+  {
+    path: "user-input/updates/CHANGE-1",
     is_dir: true,
     size: 0,
     editable: false,
   },
   {
-    path: "cadence/knowledge-base/user-input/updates/CHANGE-1",
-    is_dir: true,
-    size: 0,
-    editable: false,
-  },
-  {
-    path: "cadence/knowledge-base/user-input/updates/CHANGE-1/code-change.md",
+    path: "user-input/updates/CHANGE-1/code-change.md",
     is_dir: false,
     size: 12,
     editable: true,
   },
   {
     // 第二个变更包：与 CHANGE-1 同名文件，用于验证「同名文件按目录区分」。
-    path: "cadence/knowledge-base/user-input/updates/CHANGE-2",
+    path: "user-input/updates/CHANGE-2",
     is_dir: true,
     size: 0,
     editable: false,
   },
   {
-    path: "cadence/knowledge-base/user-input/updates/CHANGE-2/code-change.md",
+    path: "user-input/updates/CHANGE-2/code-change.md",
     is_dir: false,
     size: 12,
     editable: true,
@@ -80,7 +90,7 @@ const FILES = [
   },
   {
     // 读取必然失败（不在 CONTENTS 中 ⇒ 404）：用于验证读取失败后的状态清理。
-    path: "cadence/knowledge-base/missing.md",
+    path: "missing.md",
     is_dir: false,
     size: 0,
     editable: true,
@@ -88,15 +98,11 @@ const FILES = [
 ];
 
 const CONTENTS: Record<string, { content: string; digest: string }> = {
-  "cadence/knowledge-base/base-info.md": {
-    content: "# 基础信息",
-    digest: "digest-base",
-  },
-  "cadence/knowledge-base/product.md": {
-    content: "# 产品信息",
-    digest: "digest-product",
-  },
-  "cadence/knowledge-base/user-input/updates/CHANGE-1/code-change.md": {
+  "base-info.md": { content: "# 基础信息", digest: "digest-base" },
+  "product.md": { content: "# 产品信息", digest: "digest-product" },
+  "manifest.yaml": { content: "schema_version: 4.0", digest: "digest-manifest" },
+  "evidence/relation-graph.yaml": { content: "nodes: []", digest: "digest-graph" },
+  "user-input/updates/CHANGE-1/code-change.md": {
     content: "# 代码变更",
     digest: "digest-change",
   },
@@ -128,7 +134,7 @@ function installFetch(
     if (method === "PUT") {
       return overrides.write
         ? overrides.write()
-        : jsonResponse({ path: "cadence/knowledge-base/base-info.md", digest: "digest-new" });
+        : jsonResponse({ path: "base-info.md", digest: "digest-new" });
     }
     if (url.includes("/knowledge-base/status")) {
       return jsonResponse({
@@ -229,10 +235,8 @@ describe("KnowledgeBasePage", () => {
     const paths = screen
       .getAllByTestId("kb-file-node")
       .map((node) => node.getAttribute("data-path"));
-    expect(paths).toContain("cadence/knowledge-base/base-info.md");
-    expect(paths).toContain(
-      "cadence/knowledge-base/user-input/updates/CHANGE-1/code-change.md",
-    );
+    expect(paths).toContain("base-info.md");
+    expect(paths).toContain("user-input/updates/CHANGE-1/code-change.md");
     expect(await screen.findByTestId("kb-status")).toHaveTextContent("已初始化");
   });
 
@@ -244,27 +248,26 @@ describe("KnowledgeBasePage", () => {
 
     // 顶层目录必须是树根的直接子节点（此前目录只进 Map、未挂根容器 ⇒ 目录分组整体不可达）。
     const treeRoot = screen.getByRole("tree");
-    const cadenceDir = screen
+    const userInputDir = screen
       .getAllByTestId("kb-dir-node")
-      .find((node) => node.getAttribute("data-path") === "cadence");
-    expect(cadenceDir).toBeDefined();
-    const cadenceItem = cadenceDir?.closest("li");
-    expect(cadenceItem?.parentElement).toBe(treeRoot);
+      .find((node) => node.getAttribute("data-path") === "user-input");
+    expect(userInputDir).toBeDefined();
+    const userInputItem = userInputDir?.closest("li");
+    expect(userInputItem?.parentElement).toBe(treeRoot);
 
-    // 目录分组下挂有文件节点（嵌套层级：cadence → knowledge-base → 文件）。
-    const knowledgeBaseDir = screen
+    // 目录分组下挂有文件节点（嵌套层级：user-input → updates → CHANGE-* → 文件）。
+    const updatesDir = screen
       .getAllByTestId("kb-dir-node")
-      .find((node) => node.getAttribute("data-path") === "cadence/knowledge-base");
-    expect(knowledgeBaseDir).toBeDefined();
-    const knowledgeBaseItem = knowledgeBaseDir?.closest("li");
+      .find((node) => node.getAttribute("data-path") === "user-input/updates");
+    expect(updatesDir).toBeDefined();
     expect(
-      within(knowledgeBaseItem as HTMLElement)
+      within(userInputItem as HTMLElement)
         .getAllByTestId("kb-file-node")
         .map((node) => node.getAttribute("data-path")),
     ).toEqual(
       expect.arrayContaining([
-        "cadence/knowledge-base/base-info.md",
-        "cadence/knowledge-base/product.md",
+        "user-input/updates/CHANGE-1/code-change.md",
+        "user-input/updates/CHANGE-2/code-change.md",
       ]),
     );
 
@@ -273,8 +276,8 @@ describe("KnowledgeBasePage", () => {
     expect(codeChangeButtons).toHaveLength(2);
     expect(codeChangeButtons.map((button) => dirPathOf(button))).toEqual(
       expect.arrayContaining([
-        "cadence/knowledge-base/user-input/updates/CHANGE-1",
-        "cadence/knowledge-base/user-input/updates/CHANGE-2",
+        "user-input/updates/CHANGE-1",
+        "user-input/updates/CHANGE-2",
       ]),
     );
 
@@ -336,7 +339,7 @@ describe("KnowledgeBasePage", () => {
     await act(async () => {
       releaseBaseInfo?.(
         jsonResponse({
-          path: "cadence/knowledge-base/base-info.md",
+          path: "base-info.md",
           content: "# 基础信息",
           digest: "digest-base",
         }),
@@ -375,7 +378,7 @@ describe("KnowledgeBasePage", () => {
     });
     const put = calls.find((call) => call.method === "PUT");
     expect(put?.body).toEqual({
-      path: "cadence/knowledge-base/base-info.md",
+      path: "base-info.md",
       content: "# 基础信息（已改）",
       base_digest: "digest-base",
     });
@@ -447,7 +450,7 @@ describe("KnowledgeBasePage", () => {
     ).find(
       (node) =>
         node.getAttribute("data-path") ===
-        "cadence/knowledge-base/user-input/updates/CHANGE-1/code-change.md",
+        "user-input/updates/CHANGE-1/code-change.md",
     );
     expect(codeChange).toBeDefined();
     fireEvent.click(codeChange as HTMLElement);
@@ -473,5 +476,40 @@ describe("KnowledgeBasePage", () => {
       expect(confirmSpy).toHaveBeenCalled();
     });
     expect(String(confirmSpy.mock.calls[0]?.[0] ?? "")).toContain("未保存");
+  });
+
+  it("machine_managed_file_rendered_read_only", async () => {
+    const { calls } = installFetch();
+    renderPage();
+
+    await waitForEditorValue("# 基础信息");
+
+    // 打开机器管理文件 manifest.yaml：内容仍可查看，但编辑器只读
+    // （不向 MonacoEditor 传 onChange ⇒ 组件内建 readOnly 生效）。
+    fireEvent.click(screen.getByRole("button", { name: "manifest.yaml" }));
+    await waitForEditorValue("schema_version: 4.0");
+    expect(screen.getByTestId("monaco-editor")).toHaveAttribute(
+      "data-readonly",
+      "true",
+    );
+    // 保存入口不可用，且点击不得发出写请求。
+    const saveButton = screen.getByRole("button", { name: "保存" });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(0);
+    // 只读说明可见。
+    expect(screen.getByTestId("kb-readonly-hint")).toHaveTextContent(
+      "机器管理文件，只读",
+    );
+
+    // 切回可编辑文件：恢复可写 + 可保存，说明消失。
+    fireEvent.click(screen.getByRole("button", { name: "product.md" }));
+    await waitForEditorValue("# 产品信息");
+    expect(screen.getByTestId("monaco-editor")).toHaveAttribute(
+      "data-readonly",
+      "false",
+    );
+    expect(screen.queryByTestId("kb-readonly-hint")).toBeNull();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
   });
 });

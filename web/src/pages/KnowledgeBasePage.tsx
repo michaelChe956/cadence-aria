@@ -2,6 +2,8 @@
 // 左侧文件树（按目录分组）+ 右侧「编辑 / 预览」页签 + 保存按钮。
 // 编辑页签用 Task 8 的可写 MonacoEditor，预览页签用公共 MarkdownContent；
 // 变更包（user-input/updates/ 下的 CHANGE-* 目录）额外展示 lint 的字段级标记。
+// 机器管理文件（后端标记 editable=false 的 manifest.yaml、
+// evidence/relation-graph.yaml 等）按只读呈现：不提供编辑入口与保存入口。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiRequestError } from "../api/client";
 import {
@@ -20,7 +22,9 @@ import { MarkdownContent } from "../components/shared/MarkdownContent";
 import { MonacoEditor } from "../components/shared/MonacoEditor";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
 
-const CHANGE_PACKAGE_SEGMENT = "/user-input/updates/";
+/** 变更包根段：文件树 path 是知识库根相对口径（user-input/updates/CHANGE-*）；
+ *  匹配同时兼容历史聚合根相对口径（…/user-input/updates/CHANGE-*）。 */
+const CHANGE_PACKAGE_SEGMENT = "user-input/updates/";
 const UNSAVED_MESSAGE = "知识库文档有未保存的修改，离开将丢失这些改动。是否继续？";
 
 type Notice = { kind: "error" | "success"; text: string };
@@ -48,6 +52,15 @@ export function KnowledgeBasePage({
   const [lintFields, setLintFields] = useState<KnowledgeBaseChangePackageFieldStatusDto[]>([]);
   // 当前选中的文件路径（同步镜像）：用于丢弃乱序到达的过期读取响应。
   const selectedPathRef = useRef<string | null>(null);
+
+  // 选中文件的节点元数据：机器管理文件按只读呈现——编辑器不传 onChange
+  // （MonacoEditor 的「无 onChange ⇒ 只读」内建语义）、保存入口禁用、并明确
+  // 标注只读说明；可编辑文件维持「可写 + 可保存」现状。
+  const selectedNode =
+    selectedPath === null
+      ? null
+      : (nodes.find((node) => node.path === selectedPath) ?? null);
+  const selectedEditable = selectedNode?.editable ?? false;
 
   const dirty = selectedPath !== null && draft !== savedContent;
 
@@ -141,7 +154,8 @@ export function KnowledgeBasePage({
   }, [projectId, lcId, openFile]);
 
   const save = useCallback(async () => {
-    if (!selectedPath) {
+    if (!selectedPath || !selectedEditable) {
+      // 未选中文件或机器管理文件（只读）：不发写请求（按钮已禁用，这里兜底）。
       return;
     }
     if (digest === null) {
@@ -173,7 +187,7 @@ export function KnowledgeBasePage({
     } finally {
       setSaving(false);
     }
-  }, [projectId, lcId, selectedPath, draft, digest]);
+  }, [projectId, lcId, selectedPath, selectedEditable, draft, digest]);
 
   const tree = useMemo(() => buildTree(nodes), [nodes]);
 
@@ -231,11 +245,24 @@ export function KnowledgeBasePage({
             <button
               type="button"
               onClick={() => void save()}
-              disabled={selectedPath === null || digest === null || saving}
+              disabled={
+                selectedPath === null ||
+                digest === null ||
+                saving ||
+                !selectedEditable
+              }
               className="rounded-md border border-[var(--aria-line)] bg-white px-3 py-1 text-xs font-semibold text-[var(--aria-ink)] disabled:opacity-50"
             >
               保存
             </button>
+            {selectedPath !== null && !selectedEditable ? (
+              <span
+                data-testid="kb-readonly-hint"
+                className="text-xs text-[var(--aria-ink-muted)]"
+              >
+                机器管理文件，只读
+              </span>
+            ) : null}
             {selectedPath ? (
               <span className="truncate text-xs text-[var(--aria-ink-muted)]">
                 {selectedPath}
@@ -264,7 +291,7 @@ export function KnowledgeBasePage({
                 value={draft}
                 language="markdown"
                 height="480px"
-                onChange={setDraft}
+                onChange={selectedEditable ? setDraft : undefined}
               />
             ) : (
               <div className="rounded-md border border-[var(--aria-line)] bg-white p-3">
@@ -455,7 +482,9 @@ function parentOf(path: string): string | null {
 /** 变更包目录（user-input/updates/CHANGE-*）下的文件归属的变更包路径。 */
 function changePackagePathOf(path: string): string | null {
   const index = path.indexOf(CHANGE_PACKAGE_SEGMENT);
-  if (index < 0) {
+  // index=0 是知识库根相对的前缀形态；index>0 必须恰好落在目录边界
+  // （前一字符是 /），排除子串撞名（如 axuser-input/updates/…）。
+  if (index < 0 || (index > 0 && path[index - 1] !== "/")) {
     return null;
   }
   const rest = path.slice(index + CHANGE_PACKAGE_SEGMENT.length);

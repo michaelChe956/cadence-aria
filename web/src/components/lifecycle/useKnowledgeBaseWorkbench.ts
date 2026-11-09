@@ -40,6 +40,9 @@ import { errorMessage } from "./IssueLifecycleWorkbenchParts";
 export const KNOWLEDGE_BASE_DETAIL_ROUTE =
   "/workbench/projects/$projectId/logical-codebases/$lcId/knowledge-base";
 
+/** 运行中轮询间隔：与同抽屉的聚合初始化卡（useLogicalCodebaseScopeData）一致。 */
+const KNOWLEDGE_BASE_POLL_INTERVAL_MS = 2_000;
+
 type Args = {
   selectedProjectId: string | null;
   activeLogicalCodebaseId: string | null;
@@ -203,6 +206,36 @@ export function useKnowledgeBaseWorkbench({
     }
     void refresh();
   }, [panelExpanded, refresh]);
+
+  // operation 运行中每 2s 轮询（与聚合初始化卡同构）：卡片不得冻结在启动时的
+  // running 快照——完成/失败/超时必须上屏，失败文案与取消按钮的显隐才能跟随
+  // 真实状态。响应过期守卫复用 refresh 内部的 revision + 作用域守卫；这里只
+  // 负责起停定时器与不并发（inFlight）。operation 进入终态、抽屉收起或卸载时
+  // 停止拉取。
+  useEffect(() => {
+    if (!panelExpanded || knowledgeBaseOperation?.status !== "running") {
+      return;
+    }
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        await refresh();
+      } finally {
+        inFlight = false;
+      }
+    };
+    const interval = window.setInterval(
+      () => void poll(),
+      KNOWLEDGE_BASE_POLL_INTERVAL_MS,
+    );
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [panelExpanded, knowledgeBaseOperation?.status, refresh]);
 
   async function handleStartKnowledgeBase(
     kind: "bootstrap" | "update",

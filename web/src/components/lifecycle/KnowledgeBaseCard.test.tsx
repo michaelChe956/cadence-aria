@@ -26,11 +26,14 @@ vi.mock("../../api/knowledge-base", () => ({
     .mockResolvedValue({ id: "cp_0002", path: "changes/new-feature.md" }),
 }));
 
-const statusDto = (initializationStatus: string | null): KnowledgeBaseStatusDto => ({
+const statusDto = (
+  initializationStatus: string | null,
+  globalValidation: string | null = "passed",
+): KnowledgeBaseStatusDto => ({
   exists: initializationStatus !== null,
   schema_version: initializationStatus !== null ? "4.0" : null,
   initialization_status: initializationStatus,
-  global_validation: null,
+  global_validation: globalValidation,
   completed_stages: initializationStatus === "complete" ? ["bootstrap"] : [],
   skipped_stages: [],
   skills_available: true,
@@ -160,6 +163,16 @@ describe("KnowledgeBaseCard", () => {
     expect(
       screen.queryByTestId("knowledge-base-update-hint"),
     ).not.toBeInTheDocument();
+  });
+
+  it("update_button_disabled_when_global_validation_not_passed", () => {
+    // initialization_status=complete 但 global_validation 未通过 ⇒ 与后端 update
+    // 预检口径一致，按钮保持禁用（不得让用户点了才被后端拒）。
+    renderCard({ status: statusDto("complete", "failed") });
+    expect(screen.getByRole("button", { name: "知识库更新" })).toBeDisabled();
+    expect(screen.getByTestId("knowledge-base-update-hint")).toHaveTextContent(
+      "全局校验",
+    );
   });
 
   it("update_button_click_opens_update_dialog_when_enabled", async () => {
