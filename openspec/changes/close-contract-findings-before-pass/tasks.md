@@ -34,6 +34,7 @@
 
 - [ ] 5.1 建立**五条真实 finding 的基线 fixture**并断言：恰一条契约类 finding 进入必关闭集合、整轮结论 MUST NOT 为自动通过、该 finding 的原 `severity` 与 finding key 逐字不变、无 `contract_field` 的那条 MUST NOT 自动调用 author、其余四条仍不扣预算且不阻断。映射 requirement：MODIFIED REQ-WSC-17「矩阵覆盖与基线一致」。
 - [ ] 5.2 建立**覆盖矩阵**用例：category（`contract_gap` / `self_contradiction`）× severity（`suggestion` / `must_fix` / `blocking`）× disposition（`actionable` / `advisory` / 缺省）× `class_hint`（`repairable` / `human_required` / `advisory` / **缺省**）× verdict（`pass` / `revise` / `needs_human`），并补齐 owner 排除优先、历史 rebuild 同 key、同一指纹复评停止、全部 advisory 保持原行为四类专项用例。**「同一指纹复评停止」专项 fixture MUST 构造有稳定 ID 的 finding**（`contract_field=None` 且无稳定 ID 者走 `UnstableFindingIdentity`，`work_item_plan_policy/evaluate.rs:335-347`，不参与该闸门）。映射 requirement：MODIFIED REQ-WSC-17「矩阵覆盖与基线一致」「owner 显式排除优先且排除项不得复活」「严格、宽松与历史入口同一规则」「范围外 advisory 不被放大」。
+- [ ] 5.3 **【防误伤 · 新增】「人工门数量不误伤」的上界验收** —— 4.1/5.2 是**准入**口径（该拦的拦住），**缺**「不该拦的没被拦」的**上界**口径；而本改动的已知副作用正是**人工门增加**（裁决 §4.4「模型误标 category 可能增加人工门」）。若判定式过宽，用户会遇到大量「明明没问题却被要求人工」的骚扰 —— **那比现在更没法用**。故须在**未改实现**的状态下记录**基线人工门数**（范围外 advisory / 完备度意见 / 非契约类 finding 三类各多少条被转人工），改实现后断言：① 三类**非契约类** finding 的人工门数**MUST NOT 增加**（增加即误伤，属回归）；② 全量人工门数的增量**MUST 有界**且逐条可归因到「原本被误放行的契约类 finding」—— 任何**无法归因**的增量都判为误伤。验证：基线数在**未改实现**上复现；改后逐类比对，并给出增量归因表。映射 requirement：MODIFIED REQ-WSC-17「矩阵覆盖与基线一致」「范围外 advisory 不被放大」
 
 ## 6. 共享面串行与集成验收
 

@@ -7,7 +7,9 @@
 
 ## 1. 冻结策略的服务端内部承载
 
-映射 requirement：REQ-WSC-29（新的 Claude SC 原运行冻结 high / 作用域收窄 / 存量保留旧继承模式并披露未知）
+映射 requirement：REQ-WSC-29（新的 Claude SC author 原运行冻结 high / 作用域收窄 / 存量保留旧继承模式并披露未知）
+
+- [ ] 1.0 **【防退化 · 新增】「不注入时行为与现状逐字相同」的基线** —— 本 change 的**默认生效面**是「对新的 Claude SingleCandidate author 原运行注入 `CLAUDE_CODE_EFFORT_LEVEL=high`」，它**改变了现有行为**（现状是完全继承宿主）；因此必须钉住**它没有改变的那一半**：作用域外的一切（Story/Design 通用 author、Story/Design 修订、reviewer、coding、非 Claude provider、非 SingleCandidate 出口）**MUST NOT 出现任何 env 变化**，且**无冻结事实**的会话 MUST 与现状完全一致（继续继承宿主、不补造快照）。故须在**未改实现**的状态下记录这些出口的**逐字节 env map 基线**与**无冻结事实会话的继承行为**，改实现后逐条比对。验证：基线可在**未改实现**上复现；改后逐出口比对 env map 逐字节相同，且无冻结事实会话的继承行为不变 —— 任一出口出现额外变量即判为回归（对应 REQ-WSC-29 的「作用域外角色与 provider 档位不变」场景）
 
 - [ ] 1.1 建立服务端内部冻结策略类型（三元组：策略版本、provider、author effort），作为 SC 会话的**可缺省**冻结字段落 durable record；确认它**不进入**公共 provider 配置面，公共快照、wire、TS 快照与 coding 转换链零改动
 - [ ] 1.2 冻结策略的**建立规则**：仅由服务端**创建事实**决定新默认（新建 session record 的首次生成且为 SC 流程 + Claude provider ⇒ 冻结 `high`）；非 SC / 非 Claude / Story·Design / reviewer / coding 一律不写

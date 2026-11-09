@@ -118,6 +118,12 @@
 | **F-3** | 节点 `duration_ms` 写死 `None` 且终态路径不写；`run.json` 无 `elapsed_ms` | 终态落 `completed_at` 时同批算出 `duration_ms`；写 `run.json` 时落 `elapsed_ms` | **③** 真实 session ⇒ 断言 `duration_ms` 非 null；并断言 `run.json` 含 `elapsed_ms` |
 | **口径纪律** | per-step output 是占位值；claude 侧 `result.usage` 范围未判定 | output 不作总量；input/cache 按 `message.id` 去重求和；未判定项不得声称数值 | **④** 的 input/cache 断言；**output 不作断言**；未判定口径的「不得声称数值」用例 |
 
+## 回退
+
+- **纯观测面，回退代价最低**：本 change 只改**计量与埋点**，不改任何业务判定与执行路径 ⇒ 回退仅需停用新写入路径；已写入的 `usage` 事件与 `duration_ms` / `elapsed_ms` **保留可读**（append-only 记录不因回退被删除）。
+- **不丢历史计数**：回退 MUST NOT 删除或重算已落盘的 usage 事件；旧口径（末轮值）的事件保持原样，不因回退被「修正」成累计值。
+- **不承诺收益**：回退不影响任何 token / 耗时口径的对外表述 —— 本 change **从不承诺**降幅（见 W1）。
+
 ## 共享面与排序（跨 change）
 
 **处置裁决 §2.2 的全局表**（`cadence/designs-reviews/2026-11-09_裁决_WIG四change审阅问题处置_v1.0.md` §2.2）给的是 0～6 的串行顺序。本 change **不在该表的六行之内**（它是新增的独立行），按主方案 §8 序 0 定位为**必须最先**：

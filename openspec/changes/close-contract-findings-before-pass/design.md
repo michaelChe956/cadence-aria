@@ -226,6 +226,13 @@ auto_repair_permitted = requires_closure
 
 **与 `with_platform_disposition_rules` 现行行为的差异（必须声明，避免实施者收错面）：** 平台 disposition 硬化已在**通用** strict / lenient 解析器**无条件生效**（`parsers.rs:750` —— 通用 finding 解析末尾直接挂 `with_platform_disposition_rules()`；`lenient_findings.rs:136` 同口径），**只有 severity 豁免（本 change 的契约类例外）是 WorkItemPlan 专属**。实施者 MUST NOT 把平台硬化收窄到 WorkItemPlan，也 MUST NOT 把 severity 豁免扩散到通用评审。
 
+## 回退（裁决 §4.4）
+
+- **只回退到 fail-safe 人工处置**：回退 MUST NOT 静默恢复「契约缺口自动 pass」。若判定式有误导致误伤，回退路径是**回到人工门**（把新增的必关闭判定收窄回原行为），**不是**恢复自动放行（裁决 §4.4「回退只能保留 fail-safe 人工处置或回退未启用的新版本；不得静默恢复契约缺口自动 pass」）。
+- **不反向撤销**：已完成的评审轮次、已记录的 finding、已归一的 verdict **不回滚**；回退只影响**此后**的判定。
+- **owner 排除优先不可动**：owner 显式排除的 key 在任何版本下都优先，回退 MUST NOT 复活被排除项。
+- **已完成 / 已发布历史仅展示**：已完成或已发布的历史产物**只展示、不自动撤销**（裁决 §4.4）。
+
 ## 共享面与排序
 
 按全局串行表（裁决处置文件 §2.2，唯一权威）：本 change 为**序 6**，前置＝**序 5 `isolate-plan-criterion-namespace`**（本 change 消费其版本化 scope）与**序 1 `mechanicalize-plan-compile-repair`**（其 typed 判据与现场归因需先稳定）。**这些 change 目录本 change 一律不改**，仅在此登记共写文件与相对次序。
