@@ -1,25 +1,35 @@
 //! 知识库创建期前置检查（Task 4，只读、零副作用、不产生 operation）。
 //!
-//! 对应技术方案 §5.3 的预检 ①-⑥；预检 ⑦（provider 选择，按
-//! `CodingTargetWrite` 分格）与 ⑧（同 LC 单飞检查）需要 health 快照与
-//! project 作用域，由 HTTP 层经 [`crate::product::logical_codebase::provider_selection::select_aggregate_provider_for_write`]
+//! 对应技术方案 §5.3 的预检 ①-⑥ 与 ⑦ 的**能力格半边**：预检 ⑦ 的
+//! provider 选择（按 `CodingTargetWrite` 分格挑候选）与 ⑧（同 LC 单飞
+//! 检查）需要 health 快照与 project 作用域，由 HTTP 层经
+//! [`crate::product::logical_codebase::provider_selection::select_aggregate_provider_for_write`]
 //! 与 `KnowledgeBaseOperationStore::list_running` 完成后，映射进本模块的
-//! `KnowledgeBasePreflightFailure` 统一失败面；`preflight_*` 本身只产出
-//! 同步可判定的 ①-⑥。
+//! `KnowledgeBasePreflightFailure` 统一失败面；但被选 provider 的
+//! `CodingTargetWrite` 分格**是否 `launch` 与 `write_boundary` 双
+//! `Confirmed`** 是机器级 capability 记录上的同步可判定事实，由本模块的
+//! [`preflight_write_capability`] 产出（见 [`KnowledgeBasePreflightFailure::CapabilityDenied`]）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::cadence_skills::CadenceSkillsPaths;
 use crate::product::json_store::validate_relative_id;
-use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::policy::{AggregatePolicyArtifactStore, SessionPolicyAction};
+use crate::product::logical_codebase::production_policy_resolvers::StoreBackedProviderCapabilitySource;
+use crate::product::logical_codebase::provider_capability_store::{
+    MANAGED_CAPABILITY_SNAPSHOT_REF, ProviderCapabilityStore,
+};
+use crate::product::logical_codebase::provider_gateway::ProviderRef;
 use crate::product::logical_codebase::provider_selection::ProviderSelectionOutcome;
+use crate::product::logical_codebase::provider_trust::provider_wire_label;
 use crate::product::logical_codebase::provider_trust_adapters::resolve_owner_home_from_env;
 use crate::product::logical_codebase::root_recipe_receipt::root_rule_digest;
 use crate::product::logical_codebase::store::LogicalCodebaseStore;
 use crate::product::models::ProviderName;
 
 use super::change_package::{ChangePackageViolation, MemberRepoPaths, lint_change_package};
+use super::files::kb_root;
 use super::manifest::{manifest_invariants, read_manifest};
 
 /// 知识库创建期前置检查的统一失败面（稳定码登记在 Task 7，本模块只产出）。
@@ -45,8 +55,10 @@ pub enum KnowledgeBasePreflightFailure {
     /// 由 HTTP 层在调用 [`crate::product::logical_codebase::provider_selection::select_aggregate_provider_for_write`]
     /// 之后构造；`preflight_*` 本身不产出（选择需要 health 快照，是异步面）。
     ProviderSelection(ProviderSelectionOutcome),
-    /// 预检⑦：候选的 `CodingTargetWrite` 分格被真实拒绝（HTTP 层从
-    /// `ProviderSelectionOutcome::Denied` 构造）。
+    /// 预检⑦：被选 provider 的 `CodingTargetWrite` 分格未同时满足
+    /// `launch` 与 `write_boundary` 双 `Confirmed`（由
+    /// [`preflight_write_capability`] 产出：机器级 capability 记录上的
+    /// 同步可判定事实；缺记录/快照漂移同样 fail-closed 落此变体）。
     CapabilityDenied { provider: String },
     /// 预检⑧：同 LC 已有知识库 operation 在跑（durable 单飞；HTTP 层经
     /// `KnowledgeBaseOperationStore::list_running` 构造）。
@@ -78,7 +90,7 @@ const SIX_DOMAINS: [(&str, &str); 6] = [
 /// 知识库 Manifest 唯一支持的 schema 版本（skill 契约）。
 const SCHEMA_VERSION_4: &str = "4.0";
 
-/// bootstrap 前置检查（预检①②③，只读、不产生 operation）。
+/// bootstrap 前置检查（预检①②③⑦，只读、不产生 operation）。
 pub fn preflight_bootstrap(
     paths: &ProductAppPaths,
     lc_id: &str,
@@ -90,10 +102,11 @@ pub fn preflight_bootstrap(
     if !missing.is_empty() {
         return Err(KnowledgeBasePreflightFailure::InputsIncomplete { missing });
     }
+    preflight_write_capability(paths, provider)?;
     Ok(())
 }
 
-/// update 前置检查（预检①②④⑤⑥，只读、不产生 operation）。
+/// update 前置检查（预检①②④⑤⑥⑦，只读、不产生 operation）。
 pub fn preflight_update(
     paths: &ProductAppPaths,
     lc_id: &str,
@@ -103,7 +116,7 @@ pub fn preflight_update(
     members: &[MemberRepoPaths],
 ) -> Result<(), KnowledgeBasePreflightFailure> {
     preflight_common(paths, lc_id, aggregate_root, provider)?;
-    let snapshot = read_manifest(&knowledge_base_root(aggregate_root))
+    let snapshot = read_manifest(&kb_root(aggregate_root))
         .map_err(|_| KnowledgeBasePreflightFailure::ManifestMissing)?;
     if !snapshot.exists {
         return Err(KnowledgeBasePreflightFailure::ManifestMissing);
@@ -132,6 +145,7 @@ pub fn preflight_update(
             violations: lint.violations,
         });
     }
+    preflight_write_capability(paths, provider)?;
     Ok(())
 }
 
@@ -240,7 +254,7 @@ fn provider_skill_layer<'a>(
 /// 预检③：`user-input/base-info.md`（唯一入口，必需）+ 按领域「状态：」
 /// 条件判定六个 scope 文件；`database-ddl.sql` / `product.md` 可选，不判。
 fn missing_bootstrap_inputs(aggregate_root: &Path) -> Vec<String> {
-    let user_input = knowledge_base_root(aggregate_root).join("user-input");
+    let user_input = kb_root(aggregate_root).join("user-input");
     let Ok(text) = std::fs::read_to_string(user_input.join("base-info.md")) else {
         return vec!["base-info.md".to_string()];
     };
@@ -278,10 +292,35 @@ fn domain_status(domain: &str, text: &str) -> Option<String> {
     None
 }
 
-/// 知识库根目录：聚合根下 `cadence/knowledge-base`（与 Task 5 `files.rs`
-/// 的 `kb_root` 同口径；files.rs 并行落地中，先内联同一路径，落地后收敛）。
-fn knowledge_base_root(aggregate_root: &Path) -> PathBuf {
-    aggregate_root.join("cadence").join("knowledge-base")
+/// 预检⑦：被选 provider 的 `CodingTargetWrite` 分格必须 `launch` 与
+/// `write_boundary` **双 `Confirmed`**（fresh 门两半，D1）——创建 operation
+/// 之前确认，缺任一半即按能力拒绝失败面返回，不产生 operation。
+///
+/// 判定与 gateway / 写分格选择器**同源**：capability 记录（机器级）经
+/// [`StoreBackedProviderCapabilitySource::load_record`] 载入——缺记录、快照
+/// 引用不一致、IO 故障一律 fail-closed 拒绝；分格门复用既有
+/// [`ProviderActionCapability::fresh_gate`]（`launch` + `write_boundary`
+/// 两半，与 gateway `require_supported` + `require_write_boundary` 同一对
+/// 分格）。任一不是 `Confirmed` ⇒
+/// [`KnowledgeBasePreflightFailure::CapabilityDenied`]。
+pub fn preflight_write_capability(
+    paths: &ProductAppPaths,
+    provider: &ProviderName,
+) -> Result<(), KnowledgeBasePreflightFailure> {
+    let denied = || KnowledgeBasePreflightFailure::CapabilityDenied {
+        provider: provider_wire_label(provider).to_string(),
+    };
+    let provider_ref = ProviderRef::from_provider_name(provider, MANAGED_CAPABILITY_SNAPSHOT_REF)
+        .map_err(|_| denied())?;
+    let source = StoreBackedProviderCapabilitySource::with_store(ProviderCapabilityStore::new(
+        paths.clone(),
+    ));
+    let record = source.load_record(&provider_ref).map_err(|_| denied())?;
+    record
+        .action_matrix
+        .row(&SessionPolicyAction::CodingTargetWrite)
+        .fresh_gate()
+        .map_err(|_| denied())
 }
 
 #[cfg(test)]
@@ -293,9 +332,20 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN;
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::cadence_skills::CadenceSkillsPaths;
-    use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+    use crate::product::logical_codebase::policy::{
+        AggregatePolicyArtifactStore, ProviderDialect, ProviderWireDialect,
+    };
+    use crate::product::logical_codebase::provider_capability_store::{
+        CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
+        ProviderActionMatrix, ProviderCapabilityRecord,
+    };
+    use crate::product::logical_codebase::provider_gateway::{
+        ProviderRefType, ResumeEvidenceState,
+    };
     use crate::product::logical_codebase::store::LogicalCodebaseManifest;
     use crate::product::models::ProviderName;
 
@@ -375,7 +425,7 @@ mod tests {
         }
 
         fn kb_root(&self) -> PathBuf {
-            self.aggregate_root.join("cadence").join("knowledge-base")
+            kb_root(&self.aggregate_root)
         }
 
         /// 预检①：canonical 聚合根下根规则入口 + per-LC manifest +
@@ -414,6 +464,53 @@ mod tests {
 
         fn seed_all_seven_skills(&self) {
             self.seed_skills(&KNOWLEDGE_BASE_SKILLS);
+        }
+
+        /// 预检⑦：种一条 Pi 的机器级 capability 记录（`CodingTargetWrite`
+        /// 行的 `launch` / `write_boundary` 两分格由入参决定）。
+        /// `execution_semantics` 恒 `host-open-v1`——缺执行语义时记录读回
+        /// 矩阵整体读作 Unknown（不得成为当前 Confirmed）。
+        fn seed_write_capability(
+            &self,
+            launch: ProviderCapabilityEvidence,
+            write_boundary: ProviderCapabilityEvidence,
+        ) {
+            let row = ProviderActionCapability {
+                action: SessionPolicyAction::CodingTargetWrite,
+                launch,
+                resume: ProviderCapabilityEvidence::Confirmed,
+                write_boundary,
+                projection_digest: "projection-digest-CodingTargetWrite".to_string(),
+                evidence_ref: "probe://boundary/pi/0001".to_string(),
+            };
+            let record = ProviderCapabilityRecord {
+                provider_type: ProviderRefType::Pi,
+                schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                version: "1.0.0".to_string(),
+                adapter_dialect: ProviderDialect::PiRpcV1,
+                wire_dialect: ProviderWireDialect::PiRpc,
+                capability_snapshot_ref: MANAGED_CAPABILITY_SNAPSHOT_REF.to_string(),
+                evidence: CapabilityEvidence::ProductionVerified,
+                resume_evidence: ResumeEvidenceState::Confirmed,
+                supported_actions: Vec::new(),
+                action_matrix: ProviderActionMatrix::from_rows(vec![row])
+                    .expect("capability matrix rows are unique"),
+                trust: ProviderCapabilityEvidence::Confirmed,
+                probed_at: Some("2026-11-09T00:00:00Z".to_string()),
+                probe_artifact_ref: Some("probe://artifact-0001".to_string()),
+                execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            };
+            ProviderCapabilityStore::new(self.paths.clone())
+                .upsert(&record)
+                .expect("upsert capability record");
+        }
+
+        /// 预检⑦：写分格两半全 `Confirmed`（放行基线）。
+        fn seed_confirmed_write_capability(&self) {
+            self.seed_write_capability(
+                ProviderCapabilityEvidence::Confirmed,
+                ProviderCapabilityEvidence::Confirmed,
+            );
         }
 
         /// 预检③：base-info.md + 六领域 scope 文件（ddl/product 可选，不放）。
@@ -509,6 +606,7 @@ mod tests {
         fixture.seed_aggregate_initialization();
         fixture.seed_all_seven_skills();
         fixture.seed_bootstrap_inputs(&[]);
+        fixture.seed_confirmed_write_capability();
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
         preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
@@ -558,6 +656,7 @@ mod tests {
         fixture.seed_bootstrap_inputs(&[("接口", "不适用")]);
         fs::remove_file(fixture.kb_root().join("user-input").join("api-scope.md"))
             .expect("remove api scope");
+        fixture.seed_confirmed_write_capability();
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
         preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
@@ -578,10 +677,80 @@ mod tests {
                 .exists(),
             "precondition: no ddl in fixture"
         );
+        fixture.seed_confirmed_write_capability();
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
         preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
             .expect("database-ddl.sql is optional");
+    }
+
+    // ------------------------------------------------------------------
+    // 预检⑦：写分格能力门（`launch` 与 `write_boundary` 双 Confirmed）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn preflight_rejects_write_cell_when_write_boundary_not_confirmed() {
+        let fixture = PreflightFixture::new();
+        fixture.seed_aggregate_initialization();
+        fixture.seed_all_seven_skills();
+        fixture.seed_bootstrap_inputs(&[]);
+        // launch 半边已确认，write_boundary 半边未确认 ⇒ 只查 launch 半边会
+        // 误放行；双 Confirmed 门必须判能力拒绝（`CapabilityDenied` 变体
+        // 不再是死码）。
+        fixture.seed_write_capability(
+            ProviderCapabilityEvidence::Confirmed,
+            ProviderCapabilityEvidence::Unknown,
+        );
+        let _guard = HomeEnvGuard::isolate(fixture.home_path());
+
+        let failure =
+            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
+                .expect_err("write_boundary cell is not confirmed");
+        assert_eq!(
+            failure,
+            KnowledgeBasePreflightFailure::CapabilityDenied {
+                provider: "pi".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_write_cell_when_launch_cell_not_confirmed() {
+        let fixture = PreflightFixture::new();
+        fixture.seed_aggregate_initialization();
+        fixture.seed_all_seven_skills();
+        fixture.seed_bootstrap_inputs(&[]);
+        fixture.seed_write_capability(
+            ProviderCapabilityEvidence::Unknown,
+            ProviderCapabilityEvidence::Confirmed,
+        );
+        let _guard = HomeEnvGuard::isolate(fixture.home_path());
+
+        let failure =
+            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
+                .expect_err("launch cell is not confirmed");
+        assert!(matches!(
+            failure,
+            KnowledgeBasePreflightFailure::CapabilityDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn preflight_rejects_write_cell_without_capability_record() {
+        let fixture = PreflightFixture::new();
+        fixture.seed_aggregate_initialization();
+        fixture.seed_all_seven_skills();
+        fixture.seed_bootstrap_inputs(&[]);
+        // 缺 capability 记录 ⇒ fail-closed（证明不了已核验即拒绝）。
+        let _guard = HomeEnvGuard::isolate(fixture.home_path());
+
+        let failure =
+            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
+                .expect_err("capability record is missing");
+        assert!(matches!(
+            failure,
+            KnowledgeBasePreflightFailure::CapabilityDenied { .. }
+        ));
     }
 
     // ------------------------------------------------------------------

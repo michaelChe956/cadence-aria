@@ -441,6 +441,11 @@ impl IntoResponse for ApiError {
             | "aggregate_initialization_provider_health_degraded" => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
+            // 聚合初始化 trust 等待面：门未 Ready ⇒ 用户可行动、可重试的
+            // 前置失败（与同表「请求期/前置失败」惯例一致），绝不落默认 500
+            // （未登记码会走 `_ => INTERNAL_SERVER_ERROR`，把可重试的前置
+            // 失败误报成服务故障）。
+            "aggregate_initialization_trust_waiting" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -833,14 +838,16 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_provider_selection_failure_codes_map_to_4xx() {
-        // 聚合初始化 provider 选择失败族（4 码）：必须显式登记为 4xx，
-        // 不得经未知码默认路径落 500（用户可行动的前置失败）。
+    fn aggregate_initialization_prerequisite_failure_codes_map_to_4xx() {
+        // 聚合初始化前置失败族：provider 选择失败族（4 码）+ trust 等待面
+        // （1 码）：必须显式登记为 4xx，不得经未知码默认路径落 500（用户
+        // 可行动、可重试的前置失败）。
         let cases = [
             "aggregate_initialization_provider_needs_verification",
             "aggregate_initialization_no_provider_available",
             "aggregate_initialization_provider_capability_denied",
             "aggregate_initialization_provider_health_degraded",
+            "aggregate_initialization_trust_waiting",
         ];
 
         for code in cases {
