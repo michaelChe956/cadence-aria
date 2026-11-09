@@ -110,7 +110,7 @@
 
 ### 决策 6：env 注入点
 
-- **注入点 = SC author 出口模块**：新增 `src/product/workspace_engine/prompts/sc_author_input.rs`（承接 `prompts.rs:464-548` 的 SC author 段）与 `src/product/workspace_engine/prompts/sc_launch_policy.rs`（把冻结策略转成 caller env：`CLAUDE_CODE_EFFORT_LEVEL=high` 与 G-2/G-3/G-6 三变量，见决策 8），由 SC author 出口在装配 `StreamingProviderInput.env_vars` 时写入。
+- **注入点 = SC author 出口模块**：新增 `src/product/workspace_engine/prompts/sc_author_input.rs`（承接 `prompts.rs:464-548` 的 SC author 段）与 `src/product/workspace_engine/prompts/sc_launch_policy.rs`（把冻结策略转成 caller env：`CLAUDE_CODE_EFFORT_LEVEL=high` 与 G-2/G-3/G-6 三变量，见**决策 6-a**），由 SC author 出口在装配 `StreamingProviderInput.env_vars` 时写入。
 - **注入点不是** `src/cross_cutting/claude_code_provider/mod.rs`（adapter 硬编码路径，裁决 §3.3 明文否决，会静默影响所有 Claude 角色/使用者）；**注入点也不是** `src/product/workspace_engine/prompts.rs:545`（那是**共用 builder 的空 env 现状位置**，是本 change 要**被替换/分离**的对象，不是注入实现位置）。
 - 注入**只发生在 SC author 出口**；其它出口 env 保持空。
 - 不改 adapter：`gateway_start.rs:648-678` / `provider_gateway.rs:1998-2001` 已保证 caller env 原样透传为显式覆盖层；Claude direct / validated spawn 已消费 `input.env_vars`。
@@ -124,12 +124,9 @@
 
 | 项 | 变量与取值 | 依据（主方案） | 收益（**须复测**，非已测结论） |
 |---|---|---|---|
-- 本 change **新增** delta `specs/session-policy-envelope/spec.md`，以 `## MODIFIED Requirements` 修改 REQ-ENV-HOST-01，**追加**显式例外（**主规格原文与既有 3 个场景逐字保留**；例外类已按 G-2/G-3/G-6 的并入从「单一档位变量」扩为有界类「受信 provider 控制变量」，见决策 8）：
-
-  > 受信 provider 控制变量（provider 官方声明的推理档位、单次工具输出上限或前缀缓存 TTL 变量）MAY 由平台仅在调用方显式 env map 覆盖层内设定为该 provider 的受控值；MUST NOT 构造或覆盖其余子进程环境，MUST NOT 涉及凭据、隔离、网络命名空间、宿主路径、模型与账号选择、代理与路由、遥测开关；档位类 MUST NOT 依模型标签或宿主设置重算，输出上限类 MUST 只收紧，缓存 TTL 类 MUST NOT 短于 provider 内置默认。原「平台不构造、不覆盖」义务对该类以外环境不变。
-
-- 同步新增场景：「受信执行策略变量只在覆盖层内设定」（WHEN/THEN 扩展覆盖三类变量与三类约束）、「受信 provider 控制变量清单与三类约束」、「输出上限只收紧不放宽」、「缓存 TTL 不得短于内置默认」，以及凭据 / 隔离 / 网络命名空间 / 宿主路径 / 模型与账号选择 / 代理与路由 / 遥测开关**各一条拒绝场景**；「运行环境与清理边界」场景的最小收窄括注（「受信执行策略变量除外」）沿用上一轮原文，不回退。
-- 描述段合规（处置裁决 §2.1）：主规格原文段（222 字符，逐字保留）+ 例外段合计 ≤500 字符（现 492）；例外类细则全部下沉场景，MUST 约束零删减。
+| **G-2** | `MAX_MCP_OUTPUT_TOKENS=4000` | §6.4：codegraph 原文口径 **36,589** 字符 ≈ 10–13k token；codegraph server 侧**已有 25K 硬闸**，本 env 是**二道闸**，收益是「更早收敛到摘要形态」 | 预计降到 ~16,000 字符（≈ −9k token） |
+| **G-3** | `BASH_MAX_OUTPUT_LENGTH=8000` | §6.4：Bash **18,121** 字符 | 预计降到 ~8,000 字符 |
+| **G-6** | `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` | §6.5：run1 末轮 → run2 间隔 **11.0 分钟** > API key 形态默认 **5 分钟** TTL ⇒ 整段上下文按未缓存全量重发（run2 `in=90,486`、`cache_read=128`） | 预计 `in` 由 90,486 降为 cache read |
 
 1. **只压 MCP + Bash**：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`（Read 上限）**本期不设** —— 默认值与截断行为**未确认**，标为**待实测**（Read 读的是政策正文 42 KB，截断可能让模型读不全）。
 2. **reviewer 链路本期不设**：reviewer 走 codex（不吃 claude CLI 的 env），实测 4m12s、**未触发压缩**；其真实消耗被低估 6.06× ⇒ **先修 F-2 再谈优化**。即便将来要设，落点是 `prompts/review_parts/single_candidate_input.inc.rs:315`，**不是** `prompts.rs:419`。
@@ -157,9 +154,9 @@
 
 - 本 change **新增** delta `specs/session-policy-envelope/spec.md`，以 `## MODIFIED Requirements` 修改 REQ-ENV-HOST-01，**追加**一句显式例外（**主规格原文与既有 3 个场景逐字保留**；唯一例外是「运行环境与清理边界」场景的**最小收窄**，加括注指向本例外）：
 
-  > 受信 provider 控制变量（provider 官方声明的推理档位、工具输出上限或缓存 TTL 变量）MAY 由平台在调用方显式 env map 覆盖层内设定为该 provider 的受控值；该例外 MUST NOT 构造或覆盖其余子进程环境，MUST NOT 涉及凭据、隔离、网络命名空间、宿主路径、模型与账号选择、代理与路由、遥测开关；推理档位类 MUST NOT 依模型标签或宿主设置重算，输出上限类 MUST 只收紧，缓存 TTL 类 MUST NOT 短于 provider 内置默认。本变量以外仍适用「平台不构造、不覆盖子进程环境」的义务。
+  > 受信 provider 控制变量（provider 官方声明的推理档位、单次工具输出上限或前缀缓存 TTL 变量）MAY 由平台仅在调用方显式 env map 覆盖层内设定为该 provider 的受控值；MUST NOT 构造或覆盖其余子进程环境，MUST NOT 涉及凭据、隔离、网络命名空间、宿主路径、模型与账号选择、代理与路由、遥测开关；档位类 MUST NOT 依模型标签或宿主设置重算，输出上限类 MUST 只收紧，缓存 TTL 类 MUST NOT 短于 provider 内置默认。原「平台不构造、不覆盖」义务对该类以外环境不变。
 
-- 同步新增场景承载三类约束与两类拒绝（清单与三类约束 / 输出上限只收紧 / 缓存 TTL 不短于内置默认 / 不涉及凭据隔离网络命名空间与宿主路径 / 不涉及模型账号代理路由与遥测开关 / 非单候选作者出口不适用），并把「受信执行策略变量只在覆盖层内设定」改名「受信 provider 控制变量只在覆盖层内设定」以与类名一致。
+- 同步新增 **6 条**场景（「受信 provider 控制变量只在覆盖层内设定」/「受信 provider 控制变量清单与三类约束」/「输出上限只收紧不放宽」/「缓存 TTL 不得短于内置默认」/「例外不涉及凭据隔离网络命名空间与宿主路径」/「例外不涉及模型账号代理路由与遥测开关」），并把上一轮的「受信执行策略变量只在覆盖层内设定」改名「受信 provider 控制变量只在覆盖层内设定」以与类名一致；「运行环境与清理边界」场景的最小收窄括注同步改指新类名与新场景名。**「非单候选作者出口不适用」这一约束挂在 REQ-WSC-29 的「上下文与缓存控制变量同属冻结策略且只作用于 SC author 出口」场景**（作用域与冻结语义的归属地），不挂在 REQ-ENV-HOST-01。
 - **例外类由「单一档位变量」扩为「受信 provider 控制变量」的依据**：G-2/G-3/G-6 的变量（输出上限、缓存 TTL）**不是**档位变量，若不扩类则注入它们**违反**该条字面义务（决策 6-a）。扩写保持**有界**：三类白名单 + 每类的收紧方向约束 + 七类禁止项，其余环境义务不变。
 - **可达性依据**（裁决 §3.1(2) / §3.2）：caller 注入**有可达路径，不用改全局 adapter 默认** —— `run/gateway_start.rs:648-678` 原样透传 caller env；`provider_gateway.rs:1998-2001` 保留 caller 显式覆盖；Claude direct / validated 的真实 spawn 消费 `input.env_vars`。因此本例外落在**既有 caller 显式覆盖层**语义内，而非新增平台 env 构造能力。
 - **禁止**直接改 `openspec/specs/**`（主规格由归档时的 delta 自动同步）；**禁止**把该例外做成「仅本 change 的实现细节」而不进规格。
