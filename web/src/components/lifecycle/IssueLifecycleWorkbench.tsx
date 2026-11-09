@@ -23,6 +23,7 @@ import {
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import { useLogicalCodebaseScopeData } from "./useLogicalCodebaseScopeData";
 import { useIssueLifecycleWorkbenchActions } from "./useIssueLifecycleWorkbenchActions";
+import { useKnowledgeBaseWorkbench } from "./useKnowledgeBaseWorkbench";
 import {
   createPointerPublication,
   retryPointerPublicationRepo,
@@ -585,6 +586,24 @@ export function IssueLifecycleWorkbench({
     (latestPointerPublication !== null &&
       (latestPointerPublication.status.includes("failed") ||
         latestPointerPublication.status.includes("partial")));
+  // Task 9.5：知识库卡片宿主接线——状态/取数/动作收在独立 hook（工作台组件已近
+  // 1200 行门禁，知识库相关状态不再堆在这里）。抽屉展开且选中 LC 变化时取数。
+  const {
+    knowledgeBaseStatus,
+    knowledgeBaseOperation,
+    knowledgeBaseBusy,
+    knowledgeBasePreflightFailure,
+    handleStartKnowledgeBase,
+    handleCancelKnowledgeBase,
+    handleCreateKnowledgeBaseBootstrapInputs,
+    handleDismissKnowledgeBasePreflightFailure,
+    handleOpenKnowledgeBaseDetail,
+  } = useKnowledgeBaseWorkbench({
+    selectedProjectId,
+    activeLogicalCodebaseId,
+    panelExpanded: lcSummaryExpandedForProject,
+    setError,
+  });
 
   // Task 8：展开/折叠仅切换运维面板可见性——不动选中态（bootstrap 补读见下方 effect）。
   function handleToggleLcSummary() {
@@ -1067,6 +1086,19 @@ export function IssueLifecycleWorkbench({
       onPublishIncremental={() => void handlePublishIncremental()}
       onRetryRepo={(memberRepoId) => void handleRetryRepo(memberRepoId)}
       onRevoke={() => void handleRevokePublication()}
+      knowledgeBaseStatus={knowledgeBaseStatus}
+      knowledgeBaseOperation={knowledgeBaseOperation}
+      knowledgeBaseBusy={knowledgeBaseBusy}
+      knowledgeBasePreflightFailure={knowledgeBasePreflightFailure}
+      onStartKnowledgeBase={handleStartKnowledgeBase}
+      onCancelKnowledgeBase={() => void handleCancelKnowledgeBase()}
+      onOpenKnowledgeBaseDetail={handleOpenKnowledgeBaseDetail}
+      onCreateKnowledgeBaseBootstrapInputs={() =>
+        void handleCreateKnowledgeBaseBootstrapInputs()
+      }
+      onDismissKnowledgeBasePreflightFailure={
+        handleDismissKnowledgeBasePreflightFailure
+      }
       onToggleQueueCollapsed={handleToggleQueueCollapsed}
       onToggleQueueGroup={handleToggleQueueGroup}
       onQueueFilterTextChange={handleQueueFilterTextChange}

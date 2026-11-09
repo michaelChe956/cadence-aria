@@ -14,6 +14,11 @@ import type {
   WorkItemRepositoryGroup,
 } from "../../api/types";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
+import type {
+  KnowledgeBaseOperationSnapshotDto,
+  KnowledgeBaseStatusDto,
+} from "../../api/types/knowledge-base";
+import type { KnowledgeBasePreflightFailureDto } from "./KnowledgeBaseCard";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import { IssueLifecycleWorkbenchHeader } from "./IssueLifecycleWorkbenchHeader";
 import { LogicalCodebaseManagementDrawer } from "./LogicalCodebaseManagementDrawer";
@@ -60,6 +65,16 @@ export type IssueLifecycleWorkbenchViewProps = {
   onReinitializeAggregateInitialization: () => void;
   onRebuildAggregateIndex: () => void; onPublishFull: () => void; onPublishIncremental: () => void;
   onRetryRepo: (id: string) => void; onRevoke: () => void; onToggleQueueCollapsed: () => void;
+  // Task 9.5：知识库卡片宿主数据与动作（面板 → KnowledgeBaseCard）。
+  knowledgeBaseStatus: KnowledgeBaseStatusDto | null;
+  knowledgeBaseOperation: KnowledgeBaseOperationSnapshotDto | null;
+  knowledgeBaseBusy: boolean;
+  knowledgeBasePreflightFailure: KnowledgeBasePreflightFailureDto | null;
+  onStartKnowledgeBase: (kind: "bootstrap" | "update", packagePath?: string) => void;
+  onCancelKnowledgeBase: () => void;
+  onOpenKnowledgeBaseDetail: () => void;
+  onCreateKnowledgeBaseBootstrapInputs: () => void;
+  onDismissKnowledgeBasePreflightFailure: () => void;
   onToggleQueueGroup: (key: IssueQueueGroupKey) => void; onQueueFilterTextChange: (text: string) => void;
   onSelectIssue: (id: string) => void; onGenerateStorySpec: (id: string) => void;
   onDeleteIssue: (id: string) => void; onShowMoreQueueGroup: (key: IssueQueueGroupKey) => void;
@@ -115,6 +130,9 @@ export function IssueLifecycleWorkbenchView({
   onCancelAggregateInitialization, onReinitializeAggregateInitialization,
   onRebuildAggregateIndex, onPublishFull, onPublishIncremental,
   onRetryRepo, onRevoke, onToggleQueueCollapsed, onToggleQueueGroup, onQueueFilterTextChange,
+  knowledgeBaseStatus, knowledgeBaseOperation, knowledgeBaseBusy, knowledgeBasePreflightFailure,
+  onStartKnowledgeBase, onCancelKnowledgeBase, onOpenKnowledgeBaseDetail,
+  onCreateKnowledgeBaseBootstrapInputs, onDismissKnowledgeBasePreflightFailure,
   onSelectIssue, onGenerateStorySpec, onDeleteIssue, onShowMoreQueueGroup, deletingIssueId, onSelectCard,
   onOpenFullIssue, onDeleteCard, onGenerateForStage, onCloseDrawer, onOpenWorkspaceFromDrawer,
   onOpenCodingWorkspaceFromDrawer, onGenerateNext, onDeleteFromDrawer,
@@ -156,7 +174,7 @@ export function IssueLifecycleWorkbenchView({
     {isDrawerOpen && focusedEntity ? <IssueLifecycleWorkbenchDrawer focusedEntity={focusedEntity} workItems={drawerWorkItems as never} codingAttempts={codingAttempts as never} deliverySummary={deliverySummary} onClose={onCloseDrawer} onOpenWorkspace={onOpenWorkspaceFromDrawer} onOpenCodingWorkspace={onOpenCodingWorkspaceFromDrawer} onGenerateNext={onGenerateNext} onDelete={onDeleteFromDrawer} onDeleteAllCodingWorkspaces={onDeleteAllCodingWorkspacesFromDrawer} groupCodingDeleteBusy={groupCodingDeleteBusy} /> : null}
     {selectedProjectId && logicalCodebases.length > 0 ? (
       <LogicalCodebaseManagementDrawer open={lcSummaryExpanded} onClose={onToggleLcSummary}>
-        <LogicalCodebaseManagementPanel projectId={selectedProjectId} bootstrapProjection={bootstrapProjection as never} onBootstrapChanged={onBootstrapChanged} logicalCodebases={logicalCodebases} activeLogicalCodebaseId={activeLogicalCodebaseId} onSelectLogicalCodebase={onSelectLogicalCodebase} onOpenRegistration={onOpenRegistration} onOpenProviderManagement={handleOpenProviderManagement} logicalCodebaseMembers={logicalCodebaseMembers as never} aggregateInitialization={aggregateInitialization as never} aggregateInitializationBusy={aggregateInitializationBusy} onStartAggregateInitialization={onStartAggregateInitialization} onCancelAggregateInitialization={onCancelAggregateInitialization} onReinitializeAggregateInitialization={onReinitializeAggregateInitialization} aggregateIndex={aggregateIndex as never} aggregateIndexRebuilding={aggregateIndexRebuilding} onRebuildAggregateIndex={onRebuildAggregateIndex} latestPointerPublication={latestPointerPublication} pointerPublicationBusy={pointerPublicationBusy} showIncrementalHint={showIncrementalHint} onPublishFull={onPublishFull} onPublishIncremental={onPublishIncremental} onRetryRepo={onRetryRepo} onRevoke={onRevoke} />
+        <LogicalCodebaseManagementPanel projectId={selectedProjectId} bootstrapProjection={bootstrapProjection as never} onBootstrapChanged={onBootstrapChanged} logicalCodebases={logicalCodebases} activeLogicalCodebaseId={activeLogicalCodebaseId} onSelectLogicalCodebase={onSelectLogicalCodebase} onOpenRegistration={onOpenRegistration} onOpenProviderManagement={handleOpenProviderManagement} logicalCodebaseMembers={logicalCodebaseMembers as never} aggregateInitialization={aggregateInitialization as never} aggregateInitializationBusy={aggregateInitializationBusy} onStartAggregateInitialization={onStartAggregateInitialization} onCancelAggregateInitialization={onCancelAggregateInitialization} onReinitializeAggregateInitialization={onReinitializeAggregateInitialization} aggregateIndex={aggregateIndex as never} aggregateIndexRebuilding={aggregateIndexRebuilding} onRebuildAggregateIndex={onRebuildAggregateIndex} latestPointerPublication={latestPointerPublication} pointerPublicationBusy={pointerPublicationBusy} showIncrementalHint={showIncrementalHint} onPublishFull={onPublishFull} onPublishIncremental={onPublishIncremental} onRetryRepo={onRetryRepo} onRevoke={onRevoke} knowledgeBaseStatus={knowledgeBaseStatus} knowledgeBaseOperation={knowledgeBaseOperation} knowledgeBaseBusy={knowledgeBaseBusy} knowledgeBasePreflightFailure={knowledgeBasePreflightFailure} onStartKnowledgeBase={onStartKnowledgeBase} onCancelKnowledgeBase={onCancelKnowledgeBase} onOpenKnowledgeBaseDetail={onOpenKnowledgeBaseDetail} onCreateKnowledgeBaseBootstrapInputs={onCreateKnowledgeBaseBootstrapInputs} onDismissKnowledgeBasePreflightFailure={onDismissKnowledgeBasePreflightFailure} />
       </LogicalCodebaseManagementDrawer>
     ) : null}
     {/* Provider 管理（独立浮层，与 LC 管理抽屉互斥）：机器级能力面
