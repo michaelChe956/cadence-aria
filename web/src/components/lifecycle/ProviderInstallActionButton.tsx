@@ -159,11 +159,10 @@ export function ProviderInstallActionButton({
     localVersion != null && latestVersion != null
       ? compareVersions(localVersion, latestVersion)
       : Number.NaN;
-  // Kimi 非 npm 包：不做 registry 版本判定，永不显示「更新」。
-  const showUpdate =
-    target !== "kimi_code" &&
-    capabilityConfirmed &&
-    versionGap < 0;
+  // 版本来源与安装来源分离（REQ-PCI-07）：Kimi Code 的版本来源是 npm 包
+  // `@moonshot-ai/kimi-code` ⇒ 同样参与「有新版」判定、同样显示【更新】；
+  // 它的**安装源**仍是官方脚本（点击后先告知来源并确认，REQ-PCI-01）。
+  const showUpdate = capabilityConfirmed && versionGap < 0;
 
   const showInstall = !cliAvailable;
   const showVerify = cliAvailable && !capabilityConfirmed;
@@ -247,7 +246,7 @@ export function ProviderInstallActionButton({
           className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1.5"
         >
           <p className="text-xs text-[var(--aria-ink)]">
-            将执行来自 code.kimi.com 的安装脚本（远程 shell 脚本）。确认后才发起安装。
+            将执行来自 code.kimi.com 的安装脚本（远程 shell 脚本）。确认后才发起{showUpdate ? "更新" : "安装"}。
           </p>
           <div className="mt-1 flex flex-wrap gap-2">
             <button
@@ -256,7 +255,7 @@ export function ProviderInstallActionButton({
               onClick={() => void beginInstall(true)}
               className={`${buttonClass} border-[var(--aria-primary)] bg-[var(--aria-primary)] text-white`}
             >
-              确认并安装
+              确认并{showUpdate ? "更新" : "安装"}
             </button>
             <button
               type="button"

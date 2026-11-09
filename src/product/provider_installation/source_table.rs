@@ -25,8 +25,13 @@ pub struct InstallSourceRow {
     pub display_name: &'static str,
     /// CLI 命令名（`claude` / `codex` / `pi` / `kimi` / `codegraph`）。
     pub command: &'static str,
-    /// npm 包名；Kimi Code 为 `None`（官方脚本，MUST NOT 走 npm 路径）。
+    /// **安装源**：npm 包名；Kimi Code 为 `None`（官方脚本，MUST NOT 走 npm 路径）。
     pub npm_package: Option<&'static str>,
+    /// **版本来源**：用于「有新版」判定的包名（REQ-PCI-07）。
+    /// 与安装源相互独立 —— Kimi Code 的安装源是官方脚本，但版本来源是 npm 包
+    /// `@moonshot-ai/kimi-code`（官方以该包名发布，`dist-tags.latest` 与官方
+    /// `/latest` 端点同版本号）。
+    pub version_package: Option<&'static str>,
     /// 官方安装脚本地址；npm 对象为 `None`。
     pub install_script: Option<&'static str>,
 }
@@ -39,6 +44,7 @@ pub const INSTALL_SOURCE_TABLE: [InstallSourceRow; 5] = [
         display_name: "Claude Code",
         command: "claude",
         npm_package: Some("@anthropic-ai/claude-code"),
+        version_package: Some("@anthropic-ai/claude-code"),
         install_script: None,
     },
     InstallSourceRow {
@@ -46,6 +52,7 @@ pub const INSTALL_SOURCE_TABLE: [InstallSourceRow; 5] = [
         display_name: "Codex",
         command: "codex",
         npm_package: Some("@openai/codex"),
+        version_package: Some("@openai/codex"),
         install_script: None,
     },
     InstallSourceRow {
@@ -53,6 +60,7 @@ pub const INSTALL_SOURCE_TABLE: [InstallSourceRow; 5] = [
         display_name: "Pi",
         command: "pi",
         npm_package: Some("@earendil-works/pi-coding-agent"),
+        version_package: Some("@earendil-works/pi-coding-agent"),
         install_script: None,
     },
     InstallSourceRow {
@@ -60,6 +68,7 @@ pub const INSTALL_SOURCE_TABLE: [InstallSourceRow; 5] = [
         display_name: "Kimi Code",
         command: "kimi",
         npm_package: None,
+        version_package: Some("@moonshot-ai/kimi-code"),
         install_script: Some(KIMI_INSTALL_SCRIPT_URL),
     },
     InstallSourceRow {
@@ -67,6 +76,7 @@ pub const INSTALL_SOURCE_TABLE: [InstallSourceRow; 5] = [
         display_name: "codegraph",
         command: "codegraph",
         npm_package: Some("@colbymchenry/codegraph"),
+        version_package: Some("@colbymchenry/codegraph"),
         install_script: None,
     },
 ];
@@ -181,6 +191,30 @@ mod tests {
             kimi.install_script,
             Some("https://code.kimi.com/kimi-code/install.sh")
         );
+    }
+
+    /// 版本来源与安装来源分离（REQ-PCI-07）：Kimi Code 的**版本判定源**是 npm 包
+    /// `@moonshot-ai/kimi-code`（官方以该包名发布，dist-tags.latest 与官方
+    /// `/latest` 端点同版本号），但**安装源**仍是官方脚本（REQ-PCI-01 不变）。
+    #[test]
+    fn source_table_separates_version_source_from_install_source() {
+        for (wire, package) in [
+            ("claude_code", "@anthropic-ai/claude-code"),
+            ("codex", "@openai/codex"),
+            ("pi", "@earendil-works/pi-coding-agent"),
+            ("codegraph", "@colbymchenry/codegraph"),
+            ("kimi_code", "@moonshot-ai/kimi-code"),
+        ] {
+            assert_eq!(
+                row(wire).version_package,
+                Some(package),
+                "{wire}: 版本来源包必须明确"
+            );
+        }
+        // Kimi：安装源仍是官方脚本，MUST NOT 走 npm 安装路径。
+        let kimi = row("kimi_code");
+        assert_eq!(kimi.npm_package, None);
+        assert_eq!(kimi.install_script, Some(KIMI_INSTALL_SCRIPT_URL));
     }
 
     /// 测试点 #5（镜像解析半边）：默认阿里 + NPM_REGISTRY 覆盖。

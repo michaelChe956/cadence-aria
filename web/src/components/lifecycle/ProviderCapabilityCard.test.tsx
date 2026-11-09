@@ -1133,6 +1133,35 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     expect(installAction.className).toContain("max-w-full");
   });
 
+  // 2026-11-09 bug 修复：安装/更新成功后，能力投影里的版本是**旧**的
+  // （只有点「核验」才刷新），而安装目标面（provider health）是新的 ⇒
+  // 行首版本必须显示新版本，否则用户看到「更新完了版本号却没变」。
+  it("shows the fresh local version in the row header after an install/update", async () => {
+    installFetchRouter(() => confirmedCodexProjection(), undefined, {
+      targets: [
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: true,
+          // 本地已是新版本（刚更新完），能力投影仍是旧的 0.44.0。
+          local_version: "0.167.0",
+          latest_version: "0.167.0",
+          latest_checked_at: "2026-11-09T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "none",
+        },
+      ],
+    });
+
+    renderProviderManagement();
+
+    expect(
+      await screen.findByTestId("provider-capability-codex-version").then(
+        (element) => element.textContent,
+      ),
+    ).toBe("0.167.0");
+  });
+
   // owner 2026-11-04 裁定：codegraph 不是 provider，不展示在「Provider 能力核验」
   // 面板里 ⇒ 断言【不出现】，不是「可选」。
   it("does not show codegraph in the provider capability panel", async () => {

@@ -214,17 +214,59 @@ describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-0
     ).not.toBeInTheDocument();
   });
 
-  it("即使给了 latestVersion 也不对 Kimi 做版本判定（永不显示「更新」）", () => {
+  // 2026-11-09（REQ-PCI-07）：Kimi Code 的版本来源 = npm 包
+  // `@moonshot-ai/kimi-code` ⇒ 参与「有新版」判定，出现【更新】。
+  // 但它的**安装源**仍是官方脚本 ⇒ 点击【更新】必须先告知来源并确认。
+  it("Kimi 版本落后时显示「更新」与当前/最新版本", () => {
     installFetchRouter({ target: "kimi_code" });
-    const { container } = renderButton({
+    renderButton({
       target: "kimi_code",
       cliAvailable: true,
       capabilityConfirmed: true,
-      localVersion: "1.0.0",
-      latestVersion: "9.9.9",
+      localVersion: "2.4.1",
+      latestVersion: "2.5.2",
     });
 
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByRole("button", { name: "更新" })).toBeInTheDocument();
+    expect(
+      screen.getByTestId("provider-install-versions-kimi_code"),
+    ).toHaveTextContent("2.4.1");
+    expect(
+      screen.getByTestId("provider-install-versions-kimi_code"),
+    ).toHaveTextContent("2.5.2");
+  });
+
+  it("点击 Kimi 的「更新」先告知脚本来源，未确认不调 API；确认后带 acknowledge_remote_script", async () => {
+    const { requests } = installFetchRouter({
+      target: "kimi_code",
+      jobs: [() => runningJob("job_kimi", "kimi_code")],
+    });
+    renderButton({
+      target: "kimi_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+      localVersion: "2.4.1",
+      latestVersion: "2.5.2",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "更新" }));
+
+    expect(
+      screen.getByTestId("provider-install-kimi-script-notice-kimi_code"),
+    ).toHaveTextContent("将执行来自 code.kimi.com 的安装脚本");
+    expect(
+      requests.filter((request) => request.method === "POST"),
+    ).toHaveLength(0);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("provider-install-confirm-kimi_code"));
+      await Promise.resolve();
+    });
+
+    const posts = requests.filter((request) => request.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/providers/kimi_code/install");
+    expect(posts[0].body).toEqual({ acknowledge_remote_script: true });
   });
 
   it("点击安装先告知脚本来源，未确认不调 API；确认后带 acknowledge_remote_script", async () => {

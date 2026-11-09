@@ -351,7 +351,10 @@ export function ProviderCapabilityCard() {
                     data-testid={`provider-capability-${providerType}-version`}
                     className="aria-mono text-right text-xs text-[var(--aria-ink-muted)]"
                   >
-                    {provider.version ?? "未探测"}
+                    {/* 版本取**最新**的一份事实：安装目标面（provider health）
+                        在安装/更新后立刻刷新，能力投影要等下次「核验」才刷新
+                        —— 用旧的投影版本会让用户以为更新没生效（2026-11-09）。 */}
+                    {installView?.local_version ?? provider.version ?? "未探测"}
                   </span>
                 </div>
                 {/* 行2：状态胶囊（provider 级状态 / 批量逐项状态 / 版本落后）。 */}

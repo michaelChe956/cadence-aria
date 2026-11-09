@@ -203,9 +203,9 @@ pub async fn get_install_targets(State(state): State<WebAppState>) -> Json<Insta
                 codegraph.version.clone(),
             ),
         };
-        // Kimi 非 npm 包：不做 registry 版本判定（REQ-PCI-04）；npm 对象
-        // 查询失败（离线）→ None，action 退化为 verify/none。
-        let latest = match row.npm_package {
+        // Kimi 非 npm 安装源，但其**版本来源**是 npm 包（REQ-PCI-07）⇒ 同样查
+        // registry 的 latest；查不到（离线）→ None，action 退化为 verify/none。
+        let latest = match row.version_package {
             Some(package) => version_service
                 .latest_version(&registry, package, now)
                 .await
@@ -574,6 +574,11 @@ mod tests {
                     "package": "@colbymchenry/codegraph",
                     "latest_version": "1.6.2",
                     "checked_at": checked_at
+                },
+                "@moonshot-ai/kimi-code": {
+                    "package": "@moonshot-ai/kimi-code",
+                    "latest_version": "2.5.2",
+                    "checked_at": checked_at
                 }
             }),
         );
@@ -613,12 +618,15 @@ mod tests {
         assert_eq!(pi["latest_version"], json!("1.5.0"));
         assert_eq!(pi["action"], json!("update"));
 
-        // Kimi：不做 registry 版本判定（REQ-PCI-04）。
+        // Kimi：版本来源 = npm 包 `@moonshot-ai/kimi-code`（REQ-PCI-07）⇒
+        // 参与「有新版」判定；本地 0.34.0 < latest 2.5.2 ⇒ update。
+        // **安装源仍是官方脚本**（REQ-PCI-01 不变）。
         let kimi = by_target("kimi_code");
         assert_eq!(kimi["cli_available"], json!(true));
-        assert_eq!(kimi["latest_version"], Value::Null);
-        assert_eq!(kimi["latest_checked_at"], Value::Null);
-        assert_eq!(kimi["action"], json!("none"));
+        assert_eq!(kimi["local_version"], json!("0.34.0"));
+        assert_eq!(kimi["latest_version"], json!("2.5.2"));
+        assert!(kimi["latest_checked_at"].is_string());
+        assert_eq!(kimi["action"], json!("update"));
         assert_eq!(
             kimi["install_source"],
             json!("official script https://code.kimi.com/kimi-code/install.sh")
