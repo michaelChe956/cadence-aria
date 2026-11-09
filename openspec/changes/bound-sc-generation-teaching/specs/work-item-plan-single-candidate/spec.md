@@ -32,7 +32,7 @@ SC generate 段的教学重驱 SHALL 绑定原生成 run/reservation/phase，并
 
 ### Requirement: 教学机会的原子 claim 与耐久绑定（REQ-WSC-28B）
 
-每次机会 SHALL 在任何外部启动前原子 claim，耐久绑定 authorization kind、原 generation/node/run 身份、业务请求及材料摘要、失败 source 引用与 hash、context digest、允许修改闭包、机器指令 digest、完整 prompt 引用与 digest、attempt key、物理上限与冻结执行策略摘要（通用字段，值由 explicit-sc-author-effort 填写）。初次调用尚无候选 source 时 SHALL 明确记录该事实并绑定原请求/材料，MUST NOT 伪造候选引用；重驱前失败原文与其 hash 必须可验证。授权、材料、上限或持久 claim 不可证明时 MUST 零额外调用并显式系统故障。
+每次机会 SHALL 在任何外部启动前原子 claim，耐久绑定 authorization kind、原 generation/node/run 身份、业务请求及材料摘要、失败 source 引用与 hash、context digest、允许修改闭包、机器指令 digest、完整 prompt 引用与 digest、attempt key、物理上限与冻结执行策略摘要（通用字段，值由 explicit-sc-author-effort 填写）。初次调用尚无候选 source 时 SHALL 明确记录该事实并绑定原请求/材料，MUST NOT 伪造候选引用；重驱前失败原文与其 hash 必须可验证。授权、材料、上限或持久 claim 不可证明时 MUST 零额外调用并显式系统故障。RepairOnce 批准状态 SHALL 由初轮新授权在**建立窗口的同一事务内**核验并冻结，随窗口持久化，MUST NOT 因部署升级、重连、恢复、显式 fresh 或改档而变化，MUST NOT 事后补造。
 
 #### Scenario: 旧记录不可补造授权
 
@@ -48,6 +48,16 @@ SC generate 段的教学重驱 SHALL 绑定原生成 run/reservation/phase，并
 
 - **WHEN** 读取历史旧样本且缺少 grant 或实际启动证据
 - **THEN** MUST NOT 事后补造 grant 或 actual-start 记录；缺失按证据缺失处理，零额外调用
+
+#### Scenario: 批准在窗口建立时一次核验并冻结
+
+- **WHEN** 初轮新授权在同锁/CAS 下建立教学窗口，且原授权可证明、provider 路径合法、剩余物理机会 ≥1、失败事实完整
+- **THEN** 窗口 SHALL 记录 RepairOnce 批准状态为「已批准」并冻结批准规则版本，物理上限为「原调用在内最多两次」；该结论 MUST NOT 因部署升级、重连、恢复、显式 fresh 或改档而改变
+
+#### Scenario: 核验任一不成立即未批准且零额外调用
+
+- **WHEN** 窗口建立时原授权不可证明、provider 路径不具备合法观察/准入、剩余物理机会为 0，或失败事实不完整
+- **THEN** 批准状态 SHALL 为「未批准」、物理上限为「原调用在内最多一次」，MUST 零额外调用并显式系统故障，MUST NOT 以「尚未记账」推断仍有剩余机会
 
 ### Requirement: 教学重驱的 claim 与真实启动分账（REQ-WSC-28C）
 

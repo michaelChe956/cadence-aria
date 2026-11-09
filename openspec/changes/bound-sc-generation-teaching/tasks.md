@@ -10,6 +10,7 @@
 - [ ] 1.2 定义窗口的 attempt 键形如 `sc_generation:{session}:{generation}:attempt:{1|2}`（attempt1/attempt2 同用该键式；旧键 `single_candidate_author:{id}:{n}` 是 provider launch 身份、保留为 ledger 自身键，ledger 条目以 launch 身份为键并新增 attempt 键关联字段），并实现 `Claimed → ActualStarted → Terminal` 与 `LaunchUnknown` 的状态迁移；attempt 次数取窗口显式字段，不以启动账长度反推；迁移 `workspace_engine/single_candidate.rs:138-167,244-256` 与 `review/routing_scope.rs:20-46` 的隐式键派生读写点，durable→runtime 同步与 policy CAS 不得覆盖已更新 ledger（映射 REQ-WSC-28B、REQ-WSC-28C；验证：窗口 attempt 序号与账本条目数解耦，改变账本长度不改变窗口次数；记一次 C 后 A 路径键不变）
 - [ ] 1.3 在会话排它锁下提供窗口的原子 claim 与持久化能力：同一 attempt key 幂等、并发 claim 只有一个成功者、上限超限时拒绝并给出可判定原因（映射 REQ-WSC-28B；验证：并发 claim 同一键后窗口内只有一个有效 claim，其余被拒且不产生额外启动）
 - [ ] 1.4 窗口缺省即「未知、零额外调用」：历史会话缺字段、无可证明原授权或只有旧 `started` 占位时，读取历史不产生授权，且不从计数为零推断存在机会；旧记录不得事后倒填 grant 或 actual-start 证据（映射 REQ-WSC-28B；验证：旧格式会话上的教学请求产生零额外调用并给出证据缺失说明）
+- [ ] 1.5 实现 RepairOnce 批准核验（owner 裁决 2026-11-09「窗口建立即批准」）：在**初轮新授权建立窗口的同一事务内**一次性核验并冻结四项判据 —— ① 原授权可证明（原生成 run/reservation/phase）② provider 路径合法且具备可用的真实启动观察能力 ③ 剩余物理机会 ≥ 1 ④ 失败事实完整（可定位 typed 事实）；四项**全部成立**才写「已批准」并冻结批准规则版本，物理上限为「原调用在内最多两次」，任一不成立则「未批准」、上限为「原调用在内最多一次」且零额外调用并显式系统故障。**不新增签发方或授权载体**，不把现 `RepairReservation` 改名当 C grant；批准状态 MUST NOT 因部署升级、重连、恢复、显式 fresh 或改档而变化，MUST NOT 事后补造（映射 REQ-WSC-28B；验证：四条正例各一条用例（批准→上限 2）、四条反例各一条用例（未批准→上限 1 且零额外调用），并有一条用例证明批准结论在重连与显式 fresh 后不变）
 
 ## 2. 真实启动观察与既有启动账接线
 
