@@ -88,3 +88,17 @@ PATH 上生效的命令若不来自本次安装的前缀，提示「把 `<prefix
 - 界面实测（harness 内置浏览器，4317）：「核验 Codex」与【更新】同顶边
   （两者 y=367.5、height=36）；点【更新】⇒ codex 0.166.0 → 0.167.0，
   「版本落后」标签与【更新】按钮随之消失。
+
+## 5. 闭环状态（2026-11-09）
+
+- **owner 实机复测通过**：Claude Code / Codex / Pi / Kimi Code 四家的【更新】按钮逐个点过，
+  版本号与「版本落后」标签按预期变化，无异常。
+- 相关产出清单：
+  - 契约层：Kimi 支持更新走独立 OpenSpec change `kimi-provider-update-support`
+    （**已归档**，主规格已同步 REQ-PCI-07）；
+  - 计划：`cadence/plans/2026-11-09_实施计划_kimi支持更新.md`（含完成记录）；
+  - 说明：`cadence/notes/2026-11-09_kimi支持更新_版本来源与安装来源分离.md`；
+  - 启动与开发期规则：`scripts/aria-web-start.sh` +
+    `cadence/project-rules/local-service-deploy.md`（4317 启动唯一入口）+
+    `cadence/project-rules/dev-test-port-policy.md`（开发期 hooks 错位的取证与处置）。
+- **不提 PR**：该功能分支还有其它会话的在途内容，按 owner 决定不合并出 PR。
