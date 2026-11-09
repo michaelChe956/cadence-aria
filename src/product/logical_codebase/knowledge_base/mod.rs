@@ -2,10 +2,12 @@
 //! durable store（Task 1 后端底座）。
 
 pub mod change_package;
+pub mod files;
 pub mod manifest;
 pub mod operation;
 pub mod preflight;
 pub mod store;
+pub mod templates;
 
 pub use operation::{
     KnowledgeBaseOperation, KnowledgeBaseOperationInput, KnowledgeBaseOperationKind,
