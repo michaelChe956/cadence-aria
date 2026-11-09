@@ -23,6 +23,11 @@
 //!   半成品变更包；并发下别人先发布时按**幂等成功**处理（既有内容不被覆盖，
 //!   空目录也不被替换）；暂存名**与标识长度无关**（否则 255 字节的合法标识
 //!   会让暂存名超限）；
+//! - **发布必须原子**：不支持 `RENAME_NOREPLACE` 的文件系统上**直接报错**，
+//!   不用「先建占位空目录再改名」冒充发布（占位目录会被并发观察者误判成
+//!   已发布的变更包，且改名失败时会留下永久空目录）；
+//! - **碰撞目标必须是真实目录**：`EEXIST` 只说明名字被占用，占用者是普通
+//!   文件或符号链接时报错（不得当成「已发布」返回）。
 //! - 变更包目录已存在时拒绝新建并返回既有目录（幂等、不覆盖既有内容）；
 //! - 变更包标识先做 `CHANGE-` 前缀归一，再校验只含 `[A-Za-z0-9._-]`（含路径
 //!   分隔符或 `..` 一律拒绝）。
@@ -34,8 +39,8 @@ use std::path::{Path, PathBuf};
 use crate::product::json_store::ProductStoreError;
 
 use super::files::{
-    KnowledgeBaseRoot, create_new_at, kb_root, mkdirat, openat_dir, remove_tree_at, rename_at,
-    rename_noreplace_at, unlink_at, walk_dirs,
+    KnowledgeBaseRoot, create_new_at, kb_root, mkdirat, openat_dir, remove_tree_at,
+    rename_noreplace_at, walk_dirs,
 };
 
 /// 初始化输入模板所属 skill 名。
@@ -74,6 +79,24 @@ pub fn create_change_package_template(
     aggregate_root: &Path,
     skills_source_root: &Path,
     identifier: &str,
+) -> Result<PathBuf, ProductStoreError> {
+    create_change_package_template_with(
+        aggregate_root,
+        skills_source_root,
+        identifier,
+        rename_noreplace_at,
+    )
+}
+
+/// `create_change_package_template` 的可注入版本（`rename` 发布原语可替换）。
+///
+/// 注入点只用于回归测试：覆盖「文件系统不支持 `RENAME_NOREPLACE`」与
+/// 「发布瞬间目标被并发占用成非目录」两条分支。
+fn create_change_package_template_with(
+    aggregate_root: &Path,
+    skills_source_root: &Path,
+    identifier: &str,
+    rename: RenameFn,
 ) -> Result<PathBuf, ProductStoreError> {
     let normalized = normalize_change_identifier(identifier)?;
     let source = skill_user_input_dir(skills_source_root, UPDATE_SKILL)?.join("change-package");
@@ -114,7 +137,7 @@ pub fn create_change_package_template(
     drop(staging_dir);
     // 原子不替换发布：并发下别人先发布 ⇒ 幂等成功（不覆盖其内容）；普通
     // `rename` 会因目标非空而失败、空目标则被替换 ⇒ 不能用。
-    match publish_staging(&parent, &staging, &normalized) {
+    match publish_staging_with(&parent, &staging, &normalized, rename) {
         Ok(true) => Ok(destination),
         Ok(false) => {
             let _ = remove_tree_at(&parent, OsStr::new(&staging));
@@ -160,61 +183,57 @@ fn staging_name() -> String {
     format!(".kb-staging-{}-{sequence}", std::process::id())
 }
 
-/// 发布暂存目录到最终目录（**原子不替换**）。
+/// 改名发布原语（可注入，便于回归测试覆盖「不支持 `RENAME_NOREPLACE`」分支）。
+type RenameFn = fn(&OwnedFd, &OsStr, &OsStr) -> std::io::Result<()>;
+
+/// 发布暂存目录到最终目录（`rename` 原语可注入）。
 ///
-/// - `Ok(true)`：本次发布成功（目标此前不存在）。
-/// - `Ok(false)`：目标已被（并发）发布 ⇒ 幂等成功，调用方清理暂存目录并返回
-///   既有目录；既有内容不被覆盖。
-/// - `Err`：发布失败（调用方清理暂存目录并报错）。
-fn publish_staging(
+/// 三条硬约束：
+/// 1. **原子不替换**：用 `renameat2(RENAME_NOREPLACE)` 发布，目标已存在时报
+///    `EEXIST`（**不像 `renameat` 那样替换空目录**）⇒ 不会被并发写入悄悄覆盖。
+/// 2. **碰撞目标必须是真实目录**：`EEXIST` 只说明「这个名字已被占用」，**不**
+///    说明占用者是目录。碰撞后必须以父目录 fd 做 **no-follow 目录核验**
+///    （`openat(O_DIRECTORY|O_NOFOLLOW)`）：占用者是普通文件或符号链接 ⇒
+///    **不得**判成幂等成功（否则会把一个文件/越界链接当成已发布的变更包
+///    返回），一律报 `Io`。
+/// 3. **不支持 `RENAME_NOREPLACE` 时直接报错**：降级路径（先建占位空目录再
+///    改名）会在「占位」与「发布」之间暴露一个**未发布的空目录** ⇒ 既不是
+///    原子发布，又会让并发观察者把占位目录误判成「已发布的变更包」（幂等
+///    分支），甚至在改名失败时留下永久占位目录。故此处**不做降级**，宁可让
+///    该平台上的变更包创建失败并给出可读原因，也不返回半成品或误报成功。
+fn publish_staging_with(
     parent: &OwnedFd,
     staging: &str,
     target: &str,
+    rename: RenameFn,
 ) -> Result<bool, ProductStoreError> {
-    match rename_noreplace_at(parent, OsStr::new(staging), OsStr::new(target)) {
+    match rename(parent, OsStr::new(staging), OsStr::new(target)) {
         Ok(()) => Ok(true),
         // 目标已存在（`RENAME_NOREPLACE` ⇒ `EEXIST`；部分实现给 `ENOTEMPTY`）
-        // ⇒ 并发已被发布 ⇒ 幂等成功。
-        Err(error) if is_target_exists(&error) => Ok(false),
-        // 内核/文件系统不支持 `RENAME_NOREPLACE` ⇒ 降级：先用 `mkdir` 原子占位
-        // （占位成功即说明这个名字归本次调用所有），再改名覆盖**自己的**占位
-        // 空目录（POSIX 允许改名到空目录），绝不动别人的目录。
+        // ⇒ 可能是并发发布 ⇒ 必须先核验占用者确实是**真实目录**。
+        Err(error) if is_target_exists(&error) => {
+            match openat_dir(parent, OsStr::new(target)) {
+                // 真实目录 ⇒ 并发已被发布 ⇒ 幂等成功（既有内容不被覆盖）。
+                Ok(_) => Ok(false),
+                // 普通文件 / 符号链接 / 其它非目录 ⇒ 不得判成幂等成功。
+                Err(probe) => Err(ProductStoreError::Io(format!(
+                    "变更包目录已存在但不是真实目录：{target}：{probe}"
+                ))),
+            }
+        }
+        // 内核/文件系统不支持 `RENAME_NOREPLACE` ⇒ 明确报错（**不降级**，
+        // 避免暴露未发布的占位目录，见上文约束 3）。
         Err(error)
             if error.raw_os_error() == Some(libc::ENOSYS)
                 || error.raw_os_error() == Some(libc::EINVAL) =>
         {
-            publish_staging_by_placeholder(parent, staging, target)
+            Err(ProductStoreError::Io(format!(
+                "当前文件系统不支持原子不替换发布（RENAME_NOREPLACE）：{error}"
+            )))
         }
         Err(error) => Err(ProductStoreError::Io(format!(
             "发布变更包目录失败：{error}"
         ))),
-    }
-}
-
-/// 不支持 `RENAME_NOREPLACE` 时的降级发布：`mkdir` 原子占位 + 改名覆盖占位。
-fn publish_staging_by_placeholder(
-    parent: &OwnedFd,
-    staging: &str,
-    target: &str,
-) -> Result<bool, ProductStoreError> {
-    match mkdirat(parent, OsStr::new(target)) {
-        Ok(()) => {}
-        // 目标已存在 ⇒ 同样按「并发已被发布」处理（幂等成功）。
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(error) => {
-            return Err(ProductStoreError::Io(format!(
-                "发布变更包目录失败：{error}"
-            )));
-        }
-    }
-    match rename_at(parent, OsStr::new(staging), OsStr::new(target)) {
-        Ok(()) => Ok(true),
-        Err(error) => {
-            let _ = unlink_at(parent, OsStr::new(target), true);
-            Err(ProductStoreError::Io(format!(
-                "发布变更包目录失败：{error}"
-            )))
-        }
     }
 }
 
@@ -374,496 +393,4 @@ fn copy_missing(
     Ok(())
 }
 
-#[cfg(test)]
-mod knowledge_base_templates_tests {
-    use super::{
-        create_bootstrap_input_templates, create_change_package_template, publish_staging,
-    };
-    use crate::product::json_store::ProductStoreError;
-    use std::path::{Path, PathBuf};
-
-    /// 初始化输入模板的九份源文件（与插件 `knowledge-base-bootstrap/user-input/`
-    /// 的实际构成一致）。
-    const BOOTSTRAP_FILES: [&str; 9] = [
-        "api-scope.md",
-        "base-info.md",
-        "configuration-scope.md",
-        "data-model-scope.md",
-        "database-ddl.sql",
-        "middleware-scope.md",
-        "page-scope.md",
-        "product.md",
-        "project-scope.md",
-    ];
-
-    /// 变更包模板的五份文档（与插件 `knowledge-base-update/user-input/change-package/`
-    /// 的实际构成一致）。
-    const CHANGE_PACKAGE_FILES: [&str; 5] = [
-        "change-summary.md",
-        "code-change.md",
-        "configuration-change.md",
-        "database-change.md",
-        "verification.md",
-    ];
-
-    /// 建一份插件源根夹具（只落 /tmp）。
-    ///
-    /// 返回 `(夹具, 传给函数的源根)`：`"skills"` ⇒ `<root>/skills`（等价
-    /// `CadenceSkillsPaths::source_root()` 形态）；`"repository"` ⇒ `<root>`
-    /// （仓库根形态，函数内部再拼 `cadence-init/skills`）。
-    fn skills_source_fixture(layout: &str) -> (tempfile::TempDir, PathBuf) {
-        let fixture = tempfile::TempDir::new().expect("创建 /tmp 夹具");
-        let root = fixture.path().to_path_buf();
-        let (source_root, skills_root) = if layout == "repository" {
-            (root.clone(), root.join("cadence-init").join("skills"))
-        } else {
-            (root.join("skills"), root.join("skills"))
-        };
-        let bootstrap = skills_root
-            .join("knowledge-base-bootstrap")
-            .join("user-input");
-        std::fs::create_dir_all(&bootstrap).expect("创建 bootstrap 源目录");
-        for name in BOOTSTRAP_FILES {
-            std::fs::write(bootstrap.join(name), format!("模板原文 {name}")).expect("写源模板");
-        }
-        let change_package = skills_root
-            .join("knowledge-base-update")
-            .join("user-input")
-            .join("change-package");
-        std::fs::create_dir_all(change_package.join("attachments")).expect("创建变更包源目录");
-        for name in CHANGE_PACKAGE_FILES {
-            std::fs::write(change_package.join(name), format!("变更包原文 {name}"))
-                .expect("写源模板");
-        }
-        std::fs::write(
-            change_package.join("attachments").join("README.md"),
-            "附件说明",
-        )
-        .expect("写附件说明");
-        (fixture, source_root)
-    }
-
-    /// 知识库聚合根夹具（只落 /tmp）。
-    fn aggregate_fixture() -> (tempfile::TempDir, PathBuf) {
-        let fixture = tempfile::TempDir::new().expect("创建 /tmp 夹具");
-        let aggregate_root = fixture.path().join("aggregate-root");
-        std::fs::create_dir_all(&aggregate_root).expect("创建聚合根");
-        (fixture, aggregate_root)
-    }
-
-    #[test]
-    fn create_bootstrap_input_templates_does_not_overwrite_existing() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-        let user_input = aggregate_root.join("cadence/knowledge-base/user-input");
-        std::fs::create_dir_all(&user_input).expect("创建 user-input 目录");
-        std::fs::write(user_input.join("base-info.md"), "用户已填写的内容").expect("预置用户内容");
-
-        let created =
-            create_bootstrap_input_templates(&aggregate_root, &skills_root).expect("创建模板成功");
-
-        assert_eq!(
-            std::fs::read_to_string(user_input.join("base-info.md")).expect("读取 base-info.md"),
-            "用户已填写的内容",
-            "已存在文件不得被覆盖"
-        );
-        assert!(user_input.join("api-scope.md").exists(), "缺失模板应被创建");
-        assert!(
-            created.iter().any(|path| path == "user-input/api-scope.md"),
-            "新建清单应含 api-scope.md：{created:?}"
-        );
-        assert!(
-            !created.iter().any(|path| path == "user-input/base-info.md"),
-            "已存在文件不应计入新建清单：{created:?}"
-        );
-    }
-
-    #[test]
-    fn create_bootstrap_input_templates_creates_all_nine_inputs() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let created =
-            create_bootstrap_input_templates(&aggregate_root, &skills_root).expect("创建模板成功");
-
-        assert_eq!(created.len(), BOOTSTRAP_FILES.len());
-        let user_input = aggregate_root.join("cadence/knowledge-base/user-input");
-        for name in BOOTSTRAP_FILES {
-            assert!(user_input.join(name).exists(), "输入模板缺失：{name}");
-        }
-    }
-
-    #[test]
-    fn create_change_package_template_normalizes_identifier() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let directory =
-            create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-                .expect("创建变更包模板成功");
-
-        assert_eq!(
-            directory
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-            Some("CHANGE-login-refactor".to_string())
-        );
-        for name in CHANGE_PACKAGE_FILES {
-            assert!(directory.join(name).exists(), "变更包文档缺失：{name}");
-        }
-    }
-
-    #[test]
-    fn create_change_package_template_keeps_existing_prefix() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let directory =
-            create_change_package_template(&aggregate_root, &skills_root, "CHANGE-20261109-0001")
-                .expect("创建变更包模板成功");
-
-        assert_eq!(
-            directory
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-            Some("CHANGE-20261109-0001".to_string())
-        );
-    }
-
-    #[test]
-    fn create_change_package_template_rejects_unsafe_identifier() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let error = create_change_package_template(&aggregate_root, &skills_root, "../evil")
-            .expect_err("非法标识必须被拒绝");
-        assert!(
-            matches!(error, ProductStoreError::InvalidRecord { .. }),
-            "非法标识应报不可记录的标识：{error:?}"
-        );
-    }
-
-    #[test]
-    fn create_change_package_template_is_idempotent() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let first = create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-            .expect("首次创建成功");
-        std::fs::write(first.join("change-summary.md"), "用户已填写").expect("预置用户内容");
-
-        let second =
-            create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-                .expect("二次创建应幂等");
-
-        assert_eq!(first, second, "二次创建应返回同一目录");
-        assert_eq!(
-            std::fs::read_to_string(first.join("change-summary.md")).expect("读取变更包文档"),
-            "用户已填写",
-            "二次创建不得覆盖既有内容"
-        );
-    }
-
-    #[test]
-    fn create_templates_reports_io_when_skills_source_missing() {
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-        let missing = Path::new("/tmp/cadence-kb-missing-skills-source");
-
-        let error = create_bootstrap_input_templates(&aggregate_root, missing)
-            .expect_err("插件源根缺失必须报 IO 错误");
-        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
-
-        let error = create_change_package_template(&aggregate_root, missing, "login-refactor")
-            .expect_err("插件源根缺失必须报 IO 错误");
-        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
-    }
-
-    #[test]
-    fn create_templates_accepts_repository_layout_source_root() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("repository");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let created =
-            create_bootstrap_input_templates(&aggregate_root, &skills_root).expect("创建模板成功");
-        assert!(!created.is_empty(), "应新建模板文件");
-    }
-
-    // -----------------------------------------------------------------------
-    // 修复轮 1 回归用例（Critical 4 + Important 6/7）
-    // -----------------------------------------------------------------------
-
-    /// Critical 4：目标 `user-input` 是指向根外的目录链接时，模板不得复制到根外。
-    #[cfg(unix)]
-    #[test]
-    fn create_bootstrap_input_templates_rejects_symlinked_target_dir() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (aggregate_fixture, aggregate_root) = aggregate_fixture();
-        let outside = aggregate_fixture.path().join("outside");
-        std::fs::create_dir_all(&outside).expect("建根外目录");
-        let knowledge_base = aggregate_root.join("cadence/knowledge-base");
-        std::fs::create_dir_all(&knowledge_base).expect("建知识库根");
-        std::os::unix::fs::symlink(&outside, knowledge_base.join("user-input"))
-            .expect("创建越界目录链接");
-
-        let error = create_bootstrap_input_templates(&aggregate_root, &skills_root)
-            .expect_err("目标目录是越界符号链接时必须被拒绝");
-        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
-        assert_eq!(
-            std::fs::read_dir(&outside).expect("读取根外目录").count(),
-            0,
-            "模板不得复制到根外"
-        );
-    }
-
-    /// Critical 4：变更包父目录（`user-input`）是根外链接时，变更包不得落到根外。
-    #[cfg(unix)]
-    #[test]
-    fn create_change_package_template_rejects_symlinked_parent_dir() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (aggregate_fixture, aggregate_root) = aggregate_fixture();
-        let outside = aggregate_fixture.path().join("outside");
-        std::fs::create_dir_all(&outside).expect("建根外目录");
-        let knowledge_base = aggregate_root.join("cadence/knowledge-base");
-        std::fs::create_dir_all(&knowledge_base).expect("建知识库根");
-        std::os::unix::fs::symlink(&outside, knowledge_base.join("user-input"))
-            .expect("创建越界目录链接");
-
-        let error = create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-            .expect_err("父目录是越界符号链接时必须被拒绝");
-        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
-        assert!(!outside.join("updates").exists(), "变更包不得复制到根外");
-    }
-
-    /// Important 6：目标位置是悬空符号链接时不得跟随（不得在根外创建文件），
-    /// 且该链接不得被替换。
-    #[cfg(unix)]
-    #[test]
-    fn create_bootstrap_input_templates_does_not_follow_dangling_symlink() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (aggregate_fixture, aggregate_root) = aggregate_fixture();
-        let outside = aggregate_fixture.path().join("outside");
-        std::fs::create_dir_all(&outside).expect("建根外目录");
-        let user_input = aggregate_root.join("cadence/knowledge-base/user-input");
-        std::fs::create_dir_all(&user_input).expect("建 user-input 目录");
-        let link = user_input.join("base-info.md");
-        std::os::unix::fs::symlink(outside.join("base-info.md"), &link).expect("预置悬空链接");
-
-        create_bootstrap_input_templates(&aggregate_root, &skills_root).expect("创建模板成功");
-
-        assert!(
-            link.symlink_metadata()
-                .expect("读取链接元数据")
-                .file_type()
-                .is_symlink(),
-            "悬空链接不得被替换成普通文件"
-        );
-        assert!(
-            !outside.join("base-info.md").exists(),
-            "不得跟随悬空链接在根外创建文件"
-        );
-    }
-
-    /// Important 7：复制失败不得留下半成品变更包目录；重试必须补齐全部文档。
-    #[cfg(unix)]
-    #[test]
-    fn create_change_package_template_leaves_no_partial_package_on_failure() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-        let secret =
-            skills_root.join("knowledge-base-update/user-input/change-package/verification.md");
-        std::fs::set_permissions(
-            &secret,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o000),
-        )
-        .expect("设置源文件权限");
-        if unsafe { libc::geteuid() } == 0 {
-            // root 绕过权限位 ⇒ 无法注入复制失败，只验证正常路径。
-            std::fs::set_permissions(
-                &secret,
-                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
-            )
-            .expect("恢复源文件权限");
-            return;
-        }
-
-        let error = create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-            .expect_err("复制失败必须报错");
-        assert!(matches!(error, ProductStoreError::Io(_)), "{error:?}");
-        let changes = aggregate_root.join("cadence/knowledge-base/user-input/updates");
-        assert!(
-            !changes.join("CHANGE-login-refactor").exists(),
-            "失败后不得留下半成品变更包目录"
-        );
-        assert_eq!(
-            std::fs::read_dir(&changes)
-                .expect("读取变更包父目录")
-                .filter_map(|entry| entry.ok())
-                .count(),
-            0,
-            "失败后不得留下暂存目录"
-        );
-
-        std::fs::set_permissions(
-            &secret,
-            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
-        )
-        .expect("恢复源文件权限");
-        let directory =
-            create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-                .expect("重试必须成功");
-        for name in CHANGE_PACKAGE_FILES {
-            assert!(
-                directory.join(name).exists(),
-                "重试后变更包文档缺失：{name}"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 修复轮 2 回归用例（Important 2 / Important 3）
-    // -----------------------------------------------------------------------
-
-    /// Important 2：发布必须**原子不替换** —— 目标已存在（含空目录）时不得被
-    /// 替换，且按「并发已被发布」判成幂等成功。
-    #[test]
-    fn publish_staging_does_not_replace_existing_target() {
-        use std::os::fd::OwnedFd;
-
-        let fixture = tempfile::TempDir::new().expect("创建 /tmp 夹具");
-        let parent_path = fixture.path().to_path_buf();
-        let parent_file = std::fs::File::open(&parent_path).expect("打开父目录");
-        let parent: OwnedFd = parent_file.into();
-
-        // 情形一：目标不存在 ⇒ 发布成功，内容落在目标目录。
-        std::fs::create_dir(parent_path.join("staging")).expect("建暂存目录");
-        std::fs::write(parent_path.join("staging/change-summary.md"), "变更包原文")
-            .expect("写暂存内容");
-        assert!(
-            publish_staging(&parent, "staging", "target").expect("发布不得报错"),
-            "目标不存在时必须发布成功"
-        );
-        assert!(
-            parent_path.join("target/change-summary.md").exists(),
-            "发布后内容必须落在目标目录"
-        );
-        assert!(
-            !parent_path.join("staging").exists(),
-            "发布成功后暂存目录必须消失"
-        );
-
-        // 情形二：目标已存在（**空目录**）⇒ 幂等成功，且目标不得被替换。
-        std::fs::create_dir(parent_path.join("staging2")).expect("建暂存目录");
-        std::fs::write(parent_path.join("staging2/change-summary.md"), "并发内容")
-            .expect("写暂存内容");
-        std::fs::create_dir(parent_path.join("target2")).expect("建已存在的空目标目录");
-        assert!(
-            !publish_staging(&parent, "staging2", "target2").expect("发布不得报错"),
-            "目标已存在时必须判成「并发已发布」（幂等）"
-        );
-        assert!(
-            parent_path
-                .join("target2")
-                .read_dir()
-                .expect("读取目标目录")
-                .next()
-                .is_none(),
-            "已存在的空目标目录不得被替换成暂存内容"
-        );
-        assert!(
-            parent_path.join("staging2").exists(),
-            "未发布的暂存目录必须保留（由调用方清理）"
-        );
-    }
-
-    /// Important 2：同一标识的并发创建都必须成功（幂等），不得因发布竞态报错。
-    #[test]
-    fn create_change_package_template_is_idempotent_under_concurrency() {
-        use std::sync::{Arc, Barrier};
-
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-        let barrier = Arc::new(Barrier::new(2));
-
-        let mut handles = Vec::new();
-        for _ in 0..2 {
-            let skills_root = skills_root.clone();
-            let aggregate_root = aggregate_root.clone();
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-            }));
-        }
-        let outcomes: Vec<_> = handles
-            .into_iter()
-            .map(|handle| handle.join().expect("创建线程结束"))
-            .collect();
-
-        for outcome in &outcomes {
-            assert!(
-                outcome.is_ok(),
-                "并发创建必须都成功（幂等），不得因发布竞态报错：{outcomes:?}"
-            );
-        }
-        let directories: Vec<&PathBuf> = outcomes
-            .iter()
-            .filter_map(|outcome| outcome.as_ref().ok())
-            .collect();
-        assert_eq!(
-            directories[0], directories[1],
-            "并发创建必须返回同一目录：{outcomes:?}"
-        );
-        for name in CHANGE_PACKAGE_FILES {
-            assert!(
-                directories[0].join(name).exists(),
-                "并发创建后变更包文档缺失：{name}"
-            );
-        }
-        assert!(
-            staging_leftovers(&aggregate_root).is_empty(),
-            "并发创建不得留下暂存目录：{:?}",
-            staging_leftovers(&aggregate_root)
-        );
-    }
-
-    /// Important 3：暂存目录名不得随标识长度增长 ⇒ 255 字节（单文件名上限）的
-    /// 合法标识必须仍能创建变更包。
-    #[test]
-    fn create_change_package_template_accepts_maximum_length_identifier() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        // 248 字节标识 + `CHANGE-` 前缀 = 255 字节（正好是单文件名上限）。
-        let identifier = "a".repeat(248);
-        let directory = create_change_package_template(&aggregate_root, &skills_root, &identifier)
-            .expect("255 字节的合法标识必须能创建变更包（不得 ENAMETOOLONG）");
-
-        assert_eq!(
-            directory
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .map(|name| name.len()),
-            Some(255),
-            "最终目录名应为 255 字节"
-        );
-        for name in CHANGE_PACKAGE_FILES {
-            assert!(directory.join(name).exists(), "变更包文档缺失：{name}");
-        }
-        assert!(
-            staging_leftovers(&aggregate_root).is_empty(),
-            "不得留下暂存目录：{:?}",
-            staging_leftovers(&aggregate_root)
-        );
-    }
-
-    /// 变更包父目录下的暂存目录残留清单（暂存名以 `.kb-staging` 开头）。
-    fn staging_leftovers(aggregate_root: &Path) -> Vec<String> {
-        let changes = aggregate_root.join("cadence/knowledge-base/user-input/updates");
-        std::fs::read_dir(changes)
-            .expect("读取变更包父目录")
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(".kb-staging"))
-            .collect()
-    }
-}
+include!("templates_tests.inc.rs");
