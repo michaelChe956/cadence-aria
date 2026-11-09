@@ -92,18 +92,21 @@ async fn request_json(
     uri: &str,
     body: Value,
 ) -> (StatusCode, Value) {
-    let response = app
-        .clone()
-        .oneshot(
+    // 有界等待：handler 任何形式的挂起都转为测试失败，绝不无限阻塞。
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.clone().oneshot(
             Request::builder()
                 .method(method)
                 .uri(uri)
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .expect("request"),
-        )
-        .await
-        .expect("response");
+        ),
+    )
+    .await
+    .expect("request timed out after 30s")
+    .expect("response");
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -563,6 +566,32 @@ async fn create_bootstrap_operation_returns_pollable_operation() {
     .await;
     assert_eq!(status, StatusCode::OK, "{fetched}");
     assert_eq!(fetched["operation_id"], operation_id.as_str());
+    // 有界等待 spawn 的 execute 收口（operation 进入终态）后再结束测试，
+    // 避免后台任务在测试结束后拖尾持有资源；10 秒内未收口即失败。
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (_, snapshot) = request_json(
+                &fixture.app,
+                Method::GET,
+                &fixture.kb_uri(&format!("/initializations/{operation_id}")),
+                json!({}),
+            )
+            .await;
+            match snapshot["status"].as_str() {
+                Some("completed") | Some("failed") | Some("cancelled") => {
+                    return snapshot["status"].clone();
+                }
+                _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .expect("knowledge base operation must settle within 10s");
+    assert!(
+        ["completed", "failed", "cancelled"]
+            .contains(&settled.as_str().unwrap_or_default()),
+        "unexpected terminal status: {settled}"
+    );
 }
 
 /// POST /initializations（update）变更包缺文档 → 4xx，
