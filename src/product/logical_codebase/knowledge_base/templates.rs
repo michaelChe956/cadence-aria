@@ -6,21 +6,16 @@
 //! - 变更包模板 → 落地到
 //!   `<聚合根>/cadence/knowledge-base/user-input/updates/CHANGE-<标识>/`。
 //!
-//! 插件源根既接受 `CadenceSkillsPaths::source_root()` 形态
-//! （`~/.agents/Cadence-skills/cadence-init/skills`），也接受仓库根形态
-//! （`~/.agents/Cadence-skills`，内部再拼 `cadence-init/skills`）——两种形态
-//! 都按既有目录探测，探测不到 ⇒ `ProductStoreError::Io`（由上层映射为
-//! skills 不可用）。
-//!
 //! 铁律：**只补缺失，绝不覆盖**（用户填的内容优先）；变更包目录已存在时
 //! 拒绝新建并返回既有目录（幂等）；变更包标识先做 `CHANGE-` 前缀归一，再
 //! 校验只含 `[A-Za-z0-9._-]`（含路径分隔符或 `..` 一律拒绝）。
+//!
+//! 插件源根缺失（Cadence-skills 未装）⇒ `ProductStoreError::Io`，由上层
+//! 映射为 skills 不可用。
 
 use std::path::{Path, PathBuf};
 
 use crate::product::json_store::ProductStoreError;
-
-use super::files::kb_root;
 
 /// 初始化输入模板所属 skill 名。
 const BOOTSTRAP_SKILL: &str = "knowledge-base-bootstrap";
@@ -28,8 +23,6 @@ const BOOTSTRAP_SKILL: &str = "knowledge-base-bootstrap";
 const UPDATE_SKILL: &str = "knowledge-base-update";
 /// 变更包目录名前缀（归一后固定带此前缀）。
 const CHANGE_PACKAGE_PREFIX: &str = "CHANGE-";
-/// 知识库内变更包目录的父目录（相对知识库根）。
-const CHANGES_DIR: [&str; 2] = ["user-input", "updates"];
 
 /// 把插件自带的初始化输入模板补到知识库的 `user-input/` 目录。
 ///
@@ -39,15 +32,8 @@ pub fn create_bootstrap_input_templates(
     aggregate_root: &Path,
     skills_source_root: &Path,
 ) -> Result<Vec<String>, ProductStoreError> {
-    let source = skill_user_input_dir(skills_source_root, BOOTSTRAP_SKILL)?;
-    let root = kb_root(aggregate_root);
-    let destination = root.join("user-input");
-    std::fs::create_dir_all(&destination).map_err(|error| {
-        ProductStoreError::Io(format!("create {}: {error}", destination.display()))
-    })?;
-    let mut created = Vec::new();
-    copy_missing(&source, &destination, &root, &mut created)?;
-    Ok(created)
+    let _ = (aggregate_root, skills_source_root);
+    unimplemented!("Task 5：初始化输入模板创建待实现");
 }
 
 /// 把插件自带的变更包模板补到知识库的 `user-input/updates/CHANGE-<标识>/`。
@@ -58,159 +44,8 @@ pub fn create_change_package_template(
     skills_source_root: &Path,
     identifier: &str,
 ) -> Result<PathBuf, ProductStoreError> {
-    let normalized = normalize_change_identifier(identifier)?;
-    let source = skill_user_input_dir(skills_source_root, UPDATE_SKILL)?.join("change-package");
-    let root = kb_root(aggregate_root);
-    let mut destination = root.clone();
-    for component in CHANGES_DIR {
-        destination.push(component);
-    }
-    destination.push(&normalized);
-    if destination.exists() {
-        // 已存在 ⇒ 拒绝新建、不覆盖、不改动既有内容。
-        return Ok(destination);
-    }
-    std::fs::create_dir_all(&destination).map_err(|error| {
-        ProductStoreError::Io(format!("create {}: {error}", destination.display()))
-    })?;
-    let mut created = Vec::new();
-    copy_missing(&source, &destination, &root, &mut created)?;
-    Ok(destination)
-}
-
-/// 标识归一：先剥掉已有的 `CHANGE-` 前缀（大小写不敏感），再补规范前缀；
-/// 归一后只允许 `[A-Za-z0-9._-]`，且不含 `..` 与路径分隔符。
-fn normalize_change_identifier(identifier: &str) -> Result<String, ProductStoreError> {
-    let trimmed = identifier.trim();
-    if trimmed.is_empty() {
-        return Err(invalid_identifier(identifier, "标识为空"));
-    }
-    let prefix_bytes = CHANGE_PACKAGE_PREFIX.len();
-    let body = match trimmed.get(..prefix_bytes) {
-        Some(prefix) if prefix.eq_ignore_ascii_case(CHANGE_PACKAGE_PREFIX) => {
-            &trimmed[prefix_bytes..]
-        }
-        _ => trimmed,
-    };
-    if body.is_empty() {
-        return Err(invalid_identifier(
-            identifier,
-            "标识在 `CHANGE-` 前缀之后为空",
-        ));
-    }
-    if body == "." || body.contains("..") {
-        return Err(invalid_identifier(identifier, "标识不得包含 `..`"));
-    }
-    if body.contains('/') || body.contains('\\') {
-        return Err(invalid_identifier(identifier, "标识不得包含路径分隔符"));
-    }
-    if !body
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
-    {
-        return Err(invalid_identifier(
-            identifier,
-            "标识只允许字母、数字、点、下划线与连字符",
-        ));
-    }
-    Ok(format!("{CHANGE_PACKAGE_PREFIX}{body}"))
-}
-
-/// 非法标识的统一错误形态。
-fn invalid_identifier(identifier: &str, reason: &str) -> ProductStoreError {
-    ProductStoreError::InvalidRecord {
-        kind: "knowledge_base_change_package_identifier",
-        reason: format!("{reason}：{identifier}"),
-    }
-}
-
-/// 定位 skill 的 `user-input/` 源目录（两种源根形态都支持）。
-fn skill_user_input_dir(
-    skills_source_root: &Path,
-    skill: &str,
-) -> Result<PathBuf, ProductStoreError> {
-    let candidates = [
-        skills_source_root.join(skill).join("user-input"),
-        skills_source_root
-            .join("cadence-init")
-            .join("skills")
-            .join(skill)
-            .join("user-input"),
-    ];
-    for candidate in &candidates {
-        if candidate.is_dir() {
-            return Ok(candidate.clone());
-        }
-    }
-    Err(ProductStoreError::Io(format!(
-        "知识库模板源不可用：{} 下找不到 {} 的 user-input 目录",
-        skills_source_root.display(),
-        skill
-    )))
-}
-
-/// 只复制缺失的文件（已存在的一律保留用户内容），并记录新建的相对路径。
-fn copy_missing(
-    source: &Path,
-    destination: &Path,
-    root: &Path,
-    created: &mut Vec<String>,
-) -> Result<(), ProductStoreError> {
-    if !source.is_dir() {
-        return Err(ProductStoreError::Io(format!(
-            "知识库模板源不可用：{} 不是目录",
-            source.display()
-        )));
-    }
-    let entries = std::fs::read_dir(source).map_err(|error| {
-        ProductStoreError::Io(format!("read_dir {}: {error}", source.display()))
-    })?;
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| ProductStoreError::Io(format!("read_dir entry: {error}")))?;
-        let file_type = entry.file_type().map_err(|error| {
-            ProductStoreError::Io(format!("file_type {}: {error}", entry.path().display()))
-        })?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        let name = entry.file_name();
-        let source_path = entry.path();
-        let destination_path = destination.join(&name);
-        if file_type.is_dir() {
-            std::fs::create_dir_all(&destination_path).map_err(|error| {
-                ProductStoreError::Io(format!("create {}: {error}", destination_path.display()))
-            })?;
-            copy_missing(&source_path, &destination_path, root, created)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        if destination_path.exists() {
-            // 已存在 ⇒ 绝不覆盖（用户填的内容优先）。
-            continue;
-        }
-        std::fs::copy(&source_path, &destination_path).map_err(|error| {
-            ProductStoreError::Io(format!(
-                "copy {} -> {}: {error}",
-                source_path.display(),
-                destination_path.display()
-            ))
-        })?;
-        created.push(relative_display(root, &destination_path));
-    }
-    Ok(())
-}
-
-/// 相对知识库根的展示路径（`/` 分隔）。
-fn relative_display(root: &Path, path: &Path) -> String {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+    let _ = (aggregate_root, skills_source_root, identifier);
+    unimplemented!("Task 5：变更包模板创建待实现");
 }
 
 #[cfg(test)]
@@ -245,20 +80,17 @@ mod knowledge_base_templates_tests {
 
     /// 建一份插件源根夹具（只落 /tmp）。
     ///
-    /// 返回 `(夹具, 传给函数的源根)`：`"skills"` ⇒ `<root>/skills`（等价
-    /// `CadenceSkillsPaths::source_root()` 形态）；`"repository"` ⇒ `<root>`
-    /// （仓库根形态，函数内部再拼 `cadence-init/skills`）。
+    /// `layout` 决定 skill 目录的层级：`"skills"` ⇒ `<root>/<skill>/`，
+    /// `"repository"` ⇒ `<root>/cadence-init/skills/<skill>/`。
     fn skills_source_fixture(layout: &str) -> (tempfile::TempDir, PathBuf) {
         let fixture = tempfile::TempDir::new().expect("创建 /tmp 夹具");
         let root = fixture.path().to_path_buf();
-        let (source_root, skills_root) = if layout == "repository" {
-            (root.clone(), root.join("cadence-init").join("skills"))
+        let skills_root = if layout == "repository" {
+            root.join("cadence-init").join("skills")
         } else {
-            (root.join("skills"), root.join("skills"))
+            root.join("skills")
         };
-        let bootstrap = skills_root
-            .join("knowledge-base-bootstrap")
-            .join("user-input");
+        let bootstrap = skills_root.join("knowledge-base-bootstrap").join("user-input");
         std::fs::create_dir_all(&bootstrap).expect("创建 bootstrap 源目录");
         for name in BOOTSTRAP_FILES {
             std::fs::write(bootstrap.join(name), format!("模板原文 {name}")).expect("写源模板");
@@ -277,7 +109,7 @@ mod knowledge_base_templates_tests {
             "附件说明",
         )
         .expect("写附件说明");
-        (fixture, source_root)
+        (fixture, skills_root)
     }
 
     /// 知识库聚合根夹具（只落 /tmp）。
@@ -304,7 +136,10 @@ mod knowledge_base_templates_tests {
             "用户已填写的内容",
             "已存在文件不得被覆盖"
         );
-        assert!(user_input.join("api-scope.md").exists(), "缺失模板应被创建");
+        assert!(
+            user_input.join("api-scope.md").exists(),
+            "缺失模板应被创建"
+        );
         assert!(
             created.iter().any(|path| path == "user-input/api-scope.md"),
             "新建清单应含 api-scope.md：{created:?}"
@@ -313,21 +148,6 @@ mod knowledge_base_templates_tests {
             !created.iter().any(|path| path == "user-input/base-info.md"),
             "已存在文件不应计入新建清单：{created:?}"
         );
-    }
-
-    #[test]
-    fn create_bootstrap_input_templates_creates_all_nine_inputs() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let created =
-            create_bootstrap_input_templates(&aggregate_root, &skills_root).expect("创建模板成功");
-
-        assert_eq!(created.len(), BOOTSTRAP_FILES.len());
-        let user_input = aggregate_root.join("cadence/knowledge-base/user-input");
-        for name in BOOTSTRAP_FILES {
-            assert!(user_input.join(name).exists(), "输入模板缺失：{name}");
-        }
     }
 
     #[test]
@@ -340,31 +160,15 @@ mod knowledge_base_templates_tests {
                 .expect("创建变更包模板成功");
 
         assert_eq!(
-            directory
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
+            directory.file_name().map(|name| name.to_string_lossy().into_owned()),
             Some("CHANGE-login-refactor".to_string())
         );
         for name in CHANGE_PACKAGE_FILES {
-            assert!(directory.join(name).exists(), "变更包文档缺失：{name}");
+            assert!(
+                directory.join(name).exists(),
+                "变更包文档缺失：{name}"
+            );
         }
-    }
-
-    #[test]
-    fn create_change_package_template_keeps_existing_prefix() {
-        let (_skills_fixture, skills_root) = skills_source_fixture("skills");
-        let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
-
-        let directory =
-            create_change_package_template(&aggregate_root, &skills_root, "CHANGE-20261109-0001")
-                .expect("创建变更包模板成功");
-
-        assert_eq!(
-            directory
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-            Some("CHANGE-20261109-0001".to_string())
-        );
     }
 
     #[test]
@@ -385,8 +189,9 @@ mod knowledge_base_templates_tests {
         let (_skills_fixture, skills_root) = skills_source_fixture("skills");
         let (_aggregate_fixture, aggregate_root) = aggregate_fixture();
 
-        let first = create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
-            .expect("首次创建成功");
+        let first =
+            create_change_package_template(&aggregate_root, &skills_root, "login-refactor")
+                .expect("首次创建成功");
         std::fs::write(first.join("change-summary.md"), "用户已填写").expect("预置用户内容");
 
         let second =

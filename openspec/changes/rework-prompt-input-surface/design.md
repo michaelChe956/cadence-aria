@@ -21,6 +21,8 @@
 
 ### 缺口二：X2 的 MODIFIED REQ-WSC-06 无 owner
 
+（**本 change 建立时的状态** —— 本 change 即该缺口的承载方；REQ-WSC-06 由本 change **独占**，任何其它 change 不得再 MODIFIED 该 requirement。）
+
 主规格 `openspec/specs/work-item-plan-single-candidate/spec.md:270` 的 REQ-WSC-06 场景群要求 reviewer 复评前获得的只读契约覆盖投影「**内容 SHALL 至少包括**：逐 WI→contract edge 的 required capabilities、所引契约输出 capabilities 与 compatibility_policy」（`:372`），且含「**节点依赖图事实**（depends_on/边/环/重复边/未知 provider）；handoff 消费闭环…；**跨 work item 写范围冲突事实**（exclusive/forbidden 重叠）」（`:377`）。
 
 主方案 §3.4 的方案 E 裁剪把这三段压成 gaps-only + handoff_consumption + 同仓冲突 + PVR ⇒ **与该条字面义务冲突**。X2 裁定：必须带 MODIFIED REQ-WSC-06 delta 重定义投影最小内容，**不得静默裁**；「只留同仓冲突」须**显式收窄 `:377` 的无仓限定措辞并给理由**（跨仓 forbidden/exclusive 在 multi-repo 场景无意义，实测 **29 条写范围冲突中 27 条为跨仓假阳性**）；且「**信息仍可从 CCC 推导**」**不足以**满足「投影 SHALL 至少包括」的字面义务。

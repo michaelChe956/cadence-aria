@@ -28,7 +28,7 @@
 - 不改 provider adapter 的默认档位，不做全局硬编码。
 - 不承诺任何提速幅度、token 降幅或质量结论（无实测）。
 - 不顺手修恢复比较中 `review_rounds` 等其它遗漏项。
-- 不做任何真实 provider 调用或 Case A/B 对照（**当前未授权**）。
+- 本 change **自身**不做任何真实 provider 调用或 Case A/B 对照 —— owner 2026-11-11 的授权落在**本 change 的 tasks W.1**（范围与判据见该条），且**前置依赖**方案 F 先落地；授权**不含** `low` 是否可成为默认（另行立项）与任何提速量级承诺。
 
 ## Decisions
 
@@ -110,7 +110,7 @@
 
 ### 决策 6：env 注入点
 
-- **注入点 = SC author 出口模块**：新增 `src/product/workspace_engine/prompts/sc_author_input.rs`（承接 `prompts.rs:464-548` 的 SC author 段）与 `src/product/workspace_engine/prompts/sc_launch_policy.rs`（把冻结策略转成 caller env：`CLAUDE_CODE_EFFORT_LEVEL=high` 与 G-2/G-3/G-6 三变量，见**决策 6-a**），由 SC author 出口在装配 `StreamingProviderInput.env_vars` 时写入。
+- **注入点 = SC author 出口模块**：新增 `src/product/workspace_engine/prompts/sc_author_input.rs`（承接 `prompts.rs:464-548` 的 SC author 段）与 `src/product/workspace_engine/prompts/sc_launch_policy.rs`（把冻结策略转成 caller env：`CLAUDE_CODE_EFFORT_LEVEL=high` 与 G-2/G-3/G-6 三变量 —— 其中 **G-6 本期不启用**，见**决策 6-a**），由 SC author 出口在装配 `StreamingProviderInput.env_vars` 时写入。
 - **注入点不是** `src/cross_cutting/claude_code_provider/mod.rs`（adapter 硬编码路径，裁决 §3.3 明文否决，会静默影响所有 Claude 角色/使用者）；**注入点也不是** `src/product/workspace_engine/prompts.rs:545`（那是**共用 builder 的空 env 现状位置**，是本 change 要**被替换/分离**的对象，不是注入实现位置）。
 - 注入**只发生在 SC author 出口**；其它出口 env 保持空。
 - 不改 adapter：`gateway_start.rs:648-678` / `provider_gateway.rs:1998-2001` 已保证 caller env 原样透传为显式覆盖层；Claude direct / validated spawn 已消费 `input.env_vars`。
@@ -126,16 +126,19 @@
 |---|---|---|---|
 | **G-2** | `MAX_MCP_OUTPUT_TOKENS=4000` | §6.4：codegraph 原文口径 **36,589** 字符 ≈ 10–13k token；codegraph server 侧**已有 25K 硬闸**，本 env 是**二道闸**，收益是「更早收敛到摘要形态」 | 预计降到 ~16,000 字符（≈ −9k token） |
 | **G-3** | `BASH_MAX_OUTPUT_LENGTH=8000` | §6.4：Bash **18,121** 字符 | 预计降到 ~8,000 字符 |
-| **G-6** | `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` | §6.5：run1 末轮 → run2 间隔 **11.0 分钟** > API key 形态默认 **5 分钟** TTL ⇒ 整段上下文按未缓存全量重发（run2 `in=90,486`、`cache_read=128`） | 预计 `in` 由 90,486 降为 cache read |
+| **G-6** | `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` —— **owner 2026-11-11：本期不启用** | §6.5：run1 末轮 → run2 间隔 **11.0 分钟** > API key 形态默认 **5 分钟** TTL ⇒ 整段上下文按未缓存全量重发（run2 `in=90,486`、`cache_read=128`） | 预计 `in` 由 90,486 降为 cache read（**本期不启用，不作承诺**） |
 
-1. **只压 MCP + Bash**：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`（Read 上限）**本期不设** —— 默认值与截断行为**未确认**，标为**待实测**（Read 读的是政策正文 42 KB，截断可能让模型读不全）。
-2. **reviewer 链路本期不设**：reviewer 走 codex（不吃 claude CLI 的 env），实测 4m12s、**未触发压缩**；其真实消耗被低估 6.06× ⇒ **先修 F-2 再谈优化**。即便将来要设，落点是 `prompts/review_parts/single_candidate_input.inc.rs:315`，**不是** `prompts.rs:419`。
-3. **不误伤其它出口**：Story/Design 通用 author（`prompts.rs:419`）、Story/Design 修订（`prompts/revision.rs:96`）、coding 转换（`coding_models/provider_config.rs:90-106`）**一律不设**（决策 6 的「本期不改的既有出口」清单）。
-4. **收益不得写成确定事实**：TTL 1h 的 cache write 单价高于 5m，且本次 `cache_creation_input_tokens` **恒为 0**（该 provider 未透传 cache write 计数）⇒ **价差无法从本地数据核算，净收益需实测**。G-2/G-3 的字符数同理是**基线对照值**，实施后须复测。
+**五条边界**（主方案 §6.4/§6.5 原文 + owner 2026-11-11 裁决，不得软化）：
 
-**冻结语义（与 G-1 同源）**：这三项 env 属裁决 §1.5 的**冻结执行策略摘要**范畴 ⇒ 同一原运行的初轮、compile/IR/structure 教学、native resume/fresh **共用同一组 env**（裁决 §3.4「由冻结配置生成 env……不是每次启动重新读取宿主或平台新默认」）。**改这三项的值只对新的合法生成授权生效**，不改在途运行、不借改档重置预算。
+1. **G-6（缓存 TTL 1h）本期不启用** —— owner 2026-11-11 裁决。理由：重驱场景净收益为正（省一次全量重发 > 抬一次 write 档的代价）、短间隔场景净亏（5 分钟内的连续调用本就命中 5m 缓存，1h 只把 write 单价抬上去），净效果取决于**调用间隔分布**而本地算不出（`cache_creation_input_tokens` 恒为 0）。**决策条件 = 方案 F（`fix-usage-and-timing-metrics`）落地后** `cache_read`/`cache_creation` 真实计数可观测。**注入点与冻结语义随本组一并就位**，但本期**不得默认注入**该变量。
+2. **只压 MCP + Bash**：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`（Read 上限）**本期不设** —— 默认值与截断行为**未确认**，标为**待实测**（Read 读的是政策正文 42 KB，截断可能让模型读不全）。**owner 2026-11-11 进一步裁决：本期不设且不单独实测，让位给 G-5**（L1/L2 直供后模型不再需要 Read 政策正文 ⇒ Read 量自然下降）。
+3. **reviewer 链路本期不设**：reviewer 走 codex（不吃 claude CLI 的 env），实测 4m12s、**未触发压缩**；其真实消耗被低估 6.06× ⇒ **先修 F-2 再谈优化**。即便将来要设，落点是 `prompts/review_parts/single_candidate_input.inc.rs:315`，**不是** `prompts.rs:419`。
+4. **不误伤其它出口**：Story/Design 通用 author（`prompts.rs:419`）、Story/Design 修订（`prompts/revision.rs:96`）、coding 转换（`coding_models/provider_config.rs:90-106`）**一律不设**（决策 6 的「本期不改的既有出口」清单）。
+5. **收益不得写成确定事实**：TTL 1h 的 cache write 单价高于 5m，且本次 `cache_creation_input_tokens` **恒为 0**（该 provider 未透传 cache write 计数）⇒ **价差无法从本地数据核算，净收益需实测**。G-2/G-3 的字符数同理是**基线对照值**，实施后须复测。
 
-**例外类的有界扩写**：这三项变量不是「档位变量」，注入它们需要把主规格 REQ-ENV-HOST-01 的例外从「单一档位变量」扩为有界类「**受信 provider 控制变量**」（推理档位 / 工具输出上限 / 缓存 TTL 三类）。扩写已在 `specs/session-policy-envelope/spec.md` 落地：三类各自的约束（档位类不依模型标签或宿主设置重算、输出上限类**只收紧**、缓存 TTL 类**不短于** provider 内置默认）、以及凭据/隔离/网络命名空间/宿主路径/模型与账号选择/代理与路由/遥测开关**一律不获例外**。原「平台不构造、不覆盖子进程环境」的义务对其余环境保持不变。
+**冻结语义（与 G-1 同源）**：本组 env 属裁决 §1.5 的**冻结执行策略摘要**范畴（本期实际启用 effort 档 + G-2/G-3 两项输出上限） ⇒ 同一原运行的初轮、compile/IR/structure 教学、native resume/fresh **共用同一组 env**（裁决 §3.4「由冻结配置生成 env……不是每次启动重新读取宿主或平台新默认」）。**改本组变量的值只对新的合法生成授权生效**，不改在途运行、不借改档重置预算。
+
+**例外类的有界扩写**：本组变量（本期启用的两项 + 保留待启用的 G-6）都不是「档位变量」，注入它们需要把主规格 REQ-ENV-HOST-01 的例外从「单一档位变量」扩为有界类「**受信 provider 控制变量**」（推理档位 / 工具输出上限 / 缓存 TTL 三类）。扩写已在 `specs/session-policy-envelope/spec.md` 落地：三类各自的约束（档位类不依模型标签或宿主设置重算、输出上限类**只收紧**、缓存 TTL 类**不短于** provider 内置默认）、以及凭据/隔离/网络命名空间/宿主路径/模型与账号选择/代理与路由/遥测开关**一律不获例外**。原「平台不构造、不覆盖子进程环境」的义务对其余环境保持不变。
 
 **备选与否决**：
 

@@ -10,14 +10,14 @@
 
 本 change 承接两个**尚无 change 承载**的遗留缺口。
 
-**缺口一：author 输入面成本（G-4 / G-5）尚无 owner。** 主方案 §6.6 的 G-4 / G-5 在 §8.0 映射表里**没有对应 change**；这些缺陷都在**平台侧**、不在模型侧：
+**缺口一：author 输入面成本（G-4 / G-5）尚无 owner。**（**本 change 建立时的状态** —— 该缺口由本 change 承接，下文「What Changes」逐项落地。）主方案 §6.6 的 G-4 / G-5 在 §8.0 映射表里**没有对应 change**；这些缺陷都在**平台侧**、不在模型侧：
 
 - G-4：聚合根顶层条目按名排序后截断到上限 12（`context.rs:233-234`），点条目占满名额，**三个业务成员仓全部落榜** —— 实测 `structure` 段仅 276 字符、5 个仓名出现 **0 次**，是模型 9 次探索的**直接诱因**。
 - G-5：`budget_markdown_context`（`prompts.rs:395`）把上下文按固定比例压进同一预算，作者拿不到平台已确认的成员仓摘要与依赖图事实，只能自行 Read/Glob 补事实 —— 实测首轮 author 产出 markdown 前 **17 次串行工具往返**、探索期 **275.4 秒**。
 - 返修轮更贵：`sc_revision.rs:27` 的返修 prompt **逐字节复用首轮完整 prompt**，每轮重付 **32KB 静态规范面**（run1 prompt 实测 **32,609 字符**；author 侧 `cache_read_tokens` 仅 **128**）。
 - 另一侧同样有账：reviewer 侧 input **61,051 token**，而**作者的探索结论没有任何形式传递给 reviewer**。
 
-**缺口二：MODIFIED REQ-WSC-06 无 owner。** 一致性裁决 X2（主方案 §3.4）已裁定：方案 E 的 reviewer 投影裁剪**与主规格 REQ-WSC-06 字面冲突**，必须带 MODIFIED delta，**不得静默裁**；「只留同仓冲突」必须显式收窄主规格 `:377` 的**无仓限定措辞**并给理由（跨仓 forbidden/exclusive 在 multi-repo 场景无意义，实测 **29 条写范围冲突中 27 条为跨仓假阳性**）。处置裁决 §7.2 定案：**承载方须另立 change，不得由 isolate 夹带**。
+**缺口二：MODIFIED REQ-WSC-06 无 owner。**（**本 change 建立时的状态** —— 本 change 即该缺口的承载方，见下文「编号与归属说明」。）一致性裁决 X2（主方案 §3.4）已裁定：方案 E 的 reviewer 投影裁剪**与主规格 REQ-WSC-06 字面冲突**，必须带 MODIFIED delta，**不得静默裁**；「只留同仓冲突」必须显式收窄主规格 `:377` 的**无仓限定措辞**并给理由（跨仓 forbidden/exclusive 在 multi-repo 场景无意义，实测 **29 条写范围冲突中 27 条为跨仓假阳性**）。处置裁决 §7.2 定案：**承载方须另立 change，不得由 isolate 夹带**。
 
 本 change 即承载方。
 

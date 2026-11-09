@@ -45,8 +45,9 @@ WIG（Work Item Generation）链路的 Claude SingleCandidate author 目前**没
 
 ## G-2 / G-3 / G-6：上下文膨胀与缓存 TTL（并入本 change 的 SC author 出口 env 策略）
 
-- **G-2** `MAX_MCP_OUTPUT_TOKENS=4000`、**G-3** `BASH_MAX_OUTPUT_LENGTH=8000`、**G-6** `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`，与 effort 档位**共用同一注入点**（`prompts/sc_launch_policy.rs`）与**同一冻结来源**（该原运行的冻结执行策略），故并入本 change，不另立。
-- **只压 MCP + Bash**：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` 本期**不设**（默认值与截断行为未确认）；**reviewer 出口本期不设**（reviewer 走 codex 不吃 claude CLI 的 env，其真实消耗被低估 6.06× ⇒ 先修 F-2）；Story/Design 通用 author、Story/Design 修订、coding 出口一律不设。
+- **G-2** `MAX_MCP_OUTPUT_TOKENS=4000`、**G-3** `BASH_MAX_OUTPUT_LENGTH=8000`，与 effort 档位**共用同一注入点**（`prompts/sc_launch_policy.rs`）与**同一冻结来源**（该原运行的冻结执行策略），故并入本 change，不另立。
+- **G-6**（`CLAUDE_CODE_PROMPT_CACHE_TTL=1h`）**本期不启用** —— owner 2026-11-11 裁决：重驱场景净收益为正、短间隔场景净亏，净效果取决于调用间隔分布而本地算不出（`cache_creation_input_tokens` 恒为 0）⇒ **决策条件 = 方案 F 落地后可核算**。其注入点与冻结语义随本组一并就位，但本期**不得默认注入**。
+- **只压 MCP + Bash**：`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` 本期**不设**（默认值与截断行为未确认；owner 2026-11-11 进一步裁决**不单独实测、让位给 G-5**）；**reviewer 出口本期不设**（reviewer 走 codex 不吃 claude CLI 的 env，其真实消耗被低估 6.06× ⇒ 先修 F-2）；Story/Design 通用 author、Story/Design 修订、coding 出口一律不设。
 - **收益不作承诺**：TTL 1h 的价差无法从本地数据核算（`cache_creation_input_tokens` 恒为 0）；G-2/G-3 的字符数是基线对照值，实施后须复测。
 
 ## 注入点事实（供主方案对齐）
