@@ -93,6 +93,7 @@ mod gateway_error_mapping;
 mod health;
 mod identity_repair;
 pub mod image_create;
+pub mod knowledge_base;
 pub(crate) mod lifecycle;
 mod logical_codebase_bootstrap;
 mod logical_codebase_capabilities;

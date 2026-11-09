@@ -38,7 +38,9 @@ use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
     ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
 };
-use cadence_aria::product::logical_codebase::provider_gateway::{ProviderRefType, ResumeEvidenceState};
+use cadence_aria::product::logical_codebase::provider_gateway::{
+    ProviderRefType, ResumeEvidenceState,
+};
 use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::error::ApiError;
@@ -63,10 +65,15 @@ struct HomeEnvGuard {
 
 impl HomeEnvGuard {
     fn acquire(home: &Path) -> Self {
-        let lock = HOME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", home) };
-        Self { _lock: lock, previous }
+        Self {
+            _lock: lock,
+            previous,
+        }
     }
 }
 
@@ -123,7 +130,13 @@ struct AllAvailableRunner;
 
 #[async_trait]
 impl BoundedCommandRunner for AllAvailableRunner {
-    async fn run(&self, request: BoundedCommandRequest) -> Result<BoundedCommandResult, cadence_aria::cross_cutting::bounded_command_runner::BoundedCommandError> {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<
+        BoundedCommandResult,
+        cadence_aria::cross_cutting::bounded_command_runner::BoundedCommandError,
+    > {
         let version = match request.executable.as_str() {
             "codex" => "2.0".to_string(),
             "pi" => "0.83.0".to_string(),
@@ -143,10 +156,7 @@ impl BoundedCommandRunner for AllAvailableRunner {
     }
 }
 
-fn with_available_provider_health(
-    state: WebAppState,
-    root: &Path,
-) -> WebAppState {
+fn with_available_provider_health(state: WebAppState, root: &Path) -> WebAppState {
     let runner: Arc<dyn BoundedCommandRunner> = Arc::new(AllAvailableRunner);
     let health = Arc::new(ProviderHealthService::with_dependencies(
         AriaStatePaths::from_workspace_root(root),
@@ -167,7 +177,10 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
             ProviderDialect::ClaudeCodeCliV1,
             ProviderWireDialect::ClaudeCodeStreamJson,
         ),
-        ProviderRefType::Codex => (ProviderDialect::CodexCliV1, ProviderWireDialect::CodexAppServerRpc),
+        ProviderRefType::Codex => (
+            ProviderDialect::CodexCliV1,
+            ProviderWireDialect::CodexAppServerRpc,
+        ),
         ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
         ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
     };
@@ -205,7 +218,9 @@ fn confirmed_capability_record(provider_type: ProviderRefType) -> ProviderCapabi
 /// 先物化 bootstrap 行，再把 ClaudeCode 覆盖写为 `Confirmed`。
 fn seed_confirmed_claude(paths: &ProductAppPaths) {
     let store = ProviderCapabilityStore::new(paths.clone());
-    store.ensure_bootstrap().expect("bootstrap capability records");
+    store
+        .ensure_bootstrap()
+        .expect("bootstrap capability records");
     store
         .upsert(&confirmed_capability_record(ProviderRefType::ClaudeCode))
         .expect("seed confirmed claude capability");
@@ -232,15 +247,15 @@ fn seed_skills(home: &Path) {
         std::fs::write(dir.join("SKILL.md"), format!("# {skill}\n")).expect("write SKILL.md");
     }
     // 初始化输入模板源（knowledge-base-bootstrap/user-input）。
-    let bootstrap = home
-        .join(".agents/Cadence-skills/cadence-init/skills/knowledge-base-bootstrap/user-input");
+    let bootstrap =
+        home.join(".agents/Cadence-skills/cadence-init/skills/knowledge-base-bootstrap/user-input");
     std::fs::create_dir_all(&bootstrap).expect("create bootstrap source");
     for name in ["base-info.md", "api-scope.md"] {
         std::fs::write(bootstrap.join(name), "# 模板\n").expect("write template");
     }
-    // 变更包模板源（knowledge-base-update/user-input）。
+    // 变更包模板源（knowledge-base-update/user-input/change-package/）。
     let update = home
-        .join(".agents/Cadence-skills/cadence-init/skills/knowledge-base-update/user-input");
+        .join(".agents/Cadence-skills/cadence-init/skills/knowledge-base-update/user-input/change-package");
     std::fs::create_dir_all(&update).expect("create update source");
     for name in [
         "change-summary.md",
@@ -299,7 +314,6 @@ update:
   last_change_package: {}
   processed_packages: []
 ";
-
 struct KnowledgeBaseFixture {
     _root: TempDir,
     _aggregate_root: TempDir,
@@ -326,7 +340,16 @@ impl KnowledgeBaseFixture {
         run_git(&member, &["add", "."]);
         run_git(
             &member,
-            &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"],
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
         );
 
         let aggregate_root_path = aggregate_root.path().to_path_buf();
@@ -359,6 +382,42 @@ impl KnowledgeBaseFixture {
         .await;
         assert_eq!(status, StatusCode::OK, "{logical}");
         let lc_id = logical["id"].as_str().expect("logical id").to_string();
+        // 经登记端点注册成员（manifest/members/checkouts 落 per-LC 子树；
+        // LC create 只落 record，manifest 由登记流程写入——预检①的
+        // owning_project 反查依赖它）。
+        let (status, preflight) = request_json(
+            &app,
+            Method::POST,
+            &format!(
+                "/api/projects/project_0001/logical-codebases/{lc_id}/registrations/preflight"
+            ),
+            json!({
+                "aggregate_root": aggregate_root_path,
+                "candidate_paths": [],
+                "auto_discover": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preflight:?}");
+        let preflight_id = preflight["preflight_id"]
+            .as_str()
+            .expect("preflight id")
+            .to_string();
+        let (status, batch) = request_json(
+            &app,
+            Method::POST,
+            &format!("/api/projects/project_0001/logical-codebases/{lc_id}/registrations"),
+            json!({
+                "preflight_id": preflight_id,
+                "aggregate_root": aggregate_root_path,
+                "confirmed_paths": [
+                    aggregate_root_path.join("alpha").display().to_string(),
+                ],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{batch}");
+        assert_eq!(batch["status"], "completed");
 
         seed_confirmed_claude(&paths);
 
@@ -385,8 +444,11 @@ impl KnowledgeBaseFixture {
 
     /// 预检①：根规则入口文件 + LC scope 下的 bootstrap 政策 artifact。
     fn seed_aggregate_initialization(&self) {
-        std::fs::write(self.aggregate_root.join("AGENTS.md"), "# aggregate root rules\n")
-            .expect("write AGENTS.md");
+        std::fs::write(
+            self.aggregate_root.join("AGENTS.md"),
+            "# aggregate root rules\n",
+        )
+        .expect("write AGENTS.md");
         let store = LogicalCodebaseStore::for_lc(self.paths.clone(), self.lc_id.clone());
         let manifest = store
             .load_lc_manifest(PROJECT_ID, &self.lc_id)
@@ -401,8 +463,11 @@ impl KnowledgeBaseFixture {
     fn seed_user_inputs(&self) {
         let user_input = self.kb_root().join("user-input");
         std::fs::create_dir_all(&user_input).expect("create user-input");
-        std::fs::write(user_input.join("base-info.md"), BASE_INFO_ALL_NOT_APPLICABLE)
-            .expect("write base-info");
+        std::fs::write(
+            user_input.join("base-info.md"),
+            BASE_INFO_ALL_NOT_APPLICABLE,
+        )
+        .expect("write base-info");
     }
 
     /// 预检④⑤：合法 complete 的 manifest.yaml。
@@ -421,8 +486,15 @@ impl KnowledgeBaseFixture {
     /// 直接经 durable store 造一条 Running operation（文件面运行期禁写的种子）。
     fn seed_running_operation(&self) {
         let now = "2026-11-09T00:00:00Z".to_string();
+        // store 校验 operation_id 必须由 (project, lc, idempotency_key) 派生。
+        let operation_id =
+            cadence_aria::product::logical_codebase::knowledge_base::operation::derive_operation_id(
+                PROJECT_ID,
+                &self.lc_id,
+                "seed",
+            );
         let operation = KnowledgeBaseOperation {
-            operation_id: "seeded_running_op".to_string(),
+            operation_id,
             project_id: PROJECT_ID.to_string(),
             logical_codebase_id: self.lc_id.clone(),
             kind: KnowledgeBaseOperationKind::Bootstrap,
@@ -469,7 +541,10 @@ async fn create_bootstrap_operation_returns_pollable_operation() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    let operation_id = body["operation_id"].as_str().expect("operation_id").to_string();
+    let operation_id = body["operation_id"]
+        .as_str()
+        .expect("operation_id")
+        .to_string();
     assert!(!operation_id.is_empty());
     assert_eq!(body["kind"], "bootstrap");
     assert_eq!(body["status"], "running");
@@ -512,13 +587,23 @@ async fn create_update_operation_rejected_when_change_package_invalid() {
         }),
     )
     .await;
-    assert!(status.is_client_error(), "expected 4xx, got {status}: {body}");
-    assert_eq!(body["code"], "knowledge_base_change_package_invalid", "{body}");
-    let violations = body["details"]["violations"].as_array().expect("violations");
+    assert!(
+        status.is_client_error(),
+        "expected 4xx, got {status}: {body}"
+    );
+    assert_eq!(
+        body["code"], "knowledge_base_change_package_invalid",
+        "{body}"
+    );
+    let violations = body["details"]["violations"]
+        .as_array()
+        .expect("violations");
     assert!(!violations.is_empty());
-    assert!(violations.iter().all(|violation| violation["code"]
-        .as_str()
-        .is_some_and(|code| code.starts_with("knowledge_base_change_package_"))));
+    assert!(violations.iter().all(|violation| {
+        violation["code"]
+            .as_str()
+            .is_some_and(|code| code.starts_with("knowledge_base_change_package_"))
+    }));
 
     // 前置检查失败是请求期产物：不产生 operation。
     let (status, active) = request_json(
@@ -545,10 +630,12 @@ async fn create_operation_rejected_when_aggregate_initialization_missing() {
         json!({"kind":"bootstrap","idempotency_key":"kb-bootstrap-missing"}),
     )
     .await;
-    assert!(status.is_client_error(), "expected 4xx, got {status}: {body}");
+    assert!(
+        status.is_client_error(),
+        "expected 4xx, got {status}: {body}"
+    );
     assert_eq!(
-        body["code"],
-        "knowledge_base_requires_aggregate_initialization",
+        body["code"], "knowledge_base_requires_aggregate_initialization",
         "{body}"
     );
 
@@ -671,7 +758,10 @@ async fn file_read_outside_root_returns_4xx() {
         json!({}),
     )
     .await;
-    assert!(status.is_client_error(), "expected 4xx, got {status}: {body}");
+    assert!(
+        status.is_client_error(),
+        "expected 4xx, got {status}: {body}"
+    );
     assert_eq!(body["code"], "knowledge_base_file_path_escapes");
 
     let (status, body) = request_json(
@@ -681,7 +771,10 @@ async fn file_read_outside_root_returns_4xx() {
         json!({"path":"../../etc/passwd","content":"x"}),
     )
     .await;
-    assert!(status.is_client_error(), "expected 4xx, got {status}: {body}");
+    assert!(
+        status.is_client_error(),
+        "expected 4xx, got {status}: {body}"
+    );
     assert_eq!(body["code"], "knowledge_base_file_path_escapes");
 }
 

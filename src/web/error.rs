@@ -400,6 +400,38 @@ impl IntoResponse for ApiError {
             }
             // C2 oracle C-2a：验证处理记录缺失（决定面）。
             "coding_verification_triage_not_found" => StatusCode::NOT_FOUND,
+            // LC 知识库模块（Task 7）：前置检查失败是请求期产物（422，零副作用），
+            // 单飞/冲突/运行期禁写 409，operation 缺失 404，能力拒绝 403，
+            // 文件面按 Task 5 错误形态（越界 400 / 缺失 404 / 白名单外 422 /
+            // 超限 413）。一律 4xx，绝不落 500。
+            "knowledge_base_requires_aggregate_initialization"
+            | "knowledge_base_skills_unavailable"
+            | "knowledge_base_inputs_incomplete"
+            | "knowledge_base_manifest_missing"
+            | "knowledge_base_manifest_version_unsupported"
+            | "knowledge_base_not_initialized"
+            | "knowledge_base_manifest_invalid"
+            | "knowledge_base_change_package_invalid"
+            | "knowledge_base_change_package_missing_document"
+            | "knowledge_base_change_package_field_empty"
+            | "knowledge_base_change_package_reason_missing"
+            | "knowledge_base_change_package_domain_matrix_invalid"
+            | "knowledge_base_change_package_sensitive_content"
+            | "knowledge_base_change_package_commit_unresolvable"
+            | "knowledge_base_change_package_scope_mismatch"
+            | "knowledge_base_write_scope_violation" => StatusCode::UNPROCESSABLE_ENTITY,
+            "knowledge_base_change_package_path_invalid"
+            | "knowledge_base_file_path_escapes"
+            | "invalid_knowledge_base_request" => StatusCode::BAD_REQUEST,
+            "knowledge_base_operation_not_found" | "knowledge_base_file_not_found" => {
+                StatusCode::NOT_FOUND
+            }
+            "knowledge_base_file_conflict"
+            | "knowledge_base_operation_running"
+            | "other_knowledge_base_running" => StatusCode::CONFLICT,
+            "knowledge_base_file_not_editable" => StatusCode::UNPROCESSABLE_ENTITY,
+            "knowledge_base_file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+            "knowledge_base_provider_capability_denied" => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()

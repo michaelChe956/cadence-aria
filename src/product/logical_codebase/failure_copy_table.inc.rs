@@ -42,14 +42,15 @@ pub const LAYOUT_RULES: &[LayoutRule] = &[
 ];
 
 fn layout_rule_of(key: &str) -> Option<&'static LayoutRule> {
-    LAYOUT_RULES
-        .iter()
-        .find(|rule| rule.codes.contains(&key))
+    LAYOUT_RULES.iter().find(|rule| rule.codes.contains(&key))
 }
 
 /// 内部码 → 对外稳定码（对外码是 canonical key，内部码只作反查）。
 const ALIASES: &[(&str, &str)] = &[
-    ("member_path_outside_root", "aggregate_root_member_outside_root"),
+    (
+        "member_path_outside_root",
+        "aggregate_root_member_outside_root",
+    ),
     (
         "member_symlink_escape",
         "aggregate_root_member_symlink_escape",
@@ -702,6 +703,197 @@ const TABLE: &[Entry] = &[
         "给这条 issue 选择一个逻辑代码库归属（存量 issue 在编辑里补选），保存后重试；还没有可用的逻辑代码库时，先把成员登记进逻辑代码库再回来创建。",
         FailureTriage::Environment,
     ),
+    // ── LC 知识库模块（Task 7：HTTP 面稳定码；明细见 details 的
+    //     missing / violations / paths 字段）──
+    (
+        "knowledge_base_requires_aggregate_initialization",
+        "聚合初始化还没完成，先完成它才能建知识库",
+        "知识库建立在聚合初始化的成果之上；当前逻辑代码库的根规则入口或已发布政策 artifact 缺失，证明不了「聚合初始化已完成」。",
+        "回到逻辑代码库管理先完成聚合初始化，成功后再发起知识库建立。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_skills_unavailable",
+        "被选 provider 缺知识库技能",
+        "被选 provider 对应的 skill 层缺少 7 个 knowledge-base 技能（缺哪些见下方明细），通常是 Cadence-skills 未安装或版本过旧。",
+        "到 Provider 管理里安装或更新 Cadence-skills 后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_inputs_incomplete",
+        "初始化输入还没填完",
+        "user-input/ 下按六领域状态判定仍有必填文件缺失（缺哪些见下方明细）；「不适用」的领域不要求，其余一律必填。",
+        "把缺失的输入文件补齐（或把对应领域标成「不适用」并写明原因）后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_manifest_missing",
+        "知识库清单不存在",
+        "cadence/knowledge-base/manifest.yaml 不存在，知识库尚未建立或清单被移走。",
+        "先完成知识库建立（bootstrap），再执行更新操作。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_manifest_version_unsupported",
+        "知识库清单版本不受支持",
+        "manifest.yaml 的 schema_version 不是 \"4.0\"（实际取值见下方明细），当前技能契约只支持 Schema 4.0。",
+        "用受支持版本的技能重建知识库，或把清单恢复为 Schema 4.0 形态。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_not_initialized",
+        "知识库初始化未完成",
+        "manifest.yaml 的初始化状态不是 complete/passed，或必需阶段缺失、乱序等结构不变量不满足——按未完成拒绝，不指望下游兜底。",
+        "回到知识库建立流程把初始化跑完（global-validation 通过）后再更新。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_manifest_invalid",
+        "知识库清单内容非法",
+        "manifest.yaml 在场但读不出合法内容，按「版本未知」降级后被前置检查拒绝。",
+        "修复或重建 manifest.yaml（Schema 4.0 形态）后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_invalid",
+        "变更包没过平台门禁",
+        "变更包的机械门禁有违规（逐条见下方明细：哪份文档、哪个字段、什么原因），门禁不过不创建更新操作。",
+        "按明细逐条修复变更包内容后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_path_invalid",
+        "变更包路径或标识非法",
+        "变更包路径/标识必须是知识库内 user-input/updates/ 下的相对目录，只允许 [A-Za-z0-9._-]，不含路径分隔符或「..」。",
+        "改用合法的变更包路径或标识后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_missing_document",
+        "变更包缺必备文档",
+        "变更包必备的五份文档（change-summary / code-change / database-change / configuration-change / verification）有缺失或内容为空（哪份见下方明细）。",
+        "把缺失的文档按模板补齐后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_field_empty",
+        "变更包必填字段为空",
+        "变更包文档里的必填字段为空（哪份文档、哪个字段见下方明细）。",
+        "按模板把空字段填好后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_reason_missing",
+        "变更包缺少变更原因",
+        "变更包没有写清楚这次变更的原因，平台门禁要求每个变更包都有明确动机。",
+        "在变更包里补充变更原因后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_domain_matrix_invalid",
+        "领域变更矩阵填写非法",
+        "change-summary.md 的领域变更矩阵取值不合法（哪个格子、什么问题见下方明细）。",
+        "按矩阵模板修正领域取值后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_sensitive_content",
+        "变更包疑似包含敏感内容",
+        "变更包里扫描到密钥/令牌类敏感形态（位置见下方明细，明细不回显命中值原文）。",
+        "把敏感内容移出变更包（改用环境变量或密钥管理）后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_commit_unresolvable",
+        "变更包引用的提交无法解析",
+        "变更包里的 Merge Request 地址或编号在任一成员仓都解析不出提交（全部成员仓尝试失败，含成员列表为空的情况）。",
+        "确认提交编号已推送到成员仓，或修正编号后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_change_package_scope_mismatch",
+        "变更范围与清单口径不一致",
+        "变更包声明的领域范围与知识库 manifest 的 scope 口径不一致（哪个领域见下方明细）。",
+        "让变更包的领域声明与知识库 scope 一致后重新提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_file_conflict",
+        "文件已被别人改过，请先刷新",
+        "提交的 base_digest 与服务端当前内容摘要不一致——写入窗口内文件内容发生了变化，乐观并发拒绝覆盖。",
+        "重新读取该文件拿到最新内容与摘要后再编辑提交。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_operation_running",
+        "知识库操作运行中，稍后再试",
+        "这条逻辑代码库有知识库 operation 正在跑（建立/更新互斥），运行期文件写入与状态变更被暂停。",
+        "等当前操作结束后重试，或先取消在跑的操作。",
+        FailureTriage::RetryOnly,
+    ),
+    (
+        "knowledge_base_operation_not_found",
+        "知识库操作不存在",
+        "按编号找不到这条逻辑代码库的知识库 operation（从未创建，或编号不属于这个逻辑代码库）。",
+        "从知识库面板重新发起或刷新操作列表。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_write_scope_violation",
+        "provider 越界写入，操作已判失败",
+        "provider turn 前后的快照差分发现允许面之外的新增/修改/删除（越界路径见下方明细）；允许面只有 cadence/knowledge-base、cadence/project-rules 与根 CLAUDE.md/AGENTS.md。",
+        "检查越界改动并恢复工作区后，重新发起知识库操作。",
+        FailureTriage::Environment,
+    ),
+    (
+        "other_knowledge_base_running",
+        "已有知识库操作在跑，不能重复发起",
+        "同一条逻辑代码库的知识库建立与更新互斥（单飞），已有 operation 在跑时拒绝新启（在跑操作编号见下方明细）。",
+        "等在跑的操作结束，或先到面板取消它。",
+        FailureTriage::RetryOnly,
+    ),
+    (
+        "knowledge_base_provider_capability_denied",
+        "provider 拒绝了知识库写入分格",
+        "候选 provider 在真实调用里拒绝了知识库所需的 CodingTargetWrite 分格（被拒 provider 见下方明细）。",
+        "按诊断修掉拒绝原因（授权/信任/版本），或换一家 provider 后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_file_path_escapes",
+        "路径越出知识库根",
+        "文件路径是绝对路径、含「..」或经符号链接逃出知识库根，读取/写入授权只覆盖知识库根内部。",
+        "改用知识库内的相对路径重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_file_not_found",
+        "文件不存在",
+        "目标文件不在知识库内或不可读（知识库尚未建立时根目录不存在也落此处）。",
+        "确认路径无误；尚未建立知识库的先完成建立。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_file_not_editable",
+        "该路径不在可编辑白名单内",
+        "写入白名单只覆盖知识库内的 *.md 与 user-input/** 下的 *.sql，机器管理文件（如 manifest.yaml）不可经文件面改写。",
+        "只编辑白名单内的文档文件。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_file_too_large",
+        "文件超过大小上限",
+        "单文件读取/写入上限为 1 MiB，目标文件超限。",
+        "拆分文档或精简内容后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "invalid_knowledge_base_request",
+        "知识库请求参数不合法",
+        "请求体缺了必填字段或取值非法（kind 只能是 bootstrap/update；update 必须带 package_path；idempotency_key 不能为空）。",
+        "按端点契约修正请求体后重试。",
+        FailureTriage::Environment,
+    ),
 ];
 
 /// 家族模板：码表未收但语义可判定的族（仍给出完整三段，不落到未知兜底）。
@@ -759,4 +951,3 @@ fn table_entry(key: &str) -> Option<Entry> {
                 .map(|(_, entry)| *entry)
         })
 }
-
