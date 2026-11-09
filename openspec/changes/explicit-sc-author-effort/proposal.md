@@ -2,7 +2,7 @@
 
 > 状态：**草案 —— owner 已批准决策三全部推荐**（见 `cadence/designs-reviews/2026-11-08_决策_WIG六项owner裁决_v1.0.md` §3.1–§3.5）。**本 change 只立项，不实施**：`tasks.md` 是待办清单，不是已完成记录。
 > 依据：决策报告 §3（effort 默认 high、独立内部承载、恢复冻结）、主方案 `cadence/designs/2026-11-08_技术方案_WIG生成加速与收敛性加固_v1.0.md` 的 G 工作包。
-> 需求编号：本 change 占用 **REQ-WSC-29**（WSC-26/27 已被归档 change `2026-11-08-gate-card-resolved-and-inflight-state` 占用；WSC-28 归 `bound-sc-generation-teaching`；WSC-30/31 归 `isolate-plan-criterion-namespace`）。
+> 需求编号：本 change 占用 **REQ-WSC-29**（WSC-26/27 已被归档 change `2026-11-08-gate-card-resolved-and-inflight-state` 占用；WSC-28 归 `bound-sc-generation-teaching`；WSC-30/31 归 `isolate-plan-criterion-namespace`），并 **MODIFIED `session-policy-envelope` 的 REQ-ENV-HOST-01**（新增受信执行策略变量例外，见「范围」）。
 
 ## Why
 
@@ -39,8 +39,14 @@ WIG（Work Item Generation）链路的 Claude SingleCandidate author 目前**没
 
 | 能力 | 变更 |
 |---|---|
-| `work-item-plan-single-candidate` | **ADDED** REQ-WSC-29（SC author 显式 effort 冻结策略：默认 high、作用域收窄、冻结贯穿教学/resume/fresh、存量未知披露、requested/effective 分离） |
+| `work-item-plan-single-candidate` | **ADDED** REQ-WSC-29（SC author 显式 effort 冻结策略：默认 high、作用域收窄、冻结贯穿教学/resume/fresh、存量未知披露、requested/effective 分离；含「原运行 vs 真实新生成」界定与 policy_version 不可识别时的零启动 fail-closed） |
 | `workspace-session-resume-recovery` | **MODIFIED**「明确 fresh 只换 native 会话」（内部执行策略亦按原运行冻结；fresh 不换 effort、不重置授权/预算；存量无冻结事实不追溯改档，下一次真实新生成才用新默认；兼容例外写入） |
+| `session-policy-envelope` | **MODIFIED** REQ-ENV-HOST-01（追加**受信执行策略变量例外**：provider 官方声明的单一档位变量 MAY 在**调用方显式 env map 覆盖层**内设定为受控值；其余环境、凭据、隔离与网络命名空间不受影响。主规格原文与既有场景逐字保留） |
+
+## 注入点事实（供主方案对齐）
+
+- 注入点是 **SC author 出口模块**：新增 `prompts/sc_author_input.rs` + `prompts/sc_launch_policy.rs`（冻结策略 → caller env `CLAUDE_CODE_EFFORT_LEVEL`）。
+- **不是** `claude_code_provider/mod.rs`（adapter 硬编码路径已被裁决 §3.3 否决），**不是** `workspace_engine/prompts.rs:545`（那是共用 builder 的空 env **现状位置**，是本 change 要被分离的对象，不是注入实现位置）。
 
 ## OpenSpec 阈值判定
 
@@ -58,6 +64,7 @@ WIG（Work Item Generation）链路的 Claude SingleCandidate author 目前**没
 
 ## 跨 change 登记
 
-- 与 `bound-sc-generation-teaching` 共享面：SC 生成教学链的**运行绑定摘要**需把冻结策略纳入冻结输入，MUST NOT 用当前默认覆盖旧绑定 —— 该共享面与串行归属见本 change `design.md` 的「共享面与排序」。
-- 与 `isolate-plan-criterion-namespace` 无共享写面（该 change 占用 REQ-WSC-30/31 与 `work-item-typed-outcome-policy`）。
-- 与 `mechanicalize-plan-compile-repair` / `fix-author-rewrite-quota-pool` 无共享写面；本 change MUST NOT 修改这两个 change 目录的任何文件。
+- 与 `bound-sc-generation-teaching` 共享面（次序 **bound → effort**）：SC 生成教学链的**运行绑定摘要**需把冻结策略纳入冻结输入，MUST NOT 用当前默认覆盖旧绑定 —— **该冻结输入摘要字段由 bound 的 REQ-WSC-28B / D1 提供，本 change 只负责填值**；完整共享面与串行归属见本 change `design.md` 的「共享面与排序」。
+- 与 `isolate-plan-criterion-namespace` 共享面：仅 `lifecycle_store/workspace.rs` 的**创建 / 接管段**（次序 **effort → isolate**；isolate 改 `run_history` 创建点与代际）。该 change 另占用 REQ-WSC-30/31 与 `work-item-typed-outcome-policy`。
+- 与 `close-contract-findings-before-pass` **无直接共享写面**（close 的写面为 `work_item_plan_policy/classify.rs`、`review/routing*.rs` / `review/closure_policy.rs` 与 REQ-WSC-17 / REQ-TOP-07 delta）。
+- 与 `mechanicalize-plan-compile-repair` / `fix-author-rewrite-quota-pool` **经决策六拆分后**不共享写面（mechanicalize 的代码面含 `run/single_candidate.rs`，须先落决策六的纯移动拆分）；本 change MUST NOT 修改这两个 change 目录的任何文件。

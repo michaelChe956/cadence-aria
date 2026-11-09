@@ -18,6 +18,7 @@ plan 域的验收标准 ID（当前统一写成 `AC-001`）与 spec 域的验收
 - **spec 域 / plan 域职责分界**：spec 域 `REQ-*` / `NFR-*` / `AC-*` 只服务 Traceability 与 `requirement_refs`；plan 域 ID 只服务本 Work Item 的 criterion、`done_when_refs` 与 `reviewer_check_refs`。
 - **服务端命名策略元数据**：新增 server-only 的命名策略（`WicV1` / `LegacyPreserved`），在真实 SC 首次生成准入时以 CAS 冻结；存量 lineage 冻结为 `LegacyPreserved`，未知历史不得伪装成新生；客户端不得以任何入参绕过。
 - **存量保 ID、新生强制 WIC**：`LegacyPreserved` lineage 的修订保留基线既有 AC ID，新增 criterion 必须用 WIC；不提供「仅前缀升级」替换整组身份的操作，也不批量 AC→WIC，不改旧 immutable record 与其 hash。
+- **删除 plan 域 `forged_done_when` 伪造误判**：SC handler 保留真实 spec 域 `forged` 检查（`requirement_refs` 不在 spec 注册集仍拒），删除把 plan 域 criterion / done_when 引用拿去 spec 注册集判伪造的 `forged_done_when` 及其混合错误文案——本 WI 引用合法性由既有 canonical 成员校验负责；`LegacyPreserved` lineage 的 plan 域 `AC-001` 不在 spec 注册集时不再被判伪造，真实 spec 域伪造仍拒。
 - **指纹代际隔离**：新代际使用带 `WIC-` 的稳定 ID 前缀集合，抽取与删除走同一套 token 扫描（最长前缀先、token 前后不得紧连字母/数字/下划线）；原 v2 身份配方逐字保留，仅用于读冻结的旧历史。
 - **代际随会话固定**：`RunHistory` 增可缺省的指纹代际字段（缺省为 v2，旧 v2 记录序列化时可省略）；新建受控会话显式写入新代际；review scope 增可缺省版本，v2 的 scope 摘要配方逐字不变，新代际 scope 绑定版本与 original 集合；版本不一致按既有结构性协议错误处理，不降级为人工门。
 - **compiler version 本轮不 bump**：双前缀是兼容接受新字面形式，旧输入的 lower 结果与内容寻址不漂移；命名纪律由独立命名策略承担、算法代际由独立版本承担，都不借编译器版本表达。
@@ -52,6 +53,7 @@ plan 域的验收标准 ID（当前统一写成 `AC-001`）与 spec 域的验收
 - **策略面（指纹/评审）**：稳定 ID 抽取与剥离的 token 扫描规则、finding identity 配方分代、`RunHistory` 与 review scope 的可缺省版本字段、scope 摘要配方分代。
 - **持久化面**：工作项计划实体上的 server-only 命名策略元数据、SC 首次生成准入的 CAS 冻结点、会话创建与接管路径的代际写入。
 - **守卫面**：新候选编译与提升边界上的命名域守卫（新模块），以及人工修订路径上的同一规则复用。
+- **handler 面**：`run/single_candidate.rs` 删除 `forged_done_when` 误判与混合错误文案（`:404-437`）、`:458-487` 教学分清 spec / plan 域；`workspace_engine/prompts.rs:244-249` 教学分域；`work_item_split_engine/prompts.rs:185,306` ID 纪律加入 WIC（`:306` spec Traceability `AC-` 示例不替换）。
 - **教学与 fixture**：SC author 教学材料与提示中的 ID 纪律、编译器 fixture 与 prompt 契约测试的部分样例（真实历史 AC fixture 保留为兼容用例，不全仓替换）。
 - **兼容影响**：不 bump compiler version；旧 session、旧 lineage、旧 immutable record 与其 hash 全部保持原样可读可修订。
 - **不在本 change 范围内**：其余 WIG 工作包（教学窗口、机械处置、评审闭合、effort、计量）由各自 change 承担；与 `mechanicalize-plan-compile-repair` 的共享文件归属见 `design.md` 的「共享面与排序」。

@@ -5,6 +5,17 @@
      与未实施 change fix-error-experience-structural-governance 的 REQ-SG-02A 的关系见本 change design.md「遗留裁决 O1」：
      本 change 不新增对已持久或已评审 source 的直接改写。 -->
 
+<!-- 2026-11-09 补：归档时 `openspec archive` 会为新建 capability 写入
+     「TBD - created by archiving change ...」的 Purpose 占位，导致归档后
+     `openspec validate --specs --strict` 因 Purpose 占位告警变红。此处按本 change
+     自身的 Why/What Changes 补写 Purpose；语义不新增、不放宽任何 requirement。
+     注：本注释必须留在 `## Purpose` 之前 —— 归档器要求 Purpose 段体内不含
+     HTML 注释（含注释即判为「不可读」而放弃承接，退回 TBD 占位）。 -->
+
+## Purpose
+
+本 capability 规定 Work Item Plan 生成过程中**可机械判定的失败**由平台承担处置、模型只负责业务内容的合同边界：把契约失败分为 L0 确定性自修 / L1 结构投影补全 / L2 精确缺口 / L3 业务取舍四层，钉住「L0/L1 不引入新业务事实、不改已持久或已评审 source、不删 canonical Inputs 边」三条红线，并要求计划意图分支的等价解析、环诊断带来源、Stage1 与 Final Compile 的图判定一致、以及编译失败必须一次问清（`owner_question` + ≥2 `owner_options`）。目的是消除「把机械契约交给模型一次写对」的责任错配，使机械失败不再只有「重写整份文档」一条出口。
+
 ## ADDED Requirements
 
 ### Requirement: 机械失败的四层处置与三条红线（REQ-CRP-01）

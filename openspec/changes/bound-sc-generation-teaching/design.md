@@ -5,12 +5,12 @@
 **动机见 `proposal.md` 的 Why**，本节只列约束设计的事实。
 
 - **契约面**：`openspec/specs/work-item-plan-single-candidate/spec.md:478` 的 REQ-WSC-09 明文「每 candidate 至多一次额外驱动」；同文件 `:885` 的 REQ-WSC-25 要求每次候选生成/编译追加流水且**流水写失败不得阻断**。`openspec/specs/workspace-structural-governance/spec.md:80` 的 REQ-SG-05 要求「实际 start MUST 有 ledger」「上限/授权无法证明则零额外调用」，其逐载体表的「SC 初轮」行写明「仅已批准 RepairOnce 才原+1=2，否则 1；不伪造人工 turn」。
-- **实现面现状**：handler `src/web/workspace_ws_handler/run/single_candidate.rs:1211-1212` 用两个进程内布尔量 `compile_ir_rerun_used` / `structure_rerun_used` 表示两个互不挤占的槽（`:1222`、`:1306`、`:1389` 消费，`:1397` 置位），最坏造成原调用之外两次额外驱动，且它们随进程消失——重连、恢复或同请求重放即可重新获得机会。
-- **账本面现状**：`src/product/models/workspace.rs:843` 的 `provider_start_ledger` 是唯一的实际启动账；`src/product/work_item_plan_policy/types.rs:166` 的 `is_actual_launch_observation` 已要求 `started && provider.is_some() && started_at.is_some()`，即旧预留占位不构成实际启动证据。`src/product/lifecycle_store/workspace.rs:899` 的 `claim_provider_start_with_details` 对同一 key 直接返回 `false`，**只拒绝不回填**，也没有上限语义。
-- **占位与派生的现状**：`src/product/lifecycle_store/workspace_single_candidate.rs:129` 的 `reserve_single_candidate_provider_start` 在预留时即写入 `started: true, provider: None, started_at: None` 的占位条目；`src/product/workspace_engine/single_candidate.rs:155-157` 用 `provider_start_ledger.len()` 反推「当前 author attempt」——这是隐式的长度语义，不是显式的原授权窗口语义。
+- **实现面现状**：handler `src/web/workspace_ws_handler/run/single_candidate.rs:1211-1212` 用两个进程内布尔量 `compile_ir_rerun_used` / `structure_rerun_used` 表示两个互不挤占的槽（`:1222`、`:1306`、`:1389` 消费，`:1227`、`:1307`、`:1397` 置位——`compile_ir_rerun_used` 亦在 `:1307` 置位），最坏造成原调用之外两次额外驱动，且它们随进程消失——重连、恢复或同请求重放即可重新获得机会。
+- **账本面现状**：`src/product/models/workspace.rs:844` 的 `provider_start_ledger` 是唯一的实际启动账；`src/product/work_item_plan_policy/types.rs:166` 的 `is_actual_launch_observation` 已要求 `started && provider.is_some() && started_at.is_some()`，即旧预留占位不构成实际启动证据。`src/product/lifecycle_store/workspace.rs:899` 的 `claim_provider_start_with_details` 对同一 key 直接返回 `false`，**只拒绝不回填**，也没有上限语义。
+- **占位与派生的现状**：`src/product/lifecycle_store/workspace_single_candidate.rs:127` 的 `reserve_single_candidate_provider_start` 在预留时（占位写入实为 `:197-203`）即写入 `started: true, provider: None, started_at: None` 的占位条目（占位值须改为 `started=false`，见 D4 与 tasks 2.2）；`src/product/workspace_engine/single_candidate.rs:155-157` 用 `provider_start_ledger.len()` 反推「当前 author attempt」——这是隐式的长度语义，不是显式的原授权窗口语义。
 - **A 池载体**：`src/product/work_item_plan_policy/evaluate.rs:203-222` 的 `RepairReservation` 只有 `token / owner_session_id / owner_run_id / provider_start_idempotency_key / state / commit_id`，既无所需 hash/上限，也已承担 A 池接力。
 - **授权事实面**：`src/product/planning_failure.rs:310-338` 已有 `StructuralAuthorizationFacts { authorization_kind: GenerationRun, attempt_no, max_attempts, active, anchor_waiting, launch_unknown, ... }`，`:392-435` 的 `classify_failure_set` 已是「混合集合整批裁决」的纯函数。
-- **物理启动口**：`src/web/workspace_ws_handler/run/gateway_start.rs:585` 的 `start_work_item_plan_author` 是该 path 唯一的物理启动口（七个 caller 共用，注释已列明含教学重驱）；`src/cross_cutting/provider_resources.rs:1409-1418` 的 `release_after_session_tail` 会在会话尾部注销资源登记。
+- **物理启动口**：`src/web/workspace_ws_handler/run/gateway_start.rs:583` 的 `start_work_item_plan_author` 是该 path 唯一的物理启动口（caller 覆盖面引用 `:594` 注释「七个 caller 共用」的说法而非本文断言；实测非测试调用点为 11 处）；`src/cross_cutting/provider_resources.rs:1409-1418` 的 `release_after_session_tail` 会在会话尾部注销资源登记。
 - **接管面**：`src/product/lifecycle_store/workspace.rs:481-499` 的自动转交互接管复制 history 但清空 `repair_reservation` / `human_gate_reservation` / `provider_start_ledger`。
 
 **本设计的边界**：只交付通道 C 所需的完整 GenerationRun 执法闭环，不复开已归档的结构治理 change，不把 C 塞进 author 重写/反馈共池 change。
@@ -31,14 +31,14 @@
 - **不把通道 C 塞进 `fix-author-rewrite-quota-pool`**：该 change 继续只修门段 A/B 混扣；C 不进入它的预算域，也不改它的扣减语义。
 - **不修改 `mechanicalize-plan-compile-repair` 的目录**：资格清单的 typed IR 与 structure 扩充由集成 owner 在该 change 的 MODIFIED REQ-WSC-09 中执行（见「跨 change 共享面与排序」）。
 - **不改 REQ-SG-02A 的内容修复授权边界**、不改 REQ-SG-07 的「不会 spawn 第 3 次」语义。
-- **不扩张公共配置面**：effort/model 等档位不在本 change 范围。
+- **不扩张公共配置面**：effort/model 等档位不在本 change 范围；effort 语义不在本 change，冻结执行策略摘要字段由本 change 提供（D1、REQ-WSC-28B，值由 effort 侧填写）。
 - 本 change 的边界仅由决策报告 §1（决策一）给定；报告内其它章节列出的、需后续立项的独立范围不属本 change，本设计不复述其内容。
 
 ## Decisions
 
 ### D1 · 用一个耐久 GenerationRun 教学窗口取代两个进程内布尔槽
 
-新增一份 SC 生成教学窗口（durable generation teaching window），挂在会话记录上，与原生成 run/reservation/phase 绑定。窗口持有：authorization kind、原 generation/node/run 身份、业务请求与材料摘要、失败 source 引用与 hash、context digest、允许修改闭包、机器指令 digest、完整 prompt 引用与 digest、attempt key、物理上限（max=2）、已消费 attempt 序号、claim 状态与 ledger key。
+新增一份 SC 生成教学窗口（durable generation teaching window），挂在会话记录上，与原生成 run/reservation/phase 绑定。窗口持有：authorization kind、原 generation/node/run 身份、业务请求与材料摘要、失败 source 引用与 hash、context digest、允许修改闭包、机器指令 digest、完整 prompt 引用与 digest、attempt key、物理上限 max ∈ {1,2}（由 RepairOnce 批准状态决定：已批准且耐久绑定时原调用在内最多两次，无批准时最多一次）、RepairOnce 批准状态、批准规则版本、冻结输入摘要、冻结执行策略摘要（通用字段：本 change 只定义字段，值由 `explicit-sc-author-effort` 填写，effort 语义不在本 change）、已消费 attempt 序号、claim 状态与 ledger key。
 
 handler 的 `compile_ir_rerun_used` / `structure_rerun_used` 两个布尔量**删除**（不保留兼容 shim），改为消费窗口的 claim 结果与 typed assessment。结构失败耗尽不得落到另一自动通道。
 
@@ -59,11 +59,19 @@ handler 的 `compile_ir_rerun_used` / `structure_rerun_used` 两个布尔量**�
 sc_generation:{session}:{generation}:attempt:{1|2}
 ```
 
-`{generation}` 取原生成链的稳定标识（不得取重驱后的新 source hash，否则窗口会随 source 漂移）；provider 技术运行另用独立 launch 身份关联该 attempt。attempt 次数由窗口显式字段给出，**不得**用 `provider_start_ledger.len()` 反推。
+`{generation}` 取原生成链的稳定标识（不得取重驱后的新 source hash，否则窗口会随 source 漂移）；attempt1 与 attempt2 **同用**该键式。provider 技术运行使用独立 launch 身份关联该 attempt：旧键 `single_candidate_author:{id}:{n}` 即 provider launch 身份，**保留为 ledger 自身的键**，不与 attempt 键混用；provider_start_ledger 条目**以其 launch 身份为键**，并**新增 attempt 键关联字段**。因此「同一 attempt key 写入既有 ledger」的准确含义是：该 attempt 的实际启动 MUST 写入既有 provider_start_ledger（以 launch 身份为键）并携带 attempt 键关联，MUST NOT 为同一次启动另插第二条记录。attempt 次数由窗口显式字段给出，**不得**用 `provider_start_ledger.len()` 反推。
 
 状态机：`Claimed`（已原子 claim、尚未证明启动）→ `ActualStarted`（真实启动观察已回填）→ `Terminal`（终态：已交付、已耗尽或已停止）。外部结果不确定时进入 `LaunchUnknown`，沿原等待/对账，**不自动重播**；确定未启动（`KnownNotStarted`）可在原 key、原授权下继续同一 claim，**不增加机会**；已实际启动的不以重投方式重播。
 
 **为什么显式 attempt 序号**：`src/product/workspace_engine/single_candidate.rs:155-157` 现有的长度反推语义会被 C 的记账污染（记一次 C 就会移动 A 路径的 attempt 判定），必须改成显式窗口字段。
+
+**必须迁移的耦合读写点**（裁决 §1.5 明列三处）：
+
+| 读写点 | 现状 | 迁移要求 |
+|---|---|---|
+| `src/product/workspace_engine/single_candidate.rs:138-167,244-256` | `:244-256` 取「ledger 中最后一个前缀键」当 reservation，`:138-167` 依赖长度派生 attempt | 取消「全 ledger 长度＝当前 author attempt」与「最后一个前缀 key＝当前 reservation」的隐式关系；C 用显式原窗口当前 key，A 路径仍用其 repair reservation |
+| `src/product/review/routing_scope.rs:20-46` | 以 `ledger.len()` 预占 A 路径键 | 改为显式键派生，避免 C 记账后误接或挤占 A 的键；验收含「记一次 C 后 A 路径键不变」（tasks 1.2、8.3） |
+| durable→runtime 同步与 policy CAS（`src/product/workspace_engine/types.rs:95-102,162-168`、`src/product/lifecycle_store/workspace_policy_route.rs:104-109`） | 同步 window/ledger 镜像 | policy CAS 不得把旧 runtime 镜像覆盖到已更新 ledger；真实 start 回填后重载/合并最新 expected，冲突不得静默丢条目 |
 
 ### D3 · `RepairReservation` 不改名、不复用为 C 的 grant
 
@@ -73,11 +81,11 @@ C 使用自己的 GenerationRun 窗口载体；窗口与 `RepairReservation` 互
 
 ### D4 · `provider_start_ledger` 仍是唯一实际启动账；新增受控 observe/CAS 接口
 
-不变的事实：`src/product/models/workspace.rs:843` 的 `provider_start_ledger` 是唯一实际启动账，`is_actual_launch_observation` 的口径（`started` + provider + started_at）保持。
+不变的事实：`src/product/models/workspace.rs:844` 的 `provider_start_ledger` 是唯一实际启动账，`is_actual_launch_observation` 的口径（`started` + provider + started_at）保持。
 
 问题：`src/product/lifecycle_store/workspace.rs:899` 的 `claim_provider_start_with_details` 对同一 key **只返回 false、不回填**，也没有上限语义，因此无法表达「先占位、同 key 原位补全真实启动证据」。
 
-因此需要**新增专用受控 observe/CAS 接口**（不改变既有接口语义）：在同一 session 排它锁下，按 attempt key 把占位条目原位补全为带真实 provider/run 与启动证据的条目，并校验该 attempt key 属于已 claim 的窗口、窗口未超上限、同键幂等。**不另插一条「同一次」记录**，也不得由调用方自报「已启动」。
+因此需要**新增专用受控 observe/CAS 接口**（不改变既有接口语义）：在同一 session 排它锁下，按 attempt 键关联把占位条目**原位**补全为带真实 provider/run 与启动证据的条目（条目以 launch 身份为键，见 D2），并校验该 attempt 属于已 claim 的窗口、窗口未超上限、同键幂等。**不为同一次启动另插第二条记录**，也不得由调用方自报「已启动」。**占位值 MUST 为 `started=false`**：`reserve_single_candidate_provider_start`（`workspace_single_candidate.rs:127`，占位写入在 `:197-203`）现写 `started: true, provider: None`，须改为 `started=false`，改动点列于 tasks 2.2。
 
 真实启动证据来自 spawn 身份确认（`TrustedLaunchOwnership` 的真 PID/starttime 确认点），在 spawn 身份确认后、协议驱动继续前同步持久回填，并在 `provider_resources.rs:1409-1418` 的会话尾部注销前验证回填完成；回填失败由既有资源收口停止进程，保留 claim 与资源证据并进入 Unknown，**不自动重播**。
 
@@ -95,7 +103,7 @@ C 使用自己的 GenerationRun 窗口载体；窗口与 `RepairReservation` 互
 
 C 不增加 `repairs_used`、不增加 `manual_repairs_used`、不伪造用户 turn/hold/receipt；A/B 池的触发域、余额与计费语义一字不改。**明确禁止**：A/B 池还有余额时给 C 补第三次——那会把 C 的失败转嫁到与 C 无关的池，破坏两套池各自的语义。
 
-C 的预算表达是「窗口内 attempt 序号 + 物理上限 max=2」，与 A/B 池余额无关。
+C 的预算表达是「窗口内 attempt 序号 + 物理上限 max ∈ {1,2}（由 RepairOnce 批准状态决定）」，与 A/B 池余额无关。
 
 ### D7 · 旧记录不倒填；接管不铸造新机会
 
@@ -134,11 +142,29 @@ C 的预算表达是「窗口内 attempt 序号 + 物理上限 max=2」，与 A/
 | §1.3 场景 5 | 旧记录不可补造授权 | REQ-WSC-28B 的场景 |
 | §1.3 场景 6 | 流水与启动账本失败处理不同 | REQ-WSC-28D 的场景 |
 | §1.7 验收条目 | 一次 C 教学后 A=0、B=0、C 已消费 1、实际启动合计 2 | REQ-WSC-28A 的场景 |
-| §1.3 末段（fail-closed） | claim 不可证明即零额外调用并显式系统故障 | REQ-WSC-28B 的场景 |
+| §1.3 ¶4 末句（fail-closed） | claim 不可证明即零额外调用并显式系统故障 | REQ-WSC-28B 的场景 |
+| §1.6 行 1 | 原生成 attempt1：真实 start 一条，失败 source/hash 与 typed IR 事实关联流水 | REQ-WSC-25 / REQ-WSC-28C、28D |
+| §1.6 行 2 | 唯一教学 attempt2：已批准 RepairOnce 且 IR 事实完整才允许；真实 start 再一条；A/B 不扣 | REQ-WSC-28C 场景「IR 拒收使用唯一额外机会」+ REQ-WSC-28A 场景 |
+| §1.6 行 3 | attempt2 合法：复验正常推进，窗口不能再授第三次 | REQ-WSC-28 场景「跨类别不乘法」 |
+| §1.6 行 4 | attempt2 再次结构失败：第三次 start=0；不借 A/B、保留合法 refs 与失败证据 | REQ-WSC-28E 场景「第二次仍失败即停止」 |
+| §1.6 末句 | 历史旧样本不得事后补造 grant 或 actual-start 证据 | REQ-WSC-28B 场景「历史样本不得补造 grant 与 actual-start」 |
 
 ## 跨 change 共享面与排序
 
 > 本节只登记**共享面与归属**。本 change 不修改任何其它 change 目录；下列「由集成 owner 执行」的条目不在本 change 的制品内落地。
+
+### 共写文件与串行次序（对齐处置裁决 §2.2 全局表）
+
+**决策六（拆分大文件）先落**是本 change 的硬前置：`run/single_candidate.rs`（handler）与 `workspace_engine/prompts.rs` 的纯移动拆分必须先于本 change 的任何实质新增（handler 仅剩 6 行余量）。全局串行序：决策六(0) → mechanicalize(1) → quota-pool(2) → **bound(3，本 change)** → effort(4) → isolate(5) → close(6)。
+
+| 对端包 | 共写面 | 相对次序 |
+|---|---|---|
+| `explicit-sc-author-effort` | `models/mod.rs`、`models/workspace.rs`、`lifecycle_store/workspace.rs`、`workspace_engine/types.rs`、`run/single_candidate.rs`、`workspace_engine/prompts.rs` | bound → effort（effort 侧共享面表与本表互认） |
+| `isolate-plan-criterion-namespace` | `work_item_plan_policy/types.rs`（本 change 写 ledger entry，isolate 后续写代际字段） | bound → isolate |
+| `mechanicalize-plan-compile-repair` | MODIFIED REQ-WSC-09（typed IR + structure 资格清单）；经决策六拆分后的 `run/single_candidate.rs` 判据面 | mechanicalize（序 1）→ bound（序 3）：本 change 依赖其资格清单 |
+| `fix-author-rewrite-quota-pool` | MODIFIED REQ-WSC-21（门段 `final_compile_*` 触发域）；同一 session record 的 CAS | quota-pool（序 2）→ bound（序 3）：本 change 只引用其触发域口径，不改其合同；CAS 合并由集成 owner 串行 |
+
+**effort #6「compile 教学块迁出 prompts.rs」的归属澄清**：该项属**决策六**（纯移动到 `prompts/sc_compile_teaching.rs`），**不是 bound** 的交付物；bound 的 tasks 不承接该项。
 
 ### 与 `mechanicalize-plan-compile-repair`
 
@@ -149,6 +175,8 @@ C 的预算表达是「窗口内 attempt 序号 + 物理上限 max=2」，与 A/
 | REQ-SG-05 | mechanicalize 的 design 声明「REQ-SG-05 的 attempt 单权威与上限不变」；本 change 的 MODIFIED REQ-SG-05 只改「SC 初轮」行 | 本 change 落地；归档顺序与 mechanicalize 协调 |
 
 **去重纪律**：本 change 的 REQ-WSC-28 系列**只写**窗口、预算归属、账本分账、流水关联与停止语义；**不重写** REQ-WSC-09 的资格清单正文（typed IR 与 structure 的资格条目由 mechanicalize 侧补齐）。两份 delta 合起来构成「唯一清单 + 唯一窗口」，不得出现两套资格解释器。
+
+**归档硬门禁**：mechanicalize 的 MODIFIED REQ-WSC-09 完成 typed IR + structure 资格扩充后，本 change 方可归档；在此之前，REQ-WSC-28 的「资格以 WSC-09 为唯一清单」不得实施。本 change 不在自身 delta 内重复 MODIFIED WSC-09（裁决 §1.4）。
 
 ### 与 `fix-author-rewrite-quota-pool`
 
@@ -164,10 +192,11 @@ C 的预算表达是「窗口内 attempt 序号 + 物理上限 max=2」，与 A/
 
 ### 排序
 
-1. **规划条款先批准**：WSC-09（mechanicalize 侧）+ WSC-28 系列 + SG-05。
-2. **纵向闭环执法就位**：耐久窗口 → store CAS → 真实 spawn 观察 → handler 单槽 → 流水/故障重放（D5，五段不可拆开上线）。
-3. **最后开放新资格与载荷**：新教学资格与教学输入在此之前不得对用户开放。
-4. **共享接线的串行归属**：`mechanicalize` 的 MODIFIED WSC-09 扩充、quota-pool 与本 change 的 session CAS 合并，均由**集成 owner**串行执行；本 change 的制品只登记归属，不代做。
+1. **决策六拆分先落（硬前置）**：`run/single_candidate.rs` 与 `workspace_engine/prompts.rs` 的纯移动拆分先于本 change 的任何实质新增（见「共写文件与串行次序」）。
+2. **规划条款先批准**：WSC-09（mechanicalize 侧）+ WSC-28 系列 + SG-05。
+3. **纵向闭环执法就位**：耐久窗口 → store CAS → 真实 spawn 观察 → handler 单槽 → 流水/故障重放（D5，五段不可拆开上线）。
+4. **最后开放新资格与载荷**：新教学资格与教学输入在此之前不得对用户开放。
+5. **共享接线的串行归属**：`mechanicalize` 的 MODIFIED WSC-09 扩充、quota-pool 与本 change 的 session CAS 合并，均由**集成 owner**串行执行；本 change 的制品只登记归属，不代做。
 
 ## Risks / Trade-offs
 

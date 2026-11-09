@@ -164,12 +164,17 @@
 #### Scenario: scope 摘要配方按代际区分
 
 - **WHEN** 一个旧代际 scope 被校验，一个新代际 scope 被构造
-- **THEN** 旧代际 scope 的摘要配方 MUST 逐字不变并仍可校验通过；新代际 scope MUST 把代际版本与 original 集合绑定进摘要输入
+- **THEN** 旧代际 scope 的摘要配方 MUST 逐字不变并仍可校验通过；新代际 scope 的摘要输入 MUST 纳入代际标识并绑定 original 集合，摘要前缀 MUST 保留既有 `review_scope_v1:` 不变；Verification scope MUST 保持既有 `original_fingerprints` 逐项绑定
 
 #### Scenario: scope 版本与 session 代际不一致即失败关闭
 
 - **WHEN** scope 携带的代际版本与当前 session 的代际不一致，或 scope 摘要与所声明代际不匹配
 - **THEN** 该状态 SHALL 按既有结构性协议错误 `Fatal(ProtocolViolation)` 失败关闭，MUST NOT 重算摘要后假装同一 invocation，MUST NOT 降级为人工门或自动返修
+
+#### Scenario: 新代际稳定 ID 扫描的 token 边界
+
+- **WHEN** 新代际扫描对同一输入执行稳定 ID 抽取与删除：输入含 `WAC-001`、同计划中的 `WIC-001` 与 `AC-001`
+- **THEN** `WAC-001` MUST NOT 被抽成 `AC-001`；`WIC-001` 与 `AC-001` MUST 是不同的稳定 ID 身份；同一字符串的取与删规则 MUST 完全一致
 
 ### Requirement: 运行状态持久化、CAS 与兼容（REQ-TOP-05）
 
@@ -249,7 +254,7 @@
 
 #### Scenario: 新建受控会话显式写入新代际
 
-- **WHEN** 平台新建一个受控单候选会话
+- **WHEN** 平台以 `flow_kind=SingleCandidate` 创建路径新建一个受控单候选会话（legacy 非 SC 会话不在此列，保持缺省旧代际）
 - **THEN** 该会话的持久化历史 SHALL 显式记录新代际，MUST NOT 依赖「最新默认」隐式取值
 
 #### Scenario: 接管与恢复沿用父代际
@@ -266,3 +271,8 @@
 
 - **WHEN** 系统在某轮评审中缺少可比对的原始指纹集合、机械报告或其他基线事实
 - **THEN** 系统 SHALL 走既有等待或人工处理路径，MUST NOT 清空 seen/original 集合、MUST NOT 充值任何预算、MUST NOT 跳过重复闸门，MUST NOT 把缺证据当作新 finding 开启自动重试
+
+#### Scenario: 代际字段键名与取值域钉死
+
+- **WHEN** 序列化或反序列化 `RunHistory` 的指纹代际字段
+- **THEN** 该字段键名 MUST 为 `fingerprint_version`，取值域 MUST 为 `{"v2","v3"}`；字段缺省按旧代际解释，未知取值 MUST 按状态损坏拒收；反序列化 MUST 显式区分「字段缺省」与「未知取值」，MUST NOT 以 serde default 把未知取值回落到任一已知代际

@@ -4,7 +4,7 @@
 
 ### Requirement: 契约类 finding 的有效必关闭在中央策略中的投影（REQ-TOP-07）
 
-中央策略 SHALL 以「有效必关闭」判定消费 finding：`class_hint=advisory` 与 raw `pass` fallback MUST NOT 把有效必关闭的契约类 finding 判为 `Advisory`。有效必关闭但缺可验证定位或服务端修复许可的 finding SHALL 落 `HumanRequired` 而非 `Repairable`。本投影 MUST NOT 提高 A 池 `max_repairs` 或 B 池 `max_manual_repairs` 余额，MUST NOT 改变 Verification scope 新 finding 的既有停止规则。
+中央策略 SHALL 以「有效必关闭」判定消费 finding：`class_hint=advisory` 与 raw `pass` fallback MUST NOT 把有效必关闭的契约类 finding 判为 `Advisory`（raw verdict 指**未经有效必关闭重开**的原始判定）。闭合资格为真但缺可验证定位或服务端授权修复许可的 finding SHALL 落 `HumanRequired` 而非 `Repairable`；自动修复许可证据 MUST NOT 凭 `category`、`severity` 或 `class_hint` 构成。本投影 MUST NOT 提高 A 池 `max_repairs` 或 B 池 `max_manual_repairs` 余额，MUST NOT 改变 Verification scope 新 finding 的既有停止规则。
 
 #### Scenario: advisory 提示不得盖过有效必关闭
 
@@ -13,7 +13,7 @@
 
 #### Scenario: raw pass 不得把契约类 finding 判为建议项
 
-- **WHEN** 一条有效必关闭的契约类 finding 所在轮次的原始结论为 `pass`，且该 finding 没有任何 `class_hint`
+- **WHEN** 一条闭合资格为真的契约类 finding 所在轮次的原始结论为 `pass` 且未经有效必关闭重开，该 finding 无任何 `class_hint`，并经未发生重开的路径被消费（如读持久化旧 verdict，或 `routing_scope.rs:88`、`routing_platform_rescue.rs:71`、`prompts/review_context.rs:557` 上的分类与指纹消费点）
 - **THEN** 中央策略 MUST NOT 以 raw `pass` 的建议项兜底把它判为 `Advisory`；MUST NOT 因此把它排除在返修需求判定之外
 
 #### Scenario: 分类优先级与原始 verdict 来源不冲突
@@ -21,15 +21,25 @@
 - **WHEN** 分类器为 finding 判定分类
 - **THEN** 分类的 verdict 维度 SHALL 继续使用 raw_verdict（不因本投影改用归一后的 gate）；但对有效必关闭的契约类 finding，其分类 MUST NOT 由 `class_hint` 或 raw verdict 的兜底决定，平台侧的有效必关闭事实 SHALL 优先
 
+#### Scenario: 两级判定的分类落点
+
+- **WHEN** 一条契约类 finding 的闭合资格（`effective_disposition == actionable` 且未被 owner 显式排除）为真，分别具备与不具备「服务端授权的既有合法机械修复许可」证据和「可验证定位」（`contract_field` 非空或可定位的 typed 事实引用）证据
+- **THEN** 闭合资格真且自动修复许可真时 MUST 判 `Repairable`（沿既有许可，不新造 L1）；闭合资格真但自动修复许可假（许可或定位任一缺失）时 MUST 判 `HumanRequired`（不得 `Advisory`，不得 `Repairable`）；闭合资格假时维持既有分类行为
+
 #### Scenario: 无定位转人工而非可自动返修
 
-- **WHEN** 一条有效必关闭的契约类 finding 没有可验证定位（例如缺 `contract_field` 或其值不可用），且不存在已有的合法机械修复证据
+- **WHEN** 一条闭合资格为真的契约类 finding 的自动修复许可为假——无可验证定位（`contract_field` 为空且无可定位的 typed 事实引用），或无服务端授权的既有合法机械修复许可，二者任一缺失
 - **THEN** 中央策略 SHALL 将其裁决为 `HumanRequired`；MUST NOT 裁决为 `Repairable`，MUST NOT 因此触发自动返修或新增自动重写次数
 
-#### Scenario: 不得凭类别或严重度自造修复许可
+#### Scenario: 不得凭类别、严重度或提示自造修复许可
 
-- **WHEN** 中央策略仅依据 finding 的 `category` 或 `severity` 判断其可自动修复性
-- **THEN** 策略 MUST NOT 据此新造可自动修复的许可；是否可自动返修 MUST 依据既有定位与服务端授权证据
+- **WHEN** 中央策略仅依据 finding 的 `category`、`severity` 或 `class_hint` 判断其可自动修复性（包括 `class_hint=repairable`，以及仅凭「`Revise` + 契约类 + `contract_field` 非空」的分类兜底）
+- **THEN** 策略 MUST NOT 据此新造可自动修复的许可或自动调用 author；是否可自动返修 MUST 依据既有可验证定位与服务端授权的机械修复许可证据（`RepairReservation` / 机械修复指令链的在场证据）
+
+#### Scenario: 不得重新解析 raw 绕过 owner 排除
+
+- **WHEN** 一条契约类 finding 已被 owner 显式排除，而中央策略仍可读到其原始模型文本（包括经历史重建路径读到的原始文本）
+- **THEN** 策略 MUST NOT 通过重新解析原始文本恢复其闭合资格或绕过 owner 排除；原始模型文本仅保留用于审计，owner 排除事实源 MUST 保持优先
 
 #### Scenario: 不提高余额且不改既有停止规则
 

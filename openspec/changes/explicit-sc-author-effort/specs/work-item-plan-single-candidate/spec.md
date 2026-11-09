@@ -4,7 +4,7 @@
 
 ### Requirement: Claude SC author 显式 effort 冻结策略（REQ-WSC-29）
 
-平台 SHALL 为**新的 Claude SingleCandidate author 原运行**冻结显式 effort=`high`；同一原运行的教学、resume 及明确 fresh SHALL 使用**相同冻结策略**，不得从宿主新 settings 或当前部署默认重算。无冻结事实的存量运行 SHALL 保留旧继承模式并披露未知，不得伪造原档位；客户端不得通过恢复消息修改此策略。冻结策略 SHALL 为服务端内部事实，承载为含策略版本、provider、author effort 的独立冻结配置并随原业务运行耐久保存，MUST NOT 暴露为公共 provider 配置项。作用域 SHALL 限定 Claude + SingleCandidate author；平台 SHALL 区分 requested 与 effective，MUST NOT 把组织 cap 压低后的 effective 冒称 `high`。真实生效档位 SHALL 以 provider 支持能力与请求证据为准，缺失证据时 SHALL 记为未知而非推断。
+平台 SHALL 为**新的 Claude SingleCandidate author 原运行**冻结 effort=`high`；同一原运行的教学、resume 与明确 fresh SHALL 使用**相同冻结策略**，不得从宿主新 settings 或部署默认重算。**原运行**＝同一 session record 上的同一冻结事实；**真实新生成**＝服务端**新建 session record** 的首次生成，只有它适用部署默认，旧 record MUST NOT 写入新默认。无冻结事实的存量运行 SHALL 保留旧继承模式并披露未知。冻结策略 SHALL 为服务端内部事实（策略版本、provider、author effort）并耐久保存，MUST NOT 暴露为公共 provider 配置项。作用域 SHALL 限定 Claude + SingleCandidate author；平台 SHALL 区分 requested 与 effective，MUST NOT 把组织 cap 后的 effective 冒称 `high`。客户端不得经恢复消息改策略。
 
 #### Scenario: 新的 Claude SC 原运行冻结 high
 
@@ -25,6 +25,11 @@
 
 - **WHEN** 受影响面为 reviewer、Story/Design author、coding 或任何非 Claude provider
 - **THEN** 这些执行路径的档位 SHALL 与变更前一致，MUST NOT 因本策略被注入 `high` 或任何显式档位
+
+#### Scenario: SC 人工修订出口沿用同一冻结策略
+
+- **WHEN** 同一原运行进入 SC 人工修订出口（`sc_manual_revision.rs:356-366`）
+- **THEN** 该出口 SHALL 使用与原运行相同的冻结策略与相同 requested 档位，MUST NOT 因换了出口而换档
 
 #### Scenario: 存量运行保留旧继承模式并披露未知
 
@@ -50,3 +55,23 @@
 
 - **WHEN** 原运行因 native 会话指纹漂移进入等待并由有权 driver 明确 fresh
 - **THEN** fresh SHALL 只更换 native 会话，MUST NOT 更换 effort 档位，MUST NOT 重置原运行的授权、预算或预留事实；下一次**真实新生成**才使用届时的新默认档位
+
+#### Scenario: 创建时 provider 与准入时 author_provider 不一致按无冻结事实处理
+
+- **WHEN** 创建时写入冻结策略的 provider 与该原运行真实 SC 首次生成准入时的 author_provider 不一致
+- **THEN** 平台 MUST NOT 静默沿用该档位，MUST 按「无冻结事实」处理（披露未知、不注入平台覆盖），MUST NOT 以创建时值覆盖准入时值
+
+#### Scenario: 同一 session 重臂仍属原运行
+
+- **WHEN** 同一 session record 上的重臂、resume、native fresh 或教学 attempt 再次触发 SC author 启动
+- **THEN** 平台 SHALL 视其为同一**原运行**并继续使用同一冻结策略与同一 requested 档位，MUST NOT 写入当前部署默认，MUST NOT 因新 session ID 换档
+
+#### Scenario: 新建 session 适用新默认
+
+- **WHEN** 服务端**新建 session record** 并对其首次生成建立执行策略
+- **THEN** 该首次生成即**真实新生成**，SHALL 适用当前部署默认（本期为 `high`）；MUST NOT 被追溯适用于既有 session record 上的重臂或恢复
+
+#### Scenario: 冻结策略的 policy_version 不可识别时零启动
+
+- **WHEN** 冻结策略引用的 policy_version 在当前部署不可识别
+- **THEN** 平台 SHALL 零 provider 启动并保留原记录，MUST NOT 回落当前部署默认或宿主继承继续启动，MUST NOT 改写原记录中的冻结事实

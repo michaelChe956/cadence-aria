@@ -16,6 +16,11 @@ SC generate 段的教学重驱 SHALL 绑定原生成 run/reservation/phase，并
 - **WHEN** 失败集合含 Operational/Unknown、基线读取失败、授权缺失或缺少必要 typed 事实
 - **THEN** 零额外 author 调用；按已有等待/失败面回显真实原因，不把其渲染成模型可修语法错误
 
+#### Scenario: 窗口只在初轮新授权建立
+
+- **WHEN** 初轮新授权建立教学窗口后，A 或 B 的合法接力（机械返修、author 重写/反馈）再次进入生成链
+- **THEN** 教学窗口 MUST NOT 被重建或重开；A/B 接力仍消费各自的 repair/turn 载体，不把 handler 再次进入当成新初轮
+
 ### Requirement: 通道 C 的独立有界预算归属（REQ-WSC-28A）
 
 通道 C SHALL 是独立有界的生成教学机会，不消耗评审机械池 `max_repairs`，不消耗 author 重写/反馈池 `max_manual_repairs`；MUST NOT 增加 `repairs_used`、`manual_repairs_used` 或伪造用户 turn/hold/receipt。该归属不改变 A/B 池原有触发域、余额或计费语义，也不得由 A/B 池余额为 C 的第三次调用兜底。
@@ -27,7 +32,7 @@ SC generate 段的教学重驱 SHALL 绑定原生成 run/reservation/phase，并
 
 ### Requirement: 教学机会的原子 claim 与耐久绑定（REQ-WSC-28B）
 
-每次机会 SHALL 在任何外部启动前原子 claim，耐久绑定 authorization kind、原 generation/node/run 身份、业务请求及材料摘要、失败 source 引用与 hash、context digest、允许修改闭包、机器指令 digest、完整 prompt 引用与 digest、attempt key 和物理上限。初次调用尚无候选 source 时 SHALL 明确记录该事实并绑定原请求/材料，MUST NOT 伪造候选引用；重驱前失败原文与其 hash 必须可验证。授权、材料、上限或持久 claim 不可证明时 MUST 零额外调用并显式系统故障。
+每次机会 SHALL 在任何外部启动前原子 claim，耐久绑定 authorization kind、原 generation/node/run 身份、业务请求及材料摘要、失败 source 引用与 hash、context digest、允许修改闭包、机器指令 digest、完整 prompt 引用与 digest、attempt key、物理上限与冻结执行策略摘要（通用字段，值由 explicit-sc-author-effort 填写）。初次调用尚无候选 source 时 SHALL 明确记录该事实并绑定原请求/材料，MUST NOT 伪造候选引用；重驱前失败原文与其 hash 必须可验证。授权、材料、上限或持久 claim 不可证明时 MUST 零额外调用并显式系统故障。
 
 #### Scenario: 旧记录不可补造授权
 
@@ -39,9 +44,14 @@ SC generate 段的教学重驱 SHALL 绑定原生成 run/reservation/phase，并
 - **WHEN** 授权、材料、上限或持久 claim 中任一项不可证明
 - **THEN** 平台 MUST 零额外调用并显式系统故障，MUST NOT 以「尚未记账」推断仍有剩余机会
 
+#### Scenario: 历史样本不得补造 grant 与 actual-start
+
+- **WHEN** 读取历史旧样本且缺少 grant 或实际启动证据
+- **THEN** MUST NOT 事后补造 grant 或 actual-start 记录；缺失按证据缺失处理，零额外调用
+
 ### Requirement: 教学重驱的 claim 与真实启动分账（REQ-WSC-28C）
 
-claim 与 actual start SHALL 分账。真实启动观察 MUST 以同一 attempt key 写入既有 provider-start ledger，并可关联真实 provider/run 与启动证据；预留占位、调用前时间戳、WS 事件及旧 `started=true` MUST NOT 冒充真实启动。外部结果 Unknown 时 SHALL 沿原等待/对账，不自动重播。新 source revision、新 native 会话、重连、恢复及同请求重放 MUST NOT 重置窗口。所有允许启动仍须经过原 gateway admission/full fingerprint；显式 fresh 保留原授权/窗口/冻结输入，不获取新 RepairOnce。
+claim 与 actual start SHALL 分账。该 attempt 的实际启动 MUST 写入既有 provider-start ledger（以 launch 身份为键）并携带 attempt 键关联，可关联真实 provider/run 与启动证据；MUST NOT 为同一次启动另插第二条记录。预留占位、调用前时间戳、WS 事件及旧 `started=true` MUST NOT 冒充真实启动。外部结果 Unknown 时 SHALL 沿原等待/对账，不自动重播。新 source revision、新 native 会话、重连、恢复及同请求重放 MUST NOT 重置窗口。所有允许启动仍须经过原 gateway admission/full fingerprint；显式 fresh 保留原授权/窗口/冻结输入，不获取新 RepairOnce。
 
 #### Scenario: IR 拒收使用唯一额外机会
 
@@ -64,18 +74,28 @@ claim 与 actual start SHALL 分账。真实启动观察 MUST 以同一 attempt 
 
 ### Requirement: 第二次交付失败后的停止与越权处置（REQ-WSC-28E）
 
-第二次交付仍失败或出现修复范围越权时 MUST 停止该生成自动链、保留 last-valid refs 与失败历史，MUST NOT 提升坏 candidate、发起 review/confirm 或旁路至另一自动重写入口。后续只有真实新业务授权可按其既有合同继续，MUST NOT 由平台自动制造新 turn、candidate 或 generation 来补机会。
+第二次交付仍失败或出现修复范围越权时 MUST 停止该生成自动链、保留 last-valid refs 与失败历史，MUST NOT 提升坏 candidate、发起 review/confirm 或旁路至另一自动重写入口。后续只有真实新业务授权可按其既有合同继续，MUST NOT 由平台自动制造新 turn、candidate 或 generation 来补机会。本条仅适用于 **generate 段**原生成链的第二次交付；**门段** `final_compile_*` 候选编译类失败不属于本条，其自动重写按 REQ-WSC-21 既有合同处理，REQ-WSC-21 的触发域不因本条收窄或扩张。「修复范围越权」的判据新码 `repair_scope_violation` 由裁决 §7 的 C 包交付，C 包落地前该判据不可判定。
 
 #### Scenario: 第二次仍失败即停止
 
 - **WHEN** 唯一教学机会已消费且第二次交付仍未通过编译或仍未满足结构判据
 - **THEN** 平台停止该生成自动链并保留 last-valid refs 与失败历史；不产生第三次启动、不借 A/B 池余额、不自动制造新 turn 或 candidate 继续
 
+#### Scenario: 门段候选编译失败仍按 REQ-WSC-21 驱动重写
+
+- **WHEN** 门段 `final_compile_*` 候选编译类失败发生
+- **THEN** 其自动重写按 REQ-WSC-21 既有合同处理（提示 owner、扣 author 重写次数预算），本条停止语义不适用于该门段失败
+
+#### Scenario: 越权判据由 C 包交付（占位）
+
+- **WHEN** 修复范围越权判据（新码 `repair_scope_violation`）尚未由裁决 §7 的 C 包交付
+- **THEN** 该越权分支在 C 包落地前不可判定，本条不据此产生可验收断言；第二次交付失败的停止语义不受此占位影响
+
 ## MODIFIED Requirements
 
 ### Requirement: 候选生成尝试可序列观测（REQ-WSC-25）
 
-平台 MUST 以追加写记录每次候选生成与编译尝试，MUST NOT 只保留最近一次。每条记录 MUST 含尝试序号、source revision 引用、阶段、稳定码、typed 种类、环结构指纹、已应用的自动修复与等价规范化清单、处置结论。阶段 MUST 能区分 generate、parse、typed lowering、typed IR 校验与结构拒收；每条记录 MUST 关联同一 generation 与本次 provider attempt（attempt 序号与 attempt key），使教学重驱与原调用出现在同一可追溯序列上。由此 MUST 可计算首次通过率、机械自修收敛率与模型重写次数。
+平台 MUST 以追加写记录每次候选生成与编译尝试，MUST NOT 只保留最近一次。每条记录 MUST 含尝试序号、source revision 引用、阶段、稳定码、typed 种类、环结构指纹、已应用的自动修复与等价规范化清单、处置结论。阶段 MUST 能区分 generate、parse、typed lowering、typed IR 校验与结构拒收；每条记录 MUST 关联同一 generation，若本次触发了 provider 启动则 SHALL 记录其 attempt 序号与 attempt key，使教学重驱与原调用出现在同一可追溯序列上，若本次未触发 provider 启动则 SHALL 显式记录「无 provider 启动」，MUST NOT 伪造关联。由此 MUST 可计算首次通过率、机械自修收敛率与模型重写次数。
 
 #### Scenario: 连续失败可逐次追溯
 

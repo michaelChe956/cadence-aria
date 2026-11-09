@@ -6,11 +6,9 @@
 
 非 advisory 指纹闸门、transition budget 与 `revise` 归一 MUST 与阻断判定同口径：`advisory` MUST NOT 进指纹集合、MUST NOT 驱作者返修、MUST NOT 占 transition budget；`revise` 但无任何 actionable finding 时 MUST 归一为可通过或人工确认。`contract_gap` / `self_contradiction` MUST NOT 仅凭模型标 `advisory` 获得免阻断。
 
-平台 SHALL 维护唯一「有效必关闭」判定（effective closure），并以该判定作为契约类 finding 是否进入必关闭集合、是否重开 `pass`、是否进入非 advisory 指纹与返修预算、是否被中央策略判为可自动返修的唯一口径；verdict 判定、必关闭清单渲染、owner 处置再归一、policy 分类四个消费面 MUST 使用同一判定，不得各设门槛。
+平台 SHALL 以唯一「有效必关闭」判定统一契约类 finding 的闭合、重开 `pass`、指纹、预算与呈现口径；未排除的本 Work Item 契约类 finding MUST 进入必关闭集合，模型标签不得放行；缺可验证定位或修复许可时 SHALL 转人工处理，MUST NOT 自动调用 author；owner 排除优先，范围外 advisory 不变。
 
-未被 owner 显式排除的本 Work Item `contract_gap` / `self_contradiction` finding，MUST 进入必关闭集合；模型的 `severity=suggestion`、`class_hint=advisory` 或 `verdict=pass` 均不得使其自动放行。平台 SHALL 保留原 severity 及内容身份（finding key 逐字不变），以有效必关闭语义归一路由；缺少可验证定位或修复许可时 SHALL 转既有人工处理，不得因此自动调用 author。owner 显式排除优先，范围外 advisory 规则不变。
-
-有效必关闭的例外作用域 SHALL 限于 WorkItemPlan 的既有契约类 finding；通用 Story/Design 等其他评审的既有门槛 MUST NOT 因此扩大。作用域 SHALL 由可信 session / 解析入口传入，MUST NOT 由模型标签授予。
+例外作用域 SHALL 限于 WorkItemPlan 契约类，由可信入口传入，MUST NOT 由模型标签授予。
 
 #### Scenario: 指纹闸门与返修预算只认 actionable
 
@@ -42,15 +40,35 @@
 - **WHEN** 一条契约类 finding 的 key 已在会话 durable 已处置事实清单中（owner 已显式排除）
 - **THEN** 该 finding MUST NOT 进入必关闭集合、MUST NOT 触发作者返修；owner 排除判定 MUST 先于有效必关闭计算，且排除生效后 MUST NOT 再次被平台硬化恢复为必关闭项
 
+#### Scenario: 两级判定的分类落点
+
+- **WHEN** 一条契约类 finding 分别处于三种状态：闭合资格为真（`effective_disposition == actionable` 且未被 owner 显式排除）且具备服务端授权的既有合法机械修复许可证据与可验证定位；闭合资格为真但许可证据与可验证定位任一缺失；闭合资格为假（例如已被 owner 显式排除）
+- **THEN** 三种状态 MUST 分别落 `Repairable`（沿既有许可，不新造 L1）、`HumanRequired`（不得 `Advisory`，也不得 `Repairable`）、维持既有分类行为（范围外 advisory 不变）
+
 #### Scenario: 缺可验证定位时转人工且不自动调用 author
 
-- **WHEN** 一条被判为有效必关闭的契约类 finding 没有任何可验证定位（例如缺 `contract_field` 或其值不可用），且不存在已有的合法机械修复证据
-- **THEN** 平台 SHALL 将其转入既有人工处理通道；MUST NOT 因此自动调用 author，MUST NOT 新增自动重写次数，MUST NOT 仅凭 `category` 或 `severity` 自行造出可自动修复的许可
+- **WHEN** 一条闭合资格为真的契约类 finding 的自动修复许可为假——缺少可验证定位（`contract_field` 为空且无可定位的 typed 事实引用），或缺少服务端授权的既有合法机械修复许可，二者任一缺失
+- **THEN** 平台 SHALL 将其分类为 `HumanRequired` 并转入既有人工处理通道；MUST NOT 判为 `Repairable` 或 `Advisory`，MUST NOT 因此自动调用 author，MUST NOT 新增自动重写次数，MUST NOT 仅凭 `category`、`severity` 或 `class_hint` 自行造出可自动修复的许可
 
-#### Scenario: 四面同口径
+#### Scenario: class_hint 不得单独构成自动调用许可
 
-- **WHEN** 同一条契约类 finding 被 verdict 判定、必关闭清单渲染、owner 处置再归一、中央 policy 分类四个消费面分别处理
-- **THEN** 四个消费面 MUST 得出同一「是否有效必关闭」结论；任一面 MUST NOT 因只读 `severity`、`class_hint` 或 `verdict` 字面值而得出与该结论相反的结果
+- **WHEN** 一条闭合资格为真的契约类 finding 携带 `class_hint=repairable`，或其分类兜底仅凭「`Revise` + 契约类 + `contract_field` 非空」推出可修复，但不存在服务端授权的既有合法机械修复许可证据
+- **THEN** 平台 MUST NOT 将其判为 `Repairable` 或据此自动调用 author；无该许可证据时 MUST 落 `HumanRequired`；`class_hint`、`category`、`severity` 均不构成自动修复许可证据
+
+#### Scenario: raw pass 在未重开路径上不得放行契约类 finding
+
+- **WHEN** 一条未排除契约类 finding 的闭合资格为真，其所在轮次的原始判定为 `pass`（未经有效必关闭重开），且该 finding 经未发生重开的路径被消费——如读持久化旧 verdict，或 `routing_scope.rs:88`、`routing_platform_rescue.rs:71`、`prompts/review_context.rs:557` 上的分类与指纹消费点
+- **THEN** 该原始 `pass` MUST NOT 使该 finding 自动放行或被判为 `Advisory`；各消费面 MUST 按有效必关闭口径得出同一结论
+
+#### Scenario: 七面同口径
+
+- **WHEN** 同一条契约类 finding 被 verdict 判定、必关闭清单渲染、owner 处置再归一、中央 policy 分类、非 advisory 指纹集合、返修轮作者呈现、返修影响闭合七个消费面分别处理
+- **THEN** 七个消费面 MUST 得出同一「是否有效必关闭」结论；任一面 MUST NOT 因只读 `severity`、`class_hint` 或 `verdict` 字面值而得出与该结论相反的结果
+
+#### Scenario: 本 Work Item 的界定与 WorkItemPlan 作用域取值
+
+- **WHEN** 判定一条契约类 finding 是否属「本 Work Item」并是否启用契约类例外
+- **THEN** 「本 Work Item」MUST 以该 finding 的 `target_work_item_id` 指向的 Work Item 界定；WorkItemPlan 的 `outline` / `item` / `batch` 三种 review scope 逐 finding 按该界定启用例外（`outline` 下无 Work Item target 的结构级 finding 不在例外内），非 WorkItemPlan 的 legacy 评审不启用；平台 disposition 硬化已在通用 strict / lenient 解析器无条件生效，MUST NOT 被收窄到 WorkItemPlan，且只有 severity 豁免是 WorkItemPlan 专属，MUST NOT 扩散到通用评审
 
 #### Scenario: 例外作用域不扩到通用评审
 
@@ -69,5 +87,5 @@
 
 #### Scenario: 矩阵覆盖与基线一致
 
-- **WHEN** 以 `category`（`contract_gap` / `self_contradiction`）× `severity`（`suggestion` / `must_fix` / `blocking`）× `disposition`（`actionable` / `advisory` / 缺省）× `class_hint`（三类）× `verdict`（`pass` / `revise` / `needs_human`）构成矩阵，并代入含五条真实 finding 的基线样本
+- **WHEN** 以 `category`（`contract_gap` / `self_contradiction`）× `severity`（`suggestion` / `must_fix` / `blocking`）× `disposition`（`actionable` / `advisory` / 缺省）× `class_hint`（`repairable` / `human_required` / `advisory` / 缺省）× `verdict`（`pass` / `revise` / `needs_human`）构成矩阵，并代入含五条真实 finding 的基线样本
 - **THEN** 恰有一条契约类 finding 进入必关闭集合，整轮结论 MUST NOT 为自动通过，该 finding 的原 severity 与 key MUST 不变；无 `contract_field` 的那条 MUST NOT 自动调用 author；其余四条 MUST 仍不扣预算、不阻断

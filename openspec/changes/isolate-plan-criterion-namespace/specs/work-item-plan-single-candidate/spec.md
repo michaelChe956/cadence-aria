@@ -39,18 +39,28 @@ plan 编译器的 criterion 标识符 SHALL 以 `WIC-` 或 `AC-` 双前缀只读
 - **WHEN** 双前缀并存后重新检查全 plan criterion 唯一性与本 WI 成员关系
 - **THEN** 唯一性判据与成员关系判据 SHALL 与双前缀引入前等价，MUST NOT 因新增前缀扩大合法引用集合
 
+#### Scenario: 双前缀不改变旧 source 的 IR 与内容寻址
+
+- **WHEN** 一份只含存量 `AC-` criterion 的旧 source 在双前缀 parser 上重新编译
+- **THEN** 其 lower 结果 IR 与内容寻址 SHALL 与双前缀引入前逐位一致，MUST NOT 因 parser 兼容新前缀而漂移
+
+#### Scenario: 不同 compiler_version 仍按 freshness 拒绝
+
+- **WHEN** 一份以不同 `compiler_version` 产出的候选进入发布 / 复验判定
+- **THEN** 平台 SHALL 维持既有 freshness 拒绝语义，MUST NOT 因本轮不 bump compiler version 而放宽版本门
+
 ### Requirement: 服务端 lineage 命名策略与旧实体 ID 保持（REQ-WSC-31）
 
-平台 SHALL 以 server-only 命名策略元数据（`WicV1` / `LegacyPreserved`）记录每个 plan lineage 的命名域，并在真实 SC 首次生成准入时以 CAS 冻结该策略。`WicV1` lineage 的新交付 MUST NOT 出现 plan 域 `AC-` criterion；`LegacyPreserved` lineage 的修订 SHALL 保留基线既有 criterion ID，新增 criterion MUST 使用 `WIC-`。平台 MUST NOT 以「仅前缀升级」替换整组身份，MUST NOT 批量改写存量不可变记录与其 hash，MUST NOT 接受客户端入参绕过该策略。
+平台 SHALL 以 server-only 命名策略元数据（`WicV1` / `LegacyPreserved`）记录每个 plan lineage 的命名域，并在真实 SC 首次生成准入时以 CAS 冻结该策略。`WicV1` lineage 的新交付 MUST NOT 出现 plan 域 `AC-` criterion；`LegacyPreserved` lineage 的修订 SHALL 保留基线既有 criterion ID，新增 criterion MUST 使用 `WIC-`。未经修复闭包与业务授权，平台 MUST NOT 删除、重编号或替换旧 baseline 的 criterion ID（经授权的删除走修复闭包既有合同），且「仅前缀升级」替换整组身份在任何情况下 MUST NOT 发生。平台 MUST NOT 批量改写存量不可变记录与其 hash，MUST NOT 接受客户端入参绕过该策略。
 
 #### Scenario: 新生 lineage 准入冻结为 WicV1
 
-- **WHEN** 一个此前无 source / IR / 评审 / 发布事实的 plan 首次通过真实 SC 生成准入
+- **WHEN** 一个此前无 source / IR / 评审 / 发布事实、且存在真实新生事实的 plan 首次通过真实 SC 生成准入
 - **THEN** 平台 SHALL 以 CAS 把该 lineage 的命名策略冻结为 `WicV1`，且该 lineage 后续交付的 plan criterion MUST 全部使用 `WIC-`
 
 #### Scenario: 存量 lineage 冻结为 LegacyPreserved 且旧 ID 保持
 
-- **WHEN** 一个已存在 source / IR / 评审 / 发布事实的存量 lineage 首次被本平台识别
+- **WHEN** 一个已存在 source / IR / 评审 / 发布事实的存量 lineage 首次准入时被判定为存量
 - **THEN** 平台 SHALL 把其命名策略冻结为 `LegacyPreserved`，其既有 criterion ID SHALL 逐字保留，MUST NOT 因迁前缀被改写
 
 #### Scenario: 存量修订新增 criterion 必须使用 WIC
@@ -61,7 +71,7 @@ plan 编译器的 criterion 标识符 SHALL 以 `WIC-` 或 `AC-` 双前缀只读
 #### Scenario: 未知历史不得伪装成新生
 
 - **WHEN** 某 lineage 的历史事实不足以判定是新生还是存量
-- **THEN** 平台 MUST NOT 将其判定为 `WicV1`，SHALL 按存量兼容路径处理并披露未知，MUST NOT 以缺省值推断存在新生事实
+- **THEN** 平台 MUST NOT 将其判定为 `WicV1`、MUST NOT 伪装成新生，SHALL 不冻结命名策略并按未知处理（走既有等待或人工面）且披露未知，MUST NOT 以缺省值推断存在新生事实；「已冻结不可改」只约束已判定的 `WicV1` / `LegacyPreserved`
 
 #### Scenario: 不得仅前缀升级替换整组身份
 
@@ -82,3 +92,13 @@ plan 编译器的 criterion 标识符 SHALL 以 `WIC-` 或 `AC-` 双前缀只读
 
 - **WHEN** 同一 lineage 被重入创建、接管或重复准入
 - **THEN** 已冻结的命名策略 SHALL 保持不变，MUST NOT 因重复准入被改写为另一代际
+
+#### Scenario: WicV1 交付含 plan 域 AC 被拒且教学资格按 typed 清单判定
+
+- **WHEN** 一个 `WicV1` lineage 的交付包含 plan 域 `AC-` criterion，被命名域守卫以独立 typed fault 拒收后寻求教学重驱
+- **THEN** 平台 SHALL 以独立 typed 诊断拒收（`AC-` 在双前缀下语法合法，不触发 `invalid_work_item_id`）；其教学重驱资格 SHALL 按 REQ-WSC-09 的 typed 资格清单（由 `mechanicalize-plan-compile-repair` 扩充）判定，MUST NOT 因诊断码前缀或「缺少」措辞自动获得
+
+#### Scenario: 旧 baseline criterion ID 的改变与消失按授权处理
+
+- **WHEN** 一次修订试图删除、重编号或替换旧 baseline 的既有 criterion ID，或以「仅前缀升级」把整组身份改为 `WIC-`
+- **THEN** 未经修复闭包与业务授权，平台 MUST NOT 删除、重编号或替换旧 baseline 的 criterion ID，经授权的删除 MUST 走修复闭包既有合同；「仅前缀升级」替换整组身份在任何情况下 MUST NOT 发生
