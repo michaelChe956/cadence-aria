@@ -11,7 +11,10 @@
 //   - 「查看知识库详细内容」→ 跳 Task 10 的详情页路由。
 // 幂等键每次请求新生成（crypto.randomUUID）：后端 store 的 create 无漂移检测，
 // 复用同一个键会静默返回旧记录。
-import { useCallback, useEffect, useState } from "react";
+// 取数与动作都带「过期守卫」：LC 切换或更新的动作结果已落盘时，在飞请求的
+// 旧响应一律丢弃（否则旧 LC 的数据会挂到当前选中的 LC 上，展开时的旧取数也会
+// 用「无 active operation」抹掉刚启动的 running operation）。
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { ApiRequestError } from "../../api/client";
 import {
@@ -135,23 +138,63 @@ export function useKnowledgeBaseWorkbench({
   // CodingWorkspacePage / workbench-inbox-focus 的既有口径一致。
   const router = useRouter({ warn: false });
 
+  // 作用域（项目 + LC）：渲染期同步到 ref，供在飞请求回来时判断自己是否过期。
+  // （渲染期写 ref ⇒ 提交与副作用之间没有时间窗，晚到的旧响应也不会被误收。）
+  const scopeKey = `${selectedProjectId ?? ""}|${activeLogicalCodebaseId ?? ""}`;
+  const scopeRef = useRef(scopeKey);
+  scopeRef.current = scopeKey;
+  // 上一作用域：识别「LC/项目切换了」，切换时清空上一 LC 的数据。
+  const previousScopeRef = useRef(scopeKey);
+  // 状态版本号：每次「准备写入知识库状态」（发起取数 / 动作结果落盘）都推进；
+  // 在飞请求回来时版本已变 ⇒ 它的响应已过期（LC 已切换，或已被更新的动作结果
+  // 取代），直接丢弃。没有这个守卫时：切 LC A→B 会用 A 的慢响应覆盖 B 的卡片
+  // （把 A 的状态/operation 归属到当前选中的 B 上）；启动后展开时触发的旧取数
+  // 也会用「无 active operation」抹掉刚设置的 running operation（用户会误以为
+  // 启动失败，而后端其实在跑）。
+  const revisionRef = useRef(0);
+
   const refresh = useCallback(async () => {
-    if (!selectedProjectId || !activeLogicalCodebaseId) {
+    const projectId = selectedProjectId;
+    const lcId = activeLogicalCodebaseId;
+    if (!projectId || !lcId) {
       return;
     }
+    const scope = scopeKey;
+    revisionRef.current += 1;
+    const revision = revisionRef.current;
     try {
       const [status, operation] = await Promise.all([
-        getKnowledgeBaseStatus(selectedProjectId, activeLogicalCodebaseId),
-        getActiveKnowledgeBaseOperation(selectedProjectId, activeLogicalCodebaseId),
+        getKnowledgeBaseStatus(projectId, lcId),
+        getActiveKnowledgeBaseOperation(projectId, lcId),
       ]);
+      // 过期守卫：期间 LC 已切换（scope 变了）或状态已被更新的动作结果取代
+      // （版本号变了）⇒ 丢弃本次响应，不让它覆盖当前状态。
+      if (revision !== revisionRef.current || scope !== scopeRef.current) {
+        return;
+      }
       setKnowledgeBaseStatus(isKnowledgeBaseStatus(status) ? status : null);
       setKnowledgeBaseOperation(
         isKnowledgeBaseOperation(operation) ? operation : null,
       );
     } catch (reason) {
+      if (revision !== revisionRef.current || scope !== scopeRef.current) {
+        return;
+      }
       setError(`读取知识库状态失败：${errorMessage(reason, "未知错误")}`);
     }
-  }, [selectedProjectId, activeLogicalCodebaseId, setError]);
+  }, [selectedProjectId, activeLogicalCodebaseId, scopeKey, setError]);
+
+  // LC/项目切换时清空上一 LC 的数据：避免切换瞬间闪现前一 LC 的状态，也避免
+  // A 的预检失败挂在 B 的卡片上。取数由下面的取数 effect 重新拉。
+  useEffect(() => {
+    if (previousScopeRef.current === scopeKey) {
+      return;
+    }
+    previousScopeRef.current = scopeKey;
+    setKnowledgeBaseStatus(null);
+    setKnowledgeBaseOperation(null);
+    setKnowledgeBasePreflightFailure(null);
+  }, [scopeKey]);
 
   // 抽屉展开时取一次；选中 LC 变化（依赖变化）再取一次。收起时不取。
   useEffect(() => {
@@ -168,6 +211,7 @@ export function useKnowledgeBaseWorkbench({
     if (!selectedProjectId || !activeLogicalCodebaseId) {
       return;
     }
+    const scope = scopeKey;
     setKnowledgeBaseBusy(true);
     try {
       const operation = await startKnowledgeBaseInitialization(
@@ -177,9 +221,22 @@ export function useKnowledgeBaseWorkbench({
         crypto.randomUUID(),
         packagePath,
       );
-      setKnowledgeBaseOperation(operation);
+      if (scope !== scopeRef.current) {
+        // LC 已切换：过期响应不落到当前卡片上。
+        return;
+      }
+      // 推进版本号：作废在飞的旧取数——它若晚到会用「无 active operation」覆盖
+      // 这里刚设置的 running operation（用户会误以为启动失败，而后端在跑）。
+      revisionRef.current += 1;
+      // 形状守卫与取数侧一致：200 + 异常载荷（如代理返回空对象）不能直接进卡片。
+      setKnowledgeBaseOperation(
+        isKnowledgeBaseOperation(operation) ? operation : null,
+      );
       setKnowledgeBasePreflightFailure(null);
     } catch (reason) {
+      if (scope !== scopeRef.current) {
+        return;
+      }
       const failure = toPreflightFailure(reason);
       if (failure) {
         setKnowledgeBasePreflightFailure(failure);
@@ -199,6 +256,7 @@ export function useKnowledgeBaseWorkbench({
     if (!selectedProjectId || !activeLogicalCodebaseId || !knowledgeBaseOperation) {
       return;
     }
+    const scope = scopeKey;
     setKnowledgeBaseBusy(true);
     try {
       const operation = await cancelKnowledgeBaseOperation(
@@ -206,8 +264,17 @@ export function useKnowledgeBaseWorkbench({
         activeLogicalCodebaseId,
         knowledgeBaseOperation.operation_id,
       );
-      setKnowledgeBaseOperation(operation);
+      if (scope !== scopeRef.current) {
+        return;
+      }
+      revisionRef.current += 1;
+      setKnowledgeBaseOperation(
+        isKnowledgeBaseOperation(operation) ? operation : null,
+      );
     } catch (reason) {
+      if (scope !== scopeRef.current) {
+        return;
+      }
       setError(`取消知识库操作失败：${errorMessage(reason, "未知错误")}`);
     } finally {
       setKnowledgeBaseBusy(false);
@@ -218,15 +285,22 @@ export function useKnowledgeBaseWorkbench({
     if (!selectedProjectId || !activeLogicalCodebaseId) {
       return;
     }
+    const scope = scopeKey;
     setKnowledgeBaseBusy(true);
     try {
       await createKnowledgeBaseBootstrapInputs(
         selectedProjectId,
         activeLogicalCodebaseId,
       );
+      if (scope !== scopeRef.current) {
+        return;
+      }
       setKnowledgeBasePreflightFailure(null);
       await refresh();
     } catch (reason) {
+      if (scope !== scopeRef.current) {
+        return;
+      }
       setError(
         `创建知识库输入模板失败：${errorMessage(reason, "未知错误")}`,
       );
