@@ -165,9 +165,11 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
     }
 
     // ⑤ 不适用领域只能出现在 skipped_stages（api / pages 同理）。
-    for (domain, scope) in [("api", &snapshot.api_scope), ("pages", &snapshot.pages_scope)] {
-        if scope.as_deref() == Some(NOT_APPLICABLE)
-            && completed.iter().any(|stage| stage == domain)
+    for (domain, scope) in [
+        ("api", &snapshot.api_scope),
+        ("pages", &snapshot.pages_scope),
+    ] {
+        if scope.as_deref() == Some(NOT_APPLICABLE) && completed.iter().any(|stage| stage == domain)
         {
             violations.push(format!(
                 "`scope.{domain}.status` 为「不适用」，但 {domain} 出现在 completed_stages"
@@ -179,8 +181,7 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
     match snapshot.initialization_status.as_deref() {
         Some("in_progress") => {
             if snapshot.completed_at.is_some() {
-                violations
-                    .push("`status` 为 in_progress，但 `completed_at` 已有值".to_string());
+                violations.push("`status` 为 in_progress，但 `completed_at` 已有值".to_string());
             }
             if completed.iter().any(|stage| stage == "global-validation") {
                 violations.push(
@@ -197,8 +198,10 @@ pub fn manifest_invariants(snapshot: &KnowledgeBaseManifestSnapshot) -> Vec<Stri
                     ));
                 }
             }
-            for (domain, scope) in [("api", &snapshot.api_scope), ("pages", &snapshot.pages_scope)]
-            {
+            for (domain, scope) in [
+                ("api", &snapshot.api_scope),
+                ("pages", &snapshot.pages_scope),
+            ] {
                 let done = completed.iter().any(|stage| stage == domain);
                 let skipped = snapshot
                     .skipped_stages
@@ -261,8 +264,11 @@ fn parse_manifest(raw: &str) -> KnowledgeBaseManifestSnapshot {
         schema_version: scalar_at(&root, &["schema_version"]),
         initialization_status: scalar_at(&root, &["coverage", "initialization", "status"]),
         global_validation: scalar_at(&root, &["coverage", "initialization", "global_validation"]),
-        completed_stages: string_list_at(&root, &["coverage", "initialization", "completed_stages"])
-            .unwrap_or_default(),
+        completed_stages: string_list_at(
+            &root,
+            &["coverage", "initialization", "completed_stages"],
+        )
+        .unwrap_or_default(),
         skipped_stages: skipped_stages_at(&root, &["coverage", "initialization", "skipped_stages"])
             .unwrap_or_default(),
         completed_at: scalar_at(&root, &["coverage", "initialization", "completed_at"]),
@@ -305,7 +311,11 @@ fn skipped_stages_at(root: &Value, path: &[&str]) -> Option<Vec<KnowledgeBaseSki
         sequence
             .iter()
             .map(|item| KnowledgeBaseSkippedStage {
-                stage: item.get("stage").and_then(Value::as_str).unwrap_or_default().to_string(),
+                stage: item
+                    .get("stage")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 reason: item
                     .get("reason")
                     .and_then(Value::as_str)
@@ -328,7 +338,8 @@ fn node_at<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KnowledgeBaseManifestSnapshot, KnowledgeBaseSkippedStage, manifest_invariants, read_manifest,
+        KnowledgeBaseManifestSnapshot, KnowledgeBaseSkippedStage, manifest_invariants,
+        read_manifest,
     };
     use std::path::PathBuf;
 
@@ -375,10 +386,8 @@ coverage:
 
     /// 测试夹具只允许落 /tmp：每个用例独占一个目录，写入 manifest.yaml。
     fn write_manifest_fixture(name: &str, content: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cadence-kb-manifest-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cadence-kb-manifest-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("创建夹具目录");
         std::fs::write(dir.join("manifest.yaml"), content).expect("写入夹具 manifest");
@@ -426,7 +435,10 @@ coverage:
             snapshot.completed_stages,
             ["base-info", "overview", "global-validation"]
         );
-        assert_eq!(snapshot.completed_at.as_deref(), Some("2026-11-09T00:05:00Z"));
+        assert_eq!(
+            snapshot.completed_at.as_deref(),
+            Some("2026-11-09T00:05:00Z")
+        );
         assert_eq!(
             snapshot.skipped_stages,
             [
@@ -443,7 +455,10 @@ coverage:
         assert_eq!(snapshot.configurations_scope.as_deref(), Some("全量"));
         assert_eq!(snapshot.api_scope.as_deref(), Some("不适用"));
         assert_eq!(snapshot.pages_scope.as_deref(), Some("不适用"));
-        assert_eq!(snapshot.generated_at.as_deref(), Some("2026-11-09T00:00:00Z"));
+        assert_eq!(
+            snapshot.generated_at.as_deref(),
+            Some("2026-11-09T00:00:00Z")
+        );
         assert!(snapshot.has_last_change_package);
         assert!(snapshot.has_processed_packages);
     }
@@ -463,7 +478,10 @@ coverage:
         let snapshot = read_manifest(&kb_root).expect("读取无版本 manifest");
         assert!(snapshot.exists);
         assert_eq!(snapshot.schema_version, None);
-        assert_eq!(snapshot.initialization_status.as_deref(), Some("in_progress"));
+        assert_eq!(
+            snapshot.initialization_status.as_deref(),
+            Some("in_progress")
+        );
         assert_eq!(snapshot.completed_stages, ["base-info", "api"]);
     }
 
@@ -505,10 +523,7 @@ coverage:
         let mut snapshot = base_snapshot();
         snapshot.initialization_status = Some("complete".to_string());
         snapshot.global_validation = Some("passed".to_string());
-        snapshot.completed_stages = vec![
-            "base-info".to_string(),
-            "global-validation".to_string(),
-        ];
+        snapshot.completed_stages = vec!["base-info".to_string(), "global-validation".to_string()];
         snapshot.completed_at = Some("2026-11-09T00:05:00Z".to_string());
         let violations = manifest_invariants(&snapshot);
         assert!(!violations.is_empty(), "violations: {violations:?}");
