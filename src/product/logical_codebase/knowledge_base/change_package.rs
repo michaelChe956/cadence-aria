@@ -54,607 +54,830 @@ pub struct MemberRepoPaths {
     pub repo_root: std::path::PathBuf,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::Path;
 
-    use super::super::manifest::KnowledgeBaseManifestSnapshot;
+use super::manifest::KnowledgeBaseManifestSnapshot;
 
-    /// 拼出完整稳定码。
-    fn code(suffix: &str) -> String {
-        format!("{CODE_PREFIX}{suffix}")
-    }
+/// scope / 枚举里表示「本领域不适用」的取值。
+const NOT_APPLICABLE: &str = "不适用";
+/// 模板占位词：`不适用（具体原因）` 的括号内仍是它时视为没填原因。
+const NA_PLACEHOLDER_REASON: &str = "具体原因";
+/// 「变更状态」的候选（未二选一的占位形态视为未填）。
+const CHANGE_STATUSES: [&str; 2] = ["有变更", "无变更"];
+/// 配置领域 scope 的候选（Manifest `scope.configurations.status` 同集）。
+const CONFIGURATION_SCOPE_STATUSES: [&str; 3] = ["全量", "指定", NOT_APPLICABLE];
 
-    fn has_code(lint: &ChangePackageLint, code: &str) -> bool {
-        lint.violations.iter().any(|violation| violation.code == code)
-    }
+/// 领域变更矩阵固定七行（顺序即 change-summary.md 模板顺序）。
+const MATRIX_DOMAINS: [&str; 7] = [
+    "代码",
+    "数据模型",
+    "配置",
+    "中间件",
+    "接口",
+    "页面",
+    "业务知识",
+];
 
-    fn first_with_code<'a>(lint: &'a ChangePackageLint, code: &str) -> &'a ChangePackageViolation {
-        lint.violations
-            .iter()
-            .find(|violation| violation.code == code)
-            .expect("预期存在该稳定码的违规")
-    }
+const CHANGE_SUMMARY: &str = "change-summary.md";
+const CODE_CHANGE: &str = "code-change.md";
+const DATABASE_CHANGE: &str = "database-change.md";
+const CONFIGURATION_CHANGE: &str = "configuration-change.md";
+const VERIFICATION: &str = "verification.md";
+/// 变更包必备的五份文档（skill 契约）。
+const DOCUMENTS: [&str; 5] = [
+    CHANGE_SUMMARY,
+    CODE_CHANGE,
+    DATABASE_CHANGE,
+    CONFIGURATION_CHANGE,
+    VERIFICATION,
+];
 
-    /// 在临时目录里建一个带初始提交的成员仓，返回（仓库根, HEAD 提交）。
-    fn member_repo_with_commit(parent: &Path, name: &str) -> (PathBuf, String) {
-        let repo = parent.join(name);
-        std::fs::create_dir_all(&repo).expect("创建成员仓目录");
-        let git = |args: &[&str]| -> String {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .output()
-                .expect("git 可执行");
-            assert!(
-                output.status.success(),
-                "git {args:?} 失败：{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        };
-        git(&["init", "-q"]);
-        git(&["config", "user.email", "kb@example.test"]);
-        git(&["config", "user.name", "kb-test"]);
-        git(&["commit", "--allow-empty", "-q", "-m", "init"]);
-        let sha = git(&["rev-parse", "HEAD"]);
-        (repo, sha)
-    }
+/// 字段形态：决定取值解析与空值判定方式。
+enum FieldKind {
+    /// 普通必填文本。
+    Text,
+    /// 枚举：模板给出候选，仍含多个候选的占位形态视为未填。
+    Enum(&'static [&'static str]),
+    /// 典型形态是「不适用（具体原因）」或判断依据的文本（判定同 Text）。
+    NotApplicable,
+    /// 领域变更矩阵行（Markdown 表格取值，字段名为「领域变更矩阵/<领域>」）。
+    TableRow,
+}
 
-    /// change-summary.md 合法样例（模板结构逐字来自插件模板，值已填齐）。
-    fn valid_change_summary() -> String {
-        String::from(
-            "# 变更摘要\n\
-             \n\
-             > 所有字段必须填写且不得留空，非适用字段填写 `不适用（具体原因）`。领域变更矩阵中的状态只允许填写 `有变更` 或 `无变更`。不得填写真实配置值、密码、Token、AccessKey、Secret、密钥、私钥、完整连接串、未脱敏内部地址或敏感值哈希；发现这些内容时整个变更包在计算幂等标识前停止。\n\
-             \n\
-             ## 基本信息\n\
-             \n\
-             - 变更标识：CHANGE-20261109-0001\n\
-             - 变更目的：为订单导出增加流式分页\n\
-             - 目标环境：生产\n\
-             - 涉及服务：order-api\n\
-             - 业务影响：导出接口新增分页参数\n\
-             - 风险：低\n\
-             \n\
-             ## 领域变更矩阵\n\
-             \n\
-             | 领域 | 变更状态 | 摘要或无变更判断依据 |\n\
-             |------|----------|----------------------|\n\
-             | 代码 | 有变更 | 订单导出分页改造 |\n\
-             | 数据模型 | 无变更 | 未新增表与字段，见数据库文档 |\n\
-             | 配置 | 无变更 | 本次未调整配置，见配置文档 |\n\
-             | 中间件 | 无变更 | 未引入新中间件 |\n\
-             | 接口 | 有变更 | 导出接口新增分页参数 |\n\
-             | 页面 | 无变更 | 无前端改动 |\n\
-             | 业务知识 | 有变更 | 补充分页导出说明 |\n\
-             \n\
-             ## 关联说明\n\
-             \n\
-             - 需求、缺陷或发布单：REQ-1001\n\
-             - 负责人或确认人：张三\n\
-             - 补充说明：无\n",
-        )
-    }
+/// 五份文档的固定字段清单（逐字来自插件模板
+/// `cadence-init/skills/knowledge-base-update/user-input/change-package/`）：
+/// 基本信息 9 + 领域矩阵 7 + 代码 11 + 数据库 11 + 配置 29 + 验证 7 = 74 项。
+/// 行式字段按「- 字段：值」取值；TableRow 由领域矩阵解析器取值。
+/// configuration-change.md 的「配置差异明细」表属 skill 语义判定，不在清单内。
+const FIELD_TABLE: &[(&str, &str, FieldKind)] = &[
+    // change-summary.md：基本信息 + 关联说明 + 七行领域矩阵。
+    (CHANGE_SUMMARY, "变更标识", FieldKind::Text),
+    (CHANGE_SUMMARY, "变更目的", FieldKind::Text),
+    (CHANGE_SUMMARY, "目标环境", FieldKind::Text),
+    (CHANGE_SUMMARY, "涉及服务", FieldKind::Text),
+    (CHANGE_SUMMARY, "业务影响", FieldKind::Text),
+    (CHANGE_SUMMARY, "风险", FieldKind::Text),
+    (CHANGE_SUMMARY, "需求、缺陷或发布单", FieldKind::Text),
+    (CHANGE_SUMMARY, "负责人或确认人", FieldKind::Text),
+    (CHANGE_SUMMARY, "补充说明", FieldKind::Text),
+    (CHANGE_SUMMARY, "领域变更矩阵/代码", FieldKind::TableRow),
+    (CHANGE_SUMMARY, "领域变更矩阵/数据模型", FieldKind::TableRow),
+    (CHANGE_SUMMARY, "领域变更矩阵/配置", FieldKind::TableRow),
+    (CHANGE_SUMMARY, "领域变更矩阵/中间件", FieldKind::TableRow),
+    (CHANGE_SUMMARY, "领域变更矩阵/接口", FieldKind::TableRow),
+    (CHANGE_SUMMARY, "领域变更矩阵/页面", FieldKind::TableRow),
+    (CHANGE_SUMMARY, "领域变更矩阵/业务知识", FieldKind::TableRow),
+    // code-change.md
+    (CODE_CHANGE, "变更状态", FieldKind::Enum(&CHANGE_STATUSES)),
+    (CODE_CHANGE, "Merge Request 地址或编号", FieldKind::Text),
+    (CODE_CHANGE, "源分支", FieldKind::Text),
+    (CODE_CHANGE, "目标分支", FieldKind::Text),
+    (CODE_CHANGE, "起始提交", FieldKind::Text),
+    (CODE_CHANGE, "结束提交", FieldKind::Text),
+    (CODE_CHANGE, "修改工程", FieldKind::Text),
+    (CODE_CHANGE, "修改文件与符号", FieldKind::Text),
+    (CODE_CHANGE, "代码变更说明", FieldKind::Text),
+    (CODE_CHANGE, "本地可验证范围", FieldKind::Text),
+    (CODE_CHANGE, "无变更判断依据", FieldKind::NotApplicable),
+    // database-change.md
+    (
+        DATABASE_CHANGE,
+        "变更状态",
+        FieldKind::Enum(&CHANGE_STATUSES),
+    ),
+    (DATABASE_CHANGE, "数据库 / Schema", FieldKind::Text),
+    (DATABASE_CHANGE, "逻辑表", FieldKind::Text),
+    (DATABASE_CHANGE, "字段变化", FieldKind::Text),
+    (DATABASE_CHANGE, "索引变化", FieldKind::Text),
+    (DATABASE_CHANGE, "约束变化", FieldKind::Text),
+    (DATABASE_CHANGE, "DDL 或迁移路径", FieldKind::Text),
+    (DATABASE_CHANGE, "上线状态", FieldKind::Text),
+    (DATABASE_CHANGE, "兼容性", FieldKind::Text),
+    (DATABASE_CHANGE, "回滚方式", FieldKind::Text),
+    (DATABASE_CHANGE, "无变更判断依据", FieldKind::NotApplicable),
+    // configuration-change.md：双快照字段组
+    (
+        CONFIGURATION_CHANGE,
+        "Manifest 配置领域状态",
+        FieldKind::Enum(&CONFIGURATION_SCOPE_STATUSES),
+    ),
+    (CONFIGURATION_CHANGE, "配置领域不适用原因", FieldKind::Text),
+    (
+        CONFIGURATION_CHANGE,
+        "变更状态",
+        FieldKind::Enum(&CHANGE_STATUSES),
+    ),
+    (
+        CONFIGURATION_CHANGE,
+        "环境（基线与目标必须相同）",
+        FieldKind::Text,
+    ),
+    (CONFIGURATION_CHANGE, "基线快照标识", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "基线快照发布批次", FieldKind::Text),
+    (
+        CONFIGURATION_CHANGE,
+        "基线快照生成或获取时间",
+        FieldKind::Text,
+    ),
+    (CONFIGURATION_CHANGE, "基线快照来源类型", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "基线快照外部目录", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "基线快照指纹", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "基线范围摘要", FieldKind::Text),
+    (
+        CONFIGURATION_CHANGE,
+        "基线纳入文件数量或文件清单摘要",
+        FieldKind::Text,
+    ),
+    (CONFIGURATION_CHANGE, "基线服务摘要", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "基线文件规则摘要", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "目标快照标识", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "目标快照发布批次", FieldKind::Text),
+    (
+        CONFIGURATION_CHANGE,
+        "目标快照生成或获取时间",
+        FieldKind::Text,
+    ),
+    (CONFIGURATION_CHANGE, "目标快照来源类型", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "目标快照外部目录", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "目标快照指纹", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "目标范围摘要", FieldKind::Text),
+    (
+        CONFIGURATION_CHANGE,
+        "目标纳入文件数量或文件清单摘要",
+        FieldKind::Text,
+    ),
+    (CONFIGURATION_CHANGE, "目标服务摘要", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "目标文件规则摘要", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "纳入文件范围", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "涉及服务", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "配置组", FieldKind::Text),
+    (CONFIGURATION_CHANGE, "已知差异", FieldKind::Text),
+    (
+        CONFIGURATION_CHANGE,
+        "无变更判断依据",
+        FieldKind::NotApplicable,
+    ),
+    // verification.md：记录项组
+    (VERIFICATION, "已执行测试", FieldKind::Text),
+    (VERIFICATION, "发布验证", FieldKind::Text),
+    (VERIFICATION, "数据兼容验证", FieldKind::Text),
+    (VERIFICATION, "配置生效验证", FieldKind::Text),
+    (VERIFICATION, "回滚方式", FieldKind::Text),
+    (VERIFICATION, "未验证项目", FieldKind::Text),
+    (VERIFICATION, "风险", FieldKind::Text),
+];
 
-    /// code-change.md 合法样例（起止提交由用例注入真实可解析提交）。
-    fn valid_code_change(start: &str, end: &str) -> String {
-        format!(
-            "# 代码变更\n\
-             \n\
-             > 所有字段必须填写且不得留空。非适用字段填写 `不适用（具体原因）`；无代码变更时必须提供可验证的判断依据。不得粘贴真实配置值、凭证、完整连接串、未脱敏内部地址或敏感值哈希；发现这些内容时整个变更包在计算幂等标识前停止。\n\
-             \n\
-             - 变更状态：有变更\n\
-             - Merge Request 地址或编号：!1234\n\
-             - 源分支：feat/export-pagination\n\
-             - 目标分支：main\n\
-             - 起始提交：{start}\n\
-             - 结束提交：{end}\n\
-             - 修改工程：order-api\n\
-             - 修改文件与符号：export.rs 的 stream_export\n\
-             - 代码变更说明：分页游标改造\n\
-             - 本地可验证范围：单测覆盖游标回退\n\
-             - 无变更判断依据：不适用（本次存在代码变更）\n"
-        )
-    }
+/// 对 `package_dir` 下的五文档变更包做平台侧机械门禁，返回违规列表与
+/// 全量字段的填写状态（供编辑器渲染「哪些字段还没填」）。
+///
+/// - `manifest`：Task 2 的 Manifest 快照，用于配置分支一致性判定；
+/// - `members`：提交解析用的成员仓主 checkout，任一仓可解析即通过。
+///
+/// 门禁只判「结构与取值」；平台门禁通过 != skill 门禁通过。
+pub fn lint_change_package(
+    package_dir: &Path,
+    manifest: &KnowledgeBaseManifestSnapshot,
+    members: &[MemberRepoPaths],
+) -> ChangePackageLint {
+    let mut violations = Vec::new();
+    let mut fields = Vec::new();
 
-    /// database-change.md 合法样例（无数据模型变更分支）。
-    fn valid_database_change() -> String {
-        String::from(
-            "# 数据库变更\n\
-             \n\
-             > 本文档始终强制提供，所有字段必须填写且不得留空。非适用字段填写 `不适用（具体原因）`；无数据模型变更时必须填写无变更判断依据。DDL 或迁移证据必须先脱敏，不得包含真实配置值、凭证、完整连接串、未脱敏内部地址、真实个人数据或敏感值哈希；发现这些内容时整个变更包在计算幂等标识前停止。\n\
-             \n\
-             - 变更状态：无变更\n\
-             - 数据库 / Schema：不适用（本次无数据模型变更）\n\
-             - 逻辑表：不适用（本次无数据模型变更）\n\
-             - 字段变化：不适用（本次无数据模型变更）\n\
-             - 索引变化：不适用（本次无数据模型变更）\n\
-             - 约束变化：不适用（本次无数据模型变更）\n\
-             - DDL 或迁移路径：不适用（本次无数据模型变更）\n\
-             - 上线状态：不适用（本次无数据模型变更）\n\
-             - 兼容性：不适用（本次无数据模型变更）\n\
-             - 回滚方式：不适用（本次无数据模型变更）\n\
-             - 无变更判断依据：未新增或修改任何表、字段、索引与约束\n",
-        )
-    }
+    // P1：包路径形态（目录位置 / 目录名前缀）。
+    lint_package_path(package_dir, &mut violations);
 
-    /// configuration-change.md 合法样例（Manifest 配置领域为「全量」分支）。
-    fn valid_configuration_change() -> String {
-        String::from(
-            "# 配置变更\n\
-             \n\
-             > 本文档始终强制提供，所有字段必须填写且不得留空。Manifest 的 `scope.configurations.status` 为 `全量` 或 `指定` 时，基线和目标必须是同一环境的外部不可变快照，目录必须可读；无配置变更时仍需提供两份快照及判断依据。状态为 `不适用` 时，变更状态必须为 `无变更`，快照字段填写 `不适用（具体原因）`，并跳过快照比较。\n\
-             >\n\
-             > 配置差异明细只允许记录配置键、变更类型、用途和固定脱敏值 `<redacted>`。不得填写真实配置值、密码、Token、AccessKey、Secret、密钥、私钥、完整连接串、内部域名/IP/URL、原始配置片段或敏感值哈希；发现这些内容时整个变更包在计算幂等标识前停止。\n\
-             \n\
-             - Manifest 配置领域状态：全量\n\
-             - 配置领域不适用原因：不适用（配置领域为全量纳管）\n\
-             - 变更状态：无变更\n\
-             - 环境（基线与目标必须相同）：生产\n\
-             - 基线快照标识：snap-base-001\n\
-             - 基线快照发布批次：batch-2026-11-08\n\
-             - 基线快照生成或获取时间：2026-11-08T10:00:00Z\n\
-             - 基线快照来源类型：外部发布系统\n\
-             - 基线快照外部目录：/mnt/config-snapshots/base-001\n\
-             - 基线快照指纹：digest-9f2c1f（脱敏占位）\n\
-             - 基线范围摘要：全部业务配置\n\
-             - 基线纳入文件数量或文件清单摘要：共 42 个配置文件\n\
-             - 基线服务摘要：order-api 与调度服务\n\
-             - 基线文件规则摘要：纳管 application 与 datasource 两类\n\
-             - 目标快照标识：snap-target-001\n\
-             - 目标快照发布批次：batch-2026-11-09\n\
-             - 目标快照生成或获取时间：2026-11-09T10:00:00Z\n\
-             - 目标快照来源类型：外部发布系统\n\
-             - 目标快照外部目录：/mnt/config-snapshots/target-001\n\
-             - 目标快照指纹：digest-1a7d22（脱敏占位）\n\
-             - 目标范围摘要：全部业务配置\n\
-             - 目标纳入文件数量或文件清单摘要：共 42 个配置文件\n\
-             - 目标服务摘要：order-api 与调度服务\n\
-             - 目标文件规则摘要：纳管 application 与 datasource 两类\n\
-             - 纳入文件范围：全部纳管配置\n\
-             - 涉及服务：order-api\n\
-             - 配置组：默认配置组\n\
-             - 已知差异：导出分页阈值待发布后核对\n\
-             - 无变更判断依据：两份快照一致，本次发布未调整配置\n\
-             \n\
-             ## 配置差异明细\n\
-             \n\
-             | 配置键 | 变更类型 | 用途 | 脱敏值 |\n\
-             |--------|----------|------|--------|\n\
-             |  | 新增 / 删除 / 修改 / 移动 / 无变更 |  | `<redacted>` |\n",
-        )
-    }
-
-    /// verification.md 合法样例。
-    fn valid_verification() -> String {
-        String::from(
-            "# 验证记录\n\
-             \n\
-             > 所有字段必须填写且不得留空。未执行的验证必须明确填写 `未执行`，并在未验证项目和风险中说明影响。验证证据不得包含真实配置值、凭证、完整连接串、未脱敏内部地址、原始敏感配置或敏感值哈希；发现这些内容时整个变更包在计算幂等标识前停止。\n\
-             \n\
-             - 已执行测试：单测与集成测试全部通过\n\
-             - 发布验证：预发环境已验证导出分页\n\
-             - 数据兼容验证：不适用（本次无数据模型变更）\n\
-             - 配置生效验证：不适用（本次未调整配置）\n\
-             - 回滚方式：回滚发布批次并还原代码\n\
-             - 未验证项目：生产灰度观察未完成\n\
-             - 风险：灰度期间导出可能短暂限流\n",
-        )
-    }
-
-    /// 把五份文档写进指定目录；overrides 以整份文档内容覆盖默认值。
-    fn write_docs(dir: &Path, start: &str, end: &str, overrides: &[(&'static str, String)]) {
-        let defaults: Vec<(&'static str, String)> = vec![
-            ("change-summary.md", valid_change_summary()),
-            ("code-change.md", valid_code_change(start, end)),
-            ("database-change.md", valid_database_change()),
-            ("configuration-change.md", valid_configuration_change()),
-            ("verification.md", valid_verification()),
-        ];
-        for (document, default) in defaults {
-            let content = overrides
-                .iter()
-                .find(|(name, _)| *name == document)
-                .map(|(_, content)| content.clone())
-                .unwrap_or(default);
-            std::fs::write(dir.join(document), content).expect("写入变更包文档");
+    // P2：五份文档必须存在且非空。
+    let mut contents: HashMap<&'static str, String> = HashMap::new();
+    for document in DOCUMENTS {
+        match std::fs::read_to_string(package_dir.join(document)) {
+            Ok(text) if !text.trim().is_empty() => {
+                contents.insert(document, text);
+            }
+            Ok(_) => violations.push(mk(
+                "missing_document",
+                Some(document),
+                None,
+                "文档存在但内容为空".to_string(),
+            )),
+            Err(_) => violations.push(mk(
+                "missing_document",
+                Some(document),
+                None,
+                "文档缺失或不可读".to_string(),
+            )),
         }
     }
 
-    /// 在 root 下写一份合法变更包（位于 user-input/updates/CHANGE- 目录内）。
-    fn write_package(root: &Path, start: &str, end: &str, overrides: &[(&'static str, String)]) -> PathBuf {
-        let dir = root.join("user-input/updates/CHANGE-20261109-0001");
-        std::fs::create_dir_all(&dir).expect("创建变更包目录");
-        write_docs(&dir, start, end, overrides);
-        dir
-    }
+    // 行式字段与领域矩阵取值。
+    let values = parse_line_fields(&contents);
+    let matrix = parse_domain_matrix(
+        contents
+            .get(CHANGE_SUMMARY)
+            .map(String::as_str)
+            .unwrap_or(""),
+    );
 
-    /// 只声明配置领域 scope 的最小 Manifest 快照。
-    fn manifest_with_config_scope(status: &str) -> KnowledgeBaseManifestSnapshot {
-        KnowledgeBaseManifestSnapshot {
-            exists: true,
-            schema_version: Some("4.0".to_string()),
-            configurations_scope: Some(status.to_string()),
-            ..KnowledgeBaseManifestSnapshot::default()
+    // P1 的标识项：变更标识不得携带路径分隔符或 `..`。
+    if let Some(id) = values
+        .get(CHANGE_SUMMARY)
+        .and_then(|per_document| per_document.get("变更标识"))
+    {
+        let id = id.trim();
+        if id.contains('/') || id.contains('\\') || id.contains("..") {
+            violations.push(mk(
+                "path_invalid",
+                Some(CHANGE_SUMMARY),
+                Some("变更标识"),
+                "变更标识含路径分隔符或 `..`，存在路径逃逸风险".to_string(),
+            ));
         }
     }
 
-    fn members(repo: PathBuf) -> Vec<MemberRepoPaths> {
-        vec![MemberRepoPaths { repo_root: repo }]
-    }
-
-    #[test]
-    fn lint_accepts_fully_filled_change_package() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let dir = write_package(temp.path(), &sha, &sha, &[]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(
-            lint.violations.is_empty(),
-            "字段齐全的合法变更包不应有违规：{:?}",
-            lint.violations
-        );
-    }
-
-    #[test]
-    fn lint_reports_field_status_for_editor() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let dir = write_package(temp.path(), &sha, &sha, &[]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        // 74 = 基本信息 9 + 领域矩阵 7 + 代码 11 + 数据库 11 + 配置 29 + 验证 7。
-        assert_eq!(lint.fields.len(), 74, "字段状态应覆盖全部声明字段");
-        assert!(
-            lint.fields.iter().all(|status| status.filled),
-            "合法包所有字段应为已填：{:?}",
-            lint.fields.iter().filter(|status| !status.filled).collect::<Vec<_>>()
-        );
-        for document in [
-            "change-summary.md",
-            "code-change.md",
-            "database-change.md",
-            "configuration-change.md",
-            "verification.md",
-        ] {
-            assert!(
-                lint.fields.iter().any(|status| status.document == document),
-                "缺少 {document} 的字段状态"
-            );
+    // P3/P4：逐字段判定空值、枚举占位与「不适用」缺原因，并产出字段状态。
+    for (document, field, kind) in FIELD_TABLE {
+        if matches!(kind, FieldKind::TableRow) {
+            let domain = field
+                .strip_prefix("领域变更矩阵/")
+                .expect("TableRow 字段名带领域前缀");
+            let filled = matrix
+                .get(domain)
+                .map(|(status, basis)| {
+                    CHANGE_STATUSES.contains(&status.as_str())
+                        && (status == CHANGE_STATUSES[0] || !basis.trim().is_empty())
+                })
+                .unwrap_or(false);
+            fields.push(ChangePackageFieldStatus {
+                document: document.to_string(),
+                field: field.to_string(),
+                filled,
+            });
+            continue;
         }
-        assert!(lint
-            .fields
-            .iter()
-            .any(|status| status.document == "code-change.md"
-                && status.field == "Merge Request 地址或编号"
-                && status.filled));
-        assert!(lint
-            .fields
-            .iter()
-            .any(|status| status.field == "领域变更矩阵/业务知识" && status.filled));
+        if !contents.contains_key(document) {
+            // 文档缺失：字段级只报未填状态，违规由 missing_document 承担。
+            fields.push(ChangePackageFieldStatus {
+                document: document.to_string(),
+                field: field.to_string(),
+                filled: false,
+            });
+            continue;
+        }
+        let value = values
+            .get(document)
+            .and_then(|per_document| per_document.get(*field));
+        let filled = lint_scalar_field(document, field, kind, value, &mut violations);
+        fields.push(ChangePackageFieldStatus {
+            document: document.to_string(),
+            field: field.to_string(),
+            filled,
+        });
     }
 
-    #[test]
-    fn lint_rejects_missing_document() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let dir = write_package(temp.path(), &sha, &sha, &[]);
-        std::fs::remove_file(dir.join("verification.md")).expect("删除验证文档");
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        let violation = first_with_code(&lint, &code("missing_document"));
-        assert_eq!(violation.document.as_deref(), Some("verification.md"));
+    // P5：七行领域矩阵。
+    lint_domain_matrix(&matrix, &mut violations);
+
+    // P6：敏感内容扫描（只报位置，不回显命中值）。
+    for document in DOCUMENTS {
+        if let Some(text) = contents.get(document) {
+            scan_sensitive(document, text, &mut violations);
+        }
     }
 
-    #[test]
-    fn lint_rejects_empty_document() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let dir = write_package(temp.path(), &sha, &sha, &[]);
-        std::fs::write(dir.join("verification.md"), "").expect("写入空文档");
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        let violation = first_with_code(&lint, &code("missing_document"));
-        assert_eq!(violation.document.as_deref(), Some("verification.md"));
-        assert!(violation.detail.contains("为空"), "空文档 detail 应说明为空");
-    }
+    // P7：「有变更」分支的起止提交必须可解析。
+    lint_commits(&values, members, &mut violations);
 
-    #[test]
-    fn lint_rejects_absent_field_line() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let code_doc = valid_code_change(&sha, &sha)
-            .lines()
-            .filter(|line| !line.starts_with("- 源分支："))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let dir = write_package(temp.path(), &sha, &sha, &[("code-change.md", code_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        let violation = first_with_code(&lint, &code("field_empty"));
-        assert_eq!(violation.document.as_deref(), Some("code-change.md"));
-        assert_eq!(violation.field.as_deref(), Some("源分支"));
-    }
+    // P8/P9：配置分支与 Manifest scope.configurations.status 一致性。
+    lint_configuration_scope(&values, manifest, &mut violations);
 
-    #[test]
-    fn lint_rejects_empty_required_field() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let code_doc = valid_code_change(&sha, &sha)
-            .replace("- Merge Request 地址或编号：!1234", "- Merge Request 地址或编号：");
-        let dir = write_package(temp.path(), &sha, &sha, &[("code-change.md", code_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("field_empty")
-            && violation.field.as_deref() == Some("Merge Request 地址或编号")));
-    }
+    ChangePackageLint { violations, fields }
+}
 
-    #[test]
-    fn lint_rejects_unresolved_enum_placeholder() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let code_doc = valid_code_change(&sha, &sha)
-            .replace("- 变更状态：有变更\n", "- 变更状态：有变更 / 无变更\n");
-        let dir = write_package(temp.path(), &sha, &sha, &[("code-change.md", code_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("field_empty")
-            && violation.document.as_deref() == Some("code-change.md")
-            && violation.field.as_deref() == Some("变更状态")));
-    }
-
-    #[test]
-    fn lint_rejects_unresolved_configuration_scope_placeholder() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let config_doc = valid_configuration_change().replace(
-            "- Manifest 配置领域状态：全量",
-            "- Manifest 配置领域状态：全量 / 指定 / 不适用",
-        );
-        let dir = write_package(temp.path(), &sha, &sha, &[("configuration-change.md", config_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("field_empty")
-            && violation.field.as_deref() == Some("Manifest 配置领域状态")));
-    }
-
-    #[test]
-    fn lint_rejects_bare_not_applicable() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let db_doc = valid_database_change()
-            .replace("- 逻辑表：不适用（本次无数据模型变更）", "- 逻辑表：不适用");
-        let dir = write_package(temp.path(), &sha, &sha, &[("database-change.md", db_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("reason_missing")
-            && violation.document.as_deref() == Some("database-change.md")
-            && violation.field.as_deref() == Some("逻辑表")));
-    }
-
-    #[test]
-    fn lint_rejects_placeholder_not_applicable_reason() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let db_doc = valid_database_change()
-            .replace("- 逻辑表：不适用（本次无数据模型变更）", "- 逻辑表：不适用（具体原因）");
-        let dir = write_package(temp.path(), &sha, &sha, &[("database-change.md", db_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("reason_missing")
-            && violation.field.as_deref() == Some("逻辑表")));
-    }
-
-    #[test]
-    fn lint_rejects_incomplete_domain_matrix() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let summary = valid_change_summary()
-            .lines()
-            .filter(|line| !line.starts_with("| 接口 |"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let dir = write_package(temp.path(), &sha, &sha, &[("change-summary.md", summary)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("domain_matrix_invalid")
-            && violation.field.as_deref() == Some("领域变更矩阵/接口")));
-    }
-
-    #[test]
-    fn lint_rejects_domain_matrix_placeholder_status() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let summary = valid_change_summary().replace(
-            "| 代码 | 有变更 | 订单导出分页改造 |",
-            "| 代码 | 有变更 / 无变更 | 订单导出分页改造 |",
-        );
-        let dir = write_package(temp.path(), &sha, &sha, &[("change-summary.md", summary)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("domain_matrix_invalid")
-            && violation.field.as_deref() == Some("领域变更矩阵/代码")));
-    }
-
-    #[test]
-    fn lint_rejects_domain_matrix_without_basis() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let summary = valid_change_summary().replace(
-            "| 数据模型 | 无变更 | 未新增表与字段，见数据库文档 |",
-            "| 数据模型 | 无变更 |  |",
-        );
-        let dir = write_package(temp.path(), &sha, &sha, &[("change-summary.md", summary)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("domain_matrix_invalid")
-            && violation.field.as_deref() == Some("领域变更矩阵/数据模型")));
-    }
-
-    #[test]
-    fn lint_rejects_sensitive_content_without_echoing_value() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let code_doc = format!(
-            "{}\npassword = \"s3cr3t-value\"\n",
-            valid_code_change(&sha, &sha)
-        );
-        let dir = write_package(temp.path(), &sha, &sha, &[("code-change.md", code_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        let violation = first_with_code(&lint, &code("sensitive_content"));
-        assert_eq!(violation.document.as_deref(), Some("code-change.md"));
-        assert!(
-            !violation.detail.contains("s3cr3t-value"),
-            "detail 不得回显命中值：{}",
-            violation.detail
-        );
-        assert!(violation.detail.contains("行"), "detail 应给出行号位置");
-    }
-
-    #[test]
-    fn lint_rejects_sensitive_connection_string() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let db_doc = valid_database_change().replace(
-            "- DDL 或迁移路径：不适用（本次无数据模型变更）",
-            "- DDL 或迁移路径：jdbc:mysql://10.2.3.4:3306/order",
-        );
-        let dir = write_package(temp.path(), &sha, &sha, &[("database-change.md", db_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        let violation = first_with_code(&lint, &code("sensitive_content"));
-        assert_eq!(violation.document.as_deref(), Some("database-change.md"));
-        assert!(!violation.detail.contains("jdbc:mysql"), "detail 不回显原文");
-        assert!(!violation.detail.contains("10.2.3.4"), "detail 不回显内网地址");
-    }
-
-    #[test]
-    fn lint_rejects_sensitive_internal_url() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let config_doc = valid_configuration_change().replace(
-            "- 已知差异：导出分页阈值待发布后核对",
-            "- 已知差异：内网入口 http://192.168.1.10/api 已迁移",
-        );
-        let dir = write_package(temp.path(), &sha, &sha, &[("configuration-change.md", config_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        let violation = first_with_code(&lint, &code("sensitive_content"));
-        assert_eq!(violation.document.as_deref(), Some("configuration-change.md"));
-        assert!(!violation.detail.contains("192.168.1.10"), "detail 不回显内网地址");
-    }
-
-    #[test]
-    fn lint_rejects_unresolvable_commit() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, _sha) = member_repo_with_commit(temp.path(), "order-api");
-        let dir = write_package(temp.path(), "deadbeefdeadbeef", "deadbeefdeadbeef", &[]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        let violation = first_with_code(&lint, &code("commit_unresolvable"));
-        assert_eq!(violation.document.as_deref(), Some("code-change.md"));
-        assert_eq!(violation.field.as_deref(), Some("起始提交"));
-    }
-
-    #[test]
-    fn lint_skips_commit_resolution_when_no_code_change() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, _sha) = member_repo_with_commit(temp.path(), "order-api");
-        let code_doc = valid_code_change("deadbeefdeadbeef", "deadbeefdeadbeef")
-            .replace("- 变更状态：有变更", "- 变更状态：无变更")
-            .replace(
-                "- 无变更判断依据：不适用（本次存在代码变更）",
-                "- 无变更判断依据：发布分支未包含代码提交",
-            );
-        let dir = write_package(temp.path(), "deadbeefdeadbeef", "deadbeefdeadbeef", &[("code-change.md", code_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(
-            !has_code(&lint, &code("commit_unresolvable")),
-            "无变更分支不应校验提交可解析：{:?}",
-            lint.violations
-        );
-    }
-
-    #[test]
-    fn lint_accepts_commit_resolvable_in_any_member_repo() {
-        let temp = tempfile::tempdir().unwrap();
-        let (first, _first_sha) = member_repo_with_commit(temp.path(), "alpha");
-        let (second, second_sha) = member_repo_with_commit(temp.path(), "beta");
-        let dir = write_package(temp.path(), &second_sha, &second_sha, &[]);
-        let members = vec![
-            MemberRepoPaths { repo_root: first },
-            MemberRepoPaths { repo_root: second },
-        ];
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members);
-        assert!(
-            !has_code(&lint, &code("commit_unresolvable")),
-            "任一成员仓可解析即应通过：{:?}",
-            lint.violations
-        );
-    }
-
-    #[test]
-    fn lint_rejects_configuration_scope_mismatch() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let config_doc = valid_configuration_change()
-            .replace("- Manifest 配置领域状态：全量", "- Manifest 配置领域状态：不适用")
-            .replace(
-                "- 配置领域不适用原因：不适用（配置领域为全量纳管）",
-                "- 配置领域不适用原因：配置中心未纳管",
-            )
-            .replace("- 变更状态：无变更\n", "- 变更状态：有变更\n");
-        let dir = write_package(temp.path(), &sha, &sha, &[("configuration-change.md", config_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("不适用"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("scope_mismatch")
-            && violation.field.as_deref() == Some("变更状态")));
-    }
-
-    #[test]
-    fn lint_rejects_declared_scope_differs_from_manifest() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let config_doc = valid_configuration_change()
-            .replace("- Manifest 配置领域状态：全量", "- Manifest 配置领域状态：指定");
-        let dir = write_package(temp.path(), &sha, &sha, &[("configuration-change.md", config_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("scope_mismatch")
-            && violation.field.as_deref() == Some("Manifest 配置领域状态")));
-    }
-
-    #[test]
-    fn lint_rejects_snapshot_not_applicable_under_full_scope() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let config_doc = valid_configuration_change().replace(
-            "- 基线快照标识：snap-base-001",
-            "- 基线快照标识：不适用（快照尚未生成）",
-        );
-        let dir = write_package(temp.path(), &sha, &sha, &[("configuration-change.md", config_doc)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("scope_mismatch")
-            && violation.field.as_deref() == Some("基线快照标识")));
-    }
-
-    #[test]
-    fn lint_rejects_invalid_package_path() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let dir = temp.path().join("user-input/updates/pkg-0001");
-        std::fs::create_dir_all(&dir).expect("创建非法命名的包目录");
-        write_docs(&dir, &sha, &sha, &[]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(has_code(&lint, &code("path_invalid")));
-    }
-
-    #[test]
-    fn lint_rejects_package_path_outside_updates() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let dir = temp.path().join("downloads/CHANGE-20261109-0001");
-        std::fs::create_dir_all(&dir).expect("创建 updates 之外的包目录");
-        write_docs(&dir, &sha, &sha, &[]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(has_code(&lint, &code("path_invalid")));
-    }
-
-    #[test]
-    fn lint_rejects_change_id_with_path_traversal() {
-        let temp = tempfile::tempdir().unwrap();
-        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
-        let summary = valid_change_summary()
-            .replace("- 变更标识：CHANGE-20261109-0001", "- 变更标识：CHANGE-../../etc");
-        let dir = write_package(temp.path(), &sha, &sha, &[("change-summary.md", summary)]);
-        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
-        assert!(lint.violations.iter().any(|violation| violation.code == code("path_invalid")
-            && violation.field.as_deref() == Some("变更标识")));
+/// 组装一条违规（后缀拼进稳定码前缀）。
+fn mk(
+    code_suffix: &str,
+    document: Option<&str>,
+    field: Option<&str>,
+    detail: String,
+) -> ChangePackageViolation {
+    ChangePackageViolation {
+        code: format!("{CODE_PREFIX}{code_suffix}"),
+        document: document.map(str::to_string),
+        field: field.map(str::to_string),
+        detail,
     }
 }
+
+/// P1：目录必须在 `user-input/updates/` 之下且目录名以 `CHANGE-` 开头。
+fn lint_package_path(package_dir: &Path, violations: &mut Vec<ChangePackageViolation>) {
+    let components: Vec<String> = package_dir
+        .iter()
+        .map(|component| component.to_string_lossy().into_owned())
+        .collect();
+    let under_updates = components.windows(2).enumerate().any(|(at, window)| {
+        window[0] == "user-input" && window[1] == "updates" && at + 2 < components.len()
+    });
+    if !under_updates {
+        violations.push(mk(
+            "path_invalid",
+            None,
+            None,
+            format!("目录 {} 不在 user-input/updates/ 下", package_dir.display()),
+        ));
+    }
+    let dir_name = package_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !dir_name.starts_with("CHANGE-") {
+        violations.push(mk(
+            "path_invalid",
+            None,
+            None,
+            format!("目录名「{dir_name}」不以 CHANGE- 开头"),
+        ));
+    }
+}
+
+/// P3/P4 的单字段判定，返回该字段是否视为「已填」。
+fn lint_scalar_field(
+    document: &'static str,
+    field: &'static str,
+    kind: &FieldKind,
+    value: Option<&String>,
+    violations: &mut Vec<ChangePackageViolation>,
+) -> bool {
+    let Some(raw) = value else {
+        violations.push(mk(
+            "field_empty",
+            Some(document),
+            Some(field),
+            "必填字段缺失（模板行不存在）".to_string(),
+        ));
+        return false;
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        violations.push(mk(
+            "field_empty",
+            Some(document),
+            Some(field),
+            "必填字段为空".to_string(),
+        ));
+        return false;
+    }
+    if let FieldKind::Enum(options) = kind {
+        let hits = options
+            .iter()
+            .filter(|option| value.contains(**option))
+            .count();
+        if hits >= 2 {
+            violations.push(mk(
+                "field_empty",
+                Some(document),
+                Some(field),
+                "枚举字段仍含多个候选，未二选一".to_string(),
+            ));
+            return false;
+        }
+        // 恰有 0 个候选说明填了表外取值：机械门禁只看「有内容且已二选一」，
+        // 取值合法性交回 skill 门禁。
+        return true;
+    }
+    if classify_not_applicable(value) == NotApplicableFill::ReasonMissing {
+        violations.push(mk(
+            "reason_missing",
+            Some(document),
+            Some(field),
+            "填写「不适用」但括号内没有具体原因".to_string(),
+        ));
+        return false;
+    }
+    true
+}
+
+/// P5：七行领域矩阵必须齐全、状态二选一、无变更行带判断依据。
+fn lint_domain_matrix(
+    matrix: &HashMap<&'static str, (String, String)>,
+    violations: &mut Vec<ChangePackageViolation>,
+) {
+    for domain in MATRIX_DOMAINS {
+        let field = format!("领域变更矩阵/{domain}");
+        match matrix.get(domain) {
+            None => violations.push(mk(
+                "domain_matrix_invalid",
+                Some(CHANGE_SUMMARY),
+                Some(&field),
+                format!("领域变更矩阵缺少「{domain}」行"),
+            )),
+            Some((status, basis)) => {
+                if !CHANGE_STATUSES.contains(&status.as_str()) {
+                    violations.push(mk(
+                        "domain_matrix_invalid",
+                        Some(CHANGE_SUMMARY),
+                        Some(&field),
+                        format!("「{domain}」行的变更状态不是 有变更/无变更"),
+                    ));
+                } else if status == CHANGE_STATUSES[1] && basis.trim().is_empty() {
+                    violations.push(mk(
+                        "domain_matrix_invalid",
+                        Some(CHANGE_SUMMARY),
+                        Some(&field),
+                        format!("「{domain}」行为无变更但缺少判断依据"),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// P7：「有变更」分支的起止提交在成员仓的解析校验。
+fn lint_commits(
+    values: &HashMap<&'static str, HashMap<&'static str, String>>,
+    members: &[MemberRepoPaths],
+    violations: &mut Vec<ChangePackageViolation>,
+) {
+    let Some(status) = values
+        .get(CODE_CHANGE)
+        .and_then(|per_document| per_document.get("变更状态"))
+    else {
+        return;
+    };
+    if single_choice(status, &CHANGE_STATUSES) != Some(CHANGE_STATUSES[0]) {
+        return;
+    }
+    for field in ["起始提交", "结束提交"] {
+        let Some(revision) = values
+            .get(CODE_CHANGE)
+            .and_then(|per_document| per_document.get(field))
+        else {
+            continue;
+        };
+        let revision = revision.trim();
+        if revision.is_empty() {
+            continue; // 空值由 field_empty 报告
+        }
+        if !commit_resolves_in_any_member(revision, members) {
+            violations.push(mk(
+                "commit_unresolvable",
+                Some(CODE_CHANGE),
+                Some(field),
+                format!("提交「{revision}」在所有成员仓都无法解析"),
+            ));
+        }
+    }
+}
+
+/// P8/P9：configuration-change.md 与 Manifest `scope.configurations.status`
+/// 的一致性：声明一致、不适用分支的状态/原因相符、快照字段组与分支匹配。
+fn lint_configuration_scope(
+    values: &HashMap<&'static str, HashMap<&'static str, String>>,
+    manifest: &KnowledgeBaseManifestSnapshot,
+    violations: &mut Vec<ChangePackageViolation>,
+) {
+    let Some(actual) = manifest.configurations_scope.as_deref() else {
+        return; // Manifest 未声明配置领域：结构问题由 Task 2 不变量管
+    };
+    let declared = values
+        .get(CONFIGURATION_CHANGE)
+        .and_then(|per_document| per_document.get("Manifest 配置领域状态"));
+    if let Some(declared) = declared {
+        if let Some(choice) = single_choice(declared, &CONFIGURATION_SCOPE_STATUSES) {
+            if choice != actual {
+                violations.push(mk(
+                    "scope_mismatch",
+                    Some(CONFIGURATION_CHANGE),
+                    Some("Manifest 配置领域状态"),
+                    format!(
+                        "变更包声明为「{choice}」，Manifest scope.configurations.status 为「{actual}」"
+                    ),
+                ));
+            }
+        }
+    }
+    if actual == NOT_APPLICABLE {
+        let status = values
+            .get(CONFIGURATION_CHANGE)
+            .and_then(|per_document| per_document.get("变更状态"));
+        if let Some(status) = status {
+            if single_choice(status, &CHANGE_STATUSES) == Some(CHANGE_STATUSES[0]) {
+                violations.push(mk(
+                    "scope_mismatch",
+                    Some(CONFIGURATION_CHANGE),
+                    Some("变更状态"),
+                    "Manifest 配置领域为「不适用」时变更状态必须为「无变更」".to_string(),
+                ));
+            }
+        }
+        let reason = values
+            .get(CONFIGURATION_CHANGE)
+            .and_then(|per_document| per_document.get("配置领域不适用原因"));
+        let reason_missing = match reason {
+            Some(reason) => {
+                reason.trim().is_empty()
+                    || classify_not_applicable(reason) == NotApplicableFill::ReasonMissing
+            }
+            None => true,
+        };
+        if reason_missing {
+            violations.push(mk(
+                "scope_mismatch",
+                Some(CONFIGURATION_CHANGE),
+                Some("配置领域不适用原因"),
+                "Manifest 配置领域为「不适用」时必须给出具体的不适用原因".to_string(),
+            ));
+        }
+    }
+    // 快照字段组与 Manifest 分支的双向一致性：「不适用」分支的快照字段
+    // 应填「不适用（原因）」；「全量/指定」分支不得填「不适用」。
+    for (document, field, _) in FIELD_TABLE {
+        if *document != CONFIGURATION_CHANGE || !is_snapshot_field(field) {
+            continue;
+        }
+        let Some(value) = values
+            .get(CONFIGURATION_CHANGE)
+            .and_then(|per_document| per_document.get(*field))
+        else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue; // 空值由 field_empty 报告
+        }
+        let not_applicable = classify_not_applicable(value) != NotApplicableFill::NotUsed;
+        if actual == NOT_APPLICABLE && !not_applicable {
+            violations.push(mk(
+                "scope_mismatch",
+                Some(CONFIGURATION_CHANGE),
+                Some(field),
+                "Manifest 配置领域为「不适用」，快照字段应填写不适用（原因）".to_string(),
+            ));
+        } else if actual != NOT_APPLICABLE && not_applicable {
+            violations.push(mk(
+                "scope_mismatch",
+                Some(CONFIGURATION_CHANGE),
+                Some(field),
+                format!("Manifest 配置领域为「{actual}」，快照字段不得填写不适用"),
+            ));
+        }
+    }
+}
+
+/// P6：保守敏感内容扫描。模板自带的 `>` 说明行（警示文案本身就含
+/// Token/AccessKey/Secret 等词）不是用户填写内容，跳过以免每个按模板
+/// 撰写的包都误报。命中只报「文档 + 行号 + 模式名」，绝不回显原文。
+fn scan_sensitive(
+    document: &'static str,
+    text: &str,
+    violations: &mut Vec<ChangePackageViolation>,
+) {
+    for (offset, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with('>') {
+            continue;
+        }
+        let line_number = offset + 1;
+        let lower = line.to_ascii_lowercase();
+        if let Some(label) = sensitive_label(&lower) {
+            violations.push(mk(
+                "sensitive_content",
+                Some(document),
+                None,
+                format!("第 {line_number} 行疑似包含敏感内容（{label}），为避免泄露不回显原文"),
+            ));
+        }
+    }
+}
+
+/// 保守敏感模式集合（命中第一个即返回；标签本身不含任何被扫关键字）。
+fn sensitive_label(lower: &str) -> Option<&'static str> {
+    if lower.contains("password") || lower.contains("passwd") {
+        return Some("password/passwd 关键字");
+    }
+    if lower.contains("secret") {
+        return Some("secret 关键字");
+    }
+    if lower.contains("token") {
+        return Some("token 关键字");
+    }
+    if lower.contains("accesskey")
+        || lower.contains("access_key")
+        || lower.contains("access-key")
+        || lower.contains("access key")
+    {
+        return Some("access key 关键字");
+    }
+    if lower.contains("private key")
+        || lower.contains("private_key")
+        || lower.contains("private-key")
+        || lower.contains("privatekey")
+    {
+        return Some("private key 关键字");
+    }
+    if lower.contains("jdbc:") {
+        return Some("jdbc 连接串");
+    }
+    if lower.contains("mysql://")
+        || lower.contains("postgres://")
+        || lower.contains("postgresql://")
+        || lower.contains("redis://")
+    {
+        return Some("数据库连接串");
+    }
+    if has_internal_http_host(lower) {
+        return Some("内网地址 URL");
+    }
+    None
+}
+
+/// `http(s)://` 后紧跟内网形态主机（localhost / 127.0.0.1 / 10.* /
+/// 192.168.* / 172.16-31.*）即命中。
+fn has_internal_http_host(lower: &str) -> bool {
+    ["http://", "https://"].iter().any(|scheme| {
+        let mut from = 0;
+        while let Some(at) = lower[from..].find(scheme) {
+            let after = &lower[from + at + scheme.len()..];
+            if points_to_internal_host(after) {
+                return true;
+            }
+            from += at + scheme.len();
+        }
+        false
+    })
+}
+
+/// 判断 URL scheme 之后的主机段是否内网形态。
+fn points_to_internal_host(after_scheme: &str) -> bool {
+    let end = after_scheme
+        .find(|c: char| {
+            c == '/' || c == ':' || c == '?' || c == '"' || c == '\'' || c.is_whitespace()
+        })
+        .unwrap_or(after_scheme.len());
+    let host = &after_scheme[..end];
+    if host == "localhost" || host == "127.0.0.1" {
+        return true;
+    }
+    if host.starts_with("10.") || host.starts_with("192.168.") {
+        return true;
+    }
+    match host.strip_prefix("172.") {
+        Some(rest) => match rest.find('.') {
+            Some(dot) => rest[..dot]
+                .parse::<u16>()
+                .map(|octet| (16..=31).contains(&octet))
+                .unwrap_or(false),
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// 解析各文档的「- 字段：值」行，取 FIELD_TABLE 已知字段。
+fn parse_line_fields(
+    contents: &HashMap<&'static str, String>,
+) -> HashMap<&'static str, HashMap<&'static str, String>> {
+    let mut values: HashMap<&'static str, HashMap<&'static str, String>> = HashMap::new();
+    for (document, text) in contents {
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix("- ") else {
+                continue;
+            };
+            let Some((name, value)) = split_field_colon(rest) else {
+                continue;
+            };
+            let Some(spec) = FIELD_TABLE.iter().find(|(doc, field, kind)| {
+                doc == document && field == &name && !matches!(kind, FieldKind::TableRow)
+            }) else {
+                continue;
+            };
+            values
+                .entry(*document)
+                .or_default()
+                .insert(spec.1, value.trim().to_string());
+        }
+    }
+    values
+}
+
+/// 在「- 字段：值」的键段取第一个全角（或半角）冒号切分键值。
+fn split_field_colon(rest: &str) -> Option<(&str, &str)> {
+    if let Some(at) = rest.find('：') {
+        Some((&rest[..at], &rest[at + '：'.len_utf8()..]))
+    } else {
+        let at = rest.find(':')?;
+        Some((&rest[..at], &rest[at + 1..]))
+    }
+}
+
+/// 解析 change-summary.md 的领域矩阵：领域 →（变更状态, 摘要或判断依据）。
+fn parse_domain_matrix(text: &str) -> HashMap<&'static str, (String, String)> {
+    let mut rows: HashMap<&'static str, (String, String)> = HashMap::new();
+    for line in text.lines() {
+        let Some(cells) = table_cells(line) else {
+            continue;
+        };
+        if cells.len() < 2 || cells[0].is_empty() {
+            continue;
+        }
+        if let Some(&domain) = MATRIX_DOMAINS.iter().find(|domain| **domain == cells[0]) {
+            rows.insert(
+                domain,
+                (
+                    cells.get(1).cloned().unwrap_or_default(),
+                    cells.get(2).cloned().unwrap_or_default(),
+                ),
+            );
+        }
+    }
+    rows
+}
+
+/// 取 Markdown 表格行的单元格（去首尾竖线、逐格 trim；空单元格保留）。
+fn table_cells(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if trimmed.len() < 2 || !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return None;
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    Some(
+        inner
+            .split('|')
+            .map(|cell| cell.trim().to_string())
+            .collect(),
+    )
+}
+
+/// 枚举值里「恰好出现一个」的候选（多个 = 未二选一，零个 = 表外取值）。
+fn single_choice<'a>(value: &str, options: &'a [&'a str]) -> Option<&'a str> {
+    let mut hits = options
+        .iter()
+        .copied()
+        .filter(|option| value.contains(*option));
+    let first = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+/// 「不适用」取值的填写形态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotApplicableFill {
+    /// 取值不是「不适用」形态。
+    NotUsed,
+    /// 「不适用（原因）」且括号内是具体原因。
+    ReasonFilled,
+    /// 裸「不适用」，或括号内为空 / 仍是占位词「具体原因」。
+    ReasonMissing,
+}
+
+/// 判定「不适用」取值是否带具体原因：模板要求 `不适用（具体原因）`，
+/// 括号内为空或仍是占位词「具体原因」都视为未填原因；裸「不适用」同理。
+fn classify_not_applicable(value: &str) -> NotApplicableFill {
+    let trimmed = value.trim();
+    let Some(rest) = trimmed.strip_prefix(NOT_APPLICABLE) else {
+        return NotApplicableFill::NotUsed;
+    };
+    let inner = if let Some(body) = rest.strip_prefix('（') {
+        body.find('）').map(|end| &body[..end])
+    } else if let Some(body) = rest.strip_prefix('(') {
+        body.find(')').map(|end| &body[..end])
+    } else {
+        None
+    };
+    match inner {
+        Some(inner) => {
+            let inner = inner.trim();
+            if inner.is_empty() || inner == NA_PLACEHOLDER_REASON {
+                NotApplicableFill::ReasonMissing
+            } else {
+                NotApplicableFill::ReasonFilled
+            }
+        }
+        None => NotApplicableFill::ReasonMissing,
+    }
+}
+
+/// 快照字段组：环境 + 全部「基线…」「目标…」字段（模板「双快照字段组」）。
+fn is_snapshot_field(field: &str) -> bool {
+    field.starts_with("基线") || field.starts_with("目标") || field == "环境（基线与目标必须相同）"
+}
+/// P7：对每个成员仓跑 `git rev-parse --verify <提交>^{commit}`；
+/// 任一仓可解析即通过，全部失败（含成员列表为空）才判失败。
+fn commit_resolves_in_any_member(revision: &str, members: &[MemberRepoPaths]) -> bool {
+    let spec = format!("{revision}^{{commit}}");
+    members.iter().any(|member| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&member.repo_root)
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(&spec)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
+// 测试模块按仓库惯例拆入 `.inc.rs`（同模块命名空间，符号路径与可见性不变），
+// 保持本文件低于 large_file_guard 的 1200 行上限：
+// - change_package_tests.inc.rs：tests 模块（五文档夹具与 25 条门禁用例）。
+include!("change_package_tests.inc.rs");
