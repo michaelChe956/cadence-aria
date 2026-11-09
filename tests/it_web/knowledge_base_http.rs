@@ -165,13 +165,20 @@ async fn with_available_provider_health(state: WebAppState, root: &Path) -> WebA
         AriaStatePaths::from_workspace_root(root),
         runner.clone(),
         Arc::new(SystemProviderHealthClock),
-        // 修复轮 1：TTL 从 1s 放宽到 600s。1 秒 TTL 让几乎每次 provider
-        // 选择都在请求期刷新 health——刷新持 refresh 锁跨 tokio::fs 落盘
-        // 让出，与「注册提交自动推进任务同步 join 选择线程」（见
-        // aggregate_initialization/handlers.inc.rs 的
-        // select_aggregate_provider_blocking）在单线程测试 runtime 上构成
+        // 第 4 个参数是 **probe 命令超时**（`with_dependencies` 的 `timeout`，
+        // 定义见 src/cross_cutting/provider_health.rs:106，唯一用途是探测子
+        // 进程超时，:245），**不参与**快照新鲜度判定。快照过期阈值是
+        // provider_selection.rs:70 的 `HEALTH_STALE_AFTER_MINUTES = 10`。
+        // 选择期刷新条件只有「首次选择（generation == 0）或快照降级
+        // （degraded）」（外加 checked_at 超过 10 分钟常量的过期分支），
+        // 并非「几乎每次选择都刷新」。
+        // 刷新持 refresh 锁跨 tokio::fs 落盘让出，与「注册提交自动推进任务
+        // 同步 join 选择线程」（见 aggregate_initialization/handlers.inc.rs
+        // 的 select_aggregate_provider_blocking）在单线程测试 runtime 上构成
         // 三元死锁：请求任务持锁等调度、选择线程等锁、测试线程被 join
-        // 占死。并行高并发下窗口稳定张开 ⇒ 集成测试永久挂住。
+        // 占死。真正消除死锁的是下面的**预刷快照**（generation ≥ 1、
+        // degraded = false、checked_at = now）：使后续选择路径在 10 分钟
+        // 常量内零 refresh、零锁竞争。
         std::time::Duration::from_secs(600),
         4096,
     ));
@@ -981,12 +988,16 @@ async fn cancel_transitions_running_operation_to_cancelled() {
 /// 修复轮 1（阻塞级回归）：并发的只读 status 与 create 请求不得互相卡死。
 ///
 /// 修复前的并行挂死机理：注册提交自动推进的后台任务在测试 runtime 上
-/// 同步 join provider 选择线程，而请求侧 provider health 刷新（快照 TTL
-/// 1 秒 ⇒ 几乎每次选择都刷新）持 refresh 锁跨 tokio::fs 落盘让出——
-/// 请求任务持锁等待调度、选择线程等锁、测试线程被 join 占死，三元死锁。
+/// 同步 join provider 选择线程，而请求侧 provider health 刷新（首次选择
+/// 即刷新）持 refresh 锁跨 tokio::fs 落盘让出——请求任务持锁等待调度、
+/// 选择线程等锁、测试线程被 join 占死，三元死锁。
 /// 本用例把「同一 fixture 上并发走选择链的请求」钉进回归：若夹具重新
-/// 引入请求期刷新竞争（TTL 过短 / 未预刷），本用例在并行模式下挂住
-/// 直至 request_json 的 30 秒有界等待失败。
+/// 引入请求期刷新竞争（未预刷 / 快照降级），本用例在并行模式下挂住。
+///
+/// 失败形态：完整三元死锁复发时，测试线程被同步 `join` 钉死，request_json
+/// 的 30 秒超时 future 永不被 poll ⇒ 实际失败形态是**测试挂死、需外部
+/// 杀掉**（RED 证据：测试进程 exit=124 被外部超时杀掉），而不是有界等待
+/// 超时失败。因此守护这条用例的是**预刷快照**，而不是超时机制。
 #[tokio::test]
 async fn concurrent_status_and_create_do_not_deadlock() {
     let fixture = KnowledgeBaseFixture::new().await;
