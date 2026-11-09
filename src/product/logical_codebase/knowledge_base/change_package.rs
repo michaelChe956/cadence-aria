@@ -14,7 +14,8 @@
 //! / `scope_mismatch`。码到 HTTP 失败面的登记在 Task 7，本模块只产出码。
 //!
 //! 硬要求：敏感内容命中的 `detail` 只给位置（文档 + 行号 + 模式名），
-//! **绝不回显命中值原文**。
+//! **绝不回显命中值原文**；扫描覆盖五份文档与 `attachments/` 附件
+//! （spec 门禁⑧：变更包**与附件**不得含疑似明文凭证）。
 
 /// 所有稳定码的共享前缀。
 const CODE_PREFIX: &str = "knowledge_base_change_package_";
@@ -55,7 +56,7 @@ pub struct MemberRepoPaths {
 }
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::manifest::KnowledgeBaseManifestSnapshot;
 
@@ -336,12 +337,15 @@ pub fn lint_change_package(
     // P5：七行领域矩阵。
     lint_domain_matrix(&matrix, &mut violations);
 
-    // P6：敏感内容扫描（只报位置，不回显命中值）。
+    // P6：敏感内容扫描（只报位置，不回显命中值）——五份文档与
+    // `attachments/` 附件（spec 门禁⑧：变更包**与附件**不得含疑似明文
+    // 凭证；DDL 差异、MR 导出等附件恰是最易携带连接串/口令的地方）。
     for document in DOCUMENTS {
         if let Some(text) = contents.get(document) {
             scan_sensitive(document, text, &mut violations);
         }
     }
+    scan_attachments_sensitive(package_dir, &mut violations);
 
     // P7：「有变更」分支的起止提交必须可解析。
     lint_commits(&values, members, &mut violations);
@@ -624,11 +628,8 @@ fn lint_configuration_scope(
 /// P6：保守敏感内容扫描。模板自带的 `>` 说明行（警示文案本身就含
 /// Token/AccessKey/Secret 等词）不是用户填写内容，跳过以免每个按模板
 /// 撰写的包都误报。命中只报「文档 + 行号 + 模式名」，绝不回显原文。
-fn scan_sensitive(
-    document: &'static str,
-    text: &str,
-    violations: &mut Vec<ChangePackageViolation>,
-) {
+/// 五份文档与 `attachments/` 附件共用本函数。
+fn scan_sensitive(document: &str, text: &str, violations: &mut Vec<ChangePackageViolation>) {
     for (offset, line) in text.lines().enumerate() {
         if line.trim_start().starts_with('>') {
             continue;
@@ -644,6 +645,74 @@ fn scan_sensitive(
             ));
         }
     }
+}
+
+/// P6 附件半边的单文件大小上限：与知识库文件读面（`files.rs`）一致，
+/// 1 MiB；超限附件不逐行扫描，改为记一条说明性违规（不静默）。
+const ATTACHMENT_SCAN_MAX_BYTES: u64 = 1024 * 1024;
+
+/// P6 附件半边：遍历 `package_dir/attachments/` 直下的常规文件，逐个按
+/// UTF-8 解码后复用 `scan_sensitive`。目录与符号链接（不跟随）跳过；
+/// 超 1 MiB、非 UTF-8 或不可读的文件无法逐行扫描——门禁⑧要求「变更包
+/// **与附件**不得含疑似明文凭证」，扫不动的附件无法证明合规，各记一条
+/// 说明性 `sensitive_content` 违规（fail-closed，不静默放行）。违规的
+/// `document` 统一填 `attachments/<相对路径>`，detail 不含附件内容。
+fn scan_attachments_sensitive(package_dir: &Path, violations: &mut Vec<ChangePackageViolation>) {
+    let attachments_dir = package_dir.join("attachments");
+    // attachments/ 不是变更包必备目录：不存在或不可枚举时不产出违规。
+    let Ok(entries) = std::fs::read_dir(&attachments_dir) else {
+        return;
+    };
+    let mut files: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            // 只处理常规文件；目录与符号链接跳过（file_type 不跟随链接）。
+            entry
+                .file_type()
+                .is_ok_and(|file_type| file_type.is_file())
+                .then(|| {
+                    (
+                        entry.file_name().to_string_lossy().into_owned(),
+                        entry.path(),
+                    )
+                })
+        })
+        .collect();
+    // read_dir 返回顺序随平台/文件系统变化；按文件名排序让违规列表确定。
+    files.sort();
+    for (name, path) in files {
+        let document = format!("attachments/{name}");
+        let oversized = std::fs::metadata(&path)
+            .map(|metadata| metadata.len() > ATTACHMENT_SCAN_MAX_BYTES)
+            .unwrap_or(true);
+        if oversized {
+            note_unscannable_attachment(&document, "附件超过 1 MiB 扫描上限", violations);
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => scan_sensitive(&document, &text, violations),
+                Err(_) => {
+                    note_unscannable_attachment(&document, "附件不是 UTF-8 文本", violations);
+                }
+            },
+            Err(_) => note_unscannable_attachment(&document, "附件不可读", violations),
+        }
+    }
+}
+
+/// 记一条「附件无法扫描」的说明性违规：只给文件与原因，不回显附件内容。
+fn note_unscannable_attachment(
+    document: &str,
+    why: &str,
+    violations: &mut Vec<ChangePackageViolation>,
+) {
+    violations.push(mk(
+        "sensitive_content",
+        Some(document),
+        None,
+        format!("{why}，无法完成敏感内容检查，请转为 1 MiB 内的 UTF-8 文本或移除该附件后重新提交"),
+    ));
 }
 
 /// 保守敏感模式集合（命中第一个即返回；标签本身不含任何被扫关键字）。

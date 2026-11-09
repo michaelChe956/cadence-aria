@@ -617,6 +617,98 @@ mod tests {
     }
 
     #[test]
+    fn lint_scans_attachment_sensitive_content_without_echoing_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let dir = write_package(temp.path(), &sha, &sha, &[]);
+        let attachments = dir.join("attachments");
+        std::fs::create_dir_all(&attachments).expect("创建附件目录");
+        std::fs::write(
+            attachments.join("ddl.sql"),
+            "-- 数据库差异导出\npassword = \"s3cr3t-value\"\n",
+        )
+        .expect("写附件");
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
+        let violation = first_with_code(&lint, &code("sensitive_content"));
+        assert_eq!(
+            violation.document.as_deref(),
+            Some("attachments/ddl.sql"),
+            "附件命中的 document 必须是 attachments/<相对路径>"
+        );
+        assert!(
+            !violation.detail.contains("s3cr3t-value"),
+            "detail 不得回显命中值：{}",
+            violation.detail
+        );
+        assert!(violation.detail.contains("行"), "detail 应给出行号位置");
+    }
+
+    #[test]
+    fn lint_accepts_clean_attachments_without_false_positives() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let dir = write_package(temp.path(), &sha, &sha, &[]);
+        let attachments = dir.join("attachments");
+        std::fs::create_dir_all(&attachments).expect("创建附件目录");
+        std::fs::write(
+            attachments.join("ddl.sql"),
+            "-- 数据库差异导出\nALTER TABLE orders ADD COLUMN cursor_id BIGINT;\n",
+        )
+        .expect("写干净附件");
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
+        assert!(
+            !has_code(&lint, &code("sensitive_content")),
+            "干净附件不应产生敏感误报：{:?}",
+            lint.violations
+        );
+    }
+
+    #[test]
+    fn lint_reports_unscannable_attachments_instead_of_skipping_silently() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, sha) = member_repo_with_commit(temp.path(), "order-api");
+        let dir = write_package(temp.path(), &sha, &sha, &[]);
+        let attachments = dir.join("attachments");
+        std::fs::create_dir_all(&attachments).expect("创建附件目录");
+        // 非 UTF-8 的常规文件：无法逐行扫描 ⇒ 记说明性违规（不静默跳过）。
+        std::fs::write(attachments.join("dump.bin"), [0xFF, 0xFE, 0x00, 0x81])
+            .expect("写二进制附件");
+        // 超过 1 MiB 扫描上限的文本文件：同样记说明性违规。
+        std::fs::write(attachments.join("huge.sql"), vec![b'x'; 1024 * 1024 + 1])
+            .expect("写超限附件");
+        let lint = lint_change_package(&dir, &manifest_with_config_scope("全量"), &members(repo));
+        let unscannable: Vec<_> = lint
+            .violations
+            .iter()
+            .filter(|violation| {
+                violation.code == code("sensitive_content")
+                    && violation
+                        .document
+                        .as_deref()
+                        .is_some_and(|document| document.starts_with("attachments/"))
+                    && violation.detail.contains("无法")
+            })
+            .collect();
+        let documents: Vec<_> = unscannable
+            .iter()
+            .map(|violation| violation.document.as_deref())
+            .collect();
+        assert_eq!(
+            documents,
+            vec![Some("attachments/dump.bin"), Some("attachments/huge.sql")],
+            "不可扫描的附件要各记一条说明性违规：{:?}",
+            lint.violations
+        );
+        for violation in unscannable {
+            assert!(
+                !violation.detail.contains("xxx"),
+                "detail 不得回显附件内容：{}",
+                violation.detail
+            );
+        }
+    }
+
+    #[test]
     fn lint_rejects_unresolvable_commit() {
         let temp = tempfile::tempdir().unwrap();
         let (repo, _sha) = member_repo_with_commit(temp.path(), "order-api");

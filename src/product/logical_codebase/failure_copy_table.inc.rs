@@ -894,6 +894,44 @@ const TABLE: &[Entry] = &[
         "按端点契约修正请求体后重试。",
         FailureTriage::Environment,
     ),
+    // ── LC 知识库执行期失败码（operation 落盘记录的顶层 reason_code；
+    //     卡片/投影经 failure_copy 同码表渲染，不登记就落「本次操作未完成」
+    //     中性兜底，真实原因会被吞掉）──
+    (
+        "knowledge_base_provider_turn_failed",
+        "知识库操作执行失败",
+        "provider turn 以失败结束（provider 的输出摘要见下方诊断；超时类失败可直接重试）。",
+        "按诊断里的 provider 输出摘要处理问题后重新发起知识库操作。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_cancelled",
+        "知识库操作已取消",
+        "操作在完成前被取消，provider 已确认停止，已产生的改动按原样保留在聚合根工作树里。",
+        "确认聚合根工作树状态后按需重新发起。",
+        FailureTriage::RetryOnly,
+    ),
+    (
+        "knowledge_base_cancel_audit_indeterminate",
+        "操作已取消，且无法确认 provider 已停止写入",
+        "取消返回时没能确认 provider 进程已停止，已写入范围只算下界（provider 可能仍在写）；审计按「不确定」留痕，不当作干净取消。",
+        "人工检查聚合根工作树（git status / git diff）确认没有越界改动后，再决定是否重新发起。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_invalid_input",
+        "知识库操作输入不合法",
+        "操作输入不满足知识库执行契约（具体原因见下方诊断）。",
+        "按诊断修正输入后重新发起知识库操作。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_internal_error",
+        "知识库操作内部错误",
+        "知识库操作在服务端内部环节失败（不是输入问题；上下文见下方诊断）。",
+        "查看服务端日志定位原因后重新发起；连续失败时附机器码与诊断提交问题。",
+        FailureTriage::ProductDefect,
+    ),
 ];
 
 /// 家族模板：码表未收但语义可判定的族（仍给出完整三段，不落到未知兜底）。
