@@ -31,6 +31,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 rust-embed = { version = "8", features = ["debug-embed"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
@@ -45,7 +46,6 @@ unicode-normalization = "0.1.25"
 [dev-dependencies]
 mockito = "1"
 parking_lot = "0.12"
-serde_yaml = "0.9.34"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.29"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
