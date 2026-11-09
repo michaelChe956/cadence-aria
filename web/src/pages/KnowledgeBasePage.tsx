@@ -2,7 +2,7 @@
 // 左侧文件树（按目录分组）+ 右侧「编辑 / 预览」页签 + 保存按钮。
 // 编辑页签用 Task 8 的可写 MonacoEditor，预览页签用公共 MarkdownContent；
 // 变更包（user-input/updates/ 下的 CHANGE-* 目录）额外展示 lint 的字段级标记。
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiRequestError } from "../api/client";
 import {
   getKnowledgeBaseStatus,
@@ -46,6 +46,8 @@ export function KnowledgeBasePage({
   const [notice, setNotice] = useState<Notice | null>(null);
   const [saving, setSaving] = useState(false);
   const [lintFields, setLintFields] = useState<KnowledgeBaseChangePackageFieldStatusDto[]>([]);
+  // 当前选中的文件路径（同步镜像）：用于丢弃乱序到达的过期读取响应。
+  const selectedPathRef = useRef<string | null>(null);
 
   const dirty = selectedPath !== null && draft !== savedContent;
 
@@ -53,15 +55,31 @@ export function KnowledgeBasePage({
 
   const openFile = useCallback(
     async (path: string) => {
+      selectedPathRef.current = path;
       setSelectedPath(path);
       setNotice(null);
+      // 读取新文件前先清空内容状态：读取失败时不得残留上一文件的内容
+      // （否则保存会把旧内容写进新路径），digest 置空同时使「保存」按钮禁用
+      // （没有读时摘要不得发出无 baseDigest 的盲覆盖写）。
+      setSavedContent("");
+      setDraft("");
+      setDigest(null);
+      setLintFields([]);
       try {
         const file = await readKnowledgeBaseFile(projectId, lcId, path);
+        if (selectedPathRef.current !== path) {
+          // 已切换到别的文件：本响应过期，直接丢弃（不得覆盖当前文件内容）。
+          return;
+        }
         setSavedContent(file.content);
         setDraft(file.content);
         setDigest(file.digest);
       } catch (reason) {
+        if (selectedPathRef.current !== path) {
+          return;
+        }
         setNotice({ kind: "error", text: `读取文件失败：${errorText(reason)}` });
+        return;
       }
       const packagePath = changePackagePathOf(path);
       if (!packagePath) {
@@ -70,8 +88,14 @@ export function KnowledgeBasePage({
       }
       try {
         const lint = await lintKnowledgeBaseChangePackage(projectId, lcId, packagePath);
+        if (selectedPathRef.current !== path) {
+          return;
+        }
         setLintFields(lint.fields);
       } catch {
+        if (selectedPathRef.current !== path) {
+          return;
+        }
         // lint 不可用（后端未就绪 / 网络失败）不得让页面崩：按「无标记」降级。
         setLintFields([]);
       }
@@ -120,6 +144,14 @@ export function KnowledgeBasePage({
     if (!selectedPath) {
       return;
     }
+    if (digest === null) {
+      // 没有读时摘要一律不写：否则会发出无 baseDigest 的盲覆盖写。
+      setNotice({
+        kind: "error",
+        text: "文件尚未成功读取，无法保存（缺少读时摘要）。",
+      });
+      return;
+    }
     setSaving(true);
     try {
       const result = await writeKnowledgeBaseFile(
@@ -127,8 +159,12 @@ export function KnowledgeBasePage({
         lcId,
         selectedPath,
         draft,
-        digest ?? undefined,
+        digest,
       );
+      if (selectedPathRef.current !== selectedPath) {
+        // 保存期间已切换到别的文件：不得把旧文件的保存结果落到当前文件上。
+        return;
+      }
       setSavedContent(draft);
       setDigest(result.digest);
       setNotice({ kind: "success", text: "已保存" });
@@ -195,7 +231,7 @@ export function KnowledgeBasePage({
             <button
               type="button"
               onClick={() => void save()}
-              disabled={!selectedPath || saving}
+              disabled={selectedPath === null || digest === null || saving}
               className="rounded-md border border-[var(--aria-line)] bg-white px-3 py-1 text-xs font-semibold text-[var(--aria-ink)] disabled:opacity-50"
             >
               保存
@@ -283,10 +319,13 @@ function TreeView({
   entries,
   selectedPath,
   onSelect,
+  level = "tree",
 }: {
   entries: TreeEntry[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  /** 根层为 tree，目录内的子层为 group（避免嵌套出多棵树）。 */
+  level?: "tree" | "group";
 }) {
   if (entries.length === 0) {
     return (
@@ -294,7 +333,10 @@ function TreeView({
     );
   }
   return (
-    <ul role="tree" className="space-y-1">
+    <ul
+      role={level}
+      className={level === "tree" ? "space-y-1" : "ml-3 space-y-1"}
+    >
       {entries.map((entry) =>
         entry.kind === "dir" ? (
           <li key={entry.path} role="treeitem" aria-expanded="true">
@@ -305,13 +347,12 @@ function TreeView({
             >
               {entry.name}
             </span>
-            <ul role="group" className="ml-3 space-y-1">
-              <TreeView
-                entries={entry.children}
-                selectedPath={selectedPath}
-                onSelect={onSelect}
-              />
-            </ul>
+            <TreeView
+              level="group"
+              entries={entry.children}
+              selectedPath={selectedPath}
+              onSelect={onSelect}
+            />
           </li>
         ) : (
           <li key={entry.path} role="treeitem">
@@ -339,7 +380,8 @@ function TreeView({
 
 function buildTree(nodes: KnowledgeBaseFileNodeDto[]): TreeEntry[] {
   const dirs = new Map<string, TreeEntry & { kind: "dir" }>();
-  const files = new Map<string, TreeEntry & { kind: "file" }>();
+  // 根容器：父路径为 null 的目录与文件（顶层目录必须挂在这里，否则整棵目录分组不可达）。
+  const roots: TreeEntry[] = [];
 
   const ensureDir = (path: string): TreeEntry & { kind: "dir" } => {
     const existing = dirs.get(path);
@@ -355,9 +397,10 @@ function buildTree(nodes: KnowledgeBaseFileNodeDto[]): TreeEntry[] {
     dirs.set(path, created);
     const parentPath = parentOf(path);
     if (parentPath === null) {
-      return created;
+      roots.push(created);
+    } else {
+      ensureDir(parentPath).children.push(created);
     }
-    ensureDir(parentPath).children.push(created);
     return created;
   };
 
@@ -366,31 +409,39 @@ function buildTree(nodes: KnowledgeBaseFileNodeDto[]): TreeEntry[] {
       ensureDir(node.path);
       continue;
     }
-    const parentPath = parentOf(node.path);
     const entry: TreeEntry & { kind: "file" } = {
       kind: "file",
       name: node.path.split("/").at(-1) ?? node.path,
       path: node.path,
     };
-    files.set(node.path, entry);
+    const parentPath = parentOf(node.path);
     if (parentPath === null) {
-      continue;
+      roots.push(entry);
+    } else {
+      ensureDir(parentPath).children.push(entry);
     }
-    ensureDir(parentPath).children.push(entry);
   }
 
-  const roots = dirs.get("");
-  const children = roots ? roots.children : [...files.values()];
-  return sortEntries(children);
+  return sortEntries(roots);
 }
 
 function sortEntries(entries: TreeEntry[]): TreeEntry[] {
-  return [...entries].sort((left, right) => {
+  const sorted = [...entries].sort((left, right) => {
     if (left.kind !== right.kind) {
       return left.kind === "dir" ? -1 : 1;
     }
     return left.name.localeCompare(right.name);
   });
+  return sorted.map((entry) =>
+    entry.kind === "dir"
+      ? {
+          kind: "dir",
+          name: entry.name,
+          path: entry.path,
+          children: sortEntries(entry.children),
+        }
+      : entry,
+  );
 }
 
 function parentOf(path: string): string | null {

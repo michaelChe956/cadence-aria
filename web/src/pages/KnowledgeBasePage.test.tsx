@@ -9,7 +9,7 @@ import {
   createRouter,
   useParams,
 } from "@tanstack/react-router";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeBasePage } from "./KnowledgeBasePage";
 
@@ -58,6 +58,33 @@ const FILES = [
     size: 12,
     editable: true,
   },
+  {
+    // 第二个变更包：与 CHANGE-1 同名文件，用于验证「同名文件按目录区分」。
+    path: "cadence/knowledge-base/user-input/updates/CHANGE-2",
+    is_dir: true,
+    size: 0,
+    editable: false,
+  },
+  {
+    path: "cadence/knowledge-base/user-input/updates/CHANGE-2/code-change.md",
+    is_dir: false,
+    size: 12,
+    editable: true,
+  },
+  {
+    // 根层文件（父路径为 null）：必须直接挂在树根，不得被折叠进任何目录分组。
+    path: "overview.md",
+    is_dir: false,
+    size: 8,
+    editable: true,
+  },
+  {
+    // 读取必然失败（不在 CONTENTS 中 ⇒ 404）：用于验证读取失败后的状态清理。
+    path: "cadence/knowledge-base/missing.md",
+    is_dir: false,
+    size: 0,
+    editable: true,
+  },
 ];
 
 const CONTENTS: Record<string, { content: string; digest: string }> = {
@@ -85,6 +112,8 @@ function installFetch(
   overrides: {
     write?: () => Response;
     lint?: () => Response;
+    /** 覆盖单文件读取（用于构造乱序/延迟响应）。 */
+    read?: (path: string) => Promise<Response>;
   } = {},
 ): { calls: FetchCall[] } {
   const calls: FetchCall[] = [];
@@ -124,6 +153,9 @@ function installFetch(
       const path = decodeURIComponent(
         new URL(url, "http://localhost").searchParams.get("path") ?? "",
       );
+      if (overrides.read) {
+        return overrides.read(path);
+      }
       const entry = CONTENTS[path];
       if (!entry) {
         return jsonResponse({ code: "knowledge_base_file_not_found", message: "文件不存在" }, 404);
@@ -171,6 +203,17 @@ async function waitForEditorValue(expected: string) {
   });
 }
 
+/** 取文件节点所属的目录分组路径（文件项所在 group 的父 li 上的目录标题）。 */
+function dirPathOf(fileNode: HTMLElement): string | null {
+  const item = fileNode.closest("li");
+  const group = item?.parentElement;
+  const dirItem = group?.parentElement;
+  return (
+    dirItem?.querySelector('[data-testid="kb-dir-node"]')?.getAttribute("data-path") ??
+    null
+  );
+}
+
 describe("KnowledgeBasePage", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -191,6 +234,120 @@ describe("KnowledgeBasePage", () => {
       "cadence/knowledge-base/user-input/updates/CHANGE-1/code-change.md",
     );
     expect(await screen.findByTestId("kb-status")).toHaveTextContent("已初始化");
+  });
+
+  it("renders_directory_groups_in_file_tree", async () => {
+    installFetch();
+    renderPage();
+
+    await screen.findByTestId("kb-file-tree");
+
+    // 顶层目录必须是树根的直接子节点（此前目录只进 Map、未挂根容器 ⇒ 目录分组整体不可达）。
+    const treeRoot = screen.getByRole("tree");
+    const cadenceDir = screen
+      .getAllByTestId("kb-dir-node")
+      .find((node) => node.getAttribute("data-path") === "cadence");
+    expect(cadenceDir).toBeDefined();
+    const cadenceItem = cadenceDir?.closest("li");
+    expect(cadenceItem?.parentElement).toBe(treeRoot);
+
+    // 目录分组下挂有文件节点（嵌套层级：cadence → knowledge-base → 文件）。
+    const knowledgeBaseDir = screen
+      .getAllByTestId("kb-dir-node")
+      .find((node) => node.getAttribute("data-path") === "cadence/knowledge-base");
+    expect(knowledgeBaseDir).toBeDefined();
+    const knowledgeBaseItem = knowledgeBaseDir?.closest("li");
+    expect(
+      within(knowledgeBaseItem as HTMLElement)
+        .getAllByTestId("kb-file-node")
+        .map((node) => node.getAttribute("data-path")),
+    ).toEqual(
+      expect.arrayContaining([
+        "cadence/knowledge-base/base-info.md",
+        "cadence/knowledge-base/product.md",
+      ]),
+    );
+
+    // 同名文件（code-change.md）必须按所在目录区分。
+    const codeChangeButtons = screen.getAllByRole("button", { name: "code-change.md" });
+    expect(codeChangeButtons).toHaveLength(2);
+    expect(codeChangeButtons.map((button) => dirPathOf(button))).toEqual(
+      expect.arrayContaining([
+        "cadence/knowledge-base/user-input/updates/CHANGE-1",
+        "cadence/knowledge-base/user-input/updates/CHANGE-2",
+      ]),
+    );
+
+    // 根层文件不隶属于任何目录分组。
+    const overview = screen.getByRole("button", { name: "overview.md" });
+    expect(overview.closest('[data-testid="kb-dir-node"]')).toBeNull();
+  });
+
+  it("read_failure_clears_content_and_blocks_save", async () => {
+    const { calls } = installFetch();
+    renderPage();
+
+    await waitForEditorValue("# 基础信息");
+
+    fireEvent.click(screen.getByRole("button", { name: "missing.md" }));
+
+    const notice = await screen.findByTestId("kb-notice");
+    await waitFor(() => {
+      expect(notice).toHaveTextContent("读取文件失败");
+    });
+    // 读取失败必须清空内容状态（不得残留上一文件的内容）。
+    await waitFor(() => {
+      expect((screen.getByTestId("kb-editor") as HTMLTextAreaElement).value).toBe("");
+    });
+    // 无读时摘要 ⇒ 保存禁用（不得无 baseDigest 盲覆盖写）。
+    const saveButton = screen.getByRole("button", { name: "保存" });
+    await waitFor(() => {
+      expect(saveButton).toBeDisabled();
+    });
+    fireEvent.click(saveButton);
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(0);
+  });
+
+  it("stale_read_response_does_not_overwrite_current_file", async () => {
+    let releaseBaseInfo: ((response: Response) => void) | null = null;
+    const baseInfoPending = new Promise<Response>((resolve) => {
+      releaseBaseInfo = resolve;
+    });
+    installFetch({
+      read: (path) =>
+        path.endsWith("base-info.md")
+          ? baseInfoPending
+          : Promise.resolve(
+              jsonResponse({
+                path,
+                content: "# 产品信息",
+                digest: "digest-product",
+              }),
+            ),
+    });
+    renderPage();
+
+    // 首屏自动打开 base-info.md（读取挂起），随后切换到 product.md。
+    await screen.findByTestId("kb-file-tree");
+    fireEvent.click(screen.getByRole("button", { name: "product.md" }));
+    await waitForEditorValue("# 产品信息");
+
+    // 先到的 product.md 响应已落地；此时才到达的 base-info.md 响应属于过期响应。
+    await act(async () => {
+      releaseBaseInfo?.(
+        jsonResponse({
+          path: "cadence/knowledge-base/base-info.md",
+          content: "# 基础信息",
+          digest: "digest-base",
+        }),
+      );
+      await baseInfoPending;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect((screen.getByTestId("kb-editor") as HTMLTextAreaElement).value).toBe(
+      "# 产品信息",
+    );
   });
 
   it("switching_file_loads_content_into_editor", async () => {
@@ -284,9 +441,16 @@ describe("KnowledgeBasePage", () => {
     });
     renderPage();
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "code-change.md" }),
+    // 两个变更包下存在同名文件 ⇒ 按完整路径定位目标按钮。
+    const codeChange = (
+      await screen.findAllByTestId("kb-file-node")
+    ).find(
+      (node) =>
+        node.getAttribute("data-path") ===
+        "cadence/knowledge-base/user-input/updates/CHANGE-1/code-change.md",
     );
+    expect(codeChange).toBeDefined();
+    fireEvent.click(codeChange as HTMLElement);
 
     expect(await screen.findByText("未填")).toBeInTheDocument();
     expect(screen.getByText("Merge Request 地址或编号")).toBeInTheDocument();
