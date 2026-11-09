@@ -700,6 +700,80 @@ async fn create_operation_rejected_when_aggregate_initialization_missing() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// provider 选择失败面必须走仓内失败文案单一来源（failure_copy）：
+/// 四家 CLI 可用但无人核验 ⇒ message 是中文成品文案（不再是英文原文），
+/// code 仍是聚合选择期稳定码，候选表 details（逐候选 + action_hint）
+/// 原样透出（候选数随选择器候选集，真机四家、本 stub 环境三家）；
+/// 选择期失败零写入（不创建 operation）。
+#[tokio::test]
+async fn create_operation_provider_unverified_returns_chinese_failure_copy() {
+    let fixture = KnowledgeBaseFixture::new().await;
+    // 能力面重置回 bootstrap Unknown 行：L1 四家 CLI 全可用、无人核验。
+    let capabilities = fixture
+        .paths
+        .provider_capabilities_root()
+        .join("capabilities.json");
+    std::fs::remove_file(&capabilities).expect("reset capability rows");
+    ProviderCapabilityStore::new(fixture.paths.clone())
+        .ensure_bootstrap()
+        .expect("bootstrap unverified capability rows");
+
+    let (status, body) = request_json(
+        &fixture.app,
+        Method::POST,
+        &fixture.kb_uri("/initializations"),
+        json!({"kind":"bootstrap","idempotency_key":"kb-needs-verification"}),
+    )
+    .await;
+    assert!(
+        status.is_client_error(),
+        "expected 4xx, got {status}: {body}"
+    );
+    assert_eq!(
+        body["code"], "aggregate_initialization_provider_needs_verification",
+        "{body}"
+    );
+    let message = body["message"].as_str().expect("message");
+    assert!(
+        message.contains("核验"),
+        "message must be the Chinese failure copy: {body}"
+    );
+    assert!(
+        !message.contains("no candidate provider has verified capability"),
+        "message must not leak the English original: {body}"
+    );
+    // 候选表原样透出：逐候选非空 action_hint，全部因未核验被跳过。
+    let candidates = body["details"]["candidates"]["candidates"]
+        .as_array()
+        .expect("candidate table");
+    assert!(
+        !candidates.is_empty(),
+        "write-cell candidates must be listed: {body}"
+    );
+    assert!(
+        candidates.iter().all(|candidate| !candidate["action_hint"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()),
+        "every candidate carries an action hint: {body}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate["skipped_reason"] == "needs_verification"),
+        "bootstrap rows are all unverified: {body}"
+    );
+
+    let (status, _) = request_json(
+        &fixture.app,
+        Method::GET,
+        &fixture.kb_uri("/initializations/active"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// GET /status：未初始化 → exists == false。
 #[tokio::test]
 async fn status_endpoint_reports_missing_knowledge_base() {

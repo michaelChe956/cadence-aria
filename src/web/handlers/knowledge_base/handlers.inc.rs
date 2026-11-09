@@ -138,25 +138,16 @@ fn knowledge_base_preflight_api_error(failure: KnowledgeBasePreflightFailure) ->
 
 /// provider 选择失败：**选择器失败码与候选表原样透出**（聚合初始化同款四枚
 /// 选择期失败码；候选表走与聚合 DTO 相同的字段集，前端两种失败卡同构）。
+/// `message` 走失败文案单一来源 `failure_copy::describe` 的中文成品标题
+/// （与聚合初始化面 `provider_selection_api_error` 同源同文案）；四枚
+/// 选择期码的标题不含 `{provider}` 占位符，无需点名 provider。
 fn knowledge_base_selection_api_error(outcome: &ProviderSelectionOutcome) -> ApiError {
+    use crate::product::logical_codebase::failure_copy::{describe, FailureInput};
+
     let code = outcome.reason_code().unwrap_or(
         crate::product::logical_codebase::provider_selection::REASON_CODE_PROVIDER_HEALTH_DEGRADED,
     );
-    let message = match outcome {
-        ProviderSelectionOutcome::NoCliAvailable(_) => {
-            "no candidate provider CLI is available for the knowledge base write cell"
-        }
-        ProviderSelectionOutcome::NeedsVerification { .. } => {
-            "no candidate provider has verified capability for the knowledge base write cell"
-        }
-        ProviderSelectionOutcome::Denied { .. } => {
-            "every candidate provider denied the knowledge base write cell"
-        }
-        ProviderSelectionOutcome::HealthDegraded { .. } => {
-            "provider health is degraded; the write cell selection cannot run"
-        }
-        ProviderSelectionOutcome::Selected(_) => "provider selection did not select a provider",
-    };
+    let copy = describe(FailureInput::new(code));
     let mut details = serde_json::Map::new();
     if let Some(table) = outcome.table() {
         details.insert("candidates".into(), knowledge_base_selection_dto(table));
@@ -164,7 +155,7 @@ fn knowledge_base_selection_api_error(outcome: &ProviderSelectionOutcome) -> Api
     if let ProviderSelectionOutcome::HealthDegraded { detail } = outcome {
         details.insert("detail".into(), json!(detail));
     }
-    ApiError::runtime(code, message, Value::Object(details))
+    ApiError::runtime(code, copy.title_zh, Value::Object(details))
 }
 
 /// durable store 错误 → HTTP 错误面：缺记录 404，状态机冲突 409。
