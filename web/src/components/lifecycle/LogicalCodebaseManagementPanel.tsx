@@ -2,6 +2,8 @@ import { AggregateIndexCard } from "./AggregateIndexCard";
 import { AggregateInitializationCard } from "./AggregateInitializationCard";
 import { LogicalCodebaseBootstrapCard } from "./LogicalCodebaseBootstrapCard";
 import { PointerPublicationPanel } from "./PointerPublicationPanel";
+import { KnowledgeBaseCard } from "./KnowledgeBaseCard";
+import type { KnowledgeBasePreflightFailureDto } from "./KnowledgeBaseCard";
 import type {
   AggregateIndexActiveResponse,
   AggregateInitializationOperationSnapshot,
@@ -10,6 +12,10 @@ import type {
   LogicalCodebaseMemberDto,
   PointerPublicationDto,
 } from "../../api/types";
+import type {
+  KnowledgeBaseOperationSnapshotDto,
+  KnowledgeBaseStatusDto,
+} from "../../api/types/knowledge-base";
 
 type LogicalCodebaseManagementPanelProps = {
   logicalCodebases: CodebaseSummaryDto[];
@@ -38,6 +44,19 @@ type LogicalCodebaseManagementPanelProps = {
   onPublishIncremental: () => void;
   onRetryRepo: (memberRepoId: string) => void;
   onRevoke: () => void;
+  /** 知识库卡片（Task 9）：数据与动作全部可选——未注入时卡片以空态挂载，不破坏既有宿主测试。 */
+  knowledgeBaseStatus?: KnowledgeBaseStatusDto | null;
+  knowledgeBaseOperation?: KnowledgeBaseOperationSnapshotDto | null;
+  knowledgeBaseBusy?: boolean;
+  knowledgeBasePreflightFailure?: KnowledgeBasePreflightFailureDto | null;
+  onStartKnowledgeBase?: (
+    kind: "bootstrap" | "update",
+    packagePath?: string,
+  ) => void;
+  onCancelKnowledgeBase?: () => void;
+  onOpenKnowledgeBaseDetail?: () => void;
+  onCreateKnowledgeBaseBootstrapInputs?: () => void;
+  onDismissKnowledgeBasePreflightFailure?: () => void;
 };
 
 /**
@@ -71,6 +90,15 @@ export function LogicalCodebaseManagementPanel({
   onPublishIncremental,
   onRetryRepo,
   onRevoke,
+  knowledgeBaseStatus = null,
+  knowledgeBaseOperation = null,
+  knowledgeBaseBusy = false,
+  knowledgeBasePreflightFailure = null,
+  onStartKnowledgeBase = () => {},
+  onCancelKnowledgeBase = () => {},
+  onOpenKnowledgeBaseDetail = () => {},
+  onCreateKnowledgeBaseBootstrapInputs = () => {},
+  onDismissKnowledgeBasePreflightFailure = () => {},
 }: LogicalCodebaseManagementPanelProps) {
   return (
     <div className="bg-[var(--aria-panel)]">
@@ -153,6 +181,25 @@ export function LogicalCodebaseManagementPanel({
           onCancel={onCancelAggregateInitialization}
           onReinitialize={onReinitializeAggregateInitialization}
           advanceStop={bootstrapProjection?.advance_stop ?? undefined}
+        />
+      ) : null}
+      {logicalCodebaseMembers.length > 0 &&
+      projectId !== null &&
+      activeLogicalCodebaseId !== null ? (
+        /* 知识库卡片（Task 9）：数据与动作由宿主注入；未注入时以空态呈现。
+           挂载点放在聚合初始化卡之后，不改动其它卡片与逻辑。 */
+        <KnowledgeBaseCard
+          projectId={projectId}
+          logicalCodebaseId={activeLogicalCodebaseId}
+          status={knowledgeBaseStatus}
+          operation={knowledgeBaseOperation}
+          busy={knowledgeBaseBusy}
+          preflightFailure={knowledgeBasePreflightFailure}
+          onStart={onStartKnowledgeBase}
+          onCancel={onCancelKnowledgeBase}
+          onOpenDetail={onOpenKnowledgeBaseDetail}
+          onCreateBootstrapInputs={onCreateKnowledgeBaseBootstrapInputs}
+          onDismissPreflightFailure={onDismissKnowledgeBasePreflightFailure}
         />
       ) : null}
       {aggregateIndex ? (

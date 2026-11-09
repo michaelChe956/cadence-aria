@@ -11,6 +11,11 @@ import type {
   AggregateInitializationStepStatus,
   AggregateProviderSelectionDto,
 } from "../../api/types";
+import { ProviderSelectionSummary } from "./KnowledgeBaseCard";
+
+// provider 选择摘要已提升为公共组件（Task 9）：知识库卡片与聚合卡共用同一
+// 文案口径；此处保留 re-export 以维持既有导入路径稳定。
+export { ProviderSelectionSummary } from "./KnowledgeBaseCard";
 
 const STEP_LABELS: Record<string, string> = {
   machine_skills: "Machine Skills",
@@ -162,33 +167,6 @@ function stepIndicatorIcon(status: AggregateInitializationStepStatus) {
  */
 const REINITIALIZE_CONFIRM_TEXT =
   "重新初始化会强制重跑完整五步：/pre-check、/rule-config、/mcp-configuration、/project-rules-examples 四条 Cadence-skills 命令一律执行（不因聚合根已初始化而跳过），适用于 Cadence-skills 更新后重装；执行后会重新合成并发布新的聚合政策版本（policy/<项目>/<逻辑代码库>/<版本+1>）。确认重新初始化？";
-/** 跳过原因码 → 摘要行中文标签（与后端 skipped_reason 词表一一对应）。 */
-const SKIPPED_REASON_LABELS: Record<string, string> = {
-  cli_unavailable: "未安装",
-  needs_verification: "未核验",
-  denied: "实测拒绝",
-  evidence_stale: "证据过期",
-};
-
-/**
- * 冻结的 provider 选择摘要（REQ-BOOT-07）：「本次使用 X；跳过：Y（原因）、…」。
- * 候选顺序沿用后端 owner 顺序，不按结果重排；未知原因码如实原样展示。
- */
-function providerSelectionSummary(selection: AggregateProviderSelectionDto): string {
-  const selected =
-    selection.candidates.find((c) => c.provider === selection.selected)?.display_name ??
-    selection.selected;
-  const skipped = selection.candidates
-    .filter((c) => c.skipped_reason != null)
-    .map((c) => {
-      const reason = c.skipped_reason ?? "";
-      return `${c.display_name}（${SKIPPED_REASON_LABELS[reason] ?? reason}）`;
-    });
-  return skipped.length === 0
-    ? `本次使用 ${selected}`
-    : `本次使用 ${selected}；跳过：${skipped.join("、")}`;
-}
-
 
 export type AggregateInitializationCardProps = {
   operation: AggregateInitializationOperationSnapshot | null;
@@ -384,7 +362,7 @@ export function AggregateInitializationCard({
           data-testid="aggregate-initialization-provider-selection"
           className="mt-2 text-xs text-[var(--aria-ink-muted)]"
         >
-          {providerSelectionSummary(operation.provider_selection)}
+          <ProviderSelectionSummary selection={operation.provider_selection} />
         </p>
       ) : null}
 
