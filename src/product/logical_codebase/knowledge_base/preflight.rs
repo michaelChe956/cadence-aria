@@ -20,7 +20,7 @@ use crate::product::logical_codebase::store::LogicalCodebaseStore;
 use crate::product::models::ProviderName;
 
 use super::change_package::{ChangePackageViolation, MemberRepoPaths, lint_change_package};
-use super::manifest::read_manifest;
+use super::manifest::{manifest_invariants, read_manifest};
 
 /// 知识库创建期前置检查的统一失败面（稳定码登记在 Task 7，本模块只产出）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +118,12 @@ pub fn preflight_update(
     if snapshot.initialization_status.as_deref() != Some("complete")
         || snapshot.global_validation.as_deref() != Some("passed")
     {
+        return Err(KnowledgeBasePreflightFailure::NotInitialized);
+    }
+    // 状态字面写着 complete/passed 不等于初始化有效完成：必需阶段缺失、阶段重复或
+    // 乱序、completed_at 为空、适用领域被错误跳过等不变量违规，一律按未完成拒绝
+    // （lint 消费端不再校验这些，不能指望下游兜底）。
+    if !manifest_invariants(&snapshot).is_empty() {
         return Err(KnowledgeBasePreflightFailure::NotInitialized);
     }
     let lint = lint_change_package(package_dir, &snapshot, members);
@@ -629,5 +635,52 @@ mod tests {
                 found: "3.0".to_string()
             }
         );
+    }
+
+    #[test]
+    fn preflight_update_rejects_complete_passed_manifest_with_broken_invariants() {
+        let fixture = PreflightFixture::new();
+        fixture.seed_aggregate_initialization();
+        fixture.seed_all_seven_skills();
+        // status/global_validation 字面合法，但必需阶段一个都没完成、completed_at 为空：
+        // 不变量非法 ⇒ 必须在进入变更包 lint 之前被拒。
+        fixture.write_manifest_yaml(
+            "schema_version: \"4.0\"\ncoverage:\n  initialization:\n    status: complete\n    global_validation: passed\n    completed_stages: []\n    skipped_stages: []\n    completed_at: \"\"\n",
+        );
+        let _guard = HomeEnvGuard::isolate(fixture.home_path());
+
+        let failure = preflight_update(
+            &fixture.paths,
+            LC_ID,
+            &fixture.aggregate_root,
+            &provider(),
+            &fixture.kb_root().join("user-input/updates/CHANGE-demo"),
+            &[],
+        )
+        .expect_err("complete + passed with broken invariants must be rejected");
+        assert_eq!(failure, KnowledgeBasePreflightFailure::NotInitialized);
+    }
+
+    #[test]
+    fn preflight_update_legal_complete_manifest_passes_invariant_gate() {
+        let fixture = PreflightFixture::new();
+        fixture.seed_aggregate_initialization();
+        fixture.seed_all_seven_skills();
+        // 合法 complete manifest（与 manifest.rs 的 COMPLETE_FIXTURE 同形）：
+        // 不变量门禁必须放行，失败只能来自后续的变更包 lint（目录不存在）。
+        fixture.write_manifest_yaml(
+            "schema_version: \"4.0\"\ncoverage:\n  initialization:\n    status: complete\n    global_validation: passed\n    completed_stages: [base-info, overview, global-validation]\n    skipped_stages:\n      - stage: api\n        reason: 接口领域不适用\n      - stage: pages\n        reason: 页面领域不适用\n    completed_at: \"2026-11-09T00:05:00Z\"\nscope:\n  configurations:\n    status: 全量\n  api:\n    status: 不适用\n  pages:\n    status: 不适用\n",
+        );
+        let _guard = HomeEnvGuard::isolate(fixture.home_path());
+
+        let failure = preflight_update(
+            &fixture.paths,
+            LC_ID,
+            &fixture.aggregate_root,
+            &provider(),
+            &fixture.kb_root().join("user-input/updates/CHANGE-demo"),
+            &[],
+        );
+        assert_ne!(failure, Err(KnowledgeBasePreflightFailure::NotInitialized));
     }
 }
