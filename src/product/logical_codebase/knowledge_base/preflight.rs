@@ -14,8 +14,7 @@ use std::path::Path;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::cadence_skills::CadenceSkillsPaths;
-use crate::product::json_store::validate_relative_id;
-use crate::product::logical_codebase::policy::{AggregatePolicyArtifactStore, SessionPolicyAction};
+use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::production_policy_resolvers::StoreBackedProviderCapabilitySource;
 use crate::product::logical_codebase::provider_capability_store::{
     MANAGED_CAPABILITY_SNAPSHOT_REF, ProviderCapabilityStore,
@@ -24,8 +23,10 @@ use crate::product::logical_codebase::provider_gateway::ProviderRef;
 use crate::product::logical_codebase::provider_selection::ProviderSelectionOutcome;
 use crate::product::logical_codebase::provider_trust::provider_wire_label;
 use crate::product::logical_codebase::provider_trust_adapters::resolve_owner_home_from_env;
-use crate::product::logical_codebase::root_recipe_receipt::root_rule_digest;
-use crate::product::logical_codebase::store::LogicalCodebaseStore;
+use crate::product::logical_codebase::{
+    LogicalCodebaseBootstrapProjector, LogicalCodebaseBootstrapStep,
+    LogicalCodebaseBootstrapStepStatus,
+};
 use crate::product::models::ProviderName;
 
 use super::change_package::{ChangePackageViolation, MemberRepoPaths, lint_change_package};
@@ -35,7 +36,7 @@ use super::manifest::{manifest_invariants, read_manifest};
 /// 知识库创建期前置检查的统一失败面（稳定码登记在 Task 7，本模块只产出）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeBasePreflightFailure {
-    /// 预检①：聚合初始化未完成（根规则入口或已发布政策 artifact 缺失）。
+    /// 预检①：聚合初始化未完成（冷启动投影 `rules_policy` 步未 Completed）。
     RequiresAggregateInitialization,
     /// 预检②：被选 provider 对应 skill 层缺 `knowledge-base-*` skill。
     SkillsUnavailable { missing: Vec<String> },
@@ -93,11 +94,12 @@ const SCHEMA_VERSION_4: &str = "4.0";
 /// bootstrap 前置检查（预检①②③⑦，只读、不产生 operation）。
 pub fn preflight_bootstrap(
     paths: &ProductAppPaths,
+    project_id: &str,
     lc_id: &str,
     aggregate_root: &Path,
     provider: &ProviderName,
 ) -> Result<(), KnowledgeBasePreflightFailure> {
-    preflight_common(paths, lc_id, aggregate_root, provider)?;
+    preflight_common(paths, project_id, lc_id, provider)?;
     let missing = missing_bootstrap_inputs(aggregate_root);
     if !missing.is_empty() {
         return Err(KnowledgeBasePreflightFailure::InputsIncomplete { missing });
@@ -109,13 +111,14 @@ pub fn preflight_bootstrap(
 /// update 前置检查（预检①②④⑤⑥⑦，只读、不产生 operation）。
 pub fn preflight_update(
     paths: &ProductAppPaths,
+    project_id: &str,
     lc_id: &str,
     aggregate_root: &Path,
     provider: &ProviderName,
     package_dir: &Path,
     members: &[MemberRepoPaths],
 ) -> Result<(), KnowledgeBasePreflightFailure> {
-    preflight_common(paths, lc_id, aggregate_root, provider)?;
+    preflight_common(paths, project_id, lc_id, provider)?;
     let snapshot = read_manifest(&kb_root(aggregate_root))
         .map_err(|_| KnowledgeBasePreflightFailure::ManifestMissing)?;
     if !snapshot.exists {
@@ -152,11 +155,11 @@ pub fn preflight_update(
 /// 预检①②（bootstrap 与 update 共用，顺序固定：先聚合初始化，后 skills）。
 fn preflight_common(
     paths: &ProductAppPaths,
+    project_id: &str,
     lc_id: &str,
-    aggregate_root: &Path,
     provider: &ProviderName,
 ) -> Result<(), KnowledgeBasePreflightFailure> {
-    if !aggregate_initialization_completed(paths, lc_id, aggregate_root) {
+    if !aggregate_initialization_completed(paths, project_id, lc_id) {
         return Err(KnowledgeBasePreflightFailure::RequiresAggregateInitialization);
     }
     let missing = missing_knowledge_base_skills(provider);
@@ -166,51 +169,27 @@ fn preflight_common(
     Ok(())
 }
 
-/// 「聚合初始化已完成」= canonical 聚合根下根规则入口文件存在 **且** 该 LC
-/// scope 下已发布政策 artifact 存在。两个事实分别复用既有只读查询
-/// （`root_recipe_receipt::root_rule_digest` 与
-/// `AggregatePolicyArtifactStore::get`），不新造判定；任一事实证明不了
-/// （缺失、IO 故障、LC 归属找不到）都判未完成（fail-closed）。
-fn aggregate_initialization_completed(
+/// 「聚合初始化已完成」= 冷启动投影的 `rules_policy` 步 `status == Completed`
+/// （唯一口径，与 readiness 页面 / advance 推进器同源：权威冻结的政策引用、
+/// 已发布政策 artifact、Completed 根配方 operation 与最终 receipt 三源全一致
+/// 才投影 Completed，见 [`LogicalCodebaseBootstrapProjector::project`]）。旧的
+/// 「根规则文件 + 政策 artifact」两文件判定已删除，不并存两套口径；投影读不出
+/// （LC/项目不存在、身份冲突）或 IO 故障都证明不了「已完成」，一律判 false
+/// （fail-closed）。
+pub fn aggregate_initialization_completed(
     paths: &ProductAppPaths,
-    lc_id: &str,
-    aggregate_root: &Path,
+    project_id: &str,
+    logical_codebase_id: &str,
 ) -> bool {
-    match root_rule_digest(aggregate_root) {
-        Ok(Some(_)) => {}
-        // Ok(None) = 入口文件缺失；Err = IO 故障——都证明不了「已完成」。
-        _ => return false,
-    }
-    let Some(project_id) = owning_project(paths, lc_id) else {
+    let Ok(projection) = LogicalCodebaseBootstrapProjector::new(paths.clone())
+        .project(project_id, logical_codebase_id)
+    else {
         return false;
     };
-    matches!(
-        AggregatePolicyArtifactStore::for_lc(paths.clone(), lc_id.to_string()).get(&project_id),
-        Ok(Some(_))
-    )
-}
-
-/// 由 lc_id 反查所属 project：本模块签名不带 project_id，只能只读扫描
-/// `projects_root` 并逐项目用既有 `load_lc_manifest` 判归属（读不到或坏
-/// manifest 都视为不属于该项目）；LC manifest 找不到 ⇒ None（fail-closed）。
-fn owning_project(paths: &ProductAppPaths, lc_id: &str) -> Option<String> {
-    let store = LogicalCodebaseStore::new(paths.clone());
-    let entries = std::fs::read_dir(paths.projects_root()).ok()?;
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let Ok(project_id) = entry.file_name().into_string() else {
-            continue;
-        };
-        if validate_relative_id(&project_id).is_err() {
-            continue;
-        }
-        if matches!(store.load_lc_manifest(&project_id, lc_id), Ok(Some(_))) {
-            return Some(project_id);
-        }
-    }
-    None
+    projection.steps.iter().any(|step| {
+        step.step == LogicalCodebaseBootstrapStep::RulesPolicy
+            && step.status == LogicalCodebaseBootstrapStepStatus::Completed
+    })
 }
 
 /// 预检②：被选 provider 对应 skill 层缺哪些 knowledge-base skill。
@@ -337,7 +316,7 @@ mod tests {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::cadence_skills::CadenceSkillsPaths;
     use crate::product::logical_codebase::policy::{
-        AggregatePolicyArtifactStore, ProviderDialect, ProviderWireDialect,
+        AggregatePolicyArtifact, AggregatePolicyArtifactStore, ProviderDialect, ProviderWireDialect,
     };
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
@@ -346,11 +325,24 @@ mod tests {
     use crate::product::logical_codebase::provider_gateway::{
         ProviderRefType, ResumeEvidenceState,
     };
-    use crate::product::logical_codebase::store::LogicalCodebaseManifest;
+    use crate::product::logical_codebase::root_recipe_receipt::{
+        ROOT_RULE_ENTRY_FILE, RootRecipeCommandVerdict, RootRecipeFilesystemAuditor,
+        RootRecipeReceiptStore, root_rule_digest,
+    };
+    use crate::product::logical_codebase::store::{
+        LogicalCodebaseCreateInput, LogicalCodebaseStore,
+    };
+    use crate::product::logical_codebase::{
+        AggregateInitializationOperation, AggregateInitializationOperationInput,
+        AggregateInitializationOperationStore, AggregateInitializationStepKind,
+        root_recipe_command_index,
+    };
     use crate::product::models::ProviderName;
+    use crate::product::project_store::{CreateProjectInput, ProjectStore};
+
+    use sha2::{Digest, Sha256};
 
     const PROJECT_ID: &str = "project_0001";
-    const LC_ID: &str = "logical_codebase_0001";
 
     // ------------------------------------------------------------------
     // HOME 互斥锚：与本测试二进制内其它改写 HOME 的用例（gateway_factory
@@ -403,6 +395,7 @@ mod tests {
         _home: TempDir,
         paths: ProductAppPaths,
         aggregate_root: PathBuf,
+        lc_id: String,
     }
 
     impl PreflightFixture {
@@ -412,11 +405,30 @@ mod tests {
             let paths = ProductAppPaths::new(workspace.path().join(".aria"));
             let aggregate_root = workspace.path().join("aggregate");
             fs::create_dir_all(&aggregate_root).expect("create aggregate root");
+            // 预检①的新口径直接消费冷启动投影：LC 身份必须先经既有 store
+            // 正规登记（record.json），不再手工摆放 manifest.json 反查归属。
+            ProjectStore::new(paths.clone())
+                .create(CreateProjectInput {
+                    name: "knowledge-base-preflight".to_string(),
+                    description: None,
+                })
+                .expect("create project");
+            let lc_id = LogicalCodebaseStore::new(paths.clone())
+                .create(
+                    PROJECT_ID,
+                    LogicalCodebaseCreateInput {
+                        name: "knowledge-base-lc".to_string(),
+                        aggregate_root: aggregate_root.clone(),
+                    },
+                )
+                .expect("create logical codebase")
+                .id;
             Self {
                 _workspace: workspace,
                 _home: home,
                 paths,
                 aggregate_root,
+                lc_id,
             }
         }
 
@@ -428,28 +440,145 @@ mod tests {
             kb_root(&self.aggregate_root)
         }
 
-        /// 预检①：canonical 聚合根下根规则入口 + per-LC manifest +
-        /// 已发布政策 artifact（经既有 store 写入，保证形态合法）。
+        /// 预检①：种齐冷启动投影 `rules_policy` 步 Completed 的全部 durable
+        /// 事实——真实（非自举桩）政策 artifact、五步全 Completed 的根配方
+        /// operation、AGENTS.md 根规则与四命令审计全 Allowed 的最终
+        /// receipt（policy/rule digest 与当前事实一致）。
         fn seed_aggregate_initialization(&self) {
+            let policy = self.real_policy();
+            AggregatePolicyArtifactStore::for_lc(self.paths.clone(), self.lc_id.clone())
+                .save(PROJECT_ID, &policy)
+                .expect("save policy artifact");
+
+            let operation_id = "aggregate_initialization_preflight_0001".to_string();
+            let init_store = AggregateInitializationOperationStore::for_lc(
+                self.paths.clone(),
+                self.lc_id.clone(),
+            );
+            init_store
+                .create_idempotent(AggregateInitializationOperation::new(
+                    operation_id.clone(),
+                    PROJECT_ID.to_string(),
+                    AggregateInitializationOperationInput {
+                        idempotency_key: format!("preflight-{operation_id}"),
+                        manifest_revision: 1,
+                        policy_digest: policy.digest.clone(),
+                        profile_evidence_digest: Some("sha256:profile".to_string()),
+                        provider_context_root: self.aggregate_root.clone(),
+                        provider: "claude_code".to_string(),
+                    },
+                    "2026-11-10T00:01:00Z".to_string(),
+                ))
+                .expect("create init operation");
+            init_store
+                .mark_running(
+                    PROJECT_ID,
+                    &operation_id,
+                    "2026-11-10T00:02:00Z".to_string(),
+                )
+                .expect("mark operation running");
+            for step in AggregateInitializationStepKind::V1 {
+                init_store
+                    .mark_step_running(
+                        PROJECT_ID,
+                        &operation_id,
+                        step,
+                        format!("preflight:{operation_id}:{}", step.as_str()),
+                        "2026-11-10T00:03:00Z".to_string(),
+                    )
+                    .expect("mark step running");
+                init_store
+                    .checkpoint_step_output(
+                        PROJECT_ID,
+                        &operation_id,
+                        step,
+                        format!("aggregate-initializations/op/{}.json", step.as_str()),
+                        "2026-11-10T00:04:00Z".to_string(),
+                    )
+                    .expect("checkpoint step output");
+                init_store
+                    .mark_step_completed(
+                        PROJECT_ID,
+                        &operation_id,
+                        step,
+                        "2026-11-10T00:05:00Z".to_string(),
+                    )
+                    .expect("mark step completed");
+            }
+            init_store
+                .finish_completed(
+                    PROJECT_ID,
+                    &operation_id,
+                    "2026-11-10T00:06:00Z".to_string(),
+                )
+                .expect("finish operation completed");
+
             fs::write(
-                self.aggregate_root.join(
-                    crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE,
-                ),
+                self.aggregate_root.join(ROOT_RULE_ENTRY_FILE),
                 "# aggregate root rules\n",
             )
             .expect("write root rule entry");
-            let manifest =
-                LogicalCodebaseManifest::new(PROJECT_ID, self.aggregate_root.clone(), vec![]);
-            let lc_dir = self.paths.logical_codebases_root(PROJECT_ID).join(LC_ID);
-            fs::create_dir_all(&lc_dir).expect("create lc scope root");
+            let canonical_root =
+                fs::canonicalize(&self.aggregate_root).expect("canonicalize aggregate root");
+            let rule_digest = root_rule_digest(&canonical_root)
+                .expect("read root rule digest")
+                .expect("root rule entry present");
+            let receipt_store =
+                RootRecipeReceiptStore::for_lc(self.paths.clone(), self.lc_id.clone());
+            let auditor = RootRecipeFilesystemAuditor::new();
+            for (index, (step, command_index, command)) in
+                root_recipe_command_index().into_iter().enumerate()
+            {
+                let watch = auditor
+                    .before_command(&operation_id, &canonical_root, step, command_index, command)
+                    .expect("freeze command watch");
+                let receipt = auditor
+                    .after_command(watch, format!("2026-11-10T00:10:{index:02}Z"))
+                    .expect("audit command");
+                assert_eq!(receipt.verdict, RootRecipeCommandVerdict::Allowed);
+                receipt_store
+                    .append_command(PROJECT_ID, receipt)
+                    .expect("append command receipt");
+            }
+            receipt_store
+                .finalize(
+                    PROJECT_ID,
+                    &operation_id,
+                    &policy.digest,
+                    &rule_digest,
+                    "2026-11-10T00:20:00Z".to_string(),
+                )
+                .expect("finalize root receipt");
+        }
+
+        /// 旧口径的「两文件」事实：canonical 聚合根下根规则入口 + 已发布
+        /// 政策 artifact——故意不种根配方 operation 与最终 receipt，验证
+        /// 两文件在新口径下不再单独构成「已完成」。
+        fn seed_legacy_two_file_facts(&self) {
             fs::write(
-                lc_dir.join("manifest.json"),
-                serde_json::to_string(&manifest).expect("serialize lc manifest"),
+                self.aggregate_root.join(ROOT_RULE_ENTRY_FILE),
+                "# aggregate root rules\n",
             )
-            .expect("write lc manifest");
-            AggregatePolicyArtifactStore::for_lc(self.paths.clone(), LC_ID.to_string())
-                .ensure_bootstrap(&manifest)
-                .expect("install lc policy artifact");
+            .expect("write root rule entry");
+            let policy = self.real_policy();
+            AggregatePolicyArtifactStore::for_lc(self.paths.clone(), self.lc_id.clone())
+                .save(PROJECT_ID, &policy)
+                .expect("save policy artifact");
+        }
+
+        /// revision 1 的真实（非自举桩）政策 artifact：digest 按 store 的
+        /// canonical 规则计算（policy_text 原字节 SHA-256、`sha256:` 前缀）。
+        fn real_policy(&self) -> AggregatePolicyArtifact {
+            let policy_text = "# Aggregate policy (root recipe)\n\nRoot-recipe aggregated policy for planning read-only and coding target-write sessions.\n".to_string();
+            AggregatePolicyArtifact {
+                policy_id: format!("policy/{PROJECT_ID}/{}/1", self.lc_id),
+                project_id: PROJECT_ID.to_string(),
+                logical_codebase_id: self.lc_id.clone(),
+                revision: 1,
+                digest: format!("sha256:{:x}", Sha256::digest(policy_text.as_bytes())),
+                policy_text,
+                created_at: "2026-11-10T00:00:00Z".to_string(),
+            }
         }
 
         /// 预检②：在 Pi 的 shared 层放 skill（provider 固定用 Pi）。
@@ -553,16 +682,72 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // 预检①：聚合初始化已完成
+    // 预检①：聚合初始化已完成（口径 = 冷启动投影 rules_policy 步 Completed）
     // ------------------------------------------------------------------
+
+    #[test]
+    fn aggregate_initialization_completed_true_when_rules_policy_step_completed() {
+        let fixture = PreflightFixture::new();
+        fixture.seed_aggregate_initialization();
+        assert!(
+            aggregate_initialization_completed(&fixture.paths, PROJECT_ID, &fixture.lc_id),
+            "rules_policy 步投影 Completed 必须判已完成"
+        );
+    }
+
+    #[test]
+    fn aggregate_initialization_completed_false_when_rules_policy_step_not_completed() {
+        let fixture = PreflightFixture::new();
+        // 只登记 LC，不种政策/operation/receipt：rules_policy 步未开始。
+        assert!(!aggregate_initialization_completed(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id
+        ));
+    }
+
+    #[test]
+    fn aggregate_initialization_completed_false_when_projection_unavailable() {
+        let fixture = PreflightFixture::new();
+        fixture.seed_aggregate_initialization();
+        // LC 不存在 / project 不存在 ⇒ 投影读不出 ⇒ fail-closed false。
+        assert!(!aggregate_initialization_completed(
+            &fixture.paths,
+            PROJECT_ID,
+            "logical_codebase_missing"
+        ));
+        assert!(!aggregate_initialization_completed(
+            &fixture.paths,
+            "project_missing",
+            &fixture.lc_id
+        ));
+    }
+
+    #[test]
+    fn aggregate_initialization_completed_false_for_legacy_two_file_facts() {
+        let fixture = PreflightFixture::new();
+        // 旧口径的「根规则 + 政策 artifact」两文件在场，但没有根配方
+        // operation 与最终 receipt：新口径下不再单独构成「已完成」。
+        fixture.seed_legacy_two_file_facts();
+        assert!(!aggregate_initialization_completed(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id
+        ));
+    }
 
     #[test]
     fn preflight_bootstrap_requires_aggregate_initialization() {
         let fixture = PreflightFixture::new();
-        // 什么都不种：没有根规则、没有政策 artifact。
-        let failure =
-            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-                .expect_err("aggregate initialization is missing");
+        // 什么都不种：rules_policy 步未完成。
+        let failure = preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect_err("aggregate initialization is missing");
         assert_eq!(
             failure,
             KnowledgeBasePreflightFailure::RequiresAggregateInitialization
@@ -586,9 +771,14 @@ mod tests {
         fixture.seed_bootstrap_inputs(&[]);
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        let failure =
-            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-                .expect_err("knowledge base skills are incomplete");
+        let failure = preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect_err("knowledge base skills are incomplete");
         match failure {
             KnowledgeBasePreflightFailure::SkillsUnavailable { missing } => {
                 assert!(
@@ -609,8 +799,14 @@ mod tests {
         fixture.seed_confirmed_write_capability();
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-            .expect("all seven skills present: preflight must pass");
+        preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect("all seven skills present: preflight must pass");
     }
 
     // ------------------------------------------------------------------
@@ -633,9 +829,14 @@ mod tests {
         .expect("remove data model scope");
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        let failure =
-            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-                .expect_err("data model scope file is required");
+        let failure = preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect_err("data model scope file is required");
         match failure {
             KnowledgeBasePreflightFailure::InputsIncomplete { missing } => {
                 assert!(
@@ -659,8 +860,14 @@ mod tests {
         fixture.seed_confirmed_write_capability();
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-            .expect("not-applicable domain must not require its scope file");
+        preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect("not-applicable domain must not require its scope file");
     }
 
     #[test]
@@ -680,8 +887,14 @@ mod tests {
         fixture.seed_confirmed_write_capability();
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-            .expect("database-ddl.sql is optional");
+        preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect("database-ddl.sql is optional");
     }
 
     // ------------------------------------------------------------------
@@ -703,9 +916,14 @@ mod tests {
         );
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        let failure =
-            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-                .expect_err("write_boundary cell is not confirmed");
+        let failure = preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect_err("write_boundary cell is not confirmed");
         assert_eq!(
             failure,
             KnowledgeBasePreflightFailure::CapabilityDenied {
@@ -726,9 +944,14 @@ mod tests {
         );
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        let failure =
-            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-                .expect_err("launch cell is not confirmed");
+        let failure = preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect_err("launch cell is not confirmed");
         assert!(matches!(
             failure,
             KnowledgeBasePreflightFailure::CapabilityDenied { .. }
@@ -744,9 +967,14 @@ mod tests {
         // 缺 capability 记录 ⇒ fail-closed（证明不了已核验即拒绝）。
         let _guard = HomeEnvGuard::isolate(fixture.home_path());
 
-        let failure =
-            preflight_bootstrap(&fixture.paths, LC_ID, &fixture.aggregate_root, &provider())
-                .expect_err("capability record is missing");
+        let failure = preflight_bootstrap(
+            &fixture.paths,
+            PROJECT_ID,
+            &fixture.lc_id,
+            &fixture.aggregate_root,
+            &provider(),
+        )
+        .expect_err("capability record is missing");
         assert!(matches!(
             failure,
             KnowledgeBasePreflightFailure::CapabilityDenied { .. }
@@ -769,7 +997,8 @@ mod tests {
 
         let failure = preflight_update(
             &fixture.paths,
-            LC_ID,
+            PROJECT_ID,
+            &fixture.lc_id,
             &fixture.aggregate_root,
             &provider(),
             &fixture.kb_root().join("user-input/updates/CHANGE-demo"),
@@ -791,7 +1020,8 @@ mod tests {
 
         let failure = preflight_update(
             &fixture.paths,
-            LC_ID,
+            PROJECT_ID,
+            &fixture.lc_id,
             &fixture.aggregate_root,
             &provider(),
             &fixture.kb_root().join("user-input/updates/CHANGE-demo"),
@@ -820,7 +1050,8 @@ mod tests {
 
         let failure = preflight_update(
             &fixture.paths,
-            LC_ID,
+            PROJECT_ID,
+            &fixture.lc_id,
             &fixture.aggregate_root,
             &provider(),
             &fixture.kb_root().join("user-input/updates/CHANGE-demo"),
@@ -844,7 +1075,8 @@ mod tests {
 
         let failure = preflight_update(
             &fixture.paths,
-            LC_ID,
+            PROJECT_ID,
+            &fixture.lc_id,
             &fixture.aggregate_root,
             &provider(),
             &fixture.kb_root().join("user-input/updates/CHANGE-demo"),

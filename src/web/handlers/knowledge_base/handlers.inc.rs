@@ -432,10 +432,11 @@ pub async fn create_knowledge_base_initialization(
     let members = knowledge_base_member_repos(&paths, &project_id, &lc_id)?;
     let preflight_result = match kind {
         KnowledgeBaseOperationKind::Bootstrap => {
-            preflight_bootstrap(&paths, &lc_id, &canonical_root, &provider)
+            preflight_bootstrap(&paths, &project_id, &lc_id, &canonical_root, &provider)
         }
         KnowledgeBaseOperationKind::Update => preflight_update(
             &paths,
+            &project_id,
             &lc_id,
             &canonical_root,
             &provider,
@@ -634,7 +635,7 @@ async fn knowledge_base_skills_available(
     let Some(provider) = provider_from_wire(&selection.selected) else {
         return false;
     };
-    match preflight_bootstrap(paths, lc_id, canonical_root, &provider) {
+    match preflight_bootstrap(paths, project_id, lc_id, canonical_root, &provider) {
         Ok(()) => true,
         Err(KnowledgeBasePreflightFailure::SkillsUnavailable { .. })
         | Err(KnowledgeBasePreflightFailure::RequiresAggregateInitialization) => false,
