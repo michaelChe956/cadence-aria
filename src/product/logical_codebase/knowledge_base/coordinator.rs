@@ -1157,5 +1157,6 @@ fn best_effort_abort(session: &ProviderSession) {
 #[cfg(test)]
 mod tests {
     include!("coordinator_tests.inc.rs");
+    include!("coordinator_draft_tests.inc.rs");
     include!("coordinator_fix_tests.inc.rs");
 }
