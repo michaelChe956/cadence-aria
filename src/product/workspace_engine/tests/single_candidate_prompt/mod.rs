@@ -492,4 +492,5 @@ async fn repaired_review_upgrades_initial_scope_from_durable_session_report_ref(
 }
 
 mod review_prompt;
+mod review_prompt_d6;
 mod verification_scope;

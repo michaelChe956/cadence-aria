@@ -1,5 +1,4 @@
 use super::*;
-use crate::product::work_item_plan_compiler::grammar;
 use crate::product::workspace_engine::PlanAuthorOutputContract;
 use crate::product::workspace_engine::SingleCandidateAuthorCompletion;
 use crate::product::workspace_engine::draft_batch::member_checkout_prefixes;
@@ -100,17 +99,7 @@ fn is_teachable_parse_failure(code: &str) -> bool {
 // 资格）属字符串资格旁路，已删除——lowering 类（缺席与值域统一）零
 // 教学重驱，确定性终态失败由 typed 诊断回显承载。
 
-/// 丢弃 provider 在 markdown 文档标题前输出的前言，保留既有 parser 的失败语义。
-///
-/// 定位首个固定文档标题的字节偏移并从该处修剪；找不到标题时原样返回，避免把
-/// 缺少标题的输出静默转换成另一种错误。
-fn trim_provider_preamble(source: &str) -> &str {
-    let document_heading = format!("{}\n", grammar::DOCUMENT_HEADING);
-    source
-        .find(&document_heading)
-        .map(|offset| &source[offset..])
-        .unwrap_or(source)
-}
+/// 丢弃 provider 在 markdown 文档标题前输出的前言（实现见 single_candidate_delivery）。
 
 /// SC author 交付进入 compiler 前的确定性净化（结构标题归一化 + EARS 关键字
 /// 空白归一化 + 前言修剪）。
@@ -125,7 +114,7 @@ fn prepare_author_delivery_for_compile(
     let normalized =
         crate::product::work_item_plan_compiler::normalize_delivery_before_compile(raw);
     crate::product::work_item_plan_compiler::NormalizedPlanSource {
-        source: trim_provider_preamble(&normalized.source).to_string(),
+        source: single_candidate_delivery::trim_provider_preamble(&normalized.source).to_string(),
         normalized_heading_lines: normalized.normalized_heading_lines,
         normalized_ears_lines: normalized.normalized_ears_lines,
     }
@@ -603,6 +592,10 @@ const PROVIDER_TRUST_MISSING_WAITING_REASON: &str = "provider_trust_missing";
 ///
 /// 预检通过返回 `Ok(())`：后续仍由调用方读取同一实际文件（无 fallback）。
 #[allow(clippy::result_large_err)] // 同上:运行收尾 typed 出口。
+/// D5 事前基线树装载面（拆出以守住单文件行数红线）。
+mod single_candidate_baseline_tree;
+mod single_candidate_delivery;
+
 fn preflight_lc_member_rules_before_author_run(
     engine: &mut WorkspaceEngine,
     run_context: &ProviderRunContext,
@@ -996,35 +989,13 @@ pub(crate) async fn run_single_candidate_author(
         None
     };
 
-    // D5 事前（REQ-WSC-06「基线树事实直供」）：作者轮启动前装载校验器同源
-    // 的 plan 基线树（`plan_preflight::plan_baseline_tree`，与 Evaluate 期
-    // 预校验同函数同源，不新增第二套基线口径），作为 L1 扩展注入
-    // [confirmed_context] 的 `baseline:` 段（上下文面，见
-    // `author_baseline_tree_section` 的预算与失败语义）。成员目录与 D3
-    // 成员仓摘要同一来源——仓库根顶层目录（排序后），按路径顶层段分组。
-    let baseline_member_dirs: Vec<String> = {
-        let mut dirs: Vec<String> = std::fs::read_dir(&repository.path)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                    .map(|entry| entry.file_name().to_string_lossy().to_string())
-                    .filter(|name| name != ".git")
-                    .collect()
-            })
-            .unwrap_or_default();
-        dirs.sort();
-        dirs
-    };
-    let baseline_tree_section =
-        crate::product::work_item_split_engine::prompts::author_baseline_tree_section(
-            crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
-                &lifecycle,
-                &run_context.session_record.project_id,
-                &run_context.session_record.issue_id,
-            ),
-            &baseline_member_dirs,
-        );
+    // D5 事前：装载基线树注入 `baseline:` 段（装载面见 single_candidate_baseline_tree）。
+    let baseline_tree_section = single_candidate_baseline_tree::baseline_tree_section(
+        &lifecycle,
+        &run_context.session_record.project_id,
+        &run_context.session_record.issue_id,
+        &repository.path,
+    );
     let full_prompt = match (revision_verdict.as_ref(), previous_source_for_fresh_revision.as_deref())
     {
         (Some(review), Some(previous_source)) => {
@@ -1513,7 +1484,7 @@ pub(crate) async fn run_single_candidate_author(
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_author_delivery_for_compile, trim_provider_preamble};
+    use super::prepare_author_delivery_for_compile;
     use crate::product::work_item_plan_compiler::WorkItemPlanSourceContext;
 
     const FIELD_REP1: &str = include_str!(concat!(
@@ -1526,7 +1497,7 @@ mod tests {
         let source = "我会先读取上下文，再生成计划。\n\n# Work Item Plan\n## Work Item WI-001: x\n";
 
         assert_eq!(
-            trim_provider_preamble(source),
+            super::single_candidate_delivery::trim_provider_preamble(source),
             "# Work Item Plan\n## Work Item WI-001: x\n"
         );
     }
@@ -1536,7 +1507,7 @@ mod tests {
         let source = "我会先读取上下文，再生成计划。# Work Item Plan\n## Work Item WI-001: x\n";
 
         assert_eq!(
-            trim_provider_preamble(source),
+            super::single_candidate_delivery::trim_provider_preamble(source),
             "# Work Item Plan\n## Work Item WI-001: x\n"
         );
     }
@@ -1545,14 +1516,14 @@ mod tests {
     fn leaves_source_without_preamble_unchanged() {
         let source = "# Work Item Plan\n## Work Item WI-001: x\n";
 
-        assert_eq!(trim_provider_preamble(source), source);
+        assert_eq!(super::single_candidate_delivery::trim_provider_preamble(source), source);
     }
 
     #[test]
     fn leaves_source_without_document_heading_unchanged() {
         let source = "我会先读取上下文，再生成计划。\n## Work Item WI-001: x\n";
 
-        assert_eq!(trim_provider_preamble(source), source);
+        assert_eq!(super::single_candidate_delivery::trim_provider_preamble(source), source);
     }
 
     #[test]
@@ -1560,7 +1531,7 @@ mod tests {
         let source = "```markdown\n# Work Item Plan\n## Work Item WI-001: x\n```\n";
 
         assert_eq!(
-            trim_provider_preamble(source),
+            super::single_candidate_delivery::trim_provider_preamble(source),
             "# Work Item Plan\n## Work Item WI-001: x\n```\n"
         );
     }
