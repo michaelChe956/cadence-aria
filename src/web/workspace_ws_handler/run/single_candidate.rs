@@ -995,6 +995,36 @@ pub(crate) async fn run_single_candidate_author(
     } else {
         None
     };
+
+    // D5 事前（REQ-WSC-06「基线树事实直供」）：作者轮启动前装载校验器同源
+    // 的 plan 基线树（`plan_preflight::plan_baseline_tree`，与 Evaluate 期
+    // 预校验同函数同源，不新增第二套基线口径），作为 L1 扩展注入
+    // [confirmed_context] 的 `baseline:` 段（上下文面，见
+    // `author_baseline_tree_section` 的预算与失败语义）。成员目录与 D3
+    // 成员仓摘要同一来源——仓库根顶层目录（排序后），按路径顶层段分组。
+    let baseline_member_dirs: Vec<String> = {
+        let mut dirs: Vec<String> = std::fs::read_dir(&repository.path)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .filter(|name| name != ".git")
+                    .collect()
+            })
+            .unwrap_or_default();
+        dirs.sort();
+        dirs
+    };
+    let baseline_tree_section =
+        crate::product::work_item_split_engine::prompts::author_baseline_tree_section(
+            crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
+                &lifecycle,
+                &run_context.session_record.project_id,
+                &run_context.session_record.issue_id,
+            ),
+            &baseline_member_dirs,
+        );
     let full_prompt = match (revision_verdict.as_ref(), previous_source_for_fresh_revision.as_deref())
     {
         (Some(review), Some(previous_source)) => {
@@ -1013,6 +1043,7 @@ pub(crate) async fn run_single_candidate_author(
                         routing_context: &launch.routing_context(),
                         member_targets: member_targets.as_ref(),
                         change_order: &confirmed_change_order,
+                        baseline_tree: baseline_tree_section.as_deref(),
                     },
                     review,
                     previous_source,
@@ -1034,6 +1065,7 @@ pub(crate) async fn run_single_candidate_author(
                         routing_context: &launch.routing_context(),
                         member_targets: member_targets.as_ref(),
                         change_order: &confirmed_change_order,
+                        baseline_tree: baseline_tree_section.as_deref(),
                     },
                     review,
                 )
@@ -1052,6 +1084,7 @@ pub(crate) async fn run_single_candidate_author(
                 routing_context: &launch.routing_context(),
                 member_targets: member_targets.as_ref(),
                 change_order: &confirmed_change_order,
+                baseline_tree: baseline_tree_section.as_deref(),
             },
         ),
     }

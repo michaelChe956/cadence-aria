@@ -38,7 +38,7 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 262_144;
 /// 与 draft 侧同源：硬兜底只拦病态序列化回归，真实边界是模型上下文窗口（owner 环境 1M）；
 /// 本批评审更充分后修订块变大（实测修订轮 prompt 70,326 字节）曾顶破旧 64 KiB，故抬到 256 KiB。
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES: usize = 262_144;
-const WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES: usize = 32_000;
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES: usize = 32_000;
 
 pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     pub story_context: &'a str,
@@ -63,6 +63,15 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     /// 仓序自动边规则与编译器同源消费，空序如实教「无已确认仓序」，
     /// 不虚构先后顺序。
     pub change_order: &'a [LogicalRepositoryId],
+    /// D5 事前（REQ-WSC-06「基线树事实直供」）：plan 基线树可用路径清单
+    /// （`render_baseline_tree_section` 按成员仓分组渲染的文本），由生产
+    /// 调用方在作者轮启动前从 `plan_preflight::plan_baseline_tree` 装载
+    /// （与 Evaluate 期校验同函数同源）。`None` = 基线树不可得（无仓
+    /// issue / 装载失败 / 空树）⇒ `baseline:` 段整段缺席，既有 prompt
+    /// 逐字节不变。清单走上下文面（`[confirmed_context]` 段度量，
+    /// `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES`），不占用固定
+    /// 规范面质量预算。
+    pub baseline_tree: Option<&'a str>,
 }
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
@@ -334,12 +343,41 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         context.design_context,
         context.repository_structure,
     );
+    // D5 事前（REQ-WSC-06）：基线树清单注入 [confirmed_context]（上下文
+    // 面），位于 structure 之后、story_spec_ids 之前；None/空 ⇒ 整段
+    // 缺席（不留 baseline: 空标记），既有 fixture prompt 逐字节不变。
+    // D5 事前：清单**计入上下文面同一配额**（owner 2026-11-10 裁决：新增
+    // 直供内容计入其所属面）。上下文面的**全部**字节都算在这 32,000 内 ——
+    // 三段压缩正文 + 清单 + `story:`/`design:`/`structure:`/`baseline:`
+    // 前缀 + `story_spec_ids:`/`design_spec_ids:` 行。故先算固定开销，
+    // 再把**剩余**额度给清单（上限 32,000/4）；额度不足则按行截断并
+    // 显式标记；额度为 0 ⇒ 整段缺席 ⇒ 上下文面恒 ≤ 32,000。
+    let context_overhead = "story:\ndesign:\nstructure:\nbaseline:\nstory_spec_ids:\ndesign_spec_ids:\n"
+        .len()
+        + request.story_spec_ids.join(", ").len()
+        + request.design_spec_ids.join(", ").len();
+    let context_used =
+        story_context.len() + design_context.len() + repository_structure.len() + context_overhead;
+    let baseline_cap = (WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 4)
+        .min(WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES.saturating_sub(context_used));
+    let baseline_tree_section = context
+        .baseline_tree
+        .filter(|tree| !tree.is_empty())
+        .and_then(|tree| {
+            let section = truncate_baseline_tree_section(tree, baseline_cap);
+            if section.is_empty() {
+                None
+            } else {
+                Some(format!("baseline:{section}\n"))
+            }
+        })
+        .unwrap_or_default();
     let prompt = format!(
         "只输出完整 `work-item-plan.md` source。\n\
          [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\
          [routing_reference]\n{routing_reference}\n\
          [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\
-         story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
+         {baseline_tree_section}story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
          [source_boundary]\n\
          不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段。\n\
          exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾。\n\
@@ -369,6 +407,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         story_context = story_context,
         design_context = design_context,
         repository_structure = repository_structure,
+        baseline_tree_section = baseline_tree_section,
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
         acceptance_baseline_repair_action = ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION,
@@ -413,6 +452,35 @@ fn budget_markdown_context(
     )
 }
 
+/// 基线树清单的截断标记（渲染器内部截断与外层配额截断共用）。
+const BASELINE_TREE_TRUNCATION_MARKER: &str =
+    "（基线树清单超出上下文面配额，已按成员仓轮转保底截断；未列出的路径仍属于基线树，引用前按同前缀就近确认）";
+
+/// 按**行边界**把已渲染的基线树清单截到 `cap` 字节；截断时以显式标记行
+/// 收尾（计入 cap），MUST NOT 把部分清单冒充全量。只删行、不改行内容 ⇒
+/// 不引入臆造路径。
+fn truncate_baseline_tree_section(section: &str, cap: usize) -> String {
+    if section.len() <= cap {
+        return section.to_string();
+    }
+    let marker_cost = BASELINE_TREE_TRUNCATION_MARKER.len() + 1;
+    if cap < marker_cost {
+        // 额度连标记都放不下 ⇒ 整段缺席（不越预算、不留半截）。
+        return String::new();
+    }
+    let budget = cap - marker_cost;
+    let mut kept = String::new();
+    for line in section.split_inclusive('\n') {
+        if kept.len() + line.len() > budget {
+            break;
+        }
+        kept.push_str(line);
+    }
+    kept.push_str(BASELINE_TREE_TRUNCATION_MARKER);
+    kept.push('\n');
+    kept
+}
+
 fn truncate_markdown_context(value: &str, budget: usize) -> String {
     if value.len() <= budget {
         return value.to_string();
@@ -425,6 +493,104 @@ fn truncate_markdown_context(value: &str, budget: usize) -> String {
         end -= 1;
     }
     format!("{}{}", &value[..end], marker)
+}
+
+/// D5 事前（REQ-WSC-06「基线树事实直供」）：渲染 plan 基线树可用路径清单，
+/// 供 `[confirmed_context]` 的 `baseline:` 段直供（上下文面）。
+///
+/// - 分组：按 `member_dirs` 顺序（成员仓优先，与 D3 成员仓摘要同序）以路径
+///   顶层段分组；不在 `member_dirs` 内的路径归入 `(未归属)` 组并排最后；
+///   组内路径按字典序（BTreeSet 迭代序）。
+/// - 行形态：`成员目录: 路径`；路径逐字取自基线树，禁止平台臆造路径。
+/// - 渲染上限 = `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 4`：超限时按
+///   成员仓轮转保底截断——每轮每组各取 1 条直到用满上限，保证每个成员仓
+///   至少 1 条；被截断时以显式标记行收尾（计入上限），不得把部分清单
+///   冒充全量。
+pub(crate) fn render_baseline_tree_section(
+    tree: &std::collections::BTreeSet<String>,
+    member_dirs: &[String],
+) -> String {
+    const UNASSIGNED_GROUP: &str = "(未归属)";
+    let cap = WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 4;
+
+    let mut groups: Vec<(&str, Vec<&str>)> = member_dirs
+        .iter()
+        .map(|dir| (dir.as_str(), Vec::new()))
+        .collect();
+    let mut unassigned: Vec<&str> = Vec::new();
+    for path in tree {
+        let group = path.split('/').next().unwrap_or(path);
+        match groups.iter_mut().find(|(dir, _)| *dir == group) {
+            Some((_, paths)) => paths.push(path.as_str()),
+            None => unassigned.push(path.as_str()),
+        }
+    }
+    groups.push((UNASSIGNED_GROUP, unassigned));
+
+    let line_bytes = |dir: &str, path: &str| dir.len() + ": ".len() + path.len() + 1;
+    let full_bytes: usize = groups
+        .iter()
+        .flat_map(|(dir, paths)| paths.iter().map(move |path| line_bytes(dir, path)))
+        .sum();
+    let mut section = String::new();
+    if full_bytes <= cap {
+        for (dir, paths) in &groups {
+            for path in paths {
+                section.push_str(dir);
+                section.push_str(": ");
+                section.push_str(path);
+                section.push('\n');
+            }
+        }
+        return section;
+    }
+
+    // 成员仓轮转保底：每轮每组各取 1 条，直到用满「cap − 截断标记行」；
+    // 放不下的行跳过（上限不可破），保证轮 0 尽量为每组保住至少 1 条。
+    let mut remaining = cap.saturating_sub(BASELINE_TREE_TRUNCATION_MARKER.len() + 1);
+    let max_rounds = groups.iter().map(|(_, paths)| paths.len()).max().unwrap_or(0);
+    for round in 0..max_rounds {
+        for (dir, paths) in &groups {
+            let Some(path) = paths.get(round) else {
+                continue;
+            };
+            let cost = line_bytes(dir, path);
+            if cost > remaining {
+                continue;
+            }
+            remaining -= cost;
+            section.push_str(dir);
+            section.push_str(": ");
+            section.push_str(path);
+            section.push('\n');
+        }
+    }
+    section.push_str(BASELINE_TREE_TRUNCATION_MARKER);
+    section.push('\n');
+    section
+}
+
+/// D5 事前（REQ-WSC-06）：作者轮启动前的基线树装载决策——
+/// - `Ok(Some(tree))`（非空）⇒ 渲染为成员仓分组清单，注入 prompt；
+/// - `Ok(None)`（无仓 issue）/ 空树 ⇒ 该段缺席（零回归）；
+/// - `Err(_)` ⇒ 仅记诊断、该段缺席，**不阻断作者轮**；既有 fail-closed
+///   点仍在 Evaluate 阶段（`plan_baseline_tree` 的 `Err` 在预校验原样上抛）。
+/// 基线树来源唯一：调用方传入 `plan_baseline_tree` 的装载结果（与
+/// Evaluate 期同函数同源），本函数不新增第二套装载。
+pub(crate) fn author_baseline_tree_section(
+    loaded: Result<Option<std::collections::BTreeSet<String>>, String>,
+    member_dirs: &[String],
+) -> Option<String> {
+    match loaded {
+        Ok(Some(tree)) if !tree.is_empty() => {
+            Some(render_baseline_tree_section(&tree, member_dirs))
+        }
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("[aria] plan baseline tree unavailable for author prompt: {error}");
+            None
+        }
+    }
 }
 
 fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String {

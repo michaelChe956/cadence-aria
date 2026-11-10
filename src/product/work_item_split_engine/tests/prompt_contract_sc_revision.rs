@@ -89,6 +89,7 @@ fn author_context()
         routing_context: &RoutingReferenceContext::Legacy,
         member_targets: None,
         change_order: &[],
+        baseline_tree: None,
     }
 }
 
@@ -397,6 +398,7 @@ fn sg_05_1_author_context<'a>(
         routing_context: &SG_05_1_ROUTING,
         member_targets: Some(member_targets),
         change_order,
+        baseline_tree: None,
     }
 }
 

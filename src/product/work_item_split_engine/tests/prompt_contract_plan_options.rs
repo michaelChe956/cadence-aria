@@ -41,6 +41,7 @@ fn plan_options_prompt(options: &crate::product::models::IssueWorkItemPlanOption
             routing_context: &RoutingReferenceContext::Legacy,
             member_targets: None,
             change_order: &[],
+            baseline_tree: None,
         },
     )
     .expect("markdown author prompt")

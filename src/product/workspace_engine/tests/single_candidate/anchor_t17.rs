@@ -82,6 +82,7 @@ fn anchor_t17_author_context()
         routing_context: &RoutingReferenceContext::Legacy,
         member_targets: None,
         change_order: &[],
+        baseline_tree: None,
     }
 }
 
@@ -187,6 +188,7 @@ fn anchor_t17_fresh_revision_prompt_keeps_hard_budget() {
             routing_context: &RoutingReferenceContext::Legacy,
             member_targets: None,
             change_order: &[],
+            baseline_tree: None,
         };
     let verdict = ReviewVerdict {
         verdict: ReviewVerdictType::Revise,

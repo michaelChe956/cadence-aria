@@ -24,6 +24,9 @@ use crate::web::workspace_ws_types::{ReviewFindingSeverity, ReviewVerdict};
 
 /// 构造 SC author 修订轮 prompt：复用首轮完整 prompt（逐字节），仅在尾部
 /// 输出指令之前插入 reviewer findings 回灌段与硬性修复指令。
+/// D5 事前（REQ-WSC-06「基线树事实直供」·返修轮同源）：`context.baseline_tree`
+/// 与首轮同一来源——基线树清单随共享基底注入，返修轮不因 delta 化而丢失
+/// 该事实（tasks 6.6）。
 pub(crate) fn build_work_item_plan_markdown_revision_prompt(
     request: &GenerateWorkItemsRequest,
     issue: &IssueRecord,
@@ -60,6 +63,7 @@ pub(crate) fn build_work_item_plan_markdown_revision_prompt(
 /// 从 source store 按 ref 装载），声明「全新会话、不依赖任何历史会话」。
 /// 正常 resume 的修订 prompt（`build_work_item_plan_markdown_revision_prompt`，
 /// 依赖旧会话记忆「上一版」）保持零变化；首轮（无 verdict）fresh 不经本函数。
+/// D5 事前：fresh 返修轮同样经 `context.baseline_tree` 携带同一份基线树清单。
 pub(crate) fn build_work_item_plan_markdown_fresh_revision_prompt(
     request: &GenerateWorkItemsRequest,
     issue: &IssueRecord,
