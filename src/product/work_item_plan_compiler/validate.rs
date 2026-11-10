@@ -80,16 +80,21 @@ pub fn validate_plan_candidate_ir(
                 // 无则同名（`baseline_candidates` 口径）；候选逐条 ∈ 基线树
                 // （平台不得臆造路径），同一候选只回灌一次；无候选时如实说明。
                 let mut candidates: Vec<&str> = Vec::new();
-                for path in &missing {
-                    for candidate in
-                        super::baseline_candidates::nearest_baseline_candidates(path, baseline_tree)
-                    {
-                        if !candidates.contains(&candidate) {
-                            candidates.push(candidate);
+                if cfg!(feature = "wig-d5-after") {
+                    for path in &missing {
+                        for candidate in super::baseline_candidates::nearest_baseline_candidates(
+                            path,
+                            baseline_tree,
+                        ) {
+                            if !candidates.contains(&candidate) {
+                                candidates.push(candidate);
+                            }
                         }
                     }
                 }
-                let candidate_hint = if candidates.is_empty() {
+                let candidate_hint = if !cfg!(feature = "wig-d5-after") {
+                    String::new()
+                } else if candidates.is_empty() {
                     "；基线树中无同目录或同名可用路径".to_string()
                 } else {
                     format!("；基线树中同目录最近可用路径：{}", candidates.join("、"))

@@ -298,14 +298,18 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     // + 清单 + 各段前缀 + spec_ids 行。故先算固定开销，再把**剩余**额度给清单
     // （上限 32,000/4）；额度不足则按行截断并显式标记；额度为 0 ⇒ 整段缺席
     // ⇒ 上下文面恒 ≤ 32,000。计算实现在 `sc_baseline_tree`。
-    let baseline_tree_section = sc_baseline_tree::baseline_tree_section(
-        &story_context,
-        &design_context,
-        &repository_structure,
-        &request.story_spec_ids,
-        &request.design_spec_ids,
-        context.baseline_tree,
-    );
+    let baseline_tree_section = if cfg!(feature = "wig-d5-before") {
+        sc_baseline_tree::baseline_tree_section(
+            &story_context,
+            &design_context,
+            &repository_structure,
+            &request.story_spec_ids,
+            &request.design_spec_ids,
+            context.baseline_tree,
+        )
+    } else {
+        String::new()
+    };
     let prompt = format!(
         "只输出完整 `work-item-plan.md` source。\n\
          [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\

@@ -570,6 +570,32 @@ pub(crate) fn single_candidate_previous_round_findings_section(
     if previous_findings.is_empty() {
         return None;
     }
+    if !cfg!(feature = "wig-d6") {
+        // D6 关闭 ⇒ 退回「前轮 findings 平铺待办清单」的旧形态（无本轮复算状态、
+        // 无去重、无分区）—— 仅用于 A/B 测量。
+        let flat: Vec<_> = previous_findings
+            .iter()
+            .map(|classified| {
+                json!({
+                    "fingerprint": classified.fingerprint.0,
+                    "category": classified.category.map(|category| category.as_str()),
+                    "contract_field": classified.contract_field,
+                    "required_action": classified.required_action,
+                })
+            })
+            .collect();
+        let payload = json!({
+            "note": "上一轮评审已登记的 finding 身份；fingerprint 是其稳定身份指纹",
+            "previous_findings": flat,
+            "current_plan_candidate_ir_ref": current_ir_ref,
+        });
+        let serialized = serde_json::to_string_pretty(&payload).ok()?;
+        return Some(format!(
+            "\n### Previous Review Round Findings\n{serialized}\n\
+             [previous_round_repetition_discipline]\n\
+             若上列某条 fingerprint 在本轮再次出现（同一问题未收敛），必须在该 finding 的 evidence 中显式标注 repeated 并说明为何自动修订未能关闭它；不得以改写措辞的方式隐式重复同一问题。\n"
+        ));
+    }
     // D6：装载当前候选机械报告（Evaluate 阶段落盘，与评审输入同代）作为求交
     // 数据源；ref 缺失或装载失败 ⇒ 如实降级（None），不 panic、不静默当作空集。
     let current_codes = current_mechanical_codes(engine, lifecycle);

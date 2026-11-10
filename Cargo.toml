@@ -3,6 +3,16 @@ name = "cadence-aria"
 version = "0.1.1"
 edition = "2024"
 
+[features]
+# —— D5 / D6 独立切分开关（测量「哪一项改动贡献了什么」）——
+# 默认全开 ⇒ 默认构建行为与全量实现**逐字节一致**；关闭某项即等价于
+# 「只回退该项」。仅用于 A/B 测量，**不是**产品开关（env 层归属
+# `explicit-sc-author-effort`，本 change 不夹带运行时开关面）。
+default = ["wig-d5-before", "wig-d5-after", "wig-d6"]
+wig-d5-before = []      # D5 事前：基线树清单直供（L1 扩展）
+wig-d5-after = []       # D5 事后：越界报错回灌基线树最近候选路径
+wig-d6 = []             # D6：前轮 findings 内容身份求交 + 去重 + 分区注入
+
 [lib]
 name = "cadence_aria"
 path = "src/lib.rs"

@@ -990,12 +990,16 @@ pub(crate) async fn run_single_candidate_author(
     };
 
     // D5 事前：装载基线树注入 `baseline:` 段（装载面见 single_candidate_baseline_tree）。
-    let baseline_tree_section = single_candidate_baseline_tree::baseline_tree_section(
-        &lifecycle,
-        &run_context.session_record.project_id,
-        &run_context.session_record.issue_id,
-        &repository.path,
-    );
+    let baseline_tree_section = if cfg!(feature = "wig-d5-before") {
+        single_candidate_baseline_tree::baseline_tree_section(
+            &lifecycle,
+            &run_context.session_record.project_id,
+            &run_context.session_record.issue_id,
+            &repository.path,
+        )
+    } else {
+        None
+    };
     let full_prompt = match (revision_verdict.as_ref(), previous_source_for_fresh_revision.as_deref())
     {
         (Some(review), Some(previous_source)) => {
