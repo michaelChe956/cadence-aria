@@ -260,6 +260,7 @@ L1/L2 **不再依赖模型自行 Read/Glob 补事实**；模型拿到的 prompt 
 | **D5 事后追加的候选路径可能是错的** | 候选路径来自**同一棵基线树**（校验器同源），按同前缀最近匹配给出、并列时全部列出、无匹配时如实说明无可用候选；**不得**由平台臆造路径（臆造即制造新的越界引用） |
 | **D6 求交键选错 ⇒ 恒不相交** | 指纹含 `message`，机械报告 message 与评审 message 不同 ⇒ **必须**按 `contract_field`/code 求交；delta 以独立场景把「求交键为内容身份而非 message 派生指纹」写成义务，防止实现踩坑 |
 | **D6 误把已解决项判为待办 ⇒ 仍会重复报** | 求交的数据源是**当前候选**的机械报告（`session.mechanical_report_ref`，Evaluate 阶段落盘）⇒ 与评审输入同代；同代校验既有 `ir_adapter.rs` 的 `mechanical_report_ref` 一致性检查兜底 |
+| **【新发现 · 既有产品缺陷】多仓场景下 plan 基线树只覆盖 issue 的**一个**仓** | `plan_baseline_tree` → `plan_baseline_repository_path` 按 issue 的 `repo_id` 解析**单一**物理仓（`git ls-tree` 该仓基线分支），返回**成员内相对路径**（实测案例：busi 的 `.gitignore`/`pom.xml`/`src/main/java/…`，**不含** frontend / gateway）。**校验器用的就是这同一棵树** ⇒ 多仓计划里 **frontend/gateway 的 AC 路径必然被判「不在基线树内」** —— 这正是基线 run3（`acceptance_path_not_in_baseline` 命中 WI-004=frontend）的直接原因。**该缺陷先于本 change 存在**，D5 事前注入的是**同一棵树**，故**只能让作者看见事实、不能修复多仓判定**。⇒ 本 change **登记**该缺陷并把「基线树覆盖全部成员仓 + 按成员仓分组比较」列为**后续独立 change**（属 REQ-WSC-02 域，需 owner 裁决其验收语义）；本 change 内的渲染**如实按树自身的顶层段分组**（不再产出误导性的 `(未归属)` 归并） |
 | **D5/D6 的收益未实测** | 现场证据是**现状基线**（n=2/档，preflight 失败 2/4、需人工介入 2/4），不是方案效果。所有收益数字一律标注为**待复测**，不得写成达成承诺（与「Open Questions」第 4 条同口径） |
 
 ## Migration Plan

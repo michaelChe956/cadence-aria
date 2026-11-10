@@ -1934,16 +1934,33 @@ fn author_baseline_tree_section_failure_semantics_keep_author_round_startable() 
             .is_none(),
         "空基线树不得注入空 baseline: 标记"
     );
-    // 在场 ⇒ 按成员仓分组渲染；未归属路径归入 (未归属) 组。
+    // 在场 ⇒ 按成员仓分组渲染；**未命中成员仓**的路径按**自身首段**分组
+    // （根文件归根文件组）。不产出误导性的「未归属」归并组：当前
+    // `plan_baseline_tree` 返回的是单仓**成员内相对路径**，与聚合根目录名
+    // 形态的 member_dirs 不同域，硬套会掩盖「这份清单只覆盖一个仓」这一事实
+    // （见 design.md 登记的多仓基线树覆盖缺陷）。
     let mut tree = std::collections::BTreeSet::new();
     tree.insert("busi/src/a.java".to_string());
     tree.insert("frontend/src/b.vue".to_string());
     tree.insert("README.md".to_string());
     let section = author_baseline_tree_section(Ok(Some(tree)), &["busi".to_string()])
         .expect("baseline tree section");
-    assert!(section.contains("busi: busi/src/a.java"));
-    assert!(section.contains("(未归属): README.md"));
-    assert!(section.contains("(未归属): frontend/src/b.vue"));
+    assert!(
+        section.contains("busi: busi/src/a.java"),
+        "命中成员仓的路径归该成员仓组：{section}"
+    );
+    assert!(
+        section.contains("frontend: frontend/src/b.vue"),
+        "未命中成员仓的路径按自身首段分组：{section}"
+    );
+    assert!(
+        section.contains("(根文件): README.md"),
+        "根级文件归根文件组：{section}"
+    );
+    assert!(
+        !section.contains("未归属"),
+        "不得产出误导性的未归属归并组：{section}"
+    );
 }
 
 #[test]

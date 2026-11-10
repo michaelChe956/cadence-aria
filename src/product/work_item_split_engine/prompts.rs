@@ -498,8 +498,8 @@ fn truncate_markdown_context(value: &str, budget: usize) -> String {
 /// D5 事前（REQ-WSC-06「基线树事实直供」）：渲染 plan 基线树可用路径清单，
 /// 供 `[confirmed_context]` 的 `baseline:` 段直供（上下文面）。
 ///
-/// - 分组：按 `member_dirs` 顺序（成员仓优先，与 D3 成员仓摘要同序）以路径
-///   顶层段分组；不在 `member_dirs` 内的路径归入 `(未归属)` 组并排最后；
+/// - 分组：先按 `member_dirs` 顺序（成员仓优先，与 D3 成员仓摘要同序）以路径
+///   顶层段分组；未命中的路径按**路径自身首段**分组（根文件归 `(根文件)`）；
 ///   组内路径按字典序（BTreeSet 迭代序）。
 /// - 行形态：`成员目录: 路径`；路径逐字取自基线树，禁止平台臆造路径。
 /// - 渲染上限 = `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 4`：超限时按
@@ -510,22 +510,37 @@ pub(crate) fn render_baseline_tree_section(
     tree: &std::collections::BTreeSet<String>,
     member_dirs: &[String],
 ) -> String {
-    const UNASSIGNED_GROUP: &str = "(未归属)";
+    const ROOT_FILES_GROUP: &str = "(根文件)";
     let cap = WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 4;
 
     let mut groups: Vec<(&str, Vec<&str>)> = member_dirs
         .iter()
         .map(|dir| (dir.as_str(), Vec::new()))
         .collect();
-    let mut unassigned: Vec<&str> = Vec::new();
+    // 未命中 member_dir 的路径按**路径自身首段**分组。理由：当前
+    // `plan_baseline_tree` 返回的是**单个成员仓的成员内相对路径**（实测
+    // 案例：busi 的 `.gitignore`/`pom.xml`/`src/main/java/…`），而
+    // `member_dirs` 是聚合根目录名（`busi`/`frontend`/…）⇒ 两者不同域，
+    // 硬套会产出误导性的归并组。按树自身首段分组对单仓基线树是自然
+    // 表达；多仓基线树尚未成立（见 `design.md` 登记的多仓覆盖缺陷）。
+    let mut extra_groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for path in tree {
-        let group = path.split('/').next().unwrap_or(path);
-        match groups.iter_mut().find(|(dir, _)| *dir == group) {
+        let head = path.split('/').next().unwrap_or(path);
+        let group = if head == path.as_str() {
+            ROOT_FILES_GROUP
+        } else {
+            head
+        };
+        if let Some((_, paths)) = groups.iter_mut().find(|(dir, _)| *dir == group) {
+            paths.push(path.as_str());
+            continue;
+        }
+        match extra_groups.iter_mut().find(|(dir, _)| *dir == group) {
             Some((_, paths)) => paths.push(path.as_str()),
-            None => unassigned.push(path.as_str()),
+            None => extra_groups.push((group, vec![path.as_str()])),
         }
     }
-    groups.push((UNASSIGNED_GROUP, unassigned));
+    groups.extend(extra_groups);
 
     let line_bytes = |dir: &str, path: &str| dir.len() + ": ".len() + path.len() + 1;
     let full_bytes: usize = groups
