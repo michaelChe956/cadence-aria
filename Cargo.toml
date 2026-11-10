@@ -3,18 +3,6 @@ name = "cadence-aria"
 version = "0.1.1"
 edition = "2024"
 
-[features]
-# `sc-author-baseline-tree`：D5 事前（plan 基线树清单直供）的**编译期**开关。
-#
-# ⚠️ 仅用于「D5 事前去留」的 A/B 判决实验：关闭它即等价于「只保留 D5 事后 +
-# D6」，用于同装置同时段对照。判决完成后，本 feature 及其分支**一并移除**
-# （或按判决结果把实现定案为默认开 / 整体撤除）。
-#
-# 采用**编译期**而非运行时 env 旋钮：避免给产品新增运行时开关面（env 层归属
-# `explicit-sc-author-effort`，本 change 不夹带）。
-default = ["sc-author-baseline-tree"]
-sc-author-baseline-tree = []
-
 [lib]
 name = "cadence_aria"
 path = "src/lib.rs"

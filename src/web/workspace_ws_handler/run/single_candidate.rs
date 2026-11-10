@@ -1002,7 +1002,6 @@ pub(crate) async fn run_single_candidate_author(
     // [confirmed_context] 的 `baseline:` 段（上下文面，见
     // `author_baseline_tree_section` 的预算与失败语义）。成员目录与 D3
     // 成员仓摘要同一来源——仓库根顶层目录（排序后），按路径顶层段分组。
-    #[cfg(feature = "sc-author-baseline-tree")]
     let baseline_member_dirs: Vec<String> = {
         let mut dirs: Vec<String> = std::fs::read_dir(&repository.path)
             .map(|entries| {
@@ -1017,12 +1016,6 @@ pub(crate) async fn run_single_candidate_author(
         dirs.sort();
         dirs
     };
-    #[cfg(not(feature = "sc-author-baseline-tree"))]
-    #[allow(unused_variables)]
-    let baseline_member_dirs: Vec<String> = Vec::new();
-    // D5 事前（A/B 实验开关）：`sc-author-baseline-tree` 关闭时整段不装载、
-    // 不注入 —— 等价于「只保留 D5 事后 + D6」。
-    #[cfg(feature = "sc-author-baseline-tree")]
     let baseline_tree_section =
         crate::product::work_item_split_engine::prompts::author_baseline_tree_section(
             crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
@@ -1032,8 +1025,6 @@ pub(crate) async fn run_single_candidate_author(
             ),
             &baseline_member_dirs,
         );
-    #[cfg(not(feature = "sc-author-baseline-tree"))]
-    let baseline_tree_section: Option<String> = None;
     let full_prompt = match (revision_verdict.as_ref(), previous_source_for_fresh_revision.as_deref())
     {
         (Some(review), Some(previous_source)) => {
