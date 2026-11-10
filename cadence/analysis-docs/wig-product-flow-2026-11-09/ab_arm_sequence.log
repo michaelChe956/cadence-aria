@@ -43,3 +43,17 @@
   prepare: 200
   terminated 已落盘
   enable: 200
+[20:36:26] session=failed (plan 仍 draft)
+[20:36:26] done arm=high eff=high port=4507
+[20:36:26] finished high eff=high port=4507
+[20:36:26] daemon pid=2708557 port=4508 eff=none ws=/tmp/aria-wig/run-xhigh-4508
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[20:37:41] plan=confirmed
+[20:37:41] done arm=high eff=high port=4503
+[20:37:41] finished high eff=high port=4503
+[20:37:41] daemon pid=2711144 port=4504 eff=none ws=/tmp/aria-wig/run-xhigh-4504
+  prepare: 200
+  terminated 已落盘
+  enable: 200
