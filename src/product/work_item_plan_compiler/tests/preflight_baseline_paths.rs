@@ -162,8 +162,21 @@ fn f56_route_reference_outside_baseline_is_blocked_with_repair_advice() {
     assert!(
         finding
             .message
-            .ends_with(ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION),
+            .contains(ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION),
         "finding 消息与共享常量逐字同源（REQ-WSC-06 口径一致）：{}",
+        finding.message
+    );
+    // D5 事后：共享常量之后追加「基线树最近候选」段。该夹具的基线树
+    // （package.json / server.js）内既无同目录也无同名路径 ⇒ 回灌段
+    // **不得含任何基线树内路径**（不得臆造候选）。措辞层面的「已说明
+    // 无可用候选」由专用新测 `acceptance_path_finding_reports_no_candidate_
+    // when_none_matches` 承担，此处只钉语义不钉措辞。
+    let tokens = path_like_tokens(&finding.message);
+    assert!(
+        !tokens
+            .iter()
+            .any(|token| token == "package.json" || token == "server.js"),
+        "无可用候选时不得臆造基线树内路径：{}",
         finding.message
     );
 }
@@ -302,4 +315,195 @@ fn unavailable_baseline_skips_acceptance_path_check() {
         "基线不可用（None）时不得产出 AC 路径 finding：{:?}",
         report.findings
     );
+}
+
+// —— D5 事后（REQ-WSC-06 场景「越界路径回灌最近候选」）——
+//
+// 越界报错须回灌**同一棵基线树**中最近的可用路径：同父目录前缀优先，
+// 无则回退到同名（basename 相等）路径；候选逐条 ∈ 基线树（不得臆造）。
+
+/// 越界候选夹具：AC 引用四个基线外路径——覆盖「同父目录」回退
+/// （`scripts/run.mjs`）、「同名」回退（两个 `notice.test.mjs` 变体，
+/// 二者只回灌同一候选 ⇒ 去重）与「同名不同目录」回退
+/// （`notice-delete-e2e.mjs`）。验证命令不带路径（不引入无关缺失路径）。
+const NOTICE_AC_STATEMENT: &str = "WHEN 请求 `tests/e2e/notice-delete-e2e.mjs` 与 `tests/e2e/notice.test.mjs` 与 `tests/component/notice.test.mjs` 与 `scripts/run.mjs` THE SYSTEM SHALL 返回既有内容。";
+
+/// 无候选夹具：AC 只引用 `scripts/run.mjs`；基线树里既无 `scripts/` 目录、
+/// 也无同名文件 ⇒ 平台如实说明无可用候选。
+const LONE_PATH_AC_STATEMENT: &str =
+    "WHEN 请求 `scripts/run.mjs` THE SYSTEM SHALL 返回既有内容。";
+
+/// 由 F-56 候选派生：换 AC statement 并去掉验证命令里的仓库内路径。
+fn candidate_with_statement(statement: &str) -> String {
+    f56_candidate()
+        .replacen(F56_AC_STATEMENT, statement, 1)
+        .replacen(
+            "- command: node --test test/status.test.js",
+            "- command: node --test",
+            1,
+        )
+}
+
+/// 抽取 message 中的**文件路径形态** token（ASCII 串且末段带扩展名）——
+/// 用于「输出中不得出现臆造路径」的断言（中文散文、`WI-001` 与散文里的
+/// 斜杠不入列）。
+fn path_like_tokens(message: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in message.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+        .into_iter()
+        .filter(|token| {
+            token
+                .rsplit_once('.')
+                .map(|(_, extension)| {
+                    !extension.is_empty()
+                        && extension
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+                })
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// REQ-WSC-06 场景「越界路径回灌最近候选」：越界 finding 的 message 附
+/// 基线树中最近可用路径——同父目录优先，无则同名；候选逐条 ∈ 基线树，
+/// 同一候选只出现一次。
+#[test]
+fn acceptance_path_finding_lists_nearest_baseline_candidates() {
+    let ir = compile_candidate(&candidate_with_statement(NOTICE_AC_STATEMENT));
+    let baseline: BTreeSet<String> = [
+        "tests/integration/notice-delete-e2e.mjs",
+        "tests/unit/notice.test.mjs",
+        "scripts/build.mjs",
+    ]
+    .map(str::to_string)
+    .into_iter()
+    .collect();
+    let fixture = BaselineFixture::new(Some(baseline.clone()));
+    let report = validate_plan_candidate_ir(&ir, &fixture.context())
+        .expect("越界缺口留在报告里回灌修订（不得硬失败 author 轮）");
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "acceptance_path_not_in_baseline")
+        .expect("基线外路径必须产出显式 finding");
+
+    // 同名回退：基线树内 `notice-delete-e2e.mjs` 只有 integration 目录那份。
+    assert!(
+        finding
+            .message
+            .contains("tests/integration/notice-delete-e2e.mjs"),
+        "同名候选必须回灌：{}",
+        finding.message
+    );
+    // 同名回退（两个不同目录的 `notice.test.mjs` 只对应同一候选 ⇒ 去重）。
+    assert!(
+        finding.message.contains("tests/unit/notice.test.mjs"),
+        "同名候选必须回灌：{}",
+        finding.message
+    );
+    // 同父目录回退：`scripts/run.mjs` 的同目录现存路径。
+    assert!(
+        finding.message.contains("scripts/build.mjs"),
+        "同目录候选必须回灌：{}",
+        finding.message
+    );
+
+    let marker = "；基线树中同目录最近可用路径：";
+    let candidates = finding
+        .message
+        .split_once(marker)
+        .expect("finding message 必须附基线树最近候选清单")
+        .1
+        .split('、')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        !candidates.is_empty(),
+        "候选清单不得为空：{}",
+        finding.message
+    );
+    for candidate in &candidates {
+        assert!(
+            baseline.contains(candidate),
+            "候选路径必须逐条 ∈ 基线树（不得臆造）：{candidate} / {}",
+            finding.message
+        );
+    }
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| *candidate == "tests/unit/notice.test.mjs")
+            .count(),
+        1,
+        "同一候选只回灌一次：{candidates:?}"
+    );
+
+    // 防臆造：message 中的路径形态 token 只能是缺失路径本身或基线树内路径。
+    let missing = [
+        "tests/e2e/notice-delete-e2e.mjs",
+        "tests/e2e/notice.test.mjs",
+        "tests/component/notice.test.mjs",
+        "scripts/run.mjs",
+    ];
+    for token in path_like_tokens(&finding.message) {
+        assert!(
+            missing.contains(&token.as_str()) || baseline.contains(&token),
+            "message 不得出现基线树外的路径（臆造）：{token} / {}",
+            finding.message
+        );
+    }
+}
+
+/// REQ-WSC-06 场景「越界路径回灌最近候选」的无候选分支：既无同目录也无
+/// 同名可用路径时如实说明，不臆造路径。
+#[test]
+fn acceptance_path_finding_reports_no_candidate_when_none_matches() {
+    let ir = compile_candidate(&candidate_with_statement(LONE_PATH_AC_STATEMENT));
+    let baseline: BTreeSet<String> = ["src/main/App.vue"]
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+    let fixture = BaselineFixture::new(Some(baseline.clone()));
+    let report = validate_plan_candidate_ir(&ir, &fixture.context())
+        .expect("越界缺口留在报告里回灌修订（不得硬失败 author 轮）");
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "acceptance_path_not_in_baseline")
+        .expect("基线外路径必须产出显式 finding");
+
+    assert!(
+        finding.message.contains("；基线树中无同目录或同名可用路径"),
+        "无候选时必须如实说明：{}",
+        finding.message
+    );
+    assert!(
+        !finding.message.contains("基线树中同目录最近可用路径"),
+        "无候选时不得给出候选清单：{}",
+        finding.message
+    );
+    assert!(
+        !finding.message.contains("src/main/App.vue"),
+        "无候选时不得臆造路径（基线树里唯一路径不得被当成候选）：{}",
+        finding.message
+    );
+    for token in path_like_tokens(&finding.message) {
+        assert!(
+            token == "scripts/run.mjs" || baseline.contains(&token),
+            "message 不得出现基线树外的路径（臆造）：{token} / {}",
+            finding.message
+        );
+    }
 }
