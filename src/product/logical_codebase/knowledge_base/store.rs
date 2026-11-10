@@ -378,6 +378,10 @@ mod tests {
                 KnowledgeBaseStepKind::ApplyUpdate,
                 Some(("packages/2026-11-09_demo", "2026-11-09_demo")),
             ),
+            // 起草 operation：无变更包参数（枚举扩容后的编译面补臂）。
+            KnowledgeBaseOperationKind::UserInput => {
+                (KnowledgeBaseStepKind::PrepareUserInput, None)
+            }
         };
         KnowledgeBaseOperation {
             operation_id: derive_operation_id(PROJECT, lc_id, idempotency_key),

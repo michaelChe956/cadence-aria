@@ -145,7 +145,7 @@ fn write_scope_audit_flags_member_git_metadata_other_than_index() {
     std::fs::write(root.join("alpha/.git/index"), "idx-two-longer").unwrap();
     let after = snapshot_aggregate_root(&root).unwrap();
     assert_eq!(
-        write_scope_violations(&before, &after),
+        write_scope_violations(&before, &after, KnowledgeBaseOperationKind::Bootstrap),
         vec![
             "alpha/.git/HEAD".to_string(),
             "alpha/.git/config".to_string(),
@@ -166,7 +166,7 @@ fn write_scope_audit_git_index_exemption_is_exact() {
     std::fs::write(root.join("alpha/.git/index.lock"), "lock").unwrap();
     let after = snapshot_aggregate_root(&root).unwrap();
     assert_eq!(
-        write_scope_violations(&before, &after),
+        write_scope_violations(&before, &after, KnowledgeBaseOperationKind::Bootstrap),
         vec![
             "alpha/.git/index.lock".to_string(),
             "alpha/index".to_string()
@@ -371,7 +371,7 @@ fn write_scope_audit_platform_runtime_exemption_is_root_level_and_exact() {
     }
     let after = snapshot_aggregate_root(&root).unwrap();
     assert_eq!(
-        write_scope_violations(&before, &after),
+        write_scope_violations(&before, &after, KnowledgeBaseOperationKind::Bootstrap),
         vec![
             ".aria/evil.sh".to_string(),
             ".aria/runtime-evil/x".to_string(),

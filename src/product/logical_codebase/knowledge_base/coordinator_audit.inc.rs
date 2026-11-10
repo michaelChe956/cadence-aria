@@ -24,6 +24,19 @@ const FAILURE_STAGE: &str = "knowledge_base";
 // ───────────────────── 错误 / 取消记录映射 ─────────────────────
 
 const VIOLATION_ACTION: &str = "知识库只允许写 cadence/knowledge-base、cadence/project-rules 与根 CLAUDE.md/AGENTS.md；检查越界改动后重新发起";
+/// 起草 operation 的越界 remediation：允许面只有 user-input 目录（skill 契约）。
+const USER_INPUT_VIOLATION_ACTION: &str =
+    "起草只允许写 cadence/knowledge-base/user-input；检查越界改动后重新发起";
+
+/// 越界 remediation 文案按 operation kind 取各自允许面。
+fn violation_action(kind: KnowledgeBaseOperationKind) -> &'static str {
+    match kind {
+        KnowledgeBaseOperationKind::UserInput => USER_INPUT_VIOLATION_ACTION,
+        KnowledgeBaseOperationKind::Bootstrap | KnowledgeBaseOperationKind::Update => {
+            VIOLATION_ACTION
+        }
+    }
+}
 
 fn describe_violations(paths: &[String]) -> String {
     let mut listed = paths
@@ -45,8 +58,9 @@ fn error_record(
     error: &KnowledgeBaseError,
     violations: &[String],
     provider: &str,
+    kind: KnowledgeBaseOperationKind,
 ) -> AggregateInitializationErrorRecord {
-    let base = base_error_record(error, provider);
+    let base = base_error_record(error, provider, kind);
     if violations.is_empty() {
         return base;
     }
@@ -67,7 +81,7 @@ fn error_record(
             describe_violations(violations)
         )),
         retryable: false,
-        action: VIOLATION_ACTION.to_string(),
+        action: violation_action(kind).to_string(),
         cause: Some(base.reason_code),
         ..base
     }
@@ -76,6 +90,7 @@ fn error_record(
 fn base_error_record(
     error: &KnowledgeBaseError,
     provider: &str,
+    kind: KnowledgeBaseOperationKind,
 ) -> AggregateInitializationErrorRecord {
     let record = |reason_code: &str,
                   summary: Option<String>,
@@ -104,7 +119,7 @@ fn base_error_record(
             REASON_WRITE_SCOPE_VIOLATION,
             Some(describe_violations(paths)),
             false,
-            VIOLATION_ACTION,
+            violation_action(kind),
             None,
         ),
         KnowledgeBaseError::TurnFailed {

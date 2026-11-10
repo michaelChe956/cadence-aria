@@ -8,18 +8,22 @@ use crate::product::logical_codebase::aggregate_initialization::{
     AggregateInitializationErrorRecord, AggregateProviderSelection,
 };
 
-/// operation 级别：首次建立（Bootstrap）或增量更新（Update）。
+/// operation 级别：用户输入起草（UserInput）、首次建立（Bootstrap）或
+/// 增量更新（Update）。枚举只增不删：旧记录反序列化不受影响。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeBaseOperationKind {
+    UserInput,
     Bootstrap,
     Update,
 }
 
-/// 步骤标识：Bootstrap 流程的单步，或 Update 流程的应用变更包步骤。
+/// 步骤标识：UserInput 流程的起草输入步、Bootstrap 流程的单步，或 Update
+/// 流程的应用变更包步骤。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeBaseStepKind {
+    PrepareUserInput,
     Bootstrap,
     ApplyUpdate,
 }
@@ -99,4 +103,70 @@ pub fn derive_operation_id(project_id: &str, lc_id: &str, idempotency_key: &str)
     let payload = format!("{project_id}:{lc_id}:{idempotency_key}");
     let digest = format!("{:x}", Sha256::digest(payload.as_bytes()));
     digest[..16].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 新增 UserInput 变体前落盘的旧记录（kind 只有 bootstrap/update）必须
+    /// 仍能反序列化：枚举只增不删，无需 serde 兜底。
+    #[test]
+    fn legacy_operation_json_still_deserializes() {
+        let legacy = r#"{
+            "operation_id": "0123456789abcdef",
+            "project_id": "project_0001",
+            "logical_codebase_id": "lc_alpha",
+            "kind": "update",
+            "input": {
+                "idempotency_key": "kb-key-0001",
+                "provider": "claude_code",
+                "package_path": "cadence/knowledge-base/user-input/updates/CHANGE-x",
+                "package_id": "CHANGE-x"
+            },
+            "status": "failed",
+            "steps": [
+                {
+                    "step_id": "apply_update",
+                    "status": "failed",
+                    "started_at": "2026-11-09T00:00:00Z",
+                    "completed_at": "2026-11-09T00:05:00Z",
+                    "output_summary": "provider exploded"
+                }
+            ],
+            "created_at": "2026-11-09T00:00:00Z"
+        }"#;
+        let operation: KnowledgeBaseOperation =
+            serde_json::from_str(legacy).expect("旧记录必须仍能反序列化");
+        assert_eq!(operation.kind, KnowledgeBaseOperationKind::Update);
+        assert_eq!(
+            operation.steps[0].step_id,
+            KnowledgeBaseStepKind::ApplyUpdate
+        );
+        assert_eq!(
+            operation.input.package_path.as_deref(),
+            Some("cadence/knowledge-base/user-input/updates/CHANGE-x")
+        );
+    }
+
+    /// 新变体以 snake_case 往返，与既有变体的序列化形态一致。
+    #[test]
+    fn user_input_kinds_round_trip_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&KnowledgeBaseOperationKind::UserInput).unwrap(),
+            r#""user_input""#
+        );
+        assert_eq!(
+            serde_json::to_string(&KnowledgeBaseStepKind::PrepareUserInput).unwrap(),
+            r#""prepare_user_input""#
+        );
+        assert_eq!(
+            serde_json::from_str::<KnowledgeBaseOperationKind>(r#""bootstrap""#).unwrap(),
+            KnowledgeBaseOperationKind::Bootstrap
+        );
+        assert_eq!(
+            serde_json::from_str::<KnowledgeBaseStepKind>(r#""apply_update""#).unwrap(),
+            KnowledgeBaseStepKind::ApplyUpdate
+        );
+    }
 }

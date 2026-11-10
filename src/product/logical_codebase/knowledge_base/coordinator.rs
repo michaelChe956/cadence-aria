@@ -44,7 +44,7 @@ use crate::product::logical_codebase::{
 };
 use crate::product::models::ProviderName;
 
-use super::command::{bootstrap_command, update_command};
+use super::command::{bootstrap_command, update_command, user_input_command};
 use super::operation::{
     KnowledgeBaseOperation, KnowledgeBaseOperationInput, KnowledgeBaseOperationKind,
     KnowledgeBaseOperationStatus, KnowledgeBaseStepKind, KnowledgeBaseStepRecord,
@@ -380,24 +380,23 @@ impl KnowledgeBaseCoordinator {
                 project_id,
                 operation_id,
                 provider,
+                operation.kind,
                 &violations,
                 audit_indeterminate,
             )),
             Err(DriveFailure {
                 error, violations, ..
             }) => {
-                let record = error_record(&error, &violations, provider);
+                let record = error_record(&error, &violations, provider, operation.kind);
                 match store.finish_failed(project_id, operation_id, Some(step), record, self.now())
                 {
                     Ok(()) => Err(error),
                     // 「取消 API 已落盘 + runner 返回普通失败」的交叉情形：已算出
                     // 的审计事实不得丢弃，改为附加到 Cancelled 记录上。
                     Err(store_error) => Err(self.settle_failed_after_cancel_won(
-                        project_id,
-                        operation_id,
+                        &operation,
                         &error,
                         &violations,
-                        provider,
                         store_error,
                     )),
                 }
@@ -421,6 +420,7 @@ impl KnowledgeBaseCoordinator {
         project_id: &str,
         operation_id: &str,
         provider: &str,
+        kind: KnowledgeBaseOperationKind,
         violations: &[String],
         audit_indeterminate: bool,
     ) -> KnowledgeBaseError {
@@ -431,7 +431,7 @@ impl KnowledgeBaseCoordinator {
         let result = if violations.is_empty() && !audit_indeterminate {
             store.cancel(project_id, operation_id, self.now())
         } else {
-            let record = cancelled_audit_record(provider, violations, audit_indeterminate);
+            let record = cancelled_audit_record(provider, kind, violations, audit_indeterminate);
             store.cancel_with_error(project_id, operation_id, record, self.now())
         };
         match result {
@@ -465,13 +465,17 @@ impl KnowledgeBaseCoordinator {
     /// 收口语义（`settle_store_conflict`）。
     fn settle_failed_after_cancel_won(
         &self,
-        project_id: &str,
-        operation_id: &str,
+        operation: &KnowledgeBaseOperation,
         error: &KnowledgeBaseError,
         violations: &[String],
-        provider: &str,
         store_error: ProductStoreError,
     ) -> KnowledgeBaseError {
+        let (project_id, operation_id, provider, kind) = (
+            operation.project_id.as_str(),
+            operation.operation_id.as_str(),
+            operation.input.provider.as_str(),
+            operation.kind,
+        );
         if violations.is_empty()
             || !matches!(store_error, ProductStoreError::IdentityMismatch { .. })
         {
@@ -485,7 +489,7 @@ impl KnowledgeBaseCoordinator {
                 match store.cancel_with_error(
                     project_id,
                     operation_id,
-                    error_record(error, violations, provider),
+                    error_record(error, violations, provider, kind),
                     self.now(),
                 ) {
                     // 附加成功，或他人已附加过（事实已在盘上）。
@@ -563,7 +567,7 @@ impl KnowledgeBaseCoordinator {
             matches!(turn, Err(KnowledgeBaseTurnError::CancelledStopUnconfirmed));
         let audit = snapshot_blocking(canonical_root)
             .await
-            .map(|after| write_scope_violations(&before, &after));
+            .map(|after| write_scope_violations(&before, &after, operation.kind));
         drop(isolation);
         match (turn, audit) {
             (Ok(summary), Ok(violations)) if violations.is_empty() => Ok(summary),
@@ -593,6 +597,7 @@ impl KnowledgeBaseCoordinator {
 
 fn step_kind(kind: KnowledgeBaseOperationKind) -> KnowledgeBaseStepKind {
     match kind {
+        KnowledgeBaseOperationKind::UserInput => KnowledgeBaseStepKind::PrepareUserInput,
         KnowledgeBaseOperationKind::Bootstrap => KnowledgeBaseStepKind::Bootstrap,
         KnowledgeBaseOperationKind::Update => KnowledgeBaseStepKind::ApplyUpdate,
     }
@@ -608,6 +613,7 @@ fn resolve_turn(
             |_| KnowledgeBaseError::InvalidInput(format!("unknown provider: {}", input.provider)),
         )?;
     let command = match kind {
+        KnowledgeBaseOperationKind::UserInput => user_input_command(&provider),
         KnowledgeBaseOperationKind::Bootstrap => bootstrap_command(&provider),
         KnowledgeBaseOperationKind::Update => {
             let package = input.package_path.as_deref().ok_or_else(|| {
@@ -650,10 +656,11 @@ include!("coordinator_audit.inc.rs");
 /// 不得静默当作干净取消。
 fn cancelled_audit_record(
     provider: &str,
+    kind: KnowledgeBaseOperationKind,
     violations: &[String],
     audit_indeterminate: bool,
 ) -> AggregateInitializationErrorRecord {
-    let mut record = error_record(&KnowledgeBaseError::Cancelled, violations, provider);
+    let mut record = error_record(&KnowledgeBaseError::Cancelled, violations, provider, kind);
     if audit_indeterminate {
         let note = "取消时无法确认 provider 已停止，写入面审计为下界，可能漏报";
         record.stderr_summary = Some(match record.stderr_summary.take() {
@@ -746,17 +753,33 @@ async fn snapshot_blocking(root: &Path) -> Result<TreeSnapshot, KnowledgeBaseErr
         .map_err(|error| KnowledgeBaseError::Io(format!("snapshot task failed: {error}")))?
 }
 
-/// 允许面：`cadence/knowledge-base/**`、`cadence/project-rules/**`、根
-/// `CLAUDE.md`、根 `AGENTS.md`。
-fn is_allowed_write(relative: &str) -> bool {
-    relative == "CLAUDE.md"
-        || relative == "AGENTS.md"
-        || relative.starts_with("cadence/knowledge-base/")
-        || relative.starts_with("cadence/project-rules/")
+/// 允许面按 operation kind 区分：
+/// - Bootstrap/Update：`cadence/knowledge-base/**`、`cadence/project-rules/**`、
+///   根 `CLAUDE.md`、根 `AGENTS.md`；
+/// - UserInput：仅 `cadence/knowledge-base/user-input/**`（起草 skill 契约
+///   「只写这个目录」，其余路径——含 knowledge-base 其它内容与根入口
+///   文件——一律越界）。
+fn is_allowed_write(kind: KnowledgeBaseOperationKind, relative: &str) -> bool {
+    match kind {
+        KnowledgeBaseOperationKind::UserInput => {
+            relative.starts_with("cadence/knowledge-base/user-input/")
+        }
+        KnowledgeBaseOperationKind::Bootstrap | KnowledgeBaseOperationKind::Update => {
+            relative == "CLAUDE.md"
+                || relative == "AGENTS.md"
+                || relative.starts_with("cadence/knowledge-base/")
+                || relative.starts_with("cadence/project-rules/")
+        }
+    }
 }
 
-/// turn 前后快照差分：新增、修改、删除且不在允许面内的路径（升序去重）。
-fn write_scope_violations(before: &TreeSnapshot, after: &TreeSnapshot) -> Vec<String> {
+/// turn 前后快照差分：新增、修改、删除且不在该 kind 允许面内的路径
+/// （升序去重）。
+fn write_scope_violations(
+    before: &TreeSnapshot,
+    after: &TreeSnapshot,
+    kind: KnowledgeBaseOperationKind,
+) -> Vec<String> {
     let mut changed = BTreeSet::new();
     for (path, stamp) in before {
         if after.get(path) != Some(stamp) {
@@ -770,7 +793,7 @@ fn write_scope_violations(before: &TreeSnapshot, after: &TreeSnapshot) -> Vec<St
     }
     changed
         .into_iter()
-        .filter(|path| !is_allowed_write(path))
+        .filter(|path| !is_allowed_write(kind, path))
         .collect()
 }
 

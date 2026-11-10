@@ -9,6 +9,7 @@ use crate::product::repository_store::RepositoryInitializationStepKind;
 
 const BOOTSTRAP_COMMAND_NAME: &str = "knowledge-base-bootstrap";
 const UPDATE_COMMAND_NAME: &str = "knowledge-base-update";
+const USER_INPUT_COMMAND_NAME: &str = "knowledge-base-user-input";
 
 /// bootstrap 命令：`<前缀>knowledge-base-bootstrap`。
 pub fn bootstrap_command(provider: &ProviderName) -> Option<String> {
@@ -31,6 +32,15 @@ pub fn update_command(provider: &ProviderName, package_rel_path: &str) -> Option
     }
     let prefix = RepositoryInitializationStepKind::skill_command_prefix(provider.clone())?;
     Some(format!("{prefix}{UPDATE_COMMAND_NAME} {package_rel_path}"))
+}
+
+/// user_input 起草命令：`<前缀>knowledge-base-user-input`（无参数）。
+///
+/// 起草 turn 在 canonical 聚合根执行；skill 契约只写
+/// `cadence/knowledge-base/user-input/`（写入面审计据此收紧允许面）。
+pub fn user_input_command(provider: &ProviderName) -> Option<String> {
+    let prefix = RepositoryInitializationStepKind::skill_command_prefix(provider.clone())?;
+    Some(format!("{prefix}{USER_INPUT_COMMAND_NAME}"))
 }
 
 #[cfg(test)]
@@ -84,5 +94,22 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn user_input_command_uses_provider_skill_prefix() {
+        assert_eq!(
+            user_input_command(&ProviderName::ClaudeCode).as_deref(),
+            Some("/knowledge-base-user-input")
+        );
+        assert_eq!(
+            user_input_command(&ProviderName::Pi).as_deref(),
+            Some("/skill:knowledge-base-user-input")
+        );
+        assert_eq!(
+            user_input_command(&ProviderName::Codex).as_deref(),
+            Some("$cadence-init:knowledge-base-user-input")
+        );
+        assert_eq!(user_input_command(&ProviderName::Fake), None);
     }
 }
