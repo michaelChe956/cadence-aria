@@ -2,7 +2,12 @@
 // 与 AggregateInitializationCard 同构：卡片头 + 按钮区 + 步骤列表 + 失败文案；
 // provider 选择摘要组件（含 SKIPPED_REASON_LABELS）从聚合卡提升至此共用，
 // AggregateInitializationCard 保留 re-export 以维持既有导入路径稳定。
-import { useState } from "react";
+//
+// Task 3（REQ-KB-13）：后端把「聚合初始化未完成」的前置门盖在全部知识库端点
+// （含 status 端点）入口，失败 = 422 + 稳定码
+// knowledge_base_requires_aggregate_initialization。卡片捕获该码 ⇒ 显示与
+// 详情页逐字一致的中文提示，并把写入口（初始化/更新/创建输入模板）禁用。
+import { useEffect, useState } from "react";
 import {
   CircleCheck,
   CircleMinus,
@@ -10,6 +15,8 @@ import {
   LoaderCircle,
   TriangleAlert,
 } from "lucide-react";
+import { ApiRequestError } from "../../api/client";
+import { getKnowledgeBaseStatus } from "../../api/knowledge-base";
 import type { AggregateProviderSelectionDto } from "../../api/types";
 import type {
   KnowledgeBaseChangePackageViolationDto,
@@ -18,6 +25,39 @@ import type {
   KnowledgeBaseStatusDto,
 } from "../../api/types/knowledge-base";
 import { KnowledgeBaseUpdateDialog } from "./KnowledgeBaseUpdateDialog";
+
+/**
+ * REQ-KB-13：后端「聚合初始化未完成」前置门的稳定失败码。
+ * 后端在知识库全部端点入口统一判定（HTTP 层一处前置门），前端按此码
+ * 渲染统一提示并禁用写入口——不臆造 status 投影里并不存在的门控字段。
+ */
+export const AGGREGATE_INITIALIZATION_REQUIRED_CODE =
+  "knowledge_base_requires_aggregate_initialization";
+
+/**
+ * REQ-KB-13：卡片与详情页共用的同款中文提示（逐字一致，两处必须同一句）。
+ * 口径取自技术方案 §3.1「需先完成聚合初始化（规则/政策）后再操作知识库」；
+ * 详情页复用本常量导出，不另起一套文案。
+ */
+export const AGGREGATE_INITIALIZATION_REQUIRED_PROMPT =
+  "需先完成聚合初始化（规则/政策）后再操作知识库";
+
+/**
+ * 前置门未满足时的复检间隔（毫秒）：聚合初始化在同一抽屉内完成后，
+ * 卡片据此恢复写入口（用户不必关开抽屉）。
+ */
+const GATE_RECHECK_INTERVAL_MS = 5_000;
+
+/**
+ * 判定一次失败是否为「聚合初始化未完成」的前置门拒绝。
+ * 只认后端给出的稳定码（ApiRequestError.code）；其它失败码一律不误判。
+ */
+function isAggregateGateFailure(reason: unknown): boolean {
+  return (
+    reason instanceof ApiRequestError &&
+    reason.code === AGGREGATE_INITIALIZATION_REQUIRED_CODE
+  );
+}
 
 /** 跳过原因码 → 摘要行中文标签（与后端 skipped_reason 词表一一对应）。 */
 export const SKIPPED_REASON_LABELS: Record<string, string> = {
@@ -82,8 +122,9 @@ export type KnowledgeBasePreflightFailureDto = {
 
 /** 预检失败稳定码 → 中文口径（Task 7 失败码；未知码回退展示 message）。 */
 const PREFLIGHT_FAILURE_LABELS: Record<string, string> = {
+  // 前置门未满足 ⇒ 与详情页同一句（REQ-KB-13：两处必须逐字一致）。
   knowledge_base_requires_aggregate_initialization:
-    "知识库预检未通过：需先完成聚合初始化。",
+    AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
   knowledge_base_skills_unavailable: "知识库预检未通过：Cadence skills 当前不可用。",
   knowledge_base_inputs_incomplete: "知识库预检未通过：输入模板不完整。",
   knowledge_base_manifest_missing: "知识库预检未通过：manifest 缺失。",
@@ -172,6 +213,12 @@ export function KnowledgeBaseCard({
   onDismissPreflightFailure,
 }: KnowledgeBaseCardProps) {
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  // REQ-KB-13：后端把「聚合初始化未完成」的门盖在全部知识库端点入口
+  // （含 status 端点），失败 = 422 + 稳定码 knowledge_base_requires_aggregate_initialization。
+  // 宿主 hook 把 status 取数失败折进工作台级错误横幅，卡片拿不到失败码
+  // ⇒ 卡片自行探测一次 status，只认后端给出的稳定码（不臆造 status 投影里
+  // 并不存在的「前置未满足」布尔位）。
+  const [aggregateGateUnmet, setAggregateGateUnmet] = useState(false);
   // 更新按钮闸门（与后端 update 预检口径一致）：initialization_status 必须是
   // complete **且** global_validation 必须是 passed——少任何一条后端都会拒，
   // 前端提前禁用，避免用户点了才被拒。
@@ -185,11 +232,63 @@ export function KnowledgeBaseCard({
     preflightFailure !== null &&
     (missingInputs.length > 0 ||
       preflightFailure.code === "knowledge_base_inputs_incomplete");
+  // 前置门未满足：探测命中，或写请求被前置门拒绝（同一稳定码）。
+  const gateRejected =
+    aggregateGateUnmet ||
+    preflightFailure?.code === AGGREGATE_INITIALIZATION_REQUIRED_CODE;
+  // 前置门失败已由预检失败面板承载同一句文案时，不再另起一条提示（避免同一
+  // 句话在同一张卡片上出现两次）。
+  const gatePromptShownByPreflight =
+    preflightFailure?.code === AGGREGATE_INITIALIZATION_REQUIRED_CODE;
   const statusLabel = operation
     ? OPERATION_STATUS_LABELS[operation.status]
-    : status?.initialization_status === "complete"
-      ? "初始化已完成"
-      : "尚未初始化";
+    : gateRejected
+      ? "前置未满足"
+      : status?.initialization_status === "complete"
+        ? "初始化已完成"
+        : "尚未初始化";
+
+  // 前置门探测：命中稳定码即置「前置未满足」；取数成功即门已放行（清零）。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        await getKnowledgeBaseStatus(projectId, logicalCodebaseId);
+        if (!cancelled) {
+          setAggregateGateUnmet(false);
+        }
+      } catch (reason) {
+        if (cancelled) {
+          return;
+        }
+        setAggregateGateUnmet(isAggregateGateFailure(reason));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, logicalCodebaseId]);
+
+  // 门未满足时定期复探：用户在同抽屉内完成聚合初始化后，知识库写入口要能
+  // 自行恢复（不必关开抽屉）。
+  useEffect(() => {
+    if (!aggregateGateUnmet) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void getKnowledgeBaseStatus(projectId, logicalCodebaseId).then(
+        () => {
+          setAggregateGateUnmet(false);
+        },
+        () => {
+          // 复探失败仍维持「前置未满足」（只有取数成功才放行）。
+        },
+      );
+    }, GATE_RECHECK_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [aggregateGateUnmet, projectId, logicalCodebaseId]);
 
   function handleBootstrap() {
     if (!window.confirm(BOOTSTRAP_CONFIRM_TEXT)) {
@@ -220,7 +319,7 @@ export function KnowledgeBaseCard({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || gateRejected}
             onClick={handleBootstrap}
             className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
           >
@@ -235,7 +334,7 @@ export function KnowledgeBaseCard({
           </button>
           <button
             type="button"
-            disabled={busy || !updateReady}
+            disabled={busy || !updateReady || gateRejected}
             onClick={() => {
               setUpdateDialogOpen(true);
             }}
@@ -276,6 +375,18 @@ export function KnowledgeBaseCard({
           ) : null}
         </div>
       </div>
+
+      {/* REQ-KB-13：前置门未满足 ⇒ 统一中文提示（与详情页逐字一致）。
+          预检失败面板已经承载同一句时不重复展示（同一张卡片不出现同一句两遍）。 */}
+      {gateRejected && !gatePromptShownByPreflight ? (
+        <p
+          data-testid="knowledge-base-aggregate-gate-hint"
+          role="alert"
+          className="mt-2 text-xs text-[var(--aria-danger)]"
+        >
+          {AGGREGATE_INITIALIZATION_REQUIRED_PROMPT}
+        </p>
+      ) : null}
 
       {!updateReady ? (
         <p
@@ -360,7 +471,7 @@ export function KnowledgeBaseCard({
             {showCreateBootstrapInputs ? (
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || gateRejected}
                 onClick={onCreateBootstrapInputs}
                 className="inline-flex h-7 items-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 text-[11px] font-semibold text-[var(--aria-ink)] disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
               >

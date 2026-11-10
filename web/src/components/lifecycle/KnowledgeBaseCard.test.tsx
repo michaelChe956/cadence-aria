@@ -1,14 +1,20 @@
 // Task 9：LC 仓管理抽屉内「知识库」卡片的测试。
 // 测试名与按钮文案按 task-9-brief Step 1 逐字落位。
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { ApiRequestError } from "../../api/client";
 import type { AggregateProviderSelectionDto } from "../../api/types";
 import type {
   KnowledgeBaseOperationSnapshotDto,
   KnowledgeBaseStatusDto,
 } from "../../api/types/knowledge-base";
+import { getKnowledgeBaseStatus } from "../../api/knowledge-base";
 import { KnowledgeBaseCard } from "./KnowledgeBaseCard";
+import {
+  AGGREGATE_INITIALIZATION_REQUIRED_CODE,
+  AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
+} from "./KnowledgeBaseCard";
 import type { KnowledgeBaseCardProps } from "./KnowledgeBaseCard";
 
 // 卡片内的更新弹窗会拉取变更包列表；把 API 客户端整体打桩，避免测试触网。
@@ -24,6 +30,15 @@ vi.mock("../../api/knowledge-base", () => ({
   createKnowledgeBaseChangePackage: vi
     .fn()
     .mockResolvedValue({ id: "cp_0002", path: "changes/new-feature.md" }),
+  getKnowledgeBaseStatus: vi.fn().mockResolvedValue({
+    exists: true,
+    schema_version: "4.0",
+    initialization_status: "complete",
+    global_validation: "passed",
+    completed_stages: [],
+    skipped_stages: [],
+    skills_available: true,
+  }),
 }));
 
 const statusDto = (
@@ -311,5 +326,109 @@ describe("KnowledgeBaseCard", () => {
     renderCard({ onOpenDetail });
     await user.click(screen.getByRole("button", { name: "查看知识库详细内容" }));
     expect(onOpenDetail).toHaveBeenCalledTimes(1);
+  });
+
+  // ── REQ-KB-13：聚合初始化未完成 ⇒ 知识库全域前置门拒绝 ────────────────
+  // 后端在全部知识库端点（含 status 端点）入口统一判定，失败 = 422 +
+  // 稳定码 knowledge_base_requires_aggregate_initialization。卡片捕获到
+  // 该失败码 ⇒ 显示与详情页逐字一致的中文提示 + 写入口禁用（不臆造
+  // status 投影里并不存在的门控字段）。
+  it("aggregate_initialization_gate_shows_prompt_and_disables_write_entries", async () => {
+    vi.mocked(getKnowledgeBaseStatus).mockRejectedValueOnce(
+      new ApiRequestError({
+        code: AGGREGATE_INITIALIZATION_REQUIRED_CODE,
+        message:
+          "知识库尚未开放：该逻辑代码库的聚合初始化（冷启动「规则/政策」步）还未完成，请先在逻辑代码库的冷启动流程完成聚合初始化再访问知识库。",
+        details: { bootstrap_step: "rules_policy" },
+      }),
+    );
+
+    renderCard({ status: statusDto("complete") });
+
+    // 前置门未满足 ⇒ 卡片显示中文提示（与详情页共用同一常量）。
+    const hint = await screen.findByTestId("knowledge-base-aggregate-gate-hint");
+    expect(hint).toHaveTextContent(AGGREGATE_INITIALIZATION_REQUIRED_PROMPT);
+    // 写入口禁用：点了也只会吃 422。
+    expect(screen.getByRole("button", { name: "知识库初始化" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "知识库更新" })).toBeDisabled();
+  });
+
+  it("aggregate_initialization_gate_disables_create_bootstrap_inputs", async () => {
+    vi.mocked(getKnowledgeBaseStatus).mockRejectedValueOnce(
+      new ApiRequestError({
+        code: AGGREGATE_INITIALIZATION_REQUIRED_CODE,
+        message: "知识库尚未开放：该逻辑代码库的聚合初始化（冷启动「规则/政策」步）还未完成。",
+        details: { bootstrap_step: "rules_policy" },
+      }),
+    );
+
+    // 前置门未满足时，之前遗留的输入模板缺失失败仍在展示 ⇒ 该写入口也禁用。
+    renderCard({
+      status: statusDto("complete"),
+      preflightFailure: {
+        code: "knowledge_base_inputs_incomplete",
+        message: "bootstrap inputs incomplete",
+        details: { missing: ["api-scope.md"], violations: [] },
+      },
+    });
+
+    expect(
+      await screen.findByTestId("knowledge-base-aggregate-gate-hint"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "创建输入模板" })).toBeDisabled();
+  });
+
+  it("status_failure_other_than_gate_keeps_write_entries_enabled", async () => {
+    // 非前置门的取数失败（如 500）不得误判为「前置未满足」。
+    vi.mocked(getKnowledgeBaseStatus).mockRejectedValueOnce(
+      new ApiRequestError({
+        code: "internal_error",
+        message: "读取知识库状态失败",
+        details: {},
+      }),
+    );
+
+    renderCard({ status: statusDto("complete") });
+
+    await waitFor(() => {
+      expect(getKnowledgeBaseStatus).toHaveBeenCalled();
+    });
+    expect(
+      screen.queryByTestId("knowledge-base-aggregate-gate-hint"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "知识库更新" })).toBeEnabled();
+  });
+
+  it("gate_preflight_failure_shows_the_same_prompt_as_the_detail_page", () => {
+    // 写请求被前置门拒绝（POST /initializations 也带同一道门）⇒ 提示文案
+    // 与详情页逐字一致（共用同一常量），不另起一套口径。
+    renderCard({
+      status: statusDto("complete"),
+      preflightFailure: {
+        code: AGGREGATE_INITIALIZATION_REQUIRED_CODE,
+        message: "知识库尚未开放：该逻辑代码库的聚合初始化（冷启动「规则/政策」步）还未完成。",
+        details: null,
+      },
+    });
+
+    const alert = screen.getByTestId("knowledge-base-preflight-failure");
+    expect(alert).toHaveTextContent(AGGREGATE_INITIALIZATION_REQUIRED_PROMPT);
+  });
+
+  it("non_gate_preflight_failure_keeps_write_entries_enabled", () => {
+    // 非前置门失败（如输入模板不完整）不得误禁用写入口。
+    renderCard({
+      status: statusDto("complete"),
+      preflightFailure: {
+        code: "knowledge_base_inputs_incomplete",
+        message: "bootstrap inputs incomplete",
+        details: { missing: ["api-scope.md"], violations: [] },
+      },
+    });
+
+    const alert = screen.getByTestId("knowledge-base-preflight-failure");
+    expect(alert).not.toHaveTextContent(AGGREGATE_INITIALIZATION_REQUIRED_PROMPT);
+    expect(screen.getByRole("button", { name: "知识库初始化" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "知识库更新" })).toBeEnabled();
   });
 });
