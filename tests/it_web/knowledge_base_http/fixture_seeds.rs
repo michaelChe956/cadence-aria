@@ -1,23 +1,6 @@
 // 夹具种子助手：经 `include!` 进入 `knowledge_base_http.rs` 的同一模块
 //（REQ-KB-13 前置门改造后自主文件拆出，守住单文件 1200 行门禁）。
 
-/// 预检③的六领域全部「不适用」⇒ 只需要 base-info.md 在场。
-const BASE_INFO_ALL_NOT_APPLICABLE: &str = "\
-# 基本信息
-## 工程信息
-- 状态：不适用（测试）
-## 数据模型
-- 状态：不适用（测试）
-## 配置
-- 状态：不适用（测试）
-## 中间件
-- 状态：不适用（测试）
-## 接口
-- 状态：不适用（测试）
-## 页面
-- 状态：不适用（测试）
-";
-
 /// 与 `manifest.rs` 测试同款的合法 complete manifest（api/pages 不适用）。
 const COMPLETE_MANIFEST: &str = "\
 schema_version: \"4.0\"
@@ -180,16 +163,6 @@ Root-recipe aggregated policy for planning read-only and coding target-write ses
             .expect("finalize root receipt");
     }
 
-    /// 预检③：六领域全部不适用 ⇒ 只放 base-info.md。
-    fn seed_user_inputs(&self) {
-        let user_input = self.kb_root().join("user-input");
-        std::fs::create_dir_all(&user_input).expect("create user-input");
-        std::fs::write(
-            user_input.join("base-info.md"),
-            BASE_INFO_ALL_NOT_APPLICABLE,
-        )
-        .expect("write base-info");
-    }
 
     /// 预检④⑤：合法 complete 的 manifest.yaml。
     fn seed_complete_manifest(&self) {
@@ -242,5 +215,79 @@ Root-recipe aggregated policy for planning read-only and coding target-write ses
         KnowledgeBaseOperationStore::for_lc(self.paths.clone(), self.lc_id.clone())
             .create(operation)
             .expect("seed running operation");
+    }
+
+    /// 9 份输入全部写入与模板逐字不同的已填内容（filled ⇒ 已准备）。
+    fn seed_filled_user_inputs(&self) {
+        let user_input = self.kb_root().join("user-input");
+        std::fs::create_dir_all(&user_input).expect("create user-input");
+        for (index, name) in USER_INPUT_FILES.iter().enumerate() {
+            std::fs::write(
+                user_input.join(name),
+                format!("# 已填写 {index}\n这是与模板逐字不同的真实内容。\n"),
+            )
+            .expect("write filled input");
+        }
+    }
+
+    /// 平台侧确认记录文件路径（per-LC `.aria`，绝不落 user-input/）。
+    fn confirmations_path(&self) -> PathBuf {
+        self.paths
+            .logical_codebases_root(PROJECT_ID)
+            .join(&self.lc_id)
+            .join("knowledge-base")
+            .join("user-input-confirmations.json")
+    }
+
+    /// 经真实客户端流程批量确认全部 9 份：逐份 GET /file 取服务端摘要 →
+    /// POST /user-input/confirm { all: true, items }。
+    async fn confirm_all_user_inputs(&self) {
+        let mut items = Vec::new();
+        for name in USER_INPUT_FILES {
+            let path = format!("user-input/{name}");
+            let (status, body) = request_json(
+                &self.app,
+                Method::GET,
+                &self.kb_uri(&format!("/file?path={path}")),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let digest = body["digest"].as_str().expect("digest").to_string();
+            items.push(json!({ "path": path, "digest": digest }));
+        }
+        let (status, body) = request_json(
+            &self.app,
+            Method::POST,
+            &self.kb_uri("/user-input/confirm"),
+            json!({ "all": true, "items": items }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["confirmed"].as_array().expect("confirmed").len(), 9);
+    }
+
+    /// 有界等待 spawn 的 execute 收口（operation 进入终态）后返回终态名；
+    /// 10 秒内未收口即失败（避免后台任务在测试结束后拖尾持有资源）。
+    async fn wait_operation_settled(&self, operation_id: &str) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let (_, snapshot) = request_json(
+                    &self.app,
+                    Method::GET,
+                    &self.kb_uri(&format!("/initializations/{operation_id}")),
+                    json!({}),
+                )
+                .await;
+                match snapshot["status"].as_str() {
+                    Some("completed") | Some("failed") | Some("cancelled") => {
+                        return snapshot["status"].as_str().expect("status").to_string();
+                    }
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+                }
+            }
+        })
+        .await
+        .expect("knowledge base operation must settle within 10s")
     }
 }

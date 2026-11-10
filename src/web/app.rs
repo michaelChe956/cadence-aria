@@ -224,6 +224,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/bootstrap-inputs",
             post(handlers::knowledge_base::create_knowledge_base_bootstrap_inputs),
         )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/user-input",
+            get(handlers::knowledge_base::get_knowledge_base_user_input),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/user-input/confirm",
+            post(handlers::knowledge_base::confirm_knowledge_base_user_input),
+        )
         // provider 能力面改**机器级**（REQ-PCR-08）：provider 是平台公用
         // 能力，与项目 / 逻辑代码库无关 ⇒ 旧的按项目 / 逻辑代码库定位的四条
         // 路由整条删除（不留兼容别名 / 转发 shim / 双写）。

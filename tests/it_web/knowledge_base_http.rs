@@ -63,6 +63,20 @@ use tower::ServiceExt;
 
 const PROJECT_ID: &str = "project_0001";
 
+/// 插件模板 `knowledge-base-bootstrap/user-input/` 的 9 份输入文件名
+/// （GET /user-input 的 total_count 基线与种子助手共用）。
+const USER_INPUT_FILES: [&str; 9] = [
+    "api-scope.md",
+    "base-info.md",
+    "configuration-scope.md",
+    "data-model-scope.md",
+    "database-ddl.sql",
+    "middleware-scope.md",
+    "page-scope.md",
+    "product.md",
+    "project-scope.md",
+];
+
 /// 预检②/模板源根按 owner HOME 解析（`resolve_owner_home_from_env`）。
 /// 仓内先例（T7HomeEnvGuard）用 `ExclusiveFileLock` 串行；外部测试 crate 取不到
 /// 该 `pub(crate)` 工具，改用模块级互斥锁等价串行——只有本模块读写 HOME。
@@ -281,11 +295,11 @@ fn seed_skills(home: &Path) {
         std::fs::create_dir_all(&dir).expect("create skill dir");
         std::fs::write(dir.join("SKILL.md"), format!("# {skill}\n")).expect("write SKILL.md");
     }
-    // 初始化输入模板源（knowledge-base-bootstrap/user-input）。
+    // 初始化输入模板源（knowledge-base-bootstrap/user-input，9 份全量）。
     let bootstrap =
         home.join(".agents/Cadence-skills/cadence-init/skills/knowledge-base-bootstrap/user-input");
     std::fs::create_dir_all(&bootstrap).expect("create bootstrap source");
-    for name in ["base-info.md", "api-scope.md"] {
+    for name in USER_INPUT_FILES {
         std::fs::write(bootstrap.join(name), "# 模板\n").expect("write template");
     }
     // 变更包模板源（knowledge-base-update/user-input/change-package/）。
@@ -434,13 +448,15 @@ impl KnowledgeBaseFixture {
 }
 
 /// POST /initializations（bootstrap）→ 202，响应含 operation_id 与 steps，
-/// 且可经 GET /initializations/{operation_id} 轮询。
+/// 且可经 GET /initializations/{operation_id} 轮询。两段式（REQ-KB-14）：
+/// 输入已准备且全部确认后，【知识库初始化】才起 bootstrap operation。
 #[tokio::test]
 async fn create_bootstrap_operation_returns_pollable_operation() {
     let fixture = KnowledgeBaseFixture::new().await;
     fixture.seed_aggregate_initialization();
-    fixture.seed_user_inputs();
+    fixture.seed_filled_user_inputs();
     let _home = HomeEnvGuard::acquire(fixture._home.path());
+    fixture.confirm_all_user_inputs().await;
 
     let (status, body) = request_json(
         &fixture.app,
@@ -473,28 +489,10 @@ async fn create_bootstrap_operation_returns_pollable_operation() {
     assert_eq!(status, StatusCode::OK, "{fetched}");
     assert_eq!(fetched["operation_id"], operation_id.as_str());
     // 有界等待 spawn 的 execute 收口（operation 进入终态）后再结束测试，
-    // 避免后台任务在测试结束后拖尾持有资源；10 秒内未收口即失败。
-    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let (_, snapshot) = request_json(
-                &fixture.app,
-                Method::GET,
-                &fixture.kb_uri(&format!("/initializations/{operation_id}")),
-                json!({}),
-            )
-            .await;
-            match snapshot["status"].as_str() {
-                Some("completed") | Some("failed") | Some("cancelled") => {
-                    return snapshot["status"].clone();
-                }
-                _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            }
-        }
-    })
-    .await
-    .expect("knowledge base operation must settle within 10s");
+    // 避免后台任务在测试结束后拖尾持有资源。
+    let settled = fixture.wait_operation_settled(&operation_id).await;
     assert!(
-        ["completed", "failed", "cancelled"].contains(&settled.as_str().unwrap_or_default()),
+        ["completed", "failed", "cancelled"].contains(&settled.as_str()),
         "unexpected terminal status: {settled}"
     );
 }
@@ -598,6 +596,8 @@ async fn create_operation_rejected_when_aggregate_initialization_missing() {
 async fn create_operation_provider_unverified_returns_chinese_failure_copy() {
     let fixture = KnowledgeBaseFixture::new().await;
     fixture.seed_aggregate_initialization();
+    // 两段式分叉会解析模板源根（owner HOME），先钉住夹具 HOME 隔离真机环境。
+    let _home = HomeEnvGuard::acquire(fixture._home.path());
     // 能力面重置回 bootstrap Unknown 行：L1 四家 CLI 全可用、无人核验。
     let capabilities = fixture
         .paths
@@ -803,6 +803,10 @@ async fn file_read_outside_root_returns_4xx() {
 }
 
 /// 本批新稳定码一律映射到 4xx（绝不落 500）。
+///
+/// 注：输入确认族两码（`knowledge_base_user_input_confirmation_stale` /
+/// `knowledge_base_user_input_not_confirmed`）的 HTTP 状态映射待 controller
+/// 在 `src/web/error.rs` 归口登记（当前未登记落 500），登记后加入本表。
 #[tokio::test]
 async fn new_stable_codes_map_to_non_500_status() {
     let codes = [
@@ -998,20 +1002,25 @@ async fn concurrent_status_and_create_do_not_deadlock() {
     );
     assert_eq!(status.0, StatusCode::OK, "{:?} {status:?}", status.0);
     assert_eq!(status.1["exists"], false);
-    // 门已过 ⇒ create 走完 provider 选择链后因输入缺失被预检③拒绝（4xx、
-    // 零 operation）。
-    assert!(
-        create.0.is_client_error(),
-        "expected 4xx, got {}: {:?}",
-        create.0,
-        create.1
-    );
+    // 门已过且输入未准备 ⇒ 两段式分叉起起草 operation（202、user_input）；
+    // create 仍走完整 provider 选择链（本用例守护的并发路径）。
     assert_eq!(
-        create.1["code"], "knowledge_base_inputs_incomplete",
-        "{:?}",
+        create.0,
+        StatusCode::ACCEPTED,
+        "expected forked user_input operation: {:?}",
         create.1
     );
+    assert_eq!(create.1["kind"], "user_input", "{:?}", create.1);
+    let operation_id = create.1["operation_id"]
+        .as_str()
+        .expect("operation_id")
+        .to_string();
+    // 有界等待 spawn 的 execute 收口，避免后台任务拖尾持有资源。
+    fixture.wait_operation_settled(&operation_id).await;
 }
+
+// 用户输入面与两段式分叉（本批新增；自主体拆出守 1200 行门禁）。
+include!("knowledge_base_http/user_input_http_tests.rs");
 
 // REQ-KB-13 统一前置门：门未满足逐端点拒绝 + 零写副作用；门满足后恢复。
 include!("knowledge_base_http/gate_tests.rs");

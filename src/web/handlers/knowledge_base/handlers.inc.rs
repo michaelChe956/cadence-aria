@@ -7,8 +7,10 @@
 // - POST   `/initializations/{operation_id}/cancel` operation 投影（无请求体）
 // - GET    `/status`                              状态投影
 // - GET    `/files` · GET/PUT `/file`             文件面
-// - GET/POST `/change-packages` · GET `/change-packages/lint`
+// - GET    `/change-packages` · GET `/change-packages/lint`
 // - POST   `/bootstrap-inputs`
+// - GET    `/user-input` · POST `/user-input/confirm`（用户输入确认面，
+//   实现见 user_input.inc.rs）
 
 // ───────────────────────── 稳定码 ─────────────────────────
 
@@ -348,9 +350,12 @@ fn knowledge_base_operation_dto(operation: &KnowledgeBaseOperation) -> Value {
 
 // ───────────────────────── operation 生命周期端点 ─────────────────────────
 
-/// POST `/initializations`：解析 LC → provider 选择（写分格，失败码原样透出、
-/// 不创建 operation）→ 前置检查（失败即返回，不创建 operation）→ trust 门 →
-/// 冻结输入 + 幂等 begin → run lease + spawn 执行。202 同步返回 operation 投影。
+/// POST `/initializations`：解析 LC → REQ-KB-13 统一前置门 → 两段式分叉
+///（仅 kind=bootstrap：输入未准备 ⇒ 改跑 user_input 起草；已准备未全部
+/// 确认 ⇒ 4xx 拒绝，零 operation）→ provider 选择（写分格，失败码原样
+/// 透出、不创建 operation）→ 前置检查（失败即返回，不创建 operation）→
+/// trust 门 → 冻结输入 + 幂等 begin → run lease + spawn 执行。202 同步
+/// 返回 operation 投影（分叉时 kind 为 user_input）。
 ///
 /// 注：预检②/命令构造都需要 provider，故 provider 选择先行——与「选择必须
 /// 在创建 operation 之前」的约束一致；选择失败码与 details 原样透出。
@@ -365,7 +370,7 @@ pub async fn create_knowledge_base_initialization(
             "idempotency_key must not be empty",
         ));
     }
-    let kind = match request.kind.as_str() {
+    let request_kind = match request.kind.as_str() {
         "bootstrap" => KnowledgeBaseOperationKind::Bootstrap,
         "update" => KnowledgeBaseOperationKind::Update,
         "user_input" => KnowledgeBaseOperationKind::UserInput,
@@ -377,7 +382,7 @@ pub async fn create_knowledge_base_initialization(
     };
     // 变更包路径（相对知识库根）双形态：给 preflight 的目录与给命令/冻结输入
     // 的相对聚合根路径必须指向**同一个包**（门禁与实际执行对得上）。
-    let (package_kb_rel, package_root_rel) = match kind {
+    let (package_kb_rel, package_root_rel) = match request_kind {
         KnowledgeBaseOperationKind::Bootstrap
         | KnowledgeBaseOperationKind::UserInput => (None, None),
         KnowledgeBaseOperationKind::Update => {
@@ -406,6 +411,21 @@ pub async fn create_knowledge_base_initialization(
     // ⓪ REQ-KB-13 统一前置门（与其余端点经 `knowledge_base_read_context`
     // 的判定同源同文案）：聚合初始化未完成 ⇒ 422，零写副作用。
     require_knowledge_base_aggregate_gate(&paths, &project_id, &lc_id)?;
+
+    // ⓪½ 两段式分叉（REQ-KB-14，D6：后端单一事实源）：【知识库初始化】
+    //（kind=bootstrap）按输入状态决定跑哪一段——未准备 ⇒ 起草（改跑
+    // user_input，起草完成停在待确认，不执行 bootstrap）；已准备未全部
+    // 确认 ⇒ 4xx 拒绝并列出未确认文件（零 operation）；全部确认 ⇒ 跑
+    // bootstrap。update 与显式 user_input 不走分叉。
+    let kind = match request_kind {
+        KnowledgeBaseOperationKind::Bootstrap => fork_knowledge_base_bootstrap_kind(
+            &paths,
+            &project_id,
+            &lc_id,
+            &canonical_root,
+        )?,
+        unchanged => unchanged,
+    };
 
     // ① provider 选择（写分格选择器，零写入）。
     let outcome = select_aggregate_provider_for_write(&paths, &state.provider_health, &project_id)

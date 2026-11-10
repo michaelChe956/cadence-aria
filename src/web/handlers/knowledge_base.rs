@@ -59,3 +59,4 @@ use crate::web::state::{InitializationRunKey, InitializationRunRegistry, WebAppS
 
 include!("knowledge_base/dependencies.inc.rs");
 include!("knowledge_base/handlers.inc.rs");
+include!("knowledge_base/user_input.inc.rs");

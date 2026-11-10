@@ -10,6 +10,7 @@ pub mod operation;
 pub mod preflight;
 pub mod store;
 pub mod templates;
+pub mod user_input;
 
 pub use operation::{
     KnowledgeBaseOperation, KnowledgeBaseOperationInput, KnowledgeBaseOperationKind,
