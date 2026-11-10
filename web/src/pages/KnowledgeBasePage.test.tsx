@@ -10,9 +10,14 @@ import {
   useParams,
 } from "@tanstack/react-router";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CockpitShell } from "../components/cockpit/CockpitShell";
 import { KnowledgeBasePage } from "./KnowledgeBasePage";
+
+// Monaco 编辑器挂载计数：用于验证「折叠文件树不会重挂载编辑器」
+// （key 重挂载会清空撤销栈、重置光标与选区、打断输入法）。
+const editorMounts = vi.hoisted(() => ({ count: 0 }));
 
 vi.mock("@monaco-editor/react", () => ({
   // ★`monaco-local-setup.ts` 在模块加载期调用 `loader.config` ⇒ mock 必须带 loader。
@@ -27,18 +32,23 @@ vi.mock("@monaco-editor/react", () => ({
     value?: string;
     onChange?: (value: string | undefined) => void;
     options?: { readOnly?: boolean };
-  }) => (
-    <div
-      data-testid="monaco-editor"
-      data-readonly={options?.readOnly ? "true" : "false"}
-    >
-      <textarea
-        data-testid="kb-editor"
-        value={value ?? ""}
-        onChange={(event) => onChange?.(event.target.value)}
-      />
-    </div>
-  ),
+  }) => {
+    useEffect(() => {
+      editorMounts.count += 1;
+    }, []);
+    return (
+      <div
+        data-testid="monaco-editor"
+        data-readonly={options?.readOnly ? "true" : "false"}
+      >
+        <textarea
+          data-testid="kb-editor"
+          value={value ?? ""}
+          onChange={(event) => onChange?.(event.target.value)}
+        />
+      </div>
+    );
+  },
 }));
 
 // CockpitShell（沉浸模式用例）依赖会话观察者投影：单测里给空投影，
@@ -137,8 +147,8 @@ function installFetch(
     lint?: () => Response;
     /** 覆盖单文件读取（用于构造乱序/延迟响应）。 */
     read?: (path: string) => Promise<Response>;
-    /** 覆盖知识库状态（用于构造前置门拒绝）。 */
-    status?: () => Response;
+    /** 覆盖知识库状态（用于构造前置门拒绝；按 URL 区分 LC 以覆盖换参重跑）。 */
+    status?: (url: string) => Response;
     /** 覆盖项目清单（顶栏项目名来源）。 */
     projects?: () => Response;
     /** 覆盖逻辑代码库清单（顶栏 LC 名来源）。 */
@@ -161,7 +171,7 @@ function installFetch(
     }
     if (url.includes("/knowledge-base/status")) {
       if (overrides.status) {
-        return overrides.status();
+        return overrides.status(url);
       }
       return jsonResponse({
         exists: true,
@@ -297,6 +307,7 @@ describe("KnowledgeBasePage", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    editorMounts.count = 0;
   });
 
   it("renders_file_tree_from_status", async () => {
@@ -675,6 +686,69 @@ describe("KnowledgeBasePage", () => {
     expect(screen.queryByTestId("kb-file-tree")).toBeNull();
     fireEvent.click(screen.getByTestId("kb-tree-toggle"));
     expect(await screen.findByTestId("kb-file-tree")).toBeInTheDocument();
+  });
+
+  it("collapsing_file_tree_does_not_remount_editor", async () => {
+    installFetch();
+    renderPage();
+
+    // Monaco 默认开启 automaticLayout ⇒ 折叠文件树无需重挂载编辑器
+    // （重挂载会清空撤销栈、重置光标与选区、打断输入法）。
+    await screen.findByTestId("monaco-editor");
+    await waitFor(() => {
+      expect(editorMounts.count).toBe(1);
+    });
+
+    fireEvent.click(screen.getByTestId("kb-tree-toggle"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("kb-file-tree")).toBeNull();
+    });
+    // 折叠后编辑器不得被卸载重挂（挂载次数保持 1）。
+    expect(editorMounts.count).toBe(1);
+
+    fireEvent.click(screen.getByTestId("kb-tree-toggle"));
+    await waitFor(() => {
+      expect(screen.getByTestId("kb-file-tree")).toBeInTheDocument();
+    });
+    expect(editorMounts.count).toBe(1);
+  });
+
+  it("preflight_badge_clears_when_new_logical_codebase_status_succeeds", async () => {
+    installFetch({
+      status: (url) =>
+        url.includes("/lc1/")
+          ? jsonResponse(
+              {
+                code: "knowledge_base_requires_aggregate_initialization",
+                message: "请先完成聚合初始化",
+              },
+              403,
+            )
+          : jsonResponse({
+              exists: true,
+              schema_version: "4.0",
+              initialization_status: "complete",
+              global_validation: "passed",
+              completed_stages: ["base-info"],
+              skipped_stages: [],
+              skills_available: true,
+            }),
+    });
+    const router = renderPage();
+
+    expect(await screen.findByTestId("kb-status")).toHaveTextContent(
+      "前置未满足",
+    );
+
+    // 同路由仅换 LC 参数：组件不卸载，副作用重跑；成功路径须清零徽标。
+    await act(async () => {
+      await router.navigate({ to: "/knowledge-base/p1/lc2" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kb-status")).toHaveTextContent("已初始化");
+    });
+    expect(screen.getByTestId("kb-status")).not.toHaveTextContent("前置未满足");
   });
 
   it("cockpit_shell_hides_global_widgets_on_knowledge_base_route", async () => {

@@ -156,6 +156,9 @@ export function KnowledgeBasePage({
       .then((next) => {
         if (!cancelled) {
           setStatus(next);
+          // 同路由仅换 LC 参数重跑副作用时，成功路径须清零「前置未满足」，
+          // 否则旧徽标会残留。
+          setPreflightUnmet(false);
         }
       })
       .catch((reason) => {
@@ -421,11 +424,10 @@ export function KnowledgeBasePage({
                 data-testid="kb-editor-host"
                 className="h-full min-h-0 overflow-hidden rounded-md border border-[var(--aria-line)] bg-white"
               >
-                {/* 折叠文件树会改变右栏宽度；Monaco 未开启 automaticLayout，
-                    宽度变化后不会自行重排——用 key 强制重挂载一次（草稿内容
-                    由受控 value 保留）。 */}
+                {/* 折叠文件树会改变右栏宽度；@monaco-editor/react 默认开启
+                    automaticLayout，Monaco 会自行重排，故此处不做 key 重挂载
+                    （避免清空撤销栈、重置光标与选区、打断输入法）。 */}
                 <MonacoEditor
-                  key={treeCollapsed ? "kb-editor-collapsed" : "kb-editor-expanded"}
                   value={draft}
                   language="markdown"
                   height="100%"
