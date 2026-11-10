@@ -26,7 +26,7 @@ use crate::product::logical_codebase::knowledge_base::change_package::{
     ChangePackageFieldStatus, ChangePackageViolation, MemberRepoPaths, lint_change_package,
 };
 use crate::product::logical_codebase::knowledge_base::command::{
-    bootstrap_command, update_command,
+    bootstrap_command, update_command, user_input_command,
 };
 use crate::product::logical_codebase::knowledge_base::coordinator::{
     Clock as KnowledgeBaseClock, KnowledgeBaseCoordinator, KnowledgeBaseError,
@@ -41,7 +41,7 @@ use crate::product::logical_codebase::knowledge_base::operation::{
     KnowledgeBaseOperationStatus, derive_operation_id,
 };
 use crate::product::logical_codebase::knowledge_base::preflight::{
-    KnowledgeBasePreflightFailure, preflight_bootstrap, preflight_update,
+    KnowledgeBasePreflightFailure, preflight_bootstrap, preflight_update, preflight_user_input,
 };
 use crate::product::logical_codebase::knowledge_base::store::KnowledgeBaseOperationStore;
 use crate::product::logical_codebase::knowledge_base::templates::{

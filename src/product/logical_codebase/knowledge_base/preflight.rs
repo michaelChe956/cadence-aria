@@ -152,6 +152,24 @@ pub fn preflight_update(
     Ok(())
 }
 
+/// user_input 起草前置检查（预检②⑦，只读、不产生 operation）。
+///
+/// 起草 turn 只跑 `/knowledge-base-user-input` skill：预检③（bootstrap 输入
+/// 完整性）与预检④⑤⑥（manifest / 变更包门禁）均不适用——起草的产物正是
+/// 输入文件本身；预检①（聚合初始化）由 HTTP 层统一前置门在进入本函数前
+/// 判定（REQ-KB-13），此处不重复。前置 = provider 的 skill 层可用 + 写分格
+/// 双 `Confirmed`（复用既有 [`preflight_write_capability`]）。
+pub fn preflight_user_input(
+    paths: &ProductAppPaths,
+    provider: &ProviderName,
+) -> Result<(), KnowledgeBasePreflightFailure> {
+    let missing = missing_knowledge_base_skills(provider);
+    if !missing.is_empty() {
+        return Err(KnowledgeBasePreflightFailure::SkillsUnavailable { missing });
+    }
+    preflight_write_capability(paths, provider)
+}
+
 /// 预检①②（bootstrap 与 update 共用，顺序固定：先聚合初始化，后 skills）。
 fn preflight_common(
     paths: &ProductAppPaths,

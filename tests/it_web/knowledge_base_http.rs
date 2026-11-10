@@ -32,7 +32,17 @@ use cadence_aria::product::logical_codebase::knowledge_base::operation::{
 };
 use cadence_aria::product::logical_codebase::knowledge_base::store::KnowledgeBaseOperationStore;
 use cadence_aria::product::logical_codebase::policy::{
-    AggregatePolicyArtifactStore, ProviderDialect, ProviderWireDialect, SessionPolicyAction,
+    AggregatePolicyArtifact, AggregatePolicyArtifactStore, ProviderDialect, ProviderWireDialect,
+    SessionPolicyAction,
+};
+use cadence_aria::product::logical_codebase::root_recipe_receipt::{
+    ROOT_RULE_ENTRY_FILE, RootRecipeCommandVerdict, RootRecipeFilesystemAuditor,
+    RootRecipeReceiptStore, root_rule_digest,
+};
+use cadence_aria::product::logical_codebase::{
+    AggregateInitializationOperation, AggregateInitializationOperationInput,
+    AggregateInitializationOperationStore, AggregateInitializationStepKind,
+    root_recipe_command_index,
 };
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
@@ -293,52 +303,6 @@ fn seed_skills(home: &Path) {
     }
 }
 
-/// 预检③的六领域全部「不适用」⇒ 只需要 base-info.md 在场。
-const BASE_INFO_ALL_NOT_APPLICABLE: &str = "\
-# 基本信息
-## 工程信息
-- 状态：不适用（测试）
-## 数据模型
-- 状态：不适用（测试）
-## 配置
-- 状态：不适用（测试）
-## 中间件
-- 状态：不适用（测试）
-## 接口
-- 状态：不适用（测试）
-## 页面
-- 状态：不适用（测试）
-";
-
-/// 与 `manifest.rs` 测试同款的合法 complete manifest（api/pages 不适用）。
-const COMPLETE_MANIFEST: &str = "\
-schema_version: \"4.0\"
-generated_at: \"2026-11-09T00:00:00Z\"
-coverage:
-  initialization:
-    status: complete
-    global_validation: passed
-    completed_stages:
-      - base-info
-      - overview
-      - global-validation
-    skipped_stages:
-      - stage: api
-        reason: 接口领域不适用
-      - stage: pages
-        reason: 页面领域不适用
-    completed_at: \"2026-11-09T00:05:00Z\"
-scope:
-  configurations:
-    status: 全量
-  api:
-    status: 不适用
-  pages:
-    status: 不适用
-update:
-  last_change_package: {}
-  processed_packages: []
-";
 struct KnowledgeBaseFixture {
     _root: TempDir,
     _aggregate_root: TempDir,
@@ -468,86 +432,6 @@ impl KnowledgeBaseFixture {
         )
     }
 
-    /// 预检①：根规则入口文件 + LC scope 下的 bootstrap 政策 artifact。
-    fn seed_aggregate_initialization(&self) {
-        std::fs::write(
-            self.aggregate_root.join("AGENTS.md"),
-            "# aggregate root rules\n",
-        )
-        .expect("write AGENTS.md");
-        let store = LogicalCodebaseStore::for_lc(self.paths.clone(), self.lc_id.clone());
-        let manifest = store
-            .load_lc_manifest(PROJECT_ID, &self.lc_id)
-            .expect("load manifest")
-            .expect("manifest present");
-        AggregatePolicyArtifactStore::for_lc(self.paths.clone(), self.lc_id.clone())
-            .ensure_bootstrap(&manifest)
-            .expect("ensure bootstrap policy");
-    }
-
-    /// 预检③：六领域全部不适用 ⇒ 只放 base-info.md。
-    fn seed_user_inputs(&self) {
-        let user_input = self.kb_root().join("user-input");
-        std::fs::create_dir_all(&user_input).expect("create user-input");
-        std::fs::write(
-            user_input.join("base-info.md"),
-            BASE_INFO_ALL_NOT_APPLICABLE,
-        )
-        .expect("write base-info");
-    }
-
-    /// 预检④⑤：合法 complete 的 manifest.yaml。
-    fn seed_complete_manifest(&self) {
-        std::fs::create_dir_all(self.kb_root()).expect("create kb root");
-        std::fs::write(self.kb_root().join("manifest.yaml"), COMPLETE_MANIFEST)
-            .expect("write manifest");
-    }
-
-    /// 空变更包（缺全部五份文档 ⇒ missing_document 违规）。
-    fn seed_empty_change_package(&self, name: &str) {
-        let dir = self.kb_root().join("user-input").join("updates").join(name);
-        std::fs::create_dir_all(&dir).expect("create change package dir");
-    }
-
-    /// 直接经 durable store 造一条 Running operation（文件面运行期禁写的种子）。
-    fn seed_running_operation(&self) {
-        let now = "2026-11-09T00:00:00Z".to_string();
-        // store 校验 operation_id 必须由 (project, lc, idempotency_key) 派生。
-        let operation_id =
-            cadence_aria::product::logical_codebase::knowledge_base::operation::derive_operation_id(
-                PROJECT_ID,
-                &self.lc_id,
-                "seed",
-            );
-        let operation = KnowledgeBaseOperation {
-            operation_id,
-            project_id: PROJECT_ID.to_string(),
-            logical_codebase_id: self.lc_id.clone(),
-            kind: KnowledgeBaseOperationKind::Bootstrap,
-            input: KnowledgeBaseOperationInput {
-                idempotency_key: "seed".to_string(),
-                provider: "claude_code".to_string(),
-                package_path: None,
-                package_id: None,
-            },
-            status: KnowledgeBaseOperationStatus::Running,
-            steps: vec![KnowledgeBaseStepRecord {
-                step_id: KnowledgeBaseStepKind::Bootstrap,
-                status: KnowledgeBaseStepStatus::Running,
-                started_at: Some(now.clone()),
-                completed_at: None,
-                output_summary: None,
-            }],
-            provider_selection: None,
-            error: None,
-            created_at: now.clone(),
-            started_at: Some(now),
-            completed_at: None,
-        };
-        KnowledgeBaseOperationStore::for_lc(self.paths.clone(), self.lc_id.clone())
-            .create(operation)
-            .expect("seed running operation");
-    }
 }
 
 /// POST /initializations（bootstrap）→ 202，响应含 operation_id 与 steps，
@@ -690,14 +574,20 @@ async fn create_operation_rejected_when_aggregate_initialization_missing() {
         "{body}"
     );
 
-    let (status, _) = request_json(
+    // 门（REQ-KB-13）同样拦截 active 查询：统一 422 前置失败码（零 operation
+    // 语义由上面的 create 断言守护）。
+    let (status, body) = request_json(
         &fixture.app,
         Method::GET,
         &fixture.kb_uri("/initializations/active"),
         json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body["code"], "knowledge_base_requires_aggregate_initialization",
+        "{body}"
+    );
 }
 
 /// provider 选择失败面必须走仓内失败文案单一来源（failure_copy）：
@@ -708,6 +598,7 @@ async fn create_operation_rejected_when_aggregate_initialization_missing() {
 #[tokio::test]
 async fn create_operation_provider_unverified_returns_chinese_failure_copy() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     // 能力面重置回 bootstrap Unknown 行：L1 四家 CLI 全可用、无人核验。
     let capabilities = fixture
         .paths
@@ -778,6 +669,10 @@ async fn create_operation_provider_unverified_returns_chinese_failure_copy() {
 #[tokio::test]
 async fn status_endpoint_reports_missing_knowledge_base() {
     let fixture = KnowledgeBaseFixture::new().await;
+    // REQ-KB-13 门要求聚合初始化已完成；种三源事实后本用例聚焦
+    //「manifest 未初始化 ⇒ exists == false」的投影语义。
+    fixture.seed_aggregate_initialization();
+    let _home = HomeEnvGuard::acquire(fixture._home.path());
 
     let (status, body) = request_json(
         &fixture.app,
@@ -791,13 +686,15 @@ async fn status_endpoint_reports_missing_knowledge_base() {
     assert_eq!(body["schema_version"], Value::Null);
     assert_eq!(body["completed_stages"], json!([]));
     assert_eq!(body["skipped_stages"], json!([]));
-    assert_eq!(body["skills_available"], false);
+    // 门已过（①✓②✓），仅输入缺失（③）——skills 在场是可判定的真事实。
+    assert_eq!(body["skills_available"], true);
 }
 
 /// PUT 一个 .md → 200；GET 同路径 → 内容一致、摘要一致。
 #[tokio::test]
 async fn file_roundtrip_write_then_read() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     std::fs::create_dir_all(fixture.kb_root().join("user-input")).expect("kb root");
 
     let (status, written) = request_json(
@@ -830,6 +727,7 @@ async fn file_roundtrip_write_then_read() {
 #[tokio::test]
 async fn file_write_conflict_returns_409() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     std::fs::create_dir_all(fixture.kb_root().join("user-input")).expect("kb root");
     std::fs::write(
         fixture.kb_root().join("user-input").join("base-info.md"),
@@ -856,6 +754,7 @@ async fn file_write_conflict_returns_409() {
 #[tokio::test]
 async fn file_write_during_running_operation_returns_409() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     std::fs::create_dir_all(fixture.kb_root().join("user-input")).expect("kb root");
     fixture.seed_running_operation();
 
@@ -874,6 +773,7 @@ async fn file_write_during_running_operation_returns_409() {
 #[tokio::test]
 async fn file_read_outside_root_returns_4xx() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     std::fs::create_dir_all(fixture.kb_root()).expect("kb root");
 
     let (status, body) = request_json(
@@ -951,6 +851,7 @@ async fn new_stable_codes_map_to_non_500_status() {
 #[tokio::test]
 async fn change_package_template_lint_and_list_roundtrip() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     let _home = HomeEnvGuard::acquire(fixture._home.path());
 
     let (status, created) = request_json(
@@ -999,6 +900,7 @@ async fn change_package_template_lint_and_list_roundtrip() {
 #[tokio::test]
 async fn bootstrap_inputs_create_templates() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     let _home = HomeEnvGuard::acquire(fixture._home.path());
 
     let (status, body) = request_json(
@@ -1020,6 +922,7 @@ async fn bootstrap_inputs_create_templates() {
 #[tokio::test]
 async fn get_unknown_operation_returns_404() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
 
     let (status, body) = request_json(
         &fixture.app,
@@ -1039,6 +942,7 @@ async fn get_unknown_operation_returns_404() {
 #[tokio::test]
 async fn cancel_transitions_running_operation_to_cancelled() {
     let fixture = KnowledgeBaseFixture::new().await;
+    fixture.seed_aggregate_initialization();
     fixture.seed_running_operation();
     let operation_id =
         cadence_aria::product::logical_codebase::knowledge_base::operation::derive_operation_id(
@@ -1075,6 +979,11 @@ async fn cancel_transitions_running_operation_to_cancelled() {
 #[tokio::test]
 async fn concurrent_status_and_create_do_not_deadlock() {
     let fixture = KnowledgeBaseFixture::new().await;
+    // 门（REQ-KB-13）要求先种聚合初始化；再种 user-input 前置已过 ⇒ create
+    // 会真实走到 provider 选择链（本用例守护的并发路径），随后因输入缺失
+    // 在预检③被拒（4xx、零 operation）。
+    fixture.seed_aggregate_initialization();
+    let _home = HomeEnvGuard::acquire(fixture._home.path());
     let app = fixture.app.clone();
     let status_uri = fixture.kb_uri("/status");
     let create_uri = fixture.kb_uri("/initializations");
@@ -1090,7 +999,8 @@ async fn concurrent_status_and_create_do_not_deadlock() {
     );
     assert_eq!(status.0, StatusCode::OK, "{:?} {status:?}", status.0);
     assert_eq!(status.1["exists"], false);
-    // 未种聚合初始化 ⇒ 预检失败稳定码（4xx），且不创建 operation。
+    // 门已过 ⇒ create 走完 provider 选择链后因输入缺失被预检③拒绝（4xx、
+    // 零 operation）。
     assert!(
         create.0.is_client_error(),
         "expected 4xx, got {}: {:?}",
@@ -1098,8 +1008,14 @@ async fn concurrent_status_and_create_do_not_deadlock() {
         create.1
     );
     assert_eq!(
-        create.1["code"], "knowledge_base_requires_aggregate_initialization",
+        create.1["code"], "knowledge_base_inputs_incomplete",
         "{:?}",
         create.1
     );
 }
+
+// REQ-KB-13 统一前置门：门未满足逐端点拒绝 + 零写副作用；门满足后恢复。
+include!("knowledge_base_http/gate_tests.rs");
+
+// 夹具种子助手（三源聚合初始化种子等；自主体拆出守 1200 行门禁）。
+include!("knowledge_base_http/fixture_seeds.rs");

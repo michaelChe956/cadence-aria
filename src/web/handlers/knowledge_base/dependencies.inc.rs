@@ -136,8 +136,37 @@ fn knowledge_base_read_context(
             json!({}),
         )
     })?;
+    require_knowledge_base_aggregate_gate(&paths, project_id, lc_id)?;
     let store = KnowledgeBaseOperationStore::for_lc(paths.clone(), lc_id.to_string());
     Ok((paths, canonical_root, store))
+}
+
+/// REQ-KB-13 知识库全域统一前置门：冷启动投影的「规则/政策」步非
+/// `Completed` ⇒ 拒绝。判定**复用** `preflight::aggregate_initialization_completed`
+/// （唯一口径；投影读不出 / IO 故障 / LC 归属不明一律按未完成 fail-closed），
+/// 不在 handler 层另写判据。门集中在两处调用：本模块的
+/// [`knowledge_base_read_context`]（覆盖 status / files / file 读写 /
+/// change-packages×3 / bootstrap-inputs / initializations 查询与取消共 11 个
+/// 端点）与创建端点 canonicalize 之后（见 handlers 片段）；未满足时在进入
+/// 任何业务逻辑前返回 422，保证零写副作用（尤其 file 写入不落盘）。
+fn require_knowledge_base_aggregate_gate(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    lc_id: &str,
+) -> ApiResult<()> {
+    if crate::product::logical_codebase::knowledge_base::preflight::aggregate_initialization_completed(
+        paths, project_id, lc_id,
+    ) {
+        return Ok(());
+    }
+    Err(ApiError::runtime(
+        CODE_REQUIRES_AGGREGATE_INITIALIZATION,
+        "知识库尚未开放：该逻辑代码库的聚合初始化（冷启动「规则/政策」步）还未完成，\
+         请先在逻辑代码库的冷启动流程完成聚合初始化再访问知识库；若此前已完成、\
+         因根规则或政策引用变动（如规则摘要漂移）被重新判为未完成，请回到该流程\
+         重新校验后再试。这是前置条件未满足，不是知识库自身故障。",
+        json!({ "bootstrap_step": "rules_policy" }),
+    ))
 }
 
 /// 校验路径段形式的 project/lc 标识（与聚合初始化端点同一拒绝面）。

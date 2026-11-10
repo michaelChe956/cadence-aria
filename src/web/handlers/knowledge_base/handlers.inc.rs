@@ -288,6 +288,7 @@ fn knowledge_base_selection_dto(selection: &AggregateProviderSelection) -> Value
 /// 可空字段显式 null，不缺键）。
 fn knowledge_base_operation_dto(operation: &KnowledgeBaseOperation) -> Value {
     let kind = match operation.kind {
+        KnowledgeBaseOperationKind::UserInput => "user_input",
         KnowledgeBaseOperationKind::Bootstrap => "bootstrap",
         KnowledgeBaseOperationKind::Update => "update",
     };
@@ -302,6 +303,7 @@ fn knowledge_base_operation_dto(operation: &KnowledgeBaseOperation) -> Value {
         .iter()
         .map(|step| {
             let step_id = match step.step_id {
+                crate::product::logical_codebase::knowledge_base::operation::KnowledgeBaseStepKind::PrepareUserInput => "prepare_user_input",
                 crate::product::logical_codebase::knowledge_base::operation::KnowledgeBaseStepKind::Bootstrap => "bootstrap",
                 crate::product::logical_codebase::knowledge_base::operation::KnowledgeBaseStepKind::ApplyUpdate => "apply_update",
             };
@@ -366,16 +368,18 @@ pub async fn create_knowledge_base_initialization(
     let kind = match request.kind.as_str() {
         "bootstrap" => KnowledgeBaseOperationKind::Bootstrap,
         "update" => KnowledgeBaseOperationKind::Update,
+        "user_input" => KnowledgeBaseOperationKind::UserInput,
         other => {
             return Err(knowledge_base_invalid_request(format!(
-                "kind must be \"bootstrap\" or \"update\", got {other:?}"
+                "kind must be \"bootstrap\", \"update\" or \"user_input\", got {other:?}"
             )));
         }
     };
     // 变更包路径（相对知识库根）双形态：给 preflight 的目录与给命令/冻结输入
     // 的相对聚合根路径必须指向**同一个包**（门禁与实际执行对得上）。
     let (package_kb_rel, package_root_rel) = match kind {
-        KnowledgeBaseOperationKind::Bootstrap => (None, None),
+        KnowledgeBaseOperationKind::Bootstrap
+        | KnowledgeBaseOperationKind::UserInput => (None, None),
         KnowledgeBaseOperationKind::Update => {
             let package_path = request.package_path.clone().ok_or_else(|| {
                 knowledge_base_invalid_request("package_path is required for update")
@@ -399,6 +403,10 @@ pub async fn create_knowledge_base_initialization(
         )
     })?;
 
+    // ⓪ REQ-KB-13 统一前置门（与其余端点经 `knowledge_base_read_context`
+    // 的判定同源同文案）：聚合初始化未完成 ⇒ 422，零写副作用。
+    require_knowledge_base_aggregate_gate(&paths, &project_id, &lc_id)?;
+
     // ① provider 选择（写分格选择器，零写入）。
     let outcome = select_aggregate_provider_for_write(&paths, &state.provider_health, &project_id)
         .await
@@ -419,6 +427,7 @@ pub async fn create_knowledge_base_initialization(
         KnowledgeBaseOperationKind::Update => {
             update_command(&provider, package_root_rel.as_deref().unwrap_or_default()).is_some()
         }
+        KnowledgeBaseOperationKind::UserInput => user_input_command(&provider).is_some(),
     };
     if !command_constructible {
         return Err(ApiError::runtime(
@@ -443,6 +452,7 @@ pub async fn create_knowledge_base_initialization(
             &kb_root(&canonical_root).join(package_kb_rel.as_deref().unwrap_or_default()),
             &members,
         ),
+        KnowledgeBaseOperationKind::UserInput => preflight_user_input(&paths, &provider),
     };
     preflight_result.map_err(knowledge_base_preflight_api_error)?;
     // 前置检查全部通过后再组装执行依赖（gateway 需要 LC 政策 artifact，而
