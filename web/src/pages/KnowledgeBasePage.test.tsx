@@ -1069,4 +1069,63 @@ describe("KnowledgeBasePage", () => {
       "false",
     );
   });
+
+  // 前置门由关到开（同一 LC，状态复检成功后放行）时，输入确认区必须自动
+  // 出现：门未满足期间 GET /user-input 被前置门拒绝，确认区一直隐藏，
+  // 若门开时不补拉投影，用户必须手动刷新页面才能看到确认区。
+  it("preflight_gate_opening_refreshes_user_input_panel", async () => {
+    // 只伪造 setInterval：门态复检间隔（5s）可控，其余定时器保持真实，
+    // 免得影响 testing-library 的等待机制。
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      let gateOpen = false;
+      installFetch({
+        status: () =>
+          gateOpen
+            ? jsonResponse({
+                exists: true,
+                schema_version: "4.0",
+                initialization_status: "complete",
+                global_validation: "passed",
+                completed_stages: ["base-info"],
+                skipped_stages: [],
+                skills_available: true,
+              })
+            : jsonResponse(
+                {
+                  code: "knowledge_base_requires_aggregate_initialization",
+                  message: "聚合初始化未完成，知识库暂不可用",
+                },
+                422,
+              ),
+        // 门未满足时输入投影同样被前置门拒绝（⇒ 确认区隐藏）。
+        userInput: () =>
+          gateOpen
+            ? jsonResponse(userInputSummary([{ path: "user-input/goal.md" }]))
+            : jsonResponse(
+                {
+                  code: "knowledge_base_requires_aggregate_initialization",
+                  message: "聚合初始化未完成，知识库暂不可用",
+                },
+                422,
+              ),
+      });
+      renderPage();
+
+      expect(await screen.findByTestId("kb-preflight-notice")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.queryByTestId("kb-user-input-panel")).toBeNull();
+      });
+
+      // 门由关到开：复检成功后确认区必须自动出现（不必手动刷新页面）。
+      gateOpen = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+
+      expect(await screen.findByTestId("kb-user-input-panel")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

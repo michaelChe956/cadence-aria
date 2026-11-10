@@ -9,10 +9,12 @@ use crate::product::logical_codebase::knowledge_base::user_input::{
 
 // ───────────────────────── 稳定码 ─────────────────────────
 //
-// 注：两码的 HTTP 状态映射尚未在 `src/web/error.rs` 登记（该文件归
-// controller 归口管理，本任务不改）；未登记码经 `IntoResponse` 的兜底分支
-// 落 500。message 已内联中文可执行文案（不走 failure_copy 表，避免与并发
-// 改动面冲突）；登记后即为 4xx 前置失败。
+// 两码的 HTTP 状态映射已在 `src/web/error.rs` 归口登记：
+// `knowledge_base_user_input_not_confirmed` ⇒ 422（前置不满足、零副作用），
+// `knowledge_base_user_input_confirmation_stale` ⇒ 409（客户端拿过期摘要来
+// 确认）。两码的标题/说明/下一步文案也已登记进 `failure_copy_table`。
+// 本片段内联的中文可执行文案是 HTTP 响应 message 的直接来源（与 failure_copy
+// 双文案并存，待后续统一，本轮不动）。
 
 const CODE_USER_INPUT_NOT_CONFIRMED: &str = "knowledge_base_user_input_not_confirmed";
 const CODE_USER_INPUT_CONFIRMATION_STALE: &str = "knowledge_base_user_input_confirmation_stale";
@@ -206,7 +208,9 @@ fn knowledge_base_user_input_confirm_items(
 ///   （details 列未确认文件），零 operation；
 /// - 全部确认 ⇒ 维持 bootstrap。
 ///
-/// update 与显式 user_input（详情页「重新生成草稿」入口）不走本分叉。
+/// update 与显式 user_input 不走本分叉：后端已具备 `kind=user_input` 的起草
+/// 能力（起草完成停在待确认），但详情页尚未接入「重新生成草稿」入口，UI 侧
+/// 当前只能由 kind=bootstrap 的分叉间接触发起草。
 fn fork_knowledge_base_bootstrap_kind(
     paths: &ProductAppPaths,
     project_id: &str,

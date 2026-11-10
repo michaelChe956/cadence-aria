@@ -34,9 +34,9 @@ async fn create_bootstrap_operation_forks_to_user_input_draft_when_inputs_not_pr
 }
 
 /// REQ-KB-14 场景三：输入已准备但未全部确认 ⇒ 拒绝并列出未确认文件，
-/// 不产生任何 operation。注：`knowledge_base_user_input_not_confirmed` 的
-/// HTTP 状态映射待 controller 在 src/web/error.rs 归口登记（当前落 500），
-/// 此处钉住稳定码、中文文案与零 operation 语义。
+/// 不产生任何 operation。`knowledge_base_user_input_not_confirmed` 的 HTTP
+/// 状态映射已在 `src/web/error.rs` 登记为 422（前置不满足），此处钉住具体
+/// 状态码、稳定码、中文文案与零 operation 语义。
 #[tokio::test]
 async fn create_bootstrap_operation_rejected_when_user_input_not_confirmed() {
     let fixture = KnowledgeBaseFixture::new().await;
@@ -51,10 +51,7 @@ async fn create_bootstrap_operation_rejected_when_user_input_not_confirmed() {
         json!({"kind":"bootstrap","idempotency_key":"kb-unconfirmed-1"}),
     )
     .await;
-    assert!(
-        !status.is_success(),
-        "expected failure, got {status}: {body}"
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(
         body["code"], "knowledge_base_user_input_not_confirmed",
         "{body}"
@@ -212,12 +209,9 @@ async fn user_input_confirm_rejects_stale_digest_without_recording() {
         json!({"path":"user-input/base-info.md","digest":"deadbeef"}),
     )
     .await;
-    // 注：stale 码的 HTTP 状态映射待 controller 在 src/web/error.rs 归口登记
-    //（当前落 500），此处钉住稳定码与中文可执行文案。
-    assert!(
-        !status.is_success(),
-        "expected failure, got {status}: {body}"
-    );
+    // stale 码的 HTTP 状态映射已在 `src/web/error.rs` 登记为 409（客户端拿
+    // 过期内容来确认），此处钉死状态码与中文可执行文案。
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(
         body["code"], "knowledge_base_user_input_confirmation_stale",
         "{body}"

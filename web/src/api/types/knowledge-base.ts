@@ -89,7 +89,7 @@ export type KnowledgeBaseOperationSnapshotDto = {
   operation_id: string;
   project_id: string;
   logical_codebase_id: string;
-  kind: "bootstrap" | "update";
+  kind: "bootstrap" | "update" | "user_input";
   input: KnowledgeBaseOperationInputDto;
   status: "running" | "completed" | "failed" | "cancelled";
   steps: KnowledgeBaseOperationStepDto[];

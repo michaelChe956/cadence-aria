@@ -375,6 +375,16 @@ export function KnowledgeBasePage({
     void refreshUserInput();
   }, [refreshUserInput]);
 
+  // 前置门由关到开时（门态复检成功 ⇒ reloadToken 递增）补拉输入投影：门
+  // 未满足期间 GET /user-input 被前置门拒绝，确认区一直隐藏到用户手动刷新
+  // 页面。reloadToken 只在门由关到开时递增（初始值 0 ⇒ 跳过首次挂载）。
+  useEffect(() => {
+    if (reloadToken === 0) {
+      return;
+    }
+    void refreshUserInput();
+  }, [reloadToken, refreshUserInput]);
+
   const save = useCallback(async () => {
     if (!selectedPath || !selectedEditable) {
       // 未选中文件或机器管理文件（只读）：不发写请求（按钮已禁用，这里兜底）。

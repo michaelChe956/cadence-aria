@@ -804,9 +804,10 @@ async fn file_read_outside_root_returns_4xx() {
 
 /// 本批新稳定码一律映射到 4xx（绝不落 500）。
 ///
-/// 注：输入确认族两码（`knowledge_base_user_input_confirmation_stale` /
-/// `knowledge_base_user_input_not_confirmed`）的 HTTP 状态映射待 controller
-/// 在 `src/web/error.rs` 归口登记（当前未登记落 500），登记后加入本表。
+/// 注：输入确认族两码（`knowledge_base_user_input_not_confirmed` /
+/// `knowledge_base_user_input_confirmation_stale`）的 HTTP 状态映射已在
+/// `src/web/error.rs` 归口登记，本表同时钉死各自的具体状态码（422 / 409）——
+/// 映射被删即回退 500，此处断言会红。
 #[tokio::test]
 async fn new_stable_codes_map_to_non_500_status() {
     let codes = [
@@ -839,6 +840,9 @@ async fn new_stable_codes_map_to_non_500_status() {
         "knowledge_base_file_too_large",
         // 请求形状拒绝（kind 未知 / update 缺 package_path）。
         "invalid_knowledge_base_request",
+        // 输入确认族两码（状态映射已在 `src/web/error.rs` 登记，详见下方钉死断言）。
+        "knowledge_base_user_input_not_confirmed",
+        "knowledge_base_user_input_confirmation_stale",
     ];
     for code in codes {
         let response: Response = ApiError::runtime(code, "test", json!({})).into_response();
@@ -846,6 +850,27 @@ async fn new_stable_codes_map_to_non_500_status() {
         assert!(
             status.is_client_error(),
             "{code} must map to 4xx, got {status}"
+        );
+    }
+
+    // 输入确认族两码钉死各自的具体状态码：输入已准备但未全部确认是前置不满足
+    // （422，零副作用）；确认摘要过期是客户端拿旧内容来确认（409）。
+    for (code, expected) in [
+        (
+            "knowledge_base_user_input_not_confirmed",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "knowledge_base_user_input_confirmation_stale",
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        let response: Response = ApiError::runtime(code, "test", json!({})).into_response();
+        assert_eq!(
+            response.status(),
+            expected,
+            "{code} must map to {expected}, got {}",
+            response.status()
         );
     }
 }
