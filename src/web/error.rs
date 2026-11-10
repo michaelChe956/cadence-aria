@@ -429,6 +429,13 @@ impl IntoResponse for ApiError {
             "knowledge_base_file_conflict"
             | "knowledge_base_operation_running"
             | "other_knowledge_base_running" => StatusCode::CONFLICT,
+            // 收尾 A（REQ-KB-14/15）：输入确认族两个新稳定码——输入已准备
+            // 但未全部确认是前置不满足（与 requires_aggregate_initialization
+            // 同类 422，零副作用）；确认摘要过期是客户端拿过期内容来确认
+            //（与 knowledge_base_file_conflict 同类 409）。不登记会落默认
+            // 500，把可操作拒绝误报成服务故障。
+            "knowledge_base_user_input_not_confirmed" => StatusCode::UNPROCESSABLE_ENTITY,
+            "knowledge_base_user_input_confirmation_stale" => StatusCode::CONFLICT,
             "knowledge_base_file_not_editable" => StatusCode::UNPROCESSABLE_ENTITY,
             "knowledge_base_file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
             "knowledge_base_provider_capability_denied" => StatusCode::FORBIDDEN,

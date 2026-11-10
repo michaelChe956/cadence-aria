@@ -707,9 +707,9 @@ const TABLE: &[Entry] = &[
     //     missing / violations / paths 字段）──
     (
         "knowledge_base_requires_aggregate_initialization",
-        "聚合初始化还没完成，先完成它才能建知识库",
-        "知识库建立在聚合初始化的成果之上；当前逻辑代码库的根规则入口或已发布政策 artifact 缺失，证明不了「聚合初始化已完成」。",
-        "回到逻辑代码库管理先完成聚合初始化，成功后再发起知识库建立。",
+        "聚合初始化未完成，知识库暂不可用",
+        "该逻辑代码库的聚合初始化（冷启动投影的「规则/政策」步）还没有完成；在它完成之前，知识库的一切操作（建立、更新、文件与输入读写）都不可用。",
+        "先到逻辑代码库管理里完成聚合初始化，再回来使用知识库；若此前已完成、因规则摘要漂移被重新判为未完成，先在该流程执行「重新生成政策」（Republish）收敛后再试。",
         FailureTriage::Environment,
     ),
     (
@@ -892,6 +892,22 @@ const TABLE: &[Entry] = &[
         "知识库请求参数不合法",
         "请求体缺了必填字段或取值非法（kind 只能是 bootstrap/update；update 必须带 package_path；idempotency_key 不能为空）。",
         "按端点契约修正请求体后重试。",
+        FailureTriage::Environment,
+    ),
+    // ── LC 知识库输入确认面（收尾 A，REQ-KB-14/15：两段式分叉与确认端点
+    //     的两个新稳定码；明细见 details 的 unconfirmed / path 字段）──
+    (
+        "knowledge_base_user_input_not_confirmed",
+        "初始化输入还有未确认的文件",
+        "user-input/ 下的初始化输入已准备就绪，但仍有文件未确认（哪些未确认见下方明细）；全部确认之前，知识库建立不会开始。",
+        "到知识库输入确认区逐份核对并确认全部输入文件（内容有改动就先改再确认），然后重新发起知识库初始化。",
+        FailureTriage::Environment,
+    ),
+    (
+        "knowledge_base_user_input_confirmation_stale",
+        "输入内容已变化，这次确认已过期",
+        "确认请求携带的摘要与服务端当前文件内容不一致——文件在确认前被改动过，本次确认被整批原子拒绝，没有落下任何确认记录。",
+        "刷新读取该文件的最新内容与摘要后重新确认。",
         FailureTriage::Environment,
     ),
     // ── LC 知识库执行期失败码（operation 落盘记录的顶层 reason_code；

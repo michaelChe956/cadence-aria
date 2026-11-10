@@ -80,11 +80,19 @@ fn change_package_violation_dto(violation: &ChangePackageViolation) -> Value {
 /// 逐条 violation 都放进 `details` 供前端「最近一次预检失败」卡片渲染）。
 fn knowledge_base_preflight_api_error(failure: KnowledgeBasePreflightFailure) -> ApiError {
     match failure {
-        KnowledgeBasePreflightFailure::RequiresAggregateInitialization => ApiError::runtime(
-            CODE_REQUIRES_AGGREGATE_INITIALIZATION,
-            "aggregate initialization has not completed for this logical codebase",
-            json!({}),
-        ),
+        KnowledgeBasePreflightFailure::RequiresAggregateInitialization => {
+            // TOCTOU 兜底：统一前置门（dependencies 片段的
+            // `require_knowledge_base_aggregate_gate`）在进入业务逻辑前已
+            // 拒绝，此臂只覆盖门通过后、前置检查执行前的竞态窗口；message
+            // 同样走失败文案单一来源 failure_copy 的中文成品标题，不留
+            // 英文残臂。
+            use crate::product::logical_codebase::failure_copy::{describe, FailureInput};
+            ApiError::runtime(
+                CODE_REQUIRES_AGGREGATE_INITIALIZATION,
+                describe(FailureInput::new(CODE_REQUIRES_AGGREGATE_INITIALIZATION)).title_zh,
+                json!({}),
+            )
+        }
         KnowledgeBasePreflightFailure::SkillsUnavailable { missing } => ApiError::runtime(
             CODE_SKILLS_UNAVAILABLE,
             "the selected provider's skill layer is missing knowledge-base skills",
@@ -935,5 +943,17 @@ mod preflight_failure_copy_tests {
         assert_eq!(error.message, "provider 拒绝了知识库写入分格");
         // 被拒 provider 仍在 details 明细里供前端点名。
         assert_eq!(error.details["provider"], json!("kimi"));
+    }
+
+    /// 收尾 A：RequiresAggregateInitialization 的英文残臂（现仅 TOCTOU 竞态
+    /// 窗口可达）同样归口 failure_copy——message 必须是码表登记的中文成品
+    /// 标题，不得手写英文（与 CapabilityDenied 同款做法）。
+    #[test]
+    fn requires_aggregate_initialization_message_uses_chinese_failure_copy() {
+        let error = knowledge_base_preflight_api_error(
+            KnowledgeBasePreflightFailure::RequiresAggregateInitialization,
+        );
+        assert_eq!(error.code, CODE_REQUIRES_AGGREGATE_INITIALIZATION);
+        assert_eq!(error.message, "聚合初始化未完成，知识库暂不可用");
     }
 }

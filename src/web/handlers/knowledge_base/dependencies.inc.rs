@@ -159,12 +159,13 @@ fn require_knowledge_base_aggregate_gate(
     ) {
         return Ok(());
     }
+    // message 走失败文案单一来源 failure_copy 的中文成品标题（码表已登记
+    // 该码三段），handler 不手写文案；`details.bootstrap_step` 保留供前端
+    // 定位冷启动的具体步。
+    use crate::product::logical_codebase::failure_copy::{describe, FailureInput};
     Err(ApiError::runtime(
         CODE_REQUIRES_AGGREGATE_INITIALIZATION,
-        "知识库尚未开放：该逻辑代码库的聚合初始化（冷启动「规则/政策」步）还未完成，\
-         请先在逻辑代码库的冷启动流程完成聚合初始化再访问知识库；若此前已完成、\
-         因根规则或政策引用变动（如规则摘要漂移）被重新判为未完成，请回到该流程\
-         重新校验后再试。这是前置条件未满足，不是知识库自身故障。",
+        describe(FailureInput::new(CODE_REQUIRES_AGGREGATE_INITIALIZATION)).title_zh,
         json!({ "bootstrap_step": "rules_policy" }),
     ))
 }
