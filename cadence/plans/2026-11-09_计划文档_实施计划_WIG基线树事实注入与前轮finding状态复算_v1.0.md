@@ -25,7 +25,7 @@
 - **不得改** `ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION`（`src/product/work_item_plan_compiler/types.rs:121`）的逐字文本。
 - **不得改** `mechanicalize` 的四类 typed IR 诊断资格清单与机械化判定口径。
 - **不得改** `close` 的有效必关闭判定、severity 呈现与 owner 排除口径。
-- **不得上调** `WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES`（23,500）与 `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES`（32,000）两个常量。
+- **不得上调** `WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES`（23,500）与 `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES`（32,000）两个常量。**预算按两面归属**（owner 2026-11-10 裁决）：新增直供内容 MUST 计入其所属面 —— 固定规范面内容计入 23,500（以 fixture 度量）、上下文面内容计入 32,000（以 `[confirmed_context]` 段度量）；SHALL NOT 以「动态段」名义规避任一面；两面各自须有字节断言。
 - **不得**引入第二套基线树来源：一切基线树事实 MUST 来自 `crate::product::workspace_engine::plan_preflight::plan_baseline_tree`。
 - **不得**由平台臆造路径：注入或回灌的每个候选路径 MUST ∈ 基线树。
 - 求交键 MUST 为**内容身份**（`contract_field` vs 机械报告 `code`），MUST NOT 为 `FindingFingerprint`（其派生含 `message`，机械报告 message 与评审 message 不同 ⇒ 按指纹求交恒不相交）。
@@ -178,6 +178,8 @@ fn markdown_author_prompt_with_baseline_tree_stays_within_context_budget() {
     //      且成员仓三个名字全部在场（不得因截断把某个成员仓整体挤掉）
 }
 ```
+
+**两面归属的断言口径（owner 2026-11-10 裁决）**：既有固定面预算断言（fixture 度量，23,500）**不改、不抬** —— fixture 不提供基线树 ⇒ 该段缺席 ⇒ 断言值不变；基线树**在场的**那一面由上面的**上下文面断言**（32,000）覆盖。两面各有断言，均不得超；两个常量均不修改。
 
 - [ ] **Step 2: 运行测试确认失败**
 

@@ -135,6 +135,15 @@ L1/L2 **不再依赖模型自行 Read/Glob 补事实**；模型拿到的 prompt 
 
 **为什么不放固定规范面**：固定规范面质量预算 `WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES` = 23,500 B，实测余量仅 **18~40 B**（红线：任何 SC author 教学变更必须先提额到整百级）。把 1,774 B 塞进固定面**必然要提额**，直接违反本 change 的 Non-Goal「不 bump 任何预算常量」。故清单必须落在**上下文面**。
 
+**预算口径裁决（owner 2026-11-10 · 两个常量均不动）**：作者 prompt 的字节预算**分两面**，归属显式化：
+
+| 面 | 常量 | 度量方式 | 本决策的清单归属 |
+|---|---|---|---|
+| 固定规范面 | `WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES` = 23,500 | 以 fixture 度量（fixture 上下文极小 ⇒ 实测余量 18~40 B） | **不属此面** —— 清单不是固定教学内容 |
+| 上下文面 | `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES` = 32,000 | 以 `[confirmed_context]` 段度量（真实占用 24,146 B ⇒ 余量 7,854 B） | **属此面** —— 清单 1,774 B 装得下 |
+
+⇒ 新增直供内容 MUST 计入**其所属面**，SHALL NOT 以「动态段」名义规避任一面；**两个常量均不上调**。相应地，既有任务 2.4 的措辞（「新增直供内容计入整 prompt 字节预算 23,500」）**已改写**为按面归属的口径 —— 改动的是**验收口径的措辞**，不是常量值、也不是「总预算不逃逸」这条约束本身（该约束仍在：两面各自有断言，均不得超）。
+
 **事后：越界报错附最近候选路径（走既有教学重驱通道）**
 
 - 落点：`work_item_plan_compiler/validate.rs` 生成 `acceptance_path_not_in_baseline` finding 处 —— **该处已在 `baseline_tree` 参数作用域内**，无需新增装载。

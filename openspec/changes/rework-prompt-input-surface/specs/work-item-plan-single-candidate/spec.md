@@ -189,7 +189,7 @@
 #### Scenario: 基线树清单不得占用固定规范面预算
 
 - **WHEN** 注入基线树可用路径清单
-- **THEN** 清单 SHALL 落在**上下文面**（既有 `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES` 分配口径内），MUST NOT 挤占固定规范面质量预算（`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES`，实测余量仅 18~40 B）；清单超上限时 SHALL 按成员仓保底截断，MUST NOT 使上下文面超预算
+- **THEN** 清单 SHALL 落在**上下文面**（`WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES` = 32,000），MUST NOT 挤占固定规范面质量预算（`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES` = 23,500，实测余量仅 18~40 B）；**两个预算常量 SHALL NOT 上调**；新增直供内容 SHALL 计入其所属预算面（固定规范面内容计入 23,500、上下文面内容计入 32,000），SHALL NOT 以「动态段」名义规避任一面；清单超上限时 SHALL 按成员仓保底截断，MUST NOT 使上下文面超预算
 
 #### Scenario: 越界路径回灌最近候选
 

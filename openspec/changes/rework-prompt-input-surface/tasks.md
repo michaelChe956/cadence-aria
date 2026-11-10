@@ -25,7 +25,7 @@
 - [ ] 2.1 **L1 直供（成员仓摘要）**：把成员仓摘要作为**平台直供**段注入 author prompt，来源为 1.x 修好的成员仓摘要，不得再靠模型 Read/Glob 补齐。验证：author prompt 中该段的存在有可断言的证据；模型侧无需为「知道有哪些成员仓」发起工具调用
 - [ ] 2.2 **L2 直供（依赖图事实）**：把已确认的依赖图事实（confirmed member targets / change_order 等）作为平台直供段注入，**与已确认来源同源**，**不得**在 prompt 侧独立重述口径。验证：直供内容与 canonical 侧同源可对账；不存在第二套「依赖图是什么」的解释
 - [ ] 2.3 **L3 预算约束不变**：`budget_markdown_context`（`src/product/work_item_split_engine/prompts.rs:395`）改签名与调用点后，L3（story / design 等可再加载上下文）的既有预算分配口径**保持不变**；`WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES`（32,000）**不调**。验证：L3 各段的既有配额断言仍绿；新直供段不挤占 L3 的既有配额
-- [ ] 2.4 **总预算不逃逸**：新增直供内容计入作者 prompt 的**整 prompt 字节预算**（`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES` = 23,500），**不得**借「动态段」名义规避总预算（决策 §7.1 集成约束 4）。验证：作者 prompt 实测字节仍低于既有质量预算；预算常量**未上调**
+- [ ] 2.4 **总预算不逃逸（口径已裁决澄清 · 2026-11-10）**：作者 prompt 的字节预算**分两面**，新增直供内容 MUST 计入**其所属面** —— **固定规范面**内容计入 `WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES`（23,500），**上下文面**内容计入 `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES`（32,000）。两面的归属在实现与断言中 MUST 显式可分（固定面以 fixture 度量、上下文面以 `[confirmed_context]` 段度量），**不得**借「动态段」名义规避任一面（决策 §7.1 集成约束 4）；**两个预算常量 SHALL NOT 上调**。验证：两面各自的字节断言均在既有预算内；常量值逐字未变（23,500 / 32,000）
 - [ ] 2.5 **探索行为复测**：实施后须复测首 token 前的**串行工具往返次数**与**探索期墙钟**（基线对照：17 次串行工具往返 / 探索期 275.4 秒）。验证：复测方法与基线同口径、结果已记录；**不得**把复测结果写成已测结论或收益承诺
 - [ ] 2.6 **requirement 映射**：本工作包落在 MODIFIED REQ-WSC-06 的场景「author 上下文分级直供」。验证：场景对账无遗漏
 
