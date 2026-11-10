@@ -31,3 +31,29 @@
   prepare: 200
   terminated 已落盘
   enable: 200
+[14:28:42] session=failed (plan 仍 draft)
+[14:28:42] done arm=xhigh eff=none port=4405
+[14:28:42] finished xhigh eff=none port=4405
+[14:28:42] daemon pid=2150183 port=4406 eff=high ws=/tmp/aria-wig/run-high-4406
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[14:38:34] session=failed (plan 仍 draft)
+[14:38:34] done arm=high eff=high port=4406
+[14:38:34] finished high eff=high port=4406
+[14:38:34] daemon pid=2162994 port=4407 eff=high ws=/tmp/aria-wig/run-high-4407
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[15:01:44] session=failed (plan 仍 draft)
+[15:01:44] done arm=high eff=high port=4407
+[15:01:44] finished high eff=high port=4407
+[15:01:44] daemon pid=2190638 port=4408 eff=none ws=/tmp/aria-wig/run-xhigh-4408
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[15:31:09] session=failed (plan 仍 draft)
+/tmp/aria-wig/run_product.sh: line 118: syntax error near unexpected token `plan'
+/tmp/aria-wig/run_product.sh: line 118: `$ss (plan 仍 draft)"; break;; esac'
+[15:31:09] finished xhigh eff=none port=4408
+ALL_RETEST_DONE

@@ -43,6 +43,22 @@
     session 终态=failed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
     plan: status=draft WIs=[] validator=[]
 
+--- high  (run-high-4406)  session=workspace_session_auto_01a9f798-9f5b-40b
+    timeline_node_001: author_run             failed     dur=    581.4s cmds=  0 codegraph=0
+    合计: 墙钟=581.4s 作者轮次=1(含重写0) reviewer轮次=0 compile=0 codegraph=0 cmds=0
+    usage: in=32,035 out=29,063 cache_read=2,304
+    IR 判定（平台 compiler）: []
+    session 终态=failed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=draft WIs=[] validator=[]
+
+--- high  (run-high-4407)  session=workspace_session_auto_d23fc2c2-28d0-412
+    timeline_node_001: author_run             failed     dur=   1369.2s cmds=  0 codegraph=0
+    合计: 墙钟=1369.2s 作者轮次=1(含重写0) reviewer轮次=0 compile=0 codegraph=0 cmds=0
+    usage: in=7,955 out=27,840 cache_read=34,240
+    IR 判定（平台 compiler）: []
+    session 终态=failed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=draft WIs=[] validator=[]
+
 --- xhigh  (run-xhigh-4401)  session=workspace_session_auto_b67a3931-2922-455
     timeline_node_002: reviewer_run           completed  dur=      0.1s cmds=  0 codegraph=0
     timeline_node_001: author_run             completed  dur=   1279.3s cmds=  8 codegraph=0
@@ -100,30 +116,59 @@
         前端删除交互工作项没有登记对「删除接口与 404 中文错误契约」的输入依赖，其成功与失败两条能力实际依赖网关工作项提供的接口契约，目前仅靠执行先后顺序间接保证前端与网关契约不错位。
 
 --- xhigh  (run-xhigh-4405)  session=workspace_session_auto_882679ae-3315-4bd
+    timeline_node_001: author_run             failed     dur=    827.6s cmds=  0 codegraph=0
+    合计: 墙钟=827.6s 作者轮次=1(含重写0) reviewer轮次=0 compile=0 codegraph=0 cmds=0
+    usage: in=8,132 out=11,846 cache_read=34,112
+    IR 判定（平台 compiler）: []
+    session 终态=failed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=draft WIs=[] validator=[]
+
+--- xhigh  (run-xhigh-4408)  session=workspace_session_auto_dcad9ba0-c313-446
+    timeline_node_001: author_run             failed     dur=   1757.7s cmds=  8 codegraph=0
+    合计: 墙钟=1757.7s 作者轮次=1(含重写0) reviewer轮次=0 compile=0 codegraph=0 cmds=8
+    usage: in=9,717 out=10,097 cache_read=65,920
+    IR 判定（平台 compiler）: [('failed', 'final')]
+    session 终态=failed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=draft WIs=[] validator=[]
+    最终 source: source-f1c75c43ef699029.json | WI=4 criterion=6 refs=12 **cross-WI=0**
+
+--- xhigh  (run-xhigh-4501)  session=workspace_session_auto_9b6e656a-1e63-45c
     timeline_node_001: author_run             active     dur=        ? cmds=  0 codegraph=0
     合计: 墙钟=0.0s 作者轮次=1(含重写0) reviewer轮次=0 compile=0 codegraph=0 cmds=0
     usage: in=0 out=0 cache_read=0
     IR 判定（平台 compiler）: []
     session 终态=running policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
     plan: status=draft WIs=[] validator=[]
-（provider/环境层失败、未产出可评估终态的 run：1 个，不计入对照）
+（provider/环境层中断的 run：1 个，单列不计入对照）
+（未产出计划的产品级失败 run：4 个 —— 已计入对照）
+
+================================================================================================================
+=== 实施前 vs 实施后（两臂合并；档位在两轮间不变）
+================================================================================================================
+指标                                            实施前                实施后
+样本 run 数                                        4                  7
+产出计划成功(confirmed)                       2/4                2/7      
+需人工介入(stopped_needs_human)              2/4                1/7      
+未产出计划(failed)                           0/4                4/7      
+preflight 拦截                            2/4                3/7      
+墙钟中位数 s                                     607.2            1,474.9
 （进行中的 run 未计入对照：2 个）
 
 ================================================================================================================
-=== 对照（xhigh n=2 vs high n=1）
+=== 对照（xhigh n=4 vs high n=3）
 ================================================================================================================
 指标                                  xhigh             high        差(high-xhigh)        置换p
-墙钟合计 s                            1,591.4          2,288.4               +697.0 ( +43.8%)     0.6613
-input token                      91,964.0        101,193.0             +9,229.0 ( +10.0%)     1.0000
-output token                     19,643.5         23,690.0             +4,046.5 ( +20.6%)     1.0000
-cache_read token                146,211.0        148,224.0             +2,013.0 (  +1.4%)     0.6613
-codegraph 调用                          3.5              3.0                 -0.5 ( -14.3%)     1.0000
-作者轮次(含重写)                             2.0              2.0                 +0.0 (  +0.0%)     1.0000
-reviewer 轮次                           2.0              2.0                 +0.0 (  +0.0%)     1.0000
-重写轮次                                  1.0              1.0                 +0.0 (  +0.0%)     1.0000
-IR 校验失败次数                             0.5              0.0                 -0.5 (-100.0%)     1.0000
-需人工介入次数                               0.0              1.0                 +1.0 (  +0.0%)     1.0000
-preflight 机械校验失败                      1.0              1.0                 +0.0 (  +0.0%)     1.0000
-编译次数                                  1.0              0.0                 -1.0 (-100.0%)     1.0000
+墙钟合计 s                            1,591.4          1,369.2               -222.2 ( -14.0%)     0.8533
+input token                      46,126.0          8,382.0            -37,744.0 ( -81.8%)     0.6301
+output token                     13,104.0         23,690.0            +10,586.0 ( +80.8%)     0.2295
+cache_read token                105,763.0         34,240.0            -71,523.0 ( -67.6%)     0.8580
+codegraph 调用                          1.5              0.0                 -1.5 (-100.0%)     0.8251
+作者轮次(含重写)                             1.5              1.0                 -0.5 ( -33.3%)     1.0000
+reviewer 轮次                           1.0              0.0                 -1.0 (-100.0%)     1.0000
+重写轮次                                  0.5              0.0                 -0.5 (-100.0%)     1.0000
+IR 校验失败次数                             0.5              0.0                 -0.5 (-100.0%)     0.4233
+需人工介入次数                               0.0              0.0                 +0.0 (  +0.0%)     0.4277
+preflight 机械校验失败                      0.5              0.0                 -0.5 (-100.0%)     1.0000
+编译次数                                  0.5              0.0                 -0.5 (-100.0%)     0.4204
 reviewer findings 合计                   13               10                   -3
-最终 plan cross-WI 越界               0/29             0/20   
+最终 plan cross-WI 越界               0/41             0/20   
