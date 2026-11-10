@@ -4,7 +4,7 @@
 
 ### Requirement: prompt 分层职责（REQ-WSC-06）
 
-系统 SHALL 使 workitem author/reviewer prompt 仅承载产物规格（任务上下文、输出语法、边界约束、判例 few-shot），SHALL NOT 重复目标仓库已注入的通用行为教学（Superpowers/OpenSpec/项目规则）。reviewer 复评前获得的只读契约覆盖投影 SHALL 以最小内容交付：能力覆盖缺口（gaps-only）、handoff 消费闭环、同仓写范围冲突与 PVR；写范围冲突事实 SHALL 限于同一目标仓内（跨仓 forbidden/exclusive 在 multi-repo 场景为假阳性，实测 29 条中 27 条）。author 上下文 SHALL 分级供给：L1 成员仓摘要与 L2 依赖图事实由平台直接注入 prompt，MUST NOT 依赖模型自行 Read/Glob 补事实；L3 维持既有预算约束。**L1 SHALL 进一步包含 plan 基线树可用路径清单**（由平台在校验器同源的基线树上装载后直供），MUST NOT 以纪律文案替代该事实 —— 实测纪律已在 prompt 内而越界率仍达 50%（作者引用了基线树内不存在的目录）。返修轮 prompt SHALL 只携带本轮 delta 与本轮相关既有上下文，MUST NOT 逐字节重发首轮完整 prompt。**复评前轮 findings 清单 SHALL 附本轮机械复算状态并按内容身份去重分区**（待办 / 已关闭）：判定主体 SHALL 为平台对当前候选机械报告的复算，SHALL NOT 交由模型依据自由文本判断某前轮 finding 是否仍存在。
+workitem author/reviewer prompt SHALL 仅承载产物规格（任务上下文、输出语法、边界约束、判例 few-shot），SHALL NOT 重复目标仓库已注入的通用行为教学。reviewer 复评前的只读契约覆盖投影 SHALL 以最小内容交付：能力覆盖缺口（gaps-only）、handoff 消费闭环、同仓写范围冲突与 PVR（跨仓 forbidden/exclusive 为 multi-repo 假阳性）。author 上下文 SHALL 分级供给：L1（成员仓摘要**与 plan 基线树可用路径清单**）与 L2（依赖图事实）由平台直接注入 prompt，MUST NOT 依赖模型自行补事实；L3 维持既有预算约束。返修轮 prompt SHALL 只携带本轮 delta 与本轮相关既有上下文，MUST NOT 逐字节重发首轮完整 prompt。复评前轮 findings 清单 SHALL 附本轮机械复算状态、按内容身份去重并分区（待办/已关闭），该判定主体 SHALL 为平台对当前候选机械报告的复算，SHALL NOT 由模型依据自由文本判断。
 
 #### Scenario: 弱模型借助判例避免已知矛盾
 
