@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-router";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CockpitShell } from "../components/cockpit/CockpitShell";
 import { KnowledgeBasePage } from "./KnowledgeBasePage";
 
 vi.mock("@monaco-editor/react", () => ({
@@ -38,6 +39,22 @@ vi.mock("@monaco-editor/react", () => ({
       />
     </div>
   ),
+}));
+
+// CockpitShell（沉浸模式用例）依赖会话观察者投影：单测里给空投影，
+// 避免真实轮询发请求。
+vi.mock("../hooks/useWorkspaceSessionObservers", () => ({
+  useWorkspaceSessionObservers: () => ({
+    records: [],
+    inbox: [],
+    countedInbox: [],
+    watchedSessionIds: [],
+    watchSession: () => undefined,
+    codingAttemptForSession: () => null,
+    displayItems: [],
+    actionableCount: 0,
+    notificationCandidates: [],
+  }),
 }));
 
 // 文件树夹具：path 一律是**知识库根相对**口径（与后端 files.rs / HTTP 层一致，
@@ -120,6 +137,12 @@ function installFetch(
     lint?: () => Response;
     /** 覆盖单文件读取（用于构造乱序/延迟响应）。 */
     read?: (path: string) => Promise<Response>;
+    /** 覆盖知识库状态（用于构造前置门拒绝）。 */
+    status?: () => Response;
+    /** 覆盖项目清单（顶栏项目名来源）。 */
+    projects?: () => Response;
+    /** 覆盖逻辑代码库清单（顶栏 LC 名来源）。 */
+    logicalCodebases?: () => Response;
   } = {},
 ): { calls: FetchCall[] } {
   const calls: FetchCall[] = [];
@@ -137,6 +160,9 @@ function installFetch(
         : jsonResponse({ path: "base-info.md", digest: "digest-new" });
     }
     if (url.includes("/knowledge-base/status")) {
+      if (overrides.status) {
+        return overrides.status();
+      }
       return jsonResponse({
         exists: true,
         schema_version: "4.0",
@@ -168,6 +194,32 @@ function installFetch(
       }
       return jsonResponse({ path, content: entry.content, digest: entry.digest });
     }
+    // 顶栏取名用的既有只读端点：项目清单与逻辑代码库清单。
+    if (/^\/api\/projects\/[^/]+\/logical-codebases$/.test(url)) {
+      if (overrides.logicalCodebases) {
+        return overrides.logicalCodebases();
+      }
+      return jsonResponse({
+        logical_codebases: [{ id: "lc1", name: "核心逻辑代码库", aggregate_root: "repos/core" }],
+      });
+    }
+    if (url === "/api/projects") {
+      if (overrides.projects) {
+        return overrides.projects();
+      }
+      return jsonResponse({
+        projects: [
+          {
+            project_id: "p1",
+            name: "示例项目",
+            description: null,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+            last_opened_at: null,
+          },
+        ],
+      });
+    }
     return jsonResponse({ code: "not_found", message: `未知请求 ${url}` }, 404);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -198,6 +250,27 @@ function createTestRouter() {
 
 function renderPage() {
   const router = createTestRouter();
+  render(<RouterProvider router={router} />);
+  return router;
+}
+
+/**
+ * 渲染 CockpitShell（沉浸模式用例）：initialEntries 的 path 决定外壳是否
+ * 命中知识库详情页路由（/workbench/projects/:projectId/logical-codebases/
+ * :lcId/knowledge-base）。
+ */
+function renderShellAtPath(path: string) {
+  const rootRoute = createRootRoute({
+    component: () => (
+      <CockpitShell>
+        <div data-testid="shell-child">子页面</div>
+      </CockpitShell>
+    ),
+  });
+  const router = createRouter({
+    routeTree: rootRoute,
+    history: createMemoryHistory({ initialEntries: [path] }),
+  });
   render(<RouterProvider router={router} />);
   return router;
 }
@@ -511,5 +584,117 @@ describe("KnowledgeBasePage", () => {
     );
     expect(screen.queryByTestId("kb-readonly-hint")).toBeNull();
     expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+  });
+
+  it("header_shows_project_name_logical_codebase_name_and_workbench_entry", async () => {
+    installFetch();
+    renderPage();
+
+    expect(
+      await screen.findByRole("heading", { name: "知识库" }),
+    ).toBeInTheDocument();
+    const context = await screen.findByTestId("kb-context");
+    await waitFor(() => {
+      expect(context).toHaveTextContent("示例项目");
+      expect(context).toHaveTextContent("核心逻辑代码库");
+    });
+    // 返回工作台入口指向工作台路由。
+    expect(screen.getByTestId("kb-back-to-workbench")).toHaveAttribute(
+      "href",
+      "/workbench",
+    );
+    // 状态徽标来自既有 status 投影（已初始化）。
+    expect(screen.getByTestId("kb-status")).toHaveTextContent("已初始化");
+  });
+
+  it("header_falls_back_to_ids_when_names_are_unavailable", async () => {
+    installFetch({
+      projects: () =>
+        jsonResponse({ code: "not_found", message: "项目清单不可用" }, 404),
+      logicalCodebases: () =>
+        jsonResponse({ code: "not_found", message: "LC 清单不可用" }, 404),
+    });
+    renderPage();
+
+    const context = await screen.findByTestId("kb-context");
+    await waitFor(() => {
+      expect(context).toHaveTextContent("p1");
+      expect(context).toHaveTextContent("lc1");
+    });
+    // 取名失败不得让副标题留空。
+    expect(context.textContent?.trim()).not.toBe("");
+  });
+
+  it("status_badge_reports_preflight_gate_rejection", async () => {
+    installFetch({
+      status: () =>
+        jsonResponse(
+          {
+            code: "knowledge_base_requires_aggregate_initialization",
+            message: "请先完成聚合初始化",
+          },
+          403,
+        ),
+    });
+    renderPage();
+
+    // 前置门未满足：显示「前置未满足」徽标（不臆造 status 字段）。
+    expect(await screen.findByTestId("kb-status")).toHaveTextContent(
+      "前置未满足",
+    );
+  });
+
+  it("layout_fills_available_height_with_two_columns", async () => {
+    installFetch();
+    renderPage();
+
+    const workspace = await screen.findByTestId("kb-workspace");
+    expect(workspace.className).toContain("h-full");
+    expect(workspace.className).toContain("min-h-0");
+    // 左：文件树固定宽（不随右区伸展）。
+    const treePanel = screen.getByTestId("kb-file-tree-panel");
+    expect(treePanel.className).toContain("shrink-0");
+    // 右：编辑/预览自适应并吃满可用高度。
+    const editorPanel = screen.getByTestId("kb-editor-panel");
+    expect(editorPanel.className).toContain("flex-1");
+    expect(editorPanel.className).toContain("min-h-0");
+    const tabpanel = screen.getByTestId("kb-tabpanel");
+    expect(tabpanel.className).toContain("flex-1");
+    expect(tabpanel.className).toContain("min-h-0");
+    // 编辑器宿主拉满（高度不由固定像素决定 ⇒ 下半屏不留空白）。
+    const editorHost = screen.getByTestId("kb-editor-host");
+    expect(editorHost.className).toContain("h-full");
+  });
+
+  it("file_tree_can_be_collapsed", async () => {
+    installFetch();
+    renderPage();
+
+    await screen.findByTestId("kb-file-tree");
+    fireEvent.click(screen.getByTestId("kb-tree-toggle"));
+    expect(screen.queryByTestId("kb-file-tree")).toBeNull();
+    fireEvent.click(screen.getByTestId("kb-tree-toggle"));
+    expect(await screen.findByTestId("kb-file-tree")).toBeInTheDocument();
+  });
+
+  it("cockpit_shell_hides_global_widgets_on_knowledge_base_route", async () => {
+    installFetch();
+    renderShellAtPath(
+      "/workbench/projects/p1/logical-codebases/lc1/knowledge-base",
+    );
+
+    await screen.findByTestId("shell-child");
+    // 沉浸模式：全局设置入口（及其兜底浮层）不渲染。
+    expect(screen.queryByTestId("cockpit-settings-trigger")).toBeNull();
+    expect(screen.queryByTestId("cockpit-settings-fallback")).toBeNull();
+  });
+
+  it("cockpit_shell_keeps_global_widgets_on_other_routes", async () => {
+    installFetch();
+    renderShellAtPath("/workbench");
+
+    await screen.findByTestId("shell-child");
+    // 非知识库路由：既有行为零变化（全局设置入口仍在）。
+    expect(screen.getByTestId("cockpit-settings-trigger")).toBeInTheDocument();
   });
 });

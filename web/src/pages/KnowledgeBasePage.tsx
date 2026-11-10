@@ -1,11 +1,14 @@
 // Task 10：LC 知识库详情页。
-// 左侧文件树（按目录分组）+ 右侧「编辑 / 预览」页签 + 保存按钮。
+// 全屏工作区形态（Task 7）：顶栏（标题 + 所属项目名/逻辑代码库名 + 状态徽标 +
+// 返回工作台）+ 主体两栏——左侧文件树（固定宽、可折叠）+ 右侧「编辑 / 预览」
+// 自适应并吃满可用高度（滚动只发生在文件树与编辑区内部，下半屏不留空白）。
 // 编辑页签用 Task 8 的可写 MonacoEditor，预览页签用公共 MarkdownContent；
 // 变更包（user-input/updates/ 下的 CHANGE-* 目录）额外展示 lint 的字段级标记。
 // 机器管理文件（后端标记 editable=false 的 manifest.yaml、
 // evidence/relation-graph.yaml 等）按只读呈现：不提供编辑入口与保存入口。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiRequestError } from "../api/client";
+import { ApiRequestError, listProjects } from "../api/client";
+import { listLogicalCodebases } from "../api/codebases";
 import {
   getKnowledgeBaseStatus,
   lintKnowledgeBaseChangePackage,
@@ -26,6 +29,12 @@ import { useUnloadGuard } from "../hooks/useUnloadGuard";
  *  匹配同时兼容历史聚合根相对口径（…/user-input/updates/CHANGE-*）。 */
 const CHANGE_PACKAGE_SEGMENT = "user-input/updates/";
 const UNSAVED_MESSAGE = "知识库文档有未保存的修改，离开将丢失这些改动。是否继续？";
+/**
+ * REQ-KB-13 前置门：聚合初始化未完成时，知识库端点（含状态端点）在 HTTP 层
+ * 以该稳定码拒绝。前置未满足的判定只依据后端已给出的稳定码——不臆造
+ * status 投影里尚不存在的字段（status 缺该信号时不显示「前置未满足」徽标）。
+ */
+const PREFLIGHT_REQUIRED_CODE = "knowledge_base_requires_aggregate_initialization";
 
 type Notice = { kind: "error" | "success"; text: string };
 
@@ -50,6 +59,13 @@ export function KnowledgeBasePage({
   const [notice, setNotice] = useState<Notice | null>(null);
   const [saving, setSaving] = useState(false);
   const [lintFields, setLintFields] = useState<KnowledgeBaseChangePackageFieldStatusDto[]>([]);
+  // 顶栏副标题的关联名：项目名 + 逻辑代码库名（取不到时回落 id，不留空）。
+  const [projectName, setProjectName] = useState<string | null>(null);
+  const [logicalCodebaseName, setLogicalCodebaseName] = useState<string | null>(null);
+  // 前置门未满足（后端以稳定码拒绝）⇒ 顶栏显示「前置未满足」徽标。
+  const [preflightUnmet, setPreflightUnmet] = useState(false);
+  // 左侧文件树可折叠（固定宽，折叠后右区获得全部宽度）。
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
   // 当前选中的文件路径（同步镜像）：用于丢弃乱序到达的过期读取响应。
   const selectedPathRef = useRef<string | null>(null);
 
@@ -142,16 +158,54 @@ export function KnowledgeBasePage({
           setStatus(next);
         }
       })
-      .catch(() => {
+      .catch((reason) => {
         // status 不可用不阻塞文件浏览（后端未就绪时的正常降级）。
-        if (!cancelled) {
-          setStatus(null);
+        if (cancelled) {
+          return;
         }
+        setStatus(null);
+        // 前置门拒绝（聚合初始化未完成）⇒ 顶栏显示「前置未满足」。
+        setPreflightUnmet(
+          reason instanceof ApiRequestError && reason.code === PREFLIGHT_REQUIRED_CODE,
+        );
       });
     return () => {
       cancelled = true;
     };
   }, [projectId, lcId, openFile]);
+
+  // 顶栏关联名：项目名 + 逻辑代码库名（既有只读端点；取不到时回落 id）。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [projectsResult, logicalCodebasesResult] = await Promise.allSettled([
+        listProjects(),
+        listLogicalCodebases(projectId),
+      ]);
+      if (cancelled) {
+        return;
+      }
+      if (projectsResult.status === "fulfilled") {
+        const matched = projectsResult.value.projects.find(
+          (item) => item.project_id === projectId,
+        );
+        if (matched) {
+          setProjectName(matched.name);
+        }
+      }
+      if (logicalCodebasesResult.status === "fulfilled") {
+        const matched = logicalCodebasesResult.value.logical_codebases.find(
+          (item) => item.id === lcId,
+        );
+        if (matched) {
+          setLogicalCodebaseName(matched.name);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, lcId]);
 
   const save = useCallback(async () => {
     if (!selectedPath || !selectedEditable) {
@@ -191,37 +245,108 @@ export function KnowledgeBasePage({
 
   const tree = useMemo(() => buildTree(nodes), [nodes]);
 
+  // 关联名回落：取不到时用 id（副标题不留空）。
+  const projectLabel = projectName ?? projectId;
+  const logicalCodebaseLabel = logicalCodebaseName ?? lcId;
+
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 px-4 py-3">
-      <header className="flex flex-wrap items-center gap-3">
-        <h1 className="text-base font-semibold text-[var(--aria-ink)]">知识库</h1>
-        <span data-testid="kb-status" className="text-xs text-[var(--aria-ink-muted)]">
-          {status === null
-            ? "知识库状态未知"
-            : status.exists
-              ? "知识库已初始化"
-              : "知识库尚未初始化"}
-        </span>
-        {dirty ? (
-          <span data-testid="kb-dirty" className="text-xs text-amber-700">
-            有未保存的修改
-          </span>
-        ) : null}
+    <div
+      data-testid="kb-workspace"
+      className="flex h-full min-h-0 flex-col bg-[var(--aria-bg)]"
+    >
+      {/* 顶栏：标题 + 关联名 + 状态徽标 + 返回工作台（页头固定，不随内容滚动）。 */}
+      <header
+        data-testid="kb-header"
+        className="flex shrink-0 items-center gap-3 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2"
+      >
+        <div className="min-w-0">
+          <h1 className="text-base font-semibold text-[var(--aria-ink)]">知识库</h1>
+          <p
+            data-testid="kb-context"
+            className="truncate text-xs text-[var(--aria-ink-muted)]"
+          >
+            {projectLabel} · {logicalCodebaseLabel}
+          </p>
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {preflightUnmet ? (
+            <span
+              data-testid="kb-status"
+              data-status="preflight-unmet"
+              className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800"
+            >
+              前置未满足
+            </span>
+          ) : (
+            <span
+              data-testid="kb-status"
+              data-status={
+                status === null
+                  ? "unknown"
+                  : status.exists
+                    ? "initialized"
+                    : "not-initialized"
+              }
+              className="rounded-full border border-[var(--aria-line)] bg-white px-2 py-0.5 text-xs font-medium text-[var(--aria-ink-muted)]"
+            >
+              {status === null
+                ? "状态未知"
+                : status.exists
+                  ? "已初始化"
+                  : "尚未初始化"}
+            </span>
+          )}
+          {dirty ? (
+            <span
+              data-testid="kb-dirty"
+              className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800"
+            >
+              有未保存的修改
+            </span>
+          ) : null}
+          <a
+            data-testid="kb-back-to-workbench"
+            href="/workbench"
+            className="inline-flex h-8 items-center rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)]"
+          >
+            返回工作台
+          </a>
+        </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 gap-4">
-        <aside className="w-72 shrink-0 overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2">
-          <div data-testid="kb-file-tree">
-            <TreeView
-              entries={tree}
-              selectedPath={selectedPath}
-              onSelect={(path) => void openFile(path)}
-            />
-          </div>
+      {/* 主体：左文件树（固定宽、可折叠）+ 右编辑/预览（自适应并吃满高度）。 */}
+      <div className="flex min-h-0 flex-1">
+        <aside
+          data-testid="kb-file-tree-panel"
+          className={`flex shrink-0 flex-col gap-2 overflow-auto border-r border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2 ${
+            treeCollapsed ? "w-14" : "w-72"
+          }`}
+        >
+          <button
+            type="button"
+            data-testid="kb-tree-toggle"
+            aria-expanded={!treeCollapsed}
+            onClick={() => setTreeCollapsed((collapsed) => !collapsed)}
+            className="whitespace-nowrap rounded-md border border-[var(--aria-line)] bg-white px-1.5 py-1 text-xs font-medium text-[var(--aria-ink)] transition-colors duration-200 hover:bg-[var(--aria-panel)]"
+          >
+            {treeCollapsed ? "展开" : "折叠"}
+          </button>
+          {treeCollapsed ? null : (
+            <div data-testid="kb-file-tree">
+              <TreeView
+                entries={tree}
+                selectedPath={selectedPath}
+                onSelect={(path) => void openFile(path)}
+              />
+            </div>
+          )}
         </aside>
 
-        <section className="flex min-w-0 flex-1 flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-2">
+        <section
+          data-testid="kb-editor-panel"
+          className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 p-4"
+        >
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
             <div role="tablist" className="flex items-center gap-1">
               <button
                 type="button"
@@ -277,24 +402,41 @@ export function KnowledgeBasePage({
               data-kind={notice.kind}
               className={
                 notice.kind === "error"
-                  ? "rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
-                  : "rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700"
+                  ? "shrink-0 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+                  : "shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700"
               }
             >
               {notice.text}
             </div>
           ) : null}
 
-          <div role="tabpanel" className="min-h-0 flex-1">
+          {/* 编辑/预览区：吃掉右栏全部剩余高度（滚动只发生在本区内部）。 */}
+          <div
+            role="tabpanel"
+            data-testid="kb-tabpanel"
+            className="min-h-0 flex-1 overflow-hidden"
+          >
             {tab === "edit" ? (
-              <MonacoEditor
-                value={draft}
-                language="markdown"
-                height="480px"
-                onChange={selectedEditable ? setDraft : undefined}
-              />
+              <div
+                data-testid="kb-editor-host"
+                className="h-full min-h-0 overflow-hidden rounded-md border border-[var(--aria-line)] bg-white"
+              >
+                {/* 折叠文件树会改变右栏宽度；Monaco 未开启 automaticLayout，
+                    宽度变化后不会自行重排——用 key 强制重挂载一次（草稿内容
+                    由受控 value 保留）。 */}
+                <MonacoEditor
+                  key={treeCollapsed ? "kb-editor-collapsed" : "kb-editor-expanded"}
+                  value={draft}
+                  language="markdown"
+                  height="100%"
+                  onChange={selectedEditable ? setDraft : undefined}
+                />
+              </div>
             ) : (
-              <div className="rounded-md border border-[var(--aria-line)] bg-white p-3">
+              <div
+                data-testid="kb-preview"
+                className="h-full min-h-0 overflow-auto rounded-md border border-[var(--aria-line)] bg-white p-3"
+              >
                 <MarkdownContent content={draft} />
               </div>
             )}
@@ -303,7 +445,7 @@ export function KnowledgeBasePage({
           {lintFields.length > 0 ? (
             <div
               data-testid="kb-lint-fields"
-              className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
+              className="max-h-40 shrink-0 overflow-auto rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-2"
             >
               <div className="px-1 pb-1 text-xs font-semibold text-[var(--aria-ink)]">
                 变更包字段状态
