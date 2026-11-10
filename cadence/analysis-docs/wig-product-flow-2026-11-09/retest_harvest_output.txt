@@ -1,0 +1,129 @@
+================================================================================================================
+产品 WIG 全流程 —— 串行交替对照（唯一变量 = effort 档位；同一真实案例 + codegraph + reviewer + 编译重驱链）
+================================================================================================================
+
+--- high  (run-high-4402)  session=workspace_session_auto_98dbf00d-0f9b-4bb
+    timeline_node_002: reviewer_run           completed  dur=      0.1s cmds=  0 codegraph=0
+    timeline_node_001: author_run             completed  dur=   2047.8s cmds=  4 codegraph=0
+    timeline_node_004: author_run             completed  dur=     75.5s cmds=  0 codegraph=0
+    timeline_node_005: reviewer_run           completed  dur=    165.0s cmds= 30 codegraph=3
+    合计: 墙钟=2288.4s 作者轮次=2(含重写1) reviewer轮次=2 compile=0 codegraph=3 cmds=34
+    usage: in=101,193 out=23,690 cache_read=148,224
+    IR 判定（平台 compiler）: []
+    session 终态=stopped_needs_human policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=1
+    preflight 机械校验码: ['intent_unexecutable']
+    plan: status=draft WIs=[] validator=[]
+    最终 source: source-47261f65bb7a5343.json | WI=4 criterion=6 refs=20 **cross-WI=0**
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=verification_unattributable field=verification_checks[CHECK-012]
+        前端断言脚本依赖未运行的常驻容器、且异常被吞掉，WI-004 的前端自动化验证在当前环境无法稳定产出可归因证据。
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=completeness field=acceptance_criteria[AC-003], acceptance_criteria[AC-004]
+        WI-003 的三条验收标准中有两条没有任何任务声明完成条件，删除按钮与空态、删除成功提示与列表刷新，以及取消不发请求这两项验收缺少任务级追踪。
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=completeness field=output_contracts[CT-003]
+        对外能力里的删除期间当前行按钮 loading 且全部行删除按钮禁用，没有任何验收标准或检查项承接，处于无人验证状态。
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=verification_unattributable field=verification_checks[CHECK-002], verification_checks[CHECK-013]
+        两处冒烟检查用数字前缀做 grep 判断公告是否已被物理删除，可能把正确实现误判为失败（判成仍存在）。
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=completeness field=acceptance_criteria[AC-002]
+        验收标准点名要求 swagger-ui.html 收录删除端点，但检查项只校验了 /v3/api-docs，swagger-ui 一侧没有任何证据。
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=completeness field=verification_checks[CHECK-006], verification_checks[CHECK-007], verification_checks[CHECK-008]
+        前端删除交互的三条验收全部依赖人工核对，机械校验也提示 e2e 覆盖缺失，删除失败不白屏这类体验类验收没有自动化证据兜底。
+
+--- high  (run-high-4403)  session=workspace_session_auto_41424d4b-82db-490
+    timeline_node_001: author_run             failed     dur=    709.6s cmds=  0 codegraph=0
+    合计: 墙钟=709.6s 作者轮次=1(含重写0) reviewer轮次=0 compile=0 codegraph=0 cmds=0
+    usage: in=8,382 out=17,631 cache_read=33,984
+    IR 判定（平台 compiler）: []
+    session 终态=failed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=draft WIs=[] validator=[]
+
+--- xhigh  (run-xhigh-4401)  session=workspace_session_auto_b67a3931-2922-455
+    timeline_node_002: reviewer_run           completed  dur=      0.1s cmds=  0 codegraph=0
+    timeline_node_001: author_run             completed  dur=   1279.3s cmds=  8 codegraph=0
+    timeline_node_004: author_run             completed  dur=     82.6s cmds=  0 codegraph=0
+    timeline_node_005: reviewer_run           completed  dur=    130.8s cmds= 12 codegraph=4
+    timeline_node_003: human_confirm          completed  dur=    214.1s cmds=  0 codegraph=0
+    timeline_node_006: work_item_plan_compile completed  dur=      1.0s cmds=  0 codegraph=0
+    合计: 墙钟=1707.9s 作者轮次=2(含重写1) reviewer轮次=2 compile=1 codegraph=4 cmds=20
+    usage: in=82,535 out=24,925 cache_read=146,816
+    IR 判定（平台 compiler）: [('failed', 'final'), ('passed', 'final')]
+    session 终态=confirmed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    preflight 机械校验码: ['intent_unexecutable', 'write_scope_outside_bound_repository']
+    plan: status=confirmed WIs=['WI-001', 'WI-002', 'WI-003', 'WI-004'] validator=[('warning', 'integration_or_e2e_skipped_risk')]
+    最终 source: source-2cc37767d549c778.json | WI=4 criterion=6 refs=14 **cross-WI=0**
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.intent_unexecutable
+        [intent_unexecutable] intent target 逻辑代码库 lc_aggregate_root_view_7cb8c0b4-bccc-4b16-bc6f-8f7dccc4b451 不在授权逻辑代码库 7cb8c0b4
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.write_scope_outside_bound_repository
+        [write_scope_outside_bound_repository] work item WI-003 的写范围 [/tmp/notice-delete-frontend-check/**（按成员目录前缀写法不落在任何成员 chec
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.write_scope_outside_bound_repository
+        [write_scope_outside_bound_repository] work item WI-004 的写范围 [/tmp/notice-delete-e2e/**（按成员目录前缀写法不落在任何成员 checkout 下：若指聚合
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=verification_unattributable field=WI-003.verification_checks[CHECK-004]
+        前端删除行为的唯一自动化证据是容器内 /tmp/notice-delete-frontend-check/ 下的临时断言脚本：它既不在仓库内（frontend/package.json 属于禁止范围，frontend/src/** 只承载业
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=verification_unattributable field=WI-002.acceptance_criteria[AC-003]
+        WI-002 的验收标准同时包含「再次删除同一 id 返回 404」和「GET 列表不再包含 A」这类跨仓端到端观察，但 WI-002 自身的唯一门禁 CHECK-002 是 gateway 的 mvn verify，其网关用例对 Feig
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=contract_gap field=WI-002.output_contracts[CT-002]
+        同一契约编号 CT-002 在 WI-002 的输出契约里出现了两次且能力集合不同：一条含 OpenAPI 文档能力、一条不含。能力覆盖复算显示 WI-003 与 WI-004 的所需能力均已满足、missing_capabilities 
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=completeness field=WI-004.depends_on
+        WI-004 的验收标准与任务要求汇总 frontend npm run lint 的证据，但其 depends_on 只声明了 WI-001 与 WI-002，未声明 WI-003；WI-003 输出的前端契约 CT-003 也没有任何消
+
+--- xhigh  (run-xhigh-4404)  session=workspace_session_auto_6900f3cf-32a5-4db
+    timeline_node_002: reviewer_run           completed  dur=      0.1s cmds=  0 codegraph=0
+    timeline_node_001: author_run             completed  dur=   1034.5s cmds=  0 codegraph=0
+    timeline_node_004: author_run             completed  dur=     64.1s cmds=  0 codegraph=0
+    timeline_node_005: reviewer_run           completed  dur=    155.2s cmds= 28 codegraph=3
+    timeline_node_003: human_confirm          completed  dur=    220.0s cmds=  0 codegraph=0
+    timeline_node_006: work_item_plan_compile completed  dur=      1.0s cmds=  0 codegraph=0
+    合计: 墙钟=1474.9s 作者轮次=2(含重写1) reviewer轮次=2 compile=1 codegraph=3 cmds=28
+    usage: in=101,393 out=14,362 cache_read=145,606
+    IR 判定（平台 compiler）: [('passed', 'final')]
+    session 终态=confirmed policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    preflight 机械校验码: ['write_scope_outside_bound_repository']
+    plan: status=confirmed WIs=['WI-001', 'WI-002', 'WI-003', 'WI-004'] validator=[('warning', 'integration_or_e2e_skipped_risk')]
+    最终 source: source-1a5935e2d4f98b7a.json | WI=4 criterion=6 refs=15 **cross-WI=0**
+    reviewer finding [reviewer_run]: disposition=None class_hint=repairable category=contract_gap field=plan_preflight.write_scope_outside_bound_repository
+        [write_scope_outside_bound_repository] work item WI-004 的写范围 [busi/target/surefire-reports/**（成员 checkout busi 内，归属仓 rep
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=verification_unattributable field=acceptance_criteria
+        前端工作项的「确认删除成功并自动刷新」与「删除失败按错误体 message 中文提示」两条能力没有对应的验收判据，确认删除任务的完成判据指向的却是只描述「点取消不发出请求」的判据；成功/失败路径目前只由无命令的脚本检查和集成工作项间接兜底。
+    reviewer finding [reviewer_run]: disposition=None class_hint=advisory category=contract_gap field=input_contracts
+        前端删除交互工作项没有登记对「删除接口与 404 中文错误契约」的输入依赖，其成功与失败两条能力实际依赖网关工作项提供的接口契约，目前仅靠执行先后顺序间接保证前端与网关契约不错位。
+
+--- xhigh  (run-xhigh-4405)  session=workspace_session_auto_882679ae-3315-4bd
+    timeline_node_001: author_run             active     dur=        ? cmds=  0 codegraph=0
+    合计: 墙钟=0.0s 作者轮次=1(含重写0) reviewer轮次=0 compile=0 codegraph=0 cmds=0
+    usage: in=0 out=0 cache_read=0
+    IR 判定（平台 compiler）: []
+    session 终态=running policy=auto_if_valid review_rounds=1 ⇒ 需人工介入=0
+    plan: status=draft WIs=[] validator=[]
+（provider/环境层失败、未产出可评估终态的 run：1 个，不计入对照）
+（进行中的 run 未计入对照：2 个）
+
+================================================================================================================
+=== 对照（xhigh n=2 vs high n=1）
+================================================================================================================
+指标                                  xhigh             high        差(high-xhigh)        置换p
+墙钟合计 s                            1,591.4          2,288.4               +697.0 ( +43.8%)     0.6613
+input token                      91,964.0        101,193.0             +9,229.0 ( +10.0%)     1.0000
+output token                     19,643.5         23,690.0             +4,046.5 ( +20.6%)     1.0000
+cache_read token                146,211.0        148,224.0             +2,013.0 (  +1.4%)     0.6613
+codegraph 调用                          3.5              3.0                 -0.5 ( -14.3%)     1.0000
+作者轮次(含重写)                             2.0              2.0                 +0.0 (  +0.0%)     1.0000
+reviewer 轮次                           2.0              2.0                 +0.0 (  +0.0%)     1.0000
+重写轮次                                  1.0              1.0                 +0.0 (  +0.0%)     1.0000
+IR 校验失败次数                             0.5              0.0                 -0.5 (-100.0%)     1.0000
+需人工介入次数                               0.0              1.0                 +1.0 (  +0.0%)     1.0000
+preflight 机械校验失败                      1.0              1.0                 +0.0 (  +0.0%)     1.0000
+编译次数                                  1.0              0.0                 -1.0 (-100.0%)     1.0000
+reviewer findings 合计                   13               10                   -3
+最终 plan cross-WI 越界               0/29             0/20   

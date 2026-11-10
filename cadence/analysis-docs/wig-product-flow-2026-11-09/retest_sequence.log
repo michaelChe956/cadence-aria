@@ -1,0 +1,33 @@
+[11:47:44] daemon pid=2026274 port=4401 eff=none ws=/tmp/aria-wig/run-xhigh-4401
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[12:12:52] plan=confirmed
+[12:12:52] done arm=xhigh eff=none port=4401
+[12:12:52] finished xhigh eff=none port=4401
+[12:12:52] daemon pid=2043606 port=4402 eff=high ws=/tmp/aria-wig/run-high-4402
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[13:13:02] done arm=high eff=high port=4402
+[13:13:02] finished high eff=high port=4402
+[13:13:03] daemon pid=2084858 port=4403 eff=high ws=/tmp/aria-wig/run-high-4403
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[13:53:12] finished high eff=high port=4403
+[13:53:12] daemon pid=2114206 port=4404 eff=none ws=/tmp/aria-wig/run-xhigh-4404
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[14:14:19] plan=confirmed
+/tmp/aria-wig/run_product.sh: line 98: 终态但: command not found
+[14:14:19] session=confirmed (plan 仍 draft)
+/tmp/aria-wig/run_product.sh: line 117: break: only meaningful in a `for', `while', or `until' loop
+/tmp/aria-wig/run_product.sh: line 119: syntax error near unexpected token `done'
+/tmp/aria-wig/run_product.sh: line 119: `done'
+[14:14:34] finished xhigh eff=none port=4404
+[14:14:34] daemon pid=2130430 port=4405 eff=none ws=/tmp/aria-wig/run-xhigh-4405
+  prepare: 200
+  terminated 已落盘
+  enable: 200

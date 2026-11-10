@@ -220,6 +220,13 @@ def main():
             print(f"        {f['msg'][:130]}")
     # 完成判定：会话不再是 running（confirmed / failed / stopped_needs_human 都算跑完）
     done = [r for r in runs if r.get("session_status") and r["session_status"] != "running"]
+    # provider/环境层失败（会话 failed、plan 仍 draft、无产品侧错误事实）单列，
+    # 不计入效果指标 —— 它不是被测行为的结果。
+    incomplete = [r for r in done if r.get("session_status") == "failed"
+                  and (r.get("plan") or {}).get("status") == "draft"]
+    done = [r for r in done if r not in incomplete]
+    if incomplete:
+        print(f"（provider/环境层失败、未产出可评估终态的 run：{len(incomplete)} 个，不计入对照）")
     X = [r for r in done if r["arm"] == "xhigh"]
     H = [r for r in done if r["arm"] == "high"]
     if len(done) < len(runs):
