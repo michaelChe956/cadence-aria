@@ -11,12 +11,10 @@ pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_FINDINGS: &str = include_str!(concat!(
     "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
 ));
 
-
 pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 11] = [
     "rep1-f1", "rep1-f2", "rep2-f1", "rep2-f2", "rep2-f3", "rep2-f4", "rep2-f5", "rep2-f6",
     "rep3-f1", "rep4-f1", "rep4-f2",
 ];
-
 
 pub(crate) fn work_item_plan_dependency_syntax_rules() -> String {
     let dependencies_key = grammar::DEPENDENCIES_KEY;
@@ -26,7 +24,6 @@ pub(crate) fn work_item_plan_dependency_syntax_rules() -> String {
         "`{dependencies_key}`：`- {dependencies_key}: []`；`- {dependencies_key}: {item_id_prefix}001`（裸值）；多依赖每行：`- {dependencies_key}: {item_id_prefix}001`\n`- {dependencies_key}: {item_id_prefix}002`。禁止括号列表、空格或逗号分隔多值；值仅 `[]` 或 `{item_id_prefix}{item_id_suffix}`。"
     )
 }
-
 
 pub(crate) fn work_item_plan_real_few_shot() -> Result<String, String> {
     let findings: Vec<serde_json::Value> =
@@ -68,4 +65,3 @@ pub(crate) fn work_item_plan_real_few_shot() -> Result<String, String> {
 
     Ok(cases)
 }
-

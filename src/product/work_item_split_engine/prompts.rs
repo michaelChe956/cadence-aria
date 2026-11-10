@@ -38,7 +38,6 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 262_144;
 /// 本批评审更充分后修订块变大（实测修订轮 prompt 70,326 字节）曾顶破旧 64 KiB，故抬到 256 KiB。
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES: usize = 262_144;
 
-
 pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     pub story_context: &'a str,
     pub design_context: &'a str,
@@ -177,11 +176,11 @@ mod sc_few_shot;
 #[cfg(test)]
 pub(crate) use sc_few_shot::WORK_ITEM_PLAN_FEW_SHOT_IDS;
 mod sc_baseline_tree;
-pub(crate) use sc_baseline_tree::{author_baseline_tree_section, budget_markdown_context};
 #[cfg(test)]
 pub(crate) use sc_baseline_tree::WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES;
 #[cfg(test)]
 pub(crate) use sc_baseline_tree::render_baseline_tree_section;
+pub(crate) use sc_baseline_tree::{author_baseline_tree_section, budget_markdown_context};
 mod sc_revision;
 pub(crate) use sc_revision::build_work_item_plan_markdown_fresh_revision_prompt;
 pub(crate) use sc_revision::build_work_item_plan_markdown_revision_prompt;

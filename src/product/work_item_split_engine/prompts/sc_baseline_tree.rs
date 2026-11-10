@@ -33,7 +33,6 @@ pub(crate) fn budget_markdown_context(
     )
 }
 
-
 fn truncate_markdown_context(value: &str, budget: usize) -> String {
     if value.len() <= budget {
         return value.to_string();
@@ -47,7 +46,6 @@ fn truncate_markdown_context(value: &str, budget: usize) -> String {
     }
     format!("{}{}", &value[..end], marker)
 }
-
 
 const BASELINE_TREE_TRUNCATION_MARKER: &str = "（基线树清单超出上下文面配额，已按成员仓轮转保底截断；未列出的路径仍属于基线树，引用前按同前缀就近确认）";
 
@@ -72,7 +70,6 @@ fn truncate_baseline_tree_section(section: &str, cap: usize) -> String {
     kept.push('\n');
     kept
 }
-
 
 pub(crate) fn render_baseline_tree_section(
     tree: &std::collections::BTreeSet<String>,
@@ -157,7 +154,6 @@ pub(crate) fn render_baseline_tree_section(
     section
 }
 
-
 pub(crate) fn author_baseline_tree_section(
     loaded: Result<Option<std::collections::BTreeSet<String>>, String>,
     member_dirs: &[String],
@@ -173,7 +169,6 @@ pub(crate) fn author_baseline_tree_section(
         }
     }
 }
-
 
 /// D5 事前（REQ-WSC-06）：计算作者 prompt 中 `baseline:` 段的最终文本。
 ///

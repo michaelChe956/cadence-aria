@@ -1516,14 +1516,20 @@ mod tests {
     fn leaves_source_without_preamble_unchanged() {
         let source = "# Work Item Plan\n## Work Item WI-001: x\n";
 
-        assert_eq!(super::single_candidate_delivery::trim_provider_preamble(source), source);
+        assert_eq!(
+            super::single_candidate_delivery::trim_provider_preamble(source),
+            source
+        );
     }
 
     #[test]
     fn leaves_source_without_document_heading_unchanged() {
         let source = "我会先读取上下文，再生成计划。\n## Work Item WI-001: x\n";
 
-        assert_eq!(super::single_candidate_delivery::trim_provider_preamble(source), source);
+        assert_eq!(
+            super::single_candidate_delivery::trim_provider_preamble(source),
+            source
+        );
     }
 
     #[test]
