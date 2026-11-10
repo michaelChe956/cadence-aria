@@ -13,6 +13,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CockpitShell } from "../components/cockpit/CockpitShell";
+import { AGGREGATE_INITIALIZATION_REQUIRED_PROMPT } from "../components/lifecycle/KnowledgeBaseCard";
 import { KnowledgeBasePage } from "./KnowledgeBasePage";
 import type { KnowledgeBaseUserInputSummaryDto } from "../api/types/knowledge-base";
 
@@ -165,6 +166,8 @@ function installFetch(
     read?: (path: string) => Promise<Response>;
     /** 覆盖知识库状态（用于构造前置门拒绝；按 URL 区分 LC 以覆盖换参重跑）。 */
     status?: (url: string) => Response;
+    /** 覆盖知识库文件树（用于构造前置门拒绝下的只读浏览面）。 */
+    files?: () => Response;
     /** 覆盖项目清单（顶栏项目名来源）。 */
     projects?: () => Response;
     /** 覆盖逻辑代码库清单（顶栏 LC 名来源）。 */
@@ -204,6 +207,9 @@ function installFetch(
       });
     }
     if (url.includes("/knowledge-base/files")) {
+      if (overrides.files) {
+        return overrides.files();
+      }
       return jsonResponse({ nodes: FILES });
     }
     if (url.includes("/change-packages/lint")) {
@@ -921,5 +927,146 @@ describe("KnowledgeBasePage", () => {
         .find((node) => node.getAttribute("data-path") === "user-input/goal.md");
       expect(badge).toHaveTextContent("已确认");
     });
+  });
+
+  // ── REQ-KB-13：聚合初始化未完成（前置门）时的详情页行为 ──────────────
+  it("preflight_gate_shows_chinese_prompt_with_actionable_next_step", async () => {
+    const { calls } = installFetch({
+      status: () =>
+        jsonResponse(
+          {
+            code: "knowledge_base_requires_aggregate_initialization",
+            message: "聚合初始化未完成，知识库暂不可用",
+          },
+          422,
+        ),
+      files: () =>
+        jsonResponse(
+          {
+            code: "knowledge_base_requires_aggregate_initialization",
+            message: "聚合初始化未完成，知识库暂不可用",
+          },
+          422,
+        ),
+    });
+    renderPage();
+
+    // 顶部中文提示：透传后端 message。
+    const notice = await screen.findByTestId("kb-preflight-notice");
+    expect(within(notice).getByTestId("kb-preflight-notice-headline")).toHaveTextContent(
+      "聚合初始化未完成，知识库暂不可用",
+    );
+    // 与卡片侧同口径：统一短文案逐字一致（同一份常量，不得各写一套）。
+    expect(within(notice).getByTestId("kb-preflight-notice-prompt")).toHaveTextContent(
+      AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
+    );
+    // 可执行的下一步：告诉用户去哪儿做什么，而不是只丢一个码。
+    expect(within(notice).getByTestId("kb-preflight-next-step")).toHaveTextContent(
+      "逻辑代码库管理",
+    );
+    // 顶栏徽标同步显示「前置未满足」。
+    expect(screen.getByTestId("kb-status")).toHaveTextContent("前置未满足");
+    // 前置门拒绝时不得有任何写请求。
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(0);
+  });
+
+  it("preflight_gate_disables_write_entries_but_keeps_read_only_browsing", async () => {
+    const { calls } = installFetch({
+      status: () =>
+        jsonResponse(
+          {
+            code: "knowledge_base_requires_aggregate_initialization",
+            // message 为空 ⇒ 回落到与卡片侧同一份统一短文案。
+            message: "",
+          },
+          422,
+        ),
+      userInput: () =>
+        jsonResponse(
+          userInputSummary([{ path: "user-input/goal.md" }]),
+        ),
+    });
+    renderPage();
+
+    // 只读浏览仍然可用：文件树渲染，文件可打开预览。
+    await screen.findByTestId("kb-file-tree");
+    await waitForEditorValue("# 基础信息");
+    fireEvent.click(screen.getByRole("button", { name: "product.md" }));
+    await waitForEditorValue("# 产品信息");
+
+    // message 为空 ⇒ 顶部提示回落到统一短文案。
+    const notice = await screen.findByTestId("kb-preflight-notice");
+    expect(within(notice).getByTestId("kb-preflight-notice-headline")).toHaveTextContent(
+      AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
+    );
+
+    // 写入口禁用：保存按钮禁用且点击不发写请求。
+    const saveButton = screen.getByRole("button", { name: "保存" });
+    await waitFor(() => {
+      expect(saveButton).toBeDisabled();
+    });
+    fireEvent.click(saveButton);
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(0);
+
+    // 编辑器只读（无 onChange ⇒ MonacoEditor 内建 readOnly 语义）。
+    expect(screen.getByTestId("monaco-editor")).toHaveAttribute(
+      "data-readonly",
+      "true",
+    );
+    expect(screen.getByTestId("kb-preflight-write-hint")).toHaveTextContent(
+      "聚合初始化未完成",
+    );
+
+    // 输入确认区整体隐藏 ⇒ 确认动作不可达（确认请求不得发出）。
+    await waitFor(() => {
+      expect(screen.queryByTestId("kb-user-input-panel")).toBeNull();
+    });
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+  });
+
+  it("preflight_gate_clears_and_restores_write_entries_on_success", async () => {
+    installFetch({
+      status: (url) =>
+        url.includes("/lc1/")
+          ? jsonResponse(
+              {
+                code: "knowledge_base_requires_aggregate_initialization",
+                message: "聚合初始化未完成，知识库暂不可用",
+              },
+              422,
+            )
+          : jsonResponse({
+              exists: true,
+              schema_version: "4.0",
+              initialization_status: "complete",
+              global_validation: "passed",
+              completed_stages: ["base-info"],
+              skipped_stages: [],
+              skills_available: true,
+            }),
+    });
+    const router = renderPage();
+
+    expect(await screen.findByTestId("kb-preflight-notice")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    });
+
+    // 换到前置已满足的 LC：提示消失，写入口恢复。
+    await act(async () => {
+      await router.navigate({ to: "/knowledge-base/p1/lc2" });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("kb-preflight-notice")).toBeNull();
+    });
+    await waitForEditorValue("# 基础信息");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    });
+    expect(screen.getByTestId("monaco-editor")).toHaveAttribute(
+      "data-readonly",
+      "false",
+    );
   });
 });

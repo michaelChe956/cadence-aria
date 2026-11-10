@@ -6,7 +6,13 @@
 // 变更包（user-input/updates/ 下的 CHANGE-* 目录）额外展示 lint 的字段级标记。
 // 机器管理文件（后端标记 editable=false 的 manifest.yaml、
 // evidence/relation-graph.yaml 等）按只读呈现：不提供编辑入口与保存入口。
+//
+// Task 7（REQ-KB-13）：聚合初始化未完成时，后端在知识库全部端点入口（含状态
+// 端点）以 422 + 稳定码拒绝。详情页据此进入「前置未满足」态：顶部给出与
+// 卡片侧逐字一致的中文提示 + 可执行下一步，并把写入口（保存、输入确认）
+// 禁用，只读浏览（文件树 / 预览）保持可用。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import { ApiRequestError, listProjects } from "../api/client";
 import { listLogicalCodebases } from "../api/codebases";
 import {
@@ -24,6 +30,17 @@ import type {
   KnowledgeBaseUserInputSummaryDto,
 } from "../api/types/knowledge-base";
 import { KnowledgeBaseUserInputPanel } from "../components/lifecycle/KnowledgeBaseUserInputPanel";
+/**
+ * REQ-KB-13 前置门：聚合初始化未完成时，知识库端点（含状态端点）在 HTTP 层
+ * 以该稳定码拒绝。前置未满足的判定只依据后端已给出的稳定码——不臆造
+ * status 投影里尚不存在的字段（status 缺该信号时不显示「前置未满足」徽标）。
+ * 稳定码与统一提示文案都取自卡片侧导出的同一份常量（两处必须逐字一致，
+ * 不得各写一套文案）。
+ */
+import {
+  AGGREGATE_INITIALIZATION_REQUIRED_CODE,
+  AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
+} from "../components/lifecycle/KnowledgeBaseCard";
 import { MarkdownContent } from "../components/shared/MarkdownContent";
 import { MonacoEditor } from "../components/shared/MonacoEditor";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
@@ -33,11 +50,18 @@ import { useUnloadGuard } from "../hooks/useUnloadGuard";
 const CHANGE_PACKAGE_SEGMENT = "user-input/updates/";
 const UNSAVED_MESSAGE = "知识库文档有未保存的修改，离开将丢失这些改动。是否继续？";
 /**
- * REQ-KB-13 前置门：聚合初始化未完成时，知识库端点（含状态端点）在 HTTP 层
- * 以该稳定码拒绝。前置未满足的判定只依据后端已给出的稳定码——不臆造
- * status 投影里尚不存在的字段（status 缺该信号时不显示「前置未满足」徽标）。
+ * 提示的可执行下一步：不能只丢一个稳定码，必须告诉用户去哪儿做什么。
+ * 口径与后端失败文案表（failure_copy_table）一致：先到逻辑代码库管理里完成
+ * 聚合初始化，再回来使用知识库。
  */
-const PREFLIGHT_REQUIRED_CODE = "knowledge_base_requires_aggregate_initialization";
+const PREFLIGHT_NEXT_STEP =
+  "下一步：先到逻辑代码库管理里完成聚合初始化（规则/政策），完成后刷新本页即可继续浏览与编辑。";
+
+/**
+ * 前置门未满足时的复检间隔（毫秒）：与卡片侧同口径——聚合初始化完成后，
+ * 详情页据此自动恢复写入口（用户不必手动刷新）。
+ */
+const GATE_RECHECK_INTERVAL_MS = 5_000;
 
 type Notice = { kind: "error" | "success"; text: string };
 
@@ -67,6 +91,12 @@ export function KnowledgeBasePage({
   const [logicalCodebaseName, setLogicalCodebaseName] = useState<string | null>(null);
   // 前置门未满足（后端以稳定码拒绝）⇒ 顶栏显示「前置未满足」徽标。
   const [preflightUnmet, setPreflightUnmet] = useState(false);
+  // 前置门拒绝时后端给的中文 message（透传展示；为空则回落到统一短文案）。
+  const [preflightMessage, setPreflightMessage] = useState<string | null>(null);
+  // 装载计数：前置门恢复后据此重跑装载副作用（文件树 + 状态）。
+  const [reloadToken, setReloadToken] = useState(0);
+  // 门控结论的作用域（projectId/lcId）：换 LC 时据此清零上一 LC 的结论。
+  const gateScopeRef = useRef<string | null>(null);
   // 左侧文件树可折叠（固定宽，折叠后右区获得全部宽度）。
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   // 当前选中的文件路径（同步镜像）：用于丢弃乱序到达的过期读取响应。
@@ -97,6 +127,23 @@ export function KnowledgeBasePage({
 
   useUnloadGuard({ enabled: dirty, message: UNSAVED_MESSAGE });
 
+  /**
+   * 前置门拒绝（聚合初始化未完成）的统一识别与登记：任一知识库请求收到
+   * 该稳定码即进入「前置未满足」态（顶部提示 + 写入口禁用）。返回 true
+   * 表示本次失败就是前置门拒绝（调用方据此不再叠加泛化失败文案）。
+   */
+  const applyPreflightRejection = useCallback((reason: unknown): boolean => {
+    if (
+      !(reason instanceof ApiRequestError) ||
+      reason.code !== AGGREGATE_INITIALIZATION_REQUIRED_CODE
+    ) {
+      return false;
+    }
+    setPreflightUnmet(true);
+    setPreflightMessage(reason.message ?? "");
+    return true;
+  }, []);
+
   const openFile = useCallback(
     async (path: string) => {
       selectedPathRef.current = path;
@@ -122,6 +169,10 @@ export function KnowledgeBasePage({
         if (selectedPathRef.current !== path) {
           return;
         }
+        // 前置门拒绝（聚合初始化未完成）：顶部统一提示接管，不叠加泛化失败文案。
+        if (applyPreflightRejection(reason)) {
+          return;
+        }
         setNotice({ kind: "error", text: `读取文件失败：${errorText(reason)}` });
         return;
       }
@@ -136,26 +187,39 @@ export function KnowledgeBasePage({
           return;
         }
         setLintFields(lint.fields);
-      } catch {
+      } catch (reason) {
         if (selectedPathRef.current !== path) {
           return;
         }
         // lint 不可用（后端未就绪 / 网络失败）不得让页面崩：按「无标记」降级。
         setLintFields([]);
+        // 前置门拒绝时登记「前置未满足」态（顶部提示接管失败面）。
+        applyPreflightRejection(reason);
       }
     },
-    [projectId, lcId],
+    [projectId, lcId, applyPreflightRejection],
   );
 
   useEffect(() => {
     let cancelled = false;
+    // 换 LC（作用域变化）时清零「前置未满足」：上一 LC 的门控结论不得带到
+    // 新 LC（成功路径同样会清零，这里覆盖「新 LC 直接被拒」的路径）。
+    const scope = `${projectId}/${lcId}`;
+    if (gateScopeRef.current !== scope) {
+      gateScopeRef.current = scope;
+      setPreflightUnmet(false);
+      setPreflightMessage(null);
+    }
     void (async () => {
       let fileNodes: KnowledgeBaseFileNodeDto[] = [];
       try {
         fileNodes = await listKnowledgeBaseFiles(projectId, lcId);
       } catch (reason) {
         if (!cancelled) {
-          setNotice({ kind: "error", text: `加载知识库文件失败：${errorText(reason)}` });
+          // 前置门拒绝（聚合初始化未完成）：顶部统一提示接管，不叠加泛化失败文案。
+          if (!applyPreflightRejection(reason)) {
+            setNotice({ kind: "error", text: `加载知识库文件失败：${errorText(reason)}` });
+          }
         }
       }
       if (cancelled) {
@@ -174,6 +238,7 @@ export function KnowledgeBasePage({
           // 同路由仅换 LC 参数重跑副作用时，成功路径须清零「前置未满足」，
           // 否则旧徽标会残留。
           setPreflightUnmet(false);
+          setPreflightMessage(null);
         }
       })
       .catch((reason) => {
@@ -182,15 +247,42 @@ export function KnowledgeBasePage({
           return;
         }
         setStatus(null);
-        // 前置门拒绝（聚合初始化未完成）⇒ 顶栏显示「前置未满足」。
-        setPreflightUnmet(
-          reason instanceof ApiRequestError && reason.code === PREFLIGHT_REQUIRED_CODE,
-        );
+        // 前置门拒绝（聚合初始化未完成）⇒ 顶栏显示「前置未满足」+ 顶部提示。
+        // 非门控失败不改动门控状态（可能已由同轮的文件树请求登记）。
+        applyPreflightRejection(reason);
       });
     return () => {
       cancelled = true;
     };
-  }, [projectId, lcId, openFile]);
+  }, [projectId, lcId, openFile, reloadToken, applyPreflightRejection]);
+
+  // 前置门未满足时定期复检 status：聚合初始化完成后自动恢复写入口与文件树
+  // （与卡片侧同口径的复检节奏，用户不必手动刷新页面）。
+  useEffect(() => {
+    if (!preflightUnmet) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void getKnowledgeBaseStatus(projectId, lcId)
+        .then(() => {
+          if (cancelled) {
+            return;
+          }
+          setPreflightUnmet(false);
+          setPreflightMessage(null);
+          // 重跑装载副作用（文件树 + 状态）⇒ 写入口恢复。
+          setReloadToken((token) => token + 1);
+        })
+        .catch(() => {
+          // 仍未满足：保持当前提示，不叠加失败文案。
+        });
+    }, GATE_RECHECK_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [preflightUnmet, projectId, lcId]);
 
   // 顶栏关联名：项目名 + 逻辑代码库名（既有只读端点；取不到时回落 id）。
   useEffect(() => {
@@ -265,13 +357,15 @@ export function KnowledgeBasePage({
         return;
       }
       applyUserInputSummary(next);
-    } catch {
+    } catch (reason) {
       if (epoch !== userInputEpochRef.current) {
         return;
       }
       setUserInput(null);
+      // 前置门拒绝（聚合初始化未完成）：登记「前置未满足」态。
+      applyPreflightRejection(reason);
     }
-  }, [projectId, lcId, applyUserInputSummary]);
+  }, [projectId, lcId, applyUserInputSummary, applyPreflightRejection]);
 
   // 输入确认区随路由参数加载；换 LC 时先清零失效集合，避免旧 LC 的
   // 「已确认」基线把新 LC 的文件误标为需重新确认。
@@ -284,6 +378,10 @@ export function KnowledgeBasePage({
   const save = useCallback(async () => {
     if (!selectedPath || !selectedEditable) {
       // 未选中文件或机器管理文件（只读）：不发写请求（按钮已禁用，这里兜底）。
+      return;
+    }
+    if (preflightUnmet) {
+      // 前置门未满足（聚合初始化未完成）：写入口禁用，不发写请求。
       return;
     }
     if (digest === null) {
@@ -324,12 +422,22 @@ export function KnowledgeBasePage({
     lcId,
     selectedPath,
     selectedEditable,
+    preflightUnmet,
     draft,
     digest,
     refreshUserInput,
   ]);
 
   const tree = useMemo(() => buildTree(nodes), [nodes]);
+
+  // 顶部提示文案：透传后端 message；message 为空时回落到与卡片侧同一份
+  // 统一短文案（两处必须逐字一致）。
+  const preflightHeadline =
+    preflightMessage !== null && preflightMessage.trim() !== ""
+      ? preflightMessage
+      : AGGREGATE_INITIALIZATION_REQUIRED_PROMPT;
+  // 后端给了自己的 message 时，仍把统一短文案并排展示（保证与卡片侧同口径）。
+  const showUnifiedPrompt = preflightHeadline !== AGGREGATE_INITIALIZATION_REQUIRED_PROMPT;
 
   // 关联名回落：取不到时用 id（副标题不留空）。
   const projectLabel = projectName ?? projectId;
@@ -400,6 +508,32 @@ export function KnowledgeBasePage({
         </div>
       </header>
 
+      {/* 前置门未满足（聚合初始化未完成）：顶部中文提示 + 可执行下一步。
+          写入口（保存 / 输入确认）同时禁用，只读浏览不受影响。 */}
+      {preflightUnmet ? (
+        <div
+          data-testid="kb-preflight-notice"
+          role="alert"
+          className="flex shrink-0 items-start gap-2 border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-800"
+        >
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <div className="min-w-0">
+            <p
+              data-testid="kb-preflight-notice-headline"
+              className="font-semibold"
+            >
+              {preflightHeadline}
+            </p>
+            {showUnifiedPrompt ? (
+              <p data-testid="kb-preflight-notice-prompt">
+                {AGGREGATE_INITIALIZATION_REQUIRED_PROMPT}
+              </p>
+            ) : null}
+            <p data-testid="kb-preflight-next-step">{PREFLIGHT_NEXT_STEP}</p>
+          </div>
+        </div>
+      ) : null}
+
       {/* 主体：左文件树（固定宽、可折叠）+ 右编辑/预览（自适应并吃满高度）。 */}
       <div className="flex min-h-0 flex-1">
         <aside
@@ -426,7 +560,7 @@ export function KnowledgeBasePage({
                   onSelect={(path) => void openFile(path)}
                 />
               </div>
-              {userInput ? (
+              {userInput && !preflightUnmet ? (
                 <KnowledgeBaseUserInputPanel
                   projectId={projectId}
                   lcId={lcId}
@@ -473,7 +607,8 @@ export function KnowledgeBasePage({
                 selectedPath === null ||
                 digest === null ||
                 saving ||
-                !selectedEditable
+                !selectedEditable ||
+                preflightUnmet
               }
               className="rounded-md border border-[var(--aria-line)] bg-white px-3 py-1 text-xs font-semibold text-[var(--aria-ink)] disabled:opacity-50"
             >
@@ -485,6 +620,14 @@ export function KnowledgeBasePage({
                 className="text-xs text-[var(--aria-ink-muted)]"
               >
                 机器管理文件，只读
+              </span>
+            ) : null}
+            {preflightUnmet ? (
+              <span
+                data-testid="kb-preflight-write-hint"
+                className="text-xs text-amber-800"
+              >
+                聚合初始化未完成，暂不可编辑与保存
               </span>
             ) : null}
             {selectedPath ? (
@@ -527,7 +670,9 @@ export function KnowledgeBasePage({
                   value={draft}
                   language="markdown"
                   height="100%"
-                  onChange={selectedEditable ? setDraft : undefined}
+                  onChange={
+                    selectedEditable && !preflightUnmet ? setDraft : undefined
+                  }
                 />
               </div>
             ) : (
