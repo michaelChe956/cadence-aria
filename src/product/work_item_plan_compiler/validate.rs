@@ -81,10 +81,9 @@ pub fn validate_plan_candidate_ir(
                 // （平台不得臆造路径），同一候选只回灌一次；无候选时如实说明。
                 let mut candidates: Vec<&str> = Vec::new();
                 for path in &missing {
-                    for candidate in super::baseline_candidates::nearest_baseline_candidates(
-                        path,
-                        baseline_tree,
-                    ) {
+                    for candidate in
+                        super::baseline_candidates::nearest_baseline_candidates(path, baseline_tree)
+                    {
                         if !candidates.contains(&candidate) {
                             candidates.push(candidate);
                         }

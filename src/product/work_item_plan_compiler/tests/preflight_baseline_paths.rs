@@ -330,8 +330,7 @@ const NOTICE_AC_STATEMENT: &str = "WHEN 请求 `tests/e2e/notice-delete-e2e.mjs`
 
 /// 无候选夹具：AC 只引用 `scripts/run.mjs`；基线树里既无 `scripts/` 目录、
 /// 也无同名文件 ⇒ 平台如实说明无可用候选。
-const LONE_PATH_AC_STATEMENT: &str =
-    "WHEN 请求 `scripts/run.mjs` THE SYSTEM SHALL 返回既有内容。";
+const LONE_PATH_AC_STATEMENT: &str = "WHEN 请求 `scripts/run.mjs` THE SYSTEM SHALL 返回既有内容。";
 
 /// 由 F-56 候选派生：换 AC statement 并去掉验证命令里的仓库内路径。
 fn candidate_with_statement(statement: &str) -> String {

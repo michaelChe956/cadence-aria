@@ -352,10 +352,10 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     // 前缀 + `story_spec_ids:`/`design_spec_ids:` 行。故先算固定开销，
     // 再把**剩余**额度给清单（上限 32,000/4）；额度不足则按行截断并
     // 显式标记；额度为 0 ⇒ 整段缺席 ⇒ 上下文面恒 ≤ 32,000。
-    let context_overhead = "story:\ndesign:\nstructure:\nbaseline:\nstory_spec_ids:\ndesign_spec_ids:\n"
-        .len()
-        + request.story_spec_ids.join(", ").len()
-        + request.design_spec_ids.join(", ").len();
+    let context_overhead =
+        "story:\ndesign:\nstructure:\nbaseline:\nstory_spec_ids:\ndesign_spec_ids:\n".len()
+            + request.story_spec_ids.join(", ").len()
+            + request.design_spec_ids.join(", ").len();
     let context_used =
         story_context.len() + design_context.len() + repository_structure.len() + context_overhead;
     let baseline_cap = (WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 4)
@@ -453,8 +453,7 @@ fn budget_markdown_context(
 }
 
 /// 基线树清单的截断标记（渲染器内部截断与外层配额截断共用）。
-const BASELINE_TREE_TRUNCATION_MARKER: &str =
-    "（基线树清单超出上下文面配额，已按成员仓轮转保底截断；未列出的路径仍属于基线树，引用前按同前缀就近确认）";
+const BASELINE_TREE_TRUNCATION_MARKER: &str = "（基线树清单超出上下文面配额，已按成员仓轮转保底截断；未列出的路径仍属于基线树，引用前按同前缀就近确认）";
 
 /// 按**行边界**把已渲染的基线树清单截到 `cap` 字节；截断时以显式标记行
 /// 收尾（计入 cap），MUST NOT 把部分清单冒充全量。只删行、不改行内容 ⇒
@@ -506,7 +505,7 @@ fn truncate_markdown_context(value: &str, budget: usize) -> String {
 ///   成员仓轮转保底截断——每轮每组各取 1 条直到用满上限，保证每个成员仓
 ///   至少 1 条；被截断时以显式标记行收尾（计入上限），不得把部分清单
 ///   冒充全量。
-    pub(crate) fn render_baseline_tree_section(
+pub(crate) fn render_baseline_tree_section(
     tree: &std::collections::BTreeSet<String>,
     member_dirs: &[String],
 ) -> String {
@@ -563,7 +562,11 @@ fn truncate_markdown_context(value: &str, budget: usize) -> String {
     // 成员仓轮转保底：每轮每组各取 1 条，直到用满「cap − 截断标记行」；
     // 放不下的行跳过（上限不可破），保证轮 0 尽量为每组保住至少 1 条。
     let mut remaining = cap.saturating_sub(BASELINE_TREE_TRUNCATION_MARKER.len() + 1);
-    let max_rounds = groups.iter().map(|(_, paths)| paths.len()).max().unwrap_or(0);
+    let max_rounds = groups
+        .iter()
+        .map(|(_, paths)| paths.len())
+        .max()
+        .unwrap_or(0);
     for round in 0..max_rounds {
         for (dir, paths) in &groups {
             let Some(path) = paths.get(round) else {
@@ -592,7 +595,7 @@ fn truncate_markdown_context(value: &str, budget: usize) -> String {
 ///   点仍在 Evaluate 阶段（`plan_baseline_tree` 的 `Err` 在预校验原样上抛）。
 /// 基线树来源唯一：调用方传入 `plan_baseline_tree` 的装载结果（与
 /// Evaluate 期同函数同源），本函数不新增第二套装载。
-    pub(crate) fn author_baseline_tree_section(
+pub(crate) fn author_baseline_tree_section(
     loaded: Result<Option<std::collections::BTreeSet<String>>, String>,
     member_dirs: &[String],
 ) -> Option<String> {

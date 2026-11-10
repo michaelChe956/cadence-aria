@@ -772,7 +772,10 @@ fn previous_round_section_deduplicates_same_content_identity() {
         .collect();
     let replay = previous_round_replay(
         "previous_round_dedup",
-        vec![mechanical_finding("intent_unexecutable", "mechanical summary")],
+        vec![mechanical_finding(
+            "intent_unexecutable",
+            "mechanical summary",
+        )],
         previous,
     );
     let prompt = replay
@@ -844,7 +847,10 @@ fn previous_round_section_resolves_by_content_identity_not_fingerprint() {
 fn previous_round_section_skips_non_mechanically_judgeable_findings() {
     let replay = previous_round_replay(
         "previous_round_non_mechanical",
-        vec![mechanical_finding("intent_unexecutable", "mechanical summary")],
+        vec![mechanical_finding(
+            "intent_unexecutable",
+            "mechanical summary",
+        )],
         vec![
             previous_finding(
                 "coverage 缺口：上游未提供 capability",
@@ -900,10 +906,7 @@ fn previous_round_section_degrades_when_mechanical_report_unavailable() {
         )
         .expect("降级必须如实注入清单段（不 panic、不清空清单）")
     };
-    for unavailable_ref in [
-        None,
-        Some("mechanical_report/does-not-resolve".to_string()),
-    ] {
+    for unavailable_ref in [None, Some("mechanical_report/does-not-resolve".to_string())] {
         replay.engine.session.mechanical_report_ref = unavailable_ref;
         let section = section_for(&replay.engine);
         let payload = previous_round_payload(&section);

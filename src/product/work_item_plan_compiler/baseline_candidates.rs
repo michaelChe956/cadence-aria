@@ -84,7 +84,11 @@ mod tests {
     #[test]
     fn candidates_always_belong_to_the_baseline_tree() {
         let baseline = tree(&["tests/unit/notice.test.mjs", "scripts/build.mjs"]);
-        for missing in ["tests/e2e/notice.test.mjs", "scripts/run.mjs", "notice.test.mjs"] {
+        for missing in [
+            "tests/e2e/notice.test.mjs",
+            "scripts/run.mjs",
+            "notice.test.mjs",
+        ] {
             for candidate in nearest_baseline_candidates(missing, &baseline) {
                 assert!(
                     baseline.contains(candidate),
