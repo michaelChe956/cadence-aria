@@ -102,6 +102,17 @@ fn persist_verification_artifacts(
     lifecycle: &crate::product::lifecycle_store::LifecycleStore,
     plan_id: &str,
 ) -> (String, String) {
+    persist_verification_artifacts_with_findings(lifecycle, plan_id, Vec::new())
+}
+
+/// D6（REQ-WSC-06「前轮 finding 状态求交按内容身份」）：带机械 findings 的
+/// 变体——当前候选机械报告的 finding `code` 集合是复评前轮 finding 状态
+/// 求交的数据源（与评审输入同代）。
+pub(super) fn persist_verification_artifacts_with_findings(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    plan_id: &str,
+    findings: Vec<WorkItemSplitFinding>,
+) -> (String, String) {
     let source = "# immutable repaired Work Item Plan\n";
     let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
     let mut source_revision = SourceRevisionRecord {
@@ -137,7 +148,7 @@ fn persist_verification_artifacts(
         report: PlanCandidateMechanicalReport {
             source_revision_hash: ir.ir.source_revision_hash,
             compiler_version: ir.ir.compiler_version,
-            findings: Vec::<WorkItemSplitFinding>::new(),
+            findings,
         },
         // SG3a.0：旧 fixture 形态（无结构报告）。
         structure_report: None,

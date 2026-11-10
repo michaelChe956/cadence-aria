@@ -509,12 +509,16 @@ fn validate_plan_projection_hashes(projection: &PlanProjectionBundle) -> Result<
     Ok(())
 }
 
-/// REQ-TOP-04 场景 6（F-52 L2 前轮注入）：加载上一 ReviewerRun 持久化
-/// verdict（与 F5-B 闸门同源的单候选加载形态），其非 advisory findings
-/// 逐条经 classify_finding 得到结构化身份（fingerprint/category/
-/// contract_field/required_action）注入复评轮 prompt——reviewer 可比对
-/// fingerprint 显式标注 repeated，不再依赖措辞巧合判重。首轮（无前轮
-/// verdict 或前轮无非 advisory finding）返回 None；prompt 字节预算由
+/// REQ-TOP-04 场景 6（F-52 L2 前轮注入）+ D6（REQ-WSC-06「前轮 finding 分区
+/// 注入」）：加载上一 ReviewerRun 持久化 verdict（与 F5-B 闸门同源的单候选
+/// 加载形态），其非 advisory findings 逐条经 classify_finding 得到结构化身份
+/// 后，以**内容身份**（`contract_field` 去 `plan_preflight.` 前缀 vs 当前候选
+/// 机械报告 finding 的 `code`）求交、同身份去重并按「待办 / 已关闭」分区注入
+/// ——「某前轮 finding 在本轮是否仍存在」由平台对当前候选机械报告复算得出，
+/// 不由模型依据清单文本自行推断。机械报告不可得 ⇒ 如实降级
+/// （`mechanical_report_available: false`，前轮 finding 既不进待办也不进
+/// 已关闭，不 panic、不得当作「全部已解决」）。首轮（无前轮 verdict 或前轮
+/// 无非 advisory finding）返回 None；prompt 字节预算由
 /// `ensure_single_candidate_review_prompt_budget`（96KiB）兜底。
 pub(crate) fn single_candidate_previous_round_findings_section(
     engine: &WorkspaceEngine,
@@ -562,29 +566,104 @@ pub(crate) fn single_candidate_previous_round_findings_section(
         .filter(|classified| {
             classified.class != crate::product::work_item_plan_policy::FindingClass::Advisory
         })
-        .map(|classified| {
-            json!({
-                "fingerprint": classified.fingerprint.0,
-                "category": classified.category.map(|category| category.as_str()),
-                "contract_field": classified.contract_field,
-                "required_action": classified.required_action,
-            })
-        })
         .collect();
     if previous_findings.is_empty() {
         return None;
     }
+    // D6：装载当前候选机械报告（Evaluate 阶段落盘，与评审输入同代）作为求交
+    // 数据源；ref 缺失或装载失败 ⇒ 如实降级（None），不 panic、不静默当作空集。
+    let current_codes = current_mechanical_codes(engine, lifecycle);
+    let mut unresolved_findings = Vec::new();
+    let mut resolved_findings = Vec::new();
+    let mut duplicate_count = 0usize;
+    let mut seen_identities = BTreeSet::new();
+    for classified in &previous_findings {
+        let Some(identity) = content_identity(classified.contract_field.as_deref()) else {
+            // contract_field 缺失或无 plan_preflight. 前缀 ⇒ 不可机械判定：
+            // 既不进待办也不进已关闭（不得当作已解决）。
+            continue;
+        };
+        if !seen_identities.insert(identity.clone()) {
+            // 同一内容身份只保留首条，其余折叠为计数（同一 preflight 码对
+            // 多个 Work Item 各登记一次的重复噪声不再逐条呈现）。
+            duplicate_count += 1;
+            continue;
+        }
+        let Some(codes) = current_codes.as_ref() else {
+            // 机械报告不可得 ⇒ 该 finding 既不进待办也不进已关闭。
+            continue;
+        };
+        if codes.contains(&identity) {
+            unresolved_findings.push(json!({
+                "fingerprint": classified.fingerprint.0,
+                "category": classified.category.map(|category| category.as_str()),
+                "contract_field": classified.contract_field,
+                "required_action": classified.required_action,
+                "content_identity": identity,
+            }));
+        } else {
+            resolved_findings.push(json!({
+                "fingerprint": classified.fingerprint.0,
+                "category": classified.category.map(|category| category.as_str()),
+                "contract_field": classified.contract_field,
+                "content_identity": identity,
+                "resolved_by": current_ir_ref,
+            }));
+        }
+    }
     let payload = json!({
-        "note": "上一轮评审已登记的 finding 身份；fingerprint 是其稳定身份指纹",
-        "previous_findings": previous_findings,
+        "note": "上一轮评审已登记的非 advisory finding 分区清单；待办=当前候选机械复算仍存在同内容身份，已关闭=当前候选机械复算已无该内容身份；duplicate_count=同身份被折叠的重复条目数",
+        "unresolved_findings": unresolved_findings,
+        "resolved_findings": resolved_findings,
+        "duplicate_count": duplicate_count,
+        "mechanical_report_available": current_codes.is_some(),
         "current_plan_candidate_ir_ref": current_ir_ref,
     });
     let serialized = serde_json::to_string_pretty(&payload).ok()?;
     Some(format!(
         "\n### Previous Review Round Findings\n{serialized}\n\
          [previous_round_repetition_discipline]\n\
-         若上列某条 fingerprint 在本轮再次出现（同一问题未收敛），必须在该 finding 的 evidence 中显式标注 repeated 并说明为何自动修订未能关闭它；不得以改写措辞的方式隐式重复同一问题。\n"
+         前轮 finding 在本轮是否仍存在，以平台给出的分区复算事实为准（unresolved_findings=仍存在的待办，resolved_findings=当前候选机械复算已确认关闭）：已关闭区条目不得再作为待办重复上报，也不得要求作者再次修改；该判定不得由你依据清单文本自行推断。若待办区某条 fingerprint 在本轮再次出现（同一问题未收敛），必须在该 finding 的 evidence 中显式标注 repeated 并说明为何自动修订未能关闭它；不得以改写措辞的方式隐式重复同一问题。\n"
     ))
+}
+
+/// D6（REQ-WSC-06「前轮 finding 状态求交按内容身份」）：前轮 finding 的
+/// **内容身份** = `contract_field` 去掉 `plan_preflight.` 前缀后的机械码，
+/// 与当前候选机械报告 finding 的 `code` 同域可比。`contract_field` 缺失或
+/// 无该前缀 ⇒ None（不可机械判定：既不进待办也不进已关闭）。求交 MUST NOT
+/// 用 `FindingFingerprint`——其派生含 `message`，而机械报告 message 与评审
+/// message 不同，按指纹求交恒不相交。
+pub(crate) fn content_identity(contract_field: Option<&str>) -> Option<String> {
+    let code = contract_field?.strip_prefix("plan_preflight.")?;
+    (!code.trim().is_empty()).then(|| code.to_string())
+}
+
+/// 装载当前候选机械报告的 finding `code` 集合（D6 求交数据源：与评审输入
+/// 同代的 `session.mechanical_report_ref`）。ref 缺失或装载失败 ⇒ None
+/// （如实降级；不得 panic、不得静默当作空集——空集意味着「全部已关闭」）。
+fn current_mechanical_codes(
+    engine: &WorkspaceEngine,
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+) -> Option<BTreeSet<String>> {
+    let report_ref = engine.session.mechanical_report_ref.as_deref()?;
+    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+        project_id: engine.session.project_id.clone(),
+        issue_id: engine.session.issue_id.clone(),
+        plan_id: engine.session.entity_id.clone(),
+    };
+    let record = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+        lifecycle.app_paths(),
+    )
+    .get_mechanical_report(&scope, report_ref)
+    .ok()?;
+    Some(
+        record
+            .report
+            .findings
+            .iter()
+            .map(|finding| finding.code.clone())
+            .collect(),
+    )
 }
 
 // 余量按完整多 WI plan 的增长预留；接近上限时先实测，再放宽至整百级。
