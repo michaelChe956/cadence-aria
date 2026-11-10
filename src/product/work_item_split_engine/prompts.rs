@@ -506,7 +506,8 @@ fn truncate_markdown_context(value: &str, budget: usize) -> String {
 ///   成员仓轮转保底截断——每轮每组各取 1 条直到用满上限，保证每个成员仓
 ///   至少 1 条；被截断时以显式标记行收尾（计入上限），不得把部分清单
 ///   冒充全量。
-pub(crate) fn render_baseline_tree_section(
+#[cfg_attr(not(feature = "sc-author-baseline-tree"), allow(dead_code))]
+    pub(crate) fn render_baseline_tree_section(
     tree: &std::collections::BTreeSet<String>,
     member_dirs: &[String],
 ) -> String {
@@ -592,7 +593,8 @@ pub(crate) fn render_baseline_tree_section(
 ///   点仍在 Evaluate 阶段（`plan_baseline_tree` 的 `Err` 在预校验原样上抛）。
 /// 基线树来源唯一：调用方传入 `plan_baseline_tree` 的装载结果（与
 /// Evaluate 期同函数同源），本函数不新增第二套装载。
-pub(crate) fn author_baseline_tree_section(
+#[cfg_attr(not(feature = "sc-author-baseline-tree"), allow(dead_code))]
+    pub(crate) fn author_baseline_tree_section(
     loaded: Result<Option<std::collections::BTreeSet<String>>, String>,
     member_dirs: &[String],
 ) -> Option<String> {
