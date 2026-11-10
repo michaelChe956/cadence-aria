@@ -99,3 +99,29 @@ export type KnowledgeBaseOperationSnapshotDto = {
   started_at: string | null;
   completed_at: string | null;
 };
+
+/** GET /user-input 的单份输入文件状态投影（filled/confirmed/pending 三态）。 */
+export type KnowledgeBaseUserInputFileDto = {
+  path: string;
+  filled: boolean;
+  confirmed: boolean;
+  pending: boolean;
+};
+
+/** GET /user-input 响应：输入文件的状态汇总（confirmed_count 只计已填写且摘要一致的）。 */
+export type KnowledgeBaseUserInputSummaryDto = {
+  files: KnowledgeBaseUserInputFileDto[];
+  confirmed_count: number;
+  total_count: number;
+};
+
+/** 确认载荷：文件路径 + 客户端当前读到的 digest（服务端重算比对）。 */
+export type KnowledgeBaseUserInputDigestItem = {
+  path: string;
+  digest: string;
+};
+
+/** POST /user-input/confirm 响应：本轮确认成功的路径（升序去重）。 */
+export type KnowledgeBaseUserInputConfirmationDto = {
+  confirmed: string[];
+};

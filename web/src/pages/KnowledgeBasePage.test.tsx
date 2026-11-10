@@ -14,6 +14,7 @@ import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CockpitShell } from "../components/cockpit/CockpitShell";
 import { KnowledgeBasePage } from "./KnowledgeBasePage";
+import type { KnowledgeBaseUserInputSummaryDto } from "../api/types/knowledge-base";
 
 // Monaco 编辑器挂载计数：用于验证「折叠文件树不会重挂载编辑器」
 // （key 重挂载会清空撤销栈、重置光标与选区、打断输入法）。
@@ -122,6 +123,19 @@ const FILES = [
     size: 0,
     editable: true,
   },
+  {
+    // 输入确认区用例：9 份输入之一（可编辑 ⇒ 面板点击后在右侧编辑器打开）。
+    path: "user-input/goal.md",
+    is_dir: false,
+    size: 10,
+    editable: true,
+  },
+  {
+    path: "user-input/scope.md",
+    is_dir: false,
+    size: 10,
+    editable: true,
+  },
 ];
 
 const CONTENTS: Record<string, { content: string; digest: string }> = {
@@ -133,6 +147,8 @@ const CONTENTS: Record<string, { content: string; digest: string }> = {
     content: "# 代码变更",
     digest: "digest-change",
   },
+  "user-input/goal.md": { content: "# 目标", digest: "digest-goal" },
+  "user-input/scope.md": { content: "# 范围", digest: "digest-scope" },
 };
 
 type FetchCall = { url: string; method: string; body?: unknown };
@@ -153,6 +169,10 @@ function installFetch(
     projects?: () => Response;
     /** 覆盖逻辑代码库清单（顶栏 LC 名来源）。 */
     logicalCodebases?: () => Response;
+    /** 覆盖输入投影（GET /user-input；默认 404 ⇒ 输入确认区不渲染）。 */
+    userInput?: () => Response;
+    /** 覆盖输入确认（POST /user-input/confirm；按需翻转夹具状态）。 */
+    userInputConfirm?: (body: unknown) => Response;
   } = {},
 ): { calls: FetchCall[] } {
   const calls: FetchCall[] = [];
@@ -190,6 +210,18 @@ function installFetch(
       return overrides.lint
         ? overrides.lint()
         : jsonResponse({ violations: [], fields: [] });
+    }
+    if (url.includes("/knowledge-base/user-input/confirm")) {
+      return overrides.userInputConfirm
+        ? overrides.userInputConfirm(calls.at(-1)?.body)
+        : jsonResponse({ confirmed: [] });
+    }
+    if (url.includes("/knowledge-base/user-input")) {
+      if (overrides.userInput) {
+        return overrides.userInput();
+      }
+      // 默认不提供输入投影（404）：既有用例不渲染输入确认区，断言面稳定。
+      return jsonResponse({ code: "not_found", message: "输入投影不可用" }, 404);
     }
     if (url.includes("/knowledge-base/file")) {
       const path = decodeURIComponent(
@@ -234,6 +266,21 @@ function installFetch(
   });
   vi.stubGlobal("fetch", fetchMock);
   return { calls };
+}
+/** 构造 GET /user-input 汇总投影：默认已填写且未确认（filled ⇒ pending）。 */
+function userInputSummary(
+  files: { path: string; filled?: boolean; confirmed?: boolean }[],
+): KnowledgeBaseUserInputSummaryDto {
+  const rows = files.map((file) => {
+    const filled = file.filled ?? true;
+    const confirmed = file.confirmed ?? false;
+    return { path: file.path, filled, confirmed, pending: filled && !confirmed };
+  });
+  return {
+    files: rows,
+    confirmed_count: rows.filter((row) => row.confirmed).length,
+    total_count: rows.length,
+  };
 }
 
 function createTestRouter() {
@@ -770,5 +817,109 @@ describe("KnowledgeBasePage", () => {
     await screen.findByTestId("shell-child");
     // 非知识库路由：既有行为零变化（全局设置入口仍在）。
     expect(screen.getByTestId("cockpit-settings-trigger")).toBeInTheDocument();
+  });
+
+  it("user_input_panel_lists_files_with_badges_and_pending_hint", async () => {
+    installFetch({
+      userInput: () =>
+        jsonResponse(
+          userInputSummary([
+            { path: "user-input/goal.md", confirmed: true },
+            { path: "user-input/scope.md" },
+          ]),
+        ),
+    });
+    renderPage();
+
+    const panel = await screen.findByTestId("kb-user-input-panel");
+    expect(panel).toBeInTheDocument();
+    const badgeOf = (path: string) =>
+      within(panel)
+        .getAllByTestId("kb-user-input-badge")
+        .find((node) => node.getAttribute("data-path") === path);
+    await waitFor(() => {
+      expect(badgeOf("user-input/goal.md")).toHaveTextContent("已确认");
+      expect(badgeOf("user-input/scope.md")).toHaveTextContent("待确认");
+    });
+    // 未确认时提示体现「待确认 N 份」（N = 总数 - 已确认数，含未填份额）。
+    expect(within(panel).getByTestId("kb-user-input-summary")).toHaveTextContent(
+      "待确认 1 份",
+    );
+  });
+
+  it("saving_confirmed_input_file_invalidates_and_reconfirms", async () => {
+    let goalConfirmed = true;
+    let goalDigest = "digest-goal";
+    const { calls } = installFetch({
+      userInput: () =>
+        jsonResponse(
+          userInputSummary([
+            { path: "user-input/goal.md", confirmed: goalConfirmed },
+          ]),
+        ),
+      userInputConfirm: () => {
+        goalConfirmed = true;
+        return jsonResponse({ confirmed: ["user-input/goal.md"] });
+      },
+      write: () => {
+        goalConfirmed = false;
+        goalDigest = "digest-goal-v2";
+        return jsonResponse({ path: "user-input/goal.md", digest: goalDigest });
+      },
+      read: (path) =>
+        Promise.resolve(
+          jsonResponse({
+            path,
+            content: CONTENTS[path]?.content ?? "# 内容",
+            digest:
+              path === "user-input/goal.md"
+                ? goalDigest
+                : (CONTENTS[path]?.digest ?? "digest-x"),
+          }),
+        ),
+    });
+    renderPage();
+
+    // 点输入文件：右侧编辑器打开并可直接编辑。
+    fireEvent.click(await screen.findByTestId("kb-user-input-open"));
+    await waitForEditorValue("# 目标");
+    fireEvent.change(screen.getByTestId("kb-editor"), {
+      target: { value: "# 目标（已改）" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    // 保存后该份确认按 digest 自动失效：徽标回到待确认并提示需重新确认。
+    expect(await screen.findByTestId("kb-user-input-invalidated")).toHaveTextContent(
+      "已修改，需重新确认",
+    );
+    await waitFor(() => {
+      const badge = screen
+        .getAllByTestId("kb-user-input-badge")
+        .find((node) => node.getAttribute("data-path") === "user-input/goal.md");
+      expect(badge).toHaveTextContent("待确认");
+    });
+
+    // 重新确认携带当前读到的 digest；成功后提示消失、徽标回到已确认。
+    fireEvent.click(screen.getByTestId("kb-user-input-confirm"));
+    const confirmPost = await waitFor(() => {
+      const post = calls.find(
+        (call) => call.method === "POST" && call.url.includes("/user-input/confirm"),
+      );
+      expect(post).toBeDefined();
+      return post;
+    });
+    expect(confirmPost?.body).toEqual({
+      path: "user-input/goal.md",
+      digest: "digest-goal-v2",
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("kb-user-input-invalidated")).toBeNull();
+    });
+    await waitFor(() => {
+      const badge = screen
+        .getAllByTestId("kb-user-input-badge")
+        .find((node) => node.getAttribute("data-path") === "user-input/goal.md");
+      expect(badge).toHaveTextContent("已确认");
+    });
   });
 });

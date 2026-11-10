@@ -11,6 +11,7 @@ import { ApiRequestError, listProjects } from "../api/client";
 import { listLogicalCodebases } from "../api/codebases";
 import {
   getKnowledgeBaseStatus,
+  getKnowledgeBaseUserInput,
   lintKnowledgeBaseChangePackage,
   listKnowledgeBaseFiles,
   readKnowledgeBaseFile,
@@ -20,7 +21,9 @@ import type {
   KnowledgeBaseChangePackageFieldStatusDto,
   KnowledgeBaseFileNodeDto,
   KnowledgeBaseStatusDto,
+  KnowledgeBaseUserInputSummaryDto,
 } from "../api/types/knowledge-base";
+import { KnowledgeBaseUserInputPanel } from "../components/lifecycle/KnowledgeBaseUserInputPanel";
 import { MarkdownContent } from "../components/shared/MarkdownContent";
 import { MonacoEditor } from "../components/shared/MonacoEditor";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
@@ -68,6 +71,18 @@ export function KnowledgeBasePage({
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   // 当前选中的文件路径（同步镜像）：用于丢弃乱序到达的过期读取响应。
   const selectedPathRef = useRef<string | null>(null);
+  // 输入确认区（REQ-KB-15）：9 份输入的状态投影；不可用（前置门未满足 /
+  // 后端未就绪）时为 null ⇒ 确认区整体隐藏，不阻塞文件浏览。
+  const [userInput, setUserInput] = useState<KnowledgeBaseUserInputSummaryDto | null>(
+    null,
+  );
+  // 已确认后被编辑（摘要漂移）的输入文件：逐份提示「已修改，需重新确认」。
+  const [userInputInvalidated, setUserInputInvalidated] = useState<
+    ReadonlySet<string>
+  >(new Set());
+  const confirmedPathsRef = useRef<ReadonlySet<string>>(new Set());
+  const userInputPathsRef = useRef<ReadonlySet<string>>(new Set());
+  const userInputEpochRef = useRef(0);
 
   // 选中文件的节点元数据：机器管理文件按只读呈现——编辑器不传 onChange
   // （MonacoEditor 的「无 onChange ⇒ 只读」内建语义）、保存入口禁用、并明确
@@ -210,6 +225,62 @@ export function KnowledgeBasePage({
     };
   }, [projectId, lcId]);
 
+  /** 应用新的输入投影：记录「已确认 → 待确认」迁移（编辑使确认按 digest 失效）。 */
+  const applyUserInputSummary = useCallback(
+    (next: KnowledgeBaseUserInputSummaryDto) => {
+      const confirmed = new Set(
+        next.files.filter((file) => file.confirmed).map((file) => file.path),
+      );
+      const pending = new Set(
+        next.files.filter((file) => file.pending).map((file) => file.path),
+      );
+      // 迁移必须在 setState 外用「更新前」的 ref 基线急切计算：React 的
+      // state updater 在下次渲染才执行，届时 ref 已指向新基线会漏判。
+      const lapsed = [...confirmedPathsRef.current].filter((path) =>
+        pending.has(path),
+      );
+      setUserInputInvalidated((prev) => {
+        const merged = new Set(prev);
+        for (const path of lapsed) {
+          merged.add(path);
+        }
+        for (const path of confirmed) {
+          merged.delete(path);
+        }
+        return merged;
+      });
+      confirmedPathsRef.current = confirmed;
+      userInputPathsRef.current = new Set(next.files.map((file) => file.path));
+      setUserInput(next);
+    },
+    [],
+  );
+
+  /** 拉取输入确认投影；换 LC 的乱序响应按轮次丢弃。失败 ⇒ 静默隐藏确认区。 */
+  const refreshUserInput = useCallback(async () => {
+    const epoch = ++userInputEpochRef.current;
+    try {
+      const next = await getKnowledgeBaseUserInput(projectId, lcId);
+      if (epoch !== userInputEpochRef.current) {
+        return;
+      }
+      applyUserInputSummary(next);
+    } catch {
+      if (epoch !== userInputEpochRef.current) {
+        return;
+      }
+      setUserInput(null);
+    }
+  }, [projectId, lcId, applyUserInputSummary]);
+
+  // 输入确认区随路由参数加载；换 LC 时先清零失效集合，避免旧 LC 的
+  // 「已确认」基线把新 LC 的文件误标为需重新确认。
+  useEffect(() => {
+    confirmedPathsRef.current = new Set();
+    setUserInputInvalidated(new Set());
+    void refreshUserInput();
+  }, [refreshUserInput]);
+
   const save = useCallback(async () => {
     if (!selectedPath || !selectedEditable) {
       // 未选中文件或机器管理文件（只读）：不发写请求（按钮已禁用，这里兜底）。
@@ -239,12 +310,24 @@ export function KnowledgeBasePage({
       setSavedContent(draft);
       setDigest(result.digest);
       setNotice({ kind: "success", text: "已保存" });
+      // 保存的是输入文件 ⇒ 刷新输入投影（编辑会使该份确认按 digest 自动失效）。
+      if (userInputPathsRef.current.has(selectedPath)) {
+        void refreshUserInput();
+      }
     } catch (reason) {
       setNotice({ kind: "error", text: describeSaveError(reason) });
     } finally {
       setSaving(false);
     }
-  }, [projectId, lcId, selectedPath, selectedEditable, draft, digest]);
+  }, [
+    projectId,
+    lcId,
+    selectedPath,
+    selectedEditable,
+    draft,
+    digest,
+    refreshUserInput,
+  ]);
 
   const tree = useMemo(() => buildTree(nodes), [nodes]);
 
@@ -335,13 +418,26 @@ export function KnowledgeBasePage({
             {treeCollapsed ? "展开" : "折叠"}
           </button>
           {treeCollapsed ? null : (
-            <div data-testid="kb-file-tree">
-              <TreeView
-                entries={tree}
-                selectedPath={selectedPath}
-                onSelect={(path) => void openFile(path)}
-              />
-            </div>
+            <>
+              <div data-testid="kb-file-tree">
+                <TreeView
+                  entries={tree}
+                  selectedPath={selectedPath}
+                  onSelect={(path) => void openFile(path)}
+                />
+              </div>
+              {userInput ? (
+                <KnowledgeBaseUserInputPanel
+                  projectId={projectId}
+                  lcId={lcId}
+                  summary={userInput}
+                  invalidatedPaths={userInputInvalidated}
+                  selectedPath={selectedPath}
+                  onOpenFile={(path) => void openFile(path)}
+                  onSummaryChanged={() => void refreshUserInput()}
+                />
+              ) : null}
+            </>
           )}
         </aside>
 

@@ -9,6 +9,9 @@ import type {
   KnowledgeBaseFileNodeDto,
   KnowledgeBaseOperationSnapshotDto,
   KnowledgeBaseStatusDto,
+  KnowledgeBaseUserInputConfirmationDto,
+  KnowledgeBaseUserInputDigestItem,
+  KnowledgeBaseUserInputSummaryDto,
 } from "./types/knowledge-base";
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -200,6 +203,51 @@ export function cancelKnowledgeBaseOperation(
     )}/initializations/${encodeURIComponent(operationId)}/cancel`,
     {
       method: "POST",
+    },
+  );
+}
+
+/** GET /user-input：输入文件的状态投影（filled/confirmed/pending）与汇总。 */
+export function getKnowledgeBaseUserInput(
+  projectId: string,
+  lcId: string,
+): Promise<KnowledgeBaseUserInputSummaryDto> {
+  return requestJson<KnowledgeBaseUserInputSummaryDto>(
+    `${knowledgeBasePath(projectId, lcId)}/user-input`,
+  );
+}
+
+/**
+ * 逐份确认（POST /user-input/confirm，单份形态 `{ path, digest }`）。
+ * digest 必须是客户端当前读到的服务端摘要；不符 ⇒ 409
+ * `knowledge_base_user_input_confirmation_stale`。
+ */
+export function confirmKnowledgeBaseUserInputFile(
+  projectId: string,
+  lcId: string,
+  path: string,
+  digest: string,
+): Promise<KnowledgeBaseUserInputConfirmationDto> {
+  return requestJson<KnowledgeBaseUserInputConfirmationDto>(
+    `${knowledgeBasePath(projectId, lcId)}/user-input/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({ path, digest }),
+    },
+  );
+}
+
+/** 批量确认（POST /user-input/confirm，批量形态 `{ all: true, items }`）。 */
+export function confirmAllKnowledgeBaseUserInput(
+  projectId: string,
+  lcId: string,
+  items: KnowledgeBaseUserInputDigestItem[],
+): Promise<KnowledgeBaseUserInputConfirmationDto> {
+  return requestJson<KnowledgeBaseUserInputConfirmationDto>(
+    `${knowledgeBasePath(projectId, lcId)}/user-input/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({ all: true, items }),
     },
   );
 }
