@@ -1,0 +1,52 @@
+
+===== 改前（db34f3f0，无 D5/D6）  (n=8) =====
+  终态: {'stopped_needs_human': 4, 'failed': 3, 'confirmed': 1}
+  【平台】总墙钟中位数=1208s  计划产出(confirmed)=1/8  人工介入=4/8
+  【author】轮次中位=2.0 耗时中位=996s 工具调用中位=0 codegraph中位=0 产出字节中位=14268 失败模式={'teaching_reredrive': 1, 'missing_section': 1, 'provider_or_parse': 1}
+  【author】token in中位=77,564 out中位=25,878
+  【reviewer】轮次中位=2.0 耗时中位=125s findings中位=6 must_fix中位=2 suggestion中位=2 **重复报中位=1** 机械码field中位=0 语义field中位=2
+  【reviewer】工具调用中位=8 codegraph中位=2
+  【preflight/compiler】拦截码={'intent_unexecutable': 12, 'write_scope_outside_bound_repository': 1} IR failed=4 passed=1 编译通过=1/8
+  【产物】WI=0 criterion=6 done_when_refs=12 checks=8 tasks=10 **cross-WI=0** validator={'warning:integration_or_e2e_skipped_risk': 1}
+
+===== 改后（HEAD，含 D5/D6）  (n=8) =====
+  终态: {'confirmed': 2, 'stopped_needs_human': 3, 'failed': 3}
+  【平台】总墙钟中位数=1086s  计划产出(confirmed)=2/8  人工介入=3/8
+  【author】轮次中位=2.0 耗时中位=917s 工具调用中位=0 codegraph中位=0 产出字节中位=14991 失败模式={'ir_family': 1, 'missing_section': 2}
+  【author】token in中位=77,600 out中位=26,104
+  【reviewer】轮次中位=2.0 耗时中位=93s findings中位=4 must_fix中位=2 suggestion中位=2 **重复报中位=0** 机械码field中位=1 语义field中位=0
+  【reviewer】工具调用中位=10 codegraph中位=2
+  【preflight/compiler】拦截码={'intent_unexecutable': 7, 'acceptance_path_not_in_baseline': 2, 'write_scope_outside_bound_repository': 1} IR failed=3 passed=2 编译通过=2/8
+  【产物】WI=0 criterion=6 done_when_refs=11 checks=9 tasks=10 **cross-WI=0** validator={'warning:integration_or_e2e_skipped_risk': 2}
+
+====================================================================================================
+改前 → 改后 对照（同样时段、同样装置、n=8/8）
+====================================================================================================
+  【平台】计划产出率(confirmed)                          1/8  →             2/8
+  【平台】需人工介入率                                    4/8  →             3/8
+  【平台】未产出计划(failed)                             3/8  →             3/8
+  【平台】总墙钟中位数 s                                 1208  →            1086
+  【author】轮次中位                                  2.0  →             2.0
+  【author】耗时中位 s                                996  →             917
+  【author】工具调用中位                                  0  →               0
+  【author】codegraph 中位                            0  →               0
+  【author】产出字节中位                              14268  →           14991
+  【author】token in 中位                        77,564  →          77,600
+  【author】token out 中位                       25,878  →          26,104
+  【reviewer】轮次中位                                2.0  →             2.0
+  【reviewer】耗时中位 s                              125  →              93
+  【reviewer】findings 中位                           6  →               4
+  【reviewer】must_fix 中位                           2  →               2
+  【reviewer】suggestion 中位                         2  →               2
+  【reviewer】重复报 中位                                1  →               0
+  【reviewer】机械码 field 中位                          0  →               1
+  【reviewer】语义 field 中位                           2  →               0
+  【reviewer】工具调用中位                                8  →              10
+  【preflight】拦截次数中位                               0  →               1
+  【compiler】IR failed 合计                          4  →               3
+  【compiler】编译通过                                1/8  →             2/8
+  【产物】WI 中位                                       0  →               0
+  【产物】criterion 中位                                6  →               6
+  【产物】checks 中位                                   8  →               9
+  【产物】tasks 中位                                   10  →              10
+  【产物】cross-WI 越界合计                               0  →               0

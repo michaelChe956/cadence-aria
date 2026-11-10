@@ -229,15 +229,30 @@ def summarize(tag, runs):
     return rs
 
 
+def arm_map_from_logs(log_paths):
+    """从序列日志读「端口 → (臂, 档位)」的权威映射（避免手写标签出错）。"""
+    import re
+    m = {}
+    for lp in log_paths:
+        if not os.path.exists(lp):
+            continue
+        for ln in open(lp, encoding="utf-8", errors="replace"):
+            mt = re.search(r"finished (before|after)\s+(\w+)\s+eff=(\S+)\s+port=(\d+)", ln)
+            if mt:
+                m[mt.group(4)] = (mt.group(1), mt.group(2), mt.group(3))
+    return m
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "/tmp/aria-wig"
+    logs = sys.argv[2:] or ["/tmp/aria-wig/ba/sequence.log"]
+    amap = arm_map_from_logs(logs)
     before, after = [], []
-    for port, arm in (("4701", "xhigh"), ("4702", "high"), ("4703", "high"), ("4704", "xhigh"),
-                      ("4705", "xhigh"), ("4706", "xhigh"), ("4707", "xhigh"), ("4708", "high")):
+    for port, (tag, arm, _eff) in sorted(amap.items()):
         d = os.path.join(root, f"run-{arm}-{port}")
         if not os.path.isdir(d):
             continue
-        (before if port in ("4701", "4704", "4705", "4708") else after).append(d)
+        (before if tag == "before" else after).append(d)
     b = summarize("改前（db34f3f0，无 D5/D6）", before)
     a = summarize("改后（HEAD，含 D5/D6）", after)
     if b and a:
