@@ -60,11 +60,20 @@ impl KnowledgeBaseFixture {
 
 Root-recipe aggregated policy for planning read-only and coding target-write sessions.
 ";
+        // 政策 artifact 的身份字段必须与注册流写下的 LC manifest 一致：
+        // it_web 走 HTTP 注册，manifest 的 logical_codebase_id 是 UUID 形态
+        //（路由 lc_id 是 logical_codebase_* 形态）；resolver 会对
+        // artifact ↔ manifest 做一致性校验，不一致 ⇒ 投影 fail-closed。
+        let manifest = LogicalCodebaseStore::for_lc(self.paths.clone(), self.lc_id.clone())
+            .load_lc_manifest(PROJECT_ID, &self.lc_id)
+            .expect("load lc manifest")
+            .expect("manifest present");
+        let manifest_lc_id = manifest.logical_codebase_id.to_string();
         // sha256(policy_text) 的十六进制（与 preflight.rs 单测夹具同文本同摘要）。
         let policy = AggregatePolicyArtifact {
-            policy_id: format!("policy/{PROJECT_ID}/{}/1", self.lc_id),
+            policy_id: format!("policy/{PROJECT_ID}/{manifest_lc_id}/1"),
             project_id: PROJECT_ID.to_string(),
-            logical_codebase_id: self.lc_id.clone(),
+            logical_codebase_id: manifest_lc_id,
             revision: 1,
             digest: "sha256:e8f94ab7c62c203488cf1b8521ecd3b8f144250517a184698b16ed7c7817bdc1"
                 .to_string(),

@@ -35,15 +35,6 @@ use cadence_aria::product::logical_codebase::policy::{
     AggregatePolicyArtifact, AggregatePolicyArtifactStore, ProviderDialect, ProviderWireDialect,
     SessionPolicyAction,
 };
-use cadence_aria::product::logical_codebase::root_recipe_receipt::{
-    ROOT_RULE_ENTRY_FILE, RootRecipeCommandVerdict, RootRecipeFilesystemAuditor,
-    RootRecipeReceiptStore, root_rule_digest,
-};
-use cadence_aria::product::logical_codebase::{
-    AggregateInitializationOperation, AggregateInitializationOperationInput,
-    AggregateInitializationOperationStore, AggregateInitializationStepKind,
-    root_recipe_command_index,
-};
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
     ProviderActionMatrix, ProviderCapabilityRecord, ProviderCapabilityStore,
@@ -51,7 +42,16 @@ use cadence_aria::product::logical_codebase::provider_capability_store::{
 use cadence_aria::product::logical_codebase::provider_gateway::{
     ProviderRefType, ResumeEvidenceState,
 };
+use cadence_aria::product::logical_codebase::root_recipe_receipt::{
+    ROOT_RULE_ENTRY_FILE, RootRecipeCommandVerdict, RootRecipeFilesystemAuditor,
+    RootRecipeReceiptStore, root_rule_digest,
+};
 use cadence_aria::product::logical_codebase::store::LogicalCodebaseStore;
+use cadence_aria::product::logical_codebase::{
+    AggregateInitializationOperation, AggregateInitializationOperationInput,
+    AggregateInitializationOperationStore, AggregateInitializationStepKind,
+    root_recipe_command_index,
+};
 use cadence_aria::web::app::build_web_router;
 use cadence_aria::web::error::ApiError;
 use cadence_aria::web::events::EventHub;
@@ -431,7 +431,6 @@ impl KnowledgeBaseFixture {
             self.lc_id
         )
     }
-
 }
 
 /// POST /initializations（bootstrap）→ 202，响应含 operation_id 与 steps，
