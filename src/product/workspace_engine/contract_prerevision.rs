@@ -350,10 +350,12 @@ pub(crate) enum PreciseUniqueness {
     HistoryVerified { resolved_fact_digest: String },
 }
 
-/// 精确操作：旧 autorepair 内容直改语义迁为指令载荷（REQ-SG-02A）。
-/// `ReplaceLine`/`InsertLines`/`DeleteLines` 是可机械逐字应用的行编辑
-/// （contract_autorepair 本地收敛消费）；`RewriteWithGrammarTemplate`/
-/// `RestoreResolvedFact` 是 author 执行域的表达/历史恢复指令。
+/// 精确操作：旧 autorepair 内容直改语义迁为指令载荷（REQ-SG-02A、O1
+/// 裁决二）。`ReplaceLine`/`InsertLines`/`DeleteLines` 是可逐字核对的
+/// 行编辑事实——仅作为机器指令载荷交原授权 author 执行，平台不再本地
+/// 应用（contract_autorepair 收敛已清切为产出指令）；
+/// `RewriteWithGrammarTemplate`/`RestoreResolvedFact` 是 author 执行域
+/// 的表达/历史恢复指令。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum StructuralRepairOperation {
     /// 1-based 行替换：before/after 逐字（应用前后可核对）。

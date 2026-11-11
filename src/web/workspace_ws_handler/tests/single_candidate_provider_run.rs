@@ -820,8 +820,12 @@ fn single_candidate_markdown_with_batched_traceability(story_id: &str, design_id
     )
 }
 
+/// O1（裁决二 §2.2/§2.4）：重复 trusted command 不再由平台本地删除——
+/// compile 失败保持终态（lowering 类不在教学重驱白名单，零重驱），
+/// 收窄指令随失败面呈现（错误消息携带「交原授权 author」处置口径），
+/// 不持久化任何 source revision（无暗修产物）。
 #[tokio::test]
-async fn single_candidate_repairs_duplicate_trusted_command_before_terminal_failure() {
+async fn single_candidate_duplicate_trusted_command_terminal_failure_carries_author_instruction() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let output =
@@ -851,61 +855,32 @@ async fn single_candidate_repairs_duplicate_trusted_command_before_terminal_fail
             tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
             Ok(Some(_))
         ),
-        "mechanically repairable duplicate command must not trigger a provider re-drive"
+        "duplicate trusted command is not teachable: zero re-drive; the O1 instruction rides the failure surface"
     );
 
-    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("compile markdown source failed"),
+        "{message}"
+    );
+    assert!(
+        message.contains("duplicate_trusted_command")
+            && message.contains("平台不替 author 删 command"),
+        "O1：收窄指令（指出重复及受影响 check/ref，交原授权 author）必须随终态失败面呈现：{message}"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
     let durable = fixture
         .lifecycle
         .get_workspace_session(&fixture.record.id)
-        .expect("reload repaired single-candidate session");
-    assert_eq!(
-        durable.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Approval),
-        "duplicate trusted command must reach the engine approval path instead of terminal failure"
+        .expect("reload terminal single-candidate session");
+    assert!(
+        durable.work_item_plan_source_revision_ref.is_none(),
+        "terminal failure must not persist any source revision (no silent repair)"
     );
-
-    let source_ref = durable
-        .work_item_plan_source_revision_ref
-        .as_deref()
-        .expect("repaired source revision ref");
-    let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
-        project_id: durable.project_id.clone(),
-        issue_id: durable.issue_id.clone(),
-        plan_id: durable.entity_id.clone(),
-    };
-    let source_store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
-        fixture.app_paths.clone(),
-    );
-    let repaired_source = source_store
-        .get_source_revision(&scope, source_ref)
-        .expect("repaired source must be persisted")
-        .source;
-    assert_eq!(
-        repaired_source
-            .matches("- command: cargo test --locked --lib backend_api")
-            .count(),
-        1,
-        "engine authoritative convergence must persist source with one trusted command"
-    );
-
-    while let Ok(Some(outbound)) =
-        tokio::time::timeout(std::time::Duration::from_millis(20), outbound_rx.recv()).await
-    {
-        if let OutboundControl::Text(json) = outbound {
-            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
-            assert_ne!(
-                value["type"], "error",
-                "repair path must not emit terminal error"
-            );
-            assert!(
-                !value["message"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("compile markdown source failed")
-            );
-        }
-    }
 }
 
 #[tokio::test]

@@ -462,12 +462,15 @@ impl WorkspaceEngine {
             })
             .transpose()?;
 
-        // DEF-PVR-ALL 确定性契约补齐（3.6 全量收敛轮）：author 落盘前对两类
-        // 机械契约缺口（required_capability_missing / unconsumed_required_handoff）
-        // 先行确定性修复（markdown source 级逐字补丁，见 contract_autorepair.rs），
-        // 残余 Error 才产生机械 verdict 走 F5-A 模型返修（该通道语义零变化）。
-        // 补齐后的 source/IR/report 同源生成，publish freshness 链路零变化。
-        let (ir, source, autorepair_log) = contract_autorepair::converge_work_item_plan_source(
+        // O1（裁决二 §2.2/§2.4）：author 落盘前不再本地改写 source——
+        // converge 单次编译并产出机器指令；IR/source 保持 author 原始
+        // 产物，Error 级契约缺口由既有机械 verdict 通道（F5-A）交原授权
+        // author 返修，指令随完成面呈现给 owner（不应用、不丢弃）。
+        let contract_autorepair::ContractConvergeOutcome {
+            ir,
+            instructions: contract_autorepair_instructions,
+            audit,
+        } = contract_autorepair::converge_work_item_plan_source(
             &source,
             WorkItemPlanSourceContext {
                 target_repository_id,
@@ -477,6 +480,12 @@ impl WorkspaceEngine {
         .map_err(|diagnostics| {
             format_compiler_diagnostics("compile markdown source", &diagnostics)
         })?;
+        tracing::debug!(
+            session_id = %self.session.session_id,
+            equivalence_canonicalizations = audit.equivalence_canonicalizations.len(),
+            contract_autorepair_instructions = contract_autorepair_instructions.len(),
+            "single-candidate author completion converged (O1: instructions only, no source mutation)"
+        );
         let source_hash = hex::encode(Sha256::digest(source.as_bytes()));
         let source_id = format!("source-{}", &source_hash[..16]);
         let mut source_revision = SourceRevisionRecord {
@@ -708,13 +717,17 @@ impl WorkspaceEngine {
             diff: None,
         })
         .await;
-        let completion_message = if autorepair_log.is_empty() {
+        let completion_message = if contract_autorepair_instructions.is_empty() {
             "SingleCandidate markdown source 已编译并持久化，等待 Evaluate".to_string()
         } else {
             format!(
-                "SingleCandidate markdown source 已编译并持久化（确定性契约补齐 {} 项：{}），等待 Evaluate",
-                autorepair_log.len(),
-                autorepair_log.join("；")
+                "SingleCandidate markdown source 已编译并持久化（O1：{} 条契约缺口机器指令交原授权 author，平台不改写 source——{}），等待 Evaluate",
+                contract_autorepair_instructions.len(),
+                contract_autorepair_instructions
+                    .iter()
+                    .map(|instruction| instruction.required_action.as_str())
+                    .collect::<Vec<_>>()
+                    .join("；")
             )
         };
         self.complete_active_node(Some(completion_message)).await;

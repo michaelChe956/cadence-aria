@@ -799,13 +799,13 @@ pub(crate) async fn run_single_candidate_author(
     // （TEACHABLE_PARSE_FAILURE_CODES：missing_section / invalid_ears /
     // invalid_work_item_id）——lowering 类（缺席/值域统一）零重驱资格，
     // 原 message「缺少/缺失」措辞分流（is_lowering_absence_message）已按
-    // F1.2 typed 口径删除。compile 失败不再直接终态：先在 handler 预检查
-    // 中复用与引擎落盘路径同源的 contract_autorepair 收敛器；收敛成功的
-    // 机械 lowering 缺口（当前为重复 trusted command）直接带着修复后的
-    // source 进入 complete，后者再次经过同一收敛入口并落盘。收敛失败则
-    // 保留原诊断，parse 语法类继续教学重驱。重驱产物重新进入本循环，因此
-    // 同样不能绕过收敛器；重驱槽与收敛轮彼此独立，每 candidate 仍至多
-    // 一次额外 provider 驱动。
+    // F1.2 typed 口径删除。O1（裁决二 §2.2/§2.4）：converge 不再本地改写
+    // source——单次编译，成功路径产出机器指令（不应用、不丢弃，渲染进
+    // owner 可见呈现面；缺口本体沿引擎既有机械 verdict 通道 F5-A 交
+    // 原授权 author），失败路径保留原诊断，parse 语法类继续教学重驱，
+    // 收窄指令（未知 key 迁移/重复 trusted command）随失败面呈现。
+    // 教学重驱 prompt 携带指令文本的完整接线在 Task 4。重驱产物重新
+    // 进入本循环；重驱槽独立，每 candidate 仍至多一次额外 provider 驱动。
     // 3.6 弱模型基线加固：IR 校验失败（validate plan candidate IR failed 类，
     // 如 unknown_requirement_ref / acceptance_criterion_without_reviewer_check）
     // 同样享有恰一次教学重驱——在持久化前预跑同源 validate_plan_candidate_ir
@@ -826,14 +826,27 @@ pub(crate) async fn run_single_candidate_author(
     let mut compile_ir_rerun_used = false;
     let mut structure_rerun_used = false;
     let candidate_item_count = loop {
-        let (ir, repaired_source, _autorepair_log) =
-            match crate::product::workspace_engine::contract_autorepair::converge_work_item_plan_source(
-                &compile_source,
-                compile_context.clone(),
-            ) {
-                Ok(outcome) => outcome,
-                Err(diagnostics) => {
-                    let reasons = format_compile_failure_reasons(&diagnostics);
+        let crate::product::workspace_engine::contract_autorepair::ContractConvergeOutcome {
+            ir,
+            instructions: contract_autorepair_instructions,
+            ..
+        } = match crate::product::workspace_engine::contract_autorepair::converge_work_item_plan_source(
+            &compile_source,
+            compile_context.clone(),
+        ) {
+            Ok(outcome) => outcome,
+            Err(diagnostics) => {
+                let mut reasons = format_compile_failure_reasons(&diagnostics);
+                // O1：compile 失败路径的收窄指令（未知 key 迁移/重复
+                // trusted command）随失败面呈现（教学重驱 prompt 与终态
+                // 错误同源），平台不应用、不丢弃。
+                reasons.extend(
+                    crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
+                        &crate::product::workspace_engine::contract_autorepair::build_compile_failure_repair_instructions(
+                            &compile_source, &diagnostics, &compile_context,
+                        ),
+                    ),
+                );
                     if !compile_ir_rerun_used
                         && diagnostics
                             .iter()
@@ -915,7 +928,38 @@ pub(crate) async fn run_single_candidate_author(
                     return Err(SingleCandidateProviderRunError::Message(message));
                 }
             };
-        compile_source = repaired_source;
+        // O1（裁决二）：缺口机器指令不应用、不丢弃——渲染进 owner 可见
+        // 执行事件随失败面呈现（与教学重驱 prompt 同源的呈现面）；缺口
+        // 本体沿引擎既有机械 verdict 通道（F5-A）交原授权 author 返修。
+        // prompt 携带指令文本驱动教学重驱的完整接线在 Task 4。
+        if !contract_autorepair_instructions.is_empty() {
+            engine
+                .emit_execution_event(
+                    ProviderExecutionEvent {
+                        event_id: format!("{node_id}_contract_autorepair_instructions"),
+                        kind: ProviderExecutionEventKind::Output,
+                        status: ProviderExecutionEventStatus::Started,
+                        title: "SC 契约缺口 author 修复指令（O1：平台不改写 source）"
+                            .to_string(),
+                        detail: Some(format!(
+                            "确定性契约缺口产出 {} 条机器指令，交原授权 author 在保护闭包内产出新 revision",
+                            contract_autorepair_instructions.len()
+                        )),
+                        command: None,
+                        cwd: None,
+                        output: Some(
+                            crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
+                                &contract_autorepair_instructions,
+                            )
+                            .join("\n"),
+                        ),
+                        exit_code: None,
+                    },
+                    Some(node_id.clone()),
+                    Some(author_provider.clone()),
+                )
+                .await;
+        }
 
         if let Some(reasons) = prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir) {
             if !compile_ir_rerun_used {

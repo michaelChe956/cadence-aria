@@ -1,7 +1,7 @@
 // C1 Task 1 options 预检回灌链用例（REQ-WSC-02 场景 11-12；F-51）。
 // 按大文件守卫(>1200 行)拆分至本文件，经 include! 内联进父模块。
 mod preflight_options_loop {
-    use super::contract_prerevision::{REP4_FIXTURE, author_round_record};
+    use super::contract_prerevision::{REP4_FIXTURE, author_round_record, clean_candidate};
     use super::*;
     use crate::product::json_store::write_json;
     use crate::web::workspace_ws_types::TimelineNodeType;
@@ -138,10 +138,12 @@ mod preflight_options_loop {
             .await
             .expect("first gapped round completes");
 
-        // 第二轮：rep4 完整三 item（含 WI-003 integration）满足存储 options。
+        // 第二轮：rep4 完整三 item（含 WI-003 integration）满足存储 options；
+        // O1 后平台不再替 author 清 unconsumed handoff——修复轮候选必须是
+        // author 自己产出的干净形态（handoff 提供行已按指令清空）。
         engine
             .complete_single_candidate_work_item_plan_author(
-                REP4_FIXTURE.replace(
+                clean_candidate().replace(
                     "Integration levels API coverage",
                     "Integration levels API coverage round-2",
                 ),
@@ -325,7 +327,9 @@ mod preflight_options_loop {
         // 修复轮：补上 integration item 的收敛候选 → reviewer 复评。
         engine
             .complete_single_candidate_work_item_plan_author(
-                REP4_FIXTURE.replace(
+                // O1：修复轮候选是 author 按指令自产出的干净形态（平台
+                // 不再替 author 清 unconsumed handoff）。
+                clean_candidate().replace(
                     "Integration levels API coverage",
                     "Integration levels API coverage round-2",
                 ),

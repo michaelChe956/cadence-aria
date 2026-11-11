@@ -288,18 +288,19 @@ async fn single_candidate_unrepairable_unknown_key_failure_gets_one_reredrive_th
     .await;
 }
 
-/// 复验 F-41：`### Handoff Schema` 内自创的表外 key（`- bogus_key: x`）由收敛器
-/// 确定性删行修复，不再终态失败、也不消耗教学重驱——恰一次 provider 驱动后继续到
-/// HumanConfirm，且持久化的 source revision 是删行后的版本。
+/// O1（裁决二 §2.2/§2.4）：`### Handoff Schema` 内自创的表外 key
+/// （`- bogus_key: x`）不再由平台确定性删行——compile 失败经恰一次教学
+/// 重驱交原授权 author 自纠（重驱 prompt 随失败面携带收窄指令文本），
+/// 重驱产物（author 新 revision）逐字节持久化，不再二次暗修。
 #[tokio::test]
-async fn single_candidate_unknown_key_line_is_removed_deterministically_without_reredrive() {
+async fn single_candidate_unknown_key_line_reredrive_persists_author_product() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(SequenceOutputProvider {
-        outputs: vec![markdown_with_unknown_structured_key(
-            &fixture.story_id,
-            &fixture.design_id,
-        )],
+        outputs: vec![
+            markdown_with_unknown_structured_key(&fixture.story_id, &fixture.design_id),
+            single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        ],
         inputs: input_tx,
         next: AtomicUsize::new(0),
     });
@@ -316,12 +317,21 @@ async fn single_candidate_unknown_key_line_is_removed_deterministically_without_
     .await;
 
     let _first_input = next_provider_input(&mut input_rx).await;
+    // 恰一次教学重驱（第二轮）：author 按指令自纠，产出干净 revision。
+    let reredrive_input = next_provider_input(&mut input_rx).await;
+    for required in ["unknown_structured_key", "迁往合法字段"] {
+        assert!(
+            reredrive_input.prompt.contains(required),
+            "teaching re-drive prompt must carry the diagnostic and the O1 narrowed instruction ({required}): {}",
+            reredrive_input.prompt
+        );
+    }
     no_more_provider_inputs(&mut input_rx).await;
     wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
     assert_eq!(
         single_candidate_generation_steps_for_session(&fixture.record.id),
         vec!["full_markdown_author", "parse_source_revision", "selector"],
-        "unknown key line deletion must continue through the canonical compile path exactly once",
+        "re-drive recovery must continue through the canonical compile path exactly once",
     );
     let durable = fixture
         .lifecycle
@@ -348,15 +358,10 @@ async fn single_candidate_unknown_key_line_is_removed_deterministically_without_
                 .expect("source revision ref"),
         )
         .expect("stored source");
-    assert!(
-        !stored.source.contains("bogus_key"),
-        "the unknown key line must be deleted from the persisted source revision: {}",
-        stored.source
-    );
     assert_eq!(
         stored.source,
         single_candidate_markdown(&fixture.story_id, &fixture.design_id),
-        "deleting the unknown key line must restore the original legal source byte-for-byte"
+        "the persisted source must be the author's re-drive output byte-for-byte (no silent repair)"
     );
 }
 
@@ -771,10 +776,7 @@ async fn single_candidate_terminal_failure_releases_manager_run_registration() {
     }
     let error = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let outbound = outbound_rx
-                .recv()
-                .await
-                .expect("terminal failure outbound");
+            let outbound = outbound_rx.recv().await.expect("terminal failure outbound");
             let OutboundControl::Text(json) = outbound else {
                 continue;
             };
@@ -787,7 +789,10 @@ async fn single_candidate_terminal_failure_releases_manager_run_registration() {
     .await
     .expect("terminal failure error outbound");
     assert!(
-        error["message"].as_str().unwrap_or_default().contains("compile markdown source failed"),
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("compile markdown source failed"),
         "terminal failure must surface compile diagnostics: {error}"
     );
     wait_for_single_candidate_phase(

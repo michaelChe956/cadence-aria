@@ -1,12 +1,8 @@
-// DEF-PVR-ALL 确定性 capability 补齐器（contract_autorepair）用例按大文件守卫
-// (>1200 行) 拆分至本文件，经 include! 内联进父模块。
-
-/// DEF-PVR-ALL 主方案：class_hint=repairable 的机械契约缺口（3.6 门重测
-/// codex rep1/rep2 全败根因：required_capability_missing 指纹轮转不收敛）
-/// 在 author 落盘前先行确定性修复——required_action 的「追加逐字行」/
-/// 「删未消费引用」由服务端直接应用到 markdown source，重编译后校验干净
-/// 即零返修轮（不产生 verdict、不消费预算、不播指纹）；残余非机械缺口
-/// 才走 F5-A 模型返修通道（既有语义零变化）。
+// O1（裁决二 §2.2/§2.4）：contract_autorepair 迁移为「机器指令交原授权
+// author」后的引擎侧用例——原「自动补/删成功」断言按 8.4 改写为：source
+// 不变（与 author 原始输出逐字节一致）、缺口沿既有机械 verdict 通道
+// （F5-A）交原授权 author 返修。用例按大文件守卫 (>1200 行) 拆分至本
+// 文件，经 include! 内联进父模块。
 mod contract_autorepair {
     use super::contract_prerevision::{
         REP4_FIXTURE, author_round_record, clean_candidate, missing_contract_candidate,
@@ -31,10 +27,10 @@ mod contract_autorepair {
             )
     }
 
-    // 非机械可修缺口（required_contract_missing）见 contract_prerevision::
-    // missing_contract_candidate——provider 未承诺被消费契约，补齐器边界外。
+    // 非机械指令类缺口（required_contract_missing）见 contract_prerevision::
+    // missing_contract_candidate——provider 未承诺被消费契约，指令域外。
 
-    /// 混合缺口：机械可修（capability）+ 非机械（required_contract_missing）并存。
+    /// 混合缺口：指令类（capability）+ 非机械（required_contract_missing）并存。
     fn mixed_gap_candidate(round: usize) -> String {
         missing_contract_candidate(round).replace(
             "- required_capabilities: api.levels.read\n",
@@ -61,51 +57,65 @@ mod contract_autorepair {
             .source
     }
 
-    /// 红测主例：repairable capability 缺口进 author 落盘后产物必须已补齐——
-    /// 补齐后的 source 重编译，canonical 契约投影校验必须干净，且全程零
-    /// 返修轮（无 verdict、repairs_used=0、指纹集空、路由与干净候选一致）。
+    /// 迁自 capability_gap_is_autorepaired_before_revision_routing（O1 改写）：
+    /// capability 缺口不再被平台本地补齐——持久化 source 与 author 原始
+    /// 输出逐字节一致；缺口沿既有机械 verdict 通道（F5-A）交原授权
+    /// author 返修（repairs_used 计 1、缺口指纹入 durable 集）。
     #[tokio::test]
-    async fn capability_gap_is_autorepaired_before_revision_routing() {
+    async fn capability_gap_routes_author_revision_without_source_mutation() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         author_round_record(&lifecycle, &mut engine);
 
+        let author_source = capability_gap_candidate(1);
         engine
             .complete_single_candidate_work_item_plan_author(
-                capability_gap_candidate(1),
+                author_source.clone(),
                 fixture_sc_target(&engine),
                 fixture_sc_member_targets(&engine),
                 false,
             )
             .await
-            .expect("gapped candidate must complete author round after autorepair");
+            .expect("gapped candidate must complete with instructions, not mutation");
 
-        // 零返修轮：不产生 pending revision verdict、不消费预算、不播指纹。
+        // source 不变：持久化产物与 author 原始输出逐字节一致。
+        let source = persisted_source(&lifecycle, &engine);
+        assert_eq!(
+            source, author_source,
+            "completion must keep the author source byte-identical"
+        );
+        assert!(!source.contains("- capabilities: api.levels.read, api.levels.write\n"));
+
+        // 指令完整（缺口未消失）：机械 verdict 携带 capability finding。
+        let pending = engine
+            .single_candidate_pending_revision_verdict()
+            .expect("capability gap must route a mechanical revision round");
+        assert_eq!(pending.verdict, ReviewVerdictType::Revise);
         assert!(
-            engine.single_candidate_pending_revision_verdict().is_none(),
-            "capability gap must be deterministically repaired, not routed to a revision round"
+            pending
+                .findings
+                .iter()
+                .any(|finding| finding.message.starts_with("required_capability_missing: ")),
+            "capability finding must ride the verdict: {:?}",
+            pending
+                .findings
+                .iter()
+                .map(|finding| &finding.message)
+                .collect::<Vec<_>>()
         );
         let persisted = lifecycle
             .get_workspace_session(&engine.session().session_id)
             .expect("load persisted session");
         assert_eq!(
-            persisted.run_history.repairs_used, 0,
-            "autorepair must not consume the shared repair budget"
+            persisted.run_history.repairs_used, 1,
+            "O1 收窄后机械缺口走真实 author 返修（不再零预算本地补齐）"
         );
         assert!(
-            persisted.run_history.seen_fingerprints.is_empty(),
-            "autorepair must not seed any fingerprint (repeat gate stays cold)"
+            !persisted.run_history.seen_fingerprints.is_empty(),
+            "gap fingerprints must enter the durable seen set for the repeat gate"
         );
-        // 路由与干净候选一致：有 reviewer 时 Evaluate 后进 CrossReview。
-        assert_eq!(engine.session().stage, WorkspaceStage::CrossReview);
 
-        // 产物已补齐：持久化 source 含逐字追加的 capability；重编译后
-        // canonical 契约校验（同 contract_prerevision 口径）干净。
-        let source = persisted_source(&lifecycle, &engine);
-        assert!(
-            source.contains("- capabilities: api.levels.read, api.levels.write\n"),
-            "repaired source must merge the missing capability verbatim into the provider line:\n{source}"
-        );
+        // author 新产物复验口径：重编译 author 原文，契约缺口仍在（未被暗修）。
         let ir = compile_work_item_plan(
             &source,
             &WorkItemPlanSourceContext {
@@ -113,20 +123,21 @@ mod contract_autorepair {
                 member_targets: None,
             },
         )
-        .expect("repaired source must recompile");
+        .expect("author source must recompile");
         assert!(
-            crate::product::workspace_engine::contract_prerevision::single_candidate_contract_prerevision_verdict(&ir)
-                .is_none(),
-            "repaired source must pass the mechanical contract validation"
+            crate::product::workspace_engine::contract_prerevision::single_candidate_contract_prerevision_verdict(
+                &ir
+            )
+            .is_some(),
+            "the gap must still be present in the persisted author source"
         );
-        // 持久化 IR 与补齐后 source 新鲜一致（freshness 链路不受影响）。
-        assert_eq!(ir.items.len(), 3);
     }
 
-    /// unconsumed_required_handoff 同机械修复：终端 WI 的未消费 handoff 引用
-    /// 直接从 provided_contract_refs 删除（裸 rep4 fixture 自带该缺口）。
+    /// 迁自 unconsumed_handoff_ref_is_deterministically_removed（O1 改写）：
+    /// 未消费引用不再被平台删除/改写为 `[]`——source 逐字节保持 author
+    /// 原文，缺口走机械 verdict（裸 rep4 fixture 自带该缺口）。
     #[tokio::test]
-    async fn unconsumed_handoff_ref_is_deterministically_removed() {
+    async fn unconsumed_handoff_ref_kept_for_author_decision() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         author_round_record(&lifecycle, &mut engine);
@@ -139,41 +150,35 @@ mod contract_autorepair {
                 false,
             )
             .await
-            .expect("unconsumed-handoff candidate must complete after autorepair");
+            .expect("unconsumed-handoff candidate must complete with instructions only");
 
-        assert!(
-            engine.single_candidate_pending_revision_verdict().is_none(),
-            "unconsumed handoff ref must be removed deterministically, not routed to a revision round"
-        );
-        let persisted = lifecycle
-            .get_workspace_session(&engine.session().session_id)
-            .expect("load persisted session");
-        assert_eq!(persisted.run_history.repairs_used, 0);
         let source = persisted_source(&lifecycle, &engine);
-        assert!(
-            source.contains(
-                "### Handoff Schema\n- required_fields: commit_sha\n- provided_contract_refs: []\n"
-            ),
-            "the unconsumed provided ref must be rewritten to the legal empty list:\n{source}"
+        assert_eq!(
+            source, REP4_FIXTURE,
+            "completion must keep the author source byte-identical"
         );
-        let ir = compile_work_item_plan(
-            &source,
-            &WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-                member_targets: None,
-            },
-        )
-        .expect("repaired source must recompile");
+        assert!(source.contains("- provided_contract_refs: contract.levels-integration\n"));
+        let pending = engine
+            .single_candidate_pending_revision_verdict()
+            .expect("unconsumed handoff gap must route a mechanical revision round");
         assert!(
-            crate::product::workspace_engine::contract_prerevision::single_candidate_contract_prerevision_verdict(&ir)
-                .is_none()
+            pending
+                .findings
+                .iter()
+                .any(|finding| finding.message.starts_with("unconsumed_required_handoff: ")),
+            "handoff finding must ride the verdict: {:?}",
+            pending
+                .findings
+                .iter()
+                .map(|finding| &finding.message)
+                .collect::<Vec<_>>()
         );
     }
 
-    /// 边界：非机械可修缺口（required_contract_missing——provider 未承诺
-    /// 被消费契约）不被补齐器拦截，仍走既有机械 verdict → 模型返修通道；
-    /// 残余 verdict 只含非机械 finding。依赖环自 SG3a.1 起在候选结构门
-    /// 拒收（零提升/零评审），不再走本通道。
+    /// 边界（口径不变）：非指令类缺口（required_contract_missing——provider
+    /// 未承诺被消费契约）仍走既有机械 verdict → 模型返修通道；残余 verdict
+    /// 只含非指令类 finding。依赖环自 SG3a.1 起在候选结构门拒收（零提升/
+    /// 零评审），不再走本通道。
     #[tokio::test]
     async fn non_mechanical_gap_still_routes_model_revision() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
@@ -203,7 +208,7 @@ mod contract_autorepair {
             pending
                 .findings
                 .iter()
-                .map(|f| &f.message)
+                .map(|finding| &finding.message)
                 .collect::<Vec<_>>()
         );
         let persisted = lifecycle
@@ -212,17 +217,19 @@ mod contract_autorepair {
         assert_eq!(persisted.run_history.repairs_used, 1);
     }
 
-    /// 混合缺口：机械项被先行补齐，残余（非机械）走模型返修，且残余 verdict
-    /// 不再包含已补齐的 capability finding。
+    /// 迁自 mixed_gap_autorepairs_mechanical_part_and_routes_residual（O1
+    /// 改写）：指令类不再被先行补齐——source 逐字节保持，两类缺口同
+    /// verdict 路由交 author。
     #[tokio::test]
-    async fn mixed_gap_autorepairs_mechanical_part_and_routes_residual() {
+    async fn mixed_gap_routes_all_findings_without_mutation() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         author_round_record(&lifecycle, &mut engine);
 
+        let author_source = mixed_gap_candidate(1);
         engine
             .complete_single_candidate_work_item_plan_author(
-                mixed_gap_candidate(1),
+                author_source.clone(),
                 fixture_sc_target(&engine),
                 fixture_sc_member_targets(&engine),
                 false,
@@ -231,24 +238,31 @@ mod contract_autorepair {
             .expect("mixed-gap candidate must still complete");
 
         let source = persisted_source(&lifecycle, &engine);
-        assert!(
-            source.contains("- capabilities: api.levels.read, api.levels.write\n"),
-            "mechanical part must be repaired even when residual findings remain:\n{source}"
+        assert_eq!(
+            source, author_source,
+            "completion must keep the author source byte-identical"
         );
         let pending = engine
             .single_candidate_pending_revision_verdict()
-            .expect("residual non-mechanical gap must still route a revision round");
+            .expect("mixed gap must still route a revision round");
         assert!(
             pending
                 .findings
                 .iter()
-                .all(|finding| finding.message.starts_with("required_contract_missing: ")),
-            "repaired capability findings must not ride the residual verdict: {:?}",
+                .any(|finding| finding.message.starts_with("required_capability_missing: ")),
+            "capability finding must ride the verdict alongside the residual: {:?}",
             pending
                 .findings
                 .iter()
-                .map(|f| &f.message)
+                .map(|finding| &finding.message)
                 .collect::<Vec<_>>()
+        );
+        assert!(
+            pending
+                .findings
+                .iter()
+                .any(|finding| finding.message.starts_with("required_contract_missing: ")),
+            "residual non-mechanical finding must still ride the verdict"
         );
     }
 }

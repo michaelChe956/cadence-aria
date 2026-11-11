@@ -1,34 +1,27 @@
-//! 确定性契约缺口的机器指令 producer 与本地收敛器（DEF-PVR-ALL 主方案，
-//! SG2 内容直改迁机器指令）。
+//! 确定性契约缺口的机器指令 producer 与单次编译收敛入口（DEF-PVR-ALL
+//! 主方案 + O1 裁决二 §2.2/§2.4：内容 autorepair 迁原授权 author）。
 //!
-//! 门重测根因（codex rep1/rep2 全败、repeated_fingerprint 轮转不收敛）：
-//! `required_capability_missing` 的 required_action 本就是「追加逐字给定行」
-//! 的纯机械操作，但模型返修重写整份计划而不逐字应用补丁行，同族缺口
-//! 跨指纹轮转。SG2（REQ-SG-02A、设计 §3.1/§11）把全部内容直改决定迁为
-//! `StructuralRepairInstruction`（精确行操作，不声明唯一）：
+//! 平台只诊断与开方，不替 author 改写 source：四类内容缺口一律产出
+//! `StructuralRepairInstruction`（复用 `contract_prerevision` 既有类型）
+//! 交原授权 author 在保护闭包内产出新 revision——
 //!
-//! - `required_capability_missing`：缺失 capability 逐字并入 provider 对应
-//!   Outputs 契约块的**最后一条** `- capabilities:` 行（`lower_outputs` 对
-//!   同一契约多条 capabilities 行是「最后一条生效」语义；`split_value`
-//!   逗号拆分语义保证旧行片段全保留+新片段加入）；契约块无 capabilities
-//!   行时在该 `- contract_id:` 行后插入新行。
-//! - `unconsumed_required_handoff`：从 provider `### Handoff Schema` 的
-//!   `- provided_contract_refs:` 值中删除未消费引用（`split_values` 跨行
-//!   聚合语义，逐行删值；剩余引用重接，空则写合法空值 `[]`）。
-//! - `unknown_structured_key`：删除该诊断指向的未知结构化 key 源行（仅当
-//!   该行 strip 后为 `- <key>:` 或 `<key>:` 形态才删；未知 section/非
-//!   key-value 行共用同一 code，保持失败关闭。F1.2：携带 typed kind 的
-//!   诊断（非法二级 heading，REQ-SG-02 第414行场景）按类型排除，绝不按
-//!   共享码删 heading 行；重复 trusted command 的资格同样只认结构身份）。
+//! - `required_capability_missing`：不自动追加 capability（consumer 提出
+//!   需求不证明 provider 已实现能力）；产「回查原业务与实现承诺、保护
+//!   闭包内产新 revision」指令。
+//! - `unconsumed_required_handoff`：不删 ref/替换 `[]`（不消费不等于
+//!   不需要）；产携带 provider、原始行值与未消费引用集的完整来源事实
+//!   指令。
+//! - `unknown_structured_key`：不按诊断行删业务承载行；只产「保留内容、
+//!   迁往合法字段」指令（携带 typed kind 的诊断按类型排除，混合集合
+//!   整体 fail-closed）。
+//! - 重复 trusted command：不本地删 command/整 check；产「指出重复及
+//!   受影响 check/ref（manual 与无 manual 两支处置均交 author）」指令。
 //!
-//! producer 是纯函数（零 source mutation、零 provider/模型调用）；本地
-//! 收敛循环只机械应用指令的精确行编辑并重编译（source/IR/report 新鲜
-//! 一致，`verify_publish_freshness` 链路零变化），零 verdict、零预算、
-//! 零指纹——8 轮本地循环不触发 AI 乘法。残余 Error（`required_contract_
-//! missing`/`unknown_provider_logical_work_item`/环/重复等非机械类）不拦
-//! 截，照常产生机械 verdict 走 F5-A 模型返修。author 执行域接线（heading/
-//! 回归/候选类指令驱原授权 author）由 SG5/SG6a 落地；本模块不发布新自动
-//! 能力、不扩大已确认产物的修改权。
+//! producer 是纯函数（零 source mutation、零 provider/模型调用、零修复
+//! 轮次）；本地八轮 mutation 收敛与 `apply_structural_repair_operations`/
+//! `rewrite_source` 已按 O1 裁决移除，不保同名旧行为 shim。残余 Error
+//! 走既有机械 verdict 通道（F5-A 模型返修），source/IR/report 保持
+//! author 产物同源新鲜。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,71 +30,62 @@ use crate::product::work_item_contract::{
     validate_dependency_contract_graph,
 };
 use crate::product::work_item_plan_compiler::{
-    CompilerDiagnostic, PlanCandidateIr, WorkItemPlanSourceContext, compile_work_item_plan,
-    parse_work_item_plan,
+    CompiledPlanAudit, CompilerDiagnostic, PlanCandidateIr, WorkItemPlanSourceContext,
+    compile_work_item_plan_audited, parse_work_item_plan,
 };
 use crate::product::workspace_engine::contract_prerevision::{
-    ProtectedBusinessFacts, StructuralRepairInstruction, StructuralRepairOperation,
-    StructuralRepairSolution, capability_patch_action_text, seal_structural_repair_instruction,
+    ProtectedBusinessFacts, StructuralRepairCandidate, StructuralRepairInstruction,
+    StructuralRepairSolution, seal_structural_repair_instruction,
 };
 use crate::product::workspace_engine::draft_batch::compile_support::PlanningStructureSpan;
 use sha2::{Digest, Sha256};
 
-/// 收敛上限。每轮补齐严格消除至少一个机械缺口（provider capability 集合
-/// 单调增长、未消费引用单调减少），实测 1 轮收敛；上限仅防御程序性退化，
-/// 触顶时残余 findings 照常走模型返修。本地确定性循环：零 provider/模型
-/// 调用（设计 §11「8 轮本地循环不触发 AI 乘法」）。
-const MAX_CONTRACT_AUTOREPAIR_ROUNDS: usize = 8;
-
 /// SG2 规则域版本：本模块确定性发现规则的稳定标识（指令身份绑定）。
 const CONTRACT_AUTOREPAIR_RULE_VERSION: &str = "contract_autorepair/v1";
 
-/// 收敛循环（SG2 指令驱动）：compile → producer 生成机器指令 → 机械应用
-/// 指令精确行编辑 → 重编译，直到无可机械修复缺口或达上限。首编译的
-/// lowering/parse 错误仅在**所有**诊断均可由行号精确映射的机械缺口（未知
-/// 结构化 key 行删除 / 重复 trusted command）时修复；其余诊断保持原样
-/// 失败关闭。每轮补齐后的编译失败同样上抛——补丁行不合法属程序缺陷，
-/// 绝不静默回退掩盖。返回最终 IR、最终 source 与补齐日志。
+/// O1（裁决二）：converge 出口——单次编译的 IR、收窄后四类 producer 的
+/// 机器指令与 Task 1 等价解析审计。不再返回 repaired_source、不再有
+/// 修复轮次：source 改写归原授权 author。
+#[derive(Debug)]
+pub(crate) struct ContractConvergeOutcome {
+    pub ir: PlanCandidateIr,
+    pub instructions: Vec<StructuralRepairInstruction>,
+    pub audit: CompiledPlanAudit,
+}
+
+/// 单次收敛入口（O1 收窄）：`compile_work_item_plan_audited` 一次——
+/// 失败直接 `Err(diagnostics)`（不修，交 handler 教学重驱/终态面）；
+/// 成功则产出机器指令（不应用）与等价解析审计。source 字节不变。
 pub(crate) fn converge_work_item_plan_source(
     source: &str,
     context: WorkItemPlanSourceContext,
-) -> Result<(PlanCandidateIr, String, Vec<String>), Vec<CompilerDiagnostic>> {
-    let mut source = source.to_string();
-    let mut applied = Vec::new();
-    for _ in 0..MAX_CONTRACT_AUTOREPAIR_ROUNDS {
-        match compile_work_item_plan(&source, &context) {
-            Ok(ir) => {
-                let instructions = build_contract_autorepair_instructions(&source, &ir, &context);
-                let Some((repaired, log)) =
-                    apply_structural_repair_operations(&source, &instructions)
-                else {
-                    return Ok((ir, source, applied));
-                };
-                source = repaired;
-                applied.extend(log);
-            }
-            Err(diagnostics) => {
-                let instructions =
-                    build_compile_failure_repair_instructions(&source, &diagnostics, &context);
-                let Some((repaired, log)) =
-                    apply_structural_repair_operations(&source, &instructions)
-                else {
-                    return Err(diagnostics);
-                };
-                source = repaired;
-                applied.extend(log);
-            }
-        }
-    }
-    compile_work_item_plan(&source, &context).map(|ir| (ir, source, applied))
+) -> Result<ContractConvergeOutcome, Vec<CompilerDiagnostic>> {
+    let (ir, audit) = compile_work_item_plan_audited(source, &context)?;
+    let instructions = build_contract_autorepair_instructions(source, &ir, &context);
+    Ok(ContractConvergeOutcome {
+        ir,
+        instructions,
+        audit,
+    })
+}
+
+/// 指令文本渲染（与 handler `format_compile_failure_reasons` 同源的
+/// `身份:动作` 形态，供失败面/owner 呈现拼接）。
+pub(crate) fn format_contract_autorepair_instructions(
+    instructions: &[StructuralRepairInstruction],
+) -> Vec<String> {
+    instructions
+        .iter()
+        .map(|instruction| format!("{}:{}", instruction.repair_id, instruction.required_action))
+        .collect()
 }
 
 /// SG2：compile 成功路径的机器指令 producer——对 IR canonical 契约校验的
-/// 两类机械缺口（required_capability_missing / unconsumed_required_handoff）
-/// 生成精确行编辑指令。纯函数：零 source mutation、零 provider/模型调用；
-/// `uniqueness` 恒 None（REQ-PLN-10：内容补齐不声明唯一解）。required_action
-/// 复用 `contract_prerevision::required_action_text` 同一 F5-A 模板口径
-/// （单一事实源，不给第二套语义）。
+/// 两类缺口（required_capability_missing / unconsumed_required_handoff）
+/// 生成交原授权 author 的机器指令。纯函数：零 source mutation、零
+/// provider/模型调用；`uniqueness` 恒 None（REQ-PLN-10：内容补齐不声明
+/// 唯一解）。O1 收窄：指令只携带 typed 缺口事实、定位与 author 处置
+/// 口径，不携带行编辑操作。
 pub(crate) fn build_contract_autorepair_instructions(
     source: &str,
     ir: &PlanCandidateIr,
@@ -112,7 +96,7 @@ pub(crate) fn build_contract_autorepair_instructions(
         .iter()
         .map(|item| item.contract.clone())
         .collect::<Vec<_>>();
-    // Err（重复 identity 等）不含两类机械缺口，交模型返修。
+    // Err（重复 identity 等）不含两类缺口，交模型返修。
     let Ok(graph) = build_dependency_contract_graph(&contracts) else {
         return Vec::new();
     };
@@ -171,7 +155,7 @@ pub(crate) fn build_contract_autorepair_instructions(
     let mut instructions = Vec::new();
 
     // capability 缺口按 (provider, contract_id) 聚合：同契约多条缺失并入
-    // 同一行编辑（BTreeMap 键序确定，指令与日志均确定）。
+    // 同一指令（BTreeMap 键序确定，指令与日志均确定）。
     let mut gaps_by_contract =
         BTreeMap::<(String, String), std::collections::BTreeSet<String>>::new();
     for gap in capability_gaps {
@@ -182,49 +166,21 @@ pub(crate) fn build_contract_autorepair_instructions(
             .insert(gap.capability);
     }
     for ((provider, contract_id), capabilities) in gaps_by_contract {
-        match outputs_capabilities_anchor(&ast, &provider, &contract_id) {
-            OutputsAnchor::MergeInto { line, value } => {
-                let mut merged = value.clone();
-                for capability in &capabilities {
-                    if !merged.is_empty() {
-                        merged.push_str(", ");
-                    }
-                    merged.push_str(capability);
-                }
-                instructions.push(capability_instruction(
-                    &identity,
-                    &provider,
-                    &contract_id,
-                    &capabilities,
-                    StructuralRepairOperation::ReplaceLine {
-                        line,
-                        before: format!("- capabilities: {value}"),
-                        after: format!("- capabilities: {merged}"),
-                    },
-                    line,
-                ));
-            }
-            OutputsAnchor::InsertAfter { line } => {
-                instructions.push(capability_instruction(
-                    &identity,
-                    &provider,
-                    &contract_id,
-                    &capabilities,
-                    StructuralRepairOperation::InsertLines {
-                        after_line: line,
-                        lines: vec![format!(
-                            "- capabilities: {}",
-                            capabilities.iter().cloned().collect::<Vec<_>>().join(", ")
-                        )],
-                    },
-                    line,
-                ));
-            }
+        let anchor_line = match outputs_capabilities_anchor(&ast, &provider, &contract_id) {
+            OutputsAnchor::MergeInto { line, .. } => line,
+            OutputsAnchor::InsertAfter { line } => line,
             OutputsAnchor::NotFound => continue,
-        }
+        };
+        instructions.push(capability_instruction(
+            &identity,
+            &provider,
+            &contract_id,
+            &capabilities,
+            anchor_line,
+        ));
     }
 
-    // 未消费 handoff 引用按 provider 聚合，逐行生成重写指令。
+    // 未消费 handoff 引用按 provider 聚合，逐行生成完整来源事实指令。
     let mut refs_by_provider = BTreeMap::<String, Vec<String>>::new();
     for gap in handoff_gaps {
         refs_by_provider
@@ -235,43 +191,34 @@ pub(crate) fn build_contract_autorepair_instructions(
     for (provider, contract_refs) in refs_by_provider {
         for (line, value) in handoff_provided_ref_fields(&ast, &provider) {
             let parts = split_ref_parts(&value);
-            let remaining = parts
+            let unconsumed = parts
                 .iter()
-                .filter(|part| !contract_refs.contains(part))
+                .filter(|part| contract_refs.contains(part))
                 .cloned()
                 .collect::<Vec<_>>();
-            if remaining.len() == parts.len() {
+            if unconsumed.is_empty() {
                 continue;
             }
             instructions.push(handoff_instruction(
                 &identity,
                 &provider,
-                &contract_refs,
-                StructuralRepairOperation::ReplaceLine {
-                    line,
-                    before: format!("- provided_contract_refs: {value}"),
-                    after: format!(
-                        "- provided_contract_refs: {}",
-                        if remaining.is_empty() {
-                            "[]".to_string()
-                        } else {
-                            remaining.join(", ")
-                        }
-                    ),
-                },
+                &unconsumed,
                 line,
+                &value,
             ));
         }
     }
     instructions
 }
 
-/// SG2：compile 失败路径的机器指令 producer——只消费明确映射到「自身源行」
-/// 的未知结构化 key 诊断与重复 trusted command 诊断，生成精确删行指令；
-/// 携带 typed kind 的诊断（非法二级 heading 等）永不进入删行分支（REQ-SG-02
-/// 第 414 行场景：不按共享 unknown key 码删 heading 行），任一诊断不可精确
-/// 映射则该路径整体 fail-closed（空指令）。纯函数：零 source mutation、
-/// 零模型调用。
+/// SG2：compile 失败路径的机器指令 producer——只消费明确映射到「自身源
+/// 行」的未知结构化 key 诊断与重复 trusted command 诊断，生成交原授权
+/// author 的机器指令；携带 typed kind 的诊断（非法二级 heading 等）永不
+/// 进入指令分支（REQ-SG-02 第 414 行场景：不按共享 unknown key 码处置
+/// heading 行），任一诊断不可精确映射则该路径整体 fail-closed（空指令）。
+/// 纯函数：零 source mutation、零模型调用。O1 收窄：不删行——未知 key
+/// 产「保留内容、迁往合法字段」指令，重复 command 产「指出重复及受影
+/// 响 check/ref」指令。
 pub(crate) fn build_compile_failure_repair_instructions(
     source: &str,
     diagnostics: &[CompilerDiagnostic],
@@ -366,7 +313,7 @@ fn authorized_member_ids(context: &WorkItemPlanSourceContext) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 本地指令公共组装（producer 域内事实组装 + 摘要封口）。
+/// 指令公共组装（producer 域内事实组装 + 摘要封口）。
 #[allow(clippy::too_many_arguments)] // 组装面:逐字段对应 StructuralRepairInstruction 的必填事实。
 fn build_local_instruction(
     identity: &InstructionIdentity,
@@ -412,23 +359,22 @@ fn build_local_instruction(
     })
 }
 
-/// capability 缺口指令：逐字行合并/插入（旧「末行生效」补齐语义迁指令）。
+/// capability 缺口指令（O1 收窄）：不携带行编辑操作——consumer 提出需求
+/// 不证明 provider 已实现能力；author 必须回查原业务与实现承诺、在保护
+/// 闭包内产出新 revision，不能仅给缺口打补丁。指令携带 typed 缺口事实
+/// （provider、契约、缺失能力集）与生效 capabilities 行定位。
 fn capability_instruction(
     identity: &InstructionIdentity,
     provider: &str,
     contract_id: &str,
     capabilities: &std::collections::BTreeSet<String>,
-    operation: StructuralRepairOperation,
     anchor_line: usize,
 ) -> StructuralRepairInstruction {
-    let patch_lines: Vec<String> = capabilities
-        .iter()
-        .map(|capability| capability_patch_action_text(provider, contract_id, capability))
-        .collect();
+    let capabilities_text = capabilities.iter().cloned().collect::<Vec<_>>().join("、");
     let expected_predicates = capabilities
         .iter()
         .map(|capability| format!("capability_satisfied:{contract_id}::{capability}"))
-        .collect();
+        .collect::<Vec<_>>();
     build_local_instruction(
         identity,
         format!("required_capability_missing/{provider}/{contract_id}"),
@@ -438,29 +384,49 @@ fn capability_instruction(
             line: anchor_line,
         }],
         vec![format!(
-            "{provider} Outputs 契约 {contract_id} 的 capabilities 列表（仅追加，不删既有条目）"
+            "{provider} Outputs 契约 {contract_id} 的能力声明（回查原业务与实现承诺后在保护闭包内修订）"
         )],
         vec![
+            "平台代为追加 capability（O1：平台不替 author 改写业务内容）".to_string(),
             "删除消费方的 required_capabilities 需求（假修复）".to_string(),
             "删除 provider 既有 capabilities".to_string(),
         ],
-        StructuralRepairSolution::Precise {
-            operations: vec![operation],
-            uniqueness: None,
+        StructuralRepairSolution::Candidates {
+            candidates: vec![StructuralRepairCandidate {
+                title: format!(
+                    "回查原业务与实现承诺：核对 {contract_id} 是否应提供 {capabilities_text}，在保护闭包内产出新 revision（补齐 provider capabilities 或修正消费方需求）"
+                ),
+                constraints: vec![
+                    "先核对消费方需求与 provider 实现承诺，不直接给缺口打补丁".to_string(),
+                    "消费方真实需求与 provider 既有 capabilities 不得删除".to_string(),
+                ],
+                evidence: vec![
+                    format!("provider={provider}"),
+                    format!("contract={contract_id}"),
+                    format!("缺失 capabilities={capabilities_text}"),
+                    format!("定位=outputs.{contract_id}.capabilities 行{anchor_line}"),
+                ],
+                verified_predicates: expected_predicates.clone(),
+            }],
         },
-        patch_lines.join("\n"),
+        format!(
+            "回查原业务与实现承诺：消费方要求 {contract_id} 提供 {capabilities_text}，provider {provider} 的 Outputs 契约未声明该能力。核对业务事实后在保护闭包内产出新 revision（补齐 provider capabilities，或修正消费方需求）——平台不替 author 追加 capability。"
+        ),
         expected_predicates,
         vec![contract_id.to_string()],
     )
 }
 
-/// 未消费 handoff 引用指令：provided_contract_refs 逐行重写。
+/// 未消费 handoff 引用指令（O1 收窄）：不携带删 ref/替换 `[]` 的行编辑
+/// ——不消费不等于不需要；指令携带完整来源事实（provider、原始行值、
+/// 未消费引用集），author 可合法重组（移除引用或补齐下游消费方），
+/// 平台不得删真实边过门。
 fn handoff_instruction(
     identity: &InstructionIdentity,
     provider: &str,
-    contract_refs: &[String],
-    operation: StructuralRepairOperation,
+    unconsumed_refs: &[String],
     anchor_line: usize,
+    line_value: &str,
 ) -> StructuralRepairInstruction {
     build_local_instruction(
         identity,
@@ -471,26 +437,43 @@ fn handoff_instruction(
             line: anchor_line,
         }],
         vec![format!(
-            "{provider} ### Handoff Schema 的 provided_contract_refs 值列表（仅移除未消费引用）"
+            "{provider} ### Handoff Schema 的 provided_contract_refs 声明（回查供需事实后在保护闭包内重组）"
         )],
         vec![
+            "平台代为删除引用或改写为 []（O1：平台不替 author 改写业务内容）".to_string(),
             "移除仍被消费的 handoff 引用".to_string(),
             "删除消费方对仍需契约的真实需求".to_string(),
         ],
-        StructuralRepairSolution::Precise {
-            operations: vec![operation],
-            uniqueness: None,
+        StructuralRepairSolution::Candidates {
+            candidates: vec![StructuralRepairCandidate {
+                title: format!(
+                    "回查 handoff 供需事实：核对 {} 是否仍需由 {provider} 提供，在保护闭包内产出新 revision（移除未消费引用，或补齐下游消费方）",
+                    unconsumed_refs.join("、")
+                ),
+                constraints: vec![
+                    "真实供需边不得凭「未消费」直接删除（不消费不等于不需要）".to_string(),
+                    "仍被消费的引用与消费方真实需求不得删除".to_string(),
+                ],
+                evidence: vec![
+                    format!("provider={provider}"),
+                    format!("行{anchor_line} 原值=provided_contract_refs: {line_value}"),
+                    format!("未消费引用={}", unconsumed_refs.join("、")),
+                ],
+                verified_predicates: vec![format!("no_unconsumed_required_handoff:{provider}")],
+            }],
         },
         format!(
-            "从 {provider} 的 ### Handoff Schema 的 provided_contract_refs 中移除未消费引用 {}（保留仍被消费的引用；全部未消费时写合法空值 []）；或补齐下游消费方。",
-            contract_refs.join("、")
+            "回查 handoff 供需事实：{provider} 的 ### Handoff Schema 行 {anchor_line} 声明 provided_contract_refs（原值：{line_value}），其中 {} 无任何消费方。核对业务事实后在保护闭包内产出新 revision（移除未消费引用，或补齐下游消费方）——平台不替 author 删引用或改写为 []。",
+            unconsumed_refs.join("、")
         ),
         vec![format!("no_unconsumed_required_handoff:{provider}")],
-        contract_refs.to_vec(),
+        unconsumed_refs.to_vec(),
     )
 }
 
-/// 未知结构化 key 行删除指令（fail-closed：任一不可映射即整批放弃）。
+/// 未知结构化 key 指令（O1 收窄）：不按诊断行删业务承载行——只产
+/// 「保留内容、迁往合法字段」指令，携带该行原文（fail-closed：任一
+/// 不可映射即整批放弃）。
 fn unknown_structured_key_instructions(
     source: &str,
     diagnostics: &[CompilerDiagnostic],
@@ -505,10 +488,16 @@ fn unknown_structured_key_instructions(
     {
         let Some(line) = unknown_structured_key_line(source, diagnostic) else {
             // 行号错位/越界/typed heading（REQ-SG-02 第 414 行场景）：
-            // 整体 fail-closed，不产生任何删行指令。
+            // 整体 fail-closed，不产生任何指令。
             return Vec::new();
         };
         if seen_lines.insert(line) {
+            let raw_line = source
+                .lines()
+                .nth(line.saturating_sub(1))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             instructions.push(build_local_instruction(
                 &identity,
                 format!("unknown_structured_key/行{line}/{}", diagnostic.field),
@@ -517,20 +506,33 @@ fn unknown_structured_key_instructions(
                     field: diagnostic.field.clone(),
                     line,
                 }],
-                vec!["该未知 key 自身源行的删除（业务内容先迁移合法字段）".to_string()],
+                vec!["该未知 key 承载的业务内容（先迁移到合法字段，随 author 新 revision 处置）".to_string()],
                 vec![
+                    "平台代为删除业务承载行（O1：平台不替 author 改写业务内容）".to_string(),
                     "删除未知 section/非 key-value 行/合法字段（共用 code，不误删）".to_string(),
-                    "删除承载业务供需/AC 的合法内容".to_string(),
+                    "丢弃该行承载的业务供需/AC 内容".to_string(),
                 ],
-                StructuralRepairSolution::Precise {
-                    operations: vec![StructuralRepairOperation::DeleteLines {
-                        lines: vec![line],
-                        reason: format!("删除未知结构化 key 行 {line}：{}", diagnostic.field),
+                StructuralRepairSolution::Candidates {
+                    candidates: vec![StructuralRepairCandidate {
+                        title: format!(
+                            "保留内容、迁往合法字段：key「{}」在 STRUCTURED_KEYS 白名单外",
+                            diagnostic.field
+                        ),
+                        constraints: vec![
+                            "该行承载的业务正文不得消失（先迁移后处置）".to_string(),
+                            "迁移目标必须是本 section 的合法字段".to_string(),
+                        ],
+                        evidence: vec![
+                            format!("行{line} 原文={raw_line}"),
+                            format!("key={}", diagnostic.field),
+                        ],
+                        verified_predicates: vec![format!(
+                            "unknown_structured_key_cleared:行{line}"
+                        )],
                     }],
-                    uniqueness: None,
                 },
                 format!(
-                    "删除未知结构化 key 行 {line}（key：{}）——该行是 STRUCTURED_KEYS 白名单外的自创 key 行；若该行承载业务内容，先迁移到合法字段再删除该 key 行。",
+                    "保留业务内容、迁往合法字段：行 {line} 的 key「{}」在 STRUCTURED_KEYS 白名单外，该行原文为「{raw_line}」。先将其承载的业务正文迁移到合法字段，再随新 revision 移除该自创 key 行——平台不替 author 删业务承载行。",
                     diagnostic.field
                 ),
                 vec![format!("unknown_structured_key_cleared:行{line}")],
@@ -541,8 +543,9 @@ fn unknown_structured_key_instructions(
     instructions
 }
 
-/// 重复 trusted command 删除指令（fail-closed：仅当全部诊断均为该结构
-/// 身份且逐条可映射）。
+/// 重复 trusted command 指令（O1 收窄）：不本地删 command/整 check——
+/// producer 指出重复及受影响 check/ref（manual 与无 manual 两支处置均
+/// 交 author；fail-closed：仅当全部诊断均为该结构身份且逐条可映射）。
 fn duplicate_trusted_command_instructions(
     source: &str,
     diagnostics: &[CompilerDiagnostic],
@@ -564,26 +567,6 @@ fn duplicate_trusted_command_instructions(
         let Some(repair) = duplicate_trusted_command_repair(&ast, source, diagnostic.line) else {
             return Vec::new();
         };
-        // 含非空 manual instruction 的重复 check 仅删 command 行；无独立
-        // 人工说明的 check 整块删除，避免留下既无 command 又无手工步骤的
-        // 非法 check。
-        let (lines, reason) = if repair.has_manual_instruction {
-            (
-                vec![repair.command_line],
-                format!(
-                    "{}/{} 移除重复 trusted command（保留 manual_instruction）",
-                    repair.work_item_id, repair.check_id
-                ),
-            )
-        } else {
-            (
-                (repair.check_start_line..=repair.check_end_line).collect::<Vec<_>>(),
-                format!(
-                    "{}/{} 删除仅含重复 trusted command 的 Verification check",
-                    repair.work_item_id, repair.check_id
-                ),
-            )
-        };
         instructions.push(build_local_instruction(
             &identity,
             format!(
@@ -596,23 +579,55 @@ fn duplicate_trusted_command_instructions(
                 line: repair.command_line,
             }],
             vec![format!(
-                "{}/{} Verification check 的重复 command（manual_instruction 保留）",
+                "{}/{} Verification check 的重复 command（两支处置均由 author 决定）",
                 repair.work_item_id, repair.check_id
             )],
             vec![
+                "平台代为删除 command 或整 check（O1：平台不替 author 删验收证据）".to_string(),
                 "删除首处（非重复）trusted command".to_string(),
                 "删除仍被引用的 manual_instruction 业务说明".to_string(),
             ],
-            StructuralRepairSolution::Precise {
-                operations: vec![StructuralRepairOperation::DeleteLines {
-                    lines: lines.clone(),
-                    reason,
+            StructuralRepairSolution::Candidates {
+                candidates: vec![StructuralRepairCandidate {
+                    title: format!(
+                        "{}/{} 存在重复 trusted command：回查验证承诺后去重",
+                        repair.work_item_id, repair.check_id
+                    ),
+                    constraints: vec![
+                        "验证语义与验收证据不得无故消失".to_string(),
+                        "首处（非重复）trusted command 不得删除".to_string(),
+                    ],
+                    evidence: vec![
+                        format!("重复 command 行={}", repair.command_line),
+                        format!(
+                            "受影响 check={}/{}（行{}—行{}）",
+                            repair.work_item_id,
+                            repair.check_id,
+                            repair.check_start_line,
+                            repair.check_end_line
+                        ),
+                        format!(
+                            "manual_instruction={}",
+                            if repair.has_manual_instruction {
+                                "非空（保留分支适用）"
+                            } else {
+                                "缺席（整块处置分支适用）"
+                            }
+                        ),
+                    ],
+                    verified_predicates: vec![format!(
+                        "duplicate_trusted_command_cleared:{}/{}",
+                        repair.work_item_id, repair.check_id
+                    )],
                 }],
-                uniqueness: None,
             },
             format!(
-                "{}/{} 存在重复 trusted command：移除重复 command 行（保留 manual_instruction 与既有验证语义）；无独立人工说明的 check 整块删除。",
-                repair.work_item_id, repair.check_id
+                "回查重复 trusted command：{}/{} 在行 {} 存在重复 command，受影响 check 行区间 {}—{}。两支处置均由 author 决定：check 携带非空 manual_instruction 时移除重复 command 行（保留 manual_instruction 与既有验证语义）；无独立人工说明时由 author 决定整块删除该重复 check 或补齐人工说明——平台不替 author 删 command/删整 check。",
+                repair.work_item_id,
+                repair.check_id,
+                repair.command_line,
+                repair.check_start_line,
+                repair.check_end_line
             ),
             vec![format!(
                 "duplicate_trusted_command_cleared:{}/{}",
@@ -622,83 +637,6 @@ fn duplicate_trusted_command_instructions(
         ));
     }
     instructions
-}
-
-/// 机械应用指令的精确行编辑操作（本地收敛唯一 mutation 点）：
-/// `ReplaceLine`/`InsertLines`/`DeleteLines`；author 执行域操作（模板重写/
-/// 历史恢复）不经本地应用（SG5/SG6a 接线）。无可应用操作返回 None。
-fn apply_structural_repair_operations(
-    source: &str,
-    instructions: &[StructuralRepairInstruction],
-) -> Option<(String, Vec<String>)> {
-    let mut replacements = BTreeMap::<usize, String>::new();
-    let mut inserts = BTreeMap::<usize, Vec<String>>::new();
-    let mut deletions = BTreeSet::new();
-    let mut applied = Vec::new();
-    for instruction in instructions {
-        let StructuralRepairSolution::Precise { operations, .. } = &instruction.solution else {
-            continue;
-        };
-        for operation in operations {
-            match operation {
-                StructuralRepairOperation::ReplaceLine {
-                    line,
-                    before,
-                    after,
-                } => {
-                    replacements.insert(*line, after.clone());
-                    applied.push(format!("行 {line} 替换：{before} → {after}"));
-                }
-                StructuralRepairOperation::InsertLines { after_line, lines } => {
-                    inserts.insert(*after_line, lines.clone());
-                    applied.push(format!("行 {after_line} 后插入：{}", lines.join("；")));
-                }
-                StructuralRepairOperation::DeleteLines { lines, reason } => {
-                    deletions.extend(lines.iter().copied());
-                    applied.push(reason.clone());
-                }
-                // author 执行域操作（heading 模板/历史恢复）不经本地应用。
-                StructuralRepairOperation::RewriteWithGrammarTemplate { .. }
-                | StructuralRepairOperation::RestoreResolvedFact { .. } => {}
-            }
-        }
-    }
-    if applied.is_empty() {
-        return None;
-    }
-    Some((
-        rewrite_source(source, &replacements, &inserts, &deletions),
-        applied,
-    ))
-}
-
-/// 按行号应用替换/插入/删除（前向单遍重建，行号互不位移；保留原 source
-/// 收尾换行形态）。
-fn rewrite_source(
-    source: &str,
-    replacements: &BTreeMap<usize, String>,
-    inserts: &BTreeMap<usize, Vec<String>>,
-    deletions: &BTreeSet<usize>,
-) -> String {
-    let had_trailing_newline = source.ends_with('\n');
-    let mut lines = Vec::with_capacity(source.lines().count() + inserts.len());
-    for (index, line) in source.lines().enumerate() {
-        let line_no = index + 1;
-        if !deletions.contains(&line_no) {
-            match replacements.get(&line_no) {
-                Some(replacement) => lines.push(replacement.clone()),
-                None => lines.push(line.to_string()),
-            }
-        }
-        if let Some(inserted) = inserts.get(&line_no) {
-            lines.extend(inserted.iter().cloned());
-        }
-    }
-    let mut rewritten = lines.join("\n");
-    if had_trailing_newline {
-        rewritten.push('\n');
-    }
-    rewritten
 }
 
 struct DuplicateTrustedCommandRepair {
@@ -721,10 +659,10 @@ const UNKNOWN_STRUCTURED_KEY_CODE: &str =
 /// 返回该行号；行号错位/越界、或 field 与行内容不符（未知 section、非
 /// key/value 行等）返回 None。
 fn unknown_structured_key_line(source: &str, diagnostic: &CompilerDiagnostic) -> Option<usize> {
-    // F1.2（REQ-SG-02 第414行场景）：机械删除资格切 compiler typed——
+    // F1.2（REQ-SG-02 第414行场景）：指令资格切 compiler typed——
     // 携带 typed kind 的诊断（如非法二级 heading，携 source 原行/field/
-    // example）不是可删除的未知 key 行，按类型整体排除，绝不按共享
-    // unknown_structured_key 码删行；未 typed 诊断仍走逐行精确映射。
+    // example）不是可处置的未知 key 行，按类型整体排除，绝不按共享
+    // unknown_structured_key 码处置；未 typed 诊断仍走逐行精确映射。
     if diagnostic.kind.is_some() {
         return None;
     }
@@ -742,7 +680,7 @@ fn is_duplicate_trusted_command_diagnostic(diagnostic: &CompilerDiagnostic) -> b
     // F1.2（REQ-SG-01/02A）：资格切 compiler typed——只认 compiler 源分支
     // 的结构身份（code+field）且诊断未携带 typed kind；不再从自由文本
     // message 匹配资格（不从 message 分类）。携带 typed kind 的诊断一律
-    // 排除机械删除，交 typed 指令通道处理。
+    // 排除指令资格，交 typed 指令通道处理。
     diagnostic.kind.is_none()
         && diagnostic.code == "lowering_error"
         && diagnostic.field == "trusted_commands"
@@ -825,13 +763,14 @@ struct HandoffGap {
     contract_ref: String,
 }
 
-/// provider 对应 Outputs 契约块的 capabilities 锚点。
+/// provider 对应 Outputs 契约块的 capabilities 锚点（O1 收窄：仅定位，
+/// 不携带待改写原值）。
 enum OutputsAnchor {
-    /// 契约块最后一条 `- capabilities:` 行（行号 + 原值）。
-    MergeInto { line: usize, value: String },
-    /// 契约块仅有 `- contract_id:` 行（其后插入新 capabilities 行）。
+    /// 契约块最后一条 `- capabilities:` 行（行号；`lower_outputs` 末行生效）。
+    MergeInto { line: usize },
+    /// 契约块仅有 `- contract_id:` 行（其后为 capabilities 声明落点）。
     InsertAfter { line: usize },
-    /// provider 或契约块不存在（required_contract_missing 族，不属机械补齐）。
+    /// provider 或契约块不存在（required_contract_missing 族，不属指令域）。
     NotFound,
 }
 
@@ -851,7 +790,7 @@ fn outputs_capabilities_anchor(
         return OutputsAnchor::NotFound;
     };
     let mut contract_line = None;
-    let mut last_capabilities = None;
+    let mut last_capabilities_line = None;
     for field in &outputs.fields {
         match field.key.value.as_str() {
             "contract_id" => {
@@ -866,16 +805,13 @@ fn outputs_capabilities_anchor(
             "capabilities" if contract_line.is_some() => {
                 // 块内多行 capabilities：`lower_outputs` 末行生效，
                 // 持续覆盖以锚定末行。
-                last_capabilities = Some((field.value.line, field.value.value.clone()));
+                last_capabilities_line = Some(field.value.line);
             }
             _ => {}
         }
     }
-    match (contract_line, last_capabilities) {
-        (Some(_line), Some((cap_line, value))) => OutputsAnchor::MergeInto {
-            line: cap_line,
-            value,
-        },
+    match (contract_line, last_capabilities_line) {
+        (Some(_), Some(cap_line)) => OutputsAnchor::MergeInto { line: cap_line },
         (Some(line), None) => OutputsAnchor::InsertAfter { line },
         (None, _) => OutputsAnchor::NotFound,
     }
@@ -924,8 +860,8 @@ fn split_ref_parts(value: &str) -> Vec<String> {
 }
 
 /// 反查 (consumer, contract_id) 所在依赖边的 provider（与
-/// `contract_prerevision::required_action_text` 同一查询，保证补齐落点与
-/// 返修指令指认的 provider 一致）。
+/// `contract_prerevision::required_action_text` 同一查询，保证指令指认的
+/// provider 与返修文本一致）。
 fn provider_for_consumer_contract<'a>(
     graph: &'a DependencyContractGraph,
     consumer: &str,
@@ -942,705 +878,4 @@ fn provider_for_consumer_contract<'a>(
                     .any(|required| required.contract_id == contract_id)
         })
         .map(|edge| edge.from.as_str())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const REP4_FIXTURE: &str = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/product/work_item_plan_compiler/fixtures/work-item-plan-rep4.md"
-    ));
-
-    fn compile(source: &str) -> PlanCandidateIr {
-        compile_work_item_plan(
-            source,
-            &WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-                member_targets: None,
-            },
-        )
-        .expect("fixture compiles")
-    }
-
-    fn clean_candidate() -> String {
-        REP4_FIXTURE.replace(
-            "- provided_contract_refs: contract.levels-integration",
-            "- provided_contract_refs: []",
-        )
-    }
-
-    fn capability_gap_candidate() -> String {
-        clean_candidate().replace(
-            "- required_capabilities: api.levels.read\n",
-            "- required_capabilities: api.levels.read, api.levels.write\n",
-        )
-    }
-
-    /// 指令精确操作视图（SG2：旧 patch 断言迁指令断言）。
-    fn precise_operations(
-        instruction: &crate::product::workspace_engine::contract_prerevision::StructuralRepairInstruction,
-    ) -> &[StructuralRepairOperation] {
-        let crate::product::workspace_engine::contract_prerevision::StructuralRepairSolution::Precise { operations, .. } =
-            &instruction.solution
-        else {
-            panic!("expected precise operations, got {:?}", instruction.solution);
-        };
-        operations
-    }
-
-    fn assert_validates_clean(source: &str) {
-        let repaired_ir = compile(source);
-        let contracts = repaired_ir
-            .items
-            .iter()
-            .map(|item| item.contract.clone())
-            .collect::<Vec<_>>();
-        let graph = build_dependency_contract_graph(&contracts).expect("graph");
-        assert!(
-            validate_dependency_contract_graph(&graph).is_valid(),
-            "source must validate clean:\n{source}"
-        );
-    }
-
-    #[test]
-    fn merges_missing_capability_into_provider_last_capabilities_line() {
-        let source = capability_gap_candidate();
-        let instructions =
-            build_contract_autorepair_instructions(&source, &compile(&source), &source_context());
-        assert_eq!(
-            instructions.len(),
-            1,
-            "capability gap must produce one instruction"
-        );
-        let operations = precise_operations(&instructions[0]);
-        let StructuralRepairOperation::ReplaceLine {
-            line,
-            before,
-            after,
-        } = &operations[0]
-        else {
-            panic!("capability merge must be a precise line replacement");
-        };
-        assert_eq!(
-            *line,
-            source
-                .lines()
-                .position(|line| line == "- capabilities: api.levels.read")
-                .expect("fixture carries the provider capabilities line")
-                + 1
-        );
-        assert_eq!(before, "- capabilities: api.levels.read");
-        assert_eq!(after, "- capabilities: api.levels.read, api.levels.write");
-        // 本地应用指令后重编译，机械契约校验干净。
-        let (_ir, repaired, applied) = converge_work_item_plan_source(&source, source_context())
-            .expect("local convergence must apply the instruction");
-        assert!(
-            repaired.contains("- capabilities: api.levels.read, api.levels.write\n"),
-            "repaired source must merge the capability verbatim:\n{repaired}"
-        );
-        assert_eq!(applied.len(), 1);
-        assert_validates_clean(&repaired);
-    }
-
-    #[test]
-    fn merge_targets_the_last_capabilities_line_of_the_contract_block() {
-        // `lower_outputs` 同一契约多行 capabilities 为「最后一条生效」；
-        // 指令必须并入末行而不是新增一行（新增行会整体顶掉既有能力）。
-        let source = clean_candidate()
-            .replace(
-                "- capabilities: api.levels.read\n",
-                "- capabilities: api.levels.stale\n- capabilities: api.levels.read\n",
-            )
-            .replace(
-                "- required_capabilities: api.levels.read\n",
-                "- required_capabilities: api.levels.read, api.levels.write\n",
-            );
-        let instructions =
-            build_contract_autorepair_instructions(&source, &compile(&source), &source_context());
-        let operations = precise_operations(&instructions[0]);
-        let StructuralRepairOperation::ReplaceLine { line, .. } = &operations[0] else {
-            panic!("merge must be a line replacement");
-        };
-        let last = source
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| *line == "- capabilities: api.levels.read")
-            .map(|(index, _)| index + 1)
-            .last()
-            .expect("fixture carries two capabilities lines");
-        assert_eq!(*line, last, "merge must target the live (last) line");
-        let (_ir, repaired, _applied) = converge_work_item_plan_source(&source, source_context())
-            .expect("converge must succeed");
-        assert!(
-            repaired.contains("- capabilities: api.levels.read, api.levels.write\n"),
-            "merge must land on the live capabilities line:\n{repaired}"
-        );
-        assert!(
-            !repaired.contains("api.levels.write, api.levels.write"),
-            "repair must stay idempotent-free of duplicated appends"
-        );
-    }
-
-    #[test]
-    fn inserts_new_capabilities_line_when_contract_block_has_none() {
-        // 目标契约块无 capabilities 行（section 级语法仍满足：前一个契约块
-        // 带 capabilities 键），指令在该 `- contract_id:` 行后插入新行。
-        let source = clean_candidate()
-            .replace(
-                "- contract_id: contract.levels-api\n- capabilities: api.levels.read\n",
-                "- contract_id: contract.audit\n- capabilities: audit.evidence\n- contract_id: contract.levels-api\n",
-            )
-            .replace(
-                "- required_capabilities: api.levels.read\n",
-                "- required_capabilities: api.levels.read, api.levels.write\n",
-            );
-        let instructions =
-            build_contract_autorepair_instructions(&source, &compile(&source), &source_context());
-        let operations = precise_operations(&instructions[0]);
-        let StructuralRepairOperation::InsertLines { after_line, lines } = &operations[0] else {
-            panic!("capabilities-less block must get a line insert");
-        };
-        assert_eq!(
-            *after_line,
-            source
-                .lines()
-                .position(|line| line == "- contract_id: contract.levels-api")
-                .expect("fixture carries the target contract block")
-                + 1
-        );
-        assert_eq!(
-            lines,
-            &vec!["- capabilities: api.levels.read, api.levels.write".to_string()]
-        );
-        let (_ir, repaired, _applied) = converge_work_item_plan_source(&source, source_context())
-            .expect("converge must succeed");
-        assert!(
-            repaired.contains(
-                "- contract_id: contract.levels-api\n- capabilities: api.levels.read, api.levels.write\n"
-            ),
-            "a new capabilities line must follow the contract_id line:\n{repaired}"
-        );
-        assert_validates_clean(&repaired);
-    }
-
-    #[test]
-    fn removes_unconsumed_handoff_ref_and_rewrites_to_legal_empty_list() {
-        let source = REP4_FIXTURE;
-        let instructions =
-            build_contract_autorepair_instructions(source, &compile(source), &source_context());
-        assert_eq!(
-            instructions.len(),
-            1,
-            "unconsumed handoff must produce one instruction"
-        );
-        let operations = precise_operations(&instructions[0]);
-        let StructuralRepairOperation::ReplaceLine { after, .. } = &operations[0] else {
-            panic!("handoff removal must be a line replacement");
-        };
-        assert_eq!(after, "- provided_contract_refs: []");
-        let (_ir, repaired, applied) = converge_work_item_plan_source(source, source_context())
-            .expect("local convergence must apply the instruction");
-        assert!(
-            repaired.contains("- provided_contract_refs: []\n"),
-            "sole ref removal must rewrite the legal empty value:\n{repaired}"
-        );
-        assert_eq!(applied.len(), 1);
-        assert_validates_clean(&repaired);
-    }
-
-    #[test]
-    fn keeps_sibling_refs_when_removing_one_from_a_multi_ref_line() {
-        let source = clean_candidate().replace(
-            "- provided_contract_refs: contract.levels-api\n",
-            "- provided_contract_refs: contract.levels-api, contract.levels-extra\n",
-        );
-        // contract.levels-extra 未被消费 → 删它，保留仍被消费的 levels-api。
-        let instructions =
-            build_contract_autorepair_instructions(&source, &compile(&source), &source_context());
-        let operations = precise_operations(&instructions[0]);
-        let StructuralRepairOperation::ReplaceLine { after, .. } = &operations[0] else {
-            panic!("multi-ref handoff gap must be a line replacement");
-        };
-        assert_eq!(after, "- provided_contract_refs: contract.levels-api");
-        let (_ir, repaired, _applied) = converge_work_item_plan_source(&source, source_context())
-            .expect("converge must succeed");
-        assert!(
-            repaired.contains("- provided_contract_refs: contract.levels-api\n"),
-            "consumed sibling ref must survive the removal:\n{repaired}"
-        );
-        assert!(!repaired.contains("contract.levels-extra"));
-    }
-
-    #[test]
-    fn clean_and_non_mechanical_sources_return_none() {
-        assert!(
-            build_contract_autorepair_instructions(
-                &clean_candidate(),
-                &compile(&clean_candidate()),
-                &source_context()
-            )
-            .is_empty()
-        );
-        // 依赖环不在两类机械缺口内：不拦截。
-        let cycled = clean_candidate().replace(
-            "### Inputs\n\n### Outputs\n- contract_id: contract.levels-api",
-            "### Inputs\n- contract_id: contract.level-selector\n- provider_logical_work_item_id: WI-002\n- required_capabilities: ui.level-selector.rendered\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.levels-api",
-        );
-        let ir = compile(&cycled);
-        let contracts = ir
-            .items
-            .iter()
-            .map(|item| item.contract.clone())
-            .collect::<Vec<_>>();
-        let graph = build_dependency_contract_graph(&contracts).expect("graph");
-        assert!(
-            !validate_dependency_contract_graph(&graph).is_valid(),
-            "cycle fixture must actually carry a non-mechanical gap"
-        );
-        assert!(build_contract_autorepair_instructions(&cycled, &ir, &source_context()).is_empty());
-    }
-
-    #[test]
-    fn converge_loop_repairs_until_clean_and_reports_log() {
-        let (ir, source, applied) =
-            converge_work_item_plan_source(&capability_gap_candidate(), source_context())
-                .expect("converge must succeed");
-        assert!(
-            source.contains("- capabilities: api.levels.read, api.levels.write\n"),
-            "converged source must carry the repair"
-        );
-        assert_eq!(applied.len(), 1);
-        let contracts = ir
-            .items
-            .iter()
-            .map(|item| item.contract.clone())
-            .collect::<Vec<_>>();
-        let graph = build_dependency_contract_graph(&contracts).expect("graph");
-        assert!(validate_dependency_contract_graph(&graph).is_valid());
-    }
-    #[test]
-    fn converge_repairs_duplicate_trusted_command_without_losing_manual_instruction() {
-        let source = clean_candidate().replacen(
-            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true",
-            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true\n- check_id: CHECK-004\n- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint still returns configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true",
-            1,
-        );
-        let (ir, source, applied) = converge_work_item_plan_source(
-            &source,
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-                member_targets: None,
-            },
-        )
-        .expect("duplicate trusted command must be mechanically repaired");
-
-        let verification = &ir.items[0].contract.verification_checks;
-        assert_eq!(verification.len(), 2);
-        assert_eq!(
-            verification[0].command.as_deref(),
-            Some("cargo test --locked --lib levels_api")
-        );
-        assert_eq!(verification[1].command, None);
-        assert_eq!(
-            source
-                .matches("- command: cargo test --locked --lib levels_api")
-                .count(),
-            1
-        );
-        assert!(!source.contains("CHECK-004\n- command: cargo test --locked --lib levels_api"));
-        assert!(source.contains(
-            "- check_id: CHECK-004\n- manual_instruction: Confirm the endpoint still returns configured levels JSON."
-        ));
-        assert_eq!(applied.len(), 1);
-        assert!(applied[0].contains("重复 trusted command"));
-    }
-    #[test]
-    fn converge_removes_duplicate_check_without_manual_instruction() {
-        let source = clean_candidate().replacen(
-            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true",
-            "- command: cargo test --locked --lib levels_api\n- manual_instruction: Confirm the endpoint returns the configured levels JSON.\n- required: true\n- non_zero_test_execution_required: true\n- check_id: CHECK-004\n- command: cargo test --locked --lib levels_api\n- required: true\n- non_zero_test_execution_required: true",
-            1,
-        );
-        let (ir, source, applied) = converge_work_item_plan_source(
-            &source,
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-                member_targets: None,
-            },
-        )
-        .expect("duplicate check without manual instruction must be removed");
-
-        assert_eq!(ir.items[0].contract.verification_checks.len(), 1);
-        assert!(!source.contains("CHECK-004"));
-        assert_eq!(applied.len(), 1);
-        assert!(applied[0].contains("删除仅含重复 trusted command"));
-    }
-
-    /// 复验 F-41：修订轮 author 在 `### Handoff Schema` 自创 `requested_fields`
-    /// （`STRUCTURED_KEYS` 白名单外）→ parse 阶段 `unknown_structured_key` 直接终态死。
-    fn unknown_structured_key_candidate() -> String {
-        clean_candidate().replacen(
-            "- required_fields: commit_sha\n",
-            "- required_fields: commit_sha\n- requested_fields: 无\n",
-            1,
-        )
-    }
-
-    fn source_context() -> WorkItemPlanSourceContext {
-        WorkItemPlanSourceContext {
-            target_repository_id: "repo_fixture".to_string(),
-            member_targets: None,
-        }
-    }
-
-    fn unknown_key_diagnostic(line: usize, field: &str) -> CompilerDiagnostic {
-        CompilerDiagnostic {
-            code: "unknown_structured_key".to_string(),
-            line,
-            field: field.to_string(),
-            message: "未知结构化 key 必须拒绝。".to_string(),
-            repair_example: "- kind: backend".to_string(),
-            kind: None,
-            lowering_fault: None,
-            ir_fault: None,
-        }
-    }
-
-    #[test]
-    fn converge_removes_unknown_structured_key_line_and_recompiles_clean() {
-        let source = unknown_structured_key_candidate();
-        let diagnostics = compile_work_item_plan(&source, &source_context())
-            .expect_err("unknown structured key must fail the first compile");
-        assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "unknown_structured_key"
-                    && diagnostic.field == "requested_fields"
-            }),
-            "first compile must report the unknown key: {diagnostics:?}"
-        );
-
-        let (ir, source, applied) = converge_work_item_plan_source(&source, source_context())
-            .expect("unknown structured key line must be mechanically repaired");
-        assert!(!source.contains("requested_fields"));
-        assert!(
-            source.contains(
-                "- required_fields: commit_sha\n- provided_contract_refs: contract.levels-api\n"
-            ),
-            "neighbouring legal fields must survive the deletion:\n{source}"
-        );
-        assert_eq!(
-            source.lines().count(),
-            unknown_structured_key_candidate().lines().count() - 1
-        );
-        // 返回的 IR 由删除后的 source 新鲜编译得到。
-        assert_eq!(ir.items.len(), 3);
-        assert_eq!(applied.len(), 1);
-        assert!(
-            applied[0].contains("未知结构化 key") && applied[0].contains("requested_fields"),
-            "deterministic log entry: {}",
-            applied[0]
-        );
-    }
-
-    #[test]
-    fn unknown_structured_key_repair_requires_the_line_to_carry_the_key() {
-        let source = unknown_structured_key_candidate();
-        // 行号错位（指向相邻的合法行）与行号越界均不产生删行指令。
-        assert!(
-            build_compile_failure_repair_instructions(
-                &source,
-                &[unknown_key_diagnostic(50, "requested_fields")],
-                &source_context()
-            )
-            .is_empty()
-        );
-        assert!(
-            build_compile_failure_repair_instructions(
-                &source,
-                &[unknown_key_diagnostic(
-                    source.lines().count() + 1,
-                    "requested_fields"
-                )],
-                &source_context()
-            )
-            .is_empty()
-        );
-        // 命中行时指令按诊断行号精确删除。
-        let target = source
-            .lines()
-            .position(|line| line == "- requested_fields: 无")
-            .expect("fixture carries the unknown key line")
-            + 1;
-        let instructions = build_compile_failure_repair_instructions(
-            &source,
-            &[unknown_key_diagnostic(target, "requested_fields")],
-            &source_context(),
-        );
-        assert_eq!(instructions.len(), 1);
-        let operations = precise_operations(&instructions[0]);
-        assert_eq!(
-            operations,
-            &vec![StructuralRepairOperation::DeleteLines {
-                lines: vec![target],
-                reason: format!("删除未知结构化 key 行 {target}：requested_fields"),
-            }]
-        );
-    }
-
-    #[test]
-    fn converge_keeps_same_code_non_key_lines_fail_closed() {
-        // 未知 section 与非 key/value 行共用 `unknown_structured_key` code：
-        // 诊断 field 与源行内容不符，绝不误删。
-        let unknown_section = clean_candidate().replacen(
-            "### Blockers\n",
-            "### Unexpected Section\n### Blockers\n",
-            1,
-        );
-        let malformed_line = clean_candidate().replacen(
-            "- required_fields: commit_sha\n",
-            "requested_fields 无\n- required_fields: commit_sha\n",
-            1,
-        );
-        for source in [unknown_section, malformed_line] {
-            let diagnostics = converge_work_item_plan_source(&source, source_context())
-                .expect_err("non-key lines sharing the code must stay fail-closed");
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.code == "unknown_structured_key"),
-                "{diagnostics:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn converge_keeps_non_duplicate_diagnostics_fail_closed() {
-        let source = REP4_FIXTURE.replacen("- kind: backend\n", "", 1);
-        let diagnostics = converge_work_item_plan_source(
-            &source,
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-                member_targets: None,
-            },
-        )
-        .expect_err("non-mechanical compiler diagnostics must remain errors");
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.field == "kind" && diagnostic.code != "lowering_error"
-        }));
-        assert!(
-            !diagnostics
-                .iter()
-                .any(is_duplicate_trusted_command_diagnostic)
-        );
-    }
-
-    // —— F1.2（REQ-SG-01/02/02A）：机械删除资格切 compiler typed ——
-
-    #[test]
-    fn sg_f1_2_typed_heading_never_deleted_as_unknown_key() {
-        use crate::product::planning_failure::PlanningFailureKind;
-
-        // REQ-SG-02 第414行场景（R2 防线）：非法二级 heading 与未知 key
-        // 共享 unknown_structured_key code；heading 分支携带 typed kind，
-        // 机械删除资格按 typed payload 排除——绝不按共享码删 heading 行，
-        // 混合集合同样整体 fail-closed。
-        let source = unknown_structured_key_candidate().replacen(
-            "### Blockers\n",
-            "## 验收说明\n### Blockers\n",
-            1,
-        );
-        let diagnostics = compile_work_item_plan(&source, &source_context())
-            .expect_err("heading + unknown key 必须编译失败");
-        let heading = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.field == "work_item_heading")
-            .expect("heading 诊断必须存在");
-        assert_eq!(heading.code, "unknown_structured_key");
-        assert!(matches!(
-            &heading.kind,
-            Some(PlanningFailureKind::InvalidWorkItemHeading {
-                line,
-                raw_line,
-                ..
-            }) if *line >= 1 && raw_line == "## 验收说明"
-        ));
-        assert!(
-            build_compile_failure_repair_instructions(&source, &diagnostics, &source_context())
-                .is_empty(),
-            "typed heading 排除机械删除资格，混合集合整体 fail-closed（零删行指令）"
-        );
-        assert!(
-            converge_work_item_plan_source(&source, source_context()).is_err(),
-            "heading 错误不经机械删除收敛"
-        );
-    }
-
-    #[test]
-    fn sg_f1_2_duplicate_command_qualification_is_structural_not_message() {
-        use crate::product::planning_failure::PlanningFailureKind;
-
-        // 资格切 compiler typed（F1.2）：重复 trusted command 的机械删除
-        // 资格只认结构身份（code+field）且未携带 typed kind——message
-        // 文案漂移不改变判定（REQ-SG-01：不从自由文本分类）。
-        let drifted = CompilerDiagnostic {
-            code: "lowering_error".to_string(),
-            message: "文案漂移后的重复 trusted command 描述".to_string(),
-            repair_example: "- command: cargo test --locked --lib target".to_string(),
-            ..unknown_key_diagnostic(9, "trusted_commands")
-        };
-        assert!(is_duplicate_trusted_command_diagnostic(&drifted));
-        let mut other_field = drifted.clone();
-        other_field.field = "kind".to_string();
-        assert!(!is_duplicate_trusted_command_diagnostic(&other_field));
-        let mut typed = drifted.clone();
-        typed.kind = Some(PlanningFailureKind::InvalidWorkItemHeading {
-            line: 1,
-            field: "work_item_heading".to_string(),
-            raw_line: "## 验收说明".to_string(),
-            example: "## Work Item WI-001: fixture".to_string(),
-        });
-        assert!(
-            !is_duplicate_trusted_command_diagnostic(&typed),
-            "携带 typed kind 的诊断不参与机械删除"
-        );
-    }
-
-    // —— SG2（REQ-SG-02/02A、REQ-PLN-10）：内容直改迁机器指令 ——
-
-    /// 内容 autorepair 迁机器指令：producer 是纯函数（零 source mutation、
-    /// 零 provider/模型调用、无 8×AI 循环），输出为精确行编辑指令且不声明
-    /// 唯一解；required_action 与 F5-A 机械 verdict 同一模板口径（单一事实
-    /// 源，不给第二套语义）；本地收敛仍确定性应用指令并重编译干净。
-    #[test]
-    fn sg_02_no_fake_edge_removal_content_autorepair_migrated_to_pure_instructions() {
-        use crate::product::workspace_engine::contract_prerevision::{
-            StructuralRepairOperation, StructuralRepairSolution,
-        };
-        use sha2::{Digest, Sha256};
-
-        let source = capability_gap_candidate();
-        let context = source_context();
-        let ir = compile(&source);
-        let instructions = build_contract_autorepair_instructions(&source, &ir, &context);
-        assert_eq!(instructions.len(), 1, "capability 缺口产一条精确补齐指令");
-        let instruction = &instructions[0];
-
-        // 纯 producer 的身份绑定与确定性（无隐藏状态/循环副作用）。
-        assert_eq!(
-            instruction.source_hash,
-            hex::encode(Sha256::digest(source.as_bytes())),
-            "指令 source_hash 绑定待修 source"
-        );
-        assert!(!instruction.instruction_digest.is_empty());
-        assert_eq!(
-            build_contract_autorepair_instructions(&source, &ir, &context),
-            instructions,
-            "同输入两次构建全等（确定性）"
-        );
-        assert_eq!(instruction.rule_version, CONTRACT_AUTOREPAIR_RULE_VERSION);
-
-        // 精确操作为逐字行合并（旧「末行生效」补齐语义迁为指令载荷）。
-        let StructuralRepairSolution::Precise {
-            operations,
-            uniqueness,
-        } = &instruction.solution
-        else {
-            panic!("capability 补齐必须是精确操作形态");
-        };
-        assert!(uniqueness.is_none(), "内容补齐不携带唯一标签（REQ-PLN-10）");
-        assert_eq!(
-            operations,
-            &vec![StructuralRepairOperation::ReplaceLine {
-                line: source
-                    .lines()
-                    .position(|line| line == "- capabilities: api.levels.read")
-                    .expect("fixture carries the provider capabilities line")
-                    + 1,
-                before: "- capabilities: api.levels.read".to_string(),
-                after: "- capabilities: api.levels.read, api.levels.write".to_string(),
-            }],
-            "操作逐字指向 provider 的生效 capabilities 行"
-        );
-
-        // required_action 与 F5-A verdict 同一模板（单一口径）。
-        assert!(
-            instruction.required_action.contains(
-                "在 WI-001 的 Outputs 契约 contract.levels-api 的 capabilities 列表追加一行（逐字复制）：- api.levels.write"
-            ),
-            "required_action 复用 F5-A 逐字补丁行模板：{}",
-            instruction.required_action
-        );
-
-        // 本地收敛仍机械应用指令并重编译干净（8 轮本地循环零 AI 调用）。
-        let (repaired_ir, repaired, applied) = converge_work_item_plan_source(&source, context)
-            .expect("local convergence must still apply the instruction");
-        assert!(
-            repaired.contains("- capabilities: api.levels.read, api.levels.write\n"),
-            "收敛后的 source 携带逐字补齐：\n{repaired}"
-        );
-        assert_eq!(applied.len(), 1);
-        let contracts = repaired_ir
-            .items
-            .iter()
-            .map(|item| item.contract.clone())
-            .collect::<Vec<_>>();
-        let graph = build_dependency_contract_graph(&contracts).expect("graph");
-        assert!(
-            validate_dependency_contract_graph(&graph).is_valid(),
-            "收敛后机械契约校验必须干净"
-        );
-    }
-
-    /// 未知 key 大码 heading 不删行（REQ-SG-02 第 414 行场景）：typed
-    /// heading 诊断（非法二级 heading）与未知 key 共享 code，但携带 typed
-    /// kind——指令 producer 永不为其生成删行指令；混合集合整体 fail-closed，
-    /// 纯 heading 缺口同样零删行指令、不经本地收敛。
-    #[test]
-    fn sg_02_no_fake_edge_removal_unknown_key_big_code_heading_never_deleted() {
-        use crate::product::planning_failure::PlanningFailureKind;
-
-        let context = source_context();
-        let mixed = unknown_structured_key_candidate().replacen(
-            "### Blockers\n",
-            "## 验收说明\n### Blockers\n",
-            1,
-        );
-        let diagnostics = compile_work_item_plan(&mixed, &context)
-            .expect_err("heading + unknown key 必须编译失败");
-        let heading = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.field == "work_item_heading")
-            .expect("heading 诊断必须存在");
-        assert_eq!(heading.code, "unknown_structured_key");
-        assert!(matches!(
-            &heading.kind,
-            Some(PlanningFailureKind::InvalidWorkItemHeading { line, raw_line, .. })
-                if *line >= 1 && raw_line == "## 验收说明"
-        ));
-        assert!(
-            build_compile_failure_repair_instructions(&mixed, &diagnostics, &context).is_empty(),
-            "typed heading 与未知 key 混合集合整体 fail-closed：零删行指令（绝不按共享码删 heading 行）"
-        );
-        assert!(
-            converge_work_item_plan_source(&mixed, context.clone()).is_err(),
-            "heading 错误不经机械删行收敛"
-        );
-
-        // 纯 heading 缺口：同样零删行指令（不删业务行）。
-        let heading_only =
-            clean_candidate().replacen("### Blockers\n", "## 验收说明\n### Blockers\n", 1);
-        let heading_diagnostics = compile_work_item_plan(&heading_only, &context)
-            .expect_err("pure heading fixture must fail compile");
-        assert!(
-            build_compile_failure_repair_instructions(
-                &heading_only,
-                &heading_diagnostics,
-                &context
-            )
-            .is_empty(),
-            "typed heading 诊断不产生任何删行指令"
-        );
-    }
 }
