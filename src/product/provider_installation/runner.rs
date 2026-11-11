@@ -782,8 +782,7 @@ mod tests {
         // `<prefix>/bin` 的那一支由下方 `npm_path_hint` 单测（受控
         // PATH）确定性覆盖。
         let command_on_path =
-            first_path_dir_with_command("codex", std::env::var("PATH").ok().as_deref())
-                .is_some();
+            first_path_dir_with_command("codex", std::env::var("PATH").ok().as_deref()).is_some();
         if command_on_path {
             assert!(
                 outcome.path_hint.is_none(),
