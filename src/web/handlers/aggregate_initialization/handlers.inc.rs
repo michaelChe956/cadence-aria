@@ -423,23 +423,67 @@ fn start_lc_initialization_outcome(
     }
 }
 
-/// prepare 被拒的可读上下文：HTTP 面错误 message + 非空 details 的紧凑
-/// JSON（provider 选择门的候选表/单家核验入口就在 details 里）。只作诊断
-/// 展示，落盘前统一走脱敏截断。
+/// prepare 被拒的可读上下文：HTTP 面错误 message + **紧凑中文**的候选状态。
+///
+/// 旧实现把整个 `details`（候选表 + 单家核验入口 + copy + 规则版本）序列化
+/// 进诊断串，界面直接摊开一坨机器报文 —— 用户要的是「哪几家、什么状态」，
+/// 不是原始 JSON。机器字段仍留在 HTTP 响应体里给 agent 用，界面文案只留
+/// 可执行的那部分。落盘前统一走脱敏截断。
 fn prepare_rejection_detail(error: &crate::web::error::ApiError) -> Option<String> {
-    let details = if error
-        .details
-        .as_object()
-        .is_some_and(|details| !details.is_empty())
+    Some(
+        match compact_candidate_line(&error.details) {
+            Some(line) => format!("{}；{line}", error.message),
+            None => error.message.clone(),
+        },
+    )
+}
+
+/// 把 provider 选择门的 `details.candidates` 渲染成一行紧凑中文（逐家状态）。
+///
+/// 无候选表时返回 `None`（诊断串只保留错误 message，不追加任何机器字段）。
+fn compact_candidate_line(details: &serde_json::Value) -> Option<String> {
+    let candidates = details.get("candidates")?.as_array()?;
+    let parts: Vec<String> = candidates
+        .iter()
+        .map(|candidate| {
+            let name = candidate
+                .get("display_name")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| candidate.get("provider").and_then(serde_json::Value::as_str))
+                .unwrap_or("未知 provider");
+            format!("{name}（{}）", candidate_state_label(candidate))
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("候选：{}", parts.join("、")))
+}
+
+/// 候选的中文状态标签（与前端 `SKIPPED_REASON_LABELS` / 能力面口径一致）。
+///
+/// 优先用 `skipped_reason`（为什么被跳过），缺省再看 `capability_state`；
+/// 认不出的形态一律按「未核验」呈现 —— 不谎报「已核验」。
+fn candidate_state_label(candidate: &serde_json::Value) -> &'static str {
+    match candidate
+        .get("skipped_reason")
+        .and_then(serde_json::Value::as_str)
     {
-        format!(
-            " | details: {}",
-            serde_json::to_string(&error.details).unwrap_or_default()
-        )
-    } else {
-        String::new()
-    };
-    Some(format!("{}{details}", error.message))
+        Some("cli_unavailable") => "未安装",
+        Some("needs_verification") => "未核验",
+        Some("denied") => "实测拒绝",
+        Some("evidence_stale") => "证据过期",
+        _ => match candidate
+            .get("capability_state")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("confirmed") => "已核验",
+            Some("not_installed") => "未安装",
+            Some("denied") => "实测拒绝",
+            Some("evidence_stale") => "证据过期",
+            _ => "未核验",
+        },
+    }
 }
 
 /// Legacy `/logical-codebase/initializations/{operation_id}` compatibility

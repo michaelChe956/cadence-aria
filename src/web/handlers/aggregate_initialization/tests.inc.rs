@@ -1125,3 +1125,4 @@ include!("tests_parts/selection_failure.inc.rs");
 include!("tests_parts/l2_global_capability.inc.rs");
 include!("tests_parts/resume_legacy_compat.inc.rs");
 include!("tests_parts/selector_seed.inc.rs");
+include!("tests_parts/advance_stop_detail.inc.rs");
