@@ -54,17 +54,19 @@ export async function waitForKnowledgeBaseOperation(
     } catch {
       // 轮询失败不打断建库：下一轮重试（终态以最后一次成功取数为准）。
     }
-    const { promise, resolve } = Promise.withResolvers<void>();
-    const timer = window.setTimeout(resolve, KNOWLEDGE_BASE_OPERATION_POLL_INTERVAL_MS);
-    options?.signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-    await promise;
+    // 等待下一轮轮询：ES2022 lib（web/tsconfig.json 的 lib 口径）没有
+    // Promise.withResolvers 的类型 ⇒ 用 executor 形态。
+    await new Promise<void>((resolve) => {
+      const timer = window.setTimeout(resolve, KNOWLEDGE_BASE_OPERATION_POLL_INTERVAL_MS);
+      options?.signal?.addEventListener(
+        "abort",
+        () => {
+          window.clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    });
     if (options?.signal?.aborted) {
       return null;
     }
