@@ -50,6 +50,7 @@ export function KnowledgeBaseUserInputPanel({
   onSummaryChanged,
   onAllConfirmed,
   initializing = false,
+  alreadyInitialized = false,
 }: {
   projectId: string;
   lcId: string;
@@ -68,6 +69,8 @@ export function KnowledgeBaseUserInputPanel({
   onAllConfirmed?: () => void | Promise<void>;
   /** 建库进行中（页面侧 operation 在跑）⇒ 按钮禁用且显示进行中文案。 */
   initializing?: boolean;
+  /** 知识库已建成 ⇒ 不再提供「确认并初始化」（重复跑一次 bootstrap 没有意义）。 */
+  alreadyInitialized?: boolean;
 }) {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [confirmingPaths, setConfirmingPaths] = useState<ReadonlySet<string>>(
@@ -204,12 +207,16 @@ export function KnowledgeBaseUserInputPanel({
           type="button"
           data-testid="kb-user-input-confirm-and-initialize"
           disabled={
-            initializing || confirmingAll || unfilledCount > 0
+            initializing || confirmingAll || unfilledCount > 0 || alreadyInitialized
           }
           onClick={() => void confirmAndInitialize()}
           className="shrink-0 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-2 py-1 text-xs font-semibold text-white transition-colors duration-200 hover:opacity-90 disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
         >
-          {initializing ? "正在初始化知识库…" : "确认并初始化"}
+          {alreadyInitialized
+            ? "知识库已初始化"
+            : initializing
+              ? "正在初始化知识库…"
+              : "确认并初始化"}
         </button>
       ) : null}
       {/* 未确认时提示体现「待确认 N 份」；全部确认后提示可执行初始化。 */}

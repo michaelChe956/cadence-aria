@@ -458,6 +458,31 @@ describe("KnowledgeBasePage", () => {
     await waitForEditorValue("# 基础信息");
   });
 
+  it("disables_the_initialize_button_once_the_knowledge_base_is_built", async () => {
+    // 知识库已建成 ⇒ 「确认并初始化」不再可用（重复跑一次 bootstrap 没有意义）。
+    installFetch({
+      status: () =>
+        jsonResponse({
+          exists: true,
+          schema_version: "4.0",
+          initialization_status: "complete",
+          global_validation: "passed",
+          completed_stages: ["base-info"],
+          skipped_stages: [],
+          skills_available: true,
+        }),
+      userInput: () =>
+        jsonResponse(userInputSummary([{ path: "user-input/goal.md" }])),
+    });
+    renderPage();
+
+    const button = await screen.findByTestId(
+      "kb-user-input-confirm-and-initialize",
+    );
+    expect(button).toBeDisabled();
+    expect(button).toHaveTextContent("知识库已初始化");
+  });
+
   it("confirm_and_initialize_creates_bootstrap_operation_and_refreshes", async () => {
     const { calls } = installFetch({
       status: () =>

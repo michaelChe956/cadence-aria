@@ -723,6 +723,7 @@ export function KnowledgeBasePage({
                   onSummaryChanged={() => void refreshUserInput()}
                   onAllConfirmed={() => void handleAllConfirmed()}
                   initializing={initializing}
+                  alreadyInitialized={status?.initialization_status === "complete"}
                 />
               ) : null}
               {initNotice ? (
