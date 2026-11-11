@@ -69,6 +69,7 @@ fn single_repo_prompt() -> String {
             routing_context: &RoutingReferenceContext::Legacy,
             member_targets: None,
             change_order: &[],
+            baseline_tree: None,
         },
     )
     .expect("single-repo markdown author prompt")
@@ -104,6 +105,7 @@ fn lc_prompt() -> String {
             routing_context: &RoutingReferenceContext::Legacy,
             member_targets: Some(&members),
             change_order: &[backend, web],
+            baseline_tree: None,
         },
     )
     .expect("LC multi-repo markdown author prompt")

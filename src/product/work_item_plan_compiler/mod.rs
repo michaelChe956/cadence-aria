@@ -1,4 +1,5 @@
 mod ac_paths;
+mod baseline_candidates;
 mod check_target_forbidden;
 pub mod freshness;
 pub mod grammar;

@@ -31,6 +31,11 @@ mod prompt_contract_plan_intent_target {
 
     include!("tests/prompt_contract_plan_intent_target.rs");
 }
+mod prompt_contract_baseline_tree {
+    use super::*;
+
+    include!("tests/prompt_contract_baseline_tree.rs");
+}
 include!("tests/part_02.rs");
 include!("tests/routing_reference_contract.rs");
 include!("tests/part_03.rs");

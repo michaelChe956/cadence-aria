@@ -264,9 +264,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     // 「归属必填」注释 + 别名 id 调用（多行）⇒ +8 行。
     ("src/web/workspace_session/tests/part_01.rs", 1619),
     ("src/web/workspace_session/tests/part_07.rs", 1272),
-    // 2026-10-30（REQ-WSC-10，待 owner 裁决）：运行期预校验接线成员 checkout
-    // 前缀表装载（共享门控，单块调用）+8。
-    ("src/web/workspace_ws_handler/run/single_candidate.rs", 1666),
     ("src/web/workspace_ws_handler/socket.rs", 1893),
     (
         "src/web/workspace_ws_handler/tests/campaign_stage3_interactive/cases.rs",

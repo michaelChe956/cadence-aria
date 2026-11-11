@@ -11,7 +11,7 @@ import {
   useSearch,
   type RouterHistory,
 } from "@tanstack/react-router";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { AppShell } from "./app-shell";
 import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvailabilityGuard";
 import { CockpitShell } from "./components/cockpit/CockpitShell";
@@ -20,6 +20,7 @@ import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
 import { WorkbenchOverlayHost } from "./components/lifecycle/WorkbenchOverlayHost";
 import type { CodingAttentionItemDto } from "./api/types";
 import { ImageCreatePage } from "./pages/ImageCreatePage";
+import { KnowledgeBasePage } from "./pages/KnowledgeBasePage";
 import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
 import { seedWorkbenchOverlayAddress } from "./state/workbench-overlay-store";
 import {
@@ -75,20 +76,34 @@ const indexRoute = createRoute({
 function WorkbenchRouteComponent() {
   const search = useSearch({ strict: false }) as WorkbenchSearch;
   const navigate = useNavigate();
+  // navigate 的身份随位置变化 ⇒ 直接把它放进 useCallback 依赖会让
+  // syncDrawerFocus 每次导航都换身份 ⇒ 下游（工作台的抽屉焦点同步 effect）
+  // 跟着重跑，并在 replace 里把刚发生的跨路由导航（如「查看知识库详细内容」
+  // → 知识库详情页）**顶回 /workbench**。用 ref 固定 navigate，让两个回调
+  // 身份稳定。
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  // 当前路径：抽屉焦点同步只在「当前就在工作台路由」时写地址。跨路由导航
+  // 过程中工作台组件还会再渲染一帧（卸载前），那一帧若执行 replace
+  // /workbench，会把刚发生的导航顶回去（真机复现：点「打开输入文件并补充」
+  // 被顶回工作台）。
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
   // UI-1 冻结契约：/workbench 的任何 search 写入都必须合并现有 search
   // （mergeWorkbenchSearch）。此前 syncDrawerFocus 只写 {focus} 会覆盖掉
   // overlay 抽屉定位字段——本回调是必改点。
-  const syncDrawerFocus = useCallback(
-    (entityKey: string | null) => {
-      void navigate({
-        to: "/workbench",
-        search: (previous: Partial<WorkbenchSearch>) =>
-          mergeWorkbenchSearch(previous, { focus: entityKey ?? undefined }),
-        replace: true,
-      });
-    },
-    [navigate],
-  );
+  const syncDrawerFocus = useCallback((entityKey: string | null) => {
+    if (pathnameRef.current !== "/workbench") {
+      return;
+    }
+    void navigateRef.current({
+      to: "/workbench",
+      search: (previous: Partial<WorkbenchSearch>) =>
+        mergeWorkbenchSearch(previous, { focus: entityKey ?? undefined }),
+      replace: true,
+    });
+  }, []);
   // overlay 抽屉（plan-overview/inbox）定位写入：同路由合并，可前进后退。
   const updateOverlaySearch = useCallback(
     (patch: Partial<WorkbenchSearch>) => {
@@ -274,6 +289,20 @@ const codingPlanOverviewRoute = createRoute({
   getParentRoute: () => guardedWorkflowRoute,
   path: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
   component: CodingPlanOverviewRedirectRouteComponent,
+});
+
+// LC 知识库详情页（文件树 + 可写编辑器 + 预览 + 保存）。
+// 挂在 guardedWorkflowRoute 子树下，与 codingWorkspaceRoute 同风格：路由参数
+// 由 useParams 取出后透传给页面组件。
+function KnowledgeBaseRouteComponent() {
+  const { projectId, lcId } = useParams({ strict: false });
+  return <KnowledgeBasePage projectId={projectId} lcId={lcId} />;
+}
+
+const knowledgeBaseRoute = createRoute({
+  getParentRoute: () => guardedWorkflowRoute,
+  path: "/workbench/projects/$projectId/logical-codebases/$lcId/knowledge-base",
+  component: KnowledgeBaseRouteComponent,
 });
 
 // ── P1-c（REQ-MTG-12）+ UI-1：A1 待办 target 统一导航 ──
@@ -465,6 +494,7 @@ const guardedWorkflowTree = guardedWorkflowRoute.addChildren([
   codingWorkspaceRoute,
   codingPlanOverviewRoute,
   legacyCodingWorkspaceRoute,
+  knowledgeBaseRoute,
 ]);
 
 const routeTree = rootRoute.addChildren([

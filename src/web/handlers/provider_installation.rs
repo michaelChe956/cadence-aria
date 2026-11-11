@@ -203,9 +203,9 @@ pub async fn get_install_targets(State(state): State<WebAppState>) -> Json<Insta
                 codegraph.version.clone(),
             ),
         };
-        // Kimi 非 npm 包：不做 registry 版本判定（REQ-PCI-04）；npm 对象
-        // 查询失败（离线）→ None，action 退化为 verify/none。
-        let latest = match row.npm_package {
+        // Kimi 非 npm 安装源，但其**版本来源**是 npm 包（REQ-PCI-07）⇒ 同样查
+        // registry 的 latest；查不到（离线）→ None，action 退化为 verify/none。
+        let latest = match row.version_package {
             Some(package) => version_service
                 .latest_version(&registry, package, now)
                 .await
@@ -351,6 +351,8 @@ mod tests {
 
     struct ScriptedRunner {
         results: Mutex<VecDeque<Result<BoundedCommandResult, BoundedCommandError>>>,
+        /// 脚本原件：脚本用尽时**回放一轮**（见 `run` 的说明）。
+        script: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
         delay: Duration,
     }
 
@@ -360,7 +362,8 @@ mod tests {
             delay: Duration,
         ) -> Arc<Self> {
             Arc::new(Self {
-                results: Mutex::new(VecDeque::from(results)),
+                results: Mutex::new(VecDeque::from(results.clone())),
+                script: results,
                 delay,
             })
         }
@@ -375,11 +378,15 @@ mod tests {
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
-            self.results
-                .lock()
-                .expect("scripted results")
-                .pop_front()
-                .expect("scripted result")
+            let mut results = self.results.lock().expect("scripted results");
+            if results.is_empty() {
+                // 脚本用尽 = 发生了**额外一轮**探测（CI 慢机上更常见：一次刷新
+                // 赶在快照过期后）。回放脚本原件（探测顺序与结果不变）而不是
+                // panic ——「不该发生的额外调用」由用例自身的断言把关，不该由
+                // 夹具的 panic 表达（那会把慢机误报成功能缺陷）。
+                results.extend(self.script.iter().cloned());
+            }
+            results.pop_front().expect("scripted result")
         }
     }
 
@@ -511,7 +518,7 @@ mod tests {
             resolve_install_action(true, true, Some("2.0.0"), Some("2.0.0")),
             "none"
         );
-        // registry 不可知（Kimi/离线）→ none（已装且探过）
+        // registry 不可知（离线 / 查询失败）→ none（已装且探过）
         assert_eq!(
             resolve_install_action(true, true, Some("2.0.0"), None),
             "none"
@@ -547,7 +554,7 @@ mod tests {
         );
         // 预置缓存：claude=1.0.0（最新）、codex=2.0.0（无关，缺装）、
         // pi=1.5.0（落后）、codegraph=1.6.2（无关，缺装）。
-        // pi 的「落后」必须是**精确 semver 下真落后**（REQ-PCI-04）：
+        // pi 的「落后」必须是**精确 semver 下真落后**（REQ-PCI-07）：
         // 本地 0.85.0（devbox pin）vs latest 1.5.0（块2 技术方案
         // §3.6.9 未验证项 1 实测的 registry latest）⇒ 0.85.0 < 1.5.0。
         // （旧的 0.9.0 在 semver 下**新于** 0.85.0 —— minor 9 < 85。）
@@ -573,6 +580,11 @@ mod tests {
                 "@colbymchenry/codegraph": {
                     "package": "@colbymchenry/codegraph",
                     "latest_version": "1.6.2",
+                    "checked_at": checked_at
+                },
+                "@moonshot-ai/kimi-code": {
+                    "package": "@moonshot-ai/kimi-code",
+                    "latest_version": "2.5.2",
                     "checked_at": checked_at
                 }
             }),
@@ -613,12 +625,15 @@ mod tests {
         assert_eq!(pi["latest_version"], json!("1.5.0"));
         assert_eq!(pi["action"], json!("update"));
 
-        // Kimi：不做 registry 版本判定（REQ-PCI-04）。
+        // Kimi：版本来源 = npm 包 `@moonshot-ai/kimi-code`（REQ-PCI-07）⇒
+        // 参与「有新版」判定；本地 0.34.0 < latest 2.5.2 ⇒ update。
+        // **安装源仍是官方脚本**（REQ-PCI-01 不变）。
         let kimi = by_target("kimi_code");
         assert_eq!(kimi["cli_available"], json!(true));
-        assert_eq!(kimi["latest_version"], Value::Null);
-        assert_eq!(kimi["latest_checked_at"], Value::Null);
-        assert_eq!(kimi["action"], json!("none"));
+        assert_eq!(kimi["local_version"], json!("0.34.0"));
+        assert_eq!(kimi["latest_version"], json!("2.5.2"));
+        assert!(kimi["latest_checked_at"].is_string());
+        assert_eq!(kimi["action"], json!("update"));
         assert_eq!(
             kimi["install_source"],
             json!("official script https://code.kimi.com/kimi-code/install.sh")
@@ -630,6 +645,61 @@ mod tests {
         assert_eq!(
             codegraph["install_source"],
             json!("npm @colbymchenry/codegraph")
+        );
+    }
+
+    /// Kimi **未安装** → 【安装】而不是【更新】：版本判定与安装判定相互独立
+    /// —— 命令缺失时永远是 install（REQ-PCI-02 / REQ-PCI-07）。
+    #[tokio::test]
+    async fn install_targets_reports_install_for_missing_kimi() {
+        let root = tempdir().expect("root");
+        // health：claude ok、codex ok、pi ok、**kimi 缺失**。
+        let health = health_service(
+            root.path(),
+            vec![
+                success("1.0.0"),
+                success("0.166.0"),
+                success("1.3.0"),
+                missing("kimi"),
+            ],
+        );
+        health
+            .refresh(tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("refresh health");
+        let state = state(
+            root.path(),
+            health,
+            ScriptedRunner::new(vec![missing("codegraph")], Duration::ZERO),
+        );
+        // Kimi 的版本来源缓存（latest 2.5.2）——版本判定仍生效。
+        let checked_at = (Utc::now() - TimeDelta::hours(1)).to_rfc3339();
+        seed_version_cache(
+            root.path(),
+            json!({
+                "@moonshot-ai/kimi-code": {
+                    "package": "@moonshot-ai/kimi-code",
+                    "latest_version": "2.5.2",
+                    "checked_at": checked_at
+                }
+            }),
+        );
+
+        let response = get_install_targets(State(state)).await;
+        let payload = response_json(response.into_response()).await;
+        let targets = payload["targets"].as_array().expect("targets array");
+        let kimi = targets
+            .iter()
+            .find(|dto| dto["target"] == json!("kimi_code"))
+            .expect("kimi target");
+
+        assert_eq!(kimi["cli_available"], json!(false));
+        assert_eq!(kimi["local_version"], Value::Null);
+        assert_eq!(kimi["latest_version"], json!("2.5.2"));
+        assert_eq!(
+            kimi["action"],
+            json!("install"),
+            "命令缺失时必须给【安装】，不能给【更新】"
         );
     }
 

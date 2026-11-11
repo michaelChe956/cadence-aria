@@ -10,7 +10,6 @@ use crate::product::models::{
 };
 use crate::product::work_item_plan_compiler::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION;
 use crate::product::work_item_plan_compiler::PlanMemberTargets;
-use crate::product::work_item_plan_compiler::grammar;
 use crate::product::workspace_engine::{allowed_outputs_for, forbidden_outputs_for};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::types::GenerateWorkItemsRequest;
@@ -38,7 +37,6 @@ pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 262_144;
 /// 与 draft 侧同源：硬兜底只拦病态序列化回归，真实边界是模型上下文窗口（owner 环境 1M）；
 /// 本批评审更充分后修订块变大（实测修订轮 prompt 70,326 字节）曾顶破旧 64 KiB，故抬到 256 KiB。
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES: usize = 262_144;
-const WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES: usize = 32_000;
 
 pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     pub story_context: &'a str,
@@ -63,6 +61,15 @@ pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {
     /// 仓序自动边规则与编译器同源消费，空序如实教「无已确认仓序」，
     /// 不虚构先后顺序。
     pub change_order: &'a [LogicalRepositoryId],
+    /// D5 事前（REQ-WSC-06「基线树事实直供」）：plan 基线树可用路径清单
+    /// （`render_baseline_tree_section` 按成员仓分组渲染的文本），由生产
+    /// 调用方在作者轮启动前从 `plan_preflight::plan_baseline_tree` 装载
+    /// （与 Evaluate 期校验同函数同源）。`None` = 基线树不可得（无仓
+    /// issue / 装载失败 / 空树）⇒ `baseline:` 段整段缺席，既有 prompt
+    /// 逐字节不变。清单走上下文面（`[confirmed_context]` 段度量，
+    /// `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES`），不占用固定
+    /// 规范面质量预算。
+    pub baseline_tree: Option<&'a str>,
 }
 
 /// Draft prompt 质量预算：真实规模中文 fixture 的确定性预算测试阈值。
@@ -165,6 +172,15 @@ pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 23
 pub(crate) const WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE: &str =
     "[output] 现在仅输出完整 markdown source。";
 
+mod sc_few_shot;
+#[cfg(test)]
+pub(crate) use sc_few_shot::WORK_ITEM_PLAN_FEW_SHOT_IDS;
+mod sc_baseline_tree;
+#[cfg(test)]
+pub(crate) use sc_baseline_tree::WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES;
+#[cfg(test)]
+pub(crate) use sc_baseline_tree::render_baseline_tree_section;
+pub(crate) use sc_baseline_tree::{author_baseline_tree_section, budget_markdown_context};
 mod sc_revision;
 pub(crate) use sc_revision::build_work_item_plan_markdown_fresh_revision_prompt;
 pub(crate) use sc_revision::build_work_item_plan_markdown_revision_prompt;
@@ -233,66 +249,6 @@ fn work_item_plan_runtime_contract(role: &str, context: &RoutingReferenceContext
     )
 }
 
-const WORK_ITEM_PLAN_FEW_SHOT_FINDINGS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
-));
-
-pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 11] = [
-    "rep1-f1", "rep1-f2", "rep2-f1", "rep2-f2", "rep2-f3", "rep2-f4", "rep2-f5", "rep2-f6",
-    "rep3-f1", "rep4-f1", "rep4-f2",
-];
-
-fn work_item_plan_dependency_syntax_rules() -> String {
-    let dependencies_key = grammar::DEPENDENCIES_KEY;
-    let item_id_prefix = grammar::ITEM_ID_PREFIX;
-    let item_id_suffix = grammar::ITEM_ID_SUFFIX;
-    format!(
-        "`{dependencies_key}`：`- {dependencies_key}: []`；`- {dependencies_key}: {item_id_prefix}001`（裸值）；多依赖每行：`- {dependencies_key}: {item_id_prefix}001`\n`- {dependencies_key}: {item_id_prefix}002`。禁止括号列表、空格或逗号分隔多值；值仅 `[]` 或 `{item_id_prefix}{item_id_suffix}`。"
-    )
-}
-
-fn work_item_plan_real_few_shot() -> Result<String, String> {
-    let findings: Vec<serde_json::Value> =
-        serde_json::from_str(WORK_ITEM_PLAN_FEW_SHOT_FINDINGS)
-            .map_err(|error| format!("无法读取 Work Item Plan 判例 fixture：{error}"))?;
-    let mut cases = String::from(
-        "[real_finding_few_shot]\n以下为真实 provider 原始 finding；rep1 是 Advisory。按错误模式→修正原则学习，勿照抄业务名、ID、路径或命令。\n",
-    );
-
-    for id in WORK_ITEM_PLAN_FEW_SHOT_IDS {
-        let entry = findings
-            .iter()
-            .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))
-            .ok_or_else(|| format!("判例 fixture 缺少 {id}"))?;
-        if entry.get("source_kind").and_then(serde_json::Value::as_str) != Some("provider_raw") {
-            return Err(format!("判例 {id} 不是 provider 原始 finding"));
-        }
-        let finding = entry
-            .get("finding")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| format!("判例 {id} 缺少 finding"))?;
-        let field = |name: &str| {
-            finding
-                .get(name)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| format!("判例 {id} 缺少 {name}"))
-        };
-        cases.push_str(&format!(
-            "\n#### {id}\n错误模式：{}\n证据：{}\n修正原则：{}\n",
-            field("message")?,
-            field("evidence")?,
-            field("required_action")?,
-        ));
-    }
-
-    cases.push_str(
-        "\n标题正反例：❌ `# 工作项计划` / `### 身份` → ✅ `# Work Item Plan` / `### Identity`（内容中文，标题英文逐字）。\n",
-    );
-
-    Ok(cases)
-}
-
 /// r46 配套 2(AT):多 source traceability 正例样例——结构歧义用样例封。
 /// ID 用真实登记形态(REQ-/AC-)但 000 后缀表样例占位(勿照抄指令在段头);
 /// 每组三元组(source_type/source_id/requirement_id)各自成组,缺
@@ -315,9 +271,9 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     repository: &RepositoryRecord,
     context: WorkItemPlanMarkdownAuthorContext<'_>,
 ) -> Result<String, String> {
-    let few_shot = work_item_plan_real_few_shot()?;
+    let few_shot = sc_few_shot::work_item_plan_real_few_shot()?;
     let plan_options_mirror = work_item_plan_option_mirror_teaching(context.plan_options);
-    let dependency_syntax_rules = work_item_plan_dependency_syntax_rules();
+    let dependency_syntax_rules = sc_few_shot::work_item_plan_dependency_syntax_rules();
     let reference_discipline =
         work_item_plan_markdown_reference_discipline(Some(context.design_requirement_ids));
     // SG5.1（REQ-CG-03、REQ-SG-02）：已确认成员/仓序教学——LC 多仓 plan 注入
@@ -334,12 +290,32 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         context.design_context,
         context.repository_structure,
     );
+    // D5 事前（REQ-WSC-06）：基线树清单注入 [confirmed_context]（上下文
+    // 面），位于 structure 之后、story_spec_ids 之前；None/空 ⇒ 整段
+    // 缺席（不留 baseline: 空标记），既有 fixture prompt 逐字节不变。
+    // 清单**计入上下文面同一配额**（owner 2026-11-10 裁决：新增直供内容计入
+    // 其所属面）：上下文面的**全部**字节都算在这 32,000 内 —— 三段压缩正文
+    // + 清单 + 各段前缀 + spec_ids 行。故先算固定开销，再把**剩余**额度给清单
+    // （上限 32,000/4）；额度不足则按行截断并显式标记；额度为 0 ⇒ 整段缺席
+    // ⇒ 上下文面恒 ≤ 32,000。计算实现在 `sc_baseline_tree`。
+    let baseline_tree_section = if cfg!(feature = "wig-d5-before") {
+        sc_baseline_tree::baseline_tree_section(
+            &story_context,
+            &design_context,
+            &repository_structure,
+            &request.story_spec_ids,
+            &request.design_spec_ids,
+            context.baseline_tree,
+        )
+    } else {
+        String::new()
+    };
     let prompt = format!(
         "只输出完整 `work-item-plan.md` source。\n\
          [issue] {issue_title}\n{issue_description}\nrepo={repository_id} path={repository_path}\n\
          [routing_reference]\n{routing_reference}\n\
          [confirmed_context]\nstory:{story_context}\ndesign:{design_context}\nstructure:{repository_structure}\n\
-         story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
+         {baseline_tree_section}story_spec_ids:{story_spec_ids}\ndesign_spec_ids:{design_spec_ids}\n\
          [source_boundary]\n\
          不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段。\n\
          exclusive_scopes 仅限本项且依赖项不得重叠；non_goals 不得与 tasks、验收、write policy 矛盾。\n\
@@ -369,6 +345,7 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
         story_context = story_context,
         design_context = design_context,
         repository_structure = repository_structure,
+        baseline_tree_section = baseline_tree_section,
         story_spec_ids = request.story_spec_ids.join(", "),
         design_spec_ids = request.design_spec_ids.join(", "),
         acceptance_baseline_repair_action = ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION,
@@ -392,41 +369,32 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     Ok(prompt)
 }
 
-fn budget_markdown_context(
-    story_context: &str,
-    design_context: &str,
-    repository_structure: &str,
-) -> (String, String, String) {
-    (
-        truncate_markdown_context(
-            story_context,
-            WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES * 9 / 20,
-        ),
-        truncate_markdown_context(
-            design_context,
-            WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES * 9 / 20,
-        ),
-        truncate_markdown_context(
-            repository_structure,
-            WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 10,
-        ),
-    )
-}
+// 基线树清单的截断标记（渲染器内部截断与外层配额截断共用）——常量在
+// prompts/sc_baseline_tree.rs。
 
-fn truncate_markdown_context(value: &str, budget: usize) -> String {
-    if value.len() <= budget {
-        return value.to_string();
-    }
-    let marker =
-        "\n[上下文因 prompt 预算截断；请仅依据保留内容和 source_spec_ids 输出，不得猜测。]\n";
-    let keep = budget.saturating_sub(marker.len());
-    let mut end = keep.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{}", &value[..end], marker)
-}
-
+/// 按**行边界**把已渲染的基线树清单截到 `cap` 字节；截断时以显式标记行
+/// 收尾（计入 cap），MUST NOT 把部分清单冒充全量。只删行、不改行内容 ⇒
+/// 不引入臆造路径。
+/// D5 事前（REQ-WSC-06「基线树事实直供」）：渲染 plan 基线树可用路径清单，
+/// 供 `[confirmed_context]` 的 `baseline:` 段直供（上下文面）。
+///
+/// - 分组：先按 `member_dirs` 顺序（成员仓优先，与 D3 成员仓摘要同序）以路径
+///   顶层段分组；未命中的路径按**路径自身首段**分组（根文件归 `(根文件)`）；
+///   组内路径按字典序（BTreeSet 迭代序）。
+/// - 行形态：`成员目录: 路径`；路径逐字取自基线树，禁止平台臆造路径。
+/// - 渲染上限 = `WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 4`：超限时按
+///   成员仓轮转保底截断——每轮每组各取 1 条直到用满上限，保证每个成员仓
+///   至少 1 条；被截断时以显式标记行收尾（计入上限），不得把部分清单
+///   冒充全量。
+///
+/// D5 事前（REQ-WSC-06）：作者轮启动前的基线树装载决策——
+/// - `Ok(Some(tree))`（非空）⇒ 渲染为成员仓分组清单，注入 prompt；
+/// - `Ok(None)`（无仓 issue）/ 空树 ⇒ 该段缺席（零回归）；
+/// - `Err(_)` ⇒ 仅记诊断、该段缺席，**不阻断作者轮**；既有 fail-closed
+///   点仍在 Evaluate 阶段（`plan_baseline_tree` 的 `Err` 在预校验原样上抛）。
+///
+/// 基线树来源唯一：调用方传入 `plan_baseline_tree` 的装载结果（与
+/// Evaluate 期同函数同源），本函数不新增第二套装载。
 fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String {
     let workspace_type = WorkspaceType::WorkItemPlan;
     format!(

@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { JSX } from "react";
 import { createPortal } from "react-dom";
+import { useLocation, useRouter } from "@tanstack/react-router";
 import { Settings } from "lucide-react";
 import {
   useWorkspaceSessionObservers,
@@ -36,6 +37,19 @@ import { CockpitSettingsDialog } from "./CockpitSettingsDialog";
 import { isRecentCompletionVisible } from "../../state/recent-completion";
 import { useWorkspaceStore } from "../../state/workspace-ws-store";
 const SYSTEM_NOTIFICATION_DELAY_MS = 30_000;
+
+/**
+ * 知识库详情页路由（沉浸模式判定）：
+ * /workbench/projects/:projectId/logical-codebases/:lcId/knowledge-base
+ * ——命中该路由时外壳只渲染页面自身，不渲染任何全局浮动件。
+ */
+const KNOWLEDGE_BASE_ROUTE_PATTERN =
+  /^\/workbench\/projects\/[^/]+\/logical-codebases\/[^/]+\/knowledge-base\/?$/;
+
+/** 当前路径是否命中知识库详情页路由（沉浸模式）。 */
+export function isKnowledgeBaseRoute(pathname: string): boolean {
+  return KNOWLEDGE_BASE_ROUTE_PATTERN.test(pathname);
+}
 
 type NotificationGuidance = "permission-denied" | "permission-default" | null;
 type CockpitShellContextValue = {
@@ -244,16 +258,11 @@ export function useCockpitInboxFocusOpener(): ((
 ) => void) | null {
   return useContext(CockpitShellContext)?.openInboxFocus ?? null;
 }
-export function CockpitShell({
-  children,
-  onGoToInbox,
-  onOpenAttentionTarget,
-  onOpenInboxFocus,
-}: {
+type CockpitShellProps = {
   children: ReactNode;
   onGoToInbox?: (sessionId: string) => void;
   /**
-   * P4-e（REQ-UI37-19）：A1 待处理 target 统一导航（router 挂载点注入
+   * P4-e（REQ-UI37-19）：coding_action 的统一导航（router 挂载点注入
    * `useCodingAttentionTargetOpener`）；缺席时 coding_action 的系统通知
    * onclick/告警条分流/收件箱「去处理」均不启用（平台消息不受影响）。
    * 组件自身不 import router 模块，避免 Shell↔router 循环加载。
@@ -266,7 +275,33 @@ export function CockpitShell({
    * 无路由上下文时为 null → 消费方回落旧导航）。
    */
   onOpenInboxFocus?: (target: WorkbenchInboxFocusTarget) => void;
-}): JSX.Element {
+};
+
+/**
+ * 外壳入口：路由感知（沉浸模式按当前路径判定）。
+ * 无路由上下文（单组件测试）时按普通模式渲染——既有行为零变化。
+ */
+export function CockpitShell(props: CockpitShellProps): JSX.Element {
+  const router = useRouter({ warn: false });
+  if (!router) {
+    return <CockpitShellContent {...props} pathname="" />;
+  }
+  return <CockpitShellRouted {...props} />;
+}
+
+/** 路由上下文内取当前路径（useLocation 订阅路由状态 ⇒ 路由切换即时生效）。 */
+function CockpitShellRouted(props: CockpitShellProps): JSX.Element {
+  const pathname = useLocation({ select: (location) => location.pathname });
+  return <CockpitShellContent {...props} pathname={pathname} />;
+}
+
+function CockpitShellContent({
+  children,
+  onGoToInbox,
+  onOpenAttentionTarget,
+  onOpenInboxFocus,
+  pathname,
+}: CockpitShellProps & { pathname: string }): JSX.Element {
   // UI-3：共享待处理抽屉聚焦导航（通知/告警/收件箱行同源消费）。
   const routerOpenInboxFocus = useWorkbenchInboxFocusOpener();
   const openInboxFocus = onOpenInboxFocus ?? routerOpenInboxFocus;
@@ -540,6 +575,27 @@ export function CockpitShell({
       <Settings aria-hidden="true" className="h-4 w-4" />
     </button>
   );
+
+  // 沉浸模式（知识库详情页路由）：只渲染页面自身——全局浮动件一律不渲染
+  // （设置触发器/兜底浮层、设置对话框、升级提醒、待处理告警条与 toast）。
+  // 外壳容器保留（仅承载视口高度与滚动链路），页面内部自行滚动。
+  if (isKnowledgeBaseRoute(pathname)) {
+    return (
+      <CockpitShellContext.Provider value={contextValue}>
+        <div
+          data-testid="cockpit-shell"
+          className="flex h-screen flex-col overflow-hidden bg-[var(--aria-bg)] text-[var(--aria-ink)]"
+        >
+          <div
+            data-testid="cockpit-shell-scroll"
+            className="min-h-0 flex-1 overflow-hidden"
+          >
+            {children}
+          </div>
+        </div>
+      </CockpitShellContext.Provider>
+    );
+  }
 
   return (
     <CockpitShellContext.Provider value={contextValue}>

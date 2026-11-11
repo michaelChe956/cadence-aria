@@ -21,6 +21,7 @@ fn anti_preamble_context()
         routing_context: &RoutingReferenceContext::Legacy,
         member_targets: None,
         change_order: &[],
+        baseline_tree: None,
     }
 }
 

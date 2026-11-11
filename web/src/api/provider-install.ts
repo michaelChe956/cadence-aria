@@ -71,7 +71,7 @@ function parseVersion(raw: string): {
   };
 }
 
-/** 精确 semver 比较（REQ-PCI-04）：预发布低于同号正式版；无法解析返回 NaN
+/** 精确 semver 比较（REQ-PCI-07）：预发布低于同号正式版；无法解析返回 NaN
  *  （调用方据此不提供「更新」，不做字符串近似比较）。 */
 export function compareVersions(left: string, right: string): number {
   const a = parseVersion(left);

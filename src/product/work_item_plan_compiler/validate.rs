@@ -75,13 +75,38 @@ pub fn validate_plan_candidate_ir(
                 .filter(|path| !baseline_tree.contains(*path))
                 .collect();
             if !missing.is_empty() {
+                // D5 事后（REQ-WSC-06 场景「越界路径回灌最近候选」）：把
+                // 基线树中最近可用的现存路径回灌进 message——同父目录优先，
+                // 无则同名（`baseline_candidates` 口径）；候选逐条 ∈ 基线树
+                // （平台不得臆造路径），同一候选只回灌一次；无候选时如实说明。
+                let mut candidates: Vec<&str> = Vec::new();
+                if cfg!(feature = "wig-d5-after") {
+                    for path in &missing {
+                        for candidate in super::baseline_candidates::nearest_baseline_candidates(
+                            path,
+                            baseline_tree,
+                        ) {
+                            if !candidates.contains(&candidate) {
+                                candidates.push(candidate);
+                            }
+                        }
+                    }
+                }
+                let candidate_hint = if !cfg!(feature = "wig-d5-after") {
+                    String::new()
+                } else if candidates.is_empty() {
+                    "；基线树中无同目录或同名可用路径".to_string()
+                } else {
+                    format!("；基线树中同目录最近可用路径：{}", candidates.join("、"))
+                };
                 findings.push(WorkItemSplitFinding {
                     severity: WorkItemSplitFindingSeverity::Error,
                     code: "acceptance_path_not_in_baseline".to_string(),
                     message: format!(
-                        "work item {work_item_id} 的验收标准/验证计划引用路径 [{}] 不存在于 plan 基线树；修复动作：{}",
+                        "work item {work_item_id} 的验收标准/验证计划引用路径 [{}] 不存在于 plan 基线树；修复动作：{}{}",
                         missing.join("、"),
-                        super::types::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION
+                        super::types::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION,
+                        candidate_hint
                     ),
                     work_item_ids: vec![work_item_id],
                     // F1.2：preflight 族 finding 暂无 typed payload（None=

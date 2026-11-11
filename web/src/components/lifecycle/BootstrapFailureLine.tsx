@@ -55,10 +55,19 @@ function recheckConclusion(
   if (unavailable.length === 0) {
     return { message: "重新检测完成：provider 全部可用，可点「重试」继续。", hints };
   }
+  // 只装一家 provider 就能跑聚合初始化 ⇒ 未安装/不可用的那几家**不是**
+  // 本次失败的原因，不该用「按下面的安装指引处理后点重试」的语气把它们说成
+  // 必修项（真机反馈：用户以为四家都必须装）。这里改成「有一家可用即可」。
+  const available = providers.filter((entry) => entry.available);
+  const availableNames = available.map((entry) => entry.display_name).join("、");
   return {
-    message: `重新检测完成：仍有 ${unavailable.length} 个 provider 不可用（${unavailable
-      .map((entry) => entry.display_name)
-      .join("、")}），按下面的安装指引处理后点「重试」。`,
+    message: available.length > 0
+      ? `重新检测完成：可用 ${available.length} 家（${availableNames}），已具备执行条件；另有 ${unavailable.length} 家未安装或不可用（${unavailable
+          .map((entry) => entry.display_name)
+          .join("、")}）——不影响本次执行，需要换一家时再按下面的指引安装。`
+      : `重新检测完成：目前没有可用的 provider（${unavailable
+          .map((entry) => entry.display_name)
+          .join("、")}），至少要有一家可用才能执行；请按下面的指引安装其中一家后点「重试」。`,
     hints,
   };
 }
@@ -211,7 +220,9 @@ export function BootstrapFailureLine({
           className="mt-0.5 text-[var(--aria-ink-muted)]"
           data-testid="lc-bootstrap-failure-detail"
         >
-          <summary className="cursor-pointer select-none">诊断信息</summary>
+          <summary className="cursor-pointer select-none">
+            诊断信息{environmentFailure ? "（真实失败原因）" : ""}
+          </summary>
           <pre className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[11px]">
             {failure.detail}
           </pre>

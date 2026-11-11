@@ -6,8 +6,8 @@
 //   已安装已核验但版本落后      → 【更新】+ 当前版本 vs 最新版本
 //   已安装且已是最新            → 不渲染任何按钮（返回 null）
 // Kimi Code 走远程安装脚本：点击安装前必须告知「将执行来自 code.kimi.com 的
-// 安装脚本」，确认后才发 POST（acknowledge_remote_script=true）；且 Kimi 不做
-// 版本判定，永不出现「更新」（REQ-PCI-01 / REQ-PCI-04）。
+// 安装脚本」，确认后才发 POST（acknowledge_remote_script=true）；且 Kimi 的
+// 版本来源是 npm 包 `@moonshot-ai/kimi-code` ⇒ 同样显示「更新」（REQ-PCI-01 / REQ-PCI-07）。
 // 安装是异步作业：POST 立即返回 job_id，组件自带轮询（durable），终态后回调
 // onSettled 让父级重读 health（安装 ≠ 核验，REQ-PCI-05）。
 import { useEffect, useRef, useState } from "react";
@@ -159,11 +159,10 @@ export function ProviderInstallActionButton({
     localVersion != null && latestVersion != null
       ? compareVersions(localVersion, latestVersion)
       : Number.NaN;
-  // Kimi 非 npm 包：不做 registry 版本判定，永不显示「更新」。
-  const showUpdate =
-    target !== "kimi_code" &&
-    capabilityConfirmed &&
-    versionGap < 0;
+  // 版本来源与安装来源分离（REQ-PCI-07）：Kimi Code 的版本来源是 npm 包
+  // `@moonshot-ai/kimi-code` ⇒ 同样参与「有新版」判定、同样显示【更新】；
+  // 它的**安装源**仍是官方脚本（点击后先告知来源并确认，REQ-PCI-01）。
+  const showUpdate = capabilityConfirmed && versionGap < 0;
 
   const showInstall = !cliAvailable;
   const showVerify = cliAvailable && !capabilityConfirmed;
@@ -178,7 +177,7 @@ export function ProviderInstallActionButton({
   return (
     <div
       data-testid={`provider-install-action-${target}`}
-      className="mt-1 space-y-1"
+      className="mt-1 min-w-0 max-w-full space-y-1"
     >
       <div className="flex flex-wrap items-center gap-2">
         {showInstall ? (
@@ -232,7 +231,7 @@ export function ProviderInstallActionButton({
       {showInstall ? (
         <p
           data-testid={`provider-install-manual-command-${target}`}
-          className="text-xs text-[var(--aria-ink-muted)]"
+          className="break-words text-xs text-[var(--aria-ink-muted)]"
         >
           手动安装：
           <code className="ml-1 break-all rounded bg-[var(--aria-panel-muted)] px-1 py-0.5">
@@ -247,7 +246,7 @@ export function ProviderInstallActionButton({
           className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2 py-1.5"
         >
           <p className="text-xs text-[var(--aria-ink)]">
-            将执行来自 code.kimi.com 的安装脚本（远程 shell 脚本）。确认后才发起安装。
+            将执行来自 code.kimi.com 的安装脚本（远程 shell 脚本）。确认后才发起{showUpdate ? "更新" : "安装"}。
           </p>
           <div className="mt-1 flex flex-wrap gap-2">
             <button
@@ -256,7 +255,7 @@ export function ProviderInstallActionButton({
               onClick={() => void beginInstall(true)}
               className={`${buttonClass} border-[var(--aria-primary)] bg-[var(--aria-primary)] text-white`}
             >
-              确认并安装
+              确认并{showUpdate ? "更新" : "安装"}
             </button>
             <button
               type="button"
@@ -273,7 +272,7 @@ export function ProviderInstallActionButton({
       {running ? (
         <p
           data-testid={`provider-install-status-${target}`}
-          className="text-xs text-[var(--aria-ink-muted)]"
+          className="break-words text-xs text-[var(--aria-ink-muted)]"
         >
           安装中：正在执行安装命令，可能需要数分钟；作业状态是 durable 的，刷新页面不会丢。
         </p>
@@ -282,7 +281,7 @@ export function ProviderInstallActionButton({
       {!running && job?.status === "completed" ? (
         <p
           data-testid={`provider-install-status-${target}`}
-          className="text-xs text-[var(--aria-ink-muted)]"
+          className="break-words text-xs text-[var(--aria-ink-muted)]"
         >
           已安装
           {job.outcome?.installed_version
@@ -297,7 +296,7 @@ export function ProviderInstallActionButton({
       {!running && job?.status === "failed" ? (
         <div
           data-testid={`provider-install-status-${target}`}
-          className="text-xs text-[var(--aria-danger)]"
+          className="break-words text-xs text-[var(--aria-danger)]"
         >
           <p>
             {job.failure
@@ -318,7 +317,7 @@ export function ProviderInstallActionButton({
       {error ? (
         <p
           data-testid={`provider-install-error-${target}`}
-          className="text-xs text-[var(--aria-danger)]"
+          className="break-words text-xs text-[var(--aria-danger)]"
         >
           {error}
         </p>

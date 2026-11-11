@@ -16,6 +16,8 @@ pub enum InitializationOperationKind {
     Repository,
     /// Independent five-step aggregate initialization.
     Aggregate,
+    /// LC 知识库的 bootstrap / update operation。
+    KnowledgeBase,
 }
 
 impl InitializationOperationKind {
@@ -23,6 +25,7 @@ impl InitializationOperationKind {
         match self {
             Self::Repository => "repository",
             Self::Aggregate => "aggregate",
+            Self::KnowledgeBase => "knowledge_base",
         }
     }
 }
@@ -59,6 +62,19 @@ impl InitializationRunKey {
     ) -> Self {
         Self {
             kind: InitializationOperationKind::Aggregate,
+            project_id: project_id.into(),
+            lc_id: lc_id.into(),
+            operation_id: operation_id.into(),
+        }
+    }
+
+    pub fn knowledge_base(
+        project_id: impl Into<String>,
+        lc_id: impl Into<String>,
+        operation_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: InitializationOperationKind::KnowledgeBase,
             project_id: project_id.into(),
             lc_id: lc_id.into(),
             operation_id: operation_id.into(),
@@ -279,6 +295,21 @@ mod tests {
         let _a = registry.register(repository).unwrap();
         let _b = registry.register(aggregate).unwrap();
         assert!(registry.register(other_project).is_some());
+    }
+
+    #[test]
+    fn run_key_knowledge_base_is_distinct_from_aggregate() {
+        let aggregate =
+            InitializationRunKey::aggregate("project_0001", "lc_0001", "operation_0001");
+        let knowledge_base =
+            InitializationRunKey::knowledge_base("project_0001", "lc_0001", "operation_0001");
+        assert_ne!(aggregate, knowledge_base);
+        assert_eq!(knowledge_base.kind.as_str(), "knowledge_base");
+
+        // 同 project/lc/operation_id 下两种 run 可同时在册，互不阻塞。
+        let registry = InitializationRunRegistry::default();
+        let _a = registry.register(aggregate).unwrap();
+        let _b = registry.register(knowledge_base).unwrap();
     }
 
     #[test]

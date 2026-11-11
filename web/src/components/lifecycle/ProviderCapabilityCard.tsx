@@ -126,7 +126,7 @@ const SECONDARY_BUTTON_CLASS =
  * （MASTER §5）。只命中安装动作容器里的操作按钮，不动 Kimi 远程脚本确认框里
  * 的【确认并安装】/【取消】（那是主/次语义按钮，不是行级操作）。 */
 const INSTALL_ACTION_CLASS =
-  "[&>div]:mt-0 [&>div>div>button]:rounded-xl [&>div>div>button]:border-transparent [&>div>div>button]:bg-[var(--aria-primary-soft)] [&>div>div>button]:text-[var(--aria-primary)] [&>div>div>button]:hover:border-[var(--aria-line-strong)] [&>div>div>button]:hover:bg-[var(--aria-primary-soft)]";
+  "min-w-0 max-w-full [&>div]:mt-0 [&>div>div>button]:rounded-xl [&>div>div>button]:border-transparent [&>div>div>button]:bg-[var(--aria-primary-soft)] [&>div>div>button]:text-[var(--aria-primary)] [&>div>div>button]:hover:border-[var(--aria-line-strong)] [&>div>div>button]:hover:bg-[var(--aria-primary-soft)]";
 
 /** 单 aspect 聚合：三 action 行全 Confirmed 才已核验（与 admission
  * fail-closed 同口径，不夸大）；任一 Unknown 仍未核验（重验证可补）；
@@ -351,7 +351,10 @@ export function ProviderCapabilityCard() {
                     data-testid={`provider-capability-${providerType}-version`}
                     className="aria-mono text-right text-xs text-[var(--aria-ink-muted)]"
                   >
-                    {provider.version ?? "未探测"}
+                    {/* 版本取**最新**的一份事实：安装目标面（provider health）
+                        在安装/更新后立刻刷新，能力投影要等下次「核验」才刷新
+                        —— 用旧的投影版本会让用户以为更新没生效（2026-11-09）。 */}
+                    {installView?.local_version ?? provider.version ?? "未探测"}
                   </span>
                 </div>
                 {/* 行2：状态胶囊（provider 级状态 / 批量逐项状态 / 版本落后）。 */}
@@ -429,7 +432,7 @@ export function ProviderCapabilityCard() {
                   </div>
                   <div
                     data-testid={`provider-capability-operations-${providerType}`}
-                    className="ml-auto flex flex-wrap items-center justify-end gap-2"
+                    className="ml-auto flex min-w-0 flex-wrap items-start justify-end gap-2"
                   >
                     <button
                       type="button"

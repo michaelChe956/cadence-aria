@@ -28,6 +28,7 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");
@@ -129,6 +130,7 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");
@@ -271,6 +273,7 @@ fn work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_co
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");
@@ -339,6 +342,7 @@ fn work_item_plan_markdown_prompt_teaches_cross_wi_paired_writing() {
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");
@@ -447,6 +451,7 @@ fn output_contract_capability_teaching_matches_dependency_validator_judgement() 
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");

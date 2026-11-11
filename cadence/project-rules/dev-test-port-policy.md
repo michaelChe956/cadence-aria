@@ -50,9 +50,43 @@
 
 ---
 
+## 开发期特有故障签名：Fast Refresh 打进来的 hooks 错位（2026-11-09 实测）
+
+**签名**：页面弹「Something went wrong!」+ `Rendered more hooks than during the previous render`
+（或 `Rendered fewer hooks than expected`），且**新开标签不复现**。
+
+**根因**：5173 的 vite dev server 直接服务 `web/src` 源码，浏览器标签长期开着时，
+**同一 worktree 里其它会话的改动会经 HMR 热替换进已挂载的组件**。当那次改动
+**增删了 hooks**（例如把一段逻辑抽成新 hook、或给组件加 `useState`/`useEffect`），
+React Fast Refresh 会把新的 hook 列表套到旧实例上 ⇒ hooks 数量前后不一致 ⇒ 报上面的错。
+这是**开发态热更新产物**，不是产品缺陷。
+
+**取证（先分清是不是它）**：
+
+```
+1. grep -nE "hmr update|page reload" <vite 日志>   # 报错时刻附近是否有 hmr update
+2. 新开一个标签复现同一操作                        # 不复现 ⇒ 就是 Fast Refresh 产物
+3. 4317（发布态、新标签）做同一操作                # 不复现 ⇒ 发布链完好
+```
+
+**处置**：**硬刷新（Ctrl+Shift+R）**即可，不需要改代码、不需要重建 dist、不需要重发二进制。
+硬刷新后仍复现 ⇒ 才按真实缺陷排查（此时取 console 的组件栈）。
+
+**预防**：
+- 共享 worktree 上多会话并行编辑时，**开发端口只服务一个 worktree**；发布态验证一律用 4317 新标签。
+- 看到 vite 日志里有 `hmr update` 而你正在做验收 ⇒ 先硬刷新再验收。
+
+**真实事故记录**：2026-11-09 17:07，owner 点 provider【更新】后页面炸 hooks 错位；
+同期 vite 日志显示 `IssueLifecycleWorkbench.tsx` / `IssueLifecycleWorkbenchView.tsx`
+在 17:05–17:08 被连续 hmr update（另一会话的知识库重构**新增了 hooks**），
+而 provider 安装完成的健康刷新恰好触发该组件重渲染 ⇒ 错位显形。
+新开标签在 4317 与 5173 各跑通一次真实更新（claude / codex / pi），**均无此错**。
+
+---
+
 ## 边界（不替代其它规则）
 
 - 本规则只约束「**测哪个端口**」与「**何时做发布态回归**」。
-- 启动方式仍以 `cadence/project-rules/local-service-deploy.md` 为准（只经 `/tmp/aria-deploy/start.sh`，必须带 TTY）。
+- 启动方式仍以 `cadence/project-rules/local-service-deploy.md` 为准（只经 `/tmp/aria-deploy/start.sh`，必须带 TTY；该脚本的仓内源 = `scripts/aria-web-start.sh`）。
 - 界面验证方式仍以 `cadence/project-rules/browser-verification-only.md` 为准（内置浏览器、真实渲染 + 真实点击）。
-- origin 白名单仍以 `/tmp/aria-deploy/start.sh` 的 `DEFAULT_ORIGINS` 为唯一真源（改脚本，不改命令行）。
+- origin 白名单仍以 `scripts/aria-web-start.sh` 的 `DEFAULT_ORIGINS` 为唯一真源（改脚本，不改命令行）。

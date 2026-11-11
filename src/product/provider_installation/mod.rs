@@ -9,6 +9,7 @@
 //! **安装 ≠ 核验**（REQ-PCI-05）：装完只刷新 provider health，不写
 //! capability 记录、不触发核验探针。
 
+pub mod effective_prefix;
 pub mod failure_classify;
 pub mod job_store;
 pub mod registry_version;

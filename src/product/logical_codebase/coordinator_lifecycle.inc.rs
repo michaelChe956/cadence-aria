@@ -386,10 +386,15 @@ impl AggregateInitializationCoordinator {
 
         // machine_skills 成功后校验四条命令的链接层：machine_skills 是确定性
         // 代码、不跑 provider，缺链接层**绝不能**归因为「provider 未登录」。
+        // 只校验**被选中 provider 那一层**（没装别家 provider 不阻断）。
         if let Some(home) = self.skills_home.as_deref()
             && let Err(error) =
                 crate::product::logical_codebase::environment_probe::ensure_skills_commands_linked(
                     home,
+                    crate::product::logical_codebase::provider_selection::provider_from_wire(
+                        &operation.input.provider,
+                    )
+                    .as_ref(),
                 )
         {
             tracing::warn!(

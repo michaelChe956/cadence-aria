@@ -250,6 +250,57 @@ describe("BootstrapFailureLine", () => {
     ).toBe("Codex：Install Codex CLI via npm (`npm i -g @openai/codex`).");
   });
 
+  it("states_that_one_available_provider_is_enough", async () => {
+    // 真机反馈：用户看到「仍有 N 个 provider 不可用…按安装指引处理后点重试」，
+    // 误以为四家都必须装。口径改成「有一家可用即可」，其余只是可选切换项。
+    recheckProvidersMock.mockResolvedValue(
+      providerSnapshot([
+        providerEntry({
+          provider: "pi",
+          display_name: "Pi",
+          available: true,
+          version: "1.5.0",
+          reason_code: null,
+          reason: null,
+          install_hint: "",
+        }),
+        providerEntry(),
+      ]),
+    );
+    render(<BootstrapFailureLine failure={layoutFailure()} />);
+
+    fireEvent.click(screen.getByTestId("lc-bootstrap-failure-recheck"));
+
+    const feedback = await screen.findByTestId(
+      "lc-bootstrap-failure-recheck-feedback",
+    );
+    expect(feedback.textContent).toContain("已具备执行条件");
+    expect(feedback.textContent).toContain("不影响本次执行");
+    expect(feedback.textContent).not.toContain("按下面的安装指引处理后点");
+  });
+
+  it("says_at_least_one_provider_is_required_when_none_is_available", async () => {
+    recheckProvidersMock.mockResolvedValue(
+      providerSnapshot([providerEntry()]),
+    );
+    render(<BootstrapFailureLine failure={layoutFailure()} />);
+
+    fireEvent.click(screen.getByTestId("lc-bootstrap-failure-recheck"));
+
+    const feedback = await screen.findByTestId(
+      "lc-bootstrap-failure-recheck-feedback",
+    );
+    expect(feedback.textContent).toContain("至少要有一家可用");
+  });
+
+  it("labels_the_diagnostic_detail_as_the_real_failure_reason", () => {
+    // 真实失败原因就在诊断段里：折叠标题点明它，用户知道该点开看什么。
+    render(<BootstrapFailureLine failure={layoutFailure()} />);
+
+    const detail = screen.getByTestId("lc-bootstrap-failure-detail");
+    expect(detail.textContent).toContain("真实失败原因");
+  });
+
   it("keeps the button busy while the recheck is in flight and does not resend it", async () => {
     const pending = deferred<ProviderHealthResponse>();
     recheckProvidersMock.mockReturnValue(pending.promise);

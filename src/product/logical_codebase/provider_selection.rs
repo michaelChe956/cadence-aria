@@ -406,6 +406,9 @@ pub fn provider_from_wire(value: &str) -> Option<ProviderName> {
     }
 }
 
+// 知识库写面(Task 4)的写分格选择入口与其测试,单独成片段文件以守 1200 行门禁。
+include!("provider_selection_write.inc.rs");
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

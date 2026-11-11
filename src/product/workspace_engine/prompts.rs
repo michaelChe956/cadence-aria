@@ -26,6 +26,7 @@ mod review_repair;
 mod reviewer_boundary_examples;
 mod reviewer_context_filter;
 mod revision;
+mod sc_compile_teaching;
 
 use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_history};
 
@@ -50,6 +51,11 @@ pub(crate) use review_context::{
     SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES, ensure_single_candidate_review_prompt_budget,
     single_candidate_previous_round_findings_section,
 };
+
+// 编译教学重驱 prompt 构造面迁至 `prompts/sc_compile_teaching.rs`（守 1200 行
+// 文件守护）；对外路径不变——调用点仍以
+// `crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt` 解析。
+pub(crate) use sc_compile_teaching::build_work_item_plan_compile_reredrive_prompt;
 
 /// 聚合视野材料块的唯一 marker（`aggregate_scope_material_prompt` 以 `## 聚合代码库成员清单`
 /// 开头）。用于在 `build_streaming_input` 中识别 Logical（有 aggregate scope）Story/Design 会话；
@@ -195,63 +201,6 @@ pub(crate) fn structured_output_nonce() -> String {
         .chars()
         .take(8)
         .collect()
-}
-
-/// F2-B：SC compile 失败教学重驱 prompt（每 candidate 恰一次）。复用
-/// [`build_artifact_retry_prompt`] 的模板形态（「上一轮已结束，但没有输出完整
-/// artifact…不要继续调研，不要只解释…立即输出完整…」）+ compile 错误原文
-/// 逐条回灌 + work-item-plan markdown source 的硬性重驱指令（第一行即文档标题）。
-///
-/// r46 核心修(三角色收敛):并入登记 ID 清单+短规则——compile 教学重驱
-/// 此前只有错误原文+B1 白名单,ID 纪律裸奔(现场:r46 首轮漏填
-/// requirement_id → 重驱改编号/新增清单外编号,震荡不收敛)。清单与
-/// IR 重驱/harness 反馈轮同集(story+design 双源 REQ-/NFR-/AC-)。
-pub(crate) fn build_work_item_plan_compile_reredrive_prompt(
-    blocking_reasons: &[String],
-    registered_requirement_ids: &[String],
-) -> String {
-    let mut prompt = String::from(
-        "上一轮已结束，但没有输出完整的 work-item-plan markdown source。\n\
-         不要继续调研，不要只解释，不要输出任何前言或路由回执。\n\
-         请基于已有上下文和刚才读取的文件，立即输出完整 work-item-plan markdown source；第一行即文档标题 `# Work Item Plan`。\n",
-    );
-    if !blocking_reasons.is_empty() {
-        prompt.push_str("\n具体失败原因:\n");
-        for reason in blocking_reasons {
-            prompt.push_str("- ");
-            prompt.push_str(reason);
-            prompt.push('\n');
-        }
-        // r41 B1(诊断增强):unknown_structured_key 类失败附「合法 section/key
-        // 白名单 + 具体动作」——错误码单行不足以让 AI 自纠(它不知道合法集)。
-        if blocking_reasons
-            .iter()
-            .any(|reason| reason.contains("unknown_structured_key"))
-        {
-            let sections =
-                crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS.join("、");
-            let free =
-                crate::product::work_item_plan_compiler::grammar::FREE_TEXT_SECTIONS.join("、");
-            prompt.push_str(&format!(
-                "\n结构化 section/key 白名单(结构化段只允许这些 key):\n- 结构化: {sections}\n- 自由文本: {free}\n\
-                 动作:删除违例 section,或将其内容并入语义最近的合法 section 后重新输出完整 plan。\n"
-            ));
-        }
-    }
-    // r46 核心修:登记 ID 清单 + 短规则(与 IR 重驱同集;措辞与校验器字面量
-    // 对齐:三元组缺 requirement_id → lowering_error「traceability 缺少
-    // requirement_id」拒绝)。
-    if !registered_requirement_ids.is_empty() {
-        prompt.push_str(&format!(
-            "\n[design_requirements] {}\n\
-             每条 Traceability 三元组 requirement_id 必填且逐字取自上列清单;\
-             修复引用时不重编号、禁止新增清单外 REQ-*/NFR-*/AC-*/TASK;\
-             done_when 只指向已定义编号。\n",
-            registered_requirement_ids.join("、")
-        ));
-    }
-    prompt.push('\n');
-    prompt
 }
 
 /// 聚合 Story/Design author 的 structured output schema（仅 build_streaming_input 注入用）。
@@ -1367,75 +1316,6 @@ mod routing_reference_prompt_tests {
         assert!(prompt.contains("sha256:abc123"), "{prompt}");
         assert!(prompt.contains("不作为政策正文"), "{prompt}");
         assert!(prompt.contains("只报告阻塞"), "{prompt}");
-    }
-}
-
-#[cfg(test)]
-mod reredrive_prompt_tests {
-    use super::build_work_item_plan_compile_reredrive_prompt;
-
-    /// r41 B1:unknown_structured_key 类失败的重驱 prompt 必须附 14 合法
-    /// section/key 白名单与具体动作(AI 不知道合法集就无法自纠)。
-    #[test]
-    fn compile_reredrive_prompt_lists_section_whitelist_for_unknown_key() {
-        let reasons = vec!["unknown_structured_key:1:未知结构化 key `NotAPermission`".to_string()];
-        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
-        assert!(prompt.contains("unknown_structured_key"));
-        assert!(
-            prompt.contains("结构化: Identity"),
-            "白名单必须列出合法 section 集: {prompt}"
-        );
-        assert!(prompt.contains("Traceability"));
-        assert!(
-            prompt.contains("删除违例 section"),
-            "必须给具体动作: {prompt}"
-        );
-    }
-
-    /// 对照:非 unknown_structured_key 失败不附白名单(保持既有形态)。
-    #[test]
-    fn compile_reredrive_prompt_keeps_plain_form_without_unknown_key() {
-        let reasons = vec!["missing_section:0:缺 Identity".to_string()];
-        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
-        assert!(!prompt.contains("白名单"));
-    }
-
-    /// r46 核心修 TDD(精确复现 r46 首轮漏填形态):compile 教学重驱 prompt
-    /// 必须含真实登记清单+必填规则——此前只有错误原文+B1 白名单,ID 纪律
-    /// 裸奔,重驱改编号/新增清单外编号震荡不收敛。
-    #[test]
-    fn compile_reredrive_prompt_carries_registered_ids_and_discipline() {
-        let reasons = vec!["lowering_error:42:traceability 缺少 requirement_id。".to_string()];
-        let registered = vec![
-            "REQ-ENV-01".to_string(),
-            "NFR-PERF-02".to_string(),
-            "AC-001".to_string(),
-        ];
-        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &registered);
-        assert!(
-            prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02、AC-001"),
-            "真实登记清单(双源同集 REQ/NFR/AC)必须并入: {prompt}"
-        );
-        assert!(
-            prompt.contains("requirement_id 必填且逐字取自上列清单"),
-            "必填规则必须在场: {prompt}"
-        );
-        assert!(
-            prompt.contains("不重编号、禁止新增清单外 REQ-*/NFR-*/AC-*/TASK"),
-            "修复纪律必须在场: {prompt}"
-        );
-        assert!(
-            prompt.contains("done_when 只指向已定义编号"),
-            "done_when 约束必须在场: {prompt}"
-        );
-    }
-
-    /// r46:清单空时不注入(无 spec 上下文的老会话零变化)。
-    #[test]
-    fn compile_reredrive_prompt_omits_empty_registered_ids() {
-        let reasons = vec!["missing_section:0:缺 Identity".to_string()];
-        let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
-        assert!(!prompt.contains("[design_requirements]"));
     }
 }
 

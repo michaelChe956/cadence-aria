@@ -1,0 +1,61 @@
+[17:42:19] daemon pid=2410706 port=4601 eff=none ws=/tmp/aria-wig/run-xhigh-4601
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[18:01:11] session=failed (plan 仍 draft)
+[18:01:11] done arm=xhigh eff=none port=4601
+[18:01:11] finished xhigh eff=none port=4601
+[18:01:11] daemon pid=2436205 port=4602 eff=high ws=/tmp/aria-wig/run-high-4602
+  prepare: 200
+  terminated 已落盘
+[18:01:16] finished xhigh eff=none port=4601
+[18:01:16] daemon pid=2436465 port=4602 eff=high ws=/tmp/aria-wig/run-high-4602
+  prepare: 200
+  enable: 200
+  ⚠️ 等待 terminated 落盘超时
+  enable: 200
+[18:19:05] plan=confirmed
+[18:19:05] done arm=high eff=high port=4602
+[18:19:05] finished high eff=high port=4602
+[18:19:05] daemon pid=2461041 port=4603 eff=high ws=/tmp/aria-wig/run-high-4603
+  prepare: 200
+[18:19:06] plan=confirmed
+[18:19:06] done arm=high eff=high port=4602
+[18:19:06] finished high eff=high port=4602
+[18:19:06] daemon pid=2461245 port=4603 eff=high ws=/tmp/aria-wig/run-high-4603
+  prepare: 200
+  terminated 已落盘
+  terminated 已落盘
+  enable: 200
+  enable: 200
+[18:32:12] session=stopped_needs_human (plan 仍 draft)
+[18:32:12] done arm=high eff=high port=4603
+[18:32:12] finished high eff=high port=4603
+[18:32:12] daemon pid=2526852 port=4604 eff=none ws=/tmp/aria-wig/run-xhigh-4604
+[18:32:13] session=stopped_needs_human (plan 仍 draft)
+[18:32:13] done arm=high eff=high port=4603
+[18:32:13] finished high eff=high port=4603
+rm: cannot remove '/tmp/aria-wig/run-xhigh-4604': Directory not empty
+[18:32:13] daemon pid=2527005 port=4604 eff=none ws=/tmp/aria-wig/run-xhigh-4604
+  prepare HTTP 404 {"code":"issue_not_found","message":"issue not found","details":{}}
+  prepare HTTP 404 {"code":"issue_not_found","message":"issue not found","details":{}}
+  ⚠️ 等待 terminated 落盘超时
+  ⚠️ 等待 terminated 落盘超时
+Traceback (most recent call last):
+  File "<stdin>", line 35, in <module>
+  File "/usr/lib/python3.14/pathlib/__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/pathlib/__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/aria-wig/run-xhigh-4604/.aria/projects/project_0001/issues/issue_0001/automation-enrollment.json'
+Traceback (most recent call last):
+  File "<stdin>", line 35, in <module>
+  File "/usr/lib/python3.14/pathlib/__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/pathlib/__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/aria-wig/run-xhigh-4604/.aria/projects/project_0001/issues/issue_0001/automation-enrollment.json'

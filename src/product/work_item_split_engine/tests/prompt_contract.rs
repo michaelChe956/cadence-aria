@@ -787,46 +787,6 @@ fn single_item_prompt_names_both_verification_check_owners() {
 }
 
 #[test]
-fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_list_is_empty() {
-    let (request, issue, repository) = split_prompt_fixture();
-    let prompt =
-        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
-            &request,
-            &issue,
-            &repository,
-            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
-                story_context: "story_spec_0001: level selection",
-                design_context: "design_spec_0001: levels API",
-                design_requirement_ids: &[],
-                repository_structure: "src/product/levels; web/src/levels; tests/integration",
-                language_rules: TEST_SINGLE_CANDIDATE_LANGUAGE_RULES,
-                plan_options: &TEST_ALL_FALSE_PLAN_OPTIONS,
-                routing_context: &RoutingReferenceContext::Legacy,
-                member_targets: None,
-                change_order: &[],
-            },
-        )
-        .expect("markdown author prompt");
-
-    for required in [
-        "[design_requirements] （无；不得编造）",
-        "[cross_reference_discipline]",
-        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
-        "同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。",
-        "违反会被编译器最终校验拒绝：lowering_error/trusted_commands「同一 Work Item 不得重复引用 trusted command。」——整份计划编译失败，需人工修复后重新编译。",
-        "反例：同一 item 的 CHECK-001 与 CHECK-002 都写 `- command: npm test` → lowering_error 拒绝。",
-        "正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。",
-        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
-        "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
-    ] {
-        assert!(
-            prompt.contains(required),
-            "markdown prompt must retain cross-reference discipline with an empty design list; missing {required}: {prompt}"
-        );
-    }
-}
-
-#[test]
 fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings() {
     let (request, issue, repository) = split_prompt_fixture();
     let design_requirement_ids = vec!["REQ-002".to_string(), "NFR-001".to_string()];
@@ -845,6 +805,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");
@@ -1071,6 +1032,7 @@ fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");
@@ -1115,6 +1077,7 @@ fn sc_author_prompt_tail_clamps_heading_language_and_raises_budget() {
                 routing_context: &RoutingReferenceContext::Legacy,
                 member_targets: None,
                 change_order: &[],
+                baseline_tree: None,
             },
         )
         .expect("markdown author prompt");

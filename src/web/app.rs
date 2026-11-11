@@ -180,6 +180,58 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             "/api/projects/{project_id}/logical-codebases/{lc_id}/bootstrap/advance",
             post(handlers::post_lc_bootstrap_advance),
         )
+        // LC 知识库模块（Task 7）：operation 生命周期 / 状态 / 文件面 / 变更包 /
+        // 初始化输入模板，全部按 lc_id 作用域。
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/initializations",
+            post(handlers::knowledge_base::create_knowledge_base_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/initializations/active",
+            get(handlers::knowledge_base::get_active_knowledge_base_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/initializations/{operation_id}",
+            get(handlers::knowledge_base::get_knowledge_base_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/initializations/{operation_id}/cancel",
+            post(handlers::knowledge_base::cancel_knowledge_base_initialization),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/status",
+            get(handlers::knowledge_base::get_knowledge_base_status),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/files",
+            get(handlers::knowledge_base::list_knowledge_base_file_nodes),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/file",
+            get(handlers::knowledge_base::read_knowledge_base_file_content)
+                .put(handlers::knowledge_base::write_knowledge_base_file_content),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/change-packages",
+            get(handlers::knowledge_base::list_knowledge_base_change_packages)
+                .post(handlers::knowledge_base::create_knowledge_base_change_package),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/change-packages/lint",
+            get(handlers::knowledge_base::lint_knowledge_base_change_package),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/bootstrap-inputs",
+            post(handlers::knowledge_base::create_knowledge_base_bootstrap_inputs),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/user-input",
+            get(handlers::knowledge_base::get_knowledge_base_user_input),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/knowledge-base/user-input/confirm",
+            post(handlers::knowledge_base::confirm_knowledge_base_user_input),
+        )
         // provider 能力面改**机器级**（REQ-PCR-08）：provider 是平台公用
         // 能力，与项目 / 逻辑代码库无关 ⇒ 旧的按项目 / 逻辑代码库定位的四条
         // 路由整条删除（不留兼容别名 / 转发 shim / 双写）。

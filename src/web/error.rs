@@ -400,6 +400,59 @@ impl IntoResponse for ApiError {
             }
             // C2 oracle C-2a：验证处理记录缺失（决定面）。
             "coding_verification_triage_not_found" => StatusCode::NOT_FOUND,
+            // LC 知识库模块（Task 7）：前置检查失败是请求期产物（422，零副作用），
+            // 单飞/冲突/运行期禁写 409，operation 缺失 404，能力拒绝 403，
+            // 文件面按 Task 5 错误形态（越界 400 / 缺失 404 / 白名单外 422 /
+            // 超限 413）。一律 4xx，绝不落 500。
+            "knowledge_base_requires_aggregate_initialization"
+            | "knowledge_base_skills_unavailable"
+            | "knowledge_base_inputs_incomplete"
+            | "knowledge_base_manifest_missing"
+            | "knowledge_base_manifest_version_unsupported"
+            | "knowledge_base_not_initialized"
+            | "knowledge_base_manifest_invalid"
+            | "knowledge_base_change_package_invalid"
+            | "knowledge_base_change_package_missing_document"
+            | "knowledge_base_change_package_field_empty"
+            | "knowledge_base_change_package_reason_missing"
+            | "knowledge_base_change_package_domain_matrix_invalid"
+            | "knowledge_base_change_package_sensitive_content"
+            | "knowledge_base_change_package_commit_unresolvable"
+            | "knowledge_base_change_package_scope_mismatch"
+            | "knowledge_base_write_scope_violation" => StatusCode::UNPROCESSABLE_ENTITY,
+            "knowledge_base_change_package_path_invalid"
+            | "knowledge_base_file_path_escapes"
+            | "invalid_knowledge_base_request" => StatusCode::BAD_REQUEST,
+            "knowledge_base_operation_not_found" | "knowledge_base_file_not_found" => {
+                StatusCode::NOT_FOUND
+            }
+            "knowledge_base_file_conflict"
+            | "knowledge_base_operation_running"
+            | "other_knowledge_base_running" => StatusCode::CONFLICT,
+            // 收尾 A（REQ-KB-14/15）：输入确认族两个新稳定码——输入已准备
+            // 但未全部确认是前置不满足（与 requires_aggregate_initialization
+            // 同类 422，零副作用）；确认摘要过期是客户端拿过期内容来确认
+            //（与 knowledge_base_file_conflict 同类 409）。不登记会落默认
+            // 500，把可操作拒绝误报成服务故障。
+            "knowledge_base_user_input_not_confirmed" => StatusCode::UNPROCESSABLE_ENTITY,
+            "knowledge_base_user_input_confirmation_stale" => StatusCode::CONFLICT,
+            "knowledge_base_file_not_editable" => StatusCode::UNPROCESSABLE_ENTITY,
+            "knowledge_base_file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+            "knowledge_base_provider_capability_denied" => StatusCode::FORBIDDEN,
+            // 聚合初始化 provider 选择失败族（4 码）：属用户可行动的前置失败
+            // （未安装 / 未核验 / 被拒绝 / 健康降级），与知识库初始化复用同一候选表，
+            // 一律 422（请求期产物、零副作用），绝不落默认 500。
+            "aggregate_initialization_provider_needs_verification"
+            | "aggregate_initialization_no_provider_available"
+            | "aggregate_initialization_provider_capability_denied"
+            | "aggregate_initialization_provider_health_degraded" => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            // 聚合初始化 trust 等待面：门未 Ready ⇒ 用户可行动、可重试的
+            // 前置失败（与同表「请求期/前置失败」惯例一致），绝不落默认 500
+            // （未登记码会走 `_ => INTERNAL_SERVER_ERROR`，把可重试的前置
+            // 失败误报成服务故障）。
+            "aggregate_initialization_trust_waiting" => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
@@ -788,6 +841,30 @@ mod tests {
         for (code, expected) in cases {
             let response = ApiError::validation(code, "evidence contract").into_response();
             assert_eq!(response.status(), expected, "{code} status mapping");
+        }
+    }
+
+    #[test]
+    fn aggregate_initialization_prerequisite_failure_codes_map_to_4xx() {
+        // 聚合初始化前置失败族：provider 选择失败族（4 码）+ trust 等待面
+        // （1 码）：必须显式登记为 4xx，不得经未知码默认路径落 500（用户
+        // 可行动、可重试的前置失败）。
+        let cases = [
+            "aggregate_initialization_provider_needs_verification",
+            "aggregate_initialization_no_provider_available",
+            "aggregate_initialization_provider_capability_denied",
+            "aggregate_initialization_provider_health_degraded",
+            "aggregate_initialization_trust_waiting",
+        ];
+
+        for code in cases {
+            let response = ApiError::validation(code, "provider selection failed").into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{code} status mapping"
+            );
+            assert!(response.status().is_client_error(), "{code} must be 4xx");
         }
     }
 

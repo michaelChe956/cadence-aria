@@ -32,3 +32,23 @@ fn work_item_plan_compile_reredrive_prompt_carries_errors_and_immediate_output_d
         );
     }
 }
+
+/// 迁移等价性护栏（决策六 Task 1）：调用方视角的路径
+/// `crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt`
+/// 必须始终可解析，且返回的 prompt 含既有开场句——编译教学块从
+/// `workspace_engine/prompts.rs` 迁到 `workspace_engine/prompts/sc_compile_teaching.rs`
+/// 后，对外路径与文案均不变。
+#[test]
+fn work_item_plan_compile_reredrive_prompt_is_reachable_from_caller_path() {
+    let reasons = vec!["missing_section:4:Work Item 缺少必需 section。".to_string()];
+
+    let prompt = crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
+        &reasons,
+        &[],
+    );
+
+    assert!(
+        prompt.contains("上一轮已结束，但没有输出完整的 work-item-plan markdown source"),
+        "compile re-drive prompt must keep the existing opening sentence: {prompt}"
+    );
+}

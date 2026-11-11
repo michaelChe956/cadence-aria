@@ -4,7 +4,8 @@
 //   （不显示安装）；版本落后 → 【更新】+ 当前 vs 最新；最新 → 不渲染任何按钮。
 // - REQ-PCI-01：Kimi Code 走官方脚本，点击前必须告知「将执行来自 code.kimi.com
 //   的安装脚本」；未确认不得调 API（POST 带 acknowledge_remote_script=true）。
-// - REQ-PCI-04：Kimi 不做版本判定 → 永不出现「更新」。
+// - REQ-PCI-07：Kimi 的版本来源是 npm 包 `@moonshot-ai/kimi-code` ⇒ 版本落后时
+//   同样出现「更新」（安装源仍是官方脚本 ⇒ 仍先告知来源并确认）。
 // - REQ-PCI-05：POST 立即返回 job_id → 立刻显示运行中；轮询到终态后回调
 //   onSettled 并停止轮询（作业状态是 durable 的，刷新不丢）。
 // - REQ-PCI-06：失败作业如实展示分类提示 + 手动命令。
@@ -197,7 +198,7 @@ describe("ProviderInstallActionButton 显示规则（REQ-PCI-02）", () => {
   });
 });
 
-describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-04）", () => {
+describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-07）", () => {
   it("latestVersion 为 null 时不出现「更新」", () => {
     installFetchRouter({ target: "kimi_code" });
     const { container } = renderButton({
@@ -214,17 +215,59 @@ describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-0
     ).not.toBeInTheDocument();
   });
 
-  it("即使给了 latestVersion 也不对 Kimi 做版本判定（永不显示「更新」）", () => {
+  // 2026-11-09（REQ-PCI-07）：Kimi Code 的版本来源 = npm 包
+  // `@moonshot-ai/kimi-code` ⇒ 参与「有新版」判定，出现【更新】。
+  // 但它的**安装源**仍是官方脚本 ⇒ 点击【更新】必须先告知来源并确认。
+  it("Kimi 版本落后时显示「更新」与当前/最新版本", () => {
     installFetchRouter({ target: "kimi_code" });
-    const { container } = renderButton({
+    renderButton({
       target: "kimi_code",
       cliAvailable: true,
       capabilityConfirmed: true,
-      localVersion: "1.0.0",
-      latestVersion: "9.9.9",
+      localVersion: "2.4.1",
+      latestVersion: "2.5.2",
     });
 
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByRole("button", { name: "更新" })).toBeInTheDocument();
+    expect(
+      screen.getByTestId("provider-install-versions-kimi_code"),
+    ).toHaveTextContent("2.4.1");
+    expect(
+      screen.getByTestId("provider-install-versions-kimi_code"),
+    ).toHaveTextContent("2.5.2");
+  });
+
+  it("点击 Kimi 的「更新」先告知脚本来源，未确认不调 API；确认后带 acknowledge_remote_script", async () => {
+    const { requests } = installFetchRouter({
+      target: "kimi_code",
+      jobs: [() => runningJob("job_kimi", "kimi_code")],
+    });
+    renderButton({
+      target: "kimi_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+      localVersion: "2.4.1",
+      latestVersion: "2.5.2",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "更新" }));
+
+    expect(
+      screen.getByTestId("provider-install-kimi-script-notice-kimi_code"),
+    ).toHaveTextContent("将执行来自 code.kimi.com 的安装脚本");
+    expect(
+      requests.filter((request) => request.method === "POST"),
+    ).toHaveLength(0);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("provider-install-confirm-kimi_code"));
+      await Promise.resolve();
+    });
+
+    const posts = requests.filter((request) => request.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/providers/kimi_code/install");
+    expect(posts[0].body).toEqual({ acknowledge_remote_script: true });
   });
 
   it("点击安装先告知脚本来源，未确认不调 API；确认后带 acknowledge_remote_script", async () => {
@@ -271,6 +314,38 @@ describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-0
     ).toHaveTextContent(
       "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
     );
+  });
+});
+
+// 2026-11-09 bug 修复：安装块是多行（按钮行 + 状态文案行），在能力卡的
+// 操作区里把「核验」按钮顶歪；长状态文案还把整行撑出卡片。断言：安装块
+// 可收缩且不撑宽（min-w-0 / max-w-full），状态文案允许折行（break-words）。
+describe("安装块的布局契约（不撑宽、不顶歪操作区）", () => {
+  it("安装块可收缩且不撑出所在行", () => {
+    installFetchRouter({ target: "codex" });
+    renderButton({ cliAvailable: false, capabilityConfirmed: false });
+
+    const action = screen.getByTestId("provider-install-action-codex");
+    expect(action.className).toContain("min-w-0");
+    expect(action.className).toContain("max-w-full");
+  });
+
+  it("运行中状态文案允许折行（不把父行撑宽）", async () => {
+    vi.useFakeTimers();
+    installFetchRouter({
+      target: "codex",
+      jobIds: ["job_0001"],
+      jobs: [() => runningJob("job_0001", "codex")],
+    });
+    renderButton({ cliAvailable: false });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "安装" }));
+      await Promise.resolve();
+    });
+
+    const status = screen.getByTestId("provider-install-status-codex");
+    expect(status.className).toContain("break-words");
   });
 });
 

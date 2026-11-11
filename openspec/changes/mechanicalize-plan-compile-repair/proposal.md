@@ -13,7 +13,7 @@
 ## What Changes
 
 - **契约四层下沉**：L0 平台确定性自修 / L1 结构投影补全 / L2 精确缺口 / L3 业务取舍；模型只负责业务内容。
-- **lowering typed fault**：新增独立 `LoweringFault`（实现于 `CompilerDiagnostic` 新字段，**不进** wire 枚举 `PlanningFailureKind`），在 `lower.rs:1121` 构造点赋值；教学资格从「parse 码白名单」改为「fault 在场且事实齐全」（`MODIFIED REQ-WSC-09`）。
+- **lowering typed fault**：新增独立 `LoweringFault`（实现于 `CompilerDiagnostic` 新字段，**不进** wire 枚举 `PlanningFailureKind`），在 `lower.rs:1121` 构造点赋值；教学资格从「parse 码白名单」改为「fault 在场且事实齐全」（`MODIFIED REQ-WSC-09`），并按裁决 §1.5 把四类 typed IR 诊断（`unknown_done_when_ref` 等）与确定性结构拒收纳入该唯一资格清单。
 - **计划意图分支等价解析**：`kind=single_repository` 而值填在兄弟 key 时，按成员表唯一映射解析采用（**不改 source**，产 `equivalence_canonicalization` 审计）；不唯一或双命中一律不猜。
 - **环诊断带来源、不删边**：typed witness 逐跳标来源；平台**不得**删依赖边消环（现场环是 `canonical_input` 逆仓序的真实数据流），只做结构化教学 → 同指纹重复则升级业务取舍并一次问清。
 - **图奇偶性**：Stage1 与 Final Compile 对同一 fixture 的「有效边集合 / 成环结论 / witness 首跳」必须一致；不一致先登记缺陷单。
@@ -34,4 +34,4 @@
 - 不让平台自动改 design 的 `change_order`。
 - 不推翻「approve 必重跑 Final Compile」。
 - 不处理 `outbound_queue_full`（会话出站可靠性，`degraded_session` 面，另开工单）。
-- 不在本 change 内裁决 `REQ-SG-02A` 与现有 `contract_autorepair` 的撞线（登记为待 owner 裁决）。
+- O1 已由 owner 裁决（2026-11-08 裁决 §2.2/§2.3）：**不改 `REQ-SG-02A`，现有 `contract_autorepair` 的内容 autorepair 迁原授权 author**（落地工作包见 tasks 第 8 节；本 change 不新增对任何 source 的内容 patch）。

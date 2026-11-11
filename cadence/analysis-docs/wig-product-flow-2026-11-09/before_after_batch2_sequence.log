@@ -1,0 +1,57 @@
+[03:59:23] daemon pid=3474590 port=4711 eff=high ws=/tmp/aria-wig/run-high-4711
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[04:18:03] plan=confirmed
+[04:18:03] done arm=high eff=high port=4711
+[04:18:03] finished before high eff=high port=4711
+[04:18:03] daemon pid=3506362 port=4712 eff=high ws=/tmp/aria-wig/run-high-4712
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[04:35:26] session=stopped_needs_human (plan 仍 draft)
+[04:35:26] done arm=high eff=high port=4712
+[04:35:26] finished after high eff=high port=4712
+[04:35:26] daemon pid=3526738 port=4713 eff=none ws=/tmp/aria-wig/run-xhigh-4713
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[04:56:34] session=failed (plan 仍 draft)
+[04:56:34] done arm=xhigh eff=none port=4713
+[04:56:34] finished after xhigh eff=none port=4713
+[04:56:35] daemon pid=3550949 port=4714 eff=none ws=/tmp/aria-wig/run-xhigh-4714
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[05:11:42] session=stopped_needs_human (plan 仍 draft)
+[05:11:42] done arm=xhigh eff=none port=4714
+[05:11:42] finished before xhigh eff=none port=4714
+[05:11:42] daemon pid=3568749 port=4715 eff=high ws=/tmp/aria-wig/run-high-4715
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[05:30:36] session=stopped_needs_human (plan 仍 draft)
+[05:30:36] done arm=high eff=high port=4715
+[05:30:36] finished before high eff=high port=4715
+[05:30:36] daemon pid=3590477 port=4716 eff=high ws=/tmp/aria-wig/run-high-4716
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[05:46:14] session=failed (plan 仍 draft)
+[05:46:14] done arm=high eff=high port=4716
+[05:46:14] finished after high eff=high port=4716
+[05:46:14] daemon pid=3608197 port=4717 eff=none ws=/tmp/aria-wig/run-xhigh-4717
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[05:57:06] session=failed (plan 仍 draft)
+[05:57:06] done arm=xhigh eff=none port=4717
+[05:57:06] finished after xhigh eff=none port=4717
+[05:57:06] daemon pid=3620684 port=4718 eff=none ws=/tmp/aria-wig/run-xhigh-4718
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[06:24:01] session=failed (plan 仍 draft)
+[06:24:01] done arm=xhigh eff=none port=4718
+[06:24:01] finished before xhigh eff=none port=4718
+ALL_BA2_DONE

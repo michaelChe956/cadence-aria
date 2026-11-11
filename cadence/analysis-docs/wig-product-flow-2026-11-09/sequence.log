@@ -1,0 +1,23 @@
+[22:18:01] daemon pid=1335080 port=4321 eff=none ws=/tmp/aria-wig/run-xhigh-4321
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[22:26:23] plan=confirmed
+[22:26:23] done arm=xhigh eff=none port=4321
+[22:26:23] finished xhigh eff=none port=4321
+[22:26:23] daemon pid=1365069 port=4322 eff=high ws=/tmp/aria-wig/run-high-4322
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[22:37:30] plan=confirmed
+[22:37:30] done arm=high eff=high port=4322
+[22:37:30] finished high eff=high port=4322
+[22:37:30] daemon pid=1454766 port=4323 eff=high ws=/tmp/aria-wig/run-high-4323
+  prepare: 200
+  terminated 已落盘
+  enable: 200
+[23:06:18] finished high eff=high port=4323
+[23:06:18] daemon pid=1542431 port=4324 eff=none ws=/tmp/aria-wig/run-xhigh-4324
+  prepare: 200
+  terminated 已落盘
+  enable: 200

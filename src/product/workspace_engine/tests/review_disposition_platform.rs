@@ -18,7 +18,7 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
 use crate::product::models::{
     AgentRole, HumanDispositionRecord, HumanFindingDispositionKind, HumanGateTurnRejection,
-    NodeDetail, ProviderName, WorkspaceType,
+    NodeDetail, ProviderName, WorkItemSplitFinding, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{FindingClass, classify_finding};
 use crate::product::workspace_engine::{WorkspaceEngine, WorkspaceSession, session_state};
@@ -331,9 +331,13 @@ fn next_review_prompt_section_carries_owner_dispositions() {
 fn previous_round_section_omits_owner_disposed_findings() {
     let fixture = platform_fixture("plan_previous_round_disposed");
     let session_id = fixture.record.id.clone();
-    let disposed = finding(ReviewFindingSeverity::MustFix, "中文 locale 尚未配置");
+    // D6 扩展：finding 带 plan_preflight. 前缀 contract_field（可机械判定），
+    // 并落一份当前候选机械报告——owner 排除口径在分区注入形态下继续成立。
+    let mut disposed = finding(ReviewFindingSeverity::MustFix, "中文 locale 尚未配置");
+    disposed.contract_field = Some("plan_preflight.locale_unavailable".to_string());
     let mut still_open = finding(ReviewFindingSeverity::MustFix, "本 Work Item 验收标准缺口");
     still_open.required_action = "补齐验收标准".to_string();
+    still_open.contract_field = Some("plan_preflight.acceptance_missing".to_string());
     let key = disposed.computed_finding_key();
     fixture
         .store
@@ -362,8 +366,21 @@ fn previous_round_section_omits_owner_disposed_findings() {
             ),
         )
         .unwrap();
+    let (_ir_ref, report_ref) =
+        super::single_candidate_prompt::persist_verification_artifacts_with_findings(
+            &fixture.store,
+            &fixture.record.entity_id,
+            vec![WorkItemSplitFinding {
+                severity: crate::product::models::WorkItemSplitFindingSeverity::Warning,
+                code: "acceptance_missing".to_string(),
+                message: "mechanical summary: acceptance missing".to_string(),
+                work_item_ids: vec!["wi-a".to_string()],
+                kind: None,
+            }],
+        );
 
     let mut engine = fixture.engine();
+    engine.session.mechanical_report_ref = Some(report_ref);
     engine.active_node_id = Some("reviewer-current".to_string());
     engine
         .timeline_nodes
@@ -382,10 +399,34 @@ fn previous_round_section_omits_owner_disposed_findings() {
     assert_eq!(
         section.matches("\"fingerprint\"").count(),
         1,
-        "只有未处置的 finding 能保留身份条目: {section}"
+        "只有未处置的 finding 能保留身份条目（待办/已关闭任一区都算）: {section}"
     );
     assert!(
         !section.contains("回写该事实"),
         "owner 已处置事实不得再以未收敛 finding 注入: {section}"
     );
+    // D6 分区形态下的 owner 排除复核：未处置项落待办区；已处置项两个区都不在。
+    let payload = previous_round_section_payload(&section);
+    let unresolved = payload
+        .get("unresolved_findings")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("unresolved_findings zone missing: {payload}"));
+    assert_eq!(unresolved.len(), 1, "{payload}");
+    assert_eq!(unresolved[0]["content_identity"], "acceptance_missing");
+    assert!(
+        !section.contains("locale_unavailable"),
+        "owner 已处置项的内容身份不得出现在任一分区: {section}"
+    );
+}
+
+/// 截取前轮清单段的 JSON 载荷（`### Previous Review Round Findings` 与纪律段之间）。
+fn previous_round_section_payload(section: &str) -> serde_json::Value {
+    let body = section
+        .split("### Previous Review Round Findings")
+        .nth(1)
+        .expect("section heading present");
+    let discipline = body
+        .find("[previous_round_repetition_discipline]")
+        .expect("discipline tag present");
+    serde_json::from_str(body[..discipline].trim()).expect("payload JSON")
 }

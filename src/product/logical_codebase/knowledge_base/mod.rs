@@ -1,0 +1,20 @@
+//! 知识库模块：Schema 4.0 KnowledgeBase 的 operation 数据模型与 per-LC
+//! durable store（Task 1 后端底座）。
+
+pub mod change_package;
+pub mod command;
+pub mod coordinator;
+pub mod files;
+pub mod manifest;
+pub mod operation;
+pub mod preflight;
+pub mod store;
+pub mod templates;
+pub mod user_input;
+
+pub use operation::{
+    KnowledgeBaseOperation, KnowledgeBaseOperationInput, KnowledgeBaseOperationKind,
+    KnowledgeBaseOperationStatus, KnowledgeBaseStepKind, KnowledgeBaseStepRecord,
+    KnowledgeBaseStepStatus, derive_operation_id,
+};
+pub use store::KnowledgeBaseOperationStore;

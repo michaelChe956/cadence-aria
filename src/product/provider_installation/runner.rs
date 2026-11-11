@@ -24,6 +24,10 @@ use crate::cross_cutting::bounded_command_runner::{
 use crate::cross_cutting::provider_health::ProviderHealthService;
 
 use super::InstallTarget;
+use super::effective_prefix::{
+    choose_effective_prefix, first_path_dir_with_command, is_writable_dir, same_dir,
+    visible_cli_prefix,
+};
 use super::failure_classify::{
     InstallFailureKind, InstallFailureSignals, InstallJobFailure, classify_install_failure,
 };
@@ -232,31 +236,30 @@ impl PostInstallProber for HealthRefreshProber {
     }
 }
 
-const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
-
-/// 命令是否出现在给定 PATH 变量的某个目录里。
-pub fn executable_on_path(command: &str, path_value: Option<&str>) -> bool {
-    path_value
-        .map(|value| {
-            value
-                .split(PATH_SEPARATOR)
-                .filter(|dir| !dir.is_empty())
-                .any(|dir| Path::new(dir).join(command).exists())
-        })
-        .unwrap_or(false)
-}
-
-/// npm 装完命令不在 PATH 上时的提示（REQ-PCI-03：`--prefix` 前缀的代价
-/// 由提示兜底）。
+/// npm 装完命令不在 PATH 上（或 PATH 上生效的仍是别处的旧版本）时的提示
+/// （REQ-PCI-03：`--prefix` 前缀的代价由提示兜底）。
+///
+/// 判定口径：PATH 上**第一个**提供该命令的目录必须就是本次安装前缀的
+/// `bin` 目录 —— 否则用户执行的仍是旧版本，必须提示把新前缀放到 PATH
+/// 前面（2026-11-09 bug：更新装到 PATH 之外 ⇒ 版本不变且无任何提示）。
 pub fn npm_path_hint(command: &str, prefix: &Path, path_value: Option<&str>) -> Option<String> {
-    if executable_on_path(command, path_value) {
-        return None;
+    let prefix_bin = prefix.join("bin");
+    match first_path_dir_with_command(command, path_value) {
+        // PATH 上生效的命令就是本次安装的那个 ⇒ 无需提示。
+        Some(dir) if same_dir(&dir, &prefix_bin) => None,
+        // PATH 上生效的是别处的旧版本 ⇒ 必须提示换前缀，否则「更新没效果」。
+        Some(dir) => Some(format!(
+            "已安装到 {}；PATH 上生效的 `{command}` 来自 {}，请把 {} 放到 PATH 前面",
+            prefix.display(),
+            dir.display(),
+            prefix_bin.display()
+        )),
+        None => Some(format!(
+            "已安装到 {}；若 `{command}` 不在 PATH 上，请把 {} 加入 PATH 后重试",
+            prefix.display(),
+            prefix_bin.display()
+        )),
     }
-    Some(format!(
-        "已安装到 {}；若 `{command}` 不在 PATH 上，请把 {}/bin 加入 PATH 后重试",
-        prefix.display(),
-        prefix.display()
-    ))
 }
 
 /// 作业执行时钟 seam。
@@ -273,6 +276,63 @@ impl InstallClock for SystemInstallClock {
     }
 }
 
+/// npm 自身全局前缀（`npm prefix -g`）的探测 seam。
+///
+/// 只在「PATH 上没有该命令」或「那个前缀不可写」时才需要它（CLI 未安装
+/// 时的新装落点）⇒ 生产实现是可选的，测试可注入桩。
+#[async_trait::async_trait]
+pub trait NpmGlobalPrefixProbe: Send + Sync {
+    async fn npm_global_prefix(&self) -> Option<PathBuf>;
+}
+
+/// 生产实现：跑一次 `npm prefix -g`（宿主 PATH 透传，短超时）。
+pub struct CommandNpmGlobalPrefixProbe {
+    command_runner: Arc<dyn BoundedCommandRunner>,
+    working_dir: PathBuf,
+    timeout: Duration,
+}
+
+impl CommandNpmGlobalPrefixProbe {
+    pub fn new(
+        command_runner: Arc<dyn BoundedCommandRunner>,
+        working_dir: impl Into<PathBuf>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            command_runner,
+            working_dir: working_dir.into(),
+            timeout,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NpmGlobalPrefixProbe for CommandNpmGlobalPrefixProbe {
+    async fn npm_global_prefix(&self) -> Option<PathBuf> {
+        let request = BoundedCommandRequest {
+            executable: "npm".to_string(),
+            argv: vec!["prefix".to_string(), "-g".to_string()],
+            working_dir: self.working_dir.clone(),
+            timeout: self.timeout,
+            cancellation: CancellationToken::new(),
+            environment: host_environment(),
+            stdout_limit: 4096,
+            stderr_limit: 4096,
+        };
+        let result = self.command_runner.run(request).await.ok()?;
+        if result.exit_code != Some(0) || result.timed_out {
+            return None;
+        }
+        let line = result
+            .stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())?;
+        let path = PathBuf::from(line);
+        path.exists().then_some(path)
+    }
+}
+
 /// durable 作业执行器：running（create 时已落盘）→ 执行安装 → 成功重探
 /// → completed / 失败分类 → failed。
 pub struct InstallJobExecution {
@@ -281,6 +341,11 @@ pub struct InstallJobExecution {
     pub prober: Arc<dyn PostInstallProber>,
     pub registry: String,
     pub npm_prefix: PathBuf,
+    /// 宿主 PATH（`None` = 运行时读进程环境）：决定「PATH 上当前生效的
+    /// CLI 在哪个前缀」，安装 / 更新必须落到那个前缀才真的生效。
+    pub path_value: Option<String>,
+    /// npm 自身全局前缀的探测（可选；`None` = 不探测）。
+    pub npm_prefix_probe: Option<Arc<dyn NpmGlobalPrefixProbe>>,
     pub clock: Arc<dyn InstallClock>,
 }
 
@@ -302,14 +367,48 @@ impl InstallJobExecution {
             ),
             prober: Arc::new(HealthRefreshProber::new(
                 health,
-                command_runner,
-                working_dir,
+                command_runner.clone(),
+                working_dir.clone(),
                 Duration::from_secs(5),
             )),
             registry: npm_registry(),
             npm_prefix: npm_prefix(),
+            path_value: None,
+            npm_prefix_probe: Some(Arc::new(CommandNpmGlobalPrefixProbe::new(
+                command_runner,
+                working_dir,
+                Duration::from_secs(10),
+            ))),
             clock: Arc::new(SystemInstallClock),
         }
+    }
+
+    /// 宿主 PATH（测试可注入；生产 = 进程环境）。
+    fn host_path(&self) -> Option<String> {
+        self.path_value
+            .clone()
+            .or_else(|| std::env::var("PATH").ok())
+    }
+
+    /// 解析生效的 npm 前缀（安装 / 更新落到这里才真的生效）。
+    ///
+    /// 顺序：PATH 上当前生效的 CLI 所在前缀 → `npm prefix -g` →
+    /// 兜底 `NPM_PREFIX` / `$HOME/.npm-global`。只取可写者。
+    pub async fn resolve_effective_prefix(
+        &self,
+        row: &InstallSourceRow,
+        path_value: Option<&str>,
+    ) -> PathBuf {
+        let visible = visible_cli_prefix(row.command, path_value);
+        if let Some(prefix) = visible.as_deref().filter(|prefix| is_writable_dir(prefix)) {
+            return prefix.to_path_buf();
+        }
+        // PATH 上没有该命令（或那个前缀不可写）⇒ 退到 npm 自己的全局前缀。
+        let npm_global = match self.npm_prefix_probe.as_ref() {
+            Some(probe) => probe.npm_global_prefix().await,
+            None => None,
+        };
+        choose_effective_prefix(None, npm_global.as_deref(), &self.npm_prefix)
     }
 
     /// 单个目标的安装作业主流程（无批量入口）：执行安装 → 成功重探 +
@@ -325,7 +424,18 @@ impl InstallJobExecution {
             let _ = self.store.fail(job_id, failure, self.clock.now());
             return;
         };
-        let Some(plan) = install_plan_for(&target, None, &self.registry, &self.npm_prefix) else {
+        let path_value = self.host_path();
+        // 安装 / 更新必须落到「PATH 上当前生效的 CLI 所在前缀」——
+        // 装到别处（哪怕可写）⇒ 用户执行的仍是旧版本（2026-11-09 bug）。
+        let prefix = match row.npm_package {
+            Some(_) => {
+                self.resolve_effective_prefix(row, path_value.as_deref())
+                    .await
+            }
+            // 官方脚本安装源（Kimi）：前缀无关。
+            None => self.npm_prefix.clone(),
+        };
+        let Some(plan) = install_plan_for(&target, None, &self.registry, &prefix) else {
             // row_for_wire 已放行 ⇒ 这里必然可达，防御性兜底。
             return;
         };
@@ -337,9 +447,8 @@ impl InstallJobExecution {
                     .await
                     .ok()
                     .flatten();
-                let path_value = std::env::var("PATH").ok();
                 let path_hint = match row.npm_package {
-                    Some(_) => npm_path_hint(row.command, &self.npm_prefix, path_value.as_deref()),
+                    Some(_) => npm_path_hint(row.command, &prefix, path_value.as_deref()),
                     None => None,
                 };
                 let outcome = InstallJobOutcome {
@@ -398,6 +507,7 @@ mod tests {
 
     struct ScriptedRunner {
         results: Mutex<VecDeque<Result<BoundedCommandResult, BoundedCommandError>>>,
+        requests: Mutex<Vec<BoundedCommandRequest>>,
         delay: Duration,
     }
 
@@ -408,8 +518,13 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 results: Mutex::new(results.into()),
+                requests: Mutex::new(Vec::new()),
                 delay,
             })
+        }
+
+        fn requests(&self) -> Vec<BoundedCommandRequest> {
+            self.requests.lock().expect("recorded requests").clone()
         }
     }
 
@@ -417,8 +532,12 @@ mod tests {
     impl BoundedCommandRunner for ScriptedRunner {
         async fn run(
             &self,
-            _request: BoundedCommandRequest,
+            request: BoundedCommandRequest,
         ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            self.requests
+                .lock()
+                .expect("recorded requests")
+                .push(request);
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
@@ -510,6 +629,8 @@ mod tests {
             prober,
             registry: REGISTRY.to_string(),
             npm_prefix: PathBuf::from("/home/dev/.npm-global"),
+            path_value: None,
+            npm_prefix_probe: None,
             clock: Arc::new(FixedClock),
         }
     }
@@ -660,7 +781,8 @@ mod tests {
         // 不在 PATH ⇒ 必须给 path_hint；已在 PATH ⇒ 不给。提示文案含
         // `<prefix>/bin` 的那一支由下方 `npm_path_hint` 单测（受控
         // PATH）确定性覆盖。
-        let command_on_path = executable_on_path("codex", std::env::var("PATH").ok().as_deref());
+        let command_on_path =
+            first_path_dir_with_command("codex", std::env::var("PATH").ok().as_deref()).is_some();
         if command_on_path {
             assert!(
                 outcome.path_hint.is_none(),
@@ -716,10 +838,109 @@ mod tests {
         assert_eq!(prober.calls(), 0, "失败安装不触发重探");
     }
 
-    /// PATH 上已有命令 → 不给 path_hint。
+    /// 2026-11-09 bug 修复：安装 / 更新必须落到 **PATH 上当前生效的 CLI
+    /// 所在前缀**（`<prefix>/bin/<cmd>`）。旧实现一律落 `~/.npm-global`
+    /// ⇒ 新版本装在 PATH 之外，用户手上的命令仍是旧版本（更新没效果）。
+    #[tokio::test]
+    async fn runner_installs_into_the_prefix_of_the_cli_on_path() {
+        let root = tempdir().expect("root");
+        let visible_prefix = root.path().join("installation");
+        let bin = visible_prefix.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        std::fs::write(bin.join("codex"), b"#!/bin/sh\n").expect("cli stub");
+        let install_runner = ScriptedRunner::new(vec![success("added 1 package")], Duration::ZERO);
+        let mut execution = execution(
+            root.path(),
+            install_runner.clone(),
+            SpyProber::new(Some("1.0.5")),
+        );
+        // PATH 上生效的 codex 在 `visible_prefix/bin`。
+        execution.path_value = Some(bin.to_string_lossy().into_owned());
+        // 旧行为的固定前缀（可写）——新实现不得选它。
+        execution.npm_prefix = root.path().join("fallback");
+        std::fs::create_dir_all(&execution.npm_prefix).expect("fallback dir");
+
+        let job = execution
+            .store
+            .create("codex", FixedClock.now())
+            .expect("create");
+        execution
+            .run(&job.job_id, InstallTarget::Provider(ProviderName::Codex))
+            .await;
+
+        let requests = install_runner.requests();
+        let install = requests.first().expect("install request");
+        let prefix_index = install
+            .argv
+            .iter()
+            .position(|arg| arg == "--prefix")
+            .expect("--prefix");
+        assert_eq!(
+            install.argv[prefix_index + 1],
+            visible_prefix.to_string_lossy().into_owned(),
+            "安装必须落到 PATH 上当前生效的 CLI 所在前缀，否则更新不生效"
+        );
+    }
+
+    /// 2026-11-09 bug 修复：CLI 未安装（PATH 上没有）⇒ 落到 npm 自己的
+    /// 全局前缀（可写时）——那是 npm 默认会装的地方。
+    #[tokio::test]
+    async fn runner_falls_back_to_npm_global_prefix_when_cli_absent() {
+        struct StubProbe {
+            prefix: Option<PathBuf>,
+        }
+
+        #[async_trait::async_trait]
+        impl NpmGlobalPrefixProbe for StubProbe {
+            async fn npm_global_prefix(&self) -> Option<PathBuf> {
+                self.prefix.clone()
+            }
+        }
+
+        let root = tempdir().expect("root");
+        let npm_global = root.path().join("npm-global");
+        std::fs::create_dir_all(&npm_global).expect("npm global dir");
+        let install_runner = ScriptedRunner::new(vec![success("added 1 package")], Duration::ZERO);
+        let mut execution = execution(
+            root.path(),
+            install_runner.clone(),
+            SpyProber::new(Some("1.0.5")),
+        );
+        // PATH 上没有 codex（未安装）。
+        execution.path_value = Some(root.path().join("empty-bin").to_string_lossy().into_owned());
+        execution.npm_prefix = root.path().join("fallback");
+        std::fs::create_dir_all(&execution.npm_prefix).expect("fallback dir");
+        execution.npm_prefix_probe = Some(Arc::new(StubProbe {
+            prefix: Some(npm_global.clone()),
+        }));
+
+        let job = execution
+            .store
+            .create("codex", FixedClock.now())
+            .expect("create");
+        execution
+            .run(&job.job_id, InstallTarget::Provider(ProviderName::Codex))
+            .await;
+
+        let requests = install_runner.requests();
+        let install = requests.first().expect("install request");
+        let prefix_index = install
+            .argv
+            .iter()
+            .position(|arg| arg == "--prefix")
+            .expect("--prefix");
+        assert_eq!(
+            install.argv[prefix_index + 1],
+            npm_global.to_string_lossy().into_owned(),
+            "CLI 未安装时必须落到 npm 自己的全局前缀"
+        );
+    }
+
+    /// path_hint 口径（2026-11-09 bug 修复）：PATH 上生效的命令必须就是
+    /// 本次安装前缀里的那个，否则用户跑的仍是旧版本 ⇒ 必须提示换前缀。
     #[test]
-    fn runner_path_hint_only_when_command_missing_from_path() {
-        // 受控 PATH ⇒ 提示文案（含 `<prefix>/bin`）在本机恒定可断言。
+    fn runner_path_hint_reflects_whether_the_visible_binary_is_the_installed_one() {
+        // 命令完全不在 PATH 上 ⇒ 提示加 PATH。
         let hint = npm_path_hint(
             "definitely-not-on-path-cli-xyz",
             Path::new("/home/dev/.npm-global"),
@@ -742,6 +963,25 @@ mod tests {
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
                 .expect("executable bit");
         }
-        assert!(npm_path_hint("my-cli-xyz", Path::new("/p"), bin.to_str()).is_none());
+        // PATH 上生效的命令就是安装前缀里的那个 ⇒ 不给提示。
+        assert!(
+            npm_path_hint("my-cli-xyz", root.path(), bin.to_str()).is_none(),
+            "PATH 上生效的就是本次安装的那个 ⇒ 不给 path_hint"
+        );
+        // PATH 上生效的是别处的旧版本 ⇒ 必须提示把新前缀放到 PATH 前面。
+        let hint = npm_path_hint(
+            "my-cli-xyz",
+            Path::new("/home/dev/.npm-global"),
+            bin.to_str(),
+        )
+        .expect("PATH 上生效的不是本次安装的那个 ⇒ 必须给 path_hint");
+        assert!(
+            hint.contains("/home/dev/.npm-global/bin"),
+            "path_hint 必须点名 <prefix>/bin: {hint}"
+        );
+        assert!(
+            hint.contains("PATH 前面"),
+            "path_hint 必须说明把新前缀放到 PATH 前面: {hint}"
+        );
     }
 }
