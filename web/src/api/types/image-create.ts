@@ -212,13 +212,3 @@ export type SettingsUpdateRequest = {
   vendors?: Partial<Record<ImageVendor, VendorSettingsUpdate>> | null;
   defaults?: DefaultImageParams | null;
 };
-
-/* 下游（状态层 / 组件层）使用的等价别名，与上面的设计命名保持同一形状。 */
-export type ImageDefaultParams = DefaultImageParams;
-export type ModelSelection = ImageModelSelection;
-export type ReferenceSource = ImageReferenceSource;
-export type ImageVendorSettings = MaskedVendorSettings;
-export type ImageCreateSettings = MaskedSettings;
-export type ImageVendorSettingsUpdate = VendorSettingsUpdate;
-export type ImageCreateSettingsUpdate = SettingsUpdateRequest;
-export type GenerateImageResponse = ImageGenerationResponse;
