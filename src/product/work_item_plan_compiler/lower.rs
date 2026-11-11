@@ -2,10 +2,13 @@ use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
+use super::equivalence::equivalent_single_repository_target;
+use super::types::LoweringFault;
 use super::{
     grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
     types::{CompilerDiagnostic, WorkItemPlanAst, WorkItemPlanFieldAst, WorkItemPlanItemAst},
 };
+use crate::product::lifecycle_store::candidate_attempts::EquivalenceCanonicalization;
 use crate::product::models::{TrustedDraftVerificationCommand, WorkItemDraftVerificationPlan};
 use crate::product::work_item_contract::{
     AcceptanceCriterion, BlockerRoute, BlockerRule, CanonicalWorkItemContract,
@@ -79,6 +82,7 @@ pub fn lower_work_item_plan(
     source: &str,
     ast: WorkItemPlanAst,
     context: &WorkItemPlanSourceContext,
+    canonicalizations: &mut Vec<EquivalenceCanonicalization>,
 ) -> Result<PlanCandidateIr, Vec<CompilerDiagnostic>> {
     let mut diagnostics = Vec::new();
     if context.target_repository_id.trim().is_empty() {
@@ -93,7 +97,13 @@ pub fn lower_work_item_plan(
     let source_revision_hash = hex::encode(Sha256::digest(source.as_bytes()));
     let mut items = Vec::with_capacity(ast.items.len());
     for item in &ast.items {
-        if let Some(item) = lower_item(item, context, &source_revision_hash, &mut diagnostics) {
+        if let Some(item) = lower_item(
+            item,
+            context,
+            &source_revision_hash,
+            &mut diagnostics,
+            canonicalizations,
+        ) {
             items.push(item);
         }
     }
@@ -119,8 +129,7 @@ pub fn compile_work_item_plan(
     source: &str,
     context: &WorkItemPlanSourceContext,
 ) -> Result<PlanCandidateIr, Vec<CompilerDiagnostic>> {
-    let ast = super::parse_work_item_plan(source)?;
-    lower_work_item_plan(source, ast, context)
+    super::equivalence::compile_work_item_plan_audited(source, context).map(|(ir, _audit)| ir)
 }
 
 fn lower_item(
@@ -128,6 +137,7 @@ fn lower_item(
     context: &WorkItemPlanSourceContext,
     source_revision_hash: &str,
     diagnostics: &mut Vec<CompilerDiagnostic>,
+    canonicalizations: &mut Vec<EquivalenceCanonicalization>,
 ) -> Option<PlanCandidateItemIr> {
     let mut fields = Vec::new();
     for section in &item.sections {
@@ -210,6 +220,8 @@ fn lower_item(
     let forbidden_scopes_snapshot = split_values(values("Write Policy", "forbidden_scopes"));
     let intent_contract = lower_plan_intent(
         &fields,
+        context,
+        canonicalizations,
         depends_on_snapshot,
         exclusive_scopes_snapshot,
         forbidden_scopes_snapshot,
@@ -307,6 +319,7 @@ fn resolve_item_target_repository_id(
             // F1.2：语义错 fail-closed 诊断未 typed（target 归属 typed
             // producer 归 F2a/SG1），不猜 kind。
             kind: None,
+            lowering_fault: None,
         });
     };
 
@@ -399,6 +412,8 @@ fn resolve_item_target_repository_id(
 /// 一级拒绝，不猜默认）。
 fn lower_plan_intent(
     fields: &[(&str, &WorkItemPlanFieldAst)],
+    context: &WorkItemPlanSourceContext,
+    canonicalizations: &mut Vec<EquivalenceCanonicalization>,
     depends_on: Vec<String>,
     exclusive_scopes: Vec<String>,
     forbidden_scopes: Vec<String>,
@@ -423,14 +438,20 @@ fn lower_plan_intent(
             })
             .unwrap_or_default()
     };
-    let mut required = |key: &str| -> Option<String> {
+    // REQ-CRP-02：Plan Intent 必填缺席在构造点显式写 typed fault
+    // （RequiredFieldAbsent），message 与修复示例保持既有口径逐字一致。
+    let mut required = |key: &'static str, expected_shape: &'static str| -> Option<String> {
         let result = value(key);
         if result.is_none_or(str::is_empty) {
-            diagnostics.push(diagnostic(
+            diagnostics.push(diagnostic_with_fault(
                 &format!("contract.intent.{key}"),
                 "Plan Intent 声明在场时该字段必填。",
                 line(key),
-                &format!("- {key}: value"),
+                expected_shape,
+                LoweringFault::RequiredFieldAbsent {
+                    field: key,
+                    expected_shape,
+                },
             ));
         }
         result.map(str::to_string)
@@ -449,14 +470,43 @@ fn lower_plan_intent(
             return None;
         }
     };
-    let provider_work_item_id = required("provider_work_item_id")?;
+    let provider_work_item_id =
+        required("provider_work_item_id", "- provider_work_item_id: value")?;
     let target = match value("intent_target_kind") {
         Some("single_repository") => EnrollmentTarget::SingleRepository {
-            repository_id: required("intent_target_repo")?,
+            // REQ-CRP-03：intent_target_repo 缺席而 intent_target_logical_repo
+            // 在场 → 等价解析（唯一命中才采用并记审计，否则 typed 拒绝）。
+            repository_id: match value("intent_target_repo").filter(|repo| !repo.is_empty()) {
+                Some(repo) => repo.to_string(),
+                None => match value("intent_target_logical_repo")
+                    .filter(|equivalent| !equivalent.is_empty())
+                {
+                    Some(equivalent) => {
+                        match equivalent_single_repository_target(
+                            equivalent,
+                            line("intent_target_logical_repo"),
+                            context,
+                            canonicalizations,
+                        ) {
+                            Ok(repository_id) => repository_id,
+                            Err(diagnostic) => {
+                                diagnostics.push(*diagnostic);
+                                return None;
+                            }
+                        }
+                    }
+                    // 无等价字段：保持既有必填缺席口径。
+                    None => required("intent_target_repo", "- intent_target_repo: value")?,
+                },
+            },
         },
         Some("logical_codebase") => {
-            let logical_codebase_id = required("intent_target_codebase")?;
-            let logical_repository_uuid = required("intent_target_logical_repo")?;
+            let logical_codebase_id =
+                required("intent_target_codebase", "- intent_target_codebase: value")?;
+            let logical_repository_uuid = required(
+                "intent_target_logical_repo",
+                "- intent_target_logical_repo: value",
+            )?;
             let Ok(uuid) = uuid::Uuid::parse_str(&logical_repository_uuid) else {
                 diagnostics.push(diagnostic(
                     "contract.intent.intent_target_logical_repo",
@@ -1125,8 +1175,25 @@ fn diagnostic(field: &str, message: &str, line: usize, repair_example: &str) -> 
         field: field.to_string(),
         message: message.to_string(),
         repair_example: repair_example.to_string(),
-        // F1.2：lowering 分支尚未 typed（enum 缺事实不猜、line=0 不伪行）；
-        // 显式 typed 工厂归后续 SG 包按事实接入，不从 code/message 推导。
+        // F1.2/REQ-CRP-02：本工厂覆盖的分支缺 typed 事实，一律 None；
+        // typed fault 由 diagnostic_with_fault 在构造点显式写入，
+        // 不从 code/message 推导。
         kind: None,
+        lowering_fault: None,
+    }
+}
+
+/// REQ-CRP-02：显式 typed fault 工厂——只在机器事实完整的构造点调用
+///（Plan Intent 等价解析 fail-closed / 必填缺席），不从 code/message 派生。
+pub(super) fn diagnostic_with_fault(
+    field: &str,
+    message: &str,
+    line: usize,
+    repair_example: &str,
+    fault: LoweringFault,
+) -> CompilerDiagnostic {
+    CompilerDiagnostic {
+        lowering_fault: Some(fault),
+        ..diagnostic(field, message, line, repair_example)
     }
 }

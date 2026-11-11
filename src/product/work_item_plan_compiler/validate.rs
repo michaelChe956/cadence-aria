@@ -246,6 +246,7 @@ pub fn validate_work_item_intent_contract(
                         ),
                         // F1.2：line=0 诊断不伪行、未 typed 不猜 kind。
                         kind: None,
+                        lowering_fault: None,
                     });
                 }
             }
@@ -354,6 +355,7 @@ fn unexecutable(work_item_id: &str, message: String) -> CompilerDiagnostic {
         repair_example: "修正 Plan Intent 的 provider/依赖/scope/target 声明后重新提交".to_string(),
         // F1.2：line=0 诊断不伪行、未 typed 不猜 kind。
         kind: None,
+        lowering_fault: None,
     }
 }
 
@@ -520,6 +522,7 @@ fn validator_diagnostic(finding: &WorkItemSplitFinding) -> CompilerDiagnostic {
         // F1.2：validator 投影无 source 行事实（line=0），不伪行、不猜 kind；
         // finding 自身的可选 kind 由 split 侧显式携带（F2b）。
         kind: None,
+        lowering_fault: None,
     }
 }
 

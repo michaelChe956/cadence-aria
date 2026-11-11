@@ -4,14 +4,14 @@
 
 ## 1. 止血：计划意图分支等价解析（REQ-CRP-03）
 
-- [ ] 1.1 先红：`kind=single_repository` + 值在 `intent_target_logical_repo`（唯一可映射到成员物理仓）→ 编译通过且产 `equivalence_canonicalization` 审计；值不在成员表 → typed 诊断且**不采用**；值同时命中逻辑键与物理值 → **不采用**（双命中 fail-closed）；legacy（`member_targets=None`）→ 取会话 target
-- [ ] 1.2 实现：`lower_plan_intent`（`src/product/work_item_plan_compiler/lower.rs:443-480`）等价解析；复用 `resolve_item_target_repository_id`（`lower.rs:262`）与 member targets
-- [ ] 1.3 回归：`kind=logical_codebase` 缺 codebase id 仍 typed 报错；单仓/多仓既有 lowering 测试全绿
+- [x] 1.1 先红：`kind=single_repository` + 值在 `intent_target_logical_repo`（唯一可映射到成员物理仓）→ 编译通过且产 `equivalence_canonicalization` 审计；值不在成员表 → typed 诊断且**不采用**；值同时命中逻辑键与物理值 → **不采用**（双命中 fail-closed）；legacy（`member_targets=None`）→ 取会话 target
+- [x] 1.2 实现：`lower_plan_intent`（`src/product/work_item_plan_compiler/lower.rs:443-480`）等价解析；复用 `resolve_item_target_repository_id`（`lower.rs:262`）与 member targets
+- [x] 1.3 回归：`kind=logical_codebase` 缺 codebase id 仍 typed 报错；单仓/多仓既有 lowering 测试全绿
 
 ## 2. 止血：lowering typed fault + 教学资格（REQ-CRP-02、MODIFIED REQ-WSC-09）
 
 - [ ] 2.1 先红（三处钉死旧语义的测试，必须先改）：`src/web/workspace_ws_handler/run/single_candidate.rs:1525-1534`、`src/web/workspace_ws_handler/tests/single_candidate_provider_run.rs:1003`（`single_candidate_batched_traceability_lowering_error_fails_terminal_without_reredrive`）、`single_candidate_provider_run/ears_reredrive.rs:8,32-34,293-297`
-- [ ] 2.2 实现：`CompilerDiagnostic` 加 `lowering_fault: Option<LoweringFault>`（`types.rs:61-80`，无 serde，零 wire 污染）；`lower.rs:1121 diagnostic()` 工厂赋 fault，禁止从 code/message 派生
+- [x] 2.2 实现：`CompilerDiagnostic` 加 `lowering_fault: Option<LoweringFault>`（`types.rs:61-80`，无 serde，零 wire 污染）；`lower.rs:1121 diagnostic()` 工厂赋 fault，禁止从 code/message 派生
 - [ ] 2.3 实现：教学资格判据由 `TEACHABLE_PARSE_FAILURE_CODES`（`run/single_candidate.rs:84-100`）改为「fault 在场且 field+行+期望形态齐全」；重驱 prompt 直接渲染 typed payload
 - [ ] 2.4 不变量：同一 candidate 总重驱次数恒 ≤1（既有单槽不变），加断言
 - [ ] 2.5 回归：无 fault 的 lowering 仍按既有终态；既有 parse 教学重驱用例全绿

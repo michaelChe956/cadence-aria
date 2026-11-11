@@ -222,13 +222,13 @@ fn grammar_contract() {
         message: "message".to_string(),
         repair_example: "example".to_string(),
         kind: None,
+        lowering_fault: None,
     };
     assert_eq!(diagnostic.code, "missing_section");
     assert_eq!(diagnostic.line, 1);
     assert_eq!(diagnostic.field, "");
     assert_eq!(diagnostic.message, "message");
-    let cloned_diagnostic = diagnostic.clone();
-    assert_eq!(diagnostic, cloned_diagnostic);
+    assert_eq!(diagnostic, diagnostic.clone());
     assert_eq!(diagnostic.repair_example, "example");
 }
 

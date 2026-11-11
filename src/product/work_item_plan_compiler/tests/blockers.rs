@@ -28,7 +28,7 @@ fn empty_blockers_section_parses_and_lowers_to_no_blocker_rules() {
 
     let ast = parse_work_item_plan(&source).expect("空 Blockers 的完整文档应通过 parse");
     assert_eq!(ast.items.len(), 3);
-    let ir = lower::lower_work_item_plan(&source, ast, &context)
+    let ir = lower::lower_work_item_plan(&source, ast, &context, &mut Vec::new())
         .expect("空 Blockers 的完整文档应通过 lower");
     assert!(
         ir.items

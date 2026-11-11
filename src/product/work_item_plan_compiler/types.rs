@@ -77,6 +77,41 @@ pub struct CompilerDiagnostic {
     /// 其余分支一律 `None`——缺事实不猜、line=0 不伪行，严禁从
     /// code/message 反推。旧 wire 记录只能折叠为 Unknown。
     pub kind: Option<crate::product::planning_failure::PlanningFailureKind>,
+    /// REQ-CRP-02：lowering 侧信道 typed fault（独立于 wire `kind`）——
+    /// 只有机器事实完整的构造点显式写 `Some`（producer：Plan Intent 分支
+    /// 等价解析 fail-closed 与必填缺席），严禁从 code/message 反推。
+    pub lowering_fault: Option<LoweringFault>,
+}
+
+/// REQ-CRP-02：lowering 阶段的独立 typed fault——不进 wire 枚举
+/// `PlanningFailureKind`、无 serde，仅作为 `CompilerDiagnostic` 的侧信道
+/// payload；只在机器事实完整的构造点显式写 `Some`（缺事实不猜、无行不
+/// 伪行），严禁从 code/message 反推。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoweringFault {
+    /// Plan Intent 分支把 target 值填错字段（如 single_repository 的值填
+    /// 在 `intent_target_logical_repo`）且等价解析 fail-closed（REQ-CRP-03）。
+    BranchKeyMismatch {
+        /// `intent_target_kind` 原值（如 `single_repository`）。
+        kind: &'static str,
+        /// 分支期望的字段名（如 `intent_target_repo`）。
+        expected_field: &'static str,
+        /// 值实际所在字段名（如 `intent_target_logical_repo`）。
+        actual_field: &'static str,
+        /// 模型实际写的原值。
+        value: String,
+        /// 值所在 1-based source 行（禁止 0 伪行）。
+        line: usize,
+        /// 修复示例形态。
+        expected_shape: &'static str,
+    },
+    /// 声明在场时必填字段缺席（不从会话事实臆造补值）。
+    RequiredFieldAbsent {
+        /// 缺席字段名。
+        field: &'static str,
+        /// 修复示例形态。
+        expected_shape: &'static str,
+    },
 }
 
 /// options×items 预检（三族）、AC 路径×基线树核对（F-56）与 C1 Task 5 意图

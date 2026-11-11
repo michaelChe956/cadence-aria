@@ -1308,6 +1308,7 @@ mod tests {
             message: "未知结构化 key 必须拒绝。".to_string(),
             repair_example: "- kind: backend".to_string(),
             kind: None,
+            lowering_fault: None,
         }
     }
 
@@ -1489,11 +1490,9 @@ mod tests {
         // 文案漂移不改变判定（REQ-SG-01：不从自由文本分类）。
         let drifted = CompilerDiagnostic {
             code: "lowering_error".to_string(),
-            line: 9,
-            field: "trusted_commands".to_string(),
             message: "文案漂移后的重复 trusted command 描述".to_string(),
             repair_example: "- command: cargo test --locked --lib target".to_string(),
-            kind: None,
+            ..unknown_key_diagnostic(9, "trusted_commands")
         };
         assert!(is_duplicate_trusted_command_diagnostic(&drifted));
         let mut other_field = drifted.clone();
