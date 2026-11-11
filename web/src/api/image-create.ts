@@ -114,10 +114,9 @@ export async function generateImage(
   form.append("quality", request.quality);
   form.append("background", request.background);
   form.append("output_format", request.output_format);
+  form.append("model", request.model);
+  form.append("use_previous", request.use_previous ? "true" : "false");
   if (request.reference) {
-    if (request.input_fidelity) {
-      form.append("input_fidelity", request.input_fidelity);
-    }
     form.append("reference", request.reference);
   }
 

@@ -19,9 +19,20 @@ export type ImageBackground = (typeof IMAGE_BACKGROUND_OPTIONS)[number];
 export const IMAGE_OUTPUT_FORMAT_OPTIONS = ["png", "jpeg", "webp"] as const;
 export type ImageOutputFormat = (typeof IMAGE_OUTPUT_FORMAT_OPTIONS)[number];
 
-export const IMAGE_INPUT_FIDELITY_OPTIONS = ["low", "high"] as const;
-export type ImageInputFidelity =
-  (typeof IMAGE_INPUT_FIDELITY_OPTIONS)[number];
+/** 图片供应方。与对话执行器的 ImageCreateProvider 无关。 */
+export const IMAGE_VENDORS = ["gpt", "minimax"] as const;
+export type ImageVendor = (typeof IMAGE_VENDORS)[number];
+
+export const IMAGE_VENDOR_LABELS: Record<ImageVendor, string> = {
+  gpt: "GPT",
+  minimax: "MiniMax",
+};
+
+/** 生成请求 model 字段的保留值：自动轮转。 */
+export const IMAGE_MODEL_AUTO = "auto";
+
+export type ImageModelSelection = "auto" | "explicit";
+export type ImageReferenceSource = "none" | "uploaded" | "previous";
 
 export type ImageCreateProviderOption = {
   value: ImageCreateProvider;
@@ -68,9 +79,12 @@ export const DEFAULT_IMAGE_PARAMS: DefaultImageParams = {
   output_format: "png",
 };
 
+/** 参数面板状态。input_fidelity 已移除。 */
 export type ImageCreateParams = DefaultImageParams & {
   prompt: string;
-  input_fidelity: ImageInputFidelity | null;
+  /** "auto" 或模型 id。 */
+  model: string;
+  use_previous: boolean;
 };
 
 export type ImageCreateSession = {
@@ -103,14 +117,25 @@ export type ImageCreatePromptBlock = {
   version: number;
 };
 
+/** 会话记录中的生成结果：旧记录没有后 4 个字段。 */
 export type ImageGenerationResult = {
   prompt: string;
   params: DefaultImageParams;
   media_type: string;
   image_id: string | null;
   legacy_pending: boolean;
+  vendor?: ImageVendor;
+  model?: string;
+  selection?: ImageModelSelection;
+  reference_source?: ImageReferenceSource;
   ts: string;
 };
+
+/** 会话记录中的生成结果附加信息：旧记录没有这些字段。 */
+export type GenerationResultMeta = Pick<
+  ImageGenerationResult,
+  "vendor" | "model" | "selection" | "reference_source"
+>;
 
 export type ImageCreateSessionEvent = {
   kind: string;
@@ -140,26 +165,60 @@ export type IterationEvent = {
   error: string | null;
 };
 
+/** 生成成功响应。 */
 export type ImageGenerationResponse = {
   media_type: string;
   image_id: string;
+  vendor: ImageVendor;
+  model: string;
+  selection: ImageModelSelection;
+  reference_source: ImageReferenceSource;
 };
 
+/** 不变：GenerateImageRequest = ImageCreateParams & { reference?: File | null } */
 export type GenerateImageRequest = ImageCreateParams & {
   reference?: File | null;
 };
 
-export type MaskedSettings = {
+/** 设置接口中的单家视图（已脱敏）。 */
+export type MaskedVendorSettings = {
   base_url: string;
   api_key_masked: string;
+  models: string[];
+  default_model: string;
+  recommended_models: string[];
+  available: boolean;
+};
+
+export type MaskedSettings = {
+  vendors: Record<ImageVendor, MaskedVendorSettings>;
   defaults: DefaultImageParams;
 };
 
+/** 不变：ApiKeyAction = "retain" | "replace" | "clear" */
 export type ApiKeyAction = "retain" | "replace" | "clear";
 
-export type SettingsUpdateRequest = {
+/** 单家更新。 */
+export type VendorSettingsUpdate = {
   base_url?: string | null;
   api_key_action: ApiKeyAction;
   api_key?: string | null;
+  models?: string[] | null;
+  default_model?: string | null;
+};
+
+/** 某家缺省 = 该家全部保留。 */
+export type SettingsUpdateRequest = {
+  vendors?: Partial<Record<ImageVendor, VendorSettingsUpdate>> | null;
   defaults?: DefaultImageParams | null;
 };
+
+/* 下游（状态层 / 组件层）使用的等价别名，与上面的设计命名保持同一形状。 */
+export type ImageDefaultParams = DefaultImageParams;
+export type ModelSelection = ImageModelSelection;
+export type ReferenceSource = ImageReferenceSource;
+export type ImageVendorSettings = MaskedVendorSettings;
+export type ImageCreateSettings = MaskedSettings;
+export type ImageVendorSettingsUpdate = VendorSettingsUpdate;
+export type ImageCreateSettingsUpdate = SettingsUpdateRequest;
+export type GenerateImageResponse = ImageGenerationResponse;

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as imageCreateTypes from "./types/image-create";
 import {
   createImageCreateSession,
   generateImage,
@@ -8,12 +9,39 @@ import {
   updateImageCreateSettings,
 } from "./image-create";
 
+const vendorsSettings = {
+  vendors: {
+    gpt: {
+      base_url: "https://images.example.com",
+      api_key_masked: "sk-***",
+      models: ["gpt-image-2.6-flare"],
+      default_model: "gpt-image-2.6-flare",
+      recommended_models: ["gpt-image-2.6-flare"],
+      available: true,
+    },
+    minimax: {
+      base_url: "",
+      api_key_masked: "",
+      models: [],
+      default_model: "",
+      recommended_models: ["MiniMax-H3-Image"],
+      available: false,
+    },
+  },
+  defaults: {
+    size: "auto",
+    quality: "auto",
+    background: "auto",
+    output_format: "png",
+  },
+};
+
 describe("image create api", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("uses the image-create JSON endpoints and request shapes", async () => {
+  it("uses the image-create session endpoints and request shapes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path === "/api/image-create/sessions" && init?.method === "POST") {
@@ -28,28 +56,10 @@ describe("image create api", () => {
         }, 201);
       }
       if (path === "/api/image-create/settings" && init?.method === "PUT") {
-        return jsonResponse({
-          base_url: "https://images.example.com",
-          api_key_masked: "sk-***",
-          defaults: {
-            size: "auto",
-            quality: "auto",
-            background: "auto",
-            output_format: "png",
-          },
-        });
+        return jsonResponse(vendorsSettings);
       }
       if (path === "/api/image-create/settings") {
-        return jsonResponse({
-          base_url: "",
-          api_key_masked: "",
-          defaults: {
-            size: "auto",
-            quality: "auto",
-            background: "auto",
-            output_format: "png",
-          },
-        });
+        return jsonResponse(vendorsSettings);
       }
       return jsonResponse([]);
     });
@@ -60,12 +70,7 @@ describe("image create api", () => {
       template: { preset: "business_flow_diagram" },
       provider_name: "codex",
     });
-    await getImageCreateSettings();
-    await updateImageCreateSettings({
-      base_url: "https://images.example.com",
-      api_key_action: "retain",
-      defaults: null,
-    });
+    const settings = await getImageCreateSettings();
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -83,16 +88,61 @@ describe("image create api", () => {
         }),
       }),
     );
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      4,
-      "/api/image-create/settings",
-      expect.objectContaining({ method: "PUT" }),
+    expect(settings.vendors.gpt.base_url).toBe("https://images.example.com");
+    expect(settings.vendors.minimax.available).toBe(false);
+  });
+
+  it("sends the settings update as a vendors-scoped body", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse(vendorsSettings),
     );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const vendorKeys = [...imageCreateTypes.IMAGE_VENDORS];
+
+    await updateImageCreateSettings({
+      vendors: {
+        gpt: {
+          base_url: "https://images.example.com",
+          api_key_action: "retain",
+        },
+        minimax: {
+          api_key_action: "clear",
+        },
+      },
+      defaults: {
+        size: "auto",
+        quality: "auto",
+        background: "auto",
+        output_format: "png",
+      },
+    });
+
+    const init = fetchMock.mock.calls[0][1];
+    expect(init?.method).toBe("PUT");
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(["vendors", "defaults"]);
+    expect(body).not.toHaveProperty("base_url");
+    expect(body).not.toHaveProperty("api_key_action");
+    const vendors = body.vendors as Record<string, unknown>;
+    expect(Object.keys(vendors)).toEqual(vendorKeys);
+    expect(vendors.gpt).toEqual({
+      base_url: "https://images.example.com",
+      api_key_action: "retain",
+    });
+    expect(vendors.minimax).toEqual({ api_key_action: "clear" });
   });
 
   it("sends generate as FormData without overriding its multipart boundary", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      jsonResponse({ media_type: "image/png", image_id: "image-1" }),
+      jsonResponse({
+        media_type: "image/png",
+        image_id: "image-1",
+        vendor: "gpt",
+        model: "gpt-image-2.6-flare",
+        selection: "explicit",
+        reference_source: "uploaded",
+      }),
     );
     vi.stubGlobal("fetch", fetchMock);
     const reference = new File(["reference"], "reference.png", {
@@ -105,7 +155,8 @@ describe("image create api", () => {
       quality: "high",
       background: "transparent",
       output_format: "png",
-      input_fidelity: "high",
+      model: "gpt-image-2.6-flare",
+      use_previous: true,
       reference,
     });
 
@@ -122,14 +173,30 @@ describe("image create api", () => {
     expect(form.get("quality")).toBe("high");
     expect(form.get("background")).toBe("transparent");
     expect(form.get("output_format")).toBe("png");
-    expect(form.get("input_fidelity")).toBe("high");
+    expect(form.get("model")).toBe("gpt-image-2.6-flare");
+    expect(form.get("use_previous")).toBe("true");
+    expect(form.has("input_fidelity")).toBe(false);
     expect(form.get("reference")).toBe(reference);
-    expect(result).toEqual({ media_type: "image/png", image_id: "image-1" });
+    expect(result).toEqual({
+      media_type: "image/png",
+      image_id: "image-1",
+      vendor: "gpt",
+      model: "gpt-image-2.6-flare",
+      selection: "explicit",
+      reference_source: "uploaded",
+    });
   });
 
-  it("omits input_fidelity when generate has no reference image", async () => {
+  it("omits the reference image but still sends model and use_previous", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      jsonResponse({ media_type: "image/png", image_id: "image-1" }),
+      jsonResponse({
+        media_type: "image/png",
+        image_id: "image-1",
+        vendor: "minimax",
+        model: "MiniMax-H3-Image",
+        selection: "auto",
+        reference_source: "none",
+      }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -139,13 +206,16 @@ describe("image create api", () => {
       quality: "auto",
       background: "auto",
       output_format: "png",
-      input_fidelity: "high",
+      model: "auto",
+      use_previous: false,
       reference: null,
     });
 
     const form = fetchMock.mock.calls[0][1]?.body as FormData;
     expect(form.has("reference")).toBe(false);
     expect(form.has("input_fidelity")).toBe(false);
+    expect(form.get("model")).toBe("auto");
+    expect(form.get("use_previous")).toBe("false");
   });
 
   it("builds encoded session image endpoint URLs", () => {
