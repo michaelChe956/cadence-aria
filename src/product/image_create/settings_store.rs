@@ -292,7 +292,8 @@ mod tests {
             replace.gpt.map(|update| update.api_key),
             Some(ApiKeyUpdate::Replace("sk-replacement".into()))
         );
-        assert_eq!(replace.minimax, None);
+        // VendorUpdate 已不 derive Debug（H4），断言改用无 Debug 约束的形式。
+        assert!(replace.minimax.is_none());
 
         // 现状语义：replace 缺值按空串替换。
         let missing_replace_value = from_request(SettingsUpdateRequest {

@@ -537,7 +537,7 @@ pub enum ApiKeyUpdate {
 }
 
 /// 单家的更新意图（内部形态）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorUpdate {
     pub base_url: Option<String>,
     pub api_key: ApiKeyUpdate,
@@ -545,7 +545,7 @@ pub struct VendorUpdate {
     pub default_model: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsUpdate {
     pub gpt: Option<VendorUpdate>,
     pub minimax: Option<VendorUpdate>,
@@ -758,7 +758,7 @@ pub struct IterationEvent {
 }
 
 /// PUT 设置接口的请求体。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsUpdateRequest {
     #[serde(default)]
     pub vendors: Option<VendorsUpdateRequest>,
@@ -766,7 +766,7 @@ pub struct SettingsUpdateRequest {
     pub defaults: Option<DefaultParams>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorsUpdateRequest {
     #[serde(default)]
     pub gpt: Option<VendorUpdateRequest>,
@@ -774,7 +774,7 @@ pub struct VendorsUpdateRequest {
     pub minimax: Option<VendorUpdateRequest>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorUpdateRequest {
     #[serde(default)]
     pub base_url: Option<String>,

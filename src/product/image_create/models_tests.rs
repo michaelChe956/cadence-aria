@@ -713,6 +713,33 @@ fn s14_wire_structs_do_not_derive_debug() {
 }
 
 #[test]
+fn s14_request_side_update_structs_do_not_derive_debug() {
+    // H4：请求侧更新结构（含 api_key 明文的 Replace/Option<String> 字段）不得 derive Debug。
+    // SettingsUpdate / VendorsUpdateRequest 因直接包含被去 Debug 的类型，一并收紧（D12.7）。
+    let source = include_str!("models.rs");
+    for name in [
+        "VendorUpdate",
+        "SettingsUpdate",
+        "SettingsUpdateRequest",
+        "VendorsUpdateRequest",
+        "VendorUpdateRequest",
+    ] {
+        let at = source
+            .find(&format!("struct {name} "))
+            .unwrap_or_else(|| panic!("models.rs 应声明 struct {name}"));
+        let derive_at = source[..at]
+            .rfind("#[derive(")
+            .unwrap_or_else(|| panic!("{name} 之上应有 derive 属性"));
+        let derive_end = source[derive_at..].find(']').expect("derive 属性应闭合") + derive_at;
+        let derive = &source[derive_at..derive_end];
+        assert!(
+            !derive.contains("Debug"),
+            "{name} 不得 derive Debug（api_key 明文会经 Debug 泄漏）"
+        );
+    }
+}
+
+#[test]
 fn previous_image_unavailable_error_renders_chinese_hint() {
     let error = ImageCreateError::PreviousImageUnavailable("图片文件缺失".to_string());
     assert!(error.to_string().contains("上一张图片不可用"));
