@@ -58,7 +58,7 @@
 - [x] 8.1 移除八轮 source mutation 收敛及其私有 apply/rewrite 死代码：`src/product/workspace_engine/contract_autorepair.rs:54-104,630-702`；四类 producer 按裁决 §2.2 收窄，不保同名旧行为 shim
 - [x] 8.2 `contract_autorepair.rs:105-267,416-625` 与 `contract_prerevision.rs:353-356`：把「本地收敛消费」注释与接口清切为 author 指令——`required_capability_missing` 取消自动追加 capability；`unconsumed_required_handoff` 取消删 ref 或替换为 `[]`；`unknown_structured_key` 不再按诊断行删业务承载行，只生成「保留内容、迁往合法字段」的指令；重复 trusted command 取消本地删 command/整 check
 - [x] 8.3 两个生产 caller 同时切到 compile/typed 诊断→原授权指令链：`src/web/workspace_ws_handler/run/single_candidate.rs:1214-1219`、`src/product/workspace_engine/single_candidate.rs:465-479`——不能只改 handler 而 completion 又二次暗修
-- [x] 8.4 测试迁移：新 `src/product/workspace_engine/tests/contract_autorepair_migration.rs`（承接原 `contract_autorepair.rs` 内联测试块与 `contract_prerevision.rs:1733-1848` 调用测试的收窄口径改写，另按 8.4 口径改写 4 处 caller 面旧「自动补/删成功」用例）：旧「自动补/删成功」断言改为 source 不变、指令完整、author 新产物及复验
+- [x] 8.4 测试迁移：新 `src/product/workspace_engine/tests/contract_autorepair_migration.rs`（承接原 `contract_autorepair.rs` 内联测试块的收窄口径改写，另按 8.4 口径改写 4 处 caller 面旧「自动补/删成功」用例；`contract_prerevision.rs:1733-1848` 两个 sg_07 调用测试原地保留、断言未动——其断言与 mutation 语义正交，收窄后仍有效，identity 绑定面由原位 sg_07 用例继续覆盖）：旧「自动补/删成功」断言改为 source 不变、指令完整、author 新产物及复验
 - [x] 8.5 验收（裁决 §2.5）：四类规则各测成功指令与拒绝场景——source 字节不变；持久/已 review 产物不改；原 author 身份及同一剩余 attempt；新产物全量复验；未知 key 携业务正文不得消失，整 check 不得无故消失
 
 ## 9. 收口

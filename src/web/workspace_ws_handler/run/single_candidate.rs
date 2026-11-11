@@ -195,9 +195,10 @@ mod single_candidate_compile_preflight;
 mod single_candidate_delivery;
 
 use single_candidate_compile_preflight::{
-    build_work_item_plan_ir_reredrive_prompt, emit_author_ears_normalized_event,
-    emit_author_heading_normalized_event, format_compile_failure_reasons,
-    is_teachable_parse_failure, prepare_author_delivery_for_compile, prevalidate_plan_candidate_ir,
+    build_work_item_plan_ir_reredrive_prompt, compile_failure_reasons_with_author_instructions,
+    emit_author_ears_normalized_event, emit_author_heading_normalized_event,
+    emit_contract_autorepair_instructions_event, is_teachable_parse_failure,
+    prepare_author_delivery_for_compile, prevalidate_plan_candidate_ir,
 };
 
 fn preflight_lc_member_rules_before_author_run(
@@ -836,16 +837,10 @@ pub(crate) async fn run_single_candidate_author(
         ) {
             Ok(outcome) => outcome,
             Err(diagnostics) => {
-                let mut reasons = format_compile_failure_reasons(&diagnostics);
-                // O1：compile 失败路径的收窄指令（未知 key 迁移/重复
-                // trusted command）随失败面呈现（教学重驱 prompt 与终态
-                // 错误同源），平台不应用、不丢弃。
-                reasons.extend(
-                    crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
-                        &crate::product::workspace_engine::contract_autorepair::build_compile_failure_repair_instructions(
-                            &compile_source, &diagnostics, &compile_context,
-                        ),
-                    ),
+                let reasons = compile_failure_reasons_with_author_instructions(
+                    &compile_source,
+                    &diagnostics,
+                    &compile_context,
                 );
                     if !compile_ir_rerun_used
                         && diagnostics
@@ -932,34 +927,13 @@ pub(crate) async fn run_single_candidate_author(
         // 执行事件随失败面呈现（与教学重驱 prompt 同源的呈现面）；缺口
         // 本体沿引擎既有机械 verdict 通道（F5-A）交原授权 author 返修。
         // prompt 携带指令文本驱动教学重驱的完整接线在 Task 4。
-        if !contract_autorepair_instructions.is_empty() {
-            engine
-                .emit_execution_event(
-                    ProviderExecutionEvent {
-                        event_id: format!("{node_id}_contract_autorepair_instructions"),
-                        kind: ProviderExecutionEventKind::Output,
-                        status: ProviderExecutionEventStatus::Started,
-                        title: "SC 契约缺口 author 修复指令（O1：平台不改写 source）"
-                            .to_string(),
-                        detail: Some(format!(
-                            "确定性契约缺口产出 {} 条机器指令，交原授权 author 在保护闭包内产出新 revision",
-                            contract_autorepair_instructions.len()
-                        )),
-                        command: None,
-                        cwd: None,
-                        output: Some(
-                            crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
-                                &contract_autorepair_instructions,
-                            )
-                            .join("\n"),
-                        ),
-                        exit_code: None,
-                    },
-                    Some(node_id.clone()),
-                    Some(author_provider.clone()),
-                )
-                .await;
-        }
+        emit_contract_autorepair_instructions_event(
+            engine,
+            &node_id,
+            &author_provider,
+            &contract_autorepair_instructions,
+        )
+        .await;
 
         if let Some(reasons) = prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir) {
             if !compile_ir_rerun_used {

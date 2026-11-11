@@ -177,6 +177,65 @@ pub(super) fn format_compile_failure_reasons(
         .collect()
 }
 
+/// O1（裁决二）：compile 失败路径的失败面拼装——诊断原文 + 收窄指令
+/// （未知 key 迁移/重复 trusted command）渲染，随教学重驱 prompt 与
+/// 终态错误同源呈现，平台不应用、不丢弃。
+pub(super) fn compile_failure_reasons_with_author_instructions(
+    source: &str,
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+    context: &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext,
+) -> Vec<String> {
+    let mut reasons = format_compile_failure_reasons(diagnostics);
+    reasons.extend(
+        crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
+            &crate::product::workspace_engine::contract_autorepair::build_compile_failure_repair_instructions(
+                source, diagnostics, context,
+            ),
+        ),
+    );
+    reasons
+}
+
+/// O1（裁决二）：缺口机器指令不应用、不丢弃——渲染进 owner 可见执行
+/// 事件随失败面呈现（与教学重驱 prompt 同源的呈现面）；缺口本体沿
+/// 引擎既有机械 verdict 通道（F5-A）交原授权 author 返修。prompt 携带
+/// 指令文本驱动教学重驱的完整接线在 Task 4。
+pub(super) async fn emit_contract_autorepair_instructions_event(
+    engine: &mut WorkspaceEngine,
+    node_id: &str,
+    author_provider: &ProviderName,
+    instructions: &[crate::product::workspace_engine::contract_prerevision::StructuralRepairInstruction],
+) {
+    if instructions.is_empty() {
+        return;
+    }
+    engine
+        .emit_execution_event(
+            ProviderExecutionEvent {
+                event_id: format!("{node_id}_contract_autorepair_instructions"),
+                kind: ProviderExecutionEventKind::Output,
+                status: ProviderExecutionEventStatus::Started,
+                title: "SC 契约缺口 author 修复指令（O1：平台不改写 source）".to_string(),
+                detail: Some(format!(
+                    "确定性契约缺口产出 {} 条机器指令，交原授权 author 在保护闭包内产出新 revision",
+                    instructions.len()
+                )),
+                command: None,
+                cwd: None,
+                output: Some(
+                    crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
+                        instructions,
+                    )
+                    .join("\n"),
+                ),
+                exit_code: None,
+            },
+            Some(node_id.to_string()),
+            Some(author_provider.clone()),
+        )
+        .await;
+}
+
 /// 3.6 弱模型基线加固：IR 预校验——在持久化前跑与
 /// `complete_single_candidate_work_item_plan_author` 内部同源的
 /// `validate_plan_candidate_ir`（上下文组装同源：plan 的 source spec ids 与
