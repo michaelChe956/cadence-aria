@@ -41,16 +41,30 @@ impl GatewayBackedAggregateProviderTurnDriver {
     }
 
     /// OracleAggInitScope：root recipe turn prompt 拼接纯函数——recipe
-    /// 命令逐字前缀+scope 纪律线追加(不经 gateway 即可直接测试)。
+    /// 命令逐字前缀+scope 纪律线追加+无人值守指令追加(不经 gateway 即可直接测试)。
+    ///
+    /// 无人值守指令：聚合初始化的 provider turn 同样**没有应答通道**，provider
+    /// 一旦发问/请求授权，本次 turn 直接判失败（真机：Pi 在 pre_check 里发问
+    /// ⇒ `aggregate_pre_check_failed`）。指令只约束**交互行为**（不提问、不
+    /// 等回答），不改变 skill 的业务规则：需要用户授权的破坏性分支仍按 skill
+    /// 规定停止并记录。
     fn recipe_prompt(
         step: AggregateInitializationStepKind,
         aggregate_root: &std::path::Path,
         provider: crate::product::models::ProviderName,
     ) -> String {
         format!(
-            "{}{}",
+            "{}{}{}",
             Self::recipe_commands(step, provider).join("\n"),
-            Self::scope_discipline_section(aggregate_root)
+            Self::scope_discipline_section(aggregate_root),
+            Self::unattended_section()
         )
+    }
+
+    /// 无人值守指令段（聚合初始化与知识库操作共用同一口径）。
+    fn unattended_section() -> &'static str {
+        "\n\n（无人值守执行：本次操作没有交互通道。不要向用户提问，也不要请求授权\
+         或等待回答；遇到需要用户决策的分支，按 skill 规定的非破坏性默认路径继续\
+         （无法安全继续时停止并在产物中写明），不要停在等待回答上。）\n"
     }
 }
