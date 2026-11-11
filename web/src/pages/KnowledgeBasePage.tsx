@@ -120,6 +120,9 @@ export function KnowledgeBasePage({
   // 文件的标记（手动选择优先，自动打开不再抢焦点）。
   const preferredPathRef = useRef<string | null>(null);
   const userSelectedRef = useRef(false);
+  // 本轮建库轮询的中止句柄（终审 I-1）：卸载 / 换 LC 时中止，避免对已卸载
+  // 的组件写状态、也不让旧 LC 的完成提示落到新 LC 页面。
+  const initAbortRef = useRef<AbortController | null>(null);
   // 【确认并初始化】的建库编排（OpenSpec change
   // add-knowledge-base-interactive-init-flow）：批量确认完成后立即创建
   // `/knowledge-base-bootstrap` operation，运行中禁用输入确认区的动作，
@@ -386,11 +389,24 @@ export function KnowledgeBasePage({
   }, [projectId, lcId, applyUserInputSummary, applyPreflightRejection]);
 
   // 输入确认区随路由参数加载；换 LC 时先清零失效集合，避免旧 LC 的
-  // 「已确认」基线把新 LC 的文件误标为需重新确认。
+  // 「已确认」基线把新 LC 的文件误标为需重新确认。同一处还要：
+  //   - 中止上一 LC 的建库轮询（终审 I-1：旧 LC 的完成提示不得落到新 LC）；
+  //   - 清零「自动打开落点 / 用户手动选择」标记（终审 M-2：落点不跨 LC 沿用）。
   useEffect(() => {
     confirmedPathsRef.current = new Set();
     setUserInputInvalidated(new Set());
+    preferredPathRef.current = null;
+    userSelectedRef.current = false;
+    initAbortRef.current?.abort();
+    initAbortRef.current = null;
+    setInitializing(false);
+    setInitNotice(null);
     void refreshUserInput();
+    return () => {
+      // 卸载时中止本轮轮询（避免对已卸载的组件写状态）。
+      initAbortRef.current?.abort();
+      initAbortRef.current = null;
+    };
   }, [refreshUserInput]);
 
   // 前置门由关到开时（门态复检成功 ⇒ reloadToken 递增）补拉输入投影：门
@@ -412,6 +428,11 @@ export function KnowledgeBasePage({
   const handleAllConfirmed = useCallback(async () => {
     setInitializing(true);
     setInitNotice(null);
+    // 本轮建库的轮询句柄：组件卸载 / 换 LC 时中止，避免对已卸载的组件写状态
+    // （终审 I-1）。
+    const controller = new AbortController();
+    initAbortRef.current?.abort();
+    initAbortRef.current = controller;
     try {
       await startKnowledgeBaseInitialization(
         projectId,
@@ -419,11 +440,19 @@ export function KnowledgeBasePage({
         "bootstrap",
         crypto.randomUUID(),
       );
+      if (controller.signal.aborted) {
+        return;
+      }
       setInitNotice({
         kind: "success",
         text: "知识库初始化已启动，正在生成知识库文档…",
       });
-      const operation = await waitForKnowledgeBaseOperation(projectId, lcId);
+      const operation = await waitForKnowledgeBaseOperation(projectId, lcId, {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) {
+        return;
+      }
       if (operation?.status === "completed") {
         // 刷新文件树与状态投影：知识库文档出现在文件树里。
         setReloadToken((token) => token + 1);
@@ -439,12 +468,20 @@ export function KnowledgeBasePage({
         text: "知识库初始化未完成，请查看知识库卡片上的失败信息后重试。",
       });
     } catch (reason) {
+      if (controller.signal.aborted) {
+        return;
+      }
       setInitNotice({
         kind: "error",
         text: `知识库初始化失败：${errorText(reason)}`,
       });
     } finally {
-      setInitializing(false);
+      if (!controller.signal.aborted) {
+        setInitializing(false);
+      }
+      if (initAbortRef.current === controller) {
+        initAbortRef.current = null;
+      }
     }
   }, [projectId, lcId, refreshUserInput]);
 
@@ -677,7 +714,12 @@ export function KnowledgeBasePage({
                   summary={userInput}
                   invalidatedPaths={userInputInvalidated}
                   selectedPath={selectedPath}
-                  onOpenFile={(path) => void openFile(path)}
+                  onOpenFile={(path) => {
+                    // 用户在输入确认区点了文件名 ⇒ 同样算「手动选择」，
+                    // 自动打开不再抢焦点（终审 M-1）。
+                    userSelectedRef.current = true;
+                    void openFile(path);
+                  }}
                   onSummaryChanged={() => void refreshUserInput()}
                   onAllConfirmed={() => void handleAllConfirmed()}
                   initializing={initializing}

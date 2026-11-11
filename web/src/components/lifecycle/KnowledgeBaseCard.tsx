@@ -425,7 +425,7 @@ export function KnowledgeBaseCard({
           data-testid="knowledge-base-user-input-cta"
           className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900"
         >
-          <p>输入草稿已生成（9 份 user-input 文件），请补充并确认后再执行知识库初始化。</p>
+          <p>输入草稿已生成，请补充并确认后再执行知识库初始化。</p>
           <button
             type="button"
             data-testid="knowledge-base-open-user-input"
