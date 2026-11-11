@@ -14,8 +14,8 @@ use crate::cross_cutting::provider_registry::ProviderRegistry;
 
 use super::models::{
     ChatMessage, DEFAULT_GPT_ROTATION_MODEL, DefaultParams, GenerationResult, ImageCreateError,
-    ImageVendor, IterationEvent, PromptBlock, RunKind, SessionEvent, SessionRecord, SessionStatus,
-    SessionStoreApi, SettingsStoreApi,
+    ImageVendor, IterationEvent, ModelChoice, PromptBlock, RunKind, SessionEvent, SessionRecord,
+    SessionStatus, SessionStoreApi, SettingsStoreApi,
 };
 use super::prompt_iteration::PromptIterationEngine;
 use super::run_registry::ImageCreateRunRegistry;
@@ -23,6 +23,16 @@ use super::run_registry::ImageCreateRunRegistry;
 #[derive(Debug, Clone)]
 struct PendingResult {
     result: GenerationResult,
+}
+
+/// 一次图片生成的命令（设计 5.5）：请求参数、模型选择、是否携带上一张生成图、上传的参考图。
+#[derive(Debug, Clone)]
+pub struct GenerateCommand {
+    pub request: ImageGenRequest,
+    pub model: ModelChoice,
+    pub use_previous: bool,
+    /// 用户上传的参考图（已过 handler 的内容校验）。
+    pub reference: Option<ImageRefImage>,
 }
 
 #[derive(Clone)]
@@ -164,8 +174,7 @@ impl ImageCreateEngine {
     pub async fn generate(
         &self,
         session_id: &str,
-        req: ImageGenRequest,
-        reference: Option<ImageRefImage>,
+        command: GenerateCommand,
     ) -> Result<GenerationResult, ImageCreateError> {
         self.active_record(session_id).await?;
         self.flush_pending(session_id).await?;
@@ -186,7 +195,7 @@ impl ImageCreateEngine {
                 _ = cancel.cancelled() => false,
             };
             let result = if registered {
-                engine.run_generation(&id, req, reference, cancel).await
+                engine.run_generation(&id, command, cancel).await
             } else {
                 Err(ImageCreateError::SessionClosing)
             };
@@ -301,10 +310,16 @@ impl ImageCreateEngine {
     async fn run_generation(
         &self,
         session_id: &str,
-        req: ImageGenRequest,
-        reference: Option<ImageRefImage>,
+        command: GenerateCommand,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<GenerationResult, ImageCreateError> {
+        // 临时过渡（仅本提交）：解构命令保持既有行为；轮转与携带上一张图随后落地。
+        let GenerateCommand {
+            request: req,
+            model: _,
+            use_previous: _,
+            reference,
+        } = command;
         let settings = self.settings_store.load().await;
         // 临时过渡：仍按单家（GPT 家）读取凭据；Task 6 将替换为按 resolve_target 解析出的目标。
         let gpt = settings.vendors.get(ImageVendor::Gpt);

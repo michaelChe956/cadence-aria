@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use base64::{Engine as _, engine::general_purpose};
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::product::image_create::ImageCreateError;
+use crate::product::image_create::models::GenerationResult;
 
 pub fn media_type_extension(media_type: &str) -> Option<&'static str> {
     match media_type {
@@ -62,6 +64,27 @@ pub async fn write_image_atomic(
         let _ = tokio::fs::remove_file(&temp_path).await;
     }
     result.map(|_| destination)
+}
+
+/// 读取一条生成结果的图片字节（设计 5.5 / D7）：
+/// 有 `image_id` 且文件可读 → 文件字节；否则有内联 `b64` 且可解码 → 解码字节；否则 `None`。
+pub async fn read_result_image(
+    paths: &AriaStatePaths,
+    result: &GenerationResult,
+) -> Option<Vec<u8>> {
+    if let Some(image_id) = result.image_id.as_deref() {
+        if let Some(path) = paths.image_create_image_file(image_id, &result.media_type) {
+            if let Ok(bytes) = tokio::fs::read(path).await {
+                return Some(bytes);
+            }
+        }
+    }
+    if let Some(b64) = result.b64.as_deref() {
+        if let Ok(bytes) = general_purpose::STANDARD.decode(b64) {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
