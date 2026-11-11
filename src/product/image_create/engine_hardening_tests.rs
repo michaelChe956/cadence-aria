@@ -77,8 +77,7 @@ impl StreamingProviderAdapter for RawTextProvider {
         &self,
         _input: StreamingProviderInput,
         _cancel: CancellationToken,
-    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>
-    {
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
         let completion = ProviderCompletion::from_output(
             self.text.clone(),
             None,
@@ -139,7 +138,10 @@ async fn h2_iteration_prompt_output_with_gpt_key_is_redacted_before_persist() {
         !persisted.contains("sk-gpt"),
         "落盘 prompt 不得含明文 key：{persisted}"
     );
-    assert!(persisted.contains("[REDACTED]"), "应替换为 [REDACTED]：{persisted}");
+    assert!(
+        persisted.contains("[REDACTED]"),
+        "应替换为 [REDACTED]：{persisted}"
+    );
     assert_eq!(
         record.session.current_prompt.as_deref(),
         Some(persisted.as_str()),
@@ -170,12 +172,17 @@ async fn h2_iteration_prompt_output_with_minimax_key_is_redacted_before_persist(
     let (_text, _prompt) = collect_iteration_outputs(&engine).await;
 
     let record = store.record.lock().await;
-    let persisted = record.as_ref().expect("record").prompt_blocks[0].content.clone();
+    let persisted = record.as_ref().expect("record").prompt_blocks[0]
+        .content
+        .clone();
     assert!(
         !persisted.contains("sk-minimax"),
         "落盘 prompt 不得含 MiniMax 明文 key：{persisted}"
     );
-    assert!(persisted.contains("[REDACTED]"), "应替换为 [REDACTED]：{persisted}");
+    assert!(
+        persisted.contains("[REDACTED]"),
+        "应替换为 [REDACTED]：{persisted}"
+    );
 }
 
 #[tokio::test]

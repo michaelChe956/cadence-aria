@@ -537,7 +537,8 @@ async fn c18_success_body_over_64mib_is_rejected_with_a_readable_error() {
         .await
         .expect_err("超限成功体必须失败");
     assert_eq!(
-        error, ImageClientError::OversizedBody,
+        error,
+        ImageClientError::OversizedBody,
         "超限应报大小上限错误，而非笼统 Network"
     );
     mock.assert_async().await;

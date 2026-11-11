@@ -57,10 +57,7 @@ fn restrict_to_owner(path: &std::path::Path) -> Result<(), ImageCreateError> {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
-            ImageCreateError::Store(format!(
-                "收紧设置文件权限失败 {}: {error}",
-                path.display()
-            ))
+            ImageCreateError::Store(format!("收紧设置文件权限失败 {}: {error}", path.display()))
         })
     }
     #[cfg(not(unix))]
