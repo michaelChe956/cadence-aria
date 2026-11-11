@@ -43,6 +43,15 @@ export const AGGREGATE_INITIALIZATION_REQUIRED_PROMPT =
   "需先完成聚合初始化（规则/政策）后再操作知识库";
 
 /**
+ * 知识库的**适用项目类型**（当前能力边界）。
+ * 知识库目前只覆盖 Java Web / 纯 Java / 纯 Web 三类项目；其它技术栈的项目
+ * 使用知识库会得到不适用的产物，所以卡片与详情页都必须把这条边界摆在
+ * 写入口旁边（两处共用本常量 ⇒ 逐字一致，不各写一套）。
+ */
+export const KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT =
+  "知识库当前仅支持 Java Web 项目、纯 Java 项目与纯 Web 项目；其他类型项目请勿使用。";
+
+/**
  * 前置门未满足时的复检间隔（毫秒）：聚合初始化在同一抽屉内完成后，
  * 卡片据此恢复写入口（用户不必关开抽屉）。
  */
@@ -375,6 +384,15 @@ export function KnowledgeBaseCard({
           ) : null}
         </div>
       </div>
+
+      {/* 知识库的适用项目类型（能力边界）：Java Web / 纯 Java / 纯 Web。
+          摆在按钮区正下方，避免其它技术栈的项目误点初始化。 */}
+      <p
+        data-testid="knowledge-base-supported-project-hint"
+        className="mt-2 rounded border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-2 py-1 text-xs text-[var(--aria-ink)]"
+      >
+        {KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT}
+      </p>
 
       {/* REQ-KB-13：前置门未满足 ⇒ 统一中文提示（与详情页逐字一致）。
           预检失败面板已经承载同一句时不重复展示（同一张卡片不出现同一句两遍）。 */}

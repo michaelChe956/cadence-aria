@@ -13,7 +13,10 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CockpitShell } from "../components/cockpit/CockpitShell";
-import { AGGREGATE_INITIALIZATION_REQUIRED_PROMPT } from "../components/lifecycle/KnowledgeBaseCard";
+import {
+  AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
+  KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT,
+} from "../components/lifecycle/KnowledgeBaseCard";
 import { KnowledgeBasePage } from "./KnowledgeBasePage";
 import type { KnowledgeBaseUserInputSummaryDto } from "../api/types/knowledge-base";
 
@@ -361,6 +364,15 @@ describe("KnowledgeBasePage", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     editorMounts.count = 0;
+  });
+
+  it("renders_supported_project_scope_hint", async () => {
+    // 详情页与卡片同款适用边界提示（同一常量 ⇒ 逐字一致）。
+    installFetch();
+    renderPage();
+
+    const hint = await screen.findByTestId("kb-supported-project-hint");
+    expect(hint).toHaveTextContent(KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT);
   });
 
   it("renders_file_tree_from_status", async () => {

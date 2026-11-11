@@ -14,6 +14,7 @@ import { KnowledgeBaseCard } from "./KnowledgeBaseCard";
 import {
   AGGREGATE_INITIALIZATION_REQUIRED_CODE,
   AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
+  KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT,
 } from "./KnowledgeBaseCard";
 import type { KnowledgeBaseCardProps } from "./KnowledgeBaseCard";
 
@@ -146,6 +147,17 @@ afterEach(() => {
 });
 
 describe("KnowledgeBaseCard", () => {
+  it("renders_supported_project_scope_hint", () => {
+    // 知识库当前只覆盖 Java Web / 纯 Java / 纯 Web 三类项目；卡片必须把这条
+    // 适用边界摆在按钮旁边，避免其它技术栈的项目误用。
+    renderCard();
+    const hint = screen.getByTestId("knowledge-base-supported-project-hint");
+    expect(hint).toHaveTextContent(KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT);
+    expect(hint).toHaveTextContent("Java Web");
+    expect(hint).toHaveTextContent("纯 Java");
+    expect(hint).toHaveTextContent("纯 Web");
+  });
+
   it("renders_three_buttons", () => {
     renderCard();
     expect(

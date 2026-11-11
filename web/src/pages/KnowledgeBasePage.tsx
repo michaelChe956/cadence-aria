@@ -40,6 +40,7 @@ import { KnowledgeBaseUserInputPanel } from "../components/lifecycle/KnowledgeBa
 import {
   AGGREGATE_INITIALIZATION_REQUIRED_CODE,
   AGGREGATE_INITIALIZATION_REQUIRED_PROMPT,
+  KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT,
 } from "../components/lifecycle/KnowledgeBaseCard";
 import { MarkdownContent } from "../components/shared/MarkdownContent";
 import { MonacoEditor } from "../components/shared/MonacoEditor";
@@ -517,6 +518,15 @@ export function KnowledgeBasePage({
           </a>
         </div>
       </header>
+
+      {/* 知识库的适用项目类型（能力边界）：Java Web / 纯 Java / 纯 Web。
+          与卡片侧共用同一常量（逐字一致）；常驻显示，不随门控状态变化。 */}
+      <p
+        data-testid="kb-supported-project-hint"
+        className="shrink-0 border-b border-[var(--aria-line)] bg-[var(--aria-warning-soft)] px-4 py-1.5 text-xs text-[var(--aria-ink)]"
+      >
+        {KNOWLEDGE_BASE_SUPPORTED_PROJECT_HINT}
+      </p>
 
       {/* 前置门未满足（聚合初始化未完成）：顶部中文提示 + 可执行下一步。
           写入口（保存 / 输入确认）同时禁用，只读浏览不受影响。 */}
