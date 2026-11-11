@@ -594,12 +594,18 @@ fn create_temporary_at(
     Err(KnowledgeBaseFileError::Conflict)
 }
 
-/// 目录内**不替换**改名（`renameat2(RENAME_NOREPLACE)`，同目录 ⇒ 原子提交）。
+/// 目录内**不替换**改名（同目录 ⇒ 原子提交）。
 ///
 /// 目标已存在 ⇒ `EEXIST`（**不像 `renameat` 那样替换空目录**）⇒ 调用方可把
 /// 「已被并发发布」判成幂等成功，而不是并发竞态下的失败。
 ///
+/// 各平台实现（**同一语义，不同系统调用**）：
+/// - Linux：`renameat2(RENAME_NOREPLACE)`；
+/// - macOS：`renamex_np(RENAME_EXCL)`；
+/// - 其它目标：退回「先查存在性再改名」（**非原子**，只保证不覆盖已存在目标）。
+///
 /// 内核或文件系统不支持该标志时返回 `ENOSYS` / `EINVAL`（由调用方降级）。
+#[cfg(target_os = "linux")]
 pub(crate) fn rename_noreplace_at(dir: &OwnedFd, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
     // 用 `syscall` 而非 `libc::renameat2`：后者只在部分 libc 目标（gnu/android）
     // 上导出，`syscall(SYS_renameat2, …)` 在全部 Linux 目标可用。
@@ -617,6 +623,41 @@ pub(crate) fn rename_noreplace_at(dir: &OwnedFd, from: &OsStr, to: &OsStr) -> st
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// macOS 的「不替换改名」：`renamex_np(RENAME_EXCL)`（与 Linux 的
+/// `RENAME_NOREPLACE` 同语义）。目标已存在 ⇒ `EEXIST`。
+#[cfg(target_os = "macos")]
+pub(crate) fn rename_noreplace_at(dir: &OwnedFd, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
+    let result = unsafe {
+        libc::renamex_np(
+            cstr(from.as_bytes()).as_ptr(),
+            cstr(to.as_bytes()).as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let _ = dir;
+    Ok(())
+}
+
+/// 其它目标（无「不替换改名」系统调用）：先查目标是否存在，存在即报
+/// `AlreadyExists`，否则普通改名。**非原子**：并发下存在极窄窗口 —— 只在
+/// 不提供该语义的平台上退化，Linux/macOS 走上面的原子实现。
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn rename_noreplace_at(dir: &OwnedFd, from: &OsStr, to: &OsStr) -> std::io::Result<()> {
+    let target = std::path::Path::new("/proc/self/fd")
+        .join(dir.as_raw_fd().to_string())
+        .join(to);
+    if target.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "目标已存在",
+        ));
+    }
+    rename_at(dir, from, to)
 }
 
 /// 目录内改名（`renameat`，同目录 ⇒ 原子提交）。
