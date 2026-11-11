@@ -552,6 +552,11 @@ fn collect_contract_ir_faults(ir: &PlanCandidateIr) -> Vec<(String, IrFault)> {
             let Some(fault) = finding.ir_fault else {
                 continue;
             };
+            // 不变量（评审 Minor 2）：本循环只处理携带 ir_fault 的
+            // finding（上方 else-continue 已过滤），而它们全经
+            // error_finding 构造 ⇒ logical_work_item_id 恒为 Some，
+            // unwrap_or_default() 的 "" 分支在本处不可达；保留非 panic
+            // 兜底（而非 expect）是零行为变化的防御性写法。
             let mut affected_ids = vec![finding.logical_work_item_id.clone().unwrap_or_default()];
             affected_ids.extend(finding.contract_ref.iter().cloned());
             affected_ids.extend(finding.capability_ref.iter().cloned());
