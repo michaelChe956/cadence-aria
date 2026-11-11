@@ -15,7 +15,11 @@ mod write_scope_bound;
 pub use equivalence::{CompiledPlanAudit, compile_work_item_plan_audited};
 pub use freshness::{FreshnessError, verify_publish_freshness};
 pub use grammar::*;
-pub use ir_fault::{IrFault, IrFaultKind, IrFaultLocator, attach_source_lines};
+pub use ir_fault::{IrFault, IrFaultKind, IrFaultLocator};
+// Task 4（Task 2 评审 Minor-1）：`attach_source_lines` 有了 crate 内生产
+// 消费方（web handler 预检）后从 crate 外 API 面收回——三个类型的 `pub`
+// 仍为 `private_interfaces` 所迫（宿主结构全公开可达），函数不被迫。
+pub(crate) use ir_fault::attach_source_lines;
 pub use lower::{
     PlanCandidateIr, PlanCandidateItemIr, PlanMemberTargets, WorkItemPlanSourceContext,
     compile_work_item_plan, lower_work_item_plan,

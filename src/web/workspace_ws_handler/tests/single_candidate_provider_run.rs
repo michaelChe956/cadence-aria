@@ -957,18 +957,16 @@ async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_
     .await;
 }
 
-/// SG6a.2（原 Task 3.5 现场回归网迁移）：lowering 结构错误（Traceability
-/// 多源批量 requirement_id 的「缺席类」）不再有教学重驱资格——按
-/// REQ-SG-05 SC 初轮行与 F1.2 typed 口径，资格只认 parse 语法类共享码
-/// 白名单，message 措辞（缺少/缺失）不构成资格源（原
-/// `is_lowering_absence_message` 分流已删除）。本用例锁新契约：零重驱、
-/// 一轮确定性终态失败、失败原因原文回显。
+/// Task 4（MODIFIED REQ-WSC-09）：typed lowering fault（Plan Intent 必填字段
+/// 在场但为空——`RequiredFieldAbsent` 在构造点显式写入，诊断行可定位）享有
+/// 恰一次教学重驱；重驱仍败 → 终态含两轮（`(after one teaching re-drive)`）。
+/// 无 typed fault 的 lowering 失败（措辞近似不构成资格源）仍直接终态——由
+/// `typed_teaching.rs::wording_or_prefix_alone_grants_no_eligibility` 钉住（2.5）。
 #[tokio::test]
-async fn single_candidate_batched_traceability_lowering_error_fails_terminal_without_reredrive() {
+async fn single_candidate_typed_lowering_fault_fails_terminal_after_exactly_one_reredrive() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let output =
-        single_candidate_markdown_with_batched_traceability(&fixture.story_id, &fixture.design_id);
+    let output = markdown_with_typed_lowering_fault(&fixture.story_id, &fixture.design_id);
     let provider = Arc::new(RecordingOutputProvider {
         output,
         inputs: input_tx,
@@ -985,39 +983,30 @@ async fn single_candidate_batched_traceability_lowering_error_fails_terminal_wit
     )
     .await;
 
-    let _full_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
-        .await
-        .expect("full author provider must receive input")
-        .expect("full author provider input");
-    // 零重驱：lowering 类（缺席/值域统一）资格取消——不再有第二次
-    // provider 输入（初轮机会纪律归 L1 同池，非独立教学池）。
-    assert!(
-        !matches!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
-            Ok(Some(_))
-        ),
-        "lowering_error must not trigger any teaching re-drive (eligibility is the parse-code whitelist; message wording is not a license source)"
-    );
+    let _full_input = next_provider_input(&mut input_rx).await;
+    // typed fault 在场且事实齐全 ⇒ 恰一次教学重驱（compile/IR 共享槽）。
+    let reredrive_input = next_provider_input(&mut input_rx).await;
+    for required in [
+        "立即输出完整 work-item-plan markdown source",
+        "intent_target_codebase",
+        "- intent_target_codebase: value",
+    ] {
+        assert!(
+            reredrive_input.prompt.contains(required),
+            "typed lowering fault 的教学重驱 prompt 必须回灌 typed 载荷（{required}）: {}",
+            reredrive_input.prompt
+        );
+    }
+    no_more_provider_inputs(&mut input_rx).await;
 
-    let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let outbound = outbound_rx.recv().await.expect("lowering failure outbound");
-            let OutboundControl::Text(json) = outbound else {
-                continue;
-            };
-            let value: serde_json::Value = serde_json::from_str(&json).expect("outbound json");
-            if value["type"] == "error" {
-                return value;
-            }
-        }
-    })
-    .await
-    .expect("lowering failure error");
+    let message = next_error_message(&mut outbound_rx).await;
     assert!(
-        error["message"]
-            .as_str()
-            .expect("error message")
-            .contains("compile markdown source failed")
+        message.contains("compile markdown source failed (after one teaching re-drive)"),
+        "typed lowering fault 重驱仍败必须终态并带既有语义: {message}"
+    );
+    assert!(
+        message.contains("first round") && message.contains("re-drive round"),
+        "终态必须携带两轮诊断: {message}"
     );
     wait_for_single_candidate_phase(
         &fixture,
@@ -1464,6 +1453,9 @@ pub(super) async fn wait_for_stage(engine: &Arc<Mutex<WorkspaceEngine>>, expecte
 include!("single_candidate_provider_run/reredrive_and_reopen.rs");
 // Task 2（REQ-WSC-09）：教学重驱白名单扩到 parse 语法类集合的端到端用例。
 include!("single_candidate_provider_run/ears_reredrive.rs");
+// Task 4（MODIFIED REQ-WSC-09）：教学资格 typed 完备判据的端到端用例
+//（RF①/②/⑤、typed 载荷渲染与等价审计落库）。
+include!("single_candidate_provider_run/typed_teaching.rs");
 // B2c（Task 5.5）：SC author 真链回归（成员材料/compile target 不跟随 native
 // 锚）与显式 fresh 同 reservation 重入用例（大文件守卫拆分）。
 include!("single_candidate_provider_run/anchor_t17.rs");

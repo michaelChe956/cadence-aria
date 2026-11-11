@@ -195,10 +195,19 @@ mod single_candidate_compile_preflight;
 mod single_candidate_delivery;
 
 use single_candidate_compile_preflight::{
-    build_work_item_plan_ir_reredrive_prompt, compile_failure_reasons_with_author_instructions,
-    emit_author_ears_normalized_event, emit_author_heading_normalized_event,
-    emit_contract_autorepair_instructions_event, is_teachable_parse_failure,
+    TeachingVerdict, build_preflight_ir_reredrive_prompt, build_typed_compile_reredrive_prompt,
+    compile_failure_surface, emit_author_ears_normalized_event,
+    emit_author_heading_normalized_event, emit_contract_autorepair_instructions_event,
     prepare_author_delivery_for_compile, prevalidate_plan_candidate_ir,
+    record_equivalence_canonicalizations, teaching_verdict,
+};
+// Task 4：`is_teachable_parse_failure` 判据已由 `teaching_verdict` 接管，
+// 生产面不再消费；`build_work_item_plan_ir_reredrive_prompt` 的生产调用点
+// 已切 `build_preflight_ir_reredrive_prompt`——两者仅为 `ir_prompt_tests`
+//（经 `use super::*`）保名。
+#[cfg(test)]
+use single_candidate_compile_preflight::{
+    build_work_item_plan_ir_reredrive_prompt, is_teachable_parse_failure,
 };
 
 fn preflight_lc_member_rules_before_author_run(
@@ -830,30 +839,26 @@ pub(crate) async fn run_single_candidate_author(
         let crate::product::workspace_engine::contract_autorepair::ContractConvergeOutcome {
             ir,
             instructions: contract_autorepair_instructions,
-            ..
+            audit,
         } = match crate::product::workspace_engine::contract_autorepair::converge_work_item_plan_source(
             &compile_source,
             compile_context.clone(),
         ) {
             Ok(outcome) => outcome,
             Err(diagnostics) => {
-                let reasons = compile_failure_reasons_with_author_instructions(
-                    &compile_source,
-                    &diagnostics,
-                    &compile_context,
-                );
-                    if !compile_ir_rerun_used
-                        && diagnostics
-                            .iter()
-                            .any(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
-                    {
-                        compile_ir_rerun_used = true;
-                        first_round_failure.get_or_insert_with(|| reasons.join("; "));
-                        let reredrive_prompt =
-                            crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
-                                &reasons,
-                                &design_requirement_ids,
-                            );
+                let (reasons, instruction_lines) =
+                    compile_failure_surface(&compile_source, &diagnostics, &compile_context);
+                if !compile_ir_rerun_used
+                    && let TeachingVerdict::Eligible { payload } =
+                        teaching_verdict(&diagnostics, &[])
+                {
+                    compile_ir_rerun_used = true;
+                    first_round_failure.get_or_insert_with(|| reasons.join("; "));
+                    let reredrive_prompt = build_typed_compile_reredrive_prompt(
+                        &payload,
+                        &instruction_lines,
+                        &design_requirement_ids,
+                    );
                         engine
                             .emit_execution_event(
                                 ProviderExecutionEvent {
@@ -862,7 +867,7 @@ pub(crate) async fn run_single_candidate_author(
                                     status: ProviderExecutionEventStatus::Started,
                                     title: "SC compile 失败教学重驱提示词".to_string(),
                                     detail: Some(
-                                        "parse 语法类（missing_section / invalid_ears / invalid_work_item_id）compile 失败的教学重驱（含 compile 错误原文），恰一次"
+                                        "typed 完备判据（parse 码表 / lowering fault / IR fault，事实齐全且可定位）compile 失败的教学重驱（含 typed 载荷与错误原文），恰一次"
                                             .to_string(),
                                     ),
                                     command: None,
@@ -935,12 +940,28 @@ pub(crate) async fn run_single_candidate_author(
         )
         .await;
 
-        if let Some(reasons) = prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir) {
-            if !compile_ir_rerun_used {
+        // 3.3（REQ-WSC-25 序列）：等价规范化审计落库——generate 段 handler 是
+        // 唯一写入点（幂等，键=node+内容摘要）；completion 复验侧不重复写。
+        if !audit.equivalence_canonicalizations.is_empty() {
+            record_equivalence_canonicalizations(
+                engine,
+                &lifecycle,
+                &node_id,
+                &audit.equivalence_canonicalizations,
+            );
+        }
+
+        let preflight =
+            prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir, &compile_source);
+        if preflight.has_failures() {
+            if !compile_ir_rerun_used
+                && let TeachingVerdict::Eligible { .. } = preflight.to_teaching_verdict()
+            {
                 compile_ir_rerun_used = true;
-                first_round_failure.get_or_insert_with(|| reasons.join("; "));
+                first_round_failure
+                    .get_or_insert_with(|| preflight.presentation_reasons().join("; "));
                 let reredrive_prompt =
-                    build_work_item_plan_ir_reredrive_prompt(&reasons, &design_requirement_ids);
+                    build_preflight_ir_reredrive_prompt(&preflight, &design_requirement_ids);
                 engine
                     .emit_execution_event(
                         ProviderExecutionEvent {
@@ -993,7 +1014,7 @@ pub(crate) async fn run_single_candidate_author(
                 .await?;
                 continue;
             }
-            let detail = reasons.join("; ");
+            let detail = preflight.presentation_reasons().join("; ");
             let message = match first_round_failure.as_deref() {
                 Some(first_round) => format!(
                     "validate plan candidate IR failed (after one teaching re-drive): \

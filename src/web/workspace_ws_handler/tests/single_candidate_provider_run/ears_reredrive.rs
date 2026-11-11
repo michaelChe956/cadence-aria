@@ -1,12 +1,11 @@
-// Task 2（REQ-WSC-09）：SC compile 教学重驱白名单从 missing_section 扩到 parse 语法类
-// 集合（`single_candidate.rs` → `TEACHABLE_PARSE_FAILURE_CODES`：missing_section /
-// invalid_ears / invalid_work_item_id）。本文件补齐诊断 open item ⑥ 指出的覆盖缺口：
-// 此前没有「非 missing_section 的 parse 类失败触发重驱」的回归网。
+// Task 2（REQ-WSC-09）→ Task 4（MODIFIED REQ-WSC-09）：SC compile 教学重驱
+// 白名单从 missing_section 扩到 parse 语法类集合，再由 Task 4 升级为 typed
+// 完备判据（`teaching_verdict`）。本文件覆盖：
 //
 // 断言面：①invalid_ears 单独触发恰一次、回灌 code:line:message、重驱成功继续链路；
 // ②invalid_work_item_id 单独触发恰一次并恢复；③两类 parse 失败先后命中时总共仍只
-// 重驱一次（终态带 `(after one teaching re-drive)` 与两轮原文）；④非 parse 类
-// （lowering_error）失败零重驱，直接走既有终态路径。
+// 重驱一次（终态带 `(after one teaching re-drive)` 与两轮原文）；④无 typed fault
+// 的 lowering 失败零重驱（parse 码表与 typed 通道各自生效），直接走既有终态路径。
 
 /// `THE SYSTEM SHALL` 后缺半角空格：归一化的三类空白操作不含「关键字后补空格」，
 /// 故该 invalid_ears 形态确定性归一化不救（REQ-WSC-02 边界），只剩教学重驱一条
@@ -29,8 +28,8 @@ fn markdown_with_invalid_work_item_id(story_id: &str, design_id: &str) -> String
     )
 }
 
-/// 非 parse 类 compile 失败：`required_evidence` 值不在 canonical enum 内，parse 全通过、
-/// 由 lowering 层报 `lowering_error`。
+/// 无 typed fault 的 lowering 失败：`required_evidence` 值不在 canonical enum 内，
+/// parse 全通过、由 lowering 层报 `lowering_error`（构造点未写 typed fault）。
 fn markdown_with_lowering_error(story_id: &str, design_id: &str) -> String {
     single_candidate_markdown(story_id, design_id).replacen(
         "- required_evidence: source_diff",
@@ -292,11 +291,11 @@ async fn single_candidate_lowering_failure_never_consumes_the_reredrive_slot() {
     let message = next_error_message(&mut outbound_rx).await;
     assert!(
         message.contains("compile markdown source failed") && message.contains("lowering_error"),
-        "非 parse 类失败必须按既有路径报原文: {message}"
+        "无 typed fault 的 lowering 失败必须按既有路径报原文: {message}"
     );
     assert!(
         !message.contains("after one teaching re-drive"),
-        "非 parse 类失败不得消耗重驱槽: {message}"
+        "无 typed fault 的 lowering 失败不得消耗重驱槽（parse 码表与 typed 通道各自生效）: {message}"
     );
     wait_for_single_candidate_phase(
         &fixture,

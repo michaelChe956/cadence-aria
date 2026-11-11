@@ -1,17 +1,14 @@
 //! SC compile 失败重驱的资格判定、诊断格式化与预检辅助面，自 single_candidate.rs 拆出以守 1200 行文件守护（先例：single_candidate_baseline_tree.rs / single_candidate_delivery.rs / single_candidate_structure_reredrive.rs）。
 use super::*;
 
-/// 可教学重驱的 compile parse 语法类诊断码。
+/// 可教学重驱的 compile parse 语法类诊断码（码表保留，供
+/// [`teaching_verdict`] 收集 `parse_reasons`；资格判定整体见该函数）。
 ///
 /// 集合来源（Task 0 实查）：`work_item_plan_compiler::parse` 的语法类诊断码全集
 /// 即 `grammar::DIAGNOSTIC_CODES`（missing_section / unknown_structured_key /
-/// invalid_work_item_id / invalid_ears），减去 `contract_autorepair` 已确定性收敛
-/// 的码——`unknown_structured_key` 在收敛器内按诊断行号确定性删行（F-41）、
-/// 重复 trusted command 亦有确定性收敛轮，先确定性后模型，故不进教学重驱。
-/// 其余三个码在编译 loop 现状下无任何自动返修面（F-48：invalid_ears 因此直达
-/// 终态），教学重驱是其唯一一次自愈机会。
-// r41 B2:unknown_structured_key 入可教面(F-48 先例:一次自愈机会;
-// contract_autorepair 可收敛多数,残余经教学重驱带 B1 白名单自纠)。
+/// invalid_ears / invalid_work_item_id）。其余 parse 码在编译 loop 现状下
+/// 无任何自动返修面（F-48：invalid_ears 因此直达终态），教学重驱是其
+/// 唯一一次自愈机会。
 pub(super) const TEACHABLE_PARSE_FAILURE_CODES: [&str; 4] = [
     "missing_section",
     "invalid_ears",
@@ -19,16 +16,119 @@ pub(super) const TEACHABLE_PARSE_FAILURE_CODES: [&str; 4] = [
     "unknown_structured_key",
 ];
 
-/// 该诊断码是否属于可教学重驱的 parse 语法类。
+/// 该诊断码是否属于可教学重驱的 parse 语法类（parse_reasons 收集用）。
 pub(super) fn is_teachable_parse_failure(code: &str) -> bool {
     TEACHABLE_PARSE_FAILURE_CODES.contains(&code)
 }
 
-// SG6a.2（REQ-SG-05 SC 初轮行×F1.2 typed 口径）：SC 初轮教学重驱资格
-// 只认共享 parse 语法码白名单（TEACHABLE_PARSE_FAILURE_CODES）；原
-// `is_lowering_absence_message`（message 含「缺少/缺失」措辞即授重驱
-// 资格）属字符串资格旁路，已删除——lowering 类（缺席与值域统一）零
-// 教学重驱，确定性终态失败由 typed 诊断回显承载。
+/// Task 4（MODIFIED REQ-WSC-09）：教学重驱资格的 typed 载荷集合——只有
+/// 失败集合里存在可定位、可回喂的 typed 事实（parse 码表 / lowering
+/// fault / IR fault）才授予恰一次教学重驱。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TeachingPayload {
+    /// parse 语法类（码表 4 项）code:line:message 回灌。
+    pub parse_reasons: Vec<String>,
+    /// lowering typed fault（构造点显式写入、事实齐全）。
+    pub lowering_faults: Vec<crate::product::work_item_plan_compiler::LoweringFault>,
+    /// IR typed 载荷（行在场 + 合法集合非空）。
+    pub ir_faults: Vec<crate::product::work_item_plan_compiler::IrFault>,
+}
+
+/// Task 4：教学资格判定结果；`reason` 为稳定判据码
+/// （mixed_operational_set / no_typed_fault / ir_fault_not_locatable）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TeachingVerdict {
+    Eligible { payload: TeachingPayload },
+    NotEligible { reason: &'static str },
+}
+
+/// 教学资格判定（钉死规则，测试逐条对应）：
+/// - `preflight_operational_failures` 非空 ⇒ `NotEligible{mixed_operational_set}`
+///   （禁止 `any(可教)` 放行）；
+/// - parse 码表命中 ⇒ 收 `parse_reasons`（code:line:message）；
+/// - `lowering_fault==Some` 且 field 非空、行>0、期望形态非空 ⇒ 收集
+///   （`line==0` 视为不可定位，不收）；
+/// - `ir_fault==Some` 且 `source_line==Some`、`legal_refs` 非空 ⇒ 收集
+///   （否则该条不授资格）；
+/// - 三者并集非空 ⇒ `Eligible`。
+///
+/// 「恰好一次」仍以前置授权、合法 provider 与剩余机会为条件；槽位机制零
+/// 改动（SG6a.2 的 `is_lowering_absence_message` 措辞旁路已按 F1.2 删除，
+/// 本函数不得以任何形式恢复措辞/前缀获权）。
+pub(super) fn teaching_verdict(
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+    preflight_operational_failures: &[String],
+) -> TeachingVerdict {
+    if !preflight_operational_failures.is_empty() {
+        return TeachingVerdict::NotEligible {
+            reason: "mixed_operational_set",
+        };
+    }
+    let mut payload = TeachingPayload {
+        parse_reasons: diagnostics
+            .iter()
+            .filter(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
+            .map(|diagnostic| {
+                format!(
+                    "{}:{}:{}",
+                    diagnostic.code, diagnostic.line, diagnostic.message
+                )
+            })
+            .collect(),
+        lowering_faults: Vec::new(),
+        ir_faults: Vec::new(),
+    };
+    let mut saw_unlocatable_ir_fault = false;
+    for diagnostic in diagnostics {
+        if let Some(fault) = locatable_lowering_fault(diagnostic) {
+            payload.lowering_faults.push(fault.clone());
+        }
+        if let Some(fault) = diagnostic.ir_fault.as_ref() {
+            if fault.source_line.is_some() && !fault.legal_refs.is_empty() {
+                payload.ir_faults.push(fault.clone());
+            } else {
+                saw_unlocatable_ir_fault = true;
+            }
+        }
+    }
+    if payload.parse_reasons.is_empty()
+        && payload.lowering_faults.is_empty()
+        && payload.ir_faults.is_empty()
+    {
+        return TeachingVerdict::NotEligible {
+            reason: if saw_unlocatable_ir_fault {
+                "ir_fault_not_locatable"
+            } else {
+                "no_typed_fault"
+            },
+        };
+    }
+    TeachingVerdict::Eligible { payload }
+}
+
+/// lowering typed fault 的可收集判据：field 非空、行>0（BranchKeyMismatch
+/// 取 fault 自带行；RequiredFieldAbsent 取诊断行——字段完全缺席时无行可
+/// 定位即为 0，不收）、期望形态非空。
+fn locatable_lowering_fault(
+    diagnostic: &crate::product::work_item_plan_compiler::CompilerDiagnostic,
+) -> Option<&crate::product::work_item_plan_compiler::LoweringFault> {
+    use crate::product::work_item_plan_compiler::LoweringFault;
+
+    let fault = diagnostic.lowering_fault.as_ref()?;
+    let locatable = match fault {
+        LoweringFault::BranchKeyMismatch {
+            expected_field,
+            line,
+            expected_shape,
+            ..
+        } => !expected_field.is_empty() && *line > 0 && !expected_shape.is_empty(),
+        LoweringFault::RequiredFieldAbsent {
+            field,
+            expected_shape,
+        } => !field.is_empty() && diagnostic.line > 0 && !expected_shape.is_empty(),
+    };
+    locatable.then_some(fault)
+}
 
 // 丢弃 provider 在 markdown 文档标题前输出的前言（实现见 single_candidate_delivery）。
 
@@ -177,23 +277,48 @@ pub(super) fn format_compile_failure_reasons(
         .collect()
 }
 
-/// O1（裁决二）：compile 失败路径的失败面拼装——诊断原文 + 收窄指令
-/// （未知 key 迁移/重复 trusted command）渲染，随教学重驱 prompt 与
-/// 终态错误同源呈现，平台不应用、不丢弃。
-pub(super) fn compile_failure_reasons_with_author_instructions(
+/// O1（裁决二）× Task 3 评审 Minor-3：compile 失败路径的失败面拼装——
+/// 诊断原文 + 收窄指令（未知 key 迁移/重复 trusted command）有界渲染，随
+/// 教学重驱 prompt 与终态错误同源呈现，平台不应用、不丢弃。
+///
+/// 返回 `(reasons, instruction_lines)`：同一份指令只计算一次，供终态错误
+/// （reasons 拼装）与 typed 重驱 prompt（instruction_lines 直入
+/// `TeachingReredriveFacts`）共用。
+pub(super) fn compile_failure_surface(
     source: &str,
     diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
     context: &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext,
-) -> Vec<String> {
-    let mut reasons = format_compile_failure_reasons(diagnostics);
-    reasons.extend(
+) -> (Vec<String>, Vec<String>) {
+    let instruction_lines = cap_instruction_lines(
         crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
             &crate::product::workspace_engine::contract_autorepair::build_compile_failure_repair_instructions(
                 source, diagnostics, context,
             ),
         ),
     );
-    reasons
+    let mut reasons = format_compile_failure_reasons(diagnostics);
+    reasons.extend(instruction_lines.iter().cloned());
+    (reasons, instruction_lines)
+}
+
+/// Task 3 评审 Minor-3：指令文本进入 owner 可见面/prompt 的条数上限——
+/// `required_action` 每条含禁则/证据多句，无界透传会撑爆日志/通知面。
+pub(super) const MAX_AUTOREPAIR_INSTRUCTION_LINES: usize = 4;
+
+/// 指令行进入 owner 可见面前的截断：条数上限 + 计数摘要行收口
+/// （与 prompt 侧 `MAX_TEACHING_INSTRUCTION_LINES` 同值双保险）。
+pub(super) fn cap_instruction_lines(lines: Vec<String>) -> Vec<String> {
+    let total = lines.len();
+    let mut bounded: Vec<String> = lines
+        .into_iter()
+        .take(MAX_AUTOREPAIR_INSTRUCTION_LINES)
+        .collect();
+    if bounded.len() < total {
+        bounded.push(format!(
+            "（共 {total} 条契约修复指令，此处仅逐条呈现前 {MAX_AUTOREPAIR_INSTRUCTION_LINES} 条；其余以计数摘要收口，不无界透传）"
+        ));
+    }
+    bounded
 }
 
 /// O1（裁决二）：缺口机器指令不应用、不丢弃——渲染进 owner 可见执行
@@ -223,8 +348,10 @@ pub(super) async fn emit_contract_autorepair_instructions_event(
                 command: None,
                 cwd: None,
                 output: Some(
-                    crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
-                        instructions,
+                    cap_instruction_lines(
+                        crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
+                            instructions,
+                        ),
                     )
                     .join("\n"),
                 ),
@@ -236,62 +363,165 @@ pub(super) async fn emit_contract_autorepair_instructions_event(
         .await;
 }
 
-/// 3.6 弱模型基线加固：IR 预校验——在持久化前跑与
+/// Task 4（MODIFIED REQ-WSC-09）：`prevalidate_plan_candidate_ir` 的 typed
+/// 分类返回（替代旧 `Option<Vec<String>>`「Some 即重驱」口径）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PreflightVerdict {
+    /// 校验失败诊断携带的 typed IR 载荷（已过 `attach_source_lines` 经
+    /// AST span 补行；不可定位者保持 `None`，不授教学资格）。
+    pub ir_faults: Vec<crate::product::work_item_plan_compiler::IrFault>,
+    /// plan 读取/基线/成员解析失败（2.7 判 Operational；非空 ⇒ 零重驱，
+    /// 禁止 `any(可教)` 放行）。
+    pub operational_failures: Vec<String>,
+    /// 校验失败原文（code:line:message 呈现回灌，供终态消息与 IR 重驱
+    /// prompt；**非资格判据**，资格只认 typed 事实）。
+    pub failure_reasons: Vec<String>,
+}
+
+impl PreflightVerdict {
+    /// 是否存在任何失败（typed / operational / 呈现原文）。
+    pub(super) fn has_failures(&self) -> bool {
+        !(self.failure_reasons.is_empty()
+            && self.operational_failures.is_empty()
+            && self.ir_faults.is_empty())
+    }
+
+    /// 终态/呈现面：operational 与校验失败原文同序回显（非资格判据）。
+    pub(super) fn presentation_reasons(&self) -> Vec<String> {
+        let mut reasons = self.operational_failures.clone();
+        reasons.extend(self.failure_reasons.iter().cloned());
+        reasons
+    }
+
+    /// 教学资格（[`teaching_verdict`] 同一钉死规则在预检侧的投影）：
+    /// operational 非空 ⇒ 零资格；可定位 IR fault（行在场 + 合法集合
+    /// 非空）非空 ⇒ Eligible；否则 NotEligible（存在 IR fault 但全部
+    /// 不可定位时报 `ir_fault_not_locatable`）。
+    pub(super) fn to_teaching_verdict(&self) -> TeachingVerdict {
+        if !self.operational_failures.is_empty() {
+            return TeachingVerdict::NotEligible {
+                reason: "mixed_operational_set",
+            };
+        }
+        let mut saw_ir_fault = false;
+        let mut ir_faults = Vec::new();
+        for fault in &self.ir_faults {
+            saw_ir_fault = true;
+            if fault.source_line.is_some() && !fault.legal_refs.is_empty() {
+                ir_faults.push(fault.clone());
+            }
+        }
+        if ir_faults.is_empty() {
+            return TeachingVerdict::NotEligible {
+                reason: if saw_ir_fault {
+                    "ir_fault_not_locatable"
+                } else {
+                    "no_typed_fault"
+                },
+            };
+        }
+        TeachingVerdict::Eligible {
+            payload: TeachingPayload {
+                parse_reasons: Vec::new(),
+                lowering_faults: Vec::new(),
+                ir_faults,
+            },
+        }
+    }
+}
+
+/// 3.6 弱模型基线加固 × Task 4 typed 化：IR 预检——在持久化前跑与
 /// `complete_single_candidate_work_item_plan_author` 内部同源的
 /// `validate_plan_candidate_ir`（上下文组装同源：plan 的 source spec ids 与
-/// repository profile），使 IR 校验失败（unknown_requirement_ref /
-/// acceptance_criterion_without_reviewer_check 等）可在 handler 分类并享有
-/// 恰一次教学重驱。仅当预校验确定性失败时返回 Some(reasons)；上下文装载
-/// 失败返回 None（不阻断流程），由 complete_... 权威路径以既有终态形态兜底。
+/// repository profile），失败分类为 [`PreflightVerdict`]：typed IR 载荷
+/// （经 `attach_source_lines` 补行）、operational 失败（plan 读取/基线/
+/// 成员解析——原 `.ok()?` 静默吞掉的路径显式记录，不触发任何重驱）与
+/// 呈现原文（非资格判据）。资格判定见 `to_teaching_verdict`；权威路径
+/// 仍以既有 fail-closed 终态兜底。
 pub(super) fn prevalidate_plan_candidate_ir(
     engine: &WorkspaceEngine,
     lifecycle: &LifecycleStore,
     request: &crate::web::types::GenerateWorkItemsRequest,
     ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
-) -> Option<Vec<String>> {
+    source: &str,
+) -> PreflightVerdict {
     let session = engine.session();
-    let plan = lifecycle
-        .get_issue_work_item_plan(&session.project_id, &session.issue_id, &session.entity_id)
-        .ok()?;
+    let operational_only = |failures: Vec<String>| PreflightVerdict {
+        ir_faults: Vec::new(),
+        operational_failures: failures,
+        failure_reasons: Vec::new(),
+    };
+    let Ok(plan) = lifecycle.get_issue_work_item_plan(
+        &session.project_id,
+        &session.issue_id,
+        &session.entity_id,
+    ) else {
+        return operational_only(vec!["load plan for prevalidation failed".to_string()]);
+    };
+    let mut operational_failures = Vec::new();
     let repository_profile = plan
         .repository_profile_ref
         .as_deref()
         .and_then(|profile_id| {
-            lifecycle
-                .get_repository_profile(&session.project_id, &session.issue_id, profile_id)
-                .ok()
+            match lifecycle.get_repository_profile(
+                &session.project_id,
+                &session.issue_id,
+                profile_id,
+            ) {
+                Ok(profile) => Some(profile),
+                Err(error) => {
+                    operational_failures.push(format!("load repository profile failed: {error}"));
+                    None
+                }
+            }
         });
     // F-56→REQ-PIB-03：运行期预校验与权威路径共用基线加载（按分支名取树）。
-    // 基线不可解析 → Err 转预检诊断（经教学重驱可观测，重驱不治本，
-    // 权威路径仍以 fail-closed 终态兜底）。
+    // Task 4（2.7）：基线不可解析 → 记 operational（混有 operational ⇒ 零
+    // 重驱）；预检以无基线形态继续收集其余失败，使失败集合完整可见，
+    // 权威路径仍以 fail-closed 终态兜底。
     let baseline_tree = match crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
         lifecycle,
         &session.project_id,
         &session.issue_id,
     ) {
         Ok(baseline_tree) => baseline_tree,
-        Err(message) => return Some(vec![message]),
+        Err(message) => {
+            operational_failures.push(message);
+            None
+        }
     };
-    // C1 Task 5（REQ-C1-PLAN-01）：existing 意图的授权解析面（读失败转预检
-    // 诊断，权威路径仍 fail-closed）。
+    // C1 Task 5（REQ-C1-PLAN-01）：existing 意图的授权解析面（读失败记
+    // operational；existing 集缺席时校验上下文不完整，不跑校验）。
     let existing_work_item_ids =
         match lifecycle.list_work_items(&session.project_id, &session.issue_id) {
             Ok(records) => records
                 .into_iter()
                 .map(|record| record.id)
                 .collect::<Vec<_>>(),
-            Err(error) => return Some(vec![format!("list existing work items failed: {error}")]),
+            Err(error) => {
+                operational_failures.push(format!("list existing work items failed: {error}"));
+                return PreflightVerdict {
+                    ir_faults: Vec::new(),
+                    operational_failures,
+                    failure_reasons: Vec::new(),
+                };
+            }
         };
     // 批 2 R1（REQ-WIGA-01）：enrolled 会话传真实 binding+成员映射（装载
-    // 失败转预检诊断，权威路径仍 fail-closed）；Manual/非 enrolled 保持
+    // 失败记 operational，不触发任何重驱）；Manual/非 enrolled 保持
     // None 零回归。
     let enrollment_binding =
         match engine.current_enrollment_binding_for_compile(lifecycle, &session.entity_id) {
             Ok(binding) => binding,
             Err(error) => {
-                return Some(vec![format!(
+                operational_failures.push(format!(
                     "load enrollment binding for prevalidation failed: {error}"
-                )]);
+                ));
+                return PreflightVerdict {
+                    ir_faults: Vec::new(),
+                    operational_failures,
+                    failure_reasons: Vec::new(),
+                };
             }
         };
     let validation_member_targets = match &enrollment_binding {
@@ -299,9 +529,14 @@ pub(super) fn prevalidate_plan_candidate_ir(
             let session_record = match lifecycle.get_workspace_session(&session.session_id) {
                 Ok(record) => record,
                 Err(error) => {
-                    return Some(vec![format!(
+                    operational_failures.push(format!(
                         "load plan session for member targets failed: {error}"
-                    )]);
+                    ));
+                    return PreflightVerdict {
+                        ir_faults: Vec::new(),
+                        operational_failures,
+                        failure_reasons: Vec::new(),
+                    };
                 }
             };
             let repository = match workspace_repository_for_session(
@@ -311,9 +546,14 @@ pub(super) fn prevalidate_plan_candidate_ir(
             ) {
                 Ok(resolved) => resolved,
                 Err(error) => {
-                    return Some(vec![format!(
+                    operational_failures.push(format!(
                         "resolve plan session repository for member targets failed: {error}"
-                    )]);
+                    ));
+                    return PreflightVerdict {
+                        ir_faults: Vec::new(),
+                        operational_failures,
+                        failure_reasons: Vec::new(),
+                    };
                 }
             };
             match crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(
@@ -321,19 +561,31 @@ pub(super) fn prevalidate_plan_candidate_ir(
             ) {
                 Ok(targets) => targets,
                 Err(error) => {
-                    return Some(vec![format!(
+                    operational_failures.push(format!(
                         "resolve plan member targets for prevalidation failed: {error}"
-                    )])
+                    ));
+                    return PreflightVerdict {
+                        ir_faults: Vec::new(),
+                        operational_failures,
+                        failure_reasons: Vec::new(),
+                    };
                 }
             }
         }
         None => None,
     };
-    // REQ-WSC-10（写范围×被授权仓归属）：enrolled 装载成员 checkout 前缀表（失败转预检诊断；单仓保持 None 零回归）。
+    // REQ-WSC-10（写范围×被授权仓归属）：enrolled 装载成员 checkout 前缀表（失败记 operational；单仓保持 None 零回归）。
     let eb = enrollment_binding.as_ref();
     let mc_prefixes = match member_checkout_prefixes::for_validation(lifecycle, &plan, eb) {
         Ok(prefixes) => prefixes,
-        Err(e) => return Some(vec![format!("member checkout prefixes: {e}")]),
+        Err(e) => {
+            operational_failures.push(format!("member checkout prefixes: {e}"));
+            return PreflightVerdict {
+                ir_faults: Vec::new(),
+                operational_failures,
+                failure_reasons: Vec::new(),
+            };
+        }
     };
     let validation_now = chrono::Utc::now().to_rfc3339();
     let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
@@ -355,67 +607,133 @@ pub(super) fn prevalidate_plan_candidate_ir(
             now: &validation_now,
         },
     );
+    let mut ir_faults = Vec::new();
+    let mut failure_reasons = Vec::new();
     match validation {
         Ok(_) => {}
-        Err(diagnostics) => return Some(format_compile_failure_reasons(&diagnostics)),
+        Err(diagnostics) => {
+            ir_faults = diagnostics
+                .iter()
+                .filter_map(|diagnostic| diagnostic.ir_fault.clone())
+                .collect();
+            // Task 4：行号经编译器同一解析器的 AST span 补全（不是 message
+            // 反解析）；source 中无该行保持 None，不授资格。
+            crate::product::work_item_plan_compiler::attach_source_lines(&mut ir_faults, source);
+            failure_reasons = format_compile_failure_reasons(&diagnostics);
+        }
     }
     // r41 B2(Max 补充):伪编号 fail-closed——contract 校验的 requirement 域
     // 只查 WI 内自洽(design_traceability 自报即过,AI 可编造+登记逃逸);
     // 此处按已确认 story/design 真实 ID 集(story+design 双源提取)比对
-    // IR 的 traceability requirement_id,清单外即拒绝(经 A2 教学重驱可
-    // 纠一次,再败终态可观测)。
-    let mut spec_contexts: Vec<String> = request
-        .story_spec_ids
-        .iter()
-        .filter_map(|id| {
-            latest_spec_markdown(lifecycle, &session.project_id, &session.issue_id, id)
-        })
-        .collect();
-    spec_contexts.extend(request.design_spec_ids.iter().filter_map(|id| {
-        latest_spec_markdown(lifecycle, &session.project_id, &session.issue_id, id)
-    }));
-    let registered =
-        crate::product::work_item_split_engine::context::extract_registered_requirement_ids(
-            &spec_contexts,
-        );
-    if !registered.is_empty() {
-        // r41 B2:traceability requirement_id 伪编号。
-        let forged: Vec<String> = ir
-            .items
+    // IR 的 traceability requirement_id,清单外即拒绝。Task 4 typed 口径:
+    // 该分支无 typed 事实(不伪造 IrFault),只进呈现原文——不构成教学
+    // 资格,由既有终态面收口。
+    if failure_reasons.is_empty() {
+        let mut spec_contexts: Vec<String> = request
+            .story_spec_ids
             .iter()
-            .flat_map(|item| item.contract.design_traceability.iter())
-            .map(|entry| entry.requirement_id.as_str())
-            .filter(|id| !registered.iter().any(|registered| registered == id))
-            .map(str::to_string)
-            .collect();
-        // r45 扩 AC:task done_when 的 AC- 引用同域 fail-closed——r45 现场
-        // 第五变体(done_when 编造 AC-002/AC-003)证明 AC 是独立命名空间
-        // 漏口;产品的 unknown_done_when_ref 只查 WI 内自洽(自报即过),
-        // 此处按已确认 story 的真实 AC 集比对,清单外经教学重驱可救一次。
-        let forged_done_when: Vec<String> = ir
-            .items
-            .iter()
-            .flat_map(|item| item.contract.tasks.iter())
-            .flat_map(|task| task.done_when_refs.iter())
-            .filter(|reference| {
-                reference.starts_with("AC-")
-                    && !registered
-                        .iter()
-                        .any(|registered| registered == reference.as_str())
+            .filter_map(|id| {
+                latest_spec_markdown(lifecycle, &session.project_id, &session.issue_id, id)
             })
-            .cloned()
             .collect();
-        if !forged.is_empty() || !forged_done_when.is_empty() {
-            let mut offenders = forged;
-            offenders.extend(forged_done_when);
-            return Some(vec![format!(
-                "unknown_requirement_ref/unknown_done_when_ref: plan 引用了已确认 spec 之外的编号 [{}];合法编号仅 [{}]",
-                offenders.join("、"),
-                registered.join("、")
-            )]);
+        spec_contexts.extend(request.design_spec_ids.iter().filter_map(|id| {
+            latest_spec_markdown(lifecycle, &session.project_id, &session.issue_id, id)
+        }));
+        let registered =
+            crate::product::work_item_split_engine::context::extract_registered_requirement_ids(
+                &spec_contexts,
+            );
+        if !registered.is_empty() {
+            // r41 B2:traceability requirement_id 伪编号。
+            let forged: Vec<String> = ir
+                .items
+                .iter()
+                .flat_map(|item| item.contract.design_traceability.iter())
+                .map(|entry| entry.requirement_id.as_str())
+                .filter(|id| !registered.iter().any(|registered| registered == id))
+                .map(str::to_string)
+                .collect();
+            // r45 扩 AC:task done_when 的 AC- 引用同域 fail-closed——r45 现场
+            // 第五变体(done_when 编造 AC-002/AC-003)证明 AC 是独立命名空间
+            // 漏口;产品的 unknown_done_when_ref 只查 WI 内自洽(自报即过),
+            // 此处按已确认 story 的真实 AC 集比对,清单外拒绝。
+            let forged_done_when: Vec<String> = ir
+                .items
+                .iter()
+                .flat_map(|item| item.contract.tasks.iter())
+                .flat_map(|task| task.done_when_refs.iter())
+                .filter(|reference| {
+                    reference.starts_with("AC-")
+                        && !registered
+                            .iter()
+                            .any(|registered| registered == reference.as_str())
+                })
+                .cloned()
+                .collect();
+            if !forged.is_empty() || !forged_done_when.is_empty() {
+                let mut offenders = forged;
+                offenders.extend(forged_done_when);
+                failure_reasons.push(format!(
+                    "unknown_requirement_ref/unknown_done_when_ref: plan 引用了已确认 spec 之外的编号 [{}];合法编号仅 [{}]",
+                    offenders.join("、"),
+                    registered.join("、")
+                ));
+            }
         }
     }
-    None
+    PreflightVerdict {
+        ir_faults,
+        operational_failures,
+        failure_reasons,
+    }
+}
+
+/// 3.3（REQ-WSC-25 序列）：等价规范化审计落库——generate 段 handler 是
+/// 唯一写入点（completion 复验侧不写）。幂等键 = node + canonicalization
+/// 内容摘要（store 按会话+attempt_key 判重，同内容重放零膨胀）；写失败
+/// 只降级记日志，不得使候选生成失败（与流水 store 的失败语义一致）。
+pub(super) fn record_equivalence_canonicalizations(
+    engine: &WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    node_id: &str,
+    canonicalizations: &[crate::product::lifecycle_store::candidate_attempts::EquivalenceCanonicalization],
+) {
+    use crate::product::lifecycle_store::candidate_attempts::{
+        CandidateAttemptOutcome, CandidateAttemptRecord, CandidateAttemptStage,
+    };
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    for entry in canonicalizations {
+        digest.update(entry.kind.as_bytes());
+        digest.update(entry.original_key.as_bytes());
+        digest.update(entry.value.as_bytes());
+        digest.update(entry.resolution_basis.as_bytes());
+    }
+    let digest = hex::encode(digest.finalize());
+    let record = CandidateAttemptRecord {
+        attempt_seq: 0,
+        attempt_key: format!("equiv/{node_id}/{}", &digest[..16]),
+        session_id: String::new(),
+        issue_id: String::new(),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        stage: CandidateAttemptStage::Final,
+        outcome: CandidateAttemptOutcome::Passed,
+        source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        failure: None,
+        auto_rewrite: None,
+        auto_repairs_applied: Vec::new(),
+        equivalence_canonicalizations: canonicalizations.to_vec(),
+    };
+    let session_id = engine.session().session_id.clone();
+    if let Err(error) = lifecycle.append_candidate_attempt(&session_id, &record) {
+        tracing::warn!(
+            session_id = %session_id,
+            %error,
+            "append equivalence canonicalization audit record failed (degraded, flow continues)"
+        );
+    }
 }
 
 /// r41 B2:spec 最新版本正文(读失败/无版本返回 None,该校验面不阻断
@@ -436,16 +754,50 @@ fn latest_spec_markdown(
 
 /// 3.6 弱模型基线加固：IR 校验失败的教学重驱 prompt。复用 F2-B 既有 compile
 /// 重驱模板（错误原文已逐条回灌 + 立即输出完整 source 指令），附加「修正引用/
-/// 补齐字段后重新输出完整 plan」的 IR 修复指令。
+/// 补齐字段后重新输出完整 plan」的 IR 修复指令（签名不变，供既有单测与
+/// `ir_prompt_tests` 复用）。Task 4 后生产调用点已切
+/// `build_preflight_ir_reredrive_prompt`，本入口仅测试面消费。
+#[cfg(test)]
 pub(super) fn build_work_item_plan_ir_reredrive_prompt(
     blocking_reasons: &[String],
     registered_requirement_ids: &[String],
 ) -> String {
-    let mut prompt =
+    append_ir_repair_instructions(
         crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
             blocking_reasons,
+            &[],
+            &[],
+            &[],
             registered_requirement_ids,
-        );
+        ),
+        registered_requirement_ids,
+    )
+}
+
+/// Task 4：preflight typed 判定面的 IR 重驱 prompt——校验失败原文
+/// （code:line:message 呈现回灌）+ typed IR 载荷（引用/合法集合/期望形态）
+/// 并入同一模板，再附既有 IR 修复指令。
+pub(super) fn build_preflight_ir_reredrive_prompt(
+    preflight: &PreflightVerdict,
+    registered_requirement_ids: &[String],
+) -> String {
+    append_ir_repair_instructions(
+        crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
+            &preflight.failure_reasons,
+            &[],
+            &preflight.ir_faults,
+            &[],
+            registered_requirement_ids,
+        ),
+        registered_requirement_ids,
+    )
+}
+
+/// IR 重驱 prompt 的既有修复指令尾段（两个入口共用，措辞逐字保持）。
+fn append_ir_repair_instructions(
+    mut prompt: String,
+    registered_requirement_ids: &[String],
+) -> String {
     prompt.push_str(
         "上述为 IR 校验失败（引用或字段不符合契约）。\n\
          修正引用/补齐字段：requirement_refs、done_when_refs、reviewer_check_refs 只能逐字引用本计划已定义 id；\
@@ -464,6 +816,23 @@ pub(super) fn build_work_item_plan_ir_reredrive_prompt(
     }
     prompt.push_str("修正后重新输出完整 plan，第一行即 `# Work Item Plan`，不要输出解释。\n");
     prompt
+}
+
+/// Task 4：compile 失败路径的 typed 重驱 prompt——parse 码表回灌 +
+/// lowering/IR typed 载荷 + 有界指令行，经同一模板渲染（typed 事实
+/// 四元组直入，不经过 message 文本）。
+pub(super) fn build_typed_compile_reredrive_prompt(
+    payload: &TeachingPayload,
+    autorepair_instructions: &[String],
+    registered_requirement_ids: &[String],
+) -> String {
+    crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
+        &payload.parse_reasons,
+        &payload.lowering_faults,
+        &payload.ir_faults,
+        autorepair_instructions,
+        registered_requirement_ids,
+    )
 }
 
 #[cfg(test)]
@@ -499,26 +868,212 @@ mod tests {
         );
     }
 
-    /// SG6a.2（原 Task 3.5 分流契约迁移）：lowering 类教学资格整体取消
-    /// ——缺席/值域统一零重驱（资格只认 parse 白名单码；message 措辞
-    /// 不构成资格源，F1.2 口径）。
+    /// Task 4（MODIFIED REQ-WSC-09，改写自旧「lowering 零资格」口径）：
+    /// lowering 类资格只认 typed fault——无 fault（message 含「缺少」措辞）
+    /// 或 fault 不可定位（诊断行 0）都不收集；事实齐全才 Eligible。
     #[test]
-    fn teachable_lowering_failures_have_zero_repair_once_eligibility() {
-        use super::is_teachable_parse_failure;
+    fn teaching_verdict_collects_only_locatable_typed_lowering_faults() {
+        use super::{TeachingVerdict, teaching_verdict};
+        use crate::product::work_item_plan_compiler::types::{CompilerDiagnostic, LoweringFault};
 
-        for (code, message) in [
-            ("lowering_error", "traceability 缺少 requirement_id。"),
-            ("lowering_error", "必填 markdown 字段缺失。"),
-            ("lowering_error", "intent 必须是 create 或 existing。"),
-        ] {
-            assert!(
-                !is_teachable_parse_failure(code),
-                "lowering 类不再有教学重驱资格（message 措辞不构成资格源）: {message}"
-            );
+        fn diagnostic(line: usize, fault: Option<LoweringFault>) -> CompilerDiagnostic {
+            CompilerDiagnostic {
+                code: "lowering_error".to_string(),
+                line,
+                field: "contract.intent.intent_target_codebase".to_string(),
+                message: "Plan Intent 声明在场时该字段必填。".to_string(),
+                repair_example: "- intent_target_codebase: value".to_string(),
+                kind: None,
+                lowering_fault: fault,
+                ir_fault: None,
+            }
         }
+        // 措辞近似但无 typed fault：不获资格（RF② 判定函数面）。
+        assert!(matches!(
+            teaching_verdict(&[diagnostic(3, None)], &[]),
+            TeachingVerdict::NotEligible {
+                reason: "no_typed_fault"
+            }
+        ));
+        // fault 在场但诊断行 0（不可定位）：不收集。
+        assert!(matches!(
+            teaching_verdict(
+                &[diagnostic(
+                    0,
+                    Some(LoweringFault::RequiredFieldAbsent {
+                        field: "intent_target_codebase",
+                        expected_shape: "- intent_target_codebase: value",
+                    })
+                )],
+                &[]
+            ),
+            TeachingVerdict::NotEligible {
+                reason: "no_typed_fault"
+            }
+        ));
+        // 事实齐全（field 非空、行>0、期望形态非空）：恰收集该 fault。
+        match teaching_verdict(
+            &[diagnostic(
+                7,
+                Some(LoweringFault::RequiredFieldAbsent {
+                    field: "intent_target_codebase",
+                    expected_shape: "- intent_target_codebase: value",
+                }),
+            )],
+            &[],
+        ) {
+            TeachingVerdict::Eligible { payload } => {
+                assert_eq!(payload.parse_reasons.len(), 0);
+                assert_eq!(payload.lowering_faults.len(), 1);
+                assert_eq!(payload.ir_faults.len(), 0);
+            }
+            TeachingVerdict::NotEligible { reason } => {
+                panic!("事实齐全的 typed lowering fault 必须获恰一次资格: {reason}")
+            }
+        }
+    }
+
+    /// Task 4（RF② 判定函数面）：code 带可教前缀但不在码表、message 措辞
+    /// 近似——都不构成资格源，零 typed fault ⇒ NotEligible。
+    #[test]
+    fn teaching_verdict_rejects_wording_or_prefix_without_typed_fault() {
+        use super::{TeachingVerdict, teaching_verdict};
+        use crate::product::work_item_plan_compiler::CompilerDiagnostic;
+
+        fn diagnostic(code: &str, message: &str) -> CompilerDiagnostic {
+            CompilerDiagnostic {
+                code: code.to_string(),
+                line: 3,
+                field: "Traceability.requirement_id".to_string(),
+                message: message.to_string(),
+                repair_example: "- requirement_id: REQ-001".to_string(),
+                kind: None,
+                lowering_fault: None,
+                ir_fault: None,
+            }
+        }
+        let diagnostics = [
+            diagnostic("lowering_error", "traceability 缺少 requirement_id。"),
+            diagnostic("missing_section_extra", "前缀近似码不在 parse 码表。"),
+        ];
+        assert!(matches!(
+            teaching_verdict(&diagnostics, &[]),
+            TeachingVerdict::NotEligible {
+                reason: "no_typed_fault"
+            }
+        ));
+        // 对照：parse 码表码仍在（parse 语法类通道不受 typed 化影响）。
+        assert!(matches!(
+            teaching_verdict(
+                &[diagnostic("invalid_ears", "statement 必须符合 EARS 模板。")],
+                &[]
+            ),
+            TeachingVerdict::Eligible { .. }
+        ));
+    }
+
+    /// Task 4（RF① 判定函数面）：operational 混入 ⇒ 零资格，禁止 any(可教)
+    /// 放行——即便 parse 码表码同时在场。
+    #[test]
+    fn teaching_verdict_rejects_mixed_operational_set() {
+        use super::{TeachingVerdict, teaching_verdict};
+        use crate::product::work_item_plan_compiler::CompilerDiagnostic;
+
+        let diagnostics = [CompilerDiagnostic {
+            code: "missing_section".to_string(),
+            line: 2,
+            field: "Goal".to_string(),
+            message: "Work Item 缺少必需 section。".to_string(),
+            repair_example: "### Goal".to_string(),
+            kind: None,
+            lowering_fault: None,
+            ir_fault: None,
+        }];
+        assert!(matches!(
+            teaching_verdict(
+                &diagnostics,
+                &["无法推断默认基准分支：仓库无 main/master 本地分支".to_string()]
+            ),
+            TeachingVerdict::NotEligible {
+                reason: "mixed_operational_set"
+            }
+        ));
+    }
+
+    /// Task 4：IR fault 不可定位（source_line=None 或 legal_refs 空）不授
+    /// 资格；可定位（行在场 + 合法集合非空）才进入 payload。
+    #[test]
+    fn teaching_verdict_marks_unlocatable_ir_fault_not_eligible() {
+        use super::{TeachingVerdict, teaching_verdict};
+        use crate::product::work_item_plan_compiler::{
+            CompilerDiagnostic, IrFault, IrFaultKind, IrFaultLocator,
+        };
+
+        fn ir_diagnostic(fault: IrFault) -> CompilerDiagnostic {
+            CompilerDiagnostic {
+                code: "unknown_requirement_ref".to_string(),
+                line: fault.source_line.unwrap_or(0),
+                field: "Tasks.requirement_refs".to_string(),
+                message: "task references unknown design requirement REQ-002".to_string(),
+                repair_example: "- requirement_refs: REQ-001".to_string(),
+                kind: None,
+                lowering_fault: None,
+                ir_fault: Some(fault),
+            }
+        }
+        fn fault(source_line: Option<usize>, legal_refs: Vec<&str>) -> IrFault {
+            IrFault {
+                kind: IrFaultKind::UnknownRequirementRef,
+                work_item_id: "WI-001".to_string(),
+                locator: IrFaultLocator::Task {
+                    task_id: "TASK-001".to_string(),
+                },
+                offending_ref: "REQ-002".to_string(),
+                legal_refs: legal_refs.into_iter().map(str::to_string).collect(),
+                source_line,
+                expected_shape: "- requirement_refs: REQ-001".to_string(),
+            }
+        }
+        // 无行：不可定位，不授资格。
+        assert!(matches!(
+            teaching_verdict(&[ir_diagnostic(fault(None, vec!["REQ-001"]))], &[]),
+            TeachingVerdict::NotEligible {
+                reason: "ir_fault_not_locatable"
+            }
+        ));
+        // 有行但合法集合空：同样不可回喂。
+        assert!(matches!(
+            teaching_verdict(&[ir_diagnostic(fault(Some(30), vec![]))], &[]),
+            TeachingVerdict::NotEligible {
+                reason: "ir_fault_not_locatable"
+            }
+        ));
+        // 行 + 合法集合齐全：收集进 payload。
+        match teaching_verdict(&[ir_diagnostic(fault(Some(30), vec!["REQ-001"]))], &[]) {
+            TeachingVerdict::Eligible { payload } => assert_eq!(payload.ir_faults.len(), 1),
+            TeachingVerdict::NotEligible { reason } => {
+                panic!("可定位 IR fault 必须获恰一次资格: {reason}")
+            }
+        }
+    }
+
+    /// Task 3 评审 Minor-3：指令行进 owner 可见面（终态错误/指令事件/
+    /// typed 重驱 prompt）前必须截断——条数上限 + 计数摘要收口。
+    #[test]
+    fn instruction_lines_are_capped_before_owner_visible_surfaces() {
+        let lines: Vec<String> = (0..10)
+            .map(|index| format!("rule-{index}: 修复动作"))
+            .collect();
+        let capped = super::cap_instruction_lines(lines);
+        assert_eq!(
+            capped.len(),
+            super::MAX_AUTOREPAIR_INSTRUCTION_LINES + 1,
+            "上限条数 + 一行计数摘要: {capped:?}"
+        );
+        assert!(capped[3].contains("rule-3"), "上限内的指令必须在场");
         assert!(
-            is_teachable_parse_failure("missing_section"),
-            "parse 语法类白名单资格不受影响"
+            capped.last().expect("summary line").contains("共 10 条"),
+            "截断必须以计数摘要显式收口: {capped:?}"
         );
     }
 

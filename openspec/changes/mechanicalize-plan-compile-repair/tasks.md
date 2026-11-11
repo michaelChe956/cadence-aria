@@ -10,20 +10,20 @@
 
 ## 2. 止血：lowering typed fault + 教学资格（REQ-CRP-02、MODIFIED REQ-WSC-09）
 
-- [ ] 2.1 先红（三处钉死旧语义的测试，必须先改）：`src/web/workspace_ws_handler/run/single_candidate.rs:1525-1534`、`src/web/workspace_ws_handler/tests/single_candidate_provider_run.rs:1003`（`single_candidate_batched_traceability_lowering_error_fails_terminal_without_reredrive`）、`single_candidate_provider_run/ears_reredrive.rs:8,32-34,293-297`
+- [x] 2.1 先红（三处钉死旧语义的测试，必须先改）：`src/web/workspace_ws_handler/run/single_candidate.rs:1525-1534`、`src/web/workspace_ws_handler/tests/single_candidate_provider_run.rs:1003`（`single_candidate_batched_traceability_lowering_error_fails_terminal_without_reredrive`）、`single_candidate_provider_run/ears_reredrive.rs:8,32-34,293-297`（Task 4：三处已按 typed 口径改红→改绿；`teaching_verdict` 未定义的编译红 + 旧期望不再成立的用例红均已观察）
 - [x] 2.2 实现：`CompilerDiagnostic` 加 `lowering_fault: Option<LoweringFault>`（`types.rs:61-80`，无 serde，零 wire 污染）；`lower.rs:1121 diagnostic()` 工厂赋 fault，禁止从 code/message 派生
-- [ ] 2.3 实现：教学资格判据由 `TEACHABLE_PARSE_FAILURE_CODES`（`run/single_candidate.rs:84-100`）改为「fault 在场且 field+行+期望形态齐全」；重驱 prompt 直接渲染 typed payload
-- [ ] 2.4 不变量：同一 candidate 总重驱次数恒 ≤1（既有单槽不变），加断言
-- [ ] 2.5 回归：无 fault 的 lowering 仍按既有终态；既有 parse 教学重驱用例全绿
+- [x] 2.3 实现：教学资格判据由 `TEACHABLE_PARSE_FAILURE_CODES`（`run/single_candidate.rs:84-100`）改为「fault 在场且 field+行+期望形态齐全」；重驱 prompt 直接渲染 typed payload（Task 4：`teaching_verdict`/`TeachingPayload`/`TeachingVerdict` + `PreflightVerdict` 落 `run/single_candidate_compile_preflight.rs`；码表保留供 `parse_reasons`）
+- [x] 2.4 不变量：同一 candidate 总重驱次数恒 ≤1（既有单槽不变），加断言（Task 4：`second_teachable_category_consumes_no_second_slot` + 既有 invalid_ears 用例双绿；`structure_rerun_used` 分支零改动）
+- [x] 2.5 回归：无 fault 的 lowering 仍按既有终态；既有 parse 教学重驱用例全绿（Task 4：`wording_or_prefix_alone_grants_no_eligibility` + ears_reredrive lowering 用例改写为 typed 口径后全绿）
 - [x] 2.6 实现：四类 typed IR 诊断 producer（裁决 §1.5）——`src/product/work_item_contract/validation.rs:245-312` 与拆出的 handler 预检产 `unknown_done_when_ref`、`unknown_reviewer_check_ref`、`acceptance_criterion_without_reviewer_check`、`unknown_requirement_ref`；新增内部 `src/product/work_item_plan_compiler/ir_fault.rs` 承载 typed payload（WI、task/check/criterion、错误 ref、本 WI 合法集合或真实 spec 集合、原行——无行即「不可定位」、所需字段形态）；MUST NOT 从现 `:265-267` message 反解析 task ID
-- [ ] 2.7 先红：数据库/基线/成员解析失败（原 handler `:288-357`）判 Operational——MUST NOT 复用「Some(reasons) 即重驱」；失败集合混合 operational 与可教类时零重驱（禁止 `any(可教)` 放行）；「恰好一次」以前置授权、合法 provider 与剩余机会为条件
-- [ ] 2.8 不变量：新增可教类别必须显式进入规格/typed 白名单（负向测试：`code` 前缀或「缺少」措辞不自动获权）；其余结构 kind 复用 `planning_failure.rs` 事实完整性规则
+- [x] 2.7 先红：数据库/基线/成员解析失败（原 handler `:288-357`）判 Operational——MUST NOT 复用「Some(reasons) 即重驱」；失败集合混合 operational 与可教类时零重驱（禁止 `any(可教)` 放行）；「恰好一次」以前置授权、合法 provider 与剩余机会为条件（Task 4：`PreflightVerdict.operational_failures` + `mixed_operational_failure_set_grants_zero_reredrive` + `teaching_verdict_rejects_mixed_operational_set`）
+- [x] 2.8 不变量：新增可教类别必须显式进入规格/typed 白名单（负向测试：`code` 前缀或「缺少」措辞不自动获权）；其余结构 kind 复用 `planning_failure.rs` 事实完整性规则（Task 4：`teaching_verdict_rejects_wording_or_prefix_without_typed_fault` + `wording_or_prefix_alone_grants_no_eligibility`）
 
 ## 3. 止血：可观测性最小版（REQ-WSC-25）
 
 - [x] 3.1 先红：同一 issue 连续 3 次失败后能读出 3 条记录（阶段/稳定码/fault/指纹/已应用修复/处置）——`src/product/lifecycle_store/tests/candidate_attempts.rs`：3 次失败 + 1 次通过共 4 行，逐条断言阶段/稳定码/typed 种类/结构指纹/自动重写阶段；同一 `attempt_key` 重复落盘零膨胀（幂等）
 - [x] 3.2 实现：追加写 `candidate-attempts.jsonl`（与 `candidate-compile-status.json` 同目录）——新 store `src/product/lifecycle_store/candidate_attempts.rs`（追加写 + 读取 + 度量读数：首次通过率 / 同 issue 连续失败次数 P50/P90 / 失败码 Top N / lowering 类终态失败计数）；写入点 `src/product/workspace_engine/compile/single_candidate.rs`（SC Final Compile 边界，失败与成功两侧各追加一行；写失败只降级为静默并记入 policy diagnostics，不影响主流程）
-- [ ] 3.3 实现：`equivalence_canonicalization` 审计事件（kind/原 key/值/映射依据）落同一序列——**流水侧已就位**（`EquivalenceCanonicalization` 类型 + 记录字段 + 单测覆盖），但**生产者未落地**：该审计由 1.2 `lower_plan_intent` 等价解析产出，1.1/1.2 实施前无事件可写，故本项**不勾**（待 1.x 落地后由生产者写入同一序列即可）
+- [x] 3.3 实现：`equivalence_canonicalization` 审计事件（kind/原 key/值/映射依据）落同一序列（Task 4：generate 段 handler 为唯一写入点，`record_equivalence_canonicalizations` 经既有 candidate-attempts store 追加，幂等键=node+内容摘要；completion 复验侧不写——`equivalence_canonicalization_audited_to_candidate_attempts` 断言两次编译仅 1 条）
 
 ## 4. 图奇偶性（REQ-WSC-23）
 
