@@ -21,6 +21,7 @@ import {
   lintKnowledgeBaseChangePackage,
   listKnowledgeBaseFiles,
   readKnowledgeBaseFile,
+  startKnowledgeBaseInitialization,
   writeKnowledgeBaseFile,
 } from "../api/knowledge-base";
 import type {
@@ -30,6 +31,7 @@ import type {
   KnowledgeBaseUserInputSummaryDto,
 } from "../api/types/knowledge-base";
 import { KnowledgeBaseUserInputPanel } from "../components/lifecycle/KnowledgeBaseUserInputPanel";
+import { waitForKnowledgeBaseOperation } from "../components/lifecycle/knowledgeBaseInitFlow";
 /**
  * REQ-KB-13 前置门：聚合初始化未完成时，知识库端点（含状态端点）在 HTTP 层
  * 以该稳定码拒绝。前置未满足的判定只依据后端已给出的稳定码——不臆造
@@ -114,6 +116,16 @@ export function KnowledgeBasePage({
   const confirmedPathsRef = useRef<ReadonlySet<string>>(new Set());
   const userInputPathsRef = useRef<ReadonlySet<string>>(new Set());
   const userInputEpochRef = useRef(0);
+  // 自动打开首份待确认输入文件的落点（与文件树默认打开互斥）+ 用户手动选过
+  // 文件的标记（手动选择优先，自动打开不再抢焦点）。
+  const preferredPathRef = useRef<string | null>(null);
+  const userSelectedRef = useRef(false);
+  // 【确认并初始化】的建库编排（OpenSpec change
+  // add-knowledge-base-interactive-init-flow）：批量确认完成后立即创建
+  // `/knowledge-base-bootstrap` operation，运行中禁用输入确认区的动作，
+  // 完成后刷新文件树与状态投影并停在详情页。
+  const [initializing, setInitializing] = useState(false);
+  const [initNotice, setInitNotice] = useState<Notice | null>(null);
 
   // 选中文件的节点元数据：机器管理文件按只读呈现——编辑器不传 onChange
   // （MonacoEditor 的「无 onChange ⇒ 只读」内建语义）、保存入口禁用、并明确
@@ -227,7 +239,12 @@ export function KnowledgeBasePage({
         return;
       }
       setNodes(fileNodes);
-      const first = fileNodes.find((node) => !node.is_dir);
+      // 默认打开第一份非目录文件；已被「自动打开首份待确认输入文件」占位时
+      // 打开那份（两者互斥，谁先定谁说了算）。
+      const preferred = preferredPathRef.current;
+      const first = fileNodes.find(
+        (node) => !node.is_dir && node.path === preferred,
+      ) ?? fileNodes.find((node) => !node.is_dir);
       if (first) {
         await openFile(first.path);
       }
@@ -385,6 +402,75 @@ export function KnowledgeBasePage({
     }
     void refreshUserInput();
   }, [reloadToken, refreshUserInput]);
+
+  /**
+   * 【确认并初始化】的建库编排：输入确认区批量确认完成后立即创建
+   * `/knowledge-base-bootstrap` operation（后端分叉在「已准备且全部已确认」
+   * 时放行），轮询到终态后刷新文件树与状态投影 —— 用户停留在详情页继续
+   * 编辑知识库文档（以用户的修改为准）。
+   */
+  const handleAllConfirmed = useCallback(async () => {
+    setInitializing(true);
+    setInitNotice(null);
+    try {
+      await startKnowledgeBaseInitialization(
+        projectId,
+        lcId,
+        "bootstrap",
+        crypto.randomUUID(),
+      );
+      setInitNotice({
+        kind: "success",
+        text: "知识库初始化已启动，正在生成知识库文档…",
+      });
+      const operation = await waitForKnowledgeBaseOperation(projectId, lcId);
+      if (operation?.status === "completed") {
+        // 刷新文件树与状态投影：知识库文档出现在文件树里。
+        setReloadToken((token) => token + 1);
+        void refreshUserInput();
+        setInitNotice({
+          kind: "success",
+          text: "知识库已生成，可继续编辑（以你的修改为准）",
+        });
+        return;
+      }
+      setInitNotice({
+        kind: "error",
+        text: "知识库初始化未完成，请查看知识库卡片上的失败信息后重试。",
+      });
+    } catch (reason) {
+      setInitNotice({
+        kind: "error",
+        text: `知识库初始化失败：${errorText(reason)}`,
+      });
+    } finally {
+      setInitializing(false);
+    }
+  }, [projectId, lcId, refreshUserInput]);
+
+  /**
+   * 起草完成 ⇒ 自动打开第一份待确认的 user-input 文件（引导用户补充）。
+   *
+   * 只在「知识库尚未建成」时自动打开：已建成的知识库不该被输入文件抢焦点。
+   * `preferredPathRef` 让文件树的默认打开（第一份非目录文件）与本自动打开
+   * **互斥**：谁先定谁说了算，用户手动点过文件后不再自动切换。
+   */
+  useEffect(() => {
+    // 只在状态明确「知识库尚未建成」时自动打开：状态未知（前置门拒绝导致
+    // status 取不到）时不猜，避免把用户的浏览焦点抢走。
+    if (!userInput || status?.exists !== false) {
+      return;
+    }
+    if (preferredPathRef.current !== null || userSelectedRef.current) {
+      return;
+    }
+    const firstPending = userInput.files.find((file) => file.pending);
+    if (!firstPending) {
+      return;
+    }
+    preferredPathRef.current = firstPending.path;
+    void openFile(firstPending.path);
+  }, [userInput, status?.exists, openFile]);
 
   const save = useCallback(async () => {
     if (!selectedPath || !selectedEditable) {
@@ -577,7 +663,11 @@ export function KnowledgeBasePage({
                 <TreeView
                   entries={tree}
                   selectedPath={selectedPath}
-                  onSelect={(path) => void openFile(path)}
+                  onSelect={(path) => {
+                    // 用户手动选过文件 ⇒ 不再被「自动打开输入文件」抢焦点。
+                    userSelectedRef.current = true;
+                    void openFile(path);
+                  }}
                 />
               </div>
               {userInput && !preflightUnmet ? (
@@ -589,7 +679,23 @@ export function KnowledgeBasePage({
                   selectedPath={selectedPath}
                   onOpenFile={(path) => void openFile(path)}
                   onSummaryChanged={() => void refreshUserInput()}
+                  onAllConfirmed={() => void handleAllConfirmed()}
+                  initializing={initializing}
                 />
+              ) : null}
+              {initNotice ? (
+                <p
+                  role={initNotice.kind === "error" ? "alert" : "status"}
+                  data-testid="kb-init-notice"
+                  data-kind={initNotice.kind}
+                  className={
+                    initNotice.kind === "error"
+                      ? "shrink-0 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700"
+                      : "shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs text-emerald-700"
+                  }
+                >
+                  {initNotice.text}
+                </p>
               ) : null}
             </>
           )}

@@ -7,7 +7,7 @@
 // （含 status 端点）入口，失败 = 422 + 稳定码
 // knowledge_base_requires_aggregate_initialization。卡片捕获该码 ⇒ 显示与
 // 详情页逐字一致的中文提示，并把写入口（初始化/更新/创建输入模板）禁用。
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CircleCheck,
   CircleMinus,
@@ -256,6 +256,38 @@ export function KnowledgeBaseCard({
       : status?.initialization_status === "complete"
         ? "初始化已完成"
         : "尚未初始化";
+  // 起草完成（kind=user_input 且 completed）⇒ 下一步是「用户补充并确认输入
+  // 文件」，卡片必须给出入口（OpenSpec change
+  // add-knowledge-base-interactive-init-flow）。
+  const userInputDraftCompleted =
+    operation?.kind === "user_input" && operation.status === "completed";
+  // 自动进入详情页的「已跳过」标记：同一 operation 只跳一次。
+  const autoOpenedOperationRef = useRef<string | null>(null);
+  // 上一份 operation 快照（id + status）：只在**观察到** running → completed
+  // 的跃迁时自动跳转（打开抽屉时看到的是早已完成的起草 ⇒ 不抢焦点，只留
+  // 卡片入口）。
+  const previousOperationRef = useRef<{ id: string; status: string } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const current = operation
+      ? { id: operation.operation_id, status: operation.status }
+      : null;
+    const previous = previousOperationRef.current;
+    previousOperationRef.current = current;
+    if (!operation || !userInputDraftCompleted || !previous) {
+      return;
+    }
+    if (previous.id !== operation.operation_id || previous.status !== "running") {
+      return;
+    }
+    if (autoOpenedOperationRef.current === operation.operation_id) {
+      return;
+    }
+    autoOpenedOperationRef.current = operation.operation_id;
+    onOpenDetail();
+  }, [operation, userInputDraftCompleted, onOpenDetail]);
 
   // 前置门探测：命中稳定码即置「前置未满足」；取数成功即门已放行（清零）。
   useEffect(() => {
@@ -384,6 +416,26 @@ export function KnowledgeBaseCard({
           ) : null}
         </div>
       </div>
+
+      {/* 起草完成 ⇒ 下一步入口（OpenSpec change
+          add-knowledge-base-interactive-init-flow）：用户要补充并确认这 9 份
+          输入文件，之后才会建库。 */}
+      {userInputDraftCompleted ? (
+        <div
+          data-testid="knowledge-base-user-input-cta"
+          className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900"
+        >
+          <p>输入草稿已生成（9 份 user-input 文件），请补充并确认后再执行知识库初始化。</p>
+          <button
+            type="button"
+            data-testid="knowledge-base-open-user-input"
+            onClick={onOpenDetail}
+            className="mt-1 inline-flex h-7 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-2 text-xs font-semibold text-white transition-colors duration-200 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            打开输入文件并补充
+          </button>
+        </div>
+      ) : null}
 
       {/* 知识库的适用项目类型（能力边界）：Java Web / 纯 Java / 纯 Web。
           摆在按钮区正下方，避免其它技术栈的项目误点初始化。 */}

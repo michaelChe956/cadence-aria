@@ -14,6 +14,7 @@ import {
   readKnowledgeBaseFile,
 } from "../../api/knowledge-base";
 import type { KnowledgeBaseUserInputSummaryDto } from "../../api/types/knowledge-base";
+import { USER_INPUT_GUIDANCE_STEPS } from "./knowledgeBaseInitFlow";
 
 const CONFIRMATION_STALE_CODE = "knowledge_base_user_input_confirmation_stale";
 
@@ -47,6 +48,8 @@ export function KnowledgeBaseUserInputPanel({
   selectedPath,
   onOpenFile,
   onSummaryChanged,
+  onAllConfirmed,
+  initializing = false,
 }: {
   projectId: string;
   lcId: string;
@@ -57,6 +60,14 @@ export function KnowledgeBaseUserInputPanel({
   onOpenFile: (path: string) => void;
   /** 确认动作落地（成功或确认过期）后请求页面重新拉取汇总投影。 */
   onSummaryChanged: () => void;
+  /**
+   * 【确认并初始化】：批量确认成功后由页面创建 `/knowledge-base-bootstrap`
+   * operation（后端分叉在「已准备且全部已确认」时放行建库）。未提供时
+   * 【确认并初始化】按钮不渲染（只保留【全部确认】）。
+   */
+  onAllConfirmed?: () => void | Promise<void>;
+  /** 建库进行中（页面侧 operation 在跑）⇒ 按钮禁用且显示进行中文案。 */
+  initializing?: boolean;
 }) {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [confirmingPaths, setConfirmingPaths] = useState<ReadonlySet<string>>(
@@ -70,6 +81,9 @@ export function KnowledgeBaseUserInputPanel({
     summary.total_count - summary.confirmed_count,
   );
   const hasPendingFile = summary.files.some((file) => file.pending);
+  // 未填写份额（内容与模板逐字相同）：后端口径下它们无法被确认 ⇒ 未填时
+  // 不允许建库（D5：只引导，不放宽后端契约）。
+  const unfilledCount = summary.files.filter((file) => !file.filled).length;
 
   const confirmOne = useCallback(
     async (path: string) => {
@@ -103,12 +117,13 @@ export function KnowledgeBaseUserInputPanel({
     [projectId, lcId, onSummaryChanged],
   );
 
-  const confirmAll = useCallback(async () => {
+  const confirmAll = useCallback(async (): Promise<boolean> => {
     // 批量只带「待确认」文件：已确认的无需重复；未填的确认无意义
     //（服务端投影的 confirmed 只计已填写文件）。
     const pending = summary.files.filter((file) => file.pending);
     if (pending.length === 0 || confirmingAll) {
-      return;
+      // 没有待确认文件 ⇒ 视为「已确认完毕」（调用方据此继续建库）。
+      return pending.length === 0;
     }
     setNotice(null);
     setConfirmingAll(true);
@@ -121,15 +136,29 @@ export function KnowledgeBaseUserInputPanel({
       await confirmAllKnowledgeBaseUserInput(projectId, lcId, items);
       setNotice({ kind: "success", text: `已确认 ${items.length} 份输入文件` });
       onSummaryChanged();
+      return true;
     } catch (reason) {
       setNotice({ kind: "error", text: describeConfirmError(reason) });
       if (isConfirmationStale(reason)) {
         onSummaryChanged();
       }
+      return false;
     } finally {
       setConfirmingAll(false);
     }
   }, [projectId, lcId, summary, confirmingAll, onSummaryChanged]);
+
+  /**
+   * 【确认并初始化】：先批量确认全部待确认文件，再由页面创建建库 operation。
+   * 确认失败（过期摘要 / 网络）⇒ 不发起建库（不把半确认状态带进建库）。
+   */
+  const confirmAndInitialize = useCallback(async () => {
+    const confirmed = await confirmAll();
+    if (!confirmed) {
+      return;
+    }
+    await onAllConfirmed?.();
+  }, [confirmAll, onAllConfirmed]);
 
   return (
     <section
@@ -151,6 +180,38 @@ export function KnowledgeBaseUserInputPanel({
           全部确认
         </button>
       </div>
+      {/* 操作指引（OpenSpec change add-knowledge-base-interactive-init-flow）：
+          起草完成后用户面对的是「9 份待补充的文件」，必须告诉他怎么走完
+          补充 → 确认 → 建库这段流程。 */}
+      <ol
+        data-testid="kb-user-input-guide"
+        className="shrink-0 space-y-0.5 px-1 text-[11px] leading-snug text-[var(--aria-ink-muted)]"
+      >
+        {USER_INPUT_GUIDANCE_STEPS.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      {unfilledCount > 0 ? (
+        <p
+          data-testid="kb-user-input-unfilled"
+          className="shrink-0 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800"
+        >
+          还有 {unfilledCount} 份未填写：未填写的文件无法确认，请先在右侧编辑器补充内容后再执行初始化。
+        </p>
+      ) : null}
+      {onAllConfirmed ? (
+        <button
+          type="button"
+          data-testid="kb-user-input-confirm-and-initialize"
+          disabled={
+            initializing || confirmingAll || unfilledCount > 0
+          }
+          onClick={() => void confirmAndInitialize()}
+          className="shrink-0 rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-2 py-1 text-xs font-semibold text-white transition-colors duration-200 hover:opacity-90 disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
+        >
+          {initializing ? "正在初始化知识库…" : "确认并初始化"}
+        </button>
+      ) : null}
       {/* 未确认时提示体现「待确认 N 份」；全部确认后提示可执行初始化。 */}
       <p
         data-testid="kb-user-input-summary"

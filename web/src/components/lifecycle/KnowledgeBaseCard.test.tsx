@@ -118,8 +118,8 @@ const operationWithProviderSelection: KnowledgeBaseOperationSnapshotDto = {
   completed_at: null,
 };
 
-function renderCard(overrides: Partial<KnowledgeBaseCardProps> = {}) {
-  const props: KnowledgeBaseCardProps = {
+function cardProps(overrides: Partial<KnowledgeBaseCardProps> = {}): KnowledgeBaseCardProps {
+  return {
     projectId: "project_0001",
     logicalCodebaseId: "logical_codebase_0001",
     status: null,
@@ -133,8 +133,45 @@ function renderCard(overrides: Partial<KnowledgeBaseCardProps> = {}) {
     onDismissPreflightFailure: vi.fn(),
     ...overrides,
   };
+}
+
+function renderCard(overrides: Partial<KnowledgeBaseCardProps> = {}) {
+  const props = cardProps(overrides);
   render(<KnowledgeBaseCard {...props} />);
   return props;
+}
+
+/** 起草 operation（kind=user_input）：交互式两段流程的起草段。 */
+function userInputOperation(
+  status: "running" | "completed",
+): KnowledgeBaseOperationSnapshotDto {
+  return {
+    operation_id: "kb_op_user_input_0001",
+    project_id: "project_0001",
+    logical_codebase_id: "logical_codebase_0001",
+    kind: "user_input",
+    input: {
+      idempotency_key: "idem-user-input-0001",
+      provider: "pi",
+      package_path: null,
+      package_id: null,
+    },
+    status,
+    steps: [
+      {
+        step_id: "prepare_user_input",
+        status,
+        started_at: null,
+        completed_at: null,
+        output_summary: null,
+      },
+    ],
+    provider_selection: null,
+    error: null,
+    created_at: "2026-11-11T00:00:00Z",
+    started_at: null,
+    completed_at: null,
+  };
 }
 
 // 只还原 window.confirm 的 spy：vi.restoreAllMocks 会把 vi.mock 工厂里
@@ -156,6 +193,61 @@ describe("KnowledgeBaseCard", () => {
     expect(hint).toHaveTextContent("Java Web");
     expect(hint).toHaveTextContent("纯 Java");
     expect(hint).toHaveTextContent("纯 Web");
+  });
+
+  // ── OpenSpec change add-knowledge-base-interactive-init-flow ──────────────
+
+  it("draft_completed_shows_open_user_input_entry", () => {
+    // 起草完成 ⇒ 卡片必须给出「去补充输入文件」的入口（否则用户停在死角）。
+    renderCard({ operation: userInputOperation("completed") });
+
+    const cta = screen.getByTestId("knowledge-base-user-input-cta");
+    expect(cta).toHaveTextContent("输入草稿已生成");
+    expect(
+      screen.getByTestId("knowledge-base-open-user-input"),
+    ).toHaveTextContent("打开输入文件并补充");
+  });
+
+  it("draft_completed_cta_opens_detail", () => {
+    const onOpenDetail = vi.fn();
+    renderCard({ operation: userInputOperation("completed"), onOpenDetail });
+
+    fireEvent.click(screen.getByTestId("knowledge-base-open-user-input"));
+
+    expect(onOpenDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("draft_running_has_no_entry", () => {
+    renderCard({ operation: userInputOperation("running") });
+
+    expect(screen.queryByTestId("knowledge-base-user-input-cta")).toBeNull();
+  });
+
+  it("draft_completion_auto_opens_detail_once", () => {
+    // 观察到 running → completed 的跃迁 ⇒ 自动进入详情页打开输入文件。
+    const onOpenDetail = vi.fn();
+    const { rerender } = render(
+      <KnowledgeBaseCard
+        {...cardProps({ operation: userInputOperation("running"), onOpenDetail })}
+      />,
+    );
+    expect(onOpenDetail).not.toHaveBeenCalled();
+
+    rerender(
+      <KnowledgeBaseCard
+        {...cardProps({ operation: userInputOperation("completed"), onOpenDetail })}
+      />,
+    );
+
+    expect(onOpenDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("already_completed_draft_does_not_auto_open_detail", () => {
+    // 打开抽屉时看到的已是完成态起草 ⇒ 不抢焦点（只留卡片入口）。
+    const onOpenDetail = vi.fn();
+    renderCard({ operation: userInputOperation("completed"), onOpenDetail });
+
+    expect(onOpenDetail).not.toHaveBeenCalled();
   });
 
   it("renders_three_buttons", () => {

@@ -179,6 +179,10 @@ function installFetch(
     userInput?: () => Response;
     /** 覆盖输入确认（POST /user-input/confirm；按需翻转夹具状态）。 */
     userInputConfirm?: (body: unknown) => Response;
+    /** 覆盖建库启动（POST /knowledge-base/initializations）。 */
+    initializations?: (body: unknown) => Response;
+    /** 覆盖当前 operation 投影（GET /knowledge-base/initializations/active）。 */
+    activeOperation?: () => Response;
   } = {},
 ): { calls: FetchCall[] } {
   const calls: FetchCall[] = [];
@@ -224,6 +228,30 @@ function installFetch(
       return overrides.userInputConfirm
         ? overrides.userInputConfirm(calls.at(-1)?.body)
         : jsonResponse({ confirmed: [] });
+    }
+    if (url.includes("/knowledge-base/initializations/active")) {
+      return overrides.activeOperation
+        ? overrides.activeOperation()
+        : jsonResponse(
+            { code: "knowledge_base_operation_not_found", message: "无 operation" },
+            404,
+          );
+    }
+    if (url.includes("/knowledge-base/initializations")) {
+      return overrides.initializations
+        ? overrides.initializations(calls.at(-1)?.body)
+        : jsonResponse({
+            operation_id: "kb_op_0002",
+            project_id: "p1",
+            logical_codebase_id: "lc1",
+            kind: "bootstrap",
+            status: "running",
+            steps: [],
+            error: null,
+            created_at: "2026-01-01T00:00:00Z",
+            started_at: null,
+            completed_at: null,
+          });
     }
     if (url.includes("/knowledge-base/user-input")) {
       if (overrides.userInput) {
@@ -387,6 +415,111 @@ describe("KnowledgeBasePage", () => {
     expect(paths).toContain("base-info.md");
     expect(paths).toContain("user-input/updates/CHANGE-1/code-change.md");
     expect(await screen.findByTestId("kb-status")).toHaveTextContent("已初始化");
+  });
+
+  // ── OpenSpec change add-knowledge-base-interactive-init-flow ──────────────
+
+  it("opens_first_pending_user_input_file_when_knowledge_base_not_built", async () => {
+    // 起草完成、知识库尚未建成 ⇒ 自动打开第一份待确认的输入文件。
+    installFetch({
+      status: () =>
+        jsonResponse({
+          exists: false,
+          schema_version: null,
+          initialization_status: null,
+          global_validation: null,
+          completed_stages: [],
+          skipped_stages: [],
+          skills_available: true,
+        }),
+      userInput: () =>
+        jsonResponse(
+          userInputSummary([
+            { path: "user-input/goal.md" },
+            { path: "user-input/scope.md" },
+          ]),
+        ),
+    });
+    renderPage();
+
+    // 第一份待确认文件在右侧编辑器打开（内容为该文件正文）。
+    await waitForEditorValue("# 目标");
+  });
+
+  it("does_not_auto_open_user_input_when_knowledge_base_already_exists", async () => {
+    installFetch({
+      userInput: () =>
+        jsonResponse(userInputSummary([{ path: "user-input/goal.md" }])),
+    });
+    renderPage();
+
+    await screen.findByTestId("kb-file-tree");
+    // 已建成的知识库：保持默认打开的第一份文件，不被输入文件抢焦点。
+    await waitForEditorValue("# 基础信息");
+  });
+
+  it("confirm_and_initialize_creates_bootstrap_operation_and_refreshes", async () => {
+    const { calls } = installFetch({
+      status: () =>
+        jsonResponse({
+          exists: false,
+          schema_version: null,
+          initialization_status: null,
+          global_validation: null,
+          completed_stages: [],
+          skipped_stages: [],
+          skills_available: true,
+        }),
+      userInput: () =>
+        jsonResponse(userInputSummary([{ path: "user-input/goal.md" }])),
+      initializations: () =>
+        jsonResponse({
+          operation_id: "kb_op_0002",
+          project_id: "p1",
+          logical_codebase_id: "lc1",
+          kind: "bootstrap",
+          status: "running",
+          steps: [],
+          error: null,
+          created_at: "2026-01-01T00:00:00Z",
+          started_at: null,
+          completed_at: null,
+        }),
+      // 建库 operation 已是终态 completed ⇒ 页面刷新并给出完成提示。
+      activeOperation: () =>
+        jsonResponse({
+          operation_id: "kb_op_0002",
+          project_id: "p1",
+          logical_codebase_id: "lc1",
+          kind: "bootstrap",
+          status: "completed",
+          steps: [],
+          error: null,
+          created_at: "2026-01-01T00:00:00Z",
+          started_at: null,
+          completed_at: null,
+        }),
+    });
+    renderPage();
+
+    const button = await screen.findByTestId(
+      "kb-user-input-confirm-and-initialize",
+    );
+    fireEvent.click(button);
+
+    // 建库 operation 被创建（kind=bootstrap）。
+    await waitFor(() => {
+      const post = calls.find(
+        (call) =>
+          call.method === "POST" && call.url.includes("/knowledge-base/initializations"),
+      );
+      expect(post).toBeDefined();
+      expect(post?.body).toMatchObject({ kind: "bootstrap" });
+    });
+    // 建库完成后给出「可继续编辑」提示。
+    expect(await screen.findByTestId("kb-init-notice")).toHaveTextContent(
+      "知识库已生成，可继续编辑",
+    );
   });
 
   it("renders_directory_groups_in_file_tree", async () => {

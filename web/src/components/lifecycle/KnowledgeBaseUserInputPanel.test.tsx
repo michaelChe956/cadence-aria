@@ -71,6 +71,8 @@ function renderPanel(
     selectedPath?: string | null;
     onOpenFile?: (path: string) => void;
     onSummaryChanged?: () => void;
+    onAllConfirmed?: () => void;
+    initializing?: boolean;
   } = {},
 ) {
   const onOpenFile = vi.fn();
@@ -84,6 +86,8 @@ function renderPanel(
       selectedPath={props.selectedPath ?? null}
       onOpenFile={props.onOpenFile ?? onOpenFile}
       onSummaryChanged={props.onSummaryChanged ?? onSummaryChanged}
+      onAllConfirmed={props.onAllConfirmed}
+      initializing={props.initializing}
     />,
   );
   return { onOpenFile, onSummaryChanged };
@@ -254,5 +258,102 @@ describe("KnowledgeBaseUserInputPanel", () => {
     expect(hints).toHaveLength(1);
     expect(hints[0]).toHaveTextContent("已修改，需重新确认");
     expect(hints[0].getAttribute("data-path")).toBe("user-input/goal.md");
+  });
+
+  // ── OpenSpec change add-knowledge-base-interactive-init-flow ──────────────
+
+  it("renders_step_by_step_guidance", () => {
+    installFetch();
+    renderPanel(
+      userInputSummary([{ path: "user-input/goal.md" }]),
+      { onAllConfirmed: vi.fn() },
+    );
+
+    const guide = screen.getByTestId("kb-user-input-guide");
+    // 四步指引齐全：补充 → 确认 → 全部确认后初始化 → 留在本页继续编辑。
+    expect(guide.textContent).toContain("逐份打开");
+    expect(guide.textContent).toContain("需重新确认");
+    expect(guide.textContent).toContain("确认并初始化");
+    expect(guide.textContent).toContain("以你的修改为准");
+  });
+
+  it("unfilled_files_block_initialization_with_reason", () => {
+    installFetch();
+    renderPanel(
+      userInputSummary([
+        { path: "user-input/goal.md" },
+        { path: "user-input/blank.md", filled: false },
+      ]),
+      { onAllConfirmed: vi.fn() },
+    );
+
+    // 未填写的文件无法被确认 ⇒ 不允许建库（只引导，不放宽后端口径）。
+    expect(screen.getByTestId("kb-user-input-unfilled")).toHaveTextContent(
+      "还有 1 份未填写",
+    );
+    expect(
+      screen.getByTestId("kb-user-input-confirm-and-initialize"),
+    ).toBeDisabled();
+  });
+
+  it("confirm_and_initialize_confirms_pending_then_notifies_host", async () => {
+    const { calls } = installFetch();
+    const onAllConfirmed = vi.fn();
+    renderPanel(
+      userInputSummary([
+        { path: "user-input/goal.md", confirmed: true },
+        { path: "user-input/scope.md" },
+      ]),
+      { onAllConfirmed },
+    );
+
+    fireEvent.click(screen.getByTestId("kb-user-input-confirm-and-initialize"));
+
+    // 先批量确认（携带当前 digest），再交给宿主建库。
+    await waitFor(() => {
+      expect(
+        calls.some((call) => call.url.includes("/user-input/confirm")),
+      ).toBe(true);
+    });
+    await waitFor(() => {
+      expect(onAllConfirmed).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("confirm_and_initialize_does_not_start_bootstrap_when_confirmation_fails", async () => {
+    installFetch({
+      confirm: () =>
+        jsonResponse(
+          {
+            code: "knowledge_base_user_input_confirmation_stale",
+            message: "确认已过期：请刷新后重新确认。",
+          },
+          409,
+        ),
+    });
+    const onAllConfirmed = vi.fn();
+    renderPanel(
+      userInputSummary([{ path: "user-input/goal.md" }]),
+      { onAllConfirmed },
+    );
+
+    fireEvent.click(screen.getByTestId("kb-user-input-confirm-and-initialize"));
+
+    expect(await screen.findByTestId("kb-user-input-notice")).toHaveTextContent(
+      "确认已过期",
+    );
+    expect(onAllConfirmed).not.toHaveBeenCalled();
+  });
+
+  it("confirm_and_initialize_is_disabled_while_initializing", () => {
+    installFetch();
+    renderPanel(
+      userInputSummary([{ path: "user-input/goal.md" }]),
+      { onAllConfirmed: vi.fn(), initializing: true },
+    );
+
+    const button = screen.getByTestId("kb-user-input-confirm-and-initialize");
+    expect(button).toBeDisabled();
+    expect(button).toHaveTextContent("正在初始化知识库…");
   });
 });
