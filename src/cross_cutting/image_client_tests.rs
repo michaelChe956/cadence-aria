@@ -85,9 +85,7 @@ fn multipart_matcher(fields: &[(&str, &str)]) -> Matcher {
             escape_regex(value)
         ));
     }
-    pattern.push_str(&format!(
-        "{BOUNDARY}\\r\\n{FILE_PART}{BOUNDARY}--\\r\\n$"
-    ));
+    pattern.push_str(&format!("{BOUNDARY}\\r\\n{FILE_PART}{BOUNDARY}--\\r\\n$"));
     Matcher::Regex(pattern)
 }
 
@@ -152,6 +150,29 @@ async fn forbid(server: &mut mockito::Server, field: &str) -> mockito::Mock {
         .expect(0)
         .create_async()
         .await
+}
+
+/// 断言 edits 的 multipart 字段集合恰好等于给定列表，且不得出现给定字段。
+async fn assert_multipart_fields(
+    server: &mut mockito::Server,
+    target: &ImageCallTarget,
+    request: &ImageGenRequest,
+    fields: &[(&str, &str)],
+    forbidden: &[&str],
+) {
+    let edit = edits(server, multipart_matcher(fields)).await;
+    let mut guards = Vec::new();
+    for field in forbidden {
+        guards.push(forbid(server, field).await);
+    }
+    let out = call(target, request, Some(reference()))
+        .await
+        .expect("edits 必须成功");
+    assert_eq!(out.b64, "EDIT");
+    edit.assert_async().await;
+    for guard in guards {
+        guard.assert_async().await;
+    }
 }
 
 #[tokio::test]
@@ -240,74 +261,60 @@ async fn c03_model_id_is_passed_through_verbatim_and_shapes_no_request() {
 async fn c04_gpt_edits_multipart_carries_only_official_fields() {
     let mut server = mockito::Server::new_async().await;
     let target = new_target(ImageVendor::Gpt, &server.url(), GPT_MODEL);
-    let matcher = multipart_matcher(&[
-        ("model", GPT_MODEL),
-        ("prompt", "draw a fox"),
-        ("output_format", "png"),
-        ("size", "1536x1024"),
-        ("quality", "high"),
-        ("background", "transparent"),
-    ]);
-    let edit = edits(&mut server, matcher).await;
-    let no_input_fidelity = forbid(&mut server, "input_fidelity").await;
-    let no_response_format = forbid(&mut server, "response_format").await;
-    let no_area = forbid(&mut server, "area").await;
-
-    let out = call(&target, &request(ImageSize::Landscape), Some(reference()))
-        .await
-        .expect("GPT edits 必须成功");
-    assert_eq!(out.b64, "EDIT");
-    edit.assert_async().await;
-    no_input_fidelity.assert_async().await;
-    no_response_format.assert_async().await;
-    no_area.assert_async().await;
+    assert_multipart_fields(
+        &mut server,
+        &target,
+        &request(ImageSize::Landscape),
+        &[
+            ("model", GPT_MODEL),
+            ("prompt", "draw a fox"),
+            ("output_format", "png"),
+            ("size", "1536x1024"),
+            ("quality", "high"),
+            ("background", "transparent"),
+        ],
+        &["input_fidelity", "response_format", "area"],
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn c05_minimax_edits_never_sends_quality_background_or_both_size_and_area() {
     // 具体尺寸：发 size，不发 area。
     let mut server = mockito::Server::new_async().await;
-    let target = new_target(ImageVendor::Minimax, &server.url(), MINIMAX_MODEL);
-    let matcher = multipart_matcher(&[
-        ("model", MINIMAX_MODEL),
-        ("prompt", "draw a fox"),
-        ("output_format", "png"),
-        ("size", "1536x1024"),
-        ("response_format", "b64_json"),
-    ]);
-    let edit = edits(&mut server, matcher).await;
-    let no_quality = forbid(&mut server, "quality").await;
-    let no_background = forbid(&mut server, "background").await;
-    let no_input_fidelity = forbid(&mut server, "input_fidelity").await;
-    let no_area = forbid(&mut server, "area").await;
-
-    call(&target, &request(ImageSize::Landscape), Some(reference()))
-        .await
-        .expect("MiniMax edits（具体尺寸）必须成功");
-    edit.assert_async().await;
-    no_quality.assert_async().await;
-    no_background.assert_async().await;
-    no_input_fidelity.assert_async().await;
-    no_area.assert_async().await;
+    let size_target = new_target(ImageVendor::Minimax, &server.url(), MINIMAX_MODEL);
+    assert_multipart_fields(
+        &mut server,
+        &size_target,
+        &request(ImageSize::Landscape),
+        &[
+            ("model", MINIMAX_MODEL),
+            ("prompt", "draw a fox"),
+            ("output_format", "png"),
+            ("size", "1536x1024"),
+            ("response_format", "b64_json"),
+        ],
+        &["quality", "background", "input_fidelity", "area"],
+    )
+    .await;
 
     // auto：发 area，不发 size。
     let mut server = mockito::Server::new_async().await;
     let auto_target = new_target(ImageVendor::Minimax, &server.url(), MINIMAX_MODEL);
-    let matcher = multipart_matcher(&[
-        ("model", MINIMAX_MODEL),
-        ("prompt", "draw a fox"),
-        ("output_format", "png"),
-        ("response_format", "b64_json"),
-        ("area", "1K"),
-    ]);
-    let edit = edits(&mut server, matcher).await;
-    let no_size = forbid(&mut server, "size").await;
-
-    call(&auto_target, &request(ImageSize::Auto), Some(reference()))
-        .await
-        .expect("MiniMax edits（auto）必须成功");
-    edit.assert_async().await;
-    no_size.assert_async().await;
+    assert_multipart_fields(
+        &mut server,
+        &auto_target,
+        &request(ImageSize::Auto),
+        &[
+            ("model", MINIMAX_MODEL),
+            ("prompt", "draw a fox"),
+            ("output_format", "png"),
+            ("response_format", "b64_json"),
+            ("area", "1K"),
+        ],
+        &["size"],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -411,8 +418,10 @@ async fn c11_item_error_text_never_leaks_the_api_key() {
         .expect_err("逐项错误必须失败");
     match error {
         ImageClientError::ItemError(message) => {
-            assert!(!message.contains("sk-secret"), "逐项错误不得含 key 明文");
-            assert!(message.contains("[REDACTED]"), "key 必须被替换：{message}");
+            assert!(
+                !message.contains("sk-secret") && message.contains("[REDACTED]"),
+                "逐项错误必须脱敏：{message}"
+            );
         }
         other => panic!("期望逐项错误，实际：{other:?}"),
     }
@@ -489,11 +498,7 @@ fn c16_debug_output_never_contains_the_api_key() {
     target.api_key = "sk-secret".to_string();
     let debug = format!("{target:?}");
     assert!(
-        !debug.contains("sk-secret"),
-        "Debug 不得含 key 明文：{debug}"
-    );
-    assert!(
-        debug.contains("<redacted>"),
-        "Debug 必须显示脱敏占位：{debug}"
+        !debug.contains("sk-secret") && debug.contains("<redacted>"),
+        "Debug 必须脱敏：{debug}"
     );
 }

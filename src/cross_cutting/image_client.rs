@@ -210,16 +210,33 @@ struct WireFields<'a> {
 
 /// 按供应方决定发哪些字段（见设计 5.4 的规则表）。
 fn wire_fields<'a>(target: &'a ImageCallTarget, req: &'a ImageGenRequest) -> WireFields<'a> {
-    let _ = (MINIMAX_AUTO_AREA, MINIMAX_RESPONSE_FORMAT);
+    // GPT 发 size/quality/background 且不发 area/response_format；
+    // MiniMax 发 response_format=b64_json，不发 quality/background。
+    let (size, quality, background, response_format, area) = if target.vendor == ImageVendor::Gpt {
+        (
+            Some(req.size),
+            Some(req.quality),
+            Some(req.background),
+            None,
+            None,
+        )
+    } else {
+        // MiniMax 的 size 与 area 二选一：auto 时改发面积档位。
+        let (size, area) = match req.size {
+            ImageSize::Auto => (None, Some(MINIMAX_AUTO_AREA)),
+            size => (Some(size), None),
+        };
+        (size, None, None, Some(MINIMAX_RESPONSE_FORMAT), area)
+    };
     WireFields {
         model: &target.model,
         prompt: &req.prompt,
-        size: Some(req.size),
+        size,
         output_format: req.output_format,
-        quality: Some(req.quality),
-        background: Some(req.background),
-        response_format: None,
-        area: None,
+        quality,
+        background,
+        response_format,
+        area,
     }
 }
 
@@ -265,27 +282,16 @@ fn multipart_form(
         .text("model", fields.model.to_string())
         .text("prompt", fields.prompt.to_string())
         .text("output_format", wire_value(&fields.output_format)?);
-    form = push_optional(
-        form,
-        "size",
-        fields.size.map(|v| wire_value(&v)).transpose()?,
-    );
-    form = push_optional(
-        form,
-        "quality",
-        fields.quality.map(|v| wire_value(&v)).transpose()?,
-    );
-    form = push_optional(
-        form,
-        "background",
-        fields.background.map(|v| wire_value(&v)).transpose()?,
-    );
-    form = push_optional(
-        form,
-        "response_format",
-        fields.response_format.map(str::to_string),
-    );
-    form = push_optional(form, "area", fields.area.map(str::to_string));
+    let size = fields.size.map(|v| wire_value(&v)).transpose()?;
+    let quality = fields.quality.map(|v| wire_value(&v)).transpose()?;
+    let background = fields.background.map(|v| wire_value(&v)).transpose()?;
+    let response_format = fields.response_format.map(str::to_string);
+    let area = fields.area.map(str::to_string);
+    form = push_optional(form, "size", size);
+    form = push_optional(form, "quality", quality);
+    form = push_optional(form, "background", background);
+    form = push_optional(form, "response_format", response_format);
+    form = push_optional(form, "area", area);
     Ok(form.part("image[]", image))
 }
 
@@ -314,13 +320,36 @@ struct ImageResponseData {
 
 /// 从响应中取出图片（见设计 5.6）。
 fn extract_b64(payload: ImageResponse, api_key: &str) -> Result<String, ImageClientError> {
-    let _ = api_key;
-    let first = payload
-        .data
-        .into_iter()
-        .next()
-        .ok_or(ImageClientError::EmptyData)?;
-    first.b64_json.ok_or(ImageClientError::MissingB64)
+    // 规则 1：按顺序找第一个 b64_json 非空的项。
+    for item in &payload.data {
+        if let Some(b64) = item.b64_json.as_deref().filter(|value| !value.is_empty()) {
+            return Ok(b64.to_string());
+        }
+    }
+    // 规则 2：没有成功项时，存在带 error 的项即为逐项错误。
+    for item in &payload.data {
+        if let Some(error) = &item.error {
+            let message = item_error_message(error);
+            return Err(ImageClientError::ItemError(sanitize_error_body(
+                &message, api_key,
+            )));
+        }
+    }
+    // 规则 3：无成功项也无逐项错误：data 为空则 EmptyData，否则 MissingB64。
+    if payload.data.is_empty() {
+        Err(ImageClientError::EmptyData)
+    } else {
+        Err(ImageClientError::MissingB64)
+    }
+}
+
+/// 逐项错误文本：取 error 对象里的字符串 message，否则取其紧凑 JSON 文本。
+fn item_error_message(error: &serde_json::Value) -> String {
+    error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| serde_json::to_string(error).unwrap_or_else(|_| error.to_string()))
 }
 
 fn validate_target(target: &ImageCallTarget) -> Result<(), ImageClientError> {
