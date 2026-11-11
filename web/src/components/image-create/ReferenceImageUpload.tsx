@@ -13,9 +13,7 @@ export function ReferenceImageUpload() {
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const referenceImage = useImageCreateStore((state) => state.referenceImage);
-  const params = useImageCreateStore((state) => state.params);
   const isBusy = useImageCreateStore((state) => state.isBusy);
-  const setParams = useImageCreateStore((state) => state.setParams);
   const setReferenceImage = useImageCreateStore((state) => state.setReferenceImage);
   const [error, setError] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -46,9 +44,6 @@ export function ReferenceImageUpload() {
       return;
     }
     setError(null);
-    if (params.input_fidelity === null) {
-      setParams({ input_fidelity: "low" });
-    }
     setReferenceImage(file);
   }
 

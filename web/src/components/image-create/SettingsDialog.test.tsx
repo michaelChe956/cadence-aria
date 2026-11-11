@@ -1,5 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MaskedSettings } from "../../api/types/image-create";
 import { useImageCreateStore } from "../../state/image-create-store";
@@ -7,8 +7,24 @@ import { SettingsDialog } from "./SettingsDialog";
 
 const originalState = useImageCreateStore.getState();
 const settings: MaskedSettings = {
-  base_url: "https://api.openai.com/v1",
-  api_key_masked: "sk-****1234",
+  vendors: {
+    gpt: {
+      base_url: "https://api.openai.com/v1",
+      api_key_masked: "sk-****1234",
+      models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
+      default_model: "gpt-image-2.6-flare",
+      recommended_models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
+      available: true,
+    },
+    minimax: {
+      base_url: "https://api.minimax.chat/v1",
+      api_key_masked: "mm-****5678",
+      models: ["MiniMax-H3-Image"],
+      default_model: "MiniMax-H3-Image",
+      recommended_models: ["MiniMax-H3-Image", "MiniMax-H3-Image-2"],
+      available: true,
+    },
+  },
   defaults: {
     size: "1024x1024",
     quality: "medium",
@@ -38,7 +54,7 @@ beforeEach(() => {
 });
 
 async function selectCustomOption(
-  user: ReturnType<typeof userEvent.setup>,
+  user: UserEvent,
   label: string,
   option: string,
 ) {
@@ -47,93 +63,134 @@ async function selectCustomOption(
 }
 
 describe("SettingsDialog", () => {
-  it("loads settings and displays the masked API key", async () => {
+  it("loads settings and displays each vendor's masked API key", async () => {
     const { loadSettings } = renderDialog();
 
-    expect(await screen.findByDisplayValue("sk-****1234")).toBeInTheDocument();
-    expect(screen.getByLabelText("base_url")).toHaveValue(
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+    const minimax = within(screen.getByRole("region", { name: "MiniMax" }));
+
+    expect(gpt.getByLabelText("GPT API Key")).toHaveValue("sk-****1234");
+    expect(minimax.getByLabelText("MiniMax API Key")).toHaveValue("mm-****5678");
+    expect(gpt.getByLabelText("GPT base_url")).toHaveValue(
       "https://api.openai.com/v1",
     );
     expect(loadSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("retains an unchanged masked key and reloads settings after save", async () => {
+  it("sends no vendor and no defaults when nothing changed", async () => {
     const user = userEvent.setup();
     const { loadSettings, saveSettings } = renderDialog();
-    await screen.findByDisplayValue("sk-****1234");
+    await screen.findByRole("region", { name: "GPT" });
 
     await user.click(screen.getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => {
-      expect(saveSettings).toHaveBeenCalledWith({ api_key_action: "retain" });
-      expect(loadSettings).toHaveBeenCalledTimes(2);
+      expect(saveSettings).toHaveBeenCalledWith({});
     });
-    expect(saveSettings.mock.calls[0]?.[0]).not.toHaveProperty("api_key");
+    expect(loadSettings).toHaveBeenCalledTimes(2);
     expect(screen.getByText("设置已保存")).toBeInTheDocument();
   });
 
-  it("retains the key when editing restores the masked placeholder", async () => {
+  it("F-11 只改 MiniMax 的 key 时请求只含 vendors.minimax", async () => {
     const user = userEvent.setup();
     const { saveSettings } = renderDialog();
-    const apiKey = await screen.findByLabelText("API Key");
+    const minimax = within(await screen.findByRole("region", { name: "MiniMax" }));
 
+    const apiKey = minimax.getByLabelText("MiniMax API Key");
     await user.clear(apiKey);
-    await user.type(apiKey, "temporary-key");
-    await user.clear(apiKey);
-    await user.type(apiKey, settings.api_key_masked);
-    await user.click(screen.getByRole("button", { name: "保存设置" }));
-
-    await waitFor(() => {
-      expect(saveSettings).toHaveBeenCalledWith({ api_key_action: "retain" });
-    });
-    expect(saveSettings.mock.calls[0]?.[0]).not.toHaveProperty("api_key");
-  });
-
-  it("sends clear without an API key when the clear button is used", async () => {
-    const user = userEvent.setup();
-    const { saveSettings } = renderDialog();
-    await screen.findByDisplayValue("sk-****1234");
-
-    await user.click(screen.getByRole("button", { name: "清除 key" }));
-    await user.click(screen.getByRole("button", { name: "保存设置" }));
-
-    await waitFor(() => {
-      expect(saveSettings).toHaveBeenCalledWith({ api_key_action: "clear" });
-    });
-    expect(saveSettings.mock.calls[0]?.[0]).not.toHaveProperty("api_key");
-  });
-
-  it("replaces the API key with a newly entered value", async () => {
-    const user = userEvent.setup();
-    const { saveSettings } = renderDialog();
-    const apiKey = await screen.findByLabelText("API Key");
-
-    await user.clear(apiKey);
-    await user.type(apiKey, "sk-new-secret");
+    await user.type(apiKey, "mm-new-secret");
     await user.click(screen.getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => {
       expect(saveSettings).toHaveBeenCalledWith({
-        api_key_action: "replace",
-        api_key: "sk-new-secret",
+        vendors: {
+          minimax: { api_key_action: "replace", api_key: "mm-new-secret" },
+        },
+      });
+    });
+    const request = saveSettings.mock.calls[0]?.[0];
+    expect(request?.vendors?.gpt).toBeUndefined();
+  });
+
+  it("F-12 点 GPT 的清除按钮时只提交 GPT 的 clear 动作", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    await user.click(gpt.getByRole("button", { name: "清除 key" }));
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({
+        vendors: { gpt: { api_key_action: "clear" } },
+      });
+    });
+    const request = saveSettings.mock.calls[0]?.[0];
+    expect(request?.vendors?.minimax).toBeUndefined();
+    expect(request?.vendors?.gpt).not.toHaveProperty("api_key");
+  });
+
+  it("F-13 恢复推荐清单后文本框内容等于 recommended_models", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    const minimax = within(await screen.findByRole("region", { name: "MiniMax" }));
+
+    const models = minimax.getByLabelText("MiniMax 模型清单");
+    await user.clear(models);
+    await user.click(minimax.getByRole("button", { name: "恢复推荐清单" }));
+
+    expect(models).toHaveValue(
+      settings.vendors.minimax.recommended_models.join("\n"),
+    );
+  });
+
+  it("F-14 删除轮转模型所在行后轮转模型变为清单首项", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const models = gpt.getByLabelText("GPT 模型清单");
+    await user.clear(models);
+    await user.type(models, "gpt-image-2.6\n");
+
+    expect(gpt.getByRole("combobox", { name: "GPT 轮转模型" })).toHaveTextContent(
+      /^gpt-image-2\.6$/,
+    );
+  });
+
+  it("提交改动过的模型清单与轮转模型", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const models = gpt.getByLabelText("GPT 模型清单");
+    await user.clear(models);
+    await user.type(models, "gpt-image-2.6\n");
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({
+        vendors: {
+          gpt: {
+            api_key_action: "retain",
+            models: ["gpt-image-2.6"],
+            default_model: "gpt-image-2.6",
+          },
+        },
       });
     });
   });
 
-  it("submits only changed base_url and defaults options", async () => {
+  it("共享的默认参数分区照旧读写", async () => {
     const user = userEvent.setup();
     const { saveSettings } = renderDialog();
-    await screen.findByDisplayValue("sk-****1234");
+    await screen.findByRole("region", { name: "GPT" });
 
-    await user.clear(screen.getByLabelText("base_url"));
-    await user.type(screen.getByLabelText("base_url"), "http://127.0.0.1:8080/v1");
     await selectCustomOption(user, "默认质量", "high");
     await user.click(screen.getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => {
       expect(saveSettings).toHaveBeenCalledWith({
-        base_url: "http://127.0.0.1:8080/v1",
-        api_key_action: "retain",
         defaults: {
           ...settings.defaults,
           quality: "high",
@@ -142,18 +199,34 @@ describe("SettingsDialog", () => {
     });
   });
 
-  it("blocks an invalid base_url before calling the store", async () => {
+  it("阻断无效的 base_url 且不调用 store", async () => {
     const user = userEvent.setup();
     const { saveSettings } = renderDialog();
-    await screen.findByDisplayValue("sk-****1234");
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
 
-    await user.clear(screen.getByLabelText("base_url"));
-    await user.type(screen.getByLabelText("base_url"), "http://example.com/v1");
+    await user.clear(gpt.getByLabelText("GPT base_url"));
+    await user.type(gpt.getByLabelText("GPT base_url"), "http://example.com/v1");
     await user.click(screen.getByRole("button", { name: "保存设置" }));
 
     expect(
       await screen.findByText("base_url 必须使用 HTTPS，或使用 localhost/loopback IP"),
     ).toBeInTheDocument();
     expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("后端校验失败的中文信息原样显示", async () => {
+    const user = userEvent.setup();
+    const loadSettings = vi.fn(async () => {
+      useImageCreateStore.setState({ settings });
+    });
+    const saveSettings = vi.fn().mockRejectedValue(new Error("模型清单包含重复 id"));
+    useImageCreateStore.setState({ loadSettings, saveSettings });
+
+    render(<SettingsDialog onClose={vi.fn()} />);
+    await screen.findByRole("region", { name: "GPT" });
+
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    expect(await screen.findByText("模型清单包含重复 id")).toBeInTheDocument();
   });
 });

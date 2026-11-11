@@ -19,6 +19,8 @@ export type CustomSelectOption =
 export interface CustomSelectProps {
   label?: string;
   value: string;
+  /** 触发按钮上展示的文案，缺省时展示 value 本身。 */
+  displayValue?: string;
   options: readonly CustomSelectOption[];
   disabled?: boolean;
   onChange: (value: string) => void;
@@ -31,6 +33,7 @@ const triggerClassName =
 export function CustomSelect({
   label,
   value,
+  displayValue,
   options,
   disabled = false,
   onChange,
@@ -173,7 +176,9 @@ export function CustomSelect({
         onClick={() => (expanded ? closeList() : openList())}
         className={triggerClassName}
       >
-        <span className="min-w-0 flex-1 truncate">{value}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {displayValue ?? value}
+        </span>
         <ChevronDown
           aria-hidden="true"
           className={`h-4 w-4 shrink-0 text-[var(--aria-ink-muted)] transition-transform duration-200 motion-reduce:transition-none ${

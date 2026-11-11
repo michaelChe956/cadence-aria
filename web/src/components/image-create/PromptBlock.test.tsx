@@ -14,7 +14,8 @@ beforeEach(() => {
       quality: "auto",
       background: "auto",
       output_format: "png",
-      input_fidelity: null,
+      model: "auto",
+      use_previous: true,
     },
     entries: [],
   });

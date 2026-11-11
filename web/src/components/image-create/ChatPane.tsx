@@ -8,6 +8,7 @@ import {
   Wand2,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { IMAGE_VENDOR_LABELS } from "../../api/types/image-create";
 import type { ImageChatEntry } from "../../state/image-create-entries";
 import { useImageCreateStore } from "../../state/image-create-store";
 
@@ -252,7 +253,17 @@ function GenerationImageEntry({
         />
       </div>
       <div className="flex items-center justify-between gap-3 border-t border-[var(--aria-line)] px-4 py-3">
-        <p className="min-w-0 text-xs leading-5 text-[var(--aria-ink-muted)]">{entry.prompt}</p>
+        <div className="min-w-0">
+          {entry.vendor ? (
+            <p
+              data-testid="image-create-generation-meta"
+              className="text-xs font-semibold text-[var(--aria-ink)]"
+            >
+              {generationMetaText(entry)}
+            </p>
+          ) : null}
+          <p className="min-w-0 text-xs leading-5 text-[var(--aria-ink-muted)]">{entry.prompt}</p>
+        </div>
         <a
           href={entry.imageUrl}
           download={`image-create-${entry.id}.${extension}`}
@@ -264,6 +275,26 @@ function GenerationImageEntry({
       </div>
     </article>
   );
+}
+
+/** 生成图下方的标注：家 · 模型，以及轮转与参考图来源。 */
+function generationMetaText(
+  entry: Extract<ImageChatEntry, { type: "generation_image" }>,
+): string {
+  const parts = [
+    IMAGE_VENDOR_LABELS[entry.vendor ?? "gpt"],
+    entry.model ?? "",
+  ];
+  if (entry.selection === "auto") {
+    parts.push("自动轮转");
+  }
+  if (entry.referenceSource === "previous") {
+    parts.push("基于上一张图");
+  }
+  if (entry.referenceSource === "uploaded") {
+    parts.push("使用参考图");
+  }
+  return parts.filter(Boolean).join(" · ");
 }
 
 function ChatEntryView({ entry }: { entry: ImageChatEntry }) {

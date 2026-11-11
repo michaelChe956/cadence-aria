@@ -9,10 +9,6 @@ const originalState = useImageCreateStore.getState();
 beforeEach(() => {
   useImageCreateStore.setState({
     ...originalState,
-    params: {
-      ...originalState.params,
-      input_fidelity: null,
-    },
     referenceImage: null,
     isBusy: false,
   });
@@ -59,7 +55,10 @@ describe("ReferenceImageUpload", () => {
     await user.upload(screen.getByLabelText("上传参考图"), file);
 
     expect(useImageCreateStore.getState().referenceImage).toBe(file);
-    expect(useImageCreateStore.getState().params.input_fidelity).toBe("low");
+    // F-16：选图后参数上不再出现 input_fidelity。
+    expect(
+      "input_fidelity" in useImageCreateStore.getState().params,
+    ).toBe(false);
     expect(screen.getByRole("img", { name: "参考图预览" })).toHaveAttribute(
       "src",
       "blob:reference-preview",
