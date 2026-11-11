@@ -135,6 +135,23 @@ async fn wait_for_file(path: &Path) {
     panic!("file did not appear: {}", path.display());
 }
 
+/// 等到文件**存在且非空**：夹具用 shell 重定向写 pid（`printf … > file`）⇒
+/// 文件可能已建好但内容还没落盘，只等「存在」会读到空串（CI 慢机实测
+/// `fixture pid: ParseIntError { kind: Empty }`）。
+async fn wait_for_non_empty_file(path: &Path) {
+    for _ in 0..poll_attempts_for_test_timeout() {
+        if path.exists()
+            && std::fs::read_to_string(path)
+                .map(|content| !content.trim().is_empty())
+                .unwrap_or(false)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("file did not appear with content: {}", path.display());
+}
+
 fn poll_attempts_for_test_timeout() -> usize {
     (TEST_TIMEOUT.as_millis() / 5).max(1) as usize
 }

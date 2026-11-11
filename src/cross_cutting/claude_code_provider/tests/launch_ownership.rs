@@ -297,7 +297,7 @@ async fn claude_owned_raw_start_backfills_real_identity_and_deregisters_after_ta
     );
 
     // 2) 真实 PID+starttime:与 fixture 进程自身及 /proc 观察逐字相等。
-    wait_for_file(&pid_path).await;
+    wait_for_non_empty_file(&pid_path).await;
     let fixture_pid = std::fs::read_to_string(&pid_path)
         .expect("read fixture pid")
         .trim()
@@ -371,7 +371,7 @@ async fn claude_validated_start_backfills_real_identity_from_bound_carrier() {
             .map(String::as_str),
         Some(tree_key.as_str())
     );
-    wait_for_file(&pid_path).await;
+    wait_for_non_empty_file(&pid_path).await;
     let fixture_pid = std::fs::read_to_string(&pid_path)
         .expect("read fixture pid")
         .trim()
@@ -421,7 +421,7 @@ async fn claude_start_without_carrier_registers_nothing() {
         .await
         .expect("bare direct start");
     // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME。
-    wait_for_file(&pid_path).await;
+    wait_for_non_empty_file(&pid_path).await;
     let fixture_pid = std::fs::read_to_string(&pid_path)
         .expect("read fixture pid")
         .trim()
@@ -561,7 +561,7 @@ async fn claude_session_tail_cancel_releases_registration() {
     b1_drain(&mut session.events).await;
     let records = b1_wait_records(&fixture, &key, |records| records.is_empty()).await;
     assert!(records.is_empty(), "取消收口后注销: {records:?}");
-    wait_for_file(&pid_path).await;
+    wait_for_non_empty_file(&pid_path).await;
     let pid = std::fs::read_to_string(&pid_path)
         .expect("read fixture pid")
         .trim()

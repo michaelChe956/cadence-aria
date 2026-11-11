@@ -197,8 +197,28 @@ impl GitWorkspaceService {
             .await?
             .is_some()
         {
-            self.run_git(repo_path, &["worktree", "remove", "--force", &worktree])
-                .await?;
+            // 注册可能在「查得到」与「删除」之间消失/失效（并发 prune，或注册
+            // 半写未完成）⇒ git 拒删（does not point back）。此时按**残留**处理：
+            // prune + 补删目录，与下面「未注册残留」分支同语义 ⇒ 删除动作对残留
+            // 幂等（重放即清干净），而不是把一次竞态抛成失败
+            // （真机复现：CI 上 `plan_coding_delete_sweeps_residue_without_legacy_repos_json`
+            // 报 git_workspace_cleanup_failed）。
+            if let Err(error) = self
+                .run_git(repo_path, &["worktree", "remove", "--force", &worktree])
+                .await
+            {
+                let message = error.to_string();
+                if !message.contains("does not point back")
+                    && !message.contains("validation failed")
+                {
+                    return Err(error);
+                }
+                tracing::info!(
+                    worktree = %worktree,
+                    "worktree registration vanished during remove; falling back to residue cleanup"
+                );
+                let _ = self.run_git(repo_path, &["worktree", "prune"]).await;
+            }
         } else {
             tracing::info!(
                 worktree = %worktree,
