@@ -1,3 +1,9 @@
+import type {
+  ImageModelSelection,
+  ImageReferenceSource,
+  ImageVendor,
+} from "../api/types/image-create";
+
 export type ImageChatEntry =
   | UserMessage
   | ProviderText
@@ -35,6 +41,14 @@ export type GenerationImage = ImageChatEntryBase & {
   prompt: string;
   mediaType: string;
   imageUrl: string;
+  /** 供应方。旧会话记录没有该字段，读出为 undefined。 */
+  vendor?: ImageVendor;
+  /** 实际使用的模型 id。旧会话记录没有该字段，读出为 undefined。 */
+  model?: string;
+  /** 模型选择方式：自动轮转或显式指定。 */
+  selection?: ImageModelSelection;
+  /** 参考图来源：上一张图、上传参考图或无。 */
+  referenceSource?: ImageReferenceSource;
 };
 
 export type GenerationError = ImageChatEntryBase & {

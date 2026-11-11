@@ -12,15 +12,19 @@ import {
 } from "../api/image-create";
 import {
   DEFAULT_IMAGE_PARAMS,
+  IMAGE_MODEL_AUTO,
+  IMAGE_VENDORS,
   type GenerateImageRequest,
   type ImageCreateParams,
   type ImageCreateProvider,
   type ImageCreateTemplateChoice,
   type IterationEvent,
   type MaskedSettings,
+  type MaskedVendorSettings,
   type SessionRecord,
   type SessionSummary,
   type SettingsUpdateRequest,
+  type ImageVendor,
 } from "../api/types/image-create";
 import type { ImageChatEntry } from "./image-create-entries";
 
@@ -69,7 +73,8 @@ const initialState: ImageCreateState = {
   params: {
     prompt: "",
     ...DEFAULT_IMAGE_PARAMS,
-    input_fidelity: null,
+    model: IMAGE_MODEL_AUTO,
+    use_previous: true,
   },
   referenceImage: null,
   settings: null,
@@ -91,6 +96,47 @@ function entryId(prefix: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 该家是否已配置凭据：Base URL 与 API Key 均非空。 */
+export function isImageVendorConfigured(
+  vendor: MaskedVendorSettings | undefined,
+): boolean {
+  if (!vendor) {
+    return false;
+  }
+  return vendor.base_url.trim() !== "" && vendor.api_key_masked.trim() !== "";
+}
+
+/** 已配置凭据的供应方列表，供模型下拉过滤使用。 */
+export function configuredImageVendors(
+  settings: MaskedSettings | null,
+): ImageVendor[] {
+  if (!settings) {
+    return [];
+  }
+  return IMAGE_VENDORS.filter((vendor) =>
+    isImageVendorConfigured(settings.vendors[vendor]),
+  );
+}
+
+/**
+ * 所选模型若不属于任何已配置凭据的供应方的清单，则重置为自动轮转。
+ * 设置变化后调用，避免留下已下线的模型。
+ */
+function resolveConfiguredModel(
+  settings: MaskedSettings | null,
+  model: string,
+): string {
+  if (!settings || model === IMAGE_MODEL_AUTO) {
+    return model;
+  }
+  for (const vendor of configuredImageVendors(settings)) {
+    if (settings.vendors[vendor].models.includes(model)) {
+      return model;
+    }
+  }
+  return IMAGE_MODEL_AUTO;
 }
 
 function buildEntries(record: SessionRecord): ImageChatEntry[] {
@@ -131,6 +177,11 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
           prompt: result.prompt,
           mediaType: result.media_type,
           imageUrl: imageUrl(record.session.id, result.image_id),
+          // 旧会话记录没有这四个字段，读出为 undefined。
+          vendor: result.vendor,
+          model: result.model,
+          selection: result.selection,
+          referenceSource: result.reference_source,
           timestamp: result.ts,
         };
       }
@@ -515,6 +566,10 @@ export const useImageCreateStore = create<
         prompt: params.prompt,
         mediaType: result.media_type,
         imageUrl: imageUrl(sessionId, result.image_id),
+        vendor: result.vendor,
+        model: result.model,
+        selection: result.selection,
+        referenceSource: result.reference_source,
         timestamp: new Date().toISOString(),
       });
       set({ isBusy: false });
@@ -544,7 +599,11 @@ export const useImageCreateStore = create<
       const settings = await getImageCreateSettings();
       set((state) => ({
         settings,
-        params: { ...state.params, ...settings.defaults },
+        params: {
+          ...state.params,
+          ...settings.defaults,
+          model: resolveConfiguredModel(settings, state.params.model),
+        },
       }));
     } catch (error) {
       set({ error: errorMessage(error) });
@@ -553,15 +612,23 @@ export const useImageCreateStore = create<
   },
 
   saveSettings: async (request) => {
-    if (request.base_url != null) {
-      validateImageCreateBaseUrl(request.base_url);
+    // 逐家校验本次提交的 Base URL；两家都未出现时不做前置校验。
+    for (const vendor of IMAGE_VENDORS) {
+      const baseUrl = request.vendors?.[vendor]?.base_url;
+      if (baseUrl != null && baseUrl.trim() !== "") {
+        validateImageCreateBaseUrl(baseUrl);
+      }
     }
     set({ error: null });
     try {
       const settings = await updateImageCreateSettings(request);
       set((state) => ({
         settings,
-        params: { ...state.params, ...settings.defaults },
+        params: {
+          ...state.params,
+          ...settings.defaults,
+          model: resolveConfiguredModel(settings, state.params.model),
+        },
       }));
     } catch (error) {
       set({ error: errorMessage(error) });

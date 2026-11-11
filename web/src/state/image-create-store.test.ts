@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ImageCreateSession,
+  ImageVendor,
+  MaskedSettings,
+  MaskedVendorSettings,
   SessionRecord,
   SessionSummary,
 } from "../api/types/image-create";
+import type { GenerationImage } from "./image-create-entries";
 
 const api = vi.hoisted(() => ({
   listImageCreateSessions: vi.fn(),
@@ -391,6 +395,112 @@ describe("image create store", () => {
     });
     expect(useImageCreateStore.getState().isBusy).toBe(false);
   });
+
+  it("starts with the automatic rotation model and the previous-image switch enabled", async () => {
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    expect(useImageCreateStore.getState().params.model).toBe("auto");
+    expect(useImageCreateStore.getState().params.use_previous).toBe(true);
+  });
+
+  it("records the vendor, model, selection and reference source of a generated image", async () => {
+    const session = imageSession();
+    api.getImageCreateSession.mockResolvedValue(record(session));
+    api.generateImage.mockResolvedValue({
+      media_type: "image/webp",
+      image_id: "image-9",
+      vendor: "minimax",
+      model: "MiniMax-H3-Image",
+      selection: "auto",
+      reference_source: "previous",
+    });
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+    useImageCreateStore.getState().setParams({ prompt: "a cat" });
+    await useImageCreateStore.getState().generate();
+
+    expect(api.generateImage).toHaveBeenCalledWith(
+      session.id,
+      expect.objectContaining({ model: "auto", use_previous: true }),
+    );
+    expect(useImageCreateStore.getState().entries.at(-1)).toMatchObject({
+      type: "generation_image",
+      vendor: "minimax",
+      model: "MiniMax-H3-Image",
+      selection: "auto",
+      referenceSource: "previous",
+    });
+  });
+
+  it("keeps the selected model while a configured vendor still offers it", async () => {
+    const settings = maskedSettings({
+      gpt: { models: ["gpt-image-2.6"], default_model: "gpt-image-2.6" },
+    });
+    api.getImageCreateSettings.mockResolvedValue(settings);
+    api.updateImageCreateSettings.mockResolvedValue(settings);
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().loadSettings();
+    useImageCreateStore.getState().setParams({ model: "gpt-image-2.6" });
+    await useImageCreateStore
+      .getState()
+      .saveSettings({ vendors: { gpt: { api_key_action: "retain" } } });
+
+    expect(useImageCreateStore.getState().params.model).toBe("gpt-image-2.6");
+  });
+
+  it("resets the selected model to auto when no configured vendor offers it", async () => {
+    api.getImageCreateSettings.mockResolvedValue(
+      maskedSettings({
+        gpt: { models: ["gpt-image-2.6"], default_model: "gpt-image-2.6" },
+        minimax: { models: ["MiniMax-H3-Image"] },
+      }),
+    );
+    api.updateImageCreateSettings.mockResolvedValue(
+      maskedSettings({
+        gpt: { models: ["gpt-image-2.6"], default_model: "gpt-image-2.6" },
+        minimax: { models: ["MiniMax-H3-Image"] },
+      }),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().loadSettings();
+    // MiniMax 未配置凭据，其模型不进入可选清单。
+    useImageCreateStore.getState().setParams({ model: "MiniMax-H3-Image" });
+    await useImageCreateStore
+      .getState()
+      .saveSettings({ vendors: { gpt: { api_key_action: "retain" } } });
+
+    expect(useImageCreateStore.getState().params.model).toBe("auto");
+  });
+
+  it("restores legacy generation entries without vendor metadata", async () => {
+    const session = imageSession();
+    api.getImageCreateSession.mockResolvedValue(
+      record(session, [generationResult({ image_id: "legacy-image" })]),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+
+    const entry = useImageCreateStore.getState().entries.at(-1) as
+      | GenerationImage
+      | undefined;
+    expect(entry).toMatchObject({
+      type: "generation_image",
+      imageUrl:
+        "/api/image-create/sessions/session-1/images/legacy-image",
+    });
+    expect(Object.hasOwn(entry!, "vendor")).toBe(true);
+    expect(Object.hasOwn(entry!, "model")).toBe(true);
+    expect(Object.hasOwn(entry!, "selection")).toBe(true);
+    expect(Object.hasOwn(entry!, "referenceSource")).toBe(true);
+    expect(entry!.vendor).toBeUndefined();
+    expect(entry!.model).toBeUndefined();
+    expect(entry!.selection).toBeUndefined();
+    expect(entry!.referenceSource).toBeUndefined();
+  });
 });
 
 function imageSession(
@@ -449,5 +559,40 @@ function record(
     generation_results: generationResults,
     events: [],
     generation: 0,
+  };
+}
+
+/** 构造脱敏设置：默认只有 GPT 家配置了凭据。 */
+function maskedSettings(
+  overrides: Partial<Record<ImageVendor, Partial<MaskedVendorSettings>>> = {},
+): MaskedSettings {
+  const vendor = (base: Partial<MaskedVendorSettings>): MaskedVendorSettings => ({
+    base_url: "",
+    api_key_masked: "",
+    models: [],
+    default_model: "",
+    recommended_models: [],
+    available: false,
+    ...base,
+  });
+  return {
+    vendors: {
+      gpt: vendor({
+        base_url: "https://gpt.example.com/v1",
+        api_key_masked: "sk-****t123",
+        models: ["gpt-image-2.6"],
+        default_model: "gpt-image-2.6",
+        recommended_models: ["gpt-image-2.6"],
+        available: true,
+        ...overrides.gpt,
+      }),
+      minimax: vendor(overrides.minimax ?? {}),
+    },
+    defaults: {
+      size: "auto",
+      quality: "auto",
+      background: "auto",
+      output_format: "png",
+    },
   };
 }
