@@ -11,6 +11,11 @@ use crate::product::image_create::models::{
 };
 
 const MAX_ERROR_BODY_CHARS: usize = 500;
+/// 非 2xx 错误体的读取上限：流式累计到此字节数即停止读取（H6）。
+/// 恶意/被劫持端点可用超大错误体诱导大内存分配；错误文本随后仍截断到 500 字符。
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+/// 2xx 成功体的读取上限：正常 b64 响应远小于此，超过视为恶意/异常端点（H6）。
+const MAX_SUCCESS_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// MiniMax 的面积档位：用户选 `size=auto` 时改发面积（见设计 D10）。
 const MINIMAX_AUTO_AREA: &str = "1K";
 /// MiniMax 默认返回图片 URL，必须显式要求 base64。
@@ -80,6 +85,9 @@ pub enum ImageClientError {
     /// HTTP 2xx 但 data[] 中没有成功项、且存在带 error 的项。内容已脱敏并截断。
     #[error("图片端点返回逐项错误：{0}")]
     ItemError(String),
+    /// 响应体超过读取上限：视为恶意/异常端点，避免大内存分配（H6）。
+    #[error("图片端点响应体超过大小上限")]
+    OversizedBody,
 }
 
 #[async_trait]
@@ -171,17 +179,22 @@ impl ImageClientApi for ImageClient {
         }
         if !response.status().is_success() {
             let code = response.status().as_u16();
-            let body = response.text().await.map_err(normalize_reqwest_error)?;
+            // H6：错误体流式读取并设 8 KiB 上限，而非 response.text() 整读。
+            let (body, _) = read_body_within(response, MAX_ERROR_BODY_BYTES).await?;
+            let body = String::from_utf8_lossy(&body);
             return Err(ImageClientError::HttpStatus {
                 code,
                 body: sanitize_error_body(&body, &target.api_key),
             });
         }
 
-        let payload = response
-            .json::<ImageResponse>()
-            .await
-            .map_err(normalize_reqwest_error)?;
+        // H6：成功体同样设上限，超过按恶意端点处理，报可读错误。
+        let (body, hit_limit) = read_body_within(response, MAX_SUCCESS_BODY_BYTES).await?;
+        if hit_limit {
+            return Err(ImageClientError::OversizedBody);
+        }
+        let payload = serde_json::from_slice::<ImageResponse>(&body)
+            .map_err(|_| ImageClientError::Network)?;
         let b64 = extract_b64(payload, &target.api_key)?;
 
         Ok(ImageGenOutcome {
@@ -409,6 +422,24 @@ fn media_type(format: ImageOutputFormat) -> &'static str {
         ImageOutputFormat::Jpeg => "image/jpeg",
         ImageOutputFormat::Webp => "image/webp",
     }
+}
+
+/// 有上限的响应体流式读取（H6）：累计超过 limit 即保留上限内字节并停止读取。
+/// 返回 (已读字节, 是否触达上限)；UTF-8 截断点由 from_utf8_lossy 容错。
+async fn read_body_within(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), ImageClientError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(normalize_reqwest_error)? {
+        if body.len() + chunk.len() > limit {
+            let keep = limit.saturating_sub(body.len());
+            body.extend_from_slice(&chunk[..keep]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
 }
 
 fn sanitize_error_body(body: &str, api_key: &str) -> String {

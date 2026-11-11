@@ -494,3 +494,51 @@ fn c16_debug_output_never_contains_the_api_key() {
         "Debug 必须脱敏：{debug}"
     );
 }
+
+#[tokio::test]
+async fn c17_huge_error_body_is_read_with_a_cap_and_truncated_to_500_chars() {
+    // H6：恶意/被劫持端点可用超大错误体诱导大内存分配。错误体必须流式读取并设上限，
+    // 错误文本仍按既有规则截断到 ≤500 字符，请求恰好发生 1 次（不重试）。
+    let mut server = mockito::Server::new_async().await;
+    let target = new_target(ImageVendor::Gpt, &server.url(), GPT_MODEL);
+    let huge = "x".repeat(16 * 1024 * 1024);
+    let mock = status_mock(&mut server, 500, &huge, 1).await;
+    let retry = status_mock(&mut server, 500, &huge, 0).await;
+
+    let error = call(&target, &request(ImageSize::Auto), None)
+        .await
+        .expect_err("超大错误体必须失败");
+    match error {
+        ImageClientError::HttpStatus { code, body } => {
+            assert_eq!(code, 500);
+            assert!(
+                body.chars().count() <= 500,
+                "错误文本必须截断到 ≤500 字符，实际 {} 字符",
+                body.chars().count()
+            );
+            assert!(body.chars().all(|c| c == 'x'), "内容仍是错误体前缀：{body}");
+        }
+        other => panic!("期望 HttpStatus，实际：{other:?}"),
+    }
+    mock.assert_async().await;
+    retry.assert_async().await;
+}
+
+#[tokio::test]
+async fn c18_success_body_over_64mib_is_rejected_with_a_readable_error() {
+    // H6：2xx 成功体同样设 64 MiB 上限。超限时不得整读后报笼统的网络错误，
+    // 必须是明确的大小上限错误（可读、面向用户）。
+    let mut server = mockito::Server::new_async().await;
+    let target = new_target(ImageVendor::Gpt, &server.url(), GPT_MODEL);
+    let oversized = "x".repeat(64 * 1024 * 1024 + 1);
+    let mock = status_mock(&mut server, 200, &oversized, 1).await;
+
+    let error = call(&target, &request(ImageSize::Auto), None)
+        .await
+        .expect_err("超限成功体必须失败");
+    assert_eq!(
+        error, ImageClientError::OversizedBody,
+        "超限应报大小上限错误，而非笼统 Network"
+    );
+    mock.assert_async().await;
+}
