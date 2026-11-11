@@ -1,5 +1,6 @@
 //! SC compile 教学重驱 prompt 构造面，自 prompts.rs 拆出以守 1200 行文件守护
-//! （先例：prompts/sc_author_teaching.rs、prompts/sc_revision.rs）。
+//! （先例：同仓另一模块的 `work_item_split_engine/prompts/sc_author_teaching.rs`、
+//! `work_item_split_engine/prompts/sc_revision.rs`）。
 //!
 //! 对外路径不变——`prompts` 原样 re-export 本模块入口，调用点
 //! `crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt`
