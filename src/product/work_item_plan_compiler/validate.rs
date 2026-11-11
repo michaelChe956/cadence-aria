@@ -16,6 +16,7 @@ use crate::product::work_item_split_validator::{
     WorkItemDraftLocalValidator, WorkItemPlanOutlineValidator, WorkItemSplitValidator,
 };
 
+use super::ir_fault::IrFault;
 use super::{
     lower::PlanCandidateIr,
     types::{CompilerDiagnostic, PlanCandidateMechanicalReport, PlanCandidateValidationContext},
@@ -174,6 +175,11 @@ pub fn validate_plan_candidate_ir(
         finding.severity == WorkItemSplitFindingSeverity::Error
             && !super::types::PREFLIGHT_FINDING_CODES.contains(&finding.code.as_str())
     }) {
+        // 工作包 2.6（MODIFIED REQ-WSC-09）：四码 typed IR 载荷在 split
+        // validator 投影（WorkItemSplitFinding 无侧信道）中会丢失——诊断
+        // 出口用同一纯函数对同一 IR 合同确定性重建，并按（code×affected
+        // ids）对位挂接；不从 message 反解析、不新增判定面。
+        let mut contract_ir_faults = collect_contract_ir_faults(ir);
         return Err(report
             .findings
             .iter()
@@ -181,7 +187,11 @@ pub fn validate_plan_candidate_ir(
                 finding.severity == WorkItemSplitFindingSeverity::Error
                     && !super::types::PREFLIGHT_FINDING_CODES.contains(&finding.code.as_str())
             })
-            .map(validator_diagnostic)
+            .map(|finding| {
+                let mut diagnostic = validator_diagnostic(finding);
+                attach_contract_ir_fault(&mut diagnostic, &mut contract_ir_faults);
+                diagnostic
+            })
             .collect());
     }
     Ok(report)
@@ -247,6 +257,7 @@ pub fn validate_work_item_intent_contract(
                         // F1.2：line=0 诊断不伪行、未 typed 不猜 kind。
                         kind: None,
                         lowering_fault: None,
+                        ir_fault: None,
                     });
                 }
             }
@@ -356,6 +367,7 @@ fn unexecutable(work_item_id: &str, message: String) -> CompilerDiagnostic {
         // F1.2：line=0 诊断不伪行、未 typed 不猜 kind。
         kind: None,
         lowering_fault: None,
+        ir_fault: None,
     }
 }
 
@@ -523,6 +535,46 @@ fn validator_diagnostic(finding: &WorkItemSplitFinding) -> CompilerDiagnostic {
         // finding 自身的可选 kind 由 split 侧显式携带（F2b）。
         kind: None,
         lowering_fault: None,
+        ir_fault: None,
+    }
+}
+
+/// 工作包 2.6：对 IR 各 item 的同一合同重跑 `validate_canonical_contract`
+/// （纯函数、同一输入 ⇒ 同一 findings），收集四码 typed 载荷及其对位键
+/// （code × affected ids，与 draft 投影的 affected_ids 同一构造口径）。
+fn collect_contract_ir_faults(ir: &PlanCandidateIr) -> Vec<(String, IrFault)> {
+    let mut keyed = Vec::new();
+    for item in &ir.items {
+        let findings =
+            crate::product::work_item_contract::validate_canonical_contract(&item.contract)
+                .findings;
+        for finding in findings {
+            let Some(fault) = finding.ir_fault else {
+                continue;
+            };
+            let mut affected_ids = vec![finding.logical_work_item_id.clone().unwrap_or_default()];
+            affected_ids.extend(finding.contract_ref.iter().cloned());
+            affected_ids.extend(finding.capability_ref.iter().cloned());
+            affected_ids.sort();
+            affected_ids.dedup();
+            keyed.push((
+                format!("{}:{}", finding.code, affected_ids.join(",")),
+                fault,
+            ));
+        }
+    }
+    keyed
+}
+
+/// 按对位键把重建的 typed 载荷挂到 fail-closed 诊断上（同键多载荷时按
+/// 序消耗——两侧序列都来自同一确定性 findings 顺序）。
+fn attach_contract_ir_fault(
+    diagnostic: &mut CompilerDiagnostic,
+    keyed: &mut Vec<(String, IrFault)>,
+) {
+    let key = format!("{}:{}", diagnostic.code, diagnostic.field);
+    if let Some(position) = keyed.iter().position(|(candidate, _)| *candidate == key) {
+        diagnostic.ir_fault = Some(keyed.remove(position).1);
     }
 }
 

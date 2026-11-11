@@ -81,6 +81,11 @@ pub struct CompilerDiagnostic {
     /// 只有机器事实完整的构造点显式写 `Some`（producer：Plan Intent 分支
     /// 等价解析 fail-closed 与必填缺席），严禁从 code/message 反推。
     pub lowering_fault: Option<LoweringFault>,
+    /// 工作包 2.6（MODIFIED REQ-WSC-09）：IR 侧信道 typed 载荷——四码
+    /// producer（contract 交叉引用）在构造点显式写 `Some`；
+    /// `source_line` 由 `attach_source_lines` 经 AST span 补全，无原行
+    /// 保持 `None`，严禁从 code/message 反推。
+    pub ir_fault: Option<super::ir_fault::IrFault>,
 }
 
 /// REQ-CRP-02：lowering 阶段的独立 typed fault——不进 wire 枚举

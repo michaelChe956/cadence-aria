@@ -324,6 +324,7 @@ fn contract_validation_error() -> ContractValidationFinding {
         capability_ref: None,
         message: "contract validation failed".to_string(),
         kind: None,
+        ir_fault: None,
     }
 }
 

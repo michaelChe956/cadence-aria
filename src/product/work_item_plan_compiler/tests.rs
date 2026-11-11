@@ -207,8 +207,7 @@ fn grammar_contract() {
             line: 8,
         }],
     };
-    let cloned_ast = ast.clone();
-    assert_eq!(ast, cloned_ast);
+    assert_eq!(ast, ast.clone());
     assert_eq!(ast.items[0].id.value, "WI-001");
     assert_eq!(ast.items[0].id.line, 2);
     assert_eq!(ast.items[0].sections[0].fields[0].key.value, "kind");
@@ -223,6 +222,7 @@ fn grammar_contract() {
         repair_example: "example".to_string(),
         kind: None,
         lowering_fault: None,
+        ir_fault: None,
     };
     assert_eq!(diagnostic.code, "missing_section");
     assert_eq!(diagnostic.line, 1);

@@ -4,6 +4,7 @@ mod check_target_forbidden;
 mod equivalence;
 pub mod freshness;
 pub mod grammar;
+mod ir_fault;
 mod lower;
 pub mod normalize;
 mod parse;
@@ -14,6 +15,7 @@ mod write_scope_bound;
 pub use equivalence::{CompiledPlanAudit, compile_work_item_plan_audited};
 pub use freshness::{FreshnessError, verify_publish_freshness};
 pub use grammar::*;
+pub use ir_fault::{IrFault, IrFaultKind, IrFaultLocator, attach_source_lines};
 pub use lower::{
     PlanCandidateIr, PlanCandidateItemIr, PlanMemberTargets, WorkItemPlanSourceContext,
     compile_work_item_plan, lower_work_item_plan,
@@ -29,5 +31,7 @@ pub use validate::{validate_plan_candidate_ir, validate_work_item_intent_contrac
 
 #[cfg(test)]
 mod equivalence_tests;
+#[cfg(test)]
+mod ir_fault_tests;
 #[cfg(test)]
 mod tests;

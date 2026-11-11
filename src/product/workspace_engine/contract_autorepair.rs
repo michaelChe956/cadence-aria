@@ -1204,14 +1204,9 @@ mod tests {
 
     #[test]
     fn converge_loop_repairs_until_clean_and_reports_log() {
-        let (ir, source, applied) = converge_work_item_plan_source(
-            &capability_gap_candidate(),
-            WorkItemPlanSourceContext {
-                target_repository_id: "repo_fixture".to_string(),
-                member_targets: None,
-            },
-        )
-        .expect("converge must succeed");
+        let (ir, source, applied) =
+            converge_work_item_plan_source(&capability_gap_candidate(), source_context())
+                .expect("converge must succeed");
         assert!(
             source.contains("- capabilities: api.levels.read, api.levels.write\n"),
             "converged source must carry the repair"
@@ -1309,6 +1304,7 @@ mod tests {
             repair_example: "- kind: backend".to_string(),
             kind: None,
             lowering_fault: None,
+            ir_fault: None,
         }
     }
 

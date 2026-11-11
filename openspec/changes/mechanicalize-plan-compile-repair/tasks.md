@@ -15,7 +15,7 @@
 - [ ] 2.3 实现：教学资格判据由 `TEACHABLE_PARSE_FAILURE_CODES`（`run/single_candidate.rs:84-100`）改为「fault 在场且 field+行+期望形态齐全」；重驱 prompt 直接渲染 typed payload
 - [ ] 2.4 不变量：同一 candidate 总重驱次数恒 ≤1（既有单槽不变），加断言
 - [ ] 2.5 回归：无 fault 的 lowering 仍按既有终态；既有 parse 教学重驱用例全绿
-- [ ] 2.6 实现：四类 typed IR 诊断 producer（裁决 §1.5）——`src/product/work_item_contract/validation.rs:245-312` 与拆出的 handler 预检产 `unknown_done_when_ref`、`unknown_reviewer_check_ref`、`acceptance_criterion_without_reviewer_check`、`unknown_requirement_ref`；新增内部 `src/product/work_item_plan_compiler/ir_fault.rs` 承载 typed payload（WI、task/check/criterion、错误 ref、本 WI 合法集合或真实 spec 集合、原行——无行即「不可定位」、所需字段形态）；MUST NOT 从现 `:265-267` message 反解析 task ID
+- [x] 2.6 实现：四类 typed IR 诊断 producer（裁决 §1.5）——`src/product/work_item_contract/validation.rs:245-312` 与拆出的 handler 预检产 `unknown_done_when_ref`、`unknown_reviewer_check_ref`、`acceptance_criterion_without_reviewer_check`、`unknown_requirement_ref`；新增内部 `src/product/work_item_plan_compiler/ir_fault.rs` 承载 typed payload（WI、task/check/criterion、错误 ref、本 WI 合法集合或真实 spec 集合、原行——无行即「不可定位」、所需字段形态）；MUST NOT 从现 `:265-267` message 反解析 task ID
 - [ ] 2.7 先红：数据库/基线/成员解析失败（原 handler `:288-357`）判 Operational——MUST NOT 复用「Some(reasons) 即重驱」；失败集合混合 operational 与可教类时零重驱（禁止 `any(可教)` 放行）；「恰好一次」以前置授权、合法 provider 与剩余机会为条件
 - [ ] 2.8 不变量：新增可教类别必须显式进入规格/typed 白名单（负向测试：`code` 前缀或「缺少」措辞不自动获权）；其余结构 kind 复用 `planning_failure.rs` 事实完整性规则
 

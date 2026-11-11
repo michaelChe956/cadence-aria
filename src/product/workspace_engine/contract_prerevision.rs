@@ -1177,6 +1177,7 @@ mod tests {
             capability_ref: None,
             message: "acceptance criterion AC-001 must describe an observable result".to_string(),
             kind: None,
+            ir_fault: None,
         };
         let finding = contract_finding_to_review_finding(&warning, Some(&graph), None);
         assert_eq!(finding.severity, ReviewFindingSeverity::Suggestion);
@@ -1860,6 +1861,7 @@ mod tests {
             capability_ref: None,
             message: "acceptance criterion must describe an observable result".to_string(),
             kind: None,
+            ir_fault: None,
         };
         let finding = contract_finding_to_review_finding(&warning, None, None);
         assert_eq!(finding.machine_repair, None);

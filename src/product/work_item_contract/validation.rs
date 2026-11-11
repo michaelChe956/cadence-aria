@@ -1,5 +1,7 @@
 use std::{cmp::Ordering, collections::BTreeSet};
 
+use crate::product::work_item_plan_compiler::{IrFault, IrFaultKind, IrFaultLocator};
+
 use serde::{Deserialize, Serialize};
 
 use super::{BlockerRoute, CanonicalWorkItemContract};
@@ -25,6 +27,13 @@ pub struct ContractValidationFinding {
     /// 哈希兼容纪律：Option + default + skip，旧记录再序列化字节不变。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<crate::product::planning_failure::PlanningFailureKind>,
+    /// 工作包 2.6（MODIFIED REQ-WSC-09）：四码 producer 显式写入的 typed
+    /// IR 载荷（定位、出错引用与合法集合完整保留）；其余分支一律
+    /// `None`——缺事实不猜，严禁从 code/message 反推；旧 JSON 无该字段
+    /// 解析为 None。serde 形状遵循 plan §0.5 哈希兼容纪律：Option +
+    /// default + skip，旧记录再序列化字节不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ir_fault: Option<IrFault>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,7 +265,9 @@ pub fn validate_canonical_contract(
     for task in &contract.tasks {
         for reference in &task.done_when_refs {
             if !acceptance_criterion_ids.contains(reference.as_str()) {
-                findings.push(error_finding(
+                // 工作包 2.6：typed 载荷在四码构造点显式写入（合法集 =
+                // 该 WI 全部 criterion id；source_line=None，行号经 AST 补全）。
+                let mut finding = error_finding(
                     "unknown_done_when_ref",
                     logical_work_item_id,
                     Some(reference),
@@ -265,12 +276,24 @@ pub fn validate_canonical_contract(
                         "task {} references unknown acceptance criterion {reference}",
                         task.task_id
                     ),
+                );
+                finding.ir_fault = Some(typed_ir_fault(
+                    IrFaultKind::UnknownDoneWhenRef,
+                    logical_work_item_id,
+                    IrFaultLocator::Task {
+                        task_id: task.task_id.clone(),
+                    },
+                    reference,
+                    &acceptance_criterion_ids,
                 ));
+                findings.push(finding);
             }
         }
         for reference in &task.requirement_refs {
             if !requirement_ids.contains(reference.as_str()) {
-                findings.push(error_finding(
+                // 工作包 2.6：typed 载荷在四码构造点显式写入（合法集 =
+                // 该 WI Traceability 已声明的 requirement_id）。
+                let mut finding = error_finding(
                     "unknown_requirement_ref",
                     logical_work_item_id,
                     Some(reference),
@@ -279,7 +302,17 @@ pub fn validate_canonical_contract(
                         "task {} references unknown design requirement {reference}",
                         task.task_id
                     ),
+                );
+                finding.ir_fault = Some(typed_ir_fault(
+                    IrFaultKind::UnknownRequirementRef,
+                    logical_work_item_id,
+                    IrFaultLocator::Task {
+                        task_id: task.task_id.clone(),
+                    },
+                    reference,
+                    &requirement_ids,
                 ));
+                findings.push(finding);
             }
         }
     }
@@ -292,24 +325,45 @@ pub fn validate_canonical_contract(
         .collect::<BTreeSet<_>>();
     for reference in &contract.handoff_contract.reviewer_check_refs {
         if !acceptance_criterion_ids.contains(reference.as_str()) {
-            findings.push(error_finding(
+            // 工作包 2.6：typed 载荷在四码构造点显式写入（定位钉死 Handoff）。
+            let mut finding = error_finding(
                 "unknown_reviewer_check_ref",
                 logical_work_item_id,
                 Some(reference),
                 None,
                 format!("handoff reviewer check references unknown criterion {reference}"),
+            );
+            finding.ir_fault = Some(typed_ir_fault(
+                IrFaultKind::UnknownReviewerCheckRef,
+                logical_work_item_id,
+                IrFaultLocator::Handoff,
+                reference,
+                &acceptance_criterion_ids,
             ));
+            findings.push(finding);
         }
     }
     for criterion_id in &acceptance_criterion_ids {
         if !reviewer_check_refs.contains(criterion_id) {
-            findings.push(error_finding(
+            // 工作包 2.6：typed 载荷在四码构造点显式写入（定位钉死
+            // Criterion；合法集 = 实际声明的 reviewer_check_refs，空即空）。
+            let mut finding = error_finding(
                 "acceptance_criterion_without_reviewer_check",
                 logical_work_item_id,
                 Some(criterion_id),
                 None,
                 format!("acceptance criterion {criterion_id} has no handoff reviewer check"),
+            );
+            finding.ir_fault = Some(typed_ir_fault(
+                IrFaultKind::AcceptanceCriterionWithoutReviewerCheck,
+                logical_work_item_id,
+                IrFaultLocator::Criterion {
+                    criterion_id: criterion_id.to_string(),
+                },
+                criterion_id,
+                &reviewer_check_refs,
             ));
+            findings.push(finding);
         }
     }
     for criterion in &contract.acceptance_criteria {
@@ -462,6 +516,30 @@ pub(crate) fn error_finding(
         // F2a：helper 覆盖的分支不携带完整 typed 供需事实，一律 None
         //（供需族 typed 分支经 typed_error_finding 构造，缺事实不猜）。
         kind: None,
+        ir_fault: None,
+    }
+}
+
+/// 工作包 2.6（MODIFIED REQ-WSC-09）：四码 producer 的 typed 载荷构造——
+/// `source_line` 恒 `None`（contract 层无 source 行号，不猜；行号由
+/// `attach_source_lines` 经 AST 补全），`legal_refs` 取循环前已算好的
+/// 合法集合，`expected_shape` 取 `IrFaultKind` 单一事实源。
+fn typed_ir_fault(
+    kind: IrFaultKind,
+    logical_work_item_id: &str,
+    locator: IrFaultLocator,
+    offending_ref: &str,
+    legal_refs: &BTreeSet<&str>,
+) -> IrFault {
+    let expected_shape = kind.expected_shape().to_string();
+    IrFault {
+        kind,
+        work_item_id: logical_work_item_id.to_string(),
+        locator,
+        offending_ref: offending_ref.to_string(),
+        legal_refs: legal_refs.iter().copied().map(str::to_string).collect(),
+        source_line: None,
+        expected_shape,
     }
 }
 
@@ -502,6 +580,7 @@ pub(crate) fn warning_finding(
         capability_ref: capability_ref.map(str::to_string),
         message,
         kind: None,
+        ir_fault: None,
     }
 }
 

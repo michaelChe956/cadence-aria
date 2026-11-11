@@ -320,6 +320,7 @@ fn resolve_item_target_repository_id(
             // producer 归 F2a/SG1），不猜 kind。
             kind: None,
             lowering_fault: None,
+            ir_fault: None,
         });
     };
 
@@ -1079,7 +1080,7 @@ fn non_placeholder(value: &str) -> Option<String> {
 fn split_values(values: Vec<&str>) -> Vec<String> {
     values.into_iter().flat_map(split_value).collect()
 }
-fn split_value(value: &str) -> Vec<String> {
+pub(crate) fn split_value(value: &str) -> Vec<String> {
     value
         .split(',')
         .map(str::trim)
@@ -1185,5 +1186,6 @@ pub(super) fn diagnostic(
         // 不从 code/message 推导。
         kind: None,
         lowering_fault: None,
+        ir_fault: None,
     }
 }

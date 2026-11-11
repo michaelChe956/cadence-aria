@@ -159,6 +159,7 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                         example: "## Work Item WI-001: Levels API fixture".to_string(),
                     }),
                     lowering_fault: None,
+                    ir_fault: None,
                 });
                 current_item = None;
             }
@@ -629,6 +630,7 @@ fn diagnostic(
         // 一律 None（typed producer 分支单独构造，缺事实不猜）。
         kind: None,
         lowering_fault: None,
+        ir_fault: None,
     }
 }
 
