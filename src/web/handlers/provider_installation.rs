@@ -351,6 +351,8 @@ mod tests {
 
     struct ScriptedRunner {
         results: Mutex<VecDeque<Result<BoundedCommandResult, BoundedCommandError>>>,
+        /// 脚本原件：脚本用尽时**回放一轮**（见 `run` 的说明）。
+        script: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
         delay: Duration,
     }
 
@@ -360,7 +362,8 @@ mod tests {
             delay: Duration,
         ) -> Arc<Self> {
             Arc::new(Self {
-                results: Mutex::new(VecDeque::from(results)),
+                results: Mutex::new(VecDeque::from(results.clone())),
+                script: results,
                 delay,
             })
         }
@@ -375,11 +378,15 @@ mod tests {
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
-            self.results
-                .lock()
-                .expect("scripted results")
-                .pop_front()
-                .expect("scripted result")
+            let mut results = self.results.lock().expect("scripted results");
+            if results.is_empty() {
+                // 脚本用尽 = 发生了**额外一轮**探测（CI 慢机上更常见：一次刷新
+                // 赶在快照过期后）。回放脚本原件（探测顺序与结果不变）而不是
+                // panic ——「不该发生的额外调用」由用例自身的断言把关，不该由
+                // 夹具的 panic 表达（那会把慢机误报成功能缺陷）。
+                results.extend(self.script.iter().cloned());
+            }
+            results.pop_front().expect("scripted result")
         }
     }
 
