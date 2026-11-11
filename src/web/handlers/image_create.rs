@@ -5,7 +5,6 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Multipart, Path, State, WebSocketUpgrade};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -14,10 +13,11 @@ use serde_json::json;
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::cross_cutting::image_client::{ImageGenRequest, ImageRefImage};
 use crate::cross_cutting::image_reference_validation::validate_reference_image;
+use crate::product::image_create::engine::GenerateCommand;
 use crate::product::image_create::image_files;
 use crate::product::image_create::models::{
-    CreateSessionRequest, GenerationResult, ImageBackground, ImageCreateError, ImageOutputFormat,
-    ImageQuality, ImageSize, IterationEvent, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
+    CreateSessionRequest, ImageBackground, ImageCreateError, ImageOutputFormat, ImageQuality,
+    ImageSize, IterationEvent, ModelChoice, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
     SettingsStoreApi, SettingsUpdateRequest, validate_session_id,
 };
 use crate::product::image_create::{ImageCreateEngine, SessionStore, SettingsStore};
@@ -167,13 +167,9 @@ pub async fn get_session_image(
         .iter()
         .find(|result| result.image_id.as_deref() == Some(image_id.as_str()))
         .ok_or_else(ImageCreateApiError::not_found)?;
-    let bytes = match paths(&state).image_create_image_file(&image_id, &result.media_type) {
-        Some(path) => match tokio::fs::read(path).await {
-            Ok(bytes) => bytes,
-            Err(_) => decode_legacy(result)?,
-        },
-        None => decode_legacy(result)?,
-    };
+    let bytes = image_files::read_result_image(&paths(&state), result)
+        .await
+        .ok_or_else(ImageCreateApiError::not_found)?;
     let headers = [
         (
             header::CONTENT_TYPE,
@@ -191,16 +187,6 @@ pub async fn get_session_image(
     Ok((StatusCode::OK, headers, bytes).into_response())
 }
 
-fn decode_legacy(result: &GenerationResult) -> HandlerResult<Vec<u8>> {
-    let b64 = result
-        .b64
-        .as_deref()
-        .ok_or_else(ImageCreateApiError::not_found)?;
-    base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|_| ImageCreateApiError::not_found())
-}
-
 pub async fn get_settings(State(state): State<WebAppState>) -> HandlerResult<impl IntoResponse> {
     let store = settings_store(&state);
     let current = store.load().await;
@@ -214,9 +200,10 @@ pub async fn update_settings(
     let store = settings_store(&state);
     let current = store.load().await;
     let update = store.from_request(request).await;
+    // 某家缺省 = 该家整体保留（apply_update 逐家合并）。
     let updated = store.apply_update(&current, update).await;
-    // 临时过渡：沿用「先校验后保存」，改为对合并后的整份设置逐家校验（base_url 仅
-    // HTTPS 或 http+loopback）；Task 7 将替换为按家的完整设置更新流。
+    // 校验点后移到合并之后：模型清单的跨家去重与轮转模型归属只能在整份设置上判定。
+    // 校验失败返回 400 且不落盘。
     store.validate_settings(&updated).await?;
     store.save(&updated).await?;
     Ok(Json(store.to_masked(&updated).await))
@@ -228,22 +215,27 @@ pub async fn generate_image(
     multipart: Multipart,
 ) -> HandlerResult<impl IntoResponse> {
     let id = checked_session_id(id)?;
-    let (request, reference) = parse_generate_multipart(multipart).await?;
-    let result = engine(&state)?.generate(&id, request, reference).await?;
+    let command = parse_generate_multipart(multipart).await?;
+    let result = engine(&state)?.generate(&id, command).await?;
+    // 4 个字段必有（本次结果所属的家 / 模型 / 选型方式 / 参考图来源）。
     Ok(Json(json!({
         "image_id": result.image_id,
         "media_type": result.media_type,
+        "vendor": result.vendor,
+        "model": result.model,
+        "selection": result.selection,
+        "reference_source": result.reference_source,
     })))
 }
 
-async fn parse_generate_multipart(
-    mut multipart: Multipart,
-) -> HandlerResult<(ImageGenRequest, Option<ImageRefImage>)> {
+async fn parse_generate_multipart(mut multipart: Multipart) -> HandlerResult<GenerateCommand> {
     let mut prompt = None;
     let mut size = ImageSize::default();
     let mut quality = ImageQuality::default();
     let mut background = ImageBackground::default();
     let mut output_format = ImageOutputFormat::default();
+    let mut model = None;
+    let mut use_previous = None;
     let mut reference = None;
 
     while let Some(field) = multipart
@@ -282,22 +274,39 @@ async fn parse_generate_multipart(
             "output_format" => {
                 output_format = parse_enum("output_format", &field_text(field).await?)?
             }
-            // input_fidelity 已随多供应方改造移除：任何请求都不再携带该字段（设计 5.4/D10）。
+            // model：缺省/空白 = auto；否则原样（仅去首尾空白）作为模型 id。
+            "model" => model = Some(field_text(field).await?),
+            "use_previous" => {
+                use_previous = Some(parse_use_previous(&field_text(field).await?)?);
+            }
+            // input_fidelity 等未知字段一律忽略（设计 5.5：不再解析该字段）。
             _ => {}
         }
     }
 
     let prompt = prompt.ok_or_else(|| invalid_param("prompt is required"))?;
-    Ok((
-        ImageGenRequest {
+    Ok(GenerateCommand {
+        request: ImageGenRequest {
             prompt,
             size,
             quality,
             background,
             output_format,
         },
+        model: ModelChoice::parse(model.as_deref()),
+        use_previous: use_previous.unwrap_or(false),
         reference,
-    ))
+    })
+}
+
+/// use_previous 只接受 true / false；缺省或空白按 false 处理。
+fn parse_use_previous(value: &str) -> HandlerResult<bool> {
+    match value.trim() {
+        "" => Ok(false),
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(invalid_param("use_previous 仅支持 true 或 false")),
+    }
 }
 
 async fn field_text(field: axum::extract::multipart::Field<'_>) -> HandlerResult<String> {

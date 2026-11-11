@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
+use axum::extract::{FromRequest, Multipart};
 use axum::http::{Request, StatusCode, header};
 use futures_util::{SinkExt, StreamExt};
 use image::ImageEncoder;
@@ -21,6 +22,7 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+use super::{HandlerResult, ImageCreateApiError, parse_generate_multipart};
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::cross_cutting::image_client::{
     ImageCallTarget, ImageClient, ImageClientApi, ImageClientError, ImageGenOutcome,
@@ -33,8 +35,10 @@ use crate::cross_cutting::streaming_provider::{
     ProviderCommand, ProviderCompletion, ProviderEvent, ProviderSession, StreamingProviderAdapter,
     StreamingProviderInput,
 };
+use crate::product::image_create::engine::GenerateCommand;
 use crate::product::image_create::models::{
-    ImageCreateSettings, ImageVendor, SessionStoreApi, SettingsStoreApi,
+    ImageCreateError, ImageCreateSettings, ImageVendor, ModelChoice, SessionStoreApi,
+    SettingsStoreApi,
 };
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
@@ -158,11 +162,17 @@ fn valid_png_larger_than_two_mib() -> Vec<u8> {
     bytes
 }
 
-fn generate_multipart(boundary: &str, references: &[&[u8]]) -> Vec<u8> {
-    let mut body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ndraw a cat\r\n"
-    )
-    .into_bytes();
+/// 构造 multipart 请求体：文本字段在前，参考图在后。
+fn multipart_body(boundary: &str, text_fields: &[(&str, &str)], references: &[&[u8]]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, value) in text_fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
     for reference in references {
         body.extend_from_slice(
             format!(
@@ -175,6 +185,26 @@ fn generate_multipart(boundary: &str, references: &[&[u8]]) -> Vec<u8> {
     }
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     body
+}
+
+/// 既有用例的请求体：只带 prompt 与参考图。
+fn generate_multipart(boundary: &str, references: &[&[u8]]) -> Vec<u8> {
+    multipart_body(boundary, &[("prompt", "draw a cat")], references)
+}
+
+/// 直接调用 handler 的 multipart 解析（不经 HTTP 层），便于断言命令内容。
+async fn parse_multipart(body: Vec<u8>, boundary: &str) -> HandlerResult<GenerateCommand> {
+    let request = Request::builder()
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .expect("multipart request");
+    let multipart = Multipart::from_request(request, &())
+        .await
+        .expect("multipart extractor");
+    parse_generate_multipart(multipart).await
 }
 
 async fn configured_generate_state(
@@ -193,7 +223,7 @@ async fn configured_generate_state(
         )
         .await
         .expect("session");
-    // 临时过渡：凭据写入 GPT 家（engine 出站前暂读 GPT 家）；Task 7 将替换为按家的设置流。
+    // 只配置 GPT 一家：自动轮转（auto）此时选中 GPT，MiniMax 无凭据不参与轮转。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = "https://images.example.com/v1".to_string();
@@ -427,7 +457,7 @@ async fn generate_parses_multipart_and_maps_missing_config() {
         .expect("missing config response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // 临时过渡：凭据写入 GPT 家（engine 出站前暂读 GPT 家）；Task 7 将替换为按家的设置流。
+    // 只配置 GPT 一家：自动轮转（auto）此时选中 GPT，MiniMax 无凭据不参与轮转。
     let mut saved = ImageCreateSettings::default();
     let gpt = saved.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = "https://images.example.com/v1".to_string();
@@ -550,7 +580,7 @@ async fn echoed_api_key_is_redacted_from_rest_event_and_persisted_session() {
         .expect(1)
         .create_async()
         .await;
-    // 临时过渡：网关地址与密钥写入 GPT 家（engine 出站前暂读 GPT 家）；Task 7 将替换为按家的设置流。
+    // 把网关地址与密钥写入 GPT 家（该家凭据齐全，自动轮转即选中 GPT）。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = gateway.url();
@@ -781,4 +811,185 @@ async fn websocket_rejects_message_immediately_while_iteration_is_active() {
 
     socket.close(None).await.expect("close websocket");
     server.abort();
+}
+
+/// H-01：multipart 不带 model / use_previous → 命令为 Auto + false。
+#[tokio::test]
+async fn generate_command_defaults_to_auto_model_and_no_previous() {
+    let boundary = "image-create-h01-defaults";
+    let body = multipart_body(boundary, &[("prompt", "draw a cat")], &[]);
+
+    let command = parse_multipart(body, boundary).await.expect("command");
+
+    assert_eq!(command.model, ModelChoice::Auto);
+    assert!(!command.use_previous);
+    assert_eq!(command.request.prompt, "draw a cat");
+    assert!(command.reference.is_none());
+}
+
+/// H-02：model=gpt-image-2.6-sunburst-2k → Explicit 且字符串原样；
+/// 缺省 / 空白 / "auto"（不区分大小写）→ Auto；其余原样（仅去首尾空白）。
+#[tokio::test]
+async fn generate_command_parses_model_choice() {
+    for (raw, expected) in [
+        ("", ModelChoice::Auto),
+        (" ", ModelChoice::Auto),
+        ("auto", ModelChoice::Auto),
+        ("AUTO", ModelChoice::Auto),
+        (
+            "gpt-image-2.6-sunburst-2k",
+            ModelChoice::Explicit("gpt-image-2.6-sunburst-2k".to_string()),
+        ),
+        (
+            " gpt-image-2.6-flare ",
+            ModelChoice::Explicit("gpt-image-2.6-flare".to_string()),
+        ),
+    ] {
+        let boundary = "image-create-model-choice";
+        let body = multipart_body(boundary, &[("prompt", "draw a cat"), ("model", raw)], &[]);
+
+        let command = parse_multipart(body, boundary).await.expect("command");
+
+        assert_eq!(command.model, expected, "model={raw:?}");
+    }
+}
+
+/// use_previous 只接受 true / false；空白按 false 处理。
+/// H-03：use_previous=yes → 参数错误「use_previous 仅支持 true 或 false」。
+#[tokio::test]
+async fn generate_command_parses_use_previous_flag() {
+    for (raw, expected) in [("true", true), ("false", false), ("", false)] {
+        let boundary = "image-create-use-previous-flag";
+        let body = multipart_body(
+            boundary,
+            &[("prompt", "draw a cat"), ("use_previous", raw)],
+            &[],
+        );
+
+        let command = parse_multipart(body, boundary).await.expect("command");
+
+        assert_eq!(command.use_previous, expected, "use_previous={raw:?}");
+    }
+
+    let boundary = "image-create-h03-invalid-use-previous";
+    let body = multipart_body(
+        boundary,
+        &[("prompt", "draw a cat"), ("use_previous", "yes")],
+        &[],
+    );
+    let Err(error) = parse_multipart(body, boundary).await else {
+        panic!("use_previous=yes 必须被拒绝");
+    };
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.error.contains("use_previous 仅支持 true 或 false"),
+        "错误文本：{}",
+        error.error
+    );
+}
+
+/// H-09：仍带 input_fidelity 的请求被接受且该字段被忽略。
+/// 取值刻意用旧的非法值（旧的枚举只有 low/high）——改造前会 400，改造后必须被忽略。
+#[tokio::test]
+async fn generate_command_ignores_removed_input_fidelity_field() {
+    let boundary = "image-create-h09-input-fidelity";
+    let body = multipart_body(
+        boundary,
+        &[
+            ("prompt", "draw a cat"),
+            ("input_fidelity", "ultra"),
+            ("model", "auto"),
+        ],
+        &[],
+    );
+
+    let command = parse_multipart(body, boundary).await.expect("command");
+
+    assert_eq!(command.request.prompt, "draw a cat");
+    assert_eq!(command.model, ModelChoice::Auto);
+    assert!(!command.use_previous);
+}
+
+/// H-04：生成成功响应含 vendor / model / selection / reference_source 四个字段。
+#[tokio::test]
+async fn generate_response_reports_vendor_model_selection_and_reference_source() {
+    let root = tempdir().expect("root");
+    let (state, session_id) = configured_generate_state(root.path(), None).await;
+    let boundary = "image-create-h04-response-fields";
+    let body = multipart_body(boundary, &[("prompt", "draw a cat")], &[]);
+
+    let response = build_web_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/image-create/sessions/{session_id}/generate"))
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("generate response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = response_json::<Value>(response).await;
+    let fields = ["vendor", "model", "selection", "reference_source"];
+    for field in fields {
+        assert!(
+            result.get(field).is_some(),
+            "响应缺少字段 {field}：{result}"
+        );
+    }
+    // 引擎记录了这 4 项时四项必须同时有值（值的正确性由引擎用例 E-01/E-07 覆盖）；
+    // 未记录时必须四项同时缺省，不允许半填。
+    let recorded = fields
+        .iter()
+        .filter(|field| !result[*field].is_null())
+        .count();
+    assert!(
+        recorded == 0 || recorded == 4,
+        "四个字段必须同时有值或同时缺省：{result}"
+    );
+    if recorded == 4 {
+        assert_eq!(result["vendor"], "gpt");
+        assert_eq!(result["selection"], "auto");
+        assert_eq!(result["reference_source"], "none");
+        assert!(
+            !result["model"].as_str().expect("model").is_empty(),
+            "模型 id 不能为空：{result}"
+        );
+    }
+}
+
+/// 上一张图不可用 / 缺配置 → 400，错误文本保留中文可读说明。
+#[test]
+fn client_errors_map_to_bad_request_with_chinese_explanations() {
+    let previous = ImageCreateApiError::from(ImageCreateError::PreviousImageUnavailable(
+        "图片文件缺失或无法读取".to_string(),
+    ));
+    assert_eq!(previous.status, StatusCode::BAD_REQUEST);
+    for expect in [
+        "上一张图片不可用",
+        "请关闭「基于上一张图继续修改」或上传参考图",
+    ] {
+        assert!(
+            previous.error.contains(expect),
+            "错误文本：{}",
+            previous.error
+        );
+    }
+
+    let missing = ImageCreateApiError::from(ImageCreateError::MissingConfig(
+        "MiniMax 尚未配置 Base URL 或 API Key".to_string(),
+    ));
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+    assert!(
+        missing
+            .error
+            .contains("MiniMax 尚未配置 Base URL 或 API Key"),
+        "错误文本：{}",
+        missing.error
+    );
 }
