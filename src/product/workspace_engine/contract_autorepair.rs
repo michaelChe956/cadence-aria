@@ -80,6 +80,28 @@ pub(crate) fn format_contract_autorepair_instructions(
         .collect()
 }
 
+/// Task 3 评审 Minor-3（Task 4 补正）：契约修复指令进入 owner 可见面
+/// （handler 终态 error / 指令事件 / completion message / 教学重驱 prompt）
+/// 的条数上限——`required_action` 每条含禁则/证据多句，无界透传会撑爆
+/// 日志/通知面。**全部面共用本常量与 [`cap_autorepair_instruction_lines`]**，
+/// 不得各写一套阈值。
+pub(crate) const MAX_AUTOREPAIR_INSTRUCTION_LINES: usize = 4;
+
+/// 指令行进入 owner 可见面前的截断：条数上限 + 计数摘要行收口。
+pub(crate) fn cap_autorepair_instruction_lines(lines: Vec<String>) -> Vec<String> {
+    let total = lines.len();
+    let mut bounded: Vec<String> = lines
+        .into_iter()
+        .take(MAX_AUTOREPAIR_INSTRUCTION_LINES)
+        .collect();
+    if bounded.len() < total {
+        bounded.push(format!(
+            "（共 {total} 条契约修复指令，此处仅逐条呈现前 {MAX_AUTOREPAIR_INSTRUCTION_LINES} 条；其余以计数摘要收口，不无界透传）"
+        ));
+    }
+    bounded
+}
+
 /// SG2：compile 成功路径的机器指令 producer——对 IR canonical 契约校验的
 /// 两类缺口（required_capability_missing / unconsumed_required_handoff）
 /// 生成交原授权 author 的机器指令。纯函数：零 source mutation、零

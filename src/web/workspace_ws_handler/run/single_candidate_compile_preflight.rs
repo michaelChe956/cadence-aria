@@ -1,5 +1,8 @@
 //! SC compile 失败重驱的资格判定、诊断格式化与预检辅助面，自 single_candidate.rs 拆出以守 1200 行文件守护（先例：single_candidate_baseline_tree.rs / single_candidate_delivery.rs / single_candidate_structure_reredrive.rs）。
 use super::*;
+// 指令行条数上限与截断函数的唯一定义在 contract_autorepair（handler 终态
+// error / 指令事件 / completion message / 教学重驱 prompt 共用同一口径）。
+use crate::product::workspace_engine::contract_autorepair::cap_autorepair_instruction_lines;
 
 /// 可教学重驱的 compile parse 语法类诊断码（码表保留，供
 /// [`teaching_verdict`] 收集 `parse_reasons`；资格判定整体见该函数）。
@@ -289,7 +292,7 @@ pub(super) fn compile_failure_surface(
     diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
     context: &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext,
 ) -> (Vec<String>, Vec<String>) {
-    let instruction_lines = cap_instruction_lines(
+    let instruction_lines = cap_autorepair_instruction_lines(
         crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
             &crate::product::workspace_engine::contract_autorepair::build_compile_failure_repair_instructions(
                 source, diagnostics, context,
@@ -299,26 +302,6 @@ pub(super) fn compile_failure_surface(
     let mut reasons = format_compile_failure_reasons(diagnostics);
     reasons.extend(instruction_lines.iter().cloned());
     (reasons, instruction_lines)
-}
-
-/// Task 3 评审 Minor-3：指令文本进入 owner 可见面/prompt 的条数上限——
-/// `required_action` 每条含禁则/证据多句，无界透传会撑爆日志/通知面。
-pub(super) const MAX_AUTOREPAIR_INSTRUCTION_LINES: usize = 4;
-
-/// 指令行进入 owner 可见面前的截断：条数上限 + 计数摘要行收口
-/// （与 prompt 侧 `MAX_TEACHING_INSTRUCTION_LINES` 同值双保险）。
-pub(super) fn cap_instruction_lines(lines: Vec<String>) -> Vec<String> {
-    let total = lines.len();
-    let mut bounded: Vec<String> = lines
-        .into_iter()
-        .take(MAX_AUTOREPAIR_INSTRUCTION_LINES)
-        .collect();
-    if bounded.len() < total {
-        bounded.push(format!(
-            "（共 {total} 条契约修复指令，此处仅逐条呈现前 {MAX_AUTOREPAIR_INSTRUCTION_LINES} 条；其余以计数摘要收口，不无界透传）"
-        ));
-    }
-    bounded
 }
 
 /// O1（裁决二）：缺口机器指令不应用、不丢弃——渲染进 owner 可见执行
@@ -348,7 +331,7 @@ pub(super) async fn emit_contract_autorepair_instructions_event(
                 command: None,
                 cwd: None,
                 output: Some(
-                    cap_instruction_lines(
+                    cap_autorepair_instruction_lines(
                         crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
                             instructions,
                         ),
@@ -1064,10 +1047,11 @@ mod tests {
         let lines: Vec<String> = (0..10)
             .map(|index| format!("rule-{index}: 修复动作"))
             .collect();
-        let capped = super::cap_instruction_lines(lines);
+        let capped = super::cap_autorepair_instruction_lines(lines);
         assert_eq!(
             capped.len(),
-            super::MAX_AUTOREPAIR_INSTRUCTION_LINES + 1,
+            crate::product::workspace_engine::contract_autorepair::MAX_AUTOREPAIR_INSTRUCTION_LINES
+                + 1,
             "上限条数 + 一行计数摘要: {capped:?}"
         );
         assert!(capped[3].contains("rule-3"), "上限内的指令必须在场");

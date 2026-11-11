@@ -720,14 +720,15 @@ impl WorkspaceEngine {
         let completion_message = if contract_autorepair_instructions.is_empty() {
             "SingleCandidate markdown source 已编译并持久化，等待 Evaluate".to_string()
         } else {
-            format!(
-                "SingleCandidate markdown source 已编译并持久化（O1：{} 条契约缺口机器指令交原授权 author，平台不改写 source——{}），等待 Evaluate",
+            // Task 3 评审 Minor-3（Task 4 补正）：指令段与 handler 侧同一截断口径。
+            completion_message_with_instruction_actions(
                 contract_autorepair_instructions.len(),
-                contract_autorepair_instructions
-                    .iter()
-                    .map(|instruction| instruction.required_action.as_str())
-                    .collect::<Vec<_>>()
-                    .join("；")
+                &contract_autorepair::cap_autorepair_instruction_lines(
+                    contract_autorepair_instructions
+                        .iter()
+                        .map(|instruction| instruction.required_action.clone())
+                        .collect(),
+                ),
             )
         };
         self.complete_active_node(Some(completion_message)).await;
@@ -805,4 +806,53 @@ fn format_compiler_diagnostics(
         .collect::<Vec<_>>()
         .join("; ");
     format!("{operation} failed: {detail}")
+}
+
+/// O1：completion message 的指令段拼装——`total` 为真实指令条数，
+/// `capped_actions` 为已经 `cap_autorepair_instruction_lines` 截断的动作行
+/// （条数上限 + 计数摘要，与 web handler 侧同一口径，owner 可见消息有界）。
+fn completion_message_with_instruction_actions(total: usize, capped_actions: &[String]) -> String {
+    format!(
+        "SingleCandidate markdown source 已编译并持久化（O1：{total} 条契约缺口机器指令交原授权 author，平台不改写 source——{}），等待 Evaluate",
+        capped_actions.join("；")
+    )
+}
+
+#[cfg(test)]
+mod completion_message_tests {
+    use super::completion_message_with_instruction_actions;
+    use crate::product::workspace_engine::contract_autorepair::{
+        MAX_AUTOREPAIR_INSTRUCTION_LINES, cap_autorepair_instruction_lines,
+    };
+
+    /// Task 3 评审 Minor-3（Task 4 补正）：completion message 的指令段与
+    /// web handler 侧同一截断口径——超上限走计数摘要，消息长度有界，
+    /// 不再逐条无界透传全部 `required_action`。
+    #[test]
+    fn completion_message_instruction_segment_is_capped_like_handler_side() {
+        let actions: Vec<String> = (0..50)
+            .map(|index| format!("动作-{index}：{}", "禁则与证据说明".repeat(40)))
+            .collect();
+        let uncapped_len = actions.join("；").len();
+        let capped = cap_autorepair_instruction_lines(actions);
+        let message = completion_message_with_instruction_actions(50, &capped);
+
+        assert_eq!(capped.len(), MAX_AUTOREPAIR_INSTRUCTION_LINES + 1);
+        assert!(
+            message.contains("O1：50 条契约缺口机器指令"),
+            "真实总数必须保留: {message}"
+        );
+        assert!(message.contains("动作-3："), "上限内的指令必须在场");
+        assert!(!message.contains("动作-4："), "超上限的指令不得逐条透传");
+        assert!(
+            message.contains("共 50 条契约修复指令"),
+            "必须以计数摘要收口"
+        );
+        assert!(
+            message.len() * 5 < uncapped_len,
+            "消息长度必须显著小于无界全文（{} vs {}）",
+            message.len(),
+            uncapped_len
+        );
+    }
 }

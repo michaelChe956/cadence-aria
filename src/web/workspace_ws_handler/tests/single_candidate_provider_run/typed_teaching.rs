@@ -378,3 +378,73 @@ async fn equivalence_canonicalization_audited_to_candidate_attempts() {
     assert_eq!(canonicalizations[0].value, member0.0.to_string());
     assert_eq!(canonicalizations[0].resolution_basis, "physical_by_logical");
 }
+
+/// 伪编号夹具：Traceability 与 task `requirement_refs` 同时改为 REQ-002
+///（WI 内自洽 ⇒ 编译器/IR 校验通过），REQ-002 不在已确认 spec 登记清单。
+fn markdown_with_forged_registered_ref(story_id: &str, design_id: &str) -> String {
+    single_candidate_markdown(story_id, design_id)
+        .replacen("- requirement_refs: REQ-001", "- requirement_refs: REQ-002", 1)
+        .replacen("- requirement_id: REQ-001", "- requirement_id: REQ-002", 1)
+}
+
+/// 伪编号（r41 B2/r45）分支的覆盖钉子：WI 内自洽但清单外的引用，handler
+/// 侧登记清单比对只产呈现原文、**无 typed 事实**（不伪造 locator）⇒ 不授
+/// 教学重驱资格，零重驱、按既有 IR 终态面收口（相对 r41「可救一次」的
+/// 行为收窄，属 MODIFIED REQ-WSC-09「无 fault 不重驱」的规则内结果）。
+#[tokio::test]
+async fn forged_registered_ref_gets_no_teaching_reredrive() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    // 夹具 spec 无版本正文 ⇒ 登记清单为空、该分支不可达；种子一版含 REQ-001
+    // 的 story 正文使登记清单 = [REQ-001]。
+    fixture
+        .lifecycle
+        .append_version(crate::product::lifecycle_store::AppendSpecVersionInput {
+            project_id: fixture.record.project_id.clone(),
+            issue_id: fixture.record.issue_id.clone(),
+            entity_id: fixture.story_id.clone(),
+            markdown: "# Story\n\n- REQ-001：既有能力。\n".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .expect("seed registered requirement ids");
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![
+            markdown_with_forged_registered_ref(&fixture.story_id, &fixture.design_id),
+            markdown_with_forged_registered_ref(&fixture.story_id, &fixture.design_id),
+        ],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    let _full_input = next_provider_input(&mut input_rx).await;
+    no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("validate plan candidate IR failed")
+            && message.contains("已确认 spec 之外的编号")
+            && message.contains("REQ-002"),
+        "伪编号分支必须按既有 IR 终态面报原文: {message}"
+    );
+    assert!(
+        !message.contains("after one teaching re-drive"),
+        "伪编号分支无 typed 事实，不授教学重驱资格: {message}"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+}

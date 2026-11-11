@@ -23,8 +23,10 @@ use crate::product::work_item_plan_compiler::{
 };
 
 /// Task 3 评审 Minor-3：指令文本进入 prompt 的条数上限——`required_action`
-/// 每条含禁则/证据多句，无界透传会撑爆 prompt 与日志/通知面。
-const MAX_TEACHING_INSTRUCTION_LINES: usize = 4;
+/// 每条含禁则/证据多句，无界透传会撑爆 prompt 与日志/通知面。阈值取自
+/// `contract_autorepair` 的唯一定义（handler/completion/prompt 同一口径）。
+const MAX_TEACHING_INSTRUCTION_LINES: usize =
+    crate::product::workspace_engine::contract_autorepair::MAX_AUTOREPAIR_INSTRUCTION_LINES;
 
 /// Task 4（MODIFIED REQ-WSC-09）：教学重驱 prompt 的 typed 事实载体。
 #[derive(Debug, Clone, PartialEq, Eq)]
