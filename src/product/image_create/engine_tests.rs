@@ -1194,3 +1194,6 @@ async fn e16_client_error_is_prefixed_with_vendor_and_model() {
         "事件文本与错误文本一致"
     );
 }
+
+#[path = "engine_hardening_tests.rs"]
+mod engine_hardening_tests;

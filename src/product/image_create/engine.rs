@@ -8,6 +8,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::cross_cutting::image_client::{
     ImageCallTarget, ImageClientApi, ImageGenOutcome, ImageGenRequest, ImageRefImage,
+    validate_base_url,
 };
 use crate::cross_cutting::image_reference_validation::validate_reference_image;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
@@ -328,6 +329,11 @@ impl ImageCreateEngine {
             .as_ref()
             .map(|result| result.vendor.unwrap_or(ImageVendor::Gpt));
         let target = settings.resolve_target(&command.model, last_vendor)?;
+        // H3：出站前对本次目标家的 base_url 再校验一次（与保存时同规则）。手改设置
+        // 文件后的非法值在此拦下：InvalidConfig → HTTP 400，且不调用客户端；
+        // 客户端内部的同一校验保留，作为二次防线（D12.1）。
+        validate_base_url(settings.vendors.get(target.vendor).base_url.trim())
+            .map_err(|error| ImageCreateError::InvalidConfig(error.to_string()))?;
 
         // reference 决定（D7）：上传图优先 → use_previous 且有上一张 → 无。
         let (reference, reference_source) = match command.reference {
