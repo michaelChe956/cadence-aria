@@ -379,6 +379,11 @@ impl ImageCreateEngine {
                     media_type,
                     image_id: Some(image_id),
                     b64: None,
+                    // 供应方标注字段：Task 6 起随轮转解析填充，本 Task 先补 None 恢复编译。
+                    vendor: None,
+                    model: None,
+                    selection: None,
+                    reference_source: None,
                     ts: Utc::now(),
                 };
                 if let Err(error) = self

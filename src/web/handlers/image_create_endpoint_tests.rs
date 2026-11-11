@@ -95,6 +95,10 @@ async fn image_endpoint_serves_owned_image_with_cache_headers() {
                 media_type: "image/png".to_string(),
                 image_id: Some(image_id.to_string()),
                 b64: None,
+                vendor: None,
+                model: None,
+                selection: None,
+                reference_source: None,
                 ts: Utc::now(),
             },
         )
@@ -179,6 +183,10 @@ async fn image_endpoint_rejects_foreign_and_invalid_ids() {
                 media_type: "image/png".to_string(),
                 image_id: Some(foreign_image_id.to_string()),
                 b64: None,
+                vendor: None,
+                model: None,
+                selection: None,
+                reference_source: None,
                 ts: Utc::now(),
             },
         )
@@ -271,6 +279,10 @@ async fn image_endpoint_serves_legacy_b64_without_file() {
                 media_type: "image/png".to_string(),
                 image_id: Some(image_id.to_string()),
                 b64: Some("bGVnYWN5LWltYWdl".to_string()),
+                vendor: None,
+                model: None,
+                selection: None,
+                reference_source: None,
                 ts: Utc::now(),
             },
         )

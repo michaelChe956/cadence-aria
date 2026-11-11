@@ -456,9 +456,7 @@ mod tests {
     use chrono::Utc;
     use tempfile::TempDir;
 
-    use crate::product::image_create::models::{
-        DefaultParams, ImageBackground, ImageOutputFormat, ImageQuality, ImageSize, TemplateChoice,
-    };
+    use crate::product::image_create::models::{DefaultParams, TemplateChoice};
     use crate::product::models::ProviderName;
 
     use super::*;
@@ -495,18 +493,24 @@ mod tests {
         }
     }
 
-    fn generation_result(prompt: &str) -> GenerationResult {
+    /// 统一的 GenerationResult 测试辅助：Task 1 新增的 4 个可选字段在此统一置 None，
+    /// 以一个构造点替换原先散落各处的字面量，避免逐个补字段撑高行数。
+    fn generation_result(
+        prompt: &str,
+        media_type: &str,
+        image_id: Option<String>,
+        b64: Option<&str>,
+    ) -> GenerationResult {
         GenerationResult {
             prompt: prompt.to_string(),
-            params: DefaultParams {
-                size: ImageSize::Landscape,
-                quality: ImageQuality::High,
-                background: ImageBackground::Opaque,
-                output_format: ImageOutputFormat::Png,
-            },
-            media_type: "image/png".to_string(),
-            image_id: None,
-            b64: Some("aW1hZ2U=".to_string()),
+            params: DefaultParams::default(),
+            media_type: media_type.to_string(),
+            image_id,
+            b64: b64.map(str::to_string),
+            vendor: None,
+            model: None,
+            selection: None,
+            reference_source: None,
             ts: Utc::now(),
         }
     }
@@ -518,14 +522,7 @@ mod tests {
         media_type: &str,
     ) {
         let record = fixture.store.get(session_id).await.unwrap().unwrap();
-        let result = GenerationResult {
-            prompt: "legacy prompt".to_string(),
-            params: DefaultParams::default(),
-            media_type: media_type.to_string(),
-            image_id: None,
-            b64: Some(b64.to_string()),
-            ts: Utc::now(),
-        };
+        let result = generation_result("legacy prompt", media_type, None, Some(b64));
         let mut value = serde_json::to_value(&record).unwrap();
         let mut result_value = serde_json::to_value(result).unwrap();
         result_value.as_object_mut().unwrap().remove("image_id");
@@ -569,30 +566,14 @@ mod tests {
             let mut record = fixture.store.get(&session.id).await.unwrap().unwrap();
             let existing_id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".to_string();
             record.generation_results = vec![
-                GenerationResult {
-                    prompt: "first".to_string(),
-                    params: DefaultParams::default(),
-                    media_type: "image/png".to_string(),
-                    image_id: Some(existing_id.clone()),
-                    b64: Some("Zmlyc3Q=".to_string()),
-                    ts: Utc::now(),
-                },
-                GenerationResult {
-                    prompt: "invalid".to_string(),
-                    params: DefaultParams::default(),
-                    media_type: "image/png".to_string(),
-                    image_id: None,
-                    b64: Some("not-base64".to_string()),
-                    ts: Utc::now(),
-                },
-                GenerationResult {
-                    prompt: "third".to_string(),
-                    params: DefaultParams::default(),
-                    media_type: "image/png".to_string(),
-                    image_id: None,
-                    b64: Some("dGhpcmQ=".to_string()),
-                    ts: Utc::now(),
-                },
+                generation_result(
+                    "first",
+                    "image/png",
+                    Some(existing_id.clone()),
+                    Some("Zmlyc3Q="),
+                ),
+                generation_result("invalid", "image/png", None, Some("not-base64")),
+                generation_result("third", "image/png", None, Some("dGhpcmQ=")),
             ];
             fixture.store.write_record(&record).await.unwrap();
 
@@ -672,7 +653,10 @@ mod tests {
             let session = fixture.create().await;
             fixture
                 .store
-                .append_generation_result(&session.id, generation_result("legacy"))
+                .append_generation_result(
+                    &session.id,
+                    generation_result("legacy", "image/png", None, Some("aW1hZ2U=")),
+                )
                 .await
                 .unwrap();
             let lease = fixture
@@ -742,7 +726,10 @@ mod tests {
                 .expect("append prompt");
             fixture
                 .store
-                .append_generation_result(&session.id, generation_result("prompt v1"))
+                .append_generation_result(
+                    &session.id,
+                    generation_result("prompt v1", "image/png", None, Some("aW1hZ2U=")),
+                )
                 .await
                 .expect("append result");
             fixture
@@ -913,7 +900,10 @@ mod tests {
             assert!(matches!(
                 fixture
                     .store
-                    .append_generation_result(&session.id, generation_result("late"))
+                    .append_generation_result(
+                        &session.id,
+                        generation_result("late", "image/png", None, Some("aW1hZ2U=")),
+                    )
                     .await,
                 Err(ImageCreateError::SessionClosing)
             ));
@@ -1009,14 +999,12 @@ mod tests {
                     .store
                     .append_generation_result(
                         &session.id,
-                        GenerationResult {
-                            prompt: "migrated".to_string(),
-                            params: DefaultParams::default(),
-                            media_type: media_type.to_string(),
-                            image_id: Some((*image_id).to_string()),
-                            b64: None,
-                            ts: Utc::now(),
-                        },
+                        generation_result(
+                            "migrated",
+                            media_type,
+                            Some((*image_id).to_string()),
+                            None,
+                        ),
                     )
                     .await
                     .expect("append migrated result");
@@ -1068,14 +1056,7 @@ mod tests {
                 .store
                 .append_generation_result(
                     &session.id,
-                    GenerationResult {
-                        prompt: "migrated".to_string(),
-                        params: DefaultParams::default(),
-                        media_type: media_type.to_string(),
-                        image_id: Some(image_id.to_string()),
-                        b64: None,
-                        ts: Utc::now(),
-                    },
+                    generation_result("migrated", media_type, Some(image_id.to_string()), None),
                 )
                 .await
                 .expect("append migrated result");
@@ -1154,7 +1135,10 @@ mod tests {
             assert!(matches!(
                 fixture
                     .store
-                    .append_generation_result(&session.id, generation_result("late completion"))
+                    .append_generation_result(
+                        &session.id,
+                        generation_result("late completion", "image/png", None, Some("aW1hZ2U=")),
+                    )
                     .await,
                 Err(ImageCreateError::SessionClosing)
             ));
