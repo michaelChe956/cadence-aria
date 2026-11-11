@@ -12,14 +12,14 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::cross_cutting::image_client::{ImageClientError, ImageGenOutcome};
+use crate::cross_cutting::image_client::{ImageCallTarget, ImageClientError, ImageGenOutcome};
 use crate::cross_cutting::streaming_provider::{
     FakeStreamingProvider, ProviderCommand, ProviderCompletion, ProviderEvent, ProviderSession,
     StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::image_create::models::{
     ApiKeyAction, CreateSessionRequest, DeleteLease, ImageBackground, ImageCreateSession,
-    ImageCreateSettings, ImageOutputFormat, ImageQuality, ImageSize, MaskedSettings,
+    ImageCreateSettings, ImageOutputFormat, ImageQuality, ImageSize, ImageVendor, MaskedSettings,
     PresetTemplate, SessionSummary, SettingsUpdate, SettingsUpdateRequest, TemplateChoice,
 };
 use crate::product::models::ProviderName;
@@ -189,7 +189,10 @@ impl SettingsStoreApi for FakeSettingsStore {
     async fn to_masked(&self, _settings: &ImageCreateSettings) -> MaskedSettings {
         unimplemented!()
     }
-    async fn validate_base_url(&self, _url: &str) -> Result<(), ImageCreateError> {
+    async fn validate_settings(
+        &self,
+        _settings: &ImageCreateSettings,
+    ) -> Result<(), ImageCreateError> {
         unimplemented!()
     }
     async fn apply_update(
@@ -228,7 +231,7 @@ impl FakeImageClient {
 impl ImageClientApi for FakeImageClient {
     async fn generate(
         &self,
-        _settings: &ImageCreateSettings,
+        _target: &ImageCallTarget,
         _req: &ImageGenRequest,
         reference: Option<ImageRefImage>,
     ) -> Result<ImageGenOutcome, ImageClientError> {
@@ -301,11 +304,12 @@ fn test_record() -> SessionRecord {
 }
 
 fn valid_settings() -> ImageCreateSettings {
-    ImageCreateSettings {
-        base_url: "https://images.example.com".to_string(),
-        api_key: "sk-test".to_string(),
-        defaults: DefaultParams::default(),
-    }
+    // 临时过渡：凭据写入 GPT 家（engine 出站前暂读 GPT 家）；Task 6 将按 resolve_target 解析。
+    let mut settings = ImageCreateSettings::default();
+    let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
+    gpt.base_url = "https://images.example.com".to_string();
+    gpt.api_key = "sk-test".to_string();
+    settings
 }
 
 fn request(prompt: &str) -> ImageGenRequest {
@@ -315,7 +319,6 @@ fn request(prompt: &str) -> ImageGenRequest {
         quality: ImageQuality::High,
         background: ImageBackground::Opaque,
         output_format: ImageOutputFormat::Png,
-        input_fidelity: None,
     }
 }
 
@@ -390,7 +393,7 @@ async fn generate_rejects_missing_config_and_invalid_prompt_without_client_call(
     );
     assert!(matches!(
         missing.generate("session", request("draw"), None).await,
-        Err(ImageCreateError::MissingConfig)
+        Err(ImageCreateError::MissingConfig(_))
     ));
 
     let invalid = engine(store, valid_settings(), client.clone(), None);

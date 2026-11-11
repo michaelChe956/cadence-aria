@@ -65,8 +65,10 @@ impl From<ImageCreateError> for ImageCreateApiError {
             ImageCreateError::InvalidSessionId(_)
             | ImageCreateError::InvalidConfig(_)
             | ImageCreateError::InvalidParam(_)
-            | ImageCreateError::MissingConfig
-            | ImageCreateError::RefImage(_) => StatusCode::BAD_REQUEST,
+            | ImageCreateError::MissingConfig(_)
+            | ImageCreateError::RefImage(_)
+            // 携带上一张图不可用属用户可自纠错（关闭开关或改上传参考图），映射 400。
+            | ImageCreateError::PreviousImageUnavailable(_) => StatusCode::BAD_REQUEST,
             ImageCreateError::Store(_)
             | ImageCreateError::ImageClient(_)
             | ImageCreateError::Iteration(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -212,10 +214,10 @@ pub async fn update_settings(
     let store = settings_store(&state);
     let current = store.load().await;
     let update = store.from_request(request).await;
-    if let Some(base_url) = update.base_url.as_deref() {
-        store.validate_base_url(base_url).await?;
-    }
     let updated = store.apply_update(&current, update).await;
+    // 临时过渡：沿用「先校验后保存」，改为对合并后的整份设置逐家校验（base_url 仅
+    // HTTPS 或 http+loopback）；Task 7 将替换为按家的完整设置更新流。
+    store.validate_settings(&updated).await?;
     store.save(&updated).await?;
     Ok(Json(store.to_masked(&updated).await))
 }
@@ -242,7 +244,6 @@ async fn parse_generate_multipart(
     let mut quality = ImageQuality::default();
     let mut background = ImageBackground::default();
     let mut output_format = ImageOutputFormat::default();
-    let mut input_fidelity = None;
     let mut reference = None;
 
     while let Some(field) = multipart
@@ -281,12 +282,7 @@ async fn parse_generate_multipart(
             "output_format" => {
                 output_format = parse_enum("output_format", &field_text(field).await?)?
             }
-            "input_fidelity" => {
-                let value = field_text(field).await?;
-                if !value.trim().is_empty() {
-                    input_fidelity = Some(parse_enum("input_fidelity", &value)?);
-                }
-            }
+            // input_fidelity 已随多供应方改造移除：任何请求都不再携带该字段（设计 5.4/D10）。
             _ => {}
         }
     }
@@ -299,7 +295,6 @@ async fn parse_generate_multipart(
             quality,
             background,
             output_format,
-            input_fidelity,
         },
         reference,
     ))

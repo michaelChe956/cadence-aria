@@ -23,7 +23,8 @@ use tower::ServiceExt;
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::cross_cutting::image_client::{
-    ImageClient, ImageClientApi, ImageClientError, ImageGenOutcome, ImageGenRequest, ImageRefImage,
+    ImageCallTarget, ImageClient, ImageClientApi, ImageClientError, ImageGenOutcome,
+    ImageGenRequest, ImageRefImage,
 };
 use crate::cross_cutting::image_reference_validation::MAX_BYTES;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
@@ -33,7 +34,7 @@ use crate::cross_cutting::streaming_provider::{
     StreamingProviderInput,
 };
 use crate::product::image_create::models::{
-    ImageCreateSettings, SessionStoreApi, SettingsStoreApi,
+    ImageCreateSettings, ImageVendor, SessionStoreApi, SettingsStoreApi,
 };
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
@@ -51,7 +52,7 @@ struct FakeImageClient {
 impl ImageClientApi for FakeImageClient {
     async fn generate(
         &self,
-        _settings: &ImageCreateSettings,
+        _target: &ImageCallTarget,
         request: &ImageGenRequest,
         reference: Option<ImageRefImage>,
     ) -> Result<ImageGenOutcome, ImageClientError> {
@@ -192,12 +193,13 @@ async fn configured_generate_state(
         )
         .await
         .expect("session");
+    // 临时过渡：凭据写入 GPT 家（engine 出站前暂读 GPT 家）；Task 7 将替换为按家的设置流。
+    let mut settings = ImageCreateSettings::default();
+    let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
+    gpt.base_url = "https://images.example.com/v1".to_string();
+    gpt.api_key = "sk-test".to_string();
     SettingsStore::new(paths.clone())
-        .save(&ImageCreateSettings {
-            base_url: "https://images.example.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-            defaults: Default::default(),
-        })
+        .save(&settings)
         .await
         .expect("settings");
     let mut state = state(root);
@@ -332,9 +334,13 @@ async fn settings_are_masked_persisted_and_validate_base_url() {
             "PUT",
             "/api/image-create/settings",
             json!({
-                "base_url": "http://example.com/v1",
-                "api_key_action": "replace",
-                "api_key": "sk-secret1234",
+                "vendors": {
+                    "gpt": {
+                        "base_url": "http://example.com/v1",
+                        "api_key_action": "replace",
+                        "api_key": "sk-secret1234"
+                    }
+                },
                 "defaults": null
             }),
         ))
@@ -348,9 +354,13 @@ async fn settings_are_masked_persisted_and_validate_base_url() {
             "PUT",
             "/api/image-create/settings",
             json!({
-                "base_url": "https://images.example.com/v1",
-                "api_key_action": "replace",
-                "api_key": "sk-secret1234",
+                "vendors": {
+                    "gpt": {
+                        "base_url": "https://images.example.com/v1",
+                        "api_key_action": "replace",
+                        "api_key": "sk-secret1234"
+                    }
+                },
                 "defaults": null
             }),
         ))
@@ -358,7 +368,7 @@ async fn settings_are_masked_persisted_and_validate_base_url() {
         .expect("update response");
     assert_eq!(response.status(), StatusCode::OK);
     let masked: Value = response_json(response).await;
-    assert_eq!(masked["api_key_masked"], "sk-****1234");
+    assert_eq!(masked["vendors"]["gpt"]["api_key_masked"], "sk-****1234");
     assert!(!masked.to_string().contains("secret"));
 
     let response = app
@@ -371,8 +381,11 @@ async fn settings_are_masked_persisted_and_validate_base_url() {
         .await
         .expect("settings response");
     let masked: Value = response_json(response).await;
-    assert_eq!(masked["base_url"], "https://images.example.com/v1");
-    assert_eq!(masked["api_key_masked"], "sk-****1234");
+    assert_eq!(
+        masked["vendors"]["gpt"]["base_url"],
+        "https://images.example.com/v1"
+    );
+    assert_eq!(masked["vendors"]["gpt"]["api_key_masked"], "sk-****1234");
 }
 
 #[tokio::test]
@@ -414,15 +427,13 @@ async fn generate_parses_multipart_and_maps_missing_config() {
         .expect("missing config response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
+    // 临时过渡：凭据写入 GPT 家（engine 出站前暂读 GPT 家）；Task 7 将替换为按家的设置流。
+    let mut saved = ImageCreateSettings::default();
+    let gpt = saved.vendors.get_mut(ImageVendor::Gpt);
+    gpt.base_url = "https://images.example.com/v1".to_string();
+    gpt.api_key = "sk-test".to_string();
     let settings = SettingsStore::new(paths.clone());
-    settings
-        .save(&ImageCreateSettings {
-            base_url: "https://images.example.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-            defaults: Default::default(),
-        })
-        .await
-        .expect("settings");
+    settings.save(&saved).await.expect("settings");
     let mut fake_state = state(root.path());
     fake_state.image_create_engine = Some(Arc::new(ImageCreateEngine::new(
         paths.clone(),
@@ -539,12 +550,13 @@ async fn echoed_api_key_is_redacted_from_rest_event_and_persisted_session() {
         .expect(1)
         .create_async()
         .await;
+    // 临时过渡：网关地址与密钥写入 GPT 家（engine 出站前暂读 GPT 家）；Task 7 将替换为按家的设置流。
+    let mut settings = ImageCreateSettings::default();
+    let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
+    gpt.base_url = gateway.url();
+    gpt.api_key = secret.to_string();
     SettingsStore::new(paths.clone())
-        .save(&ImageCreateSettings {
-            base_url: gateway.url(),
-            api_key: secret.to_string(),
-            defaults: Default::default(),
-        })
+        .save(&settings)
         .await
         .expect("settings");
     let mut state = state(root.path());

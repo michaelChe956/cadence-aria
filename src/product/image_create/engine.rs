@@ -7,14 +7,15 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::cross_cutting::image_client::{
-    ImageClientApi, ImageGenOutcome, ImageGenRequest, ImageRefImage,
+    ImageCallTarget, ImageClientApi, ImageGenOutcome, ImageGenRequest, ImageRefImage,
 };
 use crate::cross_cutting::image_reference_validation::validate_reference_image;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 
 use super::models::{
-    ChatMessage, DefaultParams, GenerationResult, ImageCreateError, IterationEvent, PromptBlock,
-    RunKind, SessionEvent, SessionRecord, SessionStatus, SessionStoreApi, SettingsStoreApi,
+    ChatMessage, DEFAULT_GPT_ROTATION_MODEL, DefaultParams, GenerationResult, ImageCreateError,
+    ImageVendor, IterationEvent, PromptBlock, RunKind, SessionEvent, SessionRecord, SessionStatus,
+    SessionStoreApi, SettingsStoreApi,
 };
 use super::prompt_iteration::PromptIterationEngine;
 use super::run_registry::ImageCreateRunRegistry;
@@ -305,8 +306,12 @@ impl ImageCreateEngine {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<GenerationResult, ImageCreateError> {
         let settings = self.settings_store.load().await;
-        if settings.base_url.trim().is_empty() || settings.api_key.trim().is_empty() {
-            return Err(ImageCreateError::MissingConfig);
+        // 临时过渡：仍按单家（GPT 家）读取凭据；Task 6 将替换为按 resolve_target 解析出的目标。
+        let gpt = settings.vendors.get(ImageVendor::Gpt);
+        if gpt.base_url.trim().is_empty() || gpt.api_key.trim().is_empty() {
+            return Err(ImageCreateError::MissingConfig(
+                "GPT 尚未配置 Base URL 或 API Key".to_string(),
+            ));
         }
         if req.prompt.trim().is_empty() {
             return Err(ImageCreateError::InvalidParam(
@@ -322,10 +327,19 @@ impl ImageCreateEngine {
             None => None,
         };
 
+        // 临时过渡：构造仅含 GPT 家凭据与默认轮转模型的出站目标；
+        // Task 6 将按 resolve_target 解析目标并实现双家轮转。
+        let target = ImageCallTarget {
+            vendor: ImageVendor::Gpt,
+            base_url: gpt.base_url.clone(),
+            api_key: gpt.api_key.clone(),
+            model: DEFAULT_GPT_ROTATION_MODEL.to_string(),
+        };
+
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(ImageCreateError::SessionClosing),
-            outcome = self.image_client.generate(&settings, &req, reference) => {
+            outcome = self.image_client.generate(&target, &req, reference) => {
                 self.finish_generation(session_id, &req, outcome).await
             }
         }
