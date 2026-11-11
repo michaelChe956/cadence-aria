@@ -46,7 +46,7 @@
 
 ## 7. 联调、确认与收尾
 
-- [ ] 7.1 全量检查：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo test --locked`、`cd web && pnpm tsc -b && pnpm test` 全部通过 —— **未完成（原因：本条由 Task 9 执行；截至本 Task 提交时，四项尚未取得「全绿」的结论）**
+- [x] 7.1 全量检查：`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo test --locked`、`cd web && pnpm tsc -b && pnpm test` 全部通过 —— **已完成（Task 9 执行，结论：四项全绿；`cargo fmt --check` 零差异、`clippy -D warnings` 零告警、`cargo test --locked` lib 6363 passed / 0 failed 且全部集成 target 通过、`pnpm tsc -b` 零错误、`pnpm test` 281 files / 2914 tests 全通过）**
 - [ ] 7.2 真实调用确认方案 8.2 的假设 A1：向 MiniMax 各发一次「不带 `size`、带 `area=1K`」的文生图与改图请求，核对 HTTP 200 与返回图片像素；不成立时停止并回到方案 D10 重新决策，不在实现中自行调整字段规则 —— **未完成（原因：需要真实 MiniMax API Key 与可出图的 endpoint，才能核对 HTTP 200 与返回图片像素；本环境无该凭据，无法执行。方案 8.2 的假设 A1 因此未获真实端点证实，字段规则按已确认的 D10 决策实现，不在实现中自行调整）**
 - [ ] 7.3 手动验证三项需求：显式选择模型后请求中的 `model` 与所选一致；默认参数下同一会话连续三次生成依次为 GPT、MiniMax、GPT，且第二、三次基于上一张图；仅配置 GPT 的旧配置文件升级后无需重新录入即可生成 —— **未完成（原因：需要真实可用的 GPT 与 MiniMax 端点做手动验证——显式选模型后请求 `model` 与所选一致、同会话连续三次生成依次为 GPT、MiniMax、GPT 且第二、三次基于上一张图、旧配置文件升级后可直接生成；本环境无真实端点凭据，无法执行）**
 - [x] 7.4 在 `CHANGELOG.md` 记录：三项新能力；默认模型由 `gpt-image-2` 变为 `gpt-image-2.6-flare` 及加回方法；新形态配置文件不可被旧版本读取；`input_fidelity` 参数移除
