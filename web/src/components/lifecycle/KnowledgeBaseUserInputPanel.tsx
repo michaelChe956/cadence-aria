@@ -164,7 +164,7 @@ export function KnowledgeBaseUserInputPanel({
     <section
       data-testid="kb-user-input-panel"
       aria-label="输入确认区"
-      className="flex max-h-72 shrink-0 flex-col gap-2 overflow-hidden rounded-md border border-[var(--aria-line)] bg-white p-2"
+      className="flex max-h-[22rem] shrink-0 flex-col gap-2 overflow-hidden rounded-md border border-[var(--aria-line)] bg-white p-2"
     >
       <div className="flex shrink-0 items-center justify-between gap-2 px-1">
         <span className="text-xs font-semibold text-[var(--aria-ink)]">
@@ -218,8 +218,8 @@ export function KnowledgeBaseUserInputPanel({
         className="shrink-0 px-1 text-xs text-[var(--aria-ink-muted)]"
       >
         {pendingCount > 0
-          ? `已确认 ${summary.confirmed_count}/${summary.total_count}，待确认 ${pendingCount} 份：确认全部输入后才能执行【知识库初始化】`
-          : `已确认 ${summary.confirmed_count}/${summary.total_count}，可执行【知识库初始化】`}
+          ? `已确认 ${summary.confirmed_count}/${summary.total_count}，待确认 ${pendingCount} 份：全部确认后点【确认并初始化】`
+          : `已确认 ${summary.confirmed_count}/${summary.total_count}，可执行【确认并初始化】`}
       </p>
       {notice ? (
         <div
@@ -260,7 +260,6 @@ export function KnowledgeBaseUserInputPanel({
                   type="button"
                   data-testid="kb-user-input-open"
                   data-path={file.path}
-                  title={file.path}
                   aria-current={selectedPath === file.path}
                   onClick={() => onOpenFile(file.path)}
                   className={

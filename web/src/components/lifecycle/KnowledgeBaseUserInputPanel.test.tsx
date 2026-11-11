@@ -137,7 +137,7 @@ describe("KnowledgeBaseUserInputPanel", () => {
     );
 
     expect(screen.getByTestId("kb-user-input-summary")).toHaveTextContent(
-      "可执行【知识库初始化】",
+      "可执行【确认并初始化】",
     );
     expect(screen.getByTestId("kb-user-input-confirm-all")).toBeDisabled();
   });
@@ -271,10 +271,10 @@ describe("KnowledgeBaseUserInputPanel", () => {
 
     const guide = screen.getByTestId("kb-user-input-guide");
     // 四步指引齐全：补充 → 确认 → 全部确认后初始化 → 留在本页继续编辑。
-    expect(guide.textContent).toContain("逐份打开");
-    expect(guide.textContent).toContain("需重新确认");
+    expect(guide.textContent).toContain("补充内容");
+    expect(guide.textContent).toContain("「确认」");
     expect(guide.textContent).toContain("确认并初始化");
-    expect(guide.textContent).toContain("以你的修改为准");
+    expect(guide.textContent).toContain("继续编辑");
   });
 
   it("unfilled_files_block_initialization_with_reason", () => {
@@ -355,5 +355,31 @@ describe("KnowledgeBaseUserInputPanel", () => {
     const button = screen.getByTestId("kb-user-input-confirm-and-initialize");
     expect(button).toBeDisabled();
     expect(button).toHaveTextContent("正在初始化知识库…");
+  });
+
+  it("file_name_has_no_native_tooltip", () => {
+    // 原生 title 悬浮提示会盖住下方内容（真机截图里的黑色浮层）⇒ 不挂 title。
+    installFetch();
+    renderPanel(
+      userInputSummary([{ path: "user-input/api-scope.md" }]),
+      { onAllConfirmed: vi.fn() },
+    );
+
+    expect(screen.getByTestId("kb-user-input-open")).not.toHaveAttribute("title");
+  });
+
+  it("guidance_is_four_compact_steps", () => {
+    // 指引块在左侧窄栏里必须紧凑：四步各占一行，不得把文件列表挤没。
+    installFetch();
+    renderPanel(
+      userInputSummary([{ path: "user-input/api-scope.md" }]),
+      { onAllConfirmed: vi.fn() },
+    );
+
+    const steps = screen
+      .getByTestId("kb-user-input-guide")
+      .querySelectorAll("li");
+    expect(steps).toHaveLength(4);
+    expect(steps[2]?.textContent).toContain("确认并初始化");
   });
 });
