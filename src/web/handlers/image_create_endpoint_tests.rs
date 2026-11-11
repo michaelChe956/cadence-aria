@@ -372,11 +372,10 @@ async fn settings_get_returns_vendors_shape_without_plaintext_key() {
         assert!(masked_key.contains("****"), "{vendor} 的 key 未脱敏");
         assert_eq!(masked["vendors"][vendor]["available"], true);
         assert!(
-            masked["vendors"][vendor]["recommended_models"]
+            !masked["vendors"][vendor]["recommended_models"]
                 .as_array()
                 .expect("recommended models")
-                .len()
-                > 0
+                .is_empty()
         );
     }
 }

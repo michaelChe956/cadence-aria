@@ -1,15 +1,12 @@
-use std::net::IpAddr;
-
 use async_trait::async_trait;
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::product::json_store::{read_json, write_json};
 
 use super::models::{
-    ApiKeyAction, ApiKeyUpdate, ImageCreateError, ImageCreateSettings, ImageVendor,
-    MaskedSettings, MaskedVendorSettings, MaskedVendors, SettingsStoreApi, SettingsUpdate,
-    SettingsUpdateRequest, VendorSettings, VendorUpdate, VendorUpdateRequest, VendorsSettings,
-    VendorsUpdateRequest,
+    ApiKeyAction, ApiKeyUpdate, ImageCreateError, ImageCreateSettings, ImageVendor, MaskedSettings,
+    MaskedVendorSettings, MaskedVendors, SettingsStoreApi, SettingsUpdate, SettingsUpdateRequest,
+    VendorSettings, VendorUpdate, VendorUpdateRequest, VendorsSettings,
 };
 
 #[derive(Debug, Clone)]
@@ -67,42 +64,6 @@ pub fn to_masked(settings: &ImageCreateSettings) -> MaskedSettings {
             minimax: mask_vendor(ImageVendor::Minimax, &settings.vendors.minimax),
         },
         defaults: settings.defaults.clone(),
-    }
-}
-
-pub fn validate_base_url(url: &str) -> Result<(), ImageCreateError> {
-    let parsed = reqwest::Url::parse(url).map_err(|error| {
-        ImageCreateError::InvalidConfig(format!("base_url is not a valid URL: {error}"))
-    })?;
-
-    if parsed.scheme() == "https" {
-        return Ok(());
-    }
-
-    if parsed.scheme() != "http" {
-        return Err(ImageCreateError::InvalidConfig(
-            "base_url must use HTTPS or HTTP on a loopback host".to_string(),
-        ));
-    }
-
-    let host = parsed.host_str().ok_or_else(|| {
-        ImageCreateError::InvalidConfig("base_url must include a host".to_string())
-    })?;
-    let unbracketed_host = host
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host);
-    let is_loopback = host.eq_ignore_ascii_case("localhost")
-        || unbracketed_host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback());
-
-    if is_loopback {
-        Ok(())
-    } else {
-        Err(ImageCreateError::InvalidConfig(
-            "base_url must use HTTPS or resolve to a loopback host".to_string(),
-        ))
     }
 }
 
@@ -222,6 +183,7 @@ mod tests {
     use super::*;
     use crate::product::image_create::models::{
         DefaultParams, ImageBackground, ImageOutputFormat, ImageQuality, ImageSize,
+        VendorsUpdateRequest,
     };
     use tempfile::tempdir;
 
@@ -307,37 +269,5 @@ mod tests {
             missing_replace_value.minimax.map(|update| update.api_key),
             Some(ApiKeyUpdate::Replace(String::new()))
         );
-    }
-
-    #[test]
-    fn validates_https_and_loopback_base_urls_only() {
-        for allowed in [
-            "https://api.example.com/v1",
-            "http://localhost:8080/v1",
-            "http://127.0.0.1:8080/v1",
-            "http://127.42.7.9/v1",
-            "http://[::1]:8080/v1",
-        ] {
-            assert!(
-                validate_base_url(allowed).is_ok(),
-                "expected {allowed} to pass"
-            );
-        }
-
-        for rejected in [
-            "http://api.example.com/v1",
-            "ftp://localhost/images",
-            "not-a-url",
-            "http://127.0.0.1.example.com/v1",
-            "",
-        ] {
-            assert!(
-                matches!(
-                    validate_base_url(rejected),
-                    Err(ImageCreateError::InvalidConfig(_))
-                ),
-                "expected {rejected} to fail"
-            );
-        }
     }
 }

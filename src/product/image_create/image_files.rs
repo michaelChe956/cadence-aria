@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use base64::{Engine as _, engine::general_purpose};
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
 use crate::product::image_create::ImageCreateError;
 use crate::product::image_create::models::GenerationResult;
+use base64::{Engine as _, engine::general_purpose};
 
 pub fn media_type_extension(media_type: &str) -> Option<&'static str> {
     match media_type {
@@ -72,17 +72,16 @@ pub async fn read_result_image(
     paths: &AriaStatePaths,
     result: &GenerationResult,
 ) -> Option<Vec<u8>> {
-    if let Some(image_id) = result.image_id.as_deref() {
-        if let Some(path) = paths.image_create_image_file(image_id, &result.media_type) {
-            if let Ok(bytes) = tokio::fs::read(path).await {
-                return Some(bytes);
-            }
-        }
+    if let Some(image_id) = result.image_id.as_deref()
+        && let Some(path) = paths.image_create_image_file(image_id, &result.media_type)
+        && let Ok(bytes) = tokio::fs::read(path).await
+    {
+        return Some(bytes);
     }
-    if let Some(b64) = result.b64.as_deref() {
-        if let Ok(bytes) = general_purpose::STANDARD.decode(b64) {
-            return Some(bytes);
-        }
+    if let Some(b64) = result.b64.as_deref()
+        && let Ok(bytes) = general_purpose::STANDARD.decode(b64)
+    {
+        return Some(bytes);
     }
     None
 }

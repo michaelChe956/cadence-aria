@@ -510,7 +510,14 @@ impl ImageCreateSettings {
         }
 
         for id in &self.vendors.gpt.models {
-            if self.vendors.minimax.models.iter().any(|model| model == id) {
+            // 跨家去重与家内去重同一范式：两侧均取 trim 后比较，避免手改配置用首尾空白绕过唯一性。
+            if self
+                .vendors
+                .minimax
+                .models
+                .iter()
+                .any(|model| model.trim() == id.trim())
+            {
                 return Err(ImageCreateError::InvalidConfig(format!(
                     "模型 id「{id}」同时出现在 GPT 与 MiniMax 清单中"
                 )));
@@ -839,8 +846,10 @@ pub trait SettingsStoreApi: Send + Sync {
     async fn save(&self, settings: &ImageCreateSettings) -> Result<(), ImageCreateError>;
     async fn to_masked(&self, settings: &ImageCreateSettings) -> MaskedSettings;
     /// 取代原 validate_base_url：对合并后的整份设置校验。
-    async fn validate_settings(&self, settings: &ImageCreateSettings)
-        -> Result<(), ImageCreateError>;
+    async fn validate_settings(
+        &self,
+        settings: &ImageCreateSettings,
+    ) -> Result<(), ImageCreateError>;
     async fn apply_update(
         &self,
         current: &ImageCreateSettings,
@@ -877,7 +886,9 @@ pub enum ImageCreateError {
     #[error("reference image error: {0}")]
     RefImage(String),
     /// 携带上一张图失败（出站前）。
-    #[error("上一张图片不可用，无法基于它继续修改（{0}）；请关闭「基于上一张图继续修改」或上传参考图")]
+    #[error(
+        "上一张图片不可用，无法基于它继续修改（{0}）；请关闭「基于上一张图继续修改」或上传参考图"
+    )]
     PreviousImageUnavailable(String),
 }
 

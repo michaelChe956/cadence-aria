@@ -340,7 +340,8 @@ impl ImageCreateEngine {
                 Some(last) => {
                     // 上一张图取不到（文件缺失且无内联 b64）→ 明确失败、不出站（D8）。
                     let bytes = crate::product::image_create::image_files::read_result_image(
-                        &self.paths, &last,
+                        &self.paths,
+                        &last,
                     )
                     .await
                     .ok_or_else(|| {

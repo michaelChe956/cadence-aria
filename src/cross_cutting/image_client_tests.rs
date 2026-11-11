@@ -239,14 +239,6 @@ async fn c03_model_id_is_passed_through_verbatim_and_shapes_no_request() {
     first.assert_async().await;
     second.assert_async().await;
 
-    // 两个模型 id 的请求体除 model 值外完全相同。
-    let mut left = gpt_body(GPT_MODEL, "1536x1024");
-    let mut right = gpt_body(GPT_MODEL_ALT, "1536x1024");
-    for body in [&mut left, &mut right] {
-        body.as_object_mut().expect("请求体是对象").remove("model");
-    }
-    assert_eq!(left, right);
-
     // GPT 在 size=auto 时发 size="auto"，且不发 area。
     let mut server = mockito::Server::new_async().await;
     let auto = generations(&mut server, Matcher::Json(gpt_body(GPT_MODEL, "auto"))).await;
