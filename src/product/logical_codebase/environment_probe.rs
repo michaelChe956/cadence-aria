@@ -118,23 +118,39 @@ pub fn ensure_aggregate_root_writable(
     }
 }
 
-/// 校验四条 Cadence-skills 命令在 shared / codex / claude 三层的
+/// 校验四条 Cadence-skills 命令在**被选中 provider 对应的那一层**的
 /// `SKILL.md` 都可解析。`machine_skills` 是确定性代码、不跑 provider，因此
 /// 这里的失败**绝不能**归因为「provider 未登录」。
-pub fn ensure_skills_commands_linked(home: &Path) -> Result<(), AggregateInitializationError> {
+///
+/// **只装一家 provider 就该能跑**：选中的 provider 用哪一层就只校验哪一层
+/// ——没装 Codex 时 codex 层缺失、未装 Claude Code 时 claude 层缺失，都
+/// **不得**阻断本次聚合初始化（用户明确要求：不强制四家都装）。`provider`
+/// 缺省时退回旧口径（三层全查），供不知道 provider 的调用方使用。
+pub fn ensure_skills_commands_linked(
+    home: &Path,
+    provider: Option<&crate::product::models::ProviderName>,
+) -> Result<(), AggregateInitializationError> {
     let paths = CadenceSkillsPaths::from_home(home);
-    for (layer, root) in [
-        ("shared", paths.shared_skills_root()),
-        ("codex", paths.codex_skills_root()),
-        ("claude", paths.claude_skills_root()),
-    ] {
+    let layers: Vec<(&str, std::path::PathBuf)> = match provider {
+        Some(provider) => match provider_skill_layer(&paths, provider) {
+            Some((layer, root)) => vec![(layer, root)],
+            // 该 provider 没有专属层（如聚合阶段不支持的 Kimi Code）⇒ 无层可校验。
+            None => Vec::new(),
+        },
+        None => vec![
+            ("shared", paths.shared_skills_root().to_path_buf()),
+            ("codex", paths.codex_skills_root().to_path_buf()),
+            ("claude", paths.claude_skills_root().to_path_buf()),
+        ],
+    };
+    for (layer, root) in layers {
         for skill in AGGREGATE_SKILL_COMMANDS {
             let manifest = root.join(skill).join("SKILL.md");
             if !manifest.is_file() {
                 return Err(AggregateInitializationError::EnvironmentPrecondition {
                     code: "skills_commands_missing".to_string(),
                     reason: format!(
-                        "Cadence skills link layer {layer} is missing the {skill} command (expected {}); rerun the aggregate initialization so machine_skills can relink the three layers",
+                        "Cadence skills link layer {layer} is missing the {skill} command (expected {}); rerun the aggregate initialization so machine_skills can relink the layer",
                         manifest.display()
                     ),
                     retryable: true,
@@ -143,6 +159,24 @@ pub fn ensure_skills_commands_linked(home: &Path) -> Result<(), AggregateInitial
         }
     }
     Ok(())
+}
+
+/// provider → 它的 skill 层（Pi 用 shared、Claude Code 用 claude、Codex 用
+/// codex）；无专属层的 provider 返回 `None`。
+///
+/// 与知识库预检面的 `provider_skill_layer` 同一口径（Pi=shared、
+/// Claude Code=claude、Codex=codex）。
+pub fn provider_skill_layer(
+    paths: &CadenceSkillsPaths,
+    provider: &crate::product::models::ProviderName,
+) -> Option<(&'static str, std::path::PathBuf)> {
+    use crate::product::models::ProviderName;
+    match provider {
+        ProviderName::Pi => Some(("shared", paths.shared_skills_root().to_path_buf())),
+        ProviderName::ClaudeCode => Some(("claude", paths.claude_skills_root().to_path_buf())),
+        ProviderName::Codex => Some(("codex", paths.codex_skills_root().to_path_buf())),
+        _ => None,
+    }
 }
 
 /// 测试替身：只回放预先给定的探测结果，不做任何 I/O。
@@ -615,7 +649,7 @@ mod tests {
     fn skills_link_layer_requires_all_three_layers_of_four_commands() {
         let home = tempfile::tempdir().unwrap();
         assert!(
-            ensure_skills_commands_linked(home.path()).is_err(),
+            ensure_skills_commands_linked(home.path(), None).is_err(),
             "空 home 没有任何链接层，必须报缺失"
         );
 
@@ -636,14 +670,14 @@ mod tests {
                 std::fs::write(dir.join("SKILL.md"), "# skill").unwrap();
             }
         }
-        ensure_skills_commands_linked(home.path()).unwrap();
+        ensure_skills_commands_linked(home.path(), None).unwrap();
 
         let missing = paths
             .claude_skills_root()
             .join("pre-check")
             .join("SKILL.md");
         std::fs::remove_file(&missing).unwrap();
-        let error = ensure_skills_commands_linked(home.path()).expect_err("缺链接必须被拒绝");
+        let error = ensure_skills_commands_linked(home.path(), None).expect_err("缺链接必须被拒绝");
         assert!(
             matches!(
                 &error,
@@ -651,6 +685,37 @@ mod tests {
                     if code == "skills_commands_missing" && reason.contains("pre-check")
             ),
             "expected skills_commands_missing naming pre-check, got {error:?}"
+        );
+    }
+
+    /// 只装一家 provider 也能过：校验**只看被选中 provider 那层**。
+    /// 没装 Codex（codex 层缺失）、没装 Claude Code（claude 层缺失）都
+    /// 不得阻断选了 Pi 的聚合初始化。
+    #[test]
+    fn skills_link_layer_only_checks_the_selected_provider_layer() {
+        use crate::product::models::ProviderName;
+
+        let home = tempfile::tempdir().unwrap();
+        let paths = crate::product::cadence_skills::CadenceSkillsPaths::from_home(home.path());
+        // 只给 Pi 的 shared 层装齐四条命令：codex / claude 层完全不存在。
+        for skill in AGGREGATE_SKILL_COMMANDS {
+            let dir = paths.shared_skills_root().join(skill);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "# skill").unwrap();
+        }
+
+        ensure_skills_commands_linked(home.path(), Some(&ProviderName::Pi)).unwrap();
+
+        // 选了 Claude Code（它的层没装）⇒ 必须报缺失（不是「别的家没装」）。
+        let error = ensure_skills_commands_linked(home.path(), Some(&ProviderName::ClaudeCode))
+            .expect_err("选中 provider 的层缺失必须被拒");
+        assert!(
+            matches!(
+                &error,
+                AggregateInitializationError::EnvironmentPrecondition { code, .. }
+                    if code == "skills_commands_missing"
+            ),
+            "expected skills_commands_missing, got {error:?}"
         );
     }
 

@@ -921,6 +921,13 @@ const TABLE: &[Entry] = &[
         FailureTriage::Environment,
     ),
     (
+        "knowledge_base_provider_interaction_required",
+        "provider 在知识库操作中发起了提问",
+        "本次知识库操作是无人值守执行（没有应答通道）：provider 在执行中请求授权或向用户提问，本次执行因此中止——它问了什么见下方诊断。",
+        "按诊断里 provider 的提问补齐输入文件或消解该问题；无法消解时改用另一家 provider 重新发起。",
+        FailureTriage::Environment,
+    ),
+    (
         "knowledge_base_cancelled",
         "知识库操作已取消",
         "操作在完成前被取消，provider 已确认停止，已产生的改动按原样保留在聚合根工作树里。",

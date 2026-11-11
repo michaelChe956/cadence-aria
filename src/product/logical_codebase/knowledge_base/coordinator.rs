@@ -890,7 +890,7 @@ impl GatewayKnowledgeBaseTurnRunner {
                 ProviderRefType::KimiCode => ProviderType::KimiCode,
             },
             role: AdapterRole::Executor,
-            prompt: command.to_string(),
+            prompt: Self::unattended_prompt(command),
             working_dir: aggregate_root.to_path_buf(),
             workspace_session_id: None,
             resume_provider_session_id: None,
@@ -899,6 +899,23 @@ impl GatewayKnowledgeBaseTurnRunner {
             env_vars: BTreeMap::new(),
             timeout_secs: timeout.as_secs().max(1),
         }
+    }
+
+    /// 知识库操作的 prompt = 命令 + **无人值守指令**。
+    ///
+    /// 知识库 operation 是后台长任务，没有交互通道：provider 一旦发起提问或
+    /// 授权请求，本次 turn 直接判失败（`provider_interaction_required`）。真机
+    /// 上 Pi 在 bootstrap 里发问即失败，用户只看到一句无信息量的兜底。
+    ///
+    /// 指令只约束**交互行为**（不要提问、不要等回答），不改变 skill 的业务
+    /// 规则：需要用户授权的破坏性分支仍按 skill 规定停止并记录，不得擅自清理。
+    fn unattended_prompt(command: &str) -> String {
+        format!(
+            "{command}\n\n\
+             （无人值守执行：本次操作没有交互通道。不要向用户提问，也不要请求授权\
+             或等待回答；遇到需要用户决策的分支，按 skill 规定的非破坏性默认路径继续\
+             （无法安全继续时停止并在产物中写明），不要停在等待回答上。）"
+        )
     }
 
     /// 以单仓/聚合初始化同款语义消费会话：取消/超时共用预算，输出累积为有界
@@ -988,8 +1005,48 @@ impl GatewayKnowledgeBaseTurnRunner {
                         true,
                     ));
                 }
-                Some(ProviderEvent::PermissionRequest(_))
-                | Some(ProviderEvent::ChoiceRequest(_)) => {
+                Some(ProviderEvent::PermissionRequest(request)) => {
+                    // 交互请求（授权/提问）在知识库操作里没有应答通道 ⇒ 失败。
+                    // 但**必须把 provider 问了什么写进诊断**：否则用户只看到
+                    // 「provider interaction required」这句无信息量的兜底，
+                    // 不知道该改哪里（真机：Pi 在 bootstrap 里发问，失败面看不出
+                    // 原因）。
+                    output.push(&format!(
+                        "\n[provider 请求授权] tool={} desc={}",
+                        request.tool_name, request.description
+                    ));
+                    best_effort_abort(&session);
+                    let _ = Self::await_provider_stop(&mut session, stop_grace).await;
+                    return Err(turn_failed(
+                        "provider_interaction_required",
+                        "provider interaction required",
+                        &output,
+                        false,
+                    ));
+                }
+                Some(ProviderEvent::ChoiceRequest(request)) => {
+                    // 同上：把 provider 的提问原文写进诊断（用户要看到问题）。
+                    output.push(&format!(
+                        "\n[provider 提问] {}",
+                        request
+                            .effective_questions()
+                            .iter()
+                            .map(|question| {
+                                let options = question
+                                    .options
+                                    .iter()
+                                    .map(|option| option.label.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" / ");
+                                if options.is_empty() {
+                                    question.prompt.clone()
+                                } else {
+                                    format!("{}（可选：{}）", question.prompt, options)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("；")
+                    ));
                     best_effort_abort(&session);
                     let _ = Self::await_provider_stop(&mut session, stop_grace).await;
                     return Err(turn_failed(

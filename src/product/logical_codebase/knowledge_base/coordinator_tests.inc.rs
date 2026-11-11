@@ -627,6 +627,36 @@ async fn execute_records_provider_turn_failure() {
 }
 
 #[tokio::test]
+async fn execute_records_provider_interaction_with_its_own_reason_code() {
+    // provider 发问/请求授权 ⇒ 独立稳定码（不是「provider 挂了」）：界面要能
+    // 说清「它在等人回答，而知识库操作无人值守」。
+    let fixture = fixture(
+        Script::Fail {
+            code: "provider_interaction_required",
+            retryable: false,
+        },
+        false,
+    );
+    let operation = begin_bootstrap(&fixture, "kb-key-0002").await.unwrap();
+    fixture
+        .coordinator
+        .execute(
+            PROJECT,
+            &operation.operation_id,
+            &fixture.root,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    let stored = fixture.store.get(PROJECT, &operation.operation_id).unwrap();
+    let record = stored.error.expect("失败记录");
+    assert_eq!(
+        record.reason_code, "knowledge_base_provider_interaction_required"
+    );
+    assert_eq!(record.cause.as_deref(), Some("provider_interaction_required"));
+}
+
+#[tokio::test]
 async fn execute_marks_operation_cancelled_when_turn_is_cancelled() {
     let fixture = fixture(Script::WaitForCancel, false);
     let operation = begin_bootstrap(&fixture, "kb-key-0001").await.unwrap();
@@ -927,7 +957,18 @@ fn gateway_runner_streaming_input_is_executor_auto_with_bounded_timeout() {
         ));
         assert_eq!(input.timeout_secs, 1800);
         assert_eq!(input.working_dir, root);
-        assert_eq!(input.prompt, "/knowledge-base-bootstrap");
+        // prompt = 命令 + 无人值守指令（知识库 operation 没有交互通道：
+        // provider 一旦发问，本次 turn 就会判 provider_interaction_required）。
+        assert!(
+            input.prompt.starts_with("/knowledge-base-bootstrap"),
+            "prompt 必须以命令开头：{}",
+            input.prompt
+        );
+        assert!(
+            input.prompt.contains("无人值守"),
+            "prompt 必须带无人值守指令：{}",
+            input.prompt
+        );
         assert!(
             input.tool_policy.is_none(),
             "Normal 相位不携带 bootstrap marker"

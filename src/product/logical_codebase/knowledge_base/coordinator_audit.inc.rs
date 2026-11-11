@@ -16,6 +16,13 @@
 //  use 导入与常量。）
 const REASON_WRITE_SCOPE_VIOLATION: &str = "knowledge_base_write_scope_violation";
 const REASON_TURN_FAILED: &str = "knowledge_base_provider_turn_failed";
+/// provider 在无人值守的知识库操作里发起提问/授权请求（与「provider 挂了」
+/// 是两回事，界面必须能分开说）。
+const REASON_INTERACTION_REQUIRED: &str = "knowledge_base_provider_interaction_required";
+/// 交互类失败的 remediation：先看诊断里 provider 问了什么，能补输入就补，
+/// 否则换一家 provider。
+const INTERACTION_REQUIRED_ACTION: &str =
+    "按诊断里 provider 的提问补齐输入或消解该问题；无法消解时改用另一家 provider 重新发起";
 const REASON_INVALID_INPUT: &str = "knowledge_base_invalid_input";
 const REASON_INTERNAL: &str = "knowledge_base_internal_error";
 const REASON_TRUST_WAITING: &str = "aggregate_initialization_trust_waiting";
@@ -126,13 +133,29 @@ fn base_error_record(
             reason_code,
             summary,
             retryable,
-        } => record(
-            REASON_TURN_FAILED,
-            Some(summary.clone()),
-            *retryable,
-            "查看 provider 输出摘要，处理后重新发起",
-            Some(reason_code.clone()),
-        ),
+        } => {
+            // provider 发问 / 请求授权 ⇒ **单独的稳定码**：这类失败不是
+            // 「provider 挂了」，而是「它在等人回答」，而知识库 operation 是
+            // 无人值守的（没有应答通道）。界面必须说清这两者的区别，否则用户
+            // 只看到「知识库操作执行失败」，既不知道问的是什么，也不知道
+            // 该换 provider 还是该补输入（真机：Pi 在 bootstrap 里发问即失败）。
+            let interaction = reason_code == "provider_interaction_required";
+            record(
+                if interaction {
+                    REASON_INTERACTION_REQUIRED
+                } else {
+                    REASON_TURN_FAILED
+                },
+                Some(summary.clone()),
+                *retryable,
+                if interaction {
+                    INTERACTION_REQUIRED_ACTION
+                } else {
+                    "查看 provider 输出摘要，处理后重新发起"
+                },
+                Some(reason_code.clone()),
+            )
+        }
         KnowledgeBaseError::InvalidInput(message) => record(
             REASON_INVALID_INPUT,
             Some(message.clone()),
