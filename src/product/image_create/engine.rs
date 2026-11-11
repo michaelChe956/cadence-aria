@@ -14,9 +14,9 @@ use crate::cross_cutting::image_reference_validation::validate_reference_image;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 
 use super::models::{
-    ChatMessage, DefaultParams, GenerationResult, ImageCreateError, ImageVendor, IterationEvent,
-    ModelChoice, PromptBlock, ReferenceSource, ResolvedTarget, RunKind, SessionEvent,
-    SessionRecord, SessionStatus, SessionStoreApi, SettingsStoreApi,
+    ChatMessage, DefaultParams, GenerationResult, ImageCreateError, ImageCreateSettings,
+    ImageVendor, IterationEvent, ModelChoice, PromptBlock, ReferenceSource, ResolvedTarget,
+    RunKind, SessionEvent, SessionRecord, SessionStatus, SessionStoreApi, SettingsStoreApi,
 };
 use super::prompt_iteration::PromptIterationEngine;
 use super::run_registry::ImageCreateRunRegistry;
@@ -115,11 +115,19 @@ impl ImageCreateEngine {
 
             match result {
                 Ok(outcome) => {
+                    // H2：迭代执行器的 cwd 在 .aria 之下，能读到明文 key 并写进输出；
+                    // 落库与推事件前对两家 key 统一脱敏（不含 key 时逐字保留）。
+                    let settings = engine.settings_store.load().await;
+                    let readable_text = redact_api_keys(&outcome.readable_text, &settings);
+                    let suggested_prompt = outcome
+                        .suggested_prompt
+                        .as_ref()
+                        .map(|prompt| redact_api_keys(prompt, &settings));
                     let persisted = engine
                         .persist_iteration(
                             &id,
                             message,
-                            outcome.suggested_prompt.clone(),
+                            suggested_prompt.clone(),
                             outcome.provider_session_id.clone(),
                         )
                         .await;
@@ -127,18 +135,18 @@ impl ImageCreateEngine {
                         Ok(()) => {
                             // 有 suggested_prompt 时只推 prompt（provider 的解释文本对用户无价值，不展示）；
                             // 无 suggested_prompt 时才推 text 作为 fallback（让用户知道发生了什么）。
-                            if outcome.suggested_prompt.is_none() {
+                            if suggested_prompt.is_none() {
                                 let _ = event_tx
                                     .send(IterationEvent {
                                         kind: "text".to_string(),
-                                        text: Some(outcome.readable_text),
+                                        text: Some(readable_text),
                                         suggested_prompt: None,
                                         provider_session_id: None,
                                         error: None,
                                     })
                                     .await;
                             }
-                            if let Some(prompt) = outcome.suggested_prompt {
+                            if let Some(prompt) = suggested_prompt {
                                 let _ = event_tx
                                     .send(IterationEvent {
                                         kind: "prompt".to_string(),
@@ -512,6 +520,20 @@ async fn send_iteration_error(
             error: Some(error.to_string()),
         })
         .await
+}
+
+/// 迭代输出脱敏（H2）：输出文本中出现两家任一 `api_key` 明文即替换为 `[REDACTED]`。
+/// 对齐 `image_client::sanitize_error_body` 的替换思路；输出不含 key 时原文逐字返回，
+/// 不改写用户的 prompt。空 key 不参与替换（空串 replace 会在每个字符间插入）。
+fn redact_api_keys(text: &str, settings: &ImageCreateSettings) -> String {
+    let mut redacted = text.to_string();
+    for vendor in ImageVendor::ALL {
+        let key = settings.vendors.get(vendor).api_key.as_str();
+        if !key.is_empty() {
+            redacted = redacted.replace(key, "[REDACTED]");
+        }
+    }
+    redacted
 }
 
 #[cfg(test)]
