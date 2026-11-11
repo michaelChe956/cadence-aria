@@ -21,6 +21,10 @@ use super::models::{
 use super::prompt_iteration::PromptIterationEngine;
 use super::run_registry::ImageCreateRunRegistry;
 
+/// prompt 长度上限（Unicode 字符数）：两家官方上限均为 32000，
+/// 超长在出站前拒绝，避免一次必然被上游拒收、可能计费的往返（H5）。
+const MAX_PROMPT_CHARS: usize = 32000;
+
 #[derive(Debug, Clone)]
 struct PendingResult {
     result: GenerationResult,
@@ -320,6 +324,13 @@ impl ImageCreateEngine {
             return Err(ImageCreateError::InvalidParam(
                 "prompt must not be empty".to_string(),
             ));
+        }
+        // 按字符数（非字节数）计上限，与两家官方限制口径一致（H5）。
+        let prompt_chars = command.request.prompt.chars().count();
+        if prompt_chars > MAX_PROMPT_CHARS {
+            return Err(ImageCreateError::InvalidParam(format!(
+                "prompt 长度超过 {MAX_PROMPT_CHARS} 字符上限（当前 {prompt_chars} 字符）"
+            )));
         }
         // 末项在 generate() 的 flush_pending() 之后重新读取（D7）：
         // 写图成功但引用待补的结果已进入序列；旧记录无 vendor 视为 GPT（D5）。

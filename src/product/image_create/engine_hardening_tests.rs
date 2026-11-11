@@ -26,3 +26,42 @@ async fn h3_invalid_base_url_is_rejected_as_invalid_config_without_client_call()
     );
     assert_eq!(client.calls().await, 0, "出站前失败，客户端零调用");
 }
+
+#[tokio::test]
+async fn h5_prompt_over_32000_chars_is_rejected_without_client_call() {
+    // H5：超过两家官方 32000 字符上限的 prompt 在出站前拒绝（InvalidParam），
+    // 避免一次必然被上游拒收、可能计费的往返。
+    let store = Arc::new(FakeSessionStore::with_record());
+    let client = Arc::new(FakeImageClient::success());
+    let engine = engine(store, valid_settings(), client.clone(), None);
+
+    let error = generate_err(
+        &engine,
+        auto_command(request(&"长".repeat(32001)), false, None),
+    )
+    .await;
+
+    assert!(
+        matches!(&error, ImageCreateError::InvalidParam(message) if message.contains("32000")),
+        "超长 prompt 应为 InvalidParam：{error}"
+    );
+    assert_eq!(client.calls().await, 0, "出站前失败，客户端零调用");
+}
+
+#[tokio::test]
+async fn h5_prompt_of_exactly_32000_chars_passes() {
+    let store = Arc::new(FakeSessionStore::with_record());
+    let client = Arc::new(FakeImageClient::success());
+    let engine = engine(store, valid_settings(), client.clone(), None);
+
+    let result = engine
+        .generate(
+            "session",
+            auto_command(request(&"画".repeat(32000)), false, None),
+        )
+        .await
+        .expect("恰好 32000 字符的 prompt 应通过");
+
+    assert_eq!(result.prompt.chars().count(), 32000);
+    assert_eq!(client.calls().await, 1, "边界值放行，客户端恰好调用 1 次");
+}
