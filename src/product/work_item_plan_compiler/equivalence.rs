@@ -5,14 +5,12 @@
 //! 经 `work_item_plan_compiler` 的 re-export 消费。等价解析只读 source
 //! 事实与 context，绝不改写 source。
 
-use super::lower::{
-    PlanCandidateIr, WorkItemPlanSourceContext, diagnostic_with_fault, lower_work_item_plan,
-};
+use super::lower::{PlanCandidateIr, WorkItemPlanSourceContext, diagnostic, lower_work_item_plan};
 use super::types::{CompilerDiagnostic, LoweringFault};
 use crate::product::lifecycle_store::candidate_attempts::EquivalenceCanonicalization;
 
 /// 等价解析三态：唯一命中才采用；不在成员表/双命中一律 fail-closed。
-pub(super) enum EquivResolution {
+enum EquivResolution {
     Adopted {
         repository_id: String,
         basis: &'static str,
@@ -26,7 +24,7 @@ pub(super) enum EquivResolution {
 /// 与任一成员物理仓值）或不在成员表一律 fail-closed，绝不取第一个命
 /// 中；legacy 无成员表时会话 target 非聚合根视图才作回落（basis
 /// 「session target」），聚合视图 typed 拒绝（B1 铁律，不猜）。
-pub(super) fn resolve_equivalent_single_repository_target(
+fn resolve_equivalent_single_repository_target(
     value: &str,
     context: &WorkItemPlanSourceContext,
 ) -> EquivResolution {
@@ -58,6 +56,21 @@ pub(super) fn resolve_equivalent_single_repository_target(
         },
         (Some(_), true) => EquivResolution::Ambiguous,
         (None, _) => EquivResolution::NotInMemberTable,
+    }
+}
+
+/// REQ-CRP-02：显式 typed fault 工厂——只在机器事实完整的构造点调用
+///（Plan Intent 等价解析 fail-closed / 必填缺席），不从 code/message 派生。
+pub(super) fn diagnostic_with_fault(
+    field: &str,
+    message: &str,
+    line: usize,
+    repair_example: &str,
+    fault: LoweringFault,
+) -> CompilerDiagnostic {
+    CompilerDiagnostic {
+        lowering_fault: Some(fault),
+        ..diagnostic(field, message, line, repair_example)
     }
 }
 

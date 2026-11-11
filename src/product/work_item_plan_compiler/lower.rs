@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use sha2::{Digest, Sha256};
 
-use super::equivalence::equivalent_single_repository_target;
+use super::equivalence::{diagnostic_with_fault, equivalent_single_repository_target};
 use super::types::LoweringFault;
 use super::{
     grammar::WORK_ITEM_PLAN_COMPILER_VERSION,
@@ -1168,7 +1168,12 @@ fn parse_evidence_kind(
     };
     Some(evidence)
 }
-fn diagnostic(field: &str, message: &str, line: usize, repair_example: &str) -> CompilerDiagnostic {
+pub(super) fn diagnostic(
+    field: &str,
+    message: &str,
+    line: usize,
+    repair_example: &str,
+) -> CompilerDiagnostic {
     CompilerDiagnostic {
         code: "lowering_error".to_string(),
         line,
@@ -1180,20 +1185,5 @@ fn diagnostic(field: &str, message: &str, line: usize, repair_example: &str) -> 
         // 不从 code/message 推导。
         kind: None,
         lowering_fault: None,
-    }
-}
-
-/// REQ-CRP-02：显式 typed fault 工厂——只在机器事实完整的构造点调用
-///（Plan Intent 等价解析 fail-closed / 必填缺席），不从 code/message 派生。
-pub(super) fn diagnostic_with_fault(
-    field: &str,
-    message: &str,
-    line: usize,
-    repair_example: &str,
-    fault: LoweringFault,
-) -> CompilerDiagnostic {
-    CompilerDiagnostic {
-        lowering_fault: Some(fault),
-        ..diagnostic(field, message, line, repair_example)
     }
 }
