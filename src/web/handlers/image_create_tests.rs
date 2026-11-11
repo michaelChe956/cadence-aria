@@ -935,32 +935,17 @@ async fn generate_response_reports_vendor_model_selection_and_reference_source()
 
     assert_eq!(response.status(), StatusCode::OK);
     let result = response_json::<Value>(response).await;
-    let fields = ["vendor", "model", "selection", "reference_source"];
-    for field in fields {
+    // 4 个字段必有；取值由引擎写入（Task 6：自动轮转 → GPT 家的轮转模型）。
+    for field in ["vendor", "model", "selection", "reference_source"] {
         assert!(
             result.get(field).is_some(),
             "响应缺少字段 {field}：{result}"
         );
     }
-    // 引擎记录了这 4 项时四项必须同时有值（值的正确性由引擎用例 E-01/E-07 覆盖）；
-    // 未记录时必须四项同时缺省，不允许半填。
-    let recorded = fields
-        .iter()
-        .filter(|field| !result[*field].is_null())
-        .count();
-    assert!(
-        recorded == 0 || recorded == 4,
-        "四个字段必须同时有值或同时缺省：{result}"
-    );
-    if recorded == 4 {
-        assert_eq!(result["vendor"], "gpt");
-        assert_eq!(result["selection"], "auto");
-        assert_eq!(result["reference_source"], "none");
-        assert!(
-            !result["model"].as_str().expect("model").is_empty(),
-            "模型 id 不能为空：{result}"
-        );
-    }
+    assert_eq!(result["vendor"], "gpt");
+    assert_eq!(result["model"], "gpt-image-2.6-flare");
+    assert_eq!(result["selection"], "auto");
+    assert_eq!(result["reference_source"], "none");
 }
 
 /// 上一张图不可用 / 缺配置 → 400，错误文本保留中文可读说明。
