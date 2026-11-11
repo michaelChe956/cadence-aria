@@ -288,10 +288,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
                     // 交互请求（授权/提问）：聚合初始化同样没有应答通道 ⇒ 失败。
                     // 把 provider 问了什么写进 reason：否则用户只看到
                     // 「provider interaction required」而不知道该改什么。
-                    output.push(&format!(
-                        "\n[provider 请求授权] tool={} desc={}",
-                        request.tool_name, request.description
-                    ));
+                    output.push(&crate::product::logical_codebase::interaction_diagnostic::permission_interaction_text(&request));
                     best_effort_abort(&session);
                     return Err(AggregateInitializationError::ProviderTurn {
                         step,
@@ -301,27 +298,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
                 }
                 Some(ProviderEvent::ChoiceRequest(request)) => {
                     // 同上：把 provider 的提问原文写进 reason。
-                    output.push(&format!(
-                        "\n[provider 提问] {}",
-                        request
-                            .effective_questions()
-                            .iter()
-                            .map(|question| {
-                                let options = question
-                                    .options
-                                    .iter()
-                                    .map(|option| option.label.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(" / ");
-                                if options.is_empty() {
-                                    question.prompt.clone()
-                                } else {
-                                    format!("{}（可选：{}）", question.prompt, options)
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    ));
+                    output.push(&crate::product::logical_codebase::interaction_diagnostic::choice_interaction_text(&request));
                     best_effort_abort(&session);
                     return Err(AggregateInitializationError::ProviderTurn {
                         step,

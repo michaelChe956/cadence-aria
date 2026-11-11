@@ -1010,11 +1010,9 @@ impl GatewayKnowledgeBaseTurnRunner {
                     // 但**必须把 provider 问了什么写进诊断**：否则用户只看到
                     // 「provider interaction required」这句无信息量的兜底，
                     // 不知道该改哪里（真机：Pi 在 bootstrap 里发问，失败面看不出
-                    // 原因）。
-                    output.push(&format!(
-                        "\n[provider 请求授权] tool={} desc={}",
-                        request.tool_name, request.description
-                    ));
+                    // 原因）。诊断文本由事件数据类型自己渲染（见
+                    // `cross_cutting::streaming_provider`）。
+                    output.push(&crate::product::logical_codebase::interaction_diagnostic::permission_interaction_text(&request));
                     best_effort_abort(&session);
                     let _ = Self::await_provider_stop(&mut session, stop_grace).await;
                     return Err(turn_failed(
@@ -1026,27 +1024,7 @@ impl GatewayKnowledgeBaseTurnRunner {
                 }
                 Some(ProviderEvent::ChoiceRequest(request)) => {
                     // 同上：把 provider 的提问原文写进诊断（用户要看到问题）。
-                    output.push(&format!(
-                        "\n[provider 提问] {}",
-                        request
-                            .effective_questions()
-                            .iter()
-                            .map(|question| {
-                                let options = question
-                                    .options
-                                    .iter()
-                                    .map(|option| option.label.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(" / ");
-                                if options.is_empty() {
-                                    question.prompt.clone()
-                                } else {
-                                    format!("{}（可选：{}）", question.prompt, options)
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    ));
+                    output.push(&crate::product::logical_codebase::interaction_diagnostic::choice_interaction_text(&request));
                     best_effort_abort(&session);
                     let _ = Self::await_provider_stop(&mut session, stop_grace).await;
                     return Err(turn_failed(

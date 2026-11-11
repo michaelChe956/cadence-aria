@@ -369,7 +369,8 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
     Ok(prompt)
 }
 
-/// 基线树清单的截断标记（渲染器内部截断与外层配额截断共用）。
+// 基线树清单的截断标记（渲染器内部截断与外层配额截断共用）——常量在
+// prompts/sc_baseline_tree.rs。
 
 /// 按**行边界**把已渲染的基线树清单截到 `cap` 字节；截断时以显式标记行
 /// 收尾（计入 cap），MUST NOT 把部分清单冒充全量。只删行、不改行内容 ⇒
@@ -385,11 +386,13 @@ pub(crate) fn build_work_item_plan_markdown_prompt(
 ///   成员仓轮转保底截断——每轮每组各取 1 条直到用满上限，保证每个成员仓
 ///   至少 1 条；被截断时以显式标记行收尾（计入上限），不得把部分清单
 ///   冒充全量。
+///
 /// D5 事前（REQ-WSC-06）：作者轮启动前的基线树装载决策——
 /// - `Ok(Some(tree))`（非空）⇒ 渲染为成员仓分组清单，注入 prompt；
 /// - `Ok(None)`（无仓 issue）/ 空树 ⇒ 该段缺席（零回归）；
 /// - `Err(_)` ⇒ 仅记诊断、该段缺席，**不阻断作者轮**；既有 fail-closed
 ///   点仍在 Evaluate 阶段（`plan_baseline_tree` 的 `Err` 在预校验原样上抛）。
+///
 /// 基线树来源唯一：调用方传入 `plan_baseline_tree` 的装载结果（与
 /// Evaluate 期同函数同源），本函数不新增第二套装载。
 fn work_item_draft_runtime_contract(context: &RoutingReferenceContext) -> String {

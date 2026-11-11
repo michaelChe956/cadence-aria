@@ -175,9 +175,9 @@ pub(crate) fn author_baseline_tree_section(
 /// 清单**计入上下文面同一配额**（owner 2026-11-10 裁决：新增直供内容计入其
 /// 所属面）：上下文面的**全部**字节都算在这 32,000 内 —— 三段压缩正文 + 清单
 /// + `story:`/`design:`/`structure:`/`baseline:` 前缀 + `story_spec_ids:`/
-/// `design_spec_ids:` 行。故先算固定开销，再把**剩余**额度给清单（上限
-/// 32,000/4）；额度不足则按行截断并显式标记；额度为 0 ⇒ 整段缺席 ⇒
-/// 上下文面恒 ≤ 32,000。
+///   `design_spec_ids:` 行。故先算固定开销，再把**剩余**额度给清单（上限
+///   32,000/4）；额度不足则按行截断并显式标记；额度为 0 ⇒ 整段缺席 ⇒
+///   上下文面恒 ≤ 32,000。
 pub(crate) fn baseline_tree_section(
     story_context: &str,
     design_context: &str,

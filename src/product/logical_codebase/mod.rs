@@ -16,6 +16,7 @@ pub mod evidence_token;
 pub mod failure_copy;
 pub mod feature;
 pub mod identity_repair;
+pub mod interaction_diagnostic;
 pub mod issue_selection;
 pub mod knowledge_base;
 pub mod legacy_shared_worktree_migration;

@@ -33,8 +33,11 @@ pub(crate) enum SingleCandidateProviderRunError {
         /// 等待投影原样随行——供上层紧随 error 帧发送结构化
         /// `trust_missing_guidance` 帧（providers/canonical_root/
         /// command_markdown），前端不再解析平铺串；其它 waiting 恒 None。
+        /// Box 化：`ProviderTrustWaiting` 本体 ≥320 字节，不 Box 会让整个
+        /// 错误枚举过大（clippy::result_large_err ⇒ 每个返回该错误的函数都
+        /// 报红）。等待载荷只做「原样随行」的只读投影，Box 不改语义。
         trust_waiting:
-            Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>,
+            Option<Box<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>>,
     },
     /// B2c（Task 5.5，设计 §5.3 SC 纪律①）：SC author native mismatch
     /// （旧 native 在而冻结绑定不可用/已吊销）的独立 typed 等待——不落
@@ -201,7 +204,9 @@ fn preflight_lc_member_rules_before_author_run(
     engine: &mut WorkspaceEngine,
     run_context: &ProviderRunContext,
     launch: &super::gateway_start::LogicalPlanLaunch,
-) -> Result<(), SingleCandidateProviderRunError> {
+) -> Result<(), Box<SingleCandidateProviderRunError>> {
+    // 错误载荷 Box 化：clippy::result_large_err（该枚举 ≥128 字节）。`?` 经
+    // `From<E> for Box<E>` 自动装箱，调用点用 `map_err(|e| *e)` 解箱。
     let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
         &run_context.app_paths,
         &run_context.session_record.project_id,
@@ -272,19 +277,19 @@ fn preflight_lc_member_rules_before_author_run(
                     waiting.manual_guidance, waiting.retry_action
                 )
             });
-            Err(SingleCandidateProviderRunError::AdmissionWaiting {
+            Err(Box::new(SingleCandidateProviderRunError::AdmissionWaiting {
                 reason_code,
                 detail,
                 missing_materials,
                 allowed_actions,
                 manual_guidance,
-                trust_waiting,
-            })
+                trust_waiting: trust_waiting.map(Box::new),
+            }))
         }
         Err(crate::product::logical_codebase::ProviderAdmissionError::Store(error)) => {
-            Err(SingleCandidateProviderRunError::Message(format!(
+            Err(Box::new(SingleCandidateProviderRunError::Message(format!(
                 "provider admission preflight store error: {error}"
-            )))
+            ))))
         }
     }
 }
@@ -429,7 +434,8 @@ pub(crate) async fn run_single_candidate_author(
     // `resolve_plan_author_launch` 同谓词）零变化。
     let lc_plan_launch = super::gateway_start::logical_plan_launch_for(engine);
     if let Some(lc_plan_launch) = lc_plan_launch.as_ref() {
-        preflight_lc_member_rules_before_author_run(engine, run_context, lc_plan_launch)?;
+        preflight_lc_member_rules_before_author_run(engine, run_context, lc_plan_launch)
+            .map_err(|error| *error)?;
     }
     // 路 C（Task 4，REQ-REG-12）：LC SC 的必需成员材料在真实读取点判定并
     // 同源消费——对已解析 `repository.path`（`workspace_repository_for_session`

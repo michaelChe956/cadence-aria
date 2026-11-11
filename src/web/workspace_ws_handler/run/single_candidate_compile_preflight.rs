@@ -30,7 +30,7 @@ pub(super) fn is_teachable_parse_failure(code: &str) -> bool {
 // 资格）属字符串资格旁路，已删除——lowering 类（缺席与值域统一）零
 // 教学重驱，确定性终态失败由 typed 诊断回显承载。
 
-/// 丢弃 provider 在 markdown 文档标题前输出的前言（实现见 single_candidate_delivery）。
+// 丢弃 provider 在 markdown 文档标题前输出的前言（实现见 single_candidate_delivery）。
 
 /// SC author 交付进入 compiler 前的确定性净化（结构标题归一化 + EARS 关键字
 /// 空白归一化 + 前言修剪）。
