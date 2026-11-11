@@ -131,9 +131,14 @@ async fn h2_iteration_prompt_output_with_gpt_key_is_redacted_before_persist() {
 
     let (_text, prompt_event) = collect_iteration_outputs(&engine).await;
 
-    let record = store.record.lock().await;
-    let record = record.as_ref().expect("record");
-    let persisted = record.prompt_blocks[0].content.clone();
+    let (persisted, current_prompt) = {
+        let guard = store.record.lock().await;
+        let record = guard.as_ref().expect("record");
+        (
+            record.prompt_blocks[0].content.clone(),
+            record.session.current_prompt.clone(),
+        )
+    };
     assert!(
         !persisted.contains("sk-gpt"),
         "落盘 prompt 不得含明文 key：{persisted}"
@@ -143,11 +148,10 @@ async fn h2_iteration_prompt_output_with_gpt_key_is_redacted_before_persist() {
         "应替换为 [REDACTED]：{persisted}"
     );
     assert_eq!(
-        record.session.current_prompt.as_deref(),
+        current_prompt.as_deref(),
         Some(persisted.as_str()),
         "会话 meta 的 current_prompt 同步脱敏"
     );
-    drop(record);
     assert_eq!(
         prompt_event.as_deref(),
         Some(persisted.as_str()),
@@ -171,10 +175,12 @@ async fn h2_iteration_prompt_output_with_minimax_key_is_redacted_before_persist(
 
     let (_text, _prompt) = collect_iteration_outputs(&engine).await;
 
-    let record = store.record.lock().await;
-    let persisted = record.as_ref().expect("record").prompt_blocks[0]
-        .content
-        .clone();
+    let persisted = {
+        let guard = store.record.lock().await;
+        guard.as_ref().expect("record").prompt_blocks[0]
+            .content
+            .clone()
+    };
     assert!(
         !persisted.contains("sk-minimax"),
         "落盘 prompt 不得含 MiniMax 明文 key：{persisted}"
@@ -202,13 +208,13 @@ async fn h2_iteration_prompt_output_without_keys_is_verbatim() {
 
     let (_text, prompt_event) = collect_iteration_outputs(&engine).await;
 
-    let record = store.record.lock().await;
-    assert_eq!(
-        record.as_ref().expect("record").prompt_blocks[0].content,
-        suggested,
-        "无 key 时落盘文本逐字不变"
-    );
-    drop(record);
+    let persisted = {
+        let guard = store.record.lock().await;
+        guard.as_ref().expect("record").prompt_blocks[0]
+            .content
+            .clone()
+    };
+    assert_eq!(persisted, suggested, "无 key 时落盘文本逐字不变");
     assert_eq!(prompt_event.as_deref(), Some(suggested), "事件文本逐字不变");
 }
 
