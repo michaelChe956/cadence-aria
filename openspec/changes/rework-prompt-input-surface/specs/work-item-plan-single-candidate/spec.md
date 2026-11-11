@@ -210,3 +210,23 @@ workitem author/reviewer prompt SHALL 仅承载产物规格（任务上下文、
 
 - **WHEN** 前轮非 advisory findings 含多条同内容身份条目（同一机械码对多个 Work Item 各登记一次）
 - **THEN** 清单 SHALL 只保留一条并折叠为计数；MUST NOT 以多条重复条目呈现（实测同一 preflight 码曾产生 4 条完全相同的待办）
+
+#### Scenario: 写范围越界诊断区分绝对路径与仓内相对写法
+
+- **WHEN** 平台判定某 Work Item 的 exclusive_scopes 含绝对路径（如 `/tmp/notice-delete-frontend-check/**`）
+- **THEN** 平台 SHALL 产出 Error 级 finding 且码仍为 `write_scope_outside_bound_repository`、指向该 Work Item；message SHALL 保留原始路径并明确「绝对路径 / 不属于授权成员」；MUST NOT 生成「加成员目录前缀冒充仓内路径」的改写示例；MUST NOT 自动删除该 scope、去掉前导 `/` 或迁移文件；写范围判定 MUST NOT 因此放宽（该路径仍被拒）；仓内相对写法（如 `src/lib.rs`）SHALL 仍获「改写为带成员目录前缀的聚合根相对写法」的指导
+
+#### Scenario: 写范围教学反例精度
+
+- **WHEN** 多仓会话的作者 prompt 呈现写范围路径基准教学段
+- **THEN** 该段 SHALL 以**替换**（而非追加堆叠）的方式更新：既有纪律的语义要点 SHALL 逐条保留（成员目录前缀的聚合根相对形式 / 裸仓内相对写法 plan 期拒收 / 聚合根本地文件区不可写）；SHALL 增补 `/tmp/check/**` 一类绝对路径反例、SHALL 明示「不能直接加成员目录前缀冒充仓内路径」、SHALL 明示 exclusive_scopes 只能属于本 Work Item 的授权成员、SHALL 明示「被授权成员内新建路径」与「AC 基线存在性」是两项独立规则；该段 MUST 计入固定规范面预算，MUST NOT 以「动态教学」名义规避；无已确认成员的 legacy 单仓场景 SHALL 整段缺席且既有 prompt 逐字不变
+
+#### Scenario: 逐仓实况事实直供
+
+- **WHEN** 平台构造单候选 author prompt（首轮与返修轮均适用）
+- **THEN** 平台 SHALL 把成员清单与逐仓实况段（`## 逐仓实况`，每仓固定 5 行：职责 / 关键目录 / 入口 / 构建测试命令 / 基线）注入 author 上下文面；成员 alias、聚合根相对 path、职责、关键目录、入口、构建测试命令、基线逐项 SHALL 在场；该段 SHALL 与基线树清单段**分别计量**，MUST NOT 使上下文面超 32,000 B，固定规范面 23,500 B MUST NOT 因本项变动；该段不含文件清单，MUST NOT 被当作多成员基线树的替代
+
+#### Scenario: 逐仓实况成员缺席如实说明
+
+- **WHEN** 渲染逐仓实况时某成员无 checkout 记录，或渲染结果超预算 / 装载失败
+- **THEN** 无 checkout 的成员 SHALL 仍被如实呈现（其关键目录 / 入口 / 构建测试命令显「未识别」、基线显「基线未识别(该成员无 checkout 记录)」），MUST NOT 被静默丢弃；该成员清单行的聚合根相对 path 退化为成员 alias 时，平台 MUST NOT 将其呈现为真实聚合根相对路径；逐仓实况的成员集合与「已授权有效成员」的口径差 SHALL 被如实解释；渲染或装载失败时 SHALL 降级为「逐仓实况缺席」并记诊断，SHALL NOT 使作者轮失败、SHALL NOT panic、SHALL NOT 裁剪成员或输出缺员标记

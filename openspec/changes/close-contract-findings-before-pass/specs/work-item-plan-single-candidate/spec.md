@@ -89,3 +89,23 @@
 
 - **WHEN** 以 `category`（`contract_gap` / `self_contradiction`）× `severity`（`suggestion` / `must_fix` / `blocking`）× `disposition`（`actionable` / `advisory` / 缺省）× `class_hint`（`repairable` / `human_required` / `advisory` / 缺省）× `verdict`（`pass` / `revise` / `needs_human`）构成矩阵，并代入含五条真实 finding 的基线样本
 - **THEN** 恰有一条契约类 finding 进入必关闭集合，整轮结论 MUST NOT 为自动通过，该 finding 的原 severity 与 key MUST 不变；无 `contract_field` 的那条 MUST NOT 自动调用 author；其余四条 MUST 仍不扣预算、不阻断
+
+#### Scenario: 普通建议不得因模型 hint 进入必关闭集合
+
+- **WHEN** 一条 `severity=suggestion`、`category` 不属于契约类（`completeness` / `other` / `verification_unattributable` / 缺省）、`disposition=actionable` 的 finding 携带 `class_hint=repairable` 或 `class_hint=human_required`
+- **THEN** 该 finding MUST NOT 进入必关闭集合、MUST NOT 计入非 advisory 指纹集合、MUST NOT 消耗返修预算或 transition budget、MUST NOT 触发自动返修或人工门；更换 `class_hint` MUST NOT 改变上述任一结论
+
+#### Scenario: 控制面不得因普通建议升人工
+
+- **WHEN** 一条上述普通建议经中央策略分类器**真实分类**后进入控制面评估，且预置历史已包含其指纹
+- **THEN** 平台 MUST NOT 因该 finding 触发重复指纹停止、MUST NOT 因 Verification 阶段出现它而触发新 finding 停止、MUST NOT 触发自动修复候选或返修预算耗尽分支；该指纹 MUST NOT 被加入已见指纹集合；repairs / manual_repairs / transition 的消耗 MUST 均为 0；对应路由 MUST NOT 产出触发聚合返修或需人工停机的结论
+
+#### Scenario: 原生人工结论不被反向投影改写
+
+- **WHEN** 一条 finding 所在轮次的原始判定为 `NeedsHuman`（未经有效必关闭重开）
+- **THEN** 平台 MUST 继续沿既有原生人工结论路径处理，MUST NOT 因闭合资格的反向投影改写该结论；该投影的验收 MUST 以 `Pass` / `Revise` 构造，raw `NeedsHuman` 另行单独断言
+
+#### Scenario: golden 期望更新不得越界与伪造许可
+
+- **WHEN** 分类期望因闭合资格的反向投影与既有两级判定而更新
+- **THEN** 分类期望字段 MAY 被更新，但该 fixture 的 `finding.message` / `finding.evidence` / `finding.required_action` MUST NOT 被修改（该 fixture 被作者 prompt 固定规范面以 `include_str!` 嵌入并逐条渲染这三个字段）；MUST NOT 为使期望成立而补造服务端许可证据；同一 fixture 在分类器与判例渲染两处消费者 MUST 同时成立

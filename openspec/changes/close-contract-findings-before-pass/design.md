@@ -161,6 +161,8 @@ auto_repair_permitted = requires_closure
 | `requires_closure` 真 且 `auto_repair_permitted` 假 | **`HumanRequired`**（不得 `Advisory`，也不得 `Repairable`） |
 | `requires_closure` 假 | 维持既有行为（范围外 advisory 不变） |
 
+> **D9 局部修订（追加，本表其余行不变）：** 上表第三行「`requires_closure` 假 ⇒ 维持既有行为」在 D9 生效后**局部改写**为「`requires_closure` 假 ⇒ `Advisory`，`class_hint` 不得升级」。理由与边界见 **D9 · 闭合资格的反向投影**。本节其余内容（两个证据的落地口径、`fallback_class` 必须改、混合格统一、golden 影响、人工门呈现）不变。
+
 **两个证据的落地口径（必须落到现码可判定项，不得造新概念）：**
 
 - **可验证定位** ＝ 该 finding 能指到具体契约面：`contract_field` 非空，**或**携带可定位的 typed 事实引用（机械侧 typed IR / structure 诊断）。`category` / `severity` 本身**不构成**定位证据（裁决 §4.3「不凭 category 或 severity 新造 L1」）。
@@ -205,6 +207,8 @@ auto_repair_permitted = requires_closure
 
 **理由：** 现场 5 条中只有 1 条是契约类；其余 4 条是范围外 / 完备度意见，放大它们会制造大量无意义人工门，是「顺带放大普通 advisory」——本 change 明确不做。
 
+> **D9 兑现（追加，本节其余内容不变）：** 本节承诺的「不进必关闭清单、不计非 advisory 指纹、不消耗返修预算、不阻断」中，**清单面**由 D3 的七面同口径兑现；**控制面**（policy 分类 → 非 advisory 指纹集合 → 评估器）在 D9 生效前**无面负责**——D3 的 policy 特判只覆盖「闭合资格为真的契约类 finding」，「闭合资格为假 ⇒ 一律不关闭」这一方向缺失，故 `class_hint=repairable` 仍可把普通建议升级为非 Advisory。**D9 补齐该反向投影**，兑现本节承诺；D6 的类别枚举与「不放大普通 advisory」立场不变。
+
 ### D7 · 必关闭清单与 NeedsHuman 门卡的呈现口径
 
 **决定：** 必关闭清单的标题与说明 MUST NOT 再声称「仅 blocking/must_fix」；保留原 severity 展示值，并在说明中点出「平台契约闭合义务」这一独立于 severity 的义务来源。
@@ -225,6 +229,75 @@ auto_repair_permitted = requires_closure
 **「本 Work Item」的定义：** ＝ 该 finding 的 `target_work_item_id` 指向的 Work Item（`target_work_item_id` 是 finding 的既有可选字段，`parsers.rs:710-712`）。
 
 **与 `with_platform_disposition_rules` 现行行为的差异（必须声明，避免实施者收错面）：** 平台 disposition 硬化已在**通用** strict / lenient 解析器**无条件生效**（`parsers.rs:750` —— 通用 finding 解析末尾直接挂 `with_platform_disposition_rules()`；`lenient_findings.rs:136` 同口径），**只有 severity 豁免（本 change 的契约类例外）是 WorkItemPlan 专属**。实施者 MUST NOT 把平台硬化收窄到 WorkItemPlan，也 MUST NOT 把 severity 豁免扩散到通用评审。
+
+### D9 · 闭合资格的反向投影：`class_hint` 不得把普通建议升级为必关闭
+
+**决定（增量，兑现 D6，不修订方案 E / `REQ-WSC-17` 既有条款）：**
+
+在 close 已规划的 `requires_closure` 事实上补一条 **policy 侧反向投影**：
+
+| 平台事实 | 分类结果 | 归属 |
+|---|---|---|
+| `requires_closure == false` | **`Advisory`——任何 `class_hint` 都不得升级** | **本决策新增** |
+| `requires_closure == true` 且 `auto_repair_permitted == true` | `Repairable`（沿既有许可，不新造 L1） | D4（契约类两级判定） |
+| `requires_closure == true` 且 `auto_repair_permitted == false` | `HumanRequired` | D4（契约类两级判定） |
+
+⇒ 即：D1/D4 覆盖了「**真 ⇒ 由谁关闭**」，本决策补上「**假 ⇒ 一律不关闭**」。这**兑现** D6，**不修订**方案 E / `REQ-WSC-17`，**不触碰** D4 的契约类例外与 D1 的 owner 排除优先。
+
+⇒ **表中后两行指 D4 的「契约类」两级判定**；D4 明文「severity 路径（`blocking` / `must_fix`）不进入本两级判定，维持既有分类行为」**逐字不变**——即强严重度的**非契约类** finding 仍进入必关闭集合（与 D6「其余 `suggestion` 继续走原门槛」一致）。本决策**不得**被读成「把所有 `must_fix` finding 降为 `Advisory`」。
+
+**缺口的确切路径（源码直读复核）：**
+
+```text
+D1 / D6：severity ∉ {blocking, must_fix} 且 category ∉ 契约类 ⇒ requires_closure = false
+          ⇒ 按 D6「不进必关闭清单」                                        ✅ 清单面已兑现
+D3 policy 投影：特判只覆盖「闭合资格为真的契约类 finding」⇒ 这条不走特判
+          ⇒ 沿用现行 classify_finding（src/product/work_item_plan_policy/classify.rs:124-158）：
+             actionable ⇒ class_hint 优先（classify.rs:136-138）⇒ 判 Repairable ⇒ class != Advisory
+D3 指纹面：成员资格「随 policy 分类消费谓词后自动对齐」⇒ 该 finding 进指纹集合
+evaluate.rs：:399-406 合并 actionable ⇒ :311-347 重复分支 ⇒ :349-376 自动修复候选 /
+            复评 / 预算耗尽 ⇒ 把它当非 Advisory ⇒ 消耗返修预算、可能升人工
+          ⇒ D6 承诺的「不计指纹、不耗预算、不阻断」                          ❌ 控制面未兑现
+```
+
+⇒ **这不是 close 的错误，是 close 尚未覆盖的方向**：close 防住了「hint 把真缺口**降级**」（D3/D4 的契约类特判），尚未防住「hint 把普通建议**升级**」。
+⇒ **根源**在 D4 分类落点第三行「`requires_closure` 假 ⇒ 维持既有行为」——「既有行为」正是 `class_hint` 优先（`classify.rs:136-138`）。本决策对该行做**局部修订**（见上），D4 其余内容不变。
+⇒ **实测基线**中 3 条残留 finding 即此形态（`severity=suggestion` + 非契约类 `category` + `class_hint=repairable` ⇒ 被判 `Repairable` ⇒ 进必关闭集合 ⇒ 升人工）。该计数为**基线对照值**，实施后须复测。
+
+**范围收缩（只改第 4 面）：**
+
+| # | 消费面 | 本决策 |
+|---|---|---|
+| 4 | `work_item_plan_policy/classify.rs::classify_finding` | ✅ **本决策只改此面**：新增反向投影——`requires_closure == false` ⇒ 落 `Advisory`，`class_hint` 不得升级 |
+| 5 | `review/routing_scope.rs::non_advisory_finding_fingerprints`（:84-94） | ⇒ **不需另改**：D3 已定「成员资格随 policy 分类自动对齐，不另设复制判定式」；第 4 面改对，第 5 面自动对齐 |
+| 1 / 2 / 3 / 6 / 7 | `parsers.rs` / `history_compaction.rs` / `disposition_override.rs` / `sc_revision.rs` / `plan_outline/revision.rs` | — 属 close 已有工作，**不属本决策** |
+
+**既有先例（扩展，不另立约定）：** 现码已有同类前置规则——`classify.rs:132` 的「`!is_actionable()` ⇒ `Advisory`，**先于** `class_hint` / 旧轴 fallback」（对应既有测试 `tests_classify.rs` 的 `advisory_disposition_preempts_class_hint_for_classification`）。本决策把同一条「硬事实先于模型标签」的规则，从 **disposition 层**扩展到 **闭合资格层**。
+
+**边界（必须同时成立）：**
+
+- `class_hint` 降为**纯审计字段**，不再决定分类；原 `severity` / `message` / owner finding key（`sha256(severity + \u{1} + message)` 前 16 位小写 hex）**不改写**。
+- `fallback_class`（`classify.rs:169-186`）的「`Revise` + 契约类 + `contract_field` 非空 ⇒ `Repairable`」**必须改**——但那是 **D4 已规划的活，不是本决策**；实施时 MUST NOT 重复实现，也 MUST NOT 在 D4 落地前抢改同一处。
+- **不得**为证明可修复而先创建 `RepairReservation` 再拿它反证有权修复：**资格在前，预算接力载体在后**。
+- 自动修复许可 MUST 与 **source / context / 修复对象**绑定；MUST NOT 以「非空 field」「模型说 repairable」「预算尚有余额」代替。
+- 机械 Error 独立沿可信机械入口（`review/routing_scope.rs::single_candidate_mechanical_findings`，:604）处理，**不被模型建议覆盖**；模型写 `contract_field="mechanical.xxx"` 不能伪装成该通道。
+- 本反向投影只在**启用契约类例外的 WorkItemPlan 作用域**内生效（作用域口径随 D2 的 `scope` 参数与 D8 取值表传递）；**通用 Story/Design 等非 WorkItemPlan 作用域维持既有规则**，逐字不变。
+- `review/routing.rs:531-548` 的**原生人工结论旁路本次不动**（`REQ-TOP-01`「不改写原生人工结论」）；验收用 `Pass` / `Revise` 构造，raw `NeedsHuman` 单独断言。
+- **不得新增**任何自动 author 调用；**不得提高** `max_repairs` / `max_manual_repairs` 余额；**不得**改变 Verification 新 finding 的既有停止规则（`REQ-TOP-04`）。
+
+**依赖与顺序：** 本决策消费 D1/D2 的唯一谓词实现（`review/closure_policy.rs::requires_closure`）与 D4 的两级判定 ⇒ MUST 排在 D1/D2/D4 之后实施。policy 侧 MUST 消费该实现或其投影，MUST NOT 复刻判定式，MUST NOT 从 raw 文本重建闭合事实（与 D3「policy 只做投影」一致）。
+
+**能力边界（不得夸大）：** 能保证：普通 suggestion 不会因为模型自报 `repairable` / `human_required` 进入必关闭集合。不能保证：模型把普通建议错标成 `contract_gap` / `self_contradiction` 后也一定不会阻断（由 D1 的契约类例外与方案 E 现行契约决定）。
+
+**golden 与固定面耦合（必须遵守）：**
+
+`golden_findings.json` 被 `work_item_split_engine/prompts/sc_few_shot.rs:9-12` 以 `include_str!` **嵌入作者 prompt 的固定面**（`work_item_split_engine/prompts.rs:274` → `:330` 插值），从 14 条里按 `WORK_ITEM_PLAN_FEW_SHOT_IDS`（`sc_few_shot.rs:14-17`）选 **11 条**渲染；而 `work_item_plan_real_few_shot`（`sc_few_shot.rs:54-59`）**每条只渲染 `finding.message` / `finding.evidence` / `finding.required_action`** ⇒ **分类期望字段 `expected_class` / `expected_category` 不进入渲染**。
+
+⇒ **约束**：本次分类改动**只允许**改 `expected_class` / `expected_category`；**禁止**改 `finding.message` / `finding.evidence` / `finding.required_action`（那三个字段一动，作者 prompt 固定规范面即受影响；余量 52 B 为**基线对照值**，实施后须复测）。
+⇒ 该 fixture 另被 `work_item_plan_compiler/tests/reviewer_finding_channel_boundary.rs:5-6` 共用 ⇒ 改动须同时满足两处消费者。
+⇒ 其中三条 annotated variant 的 `category` 为契约类（闭合资格为真），当前依赖 hint → `Repairable`；改期望时**不得伪造许可证据**，且其归属是 **D4 的两级判定**、**不是本决策**——契约类 finding 不受本决策影响。
+
+**代价：** 无模型调用；无新增 env / wire / 持久化字段；分类与基线数据模型**不改变首轮固定规范面**。副作用是「模型自报 `repairable` 的普通建议」不再消耗返修预算——这正是 D6 承诺的方向。
 
 ## 回退（裁决 §4.4）
 

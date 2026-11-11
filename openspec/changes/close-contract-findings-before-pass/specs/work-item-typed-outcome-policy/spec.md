@@ -45,3 +45,28 @@
 
 - **WHEN** 契约类 finding 的有效必关闭投影生效
 - **THEN** A 池 `max_repairs` 与 B 池 `max_manual_repairs` 的余额 MUST 保持不变；Verification scope 中出现不属于原始指纹集合的新 finding 时，MUST 继续按既有 `VerificationNewFindings` 停止规则处理，MUST NOT 因本投影改变该规则
+
+#### Scenario: 闭合资格为假时 hint 不得升级
+
+- **WHEN** 一条 finding 在解析平台硬化后的**闭合资格为假**（WorkItemPlan 作用域下 `severity` 不属于 `{blocking, must_fix}` 且 `category` 不属于契约类），其 `disposition` 为 `actionable`，且模型给出 `class_hint=repairable` 或 `class_hint=human_required`
+- **THEN** 中央策略 MUST 将其判为 `Advisory`；MUST NOT 因 `class_hint` 将其升级为 `Repairable` 或 `HumanRequired`；MUST NOT 计入非 advisory 指纹集合、MUST NOT 消耗返修预算、MUST NOT 触发自动返修或人工门；更换 `class_hint` MUST NOT 改变该结论
+
+#### Scenario: 反向投影的作用域限于 WorkItemPlan
+
+- **WHEN** 通用 Story/Design 等非 WorkItemPlan 评审产出 finding 并被分类
+- **THEN** 该 finding MUST 继续按该评审的既有分类规则处理，MUST NOT 因本反向投影发生改变；本投影的作用域 MUST 随既有可信入口传入的作用域确定，MUST NOT 由模型输出的任何标签授予或扩大
+
+#### Scenario: 机械 Error 不被模型建议覆盖
+
+- **WHEN** 一条机械 finding 沿可信机械入口进入控制面，或一条模型建议携带 `contract_field="mechanical.xxx"`
+- **THEN** 机械 Error MUST 继续沿该可信机械入口被判定与呈现，MUST NOT 被模型建议覆盖或降级；模型建议 MUST NOT 伪装成机械通道，MUST NOT 因此获得自动修复许可或闭合资格
+
+#### Scenario: 许可证据须绑定修复对象且不得以预算载体反证
+
+- **WHEN** 中央策略判定一条 finding 的自动修复许可，且此刻尚不存在服务端 `RepairReservation`
+- **THEN** 资格判定 MUST NOT 以「先创建 `RepairReservation`、再以该载体反证自己有权修复」的方式进行；自动修复许可 MUST 与该 finding 的 source / context / 修复对象绑定；`class_hint`、`category`、`severity`、非空 `contract_field` 以及预算余额 MUST NOT 单独构成许可证据
+
+#### Scenario: 反向投影不改写 finding 身份且 hint 降为审计字段
+
+- **WHEN** 中央策略因闭合资格为假把一条 finding 判为 `Advisory`
+- **THEN** 该 finding 的 `severity`、`message` 与内容身份 key MUST 保持模型原值，owner 既有排除项的匹配与幂等语义 MUST NOT 改变；`class_hint` MUST 仅保留为审计信息，MUST NOT 再决定分类结果
