@@ -13,9 +13,9 @@ use crate::cross_cutting::image_reference_validation::validate_reference_image;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 
 use super::models::{
-    ChatMessage, DEFAULT_GPT_ROTATION_MODEL, DefaultParams, GenerationResult, ImageCreateError,
-    ImageVendor, IterationEvent, ModelChoice, PromptBlock, RunKind, SessionEvent, SessionRecord,
-    SessionStatus, SessionStoreApi, SettingsStoreApi,
+    ChatMessage, DefaultParams, GenerationResult, ImageCreateError, ImageVendor, IterationEvent,
+    ModelChoice, PromptBlock, ReferenceSource, ResolvedTarget, RunKind, SessionEvent,
+    SessionRecord, SessionStatus, SessionStoreApi, SettingsStoreApi,
 };
 use super::prompt_iteration::PromptIterationEngine;
 use super::run_registry::ImageCreateRunRegistry;
@@ -313,49 +313,79 @@ impl ImageCreateEngine {
         command: GenerateCommand,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<GenerationResult, ImageCreateError> {
-        // 临时过渡（仅本提交）：解构命令保持既有行为；轮转与携带上一张图随后落地。
-        let GenerateCommand {
-            request: req,
-            model: _,
-            use_previous: _,
-            reference,
-        } = command;
+        // 出站前决策链（设计 5.7）：任一步失败都不产生出站请求，零费用。
         let settings = self.settings_store.load().await;
-        // 临时过渡：仍按单家（GPT 家）读取凭据；Task 6 将替换为按 resolve_target 解析出的目标。
-        let gpt = settings.vendors.get(ImageVendor::Gpt);
-        if gpt.base_url.trim().is_empty() || gpt.api_key.trim().is_empty() {
-            return Err(ImageCreateError::MissingConfig(
-                "GPT 尚未配置 Base URL 或 API Key".to_string(),
-            ));
-        }
-        if req.prompt.trim().is_empty() {
+        if command.request.prompt.trim().is_empty() {
             return Err(ImageCreateError::InvalidParam(
                 "prompt must not be empty".to_string(),
             ));
         }
-        let reference = match reference {
+        // 末项在 generate() 的 flush_pending() 之后重新读取（D7）：
+        // 写图成功但引用待补的结果已进入序列；旧记录无 vendor 视为 GPT（D5）。
+        let record = self.active_record(session_id).await?;
+        let last = record.generation_results.last().cloned();
+        let last_vendor = last
+            .as_ref()
+            .map(|result| result.vendor.unwrap_or(ImageVendor::Gpt));
+        let target = settings.resolve_target(&command.model, last_vendor)?;
+
+        // reference 决定（D7）：上传图优先 → use_previous 且有上一张 → 无。
+        let (reference, reference_source) = match command.reference {
             Some(reference) => {
                 validate_reference_image(&reference.bytes, &reference.declared_mime)
                     .map_err(|error| ImageCreateError::RefImage(error.to_string()))?;
-                Some(reference)
+                (Some(reference), ReferenceSource::Uploaded)
             }
-            None => None,
+            None if command.use_previous => match last {
+                Some(last) => {
+                    // 上一张图取不到（文件缺失且无内联 b64）→ 明确失败、不出站（D8）。
+                    let bytes = crate::product::image_create::image_files::read_result_image(
+                        &self.paths, &last,
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        ImageCreateError::PreviousImageUnavailable(
+                            "图片文件缺失或无法读取".to_string(),
+                        )
+                    })?;
+                    // 与上传图同一套校验；不过则以校验原因失败，同样不出站。
+                    validate_reference_image(&bytes, &last.media_type).map_err(|error| {
+                        ImageCreateError::PreviousImageUnavailable(error.to_string())
+                    })?;
+                    (
+                        Some(ImageRefImage {
+                            bytes,
+                            declared_mime: last.media_type.clone(),
+                        }),
+                        ReferenceSource::Previous,
+                    )
+                }
+                None => (None, ReferenceSource::None),
+            },
+            None => (None, ReferenceSource::None),
         };
 
-        // 临时过渡：构造仅含 GPT 家凭据与默认轮转模型的出站目标；
-        // Task 6 将按 resolve_target 解析目标并实现双家轮转。
-        let target = ImageCallTarget {
-            vendor: ImageVendor::Gpt,
-            base_url: gpt.base_url.clone(),
-            api_key: gpt.api_key.clone(),
-            model: DEFAULT_GPT_ROTATION_MODEL.to_string(),
+        // 出站目标只含目标家的凭据：key 只发往本家 base_url（D12）。
+        let vendor_settings = settings.vendors.get(target.vendor);
+        let call_target = ImageCallTarget {
+            vendor: target.vendor,
+            base_url: vendor_settings.base_url.clone(),
+            api_key: vendor_settings.api_key.clone(),
+            model: target.model.clone(),
         };
 
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(ImageCreateError::SessionClosing),
-            outcome = self.image_client.generate(&target, &req, reference) => {
-                self.finish_generation(session_id, &req, outcome).await
+            outcome = self.image_client.generate(&call_target, &command.request, reference) => {
+                self.finish_generation(
+                    session_id,
+                    &command.request,
+                    &target,
+                    reference_source,
+                    outcome,
+                )
+                .await
             }
         }
     }
@@ -364,6 +394,8 @@ impl ImageCreateEngine {
         &self,
         session_id: &str,
         req: &ImageGenRequest,
+        target: &ResolvedTarget,
+        reference_source: ReferenceSource,
         outcome: Result<ImageGenOutcome, crate::cross_cutting::image_client::ImageClientError>,
     ) -> Result<GenerationResult, ImageCreateError> {
         match outcome {
@@ -408,11 +440,10 @@ impl ImageCreateEngine {
                     media_type,
                     image_id: Some(image_id),
                     b64: None,
-                    // 供应方标注字段：Task 6 起随轮转解析填充，本 Task 先补 None 恢复编译。
-                    vendor: None,
-                    model: None,
-                    selection: None,
-                    reference_source: None,
+                    vendor: Some(target.vendor),
+                    model: Some(target.model.clone()),
+                    selection: Some(target.selection),
+                    reference_source: Some(reference_source),
                     ts: Utc::now(),
                 };
                 if let Err(error) = self
@@ -431,7 +462,8 @@ impl ImageCreateEngine {
                 Ok(result)
             }
             Err(error) => {
-                let message = error.to_string();
+                // 已解析目标之后的供应方错误：加「[家 · 模型] 」前缀（D13），同一文本写事件。
+                let message = format!("[{} · {}] {error}", target.vendor.label(), target.model);
                 let _ = self
                     .session_store
                     .append_event(

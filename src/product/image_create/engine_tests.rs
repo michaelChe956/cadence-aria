@@ -18,9 +18,11 @@ use crate::cross_cutting::streaming_provider::{
     StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::image_create::models::{
-    ApiKeyAction, CreateSessionRequest, DeleteLease, ImageBackground, ImageCreateSession,
-    ImageCreateSettings, ImageOutputFormat, ImageQuality, ImageSize, ImageVendor, MaskedSettings,
-    PresetTemplate, SessionSummary, SettingsUpdate, SettingsUpdateRequest, TemplateChoice,
+    ApiKeyAction, CreateSessionRequest, DEFAULT_GPT_ROTATION_MODEL, DEFAULT_MINIMAX_ROTATION_MODEL,
+    DeleteLease, ImageBackground, ImageCreateSession, ImageCreateSettings, ImageOutputFormat,
+    ImageQuality, ImageSize, ImageVendor, MaskedSettings, ModelSelection, PresetTemplate,
+    ReferenceSource, ResolvedTarget, SessionSummary, SettingsUpdate, SettingsUpdateRequest,
+    TemplateChoice,
 };
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::ProviderType;
@@ -208,22 +210,35 @@ impl SettingsStoreApi for FakeSettingsStore {
 }
 
 struct FakeImageClient {
+    targets: AsyncMutex<Vec<ImageCallTarget>>,
     references: AsyncMutex<Vec<Option<ImageRefImage>>>,
     outcomes: AsyncMutex<VecDeque<Result<ImageGenOutcome, ImageClientError>>>,
 }
 
 impl FakeImageClient {
     fn success() -> Self {
+        Self::with_outcomes(vec![ok_outcome()])
+    }
+
+    fn with_outcomes(outcomes: Vec<Result<ImageGenOutcome, ImageClientError>>) -> Self {
         Self {
+            targets: AsyncMutex::new(Vec::new()),
             references: AsyncMutex::new(Vec::new()),
-            outcomes: AsyncMutex::new(
-                [Ok(ImageGenOutcome {
-                    media_type: "image/png".to_string(),
-                    b64: "AAAA".to_string(),
-                })]
-                .into(),
-            ),
+            outcomes: AsyncMutex::new(outcomes.into()),
         }
+    }
+
+    async fn calls(&self) -> usize {
+        self.targets.lock().await.len()
+    }
+
+    async fn last_target(&self) -> ImageCallTarget {
+        self.targets
+            .lock()
+            .await
+            .last()
+            .expect("target recorded")
+            .clone()
     }
 }
 
@@ -231,10 +246,11 @@ impl FakeImageClient {
 impl ImageClientApi for FakeImageClient {
     async fn generate(
         &self,
-        _target: &ImageCallTarget,
+        target: &ImageCallTarget,
         _req: &ImageGenRequest,
         reference: Option<ImageRefImage>,
     ) -> Result<ImageGenOutcome, ImageClientError> {
+        self.targets.lock().await.push(target.clone());
         self.references.lock().await.push(reference);
         self.outcomes
             .lock()
@@ -304,11 +320,14 @@ fn test_record() -> SessionRecord {
 }
 
 fn valid_settings() -> ImageCreateSettings {
-    // 临时过渡：凭据写入 GPT 家（engine 出站前暂读 GPT 家）；Task 6 将按 resolve_target 解析。
+    // 两家各配一把 key：用于断言轮转与「key 只发往本家」的隔离。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
-    gpt.base_url = "https://images.example.com".to_string();
-    gpt.api_key = "sk-test".to_string();
+    gpt.base_url = "https://gpt.example.com".to_string();
+    gpt.api_key = "sk-gpt".to_string();
+    let minimax = settings.vendors.get_mut(ImageVendor::Minimax);
+    minimax.base_url = "https://minimax.example.com".to_string();
+    minimax.api_key = "sk-minimax".to_string();
     settings
 }
 
@@ -328,6 +347,102 @@ fn png() -> Vec<u8> {
         .write_image(&[0xff], 1, 1, ExtendedColorType::L8)
         .expect("encode png");
     bytes
+}
+
+/// 生成结果图（与上传参考图 png() 内容不同，用于断言上传图不落盘）。
+fn result_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(&[0x00, 0x7f, 0x7f, 0x00], 2, 2, ExtendedColorType::L8)
+        .expect("encode result png");
+    bytes
+}
+
+fn ok_outcome() -> Result<ImageGenOutcome, ImageClientError> {
+    Ok(ImageGenOutcome {
+        media_type: "image/png".to_string(),
+        b64: general_purpose::STANDARD.encode(result_png()),
+    })
+}
+
+fn auto_command(
+    req: ImageGenRequest,
+    use_previous: bool,
+    reference: Option<ImageRefImage>,
+) -> GenerateCommand {
+    GenerateCommand {
+        request: req,
+        model: ModelChoice::Auto,
+        use_previous,
+        reference,
+    }
+}
+
+fn explicit_command(req: ImageGenRequest, model: &str) -> GenerateCommand {
+    GenerateCommand {
+        request: req,
+        model: ModelChoice::Explicit(model.to_string()),
+        use_previous: false,
+        reference: None,
+    }
+}
+
+async fn generate_ok(engine: &ImageCreateEngine, use_previous: bool) -> GenerationResult {
+    engine
+        .generate("session", auto_command(request("draw"), use_previous, None))
+        .await
+        .expect("generate")
+}
+
+async fn generate_err(engine: &ImageCreateEngine, command: GenerateCommand) -> ImageCreateError {
+    engine.generate("session", command).await.expect_err("generate")
+}
+
+async fn results(store: &FakeSessionStore) -> Vec<GenerationResult> {
+    store.record.lock().await.as_ref().expect("record").generation_results.clone()
+}
+
+async fn push_result(store: &FakeSessionStore, result: GenerationResult) {
+    store.record.lock().await.as_mut().expect("record").generation_results.push(result);
+}
+
+/// 第 1 次成功生成后其结果图的落盘路径。
+async fn first_image_path(store: &FakeSessionStore, engine: &ImageCreateEngine) -> std::path::PathBuf {
+    let image_id = results(store).await[0].image_id.clone().expect("第 1 次结果落盘");
+    engine
+        .paths
+        .image_create_image_file(&image_id, "image/png")
+        .expect("第 1 张图路径")
+}
+
+fn count_image_files(engine: &ImageCreateEngine) -> usize {
+    std::fs::read_dir(engine.paths.image_create_images_dir())
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0)
+}
+
+/// 旧记录：无 image_id、无内联 b64；vendor 为 None 表示旧形态缺字段。
+fn legacy_result(vendor: Option<ImageVendor>) -> GenerationResult {
+    GenerationResult {
+        prompt: "旧提示词".to_string(),
+        params: DefaultParams::default(),
+        media_type: "image/png".to_string(),
+        image_id: None,
+        b64: None,
+        vendor,
+        model: None,
+        selection: None,
+        reference_source: None,
+        ts: Utc::now(),
+    }
+}
+
+fn resolved_target(vendor: ImageVendor) -> ResolvedTarget {
+    ResolvedTarget {
+        vendor,
+        model: vendor.recommended_rotation_model().to_string(),
+        selection: ModelSelection::Auto,
+    }
 }
 
 fn registry(provider: Option<Arc<dyn StreamingProviderAdapter>>) -> Arc<ProviderRegistry> {
@@ -392,13 +507,17 @@ async fn generate_rejects_missing_config_and_invalid_prompt_without_client_call(
         None,
     );
     assert!(matches!(
-        missing.generate("session", request("draw"), None).await,
+        missing
+            .generate("session", auto_command(request("draw"), false, None))
+            .await,
         Err(ImageCreateError::MissingConfig(_))
     ));
 
     let invalid = engine(store, valid_settings(), client.clone(), None);
     assert!(matches!(
-        invalid.generate("session", request("   "), None).await,
+        invalid
+            .generate("session", auto_command(request("   "), false, None))
+            .await,
         Err(ImageCreateError::InvalidParam(_))
     ));
     assert!(client.references.lock().await.is_empty());
@@ -417,7 +536,7 @@ async fn generate_routes_text_and_validated_reference_and_persists_success() {
         let client = Arc::new(FakeImageClient::success());
         let engine = engine(store.clone(), valid_settings(), client.clone(), None);
         let result = engine
-            .generate("session", request("draw"), reference.clone())
+            .generate("session", auto_command(request("draw"), false, reference.clone()))
             .await
             .expect("generate");
         assert!(result.image_id.is_some());
@@ -426,17 +545,7 @@ async fn generate_routes_text_and_validated_reference_and_persists_success() {
             client.references.lock().await[0].is_some(),
             reference.is_some()
         );
-        assert_eq!(
-            store
-                .record
-                .lock()
-                .await
-                .as_ref()
-                .expect("record")
-                .generation_results
-                .len(),
-            1
-        );
+        assert_eq!(results(&store).await.len(), 1);
     }
 }
 
@@ -454,8 +563,9 @@ async fn finish_generation_writes_image_file_before_appending_reference() {
         b64: general_purpose::STANDARD.encode("img-bytes"),
     });
 
+    let target = resolved_target(ImageVendor::Gpt);
     let result = engine
-        .finish_generation("session", &request("draw"), outcome)
+        .finish_generation("session", &request("draw"), &target, ReferenceSource::None, outcome)
         .await
         .expect("finish");
     let image_id = result.image_id.as_deref().expect("image id assigned");
@@ -503,8 +613,9 @@ async fn finish_generation_image_write_failure_keeps_record_clean() {
         b64: general_purpose::STANDARD.encode("img-bytes"),
     });
 
+    let target = resolved_target(ImageVendor::Gpt);
     let error = engine
-        .finish_generation("session", &request("draw"), outcome)
+        .finish_generation("session", &request("draw"), &target, ReferenceSource::None, outcome)
         .await
         .expect_err("must fail");
     assert!(matches!(error, ImageCreateError::Store(_)));
@@ -529,19 +640,12 @@ async fn generation_write_failure_returns_error_and_is_flushed_on_next_operation
         None,
     );
     assert!(matches!(
-        engine.generate("session", request("draw"), None).await,
+        engine
+            .generate("session", auto_command(request("draw"), false, None))
+            .await,
         Err(ImageCreateError::Store(_))
     ));
-    assert!(
-        store
-            .record
-            .lock()
-            .await
-            .as_ref()
-            .expect("record")
-            .generation_results
-            .is_empty()
-    );
+    assert!(results(&store).await.is_empty());
     let image_id = engine
         .pending_results
         .lock()
@@ -560,30 +664,14 @@ async fn generation_write_failure_returns_error_and_is_flushed_on_next_operation
     );
 
     assert!(matches!(
-        engine.generate("session", request("   "), None).await,
+        engine
+            .generate("session", auto_command(request("   "), false, None))
+            .await,
         Err(ImageCreateError::InvalidParam(_))
     ));
+    assert_eq!(results(&store).await.len(), 1);
     assert_eq!(
-        store
-            .record
-            .lock()
-            .await
-            .as_ref()
-            .expect("record")
-            .generation_results
-            .len(),
-        1
-    );
-    assert_eq!(
-        store
-            .record
-            .lock()
-            .await
-            .as_ref()
-            .expect("record")
-            .generation_results[0]
-            .image_id
-            .as_deref(),
+        results(&store).await[0].image_id.as_deref(),
         Some(image_id.as_str())
     );
 }
@@ -712,4 +800,265 @@ fn request_types_remain_enum_backed() {
     let _ = ApiKeyAction::Retain;
     let _: ProviderType = ProviderName::KimiCode.into();
     assert_eq!(req.size, ImageSize::Square);
+}
+
+// ---------- E-01…E-16：双家轮转、携带上一张图、结果记录（设计 7.1 引擎表） ----------
+
+fn engine_with_outcomes(
+    outcomes: Vec<Result<ImageGenOutcome, ImageClientError>>,
+) -> (Arc<FakeSessionStore>, Arc<FakeImageClient>, ImageCreateEngine) {
+    let store = Arc::new(FakeSessionStore::with_record());
+    let client = Arc::new(FakeImageClient::with_outcomes(outcomes));
+    let engine = engine(store.clone(), valid_settings(), client.clone(), None);
+    (store, client, engine)
+}
+
+fn engine_under_test(
+    successes: usize,
+) -> (Arc<FakeSessionStore>, Arc<FakeImageClient>, ImageCreateEngine) {
+    engine_with_outcomes((0..successes).map(|_| ok_outcome()).collect())
+}
+
+/// E-01：纯自动连续 3 次成功 → 客户端依次收到 GPT、MiniMax、GPT；结果标注相符。
+#[tokio::test]
+async fn e01_auto_rotation_alternates_vendor_per_success() {
+    let (_, client, engine) = engine_under_test(3);
+    let expected = [
+        (ImageVendor::Gpt, DEFAULT_GPT_ROTATION_MODEL),
+        (ImageVendor::Minimax, DEFAULT_MINIMAX_ROTATION_MODEL),
+        (ImageVendor::Gpt, DEFAULT_GPT_ROTATION_MODEL),
+    ];
+    for (index, (vendor, model)) in expected.iter().enumerate() {
+        let result = generate_ok(&engine, false).await;
+        assert_eq!(result.vendor, Some(*vendor), "第 {} 次结果的家", index + 1);
+        assert_eq!(result.model.as_deref(), Some(*model), "第 {} 次结果的模型", index + 1);
+        assert_eq!(result.selection, Some(ModelSelection::Auto));
+    }
+    let vendors: Vec<ImageVendor> = client.targets.lock().await.iter().map(|t| t.vendor).collect();
+    assert_eq!(vendors, vec![ImageVendor::Gpt, ImageVendor::Minimax, ImageVendor::Gpt]);
+}
+
+/// E-02：key 隔离 —— 每次出站目标的 base_url / api_key 属于目标家。
+#[tokio::test]
+async fn e02_outbound_target_carries_only_target_vendor_credentials() {
+    let (_, client, engine) = engine_under_test(2);
+    generate_ok(&engine, false).await;
+    generate_ok(&engine, false).await;
+    let targets = client.targets.lock().await;
+    assert_eq!(targets[0].base_url, "https://gpt.example.com");
+    assert_eq!(targets[0].api_key, "sk-gpt");
+    assert_eq!(targets[1].base_url, "https://minimax.example.com");
+    assert_eq!(targets[1].api_key, "sk-minimax");
+}
+
+/// E-03：失败不消耗轮次 —— 第 2 次失败后第 3 次仍是 MiniMax；失败那次只调用一次。
+#[tokio::test]
+async fn e03_failed_generation_does_not_advance_rotation() {
+    let (store, client, engine) = engine_with_outcomes(vec![
+        ok_outcome(),
+        Err(ImageClientError::HttpStatus { code: 500, body: "boom".to_string() }),
+        ok_outcome(),
+    ]);
+    generate_ok(&engine, false).await;
+    let error = generate_err(&engine, auto_command(request("draw"), false, None)).await;
+    assert!(matches!(error, ImageCreateError::ImageClient(_)));
+    assert_eq!(client.calls().await, 2, "失败那次客户端只被调用 1 次，无重试");
+    generate_ok(&engine, false).await;
+    assert_eq!(client.last_target().await.vendor, ImageVendor::Minimax, "第 3 次仍是 MiniMax");
+    assert_eq!(results(&store).await.len(), 2, "失败不落盘成功结果");
+}
+
+/// E-04：显式选 GPT 模型后再自动 → 自动那次轮到 MiniMax。
+#[tokio::test]
+async fn e04_auto_after_explicit_gpt_picks_minimax() {
+    let (_, client, engine) = engine_under_test(2);
+    let command = explicit_command(request("draw"), DEFAULT_GPT_ROTATION_MODEL);
+    let first = engine.generate("session", command).await.expect("显式生成");
+    assert_eq!(first.vendor, Some(ImageVendor::Gpt));
+    assert_eq!(first.selection, Some(ModelSelection::Explicit));
+    let second = generate_ok(&engine, false).await;
+    assert_eq!(second.vendor, Some(ImageVendor::Minimax));
+    assert_eq!(client.last_target().await.vendor, ImageVendor::Minimax);
+}
+
+/// E-05：末项为旧记录（无 vendor 字段）→ 视为 GPT，自动轮转选 MiniMax。
+#[tokio::test]
+async fn e05_legacy_result_without_vendor_counts_as_gpt() {
+    let (store, client, engine) = engine_under_test(1);
+    push_result(&store, legacy_result(None)).await;
+    let result = generate_ok(&engine, false).await;
+    assert_eq!(result.vendor, Some(ImageVendor::Minimax));
+    assert_eq!(client.last_target().await.vendor, ImageVendor::Minimax);
+}
+
+/// E-06：use_previous=true 且已有 1 条结果 → reference 字节等于上一张图片文件内容。
+#[tokio::test]
+async fn e06_use_previous_carries_last_generated_image_file() {
+    let (store, client, engine) = engine_under_test(2);
+    generate_ok(&engine, false).await;
+    let second = generate_ok(&engine, true).await;
+    assert_eq!(second.reference_source, Some(ReferenceSource::Previous));
+    let reference = client.references.lock().await[1].clone().expect("携带上一张图");
+    assert_eq!(
+        reference.bytes,
+        tokio::fs::read(first_image_path(&store, &engine).await).await.expect("上一张图文件")
+    );
+    assert_eq!(reference.declared_mime, "image/png");
+}
+
+/// E-07：use_previous=true 但会话无结果 → 无 reference，来源记 none。
+#[tokio::test]
+async fn e07_use_previous_without_results_sends_no_reference() {
+    let (_, client, engine) = engine_under_test(1);
+    let result = generate_ok(&engine, true).await;
+    assert!(client.references.lock().await[0].is_none());
+    assert_eq!(result.reference_source, Some(ReferenceSource::None));
+}
+
+/// E-08：use_previous=true 且带上传图 → 上传图优先，来源记 uploaded。
+#[tokio::test]
+async fn e08_uploaded_reference_takes_priority_over_previous() {
+    let (_, client, engine) = engine_under_test(2);
+    generate_ok(&engine, false).await;
+    let command = auto_command(
+        request("draw"),
+        true,
+        Some(ImageRefImage { bytes: png(), declared_mime: "image/png".to_string() }),
+    );
+    let second = engine.generate("session", command).await.expect("第 2 次生成");
+    assert_eq!(second.reference_source, Some(ReferenceSource::Uploaded));
+    assert_eq!(client.references.lock().await[1].as_ref().expect("携带上传图").bytes, png());
+}
+
+/// E-09：use_previous=false 且已有结果 → 无 reference。
+#[tokio::test]
+async fn e09_use_previous_false_sends_no_reference() {
+    let (_, client, engine) = engine_under_test(2);
+    generate_ok(&engine, false).await;
+    let second = generate_ok(&engine, false).await;
+    assert!(client.references.lock().await[1].is_none());
+    assert_eq!(second.reference_source, Some(ReferenceSource::None));
+}
+
+/// E-10：上一张图文件被删且无内联 b64 → PreviousImageUnavailable，零出站。
+#[tokio::test]
+async fn e10_missing_previous_image_fails_before_outbound() {
+    let (store, client, engine) = engine_under_test(2);
+    generate_ok(&engine, false).await;
+    let file = first_image_path(&store, &engine).await;
+    tokio::fs::remove_file(&file).await.expect("删除上一张图文件");
+    let error = generate_err(&engine, auto_command(request("draw"), true, None)).await;
+    assert!(matches!(error, ImageCreateError::PreviousImageUnavailable(_)));
+    assert!(error.to_string().contains("图片文件缺失或无法读取"));
+    assert_eq!(client.calls().await, 1, "出站前失败，客户端只被第 1 次调用");
+    assert_eq!(results(&store).await.len(), 1);
+    let record = store.record.lock().await;
+    let record = record.as_ref().expect("record");
+    assert!(
+        !record.events.iter().any(|event| event.kind == "generation_error"),
+        "出站前错误不写 generation_error 事件"
+    );
+}
+
+/// E-11：上一张为旧记录内联 b64 → reference 字节等于解码结果。
+#[tokio::test]
+async fn e11_previous_image_falls_back_to_inline_b64() {
+    let (store, client, engine) = engine_under_test(1);
+    let mut legacy = legacy_result(Some(ImageVendor::Gpt));
+    legacy.b64 = Some(general_purpose::STANDARD.encode(png()));
+    push_result(&store, legacy).await;
+    let result = generate_ok(&engine, true).await;
+    assert_eq!(result.reference_source, Some(ReferenceSource::Previous));
+    assert_eq!(client.references.lock().await[0].as_ref().expect("携带上一张图").bytes, png());
+}
+
+/// E-12：显式模型不在清单 → InvalidParam，零出站。
+#[tokio::test]
+async fn e12_explicit_model_not_in_catalog_fails_before_outbound() {
+    let (_, client, engine) = engine_under_test(1);
+    let command = explicit_command(request("draw"), "no-such-model-anywhere");
+    let error = generate_err(&engine, command).await;
+    assert!(matches!(error, ImageCreateError::InvalidParam(_)));
+    assert!(error.to_string().contains("no-such-model-anywhere"));
+    assert_eq!(client.calls().await, 0, "出站前失败，客户端零调用");
+}
+
+/// E-13：携带链跨家 —— 第 1 次 GPT，第 2 次自动 + use_previous → MiniMax 且携带第 1 张图。
+#[tokio::test]
+async fn e13_previous_image_carries_across_vendor_switch() {
+    let (store, client, engine) = engine_under_test(2);
+    generate_ok(&engine, false).await;
+    let file_bytes = tokio::fs::read(first_image_path(&store, &engine).await).await.expect("第 1 张图");
+    let second = generate_ok(&engine, true).await;
+    assert_eq!(second.vendor, Some(ImageVendor::Minimax));
+    assert_eq!(client.last_target().await.vendor, ImageVendor::Minimax);
+    assert_eq!(client.references.lock().await[1].as_ref().expect("携带第 1 张图").bytes, file_bytes);
+}
+
+/// E-14：上传参考图不落盘 —— 带上传图生成后图片目录只新增 1 个结果文件。
+#[tokio::test]
+async fn e14_uploaded_reference_is_not_persisted() {
+    let (_, _client, engine) = engine_under_test(1);
+    let before = count_image_files(&engine);
+    let command = auto_command(
+        request("draw"),
+        false,
+        Some(ImageRefImage { bytes: png(), declared_mime: "image/png".to_string() }),
+    );
+    let result = engine.generate("session", command).await.expect("generate");
+    assert_eq!(result.reference_source, Some(ReferenceSource::Uploaded));
+    assert_eq!(count_image_files(&engine), before + 1, "只新增 1 个结果文件");
+    let image_id = result.image_id.expect("结果图已落盘");
+    let file = engine.paths.image_create_image_file(&image_id, "image/png").expect("结果图路径");
+    assert_ne!(tokio::fs::read(&file).await.expect("结果文件"), png(), "结果文件不是上传图");
+}
+
+/// E-15：上一张图超过校验上限 → 出站前失败，原因含校验具体原因，零出站。
+#[tokio::test]
+async fn e15_previous_image_over_validation_limit_fails_before_outbound() {
+    let (store, client, engine) = engine_under_test(1);
+    let image_id = uuid::Uuid::new_v4().to_string();
+    let file = engine.paths.image_create_image_file(&image_id, "image/png").expect("路径");
+    std::fs::create_dir_all(file.parent().expect("父目录")).expect("建目录");
+    std::fs::write(&file, vec![0u8; 10 * 1024 * 1024 + 1]).expect("写超限图");
+    let mut previous = legacy_result(Some(ImageVendor::Gpt));
+    previous.image_id = Some(image_id);
+    push_result(&store, previous).await;
+    let error = generate_err(&engine, auto_command(request("draw"), true, None)).await;
+    assert!(matches!(error, ImageCreateError::PreviousImageUnavailable(_)));
+    assert!(
+        error.to_string().contains("exceeds the 10 MiB size limit"),
+        "原因含校验具体原因：{error}"
+    );
+    assert_eq!(client.calls().await, 0, "出站前失败，客户端零调用");
+}
+
+/// E-16：客户端错误的可观测性 —— 错误文本与 generation_error 事件文本同带「[家 · 模型] 」前缀。
+#[tokio::test]
+async fn e16_client_error_is_prefixed_with_vendor_and_model() {
+    let (store, _client, engine) = engine_with_outcomes(vec![
+        ok_outcome(),
+        Err(ImageClientError::HttpStatus { code: 502, body: "upstream unavailable".to_string() }),
+    ]);
+    generate_ok(&engine, false).await;
+    let error = generate_err(&engine, auto_command(request("draw"), false, None)).await;
+    let ImageCreateError::ImageClient(message) = &error else {
+        panic!("客户端错误应包装为 ImageClient：{error:?}")
+    };
+    assert!(
+        message.starts_with(&format!("[MiniMax · {DEFAULT_MINIMAX_ROTATION_MODEL}] ")),
+        "前缀缺失：{message}"
+    );
+    let record = store.record.lock().await;
+    let record = record.as_ref().expect("record");
+    assert_eq!(
+        record
+            .events
+            .iter()
+            .find(|event| event.kind == "generation_error")
+            .expect("generation_error 事件")
+            .message,
+        *message,
+        "事件文本与错误文本一致"
+    );
 }
