@@ -368,7 +368,12 @@ async fn bootstrap_project_repo_issue_and_specs(
         format!("/api/projects/project_0001/repository-initializations/{operation_id}");
     let mut last_snapshot = response;
     let mut completed = None;
-    for _ in 0..100 {
+    // 轮询预算：仓库初始化含 `git_finalize` 等后台步骤，慢机（CI）上需要
+    // **真实时间**推进——只 `yield_now` 会在初始化尚未推进时就把循环跑完
+    // （真机复现：CI 报 "repository initialization did not complete before
+    // fixture issue creation"，快照里 `git_finalize` 仍 pending）。
+    // 300 × 50ms = 15s 上限；状态仍是 completed/failed 判定（语义不变）。
+    for _ in 0..300 {
         let (status, snapshot) =
             request_json(app.clone(), Method::GET, &operation_uri, json!({})).await;
         assert_eq!(
@@ -384,7 +389,7 @@ async fn bootstrap_project_repo_issue_and_specs(
             Some("failed") => panic!("bootstrap repository initialization failed: {snapshot}"),
             _ => last_snapshot = snapshot,
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let completed = completed.unwrap_or_else(|| {
         panic!("bootstrap repository initialization did not complete: {last_snapshot}")
