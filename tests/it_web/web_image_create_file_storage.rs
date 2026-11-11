@@ -53,7 +53,8 @@ impl ImageClientApi for FakeImageGateway {
 
 async fn app_with_fake_gateway(root: &Path) -> axum::Router {
     let paths = AriaStatePaths::from_workspace_root(root);
-    // 临时过渡：凭据写入 GPT 家（engine 出站前暂读 GPT 家）；后续 Task 将替换为按家的设置流。
+    // 本测试只配置 GPT 家凭据：引擎按目标家（resolve_target）读取凭据，
+    // 自动轮转首次落在 GPT 家，故只配 GPT 家即可跑通出站。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = "https://images.example.com/v1".to_string();
