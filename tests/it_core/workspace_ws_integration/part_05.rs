@@ -672,7 +672,12 @@ async fn create_workspace_session_fixture_with_providers(
     );
     let mut last_snapshot = accepted;
     let mut completed = None;
-    for _ in 0..100 {
+    // 轮询预算：仓库初始化含 `git_finalize` 等后台步骤，慢机（CI）上需要
+    // **真实时间**推进——只 `yield_now` 会在初始化尚未推进时就把循环跑完
+    // （真机复现：CI 报 "repository initialization did not complete before
+    // fixture issue creation"，快照里 `git_finalize` 仍 pending）。
+    // 300 × 50ms = 15s 上限；状态仍是 completed/failed 判定（语义不变）。
+    for _ in 0..300 {
         let (status, snapshot) = request_json(
             app.clone(),
             Method::GET,
@@ -681,7 +686,7 @@ async fn create_workspace_session_fixture_with_providers(
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{snapshot}");
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         match snapshot["status"].as_str() {
             Some("completed") => {
                 completed = Some(snapshot);
