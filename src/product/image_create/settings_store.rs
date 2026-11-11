@@ -44,8 +44,30 @@ pub fn save(
     paths: &AriaStatePaths,
     settings: &ImageCreateSettings,
 ) -> Result<(), ImageCreateError> {
-    write_json(&paths.image_create_settings_file(), settings)
-        .map_err(|error| ImageCreateError::Store(error.to_string()))
+    let path = paths.image_create_settings_file();
+    write_json(&path, settings).map_err(|error| ImageCreateError::Store(error.to_string()))?;
+    // H1：明文 key 所在文件只允许属主读写。仅收紧本文件，
+    // 不改 write_json 的全局默认行为（会话文件等不受影响）。
+    restrict_to_owner(&path)
+}
+
+/// 把设置文件权限收紧为 0600。Windows 无 POSIX 权限位，安全 no-op（不报错）。
+fn restrict_to_owner(path: &std::path::Path) -> Result<(), ImageCreateError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
+            ImageCreateError::Store(format!(
+                "收紧设置文件权限失败 {}: {error}",
+                path.display()
+            ))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// 逐家脱敏，并填充 recommended_models 与 available。
@@ -228,6 +250,27 @@ mod tests {
         save(&paths, &expected).expect("save settings");
 
         assert_eq!(load(&paths), expected);
+    }
+
+    #[test]
+    fn saved_settings_file_is_owner_only() {
+        // H1：明文 key 所在的设置文件必须收紧为 0600（同机其他用户不可读）。
+        // Unix 下断言权限位；Windows 无 POSIX 权限位，跳过断言（实现侧为安全 no-op）。
+        let dir = tempdir().expect("tempdir");
+        let paths = AriaStatePaths::from_workspace_root(dir.path());
+
+        save(&paths, &settings()).expect("save settings");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(paths.image_create_settings_file())
+                .expect("settings file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "设置文件含明文 key，权限必须为 0600");
+        }
     }
 
     #[test]
