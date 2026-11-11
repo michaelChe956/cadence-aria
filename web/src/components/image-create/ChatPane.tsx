@@ -8,7 +8,7 @@ import {
   Wand2,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { IMAGE_VENDOR_LABELS } from "../../api/types/image-create";
+import { IMAGE_VENDOR_LABELS, type ImageVendor } from "../../api/types/image-create";
 import type { ImageChatEntry } from "../../state/image-create-entries";
 import { useImageCreateStore } from "../../state/image-create-store";
 
@@ -259,7 +259,7 @@ function GenerationImageEntry({
               data-testid="image-create-generation-meta"
               className="text-xs font-semibold text-[var(--aria-ink)]"
             >
-              {generationMetaText(entry)}
+              {generationMetaText(entry, entry.vendor)}
             </p>
           ) : null}
           <p className="min-w-0 text-xs leading-5 text-[var(--aria-ink-muted)]">{entry.prompt}</p>
@@ -280,9 +280,10 @@ function GenerationImageEntry({
 /** 生成图下方的标注：家 · 模型，以及轮转与参考图来源。 */
 function generationMetaText(
   entry: Extract<ImageChatEntry, { type: "generation_image" }>,
+  vendor: ImageVendor,
 ): string {
   const parts = [
-    IMAGE_VENDOR_LABELS[entry.vendor ?? "gpt"],
+    IMAGE_VENDOR_LABELS[vendor],
     entry.model ?? "",
   ];
   if (entry.selection === "auto") {

@@ -98,14 +98,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 该家是否已配置凭据：Base URL 与 API Key 均非空。 */
+/**
+ * 该家是否已配置凭据：Base URL 与 API Key 均非空。
+ * 注意：形参是该家的 MaskedVendorSettings 视图（掩码后的单家设置），不是供应方 id。
+ */
 export function isImageVendorConfigured(
-  vendor: MaskedVendorSettings | undefined,
+  vendorSettings: MaskedVendorSettings | undefined,
 ): boolean {
-  if (!vendor) {
+  if (!vendorSettings) {
     return false;
   }
-  return vendor.base_url.trim() !== "" && vendor.api_key_masked.trim() !== "";
+  return vendorSettings.base_url.trim() !== "" && vendorSettings.api_key_masked.trim() !== "";
 }
 
 /** 已配置凭据的供应方列表，供模型下拉过滤使用。 */

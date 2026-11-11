@@ -475,6 +475,31 @@ describe("image create store", () => {
     expect(useImageCreateStore.getState().params.model).toBe("auto");
   });
 
+  it("saveSettings locally rejects a non-https base_url without calling the API", async () => {
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await expect(
+      useImageCreateStore.getState().saveSettings({
+        vendors: {
+          minimax: { base_url: "http://evil.example.com", api_key_action: "retain" },
+        },
+      }),
+    ).rejects.toThrow("base_url 必须使用 HTTPS，或使用 localhost/loopback IP");
+    expect(api.updateImageCreateSettings).not.toHaveBeenCalled();
+  });
+
+  it("saveSettings skips local base_url validation for empty values and absent vendors", async () => {
+    api.updateImageCreateSettings.mockResolvedValue(maskedSettings());
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore
+      .getState()
+      .saveSettings({ vendors: { minimax: { base_url: "", api_key_action: "retain" } } });
+    await useImageCreateStore.getState().saveSettings({});
+
+    expect(api.updateImageCreateSettings).toHaveBeenCalledTimes(2);
+  });
+
   it("restores legacy generation entries without vendor metadata", async () => {
     const session = imageSession();
     api.getImageCreateSession.mockResolvedValue(

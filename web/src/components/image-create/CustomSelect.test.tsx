@@ -80,4 +80,20 @@ describe("CustomSelect", () => {
     await user.click(combobox);
     expect(combobox).toHaveAttribute("aria-expanded", "false");
   });
+
+  it("shows displayValue on the trigger instead of the raw value", () => {
+    render(
+      <CustomSelect
+        label="模型"
+        value="gpt-image-2.6"
+        displayValue="轮转推荐模型"
+        options={OPTIONS}
+        onChange={() => {}}
+      />,
+    );
+
+    const combobox = screen.getByRole("combobox", { name: "模型" });
+    expect(combobox).toHaveTextContent("轮转推荐模型");
+    expect(combobox).not.toHaveTextContent(/gpt-image/);
+  });
 });

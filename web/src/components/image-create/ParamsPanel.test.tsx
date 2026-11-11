@@ -49,13 +49,13 @@ function maskedSettings(
   };
 }
 
-/** 未配置凭据的供应方。 */
+/** 凭据为空的供应方：available 仍为 true，使断言只能由凭据判据满足。 */
 const unconfiguredVendor = vendorSettings({
   base_url: "",
   api_key_masked: "",
   models: [],
   default_model: "",
-  available: false,
+  available: true,
 });
 
 beforeEach(() => {
@@ -222,6 +222,21 @@ describe("ParamsPanel", () => {
       screen.getByRole("checkbox", { name: "基于上一张图继续修改" }),
     ).not.toBeDisabled();
     expect(screen.queryByText("首张图片将直接生成")).not.toBeInTheDocument();
+  });
+
+  it("F-09b 点击携带上一张图开关后翻转 params.use_previous", async () => {
+    const user = userEvent.setup();
+    useImageCreateStore.setState({
+      settings: maskedSettings(),
+      entries: [generationImageEntry()],
+      referenceImage: null,
+    });
+
+    render(<ParamsPanel />);
+
+    await user.click(screen.getByRole("checkbox", { name: "基于上一张图继续修改" }));
+
+    expect(useImageCreateStore.getState().params.use_previous).toBe(false);
   });
 
   it("F-10 等待提示不含具体模型名且页面没有保真度控件", () => {

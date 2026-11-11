@@ -131,12 +131,6 @@ export type ImageGenerationResult = {
   ts: string;
 };
 
-/** 会话记录中的生成结果附加信息：旧记录没有这些字段。 */
-export type GenerationResultMeta = Pick<
-  ImageGenerationResult,
-  "vendor" | "model" | "selection" | "reference_source"
->;
-
 export type ImageCreateSessionEvent = {
   kind: string;
   message: string;

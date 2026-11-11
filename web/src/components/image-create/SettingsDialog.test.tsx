@@ -158,6 +158,31 @@ describe("SettingsDialog", () => {
     );
   });
 
+  it("F-14b 清空清单后轮转模型为空且保存载荷 default_model 为空串", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const models = gpt.getByLabelText("GPT 模型清单");
+    await user.clear(models);
+
+    expect(gpt.getByRole("combobox", { name: "GPT 轮转模型" })).toHaveTextContent(/^$/);
+
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({
+        vendors: {
+          gpt: {
+            api_key_action: "retain",
+            models: [],
+            default_model: "",
+          },
+        },
+      });
+    });
+  });
+
   it("提交改动过的模型清单与轮转模型", async () => {
     const user = userEvent.setup();
     const { saveSettings } = renderDialog();

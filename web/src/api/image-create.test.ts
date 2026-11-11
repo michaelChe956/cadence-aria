@@ -119,6 +119,7 @@ describe("image create api", () => {
     });
 
     const init = fetchMock.mock.calls[0][1];
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/image-create/settings");
     expect(init?.method).toBe("PUT");
     const body = JSON.parse(init?.body as string) as Record<string, unknown>;
     expect(Object.keys(body)).toEqual(["vendors", "defaults"]);
