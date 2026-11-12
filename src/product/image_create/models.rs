@@ -74,8 +74,8 @@ pub enum ImageVendor {
 
 /// 内置推荐清单：仅作为默认值，用户可在设置中增删。
 pub const DEFAULT_GPT_MODELS: [&str; 8] = [
-    "gpt-image-2.6",
     "gpt-image-2.6-flare",
+    "gpt-image-2.6",
     "gpt-image-2.6-flare-2k",
     "gpt-image-2.6-flare-4k",
     "gpt-image-2.6-sunburst",
