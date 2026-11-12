@@ -352,6 +352,69 @@ fn candidate_attempt_metrics_report_pass_rate_percentiles_and_code_top_n() {
     );
 }
 
+/// 评审 Important-1（2026-11-12 整分支评审）：generate 段等价审计行
+/// （`attempt_key` 以 `equiv/` 开头，写入点 `record_equivalence_canonicalizations`）
+/// 与尝试流水同序列落库，但**不是编译尝试结果**——首过判定与连续失败判定
+/// 都必须剔除它，否则「审计行先落、Final Compile 后败」的 issue 会被计成
+/// 首次通过、连续失败被截为 0（系统性抬高 first_pass_rate、压低 P50/P90）。
+#[test]
+fn candidate_attempt_metrics_exclude_equivalence_audit_rows() {
+    // Case A：先一条等价审计行（Passed、无失败事实），后一条真实 Final
+    // Compile 失败 ⇒ 不得计为首次通过；连续失败 = 1（不是被审计行截成的 0）。
+    let mut audit = attempt_record(
+        "equiv/node-1/0123456789abcdef",
+        CandidateAttemptOutcome::Passed,
+        "2026-11-11T00:00:00Z",
+    );
+    audit.equivalence_canonicalizations = vec![EquivalenceCanonicalization {
+        kind: "intent_target_repository".to_string(),
+        original_key: "intent_target_codebase".to_string(),
+        value: "aria".to_string(),
+        resolution_basis: "member_table/physical_by_logical".to_string(),
+    }];
+    let issue_a = CandidateIssueAttemptSeries {
+        issue_id: "issue_audited".to_string(),
+        records: vec![
+            audit,
+            attempt_record(
+                "fail/after-equiv",
+                CandidateAttemptOutcome::Failed,
+                "2026-11-11T00:01:00Z",
+            ),
+        ],
+    };
+
+    let metrics = compute_candidate_attempt_metrics(&[issue_a]);
+    assert_eq!(metrics.issue_count, 1);
+    assert_eq!(
+        metrics.first_pass_issue_count, 0,
+        "等价审计行不得把随后编译失败的 issue 计成首次通过"
+    );
+    assert_eq!(metrics.first_pass_rate, Some(0.0));
+    assert_eq!(
+        metrics.consecutive_failure_p50,
+        Some(1.0),
+        "审计行后的真实失败必须计入连续失败（不得被审计行截断为 0）"
+    );
+    assert_eq!(metrics.consecutive_failure_p90, Some(1.0));
+
+    // Case B（对照）：无审计行的真实失败序列 ⇒ 过滤不得把正常路径也滤掉。
+    let issue_b = CandidateIssueAttemptSeries {
+        issue_id: "issue_plain".to_string(),
+        records: vec![attempt_record(
+            "fail/no-audit",
+            CandidateAttemptOutcome::Failed,
+            "2026-11-11T00:00:00Z",
+        )],
+    };
+    let metrics = compute_candidate_attempt_metrics(&[issue_b]);
+    assert_eq!(metrics.issue_count, 1);
+    assert_eq!(metrics.first_pass_issue_count, 0);
+    assert_eq!(metrics.first_pass_rate, Some(0.0));
+    assert_eq!(metrics.consecutive_failure_p50, Some(1.0));
+    assert_eq!(metrics.consecutive_failure_p90, Some(1.0));
+}
+
 #[test]
 fn candidate_attempt_metrics_aggregate_issue_level_streams() {
     let (_tmp, store) = setup();

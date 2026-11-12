@@ -18,6 +18,7 @@
 - [x] 2.6 实现：四类 typed IR 诊断 producer（裁决 §1.5）——`src/product/work_item_contract/validation.rs:245-312` 与拆出的 handler 预检产 `unknown_done_when_ref`、`unknown_reviewer_check_ref`、`acceptance_criterion_without_reviewer_check`、`unknown_requirement_ref`；新增内部 `src/product/work_item_plan_compiler/ir_fault.rs` 承载 typed payload（WI、task/check/criterion、错误 ref、本 WI 合法集合或真实 spec 集合、原行——无行即「不可定位」、所需字段形态）；MUST NOT 从现 `:265-267` message 反解析 task ID
 - [x] 2.7 先红：数据库/基线/成员解析失败（原 handler `:288-357`）判 Operational——MUST NOT 复用「Some(reasons) 即重驱」；失败集合混合 operational 与可教类时零重驱（禁止 `any(可教)` 放行）；「恰好一次」以前置授权、合法 provider 与剩余机会为条件（Task 4：`PreflightVerdict.operational_failures` + `mixed_operational_failure_set_grants_zero_reredrive` + `teaching_verdict_rejects_mixed_operational_set`）
 - [x] 2.8 不变量：新增可教类别必须显式进入规格/typed 白名单（负向测试：`code` 前缀或「缺少」措辞不自动获权）；其余结构 kind 复用 `planning_failure.rs` 事实完整性规则（Task 4：`teaching_verdict_rejects_wording_or_prefix_without_typed_fault` + `wording_or_prefix_alone_grants_no_eligibility`）
+- [ ] 2.9（遗留，构造点完备性）：teaching_verdict 对 BranchKeyMismatch 仅校验 expected_field 非空（single_candidate_compile_preflight.rs 的 locatable_lowering_fault），actual_field/value 为空不拒；当前唯一构造点恒写全、无触发路径；后续新增构造点时须在构造点侧补完备断言（2026-11-12 整分支评审 Minor-2 补登记：此前仅在验收记录 §6-E 与 gitignored 台账，不在任何未勾选工作项 ⇒ 后续新增构造点的实施者未必读到）
 
 ## 3. 止血：可观测性最小版（REQ-WSC-25）
 

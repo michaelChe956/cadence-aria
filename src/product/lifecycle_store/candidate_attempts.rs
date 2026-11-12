@@ -32,13 +32,16 @@
 //! ## 度量读数（可复制的查法）
 //!
 //! 程序化入口：[`compute_candidate_attempt_metrics`]（Rust API，口径见其文档）。
-//! 命令行等价查法（jq，跨 issue 聚合；口径与 Rust API 一致）：
+//! 命令行等价查法（jq，跨 issue 聚合；口径与 Rust API 一致）：两侧口径一律
+//! 剔除等价审计行（幂等键以 `equiv/` 开头——审计事件不是编译尝试结果），
+//! jq 侧同以 `startswith("equiv/")` 过滤：
 //!
 //! ```bash
 //! cat .aria/projects/*/issues/*/candidate-attempts.jsonl \
 //! | jq -s --argjson n 5 '
 //!   def pct($p): if length == 0 then null else .[(($p * length) | ceil) - 1] end;
-//!   (group_by(.issue_id) | map(sort_by(.recorded_at, .attempt_seq))) as $issues
+//!   def attempts: map(select((.attempt_key // "") | startswith("equiv/") | not));
+//!   (attempts | group_by(.issue_id) | map(sort_by(.recorded_at, .attempt_seq))) as $issues
 //!   | ([ $issues[] | (map(.outcome) as $o | (($o | index("passed")) // ($o | length))) ] | sort) as $consec
 //!   | {
 //!       issue_count: ($issues | length),
@@ -72,6 +75,12 @@ pub const CANDIDATE_ATTEMPTS_FILE_NAME: &str = "candidate-attempts.jsonl";
 
 /// lowering 类失败的稳定码（design §9.3「lowering 类终态失败数」的判据）。
 pub const LOWERING_FAILURE_STABLE_CODE: &str = "lowering_error";
+/// 等价审计行的幂等键前缀——唯一写入点是 generate 段 handler 的
+/// `record_equivalence_canonicalizations`（键形如 `equiv/{node_id}/{digest}`）；
+/// 真实尝试行恒为 `fail/` / `pass/` 前缀（本文件两处工厂），度量口径以此
+/// **精确**识别审计行（不得用 outcome/stage 宽条件：真实 Final 通过行同为
+/// Passed+Final，宽条件会误伤首过统计）。
+const EQUIVALENCE_AUDIT_ATTEMPT_KEY_PREFIX: &str = "equiv/";
 
 /// 进程内串行化（先例 `tool_policy_run_audit.rs`）：**进程内** Mutex 包住
 /// 「读既有行 + 幂等判定 + 分配序号 + append」全临界区。跨进程并发写同一
@@ -551,6 +560,9 @@ pub(crate) fn candidate_attempt_record_from_success(
 /// - **失败码 Top N**：全部失败尝试按稳定码聚合（次数降序，同数按码升序）。
 /// - **lowering 类终态失败计数**：该 issue 最后一次尝试仍失败且稳定码为
 ///   `lowering_error` 的 issue 数（终态失败=未被后续通过覆盖）。
+/// - **口径排除**：等价规范化审计行（幂等键 `equiv/…`，generate 段写入的
+///   审计事件）不是编译尝试结果，四个指标一律剔除；剔除后只剩审计行的
+///   issue 不进分母（无尝试记录）。
 pub fn compute_candidate_attempt_metrics(
     issues: &[CandidateIssueAttemptSeries],
 ) -> CandidateAttemptMetrics {
@@ -561,7 +573,18 @@ pub fn compute_candidate_attempt_metrics(
     let mut lowering_terminal_failure_count = 0usize;
 
     for issue in issues {
-        let mut records = issue.records.clone();
+        // 等价审计行（`equiv/` 幂等键）与尝试流水同序列，但不是编译尝试结果：
+        // 剔除后再判定首过/连续失败（只剩审计行的 issue 视为无尝试记录）。
+        let mut records: Vec<CandidateAttemptRecord> = issue
+            .records
+            .iter()
+            .filter(|record| {
+                !record
+                    .attempt_key
+                    .starts_with(EQUIVALENCE_AUDIT_ATTEMPT_KEY_PREFIX)
+            })
+            .cloned()
+            .collect();
         records.sort_by(|left, right| {
             (left.recorded_at.as_str(), left.attempt_seq)
                 .cmp(&(right.recorded_at.as_str(), right.attempt_seq))
