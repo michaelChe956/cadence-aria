@@ -353,7 +353,10 @@ pub(crate) fn candidate_compile_status(
 }
 
 /// 编译成功分支：同一候选的「编译不过」事实必须被覆盖清除——否则一次瞬态
-/// 失败恢复后，确认动作会被一条过期失败永久挡死（新的死路）。
+/// 失败恢复后，确认动作会被一条过期失败永久挡死（新的死路）。编译成功＝清
+/// **该候选编译链上『平台自动重写』段**（诊断计数 + 预算域已计费消费）归零；
+/// 门反馈段按 REQ-HGC-01/REQ-CG-02 既有语义不清零、不返还——整池回满额须
+/// 显式改 REQ-HGC-01/REQ-CG-02，不在本 change（未采用口径）。
 pub(crate) fn cleared_candidate_compile_status(
     source_revision_ref: Option<String>,
     plan_candidate_ir_ref: Option<String>,
@@ -365,7 +368,7 @@ pub(crate) fn cleared_candidate_compile_status(
         failure: None,
         cycle_fingerprint: None,
         repeat_count: None,
-        // 编译成功＝账本清零：新事实从零计。
+        // 编译成功＝清本编译链『平台自动重写』段诊断计数；门反馈段不清、不返还。
         auto_rewrites_used: 0,
         auto_rewrite: None,
         recorded_at,
@@ -1115,7 +1118,6 @@ mod tests {
         assert!(finding.owner_question.is_none());
         assert!(finding.owner_options.is_none());
     }
-
     #[test]
     fn cycle_witness_facts_parse_offending_template_or_stay_none() {
         let offending = "「A」 → 「B」 → 「A」 构成依赖环（箭头为产出流向）。其中「B」把「A」写成 provider，但「A」所在仓是 change_order 第 3 个仓、「B」所在仓是第 2 个仓——跨仓依赖只允许后仓消费前仓。";
@@ -1124,7 +1126,6 @@ mod tests {
         assert_eq!(facts.provider, "A");
         assert_eq!(facts.provider_order, 3);
         assert_eq!(facts.consumer_order, 2);
-
         // 无 offending 句（如同仓环 / 兜底文案）→ None，不猜。
         assert!(cycle_witness_facts("「A」 → 「B」 构成依赖环：谁都无法先执行。").is_none());
         // 位次不构成逆序（模板错乱）→ None。
@@ -1134,7 +1135,6 @@ mod tests {
         let poisoned = "其中「B」把「A」写成 provider，但「A」所在仓是 change_order 第 3 个仓、「B 所在仓是第 2 个仓——";
         assert!(cycle_witness_facts(poisoned).is_none());
     }
-
     #[test]
     fn auto_rewrite_verdict_carries_owner_question_and_options_from_witness() {
         let fingerprint = "9".repeat(64);

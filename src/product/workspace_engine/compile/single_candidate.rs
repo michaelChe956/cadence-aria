@@ -275,6 +275,13 @@ impl WorkspaceEngine {
         let Ok(record) = lifecycle.get_workspace_session(&self.session.session_id) else {
             return;
         };
+        // Task 5（工作包 4.1/4.2）：编译成功 ⇒ 只清该候选编译链的预算域自动
+        // 段，且**授权事实先落**（clear CAS 在诊断计数面之前）。两写非原子
+        // （session 记录 / candidate compile status 各一文件）⇒ 崩溃窗内只留
+        // 「诊断计数陈旧」（auto_rewrites_used 未随成功归零），不是授权事实
+        // 失真——下次编译失败的读侧以预算域（统一权威余额）为准，诊断计数随
+        // 下次成功落盘对齐。写失败只降级为静默（与下方 save 同口径）。
+        let _ = lifecycle.clear_author_rewrite_auto_segment(&self.session.session_id);
         let now = chrono::Utc::now().to_rfc3339();
         let status =
             crate::product::workspace_engine::compile_failure_surface::cleared_candidate_compile_status(

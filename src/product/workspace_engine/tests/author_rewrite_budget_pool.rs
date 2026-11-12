@@ -538,3 +538,188 @@ async fn escalation_gate_snapshot_carries_unified_balance_and_settles_segment() 
         "结转后再读权威余额 == 快照净余额 0（无双计）"
     );
 }
+
+// ============ Task 5（工作包 4.1 / 4.2 / 4.3 / 4.4 / 5.5）============
+
+/// Task 5 夹具：预置「门反馈段 + 预算域自动段」的 durable 形态——快照
+/// `manual_repairs_remaining = total − accepted_feedback_turns`（反馈段净
+/// 余额，gate-local 事实在场 ⇒ 余额可知）；自动段用真实纯函数
+/// `with_preclaim_charge` 建 N 条未退扣减（首条建域 legacy=1 ⇒ baseline=0
+/// ⇒ 净扣恰好 = 条数，与 `preland_preclaim_charge` 同口径）。
+fn preset_feedback_gate_and_auto_charges(
+    lifecycle: &LifecycleStore,
+    session_id: &str,
+    accepted_feedback_turns: u32,
+    auto_charges: u32,
+) {
+    let mut record = lifecycle
+        .get_workspace_session(session_id)
+        .expect("load fixture record");
+    let total = crate::product::work_item_plan_policy::RunBudgets::default().max_manual_repairs;
+    record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: accepted_feedback_turns,
+        manual_repairs_remaining: total - accepted_feedback_turns,
+        accepted_feedback_turns: Some(accepted_feedback_turns),
+        candidate_recovery: None,
+        trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+        resumable: true,
+    });
+    for attempt in 0..auto_charges {
+        record.author_rewrite_budget = Some(with_preclaim_charge(
+            record.author_rewrite_budget.as_ref(),
+            &format!("single_candidate_author:{}:{}", record.id, attempt),
+            1,
+            "2026-11-12T00:00:00Z".to_string(),
+        ));
+    }
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist gate + auto segment fixture");
+}
+
+/// Task 5 夹具：同门再接受一轮 owner 反馈——镜像 `lifecycle_store/
+/// human_gate.rs` 的同 CAS 扣减语义（`manual_repairs_remaining −1` 且
+/// `accepted_feedback_turns +1` 原子同落），此处直接落 durable 形态。
+fn accept_one_more_feedback_turn(lifecycle: &LifecycleStore, session_id: &str) {
+    let mut record = lifecycle
+        .get_workspace_session(session_id)
+        .expect("load fixture record");
+    let snapshot = record
+        .human_gate_snapshot
+        .as_mut()
+        .expect("gate snapshot present");
+    snapshot.manual_repairs_remaining -= 1;
+    snapshot.accepted_feedback_turns = Some(snapshot.accepted_feedback_turns.unwrap_or(0) + 1);
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist accepted feedback turn");
+}
+
+/// 工作包 4.1 / 4.2 / 4.3 / 4.4 / 5.5（Task 5）：编译成功只清该候选编译链
+/// 的『平台自动重写』段——自动 2 + 反馈 1（快照 remaining 2）⇒ 编译成功 ⇒
+/// 权威余额 `Some(2)`（自动段归零、反馈段保留）；同门再反馈一次 ⇒
+/// `Some(1)`（carry-forward 未被重置，不回满额）；`total_ever` 保留
+/// （REQ-WSC-25 可观测）。红线对照：若把门反馈段一并清零 / 整池回满，
+/// 余额会假读 3（REQ-HGC-01 被静默推翻）。
+#[tokio::test]
+async fn compile_success_clears_auto_segment_only_not_feedback() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, mut engine, _event_rx, _cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    // 幂等边界：预算域未建立（老会话）⇒ clear CAS 幂等 Ok 且不建域。
+    lifecycle
+        .clear_author_rewrite_auto_segment(&session_id)
+        .expect("预算域未建 ⇒ 幂等 Ok");
+    assert!(
+        lifecycle
+            .get_workspace_session(&session_id)
+            .expect("reload after idempotent clear")
+            .author_rewrite_budget
+            .is_none(),
+        "None ⇒ 幂等清段不得建域"
+    );
+    // 自动 2 + 反馈 1：快照 remaining 2、自动段净扣 2 ⇒ 编译前余额 Some(0)。
+    preset_feedback_gate_and_auto_charges(&lifecycle, &session_id, 1, 2);
+    let before = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("reload preset record");
+    assert_eq!(
+        durable_balance(&before, 1),
+        Some(0),
+        "编译前权威余额 = 快照 2 − 自动段 2（预算域已建 ⇒ legacy 不归并）"
+    );
+    // 编译成功走真实成功分支（run_work_item_plan_compile ⇒ record_candidate_
+    // compile_success：先清段 CAS、再落诊断计数面）。
+    engine
+        .run_work_item_plan_compile()
+        .await
+        .expect("干净候选必须编译成功");
+    let persisted = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load post-success session");
+    let budget = persisted
+        .author_rewrite_budget
+        .as_ref()
+        .expect("预算域在场（清段不拆域）");
+    assert!(
+        budget.auto_rewrite_charges.is_empty(),
+        "自动段归零（charges 清空）"
+    );
+    assert_eq!(
+        budget.legacy_auto_rewrites_charged, 0,
+        "自动段归零（baseline 归零）"
+    );
+    assert_eq!(
+        budget.total_auto_rewrite_charges_ever, 2,
+        "total_ever 保留（REQ-WSC-25 可观测）"
+    );
+    let snapshot = persisted
+        .human_gate_snapshot
+        .as_ref()
+        .expect("门快照保留（反馈段不清）");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 2,
+        "反馈段净余额不动（清段只动预算域）"
+    );
+    assert_eq!(
+        snapshot.accepted_feedback_turns,
+        Some(1),
+        "gate-local 反馈计数不动"
+    );
+    let legacy_used = lifecycle
+        .load_candidate_compile_status(&session_id)
+        .expect("load compile status")
+        .expect("status present")
+        .auto_rewrites_used;
+    assert_eq!(legacy_used, 0, "诊断计数随成功归零（cleared 状态）");
+    assert_eq!(
+        durable_balance(&persisted, legacy_used),
+        Some(2),
+        "编译成功后权威余额 = 快照 2 − 自动段 0（自动段清、反馈段留）"
+    );
+    // 同门再反馈一次 ⇒ Some(1)：carry-forward 接续（编译成功不重置门预算）。
+    accept_one_more_feedback_turn(&lifecycle, &session_id);
+    let after_feedback = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("reload after feedback turn");
+    assert_eq!(
+        durable_balance(&after_feedback, 0),
+        Some(1),
+        "同门再反馈一次 ⇒ Some(1)（carry-forward 未被重置，非回满额 3）"
+    );
+    // 幂等重放：已清段再 clear ⇒ Ok 且零状态变化。
+    lifecycle
+        .clear_author_rewrite_auto_segment(&session_id)
+        .expect("已清段 ⇒ 幂等 Ok");
+    let replayed = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("reload after replay clear");
+    assert_eq!(
+        replayed
+            .author_rewrite_budget
+            .as_ref()
+            .expect("budget domain")
+            .total_auto_rewrite_charges_ever,
+        2,
+        "幂等重放不动 total_ever"
+    );
+    assert_eq!(
+        durable_balance(&replayed, 0),
+        Some(1),
+        "幂等重放不改变权威余额"
+    );
+}

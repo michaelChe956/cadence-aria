@@ -160,6 +160,42 @@ impl LifecycleStore {
             })
         })
     }
+
+    /// 编译成功：清零预算域自动段（charges 清空、baseline 归零、total_ever
+    /// 保留）。门反馈段（快照 manual_repairs_remaining /
+    /// accepted_feedback_turns）一律不动——本 CAS 只写 `author_rewrite_budget`
+    /// 一个字段，反馈段事实沉在门快照里（REQ-HGC-01/REQ-CG-02 接续语义）。
+    /// 幂等：预算域未建（None）或已清（charges 空且 baseline==0）⇒ Ok、
+    /// 不建域、不动 updated_at。
+    pub fn clear_author_rewrite_auto_segment(
+        &self,
+        session_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——在
+        // session flock 外先解析归属再取 scope；锁内清段零变化。
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        let locked_session_path = session_path.clone();
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            with_exclusive_lock(&session_path, move || {
+                let mut session: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+                let Some(budget) = session.author_rewrite_budget.as_mut() else {
+                    // 预算域未建立（老会话）⇒ 无可清段，幂等成功（不建域、不写盘）。
+                    return Ok(());
+                };
+                if budget.auto_rewrite_charges.is_empty()
+                    && budget.legacy_auto_rewrites_charged == 0
+                {
+                    // 已清段重放 ⇒ 幂等：不重复写、不动 updated_at。
+                    return Ok(());
+                }
+                crate::product::models::author_rewrite_budget::clear_auto_segment(budget);
+                session.updated_at = Utc::now().to_rfc3339();
+                write_json(&locked_session_path, &session)?;
+                Ok(())
+            })
+        })
+    }
 }
 
 /// 读侧 legacy B1 自动重写计数（`auto_rewrites_used`）：读不到 ⇒ 0
