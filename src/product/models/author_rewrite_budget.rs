@@ -146,7 +146,12 @@ pub fn with_preclaim_charge(
     };
     match state {
         None => AuthorRewriteBudgetState {
-            legacy_auto_rewrites_charged: legacy_auto_rewrites_used,
+            // 建域时冻结的遗留计数必须**扣掉本次**：`legacy_auto_rewrites_used`
+            // 取自 `auto_rewrites_used`，而该诊断计数在 AutoRewrite **决策**时就已
+            // +1 ⇒ 预领建域时它**已含本次预领对应的那次重写**；本次又单独记一条
+            // charge ⇒ 若把 legacy 原样冻进 baseline，同一次重写会被 legacy 与
+            // charge 各记一次 ⇒ 净扣多计 1（表现为「纯自动 3 次」只跑得出 2 次）。
+            legacy_auto_rewrites_charged: legacy_auto_rewrites_used.saturating_sub(1),
             auto_rewrite_charges: vec![charge],
             total_auto_rewrite_charges_ever: 1,
         },
@@ -291,18 +296,42 @@ mod tests {
 
     #[test]
     fn legacy_b1_merged_read_side_only_until_domain_established() {
-        // 预算域 None ⇒ net = legacy(2)；建域后再读 ⇒ net 只算账本（不双计）
+        // 预算域 None ⇒ net = legacy(2)（读侧归并全部遗留计数）。
         assert_eq!(net_auto_charged(None, 2), 2);
+        // 建域：传入的 legacy **已含本次预领对应的那次重写**（`auto_rewrites_used`
+        // 在 AutoRewrite 决策时就已 +1）⇒ baseline 必须扣掉这一次，否则同一次
+        // 重写被 legacy 与 charge 各记一次 ⇒ 净扣多计 1。
         let established = with_preclaim_charge(
             None,
             "provider_start_0001",
             2,
             "2026-11-12T00:00:00Z".to_string(),
         );
-        // 建域时 legacy 冻进 baseline，而不是丢掉。
-        assert_eq!(established.legacy_auto_rewrites_charged, 2);
-        // 只算账本：baseline(2) + 活动扣减(1) = 3；双计会给出 2+2+1=5。
-        assert_eq!(net_auto_charged(Some(&established), 2), 3);
+        // 建域时 legacy 冻进 baseline（扣掉本次那次），而不是丢掉。
+        assert_eq!(established.legacy_auto_rewrites_charged, 1);
+        // 只算账本：baseline(1) + 活动扣减(1) = 2 ≡ legacy(2)（既不双计也不多计）。
+        assert_eq!(net_auto_charged(Some(&established), 2), 2);
+    }
+
+    #[test]
+    fn establishing_domain_does_not_double_count_the_current_rewrite() {
+        // 预领建域时 legacy 含本次那次 ⇒ 建域后的净扣必须**恰等于** legacy。
+        let state = with_preclaim_charge(
+            None,
+            "provider_start_0001",
+            1,
+            "2026-11-12T00:00:00Z".to_string(),
+        );
+        assert_eq!(net_auto_charged(Some(&state), 1), 1);
+        // 再扣一次 ⇒ 净扣 2（每次预领恰记一次）。
+        let next = with_preclaim_charge(
+            Some(&state),
+            "provider_start_0002",
+            2,
+            "2026-11-12T00:01:00Z".to_string(),
+        );
+        assert_eq!(net_auto_charged(Some(&next), 2), 2);
+        assert_eq!(next.total_auto_rewrite_charges_ever, 2);
     }
 
     #[test]
