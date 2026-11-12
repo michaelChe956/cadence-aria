@@ -201,14 +201,20 @@ impl LifecycleStore {
 /// 读侧 legacy B1 自动重写计数（`auto_rewrites_used`）：读不到 ⇒ 0
 /// （老会话 / 从未跑过 SC compile 的情形）。
 pub fn legacy_b1_used(store: Option<&LifecycleStore>, session_id: &str) -> u32 {
-    store
-        .and_then(|store| {
-            store
-                .load_candidate_compile_status(session_id)
-                .ok()
-                .flatten()
-        })
-        .map_or(0, |status| status.auto_rewrites_used)
+    let Some(store) = store else {
+        return 0;
+    };
+    match store.load_candidate_compile_status(session_id) {
+        Ok(Some(status)) => status.auto_rewrites_used,
+        // 「无编译状态」是正常情形（老会话 / 从未跑过 SC compile）。
+        Ok(None) => 0,
+        // 读失败与「无编译状态」**不同**：按 0 估算会让**域未建**的老会话短暂
+        // **过授**额度（该态走 legacy 归并，方向保守、可自愈），但必须可观测。
+        Err(error) => {
+            tracing::warn!(%error, "legacy auto rewrite count read failed; treating as zero");
+            0
+        }
+    }
 }
 
 /// 预领扣减（Task 2）：按预领的 provider-start 幂等键扣减 author 重写预算域

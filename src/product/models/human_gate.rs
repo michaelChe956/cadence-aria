@@ -260,7 +260,9 @@ pub struct CandidateCompileStatus {
     /// 同一结构指纹已连续出现的次数（首次＝1）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_count: Option<u32>,
-    /// 已用掉的自动重写次数（与 `CandidateAutoRewrite.remaining` 同一账本）。
+    /// 已用掉的自动重写次数（REQ-WSC-25 **诊断计数**，**不是**授权余额）。
+    /// 授权余额只有一个权威事实 = 预算域净余额（`author_rewrite_budget`）；
+    /// 本计数仅供可观测与遗留侧归并，不得被任何执法点或呈现点当作余额。
     #[serde(default)]
     pub auto_rewrites_used: u32,
     /// REQ-WSC-21/22：自动重写阶段事实；无自动重写语义（非候选无效类）为 None。
