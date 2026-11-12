@@ -1043,12 +1043,12 @@ async fn sg_07a_projection_is_pure_and_preserves_anchor() {
         started: true,
         provider: Some("fake".to_string()),
         started_at: Some("2026-10-14T00:00:00Z".to_string()),
+        provider_attempt_key: None,
     });
     write_json(&anchor_session_record_path(&paths, &birth), &latest)
         .expect("persist structural governance record");
     let ledger_len = latest.provider_start_ledger.len();
     let diagnostics_len = latest.policy_diagnostics.len();
-
     // engine 锁长持（attach 期间的极端形态）——manager Result 出口纯投影
     // 不得依赖 engine 锁，且前后 durable 字节零写。
     let mut engine_guard = manager.lock_engine_for_test().await;

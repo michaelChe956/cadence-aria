@@ -631,6 +631,7 @@ where
                                     started: true,
                                     provider: Some(provider_text),
                                     started_at: Some(started_at),
+                                    provider_attempt_key: None,
                                 },
                             );
                         }

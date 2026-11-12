@@ -244,6 +244,7 @@ impl LifecycleStore {
                     started: true,
                     provider: None,
                     started_at: None,
+                    provider_attempt_key: None,
                 },
             );
             next.updated_at = Utc::now().to_rfc3339();
@@ -468,6 +469,7 @@ impl LifecycleStore {
                         started: true,
                         provider: None,
                         started_at: None,
+                        provider_attempt_key: None,
                     },
                 );
                 next.updated_at = Utc::now().to_rfc3339();

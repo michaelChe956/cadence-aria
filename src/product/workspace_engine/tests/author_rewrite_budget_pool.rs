@@ -48,6 +48,7 @@ fn preland_preclaim_charge(
         started: true,
         provider: None,
         started_at: None,
+        provider_attempt_key: None,
     });
     record.author_rewrite_budget = Some(with_preclaim_charge(
         record.author_rewrite_budget.as_ref(),

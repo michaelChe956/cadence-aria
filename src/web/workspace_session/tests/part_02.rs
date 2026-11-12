@@ -171,6 +171,7 @@ fn automation_test_record(
         author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        sc_generation_teaching_windows: Vec::new(),
         single_candidate_phase: None,
         work_item_plan_source_revision_ref: None,
         plan_candidate_ir_ref: None,

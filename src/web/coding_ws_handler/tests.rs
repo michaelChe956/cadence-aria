@@ -303,6 +303,7 @@ fn falls_back_to_assistant_artifact_when_persisted_markdown_lacks_commands() {
         author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        sc_generation_teaching_windows: Vec::new(),
         single_candidate_phase: None,
         work_item_plan_source_revision_ref: None,
         plan_candidate_ir_ref: None,

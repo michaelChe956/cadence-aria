@@ -599,6 +599,7 @@ mod anchor_t03_tests {
             author_rewrite_budget: None,
             policy_diagnostics: Vec::new(),
             provider_start_ledger: Vec::new(),
+            sc_generation_teaching_windows: Vec::new(),
             single_candidate_phase: None,
             work_item_plan_source_revision_ref: None,
             plan_candidate_ir_ref: None,
@@ -1303,6 +1304,7 @@ mod sg_07a_tests {
                 started: true,
                 provider: Some("fake".to_string()),
                 started_at: Some(sg_07a_now()),
+                provider_attempt_key: None,
             });
         });
         sg_07a_assert_chain(&fixture5, &terminal);
@@ -1331,6 +1333,7 @@ mod sg_07a_tests {
                 started: true,
                 provider: None,
                 started_at: None,
+                provider_attempt_key: None,
             });
         });
         let runtime_old = WorkspaceSession::from_record(old.clone());

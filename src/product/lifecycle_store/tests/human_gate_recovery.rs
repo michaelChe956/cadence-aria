@@ -898,6 +898,7 @@ fn sg_04a_old_record_no_backfill_and_started_is_not_actual_launch() {
         started: true,
         provider: None,
         started_at: None,
+        provider_attempt_key: None,
     }];
     write_json(&session_path, &old).unwrap();
 

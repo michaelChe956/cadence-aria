@@ -579,6 +579,7 @@ mod sg_07a_tests {
                 started: true,
                 provider: Some("fake".to_string()),
                 started_at: Some("2026-10-14T00:00:00Z".to_string()),
+                provider_attempt_key: None,
             });
         });
         let terminal_snapshot = sg_07a_assert_chain(&store5, &terminal);

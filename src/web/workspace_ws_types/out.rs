@@ -1003,6 +1003,7 @@ mod tests {
             started: true,
             provider: None,
             started_at: None,
+            provider_attempt_key: None,
         });
 
         let value = serde_json::to_value(message).unwrap();

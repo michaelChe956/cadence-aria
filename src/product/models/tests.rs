@@ -373,6 +373,7 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        sc_generation_teaching_windows: Vec::new(),
         single_candidate_phase: None,
         work_item_plan_source_revision_ref: None,
         plan_candidate_ir_ref: None,
@@ -394,7 +395,6 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         structural_governance_state: None,
         review_identity_id: String::new(),
     };
-
     assert_serde_roundtrip(&session);
     let mut missing_binding = serde_json::to_value(&session).unwrap();
     missing_binding
@@ -407,7 +407,6 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
             .work_item_runtime_binding,
         None
     );
-
     for workspace_type in [WorkspaceType::Story, WorkspaceType::Design] {
         let mut non_work_item = session.clone();
         non_work_item.workspace_type = workspace_type;
@@ -1287,6 +1286,7 @@ fn anchor_t02_session_record() -> WorkspaceSessionRecord {
         author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        sc_generation_teaching_windows: Vec::new(),
         single_candidate_phase: None,
         work_item_plan_source_revision_ref: None,
         plan_candidate_ir_ref: None,

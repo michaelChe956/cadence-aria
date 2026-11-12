@@ -429,6 +429,7 @@ fn verification_scope_repeated_original_fingerprint_enters_human_without_second_
         started: true,
         provider: None,
         started_at: None,
+        provider_attempt_key: None,
     }];
     let mut persisted = lifecycle
         .get_workspace_session(&engine.session().session_id)

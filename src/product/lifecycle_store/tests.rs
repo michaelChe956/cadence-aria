@@ -212,10 +212,10 @@ fn human_gate_reservation_replay_repairs_torn_turn_file_without_double_debit() {
             started: true,
             provider: None,
             started_at: None,
+            provider_attempt_key: None,
         },
     );
     write_json(&session_path, &session).unwrap();
-
     let turn = crate::product::models::HumanGateTurn {
         turn_id: reservation.turn_id.clone(),
         session_id: session.id.clone(),

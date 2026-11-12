@@ -5,7 +5,6 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, WorkItemPlanSessionOptions};
 use crate::product::models::{ProviderName, WorkspaceType};
 use crate::product::work_item_plan_policy::{ReviewInvocationScope, RunHistory, RunPolicy};
-
 #[test]
 fn single_candidate_provider_start_reservation_is_one_shot_and_durable() {
     let temp = tempdir().unwrap();
@@ -90,6 +89,7 @@ fn preclaimed_single_candidate_repair_key_starts_provider_once() {
             started: true,
             provider: None,
             started_at: None,
+            provider_attempt_key: None,
         },
     );
     let preclaimed = store

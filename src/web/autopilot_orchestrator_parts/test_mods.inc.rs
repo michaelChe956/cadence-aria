@@ -260,12 +260,14 @@ mod g8_delegated_orphan {
                 started: true,
                 provider: None,
                 started_at: None,
+                provider_attempt_key: None,
             },
             ProviderStartLedgerEntry {
                 provider_start_idempotency_key: format!("single_candidate_author:{session_id}:1"),
                 started: true,
                 provider: None,
                 started_at: None,
+                provider_attempt_key: None,
             },
         ];
         session.repair_reservation = Some(RepairReservation {

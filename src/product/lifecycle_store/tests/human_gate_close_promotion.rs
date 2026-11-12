@@ -254,6 +254,7 @@ fn human_gate_close_stale_expected_record_keeps_workspace_session_conflict() {
             started: true,
             provider: None,
             started_at: None,
+            provider_attempt_key: None,
         },
     );
     write_json(

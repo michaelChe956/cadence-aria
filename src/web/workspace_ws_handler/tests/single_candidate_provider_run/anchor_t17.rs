@@ -342,6 +342,7 @@ async fn anchor_t17_sc_fresh_reuses_logical_reservation_without_rearm() {
                 started: true,
                 provider: None,
                 started_at: None,
+                provider_attempt_key: None,
             },
         ];
         record.work_item_plan_source_revision_ref = Some(source_ref.clone());

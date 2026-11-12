@@ -9,7 +9,7 @@ use super::human_gate::{
 use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 use crate::product::work_item_plan_policy::{
     HumanGateSnapshot, PolicyDiagnostic, ProviderStartLedgerEntry, RepairReservation,
-    ReviewInvocationScope, RunHistory, RunPolicy, WorkItemPlanFlowKind,
+    ReviewInvocationScope, RunHistory, RunPolicy, ScGenerationTeachingWindow, WorkItemPlanFlowKind,
 };
 use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
@@ -846,6 +846,9 @@ pub struct WorkspaceSessionRecord {
     pub policy_diagnostics: Vec<PolicyDiagnostic>,
     #[serde(default)]
     pub provider_start_ledger: Vec<ProviderStartLedgerEntry>,
+    /// SC 生成教学重驱窗口（缺省即未知、零额外调用；append-only，旧记录不得倒填）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sc_generation_teaching_windows: Vec<ScGenerationTeachingWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_candidate_phase: Option<SingleCandidatePhase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

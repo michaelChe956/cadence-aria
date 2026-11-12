@@ -330,6 +330,7 @@ impl LifecycleStore {
                 author_rewrite_budget: None,
                 policy_diagnostics: Vec::new(),
                 provider_start_ledger: Vec::new(),
+                sc_generation_teaching_windows: Vec::new(),
                 single_candidate_phase: (work_item_plan_options.flow_kind
                     == crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate)
                     .then_some(crate::product::models::SingleCandidatePhase::Prepare),
@@ -355,7 +356,6 @@ impl LifecycleStore {
                 // 身份（UUID simple）；与记录同文件持久化，会话删除即解绑。
                 review_identity_id: uuid::Uuid::new_v4().simple().to_string(),
             };
-
             super::ensure_target_absent(&target_path)?;
             write_json(&target_path, &session)?;
             Ok(session)
@@ -926,6 +926,7 @@ impl LifecycleStore {
                         started: true,
                         provider: provider.map(ToString::to_string),
                         started_at,
+                        provider_attempt_key: None,
                     },
                 );
                 session.updated_at = Utc::now().to_rfc3339();

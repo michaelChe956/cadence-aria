@@ -60,7 +60,6 @@ pub fn single_candidate_approval_attempt_id(
     .join("\0");
     hex::encode(Sha256::digest(canonical.as_bytes()))
 }
-
 /// Stable compile identity is bound to the persisted Approval tuple, never process time.
 pub fn single_candidate_compile_id(
     session_id: &str,
@@ -200,6 +199,7 @@ impl LifecycleStore {
                     started: true,
                     provider: None,
                     started_at: None,
+                    provider_attempt_key: None,
                 },
             );
             stored.updated_at = Utc::now().to_rfc3339();

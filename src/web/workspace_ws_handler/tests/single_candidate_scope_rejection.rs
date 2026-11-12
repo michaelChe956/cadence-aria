@@ -239,6 +239,7 @@ pub(super) fn scope_test_context(
         author_rewrite_budget: None,
         policy_diagnostics: vec![],
         provider_start_ledger: vec![],
+        sc_generation_teaching_windows: Vec::new(),
         single_candidate_phase: None,
         work_item_plan_source_revision_ref: None,
         plan_candidate_ir_ref: None,

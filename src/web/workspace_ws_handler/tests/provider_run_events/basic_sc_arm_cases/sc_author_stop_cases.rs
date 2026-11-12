@@ -274,6 +274,7 @@ async fn sc_native_superseded_waiting_keeps_key_and_phase() {
                 started: true,
                 provider: None,
                 started_at: None,
+                provider_attempt_key: None,
             },
         ];
         record.provider_conversations = vec![crate::product::models::ProviderConversationRef {

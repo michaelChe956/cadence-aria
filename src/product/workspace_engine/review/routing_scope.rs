@@ -76,10 +76,10 @@ fn preclaimed_repair_start(
             started: true,
             provider: None,
             started_at: None,
+            provider_attempt_key: None,
         },
     )
 }
-
 /// 计算 verdict 的非 advisory findings 指纹集合（F5-B 闸门口径）：复用 policy
 /// classify_finding 的 class/fingerprint 推导，剔除 class=Advisory 条目。与
 /// evaluate.rs 的 actionable_findings 语义一致：措辞变化在 category 存在时不改指纹。

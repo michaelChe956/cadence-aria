@@ -136,6 +136,7 @@ fn policy_cas_persists_repair_reservation_and_provider_start_ledger_atomically()
             started: true,
             provider: None,
             started_at: None,
+            provider_attempt_key: None,
         },
     ];
     let saved = store
@@ -164,7 +165,6 @@ fn policy_cas_persists_repair_reservation_and_provider_start_ledger_atomically()
         saved.provider_start_ledger
     );
 }
-
 #[test]
 fn policy_cas_conflict_rejects_stale_record_and_routing_reloads_then_reevaluates() {
     let (_tmp, store, checkpoints) = recovery_store();
