@@ -5,10 +5,35 @@ export interface ChangelogEntry {
   highlights: string[];
 }
 
-export const CURRENT_VERSION = "0.1.2";
+export const CURRENT_VERSION = "0.1.4";
 
 // 发布升版本时请裁剪数组，仅保留最新 4 条。
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.1.4",
+    date: "2026-11-12",
+    title: "聚合初始化零变更失败带出 provider 真实输出 · CI 慢机竞态修复",
+    highlights: [
+      "聚合初始化的「零变更失败」现在带出 provider 的真实输出，不再只给一句失败",
+      "聚合初始化的幂等重跑被判成功：同一请求重跑不再被当成新的失败",
+      "两处 CI 慢机竞态修复：pid 文件空读、worktree 注册消失",
+      "仓库初始化夹具轮询改用真实时间预算（CI 慢机竞态）",
+      "「聚合初始化零变更诊断」的 OpenSpec change 已归档，主规格同步",
+    ],
+  },
+  {
+    version: "0.1.3",
+    date: "2026-11-11",
+    title: "LC 仓管理知识库模块全量交付 · macOS 构建修复 · CI 红灯链条补记",
+    highlights: [
+      "LC 仓管理知识库模块全量交付（含 WIG 优化的同期改动）",
+      "「不替换改名」按平台拆分，修 macOS 构建失败",
+      "CI 两个红 job 修复：fmt 与 release poll 帧门禁，并补两条文档证据",
+      "CI 红灯的完整链条补记：4 层独立问题逐层定位，另记明 release.yml 不 needs Rust CI 的依赖缺口",
+      "记录 0.1.2 tag 与 CI 的关系及不重打 tag 的理由",
+      "根目录散落的 F58 教学注入报告归位到 cadence/reports/",
+    ],
+  },
   {
     version: "0.1.2",
     date: "2026-11-08",
@@ -31,29 +56,6 @@ export const CHANGELOG: ChangelogEntry[] = [
     highlights: [
       "「版本更新说明」面板此前读的是旧数据源，0.1.0 的更新内容在面板里看不到；本次接入产品内 changelog 数据源，0.1.0 的多仓全链路说明现已可见",
       "面板按既有约定只保留最近 4 个版本；仓库根目录 CHANGELOG.md 为长版全文（发版时两处需同步）",
-    ],
-  },
-  {
-    version: "0.1.0",
-    date: "2026-11-01",
-    title: "多仓全链路对齐：判定一致、失败可执行、通过率可查",
-    highlights: [
-      "多仓（逻辑代码库）全链路对齐：同一份候选在候选结构门与最终编译现在判定一致（此前一个说无环、一个说成环，导致「写 plan 成功但 review 后报依赖环」）",
-      "依赖环不再让你去改 design：给出环上真实链、各 Work Item 所在仓的仓序位次、逆仓序那一跳，并给 2 个各带后果的合法修法，附保护项（不得为消环删除真实数据流、不得改动仓序）",
-      "结构门拒收不再直接「生成失败」：改为落到人工门并带上可执行修法；模型另有一次自动重驱机会（带环的事实与修法回去，常能自己改对，owner 零点击）",
-      "通过率可查：每次候选尝试都进 append-only 流水（落 issue 级，重跑不会擦掉历史），并提供 issue 级 / 项目级两个只读读数出口：首次通过率、同 issue 连续失败次数 P50/P90、失败码 Top N、lowering 类终态失败计数",
-      "过期门卡不再误导：计划已确认完成后，对话流里残留的旧卡改为「这一版已确认完成，此卡是历史记录，无需处理」，不再让你去终止此门重新发起",
-      "缺陷修复：pi ask 扩展并发时读到写了一半的文件（改为临时文件 + rename 原子发布）；macOS 编译修复（libc::mode_t 宽度随平台而变）",
-      "构建与 CI：Rust 1.99 新 lint 对齐、真机 e2e 在 CI 显式跳过并打印、故障注入改为按注入根分槽、WS 集成用例时序假设修正、证据检索用例的真实 codegraph CLI 依赖（CI 安装 + 缺工具兜底跳过）",
-    ],
-  },
-  {
-    version: "0.0.9",
-    date: "2026-08-26",
-    title: "图片创作提速与修复",
-    highlights: [
-      "图片创作生成图片改为本地文件存储，历史会话打开不再受 base64 拖累",
-      "修复 kimi code 提示词迭代失败问题",
     ],
   },
 ];

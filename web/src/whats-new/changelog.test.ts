@@ -30,8 +30,8 @@ describe("CHANGELOG", () => {
     const entries = recentEntries(CURRENT_VERSION);
 
     expect(entries).toHaveLength(4);
-    expect(entries.map((entry) => entry.version)).toEqual(["0.1.2", "0.1.1", "0.1.0", "0.0.9"]);
-    expect(entries.some((entry) => entry.version === "0.0.7")).toBe(false);
+    expect(entries.map((entry) => entry.version)).toEqual(["0.1.4", "0.1.3", "0.1.2", "0.1.1"]);
+    expect(entries.some((entry) => entry.version === "0.1.0")).toBe(false);
   });
 
   it("找不到当前版本时返回空数组", () => {
