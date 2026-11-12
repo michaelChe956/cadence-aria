@@ -284,8 +284,6 @@ pub(crate) fn load_involved_from_confirmed_design(
 
 /// SG1 有效图源字段定位（纯事实）：`field` 为 canonical 源内字段路径，
 /// `line` 为 1-based 行号；不携带任何 store/provider 引用。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureSpan {
     pub field: String,
@@ -297,8 +295,6 @@ pub(crate) struct PlanningStructureSpan {
 /// Design/member/selection/options/baseline/intent 摘要；本类型不构成新
 /// 入站许可——缺失/失效/多份矛盾 Design 由外层装载时按原
 /// operational/业务门阻断，不在这里随便选一个。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureContext {
     pub source_revision_ref: String,
@@ -324,8 +320,6 @@ pub(crate) struct PlanningStructureContext {
 
 /// SG1 canonical Input 连同源定位：契约原样保留（provider、contract_id、
 /// required_capabilities、compatibility_policy），`span` 指向声明字段。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureCanonicalInput {
     pub contract: RequiredInputContract,
@@ -336,8 +330,6 @@ pub(crate) struct PlanningStructureCanonicalInput {
 /// 解析后逻辑/物理 target、canonical Inputs、声明依赖与源定位。
 /// `declared_depends_on`（Dependencies.depends_on）单独保留、按既有规则
 /// 验证一致性——它不是有效图边，未参与当前编译的声明边不得误称实际边。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureItem {
     pub logical_work_item_id: String,
@@ -359,8 +351,6 @@ pub(crate) struct PlanningStructureItem {
 /// 都保，删一来源不等于删除有效边；`contract_refs`/`spans` 属
 /// canonical_input 来源，`order_indices` 属 change_order 来源
 /// （[前仓索引, 后仓索引]，无该来源时为空）。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EffectivePlanningEdge {
     pub from: String,
@@ -375,8 +365,6 @@ pub(crate) struct EffectivePlanningEdge {
 /// `from`=被依赖方、`to`=声明方（与 IssueWorkItemDependencyEdge 同向）。
 /// `resolvable`=被引用 ID 在本批 items 内；`effective`=该端点对在有效图
 /// 中确有边（来源不限）。声明边不是有效图边。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureDeclaredDependencyFact {
     pub from: String,
@@ -390,8 +378,6 @@ pub(crate) struct PlanningStructureDeclaredDependencyFact {
 /// typed failures（真实有向 witness 在 DependencyCycle payload 内）。
 /// 残余组只是 Kahn 分组事实，不是有向 witness，禁止画成 A→B→A
 /// （REQ-PLN-10）。纯输出，不含 store/provider I/O。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureReport {
     pub source_hash: String,
@@ -421,8 +407,6 @@ pub(crate) struct PlanningStructureReport {
 /// ④ change_order 自动边（同仓无自动边、空顺序不映射——单仓语义不变）；
 /// ⑤ 现 Kahn 核心判可排序性 + 确定性 DFS 提取真实有向 witness
 ///    （每一跳确在有效图中并标来源）。
-/// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 pub(crate) fn project_effective_planning_graph(
     items: &[PlanningStructureItem],
     context: &PlanningStructureContext,
@@ -681,8 +665,6 @@ pub(crate) fn project_effective_planning_graph(
 
 /// 有效边来源累加器：同端点 canonical/change_order 贡献分别保留，
 /// 输出按固定枚举序合并（删一来源不等于删除有效边）。
-// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 #[derive(Default)]
 struct EffectiveEdgeAccumulator {
     canonical: bool,
@@ -694,8 +676,6 @@ struct EffectiveEdgeAccumulator {
 
 /// 构造带 context 身份的 typed 结构失败（stage 恒 Plan；diagnostic_ref
 /// 由 source_hash+稳定码单源派生）。
-// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
 fn structure_failure(
     kind: PlanningFailureKind,
     origin: PlanningFailureOrigin,

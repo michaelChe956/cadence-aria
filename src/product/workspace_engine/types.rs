@@ -794,11 +794,14 @@ impl PlanningCompileFailure {
                     .failures
                     .iter()
                     .map(|failure| {
-                        format!(
-                            "{}[{}]",
-                            failure.kind.stable_code(),
-                            failure.evidence.affected_ids.join("->")
-                        )
+                        let mut body = failure.evidence.affected_ids.join("->");
+                        // 5.3：evidence.details 的机器事实（环 cause 原文/指纹/
+                        // 机器 id 标记段）随渲染保留——旧 String 边界与
+                        // `compile_failure_surface` 的环事实解析锚点不回退。
+                        for (key, value) in &failure.evidence.details {
+                            body.push_str(&format!(" {key}={value}"));
+                        }
+                        format!("{}[{body}]", failure.kind.stable_code())
                     })
                     .collect::<Vec<_>>()
                     .join("; ");
@@ -867,6 +870,16 @@ impl std::fmt::Display for PlanningCompileFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.render())
     }
+}
+/// 5.3（REQ-WSC-24 残留）：Final Compile prepare 阶段的 typed 错误通道——
+/// 依赖环/结构失败以 `Structure(PlanningFailureSet)` 透传（机器标记段原文
+/// 随集合的 evidence 保留），其余按 `Operational(cause)`。失败面分流与该
+/// 枚举的 impl 见 `compile/prepare_failure.rs`。类型 `pub` + 所在模块私有
+/// （Task 2 可见性裁定先例）⇒ crate 内可达，不进 crate 外 API 面。
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitialPlanCompileFailure {
+    Operational(String),
+    Structure(crate::product::planning_failure::PlanningFailureSet),
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ use crate::product::work_item_split_validator::WorkItemSplitValidationReport;
 use crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto;
 
 pub(crate) mod ir_adapter;
+pub(crate) mod prepare_failure;
 mod single_candidate;
 #[cfg(test)]
 pub(crate) use single_candidate::SingleCandidateCompileCheckpoint;
@@ -178,12 +179,11 @@ pub fn work_item_plan_compile_admission_error(
     format!("{code}: work item plan {plan_id} compile admission rejected: {error}")
 }
 
-/// 将 legacy/IR adapter 已读取的值变成确定性的 initial compile 草稿。
-/// 此函数不持有任何 store，亦不读取系统时钟。
+/// 将 legacy/IR adapter 已读取的值变成确定性的 initial compile 草稿；不持有 store、不读系统时钟。
 pub fn prepare_initial_plan_compile(
     input: InitialPlanCompileInput,
     durable_context: InitialPlanCompileDurableContext,
-) -> Result<PreparedInitialPlanCompile, String> {
+) -> Result<PreparedInitialPlanCompile, super::types::InitialPlanCompileFailure> {
     durable_context.validate()?;
     let publication_provenance_ref = durable_context.publication_provenance_ref.clone();
     let publication_provenance_content_hash =
@@ -195,10 +195,10 @@ pub fn prepare_initial_plan_compile(
         || input.issue_id != input.active_index.issue_id
         || input.plan_id != input.active_index.plan_id
     {
-        return Err("initial plan compile input identity mismatch".to_string());
+        return Err("initial plan compile input identity mismatch".into());
     }
     if input.outline_order.is_empty() {
-        return Err("initial plan compile requires at least one outline".to_string());
+        return Err("initial plan compile requires at least one outline".into());
     }
     let outline_to_work_item_id = input
         .outline_order
@@ -223,10 +223,10 @@ pub fn prepare_initial_plan_compile(
         })
         .collect::<BTreeMap<_, _>>();
     if outline_to_work_item_id.len() != input.outline_order.len() {
-        return Err("initial plan compile outline order contains duplicates".to_string());
+        return Err("initial plan compile outline order contains duplicates".into());
     }
     let (compiled_plan, work_items, verification_plans) =
-        draft_batch::compile_support::project_work_item_plan_drafts_for_compile(
+        prepare_failure::project_work_item_plan_drafts(
             &input.previous_plan,
             &input.draft_records,
             WorkItemPlanCompileProjectionContext {

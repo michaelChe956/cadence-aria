@@ -807,9 +807,8 @@ impl WorkspaceEngine {
                 .map_err(|cause| {
                     PlanningCompileFailure::operational("single_candidate_ir_adapter_failed", cause)
                 })?;
-        let prepared = prepare_initial_plan_compile(input, durable_context).map_err(|cause| {
-            PlanningCompileFailure::operational("final_compile_prepare_failed", cause)
-        })?;
+        let prepared = prepare_initial_plan_compile(input, durable_context)
+            .map_err(prepare_failure::into_compile_failure)?;
         let stores = CompileStores {
             plan_store: self.work_item_plan_store().map_err(|cause| {
                 PlanningCompileFailure::operational("plan_store_unavailable", cause)

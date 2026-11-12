@@ -27,16 +27,16 @@
 
 ## 4. 图奇偶性（REQ-WSC-23）
 
-- [ ] 4.1 先红：把现场 #1 形态固化成脱敏 fixture（多仓、gateway 消费 frontend 产出、`change_order` 为 gateway→frontend）
-- [ ] 4.2 断言：同一 fixture 在 Stage1 typed 图与 Final Compile 图的「有效边集合 / 成环结论 / witness 首跳」三者一致；不一致者登记缺陷单（ignored + 说明），修复后转绿
-- [ ] 4.3 cleanup：清掉 `compile_support.rs:395`、`:425` 失真的「尚未接线」注释与失效的 `#[allow(dead_code)]`
+- [x] 4.1 先红：把现场 #1 形态固化成脱敏 fixture（多仓、gateway 消费 frontend 产出、`change_order` 为 gateway→frontend）（Task 5：`tests/single_candidate/structure_failure_passthrough.rs` 同构 fixture（gateway/frontend 两成员仓、gateway 消费 frontend 产出、change_order gateway→frontend），红态实测 `dependency_cycle: 「WI-GATEWAY」 → 「WI-FRONTEND」 → 「WI-GATEWAY」…` + 结构指纹 + 机器 id 段）
+- [x] 4.2 断言：同一 fixture 在 Stage1 typed 图与 Final Compile 图的「有效边集合 / 成环结论 / witness 首跳」三者一致；不一致者登记缺陷单（ignored + 说明），修复后转绿（Task 5 核验：`--lib candidate_gate_and_final_compile_agree` 2 用例全绿（effective_edges / dependency_cycle_witness 各一），归档 parity change 交付面零重写）
+- [x] 4.3 cleanup：清掉 `compile_support.rs:395`、`:425` 失真的「尚未接线」注释与失效的 `#[allow(dead_code)]`（Task 5：实测共十处（:287-:698 区间），接线证据 `plan_projection.rs` 生产消费 `project_effective_planning_graph`；全部删除后 `cargo check` 零 dead_code 告警，2308→2288 行净减）
 
 ## 5. 环的结构化教学（REQ-WSC-24、REQ-CG-08）
 
-- [ ] 5.1 先红：环失败时 durable detail 携带逐跳 `from/to/sources`；教学指令含「逆了 `change_order` 哪两个位次」+「保留全部 Inputs/AC、不得改仓序」三条保护项
-- [ ] 5.2 先红（负向）：任何自动删边路径都不存在——构造 `canonical_input` 参与的环，断言平台不产出删边修复
-- [ ] 5.3 实现：`compile/single_candidate.rs:770` 透传 `PlanningCompileFailureKind::Structure`；`compile_support.rs:783-826` 判据改 typed witness（需先拆文件）
-- [ ] 5.4 回归：同环重复停判定仍按结构指纹，不按文案
+- [x] 5.1 先红：环失败时 durable detail 携带逐跳 `from/to/sources`；教学指令含「逆了 `change_order` 哪两个位次」+「保留全部 Inputs/AC、不得改仓序」三条保护项（Task 5 核验：`--lib author_stage_cycle_failure` 1 用例绿（`author_stage_cycle_failure_carries_witness_facts_and_two_owner_options`），归档交付面零重写）
+- [x] 5.2 先红（负向）：任何自动删边路径都不存在——构造 `canonical_input` 参与的环，断言平台不产出删边修复（Task 5 核验：`candidate_gate_and_final_compile_agree_on_dependency_cycle_witness` 断言 canonical 边参与环检出后仍以 `CanonicalInput` 来源保留在有效图与 witness 中；`--lib candidate_compile_failure` 8 用例绿；本 Task 新用例断言环 cause 原文（含全部边事实）随 Structure 渲染保留）
+- [x] 5.3 实现：`compile/single_candidate.rs:770` 透传 `PlanningCompileFailureKind::Structure`；`compile_support.rs:783-826` 判据改 typed witness（需先拆文件）（Task 5：`types.rs` `InitialPlanCompileFailure{Operational,Structure}` + 新文件 `compile/prepare_failure.rs`（分流单源 `into_compile_failure` + 投影包装）+ `compile/single_candidate.rs` prepare 包裹点分流；witness 以「机器标记段原文进 evidence.details + witness 留空 fail-closed」落地——compile_support 本任务只删不增，typed witness 判据改造随拆文件另行立项；`--lib structure_failure_passthrough` 2 用例绿）
+- [x] 5.4 回归：同环重复停判定仍按结构指纹，不按文案（Task 5：`--lib candidate_compile_failure` 8 用例绿（含同环 fingerprint 重复停判定）；新用例断言 `CYCLE_FINGERPRINT_MARKER`/`CYCLE_IDS_MARKER` 随 Structure 渲染保留，指纹解析锚点不回退）
 
 ## 6. 一次答完（REQ-CG-09）
 
