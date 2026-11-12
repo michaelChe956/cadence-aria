@@ -621,7 +621,7 @@
 #### Scenario: base_url 与已保存配置不同时拒绝用已保存的 key 探测
 
 - **WHEN** 某个供应方已保存过 `api_key`，探测请求的 `api_key` 为空，而请求的 `base_url` 与该供应方已保存的 `base_url` 不一致
-- **THEN** 系统拒绝该请求并提示「Base URL 与已保存配置不同，请填写 API Key 后再测试连通性」，不使用已保存的 `api_key`，不发起任何出站请求
+- **THEN** 系统拒绝该请求并提示用户填写 API Key 后再测试连通性，不使用已保存的 `api_key`，不发起任何出站请求
 
 #### Scenario: 既未填写也未保存过 key 时拒绝探测
 
@@ -665,7 +665,7 @@
 #### Scenario: 改动 Base URL 后须重新输入 API Key 才能探测
 
 - **WHEN** 某个供应方已保存过 `api_key`，用户把该分区的 Base URL 改成与已保存不同的地址且未重新输入 `api_key`，随即点击「测试连通」
-- **THEN** 该供应方分区内显示「Base URL 与已保存配置不同，请填写 API Key 后再测试连通性」，系统未以已保存的 `api_key` 发出任何请求；用户填写 API Key 后再次点击，探测以所填的 key 发起
+- **THEN** 该供应方分区内提示 Base URL 与已保存配置不同、需填写 API Key 后再测试连通性，系统未以已保存的 `api_key` 发出任何请求；用户填写 API Key 后再次点击，探测以所填的 key 发起
 
 #### Scenario: 探测取得网关模型列表后更新模型清单
 
