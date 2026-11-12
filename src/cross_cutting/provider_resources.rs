@@ -1289,9 +1289,7 @@ impl ProviderRunResourceScope {
     }
 }
 
-// ---------------------------------------------------------------------------
 // B1-1(波 2):受信 launch 归属载体——engine 已开真实 scope → raw start 点
-// ---------------------------------------------------------------------------
 
 /// 本次 launch 的受信资源归属载体(B1-1)。
 ///
@@ -1411,6 +1409,8 @@ impl TrustedLaunchOwnership {
     ///   未回填身份(默认面错误路径,adapter 自身已 kill+wait)直接注销。
     ///   静止不可证时保留 durable 记录停等(scope 级 quiesce/恢复驱动
     ///   接管),不注销。幂等:登记项不存在即成功。
+    ///   调用方合同(Task 4,REQ-WSC-28C):存在 Claimed 未回填 SC 教学 attempt
+    ///   的调用侧须先迁移 LaunchUnknown(engine 侧 helper);本函数不引 store。
     pub(crate) async fn release_after_session_tail(&self) {
         if let Err(error) = self
             .scope

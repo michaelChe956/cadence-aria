@@ -87,6 +87,7 @@ pub(super) async fn drive_structure_gate_reredrive(
         repair_prompt,
         repository_path,
         reredrive_run.as_ref(),
+        None,
     )
     .await
 }

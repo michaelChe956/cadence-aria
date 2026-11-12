@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 
 use super::lifecycle::NativeResumeCandidateError;
 use super::*;
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::product::models::{
     LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
     ProviderName,
@@ -9,7 +10,9 @@ use crate::product::models::{
 use crate::product::work_item_plan_compiler::{
     PlanCandidateValidationContext, WorkItemPlanSourceContext, validate_plan_candidate_ir,
 };
-use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::product::work_item_plan_policy::{
+    ScTeachingAttemptLifecycle, ScTeachingAttemptRef, ScTeachingWindowStatus, WorkItemPlanFlowKind,
+};
 use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
     WorkItemPlanSourceStore,
@@ -165,6 +168,154 @@ impl WorkspaceEngine {
             .map_err(|error| format!("persist provider reservation failed: {error}"))?;
         self.reload_session_from_record(saved);
         Ok(should_start)
+    }
+
+    /// Task 4（REQ-WSC-28C，tasks 2.3 接线面）：教学重驱真实启动的同步
+    /// 回填。调用契约：web 层 SC 生成 run 驱动入口（`drive_single_candidate_
+    /// reredrive`）在 `start_work_item_plan_author` 返回——spawn 身份已由
+    /// adapter/gateway 内 `confirm_started_resource` 链确认、`ProviderSession`
+    /// 已拿到——之后、进入事件驱动循环之前的窗口内调用。
+    ///
+    /// - `None`（非教学 run）原样透传（零 durable 副作用）；
+    /// - 启动 `Err`（如治理层 full fingerprint 漂移拒启）：无会话可回填，
+    ///   确定未启动——attempt 保持 Claimed（design D2），原样上浮；
+    /// - 回填成功 ⇒ attempt → ActualStarted、占位条目**原位**补全
+    ///   （provider = 会话 author_provider 名，started_at = 当前 RFC3339 UTC）；
+    /// - 回填失败 ⇒ 先持久化 `mark_sc_teaching_attempt_unknown`
+    ///   （LaunchUnknown，fail-closed 证据保留），再把 Ok 换成带稳定原因码
+    ///   的 Err 交既有失败收口停止该 run（不自动重播）。
+    pub(crate) fn backfill_sc_teaching_launch(
+        &mut self,
+        sc_teaching_attempt: Option<&ScTeachingAttemptRef>,
+        session: Result<ProviderSession, ProviderAdapterError>,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let Some(attempt) = sc_teaching_attempt else {
+            return session;
+        };
+        let session = session?; // 启动失败：无会话可回填（占位保持 Claimed）。
+        match self.observe_sc_teaching_provider_launch(attempt) {
+            Ok(()) => Ok(session),
+            Err(message) => Err(ProviderAdapterError::provider_unavailable(format!(
+                "sc_teaching_launch_backfill_failed: {message}"
+            ))),
+        }
+    }
+
+    /// `backfill_sc_teaching_launch` 的耐久内核：锁内 CAS observe 原位补全
+    /// 占位条目；失败路径先尽力迁移 LaunchUnknown（迁移自身失败只留告警——
+    /// 会话尾迁移与本错误消息共同保留证据）。
+    pub(crate) fn observe_sc_teaching_provider_launch(
+        &mut self,
+        attempt: &ScTeachingAttemptRef,
+    ) -> Result<(), String> {
+        let lifecycle = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let expected = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| {
+                format!(
+                    "load session for sc teaching launch backfill failed ({}): {error:?}",
+                    self.session.session_id
+                )
+            })?;
+        // provider 文本取 serde snake_case 投影（与 F-19 ledger 登记同口径）。
+        let provider_text = serde_json::to_value(&self.session.author_provider)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        let started_at = chrono::Utc::now().to_rfc3339();
+        match lifecycle.observe_sc_teaching_provider_start(
+            &expected,
+            attempt.generation_seq,
+            attempt.attempt_no,
+            &provider_text,
+            started_at,
+        ) {
+            Ok(saved) => {
+                self.reload_session_from_record(saved);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    session_id = %self.session.session_id,
+                    attempt_key = %attempt.attempt_key,
+                    error = ?error,
+                    "sc teaching provider start backfill failed; marking attempt LaunchUnknown"
+                );
+                if let Ok(fresh) = lifecycle.get_workspace_session(&self.session.session_id) {
+                    match lifecycle.mark_sc_teaching_attempt_unknown(
+                        &fresh,
+                        attempt.generation_seq,
+                        attempt.attempt_no,
+                    ) {
+                        Ok(saved) => self.reload_session_from_record(saved),
+                        Err(mark_error) => tracing::warn!(
+                            session_id = %self.session.session_id,
+                            attempt_key = %attempt.attempt_key,
+                            error = ?mark_error,
+                            "sc teaching attempt unknown migration failed (evidence stays in error path)"
+                        ),
+                    }
+                }
+                Err(format!(
+                    "observe sc teaching provider start failed ({}): {error:?}",
+                    attempt.attempt_key
+                ))
+            }
+        }
+    }
+
+    /// Task 4（tasks 2.3）：会话尾收口——SC 生成 run 任一出口收尾时，把
+    /// Active 窗口内仍在 `Claimed`（已 claim 未回填）的教学 attempt 持久化
+    /// 为 `LaunchUnknown`（幂等；无窗口/已回填/已迁移均直通零写盘）。
+    /// provider 资源注销由 adapter 的 `release_after_session_tail` 自行收口
+    /// （cross_cutting 不引 store），本验证点在调用侧（web SC run 臂的统一
+    /// 出口）。迁移失败只留告警——收口不复活 run，durable 原样保留由恢复
+    /// 侧按 Unknown 等待语义处理。
+    pub(crate) fn migrate_claimed_sc_teaching_attempts_to_unknown(&mut self) {
+        if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
+            return;
+        }
+        let Some(lifecycle) = self.lifecycle_store.clone() else {
+            return;
+        };
+        loop {
+            let Ok(expected) = lifecycle.get_workspace_session(&self.session.session_id) else {
+                return;
+            };
+            let Some((generation_seq, attempt_no)) = expected
+                .sc_generation_teaching_windows
+                .iter()
+                .filter(|window| matches!(window.status, ScTeachingWindowStatus::Active))
+                .find_map(|window| {
+                    window
+                        .attempts
+                        .iter()
+                        .find(|attempt| {
+                            matches!(attempt.lifecycle, ScTeachingAttemptLifecycle::Claimed)
+                        })
+                        .map(|attempt| (window.generation_seq, attempt.attempt_no))
+                })
+            else {
+                return;
+            };
+            match lifecycle.mark_sc_teaching_attempt_unknown(&expected, generation_seq, attempt_no)
+            {
+                Ok(saved) => self.reload_session_from_record(saved),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %self.session.session_id,
+                        generation_seq,
+                        attempt_no,
+                        error = ?error,
+                        "session-tail sc teaching unknown migration failed; durable evidence left as-is"
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     /// B2c（Task 5.5，设计 §5.3 SC 纪律①，plan 接口字典 recovery entry

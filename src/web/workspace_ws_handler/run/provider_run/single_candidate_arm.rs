@@ -82,6 +82,11 @@ where
             )
         })
         .await;
+        // Task 4（REQ-WSC-28C，tasks 2.3）：SC run 会话尾统一收口——任一出口
+        // 都先把仍在 Claimed 未回填的教学 attempt 持久化为 LaunchUnknown
+        //（provider 资源注销在 adapter 的 release_after_session_tail 内，
+        // 验证点在调用侧；provider_resources 不引 store）。
+        engine.migrate_claimed_sc_teaching_attempts_to_unknown();
         match single_candidate_result {
             Ok(single_candidate::SingleCandidateProviderRunOutcome::Completed) => {}
             Err(single_candidate::SingleCandidateProviderRunError::AlreadyFinished) => {

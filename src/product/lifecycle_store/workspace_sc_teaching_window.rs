@@ -276,12 +276,13 @@ impl LifecycleStore {
         })
     }
 
-    /// 回填（锁内 CAS expected）⇒ 定位窗口与 attempt ⇒ 仅接受 Claimed/
-    /// LaunchUnknown（ActualStarted 且证据相同 ⇒ 幂等返回 stored；证据不同 ⇒
-    /// `Err(Conflict)`；Terminal ⇒ `Err(InvalidRecord)`，不接受自报）⇒ 按
-    /// launch_ledger_key 定位占位条目且 provider_attempt_key 匹配，**原位**
-    /// 补全 started=true + provider + started_at（绝不另插第二条）⇒ attempt
-    /// → ActualStarted（REQ-WSC-28C，tasks 2.2）。
+    /// 回填（锁内 CAS expected）⇒ 定位窗口与 attempt ⇒ 窗口必须 Active
+    /// （已关 ⇒ 可判定拒绝，不静默补全——Task 3 评审 Minor-1 加固）⇒ 仅接受
+    /// Claimed/LaunchUnknown（ActualStarted 且证据相同 ⇒ 幂等返回 stored；
+    /// 证据不同 ⇒ `Err(Conflict)`；Terminal ⇒ `Err(InvalidRecord)`，不接受
+    /// 自报）⇒ 按 launch_ledger_key 定位占位条目且 provider_attempt_key 匹配，
+    /// **原位**补全 started=true + provider + started_at（绝不另插第二条）⇒
+    /// attempt → ActualStarted（REQ-WSC-28C，tasks 2.2）。
     pub fn observe_sc_teaching_provider_start(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -302,6 +303,11 @@ impl LifecycleStore {
             else {
                 return Err(invalid("teaching window for the generation not found"));
             };
+            if matches!(window.status, ScTeachingWindowStatus::Closed { .. }) {
+                return Err(invalid(
+                    "teaching window is closed; launch observation is refused",
+                ));
+            }
             let Some(attempt) = window
                 .attempts
                 .iter()
@@ -419,10 +425,12 @@ impl LifecycleStore {
 
     /// 关闭（锁内 CAS）：attempt → Terminal{outcome}；窗口 → Closed{reason}
     /// （对齐映射 Delivered→Delivered、FailedTerminal→Exhausted、Stopped→
-    /// Stopped）；写 non_teaching_total_at_close 快照（供下一条链做 base，
-    /// 教学启动不占非教学计数）；**不删除**窗口（保留关闭与消耗事实，
-    /// REQ-SG-05/REQ-WSC-28B）。同 outcome 且已关闭 ⇒ 幂等返回不写盘；
-    /// 不同 outcome 的终态 ⇒ 可判定拒绝。
+    /// Stopped）；关窗前设防（Task 3 评审 Minor-1 加固）：存在**晚于**当前
+    /// attempt 的在飞（Claimed/LaunchUnknown）后继 attempt ⇒ 可判定拒绝
+    /// （防关窗后后继启动证据无处落账）。写 non_teaching_total_at_close
+    /// 快照（供下一条链做 base，教学启动不占非教学计数）；**不删除**窗口
+    /// （保留关闭与消耗事实，REQ-SG-05/REQ-WSC-28B）。同 outcome 且已关闭 ⇒
+    /// 幂等返回不写盘；不同 outcome 的终态 ⇒ 可判定拒绝。
     pub fn close_sc_teaching_window(
         &self,
         expected: &WorkspaceSessionRecord,
@@ -458,6 +466,17 @@ impl LifecycleStore {
                 if matches!(window.status, ScTeachingWindowStatus::Closed { .. }) {
                     return Ok(stored.clone());
                 }
+            }
+            if window.attempts.iter().any(|later| {
+                later.attempt_no > attempt_no
+                    && matches!(
+                        later.lifecycle,
+                        ScTeachingAttemptLifecycle::Claimed | ScTeachingAttemptLifecycle::LaunchUnknown
+                    )
+            }) {
+                return Err(invalid(
+                    "teaching window has a later in-flight attempt; close the current attempt first",
+                ));
             }
             // 先取快照（&Record）再进入可变改写，避免整记录借用冲突。
             let non_teaching_total = non_teaching_provider_start_count(stored);

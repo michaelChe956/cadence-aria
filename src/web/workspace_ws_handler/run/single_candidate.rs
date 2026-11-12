@@ -91,6 +91,8 @@ pub(super) async fn drive_single_candidate_reredrive(
     // Task 1b 段②生产臂:重驱是独立 provider run,调用方每轮 begin 新
     // handle 后传入。
     plan_split_run: Option<&crate::web::workspace_ws_handler::run::PlanSplitRunContext>,
+    // Task 4（REQ-WSC-28C）：教学 attempt 引用（claim 侧 Task 6 接线）。
+    sc_teaching_attempt: Option<&crate::product::work_item_plan_policy::ScTeachingAttemptRef>,
 ) -> Result<String, SingleCandidateProviderRunError> {
     let reredrive_input = engine
         .build_work_item_plan_streaming_input(
@@ -112,6 +114,9 @@ pub(super) async fn drive_single_candidate_reredrive(
         plan_split_run,
     )
     .await;
+    // Task 4（REQ-WSC-28C）：spawn 确认后、事件循环前同步回填（fail-closed）。
+    let reredrive_session =
+        engine.backfill_sc_teaching_launch(sc_teaching_attempt, reredrive_session);
     let reredrive_output = match engine
         .drive_work_item_plan_provider_session_to_output(
             reredrive_session,
@@ -906,6 +911,7 @@ pub(crate) async fn run_single_candidate_author(
                             &reredrive_prompt,
                             &repository.path,
                             reredrive_run.as_ref(),
+                            None,
                         )
                         .await?;
                         continue;
@@ -1010,6 +1016,7 @@ pub(crate) async fn run_single_candidate_author(
                     &reredrive_prompt,
                     &repository.path,
                     reredrive_run.as_ref(),
+                    None,
                 )
                 .await?;
                 continue;

@@ -555,6 +555,16 @@ pub struct ScTeachingAttemptState {
     pub lifecycle: ScTeachingAttemptLifecycle,
 }
 
+/// run 上下文携带的教学 attempt 引用（Task 4 接线面，REQ-WSC-28C）：
+/// SC 生成 run 驱动入口持有 claim 结果的定位三元组——spawn 身份确认后
+/// 同步回填 `provider_start_ledger` 占位条目；回填失败 fail-closed。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScTeachingAttemptRef {
+    pub generation_seq: u32,
+    pub attempt_no: u8,
+    pub attempt_key: String,
+}
+
 /// SC 生成链的耐久教学授权窗口（一条 generation 链一条，append-only：
 /// 显式 rearm 开新初轮时追加新窗口，已关闭窗口保留事实不删除）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

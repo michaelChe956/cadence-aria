@@ -1547,3 +1547,5 @@ include!("single_candidate/p2_reviewer_failure.rs");
 include!("single_candidate/anchor_t17.rs");
 // 作者阶段结构门拒收的恰一次教学重驱（与 compile/IR 重驱共享唯一槽位）。
 include!("single_candidate/author_structure_gate_reredrive.rs");
+// Task 4（REQ-WSC-28C）：教学重驱真实启动的同步回填接线用例拆分至子文件内联。
+include!("single_candidate/teaching_window_launch_observation.rs");
