@@ -61,5 +61,12 @@
 ## 8. 需求变更：移除自动轮转（2026-11-12）
 
 - [x] 8.1 移除自动轮转：模型改由用户在已配置且可用的供应方清单中手动选择；生成请求的 `model` 必填且不再有保留值；目标解析只返回供应方与模型，所选模型不可用时报错、不换家；结果不再记录选择方式；无可用供应方时生成按钮禁用并提示先配置（已由 Task 16 后端 `25842681`、Task 17 前端 `ef713dea` + `2bfaee26` 落地）
-- [x] 8.2 契约与文档同步：delta spec 删除「双供应方自动轮转」Requirement 并改写相关条目（现为 7 条 MODIFIED + 7 条 ADDED，76 个 Scenario）；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
+- [x] 8.2 契约与文档同步：delta spec 删除「双供应方自动轮转」Requirement 并改写相关条目（当时为 7 条 MODIFIED + 7 条 ADDED，76 个 Scenario；现行计数见 9.4）；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
 - [x] 8.3 内置 GPT 推荐清单改为 `gpt-image-2.6-flare` 打头（其余 7 个保持原顺序），使参数面板的初始选中项是 OpenAI 官方 id —— **已完成（后端由 Task 16 落地：`src/product/image_create/models.rs` 的 `DEFAULT_GPT_MODELS` 已调整为 `gpt-image-2.6-flare` 打头；参数面板的初始选中项因此是 OpenAI 官方 id `gpt-image-2.6-flare`）**
+
+## 9. 补充：供应方连通性探测与 Base URL 填写说明（2026-11-12）
+
+- [x] 9.1 契约：`POST /api/image-create/settings/connectivity` 的请求 / 响应形态；两步探测策略（`GET /v1/models` → 故意不含 `prompt` 的 `POST /v1/images/generations`）与各状态的判定、文案；`api_key` 为空时后端改用该供应方已保存的 key，两者皆无 → 400 且不出站；安全边界（与生成出站共用 `validate_base_url`、禁重定向、key 不进结果与日志、不落盘、连接 10s / 总计 30s）；Base URL 只填主机根路径（方案 5.5、5.9、5.11）
+- [ ] 9.2 后端：探测实现（`src/cross_cutting/image_client.rs`）与接口（`src/web/handlers/image_create.rs`，路由挂载于 `src/web/app.rs`）；验收：方案 7.4 的 P-01 至 P-10、PH-01 至 PH-06 通过，`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo test --locked` 通过 —— **由后端线落地，合入后勾选**
+- [ ] 9.3 前端：探测类型与 API、状态动作、设置弹窗的 Base URL 示例与说明、「测试连通」按钮与内联结果；验收：方案 7.4 的 PF-01 至 PF-07 通过，`cd web && pnpm tsc -b && pnpm vitest run` 通过 —— **由前端线落地，合入后勾选**
+- [x] 9.4 契约文档同步：方案新增 5.11「连通性探测」并补 5.5、5.7、5.8、5.9、7.3、7.4、8.2、8.3、9、10.3；delta spec 在「网关配置录入与脱敏存储」补 Base URL 只填主机根路径（新增 2 个 Scenario），新增 4 条 ADDED Requirement（「供应方连通性探测」「连通性探测的逐步判定规则」「连通性探测的取值来源与安全边界」「连通性探测的界面交互」，共 18 个 Scenario；拆成 4 条是因为 strict 校验要求单条 Requirement 正文不超过 500 字符）；现为 **7 条 MODIFIED + 11 条 ADDED，96 个 Scenario**；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
