@@ -533,3 +533,7 @@ impl LifecycleStore {
 #[cfg(test)]
 #[path = "workspace_sc_teaching_window_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "workspace_sc_teaching_fault_matrix_tests.rs"]
+mod fault_matrix_tests;

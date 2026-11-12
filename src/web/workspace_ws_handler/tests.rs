@@ -47,6 +47,7 @@ mod single_candidate_scope_rejection;
 mod single_candidate_structure_reredrive;
 mod single_candidate_teaching_window_baseline;
 mod single_candidate_teaching_window_cutover;
+mod single_candidate_teaching_window_fault_matrix;
 
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {
