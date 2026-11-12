@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -161,5 +161,54 @@ describe("CustomSelect", () => {
 
     await user.click(screen.getByRole("option", { name: "high" }));
     expect(onChange).toHaveBeenCalledWith("high");
+  });
+
+  it("打开后下拉面板进入可见态（拿到 opacity-100，而不是停在 opacity-0）", async () => {
+    // 回归：面板 portal 后要算定位坐标 ⇒ 打开时会多一次渲染；若可见性用的
+    // rAF 被「无依赖数组的卸载清理」在渲染间取消，面板会永远停在 opacity-0
+    // （用户看到的是「点了没反应」）。
+    const user = userEvent.setup();
+    render(
+      <CustomSelect
+        label="质量"
+        value="auto"
+        options={OPTIONS}
+        onChange={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "质量" }));
+
+    const listbox = screen.getByRole("listbox", { name: "质量" });
+    await waitFor(() => {
+      expect(listbox.className).toContain("opacity-100");
+      expect(listbox.className).not.toContain("opacity-0");
+      expect(listbox.className).not.toContain("pointer-events-none");
+    });
+  });
+
+  it("关闭后下拉面板在过场结束后从 DOM 卸载", async () => {
+    // 回归：关闭靠一个 150ms 定时器把 renderList 置 false；该定时器若被
+    // 「无依赖数组的卸载清理」在渲染间取消，面板会永久留在 DOM 里
+    // （看不见、也点不到）。
+    const user = userEvent.setup();
+    render(
+      <CustomSelect
+        label="质量"
+        value="auto"
+        options={OPTIONS}
+        onChange={() => {}}
+      />,
+    );
+
+    const combobox = screen.getByRole("combobox", { name: "质量" });
+    await user.click(combobox);
+    expect(screen.getByRole("listbox", { name: "质量" })).toBeInTheDocument();
+
+    await user.click(combobox);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    });
   });
 });

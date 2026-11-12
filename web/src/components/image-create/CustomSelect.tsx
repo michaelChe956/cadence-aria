@@ -187,6 +187,11 @@ export function CustomSelect({
     }
   }, [disabled, expanded]);
 
+  // 只在卸载时清理。依赖数组必须显式给 []：没有依赖数组时这个 cleanup 会在
+  // **每次渲染后**都执行，从而把「打开时排的可见性 rAF」与「关闭时排的 150ms
+  // 卸载定时器」在渲染之间取消 —— 面板会永远停在 opacity-0（点了没反应），
+  // 且关闭后永久留在 DOM 里。面板 portal 后要算定位坐标，打开时必然多一次渲染，
+  // 这个坑才会被触发。
   useEffect(
     () => () => {
       clearCloseTimer();
@@ -194,6 +199,7 @@ export function CustomSelect({
         window.cancelAnimationFrame(animationFrameRef.current);
       }
     },
+    [],
   );
 
   function handleOptionClick(
