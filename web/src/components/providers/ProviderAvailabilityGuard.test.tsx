@@ -250,6 +250,53 @@ describe("ProviderAvailabilityGuard", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
     expect(recheck).toHaveBeenCalledTimes(1);
   });
+  it("shows an actionable Chinese hint when the initial load fails with forbidden_host", () => {
+    useProviderAvailabilityStore.setState({
+      loadStatus: "error",
+      error: "request host not allowed",
+    });
+
+    renderGuard();
+
+    expect(
+      screen.getByText(/前端访问地址未被后端来源校验放行/),
+    ).toBeInTheDocument();
+    const alerts = screen.getAllByRole("alert");
+    expect(
+      alerts.some((alert) =>
+        alert.textContent?.includes("ARIA_API_TRUSTED_ORIGINS"),
+      ),
+    ).toBe(true);
+    // 原始英文信息保留为次要信息，不作为面向用户的结论
+    expect(
+      alerts.some((alert) =>
+        alert.textContent?.includes("request host not allowed"),
+      ),
+    ).toBe(true);
+  });
+
+  it("shows an actionable Chinese hint when the initial load fails with forbidden_origin", () => {
+    useProviderAvailabilityStore.setState({
+      loadStatus: "error",
+      error: "request origin not allowed",
+    });
+
+    renderGuard();
+
+    expect(screen.getByText(/请求来源 Origin 未被放行/)).toBeInTheDocument();
+    const alerts = screen.getAllByRole("alert");
+    expect(
+      alerts.some((alert) =>
+        alert.textContent?.includes("ARIA_API_TRUSTED_ORIGINS"),
+      ),
+    ).toBe(true);
+    expect(
+      alerts.some((alert) =>
+        alert.textContent?.includes("request origin not allowed"),
+      ),
+    ).toBe(true);
+  });
+
 
   it("disables the recheck button while a request is running", () => {
     setSnapshot(

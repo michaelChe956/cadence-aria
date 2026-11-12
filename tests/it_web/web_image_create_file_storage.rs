@@ -10,10 +10,13 @@ use axum::http::{Method, Request, StatusCode, header};
 use base64::{Engine as _, engine::general_purpose};
 use cadence_aria::cross_cutting::aria_state_paths::AriaStatePaths;
 use cadence_aria::cross_cutting::image_client::{
-    ImageClientApi, ImageClientError, ImageGenOutcome, ImageGenRequest, ImageRefImage,
+    ImageCallTarget, ImageClientApi, ImageClientError, ImageGenOutcome, ImageGenRequest,
+    ImageRefImage,
 };
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
-use cadence_aria::product::image_create::models::{ImageCreateSettings, SettingsStoreApi};
+use cadence_aria::product::image_create::models::{
+    ImageCreateSettings, ImageVendor, SettingsStoreApi,
+};
 use cadence_aria::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
 };
@@ -35,7 +38,7 @@ struct FakeImageGateway;
 impl ImageClientApi for FakeImageGateway {
     async fn generate(
         &self,
-        _settings: &ImageCreateSettings,
+        _target: &ImageCallTarget,
         request: &ImageGenRequest,
         reference: Option<ImageRefImage>,
     ) -> Result<ImageGenOutcome, ImageClientError> {
@@ -50,12 +53,14 @@ impl ImageClientApi for FakeImageGateway {
 
 async fn app_with_fake_gateway(root: &Path) -> axum::Router {
     let paths = AriaStatePaths::from_workspace_root(root);
+    // 本测试只配置 GPT 家凭据：生成时手动指定 GPT 家清单内的模型 id，
+    // 引擎按目标家（resolve_target）读取凭据，故只配 GPT 家即可跑通出站。
+    let mut settings = ImageCreateSettings::default();
+    let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
+    gpt.base_url = "https://images.example.com/v1".to_string();
+    gpt.api_key = "sk-test".to_string();
     SettingsStore::new(paths.clone())
-        .save(&ImageCreateSettings {
-            base_url: "https://images.example.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-            defaults: Default::default(),
-        })
+        .save(&settings)
         .await
         .expect("configure image settings");
 
@@ -100,7 +105,7 @@ async fn request_json(
 
 fn generate_multipart(boundary: &str) -> Vec<u8> {
     format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ncreate a file-backed image\r\n--{boundary}--\r\n"
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ncreate a file-backed image\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-image-2.6-flare\r\n--{boundary}--\r\n"
     )
     .into_bytes()
 }

@@ -1,11 +1,59 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionRecord } from "../../api/types/image-create";
+import type {
+  MaskedSettings,
+  MaskedVendorSettings,
+  SessionRecord,
+} from "../../api/types/image-create";
 import { useImageCreateStore } from "../../state/image-create-store";
 import { ParamsPanel } from "./ParamsPanel";
 
 const originalState = useImageCreateStore.getState();
+
+function vendorSettings(
+  overrides: Partial<MaskedVendorSettings> = {},
+): MaskedVendorSettings {
+  return {
+    base_url: "https://api.openai.com/v1",
+    api_key_masked: "sk-****1234",
+    models: ["gpt-image-2.6-flare", "gpt-image-2.6"],
+    recommended_models: ["gpt-image-2.6-flare", "gpt-image-2.6"],
+    available: true,
+    ...overrides,
+  };
+}
+
+function maskedSettings(
+  overrides: Partial<MaskedSettings["vendors"]> = {},
+): MaskedSettings {
+  return {
+    vendors: {
+      gpt: vendorSettings(),
+      minimax: vendorSettings({
+        base_url: "https://api.minimax.chat/v1",
+        api_key_masked: "mm-****5678",
+        models: ["MiniMax-H3-Image"],
+        recommended_models: ["MiniMax-H3-Image"],
+      }),
+      ...overrides,
+    },
+    defaults: {
+      size: "auto",
+      quality: "auto",
+      background: "auto",
+      output_format: "png",
+    },
+  };
+}
+
+/** 凭据为空的供应方：available 仍为 true，使断言只能由凭据判据满足。 */
+const unconfiguredVendor = vendorSettings({
+  base_url: "",
+  api_key_masked: "",
+  models: [],
+  available: true,
+});
 
 beforeEach(() => {
   useImageCreateStore.setState({
@@ -16,15 +64,18 @@ beforeEach(() => {
       quality: "auto",
       background: "auto",
       output_format: "png",
-      input_fidelity: null,
+      model: "gpt-image-2.6-flare",
+      use_previous: true,
     },
+    settings: maskedSettings(),
+    entries: [],
     referenceImage: null,
     isBusy: false,
   });
 });
 
 async function selectCustomOption(
-  user: ReturnType<typeof userEvent.setup>,
+  user: UserEvent,
   label: string,
   option: string,
 ) {
@@ -97,21 +148,138 @@ describe("ParamsPanel", () => {
     await waitFor(() => expect(catchSpy).toHaveBeenCalledTimes(1));
   });
 
-  it("hides fidelity without a reference and shows it when a reference exists", () => {
+  it("F-07 模型下拉只列出已配置且可用的供应方的模型 id", async () => {
+    const user = userEvent.setup();
+    useImageCreateStore.setState({
+      settings: maskedSettings({ minimax: unconfiguredVendor }),
+    });
+
+    render(<ParamsPanel />);
+
+    await user.click(screen.getByRole("combobox", { name: "模型" }));
+
+    expect(
+      screen.getByRole("option", { name: "gpt-image-2.6-flare" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "gpt-image-2.6" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "MiniMax-H3-Image" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/自动轮转/)).not.toBeInTheDocument();
+    expect(screen.getByText("MiniMax 未配置，可在设置中添加")).toBeInTheDocument();
+  });
+
+  it("F-07b 没有可用供应方时禁用生成按钮并给出提示", () => {
+    useImageCreateStore.setState({
+      settings: maskedSettings({
+        gpt: unconfiguredVendor,
+        minimax: unconfiguredVendor,
+      }),
+      currentSession: sessionRecord(),
+    });
+
+    render(<ParamsPanel />);
+
+    expect(screen.getByRole("button", { name: "生成图片" })).toBeDisabled();
+    expect(
+      screen.getByText("请先在设置里配置并启用至少一个供应方"),
+    ).toBeInTheDocument();
+  });
+
+  it("F-08 显式选择 MiniMax 模型后质量与背景置灰", async () => {
+    const user = userEvent.setup();
+    useImageCreateStore.setState({ settings: maskedSettings() });
+
+    render(<ParamsPanel />);
+
+    expect(screen.getByRole("combobox", { name: "质量" })).not.toBeDisabled();
+    expect(screen.queryByText("仅对 GPT 生效")).not.toBeInTheDocument();
+
+    await selectCustomOption(user, "模型", "MiniMax-H3-Image");
+
+    expect(screen.getByRole("combobox", { name: "质量" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "背景" })).toBeDisabled();
+    expect(screen.getByText("MiniMax 不支持该参数")).toBeInTheDocument();
+    expect(screen.queryByText("仅对 GPT 生效")).not.toBeInTheDocument();
+  });
+
+  it("F-09 无生成结果或已选上传参考图时携带上一张图开关置灰", () => {
+    useImageCreateStore.setState({ settings: maskedSettings(), entries: [] });
+
     const { rerender } = render(<ParamsPanel />);
-    expect(screen.queryByLabelText("参考图保真度")).not.toBeInTheDocument();
+
+    const toggle = screen.getByRole("checkbox", {
+      name: "基于上一张图继续修改",
+    });
+    expect(toggle).toBeDisabled();
+    expect(toggle).toBeChecked();
+    expect(screen.getByText("首张图片将直接生成")).toBeInTheDocument();
 
     useImageCreateStore.getState().setReferenceImage(
       new File(["image"], "reference.png", { type: "image/png" }),
     );
     rerender(<ParamsPanel />);
 
-    expect(screen.getByRole("combobox", { name: "参考图保真度" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("combobox", { name: "参考图保真度" }));
-    fireEvent.click(screen.getByRole("option", { name: "high" }));
-    expect(useImageCreateStore.getState().params.input_fidelity).toBe("high");
+    expect(
+      screen.getByRole("checkbox", { name: "基于上一张图继续修改" }),
+    ).toBeDisabled();
+    expect(screen.getByText("已使用上传的参考图")).toBeInTheDocument();
+
+    useImageCreateStore.setState({
+      referenceImage: null,
+      entries: [generationImageEntry()],
+    });
+    rerender(<ParamsPanel />);
+
+    expect(
+      screen.getByRole("checkbox", { name: "基于上一张图继续修改" }),
+    ).not.toBeDisabled();
+    expect(screen.queryByText("首张图片将直接生成")).not.toBeInTheDocument();
+  });
+
+  it("F-09b 点击携带上一张图开关后翻转 params.use_previous", async () => {
+    const user = userEvent.setup();
+    useImageCreateStore.setState({
+      settings: maskedSettings(),
+      entries: [generationImageEntry()],
+      referenceImage: null,
+    });
+
+    render(<ParamsPanel />);
+
+    await user.click(screen.getByRole("checkbox", { name: "基于上一张图继续修改" }));
+
+    expect(useImageCreateStore.getState().params.use_previous).toBe(false);
+  });
+
+  it("F-10 等待提示不含具体模型名且页面没有保真度控件", () => {
+    useImageCreateStore.setState({ settings: maskedSettings(), isBusy: true });
+
+    render(<ParamsPanel />);
+
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(/图片生成通常需要 1-3 分钟/);
+    expect(notice).not.toHaveTextContent(/gpt-image-2/);
+    expect(
+      screen.queryByRole("combobox", { name: "参考图保真度" }),
+    ).not.toBeInTheDocument();
   });
 });
+
+function generationImageEntry() {
+  return {
+    id: "image-1",
+    type: "generation_image" as const,
+    role: "provider" as const,
+    content: "生成的图片",
+    prompt: "画一张商务插图",
+    mediaType: "image/png",
+    imageUrl: "/api/image-create/sessions/session-1/images/image-1",
+    timestamp: "2026-08-03T10:00:00Z",
+  };
+}
 
 function sessionRecord(): SessionRecord {
   return {

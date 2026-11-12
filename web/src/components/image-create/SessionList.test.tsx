@@ -134,6 +134,44 @@ describe("SessionList", () => {
       screen.getByRole("option", { name: /Kimi Code.*Kimi Code CLI 未安装/ }),
     ).toBeDisabled();
   });
+
+  it("shows the provider display name instead of the raw id on the trigger", async () => {
+    const user = userEvent.setup();
+    render(<SessionList />);
+
+    await user.click(screen.getByRole("button", { name: "新建会话" }));
+
+    const combobox = screen.getByRole("combobox", { name: "Provider" });
+    expect(combobox).toHaveTextContent("Claude Code");
+    expect(combobox).not.toHaveTextContent("claude_code");
+  });
+
+  it("does not flag healthy providers as unconfirmed", async () => {
+    const user = userEvent.setup();
+    render(<SessionList />);
+
+    await user.click(screen.getByRole("button", { name: "新建会话" }));
+    await user.click(screen.getByRole("combobox", { name: "Provider" }));
+
+    expect(screen.getByRole("option", { name: "Codex" })).toBeInTheDocument();
+    expect(
+      screen.queryByText("Provider 状态尚未确认"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks providers as unconfirmed while the health snapshot is missing", async () => {
+    const user = userEvent.setup();
+    useProviderAvailabilityStore.setState({
+      snapshot: null,
+      loadStatus: "loading",
+    });
+    render(<SessionList />);
+
+    await user.click(screen.getByRole("button", { name: "新建会话" }));
+    await user.click(screen.getByRole("combobox", { name: "Provider" }));
+
+    expect(screen.getAllByText("Provider 状态尚未确认")).toHaveLength(4);
+  });
   it("handles a rejected open-session promise at the click boundary", async () => {
     const rejected = Promise.reject(new Error("打开失败"));
     void rejected.catch(() => {});

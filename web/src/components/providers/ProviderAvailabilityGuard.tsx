@@ -1,6 +1,40 @@
 import { useEffect, type ReactNode } from "react";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
 import { getProviderOptions } from "../../state/provider-options";
+// 控制面来源校验（Host/Origin）失败的诊断文案：后端 403 body 为
+// { code: "forbidden_host" | "forbidden_origin", message: "..." }，但 store 只保留
+// message 字符串，这里按后端稳定 message（src/web/api_auth.rs 的 forbidden_response）
+// 识别，同时兼容直接携带 code 的信息。
+type SourceGuardIssue = "forbidden_host" | "forbidden_origin";
+
+function detectSourceGuardIssue(error: string | null): SourceGuardIssue | null {
+  if (!error) {
+    return null;
+  }
+  if (error.includes("forbidden_host") || error.includes("request host not allowed")) {
+    return "forbidden_host";
+  }
+  if (error.includes("forbidden_origin") || error.includes("request origin not allowed")) {
+    return "forbidden_origin";
+  }
+  return null;
+}
+
+const SOURCE_GUARD_FIX =
+  "修复方向：用包含前端开发地址的 ARIA_API_TRUSTED_ORIGINS 启动后端（例如 " +
+  "http://127.0.0.1:5173 与 http://localhost:5173），或直接运行 " +
+  "bash scripts/aria-dev-start.sh 启动开发服务（自动配置受信 origin 并做门禁探测）。" +
+  "修改后需重启后端，再点「重新检测」。";
+
+const SOURCE_GUARD_HINTS: Record<SourceGuardIssue, string> = {
+  forbidden_host:
+    "前端访问地址未被后端来源校验放行：当前页面的 Host 不在后端受信列表，" +
+    "所有 /api 与 /ws 请求都会被拒绝（403）。这不是 Provider 本身的故障。",
+  forbidden_origin:
+    "请求来源 Origin 未被放行：当前页面的 Origin 不在后端受信列表，" +
+    "浏览器发起的请求会被拒绝（403）。这不是 Provider 本身的故障。",
+};
+
 
 export function ProviderAvailabilityGuard({ children }: { children: ReactNode }) {
   const loadStatus = useProviderAvailabilityStore((state) => state.loadStatus);
@@ -58,6 +92,9 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
   }
 
   const initialLoadFailed = !snapshot && loadStatus === "error";
+  const sourceGuardIssue = initialLoadFailed
+    ? detectSourceGuardIssue(error)
+    : null;
   const realProviders = snapshot
     ? getProviderOptions(snapshot).filter((option) => option.real)
     : [];
@@ -83,9 +120,11 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
             id="provider-availability-description"
             className="mt-2 text-sm leading-6 text-[var(--aria-ink-muted)]"
           >
-            {initialLoadFailed
-              ? "无法确认 Claude Code 与 Codex 的当前状态。为避免在未知状态下启动真实工作流，应用将保持关闭。"
-              : "Claude Code 与 Codex 当前均无法支持真实工作流。完成以下修复后重新检测，应用才会开放。"}
+            {sourceGuardIssue
+              ? SOURCE_GUARD_HINTS[sourceGuardIssue]
+              : initialLoadFailed
+                ? "无法确认 Claude Code 与 Codex 的当前状态。为避免在未知状态下启动真实工作流，应用将保持关闭。"
+                : "Claude Code 与 Codex 当前均无法支持真实工作流。完成以下修复后重新检测，应用才会开放。"}
           </p>
         </header>
 
@@ -133,7 +172,22 @@ export function ProviderAvailabilityGuard({ children }: { children: ReactNode })
           </>
         ) : null}
 
-        {error ? (
+        {sourceGuardIssue ? (
+          <>
+            <p
+              role="alert"
+              className="mt-5 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-panel-muted)] p-3 text-sm leading-6 text-[var(--aria-danger)]"
+            >
+              {SOURCE_GUARD_FIX}
+            </p>
+            <p
+              role="alert"
+              className="mt-3 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 font-mono text-xs leading-5 text-[var(--aria-ink-muted)]"
+            >
+              后端原始信息（次要）：{error}
+            </p>
+          </>
+        ) : error ? (
           <p
             role="alert"
             className="mt-5 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-panel-muted)] p-3 text-sm text-[var(--aria-danger)]"

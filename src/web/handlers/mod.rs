@@ -155,7 +155,9 @@ pub use image_create::{
     create_session as create_image_create_session, delete_session as delete_image_create_session,
     generate_image, get_session as get_image_create_session,
     get_settings as get_image_create_settings, image_create_chat_ws,
-    list_sessions as list_image_create_sessions, update_settings as update_image_create_settings,
+    list_sessions as list_image_create_sessions,
+    probe_settings_connectivity as probe_image_create_connectivity,
+    update_settings as update_image_create_settings,
 };
 pub use logical_codebase_bootstrap::{
     get_lc_bootstrap_projection, get_logical_codebase_bootstrap, post_lc_bootstrap_action,

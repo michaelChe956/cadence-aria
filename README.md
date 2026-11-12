@@ -141,8 +141,13 @@ npx @cadence-aria/cli
 pnpm -C web install   # 首次
 pnpm -C web build
 
-# 2. 启动后端 + 前端开发服务
-cargo run --locked -- web --workspace . --host 127.0.0.1 --port 4317
+# 2. 启动后端 + 前端开发服务（推荐：唯一入口脚本，自动带上
+#    ARIA_API_TRUSTED_ORIGINS 受信 origin 配置，并做受守卫端点门禁探测）
+bash scripts/aria-dev-start.sh
+
+#    裸命令等价写法（需自行设置受信 origin，否则前端 /api 会被后端来源校验 403）：
+ARIA_API_TRUSTED_ORIGINS="http://127.0.0.1:5173,http://localhost:5173" \
+  cargo run --locked -- web --workspace . --host 127.0.0.1 --port 4317
 # 在另一个终端启动前端 dev server
 cd web && pnpm dev --port 5173
 ```
@@ -269,7 +274,14 @@ launcher 会自动选择空闲端口，启动后端，并打开浏览器进入 `
 
 ```bash
 pnpm -C web build
-cargo run --locked -- web --workspace . --host 127.0.0.1 --port 4317
+
+# 推荐：开发双服务唯一入口（自动带上 ARIA_API_TRUSTED_ORIGINS 受信 origin
+# 配置，并做受守卫端点门禁探测；--check 只探测已运行服务）
+bash scripts/aria-dev-start.sh
+
+# 裸命令等价写法（需自行设置受信 origin，否则前端 /api 会被后端来源校验 403）：
+ARIA_API_TRUSTED_ORIGINS="http://127.0.0.1:5173,http://localhost:5173" \
+  cargo run --locked -- web --workspace . --host 127.0.0.1 --port 4317
 # 在另一个终端
 cd web && pnpm dev --port 5173
 ```

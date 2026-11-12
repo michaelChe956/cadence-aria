@@ -8,6 +8,7 @@ import {
   Wand2,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { IMAGE_VENDOR_LABELS, type ImageVendor } from "../../api/types/image-create";
 import type { ImageChatEntry } from "../../state/image-create-entries";
 import { useImageCreateStore } from "../../state/image-create-store";
 
@@ -152,8 +153,27 @@ export function ChatPane() {
 
 const COLLAPSE_THRESHOLD = 200;
 
-function ProviderTextEntry({ content }: { content: string }) {
+function ProviderTextEntry({
+  content,
+  collapsed,
+}: {
+  content: string;
+  collapsed?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
+  // 模型未产出 prompt 时的 fallback 说明：折叠起来，不盖过提示本身。
+  if (collapsed) {
+    return (
+      <details className="w-full max-w-none rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-sm sm:w-auto sm:max-w-[90%]">
+        <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]">
+          查看模型说明
+        </summary>
+        <div className="px-4 pb-3 text-sm leading-6 whitespace-pre-wrap text-[var(--aria-ink)]">
+          {content}
+        </div>
+      </details>
+    );
+  }
   const collapsible = content.length > COLLAPSE_THRESHOLD;
   return (
     <article className="w-full max-w-none rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-sm sm:w-auto sm:max-w-[90%]">
@@ -252,7 +272,17 @@ function GenerationImageEntry({
         />
       </div>
       <div className="flex items-center justify-between gap-3 border-t border-[var(--aria-line)] px-4 py-3">
-        <p className="min-w-0 text-xs leading-5 text-[var(--aria-ink-muted)]">{entry.prompt}</p>
+        <div className="min-w-0">
+          {entry.vendor ? (
+            <p
+              data-testid="image-create-generation-meta"
+              className="text-xs font-semibold text-[var(--aria-ink)]"
+            >
+              {generationMetaText(entry, entry.vendor)}
+            </p>
+          ) : null}
+          <p className="min-w-0 text-xs leading-5 text-[var(--aria-ink-muted)]">{entry.prompt}</p>
+        </div>
         <a
           href={entry.imageUrl}
           download={`image-create-${entry.id}.${extension}`}
@@ -266,6 +296,24 @@ function GenerationImageEntry({
   );
 }
 
+/** 生成图下方的标注：家 · 模型，以及参考图来源。 */
+function generationMetaText(
+  entry: Extract<ImageChatEntry, { type: "generation_image" }>,
+  vendor: ImageVendor,
+): string {
+  const parts = [
+    IMAGE_VENDOR_LABELS[vendor],
+    entry.model ?? "",
+  ];
+  if (entry.referenceSource === "previous") {
+    parts.push("基于上一张图");
+  }
+  if (entry.referenceSource === "uploaded") {
+    parts.push("使用参考图");
+  }
+  return parts.filter(Boolean).join(" · ");
+}
+
 function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
   switch (entry.type) {
     case "user_message":
@@ -275,7 +323,9 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
         </article>
       );
     case "provider_text":
-      return <ProviderTextEntry content={entry.content} />;
+      return (
+        <ProviderTextEntry content={entry.content} collapsed={entry.collapsed} />
+      );
     case "prompt_block":
       return <PromptBlockEntry content={entry.content} version={entry.version} />;
     case "generation_image":

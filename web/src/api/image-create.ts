@@ -1,5 +1,7 @@
 import { ApiRequestError } from "./client";
 import type {
+  ConnectivityProbeRequest,
+  ConnectivityProbeResult,
   CreateSessionRequest,
   GenerateImageRequest,
   ImageCreateSession,
@@ -104,20 +106,39 @@ export function updateImageCreateSettings(
   });
 }
 
+/**
+ * 连通性探测：不生成图片、不计费，只验证「通不通 / key 有效吗 / 网关支持哪些模型 id」。
+ * 探测用草稿值（用户当前在弹窗里填的内容），与已保存设置无关。
+ */
+export function testImageVendorConnectivity(
+  request: ConnectivityProbeRequest,
+): Promise<ConnectivityProbeResult> {
+  return requestJson<ConnectivityProbeResult>(
+    `${API_ROOT}/settings/connectivity`,
+    {
+      method: "POST",
+      body: JSON.stringify(request),
+    },
+  );
+}
+
 export async function generateImage(
   sessionId: string,
   request: GenerateImageRequest,
 ): Promise<ImageGenerationResponse> {
+  // 模型由用户手动选择，必填非空：空值不发出请求。
+  if (!request.model.trim()) {
+    throw new Error("请先选择图片生成模型");
+  }
   const form = new FormData();
   form.append("prompt", request.prompt);
   form.append("size", request.size);
   form.append("quality", request.quality);
   form.append("background", request.background);
   form.append("output_format", request.output_format);
+  form.append("model", request.model);
+  form.append("use_previous", request.use_previous ? "true" : "false");
   if (request.reference) {
-    if (request.input_fidelity) {
-      form.append("input_fidelity", request.input_fidelity);
-    }
     form.append("reference", request.reference);
   }
 

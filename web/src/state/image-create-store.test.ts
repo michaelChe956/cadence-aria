@@ -4,6 +4,7 @@ import type {
   SessionRecord,
   SessionSummary,
 } from "../api/types/image-create";
+import type { GenerationImage } from "./image-create-entries";
 
 const api = vi.hoisted(() => ({
   listImageCreateSessions: vi.fn(),
@@ -139,7 +140,9 @@ describe("image create store", () => {
     const { useImageCreateStore } = await import("./image-create-store");
 
     await useImageCreateStore.getState().openSession(session.id);
-    useImageCreateStore.getState().setParams({ prompt: "final prompt" });
+    useImageCreateStore
+      .getState()
+      .setParams({ prompt: "final prompt", model: "gpt-image-2.6" });
     await useImageCreateStore.getState().generate();
 
     expect(api.imageUrl).toHaveBeenCalledWith(session.id, "generated/image");
@@ -281,6 +284,7 @@ describe("image create store", () => {
     const { useImageCreateStore } = await import("./image-create-store");
 
     await useImageCreateStore.getState().openSession(first.id);
+    useImageCreateStore.getState().setParams({ model: "gpt-image-2.6" });
     const generation = useImageCreateStore.getState().generate();
     await useImageCreateStore.getState().openSession(second.id);
     resolveGeneration({ media_type: "image/png", image_id: "old-session-image" });
@@ -391,6 +395,75 @@ describe("image create store", () => {
     });
     expect(useImageCreateStore.getState().isBusy).toBe(false);
   });
+
+  it("records the vendor, model and reference source of a generated image", async () => {
+    const session = imageSession();
+    api.getImageCreateSession.mockResolvedValue(record(session));
+    api.generateImage.mockResolvedValue({
+      media_type: "image/webp",
+      image_id: "image-9",
+      vendor: "minimax",
+      model: "MiniMax-H3-Image",
+      reference_source: "previous",
+    });
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+    useImageCreateStore
+      .getState()
+      .setParams({ prompt: "a cat", model: "MiniMax-H3-Image" });
+    await useImageCreateStore.getState().generate();
+
+    expect(api.generateImage).toHaveBeenCalledWith(
+      session.id,
+      expect.objectContaining({ model: "MiniMax-H3-Image", use_previous: true }),
+    );
+    expect(useImageCreateStore.getState().entries.at(-1)).toMatchObject({
+      type: "generation_image",
+      vendor: "minimax",
+      model: "MiniMax-H3-Image",
+      referenceSource: "previous",
+    });
+  });
+
+  it("does not send a generation request when no model is selected", async () => {
+    const session = imageSession();
+    api.getImageCreateSession.mockResolvedValue(record(session));
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+    useImageCreateStore.getState().setParams({ prompt: "a cat", model: "" });
+
+    await expect(useImageCreateStore.getState().generate()).rejects.toThrow(
+      "请先选择图片生成模型",
+    );
+    expect(api.generateImage).not.toHaveBeenCalled();
+  });
+
+  it("restores legacy generation entries without vendor metadata", async () => {
+    const session = imageSession();
+    api.getImageCreateSession.mockResolvedValue(
+      record(session, [generationResult({ image_id: "legacy-image" })]),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().openSession(session.id);
+
+    const entry = useImageCreateStore.getState().entries.at(-1) as
+      | GenerationImage
+      | undefined;
+    expect(entry).toMatchObject({
+      type: "generation_image",
+      imageUrl:
+        "/api/image-create/sessions/session-1/images/legacy-image",
+    });
+    expect(Object.hasOwn(entry!, "vendor")).toBe(true);
+    expect(Object.hasOwn(entry!, "model")).toBe(true);
+    expect(Object.hasOwn(entry!, "referenceSource")).toBe(true);
+    expect(entry!.vendor).toBeUndefined();
+    expect(entry!.model).toBeUndefined();
+    expect(entry!.referenceSource).toBeUndefined();
+  });
 });
 
 function imageSession(
@@ -451,3 +524,4 @@ function record(
     generation: 0,
   };
 }
+

@@ -1,4 +1,4 @@
-import { KeyRound, LoaderCircle, Save, Settings } from "lucide-react";
+import { Cpu, LoaderCircle, PlugZap, Save, Settings, Zap } from "lucide-react";
 import { DialogShell } from "../shared/DialogShell";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
@@ -6,19 +6,53 @@ import {
   IMAGE_OUTPUT_FORMAT_OPTIONS,
   IMAGE_QUALITY_OPTIONS,
   IMAGE_SIZE_OPTIONS,
+  IMAGE_VENDOR_LABELS,
+  IMAGE_VENDORS,
   type ApiKeyAction,
+  type ConnectivityProbeResult,
   type DefaultImageParams,
+  type ImageVendor,
   type MaskedSettings,
+  type MaskedVendorSettings,
   type SettingsUpdateRequest,
+  type VendorSettingsUpdate,
 } from "../../api/types/image-create";
 import {
   useImageCreateStore,
   validateImageCreateBaseUrl,
+  type ImageVendorConnectivityState,
 } from "../../state/image-create-store";
+import { type ImageVendorModelPool } from "../../state/image-create-model-pool";
 import { CustomSelect } from "./CustomSelect";
+import { ModelListField, type VendorModelNotice } from "./ModelListField";
 
-const inputClassName =
-  "mt-1.5 block w-full rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-sm font-normal text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:bg-[var(--aria-panel-muted)] disabled:opacity-60";
+/**
+ * 统一控件外观：与 CustomSelect 触发器同款（边框色 / 圆角 / 内边距 /
+ * focus ring / hover 行为），输入框、textarea 与下拉因此视觉一致。
+ */
+const controlClassName =
+  "block w-full min-h-11 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3.5 py-2.5 text-base font-medium text-[var(--aria-ink)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-[var(--aria-primary)] hover:bg-[var(--aria-panel)] focus-visible:border-[var(--aria-primary)] focus-visible:bg-[var(--aria-panel)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm";
+
+/** 单个供应方的编辑态。 */
+type VendorDraft = {
+  baseUrl: string;
+  apiKey: string;
+  apiKeyAction: ApiKeyAction;
+  /** 已勾选的模型清单（= 要保存的清单）。 */
+  models: string[];
+};
+
+type VendorDrafts = Record<ImageVendor, VendorDraft>;
+
+/** 各家的 Base URL 填写示例：只填到主机根路径。 */
+const BASE_URL_EXAMPLES: Record<ImageVendor, string> = {
+  gpt: "https://api.openai.com",
+  minimax: "https://api.minimax.io",
+};
+
+/** Base URL 填写说明：一句话讲清「填到哪」。 */
+const BASE_URL_HINT =
+  "只填到主机根路径，不要带 /v1 或 /v1/images；系统会自动拼成 /v1/images/generations。";
 
 function settingsErrorMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
@@ -33,25 +67,68 @@ function defaultsEqual(left: DefaultImageParams, right: DefaultImageParams) {
   );
 }
 
+/**
+ * 分区状态 chip：按编辑态判断凭据是否齐全（与 store 的“已配置”同口径：
+ * base_url 与 key 都在位），用户改完 URL / key 即时反映。
+ * key 的「在位」口径：沿用已保存的 key 时看已保存的脱敏串，替换时看输入框里的明文。
+ */
+function isVendorConfigured(draft: VendorDraft, savedKeyMasked: string): boolean {
+  if (draft.baseUrl.trim() === "" || draft.apiKeyAction === "clear") {
+    return false;
+  }
+  if (draft.apiKeyAction === "replace") {
+    return draft.apiKey.trim() !== "";
+  }
+  return savedKeyMasked.trim() !== "";
+}
+
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const loadSettings = useImageCreateStore((state) => state.loadSettings);
   const saveSettings = useImageCreateStore((state) => state.saveSettings);
+  const testVendorConnectivity = useImageCreateStore(
+    (state) => state.testVendorConnectivity,
+  );
+  const connectivity = useImageCreateStore((state) => state.connectivity);
+  const modelPools = useImageCreateStore((state) => state.modelPools);
+  const setVendorModels = useImageCreateStore(
+    (state) => state.setVendorModels,
+  );
+  const refreshModelCandidates = useImageCreateStore(
+    (state) => state.refreshModelCandidates,
+  );
   const [original, setOriginal] = useState<MaskedSettings | null>(null);
-  const [baseUrl, setBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyAction, setApiKeyAction] = useState<ApiKeyAction>("retain");
+  const [drafts, setDrafts] = useState<VendorDrafts | null>(null);
   const [defaults, setDefaults] = useState<DefaultImageParams | null>(null);
+  const [notices, setNotices] = useState<Partial<Record<ImageVendor, VendorModelNotice>>>({});
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const submittingRef = useRef(false);
+  // 已处理过的探测结果：同一个结果只刷新一次候选池。
+  const probedRef = useRef<Partial<Record<ImageVendor, ConnectivityProbeResult | null>>>({});
 
   function hydrate(settings: MaskedSettings) {
     setOriginal(settings);
-    setBaseUrl(settings.base_url);
-    setApiKey(settings.api_key_masked);
-    setApiKeyAction("retain");
+    const models: Record<ImageVendor, string[]> = {
+      gpt: setVendorModels("gpt", settings.vendors.gpt.models),
+      minimax: setVendorModels("minimax", settings.vendors.minimax.models),
+    };
+    setDrafts({
+      gpt: {
+        baseUrl: settings.vendors.gpt.base_url,
+        // 输入框里永远不放脱敏串：用户改一个字就会把脱敏值当真 key 存回去。
+        apiKey: "",
+        apiKeyAction: "retain",
+        models: models.gpt,
+      },
+      minimax: {
+        baseUrl: settings.vendors.minimax.base_url,
+        apiKey: "",
+        apiKeyAction: "retain",
+        models: models.minimax,
+      },
+    });
     setDefaults(settings.defaults);
   }
 
@@ -86,6 +163,77 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     };
   }, [loadSettings]);
 
+  /**
+   * 挂载时 store 里已存在的探测结果不算「新的探测」。
+   * 探测结果存在模块级 store 里、跨弹窗开关持久；弹窗每次打开都是新组件实例，
+   * 若把上一次的旧结果当成新结果重放，就会把用户已保存的精简清单静默还原成
+   * 网关全量清单。这里先标记为已处理，后面的探测 effect 便不会重放。
+   * 声明顺序：本 effect 必须在探测 effect 之前执行。
+   */
+  useEffect(() => {
+    const state = useImageCreateStore.getState();
+    for (const vendor of IMAGE_VENDORS) {
+      if (probedRef.current[vendor] === undefined) {
+        probedRef.current[vendor] = state.connectivity[vendor].result;
+      }
+    }
+  }, []);
+
+  /**
+   * 探测拿到网关模型列表后刷新该家的候选池并替换草稿清单：
+   * 候选池 = 网关模型 ∪ 草稿清单里已有的；草稿清单 = 网关返回的模型
+   * （去重、保序、跳过另一家占用的 id）。判据是 available_models 非空：
+   * ok 要求两步都通过，但第二步失败时第一步的模型列表依然有效。
+   */
+  useEffect(() => {
+    if (!drafts) {
+      return;
+    }
+    for (const vendor of IMAGE_VENDORS) {
+      const result = connectivity[vendor].result;
+      if (!result || probedRef.current[vendor] === result) {
+        continue;
+      }
+      probedRef.current[vendor] = result;
+      const available = result.available_models ?? [];
+      if (available.length === 0) {
+        continue;
+      }
+      const other = IMAGE_VENDORS.find((item) => item !== vendor);
+      if (!other) {
+        continue;
+      }
+      const refresh = refreshModelCandidates(
+        vendor,
+        drafts[vendor].models,
+        drafts[other].models,
+      );
+      setDrafts((current) =>
+        current
+          ? {
+              ...current,
+              [vendor]: { ...current[vendor], models: refresh.selected },
+            }
+          : current,
+      );
+      setNotices((current) => ({
+        ...current,
+        [vendor]: {
+          skipped: refresh.skipped,
+          truncated: refresh.truncated,
+        },
+      }));
+    }
+  }, [connectivity, drafts, refreshModelCandidates]);
+
+  function updateVendor(vendor: ImageVendor, next: VendorDraft) {
+    setDrafts((current) =>
+      current ? { ...current, [vendor]: next } : current,
+    );
+    setError(null);
+    setSuccess(null);
+  }
+
   function updateDefault<K extends keyof DefaultImageParams>(
     key: K,
     value: DefaultImageParams[K],
@@ -96,38 +244,80 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   }
 
   function buildUpdate(): SettingsUpdateRequest | null {
-    if (!original || !defaults) {
+    if (!original || !defaults || !drafts) {
       setError("设置尚未加载完成");
       return null;
     }
 
-    const trimmedBaseUrl = baseUrl.trim();
-    try {
-      validateImageCreateBaseUrl(trimmedBaseUrl);
-    } catch (reason) {
-      setError(settingsErrorMessage(reason, "base_url 无效"));
-      return null;
+    const vendors: Partial<Record<ImageVendor, VendorSettingsUpdate>> = {};
+    for (const vendor of IMAGE_VENDORS) {
+      const originalVendor = original.vendors[vendor];
+      const draft = drafts[vendor];
+      const trimmedBaseUrl = draft.baseUrl.trim();
+      const models = draft.models;
+      const baseUrlChanged = trimmedBaseUrl !== originalVendor.base_url;
+      const modelsChanged =
+        models.length !== originalVendor.models.length ||
+        models.some((model, i) => model !== originalVendor.models[i]);
+      const keyChanged = draft.apiKeyAction !== "retain";
+      // 完全未改动的供应方不进入请求。
+      if (!baseUrlChanged && !modelsChanged && !keyChanged) {
+        continue;
+      }
+
+      if (baseUrlChanged && trimmedBaseUrl !== "") {
+        try {
+          validateImageCreateBaseUrl(trimmedBaseUrl);
+        } catch (reason) {
+          setError(settingsErrorMessage(reason, "base_url 无效"));
+          return null;
+        }
+      }
+
+      const update: VendorSettingsUpdate = {
+        api_key_action: draft.apiKeyAction,
+      };
+      if (baseUrlChanged) {
+        update.base_url = trimmedBaseUrl;
+      }
+      if (draft.apiKeyAction === "replace") {
+        const replacement = draft.apiKey.trim();
+        if (!replacement) {
+          setError("请输入新的 API Key，或使用“清除 key”按钮");
+          return null;
+        }
+        update.api_key = replacement;
+      }
+      if (modelsChanged) {
+        update.models = models;
+      }
+      vendors[vendor] = update;
     }
 
-    const update: SettingsUpdateRequest = {
-      api_key_action: apiKeyAction,
-    };
-    if (trimmedBaseUrl !== original.base_url) {
-      update.base_url = trimmedBaseUrl;
+    const request: SettingsUpdateRequest = {};
+    if (Object.keys(vendors).length > 0) {
+      request.vendors = vendors;
     }
     if (!defaultsEqual(defaults, original.defaults)) {
-      update.defaults = defaults;
+      request.defaults = defaults;
     }
+    return request;
+  }
 
-    if (apiKeyAction === "replace") {
-      const replacement = apiKey.trim();
-      if (!replacement || replacement === original.api_key_masked) {
-        setError("请输入新的 API Key，或使用“清除 key”按钮");
-        return null;
-      }
-      update.api_key = replacement;
+  /**
+   * 用当前草稿值发起连通性探测：只发探测请求，不生成图片、不计费。
+   * key 用草稿里的明文；沿用已保存 key 时传空串，由后端取已保存的那把。
+   */
+  function handleTestConnectivity(vendor: ImageVendor) {
+    const draft = drafts?.[vendor];
+    if (!draft) {
+      return;
     }
-    return update;
+    void testVendorConnectivity(vendor, {
+      baseUrl: draft.baseUrl,
+      apiKey: draft.apiKeyAction === "replace" ? draft.apiKey : "",
+      models: draft.models,
+    });
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -161,7 +351,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const controlsDisabled = loading || submitting || !original || !defaults;
+  const controlsDisabled = loading || submitting || !original || !defaults || !drafts;
 
   return (
     <DialogShell
@@ -179,103 +369,61 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             正在加载设置…
           </div>
         ) : (
-          <div className="space-y-5 rounded-xl bg-[var(--aria-panel-muted)] p-4">
-            <label className="block text-sm font-semibold text-[var(--aria-ink)]">
-              base_url
-              <input
-                aria-label="base_url"
-                value={baseUrl}
-                disabled={controlsDisabled}
-                onChange={(event) => {
-                  setBaseUrl(event.target.value);
-                  setError(null);
-                  setSuccess(null);
-                }}
-                className={inputClassName}
-              />
-              <span className="mt-1 block text-xs font-normal text-[var(--aria-ink-muted)]">
-                必须使用 HTTPS；本地调试可使用 HTTP localhost 或 loopback IP。
-              </span>
-            </label>
-
-            <div>
-              <label className="block text-sm font-semibold text-[var(--aria-ink)]">
-                API Key
-                <input
-                  aria-label="API Key"
-                  value={apiKeyAction === "clear" ? "" : apiKey}
-                  placeholder={apiKeyAction === "clear" ? "保存后将清除" : undefined}
-                  autoComplete="off"
+          <div className="space-y-5">
+            {IMAGE_VENDORS.map((vendor) =>
+              original && drafts ? (
+                <VendorSection
+                  key={vendor}
+                  vendor={vendor}
+                  original={original.vendors[vendor]}
+                  draft={drafts[vendor]}
                   disabled={controlsDisabled}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    setApiKey(value);
-                    setApiKeyAction(
-                      value === original?.api_key_masked ? "retain" : "replace",
-                    );
-                    setError(null);
-                    setSuccess(null);
-                  }}
-                  className={inputClassName}
+                  connectivity={connectivity[vendor]}
+                  pool={modelPools[vendor]}
+                  notice={notices[vendor] ?? null}
+                  otherVendor={
+                    IMAGE_VENDORS.find((item) => item !== vendor) ?? vendor
+                  }
+                  onChange={(next) => updateVendor(vendor, next)}
+                  onTestConnectivity={() => handleTestConnectivity(vendor)}
                 />
-              </label>
-              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-[var(--aria-ink-muted)]">
-                  {apiKeyAction === "retain"
-                    ? "当前 key 将保持不变"
-                    : apiKeyAction === "clear"
-                      ? "保存后清除当前 key"
-                      : "保存后替换当前 key"}
-                </span>
-                <button
-                  type="button"
-                  disabled={controlsDisabled}
-                  onClick={() => {
-                    setApiKeyAction("clear");
-                    setApiKey("");
-                    setError(null);
-                    setSuccess(null);
-                  }}
-                  className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--aria-danger)] bg-[var(--aria-panel)] px-3 py-2 text-xs font-semibold text-[var(--aria-danger)] transition-all duration-200 hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <KeyRound aria-hidden="true" className="h-3.5 w-3.5" />
-                  清除 key
-                </button>
-              </div>
-            </div>
+              ) : null,
+            )}
 
             {defaults ? (
-              <fieldset disabled={controlsDisabled}>
-                <legend className="text-sm font-semibold text-[var(--aria-ink)]">
-                  默认生成参数
-                </legend>
-                <div className="mt-2.5 grid gap-3 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 sm:grid-cols-2">
-                  <SettingsSelect
-                    label="默认尺寸"
-                    value={defaults.size}
-                    options={IMAGE_SIZE_OPTIONS}
-                    onChange={(value) => updateDefault("size", value)}
-                  />
-                  <SettingsSelect
-                    label="默认质量"
-                    value={defaults.quality}
-                    options={IMAGE_QUALITY_OPTIONS}
-                    onChange={(value) => updateDefault("quality", value)}
-                  />
-                  <SettingsSelect
-                    label="默认背景"
-                    value={defaults.background}
-                    options={IMAGE_BACKGROUND_OPTIONS}
-                    onChange={(value) => updateDefault("background", value)}
-                  />
-                  <SettingsSelect
-                    label="默认输出格式"
-                    value={defaults.output_format}
-                    options={IMAGE_OUTPUT_FORMAT_OPTIONS}
-                    onChange={(value) => updateDefault("output_format", value)}
-                  />
-                </div>
-              </fieldset>
+              <div className="border-t border-[var(--aria-line)] pt-5">
+                <fieldset disabled={controlsDisabled}>
+                  <legend className="text-sm font-semibold text-[var(--aria-ink)]">
+                    默认生成参数
+                  </legend>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <SettingsSelect
+                      label="默认尺寸"
+                      value={defaults.size}
+                      options={IMAGE_SIZE_OPTIONS}
+                      onChange={(value) => updateDefault("size", value)}
+                    />
+                    <SettingsSelect
+                      label="默认质量"
+                      value={defaults.quality}
+                      options={IMAGE_QUALITY_OPTIONS}
+                      onChange={(value) => updateDefault("quality", value)}
+                    />
+                    <SettingsSelect
+                      label="默认背景"
+                      value={defaults.background}
+                      options={IMAGE_BACKGROUND_OPTIONS}
+                      onChange={(value) => updateDefault("background", value)}
+                    />
+                    <SettingsSelect
+                      label="默认输出格式"
+                      value={defaults.output_format}
+                      options={IMAGE_OUTPUT_FORMAT_OPTIONS}
+                      onChange={(value) => updateDefault("output_format", value)}
+                    />
+                  </div>
+                </fieldset>
+              </div>
             ) : null}
 
             {error ? (
@@ -295,14 +443,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={onClose}
-            className="cursor-pointer rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--aria-ink-muted)] shadow-sm transition-all duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+            className="cursor-pointer rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--aria-ink-muted)] shadow-[0_2px_8px_rgba(23,32,42,0.08)] transition-colors duration-200 hover:border-[var(--aria-line-strong)] hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={controlsDisabled}
-            className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_12px_rgba(8,145,178,0.24)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-[#4338ca] bg-[var(--aria-primary)] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_2px_8px_rgba(23,32,42,0.08)] transition-colors duration-200 hover:bg-[#4338ca] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {submitting ? (
               <LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" />
@@ -314,6 +462,240 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
       </form>
     </DialogShell>
+  );
+}
+
+function VendorSection({
+  vendor,
+  original,
+  draft,
+  disabled,
+  connectivity,
+  pool,
+  notice,
+  otherVendor,
+  onChange,
+  onTestConnectivity,
+}: {
+  vendor: ImageVendor;
+  original: MaskedVendorSettings;
+  draft: VendorDraft;
+  disabled: boolean;
+  connectivity: ImageVendorConnectivityState;
+  pool: ImageVendorModelPool;
+  notice: VendorModelNotice | null;
+  otherVendor: ImageVendor;
+  onChange: (draft: VendorDraft) => void;
+  onTestConnectivity: () => void;
+}) {
+  const label = IMAGE_VENDOR_LABELS[vendor];
+  const savedKeyMasked = original.api_key_masked;
+  const configured = isVendorConfigured(draft, savedKeyMasked);
+  const probing = connectivity.phase === "testing";
+  // API Key 三态只用下方一行文字表达，措辞与实际动作一致。
+  // 沿用已保存的 key 时看脱敏串（输入框里没有脱敏串）。
+  const apiKeyState =
+    draft.apiKeyAction === "clear"
+      ? "保存后将清除当前 key"
+      : draft.apiKeyAction === "replace"
+        ? "保存后将替换当前 key"
+        : savedKeyMasked.trim() === ""
+          ? "尚未配置 key，填写后保存生效"
+          : `已保存 ${savedKeyMasked}，留空保持不变`;
+
+  return (
+    <section
+      aria-label={label}
+      className="rounded-2xl border-2 border-[var(--aria-border-muted)] bg-[var(--aria-panel)] p-4 shadow-[0_2px_8px_rgba(23,32,42,0.08)]"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5">
+          <span
+            aria-hidden="true"
+            className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--aria-primary-soft)] text-[var(--aria-primary)]"
+          >
+            <VendorIcon vendor={vendor} />
+          </span>
+          <h3 className="text-base font-semibold text-[var(--aria-ink)]">
+            {label}
+          </h3>
+        </div>
+        <span
+          className={
+            configured
+              ? "inline-flex items-center rounded-full border border-[var(--aria-success)] bg-[var(--aria-success-soft)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-ink)]"
+              : "inline-flex items-center rounded-full border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-2.5 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
+          }
+        >
+          {configured ? "已配置" : "未配置"}
+        </span>
+      </div>
+
+      <div className="mt-3">
+        <label
+          htmlFor={`${vendor}-base-url`}
+          className="text-sm font-semibold text-[var(--aria-ink)]"
+        >
+          Base URL
+        </label>
+        <input
+          id={`${vendor}-base-url`}
+          aria-label={`${label} base_url`}
+          placeholder={BASE_URL_EXAMPLES[vendor]}
+          value={draft.baseUrl}
+          disabled={disabled}
+          onChange={(event) =>
+            onChange({ ...draft, baseUrl: event.target.value })
+          }
+          className={`${controlClassName} mt-1.5`}
+        />
+        <p className="mt-1.5 text-xs text-[var(--aria-ink-muted)]">
+          {BASE_URL_HINT}
+        </p>
+        <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+          必须使用 HTTPS；本地调试可用 localhost。
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onTestConnectivity}
+            disabled={disabled || probing}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-1.5 text-xs font-semibold text-[var(--aria-ink)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {probing ? (
+              <LoaderCircle
+                aria-hidden="true"
+                className="h-3.5 w-3.5 motion-safe:animate-spin"
+              />
+            ) : (
+              <PlugZap aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
+            {probing ? "测试中…" : "测试连通"}
+          </button>
+          <span className="text-xs text-[var(--aria-ink-muted)]">
+            只测连通性，不生成图片、不计费
+          </span>
+          <span className="text-xs text-[var(--aria-ink-muted)]">
+            成功后会用网关返回的模型列表更新模型清单
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-3">
+        <label
+          htmlFor={`${vendor}-api-key`}
+          className="text-sm font-semibold text-[var(--aria-ink)]"
+        >
+          API Key
+        </label>
+        <div className="mt-1.5 flex items-center gap-2">
+          <input
+            id={`${vendor}-api-key`}
+            aria-label={`${label} API Key`}
+            value={draft.apiKeyAction === "clear" ? "" : draft.apiKey}
+            placeholder={
+              draft.apiKeyAction === "clear"
+                ? "保存后将清除"
+                : savedKeyMasked.trim() === ""
+                  ? undefined
+                  : `已保存 ${savedKeyMasked}`
+            }
+            autoComplete="off"
+            disabled={disabled}
+            onChange={(event) => {
+              const value = event.target.value;
+              onChange({
+                ...draft,
+                apiKey: value,
+                // 空串 = 沿用已保存的 key；非空 = 替换成新 key。
+                apiKeyAction: value.trim() === "" ? "retain" : "replace",
+              });
+            }}
+            className={`${controlClassName} min-w-0 flex-1`}
+          />
+          <button
+            type="button"
+            aria-label="清除 key"
+            disabled={disabled}
+            onClick={() =>
+              onChange({ ...draft, apiKeyAction: "clear", apiKey: "" })
+            }
+            className="shrink-0 cursor-pointer rounded-lg px-2 py-1.5 text-xs font-semibold text-[var(--aria-danger)] transition-colors duration-200 hover:bg-[var(--aria-danger-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-danger)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            清除
+          </button>
+        </div>
+        <p className="mt-1.5 text-xs text-[var(--aria-ink-muted)]">
+          {apiKeyState}
+        </p>
+      </div>
+
+      <ModelListField
+        vendor={vendor}
+        label={label}
+        models={draft.models}
+        pool={pool}
+        notice={notice}
+        otherVendor={otherVendor}
+        recommendedModels={original.recommended_models}
+        disabled={disabled}
+        onChange={(models) => onChange({ ...draft, models })}
+      />
+
+      <ConnectivityResult state={connectivity} />
+    </section>
+  );
+}
+
+/** 连通性探测结果：内联展示结论、每一步详情与网关未列出的模型。 */
+function ConnectivityResult({ state }: { state: ImageVendorConnectivityState }) {
+  const result = state.result;
+  if (!result && !state.error) {
+    return null;
+  }
+  return (
+    <div className="mt-3 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-xs text-[var(--aria-ink)]">
+      {state.error ? (
+        <p className="font-semibold text-[var(--aria-danger)]">{state.error}</p>
+      ) : null}
+      {result ? (
+        <>
+          <p
+            className={
+              result.ok
+                ? "font-semibold text-[var(--aria-success)]"
+                : "font-semibold text-[var(--aria-danger)]"
+            }
+          >
+            {result.message}
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {result.steps.map((step) => (
+              <li key={step.key}>
+                <span className="font-semibold">{step.label}</span>
+                <span className="ml-1 text-[var(--aria-ink-muted)]">
+                  {step.detail}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {result.missing_models.length > 0 ? (
+            <p className="mt-1.5 font-semibold text-[var(--aria-danger)]">
+              网关未列出这些模型：{result.missing_models.join("、")}
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/** 分区图标：SVG 图标（非 emoji），仅作装饰。 */
+function VendorIcon({ vendor }: { vendor: ImageVendor }) {
+  return vendor === "gpt" ? (
+    <Cpu className="h-4 w-4" />
+  ) : (
+    <Zap className="h-4 w-4" />
   );
 }
 

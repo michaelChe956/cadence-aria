@@ -73,6 +73,71 @@ describe("ChatPane", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("图片文件缺失");
   });
 
+  it("F-15 新记录显示家与模型标注，旧记录不显示", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "image-new",
+          type: "generation_image",
+          role: "provider",
+          content: "生成的图片",
+          prompt: "商务插画",
+          mediaType: "image/png",
+          imageUrl: "/api/image-create/sessions/session-1/images/new",
+          vendor: "gpt",
+          model: "gpt-image-2.6-flare",
+          referenceSource: "previous",
+          timestamp: "2026-08-03T10:00:00Z",
+        },
+        {
+          id: "image-old",
+          type: "generation_image",
+          role: "provider",
+          content: "旧图片",
+          prompt: "旧插画",
+          mediaType: "image/png",
+          imageUrl: "/api/image-create/sessions/session-1/images/old",
+          timestamp: "2026-08-02T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    const badges = screen.getAllByTestId("image-create-generation-meta");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent(
+      "GPT · gpt-image-2.6-flare · 基于上一张图",
+    );
+    expect(badges[0]).not.toHaveTextContent("自动轮转");
+  });
+
+  it("F-15 上传参考图与 MiniMax 显式选择的标注", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "image-minimax",
+          type: "generation_image",
+          role: "provider",
+          content: "生成的图片",
+          prompt: "商务插画",
+          mediaType: "image/png",
+          imageUrl: "/api/image-create/sessions/session-1/images/minimax",
+          vendor: "minimax",
+          model: "MiniMax-H3-Image",
+          referenceSource: "uploaded",
+          timestamp: "2026-08-03T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    expect(screen.getByTestId("image-create-generation-meta")).toHaveTextContent(
+      "MiniMax · MiniMax-H3-Image · 使用参考图",
+    );
+  });
+
   it("shows readable generation errors", () => {
     useImageCreateStore.setState({
       entries: [
@@ -140,6 +205,50 @@ describe("ChatPane", () => {
     expect(
       screen.getByText((content) => content.includes("正在处理，请稍候")),
     ).toBeInTheDocument();
+  });
+
+  it("把模型未产出时的说明文本折叠起来并默认收起", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "provider-1",
+          type: "provider_text",
+          role: "provider",
+          content: "我不愿意给出这张图的 prompt",
+          timestamp: "2026-08-03T10:00:00Z",
+          collapsed: true,
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    const details = screen
+      .getByText("查看模型说明")
+      .closest("details");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+    expect(details?.textContent).toContain("我不愿意给出这张图的 prompt");
+  });
+
+  it("未折叠的模型文本仍直接展示", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "provider-2",
+          type: "provider_text",
+          role: "provider",
+          content: "这是模型的普通说明",
+          timestamp: "2026-08-03T10:00:00Z",
+          collapsed: false,
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    expect(screen.getByText("这是模型的普通说明")).toBeInTheDocument();
+    expect(screen.queryByText("查看模型说明")).not.toBeInTheDocument();
   });
 });
 

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -53,14 +55,6 @@ pub enum ImageOutputFormat {
     Webp,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InputFidelity {
-    #[serde(rename = "low")]
-    Low,
-    #[serde(rename = "high")]
-    High,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DefaultParams {
     pub size: ImageSize,
@@ -69,18 +63,351 @@ pub struct DefaultParams {
     pub output_format: ImageOutputFormat,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ImageCreateSettings {
+/// 图片供应方（「家」）。决定请求字段集与响应解析。
+/// 一个模型 id 属于哪一家，只由它被配置在哪一家的清单里决定，绝不从 id 字符串推断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageVendor {
+    Gpt,
+    Minimax,
+}
+
+/// 内置推荐清单：仅作为默认值，用户可在设置中增删。
+pub const DEFAULT_GPT_MODELS: [&str; 8] = [
+    "gpt-image-2.6-flare",
+    "gpt-image-2.6",
+    "gpt-image-2.6-flare-2k",
+    "gpt-image-2.6-flare-4k",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.6-sunburst-2k",
+    "gpt-image-2.6-sunburst-4k",
+    "gpt-image-2.5",
+];
+pub const DEFAULT_MINIMAX_MODELS: [&str; 1] = ["MiniMax-H3-Image"];
+
+/// 每家模型清单上限：清单可由连通性探测从网关 /v1/models 自动拉取（大网关模型总量可观），
+/// 故额度从手工配置时代的 32 放宽到 256。
+pub const MAX_MODELS_PER_VENDOR: usize = 256;
+pub const MAX_MODEL_ID_CHARS: usize = 128;
+
+impl ImageVendor {
+    pub const ALL: [ImageVendor; 2] = [ImageVendor::Gpt, ImageVendor::Minimax];
+
+    /// 面向用户的名称："GPT" / "MiniMax"。
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageVendor::Gpt => "GPT",
+            ImageVendor::Minimax => "MiniMax",
+        }
+    }
+
+    /// 该家的内置推荐清单。
+    pub fn recommended_models(self) -> Vec<String> {
+        match self {
+            ImageVendor::Gpt => DEFAULT_GPT_MODELS.iter().map(|m| m.to_string()).collect(),
+            ImageVendor::Minimax => DEFAULT_MINIMAX_MODELS
+                .iter()
+                .map(|m| m.to_string())
+                .collect(),
+        }
+    }
+}
+
+/// 单家配置。Debug 手写：api_key 输出为 "<redacted>"。
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct VendorSettings {
     pub base_url: String,
     pub api_key: String,
+    /// 用户可配置的模型 id 清单（不透明字符串）。
+    pub models: Vec<String>,
+}
+
+impl VendorSettings {
+    /// 凭据为空、清单为该家内置默认值。
+    pub fn recommended(vendor: ImageVendor) -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            models: vendor.recommended_models(),
+        }
+    }
+
+    /// base_url 与 api_key 去空白后均非空。
+    pub fn has_credentials(&self) -> bool {
+        !self.base_url.trim().is_empty() && !self.api_key.trim().is_empty()
+    }
+
+    /// has_credentials 且 models 非空。
+    pub fn is_available(&self) -> bool {
+        self.has_credentials() && !self.models.is_empty()
+    }
+}
+
+impl fmt::Debug for VendorSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VendorSettings")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("models", &self.models)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VendorsSettings {
+    pub gpt: VendorSettings,
+    pub minimax: VendorSettings,
+}
+
+impl VendorsSettings {
+    pub fn get(&self, vendor: ImageVendor) -> &VendorSettings {
+        match vendor {
+            ImageVendor::Gpt => &self.gpt,
+            ImageVendor::Minimax => &self.minimax,
+        }
+    }
+
+    pub fn get_mut(&mut self, vendor: ImageVendor) -> &mut VendorSettings {
+        match vendor {
+            ImageVendor::Gpt => &mut self.gpt,
+            ImageVendor::Minimax => &mut self.minimax,
+        }
+    }
+
+    /// 逐字符相等查找模型 id 所属的家。
+    pub fn vendor_of(&self, model: &str) -> Option<ImageVendor> {
+        ImageVendor::ALL.into_iter().find(|vendor| {
+            self.get(*vendor)
+                .models
+                .iter()
+                .any(|candidate| candidate.as_str() == model)
+        })
+    }
+}
+
+/// 持久化于 `.aria/image_create.json`。
+/// 序列化只输出新形态；反序列化经 ImageCreateSettingsWire 兼容旧形态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ImageCreateSettingsWire")]
+pub struct ImageCreateSettings {
+    pub vendors: VendorsSettings,
+    pub defaults: DefaultParams,
+}
+
+impl Default for ImageCreateSettings {
+    fn default() -> Self {
+        Self {
+            vendors: VendorsSettings {
+                gpt: VendorSettings::recommended(ImageVendor::Gpt),
+                minimax: VendorSettings::recommended(ImageVendor::Minimax),
+            },
+            defaults: DefaultParams::default(),
+        }
+    }
+}
+
+/// 仅用于反序列化：同时接受新形态与旧形态（顶层 base_url / api_key）。
+/// 不 derive Debug：这三个 wire 结构内含 api_key 明文，Debug 输出会泄漏（见 D12.7）。
+#[derive(Default, Deserialize)]
+struct ImageCreateSettingsWire {
+    #[serde(default)]
+    vendors: Option<VendorsWire>,
+    /// 旧形态顶层字段：仅当 vendors 缺失时归入 GPT 家。
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    defaults: DefaultParams,
+}
+
+#[derive(Default, Deserialize)]
+struct VendorsWire {
+    #[serde(default)]
+    gpt: VendorWire,
+    #[serde(default)]
+    minimax: VendorWire,
+}
+
+#[derive(Default, Deserialize)]
+struct VendorWire {
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+    /// None = 文件未写该键，补内置默认清单；Some(vec![]) = 用户清空，保持为空。
+    #[serde(default)]
+    models: Option<Vec<String>>,
+}
+
+impl VendorWire {
+    /// 按 D3 规则合并：缺失项补该家内置默认值。
+    fn into_settings(self, vendor: ImageVendor) -> VendorSettings {
+        let models = match self.models {
+            // Some(vec![]) = 用户主动清空，保持为空。
+            Some(models) => models,
+            None => vendor.recommended_models(),
+        };
+        VendorSettings {
+            base_url: self.base_url,
+            api_key: self.api_key,
+            models,
+        }
+    }
+}
+
+impl From<ImageCreateSettingsWire> for ImageCreateSettings {
+    fn from(wire: ImageCreateSettingsWire) -> Self {
+        let vendors = match wire.vendors {
+            Some(vendors) => VendorsSettings {
+                gpt: vendors.gpt.into_settings(ImageVendor::Gpt),
+                minimax: vendors.minimax.into_settings(ImageVendor::Minimax),
+            },
+            // 旧形态：顶层凭据此前只用于调 GPT 模型，归入 GPT 家语义无损。
+            None => VendorsSettings {
+                gpt: VendorSettings {
+                    base_url: wire.base_url.unwrap_or_default(),
+                    api_key: wire.api_key.unwrap_or_default(),
+                    models: ImageVendor::Gpt.recommended_models(),
+                },
+                minimax: VendorSettings::recommended(ImageVendor::Minimax),
+            },
+        };
+        Self {
+            vendors,
+            defaults: wire.defaults,
+        }
+    }
+}
+
+/// 脱敏视图（GET / PUT 设置接口的响应体）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaskedSettings {
+    pub vendors: MaskedVendors,
     pub defaults: DefaultParams,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MaskedSettings {
+pub struct MaskedVendors {
+    pub gpt: MaskedVendorSettings,
+    pub minimax: MaskedVendorSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaskedVendorSettings {
     pub base_url: String,
     pub api_key_masked: String,
-    pub defaults: DefaultParams,
+    pub models: Vec<String>,
+    /// 内置推荐清单，供前端「恢复推荐清单」。
+    pub recommended_models: Vec<String>,
+    /// base_url、api_key、models 均非空。
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReferenceSource {
+    None,
+    Uploaded,
+    Previous,
+}
+
+/// 出站前解析出的目标：手动选定的模型 id 落在哪一家。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTarget {
+    pub vendor: ImageVendor,
+    pub model: String,
+}
+
+impl ImageCreateSettings {
+    /// 纯函数，不做 I/O。模型手动选的目标解析：
+    /// 1. 按逐字符相等在「已配置凭据且清单非空」的供应方里找该 model id 的归属家；
+    /// 2. 找不到 → 参数错误；
+    /// 3. id 在某家清单里但该家未配置凭据 → 配置缺失（绝不静默换到另一家）。
+    pub fn resolve_target(&self, model: &str) -> Result<ResolvedTarget, ImageCreateError> {
+        // 先在可用家里找：同一 id 误配进两家时，可用家优先。
+        let owner = ImageVendor::ALL.into_iter().find(|vendor| {
+            let settings = self.vendors.get(*vendor);
+            settings.is_available()
+                && settings
+                    .models
+                    .iter()
+                    .any(|candidate| candidate.as_str() == model)
+        });
+        if let Some(vendor) = owner {
+            return Ok(ResolvedTarget {
+                vendor,
+                model: model.to_string(),
+            });
+        }
+        // 不在任何可用家清单：若 id 出现在未配置凭据的家清单里，明确指出该家缺配置。
+        if let Some(vendor) = self.vendors.vendor_of(model) {
+            return Err(ImageCreateError::MissingConfig(format!(
+                "{} 尚未配置 Base URL 或 API Key",
+                vendor.label()
+            )));
+        }
+        Err(ImageCreateError::InvalidParam(format!(
+            "模型 {model} 不在已配置且可用的供应方清单中"
+        )))
+    }
+
+    /// 保存前整份校验：D1 规则（模型清单）+ 逐家 base_url。
+    pub fn validate(&self) -> Result<(), ImageCreateError> {
+        for vendor in ImageVendor::ALL {
+            let label = vendor.label();
+            let settings = self.vendors.get(vendor);
+
+            if settings.models.len() > MAX_MODELS_PER_VENDOR {
+                return Err(ImageCreateError::InvalidConfig(format!(
+                    "{label} 模型清单最多 {MAX_MODELS_PER_VENDOR} 个"
+                )));
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            for id in &settings.models {
+                let trimmed = id.trim();
+                if trimmed.is_empty()
+                    || trimmed.chars().count() > MAX_MODEL_ID_CHARS
+                    || !trimmed.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-')
+                    })
+                {
+                    return Err(ImageCreateError::InvalidConfig(format!(
+                        "{label} 模型 id「{id}」不合法：长度需为 1–128，且只能包含字母、数字与 . _ : / -"
+                    )));
+                }
+                if !seen.insert(trimmed) {
+                    return Err(ImageCreateError::InvalidConfig(format!(
+                        "{label} 模型清单存在重复项：{id}"
+                    )));
+                }
+            }
+
+            let base_url = settings.base_url.trim();
+            if !base_url.is_empty() {
+                crate::cross_cutting::image_client::validate_base_url(base_url)
+                    .map_err(|error| ImageCreateError::InvalidConfig(error.to_string()))?;
+            }
+        }
+
+        for id in &self.vendors.gpt.models {
+            // 跨家去重与家内去重同一范式：两侧均取 trim 后比较，避免手改配置用首尾空白绕过唯一性。
+            if self
+                .vendors
+                .minimax
+                .models
+                .iter()
+                .any(|model| model.trim() == id.trim())
+            {
+                return Err(ImageCreateError::InvalidConfig(format!(
+                    "模型 id「{id}」同时出现在 GPT 与 MiniMax 清单中"
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,10 +418,18 @@ pub enum ApiKeyUpdate {
     Clear,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SettingsUpdate {
+/// 单家的更新意图（内部形态）。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorUpdate {
     pub base_url: Option<String>,
     pub api_key: ApiKeyUpdate,
+    pub models: Option<Vec<String>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsUpdate {
+    pub gpt: Option<VendorUpdate>,
+    pub minimax: Option<VendorUpdate>,
     pub defaults: Option<DefaultParams>,
 }
 
@@ -169,6 +504,12 @@ pub struct GenerationResultDto {
     pub media_type: String,
     pub image_id: Option<String>,
     pub legacy_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<ImageVendor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_source: Option<ReferenceSource>,
     pub ts: DateTime<Utc>,
 }
 
@@ -180,6 +521,9 @@ impl From<GenerationResult> for GenerationResultDto {
             media_type: result.media_type,
             image_id: result.image_id,
             legacy_pending: result.b64.is_some(),
+            vendor: result.vendor,
+            model: result.model,
+            reference_source: result.reference_source,
             ts: result.ts,
         }
     }
@@ -246,6 +590,9 @@ pub struct ChatMessage {
 pub struct PromptBlock {
     pub content: String,
     pub version: u32,
+    /// 提示词块产生时刻；旧会话记录缺该字段时读为 None（不破坏旧数据）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +604,12 @@ pub struct GenerationResult {
     pub image_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<ImageVendor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_source: Option<ReferenceSource>,
     pub ts: DateTime<Utc>,
 }
 
@@ -279,21 +632,49 @@ pub struct IterationEvent {
     pub kind: String,
     pub text: Option<String>,
     pub suggested_prompt: Option<String>,
+    /// 模型明确未产出建议 prompt（结构化块解析成功但 suggested_prompt 为空/缺失）；
+    /// false = 正常产出，或结构化输出根本没解析出来（格式不符/模型无视契约）。
+    /// serde default 兼容不含该字段的旧事件/旧客户端。
+    #[serde(default)]
+    pub prompt_declined: bool,
     pub provider_session_id: Option<String>,
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// PUT 设置接口的请求体。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsUpdateRequest {
-    pub base_url: Option<String>,
-    pub api_key_action: ApiKeyAction,
-    pub api_key: Option<String>,
+    #[serde(default)]
+    pub vendors: Option<VendorsUpdateRequest>,
+    #[serde(default)]
     pub defaults: Option<DefaultParams>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorsUpdateRequest {
+    #[serde(default)]
+    pub gpt: Option<VendorUpdateRequest>,
+    #[serde(default)]
+    pub minimax: Option<VendorUpdateRequest>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VendorUpdateRequest {
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// 缺省 = retain。
+    #[serde(default)]
+    pub api_key_action: ApiKeyAction,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiKeyAction {
+    #[default]
     Retain,
     Replace,
     Clear,
@@ -346,7 +727,11 @@ pub trait SettingsStoreApi: Send + Sync {
     async fn load(&self) -> ImageCreateSettings;
     async fn save(&self, settings: &ImageCreateSettings) -> Result<(), ImageCreateError>;
     async fn to_masked(&self, settings: &ImageCreateSettings) -> MaskedSettings;
-    async fn validate_base_url(&self, url: &str) -> Result<(), ImageCreateError>;
+    /// 取代原 validate_base_url：对合并后的整份设置校验。
+    async fn validate_settings(
+        &self,
+        settings: &ImageCreateSettings,
+    ) -> Result<(), ImageCreateError>;
     async fn apply_update(
         &self,
         current: &ImageCreateSettings,
@@ -368,8 +753,8 @@ pub enum ImageCreateError {
     SessionGone,
     #[error("invalid session id: {0}")]
     InvalidSessionId(String),
-    #[error("image config missing")]
-    MissingConfig,
+    #[error("image config missing: {0}")]
+    MissingConfig(String),
     #[error("invalid config: {0}")]
     InvalidConfig(String),
     #[error("invalid parameter: {0}")]
@@ -382,6 +767,11 @@ pub enum ImageCreateError {
     Iteration(String),
     #[error("reference image error: {0}")]
     RefImage(String),
+    /// 携带上一张图失败（出站前）。
+    #[error(
+        "上一张图片不可用，无法基于它继续修改（{0}）；请关闭「基于上一张图继续修改」或上传参考图"
+    )]
+    PreviousImageUnavailable(String),
 }
 
 pub fn validate_session_id(id: &str) -> Result<(), ImageCreateError> {
@@ -390,92 +780,5 @@ pub fn validate_session_id(id: &str) -> Result<(), ImageCreateError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::{Serialize, de::DeserializeOwned};
-
-    fn assert_json_round_trip<T>(value: T, expected: &str)
-    where
-        T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
-    {
-        let json = serde_json::to_string(&value).unwrap();
-        assert_eq!(json, format!("\"{expected}\""));
-        assert_eq!(serde_json::from_str::<T>(&json).unwrap(), value);
-    }
-
-    #[test]
-    fn parameter_enums_round_trip_with_exact_wire_values() {
-        assert_json_round_trip(ImageSize::Square, "1024x1024");
-        assert_json_round_trip(ImageSize::Landscape, "1536x1024");
-        assert_json_round_trip(ImageSize::Portrait, "1024x1536");
-        assert_json_round_trip(ImageSize::Auto, "auto");
-
-        assert_json_round_trip(ImageQuality::Low, "low");
-        assert_json_round_trip(ImageQuality::Medium, "medium");
-        assert_json_round_trip(ImageQuality::High, "high");
-        assert_json_round_trip(ImageQuality::Auto, "auto");
-
-        assert_json_round_trip(ImageBackground::Transparent, "transparent");
-        assert_json_round_trip(ImageBackground::Opaque, "opaque");
-        assert_json_round_trip(ImageBackground::Auto, "auto");
-
-        assert_json_round_trip(ImageOutputFormat::Png, "png");
-        assert_json_round_trip(ImageOutputFormat::Jpeg, "jpeg");
-        assert_json_round_trip(ImageOutputFormat::Webp, "webp");
-
-        assert_json_round_trip(InputFidelity::Low, "low");
-        assert_json_round_trip(InputFidelity::High, "high");
-    }
-
-    #[test]
-    fn api_key_update_is_discriminable() {
-        assert!(
-            serde_json::to_string(&ApiKeyUpdate::Retain)
-                .unwrap()
-                .contains("retain")
-        );
-        let c = serde_json::to_string(&ApiKeyUpdate::Clear).unwrap();
-        assert!(c.contains("clear"));
-        let r = serde_json::to_string(&ApiKeyUpdate::Replace("sk-new".into())).unwrap();
-        assert!(r.contains("replace") && r.contains("sk-new"));
-    }
-
-    #[test]
-    fn validate_session_id_rejects_traversal() {
-        assert!(validate_session_id("../x").is_err());
-        assert!(validate_session_id("/abs").is_err());
-        assert!(validate_session_id("").is_err());
-        assert!(validate_session_id("a/b").is_err());
-        assert!(validate_session_id("a\\b").is_err());
-        assert!(validate_session_id("valid-id-1").is_ok());
-    }
-
-    #[test]
-    fn generation_result_serializes_reference_form_without_b64() {
-        let result = GenerationResult {
-            prompt: "p".to_string(),
-            params: DefaultParams::default(),
-            media_type: "image/png".to_string(),
-            image_id: Some("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0".to_string()),
-            b64: None,
-            ts: Utc::now(),
-        };
-        let json = serde_json::to_string(&result).expect("serialize");
-        assert!(json.contains("image_id"));
-        assert!(!json.contains("b64"));
-    }
-
-    #[test]
-    fn generation_result_deserializes_legacy_inline_b64() {
-        let legacy = r#"{
-            "prompt": "p",
-            "params": {"size": "auto", "quality": "auto", "background": "auto", "output_format": "png"},
-            "media_type": "image/png",
-            "b64": "aGVsbG8=",
-            "ts": "2026-08-26T00:00:00Z"
-        }"#;
-        let result: GenerationResult = serde_json::from_str(legacy).expect("deserialize legacy");
-        assert_eq!(result.b64.as_deref(), Some("aGVsbG8="));
-        assert_eq!(result.image_id, None);
-    }
-}
+#[path = "models_tests.rs"]
+mod tests;

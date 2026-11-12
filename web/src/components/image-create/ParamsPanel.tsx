@@ -2,18 +2,27 @@ import { ChevronDown, LoaderCircle, SlidersHorizontal, Wand2 } from "lucide-reac
 import { useEffect, useState } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
-  IMAGE_INPUT_FIDELITY_OPTIONS,
   IMAGE_OUTPUT_FORMAT_OPTIONS,
   IMAGE_QUALITY_OPTIONS,
   IMAGE_SIZE_OPTIONS,
+  IMAGE_VENDOR_LABELS,
+  IMAGE_VENDORS,
   type ImageBackground,
-  type ImageInputFidelity,
   type ImageOutputFormat,
   type ImageQuality,
   type ImageSize,
+  type ImageVendor,
+  type MaskedSettings,
 } from "../../api/types/image-create";
-import { useImageCreateStore } from "../../state/image-create-store";
-import { CustomSelect } from "./CustomSelect";
+import {
+  availableImageVendors,
+  configuredImageVendors,
+  useImageCreateStore,
+} from "../../state/image-create-store";
+import { CustomSelect, type CustomSelectOption } from "./CustomSelect";
+
+/** 没有可用供应方时的提示。 */
+const NO_VENDOR_HINT = "请先在设置里配置并启用至少一个供应方";
 
 function useElapsedSeconds(active: boolean): number {
   const [seconds, setSeconds] = useState(0);
@@ -31,6 +40,8 @@ function useElapsedSeconds(active: boolean): number {
 
 export function ParamsPanel() {
   const params = useImageCreateStore((state) => state.params);
+  const entries = useImageCreateStore((state) => state.entries);
+  const settings = useImageCreateStore((state) => state.settings);
   const referenceImage = useImageCreateStore((state) => state.referenceImage);
   const currentSession = useImageCreateStore((state) => state.currentSession);
   const isBusy = useImageCreateStore((state) => state.isBusy);
@@ -38,6 +49,32 @@ export function ParamsPanel() {
   const generate = useImageCreateStore((state) => state.generate);
   const [paramsExpanded, setParamsExpanded] = useState(false);
   const elapsed = useElapsedSeconds(isBusy);
+
+  // 只列出已配置凭据且清单非空的供应方的模型 id。
+  const configuredVendors = configuredImageVendors(settings);
+  const availableVendors = availableImageVendors(settings);
+  const modelOptions: CustomSelectOption[] = availableVendors.flatMap((vendor) =>
+    (settings?.vendors[vendor].models ?? []).map((model) => ({
+      value: model,
+      label: model,
+    })),
+  );
+  const selectedVendor = modelVendor(params.model, settings, availableVendors);
+  const modelDisplay = params.model || "未选择模型";
+
+  // MiniMax 不支持质量与背景；显式选择 MiniMax 模型时这两个参数置灰。
+  const minimaxSelected = selectedVendor === "minimax";
+  const vendorParamsDisabled = isBusy || minimaxSelected;
+  const vendorParamsHint = minimaxSelected ? "MiniMax 不支持该参数" : null;
+
+  // 会话内尚无生成图、或已选择上传参考图时，不携带上一张图。
+  const hasGeneratedImage = entries.some((entry) => entry.type === "generation_image");
+  const previousDisabled = isBusy || !hasGeneratedImage || Boolean(referenceImage);
+  const previousHint = referenceImage
+    ? "已使用上传的参考图"
+    : !hasGeneratedImage
+      ? "首张图片将直接生成"
+      : null;
 
   return (
     <section
@@ -91,7 +128,7 @@ export function ParamsPanel() {
             正在生成图片…已等待 {elapsed} 秒
           </div>
           <p className="mt-1.5 text-xs leading-5">
-            gpt-image-2 生成通常需要 1-3 分钟，请耐心等待，<strong>不要重复点击生成或刷新页面</strong>。
+            图片生成通常需要 1-3 分钟，请耐心等待，<strong>不要重复点击生成或刷新页面</strong>。
           </p>
         </div>
       ) : null}
@@ -101,6 +138,53 @@ export function ParamsPanel() {
           paramsExpanded ? "grid" : "hidden"
         }`}
       >
+        <div className="sm:col-span-2">
+          <CustomSelect
+            label="模型"
+            value={params.model}
+            displayValue={modelDisplay}
+            options={modelOptions}
+            disabled={isBusy}
+            onChange={(value) => setParams({ model: value })}
+          />
+          {settings
+            ? IMAGE_VENDORS.filter(
+                (vendor) => !configuredVendors.includes(vendor),
+              ).map((vendor) => (
+                <p
+                  key={vendor}
+                  className="mt-1.5 text-xs text-[var(--aria-ink-muted)]"
+                >
+                  {IMAGE_VENDOR_LABELS[vendor]} 未配置，可在设置中添加
+                </p>
+              ))
+            : null}
+          {settings && modelOptions.length === 0 ? (
+            <p className="mt-1.5 text-xs text-[var(--aria-ink-muted)]">
+              {NO_VENDOR_HINT}
+            </p>
+          ) : null}
+        </div>
+        <div className="sm:col-span-2">
+          <label className="flex min-h-11 items-center gap-2.5 text-sm font-semibold text-[var(--aria-ink)]">
+            <input
+              type="checkbox"
+              aria-label="基于上一张图继续修改"
+              checked={params.use_previous}
+              disabled={previousDisabled}
+              onChange={(event) =>
+                setParams({ use_previous: event.target.checked })
+              }
+              className="h-5 w-5 cursor-pointer accent-[var(--aria-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            基于上一张图继续修改
+          </label>
+          {previousHint ? (
+            <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+              {previousHint}
+            </p>
+          ) : null}
+        </div>
         <ParameterSelect
           label="尺寸"
           value={params.size}
@@ -108,18 +192,25 @@ export function ParamsPanel() {
           disabled={isBusy}
           onChange={(value) => setParams({ size: value as ImageSize })}
         />
-        <ParameterSelect
-          label="质量"
-          value={params.quality}
-          options={IMAGE_QUALITY_OPTIONS}
-          disabled={isBusy}
-          onChange={(value) => setParams({ quality: value as ImageQuality })}
-        />
+        <div>
+          <ParameterSelect
+            label="质量"
+            value={params.quality}
+            options={IMAGE_QUALITY_OPTIONS}
+            disabled={vendorParamsDisabled}
+            onChange={(value) => setParams({ quality: value as ImageQuality })}
+          />
+          {vendorParamsHint ? (
+            <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
+              {vendorParamsHint}
+            </p>
+          ) : null}
+        </div>
         <ParameterSelect
           label="背景"
           value={params.background}
           options={IMAGE_BACKGROUND_OPTIONS}
-          disabled={isBusy}
+          disabled={vendorParamsDisabled}
           onChange={(value) => setParams({ background: value as ImageBackground })}
         />
         <ParameterSelect
@@ -131,24 +222,15 @@ export function ParamsPanel() {
             setParams({ output_format: value as ImageOutputFormat })
           }
         />
-        {referenceImage ? (
-          <ParameterSelect
-            label="参考图保真度"
-            value={params.input_fidelity ?? "low"}
-            options={IMAGE_INPUT_FIDELITY_OPTIONS}
-            disabled={isBusy}
-            onChange={(value) =>
-              setParams({ input_fidelity: value as ImageInputFidelity })
-            }
-          />
-        ) : null}
       </div>
       <button
         type="button"
         onClick={() => {
           generate().catch(() => {});
         }}
-        disabled={isBusy || !currentSession || !params.prompt.trim()}
+        disabled={
+          isBusy || !currentSession || !params.prompt.trim() || modelOptions.length === 0
+        }
         className="mt-4 inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-3 text-sm font-semibold text-white shadow-[0_5px_16px_rgba(8,145,178,0.26)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {isBusy ? (
@@ -165,6 +247,23 @@ export function ParamsPanel() {
       ) : null}
     </section>
   );
+}
+
+/** 模型 id 归属的供应方：只依据可用供应方的清单判定。 */
+function modelVendor(
+  model: string,
+  settings: MaskedSettings | null,
+  availableVendors: ImageVendor[],
+): ImageVendor | null {
+  if (!settings || !model) {
+    return null;
+  }
+  for (const vendor of availableVendors) {
+    if (settings.vendors[vendor].models.includes(model)) {
+      return vendor;
+    }
+  }
+  return null;
 }
 
 function ParameterSelect({
