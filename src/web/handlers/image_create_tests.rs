@@ -863,7 +863,11 @@ async fn generate_command_parses_use_previous_flag() {
         let boundary = "image-create-use-previous-flag";
         let body = multipart_body(
             boundary,
-            &[("prompt", "draw a cat"), ("use_previous", raw)],
+            &[
+                ("prompt", "draw a cat"),
+                ("model", "gpt-image-2.6"),
+                ("use_previous", raw),
+            ],
             &[],
         );
 
@@ -875,7 +879,11 @@ async fn generate_command_parses_use_previous_flag() {
     let boundary = "image-create-h03-invalid-use-previous";
     let body = multipart_body(
         boundary,
-        &[("prompt", "draw a cat"), ("use_previous", "yes")],
+        &[
+            ("prompt", "draw a cat"),
+            ("model", "gpt-image-2.6"),
+            ("use_previous", "yes"),
+        ],
         &[],
     );
     let Err(error) = parse_multipart(body, boundary).await else {
@@ -917,7 +925,11 @@ async fn generate_response_reports_vendor_model_and_reference_source() {
     let root = tempdir().expect("root");
     let (state, session_id) = configured_generate_state(root.path(), None).await;
     let boundary = "image-create-h04-response-fields";
-    let body = multipart_body(boundary, &[("prompt", "draw a cat")], &[]);
+    let body = multipart_body(
+        boundary,
+        &[("prompt", "draw a cat"), ("model", "gpt-image-2.6")],
+        &[],
+    );
 
     let response = build_web_router(state)
         .oneshot(
