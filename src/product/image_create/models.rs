@@ -83,25 +83,13 @@ pub const DEFAULT_GPT_MODELS: [&str; 8] = [
     "gpt-image-2.6-sunburst-4k",
     "gpt-image-2.5",
 ];
-pub const DEFAULT_GPT_ROTATION_MODEL: &str = "gpt-image-2.6-flare";
 pub const DEFAULT_MINIMAX_MODELS: [&str; 1] = ["MiniMax-H3-Image"];
-pub const DEFAULT_MINIMAX_ROTATION_MODEL: &str = "MiniMax-H3-Image";
 
 pub const MAX_MODELS_PER_VENDOR: usize = 32;
 pub const MAX_MODEL_ID_CHARS: usize = 128;
-/// 生成请求 `model` 字段的保留值：自动轮转。不得作为模型 id。
-pub const AUTO_MODEL: &str = "auto";
 
 impl ImageVendor {
     pub const ALL: [ImageVendor; 2] = [ImageVendor::Gpt, ImageVendor::Minimax];
-
-    /// 另一家。
-    pub fn other(self) -> ImageVendor {
-        match self {
-            ImageVendor::Gpt => ImageVendor::Minimax,
-            ImageVendor::Minimax => ImageVendor::Gpt,
-        }
-    }
 
     /// 面向用户的名称："GPT" / "MiniMax"。
     pub fn label(self) -> &'static str {
@@ -121,14 +109,6 @@ impl ImageVendor {
                 .collect(),
         }
     }
-
-    /// 该家的内置默认轮转模型。
-    pub fn recommended_rotation_model(self) -> &'static str {
-        match self {
-            ImageVendor::Gpt => DEFAULT_GPT_ROTATION_MODEL,
-            ImageVendor::Minimax => DEFAULT_MINIMAX_ROTATION_MODEL,
-        }
-    }
 }
 
 /// 单家配置。Debug 手写：api_key 输出为 "<redacted>"。
@@ -138,18 +118,15 @@ pub struct VendorSettings {
     pub api_key: String,
     /// 用户可配置的模型 id 清单（不透明字符串）。
     pub models: Vec<String>,
-    /// 自动轮转轮到本家时使用的模型。
-    pub default_model: String,
 }
 
 impl VendorSettings {
-    /// 凭据为空、清单与轮转模型为该家内置默认值。
+    /// 凭据为空、清单为该家内置默认值。
     pub fn recommended(vendor: ImageVendor) -> Self {
         Self {
             base_url: String::new(),
             api_key: String::new(),
             models: vendor.recommended_models(),
-            default_model: vendor.recommended_rotation_model().to_string(),
         }
     }
 
@@ -162,15 +139,6 @@ impl VendorSettings {
     pub fn is_available(&self) -> bool {
         self.has_credentials() && !self.models.is_empty()
     }
-
-    /// default_model 在清单内则取它，否则取清单首项；清单为空返回 None。
-    pub fn rotation_model(&self) -> Option<&str> {
-        self.models
-            .iter()
-            .find(|model| model.as_str() == self.default_model)
-            .map(String::as_str)
-            .or_else(|| self.models.first().map(String::as_str))
-    }
 }
 
 impl fmt::Debug for VendorSettings {
@@ -179,7 +147,6 @@ impl fmt::Debug for VendorSettings {
             .field("base_url", &self.base_url)
             .field("api_key", &"<redacted>")
             .field("models", &self.models)
-            .field("default_model", &self.default_model)
             .finish()
     }
 }
@@ -269,9 +236,6 @@ struct VendorWire {
     /// None = 文件未写该键，补内置默认清单；Some(vec![]) = 用户清空，保持为空。
     #[serde(default)]
     models: Option<Vec<String>>,
-    /// None = 文件未写该键：清单非空时补该家内置轮转模型，清单为空时为空串。
-    #[serde(default)]
-    default_model: Option<String>,
 }
 
 impl VendorWire {
@@ -282,21 +246,10 @@ impl VendorWire {
             Some(models) => models,
             None => vendor.recommended_models(),
         };
-        let default_model = match self.default_model {
-            Some(value) => value,
-            None => {
-                if models.is_empty() {
-                    String::new()
-                } else {
-                    vendor.recommended_rotation_model().to_string()
-                }
-            }
-        };
         VendorSettings {
             base_url: self.base_url,
             api_key: self.api_key,
             models,
-            default_model,
         }
     }
 }
@@ -314,7 +267,6 @@ impl From<ImageCreateSettingsWire> for ImageCreateSettings {
                     base_url: wire.base_url.unwrap_or_default(),
                     api_key: wire.api_key.unwrap_or_default(),
                     models: ImageVendor::Gpt.recommended_models(),
-                    default_model: DEFAULT_GPT_ROTATION_MODEL.to_string(),
                 },
                 minimax: VendorSettings::recommended(ImageVendor::Minimax),
             },
@@ -344,40 +296,10 @@ pub struct MaskedVendorSettings {
     pub base_url: String,
     pub api_key_masked: String,
     pub models: Vec<String>,
-    pub default_model: String,
     /// 内置推荐清单，供前端「恢复推荐清单」。
     pub recommended_models: Vec<String>,
     /// base_url、api_key、models 均非空。
     pub available: bool,
-}
-
-/// 生成请求中的模型选择。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelChoice {
-    Auto,
-    Explicit(String),
-}
-
-impl ModelChoice {
-    /// 缺省、空白、"auto"（不区分大小写）→ Auto；其余 → Explicit(去首尾空白后的原值)。
-    pub fn parse(raw: Option<&str>) -> ModelChoice {
-        let Some(raw) = raw else {
-            return ModelChoice::Auto;
-        };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(AUTO_MODEL) {
-            ModelChoice::Auto
-        } else {
-            ModelChoice::Explicit(trimmed.to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelSelection {
-    Auto,
-    Explicit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,71 +310,29 @@ pub enum ReferenceSource {
     Previous,
 }
 
-/// 出站前解析出的目标：哪家、哪个模型、怎么选出来的。
+/// 出站前解析出的目标：手动选定的模型 id 落在哪一家。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTarget {
     pub vendor: ImageVendor,
     pub model: String,
-    pub selection: ModelSelection,
 }
 
 impl ImageCreateSettings {
-    /// 纯函数，不做 I/O。
-    /// last_vendor：会话上一条成功结果所属的家；无结果为 None；
-    /// 旧记录（无 vendor 字段）由调用方传 Some(ImageVendor::Gpt)。
-    pub fn resolve_target(
-        &self,
-        choice: &ModelChoice,
-        last_vendor: Option<ImageVendor>,
-    ) -> Result<ResolvedTarget, ImageCreateError> {
-        match choice {
-            ModelChoice::Explicit(id) => {
-                let Some(vendor) = self.vendors.vendor_of(id) else {
-                    return Err(ImageCreateError::InvalidParam(format!(
-                        "模型 {id} 不在已配置的模型清单中，请在设置中添加或改选其他模型"
-                    )));
-                };
-                if !self.vendors.get(vendor).has_credentials() {
-                    return Err(ImageCreateError::MissingConfig(format!(
-                        "{} 尚未配置 Base URL 或 API Key",
-                        vendor.label()
-                    )));
-                }
-                Ok(ResolvedTarget {
-                    vendor,
-                    model: id.clone(),
-                    selection: ModelSelection::Explicit,
-                })
-            }
-            ModelChoice::Auto => {
-                let preferred = match last_vendor {
-                    None => ImageVendor::Gpt,
-                    Some(vendor) => vendor.other(),
-                };
-                let picked = if self.vendors.get(preferred).is_available() {
-                    preferred
-                } else if self.vendors.get(preferred.other()).is_available() {
-                    preferred.other()
-                } else {
-                    return Err(ImageCreateError::MissingConfig(
-                        "尚未配置任何可用的图片生成端点".to_string(),
-                    ));
-                };
-                let Some(model) = self.vendors.get(picked).rotation_model() else {
-                    return Err(ImageCreateError::MissingConfig(
-                        "尚未配置任何可用的图片生成端点".to_string(),
-                    ));
-                };
-                Ok(ResolvedTarget {
-                    vendor: picked,
-                    model: model.to_string(),
-                    selection: ModelSelection::Auto,
-                })
-            }
-        }
+    /// 纯函数，不做 I/O。模型手动选：按逐字符相等在供应方清单里找 model id 的归属家。
+    /// 可用性门禁（凭据齐全且清单非空）随后补齐。
+    pub fn resolve_target(&self, model: &str) -> Result<ResolvedTarget, ImageCreateError> {
+        let Some(vendor) = self.vendors.vendor_of(model) else {
+            return Err(ImageCreateError::InvalidParam(format!(
+                "模型 {model} 不在已配置且可用的供应方清单中"
+            )));
+        };
+        Ok(ResolvedTarget {
+            vendor,
+            model: model.to_string(),
+        })
     }
 
-    /// 保存前整份校验：D1 规则 1–5（清单与轮转模型归属）+ 逐家 base_url。
+    /// 保存前整份校验：D1 规则（模型清单）+ 逐家 base_url。
     pub fn validate(&self) -> Result<(), ImageCreateError> {
         for vendor in ImageVendor::ALL {
             let label = vendor.label();
@@ -477,29 +357,11 @@ impl ImageCreateSettings {
                         "{label} 模型 id「{id}」不合法：长度需为 1–128，且只能包含字母、数字与 . _ : / -"
                     )));
                 }
-                if trimmed.eq_ignore_ascii_case(AUTO_MODEL) {
-                    return Err(ImageCreateError::InvalidConfig(format!(
-                        "{label} 模型 id 不能为 auto"
-                    )));
-                }
                 if !seen.insert(trimmed) {
                     return Err(ImageCreateError::InvalidConfig(format!(
                         "{label} 模型清单存在重复项：{id}"
                     )));
                 }
-            }
-
-            let default_in_catalog = settings
-                .models
-                .iter()
-                .any(|model| model.as_str() == settings.default_model);
-            if (!settings.models.is_empty() && !default_in_catalog)
-                || (settings.models.is_empty() && !settings.default_model.is_empty())
-            {
-                return Err(ImageCreateError::InvalidConfig(format!(
-                    "{label} 的轮转模型「{}」不在其模型清单中",
-                    settings.default_model
-                )));
             }
 
             let base_url = settings.base_url.trim();
@@ -542,7 +404,6 @@ pub struct VendorUpdate {
     pub base_url: Option<String>,
     pub api_key: ApiKeyUpdate,
     pub models: Option<Vec<String>>,
-    pub default_model: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,8 +489,6 @@ pub struct GenerationResultDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub selection: Option<ModelSelection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_source: Option<ReferenceSource>,
     pub ts: DateTime<Utc>,
 }
@@ -644,7 +503,6 @@ impl From<GenerationResult> for GenerationResultDto {
             legacy_pending: result.b64.is_some(),
             vendor: result.vendor,
             model: result.model,
-            selection: result.selection,
             reference_source: result.reference_source,
             ts: result.ts,
         }
@@ -728,8 +586,6 @@ pub struct GenerationResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selection: Option<ModelSelection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_source: Option<ReferenceSource>,
     pub ts: DateTime<Utc>,
 }
@@ -785,8 +641,6 @@ pub struct VendorUpdateRequest {
     pub api_key: Option<String>,
     #[serde(default)]
     pub models: Option<Vec<String>>,
-    #[serde(default)]
-    pub default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

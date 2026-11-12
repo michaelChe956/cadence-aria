@@ -37,8 +37,7 @@ use crate::cross_cutting::streaming_provider::{
 };
 use crate::product::image_create::engine::GenerateCommand;
 use crate::product::image_create::models::{
-    ImageCreateError, ImageCreateSettings, ImageVendor, ModelChoice, SessionStoreApi,
-    SettingsStoreApi,
+    ImageCreateError, ImageCreateSettings, ImageVendor, SessionStoreApi, SettingsStoreApi,
 };
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
@@ -187,9 +186,13 @@ fn multipart_body(boundary: &str, text_fields: &[(&str, &str)], references: &[&[
     body
 }
 
-/// 既有用例的请求体：只带 prompt 与参考图。
+/// 既有用例的请求体：带 prompt、model（GPT 家清单内）与参考图。
 fn generate_multipart(boundary: &str, references: &[&[u8]]) -> Vec<u8> {
-    multipart_body(boundary, &[("prompt", "draw a cat")], references)
+    multipart_body(
+        boundary,
+        &[("prompt", "draw a cat"), ("model", "gpt-image-2.6")],
+        references,
+    )
 }
 
 /// 直接调用 handler 的 multipart 解析（不经 HTTP 层），便于断言命令内容。
@@ -223,7 +226,7 @@ async fn configured_generate_state(
         )
         .await
         .expect("session");
-    // 只配置 GPT 一家：自动轮转（auto）此时选中 GPT，MiniMax 无凭据不参与轮转。
+    // 只配置 GPT 一家：请求选 GPT 清单内的模型即选中 GPT，MiniMax 无凭据不可用。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = "https://images.example.com/v1".to_string();
@@ -435,7 +438,7 @@ async fn generate_parses_multipart_and_maps_missing_config() {
         .expect("session");
     let boundary = "image-create-test-boundary";
     let body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ndraw a cat\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1024x1024\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"quality\"\r\n\r\nhigh\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"background\"\r\n\r\nopaque\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"output_format\"\r\n\r\npng\r\n--{boundary}--\r\n"
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ndraw a cat\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-image-2.6\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"size\"\r\n\r\n1024x1024\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"quality\"\r\n\r\nhigh\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"background\"\r\n\r\nopaque\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"output_format\"\r\n\r\npng\r\n--{boundary}--\r\n"
     );
 
     let response = build_web_router(state(root.path()))
@@ -457,7 +460,7 @@ async fn generate_parses_multipart_and_maps_missing_config() {
         .expect("missing config response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    // 只配置 GPT 一家：自动轮转（auto）此时选中 GPT，MiniMax 无凭据不参与轮转。
+    // 只配置 GPT 一家：手动选 GPT 清单内模型即选中 GPT，MiniMax 无凭据不可用。
     let mut saved = ImageCreateSettings::default();
     let gpt = saved.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = "https://images.example.com/v1".to_string();
@@ -580,7 +583,7 @@ async fn echoed_api_key_is_redacted_from_rest_event_and_persisted_session() {
         .expect(1)
         .create_async()
         .await;
-    // 把网关地址与密钥写入 GPT 家（该家凭据齐全，自动轮转即选中 GPT）。
+    // 把网关地址与密钥写入 GPT 家（该家凭据齐全，手动选 GPT 模型即选中 GPT）。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = gateway.url();
@@ -813,39 +816,37 @@ async fn websocket_rejects_message_immediately_while_iteration_is_active() {
     server.abort();
 }
 
-/// H-01：multipart 不带 model / use_previous → 命令为 Auto + false。
+/// model 必填：缺省、空串或去空白后为空 → 参数错误「请选择图片生成模型」。
 #[tokio::test]
-async fn generate_command_defaults_to_auto_model_and_no_previous() {
-    let boundary = "image-create-h01-defaults";
-    let body = multipart_body(boundary, &[("prompt", "draw a cat")], &[]);
-
-    let command = parse_multipart(body, boundary).await.expect("command");
-
-    assert_eq!(command.model, ModelChoice::Auto);
-    assert!(!command.use_previous);
-    assert_eq!(command.request.prompt, "draw a cat");
-    assert!(command.reference.is_none());
+async fn generate_command_requires_model_field() {
+    for fields in [
+        vec![("prompt", "draw a cat")],
+        vec![("prompt", "draw a cat"), ("model", "")],
+        vec![("prompt", "draw a cat"), ("model", "   ")],
+    ] {
+        let boundary = "image-create-model-required";
+        let body = multipart_body(boundary, &fields, &[]);
+        let Err(error) = parse_multipart(body, boundary).await else {
+            panic!("缺 model 应被拒绝：{fields:?}");
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error.error.contains("请选择图片生成模型"),
+            "错误文本：{}",
+            error.error
+        );
+    }
 }
 
-/// H-02：model=gpt-image-2.6-sunburst-2k → Explicit 且字符串原样；
-/// 缺省 / 空白 / "auto"（不区分大小写）→ Auto；其余原样（仅去首尾空白）。
+/// model 原样去首尾空白；"auto" 不再是保留值，按普通模型 id 处理。
 #[tokio::test]
-async fn generate_command_parses_model_choice() {
+async fn generate_command_keeps_model_value_verbatim_after_trim() {
     for (raw, expected) in [
-        ("", ModelChoice::Auto),
-        (" ", ModelChoice::Auto),
-        ("auto", ModelChoice::Auto),
-        ("AUTO", ModelChoice::Auto),
-        (
-            "gpt-image-2.6-sunburst-2k",
-            ModelChoice::Explicit("gpt-image-2.6-sunburst-2k".to_string()),
-        ),
-        (
-            " gpt-image-2.6-flare ",
-            ModelChoice::Explicit("gpt-image-2.6-flare".to_string()),
-        ),
+        ("gpt-image-2.6-sunburst-2k", "gpt-image-2.6-sunburst-2k"),
+        (" gpt-image-2.6-flare ", "gpt-image-2.6-flare"),
+        ("auto", "auto"),
     ] {
-        let boundary = "image-create-model-choice";
+        let boundary = "image-create-model-value";
         let body = multipart_body(boundary, &[("prompt", "draw a cat"), ("model", raw)], &[]);
 
         let command = parse_multipart(body, boundary).await.expect("command");
@@ -898,7 +899,7 @@ async fn generate_command_ignores_removed_input_fidelity_field() {
         &[
             ("prompt", "draw a cat"),
             ("input_fidelity", "ultra"),
-            ("model", "auto"),
+            ("model", "gpt-image-2.6"),
         ],
         &[],
     );
@@ -906,13 +907,13 @@ async fn generate_command_ignores_removed_input_fidelity_field() {
     let command = parse_multipart(body, boundary).await.expect("command");
 
     assert_eq!(command.request.prompt, "draw a cat");
-    assert_eq!(command.model, ModelChoice::Auto);
+    assert_eq!(command.model, "gpt-image-2.6");
     assert!(!command.use_previous);
 }
 
-/// H-04：生成成功响应含 vendor / model / selection / reference_source 四个字段。
+/// H-04：生成成功响应含 vendor / model / reference_source 字段（不再含 selection）。
 #[tokio::test]
-async fn generate_response_reports_vendor_model_selection_and_reference_source() {
+async fn generate_response_reports_vendor_model_and_reference_source() {
     let root = tempdir().expect("root");
     let (state, session_id) = configured_generate_state(root.path(), None).await;
     let boundary = "image-create-h04-response-fields";
@@ -935,16 +936,16 @@ async fn generate_response_reports_vendor_model_selection_and_reference_source()
 
     assert_eq!(response.status(), StatusCode::OK);
     let result = response_json::<Value>(response).await;
-    // 4 个字段必有；取值由引擎写入（Task 6：自动轮转 → GPT 家的轮转模型）。
-    for field in ["vendor", "model", "selection", "reference_source"] {
+    // 3 个字段必有；取值由引擎按手动选定的模型写入。
+    for field in ["vendor", "model", "reference_source"] {
         assert!(
             result.get(field).is_some(),
             "响应缺少字段 {field}：{result}"
         );
     }
+    assert!(result.get("selection").is_none(), "轮转选型字段已删除");
     assert_eq!(result["vendor"], "gpt");
-    assert_eq!(result["model"], "gpt-image-2.6-flare");
-    assert_eq!(result["selection"], "auto");
+    assert_eq!(result["model"], "gpt-image-2.6");
     assert_eq!(result["reference_source"], "none");
 }
 

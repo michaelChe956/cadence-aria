@@ -1,7 +1,7 @@
 //! models.rs 的外置测试模块：经 models.rs 内 `#[path = "models_tests.rs"]` 引入，
 //! `use super::*` 语义与原内嵌 `mod tests` 完全一致。
 //!
-//! 覆盖设计文档 7.1 的「设置与兼容」（S-01…S-14）与「目标解析」（T-01…T-12）。
+//! 覆盖设计文档 7.1 的「设置与兼容」（S-01…S-14）与「目标解析」（T-01…T-08）。
 
 use super::*;
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
@@ -78,7 +78,6 @@ fn generation_result_serializes_reference_form_without_b64() {
         b64: None,
         vendor: None,
         model: None,
-        selection: None,
         reference_source: None,
         ts: Utc::now(),
     };
@@ -111,17 +110,11 @@ fn generation_result_round_trips_vendor_annotation_and_tolerates_legacy_records(
         b64: None,
         vendor: Some(ImageVendor::Minimax),
         model: Some("MiniMax-H3-Image".to_string()),
-        selection: Some(ModelSelection::Auto),
         reference_source: Some(ReferenceSource::Previous),
         ts: Utc::now(),
     };
     let json = serde_json::to_string(&result).expect("serialize");
-    for key in [
-        "\"vendor\"",
-        "\"model\"",
-        "\"selection\"",
-        "\"reference_source\"",
-    ] {
+    for key in ["\"vendor\"", "\"model\"", "\"reference_source\""] {
         assert!(json.contains(key), "序列化输出应含 {key}");
     }
     assert_eq!(
@@ -129,7 +122,7 @@ fn generation_result_round_trips_vendor_annotation_and_tolerates_legacy_records(
         result
     );
 
-    // 旧会话记录（无 4 个新字段）反序列化为全 None，不报错。
+    // 旧会话记录（无 3 个新字段）反序列化为全 None，不报错。
     let legacy = r#"{
         "prompt": "p",
         "params": {"size": "auto", "quality": "auto", "background": "auto", "output_format": "png"},
@@ -140,7 +133,6 @@ fn generation_result_round_trips_vendor_annotation_and_tolerates_legacy_records(
     let record: GenerationResult = serde_json::from_str(legacy).expect("deserialize legacy");
     assert_eq!(record.vendor, None);
     assert_eq!(record.model, None);
-    assert_eq!(record.selection, None);
     assert_eq!(record.reference_source, None);
 }
 
@@ -148,17 +140,11 @@ fn generation_result_round_trips_vendor_annotation_and_tolerates_legacy_records(
 // 测试辅助
 // ============================================================
 
-fn vendor_settings(
-    base_url: &str,
-    api_key: &str,
-    models: &[&str],
-    default_model: &str,
-) -> VendorSettings {
+fn vendor_settings(base_url: &str, api_key: &str, models: &[&str]) -> VendorSettings {
     VendorSettings {
         base_url: base_url.to_string(),
         api_key: api_key.to_string(),
         models: models.iter().map(|m| m.to_string()).collect(),
-        default_model: default_model.to_string(),
     }
 }
 
@@ -175,13 +161,11 @@ fn both_available() -> ImageCreateSettings {
             "https://gpt.example.com/v1",
             "sk-gpt-secret123",
             &["gpt-image-2.6", "gpt-image-2.6-flare"],
-            "gpt-image-2.6-flare",
         ),
         minimax: vendor_settings(
             "https://minimax.example.com/v1",
             "sk-mm-secret123",
             &["MiniMax-H3-Image"],
-            "MiniMax-H3-Image",
         ),
     })
 }
@@ -270,22 +254,14 @@ fn s02_missing_file_yields_builtin_default_catalogs() {
         .collect();
     assert_eq!(gpt, DEFAULT_GPT_MODELS);
     assert_eq!(
-        settings.vendors.gpt.default_model,
-        DEFAULT_GPT_ROTATION_MODEL
-    );
-    assert_eq!(
         settings.vendors.minimax.models,
         default_string_list(DEFAULT_MINIMAX_MODELS)
-    );
-    assert_eq!(
-        settings.vendors.minimax.default_model,
-        DEFAULT_MINIMAX_ROTATION_MODEL
     );
 }
 
 #[test]
 fn s03_new_shape_missing_vendor_or_models_falls_back_to_builtin() {
-    // gpt 家缺 models / default_model → 补内置默认。
+    // gpt 家缺 models → 补内置默认。
     let settings: ImageCreateSettings = serde_json::from_value(serde_json::json!({
         "vendors": {
             "gpt": {
@@ -296,7 +272,6 @@ fn s03_new_shape_missing_vendor_or_models_falls_back_to_builtin() {
                 "base_url": "https://minimax.example.com/v1",
                 "api_key": "sk-mm",
                 "models": ["MiniMax-H3-Image"],
-                "default_model": "MiniMax-H3-Image"
             }
         }
     }))
@@ -304,10 +279,6 @@ fn s03_new_shape_missing_vendor_or_models_falls_back_to_builtin() {
     assert_eq!(
         settings.vendors.gpt.models,
         default_string_list(DEFAULT_GPT_MODELS)
-    );
-    assert_eq!(
-        settings.vendors.gpt.default_model,
-        DEFAULT_GPT_ROTATION_MODEL
     );
     assert_eq!(
         settings.vendors.minimax.models,
@@ -343,9 +314,7 @@ fn s04_explicitly_empty_models_list_stays_empty() {
     }))
     .expect("反序列化空清单形态");
     assert!(settings.vendors.gpt.models.is_empty());
-    assert_eq!(settings.vendors.gpt.default_model, "");
     assert!(settings.vendors.minimax.models.is_empty());
-    assert_eq!(settings.vendors.minimax.default_model, "");
 }
 
 #[test]
@@ -413,7 +382,6 @@ fn s08_updating_only_minimax_key_leaves_gpt_untouched() {
                 base_url: None,
                 api_key: ApiKeyUpdate::Replace("sk-mm-rotated99".to_string()),
                 models: None,
-                default_model: None,
             }),
             defaults: None,
         },
@@ -422,10 +390,6 @@ fn s08_updating_only_minimax_key_leaves_gpt_untouched() {
     assert_eq!(updated.vendors.gpt.base_url, current.vendors.gpt.base_url);
     assert_eq!(updated.vendors.gpt.api_key, current.vendors.gpt.api_key);
     assert_eq!(updated.vendors.gpt.models, current.vendors.gpt.models);
-    assert_eq!(
-        updated.vendors.gpt.default_model,
-        current.vendors.gpt.default_model
-    );
     assert_eq!(updated.vendors.minimax.api_key, "sk-mm-rotated99");
 }
 
@@ -440,14 +404,12 @@ fn s09_api_key_tri_state_applies_per_vendor_independently() {
                     api_key_action: gpt,
                     api_key: Some("ignored".to_string()),
                     models: None,
-                    default_model: None,
                 }),
                 minimax: Some(VendorUpdateRequest {
                     base_url: None,
                     api_key_action: minimax,
                     api_key: Some("sk-mm-next".to_string()),
                     models: None,
-                    default_model: None,
                 }),
             }),
             defaults: None,
@@ -481,7 +443,6 @@ fn s09_api_key_tri_state_applies_per_vendor_independently() {
                     api_key_action: ApiKeyAction::Retain,
                     api_key: None,
                     models: None,
-                    default_model: None,
                 }),
             }),
             defaults: None,
@@ -497,25 +458,16 @@ fn s10_model_catalog_validation_rejects_each_rule_violation() {
         ("空串", vec![String::new()]),
         ("超长", vec![over_long]),
         ("非法字符", vec!["bad model!".to_string()]),
-        ("保留字 auto", vec!["auto".to_string()]),
-        ("保留字 AUTO", vec!["AUTO".to_string()]),
         ("家内重复", vec!["m-a".to_string(), "m-a".to_string()]),
     ];
     for (name, models) in cases {
-        let default_model = models.first().cloned().unwrap_or_default();
         let settings = settings_with(VendorsSettings {
             gpt: vendor_settings(
                 "https://g.example.com",
                 "k",
                 &models.iter().map(String::as_str).collect::<Vec<_>>(),
-                &default_model,
             ),
-            minimax: vendor_settings(
-                "https://minimax.example.com/v1",
-                "k",
-                &["MiniMax-H3-Image"],
-                "MiniMax-H3-Image",
-            ),
+            minimax: vendor_settings("https://minimax.example.com/v1", "k", &["MiniMax-H3-Image"]),
         });
         assert!(
             matches!(settings.validate(), Err(ImageCreateError::InvalidConfig(_))),
@@ -525,18 +477,8 @@ fn s10_model_catalog_validation_rejects_each_rule_violation() {
 
     // 跨家重复。
     let cross = settings_with(VendorsSettings {
-        gpt: vendor_settings(
-            "https://g.example.com",
-            "k",
-            &["shared-model"],
-            "shared-model",
-        ),
-        minimax: vendor_settings(
-            "https://minimax.example.com/v1",
-            "k",
-            &["shared-model"],
-            "shared-model",
-        ),
+        gpt: vendor_settings("https://g.example.com", "k", &["shared-model"]),
+        minimax: vendor_settings("https://minimax.example.com/v1", "k", &["shared-model"]),
     });
     let error = cross.validate().unwrap_err().to_string();
     assert!(error.contains("shared-model"));
@@ -544,8 +486,8 @@ fn s10_model_catalog_validation_rejects_each_rule_violation() {
 
     // 首尾空白不同的跨家重复同样被识别（跨家比较两侧均 trim）。
     let padded = settings_with(VendorsSettings {
-        gpt: vendor_settings("https://g.example.com", "k", &["m-a"], "m-a"),
-        minimax: vendor_settings("https://minimax.example.com/v1", "k", &["m-a "], "m-a "),
+        gpt: vendor_settings("https://g.example.com", "k", &["m-a"]),
+        minimax: vendor_settings("https://minimax.example.com/v1", "k", &["m-a "]),
     });
     assert!(matches!(
         padded.validate(),
@@ -561,14 +503,8 @@ fn s10_model_catalog_validation_rejects_each_rule_violation() {
             "https://g.example.com",
             "k",
             &oversize.iter().map(String::as_str).collect::<Vec<_>>(),
-            "m-00",
         ),
-        minimax: vendor_settings(
-            "https://minimax.example.com/v1",
-            "k",
-            &["MiniMax-H3-Image"],
-            "MiniMax-H3-Image",
-        ),
+        minimax: vendor_settings("https://minimax.example.com/v1", "k", &["MiniMax-H3-Image"]),
     });
     assert!(matches!(
         over.validate(),
@@ -582,54 +518,18 @@ fn s10_model_catalog_validation_rejects_each_rule_violation() {
             "https://g.example.com",
             "k",
             &exact.iter().map(String::as_str).collect::<Vec<_>>(),
-            "m-00",
         ),
-        minimax: vendor_settings(
-            "https://minimax.example.com/v1",
-            "k",
-            &["MiniMax-H3-Image"],
-            "MiniMax-H3-Image",
-        ),
+        minimax: vendor_settings("https://minimax.example.com/v1", "k", &["MiniMax-H3-Image"]),
     });
     assert!(boundary.validate().is_ok());
-}
-
-#[test]
-fn s11_default_model_must_belong_to_catalog() {
-    // 清单非空但轮转模型不在清单内。
-    let settings = settings_with(VendorsSettings {
-        gpt: vendor_settings("https://g.example.com", "k", &["m-a", "m-b"], "m-missing"),
-        minimax: vendor_settings("https://minimax.example.com/v1", "k", &[], ""),
-    });
-    assert!(matches!(
-        settings.validate(),
-        Err(ImageCreateError::InvalidConfig(_))
-    ));
-
-    // 清单为空但轮转模型非空串。
-    let settings = settings_with(VendorsSettings {
-        gpt: vendor_settings("https://g.example.com", "k", &["m-a"], "m-a"),
-        minimax: vendor_settings("https://minimax.example.com/v1", "k", &[], "m-x"),
-    });
-    assert!(matches!(
-        settings.validate(),
-        Err(ImageCreateError::InvalidConfig(_))
-    ));
-
-    assert!(both_available().validate().is_ok());
 }
 
 #[test]
 fn s12_non_loopback_http_base_url_rejects_whole_settings() {
     // 一家 http 非回环、另一家合法 → 整体拒绝，不落盘。
     let settings = settings_with(VendorsSettings {
-        gpt: vendor_settings("http://insecure.example.com/v1", "k", &["m-a"], "m-a"),
-        minimax: vendor_settings(
-            "https://minimax.example.com/v1",
-            "k",
-            &["MiniMax-H3-Image"],
-            "MiniMax-H3-Image",
-        ),
+        gpt: vendor_settings("http://insecure.example.com/v1", "k", &["m-a"]),
+        minimax: vendor_settings("https://minimax.example.com/v1", "k", &["MiniMax-H3-Image"]),
     });
     assert!(matches!(
         settings.validate(),
@@ -638,13 +538,8 @@ fn s12_non_loopback_http_base_url_rejects_whole_settings() {
 
     // 空串 base_url 表示该家未配置，放行。
     let empty = settings_with(VendorsSettings {
-        gpt: vendor_settings("", "", &["m-a"], "m-a"),
-        minimax: vendor_settings(
-            "https://minimax.example.com/v1",
-            "k",
-            &["MiniMax-H3-Image"],
-            "MiniMax-H3-Image",
-        ),
+        gpt: vendor_settings("", "", &["m-a"]),
+        minimax: vendor_settings("https://minimax.example.com/v1", "k", &["MiniMax-H3-Image"]),
     });
     assert!(empty.validate().is_ok());
 }
@@ -747,166 +642,98 @@ fn previous_image_unavailable_error_renders_chinese_hint() {
 }
 
 // ============================================================
-// 目标解析（T-01…T-12）
+// 目标解析（T-01…T-08）：模型手动选，id 必须落在已配置且可用的供应方清单
 // ============================================================
 
+/// T-01：id 在已配置且可用的 GPT 家清单 → 解析到 GPT 本家。
 #[test]
-fn t01_auto_without_last_vendor_targets_gpt_rotation_model() {
+fn t01_model_in_configured_available_gpt_resolves_gpt() {
     let target = both_available()
-        .resolve_target(&ModelChoice::Auto, None)
-        .expect("解析自动目标");
+        .resolve_target("gpt-image-2.6-flare")
+        .expect("解析目标");
     assert_eq!(target.vendor, ImageVendor::Gpt);
     assert_eq!(target.model, "gpt-image-2.6-flare");
-    assert_eq!(target.selection, ModelSelection::Auto);
 }
 
+/// T-02：id 在已配置且可用的 MiniMax 家清单 → 解析到 MiniMax 本家。
 #[test]
-fn t02_auto_after_gpt_result_targets_minimax() {
+fn t02_model_in_configured_available_minimax_resolves_minimax() {
     let target = both_available()
-        .resolve_target(&ModelChoice::Auto, Some(ImageVendor::Gpt))
-        .expect("解析自动目标");
+        .resolve_target("MiniMax-H3-Image")
+        .expect("解析目标");
     assert_eq!(target.vendor, ImageVendor::Minimax);
     assert_eq!(target.model, "MiniMax-H3-Image");
-    assert_eq!(target.selection, ModelSelection::Auto);
 }
 
+/// T-03：id 不在任何已配置供应方的清单里 → 参数错误，信息含该 id。
 #[test]
-fn t03_auto_after_minimax_result_targets_gpt() {
-    let target = both_available()
-        .resolve_target(&ModelChoice::Auto, Some(ImageVendor::Minimax))
-        .expect("解析自动目标");
-    assert_eq!(target.vendor, ImageVendor::Gpt);
-    assert_eq!(target.model, "gpt-image-2.6-flare");
-    assert_eq!(target.selection, ModelSelection::Auto);
-}
-
-fn gpt_only_available() -> ImageCreateSettings {
-    let mut settings = both_available();
-    settings.vendors.minimax.api_key = String::new();
-    settings
-}
-
-#[test]
-fn t04_auto_with_only_gpt_available_stays_on_gpt() {
-    let target = gpt_only_available()
-        .resolve_target(&ModelChoice::Auto, Some(ImageVendor::Gpt))
-        .expect("解析自动目标");
-    assert_eq!(target.vendor, ImageVendor::Gpt);
-    assert_eq!(target.model, "gpt-image-2.6-flare");
-    assert_eq!(target.selection, ModelSelection::Auto);
-}
-
-#[test]
-fn t05_auto_with_only_minimax_available_falls_to_minimax() {
-    let mut settings = both_available();
-    settings.vendors.gpt.api_key = String::new();
-    let target = settings
-        .resolve_target(&ModelChoice::Auto, None)
-        .expect("解析自动目标");
-    assert_eq!(target.vendor, ImageVendor::Minimax);
-    assert_eq!(target.model, "MiniMax-H3-Image");
-    assert_eq!(target.selection, ModelSelection::Auto);
-}
-
-#[test]
-fn t06_auto_with_no_available_vendor_fails_with_missing_config() {
-    let mut settings = both_available();
-    settings.vendors.gpt.api_key = String::new();
-    settings.vendors.minimax.api_key = String::new();
-    let error = settings
-        .resolve_target(&ModelChoice::Auto, None)
-        .expect_err("两家均不可用应报错");
-    assert!(matches!(error, ImageCreateError::MissingConfig(_)));
-    assert!(error.to_string().contains("尚未配置任何可用的图片生成端点"));
-}
-
-#[test]
-fn t07_explicit_gpt_model_ignores_last_vendor() {
-    for last in [None, Some(ImageVendor::Minimax)] {
-        let target = both_available()
-            .resolve_target(
-                &ModelChoice::Explicit("gpt-image-2.6-flare".to_string()),
-                last,
-            )
-            .expect("解析显式目标");
-        assert_eq!(target.vendor, ImageVendor::Gpt);
-        assert_eq!(target.model, "gpt-image-2.6-flare");
-        assert_eq!(target.selection, ModelSelection::Explicit);
-    }
-}
-
-#[test]
-fn t08_explicit_unknown_model_is_invalid_param() {
+fn t03_model_in_no_configured_catalog_is_invalid_param() {
     let error = both_available()
-        .resolve_target(&ModelChoice::Explicit("no-such-model".to_string()), None)
+        .resolve_target("no-such-model")
         .expect_err("未知模型应报参数错误");
     assert!(matches!(error, ImageCreateError::InvalidParam(_)));
     assert!(error.to_string().contains("no-such-model"));
 }
 
+/// T-04：id 在未配置凭据的家清单里 → 配置缺失，信息含该家名。
 #[test]
-fn t09_explicit_minimax_model_without_credentials_is_missing_config() {
-    // MiniMax 无凭据：配置缺失，信息含「MiniMax」，不落到 GPT。
-    let error = gpt_only_available()
-        .resolve_target(&ModelChoice::Explicit("MiniMax-H3-Image".to_string()), None)
-        .expect_err("显式指定未配置的家应报配置缺失");
+fn t04_model_in_unconfigured_vendor_is_missing_config() {
+    let mut settings = both_available();
+    settings.vendors.minimax.api_key = String::new();
+    let error = settings
+        .resolve_target("MiniMax-H3-Image")
+        .expect_err("未配置的家应报配置缺失");
     assert!(matches!(error, ImageCreateError::MissingConfig(_)));
     assert!(error.to_string().contains("MiniMax"));
-
-    // 有凭据时同一 id 解析到 MiniMax 本家。
-    let target = both_available()
-        .resolve_target(&ModelChoice::Explicit("MiniMax-H3-Image".to_string()), None)
-        .expect("解析显式目标");
-    assert_eq!(target.vendor, ImageVendor::Minimax);
 }
 
+/// T-05：该家清单为空 → 该家不可用，其模型解析不到；
+/// 另一家即便可用也绝不降级 → 参数错误。
 #[test]
-fn t10_auto_falls_back_to_first_catalog_entry_when_default_model_absent() {
+fn t05_empty_catalog_makes_vendor_unavailable_without_fallback() {
     let mut settings = both_available();
-    settings.vendors.gpt.models = vec!["m-second".to_string(), "gpt-image-2.6-flare".to_string()];
-
-    // default_model 在清单内 → 取它。
-    settings.vendors.gpt.default_model = "gpt-image-2.6-flare".to_string();
-    let target = settings
-        .resolve_target(&ModelChoice::Auto, None)
-        .expect("解析自动目标");
-    assert_eq!(target.model, "gpt-image-2.6-flare");
-
-    // default_model 不在清单内（手改文件导致）→ 取清单首项。
-    settings.vendors.gpt.default_model = "not-in-list".to_string();
-    let target = settings
-        .resolve_target(&ModelChoice::Auto, None)
-        .expect("解析自动目标");
-    assert_eq!(target.model, "m-second");
+    settings.vendors.gpt.models = Vec::new();
+    // GPT 仍持有凭据但清单为空；MiniMax 可用但清单里没有该 id。
+    let error = settings
+        .resolve_target("gpt-image-2.6-flare")
+        .expect_err("清单为空应报参数错误");
+    assert!(matches!(error, ImageCreateError::InvalidParam(_)));
+    assert!(error.to_string().contains("gpt-image-2.6-flare"));
 }
 
+/// T-06：id 与清单项仅大小写不同 → 逐字符相等判定不在清单 → 参数错误。
 #[test]
-fn t11_explicit_model_match_is_case_sensitive() {
-    // 逐字符相等：仅大小写不同即视为不在清单。
+fn t06_model_match_is_case_sensitive() {
     let error = both_available()
-        .resolve_target(
-            &ModelChoice::Explicit("GPT-IMAGE-2.6-FLARE".to_string()),
-            None,
-        )
+        .resolve_target("GPT-IMAGE-2.6-FLARE")
         .expect_err("大小写不同应报参数错误");
     assert!(matches!(error, ImageCreateError::InvalidParam(_)));
+    assert!(error.to_string().contains("GPT-IMAGE-2.6-FLARE"));
 }
 
+/// T-07：两家都未配置 → 配置缺失（信息含归属家名），绝不回落到任何一家。
 #[test]
-fn t12_model_choice_parse_treats_blank_and_auto_as_auto() {
-    assert_eq!(ModelChoice::parse(None), ModelChoice::Auto);
-    assert_eq!(ModelChoice::parse(Some("")), ModelChoice::Auto);
-    assert_eq!(ModelChoice::parse(Some("   ")), ModelChoice::Auto);
-    assert_eq!(ModelChoice::parse(Some("auto")), ModelChoice::Auto);
-    assert_eq!(ModelChoice::parse(Some("AUTO")), ModelChoice::Auto);
-    assert_eq!(
-        ModelChoice::parse(Some(" x ")),
-        ModelChoice::Explicit("x".to_string())
-    );
-    assert_eq!(
-        ModelChoice::parse(Some("MiniMax-H3-Image")),
-        ModelChoice::Explicit("MiniMax-H3-Image".to_string())
-    );
+fn t07_no_vendor_configured_reports_missing_config() {
+    let mut settings = both_available();
+    settings.vendors.gpt.api_key = String::new();
+    settings.vendors.minimax.api_key = String::new();
+    let error = settings
+        .resolve_target("gpt-image-2.6-flare")
+        .expect_err("两家均未配置应报错");
+    assert!(matches!(error, ImageCreateError::MissingConfig(_)));
+    assert!(error.to_string().contains("GPT"));
+}
+
+/// T-08：id 在清单内但该家 base_url 为空（api_key 有）→ 配置缺失。
+#[test]
+fn t08_missing_base_url_with_api_key_is_missing_config() {
+    let mut settings = both_available();
+    settings.vendors.gpt.base_url = String::new();
+    let error = settings
+        .resolve_target("gpt-image-2.6-flare")
+        .expect_err("base_url 缺失应报配置缺失");
+    assert!(matches!(error, ImageCreateError::MissingConfig(_)));
+    assert!(error.to_string().contains("GPT"));
 }
 
 #[test]
@@ -920,8 +747,6 @@ fn image_vendor_serde_uses_lowercase_names() {
         serde_json::from_str::<ImageVendor>("\"minimax\"").unwrap(),
         ImageVendor::Minimax
     );
-    assert_eq!(ImageVendor::Gpt.other(), ImageVendor::Minimax);
-    assert_eq!(ImageVendor::Minimax.other(), ImageVendor::Gpt);
     assert_eq!(ImageVendor::Gpt.label(), "GPT");
     assert_eq!(ImageVendor::Minimax.label(), "MiniMax");
 }

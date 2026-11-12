@@ -17,7 +17,7 @@ use crate::product::image_create::engine::GenerateCommand;
 use crate::product::image_create::image_files;
 use crate::product::image_create::models::{
     CreateSessionRequest, ImageBackground, ImageCreateError, ImageOutputFormat, ImageQuality,
-    ImageSize, IterationEvent, ModelChoice, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
+    ImageSize, IterationEvent, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
     SettingsStoreApi, SettingsUpdateRequest, validate_session_id,
 };
 use crate::product::image_create::{ImageCreateEngine, SessionStore, SettingsStore};
@@ -217,13 +217,12 @@ pub async fn generate_image(
     let id = checked_session_id(id)?;
     let command = parse_generate_multipart(multipart).await?;
     let result = engine(&state)?.generate(&id, command).await?;
-    // 4 个字段必有（本次结果所属的家 / 模型 / 选型方式 / 参考图来源）。
+    // 3 个字段必有（本次结果所属的家 / 模型 / 参考图来源）。
     Ok(Json(json!({
         "image_id": result.image_id,
         "media_type": result.media_type,
         "vendor": result.vendor,
         "model": result.model,
-        "selection": result.selection,
         "reference_source": result.reference_source,
     })))
 }
@@ -274,7 +273,7 @@ async fn parse_generate_multipart(mut multipart: Multipart) -> HandlerResult<Gen
             "output_format" => {
                 output_format = parse_enum("output_format", &field_text(field).await?)?
             }
-            // model：缺省/空白 = auto；否则原样（仅去首尾空白）作为模型 id。
+            // model：手动选定的模型 id，仅去首尾空白（必填校验随后补齐）。
             "model" => model = Some(field_text(field).await?),
             "use_previous" => {
                 use_previous = Some(parse_use_previous(&field_text(field).await?)?);
@@ -293,7 +292,7 @@ async fn parse_generate_multipart(mut multipart: Multipart) -> HandlerResult<Gen
             background,
             output_format,
         },
-        model: ModelChoice::parse(model.as_deref()),
+        model: model.unwrap_or_default().trim().to_string(),
         use_previous: use_previous.unwrap_or(false),
         reference,
     })

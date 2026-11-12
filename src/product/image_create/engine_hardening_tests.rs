@@ -16,7 +16,7 @@ async fn h3_invalid_base_url_is_rejected_as_invalid_config_without_client_call()
     let engine = engine(store, settings, client.clone(), None);
 
     let error = engine
-        .generate("session", auto_command(request("draw"), false, None))
+        .generate("session", gpt_command(request("draw"), false, None))
         .await
         .expect_err("非法 base_url 必须在出站前失败");
 
@@ -37,7 +37,7 @@ async fn h5_prompt_over_32000_chars_is_rejected_without_client_call() {
 
     let error = generate_err(
         &engine,
-        auto_command(request(&"长".repeat(32001)), false, None),
+        gpt_command(request(&"长".repeat(32001)), false, None),
     )
     .await;
 
@@ -57,7 +57,7 @@ async fn h5_prompt_of_exactly_32000_chars_passes() {
     let result = engine
         .generate(
             "session",
-            auto_command(request(&"画".repeat(32000)), false, None),
+            gpt_command(request(&"画".repeat(32000)), false, None),
         )
         .await
         .expect("恰好 32000 字符的 prompt 应通过");

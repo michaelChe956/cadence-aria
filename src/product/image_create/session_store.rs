@@ -509,7 +509,6 @@ mod tests {
             b64: b64.map(str::to_string),
             vendor: None,
             model: None,
-            selection: None,
             reference_source: None,
             ts: Utc::now(),
         }

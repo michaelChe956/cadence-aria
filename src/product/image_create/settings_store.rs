@@ -73,7 +73,6 @@ pub fn to_masked(settings: &ImageCreateSettings) -> MaskedSettings {
         base_url: settings.base_url.clone(),
         api_key_masked: mask_api_key(&settings.api_key),
         models: settings.models.clone(),
-        default_model: settings.default_model.clone(),
         recommended_models: vendor.recommended_models(),
         available: settings.is_available(),
     };
@@ -86,7 +85,7 @@ pub fn to_masked(settings: &ImageCreateSettings) -> MaskedSettings {
     }
 }
 
-/// 逐家合并：None 一律保留旧值；base_url / models 各项 / default_model 去首尾空白；
+/// 逐家合并：None 一律保留旧值；base_url / models 各项去首尾空白；
 /// models 去空项。签名不可失败。
 pub fn apply_update(current: &ImageCreateSettings, update: SettingsUpdate) -> ImageCreateSettings {
     let merge = |current: &VendorSettings, update: Option<&VendorUpdate>| -> VendorSettings {
@@ -115,11 +114,6 @@ pub fn apply_update(current: &ImageCreateSettings, update: SettingsUpdate) -> Im
                         .collect()
                 })
                 .unwrap_or_else(|| current.models.clone()),
-            default_model: update
-                .default_model
-                .as_ref()
-                .map(|value| value.trim().to_string())
-                .unwrap_or_else(|| current.default_model.clone()),
         }
     };
 
@@ -146,7 +140,6 @@ pub fn from_request(req: SettingsUpdateRequest) -> SettingsUpdate {
                 ApiKeyAction::Replace => ApiKeyUpdate::Replace(req.api_key.unwrap_or_default()),
             },
             models: req.models,
-            default_model: req.default_model,
         })
     };
 
@@ -211,7 +204,6 @@ mod tests {
             base_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-original1234".to_string(),
             models: vec!["gpt-image-2.6".to_string()],
-            default_model: "gpt-image-2.6".to_string(),
         }
     }
 
@@ -279,7 +271,6 @@ mod tests {
                     api_key_action: ApiKeyAction::Replace,
                     api_key: Some("sk-replacement".into()),
                     models: None,
-                    default_model: None,
                 }),
                 minimax: None,
             }),
@@ -301,7 +292,6 @@ mod tests {
                     api_key_action: ApiKeyAction::Replace,
                     api_key: None,
                     models: None,
-                    default_model: None,
                 }),
             }),
             defaults: None,

@@ -119,7 +119,6 @@ async fn image_endpoint_serves_owned_image_with_cache_headers() {
                 b64: None,
                 vendor: None,
                 model: None,
-                selection: None,
                 reference_source: None,
                 ts: Utc::now(),
             },
@@ -190,7 +189,6 @@ async fn image_endpoint_rejects_foreign_and_invalid_ids() {
                 b64: None,
                 vendor: None,
                 model: None,
-                selection: None,
                 reference_source: None,
                 ts: Utc::now(),
             },
@@ -278,7 +276,6 @@ async fn image_endpoint_serves_legacy_b64_without_file() {
                 b64: Some("bGVnYWN5LWltYWdl".to_string()),
                 vendor: None,
                 model: None,
-                selection: None,
                 reference_source: None,
                 ts: Utc::now(),
             },
@@ -466,8 +463,8 @@ async fn settings_put_with_duplicate_model_across_vendors_is_rejected_without_pe
         "PUT",
         json!({
             "vendors": {
-                "gpt": {"models": ["dup-model"], "default_model": "dup-model"},
-                "minimax": {"models": ["dup-model"], "default_model": "dup-model"}
+                "gpt": {"models": ["dup-model"]},
+                "minimax": {"models": ["dup-model"]}
             }
         }),
     )

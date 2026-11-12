@@ -15,8 +15,8 @@ use crate::cross_cutting::provider_registry::ProviderRegistry;
 
 use super::models::{
     ChatMessage, DefaultParams, GenerationResult, ImageCreateError, ImageCreateSettings,
-    ImageVendor, IterationEvent, ModelChoice, PromptBlock, ReferenceSource, ResolvedTarget,
-    RunKind, SessionEvent, SessionRecord, SessionStatus, SessionStoreApi, SettingsStoreApi,
+    ImageVendor, IterationEvent, PromptBlock, ReferenceSource, ResolvedTarget, RunKind,
+    SessionEvent, SessionRecord, SessionStatus, SessionStoreApi, SettingsStoreApi,
 };
 use super::prompt_iteration::PromptIterationEngine;
 use super::run_registry::ImageCreateRunRegistry;
@@ -30,11 +30,12 @@ struct PendingResult {
     result: GenerationResult,
 }
 
-/// 一次图片生成的命令（设计 5.5）：请求参数、模型选择、是否携带上一张生成图、上传的参考图。
+/// 一次图片生成的命令（设计 5.5）：请求参数、手动选定的模型 id、
+/// 是否携带上一张生成图、上传的参考图。
 #[derive(Debug, Clone)]
 pub struct GenerateCommand {
     pub request: ImageGenRequest,
-    pub model: ModelChoice,
+    pub model: String,
     pub use_previous: bool,
     /// 用户上传的参考图（已过 handler 的内容校验）。
     pub reference: Option<ImageRefImage>,
@@ -341,13 +342,10 @@ impl ImageCreateEngine {
             )));
         }
         // 末项在 generate() 的 flush_pending() 之后重新读取（D7）：
-        // 写图成功但引用待补的结果已进入序列；旧记录无 vendor 视为 GPT（D5）。
+        // 写图成功但引用待补的结果已进入序列，上一张图以它为准。
         let record = self.active_record(session_id).await?;
         let last = record.generation_results.last().cloned();
-        let last_vendor = last
-            .as_ref()
-            .map(|result| result.vendor.unwrap_or(ImageVendor::Gpt));
-        let target = settings.resolve_target(&command.model, last_vendor)?;
+        let target = settings.resolve_target(&command.model)?;
         // H3：出站前对本次目标家的 base_url 再校验一次（与保存时同规则）。手改设置
         // 文件后的非法值在此拦下：InvalidConfig → HTTP 400，且不调用客户端；
         // 客户端内部的同一校验保留，作为二次防线（D12.1）。
@@ -468,7 +466,6 @@ impl ImageCreateEngine {
                     b64: None,
                     vendor: Some(target.vendor),
                     model: Some(target.model.clone()),
-                    selection: Some(target.selection),
                     reference_source: Some(reference_source),
                     ts: Utc::now(),
                 };

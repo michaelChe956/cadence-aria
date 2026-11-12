@@ -18,11 +18,10 @@ use crate::cross_cutting::streaming_provider::{
     StreamingProviderAdapter, StreamingProviderInput,
 };
 use crate::product::image_create::models::{
-    ApiKeyAction, CreateSessionRequest, DEFAULT_GPT_ROTATION_MODEL, DEFAULT_MINIMAX_ROTATION_MODEL,
-    DeleteLease, ImageBackground, ImageCreateSession, ImageCreateSettings, ImageOutputFormat,
-    ImageQuality, ImageSize, ImageVendor, MaskedSettings, ModelSelection, PresetTemplate,
-    ReferenceSource, ResolvedTarget, SessionSummary, SettingsUpdate, SettingsUpdateRequest,
-    TemplateChoice,
+    ApiKeyAction, CreateSessionRequest, DeleteLease, ImageBackground, ImageCreateSession,
+    ImageCreateSettings, ImageOutputFormat, ImageQuality, ImageSize, ImageVendor, MaskedSettings,
+    PresetTemplate, ReferenceSource, ResolvedTarget, SessionSummary, SettingsUpdate,
+    SettingsUpdateRequest, TemplateChoice,
 };
 use crate::product::models::ProviderName;
 use crate::protocol::contracts::ProviderType;
@@ -320,7 +319,7 @@ fn test_record() -> SessionRecord {
 }
 
 fn valid_settings() -> ImageCreateSettings {
-    // 两家各配一把 key：用于断言轮转与「key 只发往本家」的隔离。
+    // 两家各配一把 key：用于断言「key 只发往本家」的隔离。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = "https://gpt.example.com".to_string();
@@ -365,31 +364,35 @@ fn ok_outcome() -> Result<ImageGenOutcome, ImageClientError> {
     })
 }
 
-fn auto_command(
+const GPT_TEST_MODEL: &str = "gpt-image-2.6";
+const MINIMAX_TEST_MODEL: &str = "MiniMax-H3-Image";
+
+fn model_command(
     req: ImageGenRequest,
+    model: &str,
     use_previous: bool,
     reference: Option<ImageRefImage>,
 ) -> GenerateCommand {
     GenerateCommand {
         request: req,
-        model: ModelChoice::Auto,
+        model: model.to_string(),
         use_previous,
         reference,
     }
 }
 
-fn explicit_command(req: ImageGenRequest, model: &str) -> GenerateCommand {
-    GenerateCommand {
-        request: req,
-        model: ModelChoice::Explicit(model.to_string()),
-        use_previous: false,
-        reference: None,
-    }
+/// 默认命令：手动选 GPT 家清单内的模型。
+fn gpt_command(
+    req: ImageGenRequest,
+    use_previous: bool,
+    reference: Option<ImageRefImage>,
+) -> GenerateCommand {
+    model_command(req, GPT_TEST_MODEL, use_previous, reference)
 }
 
 async fn generate_ok(engine: &ImageCreateEngine, use_previous: bool) -> GenerationResult {
     engine
-        .generate("session", auto_command(request("draw"), use_previous, None))
+        .generate("session", gpt_command(request("draw"), use_previous, None))
         .await
         .expect("generate")
 }
@@ -454,7 +457,6 @@ fn legacy_result(vendor: Option<ImageVendor>) -> GenerationResult {
         b64: None,
         vendor,
         model: None,
-        selection: None,
         reference_source: None,
         ts: Utc::now(),
     }
@@ -463,8 +465,7 @@ fn legacy_result(vendor: Option<ImageVendor>) -> GenerationResult {
 fn resolved_target(vendor: ImageVendor) -> ResolvedTarget {
     ResolvedTarget {
         vendor,
-        model: vendor.recommended_rotation_model().to_string(),
-        selection: ModelSelection::Auto,
+        model: GPT_TEST_MODEL.to_string(),
     }
 }
 
@@ -531,7 +532,7 @@ async fn generate_rejects_missing_config_and_invalid_prompt_without_client_call(
     );
     assert!(matches!(
         missing
-            .generate("session", auto_command(request("draw"), false, None))
+            .generate("session", gpt_command(request("draw"), false, None))
             .await,
         Err(ImageCreateError::MissingConfig(_))
     ));
@@ -539,7 +540,7 @@ async fn generate_rejects_missing_config_and_invalid_prompt_without_client_call(
     let invalid = engine(store, valid_settings(), client.clone(), None);
     assert!(matches!(
         invalid
-            .generate("session", auto_command(request("   "), false, None))
+            .generate("session", gpt_command(request("   "), false, None))
             .await,
         Err(ImageCreateError::InvalidParam(_))
     ));
@@ -561,7 +562,7 @@ async fn generate_routes_text_and_validated_reference_and_persists_success() {
         let result = engine
             .generate(
                 "session",
-                auto_command(request("draw"), false, reference.clone()),
+                gpt_command(request("draw"), false, reference.clone()),
             )
             .await
             .expect("generate");
@@ -679,7 +680,7 @@ async fn generation_write_failure_returns_error_and_is_flushed_on_next_operation
     );
     assert!(matches!(
         engine
-            .generate("session", auto_command(request("draw"), false, None))
+            .generate("session", gpt_command(request("draw"), false, None))
             .await,
         Err(ImageCreateError::Store(_))
     ));
@@ -703,7 +704,7 @@ async fn generation_write_failure_returns_error_and_is_flushed_on_next_operation
 
     assert!(matches!(
         engine
-            .generate("session", auto_command(request("   "), false, None))
+            .generate("session", gpt_command(request("   "), false, None))
             .await,
         Err(ImageCreateError::InvalidParam(_))
     ));
@@ -840,7 +841,7 @@ fn request_types_remain_enum_backed() {
     assert_eq!(req.size, ImageSize::Square);
 }
 
-// ---------- E-01…E-16：双家轮转、携带上一张图、结果记录（设计 7.1 引擎表） ----------
+// ---------- E-02…E-16：手动选模型、key 隔离、携带上一张图、结果记录 ----------
 
 fn engine_with_outcomes(
     outcomes: Vec<Result<ImageGenOutcome, ImageClientError>>,
@@ -865,45 +866,24 @@ fn engine_under_test(
     engine_with_outcomes((0..successes).map(|_| ok_outcome()).collect())
 }
 
-/// E-01：纯自动连续 3 次成功 → 客户端依次收到 GPT、MiniMax、GPT；结果标注相符。
-#[tokio::test]
-async fn e01_auto_rotation_alternates_vendor_per_success() {
-    let (_, client, engine) = engine_under_test(3);
-    let expected = [
-        (ImageVendor::Gpt, DEFAULT_GPT_ROTATION_MODEL),
-        (ImageVendor::Minimax, DEFAULT_MINIMAX_ROTATION_MODEL),
-        (ImageVendor::Gpt, DEFAULT_GPT_ROTATION_MODEL),
-    ];
-    for (index, (vendor, model)) in expected.iter().enumerate() {
-        let result = generate_ok(&engine, false).await;
-        assert_eq!(result.vendor, Some(*vendor), "第 {} 次结果的家", index + 1);
-        assert_eq!(
-            result.model.as_deref(),
-            Some(*model),
-            "第 {} 次结果的模型",
-            index + 1
-        );
-        assert_eq!(result.selection, Some(ModelSelection::Auto));
-    }
-    let vendors: Vec<ImageVendor> = client
-        .targets
-        .lock()
-        .await
-        .iter()
-        .map(|t| t.vendor)
-        .collect();
-    assert_eq!(
-        vendors,
-        vec![ImageVendor::Gpt, ImageVendor::Minimax, ImageVendor::Gpt]
-    );
-}
-
-/// E-02：key 隔离 —— 每次出站目标的 base_url / api_key 属于目标家。
+/// E-02：key 隔离 —— 每次出站目标的 base_url / api_key 属于手动选定的目标家。
 #[tokio::test]
 async fn e02_outbound_target_carries_only_target_vendor_credentials() {
     let (_, client, engine) = engine_under_test(2);
-    generate_ok(&engine, false).await;
-    generate_ok(&engine, false).await;
+    engine
+        .generate(
+            "session",
+            model_command(request("draw"), GPT_TEST_MODEL, false, None),
+        )
+        .await
+        .expect("第 1 次生成");
+    engine
+        .generate(
+            "session",
+            model_command(request("draw"), MINIMAX_TEST_MODEL, false, None),
+        )
+        .await
+        .expect("第 2 次生成");
     let targets = client.targets.lock().await;
     assert_eq!(targets[0].base_url, "https://gpt.example.com");
     assert_eq!(targets[0].api_key, "sk-gpt");
@@ -911,55 +891,25 @@ async fn e02_outbound_target_carries_only_target_vendor_credentials() {
     assert_eq!(targets[1].api_key, "sk-minimax");
 }
 
-/// E-03：失败不消耗轮次 —— 第 2 次失败后第 3 次仍是 MiniMax；失败那次只调用一次。
+/// E-03：失败不重试 —— 失败那次客户端只被调用 1 次，且不落盘成功结果。
 #[tokio::test]
-async fn e03_failed_generation_does_not_advance_rotation() {
+async fn e03_failed_generation_does_not_retry() {
     let (store, client, engine) = engine_with_outcomes(vec![
         ok_outcome(),
         Err(ImageClientError::HttpStatus {
             code: 500,
             body: "boom".to_string(),
         }),
-        ok_outcome(),
     ]);
     generate_ok(&engine, false).await;
-    let error = generate_err(&engine, auto_command(request("draw"), false, None)).await;
+    let error = generate_err(&engine, gpt_command(request("draw"), false, None)).await;
     assert!(matches!(error, ImageCreateError::ImageClient(_)));
     assert_eq!(
         client.calls().await,
         2,
-        "失败那次客户端只被调用 1 次，无重试"
+        "失败那次客户端只被调用 1 次，无重试、不换家"
     );
-    generate_ok(&engine, false).await;
-    assert_eq!(
-        client.last_target().await.vendor,
-        ImageVendor::Minimax,
-        "第 3 次仍是 MiniMax"
-    );
-    assert_eq!(results(&store).await.len(), 2, "失败不落盘成功结果");
-}
-
-/// E-04：显式选 GPT 模型后再自动 → 自动那次轮到 MiniMax。
-#[tokio::test]
-async fn e04_auto_after_explicit_gpt_picks_minimax() {
-    let (_, client, engine) = engine_under_test(2);
-    let command = explicit_command(request("draw"), DEFAULT_GPT_ROTATION_MODEL);
-    let first = engine.generate("session", command).await.expect("显式生成");
-    assert_eq!(first.vendor, Some(ImageVendor::Gpt));
-    assert_eq!(first.selection, Some(ModelSelection::Explicit));
-    let second = generate_ok(&engine, false).await;
-    assert_eq!(second.vendor, Some(ImageVendor::Minimax));
-    assert_eq!(client.last_target().await.vendor, ImageVendor::Minimax);
-}
-
-/// E-05：末项为旧记录（无 vendor 字段）→ 视为 GPT，自动轮转选 MiniMax。
-#[tokio::test]
-async fn e05_legacy_result_without_vendor_counts_as_gpt() {
-    let (store, client, engine) = engine_under_test(1);
-    push_result(&store, legacy_result(None)).await;
-    let result = generate_ok(&engine, false).await;
-    assert_eq!(result.vendor, Some(ImageVendor::Minimax));
-    assert_eq!(client.last_target().await.vendor, ImageVendor::Minimax);
+    assert_eq!(results(&store).await.len(), 1, "失败不落盘成功结果");
 }
 
 /// E-06：use_previous=true 且已有 1 条结果 → reference 字节等于上一张图片文件内容。
@@ -995,7 +945,7 @@ async fn e07_use_previous_without_results_sends_no_reference() {
 async fn e08_uploaded_reference_takes_priority_over_previous() {
     let (_, client, engine) = engine_under_test(2);
     generate_ok(&engine, false).await;
-    let command = auto_command(
+    let command = gpt_command(
         request("draw"),
         true,
         Some(ImageRefImage {
@@ -1036,7 +986,7 @@ async fn e10_missing_previous_image_fails_before_outbound() {
     tokio::fs::remove_file(&file)
         .await
         .expect("删除上一张图文件");
-    let error = generate_err(&engine, auto_command(request("draw"), true, None)).await;
+    let error = generate_err(&engine, gpt_command(request("draw"), true, None)).await;
     assert!(matches!(
         error,
         ImageCreateError::PreviousImageUnavailable(_)
@@ -1077,14 +1027,15 @@ async fn e11_previous_image_falls_back_to_inline_b64() {
 #[tokio::test]
 async fn e12_explicit_model_not_in_catalog_fails_before_outbound() {
     let (_, client, engine) = engine_under_test(1);
-    let command = explicit_command(request("draw"), "no-such-model-anywhere");
+    let command = model_command(request("draw"), "no-such-model-anywhere", false, None);
     let error = generate_err(&engine, command).await;
     assert!(matches!(error, ImageCreateError::InvalidParam(_)));
     assert!(error.to_string().contains("no-such-model-anywhere"));
     assert_eq!(client.calls().await, 0, "出站前失败，客户端零调用");
 }
 
-/// E-13：携带链跨家 —— 第 1 次 GPT，第 2 次自动 + use_previous → MiniMax 且携带第 1 张图。
+/// E-13：携带链跨家 —— 第 1 次选 GPT 模型，第 2 次选 MiniMax 模型 + use_previous
+/// → 第 2 次出站 MiniMax 且携带第 1 张图。
 #[tokio::test]
 async fn e13_previous_image_carries_across_vendor_switch() {
     let (store, client, engine) = engine_under_test(2);
@@ -1092,7 +1043,13 @@ async fn e13_previous_image_carries_across_vendor_switch() {
     let file_bytes = tokio::fs::read(first_image_path(&store, &engine).await)
         .await
         .expect("第 1 张图");
-    let second = generate_ok(&engine, true).await;
+    let second = engine
+        .generate(
+            "session",
+            model_command(request("draw"), MINIMAX_TEST_MODEL, true, None),
+        )
+        .await
+        .expect("第 2 次生成");
     assert_eq!(second.vendor, Some(ImageVendor::Minimax));
     assert_eq!(client.last_target().await.vendor, ImageVendor::Minimax);
     assert_eq!(
@@ -1109,7 +1066,7 @@ async fn e13_previous_image_carries_across_vendor_switch() {
 async fn e14_uploaded_reference_is_not_persisted() {
     let (_, _client, engine) = engine_under_test(1);
     let before = count_image_files(&engine);
-    let command = auto_command(
+    let command = gpt_command(
         request("draw"),
         false,
         Some(ImageRefImage {
@@ -1150,7 +1107,7 @@ async fn e15_previous_image_over_validation_limit_fails_before_outbound() {
     let mut previous = legacy_result(Some(ImageVendor::Gpt));
     previous.image_id = Some(image_id);
     push_result(&store, previous).await;
-    let error = generate_err(&engine, auto_command(request("draw"), true, None)).await;
+    let error = generate_err(&engine, gpt_command(request("draw"), true, None)).await;
     assert!(matches!(
         error,
         ImageCreateError::PreviousImageUnavailable(_)
@@ -1173,12 +1130,16 @@ async fn e16_client_error_is_prefixed_with_vendor_and_model() {
         }),
     ]);
     generate_ok(&engine, false).await;
-    let error = generate_err(&engine, auto_command(request("draw"), false, None)).await;
+    let error = generate_err(
+        &engine,
+        model_command(request("draw"), MINIMAX_TEST_MODEL, false, None),
+    )
+    .await;
     let ImageCreateError::ImageClient(message) = &error else {
         panic!("客户端错误应包装为 ImageClient：{error:?}")
     };
     assert!(
-        message.starts_with(&format!("[MiniMax · {DEFAULT_MINIMAX_ROTATION_MODEL}] ")),
+        message.starts_with(&format!("[MiniMax · {MINIMAX_TEST_MODEL}] ")),
         "前缀缺失：{message}"
     );
     let record = store.record.lock().await;
