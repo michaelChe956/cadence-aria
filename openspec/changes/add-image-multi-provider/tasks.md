@@ -3,6 +3,8 @@
 > 依赖顺序：1 → 2 → 3 严格串行（后端三个工作包共享 `models.rs` / `engine.rs` / `handlers/image_create.rs`，后一个在前一个合入后开始）；4 → 5 → 6 串行，可在方案 5.5、5.8 的接口契约确认后与 2、3 并行；7 最后。每个工作包先写失败测试再写实现，各自可独立提交。
 >
 > **需求变更（2026-11-12）**：用户撤回原需求 3（GPT ⇄ MiniMax 自动轮转）——「你就让用户在已配置并可用的provider里选model id就行，轮转不需要」。下文各条中带「已按 2026-11-12 的需求变更移除」标注的内容不再是验收依据，现行行为见第 8 节与 delta spec。
+>
+> **补充（2026-11-12）**：设置弹窗的模型清单由多行文本框改为复选下拉框、候选项来自连通性探测；单家清单上限由 32 改为 256；参数面板初始选中项改为三级优先规则。下文 5.1、6.1、6.2 等条目中「一行一个」「清单的首个 id」的描述以第 10 节与 delta spec 为准。
 
 ## 1. 图片客户端按供应方构造请求与解析响应
 
@@ -61,7 +63,7 @@
 ## 8. 需求变更：移除自动轮转（2026-11-12）
 
 - [x] 8.1 移除自动轮转：模型改由用户在已配置且可用的供应方清单中手动选择；生成请求的 `model` 必填且不再有保留值；目标解析只返回供应方与模型，所选模型不可用时报错、不换家；结果不再记录选择方式；无可用供应方时生成按钮禁用并提示先配置（已由 Task 16 后端 `25842681`、Task 17 前端 `ef713dea` + `2bfaee26` 落地）
-- [x] 8.2 契约与文档同步：delta spec 删除「双供应方自动轮转」Requirement 并改写相关条目（当时为 7 条 MODIFIED + 7 条 ADDED，76 个 Scenario；现行计数见 9.4）；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
+- [x] 8.2 契约与文档同步：delta spec 删除「双供应方自动轮转」Requirement 并改写相关条目（当时为 7 条 MODIFIED + 7 条 ADDED，76 个 Scenario；现行计数见 10.4）；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
 - [x] 8.3 内置 GPT 推荐清单改为 `gpt-image-2.6-flare` 打头（其余 7 个保持原顺序），使参数面板的初始选中项是 OpenAI 官方 id —— **已完成（后端由 Task 16 落地：`src/product/image_create/models.rs` 的 `DEFAULT_GPT_MODELS` 已调整为 `gpt-image-2.6-flare` 打头；参数面板的初始选中项因此是 OpenAI 官方 id `gpt-image-2.6-flare`）**
 
 ## 9. 补充：供应方连通性探测与 Base URL 填写说明（2026-11-12）
@@ -69,4 +71,11 @@
 - [x] 9.1 契约：`POST /api/image-create/settings/connectivity` 的请求 / 响应形态；两步探测策略（`GET /v1/models` → 故意不含 `prompt` 的 `POST /v1/images/generations`）与各状态的判定、文案；`api_key` 为空时后端改用该供应方已保存的 key，两者皆无 → 400 且不出站；安全边界（与生成出站共用 `validate_base_url`、禁重定向、key 不进结果与日志、不落盘、连接 10s / 总计 30s）；Base URL 只填主机根路径（方案 5.5、5.9、5.11）
 - [x] 9.2 后端：探测实现（`src/cross_cutting/image_client.rs`）与接口（`src/web/handlers/image_create.rs`，路由挂载于 `src/web/app.rs`）；验收：方案 7.4 的 P-01 至 P-10、PH-01 至 PH-06 通过，`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo test --locked` 通过 —— **已完成（控制方独立复验：`cargo fmt --check` 通过、clippy `-D warnings` 零告警、`cargo test --locked` lib 6381 passed / 0 failed、it_web 631 / 0、其余 target 全过；探测用例 14 条先红后绿）**
 - [x] 9.3 前端：探测类型与 API、状态动作、设置弹窗的 Base URL 示例与说明、「测试连通」按钮与内联结果；验收：方案 7.4 的 PF-01 至 PF-07 通过，`cd web && pnpm tsc -b && pnpm vitest run` 通过 —— **已完成（控制方独立复验：`pnpm tsc -b` 零错误、`pnpm vitest run` 282 files / 2949 tests 全通过；前端用例 16 条先红后绿）**
-- [x] 9.4 契约文档同步：方案新增 5.11「连通性探测」并补 5.5、5.7、5.8、5.9、7.3、7.4、8.2、8.3、9、10.3；delta spec 在「网关配置录入与脱敏存储」补 Base URL 只填主机根路径（新增 2 个 Scenario），新增 4 条 ADDED Requirement（「供应方连通性探测」「连通性探测的逐步判定规则」「连通性探测的取值来源与安全边界」「连通性探测的界面交互」，共 18 个 Scenario；拆成 4 条是因为 strict 校验要求单条 Requirement 正文不超过 500 字符）；现为 **7 条 MODIFIED + 11 条 ADDED，96 个 Scenario**；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
+- [x] 9.4 契约文档同步：方案新增 5.11「连通性探测」并补 5.5、5.7、5.8、5.9、7.3、7.4、8.2、8.3、9、10.3；delta spec 在「网关配置录入与脱敏存储」补 Base URL 只填主机根路径（新增 2 个 Scenario），新增 4 条 ADDED Requirement（「供应方连通性探测」「连通性探测的逐步判定规则」「连通性探测的取值来源与安全边界」「连通性探测的界面交互」，共 18 个 Scenario；拆成 4 条是因为 strict 校验要求单条 Requirement 正文不超过 500 字符）；当时为 7 条 MODIFIED + 11 条 ADDED，96 个 Scenario（现行计数见 10.4）；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
+
+## 10. 补充：模型清单以连通性探测结果为来源与复选下拉框（2026-11-12）
+
+- [x] 10.1 契约：探测响应新增 `available_models`（`/v1/models` 一步成功时为网关返回的全部 model id，去重保序；否则为空数组），其余字段语义不变；设置弹窗的模型清单改为复选下拉框——候选池 = 网关模型（网关顺序在前）∪ 草稿清单已有项（追加在后），探测只扩充候选池、不改已有勾选，草稿清单为空时勾选网关全部模型（至多 256 个并提示），跳过已被另一家勾选的 id 并提示，是否刷新以 `available_models` 非空为准、不看 `ok`；可添加自定义 id，网关未列出的项保留并标注；单家清单上限 32 → 256；参数面板初始选中项改为三级优先规则（方案 D1、D2、5.5、5.9、5.11）
+- [ ] 10.2 后端：`ProbeReport` 新增 `available_models`（`src/cross_cutting/image_client.rs`，接口响应随之带出）；`MAX_MODELS_PER_VENDOR` 由 32 改为 256（`src/product/image_create/models.rs`）；验收：方案 7.5 的 PA-01 至 PA-04 与 7.1 的 S-10（以 256 为界）通过，`cargo fmt --check`、`cargo clippy --all-targets --all-features --locked -- -D warnings`、`cargo test --locked` 通过
+- [ ] 10.3 前端：`ConnectivityProbeResult.available_models`；状态层的 `modelPools` 与候选池动作、初始选中项三级规则；新增 `ModelMultiSelect` 与 `ModelListField`；设置弹窗的模型清单由 `textarea` 换成复选下拉框、探测后刷新候选池、「恢复推荐清单」改为并入候选池并勾选；验收：方案 7.5 的 MP / MS / MD 用例通过，`cd web && pnpm tsc -b && pnpm vitest run` 通过
+- [x] 10.4 契约文档同步：方案补 D1（上限 256）、D2（边界说明）、5.5（`available_models`）、5.8、5.9（「设置弹窗的模型清单」与初始选中项三级规则）、5.11（「模型清单以探测结果为来源」）、7.2、7.3，新增 7.5、8.3 的 R8 至 R10、第 9 节 Task 19 行与 10.4；delta spec 改写「模型清单可配置」（候选项来源、上限 256，新增 4 个 Scenario、移出 1 个）、「供应方连通性探测」（`available_models`，新增 1 个 Scenario）、「连通性探测的逐步判定规则」、「连通性探测的界面交互」（新增 1 个 Scenario），新增 2 条 ADDED Requirement（「模型初始选中项」4 个 Scenario、「模型清单以连通性探测结果为来源」11 个 Scenario）；现为 **7 条 MODIFIED + 13 条 ADDED，116 个 Scenario**；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
