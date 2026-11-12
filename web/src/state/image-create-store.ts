@@ -268,18 +268,19 @@ function resolveSelectedModel(
 }
 
 function buildEntries(record: SessionRecord): ImageChatEntry[] {
+  const userMessages = record.messages.filter((message) => message.role === "user");
   const entries: ImageChatEntry[] = record.messages.map<ImageChatEntry>(
     (message) =>
       message.role === "user"
         ? {
-            id: entryId("message"),
+            id: "",
             type: "user_message",
             role: "user",
             content: message.content,
             timestamp: message.ts,
           }
         : {
-            id: entryId("message"),
+            id: "",
             type: "provider_text",
             role: "provider",
             content: message.content,
@@ -287,18 +288,18 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
           },
   );
   entries.push(
-    ...record.prompt_blocks.map<ImageChatEntry>((block) => ({
-      id: entryId("prompt"),
+    ...record.prompt_blocks.map<ImageChatEntry>((block, index) => ({
+      id: "",
       type: "prompt_block",
       role: "provider",
       content: block.content,
       version: block.version,
-      timestamp: record.session.created_at,
+      timestamp: block.ts ?? userMessages[index]?.ts ?? record.session.created_at,
     })),
     ...record.generation_results.map<ImageChatEntry>((result) => {
       if (result.image_id) {
         return {
-          id: entryId("image"),
+          id: "",
           type: "generation_image",
           role: "provider",
           content: result.prompt,
@@ -314,7 +315,7 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
       }
       if (result.legacy_pending) {
         return {
-          id: entryId("event"),
+          id: "",
           type: "system_notice",
           role: "system",
           content: "历史图片正在迁移，请稍后刷新",
@@ -322,7 +323,7 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
         };
       }
       return {
-        id: entryId("error"),
+        id: "",
         type: "generation_error",
         role: "system",
         content: "图片引用缺失",
@@ -330,7 +331,7 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
       };
     }),
     ...record.events.map<ImageChatEntry>((event) => ({
-      id: entryId("event"),
+      id: "",
       type:
         event.kind === "generation_error"
           ? "generation_error"
@@ -346,15 +347,22 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
       (block) => block.content === record.session.current_prompt,
     )
   ) {
-    entries.push({
-      id: entryId("prompt"),
+    entries.splice(record.messages.length + record.prompt_blocks.length, 0, {
+      id: "",
       type: "prompt_block",
       role: "provider",
       content: record.session.current_prompt,
       timestamp: record.session.created_at,
     });
   }
-  return entries;
+  // 初始合并顺序即同时间戳优先级：消息 → 提示词 → 生成结果 → 事件。
+  return entries
+    .map((entry, index) => ({ entry, index, time: Date.parse(entry.timestamp) }))
+    .sort((left, right) => left.time - right.time || left.index - right.index)
+    .map(({ entry }, index) => {
+      entry.id = `history-${record.session.id}-${index}`;
+      return entry;
+    });
 }
 
 function closeActiveSocket() {

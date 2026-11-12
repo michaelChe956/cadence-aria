@@ -111,6 +111,8 @@ export type ImageCreateChatMessage = {
 export type ImageCreatePromptBlock = {
   content: string;
   version: number;
+  /** 提示词块产生时间（ISO）。旧会话记录没有该字段，读出为 undefined。 */
+  ts?: string | null;
 };
 
 /** 会话记录中的生成结果：旧记录没有后 4 个字段。 */
