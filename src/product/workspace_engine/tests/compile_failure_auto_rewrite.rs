@@ -83,7 +83,7 @@ fn author_generate_round(lifecycle: &LifecycleStore, engine: &mut WorkspaceEngin
 /// Round 1 初评已通过（cycle initial_count=1），phase=Approval，终态路由
 /// 已关闭 durable scope；候选编译失败事实已落 durable（auto_rewrite
 /// running，剩余 2）。返回带事件通道的新引擎。
-async fn compile_failure_fixture(
+pub(super) async fn compile_failure_fixture(
     cycle_verification_count: u32,
 ) -> (
     tempfile::TempDir,
@@ -176,7 +176,7 @@ async fn compile_failure_fixture(
     (_tmp, lifecycle, engine, event_rx, cycle_key)
 }
 
-fn drain_engine_events(
+pub(super) fn drain_engine_events(
     event_rx: &mut tokio::sync::mpsc::Receiver<EngineEvent>,
 ) -> Vec<EngineEvent> {
     let mut events = Vec::new();

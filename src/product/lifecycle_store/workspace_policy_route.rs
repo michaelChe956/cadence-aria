@@ -120,6 +120,46 @@ impl LifecycleStore {
             Ok(stored)
         })
     }
+
+    /// 对账回退（Task 3，工作包 3.3/3.4）：把指定 provider-start 键的自动
+    /// 重写扣减幂等退款（`refunded_at` 只写一次）。算法在
+    /// `models::author_rewrite_budget::refund_charge`（L1 纯函数层），此处
+    /// 只做 durable 读改写——与门反馈同一条 session flock（粒度 = 单
+    /// session 记录，同 `compare_and_save_policy_route` 的 CAS 域），不改写
+    /// 历史事实（total_ever 与 refunded 留痕保留）。预算域为 None / 键不
+    /// 存在 / 已退 ⇒ 无事可退，幂等成功（不动 `updated_at`）。
+    pub fn refund_author_rewrite_charge(
+        &self,
+        session_id: &str,
+        provider_start_idempotency_key: &str,
+        refunded_at: String,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        // D1.3b（fix-cascade-deletion plan §0.4）：最外层 scope 准入——在
+        // session flock 外先解析归属再取 scope；锁内回退零变化。
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        let locked_session_path = session_path.clone();
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            with_exclusive_lock(&session_path, move || {
+                let mut session: WorkspaceSessionRecord = read_json(&locked_session_path)?;
+                let Some(budget) = session.author_rewrite_budget.as_mut() else {
+                    // 预算域未建立（老会话）⇒ 无事可退。
+                    return Ok(());
+                };
+                if !crate::product::models::author_rewrite_budget::refund_charge(
+                    budget,
+                    provider_start_idempotency_key,
+                    refunded_at,
+                ) {
+                    // 已退 / 键不存在 ⇒ 幂等：不重复写、不动 updated_at。
+                    return Ok(());
+                }
+                session.updated_at = Utc::now().to_rfc3339();
+                write_json(&locked_session_path, &session)?;
+                Ok(())
+            })
+        })
+    }
 }
 
 /// 读侧 legacy B1 自动重写计数（`auto_rewrites_used`）：读不到 ⇒ 0

@@ -51,6 +51,7 @@ include!("tests/design_reviewer_boundary.rs");
 include!("review/tests_policy_routing.rs");
 mod author_revision_loop;
 mod author_revision_review_routing;
+mod author_rewrite_budget_pool;
 mod b2_p3_trust_compile_facts;
 mod candidate_compile_failure_surface;
 mod candidate_compile_owner_question_regression;

@@ -679,6 +679,12 @@ impl crate::product::workspace_engine::WorkspaceEngine {
     /// 时，durable `auto_rewrite.phase=running` 会永远谎报「正在自动重写」
     /// （现场 2adc5e41 即此形态）——此处对账为 `Stopped`（保留剩余/重复计数），
     /// 并以 Error 事件留下可观测痕迹。
+    ///
+    /// Task 3（工作包 3.3/3.4）：对账同时**回退该次预领扣减**——预领未被
+    /// 消费为 ProviderStarted 且无实际启动观察时按预领键退款（不退就是白占
+    /// 额度）；已启动 ⇒ 不退（真跑过）。回退保留诊断计数（`auto_rewrites_used`
+    /// 不回退）与 Error 事件痕迹、refunded 留痕不删（REQ-WSC-25 尝试序列
+    /// 不回归）。
     pub(crate) async fn reconcile_auto_rewrite_not_delegated(&mut self) {
         use crate::product::models::CandidateAutoRewritePhase;
         let Some(lifecycle) = self.lifecycle_store.clone() else {
@@ -694,6 +700,22 @@ impl crate::product::workspace_engine::WorkspaceEngine {
         };
         if auto_rewrite.phase != CandidateAutoRewritePhase::Running {
             return;
+        }
+        // Task 3（工作包 3.3/3.4）：未委托 ⇒ 回退该次预领扣减（不退就是白占
+        // 额度）。识别判据 = durable 事实（`unconsumed_preclaim_key`）：预领
+        // 未被消费为 ProviderStarted 且无实际启动观察 ⇒ 退；已启动 ⇒ 不退
+        // （真跑过）。回退先于 phase→Stopped 落盘——中途崩溃时 phase 仍
+        // Running，对账重放幂等重入（同键 refund 只写一次），不留悬空扣减。
+        if let Some(key) = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .ok()
+            .and_then(|record| unconsumed_preclaim_key(&record))
+        {
+            let _ = lifecycle.refund_author_rewrite_charge(
+                &self.session.session_id,
+                &key,
+                chrono::Utc::now().to_rfc3339(),
+            );
         }
         auto_rewrite.phase = CandidateAutoRewritePhase::Stopped;
         if lifecycle
@@ -713,6 +735,23 @@ impl crate::product::workspace_engine::WorkspaceEngine {
             })
             .await;
     }
+}
+
+/// 未消费预领键判别（Task 3，durable 事实）：reservation 在场且仍
+/// `Reserved`、且该键无实际启动观察（SG4a 口径：预领占位条目 started=true
+/// 但 provider/started_at 缺席，不构成启动证据）⇒ 返回该键（未真跑，可
+/// 回退）；已 `ProviderStarted` 或有实际启动观察 ⇒ `None`（真跑过，不退）。
+fn unconsumed_preclaim_key(
+    record: &crate::product::models::WorkspaceSessionRecord,
+) -> Option<String> {
+    let reservation = record.repair_reservation.as_ref()?;
+    let key = reservation.provider_start_idempotency_key.as_str();
+    let consumed = reservation.state
+        == crate::product::work_item_plan_policy::RepairReservationState::ProviderStarted
+        || record.provider_start_ledger.iter().any(|entry| {
+            entry.provider_start_idempotency_key == key && entry.is_actual_launch_observation()
+        });
+    (!consumed).then_some(key.to_string())
 }
 
 #[cfg(test)]
