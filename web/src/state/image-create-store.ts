@@ -30,8 +30,7 @@ import {
 import {
   buildEntries,
   insertNoticeBeforeFallback,
-  NO_PROMPT_NOTICE_TEXT,
-  PROMPT_DECLINED_NOTICE_TEXT,
+  promptNoticeText,
   type ImageChatEntry,
 } from "./image-create-entries";
 import {
@@ -299,7 +298,8 @@ function handleIterationEvent(event: IterationEvent) {
   const timestamp = new Date().toISOString();
   if (event.kind === "text" && event.text) {
     // text 事件只在没有 suggested_prompt 时推送：它是模型的 fallback 说明文本。
-    // 折叠展示，避免长说明盖过「本轮未产出 prompt」的提示。
+    // 只有模型明确未产出（拒答）时才折叠：那时说明只是解释，不该盖过提示；
+    // 格式不符时用户需要直接看到内容才知道发生了什么。
     const id = entryId("provider");
     lastFallbackEntryId = id;
     lastFallbackDeclined = event.prompt_declined ?? null;
@@ -308,7 +308,7 @@ function handleIterationEvent(event: IterationEvent) {
       type: "provider_text",
       role: "provider",
       content: event.text,
-      collapsed: true,
+      collapsed: event.prompt_declined === true,
       timestamp,
     });
     return;
@@ -339,25 +339,27 @@ function handleIterationEvent(event: IterationEvent) {
   }
   if (event.kind === "done") {
     useImageCreateStore.setState((state) => {
-      const retainedPrompt = state.params.prompt.trim();
+      // 本轮没产出建议 prompt 就必须提示：哪怕没有上一版、也没有说明文本，
+      // 用户也需要知道这一轮到底发生了什么。
+      const hasPrevious = state.params.prompt.trim() !== "";
       // 模型明确未产出（拒答）与「结构化输出没解析出来」是两种降级，文案不同。
       // done 事件带该字段时以其为准；未带时回落到 fallback 文本携带的标记。
-      const declined =
-        event.prompt_declined ?? lastFallbackDeclined ?? false;
-      const notice: ImageChatEntry[] =
-        !state.lastIterationHadPrompt && retainedPrompt
-          ? [
-              {
-                id: entryId("notice"),
-                type: "system_notice",
-                role: "system",
-                content: declined
-                  ? PROMPT_DECLINED_NOTICE_TEXT
-                  : NO_PROMPT_NOTICE_TEXT,
-                timestamp,
-              },
-            ]
-          : [];
+      const declined = event.prompt_declined ?? lastFallbackDeclined ?? false;
+      const notice: ImageChatEntry[] = !state.lastIterationHadPrompt
+        ? [
+            {
+              id: entryId("notice"),
+              type: "system_notice",
+              role: "system",
+              content: promptNoticeText({
+                declined,
+                hasExplanation: lastFallbackEntryId !== null,
+                hasPrevious,
+              }),
+              timestamp,
+            },
+          ]
+        : [];
       return {
         isBusy: false,
         lastIterationHadPrompt: false,

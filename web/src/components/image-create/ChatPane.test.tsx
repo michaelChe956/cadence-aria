@@ -240,6 +240,7 @@ describe("ChatPane", () => {
           role: "provider",
           content: "这是模型的普通说明",
           timestamp: "2026-08-03T10:00:00Z",
+          collapsed: false,
         },
       ],
     });

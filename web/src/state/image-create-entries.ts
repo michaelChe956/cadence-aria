@@ -70,12 +70,26 @@ export type BusyNotice = ImageChatEntryBase & {
   role: "system";
 };
 
-/** 模型明确未产出（拒答或主动不给）时的用户提示。 */
-export const PROMPT_DECLINED_NOTICE_TEXT =
-  "本轮模型未产出可用 prompt（下方是它给出的说明），已保留上一版";
-
-/** 模型未按结构化契约输出时的用户提示。 */
-export const NO_PROMPT_NOTICE_TEXT = "本轮未产出新的建议 prompt，已保留上一版";
+/**
+ * 模型未产出建议 prompt 时的用户提示文案。
+ *
+ * - declined：模型明确未产出（拒答或主动不给），与「结构化输出没解析出来」区分；
+ * - hasExplanation：本轮有没有可读的说明文本（模型是否给了 fallback 文本）；
+ * - hasPrevious：是否存在保留的上一版 prompt。
+ */
+export function promptNoticeText(options: {
+  declined: boolean;
+  hasExplanation: boolean;
+  hasPrevious: boolean;
+}): string {
+  const { declined, hasExplanation, hasPrevious } = options;
+  const retained = hasPrevious ? "，已保留上一版" : "";
+  if (!declined) {
+    return `本轮未产出新的建议 prompt${retained}`;
+  }
+  const explanation = hasExplanation ? "（下方是它给出的说明）" : "";
+  return `本轮模型未产出可用 prompt${explanation}${retained}`;
+}
 
 /**
  * 把提示插到 fallback 文本之前：提示比长文本更醒目，
