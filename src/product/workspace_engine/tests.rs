@@ -53,6 +53,7 @@ mod author_revision_loop;
 mod author_revision_review_routing;
 mod b2_p3_trust_compile_facts;
 mod candidate_compile_failure_surface;
+mod candidate_compile_owner_question_regression;
 mod compile_failure_auto_rewrite;
 mod contract_autorepair_migration;
 mod conversational_gate;

@@ -40,10 +40,10 @@
 
 ## 6. 一次答完（REQ-CG-09）
 
-- [ ] 6.1 先红：需要 owner 决定的失败 verdict 必须含 `owner_question` + ≥2 `owner_options`，每个选项带后果
-- [ ] 6.2 实现：`compile_failure_surface.rs:143-144` 由 typed 事实生成问句与选项（不交模型自由发挥）
-- [ ] 6.3 先红：已处置事实不再作为 `owner_question` 呈现（复用既有已处置清单）
-- [ ] 6.4 D4 裁决落地：已处置清单 `HumanFindingDispositionKind` 现只有 `Excluded`（`src/product/models/human_gate.rs:143-145`），`deny_unknown_fields`，且 key 必须是 16 位 hex（`human_gate.rs:162`）。因此「不再重复问」可复用清单（key 取 typed 事实的结构指纹，不取措辞），但 owner 的**具体选择**无处存放：新增 `Decided{option_id}` 变体须带 `serde(default)` 兼容并单列测试；若不愿改枚举，则本 change 只承诺「同一未变事实不重复提问」，不承诺「持久化选项内容」
+- [x] 6.1 先红：需要 owner 决定的失败 verdict 必须含 `owner_question` + ≥2 `owner_options`，每个选项带后果（Task 6 核验：`--lib auto_rewrite_verdict_carries_owner_question` 匹配 1/通过 1——问句与 2 个带后果选项全部由 typed witness 生成，不交模型自由发挥；parity change 已交付，零重写）
+- [x] 6.2 实现：`compile_failure_surface.rs:143-144` 由 typed 事实生成问句与选项（不交模型自由发挥）（Task 6 核验：环面 owner 选项 `--lib author_stage_cycle_failure` 匹配 1/通过 1（`structure_parity.rs` 既有用例）；生成面在 `cycle_owner_options` / `auto_rewrite_verdict`，已交付面零改动）
+- [x] 6.3 先红：已处置事实不再作为 `owner_question` 呈现（复用既有已处置清单）（Task 6 钉子：新 `tests/candidate_compile_owner_question_regression.rs` 用例 `answered_fact_not_reasked_as_owner_question`——构造含环 owner_question 的失败面 → 经既有 `record_human_dispositions` 通路写入 `computed_finding_key` → 同一未变事实（同结构指纹）下一轮失败面经会话级裁决不再作为 actionable owner 决定面重复提问；改前即绿（parity 已钉），记为回归护栏，不算新增行为；`--lib candidate_compile_owner_question_regression` 匹配 1/通过 1）
+- [x] 6.4 D4 裁决落地：已处置清单 `HumanFindingDispositionKind` 现只有 `Excluded`（`src/product/models/human_gate.rs:143-145`），`deny_unknown_fields`，且 key 必须是 16 位 hex（`human_gate.rs:162`）。因此「不再重复问」可复用清单（key 取 typed 事实的结构指纹，不取措辞），但 owner 的**具体选择**无处存放：新增 `Decided{option_id}` 变体须带 `serde(default)` 兼容并单列测试；若不愿改枚举，则本 change 只承诺「同一未变事实不重复提问」，不承诺「持久化选项内容」（Task 6：选收窄支——同一未变事实不重复提问已由 6.3 钉子测试承载；`Decided{option_id}` 变体不新增（避免无写入点的死代码）；持久化选项内容不在本 change 承诺范围）
 
 ## 7. prompt 分层瘦身（≈15.5K → ≤8K）
 
