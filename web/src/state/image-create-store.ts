@@ -341,28 +341,34 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
       timestamp: event.ts,
     })),
   );
+  // 初始合并顺序即同时间戳优先级：消息 → 提示词 → 生成结果 → 事件。
+  const ordered = entries
+    .map((entry, index) => ({ entry, index, time: Date.parse(entry.timestamp) }))
+    .sort((left, right) => left.time - right.time || left.index - right.index);
   if (
     record.session.current_prompt &&
     !record.prompt_blocks.some(
       (block) => block.content === record.session.current_prompt,
     )
   ) {
-    entries.splice(record.messages.length + record.prompt_blocks.length, 0, {
-      id: "",
-      type: "prompt_block",
-      role: "provider",
-      content: record.session.current_prompt,
-      timestamp: record.session.created_at,
+    // current_prompt 是当前状态而非历史事件：取最晚时刻并排在时间线末尾。
+    const latest = ordered.at(-1);
+    ordered.push({
+      entry: {
+        id: "",
+        type: "prompt_block",
+        role: "provider",
+        content: record.session.current_prompt,
+        timestamp: latest?.entry.timestamp ?? record.session.created_at,
+      },
+      index: ordered.length,
+      time: latest?.time ?? Date.parse(record.session.created_at),
     });
   }
-  // 初始合并顺序即同时间戳优先级：消息 → 提示词 → 生成结果 → 事件。
-  return entries
-    .map((entry, index) => ({ entry, index, time: Date.parse(entry.timestamp) }))
-    .sort((left, right) => left.time - right.time || left.index - right.index)
-    .map(({ entry }, index) => {
-      entry.id = `history-${record.session.id}-${index}`;
-      return entry;
-    });
+  return ordered.map(({ entry }, index) => {
+    entry.id = `history-${record.session.id}-${index}`;
+    return entry;
+  });
 }
 
 function closeActiveSocket() {

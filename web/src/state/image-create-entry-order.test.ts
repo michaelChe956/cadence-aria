@@ -215,7 +215,7 @@ describe("会话历史按时间交织", () => {
     expect(other.every((entry) => !ids.includes(entry.id))).toBe(true);
   });
 
-  it("仅 current_prompt 保存的旧提示词也按创建时间加入提示词组", async () => {
+  it("仅 current_prompt 保存的提示词作为当前状态排在时间线末尾", async () => {
     const value = record({
       messages: [{ role: "user", content: "晚消息", ts: "2026-11-12T07:00:00Z" }],
       generation_results: [generationResult({ prompt: "创建时的图", ts: CREATED_AT })],
@@ -224,8 +224,21 @@ describe("会话历史按时间交织", () => {
     value.session.current_prompt = "仅当前提示词";
     const entries = await openRecord(value);
     expect(entries.map((entry) => entry.content)).toEqual([
-      "仅当前提示词", "创建时的图", "创建时的事件", "晚消息",
+      "创建时的图", "创建时的事件", "晚消息", "仅当前提示词",
     ]);
+    expect(entries.at(-1)?.timestamp).toBe("2026-11-12T07:00:00Z");
+  });
+
+  it("没有任何其它条目时仅 current_prompt 回退到会话创建时间", async () => {
+    const value = record();
+    value.session.current_prompt = "唯一提示词";
+    const entries = await openRecord(value);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      type: "prompt_block",
+      content: "唯一提示词",
+      timestamp: CREATED_AT,
+    });
   });
 
   it("已有同内容的提示词块时不重复补 current_prompt", async () => {
