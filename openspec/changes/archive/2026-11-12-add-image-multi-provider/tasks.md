@@ -64,8 +64,10 @@
 - [ ] 7.3 手动验证需求：选择模型后请求中的 `model` 与所选一致；同一会话内手动切换 GPT / MiniMax 清单中的模型连续生成三次，第二、三次基于上一张图；仅配置 GPT 的旧配置文件升级后无需重新录入即可生成（原「默认参数下连续三次生成依次为 GPT、MiniMax、GPT」的自动轮转验证项已按 2026-11-12 的需求变更移除） —— **未完成（原因：需要真实可用的 GPT 与 MiniMax 端点做手动验证——选择模型后请求 `model` 与所选一致、同会话手动切换两家模型连续生成且第二、三次基于上一张图、旧配置文件升级后可直接生成；本环境无真实端点凭据，无法执行）**
 - [x] 7.4 在 `CHANGELOG.md` 记录：两项新能力（原第三项「双家自动轮转」已按 2026-11-12 的需求变更移除；Task 18 起「供应方连通性探测」为第三项，见第 9 节，`CHANGELOG.md` 现行小节标题为「三项新能力」）；默认模型由 `gpt-image-2` 变为 `gpt-image-2.6-flare` 及加回方法；新形态配置文件不可被旧版本读取；`input_fidelity` 参数移除
 - [x] 7.5 `openspec validate add-image-multi-provider --strict` 通过
-- [ ] 7.6 归档本变更时同步改写主 spec `openspec/specs/image-create-agent/spec.md` 的 **Purpose 段**：其中「调用 gpt-image-2 网关」的措辞在双供应方下已过时，改为「调用所选供应方的图片端点」；delta 只作用于 Requirements，Purpose 不会被自动同步，必须手工改（评审发现项 4） —— **未完成（原因：归档需用户确认后再执行，不在本次实施范围内；本条为归档时的手工改写动作，须在 `openspec archive` 时一并完成）**
-- [ ] 7.7 归档前逐条复核 delta 的 MODIFIED/ADDED 与主 spec 的对应 Requirement：确认「生成结果按媒体类型直接展示」等被 MODIFIED 的条目在归档后不与「生成结果记录供应方与模型」自相矛盾（评审发现项 1，已在 delta 补 MODIFIED） —— **未完成（原因：本条是归档前的复核步骤，须在 `openspec archive` 时随归档一并执行；本次只做归档准备，未执行归档）**
+- [x] 7.6 归档本变更时同步改写主 spec `openspec/specs/image-create-agent/spec.md` 的 **Purpose 段**：其中「调用 gpt-image-2 网关」的措辞在双供应方下已过时，改为「调用所选供应方的图片端点」；delta 只作用于 Requirements，Purpose 不会被自动同步，必须手工改（评审发现项 4） —— **已完成（2026-11-12 用户确认后执行 `openspec archive add-image-multi-provider -y`，归档为 `2026-11-12-add-image-multi-provider`；主 spec Purpose 已手工改为「确认后由 Aria 后端调用所选供应方的图片端点生成单张图片并展示」）**
+- [x] 7.7 归档前逐条复核 delta 的 MODIFIED/ADDED 与主 spec 的对应 Requirement：确认「生成结果按媒体类型直接展示」等被 MODIFIED 的条目在归档后不与「生成结果记录供应方与模型」自相矛盾（评审发现项 1，已在 delta 补 MODIFIED） —— **已完成（2026-11-12 归档时复核：归档输出为「+ 17 added / ~ 8 modified / - 0 / → 0」，与 delta 的 8 MODIFIED + 17 ADDED 一致；主 spec 归档后为 34 条 Requirement / 178 个 Scenario；逐条核对「生成结果按媒体类型直接展示」已含「会话历史中的生成结果 SHALL 只保存图片引用与非图片元数据（供应方、模型 id、参考图来源）」，与「生成结果记录供应方与模型」互补而非矛盾；全 spec 复查无残留「双家轮转 / 自动轮转」措辞，仅 464 行「不含自动轮转项」为 D15 手动选型的正确表述）**
+
+- [x] 7.8 归档后主 spec 的 Requirement 正文长度复核：归档把 delta 的 MODIFIED 正文整体写入主 spec 后，「图片生成由用户显式触发且参数可配置」（529 字）、「网关配置录入与脱敏存储」（825 字）、「API Key 安全边界与出站目标约束」（585 字）三处超过 openspec 的 500 字符上限，`openspec validate --specs --strict` 出现 1 项失败（基线 main 的 17 条 Requirement 全部合规，故属本次归档引入的回归）。按 openspec 自身的建议「把例子与边界情形移进 Scenario」，将三处正文中已被 Scenario 完整覆盖的示例与重复表述压缩到 454 / 487 / 499 字，**规范语义与 Scenario 一律未改**；主 spec 与本归档的 delta 同步改写。复核结果：主 spec 34 条 Requirement / 178 个 Scenario、归档 delta 25 条 / 155 个 Scenario，**均无超 500 字符项**，`openspec validate --specs --strict` 80 passed / 0 failed。
 
 ## 8. 需求变更：移除自动轮转（2026-11-12）
 
