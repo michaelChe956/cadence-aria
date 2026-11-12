@@ -252,7 +252,22 @@ fn s02_missing_file_yields_builtin_default_catalogs() {
         .iter()
         .map(String::as_str)
         .collect();
-    assert_eq!(gpt, DEFAULT_GPT_MODELS);
+    // 内置 GPT 清单的顺序是契约一部分：逐项断言字面量（与 spec Scenario 一致），
+    // 不与 DEFAULT_GPT_MODELS 常量自比——常量顺序改错时本用例必须红。
+    assert_eq!(gpt.len(), 8, "内置 GPT 清单恰 8 项");
+    assert_eq!(
+        gpt,
+        [
+            "gpt-image-2.6-flare",
+            "gpt-image-2.6",
+            "gpt-image-2.6-flare-2k",
+            "gpt-image-2.6-flare-4k",
+            "gpt-image-2.6-sunburst",
+            "gpt-image-2.6-sunburst-2k",
+            "gpt-image-2.6-sunburst-4k",
+            "gpt-image-2.5",
+        ]
+    );
     assert_eq!(
         settings.vendors.minimax.models,
         default_string_list(DEFAULT_MINIMAX_MODELS)
