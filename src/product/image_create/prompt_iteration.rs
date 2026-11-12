@@ -507,6 +507,37 @@ mod tests {
         PromptIterationEngine::new(Arc::new(registry))
     }
 
+    #[test]
+    fn strips_every_structured_output_block_pair_not_only_the_first() {
+        // 拒答场景：模型在块外说明文字里逐字复读模板，出现两处完整标签对 ⇒
+        // 必须全部剥离；从第二处起残留的标签原文会随 text 事件推给前端并落库。
+        let text = "无法产出。\n<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{\"suggested_prompt\":\"\"}</ARIA_STRUCTURED_OUTPUT>\n原因是隐私政策。\n<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{\"suggested_prompt\":\"\"}</ARIA_STRUCTURED_OUTPUT>\n以上。";
+
+        let stripped = strip_structured_output_block(text);
+
+        assert!(
+            !stripped.contains("<ARIA_STRUCTURED_OUTPUT"),
+            "第二处开始标签残留：{stripped}"
+        );
+        assert!(
+            !stripped.contains("</ARIA_STRUCTURED_OUTPUT"),
+            "第二处结束标签残留：{stripped}"
+        );
+        assert!(stripped.contains("无法产出。"));
+        assert!(stripped.contains("原因是隐私政策。"));
+        assert!(stripped.contains("以上。"));
+    }
+
+    #[test]
+    fn strips_single_structured_output_block_pair_as_before() {
+        // 回归：只有一个配对时行为与原实现一致（剥离一次 + 首尾 trim）。
+        let text = "  说明文字\n<ARIA_STRUCTURED_OUTPUT nonce=\"abcd1234\">{\"a\":1}</ARIA_STRUCTURED_OUTPUT>\n收尾  ";
+
+        let stripped = strip_structured_output_block(text);
+
+        assert_eq!(stripped, "说明文字\n\n收尾");
+    }
+
     #[tokio::test]
     async fn normal_parses_suggested_prompt_and_uses_eight_character_nonce() {
         let provider = Arc::new(ScriptedProvider::new([Script::Complete {
