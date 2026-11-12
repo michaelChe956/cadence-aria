@@ -40,6 +40,25 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, ProductStoreErro
 }
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductStoreError> {
+    write_json_impl(path, value, false)
+}
+
+/// 与 [`write_json`] 相同的原子写流程，但 unix 下临时文件在**创建时**即 0600：
+/// 明文密钥等敏感内容从写入到 rename 全程属主可读写，不存在 0644 暴露窗口
+/// （即使进程在 rename 之后、任何后续 chmod 之前崩溃，落盘文件也已是 0600）。
+/// Windows 无 POSIX 权限位，`mode` 不生效，行为与 [`write_json`] 一致。
+pub fn write_json_owner_only<T: Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<(), ProductStoreError> {
+    write_json_impl(path, value, true)
+}
+
+fn write_json_impl<T: Serialize>(
+    path: &Path,
+    value: &T,
+    owner_only: bool,
+) -> Result<(), ProductStoreError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -49,13 +68,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductSto
     }
 
     let temp_path = temp_path_for(path);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
-        .map_err(|error| {
-            ProductStoreError::Io(format!("create {}: {error}", temp_path.display()))
-        })?;
+    let mut file = open_temp_file(&temp_path, owner_only)?;
 
     serde_json::to_writer_pretty(&mut file, value).map_err(|error| {
         ProductStoreError::Json(format!(
@@ -72,6 +85,27 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ProductSto
     drop(file);
 
     rename_temp_file(&temp_path, path)
+}
+
+fn open_temp_file(temp_path: &Path, owner_only: bool) -> Result<std::fs::File, ProductStoreError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        if owner_only {
+            use std::os::unix::fs::OpenOptionsExt;
+            // create_new + mode(0600)：权限位随 open(2) 创建一次生效，内容写入前即收紧。
+            options.mode(0o600);
+        }
+    }
+    // Windows 等平台无 POSIX 权限位，owner_only 不适用（由调用方按需另行处理）。
+    #[cfg(not(unix))]
+    {
+        let _ = owner_only;
+    }
+    options.open(temp_path).map_err(|error| {
+        ProductStoreError::Io(format!("create {}: {error}", temp_path.display()))
+    })
 }
 
 fn temp_path_for(path: &Path) -> PathBuf {
@@ -148,4 +182,71 @@ pub fn validate_relative_artifact_ref(value: &str) -> Result<(), ProductStoreErr
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// 恒定序列化失败的探针值：让 serde_json 在临时文件创建之后、写入中途报错。
+    /// （不能依赖 f64::NAN：当前 serde_json 版本会把它序列化为 null 并成功返回。）
+    struct FailSerialize;
+
+    impl serde::Serialize for FailSerialize {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("simulated mid-write failure"))
+        }
+    }
+
+    #[test]
+    fn owner_only_temp_file_is_created_with_mode_0600() {
+        // 观测手段：序列化在临时文件创建之后失败并提前返回（此路径不清理临时文件）
+        // ⇒ 可直接读取留在磁盘上的临时文件的权限位，断言「创建即 0600」：
+        // 明文 key 在写入期间不存在 0644 暴露窗口。
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("secret.json");
+
+        let result = write_json_owner_only(&target, &FailSerialize);
+
+        assert!(result.is_err(), "序列化必须失败以留下临时文件供观测");
+        let temp_path = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "tmp"))
+            .expect("失败的 owner-only 写入应把临时文件留在目标目录");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&temp_path)
+                .expect("temp metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "owner-only 临时文件必须在创建时即 0600");
+        }
+    }
+
+    #[test]
+    fn owner_only_write_persists_target_with_mode_0600() {
+        // 端到端：owner-only 写成功后目标文件为 0600（rename 保留临时文件权限位，
+        // 目标从落盘那一刻起就不存在 0644 窗口）。
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("secret.json");
+
+        write_json_owner_only(&target, &serde_json::json!({"api_key": "sk-plain"}))
+            .expect("owner-only write");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target)
+                .expect("target metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "owner-only 写出的目标文件必须为 0600");
+        }
+    }
 }
