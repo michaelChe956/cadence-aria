@@ -767,7 +767,7 @@ impl crate::product::workspace_engine::WorkspaceEngine {
 /// `Reserved`、且该键无实际启动观察（SG4a 口径：预领占位条目 started=true
 /// 但 provider/started_at 缺席，不构成启动证据）⇒ 返回该键（未真跑，可
 /// 回退）；已 `ProviderStarted` 或有实际启动观察 ⇒ `None`（真跑过，不退）。
-pub(crate) fn unconsumed_preclaim_key(
+pub(super) fn unconsumed_preclaim_key(
     record: &crate::product::models::WorkspaceSessionRecord,
 ) -> Option<String> {
     let reservation = record.repair_reservation.as_ref()?;

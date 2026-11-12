@@ -236,12 +236,24 @@ pub fn author_rewrite_balance(
     record: &WorkspaceSessionRecord,
     total: u32,
 ) -> Option<u32> {
+    author_rewrite_balance_from_record(record, legacy_b1_used(Some(store), &record.id), total)
+}
+
+/// Task 4 评审 Minor-4：余额组装的**单一入口**——从「记录 + 遗留计数」组装
+/// `AuthorRewriteBudgetInputs`。`author_rewrite_balance` 与
+/// `platform_gate_carried_budget` 共用本函数 ⇒ 仓内**不再存在第二份**余额
+/// 算术副本（此前 `platform_gate_carried_budget` 内联重组装，有漂移风险）。
+pub fn author_rewrite_balance_from_record(
+    record: &WorkspaceSessionRecord,
+    legacy_auto_rewrites_used: u32,
+    total: u32,
+) -> Option<u32> {
     crate::product::models::author_rewrite_budget::available_author_rewrites(
         &crate::product::models::author_rewrite_budget::AuthorRewriteBudgetInputs {
             total,
             human_gate_snapshot: record.human_gate_snapshot.as_ref(),
             author_rewrite_budget: record.author_rewrite_budget.as_ref(),
-            legacy_auto_rewrites_used: legacy_b1_used(Some(store), &record.id),
+            legacy_auto_rewrites_used,
         },
     )
 }

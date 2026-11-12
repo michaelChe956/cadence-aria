@@ -131,14 +131,12 @@ pub(super) fn platform_gate_carried_budget(
     if !is_platform_compile_failure_round(&snapshot.findings) {
         return expected.author_rewrite_budget.clone();
     }
-    let balance = crate::product::models::author_rewrite_budget::available_author_rewrites(
-        &crate::product::models::author_rewrite_budget::AuthorRewriteBudgetInputs {
-            total: max_auto_rewrites(),
-            human_gate_snapshot: expected.human_gate_snapshot.as_ref(),
-            author_rewrite_budget: expected.author_rewrite_budget.as_ref(),
-            legacy_auto_rewrites_used: legacy_used,
-        },
-    );
+    let balance =
+        crate::product::lifecycle_store::workspace_policy_route::author_rewrite_balance_from_record(
+            expected,
+            legacy_used,
+            max_auto_rewrites(),
+        );
     if balance != Some(snapshot.manual_repairs_remaining) {
         return expected.author_rewrite_budget.clone();
     }
