@@ -1,5 +1,7 @@
 import { ApiRequestError } from "./client";
 import type {
+  ConnectivityProbeRequest,
+  ConnectivityProbeResult,
   CreateSessionRequest,
   GenerateImageRequest,
   ImageCreateSession,
@@ -102,6 +104,22 @@ export function updateImageCreateSettings(
     method: "PUT",
     body: JSON.stringify(request),
   });
+}
+
+/**
+ * 连通性探测：不生成图片、不计费，只验证「通不通 / key 有效吗 / 网关支持哪些模型 id」。
+ * 探测用草稿值（用户当前在弹窗里填的内容），与已保存设置无关。
+ */
+export function testImageVendorConnectivity(
+  request: ConnectivityProbeRequest,
+): Promise<ConnectivityProbeResult> {
+  return requestJson<ConnectivityProbeResult>(
+    `${API_ROOT}/settings/connectivity`,
+    {
+      method: "POST",
+      body: JSON.stringify(request),
+    },
+  );
 }
 
 export async function generateImage(

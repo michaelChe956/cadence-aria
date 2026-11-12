@@ -6,6 +6,7 @@ import {
   getImageCreateSettings,
   imageUrl,
   listImageCreateSessions,
+  testImageVendorConnectivity,
   updateImageCreateSettings,
 } from "./image-create";
 
@@ -130,6 +131,78 @@ describe("image create api", () => {
       api_key_action: "retain",
     });
     expect(vendors.minimax).toEqual({ api_key_action: "clear" });
+  });
+
+  it("posts the connectivity probe to the settings connectivity endpoint", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (
+        String(input) === "/api/image-create/settings/connectivity" &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({
+          vendor: "gpt",
+          ok: true,
+          message: "连通性正常",
+          steps: [
+            {
+              key: "models",
+              label: "模型列表 /v1/models",
+              status: "ok",
+              detail: "网关返回 3 个模型",
+            },
+            {
+              key: "generations",
+              label: "图片端点 /v1/images/generations",
+              status: "ok",
+              detail: "图片端点连通且鉴权通过（缺少 prompt 属预期，不会计费）",
+            },
+          ],
+          missing_models: [],
+          duration_ms: 12,
+        });
+      }
+      return jsonResponse({ code: "not_found", message: "未找到" }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await testImageVendorConnectivity({
+      vendor: "gpt",
+      base_url: "https://api.openai.com",
+      api_key: "",
+      models: ["gpt-image-2.6"],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/image-create/settings/connectivity",
+    );
+    const init = fetchMock.mock.calls[0][1];
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({
+      vendor: "gpt",
+      base_url: "https://api.openai.com",
+      api_key: "",
+      models: ["gpt-image-2.6"],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.steps).toHaveLength(2);
+    expect(result.missing_models).toEqual([]);
+  });
+
+  it("surfaces a rejected connectivity probe as an api error", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ code: "invalid_base_url", message: "base_url 无效" }, 400),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      testImageVendorConnectivity({
+        vendor: "minimax",
+        base_url: "not-a-url",
+        api_key: "sk-x",
+        models: [],
+      }),
+    ).rejects.toThrow("base_url 无效");
   });
 
   it("sends generate as FormData without overriding its multipart boundary", async () => {

@@ -1,8 +1,11 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { MaskedSettings } from "../../api/types/image-create";
-import { useImageCreateStore } from "../../state/image-create-store";
+import type { ImageVendor, MaskedSettings } from "../../api/types/image-create";
+import {
+  useImageCreateStore,
+  type ImageVendorConnectivityState,
+} from "../../state/image-create-store";
 import { SettingsDialog } from "./SettingsDialog";
 
 const originalState = useImageCreateStore.getState();
@@ -31,16 +34,28 @@ const settings: MaskedSettings = {
   },
 };
 
-function renderDialog() {
+function renderDialog(
+  connectivity: Partial<Record<ImageVendor, ImageVendorConnectivityState>> = {},
+) {
   const loadSettings = vi.fn(async () => {
     useImageCreateStore.setState({ settings });
   });
   const saveSettings = vi.fn().mockResolvedValue(undefined);
-  useImageCreateStore.setState({ loadSettings, saveSettings });
+  const testVendorConnectivity = vi.fn().mockResolvedValue(undefined);
+  useImageCreateStore.setState({
+    loadSettings,
+    saveSettings,
+    testVendorConnectivity,
+    connectivity: {
+      gpt: { phase: "idle", result: null, error: null },
+      minimax: { phase: "idle", result: null, error: null },
+      ...connectivity,
+    },
+  });
 
   render(<SettingsDialog onClose={vi.fn()} />);
 
-  return { loadSettings, saveSettings };
+  return { loadSettings, saveSettings, testVendorConnectivity };
 }
 
 beforeEach(() => {
@@ -364,5 +379,185 @@ describe("SettingsDialog 视觉与信息层级", () => {
 
     expect(gpt.queryByRole("combobox")).toBeNull();
     expect(gpt.queryByText(/自动轮转/)).toBeNull();
+  });
+});
+
+describe("SettingsDialog Base URL 示例与连通性探测", () => {
+  it("给出各家的 Base URL 示例与「只填主机根路径」的说明", async () => {
+    renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+    const minimax = within(screen.getByRole("region", { name: "MiniMax" }));
+
+    expect(gpt.getByLabelText("GPT base_url")).toHaveAttribute(
+      "placeholder",
+      "https://api.openai.com",
+    );
+    expect(minimax.getByLabelText("MiniMax base_url")).toHaveAttribute(
+      "placeholder",
+      "https://api.minimax.io",
+    );
+    const hint =
+      "只填到主机根路径，不要带 /v1 或 /v1/images；系统会自动拼成 /v1/images/generations。";
+    expect(gpt.getByText(hint)).toBeInTheDocument();
+    expect(minimax.getByText(hint)).toBeInTheDocument();
+  });
+
+  it("测试连通按钮位于 Base URL 附近而不是标题行", async () => {
+    renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const button = gpt.getByRole("button", { name: "测试连通" });
+    const baseUrl = gpt.getByLabelText("GPT base_url");
+    expect(baseUrl.parentElement).toContainElement(button);
+  });
+
+  it("用草稿值（而非已保存值）发起连通性探测", async () => {
+    const user = userEvent.setup();
+    const { testVendorConnectivity } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const baseUrl = gpt.getByLabelText("GPT base_url");
+    await user.clear(baseUrl);
+    await user.type(baseUrl, "https://draft.example.com");
+    const apiKey = gpt.getByLabelText("GPT API Key");
+    await user.clear(apiKey);
+    await user.type(apiKey, "sk-draft-key");
+    const models = gpt.getByLabelText("GPT 模型清单");
+    await user.clear(models);
+    await user.type(models, "gpt-image-2.6-flare");
+
+    await user.click(gpt.getByRole("button", { name: "测试连通" }));
+
+    await waitFor(() => {
+      expect(testVendorConnectivity).toHaveBeenCalledWith("gpt", {
+        baseUrl: "https://draft.example.com",
+        apiKey: "sk-draft-key",
+        models: ["gpt-image-2.6-flare"],
+      });
+    });
+  });
+
+  it("未改动 key 时探测不携带脱敏占位值", async () => {
+    const user = userEvent.setup();
+    const { testVendorConnectivity } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    await user.click(gpt.getByRole("button", { name: "测试连通" }));
+
+    await waitFor(() => {
+      expect(testVendorConnectivity).toHaveBeenCalledWith(
+        "gpt",
+        expect.objectContaining({ apiKey: "" }),
+      );
+    });
+  });
+
+  it("探测进行中按钮禁用并显示进行中态", async () => {
+    renderDialog({
+      gpt: { phase: "testing", result: null, error: null },
+    });
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const button = gpt.getByRole("button", { name: "测试中…" });
+    expect(button).toBeDisabled();
+  });
+
+  it("内联展示探测结果：结论、每一步详情与缺失模型", async () => {
+    renderDialog({
+      gpt: {
+        phase: "settled",
+        error: null,
+        result: {
+          vendor: "gpt",
+          ok: false,
+          message: "连通性异常",
+          steps: [
+            {
+              key: "models",
+              label: "模型列表 /v1/models",
+              status: "ok",
+              detail: "网关返回 3 个模型",
+            },
+            {
+              key: "generations",
+              label: "图片端点 /v1/images/generations",
+              status: "failed",
+              detail: "路径不对：只填到主机根路径",
+            },
+          ],
+          missing_models: ["gpt-image-2.6-flare"],
+          duration_ms: 42,
+        },
+      },
+    });
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    expect(gpt.getByText("连通性异常")).toBeInTheDocument();
+    expect(gpt.getByText("网关返回 3 个模型")).toBeInTheDocument();
+    expect(gpt.getByText(/路径不对：只填到主机根路径/)).toBeInTheDocument();
+    expect(
+      gpt.getByText("网关未列出这些模型：gpt-image-2.6-flare"),
+    ).toBeInTheDocument();
+  });
+
+  it("探测成功时展示连通结论", async () => {
+    renderDialog({
+      minimax: {
+        phase: "settled",
+        error: null,
+        result: {
+          vendor: "minimax",
+          ok: true,
+          message: "连通性正常",
+          steps: [
+            {
+              key: "generations",
+              label: "图片端点 /v1/images/generations",
+              status: "ok",
+              detail: "图片端点连通且鉴权通过（缺少 prompt 属预期，不会计费）",
+            },
+          ],
+          missing_models: [],
+          duration_ms: 8,
+        },
+      },
+    });
+    const minimax = within(
+      await screen.findByRole("region", { name: "MiniMax" }),
+    );
+
+    expect(minimax.getByText("连通性正常")).toBeInTheDocument();
+    expect(minimax.queryByText(/网关未列出这些模型/)).toBeNull();
+  });
+
+  it("界面不回显 API Key 明文", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    const region = await screen.findByRole("region", { name: "GPT" });
+    const gpt = within(region);
+
+    const apiKey = gpt.getByLabelText("GPT API Key");
+    await user.clear(apiKey);
+    await user.type(apiKey, "sk-super-secret");
+    await user.click(gpt.getByRole("button", { name: "测试连通" }));
+
+    await waitFor(() => {
+      expect(gpt.getByText(/保存后将替换当前 key/)).toBeInTheDocument();
+    });
+    expect(region.textContent).not.toContain("sk-super-secret");
+  });
+
+  it("探测失败不阻断保存", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog({
+      gpt: { phase: "settled", result: null, error: "API Key 无效或无权限" },
+    });
+    await screen.findByRole("region", { name: "GPT" });
+
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalled();
+    });
   });
 });

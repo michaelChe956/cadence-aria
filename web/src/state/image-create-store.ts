@@ -8,11 +8,13 @@ import {
   imageCreateChatWebSocketUrl,
   imageUrl,
   listImageCreateSessions,
+  testImageVendorConnectivity,
   updateImageCreateSettings,
 } from "../api/image-create";
 import {
   DEFAULT_IMAGE_PARAMS,
   IMAGE_VENDORS,
+  type ConnectivityProbeResult,
   type GenerateImageRequest,
   type ImageCreateParams,
   type ImageCreateProvider,
@@ -33,6 +35,16 @@ export type ImageCreateConnectionStatus =
   | "connected"
   | "error";
 
+/** 连通性探测阶段：idle 未探测、testing 探测中、settled 已有结论。 */
+export type ImageVendorConnectivityPhase = "idle" | "testing" | "settled";
+
+/** 单家供应方的连通性探测状态。error 与 result 内均不含 API Key 明文。 */
+export type ImageVendorConnectivityState = {
+  phase: ImageVendorConnectivityPhase;
+  result: ConnectivityProbeResult | null;
+  error: string | null;
+};
+
 export type ImageCreateState = {
   sessions: SessionSummary[];
   currentSession: SessionRecord | null;
@@ -40,6 +52,8 @@ export type ImageCreateState = {
   params: ImageCreateParams;
   referenceImage: File | null;
   settings: MaskedSettings | null;
+  /** 各家供应方的连通性探测结果，按家存放。 */
+  connectivity: Record<ImageVendor, ImageVendorConnectivityState>;
   connectionStatus: ImageCreateConnectionStatus;
   isBusy: boolean;
   lastIterationHadPrompt: boolean;
@@ -61,6 +75,14 @@ export type ImageCreateActions = {
   generate: () => Promise<void>;
   loadSettings: () => Promise<void>;
   saveSettings: (request: SettingsUpdateRequest) => Promise<void>;
+  /**
+   * 探测某家供应方的连通性：只发探测请求，不生成图片、不计费。
+   * 入参是弹窗里的草稿值（base_url / key / 模型清单），与已保存设置无关。
+   */
+  testVendorConnectivity: (
+    vendor: ImageVendor,
+    input: { baseUrl: string; apiKey: string; models: string[] },
+  ) => Promise<void>;
   disconnect: () => void;
   reset: () => void;
 };
@@ -78,6 +100,10 @@ const initialState: ImageCreateState = {
   },
   referenceImage: null,
   settings: null,
+  connectivity: {
+    gpt: { phase: "idle", result: null, error: null },
+    minimax: { phase: "idle", result: null, error: null },
+  },
   connectionStatus: "disconnected",
   isBusy: false,
   lastIterationHadPrompt: false,
@@ -96,6 +122,30 @@ function entryId(prefix: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 抹掉文本里的 API Key 明文，避免凭据被带进界面或状态。 */
+function redactApiKey(text: string, apiKey: string): string {
+  const key = apiKey.trim();
+  if (!key) {
+    return text;
+  }
+  return text.split(key).join("***");
+}
+
+/** 抹掉探测结果文本里的 API Key 明文。 */
+function redactProbeResult(
+  result: ConnectivityProbeResult,
+  apiKey: string,
+): ConnectivityProbeResult {
+  return {
+    ...result,
+    message: redactApiKey(result.message, apiKey),
+    steps: result.steps.map((step) => ({
+      ...step,
+      detail: redactApiKey(step.detail, apiKey),
+    })),
+  };
 }
 
 /**
@@ -668,6 +718,61 @@ export const useImageCreateStore = create<
     } catch (error) {
       set({ error: errorMessage(error) });
       throw error;
+    }
+  },
+
+  testVendorConnectivity: async (vendor, input) => {
+    const baseUrl = input.baseUrl.trim();
+    const apiKey = input.apiKey.trim();
+    const models = input.models
+      .map((model) => model.trim())
+      .filter((model) => model !== "");
+
+    const fail = (message: string) => {
+      set((state) => ({
+        connectivity: {
+          ...state.connectivity,
+          [vendor]: { phase: "settled", result: null, error: message },
+        },
+      }));
+    };
+
+    if (baseUrl === "") {
+      fail("请先填写 Base URL 再测试连通");
+      return;
+    }
+    try {
+      validateImageCreateBaseUrl(baseUrl);
+    } catch (reason) {
+      fail(redactApiKey(errorMessage(reason), apiKey));
+      return;
+    }
+
+    set((state) => ({
+      connectivity: {
+        ...state.connectivity,
+        [vendor]: { phase: "testing", result: null, error: null },
+      },
+    }));
+    try {
+      const result = await testImageVendorConnectivity({
+        vendor,
+        base_url: baseUrl,
+        api_key: apiKey,
+        models,
+      });
+      set((state) => ({
+        connectivity: {
+          ...state.connectivity,
+          [vendor]: {
+            phase: "settled",
+            result: redactProbeResult(result, apiKey),
+            error: null,
+          },
+        },
+      }));
+    } catch (reason) {
+      fail(redactApiKey(errorMessage(reason), apiKey));
     }
   },
 

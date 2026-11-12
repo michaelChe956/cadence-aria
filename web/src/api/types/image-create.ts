@@ -198,3 +198,37 @@ export type SettingsUpdateRequest = {
   vendors?: Partial<Record<ImageVendor, VendorSettingsUpdate>> | null;
   defaults?: DefaultImageParams | null;
 };
+
+/** 连通性探测的单步状态。skipped = 该步不适用，已跳到下一步。 */
+export type ConnectivityStepStatus = "ok" | "skipped" | "failed";
+
+/** 连通性探测的单步结果。detail 为中文说明，不含 API Key 明文。 */
+export type ConnectivityStep = {
+  key: string;
+  label: string;
+  status: ConnectivityStepStatus;
+  detail: string;
+};
+
+/**
+ * 连通性探测请求。
+ * base_url 只填主机根路径（如 https://api.openai.com），系统会自动拼 /v1/images/generations。
+ * api_key 为空串表示沿用该家已保存的 key。
+ */
+export type ConnectivityProbeRequest = {
+  vendor: ImageVendor;
+  base_url: string;
+  api_key: string;
+  models: string[];
+};
+
+/** 连通性探测结果：两步都通过时 ok 为 true。 */
+export type ConnectivityProbeResult = {
+  vendor: ImageVendor;
+  ok: boolean;
+  message: string;
+  steps: ConnectivityStep[];
+  /** 配置了但网关模型列表里没有的模型 id。 */
+  missing_models: string[];
+  duration_ms: number;
+};

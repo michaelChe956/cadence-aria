@@ -1,4 +1,4 @@
-import { Cpu, LoaderCircle, RotateCcw, Save, Settings, Zap } from "lucide-react";
+import { Cpu, LoaderCircle, PlugZap, RotateCcw, Save, Settings, Zap } from "lucide-react";
 import { DialogShell } from "../shared/DialogShell";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
@@ -19,6 +19,7 @@ import {
 import {
   useImageCreateStore,
   validateImageCreateBaseUrl,
+  type ImageVendorConnectivityState,
 } from "../../state/image-create-store";
 import { CustomSelect } from "./CustomSelect";
 
@@ -39,6 +40,16 @@ type VendorDraft = {
 };
 
 type VendorDrafts = Record<ImageVendor, VendorDraft>;
+
+/** 各家的 Base URL 填写示例：只填到主机根路径。 */
+const BASE_URL_EXAMPLES: Record<ImageVendor, string> = {
+  gpt: "https://api.openai.com",
+  minimax: "https://api.minimax.io",
+};
+
+/** Base URL 填写说明：一句话讲清「填到哪」。 */
+const BASE_URL_HINT =
+  "只填到主机根路径，不要带 /v1 或 /v1/images；系统会自动拼成 /v1/images/generations。";
 
 function settingsErrorMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback;
@@ -76,6 +87,10 @@ function isVendorConfigured(draft: VendorDraft): boolean {
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const loadSettings = useImageCreateStore((state) => state.loadSettings);
   const saveSettings = useImageCreateStore((state) => state.saveSettings);
+  const testVendorConnectivity = useImageCreateStore(
+    (state) => state.testVendorConnectivity,
+  );
+  const connectivity = useImageCreateStore((state) => state.connectivity);
   const [original, setOriginal] = useState<MaskedSettings | null>(null);
   const [drafts, setDrafts] = useState<VendorDrafts | null>(null);
   const [defaults, setDefaults] = useState<DefaultImageParams | null>(null);
@@ -213,6 +228,22 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     return request;
   }
 
+  /**
+   * 用当前草稿值发起连通性探测：只发探测请求，不生成图片、不计费。
+   * key 用草稿里的明文；沿用已保存 key 时传空串，由后端取已保存的那把。
+   */
+  function handleTestConnectivity(vendor: ImageVendor) {
+    const draft = drafts?.[vendor];
+    if (!draft) {
+      return;
+    }
+    void testVendorConnectivity(vendor, {
+      baseUrl: draft.baseUrl,
+      apiKey: draft.apiKeyAction === "replace" ? draft.apiKey : "",
+      models: parseModels(draft.modelsText),
+    });
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submittingRef.current) {
@@ -271,7 +302,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   original={original.vendors[vendor]}
                   draft={drafts[vendor]}
                   disabled={controlsDisabled}
+                  connectivity={connectivity[vendor]}
                   onChange={(next) => updateVendor(vendor, next)}
+                  onTestConnectivity={() => handleTestConnectivity(vendor)}
                 />
               ) : null,
             )}
@@ -356,16 +389,21 @@ function VendorSection({
   original,
   draft,
   disabled,
+  connectivity,
   onChange,
+  onTestConnectivity,
 }: {
   vendor: ImageVendor;
   original: MaskedVendorSettings;
   draft: VendorDraft;
   disabled: boolean;
+  connectivity: ImageVendorConnectivityState;
   onChange: (draft: VendorDraft) => void;
+  onTestConnectivity: () => void;
 }) {
   const label = IMAGE_VENDOR_LABELS[vendor];
   const configured = isVendorConfigured(draft);
+  const probing = connectivity.phase === "testing";
   // API Key 三态只用下方一行文字表达，措辞与实际动作一致。
   const apiKeyState =
     draft.apiKeyAction === "clear"
@@ -414,6 +452,7 @@ function VendorSection({
         <input
           id={`${vendor}-base-url`}
           aria-label={`${label} base_url`}
+          placeholder={BASE_URL_EXAMPLES[vendor]}
           value={draft.baseUrl}
           disabled={disabled}
           onChange={(event) =>
@@ -422,8 +461,32 @@ function VendorSection({
           className={`${controlClassName} mt-1.5`}
         />
         <p className="mt-1.5 text-xs text-[var(--aria-ink-muted)]">
+          {BASE_URL_HINT}
+        </p>
+        <p className="mt-1 text-xs text-[var(--aria-ink-muted)]">
           必须使用 HTTPS；本地调试可用 localhost。
         </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onTestConnectivity}
+            disabled={disabled || probing}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-1.5 text-xs font-semibold text-[var(--aria-ink)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {probing ? (
+              <LoaderCircle
+                aria-hidden="true"
+                className="h-3.5 w-3.5 motion-safe:animate-spin"
+              />
+            ) : (
+              <PlugZap aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
+            {probing ? "测试中…" : "测试连通"}
+          </button>
+          <span className="text-xs text-[var(--aria-ink-muted)]">
+            只测连通性，不生成图片、不计费
+          </span>
+        </div>
       </div>
 
       <div className="mt-3">
@@ -510,7 +573,52 @@ function VendorSection({
           一行一个模型 id，保存时自动去空行与首尾空白。
         </p>
       </div>
+
+      <ConnectivityResult state={connectivity} />
     </section>
+  );
+}
+
+/** 连通性探测结果：内联展示结论、每一步详情与网关未列出的模型。 */
+function ConnectivityResult({ state }: { state: ImageVendorConnectivityState }) {
+  const result = state.result;
+  if (!result && !state.error) {
+    return null;
+  }
+  return (
+    <div className="mt-3 rounded-xl border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] px-3 py-2 text-xs text-[var(--aria-ink)]">
+      {state.error ? (
+        <p className="font-semibold text-[var(--aria-danger)]">{state.error}</p>
+      ) : null}
+      {result ? (
+        <>
+          <p
+            className={
+              result.ok
+                ? "font-semibold text-[var(--aria-success)]"
+                : "font-semibold text-[var(--aria-danger)]"
+            }
+          >
+            {result.message}
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {result.steps.map((step) => (
+              <li key={step.key}>
+                <span className="font-semibold">{step.label}</span>
+                <span className="ml-1 text-[var(--aria-ink-muted)]">
+                  {step.detail}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {result.missing_models.length > 0 ? (
+            <p className="mt-1.5 font-semibold text-[var(--aria-danger)]">
+              网关未列出这些模型：{result.missing_models.join("、")}
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </div>
   );
 }
 

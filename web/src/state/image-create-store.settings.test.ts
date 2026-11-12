@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  ConnectivityProbeResult,
   ImageVendor,
   MaskedSettings,
   MaskedVendorSettings,
@@ -13,6 +14,7 @@ const api = vi.hoisted(() => ({
   generateImage: vi.fn(),
   getImageCreateSettings: vi.fn(),
   updateImageCreateSettings: vi.fn(),
+  testImageVendorConnectivity: vi.fn(),
   imageCreateChatWebSocketUrl: vi.fn(
     (sessionId: string) =>
       `ws://localhost:3000/api/image-create/sessions/${sessionId}/chat`,
@@ -179,6 +181,145 @@ describe("image create store 模型选择与设置", () => {
     expect(api.updateImageCreateSettings).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("image create store 连通性探测", () => {
+  it("probes with the given draft values and keeps the result per vendor", async () => {
+    api.testImageVendorConnectivity.mockResolvedValue(probeResult());
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().testVendorConnectivity("gpt", {
+      baseUrl: "https://draft.example.com",
+      apiKey: "sk-draft-key",
+      models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
+    });
+
+    expect(api.testImageVendorConnectivity).toHaveBeenCalledWith({
+      vendor: "gpt",
+      base_url: "https://draft.example.com",
+      api_key: "sk-draft-key",
+      models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
+    });
+    const state = useImageCreateStore.getState().connectivity.gpt;
+    expect(state.phase).toBe("settled");
+    expect(state.result?.ok).toBe(false);
+    expect(state.result?.missing_models).toEqual(["gpt-image-2.6-flare"]);
+    expect(state.error).toBeNull();
+    // 未探测的那家不受影响。
+    expect(useImageCreateStore.getState().connectivity.minimax.phase).toBe(
+      "idle",
+    );
+  });
+
+  it("marks the vendor as probing while the request is in flight", async () => {
+    const deferred = createDeferred<ConnectivityProbeResult>();
+    api.testImageVendorConnectivity.mockImplementation(() => deferred.promise);
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    const pending = useImageCreateStore
+      .getState()
+      .testVendorConnectivity("minimax", {
+        baseUrl: "https://api.minimax.io",
+        apiKey: "",
+        models: [],
+      });
+    expect(useImageCreateStore.getState().connectivity.minimax.phase).toBe(
+      "testing",
+    );
+
+    deferred.resolve(probeResult());
+    await pending;
+    expect(useImageCreateStore.getState().connectivity.minimax.phase).toBe(
+      "settled",
+    );
+  });
+
+  it("rejects an invalid base url locally without probing", async () => {
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().testVendorConnectivity("gpt", {
+      baseUrl: "http://evil.example.com",
+      apiKey: "",
+      models: [],
+    });
+
+    expect(api.testImageVendorConnectivity).not.toHaveBeenCalled();
+    const state = useImageCreateStore.getState().connectivity.gpt;
+    expect(state.phase).toBe("settled");
+    expect(state.error).toContain("base_url");
+  });
+
+  it("asks for a base url before probing", async () => {
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().testVendorConnectivity("gpt", {
+      baseUrl: "   ",
+      apiKey: "",
+      models: [],
+    });
+
+    expect(api.testImageVendorConnectivity).not.toHaveBeenCalled();
+    expect(
+      useImageCreateStore.getState().connectivity.gpt.error,
+    ).toContain("Base URL");
+  });
+
+  it("keeps the api key out of the probe error message", async () => {
+    api.testImageVendorConnectivity.mockRejectedValue(
+      new Error("请求失败：sk-super-secret 无效"),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().testVendorConnectivity("gpt", {
+      baseUrl: "https://api.openai.com",
+      apiKey: "sk-super-secret",
+      models: [],
+    });
+
+    const state = useImageCreateStore.getState().connectivity.gpt;
+    expect(state.error).toContain("请求失败");
+    expect(state.error).not.toContain("sk-super-secret");
+    expect(JSON.stringify(state)).not.toContain("sk-super-secret");
+  });
+});
+
+/**
+ * 一次性 deferred：项目 tsconfig 的 lib 是 ES2022，没有 Promise.withResolvers，
+ * 这里手写等价物，用来控制探测请求的完成时机。
+ */
+function createDeferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  let reject: (reason: unknown) => void = () => {};
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** 构造一份探测结果（网关未列出其中一个模型）。 */
+function probeResult(): ConnectivityProbeResult {
+  return {
+    vendor: "gpt",
+    ok: false,
+    message: "连通性异常",
+    steps: [
+      {
+        key: "models",
+        label: "模型列表 /v1/models",
+        status: "ok",
+        detail: "网关返回 3 个模型",
+      },
+      {
+        key: "generations",
+        label: "图片端点 /v1/images/generations",
+        status: "failed",
+        detail: "路径不对：只填到主机根路径",
+      },
+    ],
+    missing_models: ["gpt-image-2.6-flare"],
+    duration_ms: 42,
+  };
+}
 
 /** 构造脱敏设置：默认只有 GPT 家配置了凭据。 */
 function maskedSettings(
