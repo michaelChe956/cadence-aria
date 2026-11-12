@@ -103,7 +103,9 @@ pub enum CandidateAttemptStage {
     Structure,
     /// Final Compile 阶段。
     Final,
-    /// generate 段生成尝试阶段。
+    /// generate 段生成尝试阶段——码表外诊断（unknown/operational 类，不可
+    /// 归因到 parse/lowering/IR 任一子阶段）与空诊断集的失败行落此（评审
+    /// Important-1：五段区分在 durable 数据上穷尽，`Parse` 只收 parse 码表命中）。
     Generate,
     /// generate 段 parse 失败（markdown 语法/结构解析类诊断）。
     Parse,
@@ -113,9 +115,12 @@ pub enum CandidateAttemptStage {
     TypedIrValidation,
 }
 
-/// Task 8（REQ-WSC-28D，I-12 定案的条件式）：流水行与 provider 启动尝试的
-/// 关联——不伪造关联：行所属的窗口 attempt 才带 `Started`（序号 + attempt
-/// key），纯复验/判定失败（未触发启动）显式 `NoProviderStart`；门段 Final
+/// Task 8（REQ-WSC-28D，I-12 定案的条件式；评审 Important-2 修订）：流水行
+/// 与 provider 启动尝试的关联——不伪造关联：行所属的窗口 attempt 才带
+/// `Started`（序号 + attempt key）；`NoProviderStart` **只**写在「确实未触发
+/// 任何 provider 启动」的行上——本 change 的写点均发生在交付之后，无该
+/// 形态生产写点（义务缺口已登记，见 task-8-report 追加节）；解析不出窗口
+/// attempt（交付已物理发生但未建窗）⇒ None（两侧都不可归因）；门段 Final
 /// 行不加关联（本 change 不改门段流水语义 ⇒ None）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -614,10 +619,11 @@ fn candidate_attempt_stage_tag(stage: CandidateAttemptStage) -> &'static str {
 
 /// Task 8（REQ-WSC-25/28D，tasks 5.1/5.2）：generate 段尝试行的构造器——
 /// 阶段（Generate/Parse/TypedLowering/TypedIrValidation）与失败事实由调用方
-/// 按 generate 段判定面投影；`recorded_at`/`attempt_seq`/会话与 issue 身份由
-/// store 盖印。幂等键按尝试身份构造：有关联 ⇒ 该窗口 attempt 键 + 阶段
-/// （同 attempt 同阶段重放零膨胀）；无关联（NoProviderStart）⇒ 失败内容
-/// 寻址身份（与 `from_failure` 同口径，不与会话内其它失败行碰撞）。
+/// 按 generate 段判定面投影；`attempt_seq`/会话与 issue 身份由 store 盖印、
+/// `recorded_at` 由本构造器自盖（评审 Minor-8 勘误：store 不盖时间戳）。
+/// 幂等键按尝试身份构造：有关联 ⇒ 该窗口 attempt 键 + 阶段（同 attempt
+/// 同阶段重放零膨胀）；无关联（None/NoProviderStart）⇒ 失败内容寻址身份
+/// （与 `from_failure` 同口径，不与会话内其它失败行碰撞）。
 pub(crate) fn candidate_attempt_record_from_generate_segment(
     stage: CandidateAttemptStage,
     failure: Option<CandidateAttemptFailure>,
@@ -670,8 +676,9 @@ pub(crate) fn candidate_attempt_record_from_generate_segment(
 ///   （ActualStarted/Terminal 都是有账事实；建窗时固化的 attempt1 即原调用）
 ///   ——重驱轮交付被判定时其 backfill 已落 ⇒ 倒序首取即当前交付所属
 ///   attempt，Claimed 占位（尚未启动）被跳过不会误领；
-/// - 无窗口/无业务键（未建窗的纯判定失败）⇒ None ⇒ 调用方写显式
-///   `NoProviderStart`（不伪造关联）。
+/// - 无窗口/无业务键（含「交付已物理发生但 verdict 非 Eligible ⇒ 未建窗」
+///   的形态）⇒ None——两侧都不可归因：既不可伪造关联，也不可伪造「无
+///   启动」的否定事实（评审 Important-2；与 engine 侧同形态编码一致）。
 pub(crate) fn generate_segment_provider_attempt(
     record: &WorkspaceSessionRecord,
 ) -> Option<ProviderAttemptAssociation> {

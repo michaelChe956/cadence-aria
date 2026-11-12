@@ -196,7 +196,7 @@ const PROVIDER_TRUST_MISSING_WAITING_REASON: &str = "provider_trust_missing";
 #[allow(clippy::result_large_err)] // 同上:运行收尾 typed 出口。
 /// D5 事前基线树装载面（拆出以守住单文件行数红线）。
 mod single_candidate_baseline_tree;
-mod single_candidate_compile_preflight;
+pub(super) mod single_candidate_compile_preflight;
 mod single_candidate_delivery;
 
 use single_candidate_compile_preflight::{

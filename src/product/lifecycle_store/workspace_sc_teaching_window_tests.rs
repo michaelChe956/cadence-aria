@@ -1105,10 +1105,10 @@ fn patch_first_window_snapshot(path: &std::path::Path, value: serde_json::Value)
     .expect("write session json");
 }
 
-/// 5.4/8.4（REQ-WSC-28D）：注入 claim/observe 持久化失败 ⇒ 执法失败
-/// fail-closed。claim 侧（会话文件去写权限）：Err 上浮（不得伪装成可判定
-/// Denied），重载零变化——不无账启动、不重试；observe 侧（占位条目被移除，
-/// 文件仍可写 ⇒ Unknown 迁移路径可达）：Err 上浮，随后的
+/// 5.4/8.4（REQ-WSC-28D；评审 Minor-6 改占路径式）：注入 claim/observe
+/// 持久化失败 ⇒ 执法失败 fail-closed。claim 侧（会话目录路径被普通文件
+/// 占据，root 与非 root 行为一致）：Err 上浮（不得伪装成可判定 Denied），
+/// 重载零变化——不无账启动、不重试；observe 侧（占位条目被移除，
 /// `mark_sc_teaching_attempt_unknown` 把 attempt 迁入 LaunchUnknown（不伪装
 /// 未启动）。与 `attempt_log_write_failure_degrades`（流水写失败只降级记
 /// 日志、不阻断）期望相反且互不干扰：流水写点走 `append_candidate_attempt`
@@ -1116,7 +1116,6 @@ fn patch_first_window_snapshot(path: &std::path::Path, value: serde_json::Value)
 /// 通道互不包装。
 #[test]
 fn ledger_write_failure_fails_closed() {
-    use std::os::unix::fs::PermissionsExt as _;
     let temp = tempdir().expect("fixture tempdir");
     let store = LifecycleStore::new(ProductAppPaths::new(temp.path().to_path_buf()));
     let generate = create_sc_session(&store, RunPolicy::Interactive, "entity_t8_closed");
@@ -1124,17 +1123,36 @@ fn ledger_write_failure_fails_closed() {
     let established = establish_approved(&store, &reserved);
     let path = session_json_path(&store, &established);
     let sessions_dir = path.parent().expect("sessions dir").to_path_buf();
-    // write_json 走「临时文件 + 换名」原子写：目标文件只读挡不住持久化，
-    // 注入必须落在会话目录的去写权限上（临时文件 create_new 失败 ⇒ Err）。
-    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o555))
-        .expect("drop sessions dir write permission (claim injection)");
+    // 评审 Minor-6：占路径式注入（root 与非 root 行为一致）——write_json 走
+    // 「临时文件 + 换名」原子写，目录去写权限（0o555）在 root 下会被绕过；
+    // 改以普通文件占据会话目录路径，读写皆无法落盘 ⇒ claim 必 fail-closed
+    // Err。guard 保证断言 panic 时也复原目录与会话 json。
+    let session_json = std::fs::read(&path).expect("read session json before injection");
+    struct OccupiedSessionsDir {
+        dir: std::path::PathBuf,
+        json: std::path::PathBuf,
+        bytes: Vec<u8>,
+    }
+    impl Drop for OccupiedSessionsDir {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.dir).expect("remove sessions dir occupant");
+            std::fs::create_dir_all(&self.dir).expect("restore sessions dir");
+            std::fs::write(&self.json, &self.bytes).expect("restore session json");
+        }
+    }
+    std::fs::remove_dir_all(&sessions_dir).expect("vacate sessions dir");
+    std::fs::write(&sessions_dir, b"occupied").expect("occupy sessions dir path");
+    let _restore = OccupiedSessionsDir {
+        dir: sessions_dir,
+        json: path.clone(),
+        bytes: session_json,
+    };
     let claim_result = store.claim_sc_teaching_attempt(&established, 0);
     assert!(
         claim_result.is_err(),
         "claim 持久化失败必须 fail-closed 上浮（不得伪装 Denied）：{claim_result:?}"
     );
-    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o755))
-        .expect("restore sessions dir write permission");
+    drop(_restore);
     let reloaded = store
         .get_workspace_session(&established.id)
         .expect("reload after failed claim");

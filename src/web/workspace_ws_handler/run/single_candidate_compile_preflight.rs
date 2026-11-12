@@ -20,7 +20,7 @@ pub(super) const TEACHABLE_PARSE_FAILURE_CODES: [&str; 4] = [
 ];
 
 /// 该诊断码是否属于可教学重驱的 parse 语法类（parse_reasons 收集用）。
-pub(super) fn is_teachable_parse_failure(code: &str) -> bool {
+pub(crate) fn is_teachable_parse_failure(code: &str) -> bool {
     TEACHABLE_PARSE_FAILURE_CODES.contains(&code)
 }
 

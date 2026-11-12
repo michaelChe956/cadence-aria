@@ -769,7 +769,8 @@ fn no_provider_start_recorded_explicitly() {
 }
 
 /// 旧行（无 `provider_attempt` / `source_missing_reason` 键）反序列化 ⇒ None：
-/// 历史流水可读、不改写、不倒填。
+/// 历史流水可读、不改写、不倒填（评审 Minor-3：补 store 落盘往返半边——
+/// 旧行回写后落盘行仍无该键）。
 #[test]
 fn legacy_attempt_rows_parse_with_absent_provider_attempt() {
     let legacy: CandidateAttemptRecord = serde_json::from_str(
@@ -781,6 +782,35 @@ fn legacy_attempt_rows_parse_with_absent_provider_attempt() {
     .expect("legacy row without new keys must parse");
     assert_eq!(legacy.provider_attempt, None, "缺键读为未关联（不倒填）");
     assert_eq!(legacy.source_missing_reason, None);
+    // 评审 Minor-3：可读、**不改写**——旧行经 store 回写后，落盘行仍无
+    // `provider_attempt` / `source_missing_reason` 键（append 不倒填）。
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "t8_legacy_absent_keys", WorkspaceType::WorkItemPlan);
+    assert!(
+        store
+            .append_candidate_attempt(&session.id, &legacy)
+            .unwrap()
+    );
+    let series = store.list_candidate_attempts(&session.id).unwrap();
+    assert_eq!(series.len(), 1, "回写恰落一行：{series:?}");
+    assert_eq!(series[0].provider_attempt, None, "回读不得倒填关联");
+    assert_eq!(
+        series[0].source_missing_reason, None,
+        "回读不得倒填缺失原因"
+    );
+    let ledger = std::fs::read_to_string(
+        store
+            .app_paths()
+            .issue_lifecycle_root(&session.project_id, &session.issue_id)
+            .join(
+                crate::product::lifecycle_store::candidate_attempts::CANDIDATE_ATTEMPTS_FILE_NAME,
+            ),
+    )
+    .expect("read persisted ledger line");
+    assert!(
+        !ledger.contains("\"provider_attempt\"") && !ledger.contains("\"source_missing_reason\""),
+        "落盘行不得新增两键（不改写旧行形态）：{ledger}"
+    );
 }
 
 /// 5.2（REQ-WSC-28D）：无法形成 source 的失败 ⇒ 行内带缺失原因、

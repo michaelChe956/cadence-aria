@@ -439,14 +439,22 @@ pub(super) async fn drive_structure_gate_reredrive(
     .await
 }
 
-/// Task 8（tasks 5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行的阶段
-/// 判定——管线序 parse → typed lowering → typed IR 校验，失败集反映到达的
-/// 最深阶段：lowering fault 在场 ⇒ `TypedLowering`；否则 ir_fault 在场 ⇒
-/// `TypedIrValidation`；否则 `Parse`（parse 码表 / unknown 类）。
+/// Task 8（tasks 5.1/5.2，REQ-WSC-25/28D；评审 Important-1 修订）：generate
+/// 段失败流水行的阶段判定——lowering fault 在场 ⇒ `TypedLowering`；否则
+/// ir_fault 在场 ⇒ `TypedIrValidation`；否则仅当诊断集非空且**全部**命中
+/// parse 码表才记 `Parse`；码表外（unknown/operational 类——不可归因到
+/// parse/lowering/IR 任一子阶段，含空诊断集）记 `Generate`（生成尝试
+/// 整体失败）——五段区分在 durable 数据上穷尽，`Parse` 不再吞并码表外类。
 fn generate_segment_failure_stage(
     diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
 ) -> crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage {
     use crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage;
+    let parse_table_hit =
+        |diagnostic: &crate::product::work_item_plan_compiler::CompilerDiagnostic| {
+            super::single_candidate::single_candidate_compile_preflight::is_teachable_parse_failure(
+                &diagnostic.code,
+            )
+        };
     if diagnostics
         .iter()
         .any(|diagnostic| diagnostic.lowering_fault.is_some())
@@ -459,17 +467,23 @@ fn generate_segment_failure_stage(
     {
         return CandidateAttemptStage::TypedIrValidation;
     }
-    CandidateAttemptStage::Parse
+    if !diagnostics.is_empty() && diagnostics.iter().all(parse_table_hit) {
+        return CandidateAttemptStage::Parse;
+    }
+    CandidateAttemptStage::Generate
 }
 
-/// Task 8（5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行写入（non-blocking
-/// 义务逐字不变——写失败沿用既有降级码 `candidate_attempt_log_write_failed`
-/// 记 policy diagnostics，不阻断生成链）。关联单源 durable 解析
-/// （`generate_segment_provider_attempt`）：行所属窗口 attempt ⇒ `Started`；
-/// 无窗口（未建窗的纯判定失败，未触发启动）⇒ 显式 `NoProviderStart`，不伪造
-/// 关联。source 引用恒 None + 行内带缺失原因（generate 段失败产物不落
-/// durable source，不提升 current refs）。幂等键由构造器按尝试身份派生；
-/// 失败身份掺入世代业务键，不同世代（re-arm）同内容失败不互吃幂等键。
+/// Task 8（5.1/5.2，REQ-WSC-25/28D；评审 Important-2 修订）：generate 段失败
+/// 流水行写入（non-blocking 义务逐字不变——写失败沿用既有降级码
+/// `candidate_attempt_log_write_failed` 记 policy diagnostics，不阻断生成链）。
+/// 关联单源 durable 解析（`generate_segment_provider_attempt`）：行所属窗口
+/// attempt ⇒ `Started`；解析不出窗口 attempt ⇒ **None（不可归因）**——该形态
+/// 下交付 1 已物理发生（verdict 非 Eligible ⇒ grant 块先于建窗 break 即写行），
+/// 既不可伪造关联、也不可伪造「无启动」的否定事实，与 engine 侧同形态
+/// （写点先于建窗的 `engine_failure_provider_attempt`）编码一致。source
+/// 引用恒 None + 行内带缺失原因（generate 段失败产物不落 durable source，
+/// 不提升 current refs）。幂等键由构造器按尝试身份派生；失败身份掺入世代
+/// 业务键，不同世代（re-arm）同内容失败不互吃幂等键。
 fn record_generate_segment_failure(
     engine: &mut WorkspaceEngine,
     lifecycle: &LifecycleStore,
@@ -479,15 +493,12 @@ fn record_generate_segment_failure(
     detail: &str,
 ) {
     use crate::product::lifecycle_store::candidate_attempts::{
-        CandidateAttemptFailure, ProviderAttemptAssociation,
-        candidate_attempt_record_from_generate_segment, generate_segment_provider_attempt,
+        CandidateAttemptFailure, candidate_attempt_record_from_generate_segment,
+        generate_segment_provider_attempt,
     };
     let session_id = engine.session().session_id.clone();
     let record = lifecycle.get_workspace_session(&session_id).ok();
-    let provider_attempt = record
-        .as_ref()
-        .and_then(generate_segment_provider_attempt)
-        .or(Some(ProviderAttemptAssociation::NoProviderStart));
+    let provider_attempt = record.as_ref().and_then(generate_segment_provider_attempt);
     let series = record
         .as_ref()
         .and_then(crate::product::workspace_engine::current_sc_author_business_key)
@@ -553,4 +564,116 @@ pub(super) fn record_generate_segment_ir_validation_failure(
         vec![stable_code_kind("typed_ir_validation")],
         detail,
     );
+}
+
+/// 评审定向（Important-1/Minor-5）：阶段分类的 durable 穷尽与新写点吞错面。
+#[cfg(test)]
+mod task8_review_fixes {
+    use super::*;
+
+    fn diagnostic(code: &str) -> crate::product::work_item_plan_compiler::CompilerDiagnostic {
+        crate::product::work_item_plan_compiler::CompilerDiagnostic {
+            code: code.to_string(),
+            line: 1,
+            field: "fixture".to_string(),
+            message: format!("{code}: fixture"),
+            repair_example: "fixture".to_string(),
+            kind: None,
+            lowering_fault: None,
+            ir_fault: None,
+        }
+    }
+
+    /// Important-1：五段区分穷尽——parse 码表命中 ⇒ `Parse`；码表外
+    /// （unknown/operational 类）与空集 ⇒ `Generate`；lowering/ir fault
+    /// 仍各自优先（管线序）。
+    #[test]
+    fn generate_segment_failure_stage_is_exhaustive_in_durable_data() {
+        use crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage;
+        assert!(matches!(
+            generate_segment_failure_stage(&[diagnostic("missing_section")]),
+            CandidateAttemptStage::Parse
+        ));
+        assert!(matches!(
+            generate_segment_failure_stage(&[diagnostic("intent_undeclared")]),
+            CandidateAttemptStage::Generate
+        ));
+        assert!(matches!(
+            generate_segment_failure_stage(&[
+                diagnostic("missing_section"),
+                diagnostic("operational_x")
+            ]),
+            CandidateAttemptStage::Generate
+        ));
+        assert!(matches!(
+            generate_segment_failure_stage(&[]),
+            CandidateAttemptStage::Generate
+        ));
+    }
+
+    /// Minor-5：新 handler 写点的 non-blocking 降级——占路径注入（root 与
+    /// 非 root 行为一致）后触发 converge 失败写点：吞错（不 panic/不上浮）、
+    /// 记既有降级码 `candidate_attempt_log_write_failed`、不阻断生成（会话
+    /// 状态零变化）。
+    #[test]
+    fn generate_segment_attempt_log_write_failure_degrades_without_blocking() {
+        let tmp = tempfile::TempDir::new().expect("fixture tempdir");
+        let lifecycle = LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+            tmp.path().join(".aria"),
+        ));
+        let record = lifecycle
+            .create_workspace_session(
+                crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    entity_id: "work_item_plan_0001".to_string(),
+                    workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+                    author_provider: crate::product::models::ProviderName::Codex,
+                    reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                    review_rounds: 2,
+                    superpowers_enabled: true,
+                    openspec_enabled: true,
+                    work_item_plan_options: None,
+                },
+            )
+            .expect("fixture session");
+        let status_before = record.status.clone();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let mut engine = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                tmp.path().join("checkpoints"),
+            )),
+            lifecycle.clone(),
+            event_tx,
+            crate::product::workspace_engine::WorkspaceSession::from_record(record),
+        );
+        let ledger_path = lifecycle
+            .app_paths()
+            .issue_lifecycle_root(&engine.session().project_id, &engine.session().issue_id)
+            .join(
+                crate::product::lifecycle_store::candidate_attempts::CANDIDATE_ATTEMPTS_FILE_NAME,
+            );
+        std::fs::create_dir_all(&ledger_path).expect("occupy ledger path with a directory");
+        record_generate_segment_compile_failure(
+            &mut engine,
+            &lifecycle,
+            &[diagnostic("missing_section")],
+            "missing_section: ### Goal 缺失",
+        );
+        let persisted = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("reload session after degraded write");
+        assert!(
+            persisted
+                .policy_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "candidate_attempt_log_write_failed"),
+            "新写点流水写失败必须降级为可观测静默（记入运行日志）：{:?}",
+            persisted.policy_diagnostics
+        );
+        assert_eq!(
+            persisted.status, status_before,
+            "新写点流水写失败不得阻断生成（会话状态零变化）"
+        );
+    }
 }
