@@ -2,8 +2,6 @@
 //! 夹具体例沿用 `workspace_single_candidate_tests.rs`：tempdir +
 //! `create_workspace_session` + `reserve_single_candidate_provider_start`。
 
-use tempfile::tempdir;
-
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::{
@@ -21,7 +19,7 @@ use crate::product::work_item_plan_policy::{
     ScTeachingWindowRequest, ScTeachingWindowStatus, WorkItemPlanFlowKind,
     sc_teaching_frozen_input_digest,
 };
-
+use tempfile::tempdir;
 fn digest64(seed: &str) -> String {
     format!("{seed:0<64}")
 }
@@ -50,7 +48,6 @@ fn create_sc_session(
         })
         .expect("create candidate session")
 }
-
 fn sc_teaching_request() -> ScTeachingWindowRequest {
     ScTeachingWindowRequest {
         provider_path_admissible: true,
@@ -83,7 +80,6 @@ fn reserve_original_launch(
     assert!(did_start);
     record
 }
-
 fn establish_approved(
     store: &LifecycleStore,
     generate: &WorkspaceSessionRecord,
@@ -121,7 +117,6 @@ fn claim_attempt(
         ScTeachingClaimOutcome::Denied(rejection) => panic!("unexpected denial: {rejection:?}"),
     }
 }
-
 fn observe_started(
     store: &LifecycleStore,
     expected: &WorkspaceSessionRecord,
@@ -147,7 +142,6 @@ fn session_json_path(
         .join("workspace-sessions")
         .join(format!("{}.json", record.id))
 }
-
 fn route_persist(
     expected: &WorkspaceSessionRecord,
     status: WorkspaceSessionStatus,
@@ -176,7 +170,6 @@ fn non_teaching_entry(session_id: &str, ordinal: usize) -> ProviderStartLedgerEn
         provider_attempt_key: None,
     }
 }
-
 fn teaching_placeholder<'a>(
     record: &'a WorkspaceSessionRecord,
     attempt_key: &str,
@@ -227,7 +220,6 @@ fn assert_rejected_establish(
         }
     }
 }
-
 #[test]
 fn establish_approves_with_all_four_facts_and_freezes_max_two() {
     let temp = tempdir().unwrap();
@@ -315,7 +307,6 @@ fn establish_rejects_each_missing_fact_with_max_one() {
     let temp = tempdir().unwrap();
     let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
     let request = sc_teaching_request();
-
     // ① phase 不为 Generate（保留前缀 launch 事实）⇒ NoProvableAuthorization。
     let session = create_sc_session(&store, RunPolicy::Interactive, "entity_0002a");
     let generate = reserve_original_launch(&store, &session);
@@ -348,7 +339,6 @@ fn establish_rejects_each_missing_fact_with_max_one() {
         &inadmissible,
         ScTeachingApprovalRejection::ProviderPathNotAdmissible,
     );
-
     // ③ 前缀已有 2 条非教学条目（base=0 路径）⇒ NoRemainingPhysicalChance。
     let session = create_sc_session(&store, RunPolicy::Interactive, "entity_0002c");
     let generate = reserve_original_launch(&store, &session);
@@ -384,7 +374,6 @@ fn establish_rejects_each_missing_fact_with_max_one() {
         ScTeachingApprovalRejection::IncompleteFailureFacts,
     );
 }
-
 #[test]
 fn establish_is_idempotent_and_ab_relay_does_not_rebuild() {
     let temp = tempdir().unwrap();
@@ -414,7 +403,6 @@ fn establish_is_idempotent_and_ab_relay_does_not_rebuild() {
             panic!("Active 窗口不得被重建（A/B 接力/重放共用同一窗口）")
         }
     }
-
     // A/B 接力：重读 record 后携带漂移过的请求材料再入 ⇒ 仍 Existing，不重建不批准新窗口。
     let reloaded = store
         .get_workspace_session(&record.id)
@@ -450,7 +438,6 @@ fn approval_survives_reload_and_explicit_fresh() {
     let generate = reserve_original_launch(&store, &session);
     let record = establish_approved(&store, &generate);
     let window = &record.sc_generation_teaching_windows[0];
-
     // 模拟重连/恢复后的重读：approved 与 rule_version 不变。
     let reloaded = store
         .get_workspace_session(&record.id)
@@ -480,7 +467,6 @@ fn approval_survives_reload_and_explicit_fresh() {
         SC_TEACHING_APPROVAL_RULE_VERSION
     );
 }
-
 #[test]
 fn concurrent_claim_same_key_single_winner() {
     let temp = tempdir().unwrap();
@@ -496,7 +482,6 @@ fn concurrent_claim_same_key_single_winner() {
         .get_workspace_session(&established.id)
         .expect("reload");
     assert_eq!(on_disk, granted);
-
     // 同一 expected 并发再 claim ⇒ 整记录 CAS 冲突（单一赢家）。
     assert!(matches!(
         store.claim_sc_teaching_attempt(&established, 0),
@@ -508,7 +493,6 @@ fn concurrent_claim_same_key_single_winner() {
         .claim_sc_teaching_attempt(&granted, 0)
         .expect("replay claim");
     assert_eq!(outcome, ScTeachingClaimOutcome::Replay(granted.clone()));
-
     // ledger 中该 attempt 的占位条目只有一条（attempt 身份键 = attempt_key）。
     let attempt2_key = format!("sc_generation:{}:0:attempt:2", established.id);
     assert_eq!(
@@ -530,7 +514,6 @@ fn claim_rejected_over_limit_with_decidable_reason() {
     let established = establish_approved(&store, &generate);
     let granted = claim_attempt(&store, &established);
     let observed = observe_started(&store, &granted);
-
     // attempts 已达 2（原调用 Terminal + 教学 ActualStarted）且末态非 Claimed/
     // LaunchUnknown ⇒ 再要新 attempt ⇒ 可判定拒绝 Exhausted，不写任何字段。
     let outcome = store
@@ -556,7 +539,6 @@ fn claim_pushes_started_false_placeholder_with_attempt_association() {
     let generate = reserve_original_launch(&store, &session);
     let established = establish_approved(&store, &generate);
     let granted = claim_attempt(&store, &established);
-
     let attempt2_key = format!("sc_generation:{}:0:attempt:2", established.id);
     let entry = teaching_placeholder(&granted, &attempt2_key);
     // 占位条目：started=false、provider/started_at 缺省、关联教学 attempt 键。
@@ -582,7 +564,6 @@ fn claim_pushes_started_false_placeholder_with_attempt_association() {
         Some(entry.provider_start_idempotency_key.as_str())
     );
 }
-
 #[test]
 fn observe_completes_in_place_idempotent_no_second_record() {
     let temp = tempdir().unwrap();
@@ -606,7 +587,6 @@ fn observe_completes_in_place_idempotent_no_second_record() {
         observed.sc_generation_teaching_windows[0].attempts[1].lifecycle,
         ScTeachingAttemptLifecycle::ActualStarted
     );
-
     // 同参再 observe ⇒ 幂等返回（整记录相等，条目数仍不变）。
     let replayed = store
         .observe_sc_teaching_provider_start(
@@ -632,7 +612,6 @@ fn observe_completes_in_place_idempotent_no_second_record() {
         Err(ProductStoreError::Conflict { .. })
     ));
 }
-
 #[test]
 fn observe_rejected_when_over_limit_or_not_claimed() {
     let temp = tempdir().unwrap();
@@ -674,7 +653,6 @@ fn observe_rejected_when_over_limit_or_not_claimed() {
         ),
         Err(ProductStoreError::InvalidRecord { .. })
     ));
-
     // claim 后关闭（attempt2 → Terminal）再 observe ⇒ 仍拒绝（终态不可回填）。
     let granted = claim_attempt(&store, &established);
     let observed = observe_started(&store, &granted);
@@ -704,7 +682,6 @@ fn old_started_placeholder_not_actual_launch() {
         provider_attempt_key: None,
     };
     assert!(!legacy.is_actual_launch_observation());
-
     // 新占位（claim 产物 started=false）⇒ 同断言。
     let temp = tempdir().unwrap();
     let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
@@ -723,7 +700,6 @@ fn historical_record_without_window_yields_no_authorization_and_no_backfill() {
     let temp = tempdir().unwrap();
     let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
     let session = create_sc_session(&store, RunPolicy::Interactive, "entity_0011");
-
     // 旧格式 JSON：文件不含 sc_generation_teaching_windows 键（空窗口本就不写键）。
     let path = session_json_path(&store, &session);
     let bytes_before = std::fs::read_to_string(&path).expect("read session json");
@@ -743,7 +719,6 @@ fn historical_record_without_window_yields_no_authorization_and_no_backfill() {
             .expect("claim resolves"),
         ScTeachingClaimOutcome::Denied(ScTeachingClaimRejection::NoWindow)
     );
-
     // Denied 不写盘：文件字节原样（不倒填 grant / actual-start / 空窗口数组）。
     let bytes_after = std::fs::read_to_string(&path).expect("re-read session json");
     assert_eq!(bytes_after, bytes_before);
@@ -752,7 +727,6 @@ fn historical_record_without_window_yields_no_authorization_and_no_backfill() {
     let value = serde_json::to_value(&record).expect("serialize record");
     assert!(value.get("sc_generation_teaching_windows").is_none());
 }
-
 #[test]
 fn mark_unknown_transitions_claimed_only_and_is_idempotent() {
     let temp = tempdir().unwrap();
@@ -786,7 +760,6 @@ fn mark_unknown_transitions_claimed_only_and_is_idempotent() {
         Err(ProductStoreError::InvalidRecord { .. })
     ));
 }
-
 /// Task 4 评审 Minor-1（Task 6 补钉）：claim 后经会话尾迁移进入
 /// `LaunchUnknown`（Task 4 迁移使然，重连/恢复的常态末态）再次 claim ⇒
 /// `Replay`（同 attempt 幂等），attempts 与占位条目零变化——Unknown 等待
@@ -1105,17 +1078,18 @@ fn patch_first_window_snapshot(path: &std::path::Path, value: serde_json::Value)
     .expect("write session json");
 }
 
-/// 5.4/8.4（REQ-WSC-28D；评审 Minor-6 改占路径式）：注入 claim/observe
-/// 持久化失败 ⇒ 执法失败 fail-closed。claim 侧（会话目录路径被普通文件
-/// 占据，root 与非 root 行为一致）：Err 上浮（不得伪装成可判定 Denied），
-/// 重载零变化——不无账启动、不重试；observe 侧（占位条目被移除，
+/// 5.4/8.4（REQ-WSC-28D；评审 Minor-6＋B-⑤ 两段注入）：注入 claim/observe
+/// 持久化失败 ⇒ 执法失败 fail-closed。claim 侧两段：读阶段段（会话目录
+/// 路径被普通文件占据，root 稳定）⇒ Err 上浮（不得伪装成可判定 Denied），
+/// 重载零变化——不无账启动、不重试；写阶段段（0o555＋探针门控，非 root
+/// 才断言）⇒ 读成功、临时文件创建失败 ⇒ Err；observe 侧（占位条目被移除，
 /// `mark_sc_teaching_attempt_unknown` 把 attempt 迁入 LaunchUnknown（不伪装
-/// 未启动）。与 `attempt_log_write_failure_degrades`（流水写失败只降级记
-/// 日志、不阻断）期望相反且互不干扰：流水写点走 `append_candidate_attempt`
-/// 的吞错分支，执法写点走 claim/observe/mark_unknown 的 Result 通道，两条
-/// 通道互不包装。
+/// 未启动）。与 `attempt_log_write_failure_degrades` 期望相反且互不干扰：
+/// 流水写点走 `append_candidate_attempt` 的吞错分支，执法写点走
+/// claim/observe/mark_unknown 的 Result 通道，两条通道互不包装。
 #[test]
 fn ledger_write_failure_fails_closed() {
+    use std::os::unix::fs::PermissionsExt as _;
     let temp = tempdir().expect("fixture tempdir");
     let store = LifecycleStore::new(ProductAppPaths::new(temp.path().to_path_buf()));
     let generate = create_sc_session(&store, RunPolicy::Interactive, "entity_t8_closed");
@@ -1143,7 +1117,7 @@ fn ledger_write_failure_fails_closed() {
     std::fs::remove_dir_all(&sessions_dir).expect("vacate sessions dir");
     std::fs::write(&sessions_dir, b"occupied").expect("occupy sessions dir path");
     let _restore = OccupiedSessionsDir {
-        dir: sessions_dir,
+        dir: sessions_dir.clone(),
         json: path.clone(),
         bytes: session_json,
     };
@@ -1166,6 +1140,41 @@ fn ledger_write_failure_fails_closed() {
         1,
         "不重试：零新增 ledger 条目"
     );
+    // 评审 B-⑤ 写阶段段（探针门控）：预建锁文件后目录 0o555 ⇒ 取锁与
+    // read_json 均不触目录写权限，write_json 的临时文件 create_new 失败 ⇒
+    // 读成功、写失败；probe 失败（非 root）⇒ 断言 claim Err，probe 成功
+    // （root 绕过权限位）⇒ 跳过该子断言不误红，读阶段段仍覆盖通道性。
+    struct WriteProbeGuard(std::path::PathBuf, std::path::PathBuf, std::fs::Permissions);
+    impl Drop for WriteProbeGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.1);
+            std::fs::set_permissions(&self.0, self.2.clone()).expect("restore sessions dir perms");
+        }
+    }
+    let lock_file = sessions_dir.join(format!(
+        ".{}.lock",
+        path.file_name().expect("file name").to_string_lossy()
+    ));
+    std::fs::write(lock_file, b"").expect("pre-create lock file");
+    let probe_guard = WriteProbeGuard(
+        sessions_dir.clone(),
+        sessions_dir.join("write_probe.tmp"),
+        std::fs::metadata(&sessions_dir)
+            .expect("stat sessions dir")
+            .permissions(),
+    );
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o555))
+        .expect("drop sessions dir write permission (write-stage injection)");
+    if std::fs::write(&probe_guard.1, b"probe").is_err() {
+        let write_result = store.claim_sc_teaching_attempt(&reloaded, 0);
+        assert!(
+            matches!(&write_result, Err(ProductStoreError::Io(message)) if message.contains(".tmp")),
+            "claim 写路径持久化失败必须 Err fail-closed（失败点=临时文件创建，不得伪装 Denied）：{write_result:?}"
+        );
+    } else {
+        // root 绕过 0o555：写阶段不可测，跳过（读阶段段仍覆盖通道性）。
+    }
+    drop(probe_guard);
     let claimed = claim_attempt(&store, &reloaded);
     let mut corrupted = claimed.clone();
     corrupted.provider_start_ledger.truncate(1);
