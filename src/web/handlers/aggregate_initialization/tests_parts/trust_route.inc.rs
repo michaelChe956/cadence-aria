@@ -106,6 +106,9 @@ struct RecipeFixtureOptions {
     /// REQ-BOOT-17 负例：pre_check turn **零动作**（不产生任何落盘）——
     /// 该 step 必须判失败（零动作 turn 不得静默通过）。
     zero_change_pre_check: bool,
+    /// pre_check turn 的**脚本报告**（工具结果原文）。`Some(report)` 时 turn
+    /// 产出该报告且零落盘——「命令确实执行且按契约幂等无变更」的形态。
+    recipe_report: Option<String>,
 }
 
 impl Default for RecipeFixtureOptions {
@@ -115,7 +118,39 @@ impl Default for RecipeFixtureOptions {
             fault_first_final_turn: false,
             write_language_rule: true,
             zero_change_pre_check: false,
+            recipe_report: None,
         }
+    }
+}
+
+/// 产出「一条工具结果 + 完成」的 provider session（脚本报告形态）：
+/// 工具结果原文即脚本 stdout，平台据此读出报告结论。
+fn reported_provider_session(report: &str) -> crate::cross_cutting::streaming_provider::ProviderSession {
+    use crate::cross_cutting::streaming_provider::{
+        ProviderCompletion, ProviderEvent, ProviderToolResult,
+    };
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    let report = report.to_string();
+    tokio::spawn(async move {
+        let _ = event_tx
+            .send(ProviderEvent::ToolResult(ProviderToolResult {
+                tool_use_id: "script_report".to_string(),
+                output: report,
+                is_error: false,
+            }))
+            .await;
+        let _ = event_tx
+            .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                "recipe turn complete",
+                None,
+            )))
+            .await;
+    });
+    crate::cross_cutting::streaming_provider::ProviderSession {
+        events: event_rx,
+        commands: command_tx,
+        native_session_id: None,
     }
 }
 
@@ -209,6 +244,16 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
         // - pre_check 写 `.claude/`（真实 pre-check 写 .agents/.claude/...）；
         // - project_rules_examples 写 `cadence/project-rules/examples`
         //   （真实落盘面，见 ROOT_RECIPE_ALLOWLIST 的实测证据）。
+        // 「命令确实执行且按契约幂等无变更」形态：turn 产出脚本报告（工具
+        // 结果原文）但不产生任何落盘——零变更判据据此判成功。
+        if input.prompt.contains(pre_check) && self.options.recipe_report.is_some() {
+            let report = self
+                .options
+                .recipe_report
+                .clone()
+                .expect("recipe report option present");
+            return Ok(reported_provider_session(&report));
+        }
         if input.prompt.contains(pre_check) && !self.options.zero_change_pre_check {
             let claude_dir = input.working_dir.join(".claude");
             std::fs::create_dir_all(&claude_dir).expect("create root .claude dir");

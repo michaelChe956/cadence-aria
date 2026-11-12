@@ -317,12 +317,18 @@ mod tests {
         async fn run_turn(
             &self,
             request: AggregateProviderTurnRequest<'_>,
-        ) -> Result<String, AggregateInitializationError> {
+        ) -> Result<
+            crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+            AggregateInitializationError,
+        >{
             self.calls
                 .lock()
                 .unwrap()
                 .push(request.step.as_str().to_string());
-            Ok(format!("{} summary", request.step.as_str()))
+            Ok(crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome {
+                summary: format!("{} summary", request.step.as_str()),
+                report: crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent,
+            })
         }
     }
 

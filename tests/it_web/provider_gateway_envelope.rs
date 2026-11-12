@@ -559,7 +559,10 @@ impl AggregateProviderTurnDriver for FactoryBackedProviderTurnDriver {
     async fn run_turn(
         &self,
         request: AggregateProviderTurnRequest<'_>,
-    ) -> Result<String, AggregateInitializationError> {
+    ) -> Result<
+        cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+        AggregateInitializationError,
+    >{
         let AggregateProviderTurnRequest {
             project_id,
             operation_id,

@@ -111,7 +111,10 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
     async fn run_turn(
         &self,
         request: AggregateProviderTurnRequest<'_>,
-    ) -> Result<String, AggregateInitializationError> {
+    ) -> Result<
+        crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+        AggregateInitializationError,
+    > {
         let AggregateProviderTurnRequest {
             project_id,
             operation_id,
@@ -164,7 +167,11 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 .await
                 .map_err(|error| root_recipe_publication_failure(step, error))?;
                 return Ok(
-                    "root policy publication resumed after the audited final command".to_string(),
+                    crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome {
+                        summary: "root policy publication resumed after the audited final command"
+                            .to_string(),
+                        report: crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent,
+                    },
                 );
             }
         }
@@ -205,7 +212,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 provider_ref.clone(),
                 paths.clone(),
             );
-            let summary = driver
+            let outcome = driver
                 .run_turn(AggregateProviderTurnRequest {
                     project_id,
                     operation_id,
@@ -219,6 +226,8 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 .await?;
             // 命令未执行完成（turn 失败/取消）不落 receipt：无执行即无证据，
             // 重试窗口重新审计；同 index 同内容重放幂等。
+            // turn summary 一并传入：零变更失败的诊断要带 provider 的真实输出
+            // （零变更本身不说明原因，见 root_recipe_audit_windows.inc.rs）。
             complete_root_recipe_command_receipts(
                 paths,
                 lc_id,
@@ -226,6 +235,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 watches,
                 step,
                 provider,
+                &outcome,
             )?;
             if step_owns_final_recipe_command(step) {
                 // Task 4：末命令唯一收口（先审计后发布——发布产物
@@ -252,7 +262,7 @@ impl AggregateProviderTurnDriver for GatewayFactoryProviderTurnDriver {
                 .await
                 .map_err(|error| root_recipe_publication_failure(step, error))?;
             }
-            return Ok(summary);
+            return Ok(outcome);
         }
         let driver = GatewayBackedAggregateProviderTurnDriver::with_provider(
             Arc::new(gateway),

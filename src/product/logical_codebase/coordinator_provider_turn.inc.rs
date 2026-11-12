@@ -226,11 +226,13 @@ impl GatewayBackedAggregateProviderTurnDriver {
         step: AggregateInitializationStepKind,
         remaining: std::time::Duration,
         cancellation: CancellationToken,
-    ) -> Result<String, AggregateInitializationError> {
+    ) -> Result<AggregateProviderTurnOutcome, AggregateInitializationError> {
         use crate::cross_cutting::streaming_provider::ProviderEvent::Completed;
         use crate::cross_cutting::streaming_provider::{ProviderEvent, ProviderStatus};
 
         let mut output = BoundedOutput::new();
+        // 脚本报告结论：**只从工具结果原文读**（脚本 stdout），不采信模型自述。
+        let mut report = RecipeCommandReport::Absent;
         let timeout = tokio::time::sleep(remaining);
         tokio::pin!(timeout);
         loop {
@@ -252,12 +254,18 @@ impl GatewayBackedAggregateProviderTurnDriver {
                         output.push(&event_output);
                     }
                 }
-                Some(ProviderEvent::ToolResult(result)) => output.push(&result.output),
+                Some(ProviderEvent::ToolResult(result)) => {
+                    report = merge_recipe_report(report, recipe_report_verdict(&result.output));
+                    output.push(&result.output);
+                }
                 Some(Completed(completion)) => {
                     if output.is_empty() {
                         output.push(&completion.full_output);
                     }
-                    return Ok(output.summary());
+                    return Ok(AggregateProviderTurnOutcome {
+                        summary: output.summary(),
+                        report,
+                    });
                 }
                 Some(ProviderEvent::Failed { message }) => {
                     output.push(&message);
@@ -376,7 +384,7 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
     async fn run_turn(
         &self,
         request: AggregateProviderTurnRequest<'_>,
-    ) -> Result<String, AggregateInitializationError> {
+    ) -> Result<AggregateProviderTurnOutcome, AggregateInitializationError> {
         use crate::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 
         let AggregateProviderTurnRequest {
@@ -519,19 +527,28 @@ impl BoundedOutput {
         Self { buffer: String::new() }
     }
 
+    /// 追加 provider turn 输出。超预算时**保留头尾**（各占一半预算）：头保留
+    /// 「命令怎么下的」，尾保留「脚本报告 / 失败原文」——只留头会把最有诊断
+    /// 价值的收尾整段截掉，失败面因此只剩一句通用文案（本仓 2026-11-12 真机：
+    /// Cadence-skills 脚本的 JSON 报告整段丢失，用户只看到 `zero_change=true`）。
     fn push(&mut self, value: &str) {
-        if self.buffer.len() >= AGGREGATE_TURN_OUTPUT_LIMIT {
-            return;
+        self.buffer.push_str(value);
+        if self.buffer.len() > AGGREGATE_TURN_OUTPUT_LIMIT {
+            self.trim_middle();
         }
-        if self.buffer.len() + value.len() <= AGGREGATE_TURN_OUTPUT_LIMIT {
-            self.buffer.push_str(value);
-            return;
-        }
-        let mut end = AGGREGATE_TURN_OUTPUT_LIMIT - self.buffer.len();
-        while end > 0 && !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.buffer.push_str(&value[..end]);
+    }
+
+    /// 超预算时裁掉中段，头尾各留一半预算（字符边界对齐，绝不切碎 UTF-8）。
+    fn trim_middle(&mut self) {
+        let half = AGGREGATE_TURN_OUTPUT_LIMIT / 2;
+        let head_end = floor_char_boundary(&self.buffer, half);
+        let tail_start = ceil_char_boundary(&self.buffer, self.buffer.len() - half);
+        self.buffer = format!(
+            "{}\n…（中段 {} 字节已省略）…\n{}",
+            &self.buffer[..head_end],
+            tail_start.saturating_sub(head_end),
+            &self.buffer[tail_start..]
+        );
     }
 
     fn is_empty(&self) -> bool {
@@ -651,42 +668,6 @@ impl AggregateAssetPublisher {
     }
 }
 
-/// OracleAggInitScope 红绿测共用断言(镜像 r54
-/// `assert_worktree_discipline` 形态):root recipe prompt 必须携带 scope
-/// 纪律段四句结构(聚合根真实绝对路径硬钉+成员仓负边界+auditor 后果+
-/// zero-action 正向句)。供本文件 `provider_turn_lcg_tests` 与
-/// coordinator_tests 的 `mod tests`(profile_trust 全链测试)共用。
-#[cfg(test)]
-pub(crate) fn assert_aggregate_scope_discipline(prompt: &str, aggregate_root: &std::path::Path) {
-    assert!(
-        prompt.contains("[aggregate_scope_discipline]"),
-        "OracleAggInitScope:root recipe prompt 必须携带 scope 纪律段:\n{prompt}"
-    );
-    assert!(
-        prompt.contains(&aggregate_root.display().to_string()),
-        "纪律段必须钉 provider_context_root 真实绝对路径:\n{prompt}"
-    );
-    assert!(
-        prompt.contains("你的工作区是且只是聚合根"),
-        "纪律段第一句必须硬钉聚合根为唯一工作区:\n{prompt}"
-    );
-    assert!(
-        prompt.contains("禁止在任何成员仓目录"),
-        "纪律段必须携带成员仓目录负边界禁线:\n{prompt}"
-    );
-    assert!(
-        prompt.contains("root recipe auditor 逐路径把关"),
-        "纪律段必须声明 auditor 逐路径把关:\n{prompt}"
-    );
-    assert!(
-        prompt.contains("fail-closed"),
-        "纪律段必须声明越界=该命令 rejected+发布 fail-closed 后果:\n{prompt}"
-    );
-    assert!(
-        prompt.contains("零文件变更的空完成"),
-        "纪律段必须携带 zero-action 正向句:\n{prompt}"
-    );
-}
 
 // Task 1c-coordinator:credential phase 与 run-bound audit 时序的内嵌测试。
 // 独立 `mod`(不并入 coordinator_tests.inc.rs 的共享 `mod tests`)以保持
@@ -699,6 +680,7 @@ mod provider_turn_lcg_tests {
     use tokio_util::sync::CancellationToken;
 
     use super::AggregatePreflightSnapshot;
+    use super::RecipeCommandReport;
     use super::{
         AggregateProviderTurnDriver, AggregateProviderTurnRequest,
         GatewayBackedAggregateProviderTurnDriver,
@@ -1098,7 +1080,12 @@ mod provider_turn_lcg_tests {
             })
             .await
             .expect("production turn must complete");
-        assert_eq!(summary, "aggregate turn complete");
+        assert_eq!(summary.summary, "aggregate turn complete");
+        assert_eq!(
+            summary.report,
+            RecipeCommandReport::Absent,
+            "no tool result means no script report"
+        );
 
         // ① credential phase:adapter 在 start_validated 分发路径上真实观测
         // 冻结相位(快照缺失=未走 prepared 分流,同样失败)。
