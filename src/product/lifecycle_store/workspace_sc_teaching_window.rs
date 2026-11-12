@@ -129,8 +129,9 @@ impl LifecycleStore {
                 Ok(_) => (true, None),
                 Err(rejection) => (false, Some(rejection)),
             };
-            // 原授权引用：批准时取 evaluate 的 Ok 载荷口径（前缀最后一个条目键）；
-            // 拒绝时同口径回查（判据①失败可能无条目 ⇒ 空串显式记录）。
+            // 原授权引用：批准与拒绝**同一条路径**——按同口径回查前缀最后一个条目键
+            // （`last_sc_author_launch_key`，与 evaluate 的判据① 查找规则逐字相同）；
+            // 判据①失败可能无条目 ⇒ 空串显式记录。（evaluate 的 Ok 载荷在此**不**取用。）
             let approval_checked_against =
                 last_sc_author_launch_key(stored).unwrap_or_default();
             // 本链 base = 上一已关闭窗口的关闭快照（gen0 无前窗 ⇒ 0）。
