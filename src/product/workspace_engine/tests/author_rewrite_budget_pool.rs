@@ -586,8 +586,12 @@ fn preset_feedback_gate_and_auto_charges(
 }
 
 /// Task 5 夹具：同门再接受一轮 owner 反馈——镜像 `lifecycle_store/
-/// human_gate.rs` 的同 CAS 扣减语义（`manual_repairs_remaining −1` 且
-/// `accepted_feedback_turns +1` 原子同落），此处直接落 durable 形态。
+/// human_gate.rs` 真实 CAS（`compare_and_reserve_human_gate_turn`）的扣减
+/// 语义（`manual_repairs_remaining −1` 且 `accepted_feedback_turns +1` 原子
+/// 同落），此处直接落 durable 形态。与真实 CAS 逐分支对齐（Task 5 评审
+/// Minor-1）：`remaining == 0` ⇒ 真实 CAS 拒绝预留（预算耗尽），镜像同
+/// 口径断言红、不盲减；`accepted_feedback_turns == None` ⇒ 保持 None
+/// （旧会话缺 gate-local 事实不补计数、不改历史）。
 fn accept_one_more_feedback_turn(lifecycle: &LifecycleStore, session_id: &str) {
     let mut record = lifecycle
         .get_workspace_session(session_id)
@@ -596,8 +600,14 @@ fn accept_one_more_feedback_turn(lifecycle: &LifecycleStore, session_id: &str) {
         .human_gate_snapshot
         .as_mut()
         .expect("gate snapshot present");
+    assert!(
+        snapshot.manual_repairs_remaining > 0,
+        "预算耗尽 ⇒ 真实 CAS 拒绝预留，镜像同口径拒绝（不盲减）"
+    );
     snapshot.manual_repairs_remaining -= 1;
-    snapshot.accepted_feedback_turns = Some(snapshot.accepted_feedback_turns.unwrap_or(0) + 1);
+    if let Some(turns) = snapshot.accepted_feedback_turns {
+        snapshot.accepted_feedback_turns = Some(turns.saturating_add(1));
+    }
     write_json(
         &lifecycle
             .app_paths()
@@ -722,4 +732,467 @@ async fn compile_success_clears_auto_segment_only_not_feedback() {
         Some(1),
         "幂等重放不改变权威余额"
     );
+}
+
+// ============ Task 6（工作包 1.6 / 2.5 / 3.5 / 4.5 / 5.2 / 7.6 单测面）============
+
+use crate::product::workspace_engine::compile_failure_surface::{
+    CYCLE_FINGERPRINT_MARKER, CYCLE_IDS_MARKER, CandidateCompileRoute, candidate_compile_status,
+};
+use crate::product::workspace_engine::types::{PlanningCompileFailure, ProviderRunKind};
+
+/// Task 6 夹具：经生产单一装配口（`author_rewrite_balance`，与全部执法点
+/// 同一路径）读 durable 权威余额。
+fn production_balance(
+    lifecycle: &LifecycleStore,
+    record: &crate::product::models::WorkspaceSessionRecord,
+) -> Option<u32> {
+    crate::product::lifecycle_store::workspace_policy_route::author_rewrite_balance(
+        lifecycle,
+        record,
+        crate::product::work_item_plan_policy::RunBudgets::default().max_manual_repairs,
+    )
+}
+
+/// Task 6 夹具：整记录直写 durable（与既有 preset 夹具同一落盘口径）。
+fn persist_record(
+    lifecycle: &LifecycleStore,
+    record: &crate::product::models::WorkspaceSessionRecord,
+) {
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        record,
+    )
+    .expect("persist record");
+}
+
+/// Task 6 断言：事件流中不得出现 SC author 重跑委托（升级 / 保守路径零委托）。
+fn assert_no_author_rerun_requested(event_rx: &mut tokio::sync::mpsc::Receiver<EngineEvent>) {
+    assert!(
+        !drain_engine_events(event_rx).iter().any(|event| matches!(
+            event,
+            EngineEvent::ProviderRunRequested {
+                kind: ProviderRunKind::WorkItemPlanSingleCandidateAuthor,
+                ..
+            }
+        )),
+        "不得委托 SC author 重跑"
+    );
+}
+
+/// 工作包 1.6 / delta 场景「自动重写与反馈互扣同一余额」：自动重写 1 次
+/// （真实 TAR 路由 + 接力消费「已扣已跑」）+ 同一 logical gate 内 owner
+/// 反馈 1 次（**真实 human-gate CAS** `compare_and_reserve_human_gate_turn`
+/// ——Task 5 评审 Minor-1 要求的端到端真实反馈路径）⇒ 唯一权威余额
+/// `Some(1)`（3→2→1）。红线：旧世界两套账本各自为政会给出「自动侧 2 /
+/// 反馈侧 2」两个互不相干的数字，永远拼不出 1。
+#[tokio::test]
+async fn auto_rewrite_one_plus_feedback_one_leaves_single_balance_of_one() {
+    let (_tmp, lifecycle, mut engine, _event_rx, _cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    // ── 自动重写 1（真实路由：TAR 预领 + 扣减同 CAS 落盘 + 真委托）。
+    assert!(
+        engine.route_compile_failure_to_rewrite().await,
+        "平台轮必须被通道消费"
+    );
+    assert!(engine.sc_author_rerun_delegated(), "真实委托 author 重跑");
+    let landed = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load landed record");
+    let key0 = format!("single_candidate_author:{}:0", landed.id);
+    let (_consumed, started) = lifecycle
+        .reserve_single_candidate_provider_start(&landed, &key0)
+        .expect("relay consumption must succeed");
+    assert!(started, "预领接力消费 ⇒ 收敛为「已扣已跑」");
+    assert_eq!(
+        production_balance(&lifecycle, &landed),
+        Some(2),
+        "3 → 2：自动段净扣 1"
+    );
+    // ── 同一 logical gate 内 owner 反馈 1（真实 human-gate CAS）：门快照先开（Some(0) 起算），自动段不动。
+    preset_feedback_gate_and_auto_charges(&lifecycle, &session_id, 0, 0);
+    let expected = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load pre-feedback");
+    let turn = crate::product::models::HumanGateTurn {
+        turn_id: "turn_6001".to_string(),
+        session_id: session_id.clone(),
+        command_id: "command_6001".to_string(),
+        feedback_text: "请按环诊断修正依赖声明".to_string(),
+        status: crate::product::models::HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: String::new(),
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: "2026-11-12T00:00:00Z".to_string(),
+        updated_at: "2026-11-12T00:00:00Z".to_string(),
+    };
+    let reservation = crate::product::models::HumanGateReservation {
+        command_id: "command_6001".to_string(),
+        turn_id: "turn_6001".to_string(),
+        provider_start_idempotency_key: "human_gate_feedback_6001".to_string(),
+        reserved_at: "2026-11-12T00:00:00Z".to_string(),
+    };
+    let (saved, _saved_turn) = lifecycle
+        .compare_and_reserve_human_gate_turn(&expected, turn, reservation)
+        .expect("真实反馈预留 CAS 必须成功（余额 2 > 0）");
+    let snapshot = saved
+        .human_gate_snapshot
+        .as_ref()
+        .expect("gate snapshot survives");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 2,
+        "反馈段同 CAS 扣 1（快照 3−1）"
+    );
+    assert_eq!(
+        snapshot.accepted_feedback_turns,
+        Some(1),
+        "gate-local 反馈计数 +1"
+    );
+    // ── 唯一权威余额 = 快照 2 − 自动段 1 = Some(1)：单一数字，3→2→1。
+    assert_eq!(
+        production_balance(&lifecycle, &saved),
+        Some(1),
+        "自动 1 + 反馈 1 ⇒ 唯一权威余额 1（不是 2、不是各自 2）"
+    );
+    // 互扣仍可分账观测（REQ-WSC-25）：自动段恰 1 条未退、未被反馈 CAS 触碰。
+    let budget = saved.author_rewrite_budget.as_ref().expect("自动段在场");
+    assert_eq!(
+        budget
+            .auto_rewrite_charges
+            .iter()
+            .filter(|charge| charge.refunded_at.is_none())
+            .count(),
+        1,
+        "自动段净扣恰 1"
+    );
+    assert_no_dangling_charge(&lifecycle, &session_id);
+}
+
+/// 工作包 1.6 / REQ-WSC-21 既有场景「预算用尽后停并交人工门」：纯自动
+/// 3 次共用同一池 ⇒ 逐次余额 `Some(2)`→`Some(1)`→`Some(0)`——这正是暴露
+/// 「建域冻结基线多计 1」的那条：修正（`d892d9ba`）前 baseline 冻 legacy
+/// 原值 ⇒ 第 2 次后余额即 0，「3 次共用」只跑得出 2 次。第 4 次（新环，
+/// 非同环重复）失败 ⇒ `Escalate{remaining:0}`、phase=Stopped、诊断计数
+/// 不再 +1；路由面：B 池 0 ⇒ 升级交门（快照 0、不委托、total_ever 恰 3）。
+#[tokio::test]
+async fn auto_rewrites_exhausted_stops_and_gates_with_zero() {
+    let (_tmp, lifecycle, mut engine, _event_rx, _cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    // ── 第 1 次（真实路由）：决策时诊断计数先 +1（fixture used=1 已含本
+    // 次）⇒ 预领建域读侧取 1 ⇒ baseline = 1 − 1 = 0（契约级更正）。
+    assert!(
+        engine.route_compile_failure_to_rewrite().await,
+        "第 1 次自动重写必须委托"
+    );
+    let after_first = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("reload after 1st");
+    let budget = after_first
+        .author_rewrite_budget
+        .as_ref()
+        .expect("预算域随首次预领建域");
+    assert_eq!(
+        budget.legacy_auto_rewrites_charged, 0,
+        "建域基线扣掉本次（不多计 1）"
+    );
+    assert_eq!(
+        production_balance(&lifecycle, &after_first),
+        Some(2),
+        "第 1 次后余额 3−1=2"
+    );
+    let key0 = format!("single_candidate_author:{}:0", after_first.id);
+    let (_consumed, started) = lifecycle
+        .reserve_single_candidate_provider_start(&after_first, &key0)
+        .expect("relay consumption must succeed");
+    assert!(started, "第 1 次接力消费 ⇒ 已扣已跑");
+    // ── 第 2/3 次（生产预领序列：决策先 +1 再预领，依次 2、3；域已建 ⇒ 键追加分支）。
+    let mut record = after_first.clone();
+    for attempt in [1u32, 2u32] {
+        record.author_rewrite_budget = Some(with_preclaim_charge(
+            record.author_rewrite_budget.as_ref(),
+            &format!("single_candidate_author:{}:{}", record.id, attempt),
+            attempt + 1,
+            "2026-11-12T00:00:00Z".to_string(),
+        ));
+        persist_record(&lifecycle, &record);
+        assert_eq!(
+            production_balance(&lifecycle, &record),
+            Some(2 - attempt),
+            "第 {} 次后权威余额 3−{}（多计 1 的世界第 2 次后即 0）",
+            attempt + 1,
+            attempt + 1
+        );
+    }
+    preset_legacy_auto_rewrites_used(&lifecycle, &session_id, 3);
+    // ── 第 4 次（新环指纹 ⇒ 非同环重复）：纯预算耗尽停。
+    let previous = lifecycle
+        .load_candidate_compile_status(&session_id)
+        .expect("load status")
+        .expect("status present");
+    let cause = format!(
+        "dependency_cycle: 「X」把「Y」写成 provider{}{}{}\nwork_item_z_009",
+        CYCLE_FINGERPRINT_MARKER,
+        "b".repeat(64),
+        CYCLE_IDS_MARKER
+    );
+    let mut failure = PlanningCompileFailure::operational("final_compile_prepare_failed", cause);
+    failure.failure_id = "planning_compile_failure_task6".to_string();
+    failure.source_revision_ref = previous.source_revision_ref.clone();
+    failure.plan_candidate_ir_ref = previous.plan_candidate_ir_ref.clone();
+    let exhausted = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load exhausted");
+    assert_eq!(
+        production_balance(&lifecycle, &exhausted),
+        Some(0),
+        "纯自动 3 次 ⇒ 余额 0"
+    );
+    let (escalated, route) = candidate_compile_status(
+        Some(&previous),
+        &failure,
+        "2026-11-12T01:00:00Z".to_string(),
+        production_balance(&lifecycle, &exhausted),
+    );
+    assert_eq!(
+        route,
+        CandidateCompileRoute::Escalate {
+            repeated: 1,
+            remaining: 0
+        },
+        "预算耗尽 ⇒ Escalate{{remaining:0}}（新环 ⇒ 非同环重复分支）"
+    );
+    let auto_rewrite = escalated
+        .auto_rewrite
+        .as_ref()
+        .expect("stopped phase present");
+    assert_eq!(auto_rewrite.phase, CandidateAutoRewritePhase::Stopped);
+    assert_eq!(
+        auto_rewrite.remaining,
+        Some(0),
+        "remaining=0 呈现（REQ-WSC-21）"
+    );
+    assert_eq!(escalated.auto_rewrites_used, 3, "停下不再扣诊断计数");
+    lifecycle
+        .save_candidate_compile_status(&session_id, &escalated)
+        .expect("persist escalated status");
+    // ── 路由面（第二干净会话 + 同口径 3 扣减）：B 池 0 ⇒ 升级交门（快照 0、结转清零、total_ever 3）。
+    let (_tmp2, lifecycle2, mut engine2, mut event_rx2, _ck2) = compile_failure_fixture(0).await;
+    let session2 = engine2.session().session_id.clone();
+    let mut record2 = lifecycle2
+        .get_workspace_session(&session2)
+        .expect("load clean record");
+    for attempt in 0..3u32 {
+        record2.author_rewrite_budget = Some(with_preclaim_charge(
+            record2.author_rewrite_budget.as_ref(),
+            &format!("single_candidate_author:{}:{}", record2.id, attempt),
+            1,
+            "2026-11-12T00:00:00Z".to_string(),
+        ));
+    }
+    persist_record(&lifecycle2, &record2);
+    preset_legacy_auto_rewrites_used(&lifecycle2, &session2, 3);
+    assert!(
+        engine2.route_compile_failure_to_rewrite().await,
+        "升级交门轮必须被通道消费（单门语义）"
+    );
+    assert!(!engine2.sc_author_rerun_delegated(), "B 池 0 ⇒ 真实耗尽");
+    let gated = lifecycle2
+        .get_workspace_session(&session2)
+        .expect("load gated record");
+    let snapshot = gated
+        .human_gate_snapshot
+        .as_ref()
+        .expect("escalation gate snapshot");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 0,
+        "门快照携带权威余额 0（不补满额 3）"
+    );
+    let gated_budget = gated
+        .author_rewrite_budget
+        .as_ref()
+        .expect("预算域随门快照同 CAS 结转");
+    assert!(
+        gated_budget.auto_rewrite_charges.is_empty(),
+        "自动段结转清零（无双计）"
+    );
+    assert_eq!(
+        gated_budget.total_auto_rewrite_charges_ever, 3,
+        "total_ever 恰 3（REQ-WSC-25；第 4 次未虚增）"
+    );
+    assert_no_author_rerun_requested(&mut event_rx2);
+}
+
+/// 工作包 7.6 单测面 / REQ-WSC-22 判据不动：同一依赖环重复（结构指纹
+/// 相同）⇒ 仍提前停并升级——余额尚有 2 也不得多跑、不白耗预算（第 2 次
+/// 同环失败不产生新的 AutoRewrite 决策、不落预领扣减、通道拒绝消费）。
+#[tokio::test]
+async fn same_dependency_cycle_repeat_still_escalates() {
+    let (_tmp, lifecycle, mut engine, mut event_rx, _cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    let previous = lifecycle
+        .load_candidate_compile_status(&session_id)
+        .expect("load status")
+        .expect("status present");
+    let fingerprint = previous
+        .cycle_fingerprint
+        .clone()
+        .expect("fixture 同环指纹在场");
+    // 同一环再次失败：cause 携带与 durable 相同的结构指纹（REQ-WSC-22 只看指纹）。
+    let cause = format!(
+        "dependency_cycle: 「A」把「B」写成 provider{}{}{}\nwork_item_x_003",
+        CYCLE_FINGERPRINT_MARKER, fingerprint, CYCLE_IDS_MARKER
+    );
+    let mut failure = PlanningCompileFailure::operational("final_compile_prepare_failed", cause);
+    failure.failure_id = "planning_compile_failure_task6".to_string();
+    failure.source_revision_ref = previous.source_revision_ref.clone();
+    failure.plan_candidate_ir_ref = previous.plan_candidate_ir_ref.clone();
+    let record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load record");
+    let balance = production_balance(&lifecycle, &record);
+    assert_eq!(balance, Some(2), "余额 2 尚有 ⇒ 唯指纹判据能停");
+    let (escalated, route) = candidate_compile_status(
+        Some(&previous),
+        &failure,
+        "2026-11-12T02:00:00Z".to_string(),
+        balance,
+    );
+    assert_eq!(
+        route,
+        CandidateCompileRoute::Escalate {
+            repeated: 2,
+            remaining: 2
+        },
+        "同一环重复必须提前停（REQ-WSC-22：余额 2 也不得多跑）"
+    );
+    assert_eq!(
+        escalated.auto_rewrites_used, 1,
+        "同环停不再扣（不白耗预算）"
+    );
+    let auto_rewrite = escalated
+        .auto_rewrite
+        .as_ref()
+        .expect("stopped phase present");
+    assert_eq!(auto_rewrite.phase, CandidateAutoRewritePhase::Stopped);
+    assert_eq!(auto_rewrite.repeated, Some(2));
+    // 通道拒绝消费（phase=Stopped ⇒ 升级交门由调用方落）：零委托、零新扣减。
+    lifecycle
+        .save_candidate_compile_status(&session_id, &escalated)
+        .expect("persist escalated status");
+    assert!(
+        !engine.route_compile_failure_to_rewrite().await,
+        "同环重复的失败不得再进自动重写通道"
+    );
+    assert_no_author_rerun_requested(&mut event_rx);
+    let final_record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load final record");
+    assert!(
+        final_record.author_rewrite_budget.is_none(),
+        "同环重复停 ⇒ 零预领扣减（不白占额度）"
+    );
+}
+
+/// 工作包 5.2（老会话兼容）：旧会话缺预算域 + 门快照
+/// `accepted_feedback_turns == None`（缺 gate-local 事实）⇒ 权威余额**未知**
+/// （None）⇒ 保守 `Escalate{remaining:0}` 交门，MUST NOT 补满额 3、不得
+/// 臆造重写额度；老会话本路径零预算写入（不建域、不扣减、None 不被改写）。
+#[tokio::test]
+async fn old_session_without_gate_local_facts_is_conservative_unknown() {
+    let (_tmp, lifecycle, mut engine, mut event_rx, _cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    // 旧会话形态：门快照在场但缺 gate-local 事实（None），预算域未建。
+    let mut record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load record");
+    assert!(record.author_rewrite_budget.is_none(), "老会话无预算域");
+    record.human_gate_snapshot = Some(crate::product::work_item_plan_policy::HumanGateSnapshot {
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        accepted_feedback_turns: None,
+        candidate_recovery: None,
+        trigger: crate::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+        resumable: true,
+    });
+    persist_record(&lifecycle, &record);
+    // 余额未知：None（不是 Some(3)、不是 Some(0)、不按 remaining 2 臆算）。
+    let stored = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("reload old-session");
+    assert_eq!(
+        production_balance(&lifecycle, &stored),
+        None,
+        "缺 gate-local 事实 ⇒ 余额未知（保守不补满额）"
+    );
+    // 决策面：None ⇒ Escalate{remaining:0}（保守交门）；无指纹行 ⇒ 非同环重复。
+    let previous = lifecycle
+        .load_candidate_compile_status(&session_id)
+        .expect("load status")
+        .expect("status present");
+    let mut failure = PlanningCompileFailure::operational(
+        "final_compile_prepare_failed",
+        "dependency_cycle: 「A」把「B」写成 provider".to_string(),
+    );
+    failure.failure_id = "planning_compile_failure_task6".to_string();
+    failure.source_revision_ref = previous.source_revision_ref.clone();
+    failure.plan_candidate_ir_ref = previous.plan_candidate_ir_ref.clone();
+    let (escalated, route) = candidate_compile_status(
+        Some(&previous),
+        &failure,
+        "2026-11-12T03:00:00Z".to_string(),
+        None,
+    );
+    assert_eq!(
+        route,
+        CandidateCompileRoute::Escalate {
+            repeated: 1,
+            remaining: 0
+        },
+        "余额未知 ⇒ 保守 Escalate 交门（remaining=0，不臆造满额 3）"
+    );
+    assert_eq!(
+        escalated.auto_rewrites_used, previous.auto_rewrites_used,
+        "未知余额不得扣诊断计数"
+    );
+    assert_eq!(
+        escalated
+            .auto_rewrite
+            .as_ref()
+            .expect("stopped phase")
+            .phase,
+        CandidateAutoRewritePhase::Stopped
+    );
+    // 通道拒绝 + 老会话零写入：不建域、不扣减、快照 None 事实不被臆造。
+    lifecycle
+        .save_candidate_compile_status(&session_id, &escalated)
+        .expect("persist escalated status");
+    assert!(
+        !engine.route_compile_failure_to_rewrite().await,
+        "余额未知的失败不得进自动重写通道"
+    );
+    let final_record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load final record");
+    assert!(
+        final_record.author_rewrite_budget.is_none(),
+        "老会话零建域（本路径零预算写入、无新增中间态）"
+    );
+    assert_eq!(
+        final_record
+            .human_gate_snapshot
+            .as_ref()
+            .expect("snapshot survives")
+            .accepted_feedback_turns,
+        None,
+        "旧会话缺 gate-local 事实保持 None（不补计数不改历史）"
+    );
+    assert_no_author_rerun_requested(&mut event_rx);
 }

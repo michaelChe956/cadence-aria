@@ -281,6 +281,7 @@ impl WorkspaceEngine {
         // 「诊断计数陈旧」（auto_rewrites_used 未随成功归零），不是授权事实
         // 失真——下次编译失败的读侧以预算域（统一权威余额）为准，诊断计数随
         // 下次成功落盘对齐。写失败只降级为静默（与下方 save 同口径）。
+        // 预算域 None 的老会话本 CAS 零写入、无新增中间态（幂等 Ok 不建域）。
         let _ = lifecycle.clear_author_rewrite_auto_segment(&self.session.session_id);
         let now = chrono::Utc::now().to_rfc3339();
         let status =
