@@ -154,6 +154,12 @@ export type IterationEvent = {
   suggested_prompt: string | null;
   provider_session_id: string | null;
   error: string | null;
+  /**
+   * 模型是否明确未产出 prompt（拒答或主动不给）。
+   * true = 结构化输出被解析成功但 suggested_prompt 为空；false/缺失 = 正常产出，
+   * 或结构化输出根本没解析出来（格式不符）。后端未上线该字段时按 false 处理。
+   */
+  prompt_declined?: boolean;
 };
 
 /** 生成成功响应。 */

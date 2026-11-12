@@ -27,7 +27,13 @@ import {
   type SettingsUpdateRequest,
   type ImageVendor,
 } from "../api/types/image-create";
-import type { ImageChatEntry } from "./image-create-entries";
+import {
+  buildEntries,
+  insertNoticeBeforeFallback,
+  NO_PROMPT_NOTICE_TEXT,
+  PROMPT_DECLINED_NOTICE_TEXT,
+  type ImageChatEntry,
+} from "./image-create-entries";
 import {
   initialVendorModel,
   mergeCandidatePool,
@@ -157,6 +163,10 @@ let activeSocket: WebSocket | null = null;
 let entrySequence = 0;
 let generationRequestSequence = 0;
 let openSessionRequestSequence = 0;
+/** 本轮最近一次 fallback 文本条目的 id：提示要插到它前面。 */
+let lastFallbackEntryId: string | null = null;
+/** 本轮 fallback 文本携带的拒答标记：done 事件未带该字段时兜底。 */
+let lastFallbackDeclined: boolean | null = null;
 
 function entryId(prefix: string): string {
   entrySequence += 1;
@@ -267,110 +277,6 @@ function resolveSelectedModel(
   return initialImageModel(settings);
 }
 
-function buildEntries(record: SessionRecord): ImageChatEntry[] {
-  const userMessages = record.messages.filter((message) => message.role === "user");
-  const entries: ImageChatEntry[] = record.messages.map<ImageChatEntry>(
-    (message) =>
-      message.role === "user"
-        ? {
-            id: "",
-            type: "user_message",
-            role: "user",
-            content: message.content,
-            timestamp: message.ts,
-          }
-        : {
-            id: "",
-            type: "provider_text",
-            role: "provider",
-            content: message.content,
-            timestamp: message.ts,
-          },
-  );
-  entries.push(
-    ...record.prompt_blocks.map<ImageChatEntry>((block, index) => ({
-      id: "",
-      type: "prompt_block",
-      role: "provider",
-      content: block.content,
-      version: block.version,
-      timestamp: block.ts ?? userMessages[index]?.ts ?? record.session.created_at,
-    })),
-    ...record.generation_results.map<ImageChatEntry>((result) => {
-      if (result.image_id) {
-        return {
-          id: "",
-          type: "generation_image",
-          role: "provider",
-          content: result.prompt,
-          prompt: result.prompt,
-          mediaType: result.media_type,
-          imageUrl: imageUrl(record.session.id, result.image_id),
-          // 旧会话记录没有这三个字段，读出为 undefined。
-          vendor: result.vendor,
-          model: result.model,
-          referenceSource: result.reference_source,
-          timestamp: result.ts,
-        };
-      }
-      if (result.legacy_pending) {
-        return {
-          id: "",
-          type: "system_notice",
-          role: "system",
-          content: "历史图片正在迁移，请稍后刷新",
-          timestamp: result.ts,
-        };
-      }
-      return {
-        id: "",
-        type: "generation_error",
-        role: "system",
-        content: "图片引用缺失",
-        timestamp: result.ts,
-      };
-    }),
-    ...record.events.map<ImageChatEntry>((event) => ({
-      id: "",
-      type:
-        event.kind === "generation_error"
-          ? "generation_error"
-          : "system_notice",
-      role: "system",
-      content: event.message,
-      timestamp: event.ts,
-    })),
-  );
-  // 初始合并顺序即同时间戳优先级：消息 → 提示词 → 生成结果 → 事件。
-  const ordered = entries
-    .map((entry, index) => ({ entry, index, time: Date.parse(entry.timestamp) }))
-    .sort((left, right) => left.time - right.time || left.index - right.index);
-  if (
-    record.session.current_prompt &&
-    !record.prompt_blocks.some(
-      (block) => block.content === record.session.current_prompt,
-    )
-  ) {
-    // current_prompt 是当前状态而非历史事件：取最晚时刻并排在时间线末尾。
-    const latest = ordered.at(-1);
-    ordered.push({
-      entry: {
-        id: "",
-        type: "prompt_block",
-        role: "provider",
-        content: record.session.current_prompt,
-        timestamp: latest?.entry.timestamp ?? record.session.created_at,
-      },
-      index: ordered.length,
-      time: latest?.time ?? Date.parse(record.session.created_at),
-    });
-  }
-  return ordered.map(({ entry }, index) => {
-    entry.id = `history-${record.session.id}-${index}`;
-    return entry;
-  });
-}
-
 function closeActiveSocket() {
   if (!activeSocket) {
     return;
@@ -392,11 +298,17 @@ function appendEntry(entry: ImageChatEntry) {
 function handleIterationEvent(event: IterationEvent) {
   const timestamp = new Date().toISOString();
   if (event.kind === "text" && event.text) {
+    // text 事件只在没有 suggested_prompt 时推送：它是模型的 fallback 说明文本。
+    // 折叠展示，避免长说明盖过「本轮未产出 prompt」的提示。
+    const id = entryId("provider");
+    lastFallbackEntryId = id;
+    lastFallbackDeclined = event.prompt_declined ?? null;
     appendEntry({
-      id: entryId("provider"),
+      id,
       type: "provider_text",
       role: "provider",
       content: event.text,
+      collapsed: true,
       timestamp,
     });
     return;
@@ -428,14 +340,20 @@ function handleIterationEvent(event: IterationEvent) {
   if (event.kind === "done") {
     useImageCreateStore.setState((state) => {
       const retainedPrompt = state.params.prompt.trim();
-      const noPromptNotice: ImageChatEntry[] =
+      // 模型明确未产出（拒答）与「结构化输出没解析出来」是两种降级，文案不同。
+      // done 事件带该字段时以其为准；未带时回落到 fallback 文本携带的标记。
+      const declined =
+        event.prompt_declined ?? lastFallbackDeclined ?? false;
+      const notice: ImageChatEntry[] =
         !state.lastIterationHadPrompt && retainedPrompt
           ? [
               {
                 id: entryId("notice"),
                 type: "system_notice",
                 role: "system",
-                content: "本轮未产出新的建议 prompt，已保留上一版",
+                content: declined
+                  ? PROMPT_DECLINED_NOTICE_TEXT
+                  : NO_PROMPT_NOTICE_TEXT,
                 timestamp,
               },
             ]
@@ -443,7 +361,10 @@ function handleIterationEvent(event: IterationEvent) {
       return {
         isBusy: false,
         lastIterationHadPrompt: false,
-        entries: [...state.entries, ...noPromptNotice],
+        // 提示插到 fallback 文本之前：追加到末尾会被长文本淹没。
+        entries: notice.length
+          ? insertNoticeBeforeFallback(state.entries, notice[0], lastFallbackEntryId)
+          : state.entries,
         currentSession: state.currentSession
           ? {
               ...state.currentSession,
@@ -457,10 +378,14 @@ function handleIterationEvent(event: IterationEvent) {
           : null,
       };
     });
+    lastFallbackEntryId = null;
+    lastFallbackDeclined = null;
     return;
   }
   if (event.kind === "error") {
     const message = event.error || "图片创作迭代失败";
+    lastFallbackEntryId = null;
+    lastFallbackDeclined = null;
     useImageCreateStore.setState((state) => ({
       isBusy: false,
       lastIterationHadPrompt: false,
@@ -563,6 +488,8 @@ export const useImageCreateStore = create<
   openSession: async (sessionId) => {
     generationRequestSequence += 1;
     const requestToken = ++openSessionRequestSequence;
+    lastFallbackEntryId = null;
+    lastFallbackDeclined = null;
     set({ error: null, isBusy: false, lastIterationHadPrompt: false });
     try {
       const record = await getImageCreateSession(sessionId);
@@ -895,6 +822,8 @@ export const useImageCreateStore = create<
     closeActiveSocket();
     entrySequence = 0;
     generationRequestSequence += 1;
+    lastFallbackEntryId = null;
+    lastFallbackDeclined = null;
     set({ ...initialState, params: { ...initialState.params } });
   },
 }));

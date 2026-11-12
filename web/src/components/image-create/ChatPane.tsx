@@ -153,8 +153,27 @@ export function ChatPane() {
 
 const COLLAPSE_THRESHOLD = 200;
 
-function ProviderTextEntry({ content }: { content: string }) {
+function ProviderTextEntry({
+  content,
+  collapsed,
+}: {
+  content: string;
+  collapsed?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
+  // 模型未产出 prompt 时的 fallback 说明：折叠起来，不盖过提示本身。
+  if (collapsed) {
+    return (
+      <details className="w-full max-w-none rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-sm sm:w-auto sm:max-w-[90%]">
+        <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]">
+          查看模型说明
+        </summary>
+        <div className="px-4 pb-3 text-sm leading-6 whitespace-pre-wrap text-[var(--aria-ink)]">
+          {content}
+        </div>
+      </details>
+    );
+  }
   const collapsible = content.length > COLLAPSE_THRESHOLD;
   return (
     <article className="w-full max-w-none rounded-2xl rounded-bl-md border border-[var(--aria-line)] bg-[var(--aria-panel)] shadow-sm sm:w-auto sm:max-w-[90%]">
@@ -304,7 +323,9 @@ function ChatEntryView({ entry }: { entry: ImageChatEntry }) {
         </article>
       );
     case "provider_text":
-      return <ProviderTextEntry content={entry.content} />;
+      return (
+        <ProviderTextEntry content={entry.content} collapsed={entry.collapsed} />
+      );
     case "prompt_block":
       return <PromptBlockEntry content={entry.content} version={entry.version} />;
     case "generation_image":

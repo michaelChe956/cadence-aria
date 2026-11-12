@@ -206,6 +206,49 @@ describe("ChatPane", () => {
       screen.getByText((content) => content.includes("正在处理，请稍候")),
     ).toBeInTheDocument();
   });
+
+  it("把模型未产出时的说明文本折叠起来并默认收起", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "provider-1",
+          type: "provider_text",
+          role: "provider",
+          content: "我不愿意给出这张图的 prompt",
+          timestamp: "2026-08-03T10:00:00Z",
+          collapsed: true,
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    const details = screen
+      .getByText("查看模型说明")
+      .closest("details");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+    expect(details?.textContent).toContain("我不愿意给出这张图的 prompt");
+  });
+
+  it("未折叠的模型文本仍直接展示", () => {
+    useImageCreateStore.setState({
+      entries: [
+        {
+          id: "provider-2",
+          type: "provider_text",
+          role: "provider",
+          content: "这是模型的普通说明",
+          timestamp: "2026-08-03T10:00:00Z",
+        },
+      ],
+    });
+
+    render(<ChatPane />);
+
+    expect(screen.getByText("这是模型的普通说明")).toBeInTheDocument();
+    expect(screen.queryByText("查看模型说明")).not.toBeInTheDocument();
+  });
 });
 
 function sessionRecord(): SessionRecord {
