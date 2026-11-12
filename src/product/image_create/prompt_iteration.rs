@@ -27,6 +27,9 @@ pub struct PromptIterationEngine {
 pub struct IterationOutcome {
     pub readable_text: String,
     pub suggested_prompt: Option<String>,
+    /// 结构化块解析成功但 suggested_prompt 为空/缺失 ⇒ 模型明确未产出（拒答或主动不给）；
+    /// false = 正常产出，或结构化输出根本没解析出来（格式不符/模型无视契约）。
+    pub prompt_declined: bool,
     pub provider_session_id: Option<String>,
 }
 
@@ -119,7 +122,7 @@ fn iteration_input(
 ) -> StreamingProviderInput {
     let nonce = make_nonce();
     let prompt = format!(
-        "{prompt}\n\n请严格按以下格式输出（不要输出其他内容）：\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n{{\"nonce\":\"{nonce}\",\"suggested_prompt\":\"用中文撰写的最终图片生成 prompt\"}}\n</ARIA_STRUCTURED_OUTPUT>\n\n要求：suggested_prompt 的内容必须用中文撰写（描述主体、场景、风格、构图等），不要用英文。\n"
+        "{prompt}\n\n请严格按以下格式输出：\n<ARIA_STRUCTURED_OUTPUT nonce=\"{nonce}\">\n{{\"nonce\":\"{nonce}\",\"suggested_prompt\":\"用中文撰写的最终图片生成 prompt\"}}\n</ARIA_STRUCTURED_OUTPUT>\n\n除上面的 JSON 块外不要输出其他内容。\n若你无法或不宜给出图片 prompt（例如内容涉及真实在世人物的私生活传闻、或你判断无法完成），\n仍然必须输出上面的 JSON 块，但把 suggested_prompt 置为空字符串 \"\"，\n并可在 JSON 块之外用一段文字说明原因。\n要求：suggested_prompt 的内容必须用中文撰写（描述主体、场景、风格、构图等），不要用英文。\n"
     );
     StreamingProviderInput {
         working_directory: None,
@@ -177,18 +180,28 @@ async fn consume_iteration_events(
                     text_deltas
                 };
                 let readable_text = strip_structured_output_block(&raw_readable);
+                // 双出口契约：结构化块解析成功但没有非空 suggested_prompt ⇒ 模型明确未产出
+                // （拒答或主动不给）；与「格式不符导致解析失败」（declined 保持 false）区分开。
+                let mut prompt_declined = false;
                 let suggested_prompt = match completion.structured_output {
-                    StructuredOutputState::Parsed(value) => value
-                        .get("suggested_prompt")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|prompt| !prompt.is_empty())
-                        .map(str::to_string),
+                    StructuredOutputState::Parsed(value) => {
+                        let prompt = value
+                            .get("suggested_prompt")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::trim)
+                            .filter(|prompt| !prompt.is_empty())
+                            .map(str::to_string);
+                        if prompt.is_none() {
+                            prompt_declined = true;
+                        }
+                        prompt
+                    }
                     StructuredOutputState::NotRequested | StructuredOutputState::Failed(_) => None,
                 };
                 return Ok(IterationOutcome {
                     readable_text,
                     suggested_prompt,
+                    prompt_declined,
                     provider_session_id: completion.provider_session_id,
                 });
             }
@@ -516,6 +529,16 @@ mod tests {
         )));
         assert!(inputs[0].prompt.contains(end_tag));
         assert!(inputs[0].working_dir.is_dir());
+        assert!(inputs[0]
+            .prompt
+            .contains("除上面的 JSON 块外不要输出其他内容"));
+        assert!(!outcome.prompt_declined);
+        assert!(
+            inputs[0].prompt.contains("仍然必须输出上面的 JSON 块")
+                && inputs[0]
+                    .prompt
+                    .contains("并可在 JSON 块之外用一段文字说明原因")
+        );
     }
 
     #[tokio::test]
@@ -536,6 +559,39 @@ mod tests {
 
         assert_eq!(outcome.readable_text, "仍然可以展示这段可读回复。");
         assert_eq!(outcome.suggested_prompt, None);
+        // 结构化输出根本没解析出来（格式不符/无视契约）⇒ declined 必须保持 false，
+        // 与「模型明确未产出」严格区分（DB-03 分界）。
+        assert!(!outcome.prompt_declined);
+    }
+
+    #[tokio::test]
+    async fn declined_empty_suggested_prompt_marks_prompt_declined() {
+        let provider = Arc::new(ScriptedProvider::new([Script::Complete {
+            text: "涉及真实在世人物的私生活传闻，本轮无法产出图片 prompt。".to_string(),
+            structured: Some(json!({"suggested_prompt": ""})),
+            session: Some("provider-session-3".to_string()),
+        }]));
+        let engine = engine(provider);
+        let root = tempdir().unwrap();
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+
+        let outcome = engine
+            .iterate(
+                &record(),
+                "画某在世人物私生活场景",
+                &paths,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        // 结构化块解析成功但 suggested_prompt 为空串 ⇒ 模型明确拒答，而不是解析失败。
+        assert_eq!(outcome.suggested_prompt, None);
+        assert!(outcome.prompt_declined);
+        assert_eq!(
+            outcome.readable_text,
+            "涉及真实在世人物的私生活传闻，本轮无法产出图片 prompt。"
+        );
     }
 
     #[tokio::test]

@@ -252,3 +252,70 @@ async fn h2_iteration_text_fallback_event_is_redacted() {
         "用户自己的消息不改写"
     );
 }
+
+/// 只输出结构化块（suggested_prompt 为空串）、无可读文本的迭代执行器：
+/// 模拟「模型拒答且只给 JSON 块、不给说明文字」的极端情况。
+struct DeclinedSilentProvider;
+
+#[async_trait]
+impl StreamingProviderAdapter for DeclinedSilentProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let contract = input
+            .structured_output_contract
+            .as_ref()
+            .expect("contract");
+        let full_output = format!(
+            "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"nonce\":\"{}\",\"suggested_prompt\":\"\"}}\n</ARIA_STRUCTURED_OUTPUT>",
+            contract.nonce, contract.nonce
+        );
+        let completion = ProviderCompletion::from_output(
+            full_output,
+            Some(contract),
+            Some("provider-session".to_string()),
+        );
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
+        tokio::spawn(async move {
+            let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[tokio::test]
+async fn declined_with_blank_readable_text_pushes_no_text_event() {
+    // 拒答双出口：模型只回 JSON 块（suggested_prompt 为空串）且无可读说明 ⇒
+    // 不得推空白 text 事件（前端会渲染出空的「模型说明」折叠块）；done 仍带 prompt_declined=true。
+    let store = Arc::new(FakeSessionStore::with_record());
+    let engine = engine(
+        store,
+        valid_settings(),
+        Arc::new(FakeImageClient::success()),
+        Some(Arc::new(DeclinedSilentProvider)),
+    );
+
+    let mut events = engine
+        .start_iteration("session", "完善提示词".to_string())
+        .await
+        .expect("start iteration");
+    let mut saw_text_event = false;
+    let mut done_declined = None;
+    while let Some(event) = events.recv().await {
+        match event.kind.as_str() {
+            "text" => saw_text_event = true,
+            "done" => done_declined = Some(event.prompt_declined),
+            _ => {}
+        }
+    }
+
+    assert!(!saw_text_event, "空白可读文本不得产生 text 事件");
+    assert_eq!(done_declined, Some(true), "done 应携带 prompt_declined=true");
+}

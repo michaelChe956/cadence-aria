@@ -791,3 +791,26 @@ fn prompt_block_with_ts_round_trips_and_none_omits_field() {
     assert!(!json.contains("\"ts\""), "ts 为 None 时应省略字段：{json}");
     assert_eq!(serde_json::from_str::<PromptBlock>(&json).unwrap(), legacy);
 }
+
+/// IterationEvent 序列化带 prompt_declined 字段；旧事件 JSON 不含该字段时
+/// 反序列化默认 false（serde default），前后端向后兼容。
+#[test]
+fn iteration_event_serializes_prompt_declined_and_defaults_when_missing() {
+    let event = IterationEvent {
+        kind: "done".to_string(),
+        text: None,
+        suggested_prompt: None,
+        prompt_declined: true,
+        provider_session_id: None,
+        error: None,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(
+        json.contains("\"prompt_declined\":true"),
+        "应携带字段：{json}"
+    );
+
+    let legacy = r#"{"kind":"done","text":null,"suggested_prompt":null,"provider_session_id":null,"error":null}"#;
+    let parsed: IterationEvent = serde_json::from_str(legacy).unwrap();
+    assert!(!parsed.prompt_declined, "旧事件缺字段应默认 false");
+}

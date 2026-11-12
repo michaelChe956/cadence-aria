@@ -632,6 +632,11 @@ pub struct IterationEvent {
     pub kind: String,
     pub text: Option<String>,
     pub suggested_prompt: Option<String>,
+    /// 模型明确未产出建议 prompt（结构化块解析成功但 suggested_prompt 为空/缺失）；
+    /// false = 正常产出，或结构化输出根本没解析出来（格式不符/模型无视契约）。
+    /// serde default 兼容不含该字段的旧事件/旧客户端。
+    #[serde(default)]
+    pub prompt_declined: bool,
     pub provider_session_id: Option<String>,
     pub error: Option<String>,
 }

@@ -440,6 +440,7 @@ fn iteration_error_event(error: impl Into<String>) -> IterationEvent {
         kind: "error".to_string(),
         text: None,
         suggested_prompt: None,
+        prompt_declined: false,
         provider_session_id: None,
         error: Some(error.into()),
     }

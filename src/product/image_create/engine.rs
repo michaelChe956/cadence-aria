@@ -136,12 +136,15 @@ impl ImageCreateEngine {
                         Ok(()) => {
                             // 有 suggested_prompt 时只推 prompt（provider 的解释文本对用户无价值，不展示）；
                             // 无 suggested_prompt 时才推 text 作为 fallback（让用户知道发生了什么）。
+                            // text/done 都带本轮 prompt_declined：前端据此区分「模型明确拒答」
+                            // 与「格式不符/无视契约」，拒答时提示排在 fallback 文本之前。
                             if suggested_prompt.is_none() {
                                 let _ = event_tx
                                     .send(IterationEvent {
                                         kind: "text".to_string(),
                                         text: Some(readable_text),
                                         suggested_prompt: None,
+                                        prompt_declined: outcome.prompt_declined,
                                         provider_session_id: None,
                                         error: None,
                                     })
@@ -153,6 +156,7 @@ impl ImageCreateEngine {
                                         kind: "prompt".to_string(),
                                         text: None,
                                         suggested_prompt: Some(prompt),
+                                        prompt_declined: outcome.prompt_declined,
                                         provider_session_id: None,
                                         error: None,
                                     })
@@ -163,6 +167,7 @@ impl ImageCreateEngine {
                                     kind: "done".to_string(),
                                     text: None,
                                     suggested_prompt: None,
+                                    prompt_declined: outcome.prompt_declined,
                                     provider_session_id: outcome.provider_session_id,
                                     error: None,
                                 })
@@ -508,16 +513,18 @@ impl ImageCreateEngine {
 async fn send_iteration_error(
     sender: &mpsc::Sender<IterationEvent>,
     error: ImageCreateError,
-) -> Result<(), mpsc::error::SendError<IterationEvent>> {
+) -> Result<(), Box<mpsc::error::SendError<IterationEvent>>> {
     sender
         .send(IterationEvent {
             kind: "error".to_string(),
             text: None,
             suggested_prompt: None,
+            prompt_declined: false,
             provider_session_id: None,
             error: Some(error.to_string()),
         })
         .await
+        .map_err(Box::new)
 }
 
 /// 迭代输出脱敏（H2）：输出文本中出现两家任一 `api_key` 明文即替换为 `[REDACTED]`。
