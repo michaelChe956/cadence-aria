@@ -706,16 +706,41 @@ impl crate::product::workspace_engine::WorkspaceEngine {
         // 未被消费为 ProviderStarted 且无实际启动观察 ⇒ 退；已启动 ⇒ 不退
         // （真跑过）。回退先于 phase→Stopped 落盘——中途崩溃时 phase 仍
         // Running，对账重放幂等重入（同键 refund 只写一次），不留悬空扣减。
-        if let Some(key) = lifecycle
-            .get_workspace_session(&self.session.session_id)
-            .ok()
-            .and_then(|record| unconsumed_preclaim_key(&record))
-        {
-            let _ = lifecycle.refund_author_rewrite_charge(
-                &self.session.session_id,
-                &key,
-                chrono::Utc::now().to_rfc3339(),
-            );
+        // ⚠️ 回退未落 ⇒ **不**推进 phase→Stopped：phase 仍 Running ⇒ 对账可重放
+        // （同键 refund 只写一次，幂等重入）⇒ 不把「已扣未退」固化成第三态
+        // （Task 3 评审 Minor-2：原实现把读错误与退款错误双双吞掉后仍落
+        // Stopped，而 `phase != Running` 的早退会让对账再不可达）。
+        let refund_failed = match lifecycle.get_workspace_session(&self.session.session_id) {
+            Ok(record) => match unconsumed_preclaim_key(&record) {
+                Some(key) => lifecycle
+                    .refund_author_rewrite_charge(
+                        &self.session.session_id,
+                        &key,
+                        chrono::Utc::now().to_rfc3339(),
+                    )
+                    .is_err(),
+                None => false,
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "auto rewrite reconcile could not read the durable session for refund"
+                );
+                true
+            }
+        };
+        if refund_failed {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: format!(
+                        "candidate compile auto rewrite reconcile could not refund the unconsumed \
+                         preclaim charge; the durable phase stays running for replay (session {})",
+                        self.session.session_id
+                    ),
+                })
+                .await;
+            return;
         }
         auto_rewrite.phase = CandidateAutoRewritePhase::Stopped;
         if lifecycle
