@@ -102,11 +102,11 @@ export type ImageCreateActions = {
    */
   setVendorModels: (vendor: ImageVendor, models: readonly string[]) => string[];
   /**
-   * 用最近一次探测到的网关模型刷新该家的候选池：
+   * 用最近一次探测到的网关模型刷新该家的候选池与草稿清单：
    * - 候选池 = 网关模型（网关顺序在前）∪ 草稿清单里已有的；
-   * - 勾选集合 = 草稿清单原样（探测不新增勾选，也不取消勾选）；
-   *   草稿清单为空且网关返回非空时取网关全量，超过单家上限只保留前 N 个；
-   * - 已被另一家勾选的模型 id 不进入候选池。
+   * - 草稿清单 = 网关返回的模型（去重、保序），已被另一家勾选占用的 id 跳过，
+   *   超过单家上限时只保留前 N 个；
+   * - 网关没有模型列表时，候选池与清单都不变。
    */
   refreshModelCandidates: (
     vendor: ImageVendor,

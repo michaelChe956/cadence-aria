@@ -357,7 +357,7 @@ describe("image create store 模型候选池", () => {
     );
   });
 
-  it("refreshes the candidate pool with the gateway list but keeps the checked list unchanged", async () => {
+  it("replaces the checked list with the gateway list and keeps the existing entries in the pool", async () => {
     const useImageCreateStore = await probeGpt();
 
     const refresh = useImageCreateStore
@@ -374,8 +374,43 @@ describe("image create store 模型候选池", () => {
     expect(useImageCreateStore.getState().modelPools.gpt.candidates).toEqual(
       refresh.candidates,
     );
-    // 勾选集合 = 草稿清单原样：探测不新增勾选，也不取消勾选。
-    expect(refresh.selected).toEqual(["gpt-image-2.6-flare", "custom-x"]);
+    // 草稿清单 = 网关返回的模型（去重、保序）。
+    expect(refresh.selected).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-2.6-flare",
+      "gpt-image-3",
+    ]);
+  });
+
+  it("checks the cancelled model again when the probe runs a second time", async () => {
+    const useImageCreateStore = await probeGpt();
+
+    // 已知取舍：用户取消勾选的模型，再次探测会被网关列表重新勾上。
+    const refresh = useImageCreateStore
+      .getState()
+      .refreshModelCandidates("gpt", ["gpt-image-2.6"], []);
+
+    expect(refresh.selected).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-2.6-flare",
+      "gpt-image-3",
+    ]);
+  });
+
+  it("drops the custom model the gateway does not return from the checked list", async () => {
+    const useImageCreateStore = await probeGpt();
+
+    // 已知取舍：自定义添加但网关没返回的 id，再次探测后移出清单（仍留在候选池里）。
+    const refresh = useImageCreateStore
+      .getState()
+      .refreshModelCandidates("gpt", ["custom-x"], []);
+
+    expect(refresh.selected).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-2.6-flare",
+      "gpt-image-3",
+    ]);
+    expect(refresh.candidates).toContain("custom-x");
   });
 
   it("checks every gateway model when the current list is empty", async () => {

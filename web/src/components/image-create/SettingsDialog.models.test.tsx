@@ -118,7 +118,7 @@ beforeEach(() => {
 });
 
 describe("SettingsDialog 模型清单与探测联动", () => {
-  it("探测成功后候选池加入网关模型，勾选集合保持原样", async () => {
+  it("探测成功后草稿清单替换为网关返回的模型", async () => {
     const user = userEvent.setup();
     probeApi.mockResolvedValue(
       probeResult(["gpt-image-2.6", "gpt-image-2.6-flare", "gpt-image-3"]),
@@ -127,15 +127,33 @@ describe("SettingsDialog 模型清单与探测联动", () => {
     const gpt = within(await screen.findByRole("region", { name: "GPT" }));
 
     await user.click(gpt.getByRole("button", { name: "测试连通" }));
-    await user.click(gpt.getByRole("button", { name: "已选 2 项" }));
 
-    // 网关新增的模型进入候选池但不被自动勾选。
     await waitFor(() => {
-      expect(
-        gpt.getByRole("checkbox", { name: "gpt-image-3" }),
-      ).not.toBeChecked();
+      expect(gpt.getByRole("button", { name: "已选 3 项" })).toBeInTheDocument();
     });
-    expect(gpt.getByRole("checkbox", { name: "gpt-image-2.6" })).toBeChecked();
+    await user.click(gpt.getByRole("button", { name: "已选 3 项" }));
+    expect(gpt.getByRole("checkbox", { name: "gpt-image-3" })).toBeChecked();
+  });
+
+  it("取消勾选后再次探测会重新勾上（已知取舍）", async () => {
+    const user = userEvent.setup();
+    probeApi.mockResolvedValue(
+      probeResult(["gpt-image-2.6", "gpt-image-2.6-flare"]),
+    );
+    renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    // 先取消一个模型的勾选。
+    await user.click(gpt.getByRole("button", { name: "已选 2 项" }));
+    await user.click(gpt.getByRole("checkbox", { name: "gpt-image-2.6-flare" }));
+    expect(gpt.getByRole("button", { name: "已选 1 项" })).toBeInTheDocument();
+
+    // 再次探测：网关列表把它重新勾上（已知取舍，界面有说明文案）。
+    await user.click(gpt.getByRole("button", { name: "测试连通" }));
+
+    await waitFor(() => {
+      expect(gpt.getByRole("button", { name: "已选 2 项" })).toBeInTheDocument();
+    });
   });
 
   it("草稿清单为空时探测后全选网关模型", async () => {

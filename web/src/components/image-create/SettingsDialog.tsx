@@ -553,6 +553,9 @@ function VendorSection({
           <span className="text-xs text-[var(--aria-ink-muted)]">
             只测连通性，不生成图片、不计费
           </span>
+          <span className="text-xs text-[var(--aria-ink-muted)]">
+            成功后会用网关返回的模型列表更新模型清单
+          </span>
         </div>
       </div>
 

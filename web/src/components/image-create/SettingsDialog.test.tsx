@@ -482,6 +482,16 @@ describe("SettingsDialog Base URL 示例与连通性探测", () => {
     });
   });
 
+  it("测试连通按钮旁说明成功后会用网关模型列表更新清单", async () => {
+    renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    expect(
+      gpt.getByText("成功后会用网关返回的模型列表更新模型清单"),
+    ).toBeInTheDocument();
+    expect(gpt.getByText("只测连通性，不生成图片、不计费")).toBeInTheDocument();
+  });
+
   it("探测进行中按钮禁用并显示进行中态", async () => {
     renderDialog({
       gpt: { phase: "testing", result: null, error: null },

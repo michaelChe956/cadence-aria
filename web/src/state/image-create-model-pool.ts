@@ -51,35 +51,33 @@ export function orderByPool(
 }
 
 /**
- * 用网关模型刷新候选池（纯计算）：
- * - 候选池 = 网关模型（网关顺序在前）∪ 草稿清单里已有的；
- * - 勾选集合 = 草稿清单原样（探测不新增勾选，也不取消勾选）；
- *   草稿清单为空且网关返回非空时取网关全量，超过单家上限只保留前 N 个；
- * - 已被另一家勾选的模型 id 归属那一家，本家跳过。
+ * 用网关模型刷新候选池与草稿清单（纯计算）：
+ * - 候选池 = 网关模型（网关顺序在前）∪ 草稿清单里已有的（网关没返回的追加在后）；
+ * - 草稿清单 = 网关返回的模型（去重、保序），已被另一家勾选占用的 id 跳过，
+ *   超过单家上限时只保留前 N 个；
+ * - 已知取舍：用户取消勾选过的模型会再次被勾上，自定义但网关没返回的 id 会移出清单。
  */
 export function refreshCandidatePool(
   gateway: readonly string[],
   current: readonly string[],
   otherSelected: readonly string[],
 ): ModelCandidatesRefresh {
-  const selected = normalizeModels(current);
+  const gatewayModels = normalizeModels(gateway);
+  const currentModels = normalizeModels(current);
   const used = new Set(normalizeModels(otherSelected));
-  const skipped = gateway.filter((model) => used.has(model));
-  const available = gateway.filter((model) => !used.has(model));
-  const candidates = normalizeModels([...available, ...selected]);
-  const autoSelect = selected.length === 0 && available.length > 0;
+  // 已被另一家勾选的模型 id 归属那一家，本家跳过。
+  const skipped = gatewayModels.filter((model) => used.has(model));
+  const available = gatewayModels.filter((model) => !used.has(model));
+  const candidates = normalizeModels([
+    ...available,
+    ...currentModels.filter((model) => !used.has(model)),
+  ]);
   const kept = available.slice(0, IMAGE_MODELS_LIMIT);
-  const wanted = new Set(autoSelect ? kept : selected);
   const truncated =
-    autoSelect && available.length > IMAGE_MODELS_LIMIT
+    available.length > IMAGE_MODELS_LIMIT
       ? { total: available.length, kept: kept.length }
       : null;
-  return {
-    candidates,
-    selected: candidates.filter((model) => wanted.has(model)),
-    skipped,
-    truncated,
-  };
+  return { candidates, selected: kept, skipped, truncated };
 }
 
 /**
