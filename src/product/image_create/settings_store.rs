@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
-use crate::product::json_store::{read_json, write_json};
+use crate::product::json_store::{read_json, write_json_owner_only};
 
 use super::models::{
     ApiKeyAction, ApiKeyUpdate, ImageCreateError, ImageCreateSettings, ImageVendor, MaskedSettings,
@@ -45,20 +45,30 @@ pub fn save(
     settings: &ImageCreateSettings,
 ) -> Result<(), ImageCreateError> {
     let path = paths.image_create_settings_file();
-    write_json(&path, settings).map_err(|error| ImageCreateError::Store(error.to_string()))?;
-    // H1：明文 key 所在文件只允许属主读写。仅收紧本文件，
+    // H1：明文 key 所在文件全程属主可读写——owner-only 写路径让临时文件创建即 0600，
+    // 不存在「写入→rename 期间 0644」的暴露窗口；rename 后再统一收紧一次兜底。
     // 不改 write_json 的全局默认行为（会话文件等不受影响）。
+    write_json_owner_only(&path, settings)
+        .map_err(|error| ImageCreateError::Store(error.to_string()))?;
     restrict_to_owner(&path)
 }
 
 /// 把设置文件权限收紧为 0600。Windows 无 POSIX 权限位，安全 no-op（不报错）。
+/// 收紧失败时删除已落盘文件：宁可丢掉本次设置，也不留下可能仍为宽权限的明文 key 文件。
 fn restrict_to_owner(path: &std::path::Path) -> Result<(), ImageCreateError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
-            ImageCreateError::Store(format!("收紧设置文件权限失败 {}: {error}", path.display()))
-        })
+        if let Err(error) =
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        {
+            let _ = std::fs::remove_file(path);
+            return Err(ImageCreateError::Store(format!(
+                "收紧设置文件权限失败 {}: {error}",
+                path.display()
+            )));
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
