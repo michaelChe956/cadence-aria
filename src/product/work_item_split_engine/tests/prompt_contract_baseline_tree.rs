@@ -31,19 +31,31 @@ fn work_item_plan_markdown_prompt_keeps_cross_reference_discipline_when_design_l
         .expect("markdown author prompt");
 
     for required in [
-        "[design_requirements] （无；不得编造）",
+        "[design_requirements] （无；不编造）",
         "[cross_reference_discipline]",
-        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
-        "同一 Work Item 内同一 command 至多声明一次；需要复合验证时合并为一条 check 或改用 manual_instruction。",
-        "违反会被编译器最终校验拒绝：lowering_error/trusted_commands「同一 Work Item 不得重复引用 trusted command。」——整份计划编译失败，需人工修复后重新编译。",
-        "反例：同一 item 的 CHECK-001 与 CHECK-002 都写 `- command: npm test` → lowering_error 拒绝。",
-        "正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。",
-        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
-        "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
+        "handoff 的 reviewer_check_refs 与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "同一 Work Item 内同一 command 至多声明一次；复合验证合并为一条 check 或改用 manual_instruction",
+        "每个被 tasks 的 requirement_refs 引用的 requirement_id，在本 item 的 Traceability section 有逐字相同的登记行；登记值只来自 [design_requirements] 清单",
+        "task_id、criterion_id、check_id、contract_id 全文档全局唯一且全局递增（第二个 Work Item 从 TASK-004、AC-004 续起，不在 item 内重新编号）",
     ] {
         assert!(
             prompt.contains(required),
             "markdown prompt must retain cross-reference discipline with an empty design list; missing {required}: {prompt}"
+        );
+    }
+
+    // Task 7（REQ-CRP-05 计量闸门）：重复 trusted command 的 lowering_error
+    // 引文与正反例已退出 prompt——重复引用的判定由编译器终局校验承接，修复由
+    // workspace_engine/tests/contract_autorepair_migration.rs::
+    // duplicate_trusted_command_both_branches_in_instruction 产的 author 指令承接。
+    for retired in [
+        "「同一 Work Item 不得重复引用 trusted command。」",
+        "反例：同一 item 的 CHECK-001 与 CHECK-002 都写 `- command: npm test` → lowering_error 拒绝。",
+        "正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。",
+    ] {
+        assert!(
+            !prompt.contains(retired),
+            "REQ-CRP-05 计量闸门：已退出 prompt 的机械条款不得回潮：{retired}"
         );
     }
 }

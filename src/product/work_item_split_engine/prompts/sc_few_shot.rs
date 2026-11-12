@@ -3,6 +3,12 @@
 //! 从 `prompts.rs` 拆出，独立承载：`[real_finding_few_shot]` 判例渲染
 //! （真实 provider 原始 finding，勿照抄业务名/ID/路径/命令）与 `dependencies`
 //! 键的语法教学。判例 fixture 路径与渲染逻辑逐字节不变。
+//!
+//! Task 7（2026-11-12，`mechanicalize-plan-compile-repair` 工作包 7.2，
+//! REQ-CRP-05）：判例 11 条 → 3 条（保留最小覆盖组合：advisory 精度
+//! rep1-f1/rep1-f2 + must_fix 依赖约束 rep2-f3），其余 8 条按计量闸门
+//! 退出 prompt——各条判例主题仍由保留教学段与平台侧校验承接（逐条映射
+//! 见本 change 提交信息）；判例 fixture 本体不删（golden 全量保留）。
 
 use crate::product::work_item_plan_compiler::grammar;
 
@@ -11,17 +17,14 @@ pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_FINDINGS: &str = include_str!(concat!(
     "/src/product/work_item_plan_policy/fixtures/golden_findings.json"
 ));
 
-pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 11] = [
-    "rep1-f1", "rep1-f2", "rep2-f1", "rep2-f2", "rep2-f3", "rep2-f4", "rep2-f5", "rep2-f6",
-    "rep3-f1", "rep4-f1", "rep4-f2",
-];
+pub(crate) const WORK_ITEM_PLAN_FEW_SHOT_IDS: [&str; 3] = ["rep1-f1", "rep1-f2", "rep2-f3"];
 
 pub(crate) fn work_item_plan_dependency_syntax_rules() -> String {
     let dependencies_key = grammar::DEPENDENCIES_KEY;
     let item_id_prefix = grammar::ITEM_ID_PREFIX;
     let item_id_suffix = grammar::ITEM_ID_SUFFIX;
     format!(
-        "`{dependencies_key}`：`- {dependencies_key}: []`；`- {dependencies_key}: {item_id_prefix}001`（裸值）；多依赖每行：`- {dependencies_key}: {item_id_prefix}001`\n`- {dependencies_key}: {item_id_prefix}002`。禁止括号列表、空格或逗号分隔多值；值仅 `[]` 或 `{item_id_prefix}{item_id_suffix}`。"
+        "`{dependencies_key}`：`- {dependencies_key}: []` 或裸值 `- {dependencies_key}: {item_id_prefix}001`；多依赖每行一条：`- {dependencies_key}: {item_id_prefix}001`\n`- {dependencies_key}: {item_id_prefix}002`。不用括号列表、空格或逗号分隔多值；值仅 `[]` 或 `{item_id_prefix}{item_id_suffix}`。"
     )
 }
 

@@ -35,24 +35,31 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
 
     for required in [
         "[weak_model_precision]",
-        "AC 纪律：每个 `- criterion_id: AC-xxx` 必须在 Handoff Schema 配对一行 `- reviewer_check_refs: AC-xxx`",
-        "正例：`- criterion_id: AC-001` 配 `- reviewer_check_refs: AC-001`",
-        "漏写 → acceptance_criterion_without_reviewer_check 拒绝",
+        "AC 纪律：每个 `- criterion_id: AC-xxx` 在 Handoff Schema 配对一行 `- reviewer_check_refs: AC-xxx`",
+        "漏写 → acceptance_criterion_without_reviewer_check",
         "引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*）",
-        "且都必须逐字取自 [design_requirements] 清单",
-        "清单外 AC-* → unknown_done_when_ref 拒绝",
+        "且都逐字取自 [design_requirements] 清单",
+        "清单外 AC-* → unknown_done_when_ref",
     ] {
         assert!(
             prompt.contains(required),
             "弱模型精度教学必须包含 {required}: {prompt}"
         );
     }
+    // Task 7（REQ-CRP-05 计量闸门）：AC 配对正例已退出 prompt——规则句已完整
+    // 描述配对形态，判定由下方行为级对齐用例
+    // weak_model_precision_teaching_matches_contract_validator_judgement
+    // （acceptance_criterion_without_reviewer_check 场景）承接。
+    assert!(
+        !prompt.contains("正例：`- criterion_id: AC-001` 配 `- reviewer_check_refs: AC-001`"),
+        "REQ-CRP-05 计量闸门：已退出 prompt 的 AC 正例不得回潮"
+    );
     // 既有教学段不删不改：交叉引用纪律原句仍在，新段紧随其后、grammar 之前。
     for retained in [
         "[cross_reference_discipline]",
-        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
-        "requirement_refs 仅引用清单；清单外 REQ-* 拒绝。",
-        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
+        "handoff 的 reviewer_check_refs 与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
+        "requirement_refs 仅引用 [design_requirements] 清单。",
+        "每个被 tasks 的 requirement_refs 引用的 requirement_id，在本 item 的 Traceability section 有逐字相同的登记行；登记值只来自 [design_requirements] 清单",
     ] {
         assert!(
             prompt.contains(retained),
@@ -279,17 +286,28 @@ fn work_item_plan_markdown_prompt_teaches_output_contract_capability_verbatim_co
         .expect("markdown author prompt");
 
     for required in [
-        "输出契约纪律：SC 计划由你在同一文档先后写出",
-        "下游 Inputs required_capabilities 写什么，被 (provider_logical_work_item_id, contract_id) 指向的上游 Outputs capabilities 就逐字复制什么，require_all 逐项覆盖",
-        "同一契约全计划只声明一次：多个下游消费同一契约时把全部能力串合并进这唯一一份 capabilities，禁止按下游重复声明契约",
-        "两个下游消费同一 CT-001 → 一份 CT-001 含两者能力串",
-        "正例：下游 `- required_capabilities: [数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE]` → 上游 `capabilities:` 逐字同串",
-        "反例①改写/概括/漏一项 → required_capability_missing 拒绝",
-        "反例②按下游重复声明契约 → duplicate_contract_id 拒绝",
+        "输出契约纪律：下游 required_capabilities 写什么",
+        "下游 required_capabilities 写什么，上游被 (provider_logical_work_item_id, contract_id) 指向的 Outputs capabilities 就逐字复制什么（require_all 逐项覆盖）",
+        "同一契约全计划只声明一次——多个下游消费同一契约时把全部能力串合并进这唯一一份 capabilities，不按下游重复声明",
+        "反例①改写/概括/漏一项 → required_capability_missing",
+        "反例②按下游重复声明 → duplicate_contract_id",
     ] {
         assert!(
             prompt.contains(required),
             "输出契约纪律教学必须包含 {required}: {prompt}"
+        );
+    }
+    // Task 7（REQ-CRP-05 计量闸门）：压缩掉的正例判例不在 prompt；判定语义
+    // 由下方行为级对齐用例
+    // output_contract_capability_teaching_matches_dependency_validator_judgement
+    // （work_item_contract/tests/dependency.rs canonical_* 场景）承接。
+    for retired in [
+        "两个下游消费同一 CT-001 → 一份 CT-001 含两者能力串",
+        "正例：下游 `- required_capabilities: [数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE]` → 上游 `capabilities:` 逐字同串",
+    ] {
+        assert!(
+            !prompt.contains(retired),
+            "REQ-CRP-05 计量闸门：已退出 prompt 的正例不得回潮：{retired}"
         );
     }
     // 段序不破：新教学条仍在 [weak_model_precision] 段内，位于交叉引用纪律之后、grammar 之前。
@@ -348,18 +366,27 @@ fn work_item_plan_markdown_prompt_teaches_cross_wi_paired_writing() {
         .expect("markdown author prompt");
 
     for required in [
-        "成对书写纪律（DEF-PVR-ALL）：跨 WI 依赖必须两侧成对书写",
+        "成对书写纪律（DEF-PVR-ALL）：跨 WI 依赖两侧成对书写",
         "两侧能力串逐字相同才算写完这一对",
-        "正例：WI-002 Inputs 写 `- provider_logical_work_item_id: WI-001` + `- contract_id: CT-001` + `- required_capabilities: [GET /api/levels 返回 200]`，WI-001 Outputs 的 CT-001 就有 `- capabilities: GET /api/levels 返回 200`",
-        "反例：只写消费侧忘写提供侧 → required_capability_missing 拒绝",
+        "反例只写消费侧忘写提供侧 → required_capability_missing",
     ] {
         assert!(
             prompt.contains(required),
             "成对书写教学必须包含 {required}: {prompt}"
         );
     }
+    // Task 7（REQ-CRP-05 计量闸门）：成对书写的完整正例已退出 prompt——两侧
+    // 配对判定由 dependency 校验器（required_capability_missing，行为级对齐
+    // 见 output_contract_capability_teaching_matches_dependency_validator_judgement）
+    // 承接，教学保留规则句与反例箭头。
+    assert!(
+        !prompt.contains(
+            "正例：WI-002 Inputs 写 `- provider_logical_work_item_id: WI-001` + `- contract_id: CT-001` + `- required_capabilities: [GET /api/levels 返回 200]`，WI-001 Outputs 的 CT-001 就有 `- capabilities: GET /api/levels 返回 200`"
+        ),
+        "REQ-CRP-05 计量闸门：已退出 prompt 的成对正例不得回潮"
+    );
     let contract_discipline_pos = prompt
-        .find("输出契约纪律：SC 计划由你在同一文档先后写出")
+        .find("输出契约纪律：下游 required_capabilities 写什么")
         .expect("output contract discipline");
     let paired_pos = prompt
         .find("成对书写纪律（DEF-PVR-ALL）")
@@ -459,13 +486,19 @@ fn output_contract_capability_teaching_matches_dependency_validator_judgement() 
         "required_capability_missing",
         "(provider_logical_work_item_id, contract_id)",
         "require_all",
-        "数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE",
     ] {
         assert!(
             prompt.contains(taught),
             "输出契约教学必须逐字携带与校验器对齐的片段 {taught}: {prompt}"
         );
     }
+    // Task 7（REQ-CRP-05 计量闸门）：长正例判据串（数据错误返回 500 …）已退出
+    // prompt——逐字判定的对齐由本用例下方的行为级场景（同一能力串构造的最小
+    // canonical plan 必须以 required_capability_missing 拒绝）闭环承接。
+    assert!(
+        !prompt.contains("数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE"),
+        "REQ-CRP-05 计量闸门：已退出 prompt 的长正例判据串不得回潮"
+    );
 
     // 行为级对齐：教学正反例对应的最小 canonical plan 必须触发教学点名的错误码与消息。
     let capability = "数据错误返回 500 且 code=LEVEL_DATA_UNAVAILABLE";

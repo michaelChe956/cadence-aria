@@ -48,9 +48,9 @@
 
 ## 7. prompt 分层瘦身（≈15.5K → ≤8K）
 
-- [ ] 7.1 先加计量测试（REQ-CRP-05）：固定教学块字符数 + 硬措辞计数断言（当前基线 15.5K / 63，目标 ≤8K / ≤25），**先锁目标再裁剪**；每删一条机械条款须在变更说明中指向覆盖它的校验或自修测试
-- [ ] 7.2 按清单删/压：重复 trusted command 段、未知 key 白名单、Plan Intent 分支复述与 `lowering_error` 引文、模板枚举展开、few-shot 11 条 → 3 条、成环预防段各留 1 处
-- [ ] 7.3 回归：既有 prompt 契约测试按新契约更新（不许删测试）；本包**单独提交**
+- [x] 7.1 先加计量测试（REQ-CRP-05）：固定教学块字符数 + 硬措辞计数断言（当前基线 15.5K / 63，目标 ≤8K / ≤25），**先锁目标再裁剪**；每删一条机械条款须在变更说明中指向覆盖它的校验或自修测试（Task 7：`teaching_block_volume_within_budget` 落 `prompt_contract_volume_budget.rs`，常量 8_000/25 逐字；字符闸门度量会话无关固定教学块（单仓形态），硬措辞闸门双形态生效；实测基线 单仓 14,861/63、LC 16,176/69（2026-11-12 红态实测，15.5K/63 与 15,765/53 为不同口径历史值）；逐条映射表见本包提交信息）
+- [x] 7.2 按清单删/压：重复 trusted command 段、未知 key 白名单、Plan Intent 分支复述与 `lowering_error` 引文、模板枚举展开、few-shot 11 条 → 3 条、成环预防段各留 1 处（Task 7：清单逐项落地——trusted command 3 句收 1 句、40-key 白名单枚举整行删除、LC 分支复述收短、lowering_error 引文 ×2 删除、值域枚举展开压缩（kind/intent 保留）、few-shot 11→3（rep1-f1/rep1-f2/rep2-f3，golden 全量保留）、仓序成环预防保留单处；同闸门另删 capability 正反例对、AC/输出契约/成对书写长正例、`」` 判例、诊断码清单、LC 写范围段等并逐条登记平台侧承接）
+- [x] 7.3 回归：既有 prompt 契约测试按新契约更新（不许删测试）；本包**单独提交**（Task 7：`--lib prompt_contract` 全族 61 passed/0 failed——prompt_contract/baseline_tree/weak_model 断言按新契约更新并补「不回潮」负向断言，零测试删除；plan_intent_target/sc_revision/plan_options/anti_preamble 原断言全保留；计量闸门绿态实测 单仓 7,691 字符/20 硬措辞、LC 8,592/23（LC 字符含数据驱动成员面，作观测值进验收记录））
 
 ## 8. O1 落地：内容 autorepair 迁原授权 author（REQ-CRP-01 收窄；裁决 §2.2/§2.3/§2.4）
 

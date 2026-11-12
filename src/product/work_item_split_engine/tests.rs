@@ -31,6 +31,11 @@ mod prompt_contract_plan_intent_target {
 
     include!("tests/prompt_contract_plan_intent_target.rs");
 }
+mod prompt_contract_volume_budget {
+    use super::*;
+
+    include!("tests/prompt_contract_volume_budget.rs");
+}
 mod prompt_contract_baseline_tree {
     use super::*;
 

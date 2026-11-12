@@ -811,10 +811,10 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         .expect("markdown author prompt");
 
     assert!(prompt.contains(
-        "输出的第一行必须精确为 `# Work Item Plan`；之前不得有任何前言、解释、宣布、空白行或代码围栏（```）"
+        "输出的第一行精确为 `# Work Item Plan`；之前无任何前言、解释、空白行或代码围栏（```）"
     ));
     assert!(
-        prompt.contains("Verification.command 直接声明，将按声明执行"),
+        prompt.contains("Verification.command 直接声明、将按声明执行"),
         "完整 author 必须说明 Verification.command 是直接声明的执行来源"
     );
     assert!(!prompt.contains("受信命令目录"));
@@ -829,50 +829,35 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
     }
     for required in [
         crate::product::work_item_plan_compiler::grammar::EARS_STATEMENT_TEMPLATE,
-        "所有标题必须逐字使用上列英文名（一级 `# Work Item Plan`、二级 `## Work Item WI-<三位数字>: <title>`、三级 section 名恰为上列 14 个英文名之一）；禁止翻译标题、禁止附加中文注或括号。",
-        "未知结构化 key 必须拒绝（fail_closed）",
+        "section 按序各一次（顺序与标题形状见 [minimum_legal_source]）；自由文本仅 `Notes、Rationale`。",
+        "未知结构化 key 一律拒绝（fail_closed）",
         "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
-        "；intent=create、existing（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）",
+        "；intent=create、existing（新建一律 create）",
         "Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo；intent_target_kind=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。两分支 key 不顶替。intent_target_repo 取值来源按会话类型唯一、不得混填：单仓会话（本 prompt 无成员仓清单）逐字取 [issue] 头 repo= 的 repository id；LC 多仓会话（有成员仓清单）逐字取该清单的物理成员仓 ID。",
         "intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）",
         "[design_requirements] REQ-002、NFR-001",
         "[cross_reference_discipline]",
         "done_when_refs 仅引用先定义 criterion_id",
         "target_contract_refs 仅逐字引用已登记 input/output contract_id",
-        "requirement_refs 仅引用清单；清单外 REQ-* 拒绝",
-        "handoff 的 reviewer_check_refs 必须与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
-        "同 contract_id：provider output_capabilities 覆盖 WI input_contracts required_capabilities。",
+        "requirement_refs 仅引用 [design_requirements] 清单。",
+        "handoff 的 reviewer_check_refs 与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
         "require_all=全部覆盖（缺一项→required_capability_missing）；require_any=至少一项相交（交集空→required_capability_missing）。",
-        "端点/动作如 `GET /api/levels` 须显式声明；字段/记录不隐含端点。",
-        "反例：CT-001 仅「五项记录+字段名称」，WI-002 require_all「field constraints」「GET /api/levels」→ canonical required_capability_missing。",
-        "正例：CT-001 显式声明两项，或 WI-002 改引供能 contract。",
-        "canonical fail-closed：required_capability_missing 拒绝 plan。",
-        "Handoff Schema 必须显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段；禁止省略 section 或字段。",
-        "Handoff Schema 段只允许这三个 key；其他 key（如 requested_fields）会被编译器拒绝（unknown_structured_key）。",
-        "Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空；验证/集成类 Work Item 同样声明其产出的证据类契约。",
-        "provided_contract_refs 列出本 WI 交接给下游的契约引用：只列会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的引用；没有要交接的引用时，该字段的值写 []——[] 是 provided_contract_refs 的合法取值，不是省略字段，也不表示其他 section 可以为空。",
-        "正例：WI-002 提供 CT-005，WI-003 Inputs 写 provider_logical_work_item_id: WI-002 与 contract_id: CT-005 → 合法。",
-        "反例：WI-002 提供 CT-005 但无下游引用它 → 从 provided_contract_refs 移除 CT-005（该字段值可为 []）或补齐精确下游 Inputs；不得以省略字段、写 blocker、改 ID 或自然语言掩盖。",
-        "每个被 tasks 的 requirement_refs 引用的 requirement_id，必须在本 item 的 Traceability section 有对应登记行（requirement_id 逐字相同）；登记值只能来自 [design_requirements] 清单",
-        "task_id、criterion_id、check_id 在整份文档内全局唯一且全局递增——第二个 Work Item 的任务从 TASK-004、验收从 AC-004 继续（假设前一 item 用了 TASK-001~003），不得在每个 item 内重新从 001 编号；contract_id 同理在整份文档内全局唯一，不得重复。",
+        "端点/动作（如 `GET /api/levels`）显式声明，字段/记录不隐含端点。",
+        "Handoff Schema 显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段且只允许这三个 key（其他 key 如 requested_fields → unknown_structured_key 拒绝）。",
+        "Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 至少声明一个契约（contract_id + capabilities），永不为空",
+        "provided_contract_refs 列出会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的契约引用",
+        "每个被 tasks 的 requirement_refs 引用的 requirement_id，在本 item 的 Traceability section 有逐字相同的登记行；登记值只来自 [design_requirements] 清单",
+        "task_id、criterion_id、check_id、contract_id 全文档全局唯一且全局递增（第二个 Work Item 从 TASK-004、AC-004 续起，不在 item 内重新编号）",
         "不得从 issue、prompt 或 runtime 补齐 markdown 缺失字段",
-        "明确允许新增和维护 tests/integration/**",
-        "GET / 只验证三个容器与 level-select.js 加载",
-        "通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用",
-        "WHEN 与条件文本之间、条件文本与 THE SYSTEM SHALL 之间必须各有一个半角空格",
-        "`」` 收尾时同样必须",
-        "`WHEN 点击「重开」 THE SYSTEM SHALL 清空` 合法",
-        "`WHEN 点击「重开」THE SYSTEM SHALL 清空` 非法",
+        "WHEN、条件文本、THE SYSTEM SHALL 两两之间各留一个半角空格",
         "Blockers 为空时保留空 section（### Blockers 后直接下一 section）",
-        "WHEN 服务读取静态文件 THE SYSTEM SHALL 返回五项记录",
-        "反例：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录` 非法",
+        "反例（缺空格，非法）：`WHEN服务读取静态文件 THE SYSTEM SHALL 返回五项记录`",
         "Inputs 四行且 contract_id 首行",
         "provider_logical_work_item_id、required_capabilities、compatibility_policy",
         "require_all|require_any",
         "四行缺一不可",
-        "示例：若 WI-002 依赖 WI-001 的输出，则 WI-002 的 Inputs 写：\n- contract_id: <逐字复制 WI-001 Outputs 的 contract_id>\n- provider_logical_work_item_id: WI-001\n- required_capabilities: <该契约的能力>\n- compatibility_policy: require_all\n无依赖时 Inputs 留空 section。",
         "反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。",
-        "输出保持精炼：每个 statement 恰好一句话；同一信息不得在多个 section 重复；不写解释性散文或总结段——机械校验只消费结构化字段。",
+        "输出精炼：每个 statement 恰好一句话；同一信息不在多个 section 重复；不写解释性散文——机械校验只消费结构化字段。",
         "必须使用中文",
         "保持 grammar 指定的英文原样",
         "字段行分隔符必须是半角 ASCII",
@@ -884,6 +869,44 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         assert!(
             prompt.contains(required),
             "markdown prompt must retain grammar/boundary/few-shot evidence; missing {required}"
+        );
+    }
+
+    // Task 7（REQ-CRP-05，工作包 7.2/7.3）：以下机械条款按计量闸门退出
+    // prompt，各由平台侧校验/测试承接（逐条映射表见 change 提交信息）——
+    // 断言改为「不在 prompt」+ 平台侧承接测试名，防止条款回潮。
+    for retired in [
+        // 值域枚举展开与 lowering_error 引文 → 编译器枚举 fail-closed
+        // （work_item_plan_compiler/tests.rs::sg_f1_2_compiler_kind_not_big_code_lowering_enum_no_guess）
+        "lowering_error「intent 必须是 create 或 existing。」",
+        // 40-key 白名单枚举 → unknown_structured_key fail-closed 与 autorepair 指令
+        // （workspace_engine/tests/contract_autorepair_migration.rs::unknown_key_business_content_preserved）
+        "key 白名单：",
+        // 重复 trusted command 引文与正反例 → 编译器终局校验与 autorepair 指令
+        // （contract_autorepair_migration.rs::duplicate_trusted_command_both_branches_in_instruction）
+        "「同一 Work Item 不得重复引用 trusted command。」",
+        "反例：同一 item 的 CHECK-001 与 CHECK-002 都写",
+        // 诊断码清单 → typed 诊断与教学重驱（Task 2/4，ir_fault_tests.rs）
+        "诊断：missing_section",
+        // capability 正反例对 → dependency 校验器行为级测试
+        // （work_item_contract/tests/dependency.rs::canonical_work_item_dependency_*）
+        "同 contract_id：provider",
+        "反例：CT-001 仅「五项记录+字段名称」",
+        "正例：CT-001 显式声明两项",
+        "canonical fail-closed：required_capability_missing 拒绝 plan",
+        "正例：WI-002 提供 CT-005",
+        "反例：WI-002 提供 CT-005 但无下游引用它",
+        // Inputs 逐行模板示例 → lowering 结构校验与 grammar 行教学保留
+        "示例：若 WI-002 依赖 WI-001 的输出",
+        // `」` 收尾判例 → EARS parse 校验（invalid_ears fail-closed）
+        "WHEN 点击「重开」",
+        // few-shot 11→3：退出判例的判例正文（rep4-f1/rep4-f2）
+        "明确允许新增和维护 tests/integration/**",
+        "GET / 只验证三个容器与 level-select.js 加载",
+    ] {
+        assert!(
+            !prompt.contains(retired),
+            "REQ-CRP-05 计量闸门：已退出 prompt 的机械条款不得回潮：{retired}"
         );
     }
 
@@ -918,7 +941,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         );
     }
     assert!(
-        prompt.contains("禁止括号列表、空格或逗号分隔多值"),
+        prompt.contains("不用括号列表、空格或逗号分隔多值"),
         "完整 author 必须禁止 parser 不接受的 Dependencies 多值写法"
     );
 
@@ -1039,22 +1062,21 @@ fn sc_author_handoff_teaches_outputs_and_provided_refs_scopes() {
 
     assert!(prompt.contains("Outputs 与 Handoff Schema 相互独立"));
     assert!(prompt.contains(
-        "每个 Work Item 的 Outputs 必须声明至少一个契约（contract_id + capabilities），永不为空"
+        "每个 Work Item 的 Outputs 至少声明一个契约（contract_id + capabilities），永不为空"
     ));
     for teaching in [
-        "能力必须原子化",
+        "能力原子化",
         "每个 `- capabilities:` 与 `- required_capabilities:` 字段一行只写一个精确能力字符串",
-        "禁止用「A + B」、逗号、斜杠或自然语言把多个能力合并为一个字符串",
+        "不用「A + B」、逗号、斜杠或自然语言合并多能力",
         "`require_all` 按字符串逐字精确匹配",
-        "假性 `required_capability_missing`",
+        "假性 required_capability_missing",
     ] {
         assert!(
             prompt.contains(teaching),
             "missing capability teaching: {teaching}"
         );
     }
-    assert!(prompt.contains("该字段的值写 []"));
-    assert!(prompt.contains("不表示其他 section 可以为空"));
+    assert!(prompt.contains("无交接时写 []"));
     assert!(!prompt.contains("若本 WI 没有任何下游 consumer edge（链路末端"));
     assert!(!prompt.contains("provided_contract_refs 中每项必须被至少一个下游"));
 }
