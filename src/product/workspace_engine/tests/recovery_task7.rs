@@ -414,7 +414,7 @@ fn conversational_gate_takeover_inherits_snapshot_budget_and_refs() {
     let child = store
         .takeover_stopped_needs_human(&parent.id)
         .expect("takeover stopped run");
-        assert_eq!(
+    assert_eq!(
         child.run_policy,
         crate::product::work_item_plan_policy::RunPolicy::Interactive
     );
