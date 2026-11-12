@@ -1305,7 +1305,7 @@ async fn single_candidate_projects_declared_verification_command_without_outline
     assert!(
         full_input
             .prompt
-            .contains("Verification.command 直接声明，将按声明执行")
+            .contains("Verification.command 直接声明、将按声明执行")
     );
     assert!(!full_input.prompt.contains("outline 阶段登记"));
     wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
