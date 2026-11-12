@@ -42,29 +42,42 @@ const settings: MaskedSettings = {
   },
 };
 
-/** 渲染弹窗：走真实的 store 探测动作，只替换 API 层。 */
-function renderDialog(loaded: MaskedSettings = settings) {
+/**
+ * 渲染弹窗：走真实的 store 探测动作，只替换 API 层。
+ * keepProbeState：保留 store 里已有的探测结果与模型池（模拟「关掉弹窗再打开」，
+ * 探测状态存在模块级 store 里、跨弹窗开关持久）。
+ */
+function renderDialog(
+  loaded: MaskedSettings = settings,
+  options: { keepProbeState?: boolean } = {},
+) {
   const loadSettings = vi.fn(async () => {
     useImageCreateStore.setState({ settings: loaded });
   });
   const saveSettings = vi.fn().mockResolvedValue(undefined);
+  const keepProbeState = options.keepProbeState === true;
+  const current = useImageCreateStore.getState();
   useImageCreateStore.setState({
     loadSettings,
     saveSettings,
     testVendorConnectivity: originalState.testVendorConnectivity,
-    connectivity: {
-      gpt: { phase: "idle", result: null, error: null },
-      minimax: { phase: "idle", result: null, error: null },
-    },
-    modelPools: {
-      gpt: { gateway: [], candidates: [] },
-      minimax: { gateway: [], candidates: [] },
-    },
+    connectivity: keepProbeState
+      ? current.connectivity
+      : {
+          gpt: { phase: "idle", result: null, error: null },
+          minimax: { phase: "idle", result: null, error: null },
+        },
+    modelPools: keepProbeState
+      ? current.modelPools
+      : {
+          gpt: { gateway: [], candidates: [] },
+          minimax: { gateway: [], candidates: [] },
+        },
   });
 
-  render(<SettingsDialog onClose={vi.fn()} />);
+  const { unmount } = render(<SettingsDialog onClose={vi.fn()} />);
 
-  return { loadSettings, saveSettings };
+  return { loadSettings, saveSettings, unmount };
 }
 
 /** 构造一份探测结果：网关返回给定的模型列表。 */
@@ -211,6 +224,70 @@ describe("SettingsDialog 模型清单与探测联动", () => {
       expect(
         minimax.getByRole("button", { name: "已选 256 项" }),
       ).toBeInTheDocument();
+    });
+  });
+
+  it("重开弹窗不重放上一次的探测结果：已保存的精简清单不被还原成网关全量", async () => {
+    const user = userEvent.setup();
+    const gatewayModels = ["gpt-image-2.6", "gpt-image-2.6-flare", "gpt-image-3"];
+    probeApi.mockResolvedValue(probeResult(gatewayModels));
+    // 已保存的清单 = 网关全量（三项）。
+    const savedSettings: MaskedSettings = {
+      ...settings,
+      vendors: {
+        ...settings.vendors,
+        gpt: { ...settings.vendors.gpt, models: gatewayModels },
+      },
+    };
+    const first = renderDialog(savedSettings);
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    await user.click(gpt.getByRole("button", { name: "测试连通" }));
+    await waitFor(() => {
+      expect(gpt.getByRole("button", { name: "已选 3 项" })).toBeInTheDocument();
+    });
+
+    // 取消勾选第三个模型：用户只想保留两项。
+    await user.click(gpt.getByRole("button", { name: "已选 3 项" }));
+    await user.click(gpt.getByRole("checkbox", { name: "gpt-image-3" }));
+    expect(gpt.getByRole("button", { name: "已选 2 项" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(first.saveSettings).toHaveBeenCalledWith({
+        vendors: {
+          gpt: {
+            api_key_action: "retain",
+            models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
+          },
+        },
+      });
+    });
+
+    // 保存后的设置：清单只剩两项。
+    const afterSave: MaskedSettings = {
+      ...savedSettings,
+      vendors: {
+        ...savedSettings.vendors,
+        gpt: {
+          ...savedSettings.vendors.gpt,
+          models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
+        },
+      },
+    };
+    first.unmount();
+
+    // 重开弹窗：探测结果仍留在模块级 store 里，不得被当成新结果重放。
+    const second = renderDialog(afterSave, { keepProbeState: true });
+    const reopened = within(await screen.findByRole("region", { name: "GPT" }));
+
+    expect(reopened.getByRole("button", { name: "已选 2 项" })).toBeInTheDocument();
+    expect(reopened.queryByRole("button", { name: "已选 3 项" })).toBeNull();
+
+    // 只改默认参数再保存，不得把清单写回网关全量。
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(second.saveSettings).toHaveBeenCalledWith({});
     });
   });
 });

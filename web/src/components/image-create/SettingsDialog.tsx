@@ -160,6 +160,22 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   }, [loadSettings]);
 
   /**
+   * 挂载时 store 里已存在的探测结果不算「新的探测」。
+   * 探测结果存在模块级 store 里、跨弹窗开关持久；弹窗每次打开都是新组件实例，
+   * 若把上一次的旧结果当成新结果重放，就会把用户已保存的精简清单静默还原成
+   * 网关全量清单。这里先标记为已处理，后面的探测 effect 便不会重放。
+   * 声明顺序：本 effect 必须在探测 effect 之前执行。
+   */
+  useEffect(() => {
+    const state = useImageCreateStore.getState();
+    for (const vendor of IMAGE_VENDORS) {
+      if (probedRef.current[vendor] === undefined) {
+        probedRef.current[vendor] = state.connectivity[vendor].result;
+      }
+    }
+  }, []);
+
+  /**
    * 探测拿到网关模型列表后刷新该家的候选池并替换草稿清单：
    * 候选池 = 网关模型 ∪ 草稿清单里已有的；草稿清单 = 网关返回的模型
    * （去重、保序、跳过另一家占用的 id）。判据是 available_models 非空：
