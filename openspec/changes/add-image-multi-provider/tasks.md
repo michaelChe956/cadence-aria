@@ -62,4 +62,4 @@
 
 - [x] 8.1 移除自动轮转：模型改由用户在已配置且可用的供应方清单中手动选择；生成请求的 `model` 必填且不再有保留值；目标解析只返回供应方与模型，所选模型不可用时报错、不换家；结果不再记录选择方式；无可用供应方时生成按钮禁用并提示先配置（已由 Task 16 后端 `25842681`、Task 17 前端 `ef713dea` + `2bfaee26` 落地）
 - [x] 8.2 契约与文档同步：delta spec 删除「双供应方自动轮转」Requirement 并改写相关条目（现为 7 条 MODIFIED + 7 条 ADDED，76 个 Scenario）；`proposal.md`、本文件与 `CHANGELOG.md` 同步；`openspec validate add-image-multi-provider --strict` 通过
-- [ ] 8.3 内置 GPT 推荐清单改为 `gpt-image-2.6-flare` 打头（其余 7 个保持原顺序），使参数面板的初始选中项是 OpenAI 官方 id —— **未完成（原因：契约与文档已按新顺序书写；截至本次文档同步时，`src/product/image_create/models.rs` 的 `DEFAULT_GPT_MODELS` 仍以 `gpt-image-2.6` 打头，该文件不在本次文档任务的可写范围内，待后端落地后勾选）**
+- [x] 8.3 内置 GPT 推荐清单改为 `gpt-image-2.6-flare` 打头（其余 7 个保持原顺序），使参数面板的初始选中项是 OpenAI 官方 id —— **已完成（后端由 Task 16 落地：`src/product/image_create/models.rs` 的 `DEFAULT_GPT_MODELS` 已调整为 `gpt-image-2.6-flare` 打头；参数面板的初始选中项因此是 OpenAI 官方 id `gpt-image-2.6-flare`）**
