@@ -262,10 +262,7 @@ fn strip_structured_output_block(text: &str) -> String {
     const START: &str = "<ARIA_STRUCTURED_OUTPUT";
     const END: &str = "</ARIA_STRUCTURED_OUTPUT";
     let mut stripped = text.to_string();
-    loop {
-        let Some(start) = stripped.find(START) else {
-            break;
-        };
+    while let Some(start) = stripped.find(START) {
         // 从 END 开始找其后的 '>'（结束标签形如 </ARIA_STRUCTURED_OUTPUT>）
         let Some(end_tag_start) = stripped[start..].find(END) else {
             break;
