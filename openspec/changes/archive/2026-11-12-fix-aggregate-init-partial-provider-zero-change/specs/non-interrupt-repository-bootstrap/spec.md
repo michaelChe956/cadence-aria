@@ -31,6 +31,16 @@ provider turn 的输出超预算时，系统 SHALL 保留输出的**头部与尾
 - **WHEN** 某个 root recipe step 的 turn 结束时 receipt 判为零动作，且该 turn 的工具结果里出现脚本的失败报告（`overall=failed`）或没有脚本报告
 - **THEN** 该 step SHALL 判为失败，诊断 SHALL 携带脚本报告原文
 
+#### Scenario: 有变更的 recipe turn 照旧成功
+
+- **WHEN** root recipe 的某个 step 结束时 receipt 判出实际变更
+- **THEN** 该 step SHALL 照既有语义成功；本 requirement SHALL NOT 放宽任何既有成功判据
+
+#### Scenario: 既有成功判据不被改写
+
+- **WHEN** 既有 receipt auditor 的动作判定逻辑被复核
+- **THEN** SHALL 复用它；MUST NOT 出现第二套「有无变更」判定
+
 #### Scenario: 零变更诊断携带 provider 的真实输出
 
 - **WHEN** 零变更失败的 turn 产出了输出（例如 Cadence-skills 脚本报告某个 phase 失败并给出原文）
