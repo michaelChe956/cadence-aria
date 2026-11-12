@@ -497,7 +497,7 @@ impl ProbeStep {
     }
 }
 
-/// 探测汇总：任一步骤 failed 则 ok=false，两步明细与网关缺失模型一并列出。
+/// 探测汇总：任一步骤 failed 则 ok=false，两步明细、网关缺失模型与网关可用模型一并列出。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProbeReport {
     pub vendor: ImageVendor,
@@ -505,6 +505,9 @@ pub struct ProbeReport {
     pub message: String,
     pub steps: Vec<ProbeStep>,
     pub missing_models: Vec<String>,
+    /// /v1/models 步成功时解析出的全量模型 id（去重、保持网关返回顺序）；
+    /// 该步 skipped/failed 时为空数组。与 missing_models（配置了但网关没有）互不影响。
+    pub available_models: Vec<String>,
     pub duration_ms: u64,
 }
 
@@ -529,6 +532,8 @@ pub async fn probe_connectivity(
     let started = std::time::Instant::now();
     let mut steps = Vec::new();
     let mut missing_models = Vec::new();
+    // /v1/models 成功时才有网关全量清单；skipped/failed 保持为空。
+    let mut available_models = Vec::new();
 
     // 步骤 1：GET /v1/models。401/403 → key 无效，直接结束；不可用 → 跳过，继续第 2 步。
     let mut key_invalid = false;
@@ -550,6 +555,7 @@ pub async fn probe_connectivity(
                     .filter(|model| !ids.iter().any(|id| id == *model))
                     .cloned()
                     .collect();
+                available_models = dedup_preserving_order(&ids);
                 ProbeStep::new(
                     "models",
                     "模型列表 /v1/models",
@@ -584,7 +590,14 @@ pub async fn probe_connectivity(
 
     if !key_invalid {
         // 步骤 2：POST /v1/images/generations，body 故意只有 model、缺 prompt。
-        let probe_model = models.first().cloned().unwrap_or_else(probe_fallback_model);
+        // 模型 id 优先取清单里第一个含 "image"（忽略大小写）的：清单可来自网关 /v1/models
+        // 的全量模型（多数是文本 id），文本 id 的 404 会被误判成「路径不对」；无图片 id 回退首项。
+        let probe_model = models
+            .iter()
+            .find(|id| id.to_ascii_lowercase().contains("image"))
+            .or_else(|| models.first())
+            .cloned()
+            .unwrap_or_else(probe_fallback_model);
         let generations_step = match http
             .post(format!("{root}/v1/images/generations"))
             .bearer_auth(api_key)
@@ -656,6 +669,7 @@ pub async fn probe_connectivity(
         },
         steps,
         missing_models,
+        available_models,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -687,6 +701,15 @@ fn parse_model_ids(body: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// 去重并保持首次出现顺序：网关可能重复返回同一 id，available_models 只保留首见副本。
+fn dedup_preserving_order(ids: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    ids.iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// models 为空时的探测占位模型 id。分段拼装以避免非测试代码出现具体模型 id 字面量（C15）。
 fn probe_fallback_model() -> String {
     ["gpt", "image", "1"].join("-")
@@ -700,3 +723,7 @@ fn remaining_before(deadline: std::time::Instant) -> Duration {
 #[cfg(test)]
 #[path = "image_client_tests.rs"]
 mod image_client_tests;
+
+#[cfg(test)]
+#[path = "image_client_probe_step2_tests.rs"]
+mod image_client_probe_step2_tests;

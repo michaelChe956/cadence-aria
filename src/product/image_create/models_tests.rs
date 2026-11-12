@@ -509,10 +509,9 @@ fn s10_model_catalog_validation_rejects_each_rule_violation() {
         Err(ImageCreateError::InvalidConfig(_))
     ));
 
-    // 超过 32 个；恰好 32 个通过。
-    let oversize: Vec<String> = (0..=MAX_MODELS_PER_VENDOR)
-        .map(|i| format!("m-{i:02}"))
-        .collect();
+    // 超过 256 个被拒；恰好 256 个通过（清单可由连通性探测从网关 /v1/models 自动拉取，
+    // 额度已放宽；用字面量断言，不与 MAX_MODELS_PER_VENDOR 常量自比——常量改错时本用例必须红）。
+    let oversize: Vec<String> = (0..=256).map(|i| format!("m-{i:02}")).collect();
     let over = settings_with(VendorsSettings {
         gpt: vendor_settings(
             "https://g.example.com",
@@ -521,13 +520,9 @@ fn s10_model_catalog_validation_rejects_each_rule_violation() {
         ),
         minimax: vendor_settings("https://minimax.example.com/v1", "k", &["MiniMax-H3-Image"]),
     });
-    assert!(matches!(
-        over.validate(),
-        Err(ImageCreateError::InvalidConfig(_))
-    ));
-    let exact: Vec<String> = (0..MAX_MODELS_PER_VENDOR)
-        .map(|i| format!("m-{i:02}"))
-        .collect();
+    let error = over.validate().unwrap_err().to_string();
+    assert!(error.contains("最多 256 个"), "上限文案应体现 256：{error}");
+    let exact: Vec<String> = (0..256).map(|i| format!("m-{i:02}")).collect();
     let boundary = settings_with(VendorsSettings {
         gpt: vendor_settings(
             "https://g.example.com",

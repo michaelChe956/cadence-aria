@@ -132,6 +132,11 @@ async fn connectivity_probes_with_draft_key_and_hides_it_in_response() {
     assert_eq!(payload["ok"], json!(true));
     assert_eq!(payload["message"], json!("连通性正常"));
     assert_eq!(payload["missing_models"], json!(["m2"]));
+    assert_eq!(
+        payload["available_models"],
+        json!(["m1"]),
+        "网关全量模型 id 必须随响应返回"
+    );
     assert_eq!(payload["steps"][0]["key"], json!("models"));
     assert_eq!(payload["steps"][1]["key"], json!("generations"));
     assert!(

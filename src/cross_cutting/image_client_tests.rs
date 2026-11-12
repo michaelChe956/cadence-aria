@@ -5,7 +5,7 @@ use super::*;
 use mockito::Matcher;
 use serde_json::json;
 
-const GPT_MODEL: &str = "gpt-image-2.6-flare";
+pub(super) const GPT_MODEL: &str = "gpt-image-2.6-flare";
 const GPT_MODEL_ALT: &str = "gpt-image-2.6-flare-4k";
 const MINIMAX_MODEL: &str = "MiniMax-H3-Image";
 const OK_BODY: &str = r#"{"data":[{"b64_json":"AAAA"}]}"#;
@@ -547,7 +547,7 @@ async fn c18_success_body_over_64mib_is_rejected_with_a_readable_error() {
 // ---- 连通性探测（probe_connectivity）：两步出站，绝不生成图片、绝不计费 ----
 
 /// /v1/models mock：固定状态码与响应体，校验 Bearer 鉴权头。
-async fn models_endpoint(
+pub(super) async fn models_endpoint(
     server: &mut mockito::Server,
     status: usize,
     body: &str,
@@ -564,7 +564,7 @@ async fn models_endpoint(
 }
 
 /// generations mock：body 必须精确等于 `{"model":…}`（缺 prompt 属预期），校验 Bearer。
-async fn probe_generations(
+pub(super) async fn probe_generations(
     server: &mut mockito::Server,
     model: &str,
     status: usize,
@@ -582,7 +582,10 @@ async fn probe_generations(
         .await
 }
 
-async fn probe(base_url: &str, models: &[&str]) -> Result<ProbeReport, ImageClientError> {
+pub(super) async fn probe(
+    base_url: &str,
+    models: &[&str],
+) -> Result<ProbeReport, ImageClientError> {
     let models = models.iter().map(|id| id.to_string()).collect::<Vec<_>>();
     probe_connectivity(ImageVendor::Gpt, base_url, "sk-test", &models).await
 }
@@ -818,6 +821,79 @@ async fn p10_invalid_base_url_is_rejected_with_zero_requests() {
         .await
         .expect_err("非法 base_url 必须在出站前拒绝");
     assert!(matches!(error, ImageClientError::InvalidConfig(_)));
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p11_available_models_lists_all_gateway_ids_in_gateway_order() {
+    // /v1/models 成功 → available_models = 全量 id（保序）；missing_models 语义不变。
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(
+        &mut server,
+        200,
+        r#"{"data":[{"id":"gpt-image-2.6-flare"},{"id":"other"},{"id":"extra"}]}"#,
+        1,
+    )
+    .await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 400, "missing prompt", 1).await;
+
+    let report = probe(&server.url(), &[GPT_MODEL, "ghost-model"])
+        .await
+        .expect("探测本身返回报告");
+
+    assert_eq!(
+        report.available_models,
+        ["gpt-image-2.6-flare", "other", "extra"]
+    );
+    assert_eq!(report.missing_models, vec!["ghost-model".to_string()]);
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p12_available_models_is_empty_when_models_step_not_ok() {
+    // skipped（网关未提供 /v1/models）与 failed（key 无效）都不携带网关清单 → 空数组。
+    let mut server = mockito::Server::new_async().await;
+    let skipped = models_endpoint(&mut server, 404, "no route", 1).await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 400, "missing prompt", 1).await;
+    let report = probe(&server.url(), &[GPT_MODEL])
+        .await
+        .expect("探测本身返回报告");
+    assert_eq!(report.steps[0].status, "skipped");
+    assert!(report.available_models.is_empty(), "skipped → 空数组");
+    skipped.assert_async().await;
+    generations.assert_async().await;
+    let mut server = mockito::Server::new_async().await;
+    let failed = models_endpoint(&mut server, 401, "unauthorized", 1).await;
+    let report = probe(&server.url(), &[GPT_MODEL])
+        .await
+        .expect("探测本身返回报告");
+    assert_eq!(report.steps[0].status, "failed");
+    assert!(report.available_models.is_empty(), "failed → 空数组");
+    failed.assert_async().await;
+}
+
+#[tokio::test]
+async fn p13_available_models_dedups_repeats_and_keeps_existing_fields_untouched() {
+    // 重复 id 去重、保持首次出现顺序；steps detail 计数与 missing_models 不受去重影响。
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(
+        &mut server,
+        200,
+        r#"{"data":[{"id":"a"},{"id":"b"},{"id":"a"},{"id":"c"},{"id":"b"}]}"#,
+        1,
+    )
+    .await;
+    let generations = probe_generations(&mut server, "a", 400, "missing prompt", 1).await;
+
+    let report = probe(&server.url(), &["a", "z"])
+        .await
+        .expect("探测本身返回报告");
+
+    assert_eq!(report.available_models, ["a", "b", "c"]);
+    assert_eq!(report.steps[0].detail, "网关返回 5 个模型");
+    assert_eq!(report.missing_models, vec!["z".to_string()]);
     models.assert_async().await;
     generations.assert_async().await;
 }

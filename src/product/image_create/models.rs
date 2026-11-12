@@ -85,7 +85,9 @@ pub const DEFAULT_GPT_MODELS: [&str; 8] = [
 ];
 pub const DEFAULT_MINIMAX_MODELS: [&str; 1] = ["MiniMax-H3-Image"];
 
-pub const MAX_MODELS_PER_VENDOR: usize = 32;
+/// 每家模型清单上限：清单可由连通性探测从网关 /v1/models 自动拉取（大网关模型总量可观），
+/// 故额度从手工配置时代的 32 放宽到 256。
+pub const MAX_MODELS_PER_VENDOR: usize = 256;
 pub const MAX_MODEL_ID_CHARS: usize = 128;
 
 impl ImageVendor {
