@@ -296,10 +296,12 @@ function appendEntry(entry: ImageChatEntry) {
 
 function handleIterationEvent(event: IterationEvent) {
   const timestamp = new Date().toISOString();
-  if (event.kind === "text" && event.text) {
+  const readableText = event.kind === "text" ? event.text : null;
+  if (readableText && readableText.trim() !== "") {
     // text 事件只在没有 suggested_prompt 时推送：它是模型的 fallback 说明文本。
     // 只有模型明确未产出（拒答）时才折叠：那时说明只是解释，不该盖过提示；
     // 格式不符时用户需要直接看到内容才知道发生了什么。
+    // 空白说明不生成条目：空的折叠块只会让人以为界面又卡住了。
     const id = entryId("provider");
     lastFallbackEntryId = id;
     lastFallbackDeclined = event.prompt_declined ?? null;
@@ -307,7 +309,7 @@ function handleIterationEvent(event: IterationEvent) {
       id,
       type: "provider_text",
       role: "provider",
-      content: event.text,
+      content: readableText,
       collapsed: event.prompt_declined === true,
       timestamp,
     });

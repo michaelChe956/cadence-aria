@@ -277,6 +277,27 @@ describe("图片创作：模型未产出时的提示", () => {
     expect(providerTexts()[0]?.collapsed).toBe(true);
   });
 
+  it("模型未产出且既无说明文本也无上一版时文案最短", async () => {
+    const socket = await openSession({ current_prompt: null });
+
+    socket.receive(doneEvent(true));
+
+    const notices = useImageCreateStore
+      .getState()
+      .entries.filter((item) => item.type === "system_notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.content).toBe("本轮模型未产出可用 prompt");
+  });
+
+  it("说明文本为空白时不生成折叠块", async () => {
+    const socket = await openSession();
+
+    socket.receive(textEvent("   \n  ", true));
+    socket.receive(doneEvent(true));
+
+    expect(providerTexts()).toHaveLength(0);
+  });
+
   it("提示排在 fallback 文本之前，不会被长文本淹没", async () => {
     const socket = await openSession();
 
