@@ -958,7 +958,7 @@ impl WorkspaceEngine {
 /// ——原调用重入与等待收口共用的幂等锚。不取「ledger 最后一个前缀键」
 /// （C 教学占位会被误当业务键），也不取「全 ledger 长度」（人门键与教学
 /// 条目会把序号顶偏）。
-fn current_sc_author_business_key(
+pub(crate) fn current_sc_author_business_key(
     record: &crate::product::models::WorkspaceSessionRecord,
 ) -> Option<String> {
     let prefix = format!("single_candidate_author:{}:", record.id);

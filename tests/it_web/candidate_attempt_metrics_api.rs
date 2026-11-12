@@ -90,6 +90,8 @@ fn attempt_record(
         auto_rewrite: None,
         auto_repairs_applied: Vec::new(),
         equivalence_canonicalizations: Vec::new(),
+        provider_attempt: None,
+        source_missing_reason: None,
     }
 }
 

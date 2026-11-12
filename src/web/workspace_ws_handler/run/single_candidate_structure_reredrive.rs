@@ -438,3 +438,119 @@ pub(super) async fn drive_structure_gate_reredrive(
     )
     .await
 }
+
+/// Task 8（tasks 5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行的阶段
+/// 判定——管线序 parse → typed lowering → typed IR 校验，失败集反映到达的
+/// 最深阶段：lowering fault 在场 ⇒ `TypedLowering`；否则 ir_fault 在场 ⇒
+/// `TypedIrValidation`；否则 `Parse`（parse 码表 / unknown 类）。
+fn generate_segment_failure_stage(
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+) -> crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage {
+    use crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage;
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.lowering_fault.is_some())
+    {
+        return CandidateAttemptStage::TypedLowering;
+    }
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.ir_fault.is_some())
+    {
+        return CandidateAttemptStage::TypedIrValidation;
+    }
+    CandidateAttemptStage::Parse
+}
+
+/// Task 8（5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行写入（non-blocking
+/// 义务逐字不变——写失败沿用既有降级码 `candidate_attempt_log_write_failed`
+/// 记 policy diagnostics，不阻断生成链）。关联单源 durable 解析
+/// （`generate_segment_provider_attempt`）：行所属窗口 attempt ⇒ `Started`；
+/// 无窗口（未建窗的纯判定失败，未触发启动）⇒ 显式 `NoProviderStart`，不伪造
+/// 关联。source 引用恒 None + 行内带缺失原因（generate 段失败产物不落
+/// durable source，不提升 current refs）。幂等键由构造器按尝试身份派生；
+/// 失败身份掺入世代业务键，不同世代（re-arm）同内容失败不互吃幂等键。
+fn record_generate_segment_failure(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    stage: crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage,
+    code: &str,
+    kinds: Vec<PlanningFailureKind>,
+    detail: &str,
+) {
+    use crate::product::lifecycle_store::candidate_attempts::{
+        CandidateAttemptFailure, ProviderAttemptAssociation,
+        candidate_attempt_record_from_generate_segment, generate_segment_provider_attempt,
+    };
+    let session_id = engine.session().session_id.clone();
+    let record = lifecycle.get_workspace_session(&session_id).ok();
+    let provider_attempt = record
+        .as_ref()
+        .and_then(generate_segment_provider_attempt)
+        .or(Some(ProviderAttemptAssociation::NoProviderStart));
+    let series = record
+        .as_ref()
+        .and_then(crate::product::workspace_engine::current_sc_author_business_key)
+        .unwrap_or_else(|| "no-launch".to_string());
+    let failure = CandidateAttemptFailure {
+        failure_id: sc_sha256(&format!("{series}/{stage:?}/{code}/{detail}")),
+        code: code.to_string(),
+        typed_kinds: kinds,
+        cycle_fingerprint: None,
+    };
+    let attempt = candidate_attempt_record_from_generate_segment(
+        stage,
+        Some(failure),
+        None,
+        Some(detail.to_string()),
+        provider_attempt,
+    );
+    if let Err(error) = lifecycle.append_candidate_attempt(&session_id, &attempt) {
+        engine.record_single_candidate_compile_failure(
+            lifecycle,
+            "candidate_attempt_log_write_failed",
+            &format!("append generate segment attempt row failed: {error}"),
+        );
+    }
+}
+
+/// Task 8（5.1）：converge 失败（parse / typed lowering 类诊断集）的流水行
+/// 写点——稳定码取首条诊断码（编译器确定性输出序），typed 种类沿用窗口
+/// 请求同款投影（`compile_typed_kinds`）。
+pub(super) fn record_generate_segment_compile_failure(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+    detail: &str,
+) {
+    let code = diagnostics
+        .first()
+        .map(|diagnostic| diagnostic.code.clone())
+        .unwrap_or_else(|| "converge_failed".to_string());
+    record_generate_segment_failure(
+        engine,
+        lifecycle,
+        generate_segment_failure_stage(diagnostics),
+        &code,
+        compile_typed_kinds(diagnostics),
+        detail,
+    );
+}
+
+/// Task 8（5.1）：typed IR 校验失败（preflight 判定面）的流水行写点——
+/// 阶段恒 `TypedIrValidation`，稳定码与窗口请求同款
+/// （`stable_code_kind("typed_ir_validation")`）。
+pub(super) fn record_generate_segment_ir_validation_failure(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    detail: &str,
+) {
+    record_generate_segment_failure(
+        engine,
+        lifecycle,
+        crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::TypedIrValidation,
+        "typed_ir_validation",
+        vec![stable_code_kind("typed_ir_validation")],
+        detail,
+    );
+}

@@ -333,7 +333,6 @@ async fn parse_failure_consumes_window_and_reruns_once() {
         "教学重驱不得扣减 repairs_used / manual_repairs_used"
     );
 }
-
 /// 3.1：结构拒收（此前无 compile 失败）⇒ 同一窗口 claim、一次重驱。
 #[tokio::test]
 async fn structure_failure_consumes_same_window_when_compile_slot_unused() {
@@ -349,7 +348,6 @@ async fn structure_failure_consumes_same_window_when_compile_slot_unused() {
     });
     let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
     start_generation(context).await;
-
     let _first_input = next_provider_input(&mut input_rx).await;
     let reredrive_input = next_provider_input(&mut input_rx).await;
     assert!(
@@ -395,7 +393,6 @@ async fn structure_failure_consumes_same_window_when_compile_slot_unused() {
         "结构类同样只消费窗口的一次 claim（原调用 + 教学 = 合计 2 次物理启动）"
     );
 }
-
 fn attempt_status(
     window: &ScGenerationTeachingWindow,
     attempt_no: u8,
@@ -406,7 +403,6 @@ fn attempt_status(
         .find(|attempt| attempt.attempt_no == attempt_no)
         .map(|attempt| &attempt.lifecycle)
 }
-
 /// 3.1/8.1：parse 重驱后再结构拒收 ⇒ 第二次 claim `Denied(Exhausted)`、
 /// 前缀条目合计 2（第三次为 0）、链停止（终态 Failed，不开人工门）、
 /// refs 保持最后合法值（未提升坏 candidate）。
@@ -426,7 +422,6 @@ async fn consolidated_sequence_parse_then_structure_single_extra_start() {
     let budget_before = run_history_budget(&fixture);
     let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
     start_generation(context).await;
-
     let _first_input = next_provider_input(&mut input_rx).await;
     let parse_reredrive_input = next_provider_input(&mut input_rx).await;
     assert!(
@@ -489,7 +484,6 @@ async fn consolidated_sequence_parse_then_structure_single_extra_start() {
         "链停止不得扣减 A/B 池计数"
     );
 }
-
 /// 8.1：结构重驱后再 parse 失败 ⇒ 同一窗口耗尽、单次额外启动、终态。
 #[tokio::test]
 async fn consolidated_sequence_structure_then_parse_single_extra_start() {
@@ -542,7 +536,6 @@ async fn consolidated_sequence_structure_then_parse_single_extra_start() {
         "原调用 + 一次教学 = 前缀条目合计 2（第三次为 0）"
     );
 }
-
 /// 8.1：IR 重驱后再结构拒收 ⇒ 同一窗口耗尽、单次额外启动、终态。
 #[tokio::test]
 async fn consolidated_sequence_ir_then_structure_single_extra_start() {
@@ -559,7 +552,6 @@ async fn consolidated_sequence_ir_then_structure_single_extra_start() {
     });
     let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
     start_generation(context).await;
-
     let _first_input = next_provider_input(&mut input_rx).await;
     let ir_reredrive_input = next_provider_input(&mut input_rx).await;
     assert!(
@@ -592,7 +584,6 @@ async fn consolidated_sequence_ir_then_structure_single_extra_start() {
     );
     assert_eq!(author_ledger_prefix_count(&fixture), 2);
 }
-
 /// 3.3：混合 Unknown/Operational 失败集合 ⇒ 零 claim、零额外启动、错误面
 /// 回显真实原因（不渲染成模型可修语法错误）。
 #[tokio::test]
@@ -653,7 +644,6 @@ async fn mixed_operational_set_zero_extra_and_real_reason_surfaced() {
         "零重驱不得扣减 A/B 池计数"
     );
 }
-
 /// 3.4：窗口 approved 但链已消费第二次物理机会 ⇒ 教学请求零额外、无第三次
 /// 启动（判据③「前缀非教学条目 2 条 ⇒ max=1」的建立面变体由
 /// denied_establishment 用例与 Task 3 store 用例分别钉住）。
@@ -703,7 +693,6 @@ async fn recovery_consumed_second_chance_no_third_start() {
     // 第三次为 0 的负向钉子：重驱轮之后无新输入（no_more 已断言）。
     assert!(reredrive_input.prompt.contains("missing_section"));
 }
-
 /// 判据不成立（判据③：前缀非教学条目 2 条）⇒ durable 含
 /// `sc_teaching_window_not_approved`、零额外启动（「关闭某项即等价于只回退
 /// 该项」的对照）。
@@ -780,7 +769,6 @@ async fn denied_establishment_records_diagnostic_and_zero_extra() {
     );
     assert!(repair_reservation_absent(&fixture), "不得旁路 A 通道");
 }
-
 /// 冻结输入漂移（窗口冻结事实 ≠ 当前失败事实）⇒ 零额外调用 +
 /// `sc_teaching_frozen_input_drift` 诊断 + 既有失败面（不渲染成可修语法
 /// 错误）三侧钉死。
@@ -1107,18 +1095,60 @@ async fn stop_after_second_failure_keeps_refs_and_no_auto_new_turn() {
         2,
         "无新 ledger 条目：前缀恰两条物理启动的账，无第三条"
     );
-    // 无新增 candidate attempt 行（REQ-WSC-25 现状口径：流水行只由 engine
-    // 候选编译边界写入——结构拒收轮 1 行；parse/IR 类失败在 handler 侧
-    // typed 判定、不产生流水行，Task 8 阶段细化落地后须复测本值）：
-    // 两次物理交付恰写 1 行，无平台为「补机会」自造的额外行。
+    // candidate attempt 行（**Task 8 后口径**，2026-11-13 复测值：generate 段
+    // parse 失败行由 handler 写点追加——第 1 轮 Parse 行（关联窗口 attempt1 =
+    // 原调用）；结构拒收行仍由 engine 编译边界写入——第 2 轮 Structure 行
+    // （关联 attempt2 = 教学重驱））：两次物理交付恰写 2 行、各关联其
+    // attempt，无平台为「补机会」自造的第三行。
     let attempts_after = fixture
         .lifecycle
         .list_candidate_attempts(&fixture.record.id)
-        .expect("candidate attempt log after stop")
-        .len();
+        .expect("candidate attempt log after stop");
     assert_eq!(
-        attempts_after, 1,
-        "无新增 candidate attempt 行：恰结构拒收轮的 1 行（无第三行）"
+        attempts_after.len(),
+        2,
+        "两次物理交付恰写 2 行尝试流水（parse + structure）：{attempts_after:?}"
+    );
+    let teaching_keys: Vec<String> = durable.sc_generation_teaching_windows[0]
+        .attempts
+        .iter()
+        .map(|attempt| attempt.attempt_key.clone())
+        .collect();
+    assert!(
+        matches!(
+            attempts_after[0].stage,
+            crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::Parse
+        ),
+        "第 1 行必须是 parse 阶段：{:?}",
+        attempts_after[0].stage
+    );
+    assert_eq!(
+        attempts_after[0].provider_attempt,
+        Some(
+            crate::product::lifecycle_store::candidate_attempts::ProviderAttemptAssociation::Started {
+                attempt_seq: 1,
+                attempt_key: teaching_keys[0].clone(),
+            }
+        ),
+        "parse 行必须关联原调用 attempt1"
+    );
+    assert!(
+        matches!(
+            attempts_after[1].stage,
+            crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::Structure
+        ),
+        "第 2 行必须是结构拒收阶段：{:?}",
+        attempts_after[1].stage
+    );
+    assert_eq!(
+        attempts_after[1].provider_attempt,
+        Some(
+            crate::product::lifecycle_store::candidate_attempts::ProviderAttemptAssociation::Started {
+                attempt_seq: 2,
+                attempt_key: teaching_keys[1].clone(),
+            }
+        ),
+        "结构拒收行必须关联教学重驱 attempt2"
     );
     // 无平台自造 turn/hold/receipt 记录（观测点同用例 1：快照 turn 计数器
     // + 结构预算聚合；停止面若物化确认门快照，其计数必须为零）。

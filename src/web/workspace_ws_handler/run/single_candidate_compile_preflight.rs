@@ -708,6 +708,8 @@ pub(super) fn record_equivalence_canonicalizations(
         auto_rewrite: None,
         auto_repairs_applied: Vec::new(),
         equivalence_canonicalizations: canonicalizations.to_vec(),
+        provider_attempt: None,
+        source_missing_reason: None,
     };
     let session_id = engine.session().session_id.clone();
     if let Err(error) = lifecycle.append_candidate_attempt(&session_id, &record) {

@@ -122,12 +122,13 @@ mod author_structure_gate_reredrive {
             attempts[0].failure.as_ref().expect("failure facts").code,
             STRUCTURE_STABLE_CODE
         );
-        // 阶段单源派生：作者阶段结构拒收码走 operational 家族 →
-        // `candidate_attempt_record_from_failure` 派生 Final（与上一批
-        // 真机流水 stage=final 一致，不从文案反推）。
+        // 阶段单源派生（Task 8 写点纪律更新）：作者阶段结构拒收码走
+        // operational 家族承载，但阶段按 REQ-WSC-25 五段区分记 Structure
+        // （`candidate_attempt_record_from_failure` 的 Task 8 映射；旧流水
+        // 行 stage=final 是 Task 8 之前口径，不倒填）。
         assert_eq!(
             attempts[0].stage,
-            crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::Final
+            crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::Structure
         );
 
         // 不虚记自动重写预算：durable 不留 running，auto_rewrites_used 不变。

@@ -242,8 +242,17 @@ impl WorkspaceEngine {
             );
         let _ = lifecycle.save_candidate_compile_status(&self.session.session_id, &status);
         // REQ-WSC-25：追加写尝试流水（历史序列；与上面的「当前状态」分工）。
+        // Task 8（REQ-WSC-28D）：作者阶段结构门拒收行（from_failure 已把该行
+        // 阶段记 Structure）关联当前 generate 段 attempt；门段 Final 行不加
+        // 关联（不改门段流水语义）。
+        let provider_attempt =
+            crate::product::lifecycle_store::candidate_attempts::engine_failure_provider_attempt(
+                &lifecycle,
+                &self.session.session_id,
+                failure,
+            );
         let attempt = crate::product::lifecycle_store::candidate_attempts::
-            candidate_attempt_record_from_failure(failure, &status, now);
+            candidate_attempt_record_from_failure(failure, &status, now, provider_attempt);
         self.append_candidate_attempt(&lifecycle, attempt);
         route
     }
@@ -1135,7 +1144,7 @@ impl WorkspaceEngine {
     /// 状态保持调用前的值（compile 前置已保证 Approval），与 strict validator
     /// 深层失败「不落 durable 相位」的既有观测良好行为对齐；终态 Failed 保留
     /// 给 AbortFatal / provider 级终态（routing_scope / provider run 既有路径）。
-    fn record_single_candidate_compile_failure(
+    pub(crate) fn record_single_candidate_compile_failure(
         &mut self,
         lifecycle: &LifecycleStore,
         code: &str,

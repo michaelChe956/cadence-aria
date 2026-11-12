@@ -4,6 +4,7 @@
 use crate::product::lifecycle_store::candidate_attempts::{
     CandidateAttemptFailure, CandidateAttemptOutcome, CandidateAttemptRecord,
     CandidateAttemptStage, CandidateIssueAttemptSeries, EquivalenceCanonicalization,
+    ProviderAttemptAssociation, candidate_attempt_record_from_generate_segment,
     compute_candidate_attempt_metrics,
 };
 use crate::product::models::CandidateAutoRewrite;
@@ -39,6 +40,8 @@ fn attempt_record(
         auto_rewrite: None,
         auto_repairs_applied: Vec::new(),
         equivalence_canonicalizations: Vec::new(),
+        provider_attempt: None,
+        source_missing_reason: None,
     }
 }
 
@@ -646,4 +649,173 @@ fn candidate_attempt_stream_keeps_legacy_session_level_rows_without_double_count
         2,
         "同键行只算一次（issue 级权威文件优先）：{merged:?}"
     );
+}
+
+// Task 8（tasks 5.1/5.2，REQ-WSC-25/28D）：generate 段尝试行的模型面用例
+// （构造器 + store 落盘往返）。attempt 关联的链路解析（窗口 claim/backfill
+// 后 Started{1}/{2}）由 web 侧 cutover 停止面用例回归；本文件只钉记录模型。
+
+/// 5.1：一次原调用 + 一次教学重驱在同一条流水序列上分别落 Parse 与
+/// TypedIrValidation 两行——阶段/稳定码/source 缺失原因/处置结论与 attempt
+/// 关联各自可列、不合并为一条；同 attempt 同阶段重放幂等。
+#[test]
+fn generate_segment_stages_and_attempts_on_one_series() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "t8_generate_series", WorkspaceType::WorkItemPlan);
+    let failure = |code: &str| CandidateAttemptFailure {
+        failure_id: format!("failure::{code}"),
+        code: code.to_string(),
+        typed_kinds: Vec::new(),
+        cycle_fingerprint: None,
+    };
+    let row = |stage, code: &str, seq: u8| {
+        candidate_attempt_record_from_generate_segment(
+            stage,
+            Some(failure(code)),
+            None,
+            Some(format!("{code}: 原始输出未形成 durable source")),
+            Some(ProviderAttemptAssociation::Started {
+                attempt_seq: seq,
+                attempt_key: format!("sc_generation:{}:0:attempt:{seq}", session.id),
+            }),
+        )
+    };
+    let round1 = row(CandidateAttemptStage::Parse, "missing_section", 1);
+    let round2 = row(
+        CandidateAttemptStage::TypedIrValidation,
+        "typed_ir_validation",
+        2,
+    );
+    assert!(
+        store
+            .append_candidate_attempt(&session.id, &round1)
+            .unwrap()
+    );
+    assert!(
+        store
+            .append_candidate_attempt(&session.id, &round2)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .append_candidate_attempt(&session.id, &round1)
+            .unwrap(),
+        "同 attempt 同阶段重放零膨胀"
+    );
+    let series = store.list_candidate_attempts(&session.id).unwrap();
+    assert_eq!(series.len(), 2, "两个 attempt 两行，不合并：{series:?}");
+    assert_eq!(series[0].stage, CandidateAttemptStage::Parse);
+    assert_eq!(series[1].stage, CandidateAttemptStage::TypedIrValidation);
+    assert_eq!(
+        series[0].failure.as_ref().expect("failure facts").code,
+        "missing_section"
+    );
+    assert_eq!(
+        series[1].failure.as_ref().expect("failure facts").code,
+        "typed_ir_validation"
+    );
+    assert_eq!(
+        series[0].provider_attempt,
+        Some(ProviderAttemptAssociation::Started {
+            attempt_seq: 1,
+            attempt_key: format!("sc_generation:{}:0:attempt:1", session.id),
+        })
+    );
+    assert_eq!(
+        series[1].provider_attempt,
+        Some(ProviderAttemptAssociation::Started {
+            attempt_seq: 2,
+            attempt_key: format!("sc_generation:{}:0:attempt:2", session.id),
+        })
+    );
+    assert!(series.iter().all(|row| {
+        matches!(row.outcome, CandidateAttemptOutcome::Failed)
+            && row.source_revision_ref.is_none()
+            && row.source_missing_reason.is_some()
+    }));
+}
+
+/// 纯判定失败行 ⇒ 显式 `Some(NoProviderStart)`（MUST NOT 伪造关联）：序列化
+/// 为显式标记（非缺键），落盘重读不退化为 None（未关联）。
+#[test]
+fn no_provider_start_recorded_explicitly() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "t8_no_provider_start", WorkspaceType::WorkItemPlan);
+    let row = candidate_attempt_record_from_generate_segment(
+        CandidateAttemptStage::Parse,
+        Some(CandidateAttemptFailure {
+            failure_id: "failure::t8nops".to_string(),
+            code: "missing_section".to_string(),
+            typed_kinds: Vec::new(),
+            cycle_fingerprint: None,
+        }),
+        None,
+        Some("判定失败且未触发任何 provider 启动".to_string()),
+        Some(ProviderAttemptAssociation::NoProviderStart),
+    );
+    let json = serde_json::to_value(&row).expect("serialize row");
+    assert_eq!(
+        json["provider_attempt"], "no_provider_start",
+        "显式无启动标记必须序列化为非缺键值"
+    );
+    assert!(store.append_candidate_attempt(&session.id, &row).unwrap());
+    let series = store.list_candidate_attempts(&session.id).unwrap();
+    assert_eq!(series.len(), 1);
+    assert_eq!(
+        series[0].provider_attempt,
+        Some(ProviderAttemptAssociation::NoProviderStart),
+        "重读不得退化为 None（未关联）"
+    );
+}
+
+/// 旧行（无 `provider_attempt` / `source_missing_reason` 键）反序列化 ⇒ None：
+/// 历史流水可读、不改写、不倒填。
+#[test]
+fn legacy_attempt_rows_parse_with_absent_provider_attempt() {
+    let legacy: CandidateAttemptRecord = serde_json::from_str(
+        r#"{"attempt_seq":1,"attempt_key":"fail/planning_compile_failure_legacy",
+            "session_id":"s1","issue_id":"i1","recorded_at":"2026-11-01T00:00:00Z",
+            "stage":"final","outcome":"failed","failure":{"failure_id":"legacy",
+            "code":"final_compile_prepare_failed","typed_kinds":[]}}"#,
+    )
+    .expect("legacy row without new keys must parse");
+    assert_eq!(legacy.provider_attempt, None, "缺键读为未关联（不倒填）");
+    assert_eq!(legacy.source_missing_reason, None);
+}
+
+/// 5.2（REQ-WSC-28D）：无法形成 source 的失败 ⇒ 行内带缺失原因、
+/// `source_revision_ref == None`、会话 `work_item_plan_source_revision_ref`
+/// 未被提升。
+#[test]
+fn source_missing_reason_recorded_and_refs_not_promoted() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "t8_source_missing", WorkspaceType::WorkItemPlan);
+    let row = candidate_attempt_record_from_generate_segment(
+        CandidateAttemptStage::Parse,
+        Some(CandidateAttemptFailure {
+            failure_id: "failure::t8miss".to_string(),
+            code: "missing_section".to_string(),
+            typed_kinds: Vec::new(),
+            cycle_fingerprint: None,
+        }),
+        None,
+        Some("missing_section: ### Goal 缺失".to_string()),
+        Some(ProviderAttemptAssociation::NoProviderStart),
+    );
+    assert!(store.append_candidate_attempt(&session.id, &row).unwrap());
+    let series = store.list_candidate_attempts(&session.id).unwrap();
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0].source_revision_ref, None, "不伪造 source 引用");
+    assert_eq!(
+        series[0].source_missing_reason.as_deref(),
+        Some("missing_section: ### Goal 缺失")
+    );
+    let record = store
+        .get_workspace_session(&session.id)
+        .expect("reload session");
+    assert_eq!(
+        record.work_item_plan_source_revision_ref, None,
+        "current refs 未被提升"
+    );
+    assert_eq!(record.plan_candidate_ir_ref, None);
 }

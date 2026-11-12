@@ -208,7 +208,8 @@ use single_candidate_compile_preflight::{
 };
 use single_candidate_structure_reredrive::{
     authorize_sc_teaching_reredrive, close_sc_teaching_delivered, compile_typed_kinds,
-    drive_compile_teaching_reredrive, sc_sha256, sc_teaching_chain_binding,
+    drive_compile_teaching_reredrive, record_generate_segment_compile_failure,
+    record_generate_segment_ir_validation_failure, sc_sha256, sc_teaching_chain_binding,
     sc_teaching_failure_request, stable_code_kind,
 };
 // Task 4：`is_teachable_parse_failure` 判据已由 `teaching_verdict` 接管，
@@ -312,7 +313,6 @@ fn preflight_lc_member_rules_before_author_run(
         }
     }
 }
-
 #[allow(clippy::result_large_err)] // 同上:运行收尾 typed 出口。
 pub(crate) async fn run_single_candidate_author(
     engine: &mut WorkspaceEngine,
@@ -383,7 +383,6 @@ pub(crate) async fn run_single_candidate_author(
             _ => Err(SingleCandidateProviderRunError::Superseded),
         };
     }
-
     let lifecycle = LifecycleStore::new(run_context.app_paths.clone());
     let request = build_work_item_plan_generate_request(engine, &lifecycle).map_err(|error| {
         SingleCandidateProviderRunError::Message(format!(
@@ -622,7 +621,6 @@ pub(crate) async fn run_single_candidate_author(
     } else {
         None
     };
-
     // D5 事前：装载基线树注入 `baseline:` 段（装载面见 single_candidate_baseline_tree）。
     let baseline_tree_section = if cfg!(feature = "wig-d5-before") {
         single_candidate_baseline_tree::baseline_tree_section(
@@ -709,7 +707,6 @@ pub(crate) async fn run_single_candidate_author(
     } else {
         engine.begin_work_item_plan_author_run().await
     };
-
     #[cfg(test)]
     super::record_single_candidate_generation_step(
         &engine.session().session_id,
@@ -872,6 +869,14 @@ pub(crate) async fn run_single_candidate_author(
                         authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?;
                     break 'teach attempt.map(|attempt| (attempt, reredrive_prompt));
                 };
+                // Task 8（5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行
+                // （阶段=Parse/TypedLowering/TypedIrValidation；non-blocking）。
+                record_generate_segment_compile_failure(
+                    engine,
+                    &lifecycle,
+                    &diagnostics,
+                    &reasons.join("; "),
+                );
                 if let Some((attempt, reredrive_prompt)) = grant {
                     first_round_failure.get_or_insert_with(|| reasons.join("; "));
                     compile_source = drive_compile_teaching_reredrive(
@@ -922,7 +927,6 @@ pub(crate) async fn run_single_candidate_author(
             &contract_autorepair_instructions,
         )
         .await;
-
         // 3.3（REQ-WSC-25 序列）：等价规范化审计落库——generate 段 handler 是
         // 唯一写入点（幂等，键=node+内容摘要）；completion 复验侧不重复写。
         if !audit.equivalence_canonicalizations.is_empty() {
@@ -933,7 +937,6 @@ pub(crate) async fn run_single_candidate_author(
                 &audit.equivalence_canonicalizations,
             );
         }
-
         let preflight =
             prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir, &compile_source);
         if preflight.has_failures() {
@@ -955,6 +958,12 @@ pub(crate) async fn run_single_candidate_author(
                 let attempt = authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?;
                 break 'teach attempt.map(|attempt| (attempt, reredrive_prompt));
             };
+            // Task 8（5.1）：typed IR 校验失败流水行（stage=TypedIrValidation）。
+            record_generate_segment_ir_validation_failure(
+                engine,
+                &lifecycle,
+                &preflight.presentation_reasons().join("; "),
+            );
             if let Some((attempt, reredrive_prompt)) = grant {
                 first_round_failure
                     .get_or_insert_with(|| preflight.presentation_reasons().join("; "));
@@ -994,7 +1003,6 @@ pub(crate) async fn run_single_candidate_author(
             );
             return Err(SingleCandidateProviderRunError::Message(message));
         }
-
         // Task 6：结构门类不再有独立槽位——拒收统一交回，重驱资格由同一
         // 教学窗口的 claim 结果决定（Denied ⇒ 停止该生成自动链）。
         let failure_source_sha256 = sc_sha256(&compile_source);
@@ -1094,7 +1102,6 @@ pub(crate) async fn run_single_candidate_author(
             "parse_source_revision",
         );
     }
-
     let decision_input = crate::product::workspace_engine::SingleCandidateGenerationDecisionInput {
         provider: author_provider.clone(),
         candidate_item_count,

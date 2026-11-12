@@ -93,7 +93,9 @@ fn lock_attempt_log() -> Result<std::sync::MutexGuard<'static, ()>, ProductStore
         .map_err(|error| ProductStoreError::Io(format!("lock candidate attempt log: {error}")))
 }
 
-/// 尝试所在阶段（design §9.2 `stage(structure|final)`）。
+/// 尝试所在阶段（design §9.2 `stage(structure|final)`；Task 8 扩 generate 段
+/// 四类——REQ-WSC-25 MODIFIED「阶段 MUST 能区分 generate、parse、typed
+/// lowering、typed IR 校验与结构拒收」；既有 Structure/Final 语义逐字保留）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateAttemptStage {
@@ -101,6 +103,32 @@ pub enum CandidateAttemptStage {
     Structure,
     /// Final Compile 阶段。
     Final,
+    /// generate 段生成尝试阶段。
+    Generate,
+    /// generate 段 parse 失败（markdown 语法/结构解析类诊断）。
+    Parse,
+    /// generate 段 typed lowering 失败。
+    TypedLowering,
+    /// generate 段 typed IR 校验失败。
+    TypedIrValidation,
+}
+
+/// Task 8（REQ-WSC-28D，I-12 定案的条件式）：流水行与 provider 启动尝试的
+/// 关联——不伪造关联：行所属的窗口 attempt 才带 `Started`（序号 + attempt
+/// key），纯复验/判定失败（未触发启动）显式 `NoProviderStart`；门段 Final
+/// 行不加关联（本 change 不改门段流水语义 ⇒ None）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAttemptAssociation {
+    /// 关联一次真实 provider 启动（窗口 attempt 序号与 attempt key）。
+    Started {
+        /// 窗口内 attempt 序号（原调用 = 1，教学重驱 = 2）。
+        attempt_seq: u8,
+        /// 窗口 attempt 键（`sc_generation:{session}:{generation}:attempt:{n}`）。
+        attempt_key: String,
+    },
+    /// 显式记录「无 provider 启动」。
+    NoProviderStart,
 }
 
 /// 一次尝试的结局。
@@ -181,6 +209,14 @@ pub struct CandidateAttemptRecord {
     /// 本次尝试发生的等价规范化审计事件。
     #[serde(default)]
     pub equivalence_canonicalizations: Vec<EquivalenceCanonicalization>,
+    /// Task 8（REQ-WSC-28D）：本次行关联的 provider 启动尝试——旧行缺键
+    /// 读为 None = 未关联，**不倒填**（门段 Final 行恒 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_attempt: Option<ProviderAttemptAssociation>,
+    /// Task 8（5.2）：原始输出无法形成 source 的缺失原因（不伪造引用，
+    /// 与 `source_revision_ref == None` 同时成立）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_missing_reason: Option<String>,
 }
 
 /// 一个 issue 的尝试序列（度量聚合的输入单位）。
@@ -471,11 +507,15 @@ fn merge_attempt_records(
 /// 阶段与 typed 种类**单源于既有 typed 失败**（不从文案/错误码反推）：
 /// 结构失败集 → 阶段 `structure` + 集合内全部 `PlanningFailureKind`；
 /// 运维类失败 → 阶段 `final` + `PlanningFailureKind::Operational`。
+/// Task 8（写点纪律，REQ-WSC-25 五段区分）：作者阶段候选结构门拒收以
+/// Operational 承载、稳定码即结构拒收码 ⇒ 该行阶段按结构拒收记
+/// `structure`；`provider_attempt` 由 engine 编译边界写点解析传入。
 /// 环结构指纹与自动重写阶段取自既有 `CandidateCompileStatus`（不另算）。
 pub(crate) fn candidate_attempt_record_from_failure(
     failure: &crate::product::workspace_engine::PlanningCompileFailure,
     status: &CandidateCompileStatus,
     recorded_at: String,
+    provider_attempt: Option<ProviderAttemptAssociation>,
 ) -> CandidateAttemptRecord {
     use crate::product::workspace_engine::PlanningCompileFailureKind;
     let (stage, typed_kinds) = match &failure.kind {
@@ -487,7 +527,13 @@ pub(crate) fn candidate_attempt_record_from_failure(
                 .collect(),
         ),
         PlanningCompileFailureKind::Operational { stable_code, cause } => (
-            CandidateAttemptStage::Final,
+            if stable_code
+                == crate::product::workspace_engine::PlanningCompileFailure::STRUCTURE_STABLE_CODE
+            {
+                CandidateAttemptStage::Structure
+            } else {
+                CandidateAttemptStage::Final
+            },
             vec![PlanningFailureKind::Operational {
                 stable_code: stable_code.clone(),
                 cause: cause.clone(),
@@ -514,6 +560,8 @@ pub(crate) fn candidate_attempt_record_from_failure(
         auto_rewrite: status.auto_rewrite.clone(),
         auto_repairs_applied: Vec::new(),
         equivalence_canonicalizations: Vec::new(),
+        provider_attempt,
+        source_missing_reason: None,
     }
 }
 
@@ -547,7 +595,141 @@ pub(crate) fn candidate_attempt_record_from_success(
         auto_rewrite: None,
         auto_repairs_applied: Vec::new(),
         equivalence_canonicalizations: Vec::new(),
+        provider_attempt: None,
+        source_missing_reason: None,
     }
+}
+
+/// 阶段的 serde snake_case 投影（幂等键成分；与 `rename_all` 保持同源）。
+fn candidate_attempt_stage_tag(stage: CandidateAttemptStage) -> &'static str {
+    match stage {
+        CandidateAttemptStage::Structure => "structure",
+        CandidateAttemptStage::Final => "final",
+        CandidateAttemptStage::Generate => "generate",
+        CandidateAttemptStage::Parse => "parse",
+        CandidateAttemptStage::TypedLowering => "typed_lowering",
+        CandidateAttemptStage::TypedIrValidation => "typed_ir_validation",
+    }
+}
+
+/// Task 8（REQ-WSC-25/28D，tasks 5.1/5.2）：generate 段尝试行的构造器——
+/// 阶段（Generate/Parse/TypedLowering/TypedIrValidation）与失败事实由调用方
+/// 按 generate 段判定面投影；`recorded_at`/`attempt_seq`/会话与 issue 身份由
+/// store 盖印。幂等键按尝试身份构造：有关联 ⇒ 该窗口 attempt 键 + 阶段
+/// （同 attempt 同阶段重放零膨胀）；无关联（NoProviderStart）⇒ 失败内容
+/// 寻址身份（与 `from_failure` 同口径，不与会话内其它失败行碰撞）。
+pub(crate) fn candidate_attempt_record_from_generate_segment(
+    stage: CandidateAttemptStage,
+    failure: Option<CandidateAttemptFailure>,
+    source_revision_ref: Option<String>,
+    source_missing_reason: Option<String>,
+    provider_attempt: Option<ProviderAttemptAssociation>,
+) -> CandidateAttemptRecord {
+    let stage_tag = candidate_attempt_stage_tag(stage);
+    let attempt_key = match (&provider_attempt, &failure) {
+        (Some(ProviderAttemptAssociation::Started { attempt_key, .. }), _) => {
+            format!("gen/{attempt_key}/{stage_tag}")
+        }
+        (None | Some(ProviderAttemptAssociation::NoProviderStart), Some(failure)) => {
+            format!("fail/{}", failure.failure_id)
+        }
+        (None | Some(ProviderAttemptAssociation::NoProviderStart), None) => {
+            format!("gen/{stage_tag}")
+        }
+    };
+    let outcome = if failure.is_some() {
+        CandidateAttemptOutcome::Failed
+    } else {
+        CandidateAttemptOutcome::Passed
+    };
+    CandidateAttemptRecord {
+        attempt_seq: 0,
+        attempt_key,
+        session_id: String::new(),
+        issue_id: String::new(),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        stage,
+        outcome,
+        source_revision_ref,
+        plan_candidate_ir_ref: None,
+        failure,
+        auto_rewrite: None,
+        auto_repairs_applied: Vec::new(),
+        equivalence_canonicalizations: Vec::new(),
+        provider_attempt,
+        source_missing_reason,
+    }
+}
+
+/// Task 8（REQ-WSC-28D）：generate 段流水行的 provider attempt 关联解析
+/// （durable 单源，不依赖进程内状态）：
+/// - 世代定界：当前业务链最后一个**非教学** `single_candidate_author:{id}:`
+///   启动键（原调用预留键）＝该世代窗口 `attempts[0].launch_ledger_key`——
+///   以此把上一世代（re-arm 前的旧窗口）排除在外，不误接旧 attempt；
+/// - attempt 选取：窗口内**倒序第一个**已真实启动或已终态的 attempt
+///   （ActualStarted/Terminal 都是有账事实；建窗时固化的 attempt1 即原调用）
+///   ——重驱轮交付被判定时其 backfill 已落 ⇒ 倒序首取即当前交付所属
+///   attempt，Claimed 占位（尚未启动）被跳过不会误领；
+/// - 无窗口/无业务键（未建窗的纯判定失败）⇒ None ⇒ 调用方写显式
+///   `NoProviderStart`（不伪造关联）。
+pub(crate) fn generate_segment_provider_attempt(
+    record: &WorkspaceSessionRecord,
+) -> Option<ProviderAttemptAssociation> {
+    let business_key = crate::product::workspace_engine::current_sc_author_business_key(record)?;
+    let window = record
+        .sc_generation_teaching_windows
+        .iter()
+        .rev()
+        .find(|window| {
+            window
+                .attempts
+                .first()
+                .and_then(|attempt| attempt.launch_ledger_key.as_deref())
+                == Some(business_key.as_str())
+        })?;
+    let attempt =
+        window
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| {
+                matches!(
+                attempt.lifecycle,
+                crate::product::work_item_plan_policy::ScTeachingAttemptLifecycle::ActualStarted
+                    | crate::product::work_item_plan_policy::ScTeachingAttemptLifecycle::Terminal {
+                        ..
+                    }
+            )
+            })
+            .or_else(|| window.attempts.first())?;
+    Some(ProviderAttemptAssociation::Started {
+        attempt_seq: attempt.attempt_no,
+        attempt_key: attempt.attempt_key.clone(),
+    })
+}
+
+/// Task 8（REQ-WSC-28D）：engine 编译边界写点的关联解析——**仅**作者阶段
+/// 候选结构门拒收（Operational 承载 + 结构拒收稳定码，generate 段五阶段
+/// 中的「结构拒收」）关联当前 generate 段 attempt；门段 Final 行与 SG3b
+/// 冻结结构复验（Structure kind，门段）不加关联（不改门段流水语义）。
+pub(crate) fn engine_failure_provider_attempt(
+    lifecycle: &LifecycleStore,
+    session_id: &str,
+    failure: &crate::product::workspace_engine::PlanningCompileFailure,
+) -> Option<ProviderAttemptAssociation> {
+    use crate::product::workspace_engine::PlanningCompileFailureKind;
+    let PlanningCompileFailureKind::Operational { stable_code, .. } = &failure.kind else {
+        return None;
+    };
+    if stable_code
+        != crate::product::workspace_engine::PlanningCompileFailure::STRUCTURE_STABLE_CODE
+    {
+        return None;
+    }
+    lifecycle
+        .get_workspace_session(session_id)
+        .ok()
+        .and_then(|record| generate_segment_provider_attempt(&record))
 }
 
 /// REQ-WSC-25 度量读数（design §9.3 的四个指标）。

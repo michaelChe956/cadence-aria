@@ -214,7 +214,7 @@ pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
 pub(crate) use single_candidate::{
     SingleCandidateAuthorCompletion, SingleCandidateGenerationDecisionInput,
-    select_internal_generation_mode,
+    current_sc_author_business_key, select_internal_generation_mode,
 };
 pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
