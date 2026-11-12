@@ -65,7 +65,7 @@
 ## 9. 收口
 
 - [x] 9.1 `openspec validate mechanicalize-plan-compile-repair --strict` exit 0（Task 8 实测 2026-11-12：`Change 'mechanicalize-plan-compile-repair' is valid`，exit 0；归档演练 /tmp 复核 81 passed / 0 failed，演练目录已删）
-- [ ] 9.2 全量门禁（fmt / clippy -D / check / test）绿；预存基线按名对照
+- [x] 9.2 全量门禁（fmt / clippy -D / check / test）绿；预存基线按名对照（Task 8 复核 2026-11-12，`854dab48` 修复后**自跑**：fmt --all --check exit 0；`--lib` 6338 passed/0 failed/7 ignored（运行 6345）；it_core 221/0/1（运行 222，行数守卫含内）；it_web 631/0/17（运行 648）；clippy -D warnings exit 0、0 error。初测 `--lib` 曾 1 failed＝Task 7 措辞改写（`，`→`、`）漏更的族外陈旧断言（single_candidate_provider_run.rs:1305，非行为回归），登记验收记录 §5-G 后由 854dab48 一行修复、全仓同类漂移扫描零新增）
 
 ## 10. 待验证假设（不改契约，取证后再决定是否追加 requirement）
 
