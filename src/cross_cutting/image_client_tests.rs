@@ -543,3 +543,281 @@ async fn c18_success_body_over_64mib_is_rejected_with_a_readable_error() {
     );
     mock.assert_async().await;
 }
+
+// ---- 连通性探测（probe_connectivity）：两步出站，绝不生成图片、绝不计费 ----
+
+/// /v1/models mock：固定状态码与响应体，校验 Bearer 鉴权头。
+async fn models_endpoint(
+    server: &mut mockito::Server,
+    status: usize,
+    body: &str,
+    hits: usize,
+) -> mockito::Mock {
+    server
+        .mock("GET", "/v1/models")
+        .match_header("authorization", "Bearer sk-test")
+        .with_status(status)
+        .with_body(body)
+        .expect(hits)
+        .create_async()
+        .await
+}
+
+/// generations mock：body 必须精确等于 `{"model":…}`（缺 prompt 属预期），校验 Bearer。
+async fn probe_generations(
+    server: &mut mockito::Server,
+    model: &str,
+    status: usize,
+    body: &str,
+    hits: usize,
+) -> mockito::Mock {
+    server
+        .mock("POST", "/v1/images/generations")
+        .match_header("authorization", "Bearer sk-test")
+        .match_body(Matcher::Json(json!({ "model": model })))
+        .with_status(status)
+        .with_body(body)
+        .expect(hits)
+        .create_async()
+        .await
+}
+
+async fn probe(base_url: &str, models: &[&str]) -> Result<ProbeReport, ImageClientError> {
+    let models = models.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    probe_connectivity(ImageVendor::Gpt, base_url, "sk-test", &models).await
+}
+
+#[tokio::test]
+async fn p01_both_steps_pass_and_missing_models_are_computed() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(
+        &mut server,
+        200,
+        r#"{"data":[{"id":"gpt-image-2.6-flare"},{"id":"other"}]}"#,
+        1,
+    )
+    .await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 400, "missing prompt", 1).await;
+
+    let report = probe(&server.url(), &[GPT_MODEL, "ghost-model"])
+        .await
+        .expect("两步通过时探测必须成功");
+
+    assert!(report.ok, "两步均通过 → ok=true");
+    assert_eq!(report.message, "连通性正常");
+    assert_eq!(report.missing_models, vec!["ghost-model".to_string()]);
+    assert_eq!(report.steps.len(), 2);
+    assert_eq!(
+        (report.steps[0].key, report.steps[0].status),
+        ("models", "ok")
+    );
+    assert_eq!(report.steps[0].label, "模型列表 /v1/models");
+    assert_eq!(report.steps[0].detail, "网关返回 2 个模型");
+    assert_eq!(
+        (report.steps[1].key, report.steps[1].status),
+        ("generations", "ok")
+    );
+    assert_eq!(report.steps[1].label, "图片端点 /v1/images/generations");
+    assert_eq!(
+        report.steps[1].detail,
+        "图片端点连通且鉴权通过（缺少 prompt 属预期，不会计费）"
+    );
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p02_models_list_accepts_bare_array_shape() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(&mut server, 200, r#"["alpha","beta"]"#, 1).await;
+    let generations = probe_generations(&mut server, "alpha", 400, "missing prompt", 1).await;
+
+    let report = probe(&server.url(), &["alpha", "nope"])
+        .await
+        .expect("数组形态必须可解析");
+
+    assert_eq!(report.steps[0].detail, "网关返回 2 个模型");
+    assert_eq!(report.missing_models, vec!["nope".to_string()]);
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p03_models_401_fails_and_skips_step_two() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(&mut server, 401, "unauthorized", 1).await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 400, "missing prompt", 0).await;
+
+    let report = probe(&server.url(), &[GPT_MODEL])
+        .await
+        .expect("探测本身返回报告");
+
+    assert!(!report.ok);
+    assert_eq!(report.steps.len(), 1, "key 无效时不再发第二步");
+    assert_eq!(report.steps[0].status, "failed");
+    assert_eq!(report.steps[0].detail, "API Key 无效或无权限");
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p04_models_unavailable_is_skipped_and_probe_still_passes() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(&mut server, 404, "no such route", 1).await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 400, "missing prompt", 1).await;
+
+    let models_list = vec![GPT_MODEL.to_string()];
+    let report = probe_connectivity(ImageVendor::Minimax, &server.url(), "sk-test", &models_list)
+        .await
+        .expect("探测本身返回报告");
+
+    assert_eq!(report.vendor, ImageVendor::Minimax);
+    assert!(report.ok, "skipped 不算失败，图片端点通过即连通");
+    assert_eq!(
+        (report.steps[0].key, report.steps[0].status),
+        ("models", "skipped")
+    );
+    assert_eq!(
+        report.steps[0].detail,
+        "该网关未提供 /v1/models，改用图片端点验证"
+    );
+    assert!(
+        report.missing_models.is_empty(),
+        "/v1/models 不可用时 missing_models 为空"
+    );
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p05_models_network_error_is_skipped_and_step_two_fails() {
+    // 绑定后立即释放端口：出站必然连接被拒（网络错误路径）。
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    let report = probe(&base_url, &[GPT_MODEL])
+        .await
+        .expect("探测本身返回报告");
+
+    assert!(!report.ok);
+    assert_eq!(
+        (report.steps[0].key, report.steps[0].status),
+        ("models", "skipped")
+    );
+    assert_eq!(report.steps[1].status, "failed");
+    assert!(
+        report.steps[1].detail.contains("网络错误"),
+        "{}",
+        report.steps[1].detail
+    );
+}
+
+#[tokio::test]
+async fn p06_generations_401_fails_with_invalid_key_detail() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(
+        &mut server,
+        200,
+        r#"{"data":[{"id":"gpt-image-2.6-flare"}]}"#,
+        1,
+    )
+    .await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 401, "bad key", 1).await;
+
+    let report = probe(&server.url(), &[GPT_MODEL])
+        .await
+        .expect("探测本身返回报告");
+
+    assert!(!report.ok);
+    assert_eq!(report.steps[1].status, "failed");
+    assert_eq!(report.steps[1].detail, "API Key 无效或无权限");
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p07_generations_404_with_models_hints_base_url_path() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(&mut server, 404, "no route", 1).await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 404, "not found", 1).await;
+
+    let report = probe(&server.url(), &[GPT_MODEL])
+        .await
+        .expect("探测本身返回报告");
+
+    assert!(!report.ok);
+    assert_eq!(
+        report.steps[1].detail,
+        "路径不对：系统会自动拼 /v1/images/generations，请只填到主机根路径（不要带 /v1 或 /v1/images）"
+    );
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p08_generations_404_without_models_distinguishes_missing_probe_model() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(&mut server, 404, "no route", 1).await;
+    // models 为空 → 探测用通用占位模型 id。
+    let generations = probe_generations(&mut server, "gpt-image-1", 404, "not found", 1).await;
+
+    let report = probe(&server.url(), &[]).await.expect("探测本身返回报告");
+
+    assert!(!report.ok);
+    assert!(
+        report.steps[1].detail.contains("未指定模型 id"),
+        "404 且未指定模型时不得断言路径不对：{}",
+        report.steps[1].detail
+    );
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p09_other_status_detail_is_sanitized_and_report_hides_the_key() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(&mut server, 404, "no route", 1).await;
+    let generations = probe_generations(
+        &mut server,
+        GPT_MODEL,
+        500,
+        r#"{"error":"key sk-test rejected"}"#,
+        1,
+    )
+    .await;
+
+    let report = probe(&server.url(), &[GPT_MODEL])
+        .await
+        .expect("探测本身返回报告");
+
+    assert!(!report.ok);
+    assert!(
+        report.steps[1].detail.starts_with("网关返回 HTTP 500："),
+        "{}",
+        report.steps[1].detail
+    );
+    let report_text = serde_json::to_string(&report).expect("报告必须可序列化");
+    assert!(
+        !report_text.contains("sk-test"),
+        "报告任何字段都不得含 key 明文：{report_text}"
+    );
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn p10_invalid_base_url_is_rejected_with_zero_requests() {
+    let mut server = mockito::Server::new_async().await;
+    let models = models_endpoint(&mut server, 200, r#"{"data":[]}"#, 0).await;
+    let generations = probe_generations(&mut server, GPT_MODEL, 400, "missing prompt", 0).await;
+    let base_url = server.url().replace("http://", "ftp://");
+
+    let error = probe(&base_url, &[GPT_MODEL])
+        .await
+        .expect_err("非法 base_url 必须在出站前拒绝");
+    assert!(matches!(error, ImageClientError::InvalidConfig(_)));
+    models.assert_async().await;
+    generations.assert_async().await;
+}

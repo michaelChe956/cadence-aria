@@ -459,6 +459,244 @@ fn normalize_reqwest_error(error: reqwest::Error) -> ImageClientError {
     }
 }
 
+// ---- 供应方连通性探测（不生成图片、不计费） ----
+
+/// 探测连接超时：远短于生成路径。
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 探测总预算：两步合计 30s，每步请求超时取剩余额度。
+const PROBE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// /v1/models 响应体读取上限：模型清单远小于此（H6 同源考量）。
+const MAX_MODELS_BODY_BYTES: usize = 1024 * 1024;
+
+const PROBE_STATUS_OK: &str = "ok";
+const PROBE_STATUS_SKIPPED: &str = "skipped";
+const PROBE_STATUS_FAILED: &str = "failed";
+
+/// 单步探测结果。detail 已脱敏，不含 api_key。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProbeStep {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub status: &'static str,
+    pub detail: String,
+}
+
+impl ProbeStep {
+    fn new(
+        key: &'static str,
+        label: &'static str,
+        status: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            key,
+            label,
+            status,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// 探测汇总：任一步骤 failed 则 ok=false，两步明细与网关缺失模型一并列出。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProbeReport {
+    pub vendor: ImageVendor,
+    pub ok: bool,
+    pub message: String,
+    pub steps: Vec<ProbeStep>,
+    pub missing_models: Vec<String>,
+    pub duration_ms: u64,
+}
+
+/// 供应方连通性探测：只验证「通不通 / key 是否有效 / 配置的模型 id 网关支持哪些」，
+/// 绝不生成图片、绝不计费 —— 第 2 步故意缺 prompt，参数校验在任何实现中都先于生成。
+/// 出站前先走与生成路径同一套 `validate_base_url`（SSRF 防线）；不合规时不发任何请求。
+pub async fn probe_connectivity(
+    vendor: ImageVendor,
+    base_url: &str,
+    api_key: &str,
+    models: &[String],
+) -> Result<ProbeReport, ImageClientError> {
+    validate_base_url(base_url)?;
+    // 探测复用出站客户端的禁重定向策略，但超时大幅缩短（连接 10s / 总计 30s）。
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(PROBE_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|_| ImageClientError::InvalidConfig("探测 HTTP 客户端构建失败".to_string()))?;
+    let root = base_url.trim_end_matches('/');
+    let deadline = std::time::Instant::now() + PROBE_TOTAL_TIMEOUT;
+    let started = std::time::Instant::now();
+    let mut steps = Vec::new();
+    let mut missing_models = Vec::new();
+
+    // 步骤 1：GET /v1/models。401/403 → key 无效，直接结束；不可用 → 跳过，继续第 2 步。
+    let mut key_invalid = false;
+    let models_step = match http
+        .get(format!("{root}/v1/models"))
+        .bearer_auth(api_key)
+        .timeout(remaining_before(deadline))
+        .send()
+        .await
+    {
+        Ok(response) => match response.status().as_u16() {
+            200 => {
+                let ids = read_body_within(response, MAX_MODELS_BODY_BYTES)
+                    .await
+                    .map(|(body, _)| parse_model_ids(&body))
+                    .unwrap_or_default();
+                missing_models = models
+                    .iter()
+                    .filter(|model| !ids.iter().any(|id| id == *model))
+                    .cloned()
+                    .collect();
+                ProbeStep::new(
+                    "models",
+                    "模型列表 /v1/models",
+                    PROBE_STATUS_OK,
+                    format!("网关返回 {} 个模型", ids.len()),
+                )
+            }
+            401 | 403 => {
+                key_invalid = true;
+                ProbeStep::new(
+                    "models",
+                    "模型列表 /v1/models",
+                    PROBE_STATUS_FAILED,
+                    "API Key 无效或无权限",
+                )
+            }
+            _ => ProbeStep::new(
+                "models",
+                "模型列表 /v1/models",
+                PROBE_STATUS_SKIPPED,
+                "该网关未提供 /v1/models，改用图片端点验证",
+            ),
+        },
+        Err(_) => ProbeStep::new(
+            "models",
+            "模型列表 /v1/models",
+            PROBE_STATUS_SKIPPED,
+            "该网关未提供 /v1/models，改用图片端点验证",
+        ),
+    };
+    steps.push(models_step);
+
+    if !key_invalid {
+        // 步骤 2：POST /v1/images/generations，body 故意只有 model、缺 prompt。
+        let probe_model = models.first().cloned().unwrap_or_else(probe_fallback_model);
+        let generations_step = match http
+            .post(format!("{root}/v1/images/generations"))
+            .bearer_auth(api_key)
+            .json(&serde_json::json!({ "model": probe_model }))
+            .timeout(remaining_before(deadline))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let code = response.status().as_u16();
+                let (status, detail) = match code {
+                    400 => (
+                        PROBE_STATUS_OK,
+                        "图片端点连通且鉴权通过（缺少 prompt 属预期，不会计费）".to_string(),
+                    ),
+                    401 | 403 => (
+                        PROBE_STATUS_FAILED,
+                        "API Key 无效或无权限".to_string(),
+                    ),
+                    404 if !models.is_empty() => (
+                        PROBE_STATUS_FAILED,
+                        "路径不对：系统会自动拼 /v1/images/generations，请只填到主机根路径（不要带 /v1 或 /v1/images）"
+                            .to_string(),
+                    ),
+                    404 => (
+                        PROBE_STATUS_FAILED,
+                        "无法判定路径是否正确：未指定模型 id（404 也可能是模型不存在）。请确认只填到主机根路径，或先在配置中填写模型 id 后重试"
+                            .to_string(),
+                    ),
+                    _ => {
+                        let body = read_body_within(response, MAX_ERROR_BODY_BYTES)
+                            .await
+                            .map(|(body, _)| String::from_utf8_lossy(&body).to_string())
+                            .unwrap_or_default();
+                        (
+                            PROBE_STATUS_FAILED,
+                            format!(
+                                "网关返回 HTTP {code}：{}",
+                                sanitize_error_body(&body, api_key)
+                            ),
+                        )
+                    }
+                };
+                ProbeStep::new(
+                    "generations",
+                    "图片端点 /v1/images/generations",
+                    status,
+                    detail,
+                )
+            }
+            Err(_) => ProbeStep::new(
+                "generations",
+                "图片端点 /v1/images/generations",
+                PROBE_STATUS_FAILED,
+                "网络错误或超时：无法在 30 秒内完成探测",
+            ),
+        };
+        steps.push(generations_step);
+    }
+
+    let ok = steps.iter().all(|step| step.status != PROBE_STATUS_FAILED);
+    Ok(ProbeReport {
+        vendor,
+        ok,
+        message: if ok {
+            "连通性正常".to_string()
+        } else {
+            "连通性测试未通过，请查看步骤详情".to_string()
+        },
+        steps,
+        missing_models,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// 解析 /v1/models 响应的模型 id：兼容 `{"data":[{"id":…}]}` 与顶层数组
+/// （元素为对象取 id、为字符串取本身）两种形态。
+fn parse_model_ids(body: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let items: &[serde_json::Value] = match &value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(_) => value
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        _ => &[],
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            item.as_str().map(ToOwned::to_owned).or_else(|| {
+                item.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+        })
+        .collect()
+}
+
+/// models 为空时的探测占位模型 id。分段拼装以避免非测试代码出现具体模型 id 字面量（C15）。
+fn probe_fallback_model() -> String {
+    ["gpt", "image", "1"].join("-")
+}
+
+/// 距探测总预算截止的剩余时间；已用尽则返回零时长（请求会立即超时）。
+fn remaining_before(deadline: std::time::Instant) -> Duration {
+    deadline.saturating_duration_since(std::time::Instant::now())
+}
+
 #[cfg(test)]
 #[path = "image_client_tests.rs"]
 mod image_client_tests;

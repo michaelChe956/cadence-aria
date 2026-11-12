@@ -6,18 +6,18 @@ use axum::extract::{Multipart, Path, State, WebSocketUpgrade};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
-use crate::cross_cutting::image_client::{ImageGenRequest, ImageRefImage};
+use crate::cross_cutting::image_client::{ImageGenRequest, ImageRefImage, probe_connectivity};
 use crate::cross_cutting::image_reference_validation::validate_reference_image;
 use crate::product::image_create::engine::GenerateCommand;
 use crate::product::image_create::image_files;
 use crate::product::image_create::models::{
     CreateSessionRequest, ImageBackground, ImageCreateError, ImageOutputFormat, ImageQuality,
-    ImageSize, IterationEvent, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
+    ImageSize, ImageVendor, IterationEvent, SessionRecordDto, SessionStoreApi, SessionSummaryDto,
     SettingsStoreApi, SettingsUpdateRequest, validate_session_id,
 };
 use crate::product::image_create::{ImageCreateEngine, SessionStore, SettingsStore};
@@ -207,6 +207,46 @@ pub async fn update_settings(
     store.validate_settings(&updated).await?;
     store.save(&updated).await?;
     Ok(Json(store.to_masked(&updated).await))
+}
+
+/// 连通性探测请求：api_key 允许为空串或缺省 —— 为空则回落用该家已保存的 key。
+#[derive(Debug, Deserialize)]
+struct ConnectivityProbeRequest {
+    vendor: ImageVendor,
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    models: Vec<String>,
+}
+
+/// POST /api/image-create/settings/connectivity：用草稿值探测供应方连通性
+/// （不生成图片、不计费）。探测结果一律 200；仅入参非法才 400。
+pub async fn probe_settings_connectivity(
+    State(state): State<WebAppState>,
+    Json(raw): Json<serde_json::Value>,
+) -> HandlerResult<impl IntoResponse> {
+    let request: ConnectivityProbeRequest = serde_json::from_value(raw)
+        .map_err(|error| invalid_param(format!("探测请求不合法：{error}")))?;
+    // key 回落：草稿非空优先；为空则用该家已保存的 key
+    //（前端只有脱敏值、不可反推，回落只能在后端做）。
+    let api_key = if request.api_key.trim().is_empty() {
+        let saved = settings_store(&state).load().await;
+        let saved_key = match request.vendor {
+            ImageVendor::Gpt => saved.vendors.gpt.api_key,
+            ImageVendor::Minimax => saved.vendors.minimax.api_key,
+        };
+        if saved_key.trim().is_empty() {
+            return Err(invalid_param("未配置 API Key，无法测试连通性"));
+        }
+        saved_key
+    } else {
+        request.api_key
+    };
+    let report = probe_connectivity(request.vendor, &request.base_url, &api_key, &request.models)
+        .await
+        .map_err(|error| invalid_param(error.to_string()))?;
+    Ok(Json(report))
 }
 
 pub async fn generate_image(
@@ -422,3 +462,7 @@ mod image_create_tests;
 #[cfg(test)]
 #[path = "image_create_endpoint_tests.rs"]
 mod image_create_endpoint_tests;
+
+#[cfg(test)]
+#[path = "image_create_connectivity_tests.rs"]
+mod image_create_connectivity_tests;

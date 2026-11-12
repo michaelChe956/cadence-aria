@@ -61,6 +61,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             "/api/image-create/settings",
             get(handlers::get_image_create_settings).put(handlers::update_image_create_settings),
         )
+        .route(
+            "/api/image-create/settings/connectivity",
+            post(handlers::probe_image_create_connectivity),
+        )
         .route("/api/events", get(handlers::events))
         .route("/api/projection", get(handlers::projection))
         .route(
