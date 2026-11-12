@@ -196,7 +196,7 @@ impl LifecycleStore {
             stored.provider_start_ledger.push(
                 crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                     provider_start_idempotency_key: provider_start_idempotency_key.to_string(),
-                    started: true,
+                    started: false,
                     provider: None,
                     started_at: None,
                     provider_attempt_key: None,

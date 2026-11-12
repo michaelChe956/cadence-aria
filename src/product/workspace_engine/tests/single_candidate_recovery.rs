@@ -445,7 +445,7 @@ fn single_candidate_recovery_generate_reserved_without_ledger_replans_once() {
         before_restart.id,
         before_restart.provider_start_ledger.len() - 1
     );
-    single_candidate_recovery_assert_provider_start_dedup(&before_restart, &key, 1);
+    single_candidate_recovery_assert_provider_start_dedup(&before_restart, &key, 0);
     let events_before = single_candidate_recovery_events(&lifecycle, engine.session());
 
     let mut restarted = single_candidate_recovery_restart(&engine, &lifecycle);
@@ -464,7 +464,7 @@ fn single_candidate_recovery_generate_reserved_without_ledger_replans_once() {
         ledger_bytes_before,
         "Generate dedup restart 不得改写已有 provider ledger 字节"
     );
-    single_candidate_recovery_assert_provider_start_dedup(&after_restart, &key, 1);
+    single_candidate_recovery_assert_provider_start_dedup(&after_restart, &key, 0);
     assert_eq!(after_restart.run_history.repairs_used, 0);
     single_candidate_recovery_assert_event_prefix(
         &events_before,

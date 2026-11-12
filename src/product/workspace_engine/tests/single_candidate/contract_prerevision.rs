@@ -159,6 +159,7 @@ mod contract_prerevision {
                 entry.provider_start_idempotency_key
                     == format!("single_candidate_author:{}:0", persisted.id)
                     && entry.started
+                    && !entry.is_actual_launch_observation()
             }),
             "TriggerAggregateRepair must atomically preclaim the next author provider key"
         );

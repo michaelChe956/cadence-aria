@@ -953,8 +953,9 @@ async fn single_candidate_revise_route_does_not_misfire_a_second_followup_review
             .iter()
             .any(|entry| entry.provider_start_idempotency_key
                 == format!("single_candidate_author:{}:1", durable.id)
-                && entry.started),
-        "预领的接力键 :1 必须已在 ledger（k3 P0 原子预领）"
+                && entry.started
+                && !entry.is_actual_launch_observation()),
+        "预领的接力键 :1 必须已在 ledger（k3 P0 原子预领，预领占位非实际启动观察）"
     );
     assert!(
         durable

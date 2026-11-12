@@ -211,8 +211,9 @@ async fn compile_failure_after_passed_initial_review_delegates_author_rerun() {
             entry.provider_start_idempotency_key
                 == format!("single_candidate_author:{}:0", persisted.id)
                 && entry.started
+                && !entry.is_actual_launch_observation()
         }),
-        "必须原子预领下一次 author provider 启动键"
+        "必须原子预领下一次 author provider 启动键（预领占位非实际启动观察）"
     );
     assert!(
         persisted
