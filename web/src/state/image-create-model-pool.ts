@@ -15,7 +15,7 @@ export const IMAGE_MODELS_LIMIT = 256;
 export type ModelCandidatesRefresh = {
   /** 新的候选池：网关模型（网关顺序在前）∪ 草稿清单里已有的。 */
   candidates: string[];
-  /** 新的勾选集合：草稿清单原样；草稿为空时取网关全量。 */
+  /** 新的勾选集合：网关返回的模型（去重、保序、跳过另一家占用的 id）。 */
   selected: string[];
   /** 已被另一家勾选而跳过的模型 id。 */
   skipped: string[];
