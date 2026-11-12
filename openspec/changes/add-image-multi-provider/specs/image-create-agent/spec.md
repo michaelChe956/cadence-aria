@@ -152,7 +152,7 @@
 
 ### Requirement: 网关配置录入与脱敏存储
 
-系统 SHALL 提供设置界面供用户分别为两个供应方（GPT、MiniMax）录入各自的 `base_url`、`api_key` 与模型清单，以及两家共享的默认参数。系统 SHALL 将配置持久化于 Aria 后端 `.aria` 目录下。系统 SHALL 在前端展示每个 `api_key` 时对其脱敏（不展示明文），且前端 SHALL NOT 缓存 `api_key` 明文。设置更新 SHALL 按供应方独立采用保留语义：某个供应方未出现在更新请求中时，系统 SHALL 保留该供应方的全部配置；某个供应方出现但未提供新 `api_key`（保留动作）时，系统 SHALL 保留其原 `api_key` 而非清空；清除某个供应方的 `api_key` SHALL 需要用户针对该供应方的显式清除动作。对一个供应方的更新 SHALL NOT 改变另一个供应方的配置。任一供应方的配置校验失败时，系统 SHALL 拒绝整次更新且不改动已持久化的配置。
+系统 SHALL 提供设置界面供用户分别为两个供应方（GPT、MiniMax）录入各自的 `base_url`、`api_key` 与模型清单，以及两家共享的默认参数。系统 SHALL 将每个供应方的 `base_url` 视为主机根路径（如 `https://api.openai.com`，不含 `/v1`、`/v1/images` 等路径后缀），并在其后自动拼接 `/v1/images/generations`（文生图）或 `/v1/images/edits`（改图）构造出站地址；设置界面 SHALL 在每个供应方的 Base URL 输入框给出填写示例并说明该规则。系统 SHALL 将配置持久化于 Aria 后端 `.aria` 目录下。系统 SHALL 在前端展示每个 `api_key` 时对其脱敏（不展示明文），且前端 SHALL NOT 缓存 `api_key` 明文。设置更新 SHALL 按供应方独立采用保留语义：某个供应方未出现在更新请求中时，系统 SHALL 保留该供应方的全部配置；某个供应方出现但未提供新 `api_key`（保留动作）时，系统 SHALL 保留其原 `api_key` 而非清空；清除某个供应方的 `api_key` SHALL 需要用户针对该供应方的显式清除动作。对一个供应方的更新 SHALL NOT 改变另一个供应方的配置。任一供应方的配置校验失败时，系统 SHALL 拒绝整次更新且不改动已持久化的配置。
 
 #### Scenario: 录入并持久化配置
 
@@ -183,6 +183,16 @@
 
 - **WHEN** 更新请求中一个供应方的配置合法、另一个供应方的 `base_url` 不合法
 - **THEN** 系统拒绝该更新并提示原因，已持久化的两家配置均未改变
+
+#### Scenario: Base URL 只填主机根路径时系统自动拼接端点路径
+
+- **WHEN** 用户为某个供应方录入 `base_url` 为 `https://gateway.example.com`（末尾带或不带 `/`）并保存
+- **THEN** 发往该供应方的文生图请求地址为 `https://gateway.example.com/v1/images/generations`，改图请求地址为 `https://gateway.example.com/v1/images/edits`
+
+#### Scenario: 设置界面给出 Base URL 填写示例
+
+- **WHEN** 用户打开设置界面查看某个供应方的 Base URL 输入框
+- **THEN** 输入框带有该供应方的示例地址（GPT 为 `https://api.openai.com`，MiniMax 为 `https://api.minimax.io`），并提示只填到主机根路径、不要带 `/v1` 或 `/v1/images`，系统会自动拼接图片端点路径
 
 ### Requirement: API Key 安全边界与出站目标约束
 
@@ -437,3 +447,109 @@
 
 - **WHEN** 新形态配置文件中某个供应方的模型清单为显式空列表
 - **THEN** 系统读入后该清单仍为空，该供应方被视为不可用
+
+### Requirement: 供应方连通性探测
+
+系统 SHALL 提供供应方连通性探测，供用户在设置界面检查单个供应方的 `base_url`、`api_key` 与模型清单是否可用。探测 SHALL 依次发起至多两次出站请求：① 以 Bearer 鉴权 `GET {base_url}/v1/models`；② `POST {base_url}/v1/images/generations`，请求体只含 `model`、不含 `prompt`。每步 SHALL 至多请求一次。探测 SHALL NOT 携带 `prompt`，SHALL NOT 调用 `/v1/images/edits`，因而不生成图片、不产生费用。探测结果 SHALL 给出总体结论、每一步的状态（通过、跳过或失败）与中文说明，以及配置了但未被网关模型列表列出的模型 id。当且仅当没有任何一步失败时，结论 SHALL 为连通；存在未被列出的模型 SHALL NOT 使结论变为不连通。
+
+#### Scenario: 连通且 key 有效
+
+- **WHEN** 用户对某个供应方发起连通性探测，网关的 `/v1/models` 返回 200 且列出了清单中的全部模型，不含 `prompt` 的 `/v1/images/generations` 请求返回 400
+- **THEN** 探测结论为连通，两步均标记为通过，未被列出的模型为空
+
+#### Scenario: API Key 无效或无权限
+
+- **WHEN** 网关的 `/v1/models` 返回 401 或 403
+- **THEN** 探测结论为不连通并说明 API Key 无效或无权限，系统不再向 `/v1/images/generations` 发起请求
+
+#### Scenario: 路径不对时提示只填主机根路径
+
+- **WHEN** 用户把 `base_url` 填成带 `/v1` 或 `/v1/images` 后缀的地址，网关未在拼接后的地址提供模型列表，且 `/v1/images/generations` 请求返回 404
+- **THEN** 探测结论为不连通，并提示系统会自动拼接 `/v1/images/generations`、`base_url` 只填到主机根路径
+
+#### Scenario: 网关未列出部分配置模型
+
+- **WHEN** 网关的 `/v1/models` 返回 200，但其模型列表不含清单中的某些模型 id，且图片端点一步通过
+- **THEN** 探测结果逐个列出这些未被网关列出的模型 id，结论仍为连通
+
+#### Scenario: 探测不生成图片不计费
+
+- **WHEN** 用户对任一供应方发起连通性探测
+- **THEN** 系统至多发出一次 `GET /v1/models` 与一次不含 `prompt` 的 `POST /v1/images/generations`，不发出任何带 `prompt` 的请求，也不调用 `/v1/images/edits`；图片目录与会话记录均无新增
+
+### Requirement: 连通性探测的逐步判定规则
+
+第 ① 步（模型列表）返回 200 时，系统 SHALL 判定该步通过，并将请求中的模型清单与网关返回的模型列表逐字符比对，列出未被列出的模型 id；返回 401 或 403 时 SHALL 判定 API Key 无效或无权限并结束探测，不再发起第 ② 步；其他情况（含网络错误）SHALL 视为网关未提供模型列表，跳过该步并继续第 ② 步，此时未被列出的模型为空。第 ② 步（图片端点）返回 400 时 SHALL 判定图片端点连通且鉴权通过；返回 401 或 403 时 SHALL 判定 API Key 无效或无权限；返回 404 时 SHALL 判定路径不对并提示 `base_url` 只填到主机根路径；其他情况 SHALL 判定失败并给出状态码与脱敏后的响应摘要。请求的模型清单为空时，第 ② 步 SHALL 使用通用占位模型 id，且对 404 的说明 SHALL 区分「模型 id 未指定」与「路径不对」。
+
+#### Scenario: 网关未提供模型列表时改用图片端点验证
+
+- **WHEN** 网关的 `/v1/models` 返回 404、405、5xx 或请求出现网络错误，而不含 `prompt` 的 `/v1/images/generations` 请求返回 400
+- **THEN** 模型列表一步标记为已跳过，探测结论为连通，未被列出的模型为空
+
+#### Scenario: 图片端点鉴权失败
+
+- **WHEN** 模型列表一步被跳过，`/v1/images/generations` 请求返回 401 或 403
+- **THEN** 图片端点一步标记为失败并说明 API Key 无效或无权限，探测结论为不连通
+
+#### Scenario: 图片端点返回其他状态
+
+- **WHEN** `/v1/images/generations` 请求返回 400、401、403、404 之外的状态（如 500）
+- **THEN** 图片端点一步标记为失败，说明中包含该状态码与脱敏后的响应摘要
+
+#### Scenario: 模型清单为空时区分路径不对与模型未指定
+
+- **WHEN** 探测请求的模型清单为空，系统以通用占位模型 id 发起第 ② 步且返回 404
+- **THEN** 探测结论为不连通，说明中同时指出「模型 id 未指定」与「路径不对」两种可能，而不是直接断言路径不对
+
+### Requirement: 连通性探测的取值来源与安全边界
+
+探测 SHALL 使用请求给出的 `base_url`、`api_key` 与模型清单，即设置界面当前填写的值，无需先保存。请求未提供 `api_key`（缺省或为空）时，系统 SHALL 改用该供应方已保存的 `api_key`；两者皆无时 SHALL 拒绝该请求。探测前系统 SHALL 以与图片生成出站相同的规则校验 `base_url`（仅允许 HTTPS 或本地回环），不合规时 SHALL 拒绝该请求。被拒绝的请求 SHALL NOT 发起任何出站请求。探测请求 SHALL 只发往被探测的 `base_url`，SHALL 禁用自动重定向，SHALL NOT 携带另一供应方的 `api_key`。探测 SHALL NOT 改动已持久化的配置，SHALL NOT 写入会话记录或图片文件。探测结果、错误与日志 SHALL NOT 含 `api_key` 明文。
+
+#### Scenario: 用界面当前填写的值探测
+
+- **WHEN** 用户在设置界面修改了某个供应方的 `base_url` 与 `api_key` 但尚未保存，随即发起连通性探测
+- **THEN** 探测请求发往界面上当前填写的 `base_url`，鉴权使用当前填写的 `api_key`，而非已保存的值
+
+#### Scenario: 未重新输入 key 时用已保存的 key 探测
+
+- **WHEN** 某个供应方已保存过 `api_key`，探测请求的 `api_key` 为空
+- **THEN** 系统使用该供应方已保存的 `api_key` 完成探测
+
+#### Scenario: 既未填写也未保存过 key 时拒绝探测
+
+- **WHEN** 探测请求的 `api_key` 为空，且该供应方没有已保存的 `api_key`
+- **THEN** 系统拒绝该请求并提示未配置 API Key、无法测试连通性，不发起任何出站请求
+
+#### Scenario: base_url 不合规时拒绝探测
+
+- **WHEN** 探测请求的 `base_url` 不是 HTTPS（且非本地回环）或不是合法 URL
+- **THEN** 系统拒绝该请求并提示原因，不发起任何出站请求
+
+#### Scenario: 探测结果不含 key 明文
+
+- **WHEN** 网关的错误响应体中包含本次探测使用的 `api_key` 明文
+- **THEN** 探测结果的结论与各步说明中该明文已被替换
+
+#### Scenario: 探测不改动已保存的配置
+
+- **WHEN** 一次连通性探测结束（无论结论是否连通）
+- **THEN** 已持久化的配置与探测前相同，会话记录与图片目录均无新增
+
+### Requirement: 连通性探测的界面交互
+
+设置界面 SHALL 在每个供应方分区的 Base URL 附近提供「测试连通」入口，SHALL 以该分区当前填写的值发起探测；用户未重新输入 `api_key` 时，前端 SHALL 提交空的 `api_key`，SHALL NOT 提交脱敏值。探测结果 SHALL 在该供应方分区内联展示：结论、每一步的说明，以及单独高亮的未被网关列出的模型。探测进行期间该供应方的入口 SHALL 显示进行中状态并禁用。探测失败 SHALL NOT 阻止用户保存设置。
+
+#### Scenario: 内联展示探测结果
+
+- **WHEN** 某个供应方的连通性探测返回，且有模型未被网关列出
+- **THEN** 该供应方分区内展示结论与每一步的说明，并以单独一行高亮列出未被网关列出的模型 id
+
+#### Scenario: 探测进行中入口禁用
+
+- **WHEN** 某个供应方的连通性探测尚未返回
+- **THEN** 该供应方的「测试连通」按钮显示进行中状态并禁用，另一供应方的按钮不受影响
+
+#### Scenario: 探测失败不阻断保存
+
+- **WHEN** 某个供应方的连通性探测结论为不连通
+- **THEN** 用户仍可保存当前填写的设置
