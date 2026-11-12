@@ -54,7 +54,8 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
         !prompt.contains("正例：`- criterion_id: AC-001` 配 `- reviewer_check_refs: AC-001`"),
         "REQ-CRP-05 计量闸门：已退出 prompt 的 AC 正例不得回潮"
     );
-    // 既有教学段不删不改：交叉引用纪律原句仍在，新段紧随其后、grammar 之前。
+    // 既有教学段原判定语义保留，措辞按新契约更新（Task 7/REQ-CRP-05 计量闸门）；
+    // 段序不变：弱模型精度教学紧随交叉引用纪律之后、grammar 之前。
     for retained in [
         "[cross_reference_discipline]",
         "handoff 的 reviewer_check_refs 与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",

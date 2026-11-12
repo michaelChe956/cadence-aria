@@ -900,9 +900,11 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "示例：若 WI-002 依赖 WI-001 的输出",
         // `」` 收尾判例 → EARS parse 校验（invalid_ears fail-closed）
         "WHEN 点击「重开」",
-        // few-shot 11→3：退出判例的判例正文（rep4-f1/rep4-f2）
+        // few-shot 11→3：退出判例的判例正文（rep4-f1/rep4-f2；主题由保留
+        // 教学段 + plan_preflight / dependency.rs canonical_* 行为级测试承接）
         "明确允许新增和维护 tests/integration/**",
         "GET / 只验证三个容器与 level-select.js 加载",
+        "通过静态脚本响应或等价可执行证据验证 web/level-select.js 对 /api/levels 的引用",
     ] {
         assert!(
             !prompt.contains(retired),
