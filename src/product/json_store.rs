@@ -103,9 +103,9 @@ fn open_temp_file(temp_path: &Path, owner_only: bool) -> Result<std::fs::File, P
     {
         let _ = owner_only;
     }
-    options.open(temp_path).map_err(|error| {
-        ProductStoreError::Io(format!("create {}: {error}", temp_path.display()))
-    })
+    options
+        .open(temp_path)
+        .map_err(|error| ProductStoreError::Io(format!("create {}: {error}", temp_path.display())))
 }
 
 fn temp_path_for(path: &Path) -> PathBuf {

@@ -59,9 +59,7 @@ fn restrict_to_owner(path: &std::path::Path) -> Result<(), ImageCreateError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(error) =
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        {
+        if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             let _ = std::fs::remove_file(path);
             return Err(ImageCreateError::Store(format!(
                 "收紧设置文件权限失败 {}: {error}",
