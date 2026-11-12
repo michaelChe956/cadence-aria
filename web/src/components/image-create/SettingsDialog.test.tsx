@@ -148,6 +148,36 @@ describe("SettingsDialog", () => {
     expect(request?.vendors?.gpt).not.toHaveProperty("api_key");
   });
 
+  it("在 key 框里输入后又删空时回到 retain 且请求里不含 api_key", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const apiKey = gpt.getByLabelText("GPT API Key");
+    await user.type(apiKey, "sk-typed");
+    expect(apiKey).toHaveValue("sk-typed");
+    // 删空 ⇒ 回到「沿用已保存的 key」，输入框里不留任何明文。
+    await user.clear(apiKey);
+    expect(apiKey).toHaveValue("");
+
+    // 顺带改一处模型清单，让该家进入保存请求（其余都没动时整家不入请求）。
+    await user.click(gpt.getByRole("button", { name: "已选 2 项" }));
+    await user.click(gpt.getByRole("checkbox", { name: "gpt-image-2.6" }));
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledTimes(1);
+    });
+    const request = saveSettings.mock.calls[0]?.[0];
+    expect(request?.vendors?.gpt).toEqual({
+      api_key_action: "retain",
+      models: ["gpt-image-2.6-flare"],
+    });
+    // 输入过又删空 ⇒ 既不替换也不清空：请求里不能出现 api_key 字段。
+    expect(request?.vendors?.gpt).not.toHaveProperty("api_key");
+    expect(apiKey).toHaveValue("");
+  });
+
   it("sends no vendor and no defaults when nothing changed", async () => {
     const user = userEvent.setup();
     const { loadSettings, saveSettings } = renderDialog();
