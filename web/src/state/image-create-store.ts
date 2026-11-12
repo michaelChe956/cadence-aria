@@ -28,6 +28,15 @@ import {
   type ImageVendor,
 } from "../api/types/image-create";
 import type { ImageChatEntry } from "./image-create-entries";
+import {
+  initialVendorModel,
+  mergeCandidatePool,
+  normalizeModels,
+  orderByPool,
+  refreshCandidatePool,
+  type ImageVendorModelPool,
+  type ModelCandidatesRefresh,
+} from "./image-create-model-pool";
 
 export type ImageCreateConnectionStatus =
   | "disconnected"
@@ -45,6 +54,9 @@ export type ImageVendorConnectivityState = {
   error: string | null;
 };
 
+/** 单家供应方的模型池：网关返回的模型与可勾选的候选池。 */
+export type { ImageVendorModelPool, ModelCandidatesRefresh } from "./image-create-model-pool";
+
 export type ImageCreateState = {
   sessions: SessionSummary[];
   currentSession: SessionRecord | null;
@@ -54,6 +66,8 @@ export type ImageCreateState = {
   settings: MaskedSettings | null;
   /** 各家供应方的连通性探测结果，按家存放。 */
   connectivity: Record<ImageVendor, ImageVendorConnectivityState>;
+  /** 各家供应方的模型池（网关列表与候选池），按家存放。 */
+  modelPools: Record<ImageVendor, ImageVendorModelPool>;
   connectionStatus: ImageCreateConnectionStatus;
   isBusy: boolean;
   lastIterationHadPrompt: boolean;
@@ -83,6 +97,31 @@ export type ImageCreateActions = {
     vendor: ImageVendor,
     input: { baseUrl: string; apiKey: string; models: string[] },
   ) => Promise<void>;
+  /**
+   * 覆盖该家的候选池（载入已保存的模型清单时用），返回去重后的清单。
+   */
+  setVendorModels: (vendor: ImageVendor, models: readonly string[]) => string[];
+  /**
+   * 用最近一次探测到的网关模型刷新该家的候选池：
+   * - 候选池 = 网关模型（网关顺序在前）∪ 草稿清单里已有的；
+   * - 勾选集合 = 草稿清单原样（探测不新增勾选，也不取消勾选）；
+   *   草稿清单为空且网关返回非空时取网关全量，超过单家上限只保留前 N 个；
+   * - 已被另一家勾选的模型 id 不进入候选池。
+   */
+  refreshModelCandidates: (
+    vendor: ImageVendor,
+    current: readonly string[],
+    otherSelected: readonly string[],
+  ) => ModelCandidatesRefresh;
+  /**
+   * 把额外的模型 id 并入该家的候选池并勾选（恢复推荐清单、自定义模型），
+   * 返回按候选池顺序排列的勾选集合。
+   */
+  mergeVendorModels: (
+    vendor: ImageVendor,
+    current: readonly string[],
+    incoming: readonly string[],
+  ) => string[];
   disconnect: () => void;
   reset: () => void;
 };
@@ -103,6 +142,10 @@ const initialState: ImageCreateState = {
   connectivity: {
     gpt: { phase: "idle", result: null, error: null },
     minimax: { phase: "idle", result: null, error: null },
+  },
+  modelPools: {
+    gpt: { gateway: [], candidates: [] },
+    minimax: { gateway: [], candidates: [] },
   },
   connectionStatus: "disconnected",
   isBusy: false,
@@ -193,10 +236,13 @@ export function availableImageVendors(
  * 初始选中项：第一个可用供应方的清单首个 id；没有可用供应方时为空串。
  */
 function initialImageModel(settings: MaskedSettings | null): string {
+  if (!settings) {
+    return "";
+  }
   for (const vendor of availableImageVendors(settings)) {
-    const first = settings?.vendors[vendor].models[0];
-    if (first) {
-      return first;
+    const model = initialVendorModel(settings.vendors[vendor]);
+    if (model !== "") {
+      return model;
     }
   }
   return "";
@@ -761,6 +807,8 @@ export const useImageCreateStore = create<
         api_key: apiKey,
         models,
       });
+      // 网关模型列表按家存放：/v1/models 步骤成功时非空。
+      const availableModels = result.available_models ?? [];
       set((state) => ({
         connectivity: {
           ...state.connectivity,
@@ -770,10 +818,58 @@ export const useImageCreateStore = create<
             error: null,
           },
         },
+        modelPools: {
+          ...state.modelPools,
+          [vendor]: { ...state.modelPools[vendor], gateway: availableModels },
+        },
       }));
     } catch (reason) {
       fail(redactApiKey(errorMessage(reason), apiKey));
     }
+  },
+
+  setVendorModels: (vendor, models) => {
+    const candidates = normalizeModels(models);
+    set((state) => ({
+      modelPools: {
+        ...state.modelPools,
+        [vendor]: { ...state.modelPools[vendor], candidates },
+      },
+    }));
+    return candidates;
+  },
+
+  refreshModelCandidates: (vendor, current, otherSelected) => {
+    const { gateway, candidates } = get().modelPools[vendor];
+    if (gateway.length === 0) {
+      // 网关没有模型列表（未探测或该步失败）：候选池与勾选都不变。
+      return {
+        candidates,
+        selected: orderByPool(candidates, normalizeModels(current)),
+        skipped: [],
+        truncated: null,
+      };
+    }
+    const refresh = refreshCandidatePool(gateway, current, otherSelected);
+    set((state) => ({
+      modelPools: {
+        ...state.modelPools,
+        [vendor]: { ...state.modelPools[vendor], candidates: refresh.candidates },
+      },
+    }));
+    return refresh;
+  },
+
+  mergeVendorModels: (vendor, current, incoming) => {
+    const pool = get().modelPools[vendor].candidates;
+    const merged = mergeCandidatePool(pool, current, incoming);
+    set((state) => ({
+      modelPools: {
+        ...state.modelPools,
+        [vendor]: { ...state.modelPools[vendor], candidates: merged.candidates },
+      },
+    }));
+    return merged.selected;
   },
 
   disconnect: () => {

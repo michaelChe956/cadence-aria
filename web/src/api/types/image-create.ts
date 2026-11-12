@@ -230,5 +230,7 @@ export type ConnectivityProbeResult = {
   steps: ConnectivityStep[];
   /** 配置了但网关模型列表里没有的模型 id。 */
   missing_models: string[];
+  /** 网关模型列表：/v1/models 步骤成功时返回的全部模型 id（去重、保序）。 */
+  available_models: string[];
   duration_ms: number;
 };

@@ -1,4 +1,4 @@
-import { Cpu, LoaderCircle, PlugZap, RotateCcw, Save, Settings, Zap } from "lucide-react";
+import { Cpu, LoaderCircle, PlugZap, Save, Settings, Zap } from "lucide-react";
 import { DialogShell } from "../shared/DialogShell";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
@@ -9,6 +9,7 @@ import {
   IMAGE_VENDOR_LABELS,
   IMAGE_VENDORS,
   type ApiKeyAction,
+  type ConnectivityProbeResult,
   type DefaultImageParams,
   type ImageVendor,
   type MaskedSettings,
@@ -21,7 +22,9 @@ import {
   validateImageCreateBaseUrl,
   type ImageVendorConnectivityState,
 } from "../../state/image-create-store";
+import { type ImageVendorModelPool } from "../../state/image-create-model-pool";
 import { CustomSelect } from "./CustomSelect";
+import { ModelListField, type VendorModelNotice } from "./ModelListField";
 
 /**
  * 统一控件外观：与 CustomSelect 触发器同款（边框色 / 圆角 / 内边距 /
@@ -35,8 +38,8 @@ type VendorDraft = {
   baseUrl: string;
   apiKey: string;
   apiKeyAction: ApiKeyAction;
-  /** 模型清单原文，一行一个 id。 */
-  modelsText: string;
+  /** 已勾选的模型清单（= 要保存的清单）。 */
+  models: string[];
 };
 
 type VendorDrafts = Record<ImageVendor, VendorDraft>;
@@ -64,14 +67,6 @@ function defaultsEqual(left: DefaultImageParams, right: DefaultImageParams) {
   );
 }
 
-/** 解析模型清单：逐行去首尾空白，丢弃空行。 */
-function parseModels(text: string): string[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-}
-
 /**
  * 分区状态 chip：按编辑态判断凭据是否齐全（与 store 的“已配置”同口径：
  * base_url 与 key 都在位），用户改完 URL / key 即时反映。
@@ -91,29 +86,43 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     (state) => state.testVendorConnectivity,
   );
   const connectivity = useImageCreateStore((state) => state.connectivity);
+  const modelPools = useImageCreateStore((state) => state.modelPools);
+  const setVendorModels = useImageCreateStore(
+    (state) => state.setVendorModels,
+  );
+  const refreshModelCandidates = useImageCreateStore(
+    (state) => state.refreshModelCandidates,
+  );
   const [original, setOriginal] = useState<MaskedSettings | null>(null);
   const [drafts, setDrafts] = useState<VendorDrafts | null>(null);
   const [defaults, setDefaults] = useState<DefaultImageParams | null>(null);
+  const [notices, setNotices] = useState<Partial<Record<ImageVendor, VendorModelNotice>>>({});
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const submittingRef = useRef(false);
+  // 已处理过的探测结果：同一个结果只刷新一次候选池。
+  const probedRef = useRef<Partial<Record<ImageVendor, ConnectivityProbeResult | null>>>({});
 
   function hydrate(settings: MaskedSettings) {
     setOriginal(settings);
+    const models: Record<ImageVendor, string[]> = {
+      gpt: setVendorModels("gpt", settings.vendors.gpt.models),
+      minimax: setVendorModels("minimax", settings.vendors.minimax.models),
+    };
     setDrafts({
       gpt: {
         baseUrl: settings.vendors.gpt.base_url,
         apiKey: settings.vendors.gpt.api_key_masked,
         apiKeyAction: "retain",
-        modelsText: settings.vendors.gpt.models.join("\n"),
+        models: models.gpt,
       },
       minimax: {
         baseUrl: settings.vendors.minimax.base_url,
         apiKey: settings.vendors.minimax.api_key_masked,
         apiKeyAction: "retain",
-        modelsText: settings.vendors.minimax.models.join("\n"),
+        models: models.minimax,
       },
     });
     setDefaults(settings.defaults);
@@ -150,6 +159,53 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     };
   }, [loadSettings]);
 
+  /**
+   * 探测拿到网关模型列表后刷新该家的候选池：
+   * 候选池 = 网关模型 ∪ 草稿清单里已有的；勾选集合 = 草稿清单原样
+   * （探测不新增勾选，也不取消勾选）。判据是 available_models 非空：
+   * ok 要求两步都通过，但第二步失败时第一步的模型列表依然有效。
+   */
+  useEffect(() => {
+    if (!drafts) {
+      return;
+    }
+    for (const vendor of IMAGE_VENDORS) {
+      const result = connectivity[vendor].result;
+      if (!result || probedRef.current[vendor] === result) {
+        continue;
+      }
+      probedRef.current[vendor] = result;
+      const available = result.available_models ?? [];
+      if (available.length === 0) {
+        continue;
+      }
+      const other = IMAGE_VENDORS.find((item) => item !== vendor);
+      if (!other) {
+        continue;
+      }
+      const refresh = refreshModelCandidates(
+        vendor,
+        drafts[vendor].models,
+        drafts[other].models,
+      );
+      setDrafts((current) =>
+        current
+          ? {
+              ...current,
+              [vendor]: { ...current[vendor], models: refresh.selected },
+            }
+          : current,
+      );
+      setNotices((current) => ({
+        ...current,
+        [vendor]: {
+          skipped: refresh.skipped,
+          truncated: refresh.truncated,
+        },
+      }));
+    }
+  }, [connectivity, drafts, refreshModelCandidates]);
+
   function updateVendor(vendor: ImageVendor, next: VendorDraft) {
     setDrafts((current) =>
       current ? { ...current, [vendor]: next } : current,
@@ -178,7 +234,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       const originalVendor = original.vendors[vendor];
       const draft = drafts[vendor];
       const trimmedBaseUrl = draft.baseUrl.trim();
-      const models = parseModels(draft.modelsText);
+      const models = draft.models;
       const baseUrlChanged = trimmedBaseUrl !== originalVendor.base_url;
       const modelsChanged =
         models.length !== originalVendor.models.length ||
@@ -240,7 +296,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     void testVendorConnectivity(vendor, {
       baseUrl: draft.baseUrl,
       apiKey: draft.apiKeyAction === "replace" ? draft.apiKey : "",
-      models: parseModels(draft.modelsText),
+      models: draft.models,
     });
   }
 
@@ -303,6 +359,11 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   draft={drafts[vendor]}
                   disabled={controlsDisabled}
                   connectivity={connectivity[vendor]}
+                  pool={modelPools[vendor]}
+                  notice={notices[vendor] ?? null}
+                  otherVendor={
+                    IMAGE_VENDORS.find((item) => item !== vendor) ?? vendor
+                  }
                   onChange={(next) => updateVendor(vendor, next)}
                   onTestConnectivity={() => handleTestConnectivity(vendor)}
                 />
@@ -390,6 +451,9 @@ function VendorSection({
   draft,
   disabled,
   connectivity,
+  pool,
+  notice,
+  otherVendor,
   onChange,
   onTestConnectivity,
 }: {
@@ -398,6 +462,9 @@ function VendorSection({
   draft: VendorDraft;
   disabled: boolean;
   connectivity: ImageVendorConnectivityState;
+  pool: ImageVendorModelPool;
+  notice: VendorModelNotice | null;
+  otherVendor: ImageVendor;
   onChange: (draft: VendorDraft) => void;
   onTestConnectivity: () => void;
 }) {
@@ -534,45 +601,17 @@ function VendorSection({
         </p>
       </div>
 
-      <div className="mt-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <label
-            htmlFor={`${vendor}-models`}
-            className="text-sm font-semibold text-[var(--aria-ink)]"
-          >
-            模型清单
-          </label>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() =>
-              onChange({
-                ...draft,
-                modelsText: original.recommended_models.join("\n"),
-              })
-            }
-            className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-transparent bg-[var(--aria-primary-soft)] px-3 py-1 text-xs font-semibold text-[var(--aria-primary)] transition-colors duration-200 hover:border-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
-            恢复推荐清单
-          </button>
-        </div>
-        <textarea
-          id={`${vendor}-models`}
-          aria-label={`${label} 模型清单`}
-          value={draft.modelsText}
-          rows={8}
-          spellCheck={false}
-          disabled={disabled}
-          onChange={(event) =>
-            onChange({ ...draft, modelsText: event.target.value })
-          }
-          className={`${controlClassName} mt-1.5 min-h-[10rem] resize-y font-mono`}
-        />
-        <p className="mt-1.5 text-xs text-[var(--aria-ink-muted)]">
-          一行一个模型 id，保存时自动去空行与首尾空白。
-        </p>
-      </div>
+      <ModelListField
+        vendor={vendor}
+        label={label}
+        models={draft.models}
+        pool={pool}
+        notice={notice}
+        otherVendor={otherVendor}
+        recommendedModels={original.recommended_models}
+        disabled={disabled}
+        onChange={(models) => onChange({ ...draft, models })}
+      />
 
       <ConnectivityResult state={connectivity} />
     </section>

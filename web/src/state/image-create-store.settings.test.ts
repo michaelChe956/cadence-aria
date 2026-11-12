@@ -156,6 +156,55 @@ describe("image create store 模型选择与设置", () => {
     expect(useImageCreateStore.getState().params.model).toBe("");
   });
 
+  it("picks the first recommended model of the vendor when it is in the list", async () => {
+    api.getImageCreateSettings.mockResolvedValue(
+      maskedSettings({
+        gpt: { models: ["gpt-image-2.6", "gpt-image-2.6-flare"] },
+      }),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().loadSettings();
+
+    // 推荐清单的首个 id 命中，即使它不是清单首项。
+    expect(useImageCreateStore.getState().params.model).toBe(
+      "gpt-image-2.6-flare",
+    );
+  });
+
+  it("falls back to the first id containing image when no recommended model matches", async () => {
+    api.getImageCreateSettings.mockResolvedValue(
+      maskedSettings({
+        gpt: {
+          models: ["text-embedding-3", "GPT-IMAGE-9", "gpt-image-2.6"],
+          recommended_models: ["gpt-image-9"],
+        },
+      }),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().loadSettings();
+
+    // 含 "image" 的判断忽略大小写。
+    expect(useImageCreateStore.getState().params.model).toBe("GPT-IMAGE-9");
+  });
+
+  it("falls back to the first id when neither recommended nor image matches", async () => {
+    api.getImageCreateSettings.mockResolvedValue(
+      maskedSettings({
+        gpt: {
+          models: ["text-embedding-3", "claude-3"],
+          recommended_models: ["gpt-image-2.6"],
+        },
+      }),
+    );
+    const { useImageCreateStore } = await import("./image-create-store");
+
+    await useImageCreateStore.getState().loadSettings();
+
+    expect(useImageCreateStore.getState().params.model).toBe("text-embedding-3");
+  });
+
   it("saveSettings locally rejects a non-https base_url without calling the API", async () => {
     const { useImageCreateStore } = await import("./image-create-store");
 
@@ -282,6 +331,151 @@ describe("image create store 连通性探测", () => {
   });
 });
 
+describe("image create store 模型候选池", () => {
+  async function probeGpt(result: ConnectivityProbeResult = probeResult()) {
+    api.testImageVendorConnectivity.mockResolvedValue(result);
+    const { useImageCreateStore } = await import("./image-create-store");
+    await useImageCreateStore.getState().testVendorConnectivity("gpt", {
+      baseUrl: "https://api.openai.com",
+      apiKey: "",
+      models: [],
+    });
+    return useImageCreateStore;
+  }
+
+  it("keeps the gateway model list per vendor after a probe", async () => {
+    const useImageCreateStore = await probeGpt();
+
+    expect(useImageCreateStore.getState().modelPools.gpt.gateway).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-2.6-flare",
+      "gpt-image-3",
+    ]);
+    // 未探测的那家没有网关列表。
+    expect(useImageCreateStore.getState().modelPools.minimax.gateway).toEqual(
+      [],
+    );
+  });
+
+  it("refreshes the candidate pool with the gateway list but keeps the checked list unchanged", async () => {
+    const useImageCreateStore = await probeGpt();
+
+    const refresh = useImageCreateStore
+      .getState()
+      .refreshModelCandidates("gpt", ["gpt-image-2.6-flare", "custom-x"], []);
+
+    // 候选池 = 网关模型（网关顺序在前）∪ 草稿清单里已有的。
+    expect(refresh.candidates).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-2.6-flare",
+      "gpt-image-3",
+      "custom-x",
+    ]);
+    expect(useImageCreateStore.getState().modelPools.gpt.candidates).toEqual(
+      refresh.candidates,
+    );
+    // 勾选集合 = 草稿清单原样：探测不新增勾选，也不取消勾选。
+    expect(refresh.selected).toEqual(["gpt-image-2.6-flare", "custom-x"]);
+  });
+
+  it("checks every gateway model when the current list is empty", async () => {
+    const useImageCreateStore = await probeGpt();
+
+    const refresh = useImageCreateStore
+      .getState()
+      .refreshModelCandidates("gpt", [], []);
+
+    expect(refresh.selected).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-2.6-flare",
+      "gpt-image-3",
+    ]);
+    expect(useImageCreateStore.getState().modelPools.gpt.candidates).toEqual(
+      refresh.selected,
+    );
+  });
+
+  it("skips the models already used by the other vendor", async () => {
+    const useImageCreateStore = await probeGpt();
+
+    const refresh = useImageCreateStore
+      .getState()
+      .refreshModelCandidates("gpt", [], ["gpt-image-2.6"]);
+
+    expect(refresh.skipped).toEqual(["gpt-image-2.6"]);
+    expect(refresh.candidates).not.toContain("gpt-image-2.6");
+    expect(refresh.selected).toEqual(["gpt-image-2.6-flare", "gpt-image-3"]);
+  });
+
+  it("keeps only the first 256 gateway models when auto-selecting", async () => {
+    const many = Array.from({ length: 300 }, (_, index) => `m-${index}`);
+    const useImageCreateStore = await probeGpt({
+      ...probeResult(),
+      available_models: many,
+    });
+
+    const refresh = useImageCreateStore
+      .getState()
+      .refreshModelCandidates("gpt", [], []);
+
+    expect(refresh.selected).toHaveLength(256);
+    expect(refresh.selected[0]).toBe("m-0");
+    expect(refresh.truncated).toEqual({ total: 300, kept: 256 });
+  });
+
+  it("keeps the candidate pool and the checked list when the gateway list is empty", async () => {
+    const useImageCreateStore = await probeGpt();
+    useImageCreateStore.getState().setVendorModels("minimax", ["m-a"]);
+
+    const refresh = useImageCreateStore
+      .getState()
+      .refreshModelCandidates("minimax", ["m-a"], []);
+
+    expect(refresh.candidates).toEqual(["m-a"]);
+    expect(refresh.selected).toEqual(["m-a"]);
+    expect(refresh.skipped).toEqual([]);
+    expect(refresh.truncated).toBeNull();
+  });
+
+  it("merges extra model ids into the candidate pool and checks them", async () => {
+    const useImageCreateStore = await probeGpt();
+    useImageCreateStore
+      .getState()
+      .refreshModelCandidates("gpt", ["gpt-image-2.6"], []);
+
+    const selected = useImageCreateStore
+      .getState()
+      .mergeVendorModels("gpt", ["gpt-image-2.6"], ["gpt-image-4", "gpt-image-3"]);
+
+    expect(useImageCreateStore.getState().modelPools.gpt.candidates).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-2.6-flare",
+      "gpt-image-3",
+      "gpt-image-4",
+    ]);
+    // 勾选集合 = 已有清单 ∪ 并入的 id；池里没被勾选的项不算。
+    expect(selected).toEqual([
+      "gpt-image-2.6",
+      "gpt-image-3",
+      "gpt-image-4",
+    ]);
+  });
+
+  it("replaces the candidate pool when loading the saved list", async () => {
+    const useImageCreateStore = await probeGpt();
+
+    const models = useImageCreateStore
+      .getState()
+      .setVendorModels("gpt", ["saved-a", "saved-a", " saved-b "]);
+
+    expect(models).toEqual(["saved-a", "saved-b"]);
+    expect(useImageCreateStore.getState().modelPools.gpt.candidates).toEqual([
+      "saved-a",
+      "saved-b",
+    ]);
+  });
+});
+
 /**
  * 一次性 deferred：项目 tsconfig 的 lib 是 ES2022，没有 Promise.withResolvers，
  * 这里手写等价物，用来控制探测请求的完成时机。
@@ -317,6 +511,7 @@ function probeResult(): ConnectivityProbeResult {
       },
     ],
     missing_models: ["gpt-image-2.6-flare"],
+    available_models: ["gpt-image-2.6", "gpt-image-2.6-flare", "gpt-image-3"],
     duration_ms: 42,
   };
 }
@@ -339,11 +534,14 @@ function maskedSettings(
         base_url: "https://gpt.example.com/v1",
         api_key_masked: "sk-****t123",
         models: ["gpt-image-2.6"],
-        recommended_models: ["gpt-image-2.6"],
+        recommended_models: ["gpt-image-2.6-flare", "gpt-image-2.6"],
         available: true,
         ...overrides.gpt,
       }),
-      minimax: vendor(overrides.minimax ?? {}),
+      minimax: vendor({
+        recommended_models: ["MiniMax-H3-Image"],
+        ...overrides.minimax,
+      }),
     },
     defaults: {
       size: "auto",

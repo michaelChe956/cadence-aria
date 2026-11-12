@@ -51,6 +51,10 @@ function renderDialog(
       minimax: { phase: "idle", result: null, error: null },
       ...connectivity,
     },
+    modelPools: {
+      gpt: { gateway: [], candidates: [] },
+      minimax: { gateway: [], candidates: [] },
+    },
   });
 
   render(<SettingsDialog onClose={vi.fn()} />);
@@ -63,6 +67,10 @@ beforeEach(() => {
     ...originalState,
     settings: null,
     error: null,
+    modelPools: {
+      gpt: { gateway: [], candidates: [] },
+      minimax: { gateway: [], candidates: [] },
+    },
   });
 });
 
@@ -143,28 +151,26 @@ describe("SettingsDialog", () => {
     expect(request?.vendors?.gpt).not.toHaveProperty("api_key");
   });
 
-  it("F-13 恢复推荐清单后文本框内容等于 recommended_models", async () => {
+  it("F-13 恢复推荐清单把推荐模型并入候选池并勾选", async () => {
     const user = userEvent.setup();
     renderDialog();
     const minimax = within(await screen.findByRole("region", { name: "MiniMax" }));
 
-    const models = minimax.getByLabelText("MiniMax 模型清单");
-    await user.clear(models);
     await user.click(minimax.getByRole("button", { name: "恢复推荐清单" }));
+    await user.click(minimax.getByRole("button", { name: "已选 2 项" }));
 
-    expect(models).toHaveValue(
-      settings.vendors.minimax.recommended_models.join("\n"),
-    );
+    expect(
+      minimax.getByRole("checkbox", { name: "MiniMax-H3-Image-2" }),
+    ).toBeChecked();
   });
 
-  it("提交改动过的模型清单", async () => {
+  it("取消勾选后保存载荷少一项", async () => {
     const user = userEvent.setup();
     const { saveSettings } = renderDialog();
     const gpt = within(await screen.findByRole("region", { name: "GPT" }));
 
-    const models = gpt.getByLabelText("GPT 模型清单");
-    await user.clear(models);
-    await user.type(models, "gpt-image-2.6\n");
+    await user.click(gpt.getByRole("button", { name: "已选 2 项" }));
+    await user.click(gpt.getByRole("checkbox", { name: "gpt-image-2.6" }));
     await user.click(screen.getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => {
@@ -172,7 +178,33 @@ describe("SettingsDialog", () => {
         vendors: {
           gpt: {
             api_key_action: "retain",
-            models: ["gpt-image-2.6"],
+            models: ["gpt-image-2.6-flare"],
+          },
+        },
+      });
+    });
+  });
+
+  it("添加自定义模型后进入候选池并勾选", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    await user.click(gpt.getByRole("button", { name: "已选 2 项" }));
+    await user.type(gpt.getByLabelText("添加自定义模型"), "custom-model");
+    await user.click(gpt.getByRole("button", { name: "添加" }));
+
+    expect(
+      gpt.getByRole("checkbox", { name: "custom-model" }),
+    ).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({
+        vendors: {
+          gpt: {
+            api_key_action: "retain",
+            models: ["gpt-image-2.6", "gpt-image-2.6-flare", "custom-model"],
           },
         },
       });
@@ -307,7 +339,7 @@ describe("SettingsDialog 视觉与信息层级", () => {
     const controls = [
       gpt.getByLabelText("GPT base_url"),
       gpt.getByLabelText("GPT API Key"),
-      gpt.getByLabelText("GPT 模型清单"),
+      gpt.getByRole("button", { name: "已选 2 项" }),
       screen.getByRole("combobox", { name: "默认质量" }),
     ];
     for (const control of controls) {
@@ -319,14 +351,13 @@ describe("SettingsDialog 视觉与信息层级", () => {
     }
   });
 
-  it("模型清单 textarea 使用等宽字体、最小高度且可纵向缩放", async () => {
+  it("模型清单不再是 textarea：改为复选下拉框", async () => {
     renderDialog();
     const gpt = within(await screen.findByRole("region", { name: "GPT" }));
 
-    const models = gpt.getByLabelText("GPT 模型清单");
-    expect(models.className).toContain("font-mono");
-    expect(models.className).toContain("min-h-[10rem]");
-    expect(models.className).toContain("resize-y");
+    expect(gpt.queryByRole("textbox", { name: "GPT 模型清单" })).toBeNull();
+    expect(gpt.getByRole("group", { name: "GPT 模型清单" })).toBeInTheDocument();
+    expect(gpt.getByRole("button", { name: "已选 2 项" })).toBeInTheDocument();
   });
 
   it("清除 key 按钮与 API Key 输入框同一行且状态说明在下方", async () => {
@@ -422,9 +453,8 @@ describe("SettingsDialog Base URL 示例与连通性探测", () => {
     const apiKey = gpt.getByLabelText("GPT API Key");
     await user.clear(apiKey);
     await user.type(apiKey, "sk-draft-key");
-    const models = gpt.getByLabelText("GPT 模型清单");
-    await user.clear(models);
-    await user.type(models, "gpt-image-2.6-flare");
+    await user.click(gpt.getByRole("button", { name: "已选 2 项" }));
+    await user.click(gpt.getByRole("checkbox", { name: "gpt-image-2.6" }));
 
     await user.click(gpt.getByRole("button", { name: "测试连通" }));
 
@@ -486,6 +516,7 @@ describe("SettingsDialog Base URL 示例与连通性探测", () => {
             },
           ],
           missing_models: ["gpt-image-2.6-flare"],
+          available_models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
           duration_ms: 42,
         },
       },
@@ -518,6 +549,7 @@ describe("SettingsDialog Base URL 示例与连通性探测", () => {
             },
           ],
           missing_models: [],
+          available_models: ["MiniMax-H3-Image"],
           duration_ms: 8,
         },
       },
@@ -561,3 +593,5 @@ describe("SettingsDialog Base URL 示例与连通性探测", () => {
     });
   });
 });
+
+
