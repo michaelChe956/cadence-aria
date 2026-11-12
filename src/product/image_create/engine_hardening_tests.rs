@@ -320,3 +320,170 @@ async fn declined_with_blank_readable_text_pushes_no_text_event() {
         "done 应携带 prompt_declined=true"
     );
 }
+
+/// 跑完一轮迭代，收集完整事件序列 `(kind, prompt_declined, text)`：
+/// DB-07 用于钉死事件顺序与每条事件上的 declined 真实值。
+async fn collect_iteration_sequence(
+    engine: &ImageCreateEngine,
+) -> Vec<(String, bool, Option<String>)> {
+    let mut events = engine
+        .start_iteration("session", "完善提示词".to_string())
+        .await
+        .expect("start iteration");
+    let mut sequence = Vec::new();
+    while let Some(event) = events.recv().await {
+        sequence.push((
+            event.kind.clone(),
+            event.prompt_declined,
+            event.text.clone(),
+        ));
+    }
+    sequence
+}
+
+#[tokio::test]
+async fn normal_iteration_pushes_prompt_then_done_all_declined_false() {
+    // DB-07①：正常产出 ⇒ 事件序列恰为 [prompt, done]，全程 prompt_declined=false。
+    let store = Arc::new(FakeSessionStore::with_record());
+    let provider = Arc::new(ScriptedIterationProvider {
+        suggested_prompt: Some("蓝紫科技感等距插画".to_string()),
+    });
+    let engine = engine(
+        store,
+        valid_settings(),
+        Arc::new(FakeImageClient::success()),
+        Some(provider),
+    );
+
+    let sequence = collect_iteration_sequence(&engine).await;
+
+    assert_eq!(
+        sequence,
+        vec![
+            ("prompt".to_string(), false, None),
+            ("done".to_string(), false, None),
+        ],
+        "正常产出：先 prompt 后 done，全程 declined=false（不推 text）"
+    );
+}
+
+/// 拒答但附可读说明的迭代执行器：JSON 块 suggested_prompt 为空串，块外有说明文字。
+struct DeclinedExplainingProvider;
+
+#[async_trait]
+impl StreamingProviderAdapter for DeclinedExplainingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let contract = input.structured_output_contract.as_ref().expect("contract");
+        let full_output = format!(
+            "涉及真实在世人物的私生活传闻，本轮无法产出图片 prompt。\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"nonce\":\"{}\",\"suggested_prompt\":\"\"}}\n</ARIA_STRUCTURED_OUTPUT>",
+            contract.nonce, contract.nonce
+        );
+        let completion = ProviderCompletion::from_output(
+            full_output,
+            Some(contract),
+            Some("provider-session".to_string()),
+        );
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
+        tokio::spawn(async move {
+            let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[tokio::test]
+async fn declined_with_explanation_pushes_text_before_done_both_declined_true() {
+    // DB-07②：拒答且有可读说明 ⇒ 恰推 [text, done]，text 在 done 之前，
+    // 两者都带本轮真实值 prompt_declined=true（双出口契约：前端可从任一出口读到拒答标记）。
+    let store = Arc::new(FakeSessionStore::with_record());
+    let engine = engine(
+        store,
+        valid_settings(),
+        Arc::new(FakeImageClient::success()),
+        Some(Arc::new(DeclinedExplainingProvider)),
+    );
+
+    let sequence = collect_iteration_sequence(&engine).await;
+
+    assert_eq!(
+        sequence,
+        vec![
+            (
+                "text".to_string(),
+                true,
+                Some("涉及真实在世人物的私生活传闻，本轮无法产出图片 prompt。".to_string()),
+            ),
+            ("done".to_string(), true, None),
+        ],
+        "拒答带说明：text 先于 done，两者 declined=true，text 携带本轮可读说明原文"
+    );
+}
+
+/// 拒答且可读部分只含空白的迭代执行器：JSON 块 suggested_prompt 为空串，
+/// 块外只有空白字符（区别于 DeclinedSilentProvider 的「块外什么都没有」）。
+struct DeclinedBlankWhitespaceProvider;
+
+#[async_trait]
+impl StreamingProviderAdapter for DeclinedBlankWhitespaceProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let contract = input.structured_output_contract.as_ref().expect("contract");
+        let full_output = format!(
+            "   \n   \n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"nonce\":\"{}\",\"suggested_prompt\":\"\"}}\n</ARIA_STRUCTURED_OUTPUT>\n   ",
+            contract.nonce, contract.nonce
+        );
+        let completion = ProviderCompletion::from_output(
+            full_output.clone(),
+            Some(contract),
+            Some("provider-session".to_string()),
+        );
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: full_output,
+                })
+                .await;
+            let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+#[tokio::test]
+async fn declined_with_whitespace_readable_text_pushes_only_done() {
+    // DB-07③：拒答且可读文本只含空白 ⇒ 序列只有 [done]（不推空白 text，
+    // 前端会渲染出空的「模型说明」折叠块），done 带本轮真实值 prompt_declined=true。
+    let store = Arc::new(FakeSessionStore::with_record());
+    let engine = engine(
+        store,
+        valid_settings(),
+        Arc::new(FakeImageClient::success()),
+        Some(Arc::new(DeclinedBlankWhitespaceProvider)),
+    );
+
+    let sequence = collect_iteration_sequence(&engine).await;
+
+    assert_eq!(
+        sequence,
+        vec![("done".to_string(), true, None)],
+        "拒答且可读文本只含空白：只推 done（declined=true），不推 text"
+    );
+}

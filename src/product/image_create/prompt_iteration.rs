@@ -351,6 +351,14 @@ mod tests {
             structured: Option<Value>,
             session: Option<String>,
         },
+        /// 块内 JSON 原文直出（`{NONCE}` 占位符在构造时替换为真实 nonce）：
+        /// 用于表达「结构化块里没有 suggested_prompt 键」这类经 Value 封装
+        /// 会改写形状（缺键会被补成 null）的输入。
+        CompleteRawBlock {
+            text: String,
+            block_json: String,
+            session: Option<String>,
+        },
     }
 
     struct ScriptedProvider {
@@ -379,6 +387,12 @@ mod tests {
             _cancel: CancellationToken,
         ) -> Result<ProviderSession, ProviderAdapterError> {
             self.captured.lock().await.push(input);
+            let contract = self
+                .captured
+                .lock()
+                .await
+                .last()
+                .and_then(|input| input.structured_output_contract.clone());
             match self.scripts.lock().await.pop_front() {
                 Some(Script::StartFails(message)) => Err(ProviderAdapterError::execution_failed(
                     None,
@@ -391,12 +405,6 @@ mod tests {
                     structured,
                     session,
                 }) => {
-                    let contract = self
-                        .captured
-                        .lock()
-                        .await
-                        .last()
-                        .and_then(|input| input.structured_output_contract.clone());
                     let full_output = match (contract.as_ref(), structured) {
                         (Some(contract), Some(value)) => format!(
                             "{text}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{}\n</ARIA_STRUCTURED_OUTPUT>",
@@ -405,30 +413,22 @@ mod tests {
                         ),
                         _ => text.clone(),
                     };
-                    let completion = ProviderCompletion::from_output(
-                        full_output.clone(),
-                        contract.as_ref(),
-                        session,
-                    );
-                    let (event_tx, event_rx) = mpsc::channel(4);
-                    let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
-                    tokio::spawn(async move {
-                        if event_tx
-                            .send(ProviderEvent::TextDelta {
-                                content: full_output,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                        let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
-                    });
-                    Ok(ProviderSession {
-                        native_session_id: None,
-                        events: event_rx,
-                        commands: command_tx,
-                    })
+                    scripted_completion_session(full_output, contract.as_ref(), session)
+                }
+                Some(Script::CompleteRawBlock {
+                    text,
+                    block_json,
+                    session,
+                }) => {
+                    let full_output = match contract.as_ref() {
+                        Some(contract) => format!(
+                            "{text}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{}\n</ARIA_STRUCTURED_OUTPUT>",
+                            contract.nonce,
+                            block_json.replace("{NONCE}", &contract.nonce)
+                        ),
+                        None => text.clone(),
+                    };
+                    scripted_completion_session(full_output, contract.as_ref(), session)
                 }
                 None => Err(ProviderAdapterError::execution_failed(
                     None,
@@ -438,6 +438,34 @@ mod tests {
                 )),
             }
         }
+    }
+
+    /// 由完整输出构造流式会话：先推 TextDelta 再推 Completed，对齐真实 provider 的流式顺序。
+    fn scripted_completion_session(
+        full_output: String,
+        contract: Option<&StructuredOutputContract>,
+        session: Option<String>,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let completion = ProviderCompletion::from_output(full_output.clone(), contract, session);
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
+        tokio::spawn(async move {
+            if event_tx
+                .send(ProviderEvent::TextDelta {
+                    content: full_output,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = event_tx.send(ProviderEvent::Completed(completion)).await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
     }
 
     fn record() -> SessionRecord {
@@ -594,6 +622,130 @@ mod tests {
             outcome.readable_text,
             "涉及真实在世人物的私生活传闻，本轮无法产出图片 prompt。"
         );
+    }
+
+    #[tokio::test]
+    async fn declined_missing_suggested_prompt_key_marks_prompt_declined() {
+        // DB-06①：结构化块解析成功、但 JSON 里根本没有 suggested_prompt 键 ⇒
+        // 模型明确未产出（区别于格式不符的解析失败）：suggested_prompt=None 且 declined=true。
+        let provider = Arc::new(ScriptedProvider::new([Script::CompleteRawBlock {
+            text: "本轮不便给出图片 prompt。".to_string(),
+            block_json: r#"{"nonce":"{NONCE}"}"#.to_string(),
+            session: Some("provider-session-4".to_string()),
+        }]));
+        let engine = engine(provider);
+        let root = tempdir().unwrap();
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+
+        let outcome = engine
+            .iterate(&record(), "画一张图", &paths, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.suggested_prompt, None);
+        assert!(
+            outcome.prompt_declined,
+            "JSON 块缺 suggested_prompt 键 ⇒ 模型明确未产出，declined 必须为 true"
+        );
+    }
+
+    #[tokio::test]
+    async fn declined_whitespace_only_suggested_prompt_marks_prompt_declined() {
+        // DB-06②：suggested_prompt 的值只含空白字符 ⇒ trim 后为空 ⇒ 同样视作明确未产出。
+        let provider = Arc::new(ScriptedProvider::new([Script::Complete {
+            text: "涉及隐私传闻，本轮无法产出图片 prompt。".to_string(),
+            structured: Some(json!({"suggested_prompt": "   "})),
+            session: Some("provider-session-5".to_string()),
+        }]));
+        let engine = engine(provider);
+        let root = tempdir().unwrap();
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+
+        let outcome = engine
+            .iterate(&record(), "画一张图", &paths, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.suggested_prompt, None);
+        assert!(
+            outcome.prompt_declined,
+            "suggested_prompt 只含空白 ⇒ 模型明确未产出，declined 必须为 true"
+        );
+    }
+
+    /// DB-08 判据：迭代 prompt 的首句指令必须是新措辞，旧措辞不得以任何独立形式出现。
+    /// 新句「除上面的 JSON 块外不要输出其他内容。」本身包含子串「不要输出其他内容」，
+    /// 简单 `!contains` 无法区分新旧 ⇒ 判据取：该子串的**每一次**出现都必须紧跟新句前缀
+    /// 「除上面的 JSON 块外」之后。旧句「（不要输出其他内容）」与任何裸句式都不满足
+    /// 前缀条件，必被抓住；同时要求至少出现一次，钉死新句存在。
+    fn assert_no_standalone_old_wording(prompt: &str) {
+        const OLD_PHRASE: &str = "不要输出其他内容";
+        const NEW_PREFIX: &str = "除上面的 JSON 块外";
+        let mut occurrences = 0;
+        for index in prompt.match_indices(OLD_PHRASE).map(|(index, _)| index) {
+            assert!(
+                prompt[..index].ends_with(NEW_PREFIX),
+                "旧措辞「{OLD_PHRASE}」不得脱离新句前缀「{NEW_PREFIX}」独立出现：{prompt}"
+            );
+            occurrences += 1;
+        }
+        assert!(
+            occurrences >= 1,
+            "新措辞首句「{NEW_PREFIX}{OLD_PHRASE}。」必须存在：{prompt}"
+        );
+    }
+
+    #[test]
+    fn db08_criterion_accepts_new_wording() {
+        // 判据自证（放行方向）：新措辞连同尾句号、上下文必须原样通过。
+        let prompt = "请严格按以下格式输出：\n</ARIA_STRUCTURED_OUTPUT>\n\n除上面的 JSON 块外不要输出其他内容。\n若你无法或不宜给出图片 prompt，\n";
+        assert_no_standalone_old_wording(prompt);
+    }
+
+    #[test]
+    #[should_panic(expected = "旧措辞")]
+    fn db08_criterion_rejects_historical_parenthesized_old_wording() {
+        // 判据自证（拒绝方向一）：256ee427 之前的迭代 prompt 原文含旧句
+        // 「（不要输出其他内容）」（见 git 49a39400），必须被抓住。
+        let prompt = "请严格按以下格式输出（不要输出其他内容）：\n<ARIA_STRUCTURED_OUTPUT nonce=\"a1b2c3d4\">\n{}\n</ARIA_STRUCTURED_OUTPUT>\n";
+        assert_no_standalone_old_wording(prompt);
+    }
+
+    #[test]
+    #[should_panic(expected = "旧措辞")]
+    fn db08_criterion_rejects_bare_old_wording() {
+        // 判据自证（拒绝方向二）：即使新句存在，脱离新句前缀的裸旧句式
+        // （如「要求只输出 JSON，不要输出其他内容」）同样必须被抓住。
+        let prompt = "要求只输出 JSON，不要输出其他内容。\n除上面的 JSON 块外不要输出其他内容。\n";
+        assert_no_standalone_old_wording(prompt);
+    }
+
+    #[tokio::test]
+    async fn iteration_prompt_first_sentence_is_new_wording_not_old() {
+        // DB-08：迭代 prompt 首句为新措辞「除上面的 JSON 块外不要输出其他内容。」；
+        // 方案 7.7 的字面旧措辞「（不要输出其他内容）」不得残留，
+        // 且任何裸旧句式都不存在（assert_no_standalone_old_wording 强判据）。
+        let provider = Arc::new(ScriptedProvider::new([Script::Complete {
+            text: "已按要求优化。".to_string(),
+            structured: Some(json!({"suggested_prompt": "优化后的建议"})),
+            session: Some("provider-session-6".to_string()),
+        }]));
+        let engine = engine(provider.clone());
+        let root = tempdir().unwrap();
+        let paths = AriaStatePaths::from_workspace_root(root.path());
+
+        engine
+            .iterate(&record(), "调整构图", &paths, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let prompt = provider.captured().await[0].prompt.clone();
+        assert!(prompt.contains("除上面的 JSON 块外不要输出其他内容。"));
+        assert!(
+            !prompt.contains("（不要输出其他内容）"),
+            "旧措辞（带括号形态）不得残留"
+        );
+        assert_no_standalone_old_wording(&prompt);
     }
 
     #[tokio::test]
