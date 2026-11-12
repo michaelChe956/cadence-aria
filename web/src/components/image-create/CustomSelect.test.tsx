@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -95,5 +95,71 @@ describe("CustomSelect", () => {
     const combobox = screen.getByRole("combobox", { name: "模型" });
     expect(combobox).toHaveTextContent("推荐模型");
     expect(combobox).not.toHaveTextContent(/gpt-image/);
+  });
+  it("renders the option reason on its own line instead of dash concatenation", async () => {
+    const user = userEvent.setup();
+    render(
+      <CustomSelect
+        label="Provider"
+        value="codex"
+        options={[
+          { value: "codex", label: "Codex", reason: "Provider 状态尚未确认" },
+        ]}
+        onChange={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "Provider" }));
+
+    const option = screen.getByRole("option", { name: /^Codex/ });
+    const label = within(option).getByText("Codex");
+    const reason = within(option).getByText("Provider 状态尚未确认");
+    expect(label).not.toBe(reason);
+    expect(label.textContent).toBe("Codex");
+    expect(reason.textContent).toBe("Provider 状态尚未确认");
+    expect(option.textContent).not.toContain("—");
+  });
+
+  it("portals the listbox to document.body so overflow ancestors cannot clip it", async () => {
+    const user = userEvent.setup();
+    render(
+      <div className="overflow-y-auto overscroll-contain">
+        <CustomSelect
+          label="质量"
+          value="auto"
+          options={OPTIONS}
+          onChange={() => {}}
+        />
+      </div>,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "质量" }));
+
+    const listbox = screen.getByRole("listbox", { name: "质量" });
+    expect(listbox.parentElement?.closest(".overflow-y-auto")).toBeNull();
+    expect(listbox.parentElement).toBe(document.body);
+    expect(listbox.className).toContain("fixed");
+  });
+
+  it("treats the portaled list as inside the outside-close boundary", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <CustomSelect
+        label="质量"
+        value="auto"
+        options={OPTIONS}
+        onChange={onChange}
+      />,
+    );
+
+    const combobox = screen.getByRole("combobox", { name: "质量" });
+    await user.click(combobox);
+
+    fireEvent.mouseDown(screen.getByRole("listbox", { name: "质量" }));
+    expect(combobox).toHaveAttribute("aria-expanded", "true");
+
+    await user.click(screen.getByRole("option", { name: "high" }));
+    expect(onChange).toHaveBeenCalledWith("high");
   });
 });
