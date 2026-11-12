@@ -138,7 +138,8 @@ impl ImageCreateEngine {
                             // 无 suggested_prompt 时才推 text 作为 fallback（让用户知道发生了什么）。
                             // text/done 都带本轮 prompt_declined：前端据此区分「模型明确拒答」
                             // 与「格式不符/无视契约」，拒答时提示排在 fallback 文本之前。
-                            if suggested_prompt.is_none() {
+                            // 可读文本只剩空白时不推 text（前端会渲染出空的「模型说明」折叠块），只推 done。
+                            if suggested_prompt.is_none() && !readable_text.trim().is_empty() {
                                 let _ = event_tx
                                     .send(IterationEvent {
                                         kind: "text".to_string(),
