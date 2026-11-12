@@ -590,6 +590,9 @@ pub struct ChatMessage {
 pub struct PromptBlock {
     pub content: String,
     pub version: u32,
+    /// 提示词块产生时刻；旧会话记录缺该字段时读为 None（不破坏旧数据）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -760,3 +760,34 @@ fn image_vendor_serde_uses_lowercase_names() {
     assert_eq!(ImageVendor::Gpt.label(), "GPT");
     assert_eq!(ImageVendor::Minimax.label(), "MiniMax");
 }
+
+/// 会话历史时间交织（Task 20 线 A）：旧版本落盘的提示词块没有 ts 字段，
+/// 反序列化必须读为 None 而不是报错，旧会话记录读取不破。
+#[test]
+fn prompt_block_legacy_json_without_ts_deserializes_to_none() {
+    let block: PromptBlock =
+        serde_json::from_str(r#"{"content":"a dog","version":3}"#).expect("旧格式应可解析");
+    assert_eq!(block.content, "a dog");
+    assert_eq!(block.version, 3);
+    assert_eq!(block.ts, None);
+}
+
+/// 带 ts 的提示词块可 round-trip；ts 为 None 时序列化省略该字段，
+/// 与 GenerationResult 可选字段惯例一致（前端对旧记录读到 undefined）。
+#[test]
+fn prompt_block_with_ts_round_trips_and_none_omits_field() {
+    let ts = Utc::now();
+    let block = PromptBlock {
+        content: "a dog".to_string(),
+        version: 1,
+        ts: Some(ts),
+    };
+    let json = serde_json::to_string(&block).unwrap();
+    assert!(json.contains("\"ts\""), "ts 应出现在序列化输出：{json}");
+    assert_eq!(serde_json::from_str::<PromptBlock>(&json).unwrap(), block);
+
+    let legacy = PromptBlock { ts: None, ..block };
+    let json = serde_json::to_string(&legacy).unwrap();
+    assert!(!json.contains("\"ts\""), "ts 为 None 时应省略字段：{json}");
+    assert_eq!(serde_json::from_str::<PromptBlock>(&json).unwrap(), legacy);
+}

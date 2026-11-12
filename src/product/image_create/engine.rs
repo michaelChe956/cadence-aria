@@ -305,6 +305,7 @@ impl ImageCreateEngine {
                         PromptBlock {
                             content: prompt,
                             version: 0,
+                            ts: Some(Utc::now()),
                         },
                     )
                     .await?;

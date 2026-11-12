@@ -794,6 +794,38 @@ async fn iteration_persists_message_optional_prompt_and_meta_in_order() {
     }
 }
 
+/// Task 20 线 A：迭代产出的提示词块必须带产生时刻 ts，
+/// 前端据此把「用户消息 → 建议提示词 → 生成图 → 事件」按时间交织呈现。
+#[tokio::test]
+async fn iteration_prompt_block_records_current_timestamp() {
+    let before = Utc::now();
+    let store = Arc::new(FakeSessionStore::with_record());
+    let provider = Arc::new(ScriptedIterationProvider {
+        suggested_prompt: Some("final prompt".to_string()),
+    });
+    let engine = engine(
+        store.clone(),
+        valid_settings(),
+        Arc::new(FakeImageClient::success()),
+        Some(provider),
+    );
+    let mut events = engine
+        .start_iteration("session", "make it blue".to_string())
+        .await
+        .expect("start iteration");
+    while events.recv().await.is_some() {}
+    let after = Utc::now();
+
+    let record = store.record.lock().await;
+    let record = record.as_ref().expect("record");
+    assert_eq!(record.prompt_blocks.len(), 1);
+    let ts = record.prompt_blocks[0]
+        .ts
+        .expect("迭代产出的提示词块应带 ts");
+    assert!(ts >= before, "ts 不早于迭代开始：{ts} < {before}");
+    assert!(ts <= after, "ts 不晚于迭代结束：{ts} > {after}");
+}
+
 #[tokio::test]
 async fn delete_cancels_and_awaits_in_flight_run_before_finish() {
     let store = Arc::new(FakeSessionStore::with_record());
