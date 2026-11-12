@@ -22,6 +22,7 @@
 - **默认模型变更**：未做任何配置的升级用户，实际使用的模型由 `gpt-image-2` 变为 `gpt-image-2.6-flare`（内置 GPT 清单的首项，即参数面板的初始选中项）。
 - **供应方连通性探测与 Base URL 填写说明**：设置界面每个供应方新增「测试连通」，用当前填写的值（未重新输入 key 时由后端改用已保存的 key）依次请求 `GET /v1/models` 与一个故意不含 `prompt` 的 `POST /v1/images/generations`，给出「地址通不通、key 是否有效、清单中哪些模型未被网关列出」；探测不生成图片、不计费、不落盘，`base_url` 走与生成出站相同的校验。新增接口 `POST /api/image-create/settings/connectivity`。Base URL 输入框给出示例，并说明只填到主机根路径（系统自动拼 `/v1/images/{generations|edits}`）。
 - **模型清单以连通性探测结果为来源，设置里改为复选下拉框**：探测响应新增 `available_models`（网关 `/v1/models` 返回的全部 model id，去重并保持网关返回顺序；该步未成功时为空），其余字段不变。设置界面的模型清单由多行文本框改为复选下拉框，勾选的即要保存的清单。探测取得非空的网关模型列表时，清单**更新为网关返回的模型**（至多 256 个；已被另一供应方勾选的跳过并提示），更新前清单里有而网关未返回的项移出清单、留在候选项中并标注「网关未列出」；入口旁说明「成功后会用网关返回的模型列表更新模型清单」。用户可在此基础上取消勾选或添加网关未列出的自定义 id。单家清单上限由 32 调整为 256。参数面板的初始选中项改为三级优先规则，避免清单首项是文本模型时默认选中非图片模型。探测第 2 步的模型 id 改为优先取清单中第一个 id 含 `image` 的项。不新增接口、不新增出站请求。
+- **会话历史按时间顺序交织呈现**（缺陷修复）：重新打开会话时，对话消息、建议 prompt、生成结果、事件此前按类别分四段首尾相接，图与它的 prompt 被拆到两头、报错掉到最后。根因是会话记录里只有建议 prompt 块没有时间戳。建议 prompt 块新增可选时间戳 `ts`（写入时记录，会话记录读取接口随之返回）；前端把四类条目合并后按时间戳升序排序，时间戳相同的依次为对话消息、建议 prompt、生成结果、事件；没有时间戳的旧建议 prompt 以同序号用户消息的时间定位，再退回会话创建时间。不新增接口、不新增出站请求；旧会话记录照常可读。
 
 ## Capabilities
 
@@ -31,7 +32,7 @@
 
 ### Modified Capabilities
 
-- `image-create-agent`：生成参数增加必填的模型选择与携带上一张图、移除 `input_fidelity`；配置由单端点演进为双供应方并支持可配置模型清单；新增按供应方官方契约构造请求、逐项错误处理与结果的供应方 / 模型记录；「参考图不被持久化」的约束收窄为仅针对用户上传的参考图；新增供应方连通性探测，并明确 Base URL 只填主机根路径；模型清单以连通性探测返回的网关模型列表更新、以复选下拉框勾选，并新增模型初始选中项规则。delta 共 **7 条 MODIFIED + 13 条 ADDED，120 个 Scenario**。
+- `image-create-agent`：生成参数增加必填的模型选择与携带上一张图、移除 `input_fidelity`；配置由单端点演进为双供应方并支持可配置模型清单；新增按供应方官方契约构造请求、逐项错误处理与结果的供应方 / 模型记录；「参考图不被持久化」的约束收窄为仅针对用户上传的参考图；新增供应方连通性探测，并明确 Base URL 只填主机根路径；模型清单以连通性探测返回的网关模型列表更新、以复选下拉框勾选，并新增模型初始选中项规则；会话历史按时间顺序交织呈现，建议 prompt 记录时间戳。delta 共 **7 条 MODIFIED + 15 条 ADDED，128 个 Scenario**。
 
 ## Impact
 
@@ -39,7 +40,8 @@
 - 前端：`web/src/api/types/image-create.ts`、`web/src/api/image-create.ts`、`web/src/state/image-create-store.ts`、`web/src/state/image-create-entries.ts`、`web/src/components/image-create/{ParamsPanel,SettingsDialog,ChatPane,ReferenceImageUpload}.tsx` 及对应测试。
 - 连通性探测（2026-11-12 补充）：后端 `src/cross_cutting/image_client.rs`（探测实现）、`src/web/handlers/image_create.rs`（接口）、`src/web/app.rs`（路由）；前端 `web/src/api/types/image-create.ts`、`web/src/api/image-create.ts`、`web/src/state/image-create-store.ts`、`web/src/components/image-create/SettingsDialog.tsx` 及对应测试。不新增依赖，生成链路不变。
 - 模型清单来源与复选下拉框（2026-11-12 补充）：后端 `src/cross_cutting/image_client.rs`（探测结果新增 `available_models`）、`src/product/image_create/models.rs`（单家清单上限 32 → 256）；前端 `web/src/api/types/image-create.ts`、`web/src/state/image-create-store.ts`、`web/src/components/image-create/SettingsDialog.tsx`、新增 `web/src/components/image-create/ModelMultiSelect.tsx` 与 `ModelListField.tsx` 及对应测试。不新增依赖、接口与出站请求，配置文件形态不变。
-- 数据兼容：旧 `.aria/image_create.json` 必须可读且不丢凭据；旧会话记录（无供应方 / 模型字段、或仍内联 `b64`）必须可读、可作为上一张图。
+- 会话历史时间交织（2026-11-12 补充）：后端 `src/product/image_create/models.rs`（`PromptBlock` 新增可选 `ts`）、`engine.rs`（迭代落盘时写入）及对应测试；前端 `web/src/api/types/image-create.ts`、`web/src/state/image-create-store.ts`（`buildEntries`）与新增测试 `web/src/state/image-create-entry-order.test.ts`。会话读取 DTO 原样带出该字段，`src/web/handlers/image_create.rs` 不改。不新增依赖、接口与出站请求。
+- 数据兼容：旧 `.aria/image_create.json` 必须可读且不丢凭据；旧会话记录（无供应方 / 模型字段、或仍内联 `b64`）必须可读、可作为上一张图；旧会话记录中没有时间戳的建议 prompt 必须可读，呈现时按同序号的用户消息定位。
 - 不改动：会话存储的非测试实现（`session_store.rs`）、参考图内容校验规则、图片文件路径规则、prompt 迭代链路、会话删除流程。
 - 发布说明：`CHANGELOG.md` 记录默认模型变更与配置文件不可降级。
 - 技术方案：`cadence/designs/2026-11-11_技术方案_图片生成多模型与双家轮转_v1.0.md`（文件名沿用立项时的命名，其中的「双家轮转」已按 2026-11-12 的需求变更移除；内容为类型定义、字段规则表、时序、逐文件改动、测试用例清单）。
@@ -49,3 +51,4 @@
 - 需求变更（2026-11-12）：自动轮转已按用户 2026-11-12 要求撤回（「你就让用户在已配置并可用的provider里选model id就行，轮转不需要」）。模型改为用户手动选择，生成请求的 `model` 必填且不再有保留值，结果不再记录选择方式；内置 GPT 清单改为 `gpt-image-2.6-flare` 打头，使参数面板的初始选中项是 OpenAI 官方 id。
 - 补充（2026-11-12）：按用户要求新增供应方连通性探测与 Base URL 填写说明（「base url 中给出案例，否则用户不知道是配到 v1 还是配到 /v1/images 还是配到 /v1/images/generations」「模型配置的时候提供一个是否连通测试的功能」），契约见技术方案 5.5、5.9、5.11。待真实调用确认的假设 A2（技术方案 8.2）：两家图片端点对「只有 `model`、缺 `prompt`」的请求返回 HTTP 400；不成立时探测结论偏保守（把连通的端点判为失败），不会误出图。
 - 补充（2026-11-12）：按用户要求把模型清单的来源改为连通性探测并以复选下拉框呈现（「模型清单默认从测试连通性按钮获取,并渲染,用户可以自己删除部分或添加自定义的部分.做个复选下拉框这样的东西吧」），契约见技术方案 D1、5.5、5.9、5.11。主控裁决：单家上限 32 → 256；跨家去重保留，更新清单时跳过已被另一家勾选的 id；探测取得网关模型列表即以它**替换**清单（初版为「只扩充候选项、不改已有勾选」，因内置清单非空会使用户原话落空，同日修正为替换）；是否更新以 `available_models` 非空为准、不看 `ok`；参数面板初始选中项改为三级优先规则；探测第 2 步的模型 id 优先取含 `image` 的项。已知取舍：取消勾选过的模型再次探测会被重新勾上，网关未返回的自定义 id 再次探测后被移出清单。
+- 缺陷修复（2026-11-12）：「图片创作对话过程顺序不对」——会话历史的四类条目此前首尾相接，未按时间交织。根因在数据层（建议 prompt 块无时间戳），契约见技术方案 5.1、5.8、5.12，用例见 7.6。已知取舍：旧会话中某一轮未产出建议 prompt 时，其后的旧建议 prompt 会对到更早一轮的用户消息上（旧数据没有可还原时刻的信息，技术方案 8.3 的 R11）。
