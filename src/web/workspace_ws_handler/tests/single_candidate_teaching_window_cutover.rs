@@ -105,6 +105,41 @@ fn repair_reservation_absent(fixture: &ProviderRunFixture) -> bool {
         .is_none()
 }
 
+/// Task 7：「用户 turn/hold/receipt」的 durable 观测面（REQ-WSC-28A/28E
+/// 「不伪造用户 turn/hold/receipt」）。SC 链的确认门快照本身是既有门面
+/// （教学与否都会出现）；真正的 turn 记录是快照内的反馈轮次计数器与
+/// 结构预算聚合（StructuralGovernanceState 的 hold/receipt）。
+fn user_turn_surfaces(fixture: &ProviderRunFixture) -> UserTurnSurfaces {
+    let record = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload session for user turn surfaces");
+    let (accepted_feedback_turns, attempts_used) = record
+        .human_gate_snapshot
+        .map(|snapshot| (snapshot.accepted_feedback_turns, snapshot.attempts_used))
+        .unwrap_or((None, 0));
+    let (active_holds, user_receipts) = record
+        .structural_governance_state
+        .map(|state| (state.active_hold_count(), state.user_receipts.len() as u32))
+        .unwrap_or((0, 0));
+    UserTurnSurfaces {
+        accepted_feedback_turns,
+        attempts_used,
+        active_holds,
+        user_receipts,
+        human_gate_reservation_present: record.human_gate_reservation.is_some(),
+    }
+}
+
+/// [`user_turn_surfaces`] 的投影（Task 7）。
+struct UserTurnSurfaces {
+    accepted_feedback_turns: Option<u32>,
+    attempts_used: u32,
+    active_holds: u32,
+    user_receipts: u32,
+    human_gate_reservation_present: bool,
+}
+
 /// 删除一个 section 块制造 missing_section 类 parse 语法失败（手法同基线
 /// 文件的自含复刻原则）。
 fn markdown_missing_section(story_id: &str, design_id: &str, section_heading: &str) -> String {
@@ -830,5 +865,306 @@ async fn frozen_input_drift_zero_extra_and_diagnostic_not_rendered_as_fixable() 
         author_ledger_prefix_count(&fixture),
         prefix_count_after_first_start,
         "漂移 ⇒ 零额外调用（前缀条目零增加）"
+    );
+}
+// Task 7（tasks 4.1/8.2，REQ-WSC-28A §1.7 验收行）：一次 C 教学后四数值
+// **同时**断言——A 池 `repairs_used` 增量 0、B 池 `manual_repairs_used`
+// 增量 0、窗口 attempts==2（C 已消费 1）、前缀条目合计 2（实际启动合计
+// 2）；且不伪造用户 turn/hold/receipt（human gate / 结构预算聚合记录
+// 不变）。以 IR 类失败承载（parse 类的 wiring 面已由
+// parse_failure_consumes_window_and_reruns_once 钉住）。
+#[tokio::test]
+async fn one_teaching_keeps_ab_pools_zero_c_consumed_one_starts_two() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![
+            markdown_with_unknown_requirement_ref(&fixture.story_id, &fixture.design_id),
+            single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        ],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let budget_before = run_history_budget(&fixture);
+    assert_eq!(budget_before, (0, 0), "前提：fresh 会话两池已用计数为 0");
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+    start_generation(context).await;
+
+    let _first_input = next_provider_input(&mut input_rx).await;
+    let reredrive_input = next_provider_input(&mut input_rx).await;
+    assert!(
+        reredrive_input.prompt.contains("unknown_requirement_ref"),
+        "第二轮必须是 IR 教学重驱: {}",
+        reredrive_input.prompt
+    );
+    no_more_provider_inputs(&mut input_rx).await;
+    super::single_candidate_provider_run::wait_for_stage(
+        &fixture.engine,
+        WorkspaceStage::HumanConfirm,
+    )
+    .await;
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload single-candidate session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Approval),
+        "重驱交付成功后回到既有确认链"
+    );
+    // —— 四数值（各自独立断言，任何一个漂移都单独失败）——
+    let budget_after = run_history_budget(&fixture);
+    assert_eq!(
+        budget_after.0, budget_before.0,
+        "① A 池 repairs_used 增量必须为 0（C 不扣评审机械池）"
+    );
+    assert_eq!(
+        budget_after.1, budget_before.1,
+        "② B 池 manual_repairs_used 增量必须为 0（C 不扣 author 重写/反馈池）"
+    );
+    let window = last_teaching_window(&fixture);
+    assert_eq!(
+        window.attempts.len(),
+        2,
+        "③ 窗口 attempts==2（原调用 + C 已消费 1 次教学机会）"
+    );
+    assert_eq!(
+        author_ledger_prefix_count(&fixture),
+        2,
+        "④ 前缀条目合计 2（实际物理启动合计 2，C 只消费窗口内的一次）"
+    );
+    // —— 不伪造用户 turn/hold/receipt ——
+    // SC 链的确认门快照由既有 ensure_human_gate_snapshot_after_compile_failure
+    // 等门面合法物化（教学与否都会出现）；「用户 turn」的观测点是快照内的
+    // turn 计数器（accepted_feedback_turns / attempts_used）与结构预算聚合。
+    let turns = user_turn_surfaces(&fixture);
+    assert!(
+        matches!(turns.accepted_feedback_turns, None | Some(0)),
+        "C 教学不得接受任何反馈 turn: {:?}",
+        turns.accepted_feedback_turns
+    );
+    assert_eq!(turns.attempts_used, 0, "C 教学不得消耗任何修复轮次");
+    assert_eq!(
+        (turns.active_holds, turns.user_receipts),
+        (0, 0),
+        "C 教学不得伪造结构预算 hold/receipt"
+    );
+    assert!(
+        !turns.human_gate_reservation_present,
+        "C 教学不得伪造 human gate 预留"
+    );
+}
+
+/// Task 7（tasks 4.2，REQ-WSC-28A）：A/B 池余额充足也不得为 C 的第三次
+/// 调用兜底——C 的上限只由窗口 attempt 上限表达。两轮 parse 失败后链停止：
+/// 第三次启动仍为 0，且无 `repair_reservation` 预领（不旁路 A 通道）。
+#[tokio::test]
+async fn ab_balance_does_not_back_third_start() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    // 前提钉死：两池余额充足（fresh 记录 used=0/0 ⇒ A 余额 = max_repairs、
+    // B 余额 = max_manual_repairs，均 > 0）——若实现把第三次启动落到 A/B
+    // 池兜底，余额并不构成阻碍。
+    let budgets = crate::product::work_item_plan_policy::RunBudgets::default();
+    let (repairs_used_before, manual_used_before) = run_history_budget(&fixture);
+    assert_eq!(
+        (repairs_used_before, manual_used_before),
+        (0, 0),
+        "前提：fresh 记录两池已用计数为 0"
+    );
+    assert!(
+        budgets.max_repairs > repairs_used_before,
+        "前提：A 池余额充足（max_repairs={}）",
+        budgets.max_repairs
+    );
+    assert!(
+        budgets.max_manual_repairs > manual_used_before,
+        "前提：B 池余额充足（max_manual_repairs={}）",
+        budgets.max_manual_repairs
+    );
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![
+            markdown_missing_section(&fixture.story_id, &fixture.design_id, "### Goal"),
+            markdown_missing_section(&fixture.story_id, &fixture.design_id, "### Tasks"),
+            single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        ],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+    start_generation(context).await;
+
+    let _first_input = next_provider_input(&mut input_rx).await;
+    let reredrive_input = next_provider_input(&mut input_rx).await;
+    assert!(
+        reredrive_input.prompt.contains("missing_section"),
+        "第二轮必须是 parse 教学重驱: {}",
+        reredrive_input.prompt
+    );
+    // A/B 余额充足 ⇒ 第三次启动仍为 0（无新输入）。
+    no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("compile markdown source failed")
+            && message.contains("after one teaching re-drive"),
+        "第二次交付失败必须按既有失败面收口: {message}"
+    );
+    wait_for_single_candidate_phase(&fixture, SingleCandidatePhase::Failed).await;
+    let window = last_teaching_window(&fixture);
+    assert_eq!(
+        window.attempts.len(),
+        2,
+        "C 的上限只由窗口表达：两 attempt 后耗尽"
+    );
+    assert!(
+        matches!(
+            window.status,
+            ScTeachingWindowStatus::Closed {
+                reason: ScTeachingWindowCloseReason::Exhausted
+            }
+        ),
+        "窗口耗尽关窗（A/B 余额不续期）: {:?}",
+        window.status
+    );
+    assert_eq!(
+        author_ledger_prefix_count(&fixture),
+        2,
+        "A/B 余额充足 ⇒ 第三次启动仍为 0（前缀条目合计 2）"
+    );
+    assert!(
+        repair_reservation_absent(&fixture),
+        "C 耗尽不得落到 A 通道 repair_reservation 预领"
+    );
+    assert_eq!(
+        run_history_budget(&fixture),
+        (repairs_used_before, manual_used_before),
+        "两池计数不被 C 的停止面扣减"
+    );
+}
+
+/// Task 7（tasks 4.3/4.4，REQ-WSC-28E）：第二次失败后的停止面——无第三次
+/// 启动；`work_item_plan_source_revision_ref`/`plan_candidate_ir_ref` 保持
+/// 最后合法值（fresh 链无合法 candidate ⇒ 保持 None，不提升坏 candidate）；
+/// durable 无新增 candidate attempt 行、无新 ledger 条目、无平台自造
+/// turn/candidate/generation 记录。
+#[tokio::test]
+async fn stop_after_second_failure_keeps_refs_and_no_auto_new_turn() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let attempts_before = fixture
+        .lifecycle
+        .list_candidate_attempts(&fixture.record.id)
+        .expect("fresh candidate attempt log")
+        .len();
+    assert_eq!(
+        attempts_before, 0,
+        "基线（绝对）：fresh 会话的尝试流水为 0 行"
+    );
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![
+            markdown_missing_section(&fixture.story_id, &fixture.design_id, "### Goal"),
+            markdown_with_dependency_self_cycle(&fixture.story_id, &fixture.design_id),
+            single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        ],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+    start_generation(context).await;
+
+    let _first_input = next_provider_input(&mut input_rx).await;
+    let parse_reredrive_input = next_provider_input(&mut input_rx).await;
+    assert!(
+        parse_reredrive_input.prompt.contains("missing_section"),
+        "第二轮必须是 parse 教学重驱: {}",
+        parse_reredrive_input.prompt
+    );
+    // 无第三次启动：重驱轮之后无新输入。
+    no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("candidate structure gate rejected")
+            && message.contains("first round")
+            && message.contains("missing_section")
+            && message.contains("请显式重新开始生成"),
+        "第二次失败必须按既有失败面回显两轮真实原因: {message}"
+    );
+    wait_for_single_candidate_phase(&fixture, SingleCandidatePhase::Failed).await;
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload single-candidate session");
+    // refs 保持最后合法值：fresh 链从未出现合法 candidate ⇒ 两 refs 保持
+    // None（停止面不提升坏 candidate、也不清空/改写最后合法值）。
+    assert!(
+        durable.work_item_plan_source_revision_ref.is_none()
+            && durable.plan_candidate_ir_ref.is_none(),
+        "refs 保持最后合法值（未提升坏 candidate）"
+    );
+    // 无新 ledger 条目：恰两条（原调用 + 教学 claim 原位补全），无第三条。
+    assert_eq!(
+        author_ledger_prefix_count(&fixture),
+        2,
+        "无新 ledger 条目：前缀恰两条物理启动的账，无第三条"
+    );
+    // 无新增 candidate attempt 行（REQ-WSC-25 现状口径：流水行只由 engine
+    // 候选编译边界写入——结构拒收轮 1 行；parse/IR 类失败在 handler 侧
+    // typed 判定、不产生流水行，Task 8 阶段细化落地后须复测本值）：
+    // 两次物理交付恰写 1 行，无平台为「补机会」自造的额外行。
+    let attempts_after = fixture
+        .lifecycle
+        .list_candidate_attempts(&fixture.record.id)
+        .expect("candidate attempt log after stop")
+        .len();
+    assert_eq!(
+        attempts_after, 1,
+        "无新增 candidate attempt 行：恰结构拒收轮的 1 行（无第三行）"
+    );
+    // 无平台自造 turn/hold/receipt 记录（观测点同用例 1：快照 turn 计数器
+    // + 结构预算聚合；停止面若物化确认门快照，其计数必须为零）。
+    let turns = user_turn_surfaces(&fixture);
+    assert!(
+        matches!(turns.accepted_feedback_turns, None | Some(0)),
+        "停止后不得自造反馈 turn: {:?}",
+        turns.accepted_feedback_turns
+    );
+    assert_eq!(turns.attempts_used, 0, "停止后不得自造修复轮次");
+    assert_eq!(
+        (turns.active_holds, turns.user_receipts),
+        (0, 0),
+        "停止后不得自造结构预算 hold/receipt"
+    );
+    assert!(
+        !turns.human_gate_reservation_present,
+        "停止后不得自造 human gate 预留"
+    );
+    assert!(
+        durable.review_invocation_scope.is_none(),
+        "停止面不发起 review/confirm"
+    );
+    assert!(
+        repair_reservation_absent(&fixture),
+        "停止面不旁路 A 通道（无 repair_reservation 预领）"
+    );
+    assert_eq!(
+        teaching_window_count(&fixture),
+        1,
+        "无平台自造 generation 记录：不为「补机会」开第二窗口"
+    );
+    let window = last_teaching_window(&fixture);
+    assert_eq!(
+        window.attempts.len(),
+        2,
+        "第二次交付失败后窗口以两 attempt 耗尽收口"
+    );
+    assert!(
+        matches!(
+            window.status,
+            ScTeachingWindowStatus::Closed {
+                reason: ScTeachingWindowCloseReason::Exhausted
+            }
+        ),
+        "close(FailedTerminal) 关窗: {:?}",
+        window.status
     );
 }
