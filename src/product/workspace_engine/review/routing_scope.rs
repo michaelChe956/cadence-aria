@@ -5,6 +5,7 @@ use crate::product::work_item_plan_policy::classify::classify_finding;
 use crate::product::work_item_plan_policy::{
     FatalReason, FindingClass, FindingFingerprint, PolicyDiagnostic, ReviewFindingCategory,
     ReviewInvocationScope, ReviewPhase, RunHistory, WorkItemPlanFlowKind,
+    next_sc_author_launch_ordinal_from_entries,
 };
 use crate::product::work_item_plan_source_store::{
     SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
@@ -296,7 +297,6 @@ impl WorkspaceEngine {
             }
         }
     }
-
     pub(super) fn policy_scope_for_action(
         &self,
         invocation: &ReviewInvocationScope,
@@ -548,7 +548,6 @@ impl WorkspaceEngine {
         else {
             return Ok(None);
         };
-
         if self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate {
             // legacy 没有 source-store mechanical report；保持其既有评审路径，但让
             // classifier 仍可确认 invocation 内的 ref 未被调用方替换。
@@ -563,7 +562,6 @@ impl WorkspaceEngine {
                 false,
             ));
         }
-
         let Some(lifecycle_store) = self.lifecycle_store.as_ref() else {
             return Err(verification_scope_store_error(
                 "lifecycle_store unavailable for verification mechanical report".to_string(),
@@ -586,7 +584,6 @@ impl WorkspaceEngine {
             .map_err(|error| {
                 verification_scope_source_store_error(error, "repaired_revision_id")
             })?;
-
         if report.ir_id != repaired_ir.id
             || report.source_revision_id != repaired_ir.source_revision_id
             || report.report.source_revision_hash != repaired_ir.ir.source_revision_hash
@@ -789,7 +786,10 @@ impl WorkspaceEngine {
                 .unwrap_or_else(|| "review_unknown".to_string());
             let (reservation, entry) = preclaimed_repair_start(
                 &self.session.session_id,
-                self.session.provider_start_ledger.len(),
+                next_sc_author_launch_ordinal_from_entries(
+                    &self.session.session_id,
+                    &self.session.provider_start_ledger,
+                ),
                 owner_run_id,
             );
             let session_id = self.session.session_id.as_str();
