@@ -2,7 +2,7 @@
 
 ### Requirement: 图片生成由用户显式触发且参数可配置
 
-系统 SHALL 仅在用户显式触发（如点击生成按钮）时发起图片生成，不得由执行器自主触发。生成请求 SHALL 携带用户可配置的参数：`size`、`quality`、`background`、`output_format`、`model`、`use_previous`。系统 SHALL 仅接受预定义取值：`size` ∈ {1024x1024, 1536x1024, 1024x1536, auto}；`quality` ∈ {low, medium, high, auto}；`background` ∈ {transparent, opaque, auto}；`output_format` ∈ {png, jpeg, webp}；`model` 为 `auto` 或已配置模型清单中的某个模型 id，缺省视为 `auto`；`use_previous` ∈ {true, false}，缺省视为 `false`。系统 SHALL NOT 提供 `input_fidelity` 参数，SHALL NOT 在任何出站请求中发送 `input_fidelity`。系统 SHALL 每次生成请求恰好生成一张图片（不支持多图批量）。
+系统 SHALL 仅在用户显式触发（如点击生成按钮）时发起图片生成，不得由执行器自主触发。生成请求 SHALL 携带用户可配置的参数：`size`、`quality`、`background`、`output_format`、`model`、`use_previous`。系统 SHALL 仅接受预定义取值：`size` ∈ {1024x1024, 1536x1024, 1024x1536, auto}；`quality` ∈ {low, medium, high, auto}；`background` ∈ {transparent, opaque, auto}；`output_format` ∈ {png, jpeg, webp}；`model` 必须是已配置且可用的供应方模型清单中的某个 model id，缺省或去除首尾空白后为空视为非法参数；`use_previous` ∈ {true, false}，缺省视为 `false`。系统 SHALL NOT 提供 `input_fidelity` 参数，SHALL NOT 在任何出站请求中发送 `input_fidelity`。系统 SHALL 每次生成请求恰好生成一张图片（不支持多图批量）。
 
 #### Scenario: 用户点按钮触发生成
 
@@ -19,10 +19,15 @@
 - **WHEN** 生成请求的 `use_previous` 不是 `true` 或 `false`（如 `yes`）
 - **THEN** 系统不发起该生成请求并提示参数非法
 
-#### Scenario: 缺省 model 与 use_previous 时保持既有行为
+#### Scenario: 缺少 model 时不发起请求并提示参数非法
 
-- **WHEN** 生成请求未携带 `model` 与 `use_previous`
-- **THEN** 系统按 `model=auto`、`use_previous=false` 处理，不携带上一张生成图
+- **WHEN** 生成请求未携带 `model`，或 `model` 去除首尾空白后为空
+- **THEN** 系统不发起该生成请求并提示参数非法（请选择图片生成模型）
+
+#### Scenario: 缺省 use_previous 时不携带上一张图
+
+- **WHEN** 生成请求携带了合法的 `model` 但未携带 `use_previous`
+- **THEN** 系统按 `use_previous=false` 处理，不携带上一张生成图
 
 #### Scenario: 文生图时忽略 input_fidelity
 
@@ -89,7 +94,7 @@
 
 ### Requirement: 生成结果按媒体类型直接展示
 
-系统 SHALL 将图片端点返回的单张 `b64_json` 解码后按其 `output_format` 对应的媒体类型持久化为图片文件（`.aria/image_create/images/` 下，稳定 `image_id` 命名），会话历史中的生成结果 SHALL 只保存图片引用（`image_id` 与 `media_type`）与非图片元数据（供应方、模型 id、选择方式、参考图来源），SHALL NOT 内联 base64 字节。前端 SHALL 通过图片读取端点按 URL 懒加载展示，SHALL NOT 依赖会话记录 API 返回图片字节，SHALL NOT 固定为某一种图片格式。系统 SHALL 将生成结果（含所用 prompt 与参数及图片引用）纳入该会话历史供回看。
+系统 SHALL 将图片端点返回的单张 `b64_json` 解码后按其 `output_format` 对应的媒体类型持久化为图片文件（`.aria/image_create/images/` 下，稳定 `image_id` 命名），会话历史中的生成结果 SHALL 只保存图片引用（`image_id` 与 `media_type`）与非图片元数据（供应方、模型 id、参考图来源），SHALL NOT 内联 base64 字节。前端 SHALL 通过图片读取端点按 URL 懒加载展示，SHALL NOT 依赖会话记录 API 返回图片字节，SHALL NOT 固定为某一种图片格式。系统 SHALL 将生成结果（含所用 prompt 与参数及图片引用）纳入该会话历史供回看。
 
 #### Scenario: 按输出格式构造数据 URI
 
@@ -137,7 +142,7 @@
 
 #### Scenario: 失败后不改用另一供应方
 
-- **WHEN** 自动轮转选中的供应方返回错误
+- **WHEN** 用户所选模型所属的供应方返回错误
 - **THEN** 系统不向另一供应方发起请求，本次生成只产生过一次出站调用
 
 #### Scenario: 响应只有 URL 时判定失败
@@ -147,7 +152,7 @@
 
 ### Requirement: 网关配置录入与脱敏存储
 
-系统 SHALL 提供设置界面供用户分别为两个供应方（GPT、MiniMax）录入各自的 `base_url`、`api_key`、模型清单与轮转模型，以及两家共享的默认参数。系统 SHALL 将配置持久化于 Aria 后端 `.aria` 目录下。系统 SHALL 在前端展示每个 `api_key` 时对其脱敏（不展示明文），且前端 SHALL NOT 缓存 `api_key` 明文。设置更新 SHALL 按供应方独立采用保留语义：某个供应方未出现在更新请求中时，系统 SHALL 保留该供应方的全部配置；某个供应方出现但未提供新 `api_key`（保留动作）时，系统 SHALL 保留其原 `api_key` 而非清空；清除某个供应方的 `api_key` SHALL 需要用户针对该供应方的显式清除动作。对一个供应方的更新 SHALL NOT 改变另一个供应方的配置。任一供应方的配置校验失败时，系统 SHALL 拒绝整次更新且不改动已持久化的配置。
+系统 SHALL 提供设置界面供用户分别为两个供应方（GPT、MiniMax）录入各自的 `base_url`、`api_key` 与模型清单，以及两家共享的默认参数。系统 SHALL 将配置持久化于 Aria 后端 `.aria` 目录下。系统 SHALL 在前端展示每个 `api_key` 时对其脱敏（不展示明文），且前端 SHALL NOT 缓存 `api_key` 明文。设置更新 SHALL 按供应方独立采用保留语义：某个供应方未出现在更新请求中时，系统 SHALL 保留该供应方的全部配置；某个供应方出现但未提供新 `api_key`（保留动作）时，系统 SHALL 保留其原 `api_key` 而非清空；清除某个供应方的 `api_key` SHALL 需要用户针对该供应方的显式清除动作。对一个供应方的更新 SHALL NOT 改变另一个供应方的配置。任一供应方的配置校验失败时，系统 SHALL 拒绝整次更新且不改动已持久化的配置。
 
 #### Scenario: 录入并持久化配置
 
@@ -167,7 +172,7 @@
 #### Scenario: 只更新一个供应方不影响另一个
 
 - **WHEN** 用户只替换 MiniMax 的 `api_key` 并保存
-- **THEN** GPT 的 `base_url`、`api_key`、模型清单与轮转模型均保持不变
+- **THEN** GPT 的 `base_url`、`api_key` 与模型清单均保持不变
 
 #### Scenario: 清除一个供应方的 key
 
@@ -190,7 +195,7 @@
 
 #### Scenario: 缺少有效配置时拒绝生成
 
-- **WHEN** 用户显式选择的模型所属供应方未录入 `base_url` 或 `api_key`，或在自动轮转下没有任何可用的供应方
+- **WHEN** 用户所选模型所属的供应方未录入 `base_url` 或 `api_key`
 - **THEN** 系统不发起任何图片请求并提示用户先完成对应供应方的配置
 
 #### Scenario: 拒绝非 HTTPS 的 base_url
@@ -217,12 +222,12 @@
 
 ### Requirement: 模型清单可配置
 
-系统 SHALL 为每个供应方维护一份用户可配置的模型 id 清单与一个轮转模型（自动轮转选中该供应方时使用的模型），并 SHALL 内置推荐默认值；用户 SHALL 可在设置中增删清单项并更改轮转模型。保存时系统 SHALL 校验清单：每个 id 长度为 1–128 且仅含字母、数字与 `. _ : / -`；id 不得为保留值 `auto`（不区分大小写）；同一供应方内不重复、两个供应方之间不重复；每个供应方至多 32 个；清单非空时轮转模型必须在清单内。校验不通过时系统 SHALL 拒绝保存并给出原因。参数面板 SHALL 提供模型选择，选项为「自动轮转」与已配置凭据的供应方的清单项。
+系统 SHALL 为每个供应方维护一份用户可配置的模型 id 清单，并 SHALL 内置推荐默认值；用户 SHALL 可在设置中增删清单项。保存时系统 SHALL 校验清单：每个 id 长度为 1–128 且仅含字母、数字与 `. _ : / -`；同一供应方内不重复、两个供应方之间不重复；每个供应方至多 32 个。校验不通过时系统 SHALL 拒绝保存并给出原因。参数面板 SHALL 提供模型选择，选项为已配置且可用（已配置 `base_url`、`api_key` 且模型清单非空）的供应方的清单项，SHALL NOT 含自动轮转项；模型 SHALL 由用户手动选择，初始选中项为第一个可用供应方清单的首个 id；设置变更后所选模型不再属于任何可用供应方的清单时，SHALL 重置为该规则的结果。没有任何可用供应方时，所选模型 SHALL 为空，生成按钮 SHALL 禁用，并 SHALL 提示用户先在设置里配置并启用至少一个供应方。
 
 #### Scenario: 内置推荐清单包含 8 个 gpt 模型与 1 个 MiniMax 模型
 
 - **WHEN** 用户从未修改过模型清单并打开设置
-- **THEN** GPT 清单恰为 `gpt-image-2.6`、`gpt-image-2.6-flare`、`gpt-image-2.6-flare-2k`、`gpt-image-2.6-flare-4k`、`gpt-image-2.6-sunburst`、`gpt-image-2.6-sunburst-2k`、`gpt-image-2.6-sunburst-4k`、`gpt-image-2.5`，其轮转模型为 `gpt-image-2.6-flare`；MiniMax 清单恰为 `MiniMax-H3-Image`，其轮转模型为 `MiniMax-H3-Image`
+- **THEN** GPT 清单依次恰为 `gpt-image-2.6-flare`、`gpt-image-2.6`、`gpt-image-2.6-flare-2k`、`gpt-image-2.6-flare-4k`、`gpt-image-2.6-sunburst`、`gpt-image-2.6-sunburst-2k`、`gpt-image-2.6-sunburst-4k`、`gpt-image-2.5`；MiniMax 清单恰为 `MiniMax-H3-Image`
 
 #### Scenario: 用户新增的模型可被选择
 
@@ -231,17 +236,32 @@
 
 #### Scenario: 不合法的清单被拒绝
 
-- **WHEN** 用户保存的清单含重复项、含 `auto`、同一 id 同时出现在两个供应方的清单中、或轮转模型不在清单内
+- **WHEN** 用户保存的清单含重复项、含不合法字符的 id、或同一 id 同时出现在两个供应方的清单中
 - **THEN** 系统拒绝保存并提示具体原因，已持久化的配置未改变
 
-#### Scenario: 参数面板只列出已配置凭据的供应方的模型
+#### Scenario: 参数面板只列出已配置且可用的供应方的模型
 
-- **WHEN** 仅 GPT 配置了 `base_url` 与 `api_key`
-- **THEN** 参数面板的模型选项为「自动轮转」与 GPT 清单中的模型，并提示 MiniMax 尚未配置
+- **WHEN** 仅 GPT 配置了 `base_url` 与 `api_key` 且其模型清单非空
+- **THEN** 参数面板的模型选项恰为 GPT 清单中的模型，不含自动轮转项，并提示 MiniMax 尚未配置
+
+#### Scenario: 初始选中第一个可用供应方清单的首个模型
+
+- **WHEN** 仅 GPT 已配置且可用，用户首次打开参数面板
+- **THEN** 所选模型为 GPT 清单的首个 id
+
+#### Scenario: 所选模型不再可用时重置
+
+- **WHEN** 用户在设置中把当前所选模型从清单中删除并保存
+- **THEN** 所选模型重置为第一个可用供应方清单的首个 id；已无可用供应方时重置为空
+
+#### Scenario: 无可用供应方时生成按钮禁用并提示先配置
+
+- **WHEN** 没有任何供应方同时配置了 `base_url`、`api_key` 且模型清单非空
+- **THEN** 参数面板无模型可选，「生成」按钮禁用，并提示用户先在设置里配置并启用至少一个供应方
 
 ### Requirement: 模型 id 原样透传且供应方由清单归属决定
 
-一个模型所属的供应方 SHALL 仅由它被配置在哪个供应方的清单中决定；系统 SHALL NOT 依据模型 id 的文本内容或 `base_url` 的主机名推断供应方或端点身份。生成时显式指定的模型 SHALL 与某个清单项逐字符相等，否则系统 SHALL 拒绝该请求且不发起任何出站请求。系统 SHALL 将所选模型 id 原样写入出站请求的 `model` 字段，SHALL NOT 依据模型 id 的文本内容改变任何其他请求字段，SHALL NOT 为表达分辨率档位而发送供应方官方契约之外的字段。
+一个模型所属的供应方 SHALL 仅由它被配置在哪个供应方的清单中决定；系统 SHALL NOT 依据模型 id 的文本内容或 `base_url` 的主机名推断供应方或端点身份。生成请求的 `model` SHALL 与某个已配置且可用（已配置 `base_url`、`api_key` 且模型清单非空）的供应方的清单项逐字符相等，否则系统 SHALL 拒绝该请求且不发起任何出站请求：该 id 不在任何供应方清单中时返回参数错误；该 id 所属供应方未配置 `base_url` 或 `api_key` 时提示该供应方尚未配置。系统 SHALL 使用所选模型及其所属供应方，SHALL NOT 改用另一供应方。系统 SHALL 将所选模型 id 原样写入出站请求的 `model` 字段，SHALL NOT 依据模型 id 的文本内容改变任何其他请求字段，SHALL NOT 为表达分辨率档位而发送供应方官方契约之外的字段。
 
 #### Scenario: 显式选择的模型原样出现在出站请求中
 
@@ -255,59 +275,18 @@
 
 #### Scenario: 清单外的模型被拒绝且不出站
 
-- **WHEN** 生成请求的 `model` 既不是 `auto` 也不与任何清单项逐字符相等（包括仅大小写不同）
-- **THEN** 系统返回参数错误并指出该模型不在已配置的模型清单中，不发起任何出站请求
+- **WHEN** 生成请求的 `model` 不与任何供应方的清单项逐字符相等（包括仅大小写不同）
+- **THEN** 系统返回参数错误并指出该模型不在已配置且可用的供应方清单中，不发起任何出站请求
 
 #### Scenario: 供应方由清单归属决定
 
 - **WHEN** 用户把一个任意命名的 id 配置在 MiniMax 清单中并显式选择它生成
 - **THEN** 系统按 MiniMax 的请求规则构造请求并发往 MiniMax 的 `base_url`
 
-### Requirement: 双供应方自动轮转
+#### Scenario: 所选模型的供应方未配置时不换家
 
-当生成请求的 `model` 为 `auto` 时，系统 SHALL 按如下规则选定供应方：会话尚无成功的生成结果时首选 GPT；否则首选会话最后一条成功生成结果所属供应方的另一家，其中未记录供应方的旧结果视为 GPT。首选供应方可用（已配置 `base_url`、`api_key` 且模型清单非空）时使用它；不可用而另一家可用时使用另一家；两家都不可用时系统 SHALL 拒绝该请求且不发起出站请求。被选定供应方使用其轮转模型。轮转判定 SHALL 只依据会话已持久化的成功生成结果序列：失败的生成 SHALL NOT 改变下一次的选择。
-
-当 `model` 为显式模型 id 时，系统 SHALL 使用该模型及其所属供应方，SHALL NOT 改用另一供应方；该供应方未配置 `base_url` 或 `api_key` 时系统 SHALL 拒绝该请求且不发起出站请求。显式选择产生的成功结果同样进入序列，参与此后的自动轮转判定。
-
-#### Scenario: 首次自动生成使用 GPT
-
-- **WHEN** 两个供应方均可用，会话尚无生成结果，用户以 `model=auto` 触发生成
-- **THEN** 请求发往 GPT，使用 GPT 的轮转模型
-
-#### Scenario: 连续自动生成依次为 GPT、MiniMax、GPT
-
-- **WHEN** 两个供应方均可用，用户在同一会话中以 `model=auto` 连续成功生成三次
-- **THEN** 三次请求依次发往 GPT、MiniMax、GPT
-
-#### Scenario: 失败不消耗轮次
-
-- **WHEN** 第一次自动生成（GPT）成功，第二次自动生成（MiniMax）失败，用户再次以 `model=auto` 触发生成
-- **THEN** 第三次请求仍发往 MiniMax
-
-#### Scenario: 显式选择之后的自动生成选另一家
-
-- **WHEN** 会话最后一条成功结果是用户显式选择 GPT 模型生成的，用户随后以 `model=auto` 触发生成
-- **THEN** 请求发往 MiniMax
-
-#### Scenario: 旧记录视为 GPT
-
-- **WHEN** 会话最后一条成功结果是升级前产生的、未记录供应方的旧结果，用户以 `model=auto` 触发生成
-- **THEN** 请求发往 MiniMax
-
-#### Scenario: 仅一家可用时自动轮转恒用该家
-
-- **WHEN** 仅 GPT 可用，用户在同一会话中以 `model=auto` 连续成功生成两次
-- **THEN** 两次请求都发往 GPT，均不报配置缺失
-
-#### Scenario: 两家都不可用时拒绝
-
-- **WHEN** 两个供应方都未配置，用户以 `model=auto` 触发生成
-- **THEN** 系统提示尚未配置任何可用的图片生成端点，不发起出站请求
-
-#### Scenario: 显式选择的供应方未配置时不换家
-
-- **WHEN** 用户显式选择 MiniMax 清单中的模型，而 MiniMax 未配置 `api_key`、GPT 可用
-- **THEN** 系统提示 MiniMax 尚未配置，不发起出站请求，也不改用 GPT
+- **WHEN** 生成请求的 `model` 在 MiniMax 清单中，而 MiniMax 未配置 `api_key`、GPT 可用
+- **THEN** 系统提示 MiniMax 尚未配置 Base URL 或 API Key，不发起出站请求，也不改用 GPT
 
 ### Requirement: 连续修改携带上一张生成图
 
@@ -350,7 +329,7 @@
 
 #### Scenario: 跨供应方携带
 
-- **WHEN** 两个供应方均可用，第一次自动生成由 GPT 完成，用户随后以 `model=auto`、`use_previous=true` 触发生成
+- **WHEN** 两个供应方均可用，上一张生成图由 GPT 的模型生成，用户随后选择 MiniMax 清单中的模型并以 `use_previous=true` 触发生成
 - **THEN** 请求发往 MiniMax 的 `/v1/images/edits`，其 `image[]` 为 GPT 生成的那张图
 
 #### Scenario: 前端开关默认打开且可关闭
@@ -396,29 +375,29 @@
 - **WHEN** 系统向 MiniMax 发起参考图改图请求
 - **THEN** multipart 表单含 `model`、`prompt`、`output_format`、`response_format`、`image[]` 以及 `size` 与 `area` 二者之一，不含 `quality`、`background`、`input_fidelity`
 
-#### Scenario: 默认参数下的轮转与携带链可持续
+#### Scenario: 手动切换供应方时的携带链可持续
 
-- **WHEN** 两个供应方均可用，用户保持默认参数（`size=auto`、`model=auto`、`use_previous=true`）在同一会话中连续触发三次生成，且各次请求均成功
+- **WHEN** 两个供应方均可用，用户保持 `size=auto`、`use_previous=true`，在同一会话中依次选择 GPT、MiniMax、GPT 清单中的模型连续触发三次生成，且各次请求均成功
 - **THEN** 第二次发往 MiniMax 的请求含 `area=1K`，第三次生成能以第二次的生成结果作为参考图发出，不因上一张图超过输入约束而失败
 
 ### Requirement: 生成结果记录供应方与模型
 
-系统 SHALL 在每条成功的生成结果中记录：实际使用的供应方、实际发送的模型 id、选择方式（自动轮转或显式选择）、参考图来源（无、用户上传、上一张生成图）。生成接口的成功响应与会话记录读取接口 SHALL 返回这些信息。前端 SHALL 在生成图处展示供应方与模型，并标示自动轮转与参考图来源。对升级前产生、未记录这些信息的旧结果，系统 SHALL 正常读取与展示图片，SHALL NOT 报错，前端 SHALL NOT 为其展示供应方与模型标注。图片端点返回的错误（含写入会话历史的失败事件）SHALL 带有本次所用的供应方与模型，SHALL NOT 含 `api_key` 明文。
+系统 SHALL 在每条成功的生成结果中记录：实际使用的供应方、实际发送的模型 id、参考图来源（无、用户上传、上一张生成图）。生成接口的成功响应与会话记录读取接口 SHALL 返回这些信息。前端 SHALL 在生成图处展示供应方与模型，并标示参考图来源。对升级前产生、未记录这些信息的旧结果，系统 SHALL 正常读取与展示图片，SHALL NOT 报错，前端 SHALL NOT 为其展示供应方与模型标注。图片端点返回的错误（含写入会话历史的失败事件）SHALL 带有本次所用的供应方与模型，SHALL NOT 含 `api_key` 明文。
 
 #### Scenario: 成功结果记录供应方与模型
 
-- **WHEN** 一次自动轮转选中 MiniMax 并以上一张生成图为参考图的生成成功
-- **THEN** 该结果记录供应方为 MiniMax、模型为 MiniMax 的轮转模型、选择方式为自动、参考图来源为上一张生成图，且生成接口响应包含同样的信息
+- **WHEN** 用户选择 MiniMax 清单中的某个模型并以上一张生成图为参考图的生成成功
+- **THEN** 该结果记录供应方为 MiniMax、模型为所选的模型 id、参考图来源为上一张生成图，且生成接口响应包含同样的信息
 
 #### Scenario: 前端展示供应方与模型
 
 - **WHEN** 用户查看一条升级后产生的生成图
-- **THEN** 该图片处显示其供应方与模型 id；自动轮转选出的带有自动轮转标示，携带了上一张图的带有相应标示
+- **THEN** 该图片处显示其供应方与模型 id；携带了上一张图或使用了上传参考图的带有相应标示
 
 #### Scenario: 重新打开会话后信息仍在
 
 - **WHEN** 用户重新打开一个包含升级后生成结果的会话
-- **THEN** 会话记录读取接口返回每条结果的供应方、模型、选择方式与参考图来源，前端据此展示
+- **THEN** 会话记录读取接口返回每条结果的供应方、模型与参考图来源，前端据此展示
 
 #### Scenario: 旧结果照常展示
 
@@ -441,8 +420,8 @@
 
 #### Scenario: 升级后无需重新配置即可生成
 
-- **WHEN** 仅有旧配置文件的用户升级后以 `model=auto` 触发生成
-- **THEN** 请求使用旧文件中的 `base_url` 与 `api_key` 发往 GPT，`model` 为 GPT 的内置轮转模型
+- **WHEN** 仅有旧配置文件的用户升级后选择 GPT 内置清单中的某个模型触发生成
+- **THEN** 请求使用旧文件中的 `base_url` 与 `api_key` 发往 GPT，`model` 为所选的模型 id
 
 #### Scenario: 保存后写为新形态
 
