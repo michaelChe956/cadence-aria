@@ -529,9 +529,11 @@ mod tests {
         )));
         assert!(inputs[0].prompt.contains(end_tag));
         assert!(inputs[0].working_dir.is_dir());
-        assert!(inputs[0]
-            .prompt
-            .contains("除上面的 JSON 块外不要输出其他内容"));
+        assert!(
+            inputs[0]
+                .prompt
+                .contains("除上面的 JSON 块外不要输出其他内容")
+        );
         assert!(!outcome.prompt_declined);
         assert!(
             inputs[0].prompt.contains("仍然必须输出上面的 JSON 块")

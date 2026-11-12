@@ -264,10 +264,7 @@ impl StreamingProviderAdapter for DeclinedSilentProvider {
         input: StreamingProviderInput,
         _cancel: CancellationToken,
     ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
-        let contract = input
-            .structured_output_contract
-            .as_ref()
-            .expect("contract");
+        let contract = input.structured_output_contract.as_ref().expect("contract");
         let full_output = format!(
             "<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">\n{{\"nonce\":\"{}\",\"suggested_prompt\":\"\"}}\n</ARIA_STRUCTURED_OUTPUT>",
             contract.nonce, contract.nonce
@@ -317,5 +314,9 @@ async fn declined_with_blank_readable_text_pushes_no_text_event() {
     }
 
     assert!(!saw_text_event, "空白可读文本不得产生 text 事件");
-    assert_eq!(done_declined, Some(true), "done 应携带 prompt_declined=true");
+    assert_eq!(
+        done_declined,
+        Some(true),
+        "done 应携带 prompt_declined=true"
+    );
 }
