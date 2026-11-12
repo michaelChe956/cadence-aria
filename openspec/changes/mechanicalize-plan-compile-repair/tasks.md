@@ -64,10 +64,10 @@
 
 ## 9. 收口
 
-- [ ] 9.1 `openspec validate mechanicalize-plan-compile-repair --strict` exit 0
+- [x] 9.1 `openspec validate mechanicalize-plan-compile-repair --strict` exit 0（Task 8 实测 2026-11-12：`Change 'mechanicalize-plan-compile-repair' is valid`，exit 0；归档演练 /tmp 复核 81 passed / 0 failed，演练目录已删）
 - [ ] 9.2 全量门禁（fmt / clippy -D / check / test）绿；预存基线按名对照
 
 ## 10. 待验证假设（不改契约，取证后再决定是否追加 requirement）
 
-- [ ] 10.1 现场 #3「reviewer 连报三轮」归因：①`single_candidate_consecutive_repeated_finding_count`（`src/product/workspace_engine/review/routing_scope.rs:815-849`）要求相邻两轮非 advisory 指纹集合**完全相等**，任一增减 finding 即不触发，且仅比较相邻两轮；②指纹由 category/class/message/contract_field 组成（定义 `work_item_plan_policy/fingerprint.rs:73 identity_for_finding`，调用点 `classify.rs:141-146`），无 category 时措辞敏感；③owner 排除 key=`sha256(severity+message)`（REQ-WSC-13，`web/workspace_ws_types/review.rs:157-159`），换措辞即新 key。用现场三轮 verdict 回放核对哪个生效，结论写入 designs 文档后再决定是否新增「finding 身份稳定性」requirement
-- [ ] 10.2 `outbound_queue_full`：另开工单（不在本 change），工单引用 `src/web/workspace_session/manager/degraded_diagnostics.rs:101`
+- [x] 10.1 现场 #3「reviewer 连报三轮」归因：①`single_candidate_consecutive_repeated_finding_count`（`src/product/workspace_engine/review/routing_scope.rs:815-849`）要求相邻两轮非 advisory 指纹集合**完全相等**，任一增减 finding 即不触发，且仅比较相邻两轮；②指纹由 category/class/message/contract_field 组成（定义 `work_item_plan_policy/fingerprint.rs:73 identity_for_finding`，调用点 `classify.rs:141-146`），无 category 时措辞敏感；③owner 排除 key=`sha256(severity+message)`（REQ-WSC-13，`web/workspace_ws_types/review.rs:157-159`），换措辞即新 key。用现场三轮 verdict 回放核对哪个生效，结论写入 designs 文档后再决定是否新增「finding 身份稳定性」requirement（Task 8：取证记录落档 `cadence/notes/2026-11-11_取证记录_reviewer连报三轮归因_v1.0.md`——锚点实测行号 routing_scope.rs:814-848 / fingerprint.rs:73 + classify.rs:141-146 / review.rs:148-159；合成三轮 verdict fixture 回放（排除键为按 ③ 算法当场 sha256 实算的 16 位 hex）；现场 durable history 未提供 ⇒ 按裁决 §8.4「挂起待材料」，结论仅限代码级归因；是否新增 requirement 待 owner 决定）
+- [x] 10.2 `outbound_queue_full`：另开工单（不在本 change），工单引用 `src/web/workspace_session/manager/degraded_diagnostics.rs:101`（Task 8：已在取证记录 §5「关联工单」登记——degraded_diagnostics.rs:101 锚点实测（`record_enter` 稳定码）；proposal Non-Goals :36 已声明）
