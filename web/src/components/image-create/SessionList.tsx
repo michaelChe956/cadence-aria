@@ -39,7 +39,9 @@ function imageCreateOptions(
       value: provider,
       label: option?.label ?? providerLabel(provider),
       disabled: option?.disabled ?? true,
-      reason: option?.reason ?? "Provider 状态尚未确认",
+      // 快照里没有该 provider 才视为「尚未确认」；option 存在时原样透传
+      // （健康时为 null，?? 会把 null 也兜底成误报文案）。
+      reason: option ? option.reason : "Provider 状态尚未确认",
     };
   });
 }
@@ -248,6 +250,7 @@ export function SessionList({
               <CustomSelect
                 label="Provider"
                 value={provider}
+                displayValue={providerLabel(provider)}
                 options={imageCreateProviderOptions}
                 onChange={(value) => setProvider(value as ImageCreateProvider)}
               />
