@@ -858,6 +858,7 @@ fn work_item_workspace_session(
         human_gate_snapshot: None,
         repair_reservation: None,
         human_gate_reservation: None,
+        author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
         single_candidate_phase: None,

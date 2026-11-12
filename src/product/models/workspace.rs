@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::author_rewrite_budget::AuthorRewriteBudgetState;
 use super::human_gate::{
     HumanGateReservation, HumanGateTurnStatus, UserBudgetHold, UserBudgetReceipt,
     UserBudgetReceiptKind,
@@ -838,6 +839,9 @@ pub struct WorkspaceSessionRecord {
     pub repair_reservation: Option<RepairReservation>,
     #[serde(default)]
     pub human_gate_reservation: Option<HumanGateReservation>,
+    /// author 重写预算域（REQ-WSC-21 共池执法）：None = 未建域（老会话，读侧归并）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_rewrite_budget: Option<AuthorRewriteBudgetState>,
     #[serde(default)]
     pub policy_diagnostics: Vec<PolicyDiagnostic>,
     #[serde(default)]

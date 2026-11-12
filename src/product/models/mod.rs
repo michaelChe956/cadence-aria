@@ -1,3 +1,4 @@
+pub mod author_rewrite_budget;
 pub mod automation;
 pub mod human_gate;
 pub mod lifecycle;
@@ -21,6 +22,7 @@ where
 #[cfg(test)]
 pub mod tests;
 
+pub use author_rewrite_budget::*;
 pub use automation::*;
 pub use human_gate::*;
 pub use lifecycle::*;

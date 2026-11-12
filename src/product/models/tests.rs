@@ -34,7 +34,6 @@ where
 
     assert_eq!(&back, value);
 }
-
 fn assert_missing_field_rejected<T>(value: &serde_json::Value, field: &str)
 where
     T: DeserializeOwned,
@@ -49,7 +48,6 @@ where
         "missing required field {field} should be rejected"
     );
 }
-
 fn assert_enum_cases<T>(cases: impl IntoIterator<Item = (T, &'static str)>)
 where
     T: Serialize,
@@ -372,6 +370,7 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         human_gate_snapshot: None,
         repair_reservation: None,
         human_gate_reservation: None,
+        author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
         single_candidate_phase: None,
@@ -1285,6 +1284,7 @@ fn anchor_t02_session_record() -> WorkspaceSessionRecord {
         human_gate_snapshot: None,
         repair_reservation: None,
         human_gate_reservation: None,
+        author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
         single_candidate_phase: None,

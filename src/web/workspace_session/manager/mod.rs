@@ -305,6 +305,7 @@ pub(crate) fn test_session_record(session_id: &str) -> WorkspaceSessionRecord {
         human_gate_snapshot: None,
         repair_reservation: None,
         human_gate_reservation: None,
+        author_rewrite_budget: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
         single_candidate_phase: None,
