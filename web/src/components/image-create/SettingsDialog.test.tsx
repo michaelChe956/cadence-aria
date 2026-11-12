@@ -84,18 +84,68 @@ async function selectCustomOption(
 }
 
 describe("SettingsDialog", () => {
-  it("loads settings and displays each vendor's masked API key", async () => {
+  it("loads settings and shows each vendor's masked API key as a hint", async () => {
     const { loadSettings } = renderDialog();
 
     const gpt = within(await screen.findByRole("region", { name: "GPT" }));
     const minimax = within(screen.getByRole("region", { name: "MiniMax" }));
 
-    expect(gpt.getByLabelText("GPT API Key")).toHaveValue("sk-****1234");
-    expect(minimax.getByLabelText("MiniMax API Key")).toHaveValue("mm-****5678");
+    // 脱敏串只作提示，绝不进输入框：用户改一个字就会把它当真 key 存回去。
+    expect(gpt.getByLabelText("GPT API Key")).toHaveValue("");
+    expect(gpt.getByLabelText("GPT API Key")).toHaveAttribute(
+      "placeholder",
+      "已保存 sk-****1234",
+    );
+    expect(minimax.getByLabelText("MiniMax API Key")).toHaveValue("");
+    expect(minimax.getByLabelText("MiniMax API Key")).toHaveAttribute(
+      "placeholder",
+      "已保存 mm-****5678",
+    );
     expect(gpt.getByLabelText("GPT base_url")).toHaveValue(
       "https://api.openai.com/v1",
     );
     expect(loadSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("在 key 框里改一个字不会把脱敏串当作新 key 提交", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    const apiKey = gpt.getByLabelText("GPT API Key");
+    await user.type(apiKey, "X");
+    expect(apiKey).toHaveValue("X");
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({
+        vendors: { gpt: { api_key_action: "replace", api_key: "X" } },
+      });
+    });
+  });
+
+  it("不碰 key 框直接保存时该家为 retain 且请求里不含 api_key", async () => {
+    const user = userEvent.setup();
+    const { saveSettings } = renderDialog();
+    const gpt = within(await screen.findByRole("region", { name: "GPT" }));
+
+    // 只动模型清单，key 框保持空白（表示沿用已保存的那把）。
+    await user.click(gpt.getByRole("button", { name: "已选 2 项" }));
+    await user.click(gpt.getByRole("checkbox", { name: "gpt-image-2.6" }));
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({
+        vendors: {
+          gpt: {
+            api_key_action: "retain",
+            models: ["gpt-image-2.6-flare"],
+          },
+        },
+      });
+    });
+    const request = saveSettings.mock.calls[0]?.[0];
+    expect(request?.vendors?.gpt).not.toHaveProperty("api_key");
   });
 
   it("sends no vendor and no defaults when nothing changed", async () => {

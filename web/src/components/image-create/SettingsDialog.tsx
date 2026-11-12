@@ -70,13 +70,16 @@ function defaultsEqual(left: DefaultImageParams, right: DefaultImageParams) {
 /**
  * 分区状态 chip：按编辑态判断凭据是否齐全（与 store 的“已配置”同口径：
  * base_url 与 key 都在位），用户改完 URL / key 即时反映。
+ * key 的「在位」口径：沿用已保存的 key 时看已保存的脱敏串，替换时看输入框里的明文。
  */
-function isVendorConfigured(draft: VendorDraft): boolean {
-  return (
-    draft.baseUrl.trim() !== "" &&
-    draft.apiKeyAction !== "clear" &&
-    draft.apiKey.trim() !== ""
-  );
+function isVendorConfigured(draft: VendorDraft, savedKeyMasked: string): boolean {
+  if (draft.baseUrl.trim() === "" || draft.apiKeyAction === "clear") {
+    return false;
+  }
+  if (draft.apiKeyAction === "replace") {
+    return draft.apiKey.trim() !== "";
+  }
+  return savedKeyMasked.trim() !== "";
 }
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
@@ -114,13 +117,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     setDrafts({
       gpt: {
         baseUrl: settings.vendors.gpt.base_url,
-        apiKey: settings.vendors.gpt.api_key_masked,
+        // 输入框里永远不放脱敏串：用户改一个字就会把脱敏值当真 key 存回去。
+        apiKey: "",
         apiKeyAction: "retain",
         models: models.gpt,
       },
       minimax: {
         baseUrl: settings.vendors.minimax.base_url,
-        apiKey: settings.vendors.minimax.api_key_masked,
+        apiKey: "",
         apiKeyAction: "retain",
         models: models.minimax,
       },
@@ -485,17 +489,19 @@ function VendorSection({
   onTestConnectivity: () => void;
 }) {
   const label = IMAGE_VENDOR_LABELS[vendor];
-  const configured = isVendorConfigured(draft);
+  const savedKeyMasked = original.api_key_masked;
+  const configured = isVendorConfigured(draft, savedKeyMasked);
   const probing = connectivity.phase === "testing";
   // API Key 三态只用下方一行文字表达，措辞与实际动作一致。
+  // 沿用已保存的 key 时看脱敏串（输入框里没有脱敏串）。
   const apiKeyState =
     draft.apiKeyAction === "clear"
       ? "保存后将清除当前 key"
       : draft.apiKeyAction === "replace"
         ? "保存后将替换当前 key"
-        : draft.apiKey.trim() === ""
+        : savedKeyMasked.trim() === ""
           ? "尚未配置 key，填写后保存生效"
-          : `已保存 ${draft.apiKey}，留空保持不变`;
+          : `已保存 ${savedKeyMasked}，留空保持不变`;
 
   return (
     <section
@@ -588,7 +594,11 @@ function VendorSection({
             aria-label={`${label} API Key`}
             value={draft.apiKeyAction === "clear" ? "" : draft.apiKey}
             placeholder={
-              draft.apiKeyAction === "clear" ? "保存后将清除" : undefined
+              draft.apiKeyAction === "clear"
+                ? "保存后将清除"
+                : savedKeyMasked.trim() === ""
+                  ? undefined
+                  : `已保存 ${savedKeyMasked}`
             }
             autoComplete="off"
             disabled={disabled}
@@ -597,8 +607,8 @@ function VendorSection({
               onChange({
                 ...draft,
                 apiKey: value,
-                apiKeyAction:
-                  value === original.api_key_masked ? "retain" : "replace",
+                // 空串 = 沿用已保存的 key；非空 = 替换成新 key。
+                apiKeyAction: value.trim() === "" ? "retain" : "replace",
               });
             }}
             className={`${controlClassName} min-w-0 flex-1`}
