@@ -525,12 +525,12 @@ async fn c17_huge_error_body_is_read_with_a_cap_and_truncated_to_500_chars() {
 }
 
 #[tokio::test]
-async fn c18_success_body_over_64mib_is_rejected_with_a_readable_error() {
-    // H6：2xx 成功体同样设 64 MiB 上限。超限时不得整读后报笼统的网络错误，
-    // 必须是明确的大小上限错误（可读、面向用户）。
+async fn c18_success_body_over_128mib_is_rejected_with_a_readable_error() {
+    // H6：2xx 成功体同样设上限（128 MiB，兼容 -4k 档超大合法图）。超限时不得
+    // 整读后报笼统的网络错误，必须是明确的大小上限错误（可读、面向用户）。
     let mut server = mockito::Server::new_async().await;
     let target = new_target(ImageVendor::Gpt, &server.url(), GPT_MODEL);
-    let oversized = "x".repeat(64 * 1024 * 1024 + 1);
+    let oversized = "x".repeat(128 * 1024 * 1024 + 1);
     let mock = status_mock(&mut server, 200, &oversized, 1).await;
 
     let error = call(&target, &request(ImageSize::Auto), None)
@@ -540,6 +540,27 @@ async fn c18_success_body_over_64mib_is_rejected_with_a_readable_error() {
         error,
         ImageClientError::OversizedBody,
         "超限应报大小上限错误，而非笼统 Network"
+    );
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn c18b_success_body_over_old_64mib_cap_is_accepted() {
+    // -4k 档（4096²）合法大图：b64 膨胀 4/3 后可越过旧的 64 MiB 上限，
+    // 上限提升到 128 MiB 后必须放行并正常解码。
+    let mut server = mockito::Server::new_async().await;
+    let target = new_target(ImageVendor::Gpt, &server.url(), GPT_MODEL);
+    let big_b64 = "A".repeat(64 * 1024 * 1024);
+    let body = format!(r#"{{"data":[{{"b64_json":"{big_b64}"}}]}}"#);
+    let mock = status_mock(&mut server, 200, &body, 1).await;
+
+    let outcome = call(&target, &request(ImageSize::Auto), None)
+        .await
+        .expect("旧的 64 MiB 边界现在必须被接受");
+    assert_eq!(
+        outcome.b64.len(),
+        64 * 1024 * 1024,
+        "超旧上限的合法 b64 必须完整解码"
     );
     mock.assert_async().await;
 }

@@ -1,5 +1,5 @@
 //! 连通性探测端点（POST /api/image-create/settings/connectivity）的 handler 层用例：
-//! 入参校验 400、草稿 key 优先、空 key 回落已保存 key、两者皆无 400 且零出站。
+//! 入参校验 400、草稿 key 优先、空 key 仅回落发往已保存 base_url、两者皆无 400 且零出站。
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -153,10 +153,12 @@ async fn connectivity_probes_with_draft_key_and_hides_it_in_response() {
 
 #[tokio::test]
 async fn connectivity_with_empty_key_falls_back_to_saved_key() {
+    // 空 key 回落已保存 key 的唯一合法形态：请求的 base_url 与已保存一致，
+    // mock 收到的 Authorization 必须是已保存 key（passing_gateway 按该 key 匹配）。
     let root = tempdir().expect("root");
     let app = build_web_router(state(root.path()));
-    save_gpt_key(root.path(), "https://gateway.example.com", "sk-saved1234").await;
     let mut server = mockito::Server::new_async().await;
+    save_gpt_key(root.path(), &server.url(), "sk-saved1234").await;
     let (models, generations) = passing_gateway(&mut server, "sk-saved1234", "m1", 1).await;
 
     let (status, payload) = connectivity(
@@ -175,6 +177,103 @@ async fn connectivity_with_empty_key_falls_back_to_saved_key() {
         payload["ok"],
         json!(true),
         "已保存 key 有效则探测通过：{payload}"
+    );
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn connectivity_fallback_key_with_different_base_url_is_400_and_sends_nothing() {
+    // 凭据外发收口：已保存的 key 只允许发往已保存的 base_url。
+    // 请求换了 base_url 又不显式给 key 时必须 400 且零出站。
+    let root = tempdir().expect("root");
+    let app = build_web_router(state(root.path()));
+    let mut server = mockito::Server::new_async().await;
+    save_gpt_key(root.path(), "https://gateway.example.com", "sk-saved1234").await;
+    let (models, generations) = passing_gateway(&mut server, "sk-saved1234", "m1", 0).await;
+
+    let (status, payload) = connectivity(
+        app,
+        json!({
+            "vendor": "gpt",
+            "base_url": server.url(),
+            "api_key": "",
+            "models": ["m1"],
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "换了 base_url 且未显式给 key 必须 400：{payload}"
+    );
+    assert!(
+        payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Base URL 与已保存配置不同")),
+        "错误文案须指明 Base URL 不一致、要求显式填 key：{payload}"
+    );
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn connectivity_with_explicit_key_probes_any_base_url_even_when_saved_differs() {
+    // 用户显式提供的 key 发往哪由用户负责：与已保存 base_url 不同也照常探测，
+    // 且出站用的是请求里的 key（mock 按该 key 匹配鉴权头）。
+    let root = tempdir().expect("root");
+    let app = build_web_router(state(root.path()));
+    let mut server = mockito::Server::new_async().await;
+    save_gpt_key(root.path(), "https://gateway.example.com", "sk-saved1234").await;
+    let (models, generations) = passing_gateway(&mut server, "sk-explicit-NEW", "m1", 1).await;
+
+    let (status, payload) = connectivity(
+        app,
+        json!({
+            "vendor": "gpt",
+            "base_url": server.url(),
+            "api_key": "sk-explicit-NEW",
+            "models": ["m1"],
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "显式 key 不受已保存 base_url 约束：{payload}"
+    );
+    assert_eq!(payload["ok"], json!(true));
+    models.assert_async().await;
+    generations.assert_async().await;
+}
+
+#[tokio::test]
+async fn connectivity_fallback_ignores_trailing_slash_difference() {
+    // base_url 归一化：两侧 trim + 去末尾 `/` 后相等即视为同一地址。
+    let root = tempdir().expect("root");
+    let app = build_web_router(state(root.path()));
+    let mut server = mockito::Server::new_async().await;
+    let saved_base = format!("{}/", server.url());
+    save_gpt_key(root.path(), &saved_base, "sk-saved1234").await;
+    let (models, generations) = passing_gateway(&mut server, "sk-saved1234", "m1", 1).await;
+
+    let (status, payload) = connectivity(
+        app,
+        json!({
+            "vendor": "gpt",
+            "base_url": server.url(),
+            "api_key": "",
+            "models": ["m1"],
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "仅末尾斜杠差异应视为同一 base_url：{payload}"
     );
     models.assert_async().await;
     generations.assert_async().await;

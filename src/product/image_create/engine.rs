@@ -175,12 +175,14 @@ impl ImageCreateEngine {
                                 .await;
                         }
                         Err(error) => {
-                            let _ = send_iteration_error(&event_tx, error).await;
+                            let _ = send_iteration_error(&event_tx, error, &settings).await;
                         }
                     }
                 }
                 Err(error) => {
-                    let _ = send_iteration_error(&event_tx, error).await;
+                    // H2：失败消息可能携带 provider stderr 回显的明文 key，推事件前同样脱敏。
+                    let settings = engine.settings_store.load().await;
+                    let _ = send_iteration_error(&event_tx, error, &settings).await;
                 }
             }
             engine.run_registry.release(&id).await;
@@ -514,7 +516,11 @@ impl ImageCreateEngine {
 async fn send_iteration_error(
     sender: &mpsc::Sender<IterationEvent>,
     error: ImageCreateError,
+    settings: &ImageCreateSettings,
 ) -> Result<(), Box<mpsc::error::SendError<IterationEvent>>> {
+    // H2：失败路径与成功路径同源脱敏 —— 错误文本可能含 provider stderr
+    // 回显的明文 key，推给浏览器前按两家已保存 key 统一替换。
+    let message = redact_api_keys(&error.to_string(), settings);
     sender
         .send(IterationEvent {
             kind: "error".to_string(),
@@ -522,7 +528,7 @@ async fn send_iteration_error(
             suggested_prompt: None,
             prompt_declined: false,
             provider_session_id: None,
-            error: Some(error.to_string()),
+            error: Some(message),
         })
         .await
         .map_err(Box::new)

@@ -487,3 +487,79 @@ async fn declined_with_whitespace_readable_text_pushes_only_done() {
         "拒答且可读文本只含空白：只推 done（declined=true），不推 text"
     );
 }
+
+/// 启动即失败的迭代执行器：失败消息字面包含已保存 key，
+/// 模拟 provider 把含 `.aria/image_create.json` 明文 key 的 stderr 拼进失败消息。
+struct FailingIterationProvider {
+    message: String,
+}
+
+#[async_trait]
+impl StreamingProviderAdapter for FailingIterationProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let (command_tx, _command_rx) = mpsc::channel::<ProviderCommand>(1);
+        let message = self.message.clone();
+        tokio::spawn(async move {
+            let _ = event_tx.send(ProviderEvent::Failed { message }).await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+/// 跑完一轮迭代，收集全部 error 事件的错误文本。
+async fn collect_iteration_errors(engine: &ImageCreateEngine) -> Vec<String> {
+    let mut events = engine
+        .start_iteration("session", "完善提示词".to_string())
+        .await
+        .expect("start iteration");
+    let mut errors = Vec::new();
+    while let Some(event) = events.recv().await {
+        if event.kind == "error" {
+            errors.push(event.error.expect("error event text"));
+        }
+    }
+    errors
+}
+
+#[tokio::test]
+async fn h2_iteration_error_event_with_key_in_failure_message_is_redacted() {
+    // H2：失败路径与成功路径同源 —— 迭代执行器 cwd 在 .aria 之下，stderr 可能
+    // 回显明文 key；error 事件推给浏览器前必须替换为 [REDACTED]。
+    let store = Arc::new(FakeSessionStore::with_record());
+    let provider = Arc::new(FailingIterationProvider {
+        message: "provider exited: stderr echoes sk-gpt from .aria/image_create.json".to_string(),
+    });
+    let engine = engine(
+        store,
+        valid_settings(),
+        Arc::new(FakeImageClient::success()),
+        Some(provider),
+    );
+
+    let errors = collect_iteration_errors(&engine).await;
+
+    assert_eq!(
+        errors.len(),
+        1,
+        "失败迭代应恰好推一条 error 事件：{errors:?}"
+    );
+    assert!(
+        !errors[0].contains("sk-gpt"),
+        "error 事件文本不得含明文 key：{}",
+        errors[0]
+    );
+    assert!(
+        errors[0].contains("[REDACTED]"),
+        "error 事件文本应替换为 [REDACTED]：{}",
+        errors[0]
+    );
+}

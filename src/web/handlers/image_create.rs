@@ -230,16 +230,21 @@ pub async fn probe_settings_connectivity(
         .map_err(|error| invalid_param(format!("探测请求不合法：{error}")))?;
     // key 回落：草稿非空优先；为空则用该家已保存的 key
     //（前端只有脱敏值、不可反推，回落只能在后端做）。
+    // 凭据外发收口：已保存的 key 只允许发往已保存的 base_url ——
+    // 换地址必须由用户显式重新提供 key，探测端点不得成为凭据外发原语。
     let api_key = if request.api_key.trim().is_empty() {
         let saved = settings_store(&state).load().await;
-        let saved_key = match request.vendor {
-            ImageVendor::Gpt => saved.vendors.gpt.api_key,
-            ImageVendor::Minimax => saved.vendors.minimax.api_key,
-        };
-        if saved_key.trim().is_empty() {
+        let saved_vendor = saved.vendors.get(request.vendor);
+        if saved_vendor.api_key.trim().is_empty() {
             return Err(invalid_param("未配置 API Key，无法测试连通性"));
         }
-        saved_key
+        if same_probe_base_url(&request.base_url, &saved_vendor.base_url) {
+            saved_vendor.api_key.clone()
+        } else {
+            return Err(invalid_param(
+                "Base URL 与已保存配置不同，请填写 API Key 后再测试连通性",
+            ));
+        }
     } else {
         request.api_key
     };
@@ -365,6 +370,12 @@ fn parse_enum<T: DeserializeOwned>(name: &str, value: &str) -> HandlerResult<T> 
 
 fn invalid_param(message: impl Into<String>) -> ImageCreateApiError {
     ImageCreateError::InvalidParam(message.into()).into()
+}
+
+/// 探测回落的 base_url 判同：两侧 trim、去末尾 `/` 后比较；
+/// 其余（大小写、路径）不归一化 —— 不匹配即要求显式提供 key，安全侧从严。
+fn same_probe_base_url(requested: &str, saved: &str) -> bool {
+    requested.trim().trim_end_matches('/') == saved.trim().trim_end_matches('/')
 }
 
 pub async fn image_create_chat_ws(
