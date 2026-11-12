@@ -707,9 +707,20 @@ pub fn non_teaching_provider_start_count(record: &WorkspaceSessionRecord) -> usi
 
 /// 1 + 该前缀条目最大数字后缀（无条目 ⇒ 0）；序号单调、与 C 记账解耦。
 pub fn next_sc_author_launch_ordinal(record: &WorkspaceSessionRecord) -> usize {
-    let prefix = sc_author_launch_prefix(&record.id);
-    record
-        .provider_start_ledger
+    next_sc_author_launch_ordinal_from_entries(&record.id, &record.provider_start_ledger)
+}
+
+/// 同上，但直接吃「会话 id + 条目切片」——**内存镜像路径**（`WorkspaceSession`，
+/// 不是 `WorkspaceSessionRecord`）必须走**同一**派生口径，否则降级路径的序号
+/// 会与持久化路径漂移（Task 5 评审 Important-1：`routing_scope.rs` 的内存回退
+/// 分支曾仍传 `provider_start_ledger.len()`，与该函数注释「内存回退分支不得
+/// 与 CAS 落盘的键形/字段口径漂移」矛盾）。
+pub fn next_sc_author_launch_ordinal_from_entries(
+    session_id: &str,
+    entries: &[ProviderStartLedgerEntry],
+) -> usize {
+    let prefix = sc_author_launch_prefix(session_id);
+    entries
         .iter()
         .filter_map(|entry| entry.provider_start_idempotency_key.strip_prefix(&prefix))
         .filter_map(|suffix| match suffix.parse::<usize>() {
@@ -718,7 +729,7 @@ pub fn next_sc_author_launch_ordinal(record: &WorkspaceSessionRecord) -> usize {
             //（无条目 ⇒ 0、新键不冲突），但不再静默——留 debug 观测面。
             Err(_) => {
                 tracing::debug!(
-                    session_id = %record.id,
+                    session_id = %session_id,
                     suffix,
                     "sc author launch ordinal skipped malformed suffix"
                 );
