@@ -1357,6 +1357,7 @@ mod is_logical_codebase_issue_tests {
             workspace_type: WorkspaceType::Story,
             stage: WorkspaceStage::Revision,
             messages: Vec::new(),
+            sc_generation_teaching_windows: Vec::new(),
             artifact: None,
             author_provider: ProviderName::ClaudeCode,
             reviewer_provider: Some(ProviderName::Codex),

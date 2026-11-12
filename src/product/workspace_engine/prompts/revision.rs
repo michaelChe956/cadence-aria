@@ -213,6 +213,7 @@ mod revision_routing_reference_tests {
             workspace_type: WorkspaceType::Story,
             stage: WorkspaceStage::Revision,
             messages: Vec::new(),
+            sc_generation_teaching_windows: Vec::new(),
             artifact: Some(ArtifactPayload::Markdown {
                 markdown: "# Story Spec".to_string(),
                 diff: None,

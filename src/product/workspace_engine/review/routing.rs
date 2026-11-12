@@ -1,5 +1,5 @@
 #[path = "routing_scope.rs"]
-mod routing_scope;
+pub(crate) mod routing_scope;
 use super::feedback::{format_actionable_review_feedback, format_review_feedback};
 use super::policy_routing::{RoutingAction, carry_forward_open_gate_budget};
 use super::*;

@@ -238,10 +238,13 @@ impl LifecycleStore {
                 }
             }
             next.human_gate_reservation = Some(reservation.clone());
+            // Task 3 评审 deferred #2（Task 5 统一）：预领占位 started=false
+            //——非实际启动证据（SG4a 判别要求 started∧provider∧started_at），
+            // 非教学记账由 provider_attempt_key == None 承载。
             next.provider_start_ledger.push(
                 crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                     provider_start_idempotency_key: reservation.provider_start_idempotency_key,
-                    started: true,
+                    started: false,
                     provider: None,
                     started_at: None,
                     provider_attempt_key: None,
@@ -466,7 +469,7 @@ impl LifecycleStore {
                 next.provider_start_ledger.push(
                     crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
                         provider_start_idempotency_key,
-                        started: true,
+                        started: false,
                         provider: None,
                         started_at: None,
                         provider_attempt_key: None,

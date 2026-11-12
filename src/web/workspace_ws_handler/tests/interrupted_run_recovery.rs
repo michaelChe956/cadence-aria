@@ -52,6 +52,7 @@ async fn interrupted_recovery_provider_start_failure_returns_to_prepare_context(
         workspace_type: WorkspaceType::Story,
         stage: WorkspaceStage::CrossReview,
         messages: vec![],
+        sc_generation_teaching_windows: Vec::new(),
         artifact: None,
         author_provider: ProviderName::ClaudeCode,
         reviewer_provider: Some(ProviderName::Codex),

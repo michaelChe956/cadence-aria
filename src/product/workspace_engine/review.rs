@@ -5,7 +5,7 @@ mod drive;
 mod feedback;
 pub(crate) mod policy_routing;
 mod policy_scope;
-mod routing;
+pub(crate) mod routing;
 mod structured_output;
 
 pub(crate) use disposition_override::{

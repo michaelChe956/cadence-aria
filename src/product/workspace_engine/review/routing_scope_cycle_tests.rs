@@ -243,6 +243,7 @@ fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_r
         workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
         stage: WorkspaceStage::CrossReview,
         messages: Vec::new(),
+        sc_generation_teaching_windows: Vec::new(),
         artifact: None,
         author_provider: crate::product::models::ProviderName::ClaudeCode,
         reviewer_provider: Some(crate::product::models::ProviderName::Codex),

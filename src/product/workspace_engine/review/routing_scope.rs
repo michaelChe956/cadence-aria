@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 /// gate turn open 的既有模式）。`RepairReservation{Reserved}` 标记该键可被接力
 /// run 消费：store 层 `reserve_single_candidate_provider_start` 命中 Reserved 预领
 /// 时推进为 ProviderStarted 并放行真启动；接力 run 因此不再与 run1 的旧键碰撞
-/// （phase==Generate 启发式下 attempt=len-1 会复用已消费的 run1 键）。Task 2：预领键同时是 author 重写预算域的扣减幂等键（同 CAS 落盘，同键重放只扣一次）。
-fn provider_start_ledger_for_action(
+/// （Task 5 后预领序号 = next_sc_author_launch_ordinal、接力键由 repair_reservation 原键消费，与 C 教学记账解耦）。Task 2：预领键同时是 author 重写预算域的扣减幂等键（同 CAS 落盘，同键重放只扣一次）。
+pub(crate) fn provider_start_ledger_for_action(
     expected: &crate::product::models::WorkspaceSessionRecord,
     action: &RoutingAction,
     invoked_scope: Option<&ReviewInvocationScope>,
@@ -37,7 +37,7 @@ fn provider_start_ledger_for_action(
     }
     let (reservation, entry) = preclaimed_repair_start(
         &expected.id,
-        expected.provider_start_ledger.len(),
+        crate::product::work_item_plan_policy::next_sc_author_launch_ordinal(expected),
         invoked_scope
             .map(|scope| scope.scope_digest().to_string())
             .unwrap_or_else(|| "review_unknown".to_string()),

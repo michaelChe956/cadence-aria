@@ -99,6 +99,12 @@ pub struct WorkspaceSession {
     pub repair_reservation: Option<crate::product::work_item_plan_policy::RepairReservation>,
     pub policy_diagnostics: Vec<crate::product::work_item_plan_policy::PolicyDiagnostic>,
     pub provider_start_ledger: Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
+    /// Task 5（序 3）：SC 生成教学窗口的 runtime 只读镜像（durable 单源 =
+    /// `WorkspaceSessionRecord.sc_generation_teaching_windows`；镜像纪律同
+    /// `provider_start_ledger`——store 返回/重读后整体替换，CAS 前以最近
+    /// 记录为 expected）。
+    pub sc_generation_teaching_windows:
+        Vec<crate::product::work_item_plan_policy::ScGenerationTeachingWindow>,
     /// Task 2：author 重写预算域的 runtime 只读镜像（durable 单源 =
     /// `WorkspaceSessionRecord.author_rewrite_budget`；与预领 / ledger 同 CAS
     /// 落盘，见 `review/routing_scope.rs`）。
@@ -170,6 +176,7 @@ impl WorkspaceSession {
             repair_reservation: record.repair_reservation,
             policy_diagnostics: record.policy_diagnostics,
             provider_start_ledger: record.provider_start_ledger,
+            sc_generation_teaching_windows: record.sc_generation_teaching_windows,
             author_rewrite_budget: record.author_rewrite_budget,
             single_candidate_phase: record.single_candidate_phase,
             work_item_plan_source_revision_ref: record.work_item_plan_source_revision_ref,

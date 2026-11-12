@@ -12,6 +12,7 @@ use crate::product::work_item_plan_compiler::{
 };
 use crate::product::work_item_plan_policy::{
     ScTeachingAttemptLifecycle, ScTeachingAttemptRef, ScTeachingWindowStatus, WorkItemPlanFlowKind,
+    next_sc_author_launch_ordinal,
 };
 use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
@@ -152,17 +153,30 @@ impl WorkspaceEngine {
         let expected = lifecycle
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| format!("load session for provider reservation failed: {error}"))?;
-        let provider_start_attempt = if expected.single_candidate_phase
+        // Task 5（序 3，tasks 1.2 迁移面）：删除 `phase==Generate ? len-1 :
+        // len` 位置启发式——author 启动键不再由「全 ledger 长度/末位条目」
+        // 隐式派生。优先级：
+        // - A 接力：`repair_reservation` 是 A 池显式载体，预领键按**原键**
+        //   精确消费（Reserved 推进 ProviderStarted 放行；已启动同键幂等
+        //   让位，k3 单飞语义不变）；
+        // - Generate 相位的原调用重入：按当前业务键（最后一个非教学前缀键）
+        //   精确匹配幂等（迟到 run 让位，不把 C 教学占位误当业务键）；
+        // - 其余（新业务启动）：键序号 = next_sc_author_launch_ordinal（前缀
+        //   最大数字后缀 + 1，序号单调、与人门键及 C 教学条目计数解耦）。
+        let key = if let Some(reservation) = expected.repair_reservation.as_ref() {
+            reservation.provider_start_idempotency_key.clone()
+        } else if expected.single_candidate_phase
             == Some(crate::product::models::SingleCandidatePhase::Generate)
+            && let Some(current) = current_sc_author_business_key(&expected)
         {
-            expected.provider_start_ledger.len().saturating_sub(1)
+            current
         } else {
-            expected.provider_start_ledger.len()
+            format!(
+                "single_candidate_author:{}:{}",
+                expected.id,
+                next_sc_author_launch_ordinal(&expected)
+            )
         };
-        let key = format!(
-            "single_candidate_author:{}:{provider_start_attempt}",
-            expected.id
-        );
         let (saved, should_start) = lifecycle
             .reserve_single_candidate_provider_start(&expected, &key)
             .map_err(|error| format!("persist provider reservation failed: {error}"))?;
@@ -392,19 +406,16 @@ impl WorkspaceEngine {
             .clone()
             .or_else(|| conversation.and_then(|conversation| conversation.last_node_id.clone()))
             .unwrap_or_default();
-        // 原业务 reservation key：durable ledger 中本会话最后一个 SC author
-        // 键（等待保留原 key；fresh 重入不 reserve 第二次）。
-        let reservation_prefix = format!("single_candidate_author:{}:", expected.id);
+        // Task 5（序 3，tasks 1.2 迁移面）：等待收口的 reservation 锚改读显式
+        // 载体——A 接力取 `repair_reservation` 原键（不再取「ledger 最后一个
+        // 前缀键」：C 教学占位会被误当业务键）；无预领的原调用取当前业务键
+        //（最后一个非教学前缀键）；两者皆无 ⇒ None（无 A 接力锚，fresh 校验
+        // 退回 phase/source 对照）。等待保留原 key；fresh 重入不 reserve 第二次。
         let provider_start_reservation_key = expected
-            .provider_start_ledger
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry
-                    .provider_start_idempotency_key
-                    .starts_with(&reservation_prefix)
-            })
-            .map(|entry| entry.provider_start_idempotency_key.clone());
+            .repair_reservation
+            .as_ref()
+            .map(|reservation| reservation.provider_start_idempotency_key.clone())
+            .or_else(|| current_sc_author_business_key(&expected));
         // 候选 source hash：上一版 candidate source 的 durable content hash
         // （对账证据；装载失败不阻塞等待收口——fresh 返修的真实装载点自会
         // fail-closed）。
@@ -940,6 +951,32 @@ impl WorkspaceEngine {
         self.complete_review(ProviderCompletion::plain(readable, None), verdict)
             .await;
     }
+}
+
+/// Task 5（序 3，tasks 1.2 迁移面）：当前业务链最后一个**非教学** SC author
+/// 启动键（前缀匹配且 `provider_attempt_key == None` 的最大数字后缀条目）
+/// ——原调用重入与等待收口共用的幂等锚。不取「ledger 最后一个前缀键」
+/// （C 教学占位会被误当业务键），也不取「全 ledger 长度」（人门键与教学
+/// 条目会把序号顶偏）。
+fn current_sc_author_business_key(
+    record: &crate::product::models::WorkspaceSessionRecord,
+) -> Option<String> {
+    let prefix = format!("single_candidate_author:{}:", record.id);
+    record
+        .provider_start_ledger
+        .iter()
+        .filter(|entry| {
+            entry.provider_start_idempotency_key.starts_with(&prefix)
+                && entry.provider_attempt_key.is_none()
+        })
+        .filter_map(|entry| {
+            entry
+                .provider_start_idempotency_key
+                .strip_prefix(&prefix)
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+        })
+        .max()
+        .map(|ordinal| format!("{prefix}{ordinal}"))
 }
 
 fn format_compiler_diagnostics(

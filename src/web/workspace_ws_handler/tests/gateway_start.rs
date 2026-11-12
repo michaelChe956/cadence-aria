@@ -159,6 +159,7 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
         workspace_type: WorkspaceType::WorkItemPlan,
         stage: WorkspaceStage::Running,
         messages: vec![],
+        sc_generation_teaching_windows: Vec::new(),
         artifact: None,
         author_provider: ProviderName::ClaudeCode,
         reviewer_provider: Some(ProviderName::Codex),

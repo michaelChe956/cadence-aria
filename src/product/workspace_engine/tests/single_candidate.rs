@@ -1533,7 +1533,6 @@ mod sg3a1_structure_gate {
 // A1（REQ-WG-01/REQ-WG-02）：候选门与终编译依赖图奇偶性（大文件守卫拆分）。
 include!("single_candidate/author_structure_gate_typed.rs");
 include!("single_candidate/structure_parity.rs");
-// 5.3（REQ-WSC-24 残留）：Final Compile 环失败透传 Structure（大文件守卫拆分）。
 include!("single_candidate/structure_failure_passthrough.rs");
 // F5 契约机械校验前移（contract_prerevision）用例按大文件守卫(>1200 行)拆分至子文件内联。
 include!("single_candidate/contract_prerevision.rs");
@@ -1549,3 +1548,4 @@ include!("single_candidate/anchor_t17.rs");
 include!("single_candidate/author_structure_gate_reredrive.rs");
 // Task 4（REQ-WSC-28C）：教学重驱真实启动的同步回填接线用例拆分至子文件内联。
 include!("single_candidate/teaching_window_launch_observation.rs");
+include!("single_candidate/teaching_window_key_migration.rs");

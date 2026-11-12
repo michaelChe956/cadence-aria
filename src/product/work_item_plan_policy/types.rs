@@ -712,7 +712,19 @@ pub fn next_sc_author_launch_ordinal(record: &WorkspaceSessionRecord) -> usize {
         .provider_start_ledger
         .iter()
         .filter_map(|entry| entry.provider_start_idempotency_key.strip_prefix(&prefix))
-        .filter_map(|suffix| suffix.parse::<usize>().ok())
+        .filter_map(|suffix| match suffix.parse::<usize>() {
+            Ok(ordinal) => Some(ordinal),
+            // Task 2 评审 Minor-5（Task 5 落地）：畸形后缀不参与序号派生
+            //（无条目 ⇒ 0、新键不冲突），但不再静默——留 debug 观测面。
+            Err(_) => {
+                tracing::debug!(
+                    session_id = %record.id,
+                    suffix,
+                    "sc author launch ordinal skipped malformed suffix"
+                );
+                None
+            }
+        })
         .max()
         .map_or(0, |max| max + 1)
 }

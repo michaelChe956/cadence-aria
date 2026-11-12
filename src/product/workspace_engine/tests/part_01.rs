@@ -319,6 +319,7 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         workspace_type: WorkspaceType::Story,
         stage: WorkspaceStage::PrepareContext,
         messages: Vec::new(),
+        sc_generation_teaching_windows: Vec::new(),
         artifact: None,
         author_provider: ProviderName::ClaudeCode,
         reviewer_provider: Some(ProviderName::Codex),
