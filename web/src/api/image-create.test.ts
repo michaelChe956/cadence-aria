@@ -15,7 +15,6 @@ const vendorsSettings = {
       base_url: "https://images.example.com",
       api_key_masked: "sk-***",
       models: ["gpt-image-2.6-flare"],
-      default_model: "gpt-image-2.6-flare",
       recommended_models: ["gpt-image-2.6-flare"],
       available: true,
     },
@@ -23,7 +22,6 @@ const vendorsSettings = {
       base_url: "",
       api_key_masked: "",
       models: [],
-      default_model: "",
       recommended_models: ["MiniMax-H3-Image"],
       available: false,
     },
@@ -141,7 +139,6 @@ describe("image create api", () => {
         image_id: "image-1",
         vendor: "gpt",
         model: "gpt-image-2.6-flare",
-        selection: "explicit",
         reference_source: "uploaded",
       }),
     );
@@ -183,9 +180,29 @@ describe("image create api", () => {
       image_id: "image-1",
       vendor: "gpt",
       model: "gpt-image-2.6-flare",
-      selection: "explicit",
       reference_source: "uploaded",
     });
+  });
+
+  it("rejects an empty model before sending the request", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({}),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      generateImage("session-1", {
+        prompt: "draw from text",
+        size: "auto",
+        quality: "auto",
+        background: "auto",
+        output_format: "png",
+        model: "  ",
+        use_previous: false,
+        reference: null,
+      }),
+    ).rejects.toThrow("请先选择图片生成模型");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("omits the reference image but still sends model and use_previous", async () => {
@@ -195,7 +212,6 @@ describe("image create api", () => {
         image_id: "image-1",
         vendor: "minimax",
         model: "MiniMax-H3-Image",
-        selection: "auto",
         reference_source: "none",
       }),
     );
@@ -207,7 +223,7 @@ describe("image create api", () => {
       quality: "auto",
       background: "auto",
       output_format: "png",
-      model: "auto",
+      model: "MiniMax-H3-Image",
       use_previous: false,
       reference: null,
     });
@@ -215,7 +231,7 @@ describe("image create api", () => {
     const form = fetchMock.mock.calls[0][1]?.body as FormData;
     expect(form.has("reference")).toBe(false);
     expect(form.has("input_fidelity")).toBe(false);
-    expect(form.get("model")).toBe("auto");
+    expect(form.get("model")).toBe("MiniMax-H3-Image");
     expect(form.get("use_previous")).toBe("false");
   });
 

@@ -277,7 +277,7 @@ function GenerationImageEntry({
   );
 }
 
-/** 生成图下方的标注：家 · 模型，以及轮转与参考图来源。 */
+/** 生成图下方的标注：家 · 模型，以及参考图来源。 */
 function generationMetaText(
   entry: Extract<ImageChatEntry, { type: "generation_image" }>,
   vendor: ImageVendor,
@@ -286,9 +286,6 @@ function generationMetaText(
     IMAGE_VENDOR_LABELS[vendor],
     entry.model ?? "",
   ];
-  if (entry.selection === "auto") {
-    parts.push("自动轮转");
-  }
   if (entry.referenceSource === "previous") {
     parts.push("基于上一张图");
   }

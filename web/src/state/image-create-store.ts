@@ -12,7 +12,6 @@ import {
 } from "../api/image-create";
 import {
   DEFAULT_IMAGE_PARAMS,
-  IMAGE_MODEL_AUTO,
   IMAGE_VENDORS,
   type GenerateImageRequest,
   type ImageCreateParams,
@@ -73,7 +72,8 @@ const initialState: ImageCreateState = {
   params: {
     prompt: "",
     ...DEFAULT_IMAGE_PARAMS,
-    model: IMAGE_MODEL_AUTO,
+    // 未加载设置前没有任何可用供应方，模型为空串。
+    model: "",
     use_previous: true,
   },
   referenceImage: null,
@@ -124,22 +124,51 @@ export function configuredImageVendors(
 }
 
 /**
- * 所选模型若不属于任何已配置凭据的供应方的清单，则重置为自动轮转。
+ * 已配置凭据且清单非空的供应方列表：它们的模型才会出现在下拉里。
+ */
+export function availableImageVendors(
+  settings: MaskedSettings | null,
+): ImageVendor[] {
+  if (!settings) {
+    return [];
+  }
+  return IMAGE_VENDORS.filter(
+    (vendor) =>
+      isImageVendorConfigured(settings.vendors[vendor]) &&
+      settings.vendors[vendor].models.length > 0,
+  );
+}
+
+/**
+ * 初始选中项：第一个可用供应方的清单首个 id；没有可用供应方时为空串。
+ */
+function initialImageModel(settings: MaskedSettings | null): string {
+  for (const vendor of availableImageVendors(settings)) {
+    const first = settings?.vendors[vendor].models[0];
+    if (first) {
+      return first;
+    }
+  }
+  return "";
+}
+
+/**
+ * 所选模型若不再属于任何可用供应方的清单，则重置为初始选中项。
  * 设置变化后调用，避免留下已下线的模型。
  */
-function resolveConfiguredModel(
+function resolveSelectedModel(
   settings: MaskedSettings | null,
   model: string,
 ): string {
-  if (!settings || model === IMAGE_MODEL_AUTO) {
-    return model;
+  if (!settings || !model) {
+    return initialImageModel(settings);
   }
-  for (const vendor of configuredImageVendors(settings)) {
+  for (const vendor of availableImageVendors(settings)) {
     if (settings.vendors[vendor].models.includes(model)) {
       return model;
     }
   }
-  return IMAGE_MODEL_AUTO;
+  return initialImageModel(settings);
 }
 
 function buildEntries(record: SessionRecord): ImageChatEntry[] {
@@ -180,10 +209,9 @@ function buildEntries(record: SessionRecord): ImageChatEntry[] {
           prompt: result.prompt,
           mediaType: result.media_type,
           imageUrl: imageUrl(record.session.id, result.image_id),
-          // 旧会话记录没有这四个字段，读出为 undefined。
+          // 旧会话记录没有这三个字段，读出为 undefined。
           vendor: result.vendor,
           model: result.model,
-          selection: result.selection,
           referenceSource: result.reference_source,
           timestamp: result.ts,
         };
@@ -543,6 +571,11 @@ export const useImageCreateStore = create<
 
   generate: async () => {
     const { currentSession, params, referenceImage } = get();
+    // 模型由用户手动选择：未选择时不发请求，直接给出可读错误。
+    if (!params.model.trim()) {
+      set({ error: "请先选择图片生成模型" });
+      throw new Error("请先选择图片生成模型");
+    }
     if (!currentSession || get().isBusy) {
       return;
     }
@@ -571,7 +604,6 @@ export const useImageCreateStore = create<
         imageUrl: imageUrl(sessionId, result.image_id),
         vendor: result.vendor,
         model: result.model,
-        selection: result.selection,
         referenceSource: result.reference_source,
         timestamp: new Date().toISOString(),
       });
@@ -605,7 +637,7 @@ export const useImageCreateStore = create<
         params: {
           ...state.params,
           ...settings.defaults,
-          model: resolveConfiguredModel(settings, state.params.model),
+          model: resolveSelectedModel(settings, state.params.model),
         },
       }));
     } catch (error) {
@@ -630,7 +662,7 @@ export const useImageCreateStore = create<
         params: {
           ...state.params,
           ...settings.defaults,
-          model: resolveConfiguredModel(settings, state.params.model),
+          model: resolveSelectedModel(settings, state.params.model),
         },
       }));
     } catch (error) {

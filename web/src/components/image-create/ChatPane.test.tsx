@@ -86,7 +86,6 @@ describe("ChatPane", () => {
           imageUrl: "/api/image-create/sessions/session-1/images/new",
           vendor: "gpt",
           model: "gpt-image-2.6-flare",
-          selection: "auto",
           referenceSource: "previous",
           timestamp: "2026-08-03T10:00:00Z",
         },
@@ -108,8 +107,9 @@ describe("ChatPane", () => {
     const badges = screen.getAllByTestId("image-create-generation-meta");
     expect(badges).toHaveLength(1);
     expect(badges[0]).toHaveTextContent(
-      "GPT · gpt-image-2.6-flare · 自动轮转 · 基于上一张图",
+      "GPT · gpt-image-2.6-flare · 基于上一张图",
     );
+    expect(badges[0]).not.toHaveTextContent("自动轮转");
   });
 
   it("F-15 上传参考图与 MiniMax 显式选择的标注", () => {
@@ -125,7 +125,6 @@ describe("ChatPane", () => {
           imageUrl: "/api/image-create/sessions/session-1/images/minimax",
           vendor: "minimax",
           model: "MiniMax-H3-Image",
-          selection: "explicit",
           referenceSource: "uploaded",
           timestamp: "2026-08-03T10:00:00Z",
         },

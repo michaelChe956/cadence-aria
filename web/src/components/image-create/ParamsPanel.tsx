@@ -2,7 +2,6 @@ import { ChevronDown, LoaderCircle, SlidersHorizontal, Wand2 } from "lucide-reac
 import { useEffect, useState } from "react";
 import {
   IMAGE_BACKGROUND_OPTIONS,
-  IMAGE_MODEL_AUTO,
   IMAGE_OUTPUT_FORMAT_OPTIONS,
   IMAGE_QUALITY_OPTIONS,
   IMAGE_SIZE_OPTIONS,
@@ -16,13 +15,14 @@ import {
   type MaskedSettings,
 } from "../../api/types/image-create";
 import {
+  availableImageVendors,
   configuredImageVendors,
   useImageCreateStore,
 } from "../../state/image-create-store";
 import { CustomSelect, type CustomSelectOption } from "./CustomSelect";
 
-/** 自动轮转选项的文案。 */
-const AUTO_ROTATE_LABEL = "自动轮转（GPT ⇄ MiniMax）";
+/** 没有可用供应方时的提示。 */
+const NO_VENDOR_HINT = "请先在设置里配置并启用至少一个供应方";
 
 function useElapsedSeconds(active: boolean): number {
   const [seconds, setSeconds] = useState(0);
@@ -50,33 +50,22 @@ export function ParamsPanel() {
   const [paramsExpanded, setParamsExpanded] = useState(false);
   const elapsed = useElapsedSeconds(isBusy);
 
-  // 只列出已配置凭据的供应方的模型。
+  // 只列出已配置凭据且清单非空的供应方的模型 id。
   const configuredVendors = configuredImageVendors(settings);
-  const modelOptions: CustomSelectOption[] = [
-    { value: IMAGE_MODEL_AUTO, label: AUTO_ROTATE_LABEL },
-    ...configuredVendors.flatMap((vendor) =>
-      (settings?.vendors[vendor].models ?? []).map((model) => ({
-        value: model,
-        label: `${IMAGE_VENDOR_LABELS[vendor]} · ${model}`,
-      })),
-    ),
-  ];
-  const selectedVendor = modelVendor(params.model, settings, configuredVendors);
-  const modelDisplay =
-    params.model === IMAGE_MODEL_AUTO
-      ? AUTO_ROTATE_LABEL
-      : selectedVendor
-        ? `${IMAGE_VENDOR_LABELS[selectedVendor]} · ${params.model}`
-        : params.model;
+  const availableVendors = availableImageVendors(settings);
+  const modelOptions: CustomSelectOption[] = availableVendors.flatMap((vendor) =>
+    (settings?.vendors[vendor].models ?? []).map((model) => ({
+      value: model,
+      label: model,
+    })),
+  );
+  const selectedVendor = modelVendor(params.model, settings, availableVendors);
+  const modelDisplay = params.model || "未选择模型";
 
-  // MiniMax 不支持质量与背景；自动轮转时这两个参数仅对 GPT 生效。
+  // MiniMax 不支持质量与背景；显式选择 MiniMax 模型时这两个参数置灰。
   const minimaxSelected = selectedVendor === "minimax";
   const vendorParamsDisabled = isBusy || minimaxSelected;
-  const vendorParamsHint = minimaxSelected
-    ? "MiniMax 不支持该参数"
-    : params.model === IMAGE_MODEL_AUTO
-      ? "仅对 GPT 生效"
-      : null;
+  const vendorParamsHint = minimaxSelected ? "MiniMax 不支持该参数" : null;
 
   // 会话内尚无生成图、或已选择上传参考图时，不携带上一张图。
   const hasGeneratedImage = entries.some((entry) => entry.type === "generation_image");
@@ -170,6 +159,11 @@ export function ParamsPanel() {
                 </p>
               ))
             : null}
+          {settings && modelOptions.length === 0 ? (
+            <p className="mt-1.5 text-xs text-[var(--aria-ink-muted)]">
+              {NO_VENDOR_HINT}
+            </p>
+          ) : null}
         </div>
         <div className="sm:col-span-2">
           <label className="flex min-h-11 items-center gap-2.5 text-sm font-semibold text-[var(--aria-ink)]">
@@ -234,7 +228,9 @@ export function ParamsPanel() {
         onClick={() => {
           generate().catch(() => {});
         }}
-        disabled={isBusy || !currentSession || !params.prompt.trim()}
+        disabled={
+          isBusy || !currentSession || !params.prompt.trim() || modelOptions.length === 0
+        }
         className="mt-4 inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[var(--aria-primary)] to-[#0e7490] px-4 py-3 text-sm font-semibold text-white shadow-[0_5px_16px_rgba(8,145,178,0.26)] transition-all duration-200 hover:translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2 active:translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {isBusy ? (
@@ -253,16 +249,16 @@ export function ParamsPanel() {
   );
 }
 
-/** 模型 id 归属的供应方：只依据已配置凭据的家的清单判定。 */
+/** 模型 id 归属的供应方：只依据可用供应方的清单判定。 */
 function modelVendor(
   model: string,
   settings: MaskedSettings | null,
-  configuredVendors: ImageVendor[],
+  availableVendors: ImageVendor[],
 ): ImageVendor | null {
-  if (!settings || model === IMAGE_MODEL_AUTO) {
+  if (!settings || !model) {
     return null;
   }
-  for (const vendor of configuredVendors) {
+  for (const vendor of availableVendors) {
     if (settings.vendors[vendor].models.includes(model)) {
       return vendor;
     }

@@ -108,6 +108,10 @@ export async function generateImage(
   sessionId: string,
   request: GenerateImageRequest,
 ): Promise<ImageGenerationResponse> {
+  // 模型由用户手动选择，必填非空：空值不发出请求。
+  if (!request.model.trim()) {
+    throw new Error("请先选择图片生成模型");
+  }
   const form = new FormData();
   form.append("prompt", request.prompt);
   form.append("size", request.size);

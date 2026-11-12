@@ -17,9 +17,8 @@ function vendorSettings(
   return {
     base_url: "https://api.openai.com/v1",
     api_key_masked: "sk-****1234",
-    models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
-    default_model: "gpt-image-2.6-flare",
-    recommended_models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
+    models: ["gpt-image-2.6-flare", "gpt-image-2.6"],
+    recommended_models: ["gpt-image-2.6-flare", "gpt-image-2.6"],
     available: true,
     ...overrides,
   };
@@ -35,7 +34,6 @@ function maskedSettings(
         base_url: "https://api.minimax.chat/v1",
         api_key_masked: "mm-****5678",
         models: ["MiniMax-H3-Image"],
-        default_model: "MiniMax-H3-Image",
         recommended_models: ["MiniMax-H3-Image"],
       }),
       ...overrides,
@@ -54,7 +52,6 @@ const unconfiguredVendor = vendorSettings({
   base_url: "",
   api_key_masked: "",
   models: [],
-  default_model: "",
   available: true,
 });
 
@@ -67,7 +64,7 @@ beforeEach(() => {
       quality: "auto",
       background: "auto",
       output_format: "png",
-      model: "auto",
+      model: "gpt-image-2.6-flare",
       use_previous: true,
     },
     settings: maskedSettings(),
@@ -151,7 +148,7 @@ describe("ParamsPanel", () => {
     await waitFor(() => expect(catchSpy).toHaveBeenCalledTimes(1));
   });
 
-  it("F-07 列出自动轮转与已配置凭据的供应方模型，未配置的供应方给出提示", async () => {
+  it("F-07 模型下拉只列出已配置且可用的供应方的模型 id", async () => {
     const user = userEvent.setup();
     useImageCreateStore.setState({
       settings: maskedSettings({ minimax: unconfiguredVendor }),
@@ -162,15 +159,33 @@ describe("ParamsPanel", () => {
     await user.click(screen.getByRole("combobox", { name: "模型" }));
 
     expect(
-      screen.getByRole("option", { name: "自动轮转（GPT ⇄ MiniMax）" }),
+      screen.getByRole("option", { name: "gpt-image-2.6-flare" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("option", { name: "GPT · gpt-image-2.6" }),
+      screen.getByRole("option", { name: "gpt-image-2.6" }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("option", { name: "MiniMax · MiniMax-H3-Image" }),
+      screen.queryByRole("option", { name: "MiniMax-H3-Image" }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByText(/自动轮转/)).not.toBeInTheDocument();
     expect(screen.getByText("MiniMax 未配置，可在设置中添加")).toBeInTheDocument();
+  });
+
+  it("F-07b 没有可用供应方时禁用生成按钮并给出提示", () => {
+    useImageCreateStore.setState({
+      settings: maskedSettings({
+        gpt: unconfiguredVendor,
+        minimax: unconfiguredVendor,
+      }),
+      currentSession: sessionRecord(),
+    });
+
+    render(<ParamsPanel />);
+
+    expect(screen.getByRole("button", { name: "生成图片" })).toBeDisabled();
+    expect(
+      screen.getByText("请先在设置里配置并启用至少一个供应方"),
+    ).toBeInTheDocument();
   });
 
   it("F-08 显式选择 MiniMax 模型后质量与背景置灰", async () => {
@@ -180,9 +195,9 @@ describe("ParamsPanel", () => {
     render(<ParamsPanel />);
 
     expect(screen.getByRole("combobox", { name: "质量" })).not.toBeDisabled();
-    expect(screen.getByText("仅对 GPT 生效")).toBeInTheDocument();
+    expect(screen.queryByText("仅对 GPT 生效")).not.toBeInTheDocument();
 
-    await selectCustomOption(user, "模型", "MiniMax · MiniMax-H3-Image");
+    await selectCustomOption(user, "模型", "MiniMax-H3-Image");
 
     expect(screen.getByRole("combobox", { name: "质量" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "背景" })).toBeDisabled();
@@ -244,8 +259,9 @@ describe("ParamsPanel", () => {
 
     render(<ParamsPanel />);
 
-    expect(screen.getByText(/图片生成通常需要 1-3 分钟/)).toBeInTheDocument();
-    expect(screen.queryByText(/gpt-image-2/)).not.toBeInTheDocument();
+    const notice = screen.getByRole("status");
+    expect(notice).toHaveTextContent(/图片生成通常需要 1-3 分钟/);
+    expect(notice).not.toHaveTextContent(/gpt-image-2/);
     expect(
       screen.queryByRole("combobox", { name: "参考图保真度" }),
     ).not.toBeInTheDocument();

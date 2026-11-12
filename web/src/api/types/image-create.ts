@@ -28,10 +28,6 @@ export const IMAGE_VENDOR_LABELS: Record<ImageVendor, string> = {
   minimax: "MiniMax",
 };
 
-/** 生成请求 model 字段的保留值：自动轮转。 */
-export const IMAGE_MODEL_AUTO = "auto";
-
-export type ImageModelSelection = "auto" | "explicit";
 export type ImageReferenceSource = "none" | "uploaded" | "previous";
 
 export type ImageCreateProviderOption = {
@@ -82,7 +78,7 @@ export const DEFAULT_IMAGE_PARAMS: DefaultImageParams = {
 /** 参数面板状态。input_fidelity 已移除。 */
 export type ImageCreateParams = DefaultImageParams & {
   prompt: string;
-  /** "auto" 或模型 id。 */
+  /** 模型 id：用户从已配置且可用的供应方清单中手动选择，必填非空。 */
   model: string;
   use_previous: boolean;
 };
@@ -126,7 +122,6 @@ export type ImageGenerationResult = {
   legacy_pending: boolean;
   vendor?: ImageVendor;
   model?: string;
-  selection?: ImageModelSelection;
   reference_source?: ImageReferenceSource;
   ts: string;
 };
@@ -165,7 +160,6 @@ export type ImageGenerationResponse = {
   image_id: string;
   vendor: ImageVendor;
   model: string;
-  selection: ImageModelSelection;
   reference_source: ImageReferenceSource;
 };
 
@@ -179,7 +173,6 @@ export type MaskedVendorSettings = {
   base_url: string;
   api_key_masked: string;
   models: string[];
-  default_model: string;
   recommended_models: string[];
   available: boolean;
 };
@@ -198,7 +191,6 @@ export type VendorSettingsUpdate = {
   api_key_action: ApiKeyAction;
   api_key?: string | null;
   models?: string[] | null;
-  default_model?: string | null;
 };
 
 /** 某家缺省 = 该家全部保留。 */

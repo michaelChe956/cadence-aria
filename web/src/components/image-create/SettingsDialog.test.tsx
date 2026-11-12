@@ -7,13 +7,10 @@ import { SettingsDialog } from "./SettingsDialog";
 
 const originalState = useImageCreateStore.getState();
 // 单家视图用中间变量构造（非常量字面量）：字段增删时不会触发多余属性检查。
-// default_model 是轮转机制下线前的过渡字段，类型侧随后会移除；此处保留可让
-// 夹具在类型变更前后都成立。
 const gptVendor = {
   base_url: "https://api.openai.com/v1",
   api_key_masked: "sk-****1234",
   models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
-  default_model: "gpt-image-2.6-flare",
   recommended_models: ["gpt-image-2.6", "gpt-image-2.6-flare"],
   available: true,
 };
@@ -21,7 +18,6 @@ const minimaxVendor = {
   base_url: "https://api.minimax.chat/v1",
   api_key_masked: "mm-****5678",
   models: ["MiniMax-H3-Image"],
-  default_model: "MiniMax-H3-Image",
   recommended_models: ["MiniMax-H3-Image", "MiniMax-H3-Image-2"],
   available: true,
 };
