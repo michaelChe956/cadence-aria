@@ -70,7 +70,6 @@ impl InitialPlanCompileDurableContext {
             publication_provenance_content_hash: None,
         }
     }
-
     pub fn validate(&self) -> Result<(), String> {
         let required = [
             ("source_revision_id", self.source_revision_id.as_deref()),
@@ -370,7 +369,6 @@ pub fn execute_initial_plan_compile(
         &transaction.plan_id,
         "preparing",
     );
-
     transaction.status = WorkItemPlanCompileStatus::Validating;
     transaction.step_cursor = "validating".to_string();
     transaction.outline_to_work_item_id = prepared
@@ -417,7 +415,6 @@ pub fn execute_initial_plan_compile(
         &transaction.plan_id,
         "validating",
     );
-
     transaction.validator_findings = prepared.validation_report.findings.clone();
     if prepared.validation_report.has_errors() {
         transaction.status = WorkItemPlanCompileStatus::Failed;
@@ -434,7 +431,6 @@ pub fn execute_initial_plan_compile(
             &prepared.validation_report.findings,
         ));
     }
-
     transaction.status = WorkItemPlanCompileStatus::Committing;
     transaction.step_cursor = "committing".to_string();
     stores
@@ -596,12 +592,10 @@ impl WorkspaceEngine {
         self.enter_work_item_plan_compile_with_auto_confirmation(false, false)
             .await;
     }
-
     pub(crate) async fn enter_policy_valid_work_item_plan_compile(&mut self) {
         self.enter_work_item_plan_compile_with_auto_confirmation(true, false)
             .await;
     }
-
     /// 批 2 P3：调用方已在同一确认链、同一 engine 锁内完成
     /// `ensure_confirmation_trust_ready`（`handle_confirm` 的 SC Approval 臂与
     /// `close_human_gate` Approve 臂——两处在直入 compile 前均已做 trust 按需
@@ -611,7 +605,6 @@ impl WorkspaceEngine {
         self.enter_work_item_plan_compile_with_auto_confirmation(true, true)
             .await;
     }
-
     /// F-42/F-49：收口仍处 Active 的 HumanConfirm 门节点。
     ///
     /// F-42：确认链（SC 人门 approve → Final Compile → Confirmed）离开 human_confirm
@@ -660,7 +653,6 @@ impl WorkspaceEngine {
             .await;
         }
     }
-
     async fn enter_work_item_plan_compile_with_auto_confirmation(
         &mut self,
         auto_confirm: bool,
@@ -806,7 +798,6 @@ impl WorkspaceEngine {
             }
         }
     }
-
     pub(crate) async fn complete_policy_valid_work_item_plan(
         &mut self,
         work_item_count: usize,
@@ -838,7 +829,6 @@ impl WorkspaceEngine {
         .await;
         Ok(())
     }
-
     pub(crate) async fn enter_work_item_plan_compile_recovery(&mut self, summary: Option<String>) {
         self.transition_stage(WorkspaceStage::HumanConfirm).await;
         let _ = self
@@ -873,7 +863,6 @@ impl WorkspaceEngine {
                 .await;
         }
     }
-
     pub(crate) fn mark_latest_compile_transaction_recovery_required(&self, message: &str) -> bool {
         let Ok(store) = self.work_item_plan_store() else {
             return false;
@@ -906,9 +895,7 @@ impl WorkspaceEngine {
         tx.updated_at = chrono::Utc::now().to_rfc3339();
         store.put_compile_transaction(&tx).is_ok()
     }
-
     // ─── 批 2 P3（REQ-WIGA-02/12）：trust/compile 停点的 plan_question 写清 ───
-
     /// 批 2 P3：本次 compile 入口是否为自动确认臂（与 compile 完成后的
     /// auto-confirm 判据同一表达式：显式 policy-valid 入口，且
     /// run_policy=AutoIfValid 或 SC Approval 相位）。
@@ -1079,13 +1066,10 @@ impl WorkspaceEngine {
     /// close(Running) 与 WaitingForHuman 写入均不清快照）原样保留，不做重置。
     ///
     /// 预算口径（Task 4，工作包 1.5）：`manual_repairs_remaining` := 统一权威
-    /// 余额（`author_rewrite_balance`：门快照净余额 − 预算域自动段净扣减，
-    /// 余额未知 ⇒ 0 保守）；预算域自动段随同一 CAS 结转清零
-    /// （`carried_author_rewrite_budget`，防后续读双计）；`attempts_used =
-    /// repairs_used + manual_repairs_used` 从既有 durable 计数接续。trigger
-    /// 沿用 NativeHumanRequired、findings/repeated_fingerprints 为空（编译
-    /// 失败门无 review 分类语境，同 approval 门「不新增决策协议」的理由），
-    /// resumable=true（与 SC 门快照的既有可续语义一致）。
+    /// 余额（余额未知 ⇒ 0 保守）；自动段随同一 CAS 结转清零（防后续读双计）。
+    /// ⚠️ **未决（Reserved 未消费）预领扣减在场时，快照与账本都不吞并它**
+    /// （快照走既有初值公式、账本原样保留）——否则 Task 3 对账退款将找不到键 ⇒
+    /// 白占额度（owner 永久失去一个从未跑过的重写槽位）；与另两处门快照站点同口径。
     pub(crate) async fn ensure_human_gate_snapshot_after_compile_failure(&mut self) {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
@@ -1100,6 +1084,18 @@ impl WorkspaceEngine {
             return;
         };
         let history = record.run_history.clone();
+        let unconsumed_preclaim_present =
+            crate::product::workspace_engine::compile_failure_surface::unconsumed_preclaim_key(
+                &record,
+            )
+            .is_some();
+        let manual_repairs_remaining = if unconsumed_preclaim_present {
+            let b = crate::product::work_item_plan_policy::RunBudgets::default();
+            b.max_manual_repairs
+                .saturating_sub(history.manual_repairs_used)
+        } else {
+            self.author_rewrite_balance().unwrap_or(0)
+        };
         let snapshot = HumanGateSnapshot {
             candidate_recovery: None,
             findings: Vec::new(),
@@ -1107,7 +1103,7 @@ impl WorkspaceEngine {
             attempts_used: history
                 .repairs_used
                 .saturating_add(history.manual_repairs_used),
-            manual_repairs_remaining: self.author_rewrite_balance().unwrap_or(0),
+            manual_repairs_remaining,
             trigger: HumanReason::NativeHumanRequired,
             resumable: true,
             accepted_feedback_turns: Some(0),
@@ -1123,7 +1119,12 @@ impl WorkspaceEngine {
                 diagnostics: record.policy_diagnostics.clone(),
                 repair_reservation: record.repair_reservation.clone(),
                 provider_start_ledger: record.provider_start_ledger.clone(),
-                author_rewrite_budget: carried_author_rewrite_budget(&store, &record),
+                author_rewrite_budget: if unconsumed_preclaim_present {
+                    // 账本不清：保留原样，让 Task 3 对账能按键退款。
+                    record.author_rewrite_budget.clone()
+                } else {
+                    carried_author_rewrite_budget(&store, &record)
+                },
             },
         ) {
             Ok(saved) => {

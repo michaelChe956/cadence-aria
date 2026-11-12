@@ -616,7 +616,20 @@ impl WorkspaceEngine {
                     .saturating_add(history.manual_repairs_used),
                 // 工作包 1.5：SC 改道臂快照净余额 := 门快照余额输入（未决
                 // 预领在场时为既有初值公式）；结转清零见 platform_gate_carried_budget。
-                manual_repairs_remaining: gate_budget,
+                // ⚠️ **仅平台编译失败轮**可用统一余额：评审 finding 驱动的轮次
+                // （review-driven）是全新 logical gate，其持久化面**不**结转清段
+                // （`platform_gate_carried_budget` 对非平台轮原样保留账本）⇒ 若
+                // 读侧此时也用「已扣净余额」，后续每次读余额都会再减同一笔未付
+                // 扣减 ⇒ **双扣**。故非平台轮沿用既有重置公式（重置合法：自动段
+                // 未沉入该快照、账本继续可读，无双计）——与 `policy_routing.rs` 的
+                // `human_gate_snapshot` 同一边界。
+                manual_repairs_remaining: if platform_round {
+                    gate_budget
+                } else {
+                    RunBudgets::default()
+                        .max_manual_repairs
+                        .saturating_sub(history.manual_repairs_used)
+                },
                 trigger: HumanReason::RepairBudgetExhausted,
                 resumable: self.session.run_policy == RunPolicy::Interactive,
                 accepted_feedback_turns: Some(0),
