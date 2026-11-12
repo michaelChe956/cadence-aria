@@ -362,7 +362,6 @@ fn ensure_version_repairs_current_version_without_appending_duplicate() {
     write_json(&story_path, &stale_story).unwrap();
 
     let ensured = store.ensure_version(input).unwrap();
-
     assert_eq!(ensured.version, 1);
     assert_eq!(
         store
@@ -1883,6 +1882,7 @@ fn cascade_d1_3b_policy_route_late_writes_rejected() {
         diagnostics: Vec::new(),
         repair_reservation: None,
         provider_start_ledger: Vec::new(),
+        author_rewrite_budget: session.author_rewrite_budget.clone(),
     };
 
     // 存活实体：policy route CAS 与失败投影原路径零变化。

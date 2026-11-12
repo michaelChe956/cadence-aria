@@ -839,6 +839,7 @@ impl WorkspaceEngine {
                     diagnostics: record.policy_diagnostics.clone(),
                     repair_reservation: record.repair_reservation.clone(),
                     provider_start_ledger: record.provider_start_ledger.clone(),
+                    author_rewrite_budget: record.author_rewrite_budget.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;

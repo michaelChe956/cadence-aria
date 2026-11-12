@@ -96,6 +96,7 @@ fn stopped_takeover_fixture_with_resumable_gate(resumable: bool) -> TakeoverFixt
                 diagnostics: Vec::new(),
                 repair_reservation: None,
                 provider_start_ledger: Vec::new(),
+                author_rewrite_budget: None,
             },
         )
         .expect("persist resumable stopped parent");

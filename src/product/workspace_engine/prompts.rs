@@ -1364,6 +1364,7 @@ mod is_logical_codebase_issue_tests {
             permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
             provisional_reviewer_provider: None,
             reviewer_enabled_at_start: None,
+            author_rewrite_budget: None,
             superpowers_enabled: true,
             openspec_enabled: true,
             session_status: WorkspaceSessionStatus::Open,

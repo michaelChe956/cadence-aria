@@ -261,6 +261,7 @@ fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_r
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        author_rewrite_budget: None,
         single_candidate_phase: None,
         work_item_plan_source_revision_ref: None,
         plan_candidate_ir_ref: None,
@@ -308,4 +309,217 @@ fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_r
         .policy_invocation(ReviewPhase::Verification, &cycle_key)
         .expect("同 key 已初评的 Verification 必须从 durable refs 重建,不得 AbortFatal");
     assert!(matches!(scope, ReviewInvocationScope::Verification { .. }));
+}
+
+/// Task 2 夹具：SingleCandidate 会话 + 落盘 store（预领 CAS 用）。
+fn sc_preclaim_session_fixture() -> (
+    tempfile::TempDir,
+    crate::product::lifecycle_store::LifecycleStore,
+    WorkspaceSessionRecord,
+) {
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
+    };
+    use crate::product::models::{ProviderName, WorkspaceType};
+    use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+
+    let temp = tempfile::tempdir().expect("root");
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::Interactive,
+                rollout_snapshot: false,
+            }),
+        })
+        .expect("create SC session");
+    (temp, store, session)
+}
+
+/// Task 2（工作包 3.1/3.2/1.3/5.3）：平台自动重写扣减与 author 重跑预领
+/// **同 session CAS** 落盘——预领键与扣减键同键，CAS 覆写后 durable 记录里
+/// 同时含预领 ledger 条目与对应的一条预算扣减（同盘原子）。
+#[test]
+fn platform_preclaim_charges_author_budget_in_same_cas() {
+    let (_temp, store, session) = sc_preclaim_session_fixture();
+    let action = RoutingAction::TriggerAggregateRepair {
+        findings: Vec::new(),
+    };
+    let (reservation, ledger, budget) =
+        provider_start_ledger_for_action(&session, &action, None, 0);
+    let reservation = reservation.expect("预领必须产出 repair reservation");
+    let budget = budget.expect("预领必须产出 author 重写预算域状态");
+    let preclaim_key = reservation.provider_start_idempotency_key.clone();
+    assert_eq!(
+        preclaim_key,
+        format!("single_candidate_author:{}:0", session.id),
+        "预领键形必须是 single_candidate_author:<session>:<n>"
+    );
+    assert_eq!(budget.auto_rewrite_charges.len(), 1, "预领一次只记一条扣减");
+    assert_eq!(
+        budget.auto_rewrite_charges[0].provider_start_idempotency_key, preclaim_key,
+        "扣减键必须等于预领键（幂等键去重的唯一事实）"
+    );
+    assert_eq!(budget.total_auto_rewrite_charges_ever, 1);
+
+    let stored = store
+        .compare_and_save_policy_route(
+            &session,
+            PolicyRoutePersist {
+                status: session.status.clone(),
+                single_candidate_phase: session.single_candidate_phase.clone(),
+                run_history: session.run_history.clone(),
+                scope: session.review_invocation_scope.clone(),
+                gate: session.human_gate_snapshot.clone(),
+                diagnostics: session.policy_diagnostics.clone(),
+                repair_reservation: Some(reservation),
+                provider_start_ledger: ledger,
+                author_rewrite_budget: Some(budget),
+            },
+        )
+        .expect("policy route CAS 落盘");
+    let persisted = stored
+        .author_rewrite_budget
+        .expect("预算域必须随同 CAS 落盘");
+    assert_eq!(persisted.auto_rewrite_charges.len(), 1);
+    assert_eq!(
+        persisted.auto_rewrite_charges[0].provider_start_idempotency_key,
+        preclaim_key
+    );
+    assert_eq!(persisted.total_auto_rewrite_charges_ever, 1);
+    assert!(
+        stored
+            .provider_start_ledger
+            .iter()
+            .any(|entry| entry.provider_start_idempotency_key == preclaim_key),
+        "预领 ledger 与预算扣减必须同盘（一次 CAS）"
+    );
+}
+
+/// Task 2（工作包 5.3）：同键重放不得双扣——**两层防线分别钉住**：
+/// ① 生产路径重放（CAS 冲突后用同一份未变的 expected 重算）⇒ 领域从同一 base
+/// 重建，扣减条数与累计数都不得翻倍；
+/// ② L1 纯函数层键命中（base 已含该键）⇒ 原样返回，产出与首次**逐字一致**；
+/// ③ L2 durable 层：重放 CAS 被 expected 全量比对挡下（Conflict），
+/// durable 记录仍只有一条扣减与一条预领 ledger 条目。
+#[test]
+fn replayed_preclaim_does_not_double_charge() {
+    let (_temp, store, session) = sc_preclaim_session_fixture();
+    let action = RoutingAction::TriggerAggregateRepair {
+        findings: Vec::new(),
+    };
+    let (reservation, ledger, first) = provider_start_ledger_for_action(&session, &action, None, 0);
+    let reservation = reservation.expect("预领必须产出 repair reservation");
+    let first = first.expect("预领必须产出 author 重写预算域状态");
+    let preclaim_key = reservation.provider_start_idempotency_key.clone();
+    // 生产路径的重放（CAS 冲突后引擎用**同一份未变的 expected** 重算）：
+    // 领域从同一 base 重建 ⇒ 仍只记一条扣减、累计不翻倍。
+    let (retry_reservation, _retry_ledger, retry) =
+        provider_start_ledger_for_action(&session, &action, None, 0);
+    let retry_reservation = retry_reservation.expect("重算必须产出 repair reservation");
+    let retry = retry.expect("重算必须产出 author 重写预算域状态");
+    assert_eq!(
+        retry_reservation.provider_start_idempotency_key, preclaim_key,
+        "重算必须落在同一预领键上"
+    );
+    assert_eq!(retry.auto_rewrite_charges.len(), 1, "重算只允许一条扣减");
+    assert_eq!(
+        retry.total_auto_rewrite_charges_ever, 1,
+        "重算不得让累计扣减翻倍"
+    );
+    // L1 纯函数层：base 已含该键 ⇒ 键命中 ⇒ 原样返回（**连 charged_at 都不变**）。
+    let mut replay_base = session.clone();
+    replay_base.author_rewrite_budget = Some(first.clone());
+    let (replayed_reservation, _replayed_ledger, replayed) =
+        provider_start_ledger_for_action(&replay_base, &action, None, 0);
+    let replayed_reservation = replayed_reservation.expect("重放必须产出 repair reservation");
+    let replayed = replayed.expect("重放必须产出 author 重写预算域状态");
+    assert_eq!(
+        replayed_reservation.provider_start_idempotency_key, preclaim_key,
+        "重放必须落在同一预领键上"
+    );
+    assert_eq!(
+        replayed.auto_rewrite_charges.len(),
+        1,
+        "同键重放只允许一条扣减"
+    );
+    assert_eq!(
+        replayed.total_auto_rewrite_charges_ever, 1,
+        "同键重放不得让累计扣减翻倍"
+    );
+    assert_eq!(
+        replayed, first,
+        "键命中的重放产出必须与首次逐字一致（幂等写）"
+    );
+
+    let _stored = store
+        .compare_and_save_policy_route(
+            &session,
+            PolicyRoutePersist {
+                status: session.status.clone(),
+                single_candidate_phase: session.single_candidate_phase.clone(),
+                run_history: session.run_history.clone(),
+                scope: session.review_invocation_scope.clone(),
+                gate: session.human_gate_snapshot.clone(),
+                diagnostics: session.policy_diagnostics.clone(),
+                repair_reservation: Some(reservation.clone()),
+                provider_start_ledger: ledger.clone(),
+                author_rewrite_budget: Some(first),
+            },
+        )
+        .expect("首次预领 CAS 落盘");
+    // 重放同一 CAS（stale expected）⇒ expected 比对冲突，绝不二次落盘。
+    let replay_store = store
+        .compare_and_save_policy_route(
+            &session,
+            PolicyRoutePersist {
+                status: session.status.clone(),
+                single_candidate_phase: session.single_candidate_phase.clone(),
+                run_history: session.run_history.clone(),
+                scope: session.review_invocation_scope.clone(),
+                gate: session.human_gate_snapshot.clone(),
+                diagnostics: session.policy_diagnostics.clone(),
+                repair_reservation: Some(reservation),
+                provider_start_ledger: ledger,
+                author_rewrite_budget: Some(replayed),
+            },
+        )
+        .expect_err("重放 CAS 必须被 expected 比对挡下");
+    assert!(
+        matches!(
+            replay_store,
+            crate::product::json_store::ProductStoreError::Conflict { .. }
+        ),
+        "重放必须是冲突而非静默二次落盘"
+    );
+    let reloaded = store
+        .get_workspace_session(&session.id)
+        .expect("reload session");
+    let persisted = reloaded.author_rewrite_budget.expect("预算域已落盘");
+    assert_eq!(
+        persisted.auto_rewrite_charges.len(),
+        1,
+        "重放后 durable 仍只有一条扣减"
+    );
+    assert_eq!(persisted.total_auto_rewrite_charges_ever, 1);
+    assert_eq!(
+        reloaded
+            .provider_start_ledger
+            .iter()
+            .filter(|entry| entry.provider_start_idempotency_key == preclaim_key)
+            .count(),
+        1,
+        "重放后 durable ledger 的预领键仍只登记一次"
+    );
 }

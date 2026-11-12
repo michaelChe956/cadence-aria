@@ -19,6 +19,10 @@ pub struct PolicyRoutePersist {
     pub diagnostics: Vec<crate::product::work_item_plan_policy::PolicyDiagnostic>,
     pub repair_reservation: Option<crate::product::work_item_plan_policy::RepairReservation>,
     pub provider_start_ledger: Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
+    /// author 重写预算域（Task 2）：与预领 / ledger 同 CAS 落盘——扣减键即预领的
+    /// provider-start 幂等键，重放不重复扣。
+    pub author_rewrite_budget:
+        Option<crate::product::models::author_rewrite_budget::AuthorRewriteBudgetState>,
 }
 
 impl LifecycleStore {
@@ -83,6 +87,7 @@ impl LifecycleStore {
             diagnostics,
             repair_reservation,
             provider_start_ledger,
+            author_rewrite_budget,
         } = persist;
         validate_relative_id(&expected.id)?;
         let session_path = self.find_workspace_session_path(&expected.id)?;
@@ -107,9 +112,40 @@ impl LifecycleStore {
             stored.policy_diagnostics = diagnostics;
             stored.repair_reservation = repair_reservation;
             stored.provider_start_ledger = provider_start_ledger;
+            // Task 2：预算域扣减与预领 / ledger 同 CAS 落盘（expected 全量比对
+            // 不动——并发写在此冲突）。
+            stored.author_rewrite_budget = author_rewrite_budget;
             stored.updated_at = Utc::now().to_rfc3339();
             write_json(&locked_session_path, &stored)?;
             Ok(stored)
         })
     }
+}
+
+/// 读侧 legacy B1 自动重写计数（`auto_rewrites_used`）：读不到 ⇒ 0
+/// （老会话 / 从未跑过 SC compile 的情形）。
+pub fn legacy_b1_used(store: Option<&LifecycleStore>, session_id: &str) -> u32 {
+    store
+        .and_then(|store| {
+            store
+                .load_candidate_compile_status(session_id)
+                .ok()
+                .flatten()
+        })
+        .map_or(0, |status| status.auto_rewrites_used)
+}
+
+/// 预领扣减（Task 2）：按预领的 provider-start 幂等键扣减 author 重写预算域
+/// ——算法在 `models::author_rewrite_budget`，此处只做参数组装与时间戳。
+pub fn preclaim_budget(
+    state: &Option<crate::product::models::author_rewrite_budget::AuthorRewriteBudgetState>,
+    reservation: &crate::product::work_item_plan_policy::RepairReservation,
+    legacy_auto_rewrites_used: u32,
+) -> crate::product::models::author_rewrite_budget::AuthorRewriteBudgetState {
+    crate::product::models::author_rewrite_budget::with_preclaim_charge(
+        state.as_ref(),
+        &reservation.provider_start_idempotency_key,
+        legacy_auto_rewrites_used,
+        Utc::now().to_rfc3339(),
+    )
 }

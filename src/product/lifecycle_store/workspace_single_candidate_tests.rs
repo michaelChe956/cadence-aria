@@ -74,7 +74,6 @@ fn preclaimed_single_candidate_repair_key_starts_provider_once() {
         .reserve_single_candidate_provider_start(&session, &first_key)
         .expect("reserve first provider start");
     assert!(did_start);
-
     let repair_key = format!("single_candidate_author:{}:1", session.id);
     let reservation = crate::product::work_item_plan_policy::RepairReservation {
         token: format!("single_candidate_author_repair:{}:1", session.id),
@@ -105,6 +104,7 @@ fn preclaimed_single_candidate_repair_key_starts_provider_once() {
                 diagnostics: started.policy_diagnostics.clone(),
                 repair_reservation: Some(reservation),
                 provider_start_ledger: ledger,
+                author_rewrite_budget: started.author_rewrite_budget.clone(),
             },
         )
         .expect("preclaim repair provider key with the route");

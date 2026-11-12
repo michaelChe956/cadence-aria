@@ -16,7 +16,7 @@ pub mod utils;
 pub mod verification;
 pub mod work_item;
 pub mod workspace;
-mod workspace_policy_route;
+pub(crate) mod workspace_policy_route;
 mod workspace_single_candidate;
 pub mod worktree;
 

@@ -99,6 +99,11 @@ pub struct WorkspaceSession {
     pub repair_reservation: Option<crate::product::work_item_plan_policy::RepairReservation>,
     pub policy_diagnostics: Vec<crate::product::work_item_plan_policy::PolicyDiagnostic>,
     pub provider_start_ledger: Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
+    /// Task 2：author 重写预算域的 runtime 只读镜像（durable 单源 =
+    /// `WorkspaceSessionRecord.author_rewrite_budget`；与预领 / ledger 同 CAS
+    /// 落盘，见 `review/routing_scope.rs`）。
+    pub author_rewrite_budget:
+        Option<crate::product::models::author_rewrite_budget::AuthorRewriteBudgetState>,
     pub single_candidate_phase: Option<crate::product::models::SingleCandidatePhase>,
     pub work_item_plan_source_revision_ref: Option<String>,
     pub plan_candidate_ir_ref: Option<String>,
@@ -165,6 +170,7 @@ impl WorkspaceSession {
             repair_reservation: record.repair_reservation,
             policy_diagnostics: record.policy_diagnostics,
             provider_start_ledger: record.provider_start_ledger,
+            author_rewrite_budget: record.author_rewrite_budget,
             single_candidate_phase: record.single_candidate_phase,
             work_item_plan_source_revision_ref: record.work_item_plan_source_revision_ref,
             plan_candidate_ir_ref: record.plan_candidate_ir_ref,

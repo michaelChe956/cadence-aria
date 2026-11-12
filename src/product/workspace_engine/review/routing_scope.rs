@@ -2,6 +2,7 @@ use super::policy_routing::{GateSnapshotContext, policy_route_record_values, rou
 use super::*;
 use std::collections::BTreeSet;
 
+use crate::product::lifecycle_store::workspace_policy_route::{legacy_b1_used, preclaim_budget};
 use crate::product::work_item_plan_policy::classify::classify_finding;
 use crate::product::work_item_plan_policy::{
     FatalReason, FindingClass, FindingFingerprint, PolicyDiagnostic, ReviewFindingCategory,
@@ -16,14 +17,16 @@ use crate::product::work_item_plan_source_store::{
 /// gate turn open 的既有模式）。`RepairReservation{Reserved}` 标记该键可被接力
 /// run 消费：store 层 `reserve_single_candidate_provider_start` 命中 Reserved 预领
 /// 时推进为 ProviderStarted 并放行真启动；接力 run 因此不再与 run1 的旧键碰撞
-/// （phase==Generate 启发式下 attempt=len-1 会复用已消费的 run1 键）。
+/// （phase==Generate 启发式下 attempt=len-1 会复用已消费的 run1 键）。Task 2：预领键同时是 author 重写预算域的扣减幂等键（同 CAS 落盘，同键重放只扣一次）。
 fn provider_start_ledger_for_action(
     expected: &crate::product::models::WorkspaceSessionRecord,
     action: &RoutingAction,
     invoked_scope: Option<&ReviewInvocationScope>,
+    legacy_used: u32,
 ) -> (
     Option<crate::product::work_item_plan_policy::RepairReservation>,
     Vec<crate::product::work_item_plan_policy::ProviderStartLedgerEntry>,
+    Option<crate::product::models::author_rewrite_budget::AuthorRewriteBudgetState>,
 ) {
     if expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         || !matches!(action, RoutingAction::TriggerAggregateRepair { .. })
@@ -31,9 +34,9 @@ fn provider_start_ledger_for_action(
         return (
             expected.repair_reservation.clone(),
             expected.provider_start_ledger.clone(),
+            expected.author_rewrite_budget.clone(),
         );
     }
-
     let (reservation, entry) = preclaimed_repair_start(
         &expected.id,
         expected.provider_start_ledger.len(),
@@ -43,7 +46,8 @@ fn provider_start_ledger_for_action(
     );
     let mut provider_start_ledger = expected.provider_start_ledger.clone();
     provider_start_ledger.push(entry);
-    (Some(reservation), provider_start_ledger)
+    let next_budget = preclaim_budget(&expected.author_rewrite_budget, &reservation, legacy_used);
+    (Some(reservation), provider_start_ledger, Some(next_budget))
 }
 
 /// 预领的单次构造（持久化路径与内存路径共用，键形与字段口径不得漂移）。
@@ -260,7 +264,6 @@ impl WorkspaceEngine {
         if scope.validate_digest().is_ok() {
             return None;
         }
-
         let action = RoutingAction::AbortFatal {
             reason: FatalReason::ProtocolViolation,
             diagnostics: vec![PolicyDiagnostic {
@@ -447,7 +450,6 @@ impl WorkspaceEngine {
                 .validate_digest()
                 .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
         }
-
         let Some(store) = self.lifecycle_store.as_ref() else {
             return Err("lifecycle_store unavailable for review invocation scope".to_string());
         };
@@ -509,7 +511,6 @@ impl WorkspaceEngine {
         scope
             .validate_digest()
             .map_err(|error| format!("review invocation scope digest invalid: {error}"))?;
-
         if expected.review_invocation_scope.as_ref() == Some(&scope) {
             self.refresh_policy_state(&expected);
             return Ok(());
@@ -526,6 +527,7 @@ impl WorkspaceEngine {
                     diagnostics: expected.policy_diagnostics.clone(),
                     repair_reservation: expected.repair_reservation.clone(),
                     provider_start_ledger: expected.provider_start_ledger.clone(),
+                    author_rewrite_budget: expected.author_rewrite_budget.clone(),
                 },
             )
             .map_err(|error| format!("persist review invocation scope failed: {error}"))?;
@@ -708,8 +710,9 @@ impl WorkspaceEngine {
         let Some(expected) = expected else {
             return Ok(None);
         };
-        let (repair_reservation, provider_start_ledger) =
-            provider_start_ledger_for_action(expected, action, scope.as_ref());
+        let legacy_used = legacy_b1_used(Some(store), &expected.id);
+        let (repair_reservation, provider_start_ledger, author_rewrite_budget) =
+            provider_start_ledger_for_action(expected, action, scope.as_ref(), legacy_used);
         store
             .compare_and_save_policy_route(
                 expected,
@@ -722,6 +725,7 @@ impl WorkspaceEngine {
                     diagnostics,
                     repair_reservation,
                     provider_start_ledger,
+                    author_rewrite_budget,
                 },
             )
             .map(Some)
@@ -790,8 +794,13 @@ impl WorkspaceEngine {
                 self.session.provider_start_ledger.len(),
                 owner_run_id,
             );
+            let session_id = self.session.session_id.as_str();
+            let legacy_used = legacy_b1_used(self.lifecycle_store.as_ref(), session_id);
+            let current_budget = &self.session.author_rewrite_budget;
+            let next_budget = preclaim_budget(current_budget, &reservation, legacy_used);
             self.session.repair_reservation = Some(reservation);
             self.session.provider_start_ledger.push(entry);
+            self.session.author_rewrite_budget = Some(next_budget);
         }
         self.session.session_status = status;
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
@@ -855,6 +864,7 @@ impl WorkspaceEngine {
         self.session.repair_reservation = record.repair_reservation.clone();
         self.session.policy_diagnostics = record.policy_diagnostics.clone();
         self.session.provider_start_ledger = record.provider_start_ledger.clone();
+        self.session.author_rewrite_budget = record.author_rewrite_budget.clone();
         // stale worker CAS retry 重新评估前必须完整恢复 SingleCandidate immutable refs；
         // 否则 durable scope 已更新而内存仍指向旧 IR/report，会被误判为 protocol violation。
         self.session.work_item_plan_source_revision_ref =

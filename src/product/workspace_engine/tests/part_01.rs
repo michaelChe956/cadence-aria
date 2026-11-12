@@ -337,6 +337,7 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
+        author_rewrite_budget: None,
         single_candidate_phase: None,
         work_item_plan_source_revision_ref: None,
         plan_candidate_ir_ref: None,

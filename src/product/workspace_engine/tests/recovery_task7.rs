@@ -108,6 +108,7 @@ fn stopped_takeover_parent(
                 diagnostics: Vec::new(),
                 repair_reservation: None,
                 provider_start_ledger: Vec::new(),
+                author_rewrite_budget: parent.author_rewrite_budget.clone(),
             },
         )
         .expect("persist stopped takeover parent")
@@ -137,7 +138,6 @@ fn policy_cas_persists_repair_reservation_and_provider_start_ledger_atomically()
             started_at: None,
         },
     ];
-
     let saved = store
         .compare_and_save_policy_route(
             &expected,
@@ -150,6 +150,7 @@ fn policy_cas_persists_repair_reservation_and_provider_start_ledger_atomically()
                 diagnostics: expected.policy_diagnostics.clone(),
                 repair_reservation: Some(reservation.clone()),
                 provider_start_ledger: ledger.clone(),
+                author_rewrite_budget: expected.author_rewrite_budget.clone(),
             },
         )
         .expect("CAS save");
@@ -188,6 +189,7 @@ fn policy_cas_conflict_rejects_stale_record_and_routing_reloads_then_reevaluates
                 diagnostics: Vec::new(),
                 repair_reservation: None,
                 provider_start_ledger: Vec::new(),
+                author_rewrite_budget: stale.author_rewrite_budget.clone(),
             },
         )
         .expect_err("stale expected record must fail the CAS");
@@ -267,6 +269,7 @@ fn awaiting_human_reconnect_restores_durable_gate_without_provider_restart_or_ev
                 diagnostics: Vec::new(),
                 repair_reservation: None,
                 provider_start_ledger: Vec::new(),
+                author_rewrite_budget: parent.author_rewrite_budget.clone(),
             },
         )
         .expect("persist awaiting JSON");
@@ -277,7 +280,6 @@ fn awaiting_human_reconnect_restores_durable_gate_without_provider_restart_or_ev
             &persisted.id,
         )
         .expect("events before reconnect");
-
     let engine = recovery_engine(checkpoints, store.clone(), persisted.clone());
     match engine.build_session_state() {
         WsOutMessage::SessionState {
@@ -330,6 +332,7 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
                 diagnostics: Vec::new(),
                 repair_reservation: None,
                 provider_start_ledger: Vec::new(),
+                author_rewrite_budget: parent.author_rewrite_budget.clone(),
             },
         )
         .expect("persist stopped parent");
@@ -341,7 +344,6 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
             &persisted.id,
         )
         .expect("parent events");
-
     let engine = recovery_engine(checkpoints, store.clone(), persisted.clone());
     let child = engine
         .takeover_stopped_needs_human()
@@ -373,7 +375,6 @@ fn stopped_needs_human_takeover_creates_interactive_child_without_mutating_paren
         .expect("takeover event");
     assert_eq!(event.parent_session_id, persisted.id);
     assert_eq!(event.child_session_id, child.id);
-
     let repeated = store
         .takeover_stopped_needs_human(&persisted.id)
         .expect("repeated takeover must return the event child");
@@ -413,8 +414,7 @@ fn conversational_gate_takeover_inherits_snapshot_budget_and_refs() {
     let child = store
         .takeover_stopped_needs_human(&parent.id)
         .expect("takeover stopped run");
-
-    assert_eq!(
+        assert_eq!(
         child.run_policy,
         crate::product::work_item_plan_policy::RunPolicy::Interactive
     );
@@ -477,7 +477,6 @@ fn conversational_gate_takeover_replay_returns_same_child_without_parent_mutatio
     let second = store
         .takeover_stopped_needs_human(&parent.id)
         .expect("replayed takeover");
-
     assert_eq!(second.id, first.id);
     assert_eq!(
         std::fs::read(&parent_path).expect("read parent after replay"),
@@ -525,6 +524,7 @@ fn conversational_gate_takeover_rejects_fatal_or_persistence_diagnostic() {
                     }],
                     repair_reservation: None,
                     provider_start_ledger: Vec::new(),
+                    author_rewrite_budget: parent.author_rewrite_budget.clone(),
                 },
             )
             .expect("persist fatal diagnostic");
@@ -588,7 +588,6 @@ fn stopped_needs_human_takeover_recovers_precreated_child_without_event() {
             .expect("read absent event")
             .is_none()
     );
-
     let retried = store
         .takeover_stopped_needs_human(&parent.id)
         .expect("identity-idempotent child must allow event recovery");
@@ -672,6 +671,7 @@ fn completed_and_failed_replay_do_not_recreate_human_gate_or_start_provider() {
                     diagnostics: Vec::new(),
                     repair_reservation: None,
                     provider_start_ledger: Vec::new(),
+                    author_rewrite_budget: parent.author_rewrite_budget.clone(),
                 },
             )
             .expect("persist terminal JSON");
@@ -740,6 +740,7 @@ fn provider_start_ledger_claim_is_idempotent_across_generate_and_repair_recovery
                     diagnostics: Vec::new(),
                     repair_reservation: Some(reservation.clone()),
                     provider_start_ledger: Vec::new(),
+                    author_rewrite_budget: session.author_rewrite_budget.clone(),
                 },
             )
             .expect("persist interrupted operation");
@@ -751,7 +752,6 @@ fn provider_start_ledger_claim_is_idempotent_across_generate_and_repair_recovery
                 &persisted.id,
             )
             .expect("events before recovery");
-
         assert!(
             store
                 .claim_provider_start(&persisted.id, &reservation.provider_start_idempotency_key)

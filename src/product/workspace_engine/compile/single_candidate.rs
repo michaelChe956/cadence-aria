@@ -1135,6 +1135,7 @@ impl WorkspaceEngine {
                 diagnostics,
                 repair_reservation: record.repair_reservation.clone(),
                 provider_start_ledger: record.provider_start_ledger.clone(),
+                author_rewrite_budget: record.author_rewrite_budget.clone(),
             },
         ) {
             self.session.session_status = saved.status;

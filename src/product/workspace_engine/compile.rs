@@ -755,7 +755,6 @@ impl WorkspaceEngine {
             status: TimelineNodeStatus::Active,
         })
         .await;
-
         match self.run_work_item_plan_compile().await {
             Ok(outcome) => {
                 let work_item_count = outcome.work_items.len();
@@ -1126,6 +1125,7 @@ impl WorkspaceEngine {
                 diagnostics: record.policy_diagnostics.clone(),
                 repair_reservation: record.repair_reservation.clone(),
                 provider_start_ledger: record.provider_start_ledger.clone(),
+                author_rewrite_budget: record.author_rewrite_budget.clone(),
             },
         ) {
             Ok(saved) => {
