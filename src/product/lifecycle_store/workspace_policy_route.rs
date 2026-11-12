@@ -189,3 +189,38 @@ pub fn preclaim_budget(
         Utc::now().to_rfc3339(),
     )
 }
+
+/// Task 4（工作包 1.5）：author 重写**单一权威余额**的 durable 读侧组装——
+/// 全部执法点（`decide_route` 供参 / rescue 守卫 / 门快照构造）MUST 经此同
+/// 一事实源，不得一处读诊断计数、一处读预算域。输入全部取自 durable
+/// session 记录 + durable 编译状态读侧（不读 engine 内存镜像：reconcile
+/// 退款只写 durable、不刷镜像，读镜像会少算可用额度——Task 3 评审 Minor-3）。
+pub fn author_rewrite_balance(
+    store: &LifecycleStore,
+    record: &WorkspaceSessionRecord,
+    total: u32,
+) -> Option<u32> {
+    crate::product::models::author_rewrite_budget::available_author_rewrites(
+        &crate::product::models::author_rewrite_budget::AuthorRewriteBudgetInputs {
+            total,
+            human_gate_snapshot: record.human_gate_snapshot.as_ref(),
+            author_rewrite_budget: record.author_rewrite_budget.as_ref(),
+            legacy_auto_rewrites_used: legacy_b1_used(Some(store), &record.id),
+        },
+    )
+}
+
+/// Task 4：门快照建立/重建（快照净余额 := 权威余额）时的预算域结转——
+/// 自动段消费事实沉入快照 ⇒ 同 CAS 清段防后续读双计（老会话先冻 legacy
+/// 计数再清）。算法在 `models::author_rewrite_budget`，此处只做 durable 读侧组装。
+pub fn carried_author_rewrite_budget(
+    store: &LifecycleStore,
+    record: &WorkspaceSessionRecord,
+) -> Option<crate::product::models::author_rewrite_budget::AuthorRewriteBudgetState> {
+    Some(
+        crate::product::models::author_rewrite_budget::carried_forward_budget_state(
+            record.author_rewrite_budget.as_ref(),
+            legacy_b1_used(Some(store), &record.id),
+        ),
+    )
+}

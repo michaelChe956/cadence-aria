@@ -17,11 +17,13 @@
 use super::policy_routing::RoutingAction;
 use crate::product::work_item_plan_policy::classify::classify_finding;
 use crate::product::work_item_plan_policy::{
-    EvaluationDecision, FatalReason, FindingClass, FindingFingerprint, HumanReason, PlanOutcome,
-    PolicyDiagnostic, ReviewCycleState, ReviewFindingCategory, ReviewInvocationScope, ReviewPhase,
-    RunBudgets,
+    ClassifiedFinding, EvaluationDecision, FatalReason, FindingClass, FindingFingerprint,
+    HumanReason, PlanOutcome, PolicyDiagnostic, ReviewCycleState, ReviewFindingCategory,
+    ReviewInvocationScope, ReviewPhase, RunBudgets,
 };
-use crate::product::workspace_engine::compile_failure_surface::PLATFORM_COMPILE_FAILURE_FINDING_PREFIX;
+use crate::product::workspace_engine::compile_failure_surface::{
+    PLATFORM_COMPILE_FAILURE_FINDING_PREFIX, max_auto_rewrites,
+};
 use crate::web::workspace_ws_types::{ReviewVerdict, WorkItemPlanReviewVerdict};
 
 /// A3 / REQ-WSC-25（owner 2026-10-31 第 3 条，controller 批复）：平台合成
@@ -79,6 +81,105 @@ pub(super) fn merge_platform_compile_failure_origin(
     )
 }
 
+/// Task 4（工作包 1.5/2.1）：**平台编译失败轮**判据（分类后 findings 口径，
+/// 供 routing.rs 的 A 池 delta 分支与 policy_routing.rs 的门快照公式共用，
+/// 判据不得漂移）——与 [`rescue_platform_compile_failure_repair`] 的 verdict
+/// 内联判据同源：全部 actionable（分类后非 Advisory）finding 都带平台前缀
+/// [`PLATFORM_COMPILE_FAILURE_FINDING_PREFIX`]，且至少一条。混入任何模型
+/// finding（无前缀）⇒ 非平台轮（评审 finding 驱动，A 池口径不变）。
+pub(in crate::product::workspace_engine::review) fn is_platform_compile_failure_round(
+    findings: &[ClassifiedFinding],
+) -> bool {
+    let actionable = findings
+        .iter()
+        .filter(|finding| finding.class != FindingClass::Advisory)
+        .collect::<Vec<_>>();
+    !actionable.is_empty()
+        && actionable.iter().all(|finding| {
+            finding
+                .message
+                .starts_with(PLATFORM_COMPILE_FAILURE_FINDING_PREFIX)
+        })
+}
+
+/// Task 4（工作包 1.5）：门路由（EnterHumanGate / StopNeedsHuman）随同 CAS
+/// 携带的预算域。平台编译失败轮的新门快照以统一权威余额建立（快照净余额
+/// == 由 expected 重算的权威余额 ⇒ 自动段消费事实已沉入快照）⇒ 同 CAS
+/// 结转清段（老会话先冻 legacy 计数再清，防快照后读侧双计）。已由
+/// carry-forward 接续 durable 快照预算的（快照值 ≠ 权威余额，账本继续可读
+/// 不清）与非平台轮门（新 logical gate 重置公式合法——评审驱动的门是全新
+/// 逻辑门，自动段未沉入快照）都原样保留 expected 的预算域。
+pub(super) fn platform_gate_carried_budget(
+    expected: &crate::product::models::WorkspaceSessionRecord,
+    action: &RoutingAction,
+    legacy_used: u32,
+) -> Option<crate::product::models::author_rewrite_budget::AuthorRewriteBudgetState> {
+    let snapshot = match action {
+        RoutingAction::EnterHumanGate { snapshot } | RoutingAction::StopNeedsHuman { snapshot } => {
+            snapshot
+        }
+        _ => return expected.author_rewrite_budget.clone(),
+    };
+    // 未决（Reserved 未消费）预领扣减归 Task 3 对账路径处置（退款留痕 /
+    // 接力消费两态收敛）——本轮门快照不吞并它（快照走既有初值公式），
+    // 账本原样保留，否则对账退款将找不到键（留痕被清 = 白占额度）。
+    if crate::product::workspace_engine::compile_failure_surface::unconsumed_preclaim_key(expected)
+        .is_some()
+    {
+        return expected.author_rewrite_budget.clone();
+    }
+    if !is_platform_compile_failure_round(&snapshot.findings) {
+        return expected.author_rewrite_budget.clone();
+    }
+    let balance = crate::product::models::author_rewrite_budget::available_author_rewrites(
+        &crate::product::models::author_rewrite_budget::AuthorRewriteBudgetInputs {
+            total: max_auto_rewrites(),
+            human_gate_snapshot: expected.human_gate_snapshot.as_ref(),
+            author_rewrite_budget: expected.author_rewrite_budget.as_ref(),
+            legacy_auto_rewrites_used: legacy_used,
+        },
+    );
+    if balance != Some(snapshot.manual_repairs_remaining) {
+        return expected.author_rewrite_budget.clone();
+    }
+    Some(
+        crate::product::models::author_rewrite_budget::carried_forward_budget_state(
+            expected.author_rewrite_budget.as_ref(),
+            legacy_used,
+        ),
+    )
+}
+
+/// Task 4：门快照（平台编译失败轮）的净余额输入。存在未决（Reserved 未消费）
+/// 预领扣减时，该扣减由 Task 3 对账路径处置（退款留痕 / 接力消费），本轮门
+/// 快照不吞并它——退回既有「新 logical gate 初值」公式（账本不清、快照不沉
+/// 入，读侧 available = 快照净余额 − 账本净扣，无双计）；否则 := 统一权威
+/// 余额（余额未知 ⇒ 0 保守交门）。事实源一律 durable 记录。
+pub(super) fn gate_snapshot_author_budget(
+    store: Option<&crate::product::lifecycle_store::LifecycleStore>,
+    session_id: &str,
+) -> u32 {
+    let Some(store) = store else {
+        return 0;
+    };
+    let Ok(record) = store.get_workspace_session(session_id) else {
+        return 0;
+    };
+    if crate::product::workspace_engine::compile_failure_surface::unconsumed_preclaim_key(&record)
+        .is_some()
+    {
+        return RunBudgets::default()
+            .max_manual_repairs
+            .saturating_sub(record.run_history.manual_repairs_used);
+    }
+    crate::product::lifecycle_store::workspace_policy_route::author_rewrite_balance(
+        store,
+        &record,
+        max_auto_rewrites(),
+    )
+    .unwrap_or(0)
+}
+
 /// A3 / REQ-WSC-25（owner 2026-10-31 第 3 条，controller 批复）：纯平台
 /// 编译失败轮的返修资格复原。
 ///
@@ -88,13 +189,15 @@ pub(super) fn merge_platform_compile_failure_origin(
 ///   模型产出的新 finding 与同环重复仍必落人工门）；
 /// - verdict 的**全部** actionable finding 都带平台前缀（单源标识；混入
 ///   任何模型 finding → 不复原，守卫已在 evaluate 内把它们拦下）；
-/// - 本 cycle 的返修预算确实还有（`repairs_used < max_repairs`）——预算
-///   耗尽时 `RepairBudgetExhausted` 是真实结论，必须交人工门。
+/// - B 池（author 重写预算域）余额确实还有（`author_budget_available > 0`，
+///   durable 读侧组装）——余额耗尽时 `RepairBudgetExhausted` 是真实结论，
+///   必须交人工门；机械返修池 A 已耗尽不再阻断平台自动重写（工作包 2.2）。
 pub(super) fn rescue_platform_compile_failure_repair(
     decision: EvaluationDecision,
     phase: ReviewPhase,
-    cycle: &ReviewCycleState,
+    _cycle: &ReviewCycleState,
     verdict: &ReviewVerdict,
+    author_budget_available: Option<u32>,
 ) -> EvaluationDecision {
     if phase != ReviewPhase::Verification
         || !matches!(
@@ -121,7 +224,9 @@ pub(super) fn rescue_platform_compile_failure_repair(
     {
         return decision;
     }
-    if cycle.repairs_used >= RunBudgets::default().max_repairs {
+    // 工作包 2.2（Task 4）：守卫改读 B 池余额——A 池（cycle.repairs_used）
+    // 不再阻断平台自动重写；None（余额未知）与 0 同样不复原（保守交门）。
+    if author_budget_available.unwrap_or(0) == 0 {
         return decision;
     }
     let PlanOutcome::HumanRequired { findings, .. } = decision.outcome else {

@@ -314,6 +314,7 @@ fn gate_context(trigger: HumanReason) -> GateSnapshotContext {
             Some("WI-001.output_contracts[CT-001].capabilities"),
         )],
         trigger,
+        author_budget_available: None,
     }
 }
 

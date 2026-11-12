@@ -1,7 +1,5 @@
 use super::policy_routing::{GateSnapshotContext, policy_route_record_values, route_outcome};
 use super::*;
-use std::collections::BTreeSet;
-
 use crate::product::lifecycle_store::workspace_policy_route::{legacy_b1_used, preclaim_budget};
 use crate::product::work_item_plan_policy::classify::classify_finding;
 use crate::product::work_item_plan_policy::{
@@ -11,7 +9,7 @@ use crate::product::work_item_plan_policy::{
 use crate::product::work_item_plan_source_store::{
     SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
 };
-
+use std::collections::BTreeSet;
 /// k3 P0 接力键碰撞修复：SingleCandidate 的 TriggerAggregateRepair 在 Generate
 /// 迁移的同一 CAS 内原子预领下一把 author provider-start ledger 键（对齐 human
 /// gate turn open 的既有模式）。`RepairReservation{Reserved}` 标记该键可被接力
@@ -34,7 +32,7 @@ fn provider_start_ledger_for_action(
         return (
             expected.repair_reservation.clone(),
             expected.provider_start_ledger.clone(),
-            expected.author_rewrite_budget.clone(),
+            platform_gate_carried_budget(expected, action, legacy_used),
         );
     }
     let (reservation, entry) = preclaimed_repair_start(
@@ -1120,6 +1118,7 @@ pub(super) fn route_outcome_from_decision(
     history: &RunHistory,
     invocation: &ReviewInvocationScope,
     findings: Vec<ClassifiedFinding>,
+    author_budget_available: Option<u32>,
 ) -> RoutingAction {
     let (outcome, outcome_findings, repeated_fingerprints, trigger) = match &decision.outcome {
         PlanOutcome::HumanRequired {
@@ -1155,6 +1154,7 @@ pub(super) fn route_outcome_from_decision(
             findings: outcome_findings,
             repeated_fingerprints,
             trigger,
+            author_budget_available,
         },
     )
 }

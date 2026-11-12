@@ -557,9 +557,9 @@ pub(super) fn compile_failure_gate_fixture(
 /// R3（oracle 裁决）：SC plan 因 Final Compile 失败落 HumanConfirm 时必须补建
 /// human gate snapshot——否则 `handle_human_gate_feedback` 的硬前置
 /// （conversational_gate「human gate snapshot is missing」拒收）令该门上的
-/// 反馈入口形同虚设。预算口径沿用既有来源（routing_scope.rs
-/// `single_candidate_approval_gate` 等价构造）：
-/// `RunBudgets::default().max_manual_repairs − run_history.manual_repairs_used`，
+/// 反馈入口形同虚设。预算口径（Task 4，工作包 1.5）：统一权威余额
+/// （`author_rewrite_balance`：门快照净余额 − 预算域自动段净扣减），
+/// 编译失败事实已落 ⇒ 余额如实扣减；预算域自动段随同 CAS 结转清零。
 /// 从既有 durable 计数接续扣减，不臆造新预算常量。
 #[tokio::test]
 async fn compile_failure_human_confirm_rebuilds_gate_snapshot_and_accepts_feedback() {
@@ -586,8 +586,17 @@ async fn compile_failure_human_confirm_rebuilds_gate_snapshot_and_accepts_feedba
         .expect("R3: compile 失败落门必须补建 human gate snapshot");
     assert_eq!(
         snapshot.manual_repairs_remaining,
-        RunBudgets::default().max_manual_repairs - 1,
-        "预算接续而非重置：默认 max_manual_repairs(3) − manual_repairs_used(1)"
+        RunBudgets::default().max_manual_repairs,
+        "Task 4（工作包 1.5）：门快照净余额 := 统一权威余额（无快照 ⇒ 总额；\
+         预算域未建 ⇒ 自动段净扣 0；manual_repairs_used 不再是门快照公式来源）"
+    );
+    let settled = durable
+        .author_rewrite_budget
+        .as_ref()
+        .expect("预算域随门快照同 CAS 结转（防后续读双计）");
+    assert!(
+        settled.auto_rewrite_charges.is_empty() && settled.legacy_auto_rewrites_charged == 0,
+        "自动段已结转清零：再读权威余额 == 快照净余额（无双计）"
     );
     assert_eq!(
         snapshot.attempts_used, 3,
@@ -608,7 +617,7 @@ async fn compile_failure_human_confirm_rebuilds_gate_snapshot_and_accepts_feedba
     match opened {
         HumanGateCommandOutcome::TurnOpened {
             remaining_budget, ..
-        } => assert_eq!(remaining_budget, 1, "开门 remaining=2，turn 预留恰扣 1"),
+        } => assert_eq!(remaining_budget, 2, "开门 remaining=3，turn 预留恰扣 1"),
         other => panic!("expected TurnOpened, got {other:?}"),
     }
     let after = lifecycle
@@ -620,8 +629,8 @@ async fn compile_failure_human_confirm_rebuilds_gate_snapshot_and_accepts_feedba
             .as_ref()
             .expect("gate snapshot")
             .manual_repairs_remaining,
-        1,
-        "turn 预留后 durable 预算恰扣 1"
+        2,
+        "turn 预留后 durable 预算恰扣 1（3 → 2）"
     );
 }
 

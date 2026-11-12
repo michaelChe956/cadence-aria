@@ -251,13 +251,34 @@ async fn compile_failure_after_passed_initial_review_delegates_author_rerun() {
         engine.single_candidate_pending_revision_verdict().is_some(),
         "合成 verdict 必须注入 latest_review_verdict 供下一轮 author 回灌"
     );
-    // 尝试可序列观测（REQ-WSC-25）：本轮消耗 cycle 返修预算并计入复评轮。
+    // 尝试可序列观测（REQ-WSC-25）：自动重写必须消耗（可观测的）预算——
+    // 扣 author 重写池（B），不扣机械返修池（A）；复评观测计数照常递增。
     let cycle = persisted
         .run_history
         .review_cycles
         .get(&cycle_key)
         .expect("cycle recorded");
-    assert_eq!(cycle.repairs_used, 1, "自动重写必须消耗（可观测的）预算");
+    assert_eq!(
+        cycle.repairs_used, 0,
+        "A 池轮内 repairs_used 不递增（平台轮摘出 A 池）"
+    );
+    assert_eq!(
+        persisted.run_history.repairs_used, 0,
+        "A 池会话观测 repairs_used 不递增"
+    );
+    let budget = persisted
+        .author_rewrite_budget
+        .as_ref()
+        .expect("B 池预领扣减已落（自动重写必须消耗可观测的预算）");
+    assert_eq!(
+        budget
+            .auto_rewrite_charges
+            .iter()
+            .filter(|charge| charge.refunded_at.is_none())
+            .count(),
+        1,
+        "B 池净扣 1（自动重写必须消耗可观测的预算）"
+    );
     assert_eq!(
         cycle.verification_count, 1,
         "合成轮必须计入 cycle 复评计数（可序列观测）"

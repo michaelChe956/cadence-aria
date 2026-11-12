@@ -189,14 +189,31 @@ pub fn clear_auto_segment(state: &mut AuthorRewriteBudgetState) {
     state.legacy_auto_rewrites_charged = 0;
 }
 
+/// 门快照建立/重建的结转（Task 4）：快照净余额 := 权威余额后，自动段消费
+/// 事实已沉入快照 ⇒ 预算域同 CAS 清段（charges 清空、baseline 归零、
+/// `total_ever` 保留）。预算域未建（老会话）时先把 legacy 读侧计数冻进
+/// baseline 再清零——否则快照建立后的读侧会再次归并 legacy 计数（双计）。
+pub fn carried_forward_budget_state(
+    state: Option<&AuthorRewriteBudgetState>,
+    legacy_auto_rewrites_used: u32,
+) -> AuthorRewriteBudgetState {
+    let mut carried = state.cloned().unwrap_or_else(|| AuthorRewriteBudgetState {
+        legacy_auto_rewrites_charged: legacy_auto_rewrites_used,
+        auto_rewrite_charges: Vec::new(),
+        total_auto_rewrite_charges_ever: legacy_auto_rewrites_used,
+    });
+    clear_auto_segment(&mut carried);
+    carried
+}
+
 #[cfg(test)]
 mod tests {
     use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason};
 
     use super::{
         AuthorRewriteBudgetInputs, AuthorRewriteBudgetState, AuthorRewriteCharge,
-        available_author_rewrites, clear_auto_segment, net_auto_charged, refund_charge,
-        with_preclaim_charge,
+        available_author_rewrites, carried_forward_budget_state, clear_auto_segment,
+        net_auto_charged, refund_charge, with_preclaim_charge,
     };
 
     /// 最小门快照夹具：净余额与 gate-local 事实（accepted_feedback_turns）显式传入。
@@ -358,5 +375,24 @@ mod tests {
         assert_eq!(net_auto_charged(Some(&state), 0), 0);
         // 历史累计不清零：编译成功 / 门结转后仍可观测总扣减次数。
         assert_eq!(state.total_auto_rewrite_charges_ever, 2);
+    }
+
+    #[test]
+    fn carried_forward_state_freezes_legacy_then_clears_segment() {
+        // 预算域未建（老会话）：legacy 冻进 baseline 后清零、total_ever 保留
+        // ——快照建立后读侧净扣 0（不再重复归并 legacy，无双计）。
+        let carried = carried_forward_budget_state(None, 2);
+        assert_eq!(carried.legacy_auto_rewrites_charged, 0);
+        assert!(carried.auto_rewrite_charges.is_empty());
+        assert_eq!(carried.total_auto_rewrite_charges_ever, 2);
+        assert_eq!(net_auto_charged(Some(&carried), 2), 0);
+        // 预算域已建：消费事实沉入快照 ⇒ 清段（幂等），total_ever 不减。
+        let charged = with_preclaim_charge(None, "key", 1, "t".to_string());
+        let carried = carried_forward_budget_state(Some(&charged), 1);
+        assert_eq!(net_auto_charged(Some(&carried), 2), 0);
+        assert_eq!(
+            carried.total_auto_rewrite_charges_ever,
+            charged.total_auto_rewrite_charges_ever
+        );
     }
 }

@@ -11,10 +11,11 @@ use crate::product::work_item_plan_policy::{
     evaluate,
 };
 #[path = "routing_platform_rescue.rs"]
-mod routing_platform_rescue;
+pub(super) mod routing_platform_rescue;
 use routing_platform_rescue::{
-    classification_error_action, legacy_work_item_plan_repair_finding,
-    merge_platform_compile_failure_origin, rescue_platform_compile_failure_repair,
+    classification_error_action, gate_snapshot_author_budget, is_platform_compile_failure_round,
+    legacy_work_item_plan_repair_finding, merge_platform_compile_failure_origin,
+    platform_gate_carried_budget, rescue_platform_compile_failure_repair,
 };
 use routing_scope::{route_outcome_from_decision, single_candidate_review_cycle};
 impl WorkspaceEngine {
@@ -526,6 +527,7 @@ impl WorkspaceEngine {
                 phase,
                 &cycle,
                 verdict,
+                self.author_rewrite_balance(),
             )
         };
         if raw_verdict == ReviewVerdictType::NeedsHuman
@@ -558,6 +560,11 @@ impl WorkspaceEngine {
         {
             decision.history_delta = RunHistoryDelta::default();
         }
+        // 工作包 1.5：门快照净余额输入（durable 读侧组装，单一事实源）与
+        // 平台轮判据——供 route_outcome 快照公式与下方 A 池 delta 分支共用。
+        let gate_budget =
+            gate_snapshot_author_budget(self.lifecycle_store.as_ref(), &self.session.session_id);
+        let platform_round = is_platform_compile_failure_round(&findings);
         let mut history = self.session.run_history.clone();
         if let Err(error) = decision
             .history_delta
@@ -572,6 +579,7 @@ impl WorkspaceEngine {
                 &history,
                 &invocation,
                 findings,
+                Some(gate_budget),
             );
             return Some((invocation, action, history));
         }
@@ -581,6 +589,7 @@ impl WorkspaceEngine {
             &history,
             &invocation,
             findings,
+            Some(gate_budget),
         );
         // SG6b（Interfaces「同 grant route 先于旧 policy/repair
         // reservation」）：SC 会话存在结构授权窗口（durable
@@ -605,9 +614,9 @@ impl WorkspaceEngine {
                 attempts_used: history
                     .repairs_used
                     .saturating_add(history.manual_repairs_used),
-                manual_repairs_remaining: RunBudgets::default()
-                    .max_manual_repairs
-                    .saturating_sub(history.manual_repairs_used),
+                // 工作包 1.5：SC 改道臂快照净余额 := 门快照余额输入（未决
+                // 预领在场时为既有初值公式）；结转清零见 platform_gate_carried_budget。
+                manual_repairs_remaining: gate_budget,
                 trigger: HumanReason::RepairBudgetExhausted,
                 resumable: self.session.run_policy == RunPolicy::Interactive,
                 accepted_feedback_turns: Some(0),
@@ -624,12 +633,19 @@ impl WorkspaceEngine {
             // Keep the cross-cycle session total for observability, while
             // consuming the automatic-repair budget only inside this artifact
             // cycle. Both increments are merged atomically before CAS.
+            // Task 4（工作包 2.1）：平台编译失败轮（author 重跑）摘出 A 池
+            // ——repairs_used 双计数（轮内 / 会话观测）均不递增，改扣 B 池
+            // （预领 CAS，见 provider_start_ledger_for_action）；评审 finding
+            // 驱动的返修仍按 A 池扣。复评观测计数（verification_count）在
+            // decision 侧合并，此处不动（REQ-WSC-25 可序列观测不回归）。
+            let (repairs_used_delta, cycle_repairs_used) =
+                if platform_round { (0, 0) } else { (1, 1) };
             let repair_delta = RunHistoryDelta {
-                repairs_used_delta: 1,
+                repairs_used_delta,
                 review_cycles_to_add: std::collections::BTreeMap::from([(
                     cycle_key,
                     ReviewCycleState {
-                        repairs_used: 1,
+                        repairs_used: cycle_repairs_used,
                         ..ReviewCycleState::default()
                     },
                 )]),

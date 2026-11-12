@@ -140,17 +140,17 @@ pub(crate) fn max_auto_rewrites() -> u32 {
 /// - 稳定码必须属候选自身无效族（否则 Gate）；
 /// - 依赖环的重复只看**结构指纹**（成员集合 + 边集合规范化摘要），作者换
 ///   措辞/改标题/换行都不会被判成新环（不白耗预算）；
-/// - 预算账本 `auto_rewrites_used` 会话内累加，编译成功才清零。
+/// - 预算 = 统一权威余额（工作包 1.5）：`author_budget_available` 由调用方
+///   从 durable 记录读侧组装；诊断计数 `auto_rewrites_used` 不再喂余额。
 pub(crate) fn decide_route(
     code: &str,
     fingerprint: Option<&str>,
     previous: Option<&CandidateCompileStatus>,
-    max_auto_rewrites: u32,
+    author_budget_available: Option<u32>,
 ) -> CandidateCompileRoute {
     if !is_auto_rewrite_code(code) {
         return CandidateCompileRoute::Gate;
     }
-    let used = previous.map_or(0, |status| status.auto_rewrites_used);
     let repeated = match (
         previous.and_then(|status| status.cycle_fingerprint.as_deref()),
         fingerprint,
@@ -161,7 +161,8 @@ pub(crate) fn decide_route(
             .saturating_add(1),
         _ => 1,
     };
-    let remaining = max_auto_rewrites.saturating_sub(used);
+    // None = 余额未知 ⇒ 保守交门（remaining = 0），不臆造满额。
+    let remaining = author_budget_available.unwrap_or(0);
     // 同一环重复＝plan 层修不了：提前停，不再白耗剩余预算。
     if fingerprint.is_some() && repeated >= 2 {
         return CandidateCompileRoute::Escalate {
@@ -287,17 +288,20 @@ pub(crate) fn cycle_fingerprint(failure: &PlanningCompileFailure) -> Option<Stri
 
 /// REQ-WSC-18：由 typed 失败派生 durable 候选编译事实（失败分支）。
 ///
-/// `previous` 是上一次尝试的事实（同一会话），用于结构指纹重复判定与预算
-/// 账本接续；`recorded_at` 由调用方给（不在此取时钟，便于测试）。
+/// `previous` 是上一次尝试的事实（同一会话），用于结构指纹重复判定与诊断
+/// 计数接续；`recorded_at` 由调用方给（不在此取时钟，便于测试）；余额由
+/// `author_budget_available`（统一权威余额，durable 读侧组装）决定。
 pub(crate) fn candidate_compile_status(
     previous: Option<&CandidateCompileStatus>,
     failure: &PlanningCompileFailure,
     recorded_at: String,
+    author_budget_available: Option<u32>,
 ) -> (CandidateCompileStatus, CandidateCompileRoute) {
     let code = failure.stable_code().to_string();
     let fingerprint = cycle_fingerprint(failure);
-    let max = max_auto_rewrites();
-    let route = decide_route(&code, fingerprint.as_deref(), previous, max);
+    // 诊断计数：AutoRewrite 派生时 +1（REQ-WSC-25 观测保留；不再是余额来源）。
+    let fp = fingerprint.as_deref();
+    let route = decide_route(&code, fp, previous, author_budget_available);
     let used = previous.map_or(0, |status| status.auto_rewrites_used);
     let (auto_rewrite, auto_rewrites_used) = match route {
         CandidateCompileRoute::Gate => (None, used),
@@ -367,7 +371,6 @@ pub(crate) fn cleared_candidate_compile_status(
         recorded_at,
     }
 }
-
 /// 完整诊断原文：失败身份 + 运行身份 + typed 渲染（逐字，不截断、不改写）。
 fn detail_text(failure: &PlanningCompileFailure) -> String {
     let mut detail = format!(
@@ -388,7 +391,6 @@ fn detail_text(failure: &PlanningCompileFailure) -> String {
     detail.push_str(&failure.render());
     detail
 }
-
 /// 面向 owner 的一句人话（完整、不截断）。
 pub(crate) fn owner_message(failure: &PlanningCompileFailure) -> String {
     match &failure.kind {
@@ -401,7 +403,6 @@ pub(crate) fn owner_message(failure: &PlanningCompileFailure) -> String {
         ),
     }
 }
-
 fn operational_owner_message(stable_code: &str, cause: &str) -> String {
     let cause = cause.trim();
     // 依赖环：producer 已经把真实环事实写成人话（含「请怎么做」），
@@ -416,7 +417,6 @@ fn operational_owner_message(stable_code: &str, cause: &str) -> String {
         format!("{prefix}：{cause}")
     }
 }
-
 /// 从 cause 中取出依赖环人话段（`dependency_cycle: <人话>` 之后、机器 id
 /// 段之前）。非环诊断返回 None。
 fn cycle_sentence(cause: &str) -> Option<String> {
@@ -428,7 +428,6 @@ fn cycle_sentence(cause: &str) -> Option<String> {
     let human = human.trim();
     (!human.is_empty()).then(|| human.to_string())
 }
-
 /// 稳定码 → 人话前缀（未知码不编造原因，只给通用前缀；码本身在 `code`
 /// 与 `detail` 里，不丢信息）。
 fn operational_code_label(stable_code: &str) -> &'static str {
@@ -445,7 +444,6 @@ fn operational_code_label(stable_code: &str) -> &'static str {
         _ => "最终编译失败",
     }
 }
-
 /// 「确认当前版本」在候选已编译不过时的平台侧拒收文案（REQ-WSC-19）。
 /// 三个事实一次说清：为什么不放行、同上一次编译为什么必然再失败、下一步
 /// 有哪两条路。
@@ -766,7 +764,7 @@ impl crate::product::workspace_engine::WorkspaceEngine {
 /// `Reserved`、且该键无实际启动观察（SG4a 口径：预领占位条目 started=true
 /// 但 provider/started_at 缺席，不构成启动证据）⇒ 返回该键（未真跑，可
 /// 回退）；已 `ProviderStarted` 或有实际启动观察 ⇒ `None`（真跑过，不退）。
-fn unconsumed_preclaim_key(
+pub(crate) fn unconsumed_preclaim_key(
     record: &crate::product::models::WorkspaceSessionRecord,
 ) -> Option<String> {
     let reservation = record.repair_reservation.as_ref()?;
@@ -835,12 +833,11 @@ mod tests {
             "完整原因不得被截断：{message}"
         );
     }
-
     #[test]
     fn candidate_compile_status_binds_failure_to_candidate() {
         let failure = operational("final_compile_prepare_failed", "boom");
         let (status, route) =
-            candidate_compile_status(None, &failure, "2026-10-31T00:00:00Z".to_string());
+            candidate_compile_status(None, &failure, "2026-10-31T00:00:00Z".to_string(), Some(3));
         assert!(
             matches!(
                 route,
@@ -892,7 +889,6 @@ mod tests {
         assert!(message.contains("结构校验"), "{message}");
         assert!(message.contains("dependency_cycle"), "{message}");
     }
-
     #[test]
     fn same_structural_cycle_stops_auto_rewrite_instead_of_burning_budget() {
         // REQ-WSC-22：同一依赖环（结构指纹相同）第二次出现即提前停，不白耗预算。
@@ -903,7 +899,7 @@ mod tests {
         );
         let failure = operational("final_compile_prepare_failed", &cause);
         let (first, first_route) =
-            candidate_compile_status(None, &failure, "2026-10-31T00:00:00Z".to_string());
+            candidate_compile_status(None, &failure, "2026-10-31T00:00:00Z".to_string(), Some(3));
         assert_eq!(
             first_route,
             CandidateCompileRoute::AutoRewrite {
@@ -916,9 +912,12 @@ mod tests {
             Some(fingerprint.as_str())
         );
         assert_eq!(first.auto_rewrites_used, 1);
-
-        let (second, second_route) =
-            candidate_compile_status(Some(&first), &failure, "2026-10-31T00:05:00Z".to_string());
+        let (second, second_route) = candidate_compile_status(
+            Some(&first),
+            &failure,
+            "2026-10-31T00:05:00Z".to_string(),
+            Some(2),
+        );
         assert_eq!(
             second_route,
             CandidateCompileRoute::Escalate {
@@ -935,7 +934,27 @@ mod tests {
         );
         assert_eq!(auto_rewrite.repeated, Some(2));
     }
-
+    #[test]
+    fn decide_route_reads_unified_balance_only() {
+        // 工作包 1.5（Task 4）：余额事实源 = 统一权威余额（第四参）——
+        // previous.auto_rewrites_used 只是诊断计数，不再喂余额。
+        let code = "final_compile_prepare_failed";
+        let failure = operational(code, "boom");
+        let previous = candidate_compile_status(None, &failure, String::new(), Some(3)).0;
+        let route = |available| decide_route(code, None, Some(&previous), available);
+        assert!(matches!(
+            route(Some(0)),
+            CandidateCompileRoute::Escalate { remaining: 0, .. }
+        ));
+        assert!(matches!(
+            route(Some(2)),
+            CandidateCompileRoute::AutoRewrite { remaining: 1, .. }
+        ));
+        assert!(matches!(
+            route(None),
+            CandidateCompileRoute::Escalate { remaining: 0, .. }
+        ));
+    }
     #[test]
     fn different_cycle_structure_keeps_auto_rewrite_but_shares_budget() {
         // 换成另一个环（结构指纹不同）＝新事实，仍允许重写，但预算账本连续。
@@ -955,11 +974,13 @@ mod tests {
             None,
             &operational("final_compile_prepare_failed", &first_cause),
             "2026-10-31T00:00:00Z".to_string(),
+            Some(3),
         );
         let (second, route) = candidate_compile_status(
             Some(&first),
             &operational("final_compile_prepare_failed", &second_cause),
             "2026-10-31T00:05:00Z".to_string(),
+            Some(2),
         );
         assert_eq!(
             route,
@@ -971,13 +992,13 @@ mod tests {
         );
         assert_eq!(second.auto_rewrites_used, 2);
     }
-
     #[test]
     fn exhausted_budget_escalates_even_for_a_new_cycle() {
         let mut previous = candidate_compile_status(
             None,
             &operational("final_compile_prepare_failed", "boom"),
             "2026-10-31T00:00:00Z".to_string(),
+            Some(3),
         )
         .0;
         previous.auto_rewrites_used = max_auto_rewrites();
@@ -991,6 +1012,7 @@ mod tests {
             Some(&previous),
             &operational("final_compile_prepare_failed", &cause),
             "2026-10-31T00:09:00Z".to_string(),
+            Some(0),
         );
         assert_eq!(
             route,
@@ -1001,7 +1023,6 @@ mod tests {
             "预算用尽即停并交人工门：{route:?}"
         );
     }
-
     #[test]
     fn structure_gate_rejection_keeps_existing_contract_without_auto_rewrite() {
         // REQ-SG-03 的结构门停点不属于本 change 的自动重写范围：不得静默改成
@@ -1010,6 +1031,7 @@ mod tests {
             None,
             &operational("final_compile_structure_rejected", "structure rejected"),
             "2026-10-31T00:00:00Z".to_string(),
+            None,
         );
         assert_eq!(route, CandidateCompileRoute::Gate);
         assert!(status.auto_rewrite.is_none(), "结构门停点不得宣称自动重写");
@@ -1019,13 +1041,13 @@ mod tests {
             Some("final_compile_structure_rejected")
         );
     }
-
     #[test]
     fn non_candidate_invalid_code_never_opens_auto_rewrite() {
         let (status, route) = candidate_compile_status(
             None,
             &operational("persistence_failure", "store unavailable"),
             "2026-10-31T00:00:00Z".to_string(),
+            None,
         );
         assert_eq!(route, CandidateCompileRoute::Gate);
         assert!(
@@ -1033,14 +1055,12 @@ mod tests {
             "非候选无效类不得宣称自动重写"
         );
     }
-
     #[test]
     fn auto_rewrite_verdict_is_mechanical_revise_with_stable_structural_identity() {
         use crate::product::work_item_plan_policy::{FindingClassHint, ReviewFindingCategory};
         use crate::web::workspace_ws_types::{
             ReviewFindingSeverity, ReviewGate, ReviewVerdictType,
         };
-
         let fingerprint = "e".repeat(64);
         let detail = format!("failure_id: x\ncode: y{CYCLE_FINGERPRINT_MARKER}{fingerprint}");
         let failure = CandidateCompileFailure {

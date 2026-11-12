@@ -1,3 +1,4 @@
+use super::routing::routing_platform_rescue::is_platform_compile_failure_round;
 pub use crate::product::work_item_plan_policy::HumanGateSnapshot;
 use crate::product::work_item_plan_policy::{
     ClassifiedFinding, FatalReason, FindingFingerprint, HumanReason, PlanOutcome, PolicyDiagnostic,
@@ -12,6 +13,9 @@ pub struct GateSnapshotContext {
     pub findings: Vec<ClassifiedFinding>,
     pub repeated_fingerprints: Vec<FindingFingerprint>,
     pub trigger: HumanReason,
+    /// Task 4（工作包 1.5）：统一权威余额（durable 读侧组装）。平台编译
+    /// 失败轮 ⇒ 快照净余额 := 该值；其它轮保持「新 logical gate 初值」公式。
+    pub author_budget_available: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +97,19 @@ pub fn route_outcome(
 }
 
 fn human_gate_snapshot(context: &GateSnapshotContext, resumable: bool) -> HumanGateSnapshot {
+    // Task 4（工作包 1.5）：平台编译失败轮（author 重跑链）的门快照净余额
+    // := 统一权威余额（余额未知 ⇒ 0，保守交门）；自动段消费事实由持久化
+    // 面同 CAS 结转清零（platform_gate_carried_budget）。非平台轮（评审
+    // finding 驱动）是全新 logical gate，保持既有重置公式——重置合法：
+    // 自动段未沉入该快照、账本继续可读，无双计。
+    let manual_repairs_remaining = if is_platform_compile_failure_round(&context.findings) {
+        context.author_budget_available.unwrap_or(0)
+    } else {
+        context
+            .budgets
+            .max_manual_repairs
+            .saturating_sub(context.history.manual_repairs_used)
+    };
     HumanGateSnapshot {
         candidate_recovery: None,
         findings: context.findings.clone(),
@@ -101,10 +118,7 @@ fn human_gate_snapshot(context: &GateSnapshotContext, resumable: bool) -> HumanG
             .history
             .repairs_used
             .saturating_add(context.history.manual_repairs_used),
-        manual_repairs_remaining: context
-            .budgets
-            .max_manual_repairs
-            .saturating_sub(context.history.manual_repairs_used),
+        manual_repairs_remaining,
         trigger: context.trigger,
         resumable,
         // C2（REQ-HGC-01）：纯路由公式只服务新 logical gate——gate-local 轮次

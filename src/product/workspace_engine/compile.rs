@@ -4,6 +4,7 @@ use crate::product::entity_operation_store::{
     EntityOperationError, EntityOperationStore, EntityRunLease,
 };
 use crate::product::issue_automation_store::IssueAutomationStore;
+use crate::product::lifecycle_store::workspace_policy_route::carried_author_rewrite_budget;
 use crate::product::lifecycle_store::{
     CompileReservationError, PolicyRoutePersist, single_candidate_approval_attempt_id,
     single_candidate_compile_id,
@@ -17,7 +18,7 @@ use crate::product::work_item_plan_compiler::{
     PlanCandidatePublicationProvenance, verify_publish_freshness,
 };
 use crate::product::work_item_plan_policy::{
-    HumanGateSnapshot, HumanReason, PolicyDiagnostic, RunBudgets, RunPolicy, WorkItemPlanFlowKind,
+    HumanGateSnapshot, HumanReason, PolicyDiagnostic, RunPolicy, WorkItemPlanFlowKind,
 };
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use crate::product::work_item_split_validator::WorkItemSplitValidationReport;
@@ -1077,15 +1078,14 @@ impl WorkspaceEngine {
     /// 快照缺席的会话补建：在场快照（Interactive 链自 Approval 门接续保留的，
     /// close(Running) 与 WaitingForHuman 写入均不清快照）原样保留，不做重置。
     ///
-    /// 预算口径与 routing_scope.rs `single_candidate_approval_gate` /
-    /// policy_routing.rs `human_gate_snapshot` 等价构造一致：
-    /// `manual_repairs_remaining = RunBudgets::default().max_manual_repairs
-    /// − run_history.manual_repairs_used`（saturating）、`attempts_used =
-    /// repairs_used + manual_repairs_used`——从既有 durable 计数接续扣减，
-    /// 不臆造新预算常量。trigger 沿用 NativeHumanRequired、findings/
-    /// repeated_fingerprints 为空（编译失败门无 review 分类语境，同 approval
-    /// 门「不新增决策协议」的理由），resumable=true（与 SC 门快照的既有
-    /// 可续语义一致）。
+    /// 预算口径（Task 4，工作包 1.5）：`manual_repairs_remaining` := 统一权威
+    /// 余额（`author_rewrite_balance`：门快照净余额 − 预算域自动段净扣减，
+    /// 余额未知 ⇒ 0 保守）；预算域自动段随同一 CAS 结转清零
+    /// （`carried_author_rewrite_budget`，防后续读双计）；`attempts_used =
+    /// repairs_used + manual_repairs_used` 从既有 durable 计数接续。trigger
+    /// 沿用 NativeHumanRequired、findings/repeated_fingerprints 为空（编译
+    /// 失败门无 review 分类语境，同 approval 门「不新增决策协议」的理由），
+    /// resumable=true（与 SC 门快照的既有可续语义一致）。
     pub(crate) async fn ensure_human_gate_snapshot_after_compile_failure(&mut self) {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
@@ -1107,9 +1107,7 @@ impl WorkspaceEngine {
             attempts_used: history
                 .repairs_used
                 .saturating_add(history.manual_repairs_used),
-            manual_repairs_remaining: RunBudgets::default()
-                .max_manual_repairs
-                .saturating_sub(history.manual_repairs_used),
+            manual_repairs_remaining: self.author_rewrite_balance().unwrap_or(0),
             trigger: HumanReason::NativeHumanRequired,
             resumable: true,
             accepted_feedback_turns: Some(0),
@@ -1125,12 +1123,13 @@ impl WorkspaceEngine {
                 diagnostics: record.policy_diagnostics.clone(),
                 repair_reservation: record.repair_reservation.clone(),
                 provider_start_ledger: record.provider_start_ledger.clone(),
-                author_rewrite_budget: record.author_rewrite_budget.clone(),
+                author_rewrite_budget: carried_author_rewrite_budget(&store, &record),
             },
         ) {
             Ok(saved) => {
                 self.session.human_gate_snapshot = saved.human_gate_snapshot;
                 self.session.run_history = saved.run_history;
+                self.session.author_rewrite_budget = saved.author_rewrite_budget.clone();
             }
             Err(error) => {
                 // CAS 失败＝并发推进已抢先改写该 record：保持快照缺席的既有

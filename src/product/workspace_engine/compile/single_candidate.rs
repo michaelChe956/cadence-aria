@@ -232,11 +232,13 @@ impl WorkspaceEngine {
             .ok()
             .flatten();
         let now = chrono::Utc::now().to_rfc3339();
+        // 工作包 1.5：余额事实源 = 统一权威余额（durable 读侧组装，单一来源）。
         let (status, route) =
             crate::product::workspace_engine::compile_failure_surface::candidate_compile_status(
                 previous.as_ref(),
                 failure,
                 now.clone(),
+                self.author_rewrite_balance(),
             );
         let _ = lifecycle.save_candidate_compile_status(&self.session.session_id, &status);
         // REQ-WSC-25：追加写尝试流水（历史序列；与上面的「当前状态」分工）。
@@ -244,6 +246,22 @@ impl WorkspaceEngine {
             candidate_attempt_record_from_failure(failure, &status, now);
         self.append_candidate_attempt(&lifecycle, attempt);
         route
+    }
+
+    /// 工作包 1.5（Task 4）：author 重写**单一权威余额**的读侧组装——全部
+    /// 执法点（`candidate_compile_status` 供参、`rescue_platform_compile_
+    /// failure_repair` 守卫、三处门快照构造）MUST 经此同一事实源。事实源
+    /// 一律 **durable 记录**（Task 3 评审 Minor-3：reconcile 退款只写
+    /// durable、不刷 engine 内存镜像 ⇒ 严禁读 `self.session.author_rewrite_
+    /// budget` 镜像，否则少算可用额度）。`None` = 余额未知 ⇒ 调用方保守处理。
+    pub(crate) fn author_rewrite_balance(&self) -> Option<u32> {
+        let store = self.lifecycle_store.as_ref()?;
+        let record = store.get_workspace_session(&self.session.session_id).ok()?;
+        crate::product::lifecycle_store::workspace_policy_route::author_rewrite_balance(
+            store,
+            &record,
+            crate::product::workspace_engine::compile_failure_surface::max_auto_rewrites(),
+        )
     }
 
     /// REQ-WSC-18：编译成功 → 以「无失败」覆盖同一会话的候选编译事实，避免

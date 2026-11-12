@@ -18,7 +18,9 @@ use super::compile_failure_auto_rewrite::{compile_failure_fixture, drain_engine_
 use super::*;
 use crate::product::json_store::write_json;
 use crate::product::models::CandidateAutoRewritePhase;
-use crate::product::models::author_rewrite_budget::{net_auto_charged, with_preclaim_charge};
+use crate::product::models::author_rewrite_budget::{
+    AuthorRewriteBudgetInputs, available_author_rewrites, net_auto_charged, with_preclaim_charge,
+};
 use crate::product::work_item_plan_policy::{
     ProviderStartLedgerEntry, RepairReservation, RepairReservationState,
 };
@@ -329,4 +331,210 @@ async fn crash_window_converges_to_two_states_only() {
         "分支 B 收敛为「已扣已跑」：已启动的扣减不得回退"
     );
     assert_no_dangling_charge(&lifecycle_b, &session_b);
+}
+
+// ============ Task 4（工作包 1.3 读侧 / 1.5 / 2.1 / 2.2 / 2.5）============
+
+/// Task 4 夹具：改写 durable 编译状态的诊断计数（预算域未建 ⇒ 读侧归并
+/// 口径 net = used，余额 = total − used）。
+fn preset_legacy_auto_rewrites_used(lifecycle: &LifecycleStore, session_id: &str, used: u32) {
+    let mut status = lifecycle
+        .load_candidate_compile_status(session_id)
+        .expect("load fixture compile status")
+        .expect("status present");
+    status.auto_rewrites_used = used;
+    lifecycle
+        .save_candidate_compile_status(session_id, &status)
+        .expect("persist preset compile status");
+}
+
+/// Task 4 夹具：预置轮内 A 池计数（cycle.repairs_used）。
+fn preset_cycle_repairs_used(
+    lifecycle: &LifecycleStore,
+    session_id: &str,
+    cycle_key: &str,
+    repairs_used: u32,
+) {
+    let mut record = lifecycle
+        .get_workspace_session(session_id)
+        .expect("load fixture record");
+    record
+        .run_history
+        .review_cycles
+        .entry(cycle_key.to_string())
+        .and_modify(|cycle| cycle.repairs_used = repairs_used)
+        .or_insert_with(|| crate::product::work_item_plan_policy::ReviewCycleState {
+            repairs_used,
+            ..Default::default()
+        });
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist preset cycle repairs_used");
+}
+
+/// durable 读侧组装权威余额（与生产 `author_rewrite_balance` 同口径；
+/// 测试侧直接从 record 组装，便于断言 durable 事实本身）。
+fn durable_balance(
+    record: &crate::product::models::WorkspaceSessionRecord,
+    legacy_used: u32,
+) -> Option<u32> {
+    available_author_rewrites(&AuthorRewriteBudgetInputs {
+        total: crate::product::work_item_plan_policy::RunBudgets::default().max_manual_repairs,
+        human_gate_snapshot: record.human_gate_snapshot.as_ref(),
+        author_rewrite_budget: record.author_rewrite_budget.as_ref(),
+        legacy_auto_rewrites_used: legacy_used,
+    })
+}
+
+/// 工作包 2.1 / 2.5（Task 4）：平台编译失败轮的 author 重跑摘出机械返修
+/// 池 A——轮内 `cycle.repairs_used` 与会话观测 `run_history.repairs_used`
+/// 均不递增；B 池（author 重写预算域）净扣恰好 1（预领键一条未退扣减）。
+/// 对照改前基线：cycle.repairs_used == 1（平台轮挪用 A 池扣次）。
+#[tokio::test]
+async fn platform_round_consumes_no_a_pool_delta() {
+    let (_tmp, lifecycle, mut engine, _event_rx, cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    assert!(
+        engine.route_compile_failure_to_rewrite().await,
+        "平台轮必须被通道消费（真正委托 author 重跑）"
+    );
+    let persisted = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load persisted session");
+    let cycle = persisted
+        .run_history
+        .review_cycles
+        .get(&cycle_key)
+        .expect("cycle recorded");
+    assert_eq!(
+        cycle.repairs_used, 0,
+        "A 池轮内计数不递增（平台轮摘出 A 池）"
+    );
+    assert_eq!(
+        cycle.verification_count, 1,
+        "复评观测计数保持递增（REQ-WSC-25 可序列观测不回归）"
+    );
+    assert_eq!(
+        persisted.run_history.repairs_used, 0,
+        "A 池会话观测计数不递增"
+    );
+    let budget = persisted
+        .author_rewrite_budget
+        .as_ref()
+        .expect("B 池预领扣减已随委托同 CAS 落盘");
+    assert_eq!(
+        budget
+            .auto_rewrite_charges
+            .iter()
+            .filter(|charge| charge.refunded_at.is_none())
+            .count(),
+        1,
+        "B 池净扣恰好 1（本轮 author 重跑的预领扣减）"
+    );
+    // 委托即「已扣待跑」——接力消费预领（ProviderStarted）后收敛为
+    // 「已扣已跑」，此时才满足两态不变量（净扣 > 0 必有真跑证据）。
+    let key = format!("single_candidate_author:{}:0", persisted.id);
+    let (_consumed, started) = lifecycle
+        .reserve_single_candidate_provider_start(&persisted, &key)
+        .expect("relay consumption must succeed");
+    assert!(started, "Reserved 预领必须被接力消费放行（已扣已跑）");
+    assert_no_dangling_charge(&lifecycle, &session_id);
+}
+
+/// 工作包 2.2 / 2.5（Task 4）：rescue 守卫改读 B 池余额——A 池耗尽
+/// （cycle.repairs_used == 1 == max_repairs）不得阻断平台自动重写；B 池
+/// 余额 0 才是真耗尽（维持人工门）。
+#[tokio::test]
+async fn a_pool_exhausted_still_allows_auto_rewrite() {
+    // A 池耗尽 + B 余额 Some(1) ⇒ rescue 复原为 Repairable，委托照常。
+    let (_tmp, lifecycle, mut engine, _event_rx, cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    preset_cycle_repairs_used(&lifecycle, &session_id, &cycle_key, 1);
+    preset_legacy_auto_rewrites_used(&lifecycle, &session_id, 2); // 余额 = 3 − 2 = 1
+    assert!(
+        engine.route_compile_failure_to_rewrite().await,
+        "A 池耗尽的平台轮仍必须被通道消费"
+    );
+    assert!(
+        engine.sc_author_rerun_delegated(),
+        "A 池耗尽不得阻断平台自动重写（只要 B 池余额 > 0）——守卫改读 B 池"
+    );
+
+    // 对照：B 余额 Some(0) ⇒ rescue 不复原 ⇒ 维持 HumanRequired（真耗尽交门）。
+    let (_tmp2, lifecycle2, mut engine2, _event_rx2, _cycle_key2) =
+        compile_failure_fixture(0).await;
+    let session_id2 = engine2.session().session_id.clone();
+    preset_legacy_auto_rewrites_used(&lifecycle2, &session_id2, 3); // 余额 = 3 − 3 = 0
+    assert!(
+        engine2.route_compile_failure_to_rewrite().await,
+        "B 池耗尽的升级交门轮也必须被通道消费（单门语义）"
+    );
+    assert!(
+        !engine2.sc_author_rerun_delegated(),
+        "B 池余额 0 ⇒ 真实耗尽结论，维持人工门"
+    );
+    let persisted2 = lifecycle2
+        .get_workspace_session(&session_id2)
+        .expect("load gate session");
+    assert!(
+        persisted2.human_gate_snapshot.is_some(),
+        "B 池耗尽 ⇒ 升级交门（EnterHumanGate/StopNeedsHuman 快照在场）"
+    );
+}
+
+/// 工作包 1.5 / 2.2（Task 4）：B 余额 0 升级交门 ⇒ 新门快照
+/// manual_repairs_remaining == 0（统一权威余额，不是重置公式给 3），且同
+/// CAS 自动段已结转清零（再读权威余额 == 快照 0，无双计；total_ever 保留）。
+#[tokio::test]
+async fn escalation_gate_snapshot_carries_unified_balance_and_settles_segment() {
+    let (_tmp, lifecycle, mut engine, _event_rx, _cycle_key) = compile_failure_fixture(0).await;
+    let session_id = engine.session().session_id.clone();
+    preset_legacy_auto_rewrites_used(&lifecycle, &session_id, 3); // 余额 = 3 − 3 = 0
+    assert!(
+        engine.route_compile_failure_to_rewrite().await,
+        "升级交门轮必须被通道消费"
+    );
+    let persisted = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("load gated session");
+    let snapshot = persisted
+        .human_gate_snapshot
+        .as_ref()
+        .expect("escalation gate snapshot");
+    assert_eq!(
+        snapshot.manual_repairs_remaining, 0,
+        "门快照携带统一权威余额 0（不是重置公式的 3）"
+    );
+    let budget = persisted
+        .author_rewrite_budget
+        .as_ref()
+        .expect("预算域随门快照同 CAS 结转");
+    assert!(
+        budget.auto_rewrite_charges.is_empty(),
+        "自动段已结转清零（无双计）"
+    );
+    assert_eq!(
+        budget.legacy_auto_rewrites_charged, 0,
+        "baseline 冻结后归零（legacy 读侧不再重复归并）"
+    );
+    assert_eq!(
+        budget.total_auto_rewrite_charges_ever, 3,
+        "total_ever 保留（REQ-WSC-25 可观测）"
+    );
+    let legacy_used = lifecycle
+        .load_candidate_compile_status(&session_id)
+        .expect("load status")
+        .expect("present")
+        .auto_rewrites_used;
+    assert_eq!(
+        durable_balance(&persisted, legacy_used),
+        Some(0),
+        "结转后再读权威余额 == 快照净余额 0（无双计）"
+    );
 }

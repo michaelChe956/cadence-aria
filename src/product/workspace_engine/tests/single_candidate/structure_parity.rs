@@ -428,7 +428,7 @@ mod structure_parity {
 
         // durable 投影（只投影、不落盘）：message 必须能被既有解析面还原事实。
         let failure = crate::product::workspace_engine::compile_failure_surface::
-            candidate_compile_status(None, &typed, "2026-10-31T00:00:00Z".to_string())
+            candidate_compile_status(None, &typed, "2026-10-31T00:00:00Z".to_string(), None)
             .0
             .failure
             .expect("durable failure projection");
@@ -554,7 +554,7 @@ mod structure_parity {
         };
         let typed = author_structure_gate_failure(&ir, &context, &failures);
         let failure = crate::product::workspace_engine::compile_failure_surface::
-            candidate_compile_status(None, &typed, "2026-10-31T00:00:00Z".to_string())
+            candidate_compile_status(None, &typed, "2026-10-31T00:00:00Z".to_string(), None)
             .0
             .failure
             .expect("durable failure projection");

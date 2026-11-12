@@ -158,7 +158,7 @@ pub(crate) fn author_structure_repair_prompt(failure: &PlanningCompileFailure) -
 /// typed 失败 → durable 失败事实（与 `candidate_compile_status` 同一派生，
 /// 只做投影、不落盘）。摘要与门卡因此与 durable 记录逐字一致。
 fn durable_failure(failure: &PlanningCompileFailure) -> CandidateCompileFailure {
-    compile_failure_surface::candidate_compile_status(None, failure, String::new())
+    compile_failure_surface::candidate_compile_status(None, failure, String::new(), None)
         .0
         .failure
         .expect("candidate_compile_status 恒为失败分支产出 Some(failure)")
