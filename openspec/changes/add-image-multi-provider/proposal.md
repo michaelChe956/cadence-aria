@@ -20,6 +20,7 @@
 - **移除 `input_fidelity`**：该参数自生成接口、参数面板与出站请求中移除。**BREAKING**：生成接口不再识别 `input_fidelity`（仍带该字段的请求被接受，字段被忽略）。
 - **结果可观测**：每条生成结果记录并展示供应方、模型与参考图来源；旧记录无这些字段时照常展示。
 - **默认模型变更**：未做任何配置的升级用户，实际使用的模型由 `gpt-image-2` 变为 `gpt-image-2.6-flare`（内置 GPT 清单的首项，即参数面板的初始选中项）。
+- **供应方连通性探测与 Base URL 填写说明**：设置界面每个供应方新增「测试连通」，用当前填写的值（未重新输入 key 时由后端改用已保存的 key）依次请求 `GET /v1/models` 与一个故意不含 `prompt` 的 `POST /v1/images/generations`，给出「地址通不通、key 是否有效、清单中哪些模型未被网关列出」；探测不生成图片、不计费、不落盘，`base_url` 走与生成出站相同的校验。新增接口 `POST /api/image-create/settings/connectivity`。Base URL 输入框给出示例，并说明只填到主机根路径（系统自动拼 `/v1/images/{generations|edits}`）。
 
 ## Capabilities
 
@@ -29,12 +30,13 @@
 
 ### Modified Capabilities
 
-- `image-create-agent`：生成参数增加必填的模型选择与携带上一张图、移除 `input_fidelity`；配置由单端点演进为双供应方并支持可配置模型清单；新增按供应方官方契约构造请求、逐项错误处理与结果的供应方 / 模型记录；「参考图不被持久化」的约束收窄为仅针对用户上传的参考图。delta 共 **7 条 MODIFIED + 7 条 ADDED，76 个 Scenario**。
+- `image-create-agent`：生成参数增加必填的模型选择与携带上一张图、移除 `input_fidelity`；配置由单端点演进为双供应方并支持可配置模型清单；新增按供应方官方契约构造请求、逐项错误处理与结果的供应方 / 模型记录；「参考图不被持久化」的约束收窄为仅针对用户上传的参考图；新增供应方连通性探测，并明确 Base URL 只填主机根路径。delta 共 **7 条 MODIFIED + 11 条 ADDED，96 个 Scenario**。
 
 ## Impact
 
 - 后端：`src/cross_cutting/image_client.rs`（请求构造、响应解析、trait 签名）、`src/product/image_create/models.rs`（设置与结果模型、错误变体、`SettingsStoreApi`）、`settings_store.rs`（按家合并、校验、脱敏）、`engine.rs`（目标解析、参考图来源、结果字段）、`image_files.rs`（结果图片读取）、`src/web/handlers/image_create.rs`（生成与设置接口）；`session_store.rs` 的测试与 `src/web/handlers/image_create_endpoint_tests.rs` 仅随结果结构新增字段调整测试夹具。
 - 前端：`web/src/api/types/image-create.ts`、`web/src/api/image-create.ts`、`web/src/state/image-create-store.ts`、`web/src/state/image-create-entries.ts`、`web/src/components/image-create/{ParamsPanel,SettingsDialog,ChatPane,ReferenceImageUpload}.tsx` 及对应测试。
+- 连通性探测（2026-11-12 补充）：后端 `src/cross_cutting/image_client.rs`（探测实现）、`src/web/handlers/image_create.rs`（接口）、`src/web/app.rs`（路由）；前端 `web/src/api/types/image-create.ts`、`web/src/api/image-create.ts`、`web/src/state/image-create-store.ts`、`web/src/components/image-create/SettingsDialog.tsx` 及对应测试。不新增依赖，生成链路不变。
 - 数据兼容：旧 `.aria/image_create.json` 必须可读且不丢凭据；旧会话记录（无供应方 / 模型字段、或仍内联 `b64`）必须可读、可作为上一张图。
 - 不改动：会话存储的非测试实现（`session_store.rs`）、参考图内容校验规则、图片文件路径规则、prompt 迭代链路、会话删除流程。
 - 发布说明：`CHANGELOG.md` 记录默认模型变更与配置文件不可降级。
@@ -43,3 +45,4 @@
 - 设计评审（2026-11-12）复核结论：三条需求与四条硬约束全部满足（该评审早于同日的需求变更，其中原需求 3「自动轮转」随后已按用户要求移除）；`area=1K` 决策保留。评审发现的 3 条需修正（delta 漏改基线「生成结果按媒体类型直接展示」、前端 `saveSettings()` 前置 base_url 校验的编译级破坏点、D10 对 `area` 证据等级的越界）与 3 条建议优化已全部吸收，处置记录见技术方案 10.1 节。
 - 归档时需手工同步主 spec 的 **Purpose 段**（delta 只作用于 Requirements），见 tasks 7.6。
 - 需求变更（2026-11-12）：自动轮转已按用户 2026-11-12 要求撤回（「你就让用户在已配置并可用的provider里选model id就行，轮转不需要」）。模型改为用户手动选择，生成请求的 `model` 必填且不再有保留值，结果不再记录选择方式；内置 GPT 清单改为 `gpt-image-2.6-flare` 打头，使参数面板的初始选中项是 OpenAI 官方 id。
+- 补充（2026-11-12）：按用户要求新增供应方连通性探测与 Base URL 填写说明（「base url 中给出案例，否则用户不知道是配到 v1 还是配到 /v1/images 还是配到 /v1/images/generations」「模型配置的时候提供一个是否连通测试的功能」），契约见技术方案 5.5、5.9、5.11。待真实调用确认的假设 A2（技术方案 8.2）：两家图片端点对「只有 `model`、缺 `prompt`」的请求返回 HTTP 400；不成立时探测结论偏保守（把连通的端点判为失败），不会误出图。
