@@ -117,7 +117,10 @@ impl AggregateProviderTurnDriver for RecordingProviderTurnDriver {
     async fn run_turn(
         &self,
         request: AggregateProviderTurnRequest<'_>,
-    ) -> Result<String, cadence_aria::product::logical_codebase::AggregateInitializationError> {
+    ) -> Result<
+        cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+        cadence_aria::product::logical_codebase::AggregateInitializationError,
+    >{
         let AggregateProviderTurnRequest {
             step, preflight, ..
         } = request;
@@ -141,7 +144,7 @@ impl AggregateProviderTurnDriver for RecordingProviderTurnDriver {
                 step,
                 aggregate_root: preflight.aggregate_root.clone(),
             });
-        Ok(format!("{} summary", step.as_str()))
+        Ok(cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome { summary: format!("{} summary", step.as_str()), report: cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent })
     }
 }
 

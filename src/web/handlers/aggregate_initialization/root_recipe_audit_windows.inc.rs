@@ -64,6 +64,17 @@ fn begin_root_recipe_command_watches(
 /// REQ-BOOT-17：本 turn 的审计事实若判为**零动作**（窗口内零落盘差异）⇒
 /// 该 step 判失败（失败事实含 provider / step / 零变更），后续 step 不再
 /// 推进；零动作判据复用既有 receipt auditor 的结论，不新增第二套判定。
+///
+/// **幂等重跑例外**：Cadence-skills 四条命令的契约就是幂等（脚本按契约报告
+/// `all-skipped` / 0 created / 0 updated、产物无变化）。因此零变更**且**
+/// 脚本报告成功 ⇒ 命令确实执行且按契约无变更 ⇒ 判**成功**（本仓 2026-11-12
+/// 真机：已初始化的聚合根上重跑 recipe ⇒ 旧判据把幂等成功判成失败）。
+/// 脚本报告失败 / 没有报告（命令可能没执行）⇒ 仍判失败。
+///
+/// 失败诊断同时携带 **provider 的真实输出尾部**（`turn_output`）：零变更
+/// 本身不说明原因——命令没被执行、命令执行了但失败、命令按契约幂等无变更，
+/// 三种情形的 provider 输出完全不同（本仓 2026-11-12 真机：pre-check 脚本
+/// 的 JSON 报告被整段丢弃，用户只看到 `zero_change=true`）。
 fn complete_root_recipe_command_receipts(
     paths: &ProductAppPaths,
     lc_id: &str,
@@ -71,6 +82,7 @@ fn complete_root_recipe_command_receipts(
     watches: Vec<crate::product::logical_codebase::root_recipe_receipt::RootRecipeCommandWatch>,
     step: AggregateInitializationStepKind,
     provider: &crate::product::models::ProviderName,
+    outcome: &crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
 ) -> Result<(), AggregateInitializationError> {
     let auditor =
         crate::product::logical_codebase::root_recipe_receipt::RootRecipeFilesystemAuditor::new();
@@ -88,18 +100,31 @@ fn complete_root_recipe_command_receipts(
         .map_err(|error| root_recipe_audit_failure(step, error))?;
     match zero_change {
         None => Ok(()),
-        Some(reason) => Err(AggregateInitializationError::ProviderTurnDiagnosed {
-            step,
-            reason: reason.clone(),
-            retryable: true,
-            provider: Some(
-                crate::product::logical_codebase::provider_trust::provider_wire_label(provider)
-                    .to_string(),
-            ),
-            diagnostic: TurnDiagnostic {
-                cause: Some("root_recipe_turn_zero_change".to_string()),
-                output: Some(reason),
-            },
-        }),
+        Some(reason) => {
+            // 幂等重跑：脚本报告成功 ⇒ 命令确实执行且按契约无变更 ⇒ 成功。
+            if outcome.report
+                == crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Success
+            {
+                return Ok(());
+            }
+            Err(AggregateInitializationError::ProviderTurnDiagnosed {
+                step,
+                reason: reason.clone(),
+                retryable: true,
+                provider: Some(
+                    crate::product::logical_codebase::provider_trust::provider_wire_label(provider)
+                        .to_string(),
+                ),
+                diagnostic: TurnDiagnostic {
+                    cause: Some("root_recipe_turn_zero_change".to_string()),
+                    output: Some(
+                        crate::product::logical_codebase::aggregate_initialization_coordinator::provider_turn_failure_output(
+                            &reason,
+                            &outcome.summary,
+                        ),
+                    ),
+                },
+            })
+        }
     }
 }

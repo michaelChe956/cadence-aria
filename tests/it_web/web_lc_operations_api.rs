@@ -101,7 +101,10 @@ impl AggregateProviderTurnDriver for NoopProvider {
     async fn run_turn(
         &self,
         request: AggregateProviderTurnRequest<'_>,
-    ) -> Result<String, AggregateInitializationError> {
+    ) -> Result<
+        cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+        AggregateInitializationError,
+    >{
         let AggregateProviderTurnRequest { cancellation, .. } = request;
         if cancellation.is_cancelled() {
             return Err(AggregateInitializationError::Cancelled);
@@ -112,7 +115,7 @@ impl AggregateProviderTurnDriver for NoopProvider {
         if let Some(release) = &self.release {
             release.notified().await;
         }
-        Ok("turn complete".to_string())
+        Ok(cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome { summary: "turn complete".to_string(), report: cadence_aria::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent })
     }
 }
 

@@ -45,10 +45,16 @@ mod tests {
         async fn run_turn(
             &self,
             request: AggregateProviderTurnRequest<'_>,
-        ) -> Result<String, AggregateInitializationError> {
+        ) -> Result<
+            crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+            AggregateInitializationError,
+        > {
             let AggregateProviderTurnRequest { step, .. } = request;
             self.calls.lock().unwrap().push(step.as_str().to_string());
-            Ok(format!("{} summary", step.as_str()))
+            Ok(crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome {
+                summary: format!("{} summary", step.as_str()),
+                report: crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent,
+            })
         }
     }
 
@@ -211,7 +217,10 @@ mod tests {
             async fn run_turn(
                 &self,
                 request: AggregateProviderTurnRequest<'_>,
-            ) -> Result<String, AggregateInitializationError> {
+            ) -> Result<
+            crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+            AggregateInitializationError,
+        > {
                 let AggregateProviderTurnRequest { step, .. } = request;
                 if step == AggregateInitializationStepKind::RuleAndMcpConfig {
                     return Err(AggregateInitializationError::ProviderTurn {
@@ -220,7 +229,10 @@ mod tests {
                         retryable: true,
                     });
                 }
-                Ok("summary".to_string())
+                Ok(crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome {
+                    summary: "summary".to_string(),
+                    report: crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent,
+                })
             }
         }
 
@@ -567,10 +579,16 @@ mod tests {
             async fn run_turn(
                 &self,
                 _request: AggregateProviderTurnRequest<'_>,
-            ) -> Result<String, AggregateInitializationError> {
+            ) -> Result<
+            crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+            AggregateInitializationError,
+        > {
                 let mut count = self.count.lock().unwrap();
                 *count += 1;
-                Ok("summary".to_string())
+                Ok(crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome {
+                    summary: "summary".to_string(),
+                    report: crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent,
+                })
             }
         }
 

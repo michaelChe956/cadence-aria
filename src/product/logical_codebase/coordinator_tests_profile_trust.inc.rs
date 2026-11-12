@@ -266,13 +266,19 @@
             async fn run_turn(
                 &self,
                 _request: AggregateProviderTurnRequest<'_>,
-            ) -> Result<String, AggregateInitializationError> {
+            ) -> Result<
+            crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome,
+            AggregateInitializationError,
+        > {
                 let mut turns = self.turns.lock().unwrap();
                 *turns += 1;
                 if *turns == 1 {
                     self.token.cancel();
                 }
-                Ok("summary".to_string())
+                Ok(crate::product::logical_codebase::aggregate_initialization_coordinator::AggregateProviderTurnOutcome {
+                    summary: "summary".to_string(),
+                    report: crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Absent,
+                })
             }
         }
 

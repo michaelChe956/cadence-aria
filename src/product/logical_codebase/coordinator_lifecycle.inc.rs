@@ -924,7 +924,7 @@ impl AggregateInitializationCoordinator {
             })
             .await
         {
-            Ok(summary) => summary,
+            Ok(outcome) => outcome,
             Err(error) => {
                 let record = error.into_error_record();
                 let failed = self.operations.finish_failed(
@@ -944,7 +944,7 @@ impl AggregateInitializationCoordinator {
                 });
             }
         };
-        let output_ref = self.provider_output_ref(operation_id, step, &turn_result);
+        let output_ref = self.provider_output_ref(operation_id, step, &turn_result.summary);
         self.checkpoint_output(project_id, operation_id, step, output_ref)?;
         self.complete_step(project_id, operation_id, step)?;
         Ok(())

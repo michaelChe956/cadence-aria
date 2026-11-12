@@ -453,6 +453,35 @@ pub trait AggregatePolicyPublication: Send + Sync {
     }
 }
 
+/// Cadence-skills 脚本报告的结论（**只从工具结果原文读**，不采信模型自述）。
+///
+/// - [`RecipeCommandReport::Success`]：脚本报告 `overall=success` ⇒ 命令**确实
+///   执行且成功**（含「按契约幂等、产物无变化」这一成功形态）。
+/// - [`RecipeCommandReport::Failed`]：脚本报告 `overall=failed` ⇒ 命令执行了但失败。
+/// - [`RecipeCommandReport::Absent`]：没有脚本报告 ⇒ 命令**可能根本没执行**
+///   （skill 未展开 / 命令未被识别 / 脚本没跑）——按失败处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecipeCommandReport {
+    #[default]
+    Absent,
+    Success,
+    Failed,
+}
+
+/// 一次 provider turn 的结果：输出摘要 + recipe 命令的**执行事实**。
+///
+/// `report` 让零变更判据能区分「命令按契约幂等无变更」（成功）与「命令没执行 /
+/// 执行了但失败」（失败）——本仓 2026-11-12 真机：已初始化的聚合根上重跑四条命令，
+/// 脚本按契约报告 all-skipped / 0 created / 0 updated ⇒ 工作区零变更 ⇒
+/// 只看「有无变更」的旧判据把幂等成功判成了失败。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AggregateProviderTurnOutcome {
+    /// turn 输出摘要（有界；头尾各留一半）。
+    pub summary: String,
+    /// turn 内脚本报告的结论（多份报告时**失败优先**）。
+    pub report: RecipeCommandReport,
+}
+
 /// Drives a single provider turn for one of `pre_check`, `rule_and_mcp_config`
 /// or `openspec_and_examples`. Each call is one Claude turn rooted at the
 /// aggregate root; the driver must not run for `machine_skills` or
@@ -466,7 +495,7 @@ pub trait AggregateProviderTurnDriver: Send + Sync {
     async fn run_turn(
         &self,
         request: AggregateProviderTurnRequest<'_>,
-    ) -> Result<String, AggregateInitializationError>;
+    ) -> Result<AggregateProviderTurnOutcome, AggregateInitializationError>;
 }
 
 /// Immutable projection of one member's main checkout captured by
@@ -536,6 +565,7 @@ pub struct AggregateInitializationCoordinator {
 
 include!("coordinator_frozen_provider.inc.rs");
 include!("coordinator_provider_turn.inc.rs");
+include!("coordinator_turn_output.inc.rs");
 include!("coordinator_lifecycle.inc.rs");
 include!("coordinator_lifecycle_provider_setup.inc.rs");
 include!("coordinator_preflight.inc.rs");

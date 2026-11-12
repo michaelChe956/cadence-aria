@@ -51,6 +51,43 @@ pub(crate) fn provider_turn_diagnostic_output(output: &str, reason: &str) -> Str
     sanitize_turn_output(output)
 }
 
+/// provider turn 失败的诊断输出：**失败事实 + provider 真实输出**。
+///
+/// 零变更失败（REQ-BOOT-17）此前只把 `zero_change=true` 一句写进诊断，
+/// provider 的真实输出（Cadence-skills 脚本的 JSON 报告：哪个 phase 失败、
+/// 失败原文）整段丢失 ⇒ 用户无法判断真实原因（本仓 2026-11-12 真机：
+/// pre-check 脚本 base-tools phase 失败 → 零落盘 → 界面只显示
+/// `root recipe turn produced no workspace change ...`）。
+///
+/// 本函数把失败事实与 provider 输出的**尾部**（收尾处才是脚本报告/错误原文）
+/// 合成一段脱敏文本；provider 输出为空时只保留失败事实。
+pub(crate) fn provider_turn_failure_output(reason: &str, output: &str) -> String {
+    use crate::cross_cutting::diagnostic_redaction::sanitize_turn_output;
+    let tail = provider_output_tail(output);
+    if tail.trim().is_empty() {
+        return sanitize_turn_output(reason);
+    }
+    sanitize_turn_output(&format!("{reason}\n{tail}"))
+}
+
+/// provider 输出的尾部（最后 40 行 / 3000 字节）：脚本报告与失败原文都在
+/// 收尾处；头部（命令怎么下的）由失败事实与 scope 纪律线覆盖。
+fn provider_output_tail(output: &str) -> String {
+    const TAIL_LINES: usize = 40;
+    const TAIL_BYTES: usize = 3000;
+    let lines: Vec<&str> = output.lines().collect();
+    let tail = if lines.len() > TAIL_LINES {
+        lines[lines.len() - TAIL_LINES..].join("\n")
+    } else {
+        output.to_string()
+    };
+    if tail.len() <= TAIL_BYTES {
+        return tail;
+    }
+    let start = floor_char_boundary(&tail, tail.len() - TAIL_BYTES);
+    tail[start..].to_string()
+}
+
 /// `start_streaming` 的启动期失败。底层是 adapter 错误时，`cause` 取其
 /// code 子码（`ProviderErrorCode::as_str()`，如 `provider_unauthorized`），
 /// stdout/stderr 合并后走块2 唯一脱敏入口（路径降级 + 凭据 `[REDACTED]` +
