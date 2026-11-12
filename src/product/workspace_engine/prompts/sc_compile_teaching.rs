@@ -22,12 +22,6 @@ use crate::product::work_item_plan_compiler::{
     IrFault, IrFaultKind, IrFaultLocator, LoweringFault,
 };
 
-/// Task 3 评审 Minor-3：指令文本进入 prompt 的条数上限——`required_action`
-/// 每条含禁则/证据多句，无界透传会撑爆 prompt 与日志/通知面。阈值取自
-/// `contract_autorepair` 的唯一定义（handler/completion/prompt 同一口径）。
-const MAX_TEACHING_INSTRUCTION_LINES: usize =
-    crate::product::workspace_engine::contract_autorepair::MAX_AUTOREPAIR_INSTRUCTION_LINES;
-
 /// Task 4（MODIFIED REQ-WSC-09）：教学重驱 prompt 的 typed 事实载体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TeachingReredriveFacts<'a> {
@@ -170,25 +164,21 @@ fn render_teaching_reredrive_prompt(
             ));
         }
     }
-    // Task 3 评审 Minor-3：指令行条数上限——无界 required_action 不得整体透传。
+    // Task 3 评审 Minor-3 × Task 4 评审 Important-1：指令行条数上限——截断
+    // 与真总数摘要**单点复用** `contract_autorepair::cap_autorepair_instruction_lines`
+    //（入参保持未截断，摘要写真总数；不在此另写一套 take/文案）。
     if !facts.autorepair_instructions.is_empty() {
-        let total = facts.autorepair_instructions.len();
         prompt.push_str(
             "\n契约缺口修复指令(O1:平台不改写 source,交你在保护闭包内产出新 revision):\n",
         );
-        for instruction in facts
-            .autorepair_instructions
-            .iter()
-            .take(MAX_TEACHING_INSTRUCTION_LINES)
+        for instruction in
+            crate::product::workspace_engine::contract_autorepair::cap_autorepair_instruction_lines(
+                facts.autorepair_instructions.to_vec(),
+            )
         {
             prompt.push_str("- ");
-            prompt.push_str(instruction);
+            prompt.push_str(&instruction);
             prompt.push('\n');
-        }
-        if total > MAX_TEACHING_INSTRUCTION_LINES {
-            prompt.push_str(&format!(
-                "- (共 {total} 条指令,此处仅列前 {MAX_TEACHING_INSTRUCTION_LINES} 条,其余以计数摘要收口)\n"
-            ));
         }
     }
     // r46 核心修:登记 ID 清单 + 短规则(与 IR 重驱同集;措辞与校验器字面量
@@ -337,8 +327,9 @@ mod reredrive_prompt_tests {
         }
     }
 
-    /// Task 3 评审 Minor-3：指令条数上限——无界 required_action 不得整体
-    /// 进入 prompt（条数上限 + 计数摘要收口）。
+    /// Task 3 评审 Minor-3 × Task 4 评审 Important-1/Minor-1：指令条数上限
+    /// ——截断与「共 N 条契约修复指令」摘要单点复用
+    /// `cap_autorepair_instruction_lines`（入参未截断，摘要写真总数）。
     #[test]
     fn compile_reredrive_prompt_bounds_instruction_lines() {
         let instructions: Vec<String> = (0..10)
@@ -355,8 +346,12 @@ mod reredrive_prompt_tests {
             "超上限的指令不得逐条透传: {prompt}"
         );
         assert!(
-            prompt.contains("共 10 条指令"),
-            "截断必须以计数摘要显式收口: {prompt}"
+            prompt.contains("共 10 条契约修复指令"),
+            "截断必须以真总数计数摘要显式收口: {prompt}"
+        );
+        assert!(
+            !prompt.contains("共 5 条"),
+            "摘要不得报告截断后长度: {prompt}"
         );
     }
 }

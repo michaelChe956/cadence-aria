@@ -448,3 +448,73 @@ async fn forged_registered_ref_gets_no_teaching_reredrive() {
     )
     .await;
 }
+
+/// Task 4 评审 Important-1 的 E2E 护栏：指令数 > 上限的 compile 失败经
+/// handler 组合路径（compile_failure_surface 返回**未截断**指令行 →
+/// prompt 渲染器单点截断）时，重驱 prompt 的计数摘要必须报告**真实总数**
+///（不是截断后长度 5，也不是被 take 后的条数）。
+fn markdown_with_eight_unknown_keys(story_id: &str, design_id: &str) -> String {
+    let bogus_keys = (0..8)
+        .map(|index| format!("- bogus_key_{index:02}: x\n"))
+        .collect::<String>();
+    single_candidate_markdown(story_id, design_id).replacen(
+        "- reviewer_check_refs: AC-001\n",
+        &format!("- reviewer_check_refs: AC-001\n{bogus_keys}"),
+        1,
+    )
+}
+
+#[tokio::test]
+async fn reredrive_prompt_instruction_summary_reports_true_total_through_handler_path() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let output = markdown_with_eight_unknown_keys(&fixture.story_id, &fixture.design_id);
+    let provider = Arc::new(RecordingOutputProvider {
+        output,
+        inputs: input_tx,
+    });
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    let _full_input = next_provider_input(&mut input_rx).await;
+    let reredrive_input = next_provider_input(&mut input_rx).await;
+    assert!(
+        reredrive_input
+            .prompt
+            .contains("共 8 条契约修复指令"),
+        "重驱 prompt 的指令摘要必须报告真实总数（8 条，经未截断入参）: {}",
+        reredrive_input.prompt
+    );
+    assert!(
+        !reredrive_input.prompt.contains("共 5 条"),
+        "摘要不得报告截断后长度（Important-1 缺陷形态）: {}",
+        reredrive_input.prompt
+    );
+    assert!(
+        reredrive_input.prompt.contains("bogus_key_03")
+            && !reredrive_input.prompt.contains("bogus_key_04"),
+        "上限内（前 4 条）逐条在场，超上限以摘要收口: {}",
+        reredrive_input.prompt
+    );
+    no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("compile markdown source failed (after one teaching re-drive)")
+            && message.contains("共 8 条契约修复指令"),
+        "终态 reasons 面同样以真总数摘要收口: {message}"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+}

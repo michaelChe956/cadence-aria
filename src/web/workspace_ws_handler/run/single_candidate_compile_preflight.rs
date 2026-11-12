@@ -280,27 +280,27 @@ pub(super) fn format_compile_failure_reasons(
         .collect()
 }
 
-/// O1（裁决二）× Task 3 评审 Minor-3：compile 失败路径的失败面拼装——
-/// 诊断原文 + 收窄指令（未知 key 迁移/重复 trusted command）有界渲染，随
-/// 教学重驱 prompt 与终态错误同源呈现，平台不应用、不丢弃。
+/// O1（裁决二）× Task 3 评审 Minor-3 × Task 4 评审 Important-1：compile
+/// 失败路径的失败面拼装——诊断原文 + 收窄指令（未知 key 迁移/重复
+/// trusted command）有界渲染，随教学重驱 prompt 与终态错误同源呈现，
+/// 平台不应用、不丢弃。
 ///
-/// 返回 `(reasons, instruction_lines)`：同一份指令只计算一次，供终态错误
-/// （reasons 拼装）与 typed 重驱 prompt（instruction_lines 直入
-/// `TeachingReredriveFacts`）共用。
+/// 返回 `(reasons, instruction_lines)`：`instruction_lines` 为**未截断**的
+/// 指令行（教学重驱 prompt 侧由 `cap_autorepair_instruction_lines` 单点
+/// 截断，摘要写真总数）；终态 reasons 面在此处截断（同函数同口径）。
 pub(super) fn compile_failure_surface(
     source: &str,
     diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
     context: &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext,
 ) -> (Vec<String>, Vec<String>) {
-    let instruction_lines = cap_autorepair_instruction_lines(
+    let instruction_lines =
         crate::product::workspace_engine::contract_autorepair::format_contract_autorepair_instructions(
             &crate::product::workspace_engine::contract_autorepair::build_compile_failure_repair_instructions(
                 source, diagnostics, context,
             ),
-        ),
-    );
+        );
     let mut reasons = format_compile_failure_reasons(diagnostics);
-    reasons.extend(instruction_lines.iter().cloned());
+    reasons.extend(cap_autorepair_instruction_lines(instruction_lines.clone()));
     (reasons, instruction_lines)
 }
 
