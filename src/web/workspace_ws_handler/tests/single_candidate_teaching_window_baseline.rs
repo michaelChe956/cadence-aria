@@ -264,7 +264,7 @@ async fn teaching_baseline_terminal_face_after_exhaustion() {
     let _first_input = next_provider_input(&mut input_rx).await;
     let prefix_count_after_first_start = author_ledger_prefix_count(&fixture);
     // 槽位被首轮可教学失败消耗：重驱轮再败 ⇒ 槽位耗尽，直接终态。
-    let _reredrive_input = next_provider_input(&mut input_rx).await;
+    let reredrive_input = next_provider_input(&mut input_rx).await;
     no_more_provider_inputs(&mut input_rx).await;
     let message = next_error_message(&mut outbound_rx).await;
     assert!(
@@ -285,11 +285,35 @@ async fn teaching_baseline_terminal_face_after_exhaustion() {
     );
     // 错误面不被渲染成模型可修语法错误：终态是 WS 错误事件，不得携带
     // 重驱 prompt 的指令措辞（教学指令只进 provider prompt，不进错误面）。
+    //
+    // ⚠️ 否定标记必须**随真实措辞自校准**：从**本次实际观察到的重驱 prompt**
+    // 里取指令块（首段，失败事实在其后），而不是硬编码两句旧措辞——否则教学
+    // 块一改写（effort #6 将把教学块迁出 prompts.rs），字面量从错误面消失
+    // ⇒ 断言恒真空转、失去防退化作用；且新措辞漏进错误面时也抓不到。
+    // 提取不到指令块 ⇒ **响亮失败**（不得静默空转）。
+    let instruction_block = reredrive_input
+        .prompt
+        .split("\n\n")
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let instruction_markers: Vec<&str> = instruction_block
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
     assert!(
-        !message.contains("立即输出完整 work-item-plan markdown source")
-            && !message.contains("重新输出完整 plan"),
-        "槽位耗尽的终态错误面不得渲染成模型可修语法错误: {message}"
+        !instruction_markers.is_empty(),
+        "重驱 prompt 的指令块必须可提取（否则负向断言空转）: {}",
+        reredrive_input.prompt
     );
+    for marker in &instruction_markers {
+        assert!(
+            !message.contains(marker),
+            "槽位耗尽的终态错误面不得渲染成模型可修语法错误（含重驱指令行）: {marker}"
+        );
+    }
     wait_for_single_candidate_phase(
         &fixture,
         crate::product::models::SingleCandidatePhase::Failed,
