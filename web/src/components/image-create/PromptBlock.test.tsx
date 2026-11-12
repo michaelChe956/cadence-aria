@@ -14,7 +14,7 @@ beforeEach(() => {
       quality: "auto",
       background: "auto",
       output_format: "png",
-      model: "auto",
+      model: "gpt-image-2.6-flare",
       use_previous: true,
     },
     entries: [],
