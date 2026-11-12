@@ -323,14 +323,14 @@ impl crate::product::workspace_engine::WorkspaceEngine {
     /// **候选零提升**：本路径不改写会话 current refs、不落机械报告、不开评审，
     /// 只把「这次候选被结构门拒收」变成可观测事实并交出一条下一步。
     ///
-    /// - 结构门重驱槽位空闲（runner 的 `structure_rerun_used` 独立槽决定，
-    ///   与 compile/IR 槽互不挤占）：返回
+    /// - 调用方传入 `allow_structure_rerun=true`（Task 6 起恒 true：重驱资格
+    ///   由调用方消费同一耐久教学窗口的 claim 结果决定）：返回
     ///   [`SingleCandidateAuthorCompletion::Rejected`]，修复
     ///   指令交还 runner 经 provider 通道重驱作者一次——**不开人工门**。
     ///   重驱走 runner 通道而非引擎 prerevision 路由（候选 refs 未提升，
     ///   重写通道不可达）：不虚记自动重写预算，durable `auto_rewrite` 不留
     ///   running（未委托即对账，REQ-WSC-25）。
-    /// - 槽位已占用：保持既有落门收口，返回
+    /// - `allow_structure_rerun=false`：保持既有落门收口，返回
     ///   [`SingleCandidateAuthorCompletion::Routed`]：调用方不得再按硬失败
     ///   处理（现场缺口：owner 只看到「生成失败」，没有修法也没有流水）。
     pub(crate) async fn route_author_structure_gate_failure(

@@ -787,6 +787,52 @@ fn mark_unknown_transitions_claimed_only_and_is_idempotent() {
     ));
 }
 
+/// Task 4 评审 Minor-1（Task 6 补钉）：claim 后经会话尾迁移进入
+/// `LaunchUnknown`（Task 4 迁移使然，重连/恢复的常态末态）再次 claim ⇒
+/// `Replay`（同 attempt 幂等），attempts 与占位条目零变化——Unknown 等待
+/// 语义不因重放铸造新机会（共享 Replay 臂此前只被 Claimed 半边钉住）。
+#[test]
+fn claim_after_mark_unknown_replays_same_attempt_with_zero_mutation() {
+    let temp = tempdir().unwrap();
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+    let session = create_sc_session(&store, RunPolicy::Interactive, "entity_0015");
+    let generate = reserve_original_launch(&store, &session);
+    let established = establish_approved(&store, &generate);
+    let granted = claim_attempt(&store, &established);
+
+    let unknown = store
+        .mark_sc_teaching_attempt_unknown(&granted, 0, 2)
+        .expect("mark claimed attempt unknown");
+
+    // 再次 claim（同 expected 状态重放）⇒ Replay，不追加 attempt、不新增占位。
+    let replayed = match store.claim_sc_teaching_attempt(&unknown, 0) {
+        Ok(ScTeachingClaimOutcome::Replay(record)) => record,
+        Ok(other) => panic!("claim after mark_unknown must Replay, got: {other:?}"),
+        Err(error) => panic!("claim after mark_unknown failed: {error:?}"),
+    };
+    assert_eq!(
+        replayed.sc_generation_teaching_windows[0].attempts.len(),
+        unknown.sc_generation_teaching_windows[0].attempts.len(),
+        "Replay 不得追加 attempt"
+    );
+    assert_eq!(
+        replayed.sc_generation_teaching_windows[0].attempts.last(),
+        unknown.sc_generation_teaching_windows[0].attempts.last(),
+        "Replay 保持同一末位 attempt（LaunchUnknown、同 key）"
+    );
+    assert_eq!(
+        replayed.provider_start_ledger.len(),
+        unknown.provider_start_ledger.len(),
+        "Replay 不新增占位条目"
+    );
+    let placeholders = replayed
+        .provider_start_ledger
+        .iter()
+        .filter(|entry| entry.provider_attempt_key.is_some())
+        .count();
+    assert_eq!(placeholders, 1, "教学占位条目仍然只有一条");
+}
+
 #[test]
 fn takeover_child_gets_no_window_parent_facts_retained() {
     let temp = tempdir().unwrap();

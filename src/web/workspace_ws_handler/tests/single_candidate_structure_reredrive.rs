@@ -1,26 +1,25 @@
 //! 作者阶段候选结构门拒收的「恰一次教学重驱」端到端用例（SG3a.1 +
-//! REQ-WSC-18/25）。与 compile/IR 重驱共享 runner 的唯一槽位
-//! （first_round_failure 单槽）——从 single_candidate_provider_run.rs 拆出
-//! 以守住 large_file_guard 1200 行红线；共享 fixture 经 pub(super) 复用。
+//! REQ-WSC-18/25）。Task 6 起 compile/IR/结构四类失败共用**同一**耐久
+//! 教学窗口——从 single_candidate_provider_run.rs 拆出以守住
+//! large_file_guard 1200 行红线；共享 fixture 经 pub(super) 复用。
 //!
 //! 钉住的行为：
-//! 1. 槽位空闲的结构拒收：作者确实被驱动第二次（恰好两次 provider 输入），
-//!    重驱 prompt 是可执行修复指令；重驱成功 → 正常提升 current refs、进入
-//!    既有确认链（相位 Approval，不是 failed）；
-//! 2. 重驱后仍被拒：落人工门（WaitingForHuman + 门快照），会话不是 failed，
-//!    provider 恰好驱动两次（不再第三次）；
+//! 1. 结构拒收（此前无 compile 失败）⇒ 消费同一窗口：作者确实被驱动
+//!    第二次（恰好两次 provider 输入），重驱 prompt 是可执行修复指令；
+//!    重驱成功 → 正常提升 current refs、进入既有确认链（相位 Approval）；
+//! 2. 重驱后仍被拒 ⇒ 第二次交付失败 ⇒ close(FailedTerminal)：链停止于
+//!    终态 Failed（不开人工门、无第三次驱动），两次拒收在流水留下两行；
 //! 3. 每次尝试都进 candidate-attempts.jsonl；durable auto_rewrite 不留
 //!    running 记录、auto_rewrites_used 不变。
-//!
-//! 4. **分槽**（2026-10-31 真机修订）：结构门重驱有**自己的**槽位——
-//!    IR 校验失败（用掉 compile/IR 槽）之后又遇结构门拒收时，结构门重驱
-//!    真的发生（provider 被驱动第三次、`..._prompt_structure_reredrive`
-//!    事件落盘）；重驱后候选合法 → 正常提升 current refs、进入既有确认链。
+//! 4. **单窗口收口**（Task 6）：IR 校验失败（消费窗口）之后又遇结构门
+//!    拒收 ⇒ 第二次 claim Denied ⇒ 无第三次输入，链停止于终态（原
+//!    「分槽」语义已删除）。
 
 use super::single_candidate_ir_reredrive::markdown_with_unknown_requirement_ref;
 use super::single_candidate_provider_run::{
-    ProviderRunFixture, SequenceOutputProvider, next_provider_input, no_more_provider_inputs,
-    single_candidate_context, single_candidate_markdown, wait_for_stage,
+    ProviderRunFixture, SequenceOutputProvider, next_error_message, next_provider_input,
+    no_more_provider_inputs, single_candidate_context, single_candidate_markdown,
+    wait_for_single_candidate_phase, wait_for_stage,
 };
 use super::*;
 use std::sync::atomic::AtomicUsize;
@@ -43,26 +42,6 @@ fn attempt_rows(
         .lifecycle
         .list_candidate_attempts(&fixture.record.id)
         .expect("read candidate attempt log")
-}
-
-/// 等待 durable 会话进入「WaitingForHuman 且门快照在场」的落门形态。
-async fn wait_for_human_gate(fixture: &ProviderRunFixture) {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let record = fixture
-                .lifecycle
-                .get_workspace_session(&fixture.record.id)
-                .expect("reload session");
-            if record.status == crate::product::models::WorkspaceSessionStatus::WaitingForHuman
-                && record.human_gate_snapshot.is_some()
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("structure rejection rerun failure must land on the human gate");
 }
 
 /// ① 槽位空闲的结构拒收 → 恰一次教学重驱 → 重驱成功恢复正常链。
@@ -160,10 +139,11 @@ async fn single_candidate_structure_rejection_triggers_one_teaching_reredrive_an
     );
 }
 
-/// ② 重驱后仍被拒 → 落人工门（不是 failed），provider 恰好驱动两次，
-///    两次拒收在流水中留下两行失败。
+/// ② 重驱后仍被拒 ⇒ 第二次交付失败 ⇒ close(FailedTerminal)：链停止于
+///    终态 Failed（不开人工门），provider 恰好驱动两次，两次拒收在
+///    流水中留下两行失败，refs 零提升。
 #[tokio::test]
-async fn single_candidate_structure_rejection_reredrive_failure_lands_human_gate() {
+async fn single_candidate_structure_rejection_reredrive_failure_stops_chain_terminal() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(SequenceOutputProvider {
@@ -177,7 +157,7 @@ async fn single_candidate_structure_rejection_reredrive_failure_lands_human_gate
         inputs: input_tx,
         next: AtomicUsize::new(0),
     });
-    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
 
     handle_workspace_inbound_message(
         context,
@@ -192,27 +172,32 @@ async fn single_candidate_structure_rejection_reredrive_failure_lands_human_gate
     let _first_input = next_provider_input(&mut input_rx).await;
     let _reredrive_input = next_provider_input(&mut input_rx).await;
     no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("candidate structure gate rejected")
+            && message.contains("first round")
+            && message.contains("请显式重新开始生成"),
+        "结构重驱再败必须按既有失败面回显两轮真实原因: {message}"
+    );
 
-    // 落人工门：WaitingForHuman + 门快照在场，会话不是 failed。
-    wait_for_human_gate(&fixture).await;
+    // 单窗口收口（Task 6）：第二次交付失败 ⇒ 终态 Failed，不开人工门。
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
     let durable = fixture
         .lifecycle
         .get_workspace_session(&fixture.record.id)
         .expect("reload single-candidate session");
-    assert_ne!(
-        durable.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Failed),
-        "结构拒收重驱再败必须落门，不得终态失败"
-    );
-    assert_eq!(
-        durable.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Generate),
-        "相位保持 Generate（owner 决定下一步）"
-    );
     assert!(
         durable.work_item_plan_source_revision_ref.is_none()
             && durable.plan_candidate_ir_ref.is_none(),
         "两次被拒候选都零提升（current refs 语义不变）"
+    );
+    assert!(
+        durable.repair_reservation.is_none(),
+        "Denied 不得旁路 A 通道（不留 repair_reservation 预领）"
     );
 
     // 两次拒收 = 两行失败（每次尝试都进流水）。
@@ -229,26 +214,6 @@ async fn single_candidate_structure_rejection_reredrive_failure_lands_human_gate
             .is_some_and(|failure| failure.code == "final_compile_structure_rejected")
     }));
 
-    // 门摘要：owner 读到「候选没有通过候选结构门」的人话原因与下一步。
-    let engine = fixture.engine.lock().await;
-    let gate_summary = engine
-        .timeline_nodes
-        .iter()
-        .rev()
-        .find(|node| {
-            matches!(
-                node.node_type,
-                crate::web::workspace_ws_types::TimelineNodeType::HumanConfirm
-            )
-        })
-        .and_then(|node| node.summary.clone())
-        .expect("人工门节点必须带摘要");
-    drop(engine);
-    assert!(
-        gate_summary.contains("候选没有通过候选结构门"),
-        "门摘要必须说清结构门拒收：{gate_summary}"
-    );
-
     // 预算同样不虚记。
     let status = fixture
         .lifecycle
@@ -259,27 +224,26 @@ async fn single_candidate_structure_rejection_reredrive_failure_lands_human_gate
     assert_eq!(status.auto_rewrites_used, 0);
 }
 
-/// ③ **分槽**（2026-10-31 真机修订）：IR 校验失败（用掉 compile/IR 槽）
-///    之后又遇结构门拒收 → 结构门重驱**真的发生**（自己的槽位不被 IR 挤掉）：
-///    provider 被驱动第三次、结构门重驱提示词事件落盘；重驱后候选合法 →
-///    正常提升 current refs、进入既有确认链（不是 failed、不是人工门）。
+/// ③ **单窗口收口**（Task 6）：IR 校验失败（消费同一窗口）之后又遇结构门
+///    拒收 ⇒ 第二次 claim Denied ⇒ 无第三次输入、无结构门重驱事件，
+///    链停止于终态 Failed；refs 零提升（原「分槽」语义已删除）。
 #[tokio::test]
-async fn single_candidate_structure_rerun_slot_is_independent_from_ir_rerun_slot() {
+async fn single_candidate_structure_rerun_shares_window_with_ir_rerun() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let provider = Arc::new(SequenceOutputProvider {
         outputs: vec![
-            // 第 1 轮：IR 校验失败（unknown_requirement_ref）→ 占用 compile/IR 槽。
+            // 第 1 轮：IR 校验失败（unknown_requirement_ref）→ 消费窗口 claim。
             markdown_with_unknown_requirement_ref(&fixture.story_id, &fixture.design_id),
-            // 第 2 轮：IR 过了，但候选结构门拒收（依赖环）→ 结构门自己的槽位。
+            // 第 2 轮：IR 过了，但候选结构门拒收（依赖环）→ 窗口已耗尽 ⇒
+            // 第二次 claim Denied ⇒ 链停止（第 3 轮输出不被消费）。
             markdown_with_self_cycle(&fixture.story_id, &fixture.design_id),
-            // 第 3 轮：结构门重驱后的合法候选。
             single_candidate_markdown(&fixture.story_id, &fixture.design_id),
         ],
         inputs: input_tx,
         next: AtomicUsize::new(0),
     });
-    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
 
     handle_workspace_inbound_message(
         context,
@@ -291,7 +255,7 @@ async fn single_candidate_structure_rerun_slot_is_independent_from_ir_rerun_slot
     )
     .await;
 
-    // provider 被驱动三次：首轮 + IR 重驱 + 结构门重驱（两类槽互不挤占）。
+    // provider 恰好驱动两次：首轮 + IR 重驱（结构类与 IR 类共用同一窗口）。
     let _first_input = next_provider_input(&mut input_rx).await;
     let ir_input = next_provider_input(&mut input_rx).await;
     assert!(
@@ -299,21 +263,16 @@ async fn single_candidate_structure_rerun_slot_is_independent_from_ir_rerun_slot
         "第二轮必须是 IR 教学重驱：{}",
         ir_input.prompt
     );
-    let structure_input = next_provider_input(&mut input_rx).await;
-    for required in [
-        "候选没有通过候选结构门",
-        "final_compile_structure_rejected",
-        "依赖环",
-    ] {
-        assert!(
-            structure_input.prompt.contains(required),
-            "结构门重驱 prompt 必须包含 {required}: {}",
-            structure_input.prompt
-        );
-    }
     no_more_provider_inputs(&mut input_rx).await;
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("candidate structure gate rejected")
+            && message.contains("unknown_requirement_ref")
+            && message.contains("请显式重新开始生成"),
+        "结构类 Denied 必须按既有失败面回显两轮真实原因: {message}"
+    );
 
-    // 事件落盘：IR 重驱与结构门重驱各有一条提示词事件（结构门那一槽没被挤掉）。
+    // 事件落盘：只有 IR 重驱提示词事件；结构门重驱事件不得出现（共用窗口）。
     let event_ids: Vec<String> = fixture
         .lifecycle
         .load_timeline_nodes(&fixture.record.id)
@@ -335,26 +294,25 @@ async fn single_candidate_structure_rerun_slot_is_independent_from_ir_rerun_slot
         "IR 重驱提示词事件必须落盘：{event_ids:?}"
     );
     assert!(
-        event_ids
+        !event_ids
             .iter()
             .any(|event_id| event_id.ends_with("_prompt_structure_reredrive")),
-        "结构门重驱提示词事件必须落盘（分槽后不再被 IR 挤掉）：{event_ids:?}"
+        "共用窗口下结构门重驱事件不得落盘（无第三次启动）：{event_ids:?}"
     );
 
-    // 重驱后候选合法 → 正常提升 current refs、进入既有确认链。
-    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    // 链停止于终态 Failed：不提升 refs、不开人工门。
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
     let durable = fixture
         .lifecycle
         .get_workspace_session(&fixture.record.id)
         .expect("reload single-candidate session");
-    assert_eq!(
-        durable.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Approval),
-        "结构门重驱恢复后必须回到既有审批链"
-    );
     assert!(
-        durable.work_item_plan_source_revision_ref.is_some()
-            && durable.plan_candidate_ir_ref.is_some(),
-        "重驱后的合法候选必须正常提升 current refs"
+        durable.work_item_plan_source_revision_ref.is_none()
+            && durable.plan_candidate_ir_ref.is_none(),
+        "链停止时不得提升坏 candidate（refs 保持最后合法值）"
     );
 }

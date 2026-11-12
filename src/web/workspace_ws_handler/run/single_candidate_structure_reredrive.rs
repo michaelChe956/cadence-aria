@@ -1,16 +1,27 @@
-//! SG3a.1 作者阶段结构门拒收的「恰一次教学重驱」驱动臂（REQ-SG-02/03、
-//! REQ-WSC-18/25）。
+//! SC 生成段教学重驱的共用驱动臂与单槽窗口消费判定（REQ-SG-02/03、
+//! REQ-WSC-18/25/28/28E）。
 //!
-//! 从 `run/single_candidate.rs` 拆出以守住 large_file_guard 登记上限：本文件
-//! 只做「修复指令 prompt 的可观测呈现 + 复用既有重驱通道」——事件发射与
-//! provider 驱动和 compile/IR 教学重驱同一形状（同 node 再驱一次 provider），
-//! **不新造第二个 provider attempt 通道**；槽位（结构门类**独立槽**
-//! `structure_rerun_used`）由调用方占用，与 compile/IR 槽互不挤占（每类
-//! 至多一次）。
+//! Task 6 起「槽位」不再是进程内布尔量：四类可教学失败（parse 语法 /
+//! 事实完整 typed lowering / 事实完整 typed IR 校验 / 确定性结构拒收）
+//! 在重驱判定处统一消费**同一**耐久教学窗口（establish → 漂移核验 →
+//! claim；Granted/Replay ⇒ 恰一次重驱，Denied ⇒ 停止该生成自动链）。
+//! 本文件承载该窗口的消费判定辅助（四类共用，自 run/single_candidate.rs
+//! 拆出以守其行数登记）与结构门拒收的教学重驱驱动臂——事件发射与
+//! provider 驱动和 compile/IR 教学重驱同一形状（同 node 再驱一次
+//! provider），**不新造第二个 provider attempt 通道**；重驱资格由调用方
+//! 消费同一窗口的 claim 结果后经 `sc_teaching_attempt` 传入。
 
 use super::gateway_start::PlanAuthorLaunch;
 use super::single_candidate::SingleCandidateProviderRunError;
 use super::*;
+use crate::product::lifecycle_store::{ScTeachingClaimOutcome, ScTeachingEstablishOutcome};
+use crate::product::models::{SingleCandidatePhase, WorkspaceSessionRecord};
+use crate::product::planning_failure::PlanningFailureKind;
+use crate::product::work_item_plan_policy::{
+    ScTeachingAttemptLifecycle, ScTeachingAttemptOutcome, ScTeachingAttemptRef,
+    ScTeachingWindowRequest, ScTeachingWindowStatus,
+};
+use crate::web::types::GenerateWorkItemsRequest;
 
 /// 结构门拒收的首轮失败描述（终态错误文案用；只述事实，不虚构原因）。
 pub(super) fn structure_gate_first_round_failure() -> String {
@@ -20,10 +31,359 @@ pub(super) fn structure_gate_first_round_failure() -> String {
     )
 }
 
+/// run 级冻结绑定事实（业务请求/材料/上下文 digest——整条链内恒定，
+/// 四类失败的窗口请求共享，构成漂移核验的基准）。
+pub(super) struct ScTeachingChainBinding {
+    pub business_request_digest: String,
+    pub material_digests: Vec<String>,
+    pub context_digest: String,
+}
+
+/// 教学窗口请求/冻结摘要共用的 sha256 hex。
+pub(super) fn sc_sha256(text: &str) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(text.as_bytes()))
+}
+
+/// run 级冻结绑定的构造：业务请求取 serde 投影、材料 = story/design
+/// 上下文块逐块摘要、context = 语言规则正文摘要（三者链内恒定）。
+pub(super) fn sc_teaching_chain_binding(
+    request: &GenerateWorkItemsRequest,
+    story_blocks: &[String],
+    design_blocks: &[String],
+    language_rules: &str,
+) -> ScTeachingChainBinding {
+    let business_request = serde_json::to_string(request)
+        .unwrap_or_else(|error| format!("unserializable-request:{error}"));
+    ScTeachingChainBinding {
+        business_request_digest: sc_sha256(&business_request),
+        material_digests: story_blocks
+            .iter()
+            .chain(design_blocks.iter())
+            .map(|block| sc_sha256(block))
+            .collect(),
+        context_digest: sc_sha256(language_rules),
+    }
+}
+
+/// 允许修改闭包（本 change 冻结为常量描述：四类失败共用的教学修复边界）。
+const SC_TEACHING_ALLOWED_EDIT_CLOSURE: &str =
+    "仅允许修复本次失败事实指出的 work-item-plan markdown source 缺陷";
+
+/// typed 事实的稳定码投影（IR/结构类共用；资格判定不经此字段——WSC-09
+/// 资格由 teaching_verdict 先行给出，`Unknown{code}` 在窗口内仅作审计
+/// 留痕，不参与结构门 L1 资格）。
+pub(super) fn stable_code_kind(code: &str) -> PlanningFailureKind {
+    PlanningFailureKind::Unknown {
+        code: code.to_string(),
+    }
+}
+
+/// compile 域 typed 事实的稳定码投影（parse 码表 / lowering / IR 诊断码）。
+pub(super) fn compile_typed_kinds(
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+) -> Vec<PlanningFailureKind> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| stable_code_kind(&diagnostic.code))
+        .collect()
+}
+
+/// 各失败类的窗口请求构造：`failure_source_sha256` 为失败原文摘要（调用方
+/// 预计算，避免结构臂移动 source），`reredrive_prompt` 为已构建的重驱
+/// prompt（其 sha256 进入冻结摘要）。
+pub(super) fn sc_teaching_failure_request(
+    binding: &ScTeachingChainBinding,
+    failure_source_sha256: String,
+    failure_typed_kinds: Vec<PlanningFailureKind>,
+    prompt_ref: &str,
+    instruction_digest: String,
+    reredrive_prompt: &str,
+) -> ScTeachingWindowRequest {
+    ScTeachingWindowRequest {
+        // 判据②：author 走 start_work_item_plan_author 且 Task 4 回填已接线。
+        provider_path_admissible: true,
+        // 初次可教学失败处尚无 durable 候选 source 引用 ⇒ 显式 None。
+        failure_source_ref: None,
+        failure_source_sha256,
+        failure_typed_kinds,
+        business_request_digest: binding.business_request_digest.clone(),
+        material_digests: binding.material_digests.clone(),
+        context_digest: binding.context_digest.clone(),
+        allowed_edit_closure: SC_TEACHING_ALLOWED_EDIT_CLOSURE.to_string(),
+        instruction_digest,
+        prompt_ref: prompt_ref.to_string(),
+        prompt_digest: sc_sha256(reredrive_prompt),
+    }
+}
+
+/// 单槽收口的教学窗口消费判定结果（四类失败共用）。
+pub(super) enum ScTeachingWindowDecision {
+    /// Granted/Replay ⇒ 以该 attempt 执行恰一次重驱（原调用在内合计两次）。
+    Drive { attempt: ScTeachingAttemptRef },
+    /// 可判定拒绝（未批准/耗尽/已关闭）：已尽力 close(FailedTerminal)，
+    /// 调用方停止该生成自动链并按既有失败面回显真实原因。
+    Denied,
+    /// 冻结输入漂移：`sc_teaching_frozen_input_drift` 诊断已落 durable，
+    /// 零额外 provider 调用，调用方按既有失败面收口。
+    Drift,
+    /// 窗口执法失败（store 错误）：fail-closed 上浮（不无账启动）。
+    StoreError(String),
+}
+
+/// 四类失败在重驱判定处共用的窗口消费（REQ-WSC-28/28E）：
+/// establish（首次可教学失败建窗；末尾 Active ⇒ Existing，A/B 接力与
+/// 重放不重建）→ 结构性拒绝先行（未批准/耗尽/已关闭 ⇒ 关窗
+/// FailedTerminal——第二次交付失败即关窗、无第三次启动，且不消费 claim
+/// 故漂移核验无需进行）→ 对当前失败事实 verify_frozen_inputs（漂移 ⇒
+/// 零额外调用 + durable 诊断）→ claim（Granted/Replay ⇒ Drive）。
+pub(super) fn consume_sc_teaching_window(
+    lifecycle: &LifecycleStore,
+    session_id: &str,
+    request: &ScTeachingWindowRequest,
+) -> ScTeachingWindowDecision {
+    let record = match lifecycle.get_workspace_session(session_id) {
+        Ok(record) => record,
+        Err(error) => {
+            return ScTeachingWindowDecision::StoreError(format!(
+                "load session for sc teaching window failed: {error:?}"
+            ));
+        }
+    };
+    let record = match lifecycle.establish_sc_teaching_window(&record, request) {
+        Ok(ScTeachingEstablishOutcome::Established { record, .. })
+        | Ok(ScTeachingEstablishOutcome::Existing { record, .. }) => record,
+        Err(error) => {
+            return ScTeachingWindowDecision::StoreError(format!(
+                "establish sc teaching window failed: {error:?}"
+            ));
+        }
+    };
+    let Some(window) = record.sc_generation_teaching_windows.last() else {
+        return ScTeachingWindowDecision::StoreError(
+            "teaching window missing after establish".to_string(),
+        );
+    };
+    let generation_seq = window.generation_seq;
+    let attempt_no = window
+        .attempts
+        .last()
+        .map_or(1, |attempt| attempt.attempt_no);
+    let in_flight = matches!(
+        window.attempts.last().map(|attempt| &attempt.lifecycle),
+        Some(ScTeachingAttemptLifecycle::Claimed | ScTeachingAttemptLifecycle::LaunchUnknown)
+    );
+    if !in_flight && window.claimable_attempt_no().is_none() {
+        return deny_and_close(lifecycle, &record, generation_seq, attempt_no);
+    }
+    if window.verify_frozen_inputs(request).is_err() {
+        if let Err(error) = lifecycle.record_sc_teaching_frozen_input_drift(&record) {
+            tracing::warn!(
+                session_id,
+                error = ?error,
+                "record sc teaching frozen input drift failed (drift decision stands)"
+            );
+        }
+        return ScTeachingWindowDecision::Drift;
+    }
+    match lifecycle.claim_sc_teaching_attempt(&record, generation_seq) {
+        Ok(ScTeachingClaimOutcome::Granted(saved)) | Ok(ScTeachingClaimOutcome::Replay(saved)) => {
+            let attempt = saved
+                .sc_generation_teaching_windows
+                .last()
+                .and_then(|window| window.attempts.last())
+                .expect("claimed teaching window keeps its attempt");
+            ScTeachingWindowDecision::Drive {
+                attempt: ScTeachingAttemptRef {
+                    generation_seq,
+                    attempt_no: attempt.attempt_no,
+                    attempt_key: attempt.attempt_key.clone(),
+                },
+            }
+        }
+        Ok(ScTeachingClaimOutcome::Denied(_)) => {
+            deny_and_close(lifecycle, &record, generation_seq, attempt_no)
+        }
+        Err(error) => ScTeachingWindowDecision::StoreError(format!(
+            "claim sc teaching attempt failed: {error:?}"
+        )),
+    }
+}
+
+/// 可判定拒绝的关窗收口（尽力而为）：close(FailedTerminal) 失败只留告警、
+/// 不改变拒绝结论——durable 原状由恢复侧按 Unknown/关闭语义处理。
+fn deny_and_close(
+    lifecycle: &LifecycleStore,
+    record: &WorkspaceSessionRecord,
+    generation_seq: u32,
+    attempt_no: u8,
+) -> ScTeachingWindowDecision {
+    if let Err(error) = lifecycle.close_sc_teaching_window(
+        record,
+        generation_seq,
+        attempt_no,
+        ScTeachingAttemptOutcome::FailedTerminal,
+    ) {
+        tracing::warn!(
+            session_id = %record.id,
+            generation_seq,
+            attempt_no,
+            error = ?error,
+            "close denied sc teaching window failed (denial stands)"
+        );
+    }
+    ScTeachingWindowDecision::Denied
+}
+
+/// 重驱交付成功（Candidate）后的关窗（Delivered）——尽力而为：无窗口/
+/// 已关窗/冲突只留告警，不阻断交付链（窗口保留关闭与消耗事实，不删除；
+/// 关窗快照供下一条链做判据③ 的 base）。
+pub(super) fn close_sc_teaching_delivered(lifecycle: &LifecycleStore, session_id: &str) {
+    let Ok(record) = lifecycle.get_workspace_session(session_id) else {
+        return;
+    };
+    let Some(window) = record.sc_generation_teaching_windows.last() else {
+        return;
+    };
+    if !matches!(window.status, ScTeachingWindowStatus::Active) {
+        return;
+    }
+    let generation_seq = window.generation_seq;
+    let attempt_no = window
+        .attempts
+        .last()
+        .map_or(1, |attempt| attempt.attempt_no);
+    if let Err(error) = lifecycle.close_sc_teaching_window(
+        &record,
+        generation_seq,
+        attempt_no,
+        ScTeachingAttemptOutcome::Delivered,
+    ) {
+        tracing::warn!(
+            session_id,
+            generation_seq,
+            attempt_no,
+            error = ?error,
+            "close delivered sc teaching window failed (delivery stands)"
+        );
+    }
+}
+
+/// 教学重驱共用的 plan split run 开局：失败 ⇒ 持久化终态 Failed 后以
+/// Message 上浮（与既有各臂的收口同形）。
+#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同本文件先例）。
+pub(super) fn begin_sc_teaching_reredrive_run(
+    lifecycle: &LifecycleStore,
+    engine: &mut WorkspaceEngine,
+    launch: &PlanAuthorLaunch,
+    author_provider: &ProviderName,
+) -> Result<Option<PlanSplitRunContext>, SingleCandidateProviderRunError> {
+    let (project_id, issue_id, session_id) = {
+        let session = engine.session();
+        (
+            session.project_id.clone(),
+            session.issue_id.clone(),
+            session.session_id.clone(),
+        )
+    };
+    match begin_plan_split_run_if_logical(
+        launch,
+        lifecycle,
+        &project_id,
+        &issue_id,
+        author_provider,
+        &session_id,
+    ) {
+        Ok(run) => Ok(run),
+        Err(message) => {
+            engine.persist_single_candidate_terminal_phase(SingleCandidatePhase::Failed);
+            Err(SingleCandidateProviderRunError::Message(message))
+        }
+    }
+}
+
+/// 重驱判定的收口包装（compile/IR/结构三类臂共用）：Granted/Replay ⇒
+/// `Ok(Some(attempt))`；Denied/Drift ⇒ `Ok(None)`（调用方按既有失败面
+/// 收口，不重驱）；StoreError ⇒ 持久化终态 Failed 后以 Message 上浮
+/// （fail-closed，不无账启动）。
+#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同本文件先例）。
+pub(super) fn authorize_sc_teaching_reredrive(
+    lifecycle: &LifecycleStore,
+    engine: &mut WorkspaceEngine,
+    request: &ScTeachingWindowRequest,
+) -> Result<Option<ScTeachingAttemptRef>, SingleCandidateProviderRunError> {
+    match consume_sc_teaching_window(lifecycle, &engine.session().session_id, request) {
+        ScTeachingWindowDecision::Drive { attempt } => Ok(Some(attempt)),
+        ScTeachingWindowDecision::Denied | ScTeachingWindowDecision::Drift => Ok(None),
+        ScTeachingWindowDecision::StoreError(message) => {
+            engine.persist_single_candidate_terminal_phase(SingleCandidatePhase::Failed);
+            Err(SingleCandidateProviderRunError::Message(message))
+        }
+    }
+}
+
+/// compile/IR 两类教学重驱的共用驱动臂（自 run/single_candidate.rs 抽出
+/// 以守其行数登记）：发可观测 prompt 事件 → 开局 plan split run → 复用
+/// `drive_single_candidate_reredrive` 同一 provider 通道执行恰一次重驱，
+/// 返回归一化后的 markdown source（调用方回编译循环 continue）。
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)] // 同上：该枚举是运行收尾的唯一 typed 出口。
+pub(super) async fn drive_compile_teaching_reredrive(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    launch: &PlanAuthorLaunch,
+    provider_for_run: &Arc<dyn StreamingProviderAdapter>,
+    run_cancel: &CancellationToken,
+    command_rx: &mut mpsc::Receiver<ProviderCommand>,
+    node_id: &str,
+    author_provider: &ProviderName,
+    event_key: &str,
+    event_title: &str,
+    event_detail: &str,
+    reredrive_prompt: &str,
+    repository_path: &std::path::Path,
+    attempt: &ScTeachingAttemptRef,
+) -> Result<String, SingleCandidateProviderRunError> {
+    engine
+        .emit_execution_event(
+            ProviderExecutionEvent {
+                event_id: format!("{node_id}_prompt_{event_key}"),
+                kind: ProviderExecutionEventKind::Output,
+                status: ProviderExecutionEventStatus::Started,
+                title: event_title.to_string(),
+                detail: Some(event_detail.to_string()),
+                command: None,
+                cwd: None,
+                output: Some(reredrive_prompt.to_string()),
+                exit_code: None,
+            },
+            Some(node_id.to_string()),
+            Some(author_provider.clone()),
+        )
+        .await;
+    let reredrive_run =
+        begin_sc_teaching_reredrive_run(lifecycle, engine, launch, author_provider)?;
+    super::single_candidate::drive_single_candidate_reredrive(
+        engine,
+        launch,
+        Arc::clone(provider_for_run),
+        run_cancel,
+        command_rx,
+        node_id,
+        author_provider,
+        reredrive_prompt,
+        repository_path,
+        reredrive_run.as_ref(),
+        Some(attempt),
+    )
+    .await
+}
+
 /// 结构门拒收教学重驱：发一条可观测的 prompt 事件（与 compile/IR 重驱的
-/// 事件同形），随后复用 `drive_single_candidate_reredrive` 同一 provider 通道
-/// 再驱一次作者，返回归一化后的 markdown source——调用方回编译循环重走
-/// compile → IR 预校验 → 候选结构门。
+/// 事件同形），随后复用 `drive_single_candidate_reredrive` 同一 provider
+/// 通道再驱一次作者，返回归一化后的 markdown source——调用方回编译循环
+/// 重走 compile → IR 预校验 → 候选结构门；`sc_teaching_attempt` 为调用方
+/// 消费同一教学窗口的 claim 结果（结构门类不再有独立槽位或布尔授权）。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)] // 同上：该枚举是运行收尾的唯一 typed 出口。
 pub(super) async fn drive_structure_gate_reredrive(
@@ -37,6 +397,7 @@ pub(super) async fn drive_structure_gate_reredrive(
     author_provider: &ProviderName,
     repair_prompt: &str,
     repository_path: &std::path::Path,
+    sc_teaching_attempt: Option<&ScTeachingAttemptRef>,
 ) -> Result<String, SingleCandidateProviderRunError> {
     engine
         .emit_execution_event(
@@ -48,7 +409,7 @@ pub(super) async fn drive_structure_gate_reredrive(
                 detail: Some(
                     "候选结构门拒收（final_compile_structure_rejected）的教学重驱\
                      （环在哪 + 两个合法修法各带后果 + 保护项 + 完整修订版输出指令），\
-                     结构门类自己的恰一次机会（与 compile/IR 槽互不挤占）"
+                     同一教学窗口的恰一次机会（与 compile/IR 类共用窗口）"
                         .to_string(),
                 ),
                 command: None,
@@ -60,22 +421,8 @@ pub(super) async fn drive_structure_gate_reredrive(
             Some(author_provider.clone()),
         )
         .await;
-    let reredrive_run = match begin_plan_split_run_if_logical(
-        launch,
-        lifecycle,
-        &engine.session().project_id,
-        &engine.session().issue_id,
-        author_provider,
-        &engine.session().session_id,
-    ) {
-        Ok(run) => run,
-        Err(message) => {
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            return Err(SingleCandidateProviderRunError::Message(message));
-        }
-    };
+    let reredrive_run =
+        begin_sc_teaching_reredrive_run(lifecycle, engine, launch, author_provider)?;
     super::single_candidate::drive_single_candidate_reredrive(
         engine,
         launch,
@@ -87,7 +434,7 @@ pub(super) async fn drive_structure_gate_reredrive(
         repair_prompt,
         repository_path,
         reredrive_run.as_ref(),
-        None,
+        sc_teaching_attempt,
     )
     .await
 }

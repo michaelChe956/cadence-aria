@@ -206,8 +206,12 @@ use single_candidate_compile_preflight::{
     prepare_author_delivery_for_compile, prevalidate_plan_candidate_ir,
     record_equivalence_canonicalizations, teaching_verdict,
 };
+use single_candidate_structure_reredrive::{
+    authorize_sc_teaching_reredrive, close_sc_teaching_delivered, compile_typed_kinds,
+    drive_compile_teaching_reredrive, sc_sha256, sc_teaching_chain_binding,
+    sc_teaching_failure_request, stable_code_kind,
+};
 // Task 4：`is_teachable_parse_failure` 判据已由 `teaching_verdict` 接管，
-// 生产面不再消费；`build_work_item_plan_ir_reredrive_prompt` 的生产调用点
 // 已切 `build_preflight_ir_reredrive_prompt`——两者仅为 `ir_prompt_tests`
 //（经 `use super::*`）保名。
 #[cfg(test)]
@@ -530,6 +534,14 @@ pub(crate) async fn run_single_candidate_author(
     };
     let design_requirement_ids = registered_requirement_ids;
     let design_context = design_context_blocks.join("\n\n");
+    // Task 6（REQ-WSC-28）：教学窗口的 run 级冻结绑定（业务请求/材料/上下文
+    // digest，链内恒定——四类失败共用同一窗口的漂移核验基准）。
+    let teaching_binding = sc_teaching_chain_binding(
+        &request,
+        &story_context_blocks,
+        &design_context_blocks,
+        &language_rules,
+    );
     let repository_structure =
         crate::product::work_item_split_engine::context::summarize_repository_structure(
             &repository.path,
@@ -809,27 +821,12 @@ pub(crate) async fn run_single_candidate_author(
     emit_author_ears_normalized_event(engine, &node_id, &full_output, &delivery, &author_provider)
         .await;
     let full_output = delivery.source;
-    // F2-B：SC compile 失败教学重驱（同 candidate 恰一次）。SG6a.2（REQ-SG-05
-    // SC 初轮行）：教学重驱资格只认 parse 语法类共享码白名单
-    // （TEACHABLE_PARSE_FAILURE_CODES：missing_section / invalid_ears /
-    // invalid_work_item_id）——lowering 类（缺席/值域统一）零重驱资格，
-    // 原 message「缺少/缺失」措辞分流（is_lowering_absence_message）已按
-    // F1.2 typed 口径删除。O1（裁决二 §2.2/§2.4）：converge 不再本地改写
-    // source——单次编译，成功路径产出机器指令（不应用、不丢弃，渲染进
-    // owner 可见呈现面；缺口本体沿引擎既有机械 verdict 通道 F5-A 交
-    // 原授权 author），失败路径保留原诊断，parse 语法类继续教学重驱，
-    // 收窄指令（未知 key 迁移/重复 trusted command）随失败面呈现。
-    // 教学重驱 prompt 携带指令文本的完整接线在 Task 4。重驱产物重新
-    // 进入本循环；重驱槽独立，每 candidate 仍至多一次额外 provider 驱动。
-    // 3.6 弱模型基线加固：IR 校验失败（validate plan candidate IR failed 类，
-    // 如 unknown_requirement_ref / acceptance_criterion_without_reviewer_check）
-    // 同样享有恰一次教学重驱——在持久化前预跑同源 validate_plan_candidate_ir
-    // 分类，重驱 prompt 附错误原文与修正引用/补齐字段指令；重驱再败→终态含
-    // 两轮；非 IR/非白名单的其他失败（如内部错误/lowering 类）不触发重驱。
-    // 重驱机会在 compile/IR 两类间共享（`compile_ir_rerun_used` 单槽）。
-    // 4. 分槽（2026-10-31 真机修订）：结构门重驱有**自己的**槽位
-    // （`structure_rerun_used`）——两类槽互不挤占、每类至多一次 → 额外
-    // provider 驱动总上限 2 次（有界，不是无限自愈）。
+    // F2-B/SG6a.2（REQ-SG-05）/O1（裁决二 §2.2/§2.4）：教学重驱资格只认
+    // typed 事实（WSC-09 判据面）；converge 单次编译不本地改写 source，
+    // 机器指令渲染进 owner 可见呈现面、缺口沿机械 verdict 通道（F5-A）
+    // 交原授权 author。重驱产物重新进入本循环；重驱机会由单一耐久教学
+    // 窗口承载（Task 6，REQ-WSC-28）——四类失败共用，原调用在内合计
+    // 两次（有界，不是无限自愈）。
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
         member_targets: member_targets.clone(),
@@ -837,9 +834,6 @@ pub(crate) async fn run_single_candidate_author(
     let mut compile_source = full_output;
     // `first_round_failure`：首个失败类的描述（只用于终态错误文案，不再兼作槽位标记）。
     let mut first_round_failure: Option<String> = None;
-    // 槽位：compile/IR 两类共享一个，结构门类独立一个——互不挤占、每类至多一次。
-    let mut compile_ir_rerun_used = false;
-    let mut structure_rerun_used = false;
     let candidate_item_count = loop {
         let crate::product::workspace_engine::contract_autorepair::ContractConvergeOutcome {
             ir,
@@ -853,69 +847,52 @@ pub(crate) async fn run_single_candidate_author(
             Err(diagnostics) => {
                 let (reasons, instruction_lines) =
                     compile_failure_surface(&compile_source, &diagnostics, &compile_context);
-                if !compile_ir_rerun_used
-                    && let TeachingVerdict::Eligible { payload } =
+                // Task 6：四类失败共用同一耐久教学窗口——establish → 漂移
+                // 核验 → claim；Denied/Drift ⇒ 不重驱（既有失败面收口）。
+                let grant = 'teach: {
+                    let TeachingVerdict::Eligible { payload } =
                         teaching_verdict(&diagnostics, &[])
-                {
-                    compile_ir_rerun_used = true;
-                    first_round_failure.get_or_insert_with(|| reasons.join("; "));
+                    else {
+                        break 'teach None;
+                    };
                     let reredrive_prompt = build_typed_compile_reredrive_prompt(
                         &payload,
                         &instruction_lines,
                         &design_requirement_ids,
                     );
-                        engine
-                            .emit_execution_event(
-                                ProviderExecutionEvent {
-                                    event_id: format!("{node_id}_prompt_compile_reredrive"),
-                                    kind: ProviderExecutionEventKind::Output,
-                                    status: ProviderExecutionEventStatus::Started,
-                                    title: "SC compile 失败教学重驱提示词".to_string(),
-                                    detail: Some(
-                                        "typed 完备判据（parse 码表 / lowering fault / IR fault，事实齐全且可定位）compile 失败的教学重驱（含 typed 载荷与错误原文），恰一次"
-                                            .to_string(),
-                                    ),
-                                    command: None,
-                                    cwd: None,
-                                    output: Some(reredrive_prompt.clone()),
-                                    exit_code: None,
-                                },
-                                Some(node_id.clone()),
-                                Some(author_provider.clone()),
-                            )
-                            .await;
-                        let reredrive_run = match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
-                            &launch,
-                            &lifecycle,
-                            &engine.session().project_id,
-                            &engine.session().issue_id,
-                            &author_provider,
-                            &engine.session().session_id,
-                        ) {
-                            Ok(run) => run,
-                            Err(message) => {
-                                engine.persist_single_candidate_terminal_phase(
-                                    crate::product::models::SingleCandidatePhase::Failed,
-                                );
-                                return Err(SingleCandidateProviderRunError::Message(message));
-                            }
-                        };
-                        compile_source = drive_single_candidate_reredrive(
-                            engine,
-                            &launch,
-                            Arc::clone(&provider_for_run),
-                            &run_cancel,
-                            command_rx,
-                            &node_id,
-                            &author_provider,
-                            &reredrive_prompt,
-                            &repository.path,
-                            reredrive_run.as_ref(),
-                            None,
-                        )
-                        .await?;
-                        continue;
-                    }
+                    let request = sc_teaching_failure_request(
+                        &teaching_binding,
+                        sc_sha256(&compile_source),
+                        compile_typed_kinds(&diagnostics),
+                        "build_typed_compile_reredrive_prompt",
+                        sc_sha256(&instruction_lines.join("\n")),
+                        &reredrive_prompt,
+                    );
+                    let attempt =
+                        authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?;
+                    break 'teach attempt.map(|attempt| (attempt, reredrive_prompt));
+                };
+                if let Some((attempt, reredrive_prompt)) = grant {
+                    first_round_failure.get_or_insert_with(|| reasons.join("; "));
+                    compile_source = drive_compile_teaching_reredrive(
+                        engine,
+                        &lifecycle,
+                        &launch,
+                        &provider_for_run,
+                        &run_cancel,
+                        command_rx,
+                        &node_id,
+                        &author_provider,
+                        "compile_reredrive",
+                        "SC compile 失败教学重驱提示词",
+                        "typed 完备判据（parse 码表 / lowering fault / IR fault，事实齐全且可定位）compile 失败的教学重驱（含 typed 载荷与错误原文），恰一次",
+                        &reredrive_prompt,
+                        &repository.path,
+                        &attempt,
+                    )
+                    .await?;
+                    continue;
+                }
                     let detail = reasons.join("; ");
                     let message = match first_round_failure.as_deref() {
                         Some(first_round) => format!(
@@ -960,63 +937,42 @@ pub(crate) async fn run_single_candidate_author(
         let preflight =
             prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir, &compile_source);
         if preflight.has_failures() {
-            if !compile_ir_rerun_used
-                && let TeachingVerdict::Eligible { .. } = preflight.to_teaching_verdict()
-            {
-                compile_ir_rerun_used = true;
-                first_round_failure
-                    .get_or_insert_with(|| preflight.presentation_reasons().join("; "));
+            // Task 6：与 compile 类共用同一耐久教学窗口（无独立槽位）。
+            let grant = 'teach: {
+                let TeachingVerdict::Eligible { .. } = preflight.to_teaching_verdict() else {
+                    break 'teach None;
+                };
                 let reredrive_prompt =
                     build_preflight_ir_reredrive_prompt(&preflight, &design_requirement_ids);
-                engine
-                    .emit_execution_event(
-                        ProviderExecutionEvent {
-                            event_id: format!("{node_id}_prompt_ir_reredrive"),
-                            kind: ProviderExecutionEventKind::Output,
-                            status: ProviderExecutionEventStatus::Started,
-                            title: "SC IR 校验失败教学重驱提示词".to_string(),
-                            detail: Some(
-                                "IR 校验失败（unknown_requirement_ref / acceptance_criterion_without_reviewer_check 等）的教学重驱（含错误原文与修正指令），恰一次"
-                                    .to_string(),
-                            ),
-                            command: None,
-                            cwd: None,
-                            output: Some(reredrive_prompt.clone()),
-                            exit_code: None,
-                        },
-                        Some(node_id.clone()),
-                        Some(author_provider.clone()),
-                    )
-                    .await;
-                let reredrive_run =
-                    match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
-                        &launch,
-                        &lifecycle,
-                        &engine.session().project_id,
-                        &engine.session().issue_id,
-                        &author_provider,
-                        &engine.session().session_id,
-                    ) {
-                        Ok(run) => run,
-                        Err(message) => {
-                            engine.persist_single_candidate_terminal_phase(
-                                crate::product::models::SingleCandidatePhase::Failed,
-                            );
-                            return Err(SingleCandidateProviderRunError::Message(message));
-                        }
-                    };
-                compile_source = drive_single_candidate_reredrive(
+                let request = sc_teaching_failure_request(
+                    &teaching_binding,
+                    sc_sha256(&compile_source),
+                    vec![stable_code_kind("typed_ir_validation")],
+                    "build_preflight_ir_reredrive_prompt",
+                    sc_sha256(&preflight.presentation_reasons().join("\n")),
+                    &reredrive_prompt,
+                );
+                let attempt = authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?;
+                break 'teach attempt.map(|attempt| (attempt, reredrive_prompt));
+            };
+            if let Some((attempt, reredrive_prompt)) = grant {
+                first_round_failure
+                    .get_or_insert_with(|| preflight.presentation_reasons().join("; "));
+                compile_source = drive_compile_teaching_reredrive(
                     engine,
+                    &lifecycle,
                     &launch,
-                    Arc::clone(&provider_for_run),
+                    &provider_for_run,
                     &run_cancel,
                     command_rx,
                     &node_id,
                     &author_provider,
+                    "ir_reredrive",
+                    "SC IR 校验失败教学重驱提示词",
+                    "IR 校验失败（unknown_requirement_ref / acceptance_criterion_without_reviewer_check 等）的教学重驱（含错误原文与修正指令），恰一次",
                     &reredrive_prompt,
                     &repository.path,
-                    reredrive_run.as_ref(),
-                    None,
+                    &attempt,
                 )
                 .await?;
                 continue;
@@ -1039,41 +995,80 @@ pub(crate) async fn run_single_candidate_author(
             return Err(SingleCandidateProviderRunError::Message(message));
         }
 
+        // Task 6：结构门类不再有独立槽位——拒收统一交回，重驱资格由同一
+        // 教学窗口的 claim 结果决定（Denied ⇒ 停止该生成自动链）。
+        let failure_source_sha256 = sc_sha256(&compile_source);
         break match engine
             .complete_single_candidate_work_item_plan_author(
                 compile_source,
                 repository.id.clone(),
                 member_targets.clone(),
-                // 结构门类重驱槽（**独立槽**，与 compile/IR 槽互不挤占）：
-                // 空闲时结构门拒收先教学重驱作者一次，占用后直接落人工门
-                // （引擎侧收口，runner 不再判）。
-                !structure_rerun_used,
+                true,
             )
             .await
         {
-            Ok(SingleCandidateAuthorCompletion::Candidate { item_count }) => item_count,
-            // SG3a.1 拒收 + 结构门槽空闲：占用**结构门自己的**槽并带着可执行
-            // 修复指令重驱作者一次（provider 通道复用，不新造 attempt 通道）。
+            Ok(SingleCandidateAuthorCompletion::Candidate { item_count }) => {
+                close_sc_teaching_delivered(&lifecycle, &engine.session().session_id);
+                item_count
+            }
+            // SG3a.1 拒收：消费同一教学窗口后带着可执行修复指令重驱作者
+            // 一次（provider 通道复用，不新造 attempt 通道）。
             Ok(SingleCandidateAuthorCompletion::Rejected { repair_prompt }) => {
-                structure_rerun_used = true;
-                first_round_failure.get_or_insert_with(
-                    super::single_candidate_structure_reredrive::structure_gate_first_round_failure,
-                );
-                compile_source =
-                    super::single_candidate_structure_reredrive::drive_structure_gate_reredrive(
-                        engine,
-                        &lifecycle,
-                        &launch,
-                        Arc::clone(&provider_for_run),
-                        &run_cancel,
-                        command_rx,
-                        &node_id,
-                        &author_provider,
+                let attempt = {
+                    let request = sc_teaching_failure_request(
+                        &teaching_binding,
+                        failure_source_sha256,
+                        vec![stable_code_kind(
+                            crate::product::workspace_engine::single_candidate_structure_failure::STRUCTURE_STABLE_CODE,
+                        )],
+                        "author_structure_repair_prompt",
+                        sc_sha256(&repair_prompt),
                         &repair_prompt,
-                        &repository.path,
-                    )
-                    .await?;
-                continue;
+                    );
+                    authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?
+                };
+                if let Some(attempt) = attempt {
+                    first_round_failure.get_or_insert_with(
+                        super::single_candidate_structure_reredrive::structure_gate_first_round_failure,
+                    );
+                    compile_source =
+                        super::single_candidate_structure_reredrive::drive_structure_gate_reredrive(
+                            engine,
+                            &lifecycle,
+                            &launch,
+                            Arc::clone(&provider_for_run),
+                            &run_cancel,
+                            command_rx,
+                            &node_id,
+                            &author_provider,
+                            &repair_prompt,
+                            &repository.path,
+                            Some(&attempt),
+                        )
+                        .await?;
+                    continue;
+                }
+                // Denied/Drift ⇒ 停止该生成自动链：保留 last-valid refs 与
+                // 失败历史、不提升坏 candidate、不开人工门、不留 A 通道
+                // 预领，按既有失败面回显两轮真实原因。
+                let detail =
+                    super::single_candidate_structure_reredrive::structure_gate_first_round_failure(
+                    );
+                let message = match first_round_failure.as_deref() {
+                    Some(first_round) => format!(
+                        "candidate structure gate rejected (after one teaching re-drive): \
+                         first round: {first_round}; re-drive round: {detail}\
+                         {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
+                    ),
+                    None => format!(
+                        "candidate structure gate rejected: {detail}\
+                         {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
+                    ),
+                };
+                engine.persist_single_candidate_terminal_phase(
+                    crate::product::models::SingleCandidatePhase::Failed,
+                );
+                return Err(SingleCandidateProviderRunError::Message(message));
             }
             // SG3a.1 拒收已按 typed 失败收口（durable + 尝试流水 + 重写/人工门）：
             // 引擎已在重写或人工门态，本次 provider run 正常结束，**不落 failed**。

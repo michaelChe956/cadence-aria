@@ -25,6 +25,9 @@ use crate::product::work_item_plan_policy::{
 /// 未批准窗口的 durable 诊断码（同事务留痕，message 含拒绝枚举名）。
 const SC_TEACHING_NOT_APPROVED_CODE: &str = "sc_teaching_window_not_approved";
 
+/// 冻结输入漂移的 durable 诊断码（Task 6 handler 面：零额外调用的留痕）。
+const SC_TEACHING_FROZEN_INPUT_DRIFT_CODE: &str = "sc_teaching_frozen_input_drift";
+
 /// establish 的结果：新建（含四项合取批准判定与拒绝留痕）或既有
 /// （末尾窗口 Active ⇒ A/B 接力与重放不得重建，窗口字段零变化）。
 #[derive(Debug, Clone, PartialEq)]
@@ -417,6 +420,28 @@ impl LifecycleStore {
                 .find(|attempt| attempt.attempt_no == attempt_no)
                 .expect("attempt located above");
             attempt.lifecycle = ScTeachingAttemptLifecycle::LaunchUnknown;
+            stored.updated_at = Utc::now().to_rfc3339();
+            write_json(session_path, stored)?;
+            Ok(stored.clone())
+        })
+    }
+    /// 漂移留痕（锁内 CAS）：同事务追加一条 PolicyDiagnostic（code
+    /// `sc_teaching_frozen_input_drift`）——冻结输入漂移是显式系统故障面，
+    /// 「零额外调用」的决策必须可审计（REQ-WSC-28E，Task 6 handler 面）。
+    pub fn record_sc_teaching_frozen_input_drift(
+        &self,
+        expected: &WorkspaceSessionRecord,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        self.with_sc_teaching_session(expected, |session_path, stored| {
+            stored.policy_diagnostics.push(PolicyDiagnostic {
+                code: SC_TEACHING_FROZEN_INPUT_DRIFT_CODE.to_string(),
+                message: format!(
+                    "SC 教学窗口冻结输入漂移：当前失败事实与窗口冻结摘要不一致\
+                     （会话 {}，规则版本 {SC_TEACHING_APPROVAL_RULE_VERSION}）",
+                    stored.id
+                ),
+                field: None,
+            });
             stored.updated_at = Utc::now().to_rfc3339();
             write_json(session_path, stored)?;
             Ok(stored.clone())
