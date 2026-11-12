@@ -53,8 +53,8 @@ impl ImageClientApi for FakeImageGateway {
 
 async fn app_with_fake_gateway(root: &Path) -> axum::Router {
     let paths = AriaStatePaths::from_workspace_root(root);
-    // 本测试只配置 GPT 家凭据：引擎按目标家（resolve_target）读取凭据，
-    // 自动轮转首次落在 GPT 家，故只配 GPT 家即可跑通出站。
+    // 本测试只配置 GPT 家凭据：生成时手动指定 GPT 家清单内的模型 id，
+    // 引擎按目标家（resolve_target）读取凭据，故只配 GPT 家即可跑通出站。
     let mut settings = ImageCreateSettings::default();
     let gpt = settings.vendors.get_mut(ImageVendor::Gpt);
     gpt.base_url = "https://images.example.com/v1".to_string();
@@ -105,7 +105,7 @@ async fn request_json(
 
 fn generate_multipart(boundary: &str) -> Vec<u8> {
     format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ncreate a file-backed image\r\n--{boundary}--\r\n"
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ncreate a file-backed image\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-image-2.6-flare\r\n--{boundary}--\r\n"
     )
     .into_bytes()
 }

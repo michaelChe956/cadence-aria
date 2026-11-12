@@ -273,7 +273,7 @@ async fn parse_generate_multipart(mut multipart: Multipart) -> HandlerResult<Gen
             "output_format" => {
                 output_format = parse_enum("output_format", &field_text(field).await?)?
             }
-            // model：手动选定的模型 id，仅去首尾空白（必填校验随后补齐）。
+            // model：手动选定的模型 id，仅去首尾空白；必填（收尾处校验）。
             "model" => model = Some(field_text(field).await?),
             "use_previous" => {
                 use_previous = Some(parse_use_previous(&field_text(field).await?)?);
@@ -292,7 +292,10 @@ async fn parse_generate_multipart(mut multipart: Multipart) -> HandlerResult<Gen
             background,
             output_format,
         },
-        model: model.unwrap_or_default().trim().to_string(),
+        model: model
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid_param("请选择图片生成模型"))?,
         use_previous: use_previous.unwrap_or(false),
         reference,
     })

@@ -318,18 +318,36 @@ pub struct ResolvedTarget {
 }
 
 impl ImageCreateSettings {
-    /// 纯函数，不做 I/O。模型手动选：按逐字符相等在供应方清单里找 model id 的归属家。
-    /// 可用性门禁（凭据齐全且清单非空）随后补齐。
+    /// 纯函数，不做 I/O。模型手动选的目标解析：
+    /// 1. 按逐字符相等在「已配置凭据且清单非空」的供应方里找该 model id 的归属家；
+    /// 2. 找不到 → 参数错误；
+    /// 3. id 在某家清单里但该家未配置凭据 → 配置缺失（绝不静默换到另一家）。
     pub fn resolve_target(&self, model: &str) -> Result<ResolvedTarget, ImageCreateError> {
-        let Some(vendor) = self.vendors.vendor_of(model) else {
-            return Err(ImageCreateError::InvalidParam(format!(
-                "模型 {model} 不在已配置且可用的供应方清单中"
+        // 先在可用家里找：同一 id 误配进两家时，可用家优先。
+        let owner = ImageVendor::ALL.into_iter().find(|vendor| {
+            let settings = self.vendors.get(*vendor);
+            settings.is_available()
+                && settings
+                    .models
+                    .iter()
+                    .any(|candidate| candidate.as_str() == model)
+        });
+        if let Some(vendor) = owner {
+            return Ok(ResolvedTarget {
+                vendor,
+                model: model.to_string(),
+            });
+        }
+        // 不在任何可用家清单：若 id 出现在未配置凭据的家清单里，明确指出该家缺配置。
+        if let Some(vendor) = self.vendors.vendor_of(model) {
+            return Err(ImageCreateError::MissingConfig(format!(
+                "{} 尚未配置 Base URL 或 API Key",
+                vendor.label()
             )));
-        };
-        Ok(ResolvedTarget {
-            vendor,
-            model: model.to_string(),
-        })
+        }
+        Err(ImageCreateError::InvalidParam(format!(
+            "模型 {model} 不在已配置且可用的供应方清单中"
+        )))
     }
 
     /// 保存前整份校验：D1 规则（模型清单）+ 逐家 base_url。
