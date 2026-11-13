@@ -1,4 +1,290 @@
-// P20 RED（实现未落地态）：受控完整失败 source resolver（内部 source-input 切面）。
+// P20：受控完整失败 source resolver。
+//
+// 三类终局失败各有唯一的真实失败源：compile 与 IR preflight 取本轮 split run 的
+// provider 原始正文经既有生产归一化链得到的交付源；structure gate 取该轮自带
+// 引用的 source revision。resolver 只读不写、不发事件、不回退「最新」或
+// 「last-good」，也绝不从 locator 字符串反猜来源类别。
+use crate::product::lifecycle_store::sc_failure_evidence::{
+    ScFailureEvidenceError, sc_failure_split_locator,
+};
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::work_item_plan_policy::ScTeachingWindowRequest;
+use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
+use crate::web::workspace_ws_types::{
+    ScEvidenceRef, ScFailureClass, ScFailureScope, ScRoundIdentity, ScTeachingSourceOrigin,
+};
+use sha2::Digest as _;
+
+/// resolver 的输入：四个引用，无 `From<&ScRoundEvidence>` shim、无默认教学决定。
+#[derive(Debug, Clone, Copy)]
+pub(in crate::web::workspace_ws_handler::run) struct ScTeachingSourceInput<'a> {
+    pub identity: &'a ScRoundIdentity,
+    pub failure_class: &'a ScFailureClass,
+    pub raw: &'a ScEvidenceRef,
+    pub source: &'a ScEvidenceRef,
+}
+
+/// 解析出的真实失败源正文与其引用面。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::web::workspace_ws_handler::run) struct ScResolvedTeachingSource {
+    /// 归一化后的失败源全文（compile/IR）或 source revision 正文（structure）。
+    pub text: String,
+    /// 失败源引用：compile/IR 为 split locator；structure 为 canonical source ref。
+    pub failure_source_ref: String,
+    /// resolved text 的 64 位小写 sha256 hex。
+    pub sha256: String,
+    /// resolved text 的 UTF-8 字节数。
+    pub bytes: u64,
+    /// 来源类别：只由 `failure_class` 决定。
+    pub origin: ScTeachingSourceOrigin,
+}
+
+const STEP_RESOLVE: &str = "resolve_sc_teaching_source";
+const STEP_VERIFY: &str = "verify_sc_teaching_request_sources";
+const CODE_INVALID: &str = "sc_failure_evidence_invalid";
+const CODE_SOURCE_UNAVAILABLE: &str = "sc_failure_source_unavailable";
+
+/// 解析失败源正文（compile/IR/structure 三通道共用入口）。
+#[allow(clippy::result_large_err)]
+pub(in crate::web::workspace_ws_handler::run) fn resolve_sc_teaching_source(
+    lifecycle: &LifecycleStore,
+    scope: &ScFailureScope,
+    input: &ScTeachingSourceInput<'_>,
+) -> Result<ScResolvedTeachingSource, ScFailureEvidenceError> {
+    // 显式缺失先于任何读：历史轮次可能根本没有 source（resolver 不发事件）。
+    let Some((source_locator, source_sha256, source_bytes)) = available_parts(input.source) else {
+        return Err(unavailable_error(
+            STEP_RESOLVE,
+            input,
+            "失败源显式缺失（该轮尚无 durable source）",
+        ));
+    };
+    // 来源类别只由失败类别字段决定，绝不从 locator 字符串反猜。
+    let origin = match input.failure_class {
+        ScFailureClass::Compile => ScTeachingSourceOrigin::CompileSplitOutput,
+        ScFailureClass::IrPreflight => ScTeachingSourceOrigin::IrPreflightSplitOutput,
+        ScFailureClass::StructureGate => ScTeachingSourceOrigin::StructureRevision,
+    };
+    match input.failure_class {
+        ScFailureClass::Compile | ScFailureClass::IrPreflight => resolve_split_source(
+            lifecycle,
+            scope,
+            input,
+            source_locator,
+            source_sha256,
+            source_bytes,
+            origin,
+        ),
+        ScFailureClass::StructureGate => resolve_structure_source(
+            lifecycle,
+            scope,
+            input,
+            source_locator,
+            source_sha256,
+            source_bytes,
+        ),
+    }
+}
+
+/// 校验教学请求引用的失败源与真实失败源一致（资格判据不在此处判定）。
+#[allow(clippy::result_large_err)]
+pub(in crate::web::workspace_ws_handler::run) fn verify_sc_teaching_request_sources(
+    lifecycle: &LifecycleStore,
+    scope: &ScFailureScope,
+    input: &ScTeachingSourceInput<'_>,
+    request: &ScTeachingWindowRequest,
+) -> Result<ScResolvedTeachingSource, ScFailureEvidenceError> {
+    let Some(reference) = request.failure_source_ref.as_deref() else {
+        return Err(unavailable_error(
+            STEP_VERIFY,
+            input,
+            "教学请求未携带失败源引用",
+        ));
+    };
+    let resolved = resolve_sc_teaching_source(lifecycle, scope, input)?;
+    if reference != resolved.failure_source_ref || request.failure_source_sha256 != resolved.sha256
+    {
+        return Err(invalid_error(
+            STEP_VERIFY,
+            input,
+            "教学请求的失败源引用/摘要与真实失败源不符",
+        ));
+    }
+    Ok(resolved)
+}
+
+/// compile / IR 通道：读回本轮 split run 原始正文 → 生产归一化 → 复验摘要与字节数。
+fn resolve_split_source(
+    lifecycle: &LifecycleStore,
+    scope: &ScFailureScope,
+    input: &ScTeachingSourceInput<'_>,
+    source_locator: &str,
+    source_sha256: &str,
+    source_bytes: u64,
+    origin: ScTeachingSourceOrigin,
+) -> Result<ScResolvedTeachingSource, ScFailureEvidenceError> {
+    let Some((raw_locator, raw_sha256, raw_bytes)) = available_parts(input.raw) else {
+        return Err(invalid_error(
+            STEP_RESOLVE,
+            input,
+            "compile/IR 轮缺少 split raw 引用",
+        ));
+    };
+    let expected_locator = sc_failure_split_locator(&scope.session_id, input.identity.role_run_seq);
+    if raw_locator != expected_locator || source_locator != expected_locator {
+        return Err(invalid_error(
+            STEP_RESOLVE,
+            input,
+            "raw/source locator 与本轮 split locator 不符",
+        ));
+    }
+    let raw = lifecycle
+        .read_sc_split_output(scope, input.identity)
+        .map_err(|failure| {
+            invalid_error(
+                STEP_RESOLVE,
+                input,
+                format!(
+                    "读取 split 产物失败: {} (step={} detail={})",
+                    failure.code, failure.step, failure.detail
+                ),
+            )
+        })?;
+    if source_sha256_hex(raw.as_bytes()) != raw_sha256 || raw.len() as u64 != raw_bytes {
+        return Err(invalid_error(
+            STEP_RESOLVE,
+            input,
+            "split raw 正文与引用摘要/字节数不符",
+        ));
+    }
+    let text = super::single_candidate_compile_preflight::prepare_author_delivery_for_compile(&raw)
+        .source;
+    if text.is_empty() {
+        return Err(invalid_error(
+            STEP_RESOLVE,
+            input,
+            "归一化后的失败源正文为空",
+        ));
+    }
+    if source_sha256_hex(text.as_bytes()) != source_sha256 || text.len() as u64 != source_bytes {
+        return Err(invalid_error(
+            STEP_RESOLVE,
+            input,
+            "归一化失败源与引用摘要/字节数不符",
+        ));
+    }
+    Ok(ScResolvedTeachingSource {
+        text,
+        failure_source_ref: source_locator.to_string(),
+        sha256: source_sha256.to_string(),
+        bytes: source_bytes,
+        origin,
+    })
+}
+
+/// structure 通道：只读该轮自带引用的 source revision（不取最新、不回退 last-good）。
+fn resolve_structure_source(
+    lifecycle: &LifecycleStore,
+    scope: &ScFailureScope,
+    input: &ScTeachingSourceInput<'_>,
+    source_locator: &str,
+    source_sha256: &str,
+    source_bytes: u64,
+) -> Result<ScResolvedTeachingSource, ScFailureEvidenceError> {
+    let store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let record = store
+        .get_source_revision(
+            &SourceStoreScope {
+                project_id: scope.project_id.clone(),
+                issue_id: scope.issue_id.clone(),
+                plan_id: scope.plan_id.clone(),
+            },
+            source_locator,
+        )
+        .map_err(|failure| {
+            invalid_error(
+                STEP_RESOLVE,
+                input,
+                format!(
+                    "读取 source revision 失败: {} ({:?})",
+                    failure.code(),
+                    failure
+                ),
+            )
+        })?;
+    if record.source_revision_hash != source_sha256 || record.source.len() as u64 != source_bytes {
+        return Err(invalid_error(
+            STEP_RESOLVE,
+            input,
+            "source revision 正文与引用摘要/字节数不符",
+        ));
+    }
+    if record.source.is_empty() {
+        return Err(invalid_error(
+            STEP_RESOLVE,
+            input,
+            "source revision 正文为空",
+        ));
+    }
+    Ok(ScResolvedTeachingSource {
+        text: record.source,
+        failure_source_ref: source_locator.to_string(),
+        sha256: record.source_revision_hash,
+        bytes: source_bytes,
+        origin: ScTeachingSourceOrigin::StructureRevision,
+    })
+}
+
+/// 引用面拆解：`Missing` 无可用引用（无 None/空串后门）。
+fn available_parts(reference: &ScEvidenceRef) -> Option<(&str, &str, u64)> {
+    match reference {
+        ScEvidenceRef::Available {
+            locator,
+            sha256,
+            bytes,
+        } => Some((locator.as_str(), sha256.as_str(), *bytes)),
+        ScEvidenceRef::Missing { .. } => None,
+    }
+}
+
+fn source_sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// 来源完整性不符时的统一错误码（与 P21 renderer 同名同值）。
+fn invalid_error(
+    step: &str,
+    input: &ScTeachingSourceInput<'_>,
+    detail: impl Into<String>,
+) -> ScFailureEvidenceError {
+    ScFailureEvidenceError {
+        code: CODE_INVALID.to_string(),
+        step: step.to_string(),
+        round_id: Some(input.identity.round_id.clone()),
+        detail: detail.into(),
+        publication_incomplete: false,
+        verified_prefix: None,
+    }
+}
+
+/// 失败源显式缺失时的错误码。
+fn unavailable_error(
+    step: &str,
+    input: &ScTeachingSourceInput<'_>,
+    detail: impl Into<String>,
+) -> ScFailureEvidenceError {
+    ScFailureEvidenceError {
+        code: CODE_SOURCE_UNAVAILABLE.to_string(),
+        step: step.to_string(),
+        round_id: Some(input.identity.round_id.clone()),
+        detail: detail.into(),
+        publication_incomplete: false,
+        verified_prefix: None,
+    }
+}
+
+// P20 冻结契约测试（测试体逐字来自 RED 交接原文，未改一字；
+// 上方为 resolver 真实实现，故本模块在实现落地后编译通过）。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14,7 +300,6 @@ mod tests {
         work_item_plan_policy::{RunPolicy, ScTeachingWindowRequest, WorkItemPlanFlowKind} };
     use crate::web::workspace_ws_types::{
         ScEvidenceRef, ScFailureClass, ScFailureScope, ScRoundIdentity, ScTeachingSourceOrigin };
-    use sha2::Digest as _;
     use tempfile::TempDir;
 
     const PROJECT_ID: &str = "project_0001"; const ISSUE_ID: &str = "issue_0001";
