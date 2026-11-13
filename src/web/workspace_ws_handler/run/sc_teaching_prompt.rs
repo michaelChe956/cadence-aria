@@ -1,9 +1,203 @@
-//! P22（RED 态）：SC 教学重驱 prompt 的最终装配 facade——本文件此时**只有**内联 RED 测试，
-//! 无任何实现（编译红是设计中的 RED：facade API 未解析）。
+//! P22：SC 教学重驱 prompt 的最终装配 facade（纯函数面：零 I/O、零 provider、零 store）。
 //!
-//! 落库目标：src/web/workspace_ws_handler/run/sc_teaching_prompt.rs
-//! 登记：run/single_candidate.rs 内 `pub(super) mod sc_teaching_prompt;`（P22a 落地项）。
+//! 分层（Plan §2.4）：
+//! - 模板事实与 source 块渲染归模板层——compile 臂走 P23 的
+//!   `build_work_item_plan_compile_reredrive_prompt`（7 参 + `Result`），
+//!   结构臂走 P24 的 `author_structure_repair_prompt`（4 参 + `Result`）；
+//! - IR 尾段（指令段 + IDs 段 + 末尾输出纪律）自旧
+//!   `single_candidate_compile_preflight::append_ir_repair_instructions` 逐字搬入
+//!   （唯一来源，不复制第二份）；
+//! - 预算裁决、摘要与字节计数只发生在 `finish_sc_teaching_prompt`：先成全文，
+//!   再裁决——尾段之后不再改文本。
+//!
+//! 超预算**不是**错误：全文逐字保留并返回 `RejectedBudget`（供审计）；`Err`
+//! 只来自 source/render 失败（`sc_failure_evidence_invalid`）。预算上限只有一个
+//! 来源：`WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES`（本模块不另立数值）。
 
+use super::sc_teaching_source::ScResolvedTeachingSource;
+use super::single_candidate_compile_preflight::{PreflightVerdict, TeachingPayload};
+use crate::product::planning_failure::PlanningFailureSet;
+use crate::product::workspace_engine::single_candidate_structure_failure::author_structure_repair_prompt;
+use crate::product::workspace_engine::{
+    PlanningCompileFailure, ScTeachingPromptError, ScTeachingSourceMetadata,
+    build_work_item_plan_compile_reredrive_prompt,
+};
+use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES;
+
+/// 审计用构造器名（**不进 `prompt_ref`**）：取各臂今日的 builder 名，
+/// 便于与既有 prompt 证据对照。
+const COMPILE_BUILDER_ID: &str = "build_typed_compile_reredrive_prompt";
+const IR_BUILDER_ID: &str = "build_preflight_ir_reredrive_prompt";
+const STRUCTURE_BUILDER_ID: &str = "author_structure_repair_prompt";
+
+/// 最终教学重驱 prompt 的装配结果（纯数据；超预算也带全文，供审计）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ScPreparedTeachingPrompt {
+    /// 最终全文（超预算也逐字保留，不截断）。
+    pub text: String,
+    /// 审计用构造器名；**不进 `prompt_ref`**。
+    pub builder_id: String,
+    /// 来源 locator（resolver 解析出的真实 ref）。
+    pub source_ref: String,
+    /// 来源正文 sha256（小写 hex）。
+    pub source_sha256: String,
+    /// 来源正文 UTF-8 字节数。
+    pub source_bytes: u64,
+    /// 最终全文 sha256（小写 hex）。
+    pub prompt_digest: String,
+    /// 最终全文 UTF-8 字节数（裁决按字节，不按字符）。
+    pub prompt_bytes: u64,
+    /// 预算裁决（上限单一来源：`WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES`）。
+    pub budget_verdict: ScTeachingPromptBudgetVerdict,
+}
+
+/// 预算裁决：超限不是错误（全文保留供审计），但不得据此放行教学窗口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ScTeachingPromptBudgetVerdict {
+    /// 最终全文在预算内。
+    Allowed,
+    /// 最终全文超预算（`required_bytes` = 最终全文字节数）。
+    RejectedBudget { required_bytes: u64, max_bytes: u64 },
+}
+
+/// compile 臂：模板事实 + source 块 → 最终全文与预算裁决。
+pub(super) fn prepare_compile_teaching_prompt(
+    payload: &TeachingPayload,
+    autorepair_instructions: &[String],
+    registered_requirement_ids: &[String],
+    source: &ScResolvedTeachingSource,
+) -> Result<ScPreparedTeachingPrompt, ScTeachingPromptError> {
+    let metadata = source_metadata(source);
+    let text = build_work_item_plan_compile_reredrive_prompt(
+        &payload.parse_reasons,
+        &payload.lowering_faults,
+        &payload.ir_faults,
+        autorepair_instructions,
+        registered_requirement_ids,
+        &source.text,
+        &metadata,
+    )?;
+    Ok(finish_sc_teaching_prompt(
+        text,
+        COMPILE_BUILDER_ID,
+        source,
+    ))
+}
+
+/// IR 臂：模板事实 + source 块（base）→ IR 尾段（指令段 + IDs 段 + 末尾输出
+/// 纪律）→ 最终全文与预算裁决。
+pub(super) fn prepare_ir_teaching_prompt(
+    preflight: &PreflightVerdict,
+    registered_requirement_ids: &[String],
+    source: &ScResolvedTeachingSource,
+) -> Result<ScPreparedTeachingPrompt, ScTeachingPromptError> {
+    let metadata = source_metadata(source);
+    let base = build_work_item_plan_compile_reredrive_prompt(
+        &preflight.failure_reasons,
+        &[],
+        &preflight.ir_faults,
+        &[],
+        registered_requirement_ids,
+        &source.text,
+        &metadata,
+    )?;
+    let text = append_ir_repair_instructions(base, registered_requirement_ids);
+    Ok(finish_sc_teaching_prompt(text, IR_BUILDER_ID, source))
+}
+
+/// 结构臂：结构模板（事实 + typed 集 + source 块 + `REVISION_TEACHING`）→
+/// 最终全文与预算裁决。
+pub(super) fn prepare_structure_teaching_prompt(
+    failure: &PlanningCompileFailure,
+    structure_failures: &PlanningFailureSet,
+    source: &ScResolvedTeachingSource,
+) -> Result<ScPreparedTeachingPrompt, ScTeachingPromptError> {
+    let metadata = source_metadata(source);
+    let text = author_structure_repair_prompt(
+        failure,
+        structure_failures,
+        &source.text,
+        &metadata,
+    )?;
+    Ok(finish_sc_teaching_prompt(
+        text,
+        STRUCTURE_BUILDER_ID,
+        source,
+    ))
+}
+
+/// 唯一算 digest / bytes / verdict 的地方：先成全文，再裁决预算。
+///
+/// 超预算不返回错误——全文逐字保留（`RejectedBudget`），供审计与拒绝取证。
+pub(super) fn finish_sc_teaching_prompt(
+    text: String,
+    builder_id: &str,
+    source: &ScResolvedTeachingSource,
+) -> ScPreparedTeachingPrompt {
+    let prompt_bytes = text.len() as u64;
+    let max_bytes = WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES as u64;
+    let budget_verdict = if prompt_bytes <= max_bytes {
+        ScTeachingPromptBudgetVerdict::Allowed
+    } else {
+        ScTeachingPromptBudgetVerdict::RejectedBudget {
+            required_bytes: prompt_bytes,
+            max_bytes,
+        }
+    };
+    ScPreparedTeachingPrompt {
+        prompt_digest: sha256_hex(&text),
+        text,
+        builder_id: builder_id.to_string(),
+        source_ref: source.failure_source_ref.clone(),
+        source_sha256: source.sha256.clone(),
+        source_bytes: source.bytes,
+        prompt_bytes,
+        budget_verdict,
+    }
+}
+
+/// 来源元数据（只读借用；完整性由 P21 renderer 复算校验）。
+fn source_metadata(source: &ScResolvedTeachingSource) -> ScTeachingSourceMetadata<'_> {
+    ScTeachingSourceMetadata {
+        source_ref: &source.failure_source_ref,
+        sha256: &source.sha256,
+        bytes: source.bytes,
+        origin: source.origin,
+    }
+}
+
+/// IR 重驱 prompt 的既有修复指令尾段（自旧
+/// `single_candidate_compile_preflight::append_ir_repair_instructions` 逐字搬入；
+/// 措辞与换行零改动）。
+fn append_ir_repair_instructions(
+    mut prompt: String,
+    registered_requirement_ids: &[String],
+) -> String {
+    prompt.push_str(
+        "上述为 IR 校验失败（引用或字段不符合契约）。\n\
+         修正引用/补齐字段：requirement_refs、done_when_refs、reviewer_check_refs 只能逐字引用本计划已定义 id；\
+         每个 criterion_id 必须有配对的 reviewer_check_refs 行。\n",
+    );
+    // r41 A2/r45 扩 AC:附已登记编号清单(产品侧与 harness 反馈轮对称;
+    // story+design 双源 REQ-/NFR-/AC-,与 fresh prompt 的
+    // [design_requirements] 同集)。
+    if !registered_requirement_ids.is_empty() {
+        prompt.push_str(&format!(
+            "[design_requirements] {}\n\
+             requirement_refs 与 done_when 的引用只能取自上列清单(REQ-*/NFR-*/AC-*),\
+             清单外编号一律删除或改为清单内编号。\n",
+            registered_requirement_ids.join("、")
+        ));
+    }
+    prompt.push_str("修正后重新输出完整 plan，第一行即 `# Work Item Plan`，不要输出解释。\n");
+    prompt
+}
+
+/// 全文摘要（sha256 小写 hex）——与证据库同一口径。
+fn sha256_hex(text: &str) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(text.as_bytes()))
+}
 // P22 RED：最终预算装配的 facade 边界（3 个字节边界场景）。
 //
 // 落位：src/web/workspace_ws_handler/run/sc_teaching_prompt.rs 末尾（inline test module）。

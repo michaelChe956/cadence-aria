@@ -745,89 +745,6 @@ fn latest_spec_markdown(
         .map(|version| version.markdown)
 }
 
-/// 3.6 弱模型基线加固：IR 校验失败的教学重驱 prompt。复用 F2-B 既有 compile
-/// 重驱模板（错误原文已逐条回灌 + 立即输出完整 source 指令），附加「修正引用/
-/// 补齐字段后重新输出完整 plan」的 IR 修复指令（签名不变，供既有单测与
-/// `ir_prompt_tests` 复用）。Task 4 后生产调用点已切
-/// `build_preflight_ir_reredrive_prompt`，本入口仅测试面消费。
-#[cfg(test)]
-pub(super) fn build_work_item_plan_ir_reredrive_prompt(
-    blocking_reasons: &[String],
-    registered_requirement_ids: &[String],
-) -> String {
-    append_ir_repair_instructions(
-        crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
-            blocking_reasons,
-            &[],
-            &[],
-            &[],
-            registered_requirement_ids,
-        ),
-        registered_requirement_ids,
-    )
-}
-
-/// Task 4：preflight typed 判定面的 IR 重驱 prompt——校验失败原文
-/// （code:line:message 呈现回灌）+ typed IR 载荷（引用/合法集合/期望形态）
-/// 并入同一模板，再附既有 IR 修复指令。
-pub(super) fn build_preflight_ir_reredrive_prompt(
-    preflight: &PreflightVerdict,
-    registered_requirement_ids: &[String],
-) -> String {
-    append_ir_repair_instructions(
-        crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
-            &preflight.failure_reasons,
-            &[],
-            &preflight.ir_faults,
-            &[],
-            registered_requirement_ids,
-        ),
-        registered_requirement_ids,
-    )
-}
-
-/// IR 重驱 prompt 的既有修复指令尾段（两个入口共用，措辞逐字保持）。
-fn append_ir_repair_instructions(
-    mut prompt: String,
-    registered_requirement_ids: &[String],
-) -> String {
-    prompt.push_str(
-        "上述为 IR 校验失败（引用或字段不符合契约）。\n\
-         修正引用/补齐字段：requirement_refs、done_when_refs、reviewer_check_refs 只能逐字引用本计划已定义 id；\
-         每个 criterion_id 必须有配对的 reviewer_check_refs 行。\n",
-    );
-    // r41 A2/r45 扩 AC:附已登记编号清单(产品侧与 harness 反馈轮对称;
-    // story+design 双源 REQ-/NFR-/AC-,与 fresh prompt 的
-    // [design_requirements] 同集)。
-    if !registered_requirement_ids.is_empty() {
-        prompt.push_str(&format!(
-            "[design_requirements] {}\n\
-             requirement_refs 与 done_when 的引用只能取自上列清单(REQ-*/NFR-*/AC-*),\
-             清单外编号一律删除或改为清单内编号。\n",
-            registered_requirement_ids.join("、")
-        ));
-    }
-    prompt.push_str("修正后重新输出完整 plan，第一行即 `# Work Item Plan`，不要输出解释。\n");
-    prompt
-}
-
-/// Task 4：compile 失败路径的 typed 重驱 prompt——parse 码表回灌 +
-/// lowering/IR typed 载荷 + 有界指令行，经同一模板渲染（typed 事实
-/// 四元组直入，不经过 message 文本）。
-pub(super) fn build_typed_compile_reredrive_prompt(
-    payload: &TeachingPayload,
-    autorepair_instructions: &[String],
-    registered_requirement_ids: &[String],
-) -> String {
-    crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
-        &payload.parse_reasons,
-        &payload.lowering_faults,
-        &payload.ir_faults,
-        autorepair_instructions,
-        registered_requirement_ids,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::prepare_author_delivery_for_compile;
@@ -1146,38 +1063,6 @@ mod tests {
         );
         assert!(first.starts_with("single_candidate_heading_normalized_timeline_node_001"));
     }
-    /// A1（REQ-WSC-32）：同 message、不同 field 的 parse 诊断经资格判定与
-    /// typed 重驱入口后，最终 prompt 逐条含原三段（逐字）+ 精确 field/形状。
-    #[test]
-    fn typed_reredrive_prompt_keeps_parse_field_and_example_facts() {
-        use super::{TeachingVerdict, build_typed_compile_reredrive_prompt, teaching_verdict};
-        use crate::product::work_item_plan_compiler::CompilerDiagnostic;
-        fn missing(field: &str) -> CompilerDiagnostic {
-            CompilerDiagnostic {
-                code: "missing_section".into(),
-                line: 5,
-                field: field.into(),
-                message: "结构化 section 缺少必需字段。".into(),
-                repair_example: format!("- {field}: value"),
-                kind: None,
-                lowering_fault: None,
-                ir_fault: None,
-            }
-        }
-        let TeachingVerdict::Eligible { payload } =
-            teaching_verdict(&[missing("Goal"), missing("role")], &[])
-        else {
-            panic!("载荷变化不得改教学资格");
-        };
-        let prompt = build_typed_compile_reredrive_prompt(&payload, &[], &[]);
-        for field in ["Goal", "role"] {
-            let block = format!(
-                "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: {field}\n  正确形状: - {field}: value"
-            );
-            assert!(prompt.contains(&block), "{field} 逐条可区分: {prompt}");
-        }
-    }
-
     /// A1：资格判定的 diagnostics→parse_reasons 投影必须逐字携带 field/repair_example。
     #[test]
     fn teaching_verdict_projects_parse_field_and_example_facts() {
