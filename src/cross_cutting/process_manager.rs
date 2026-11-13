@@ -799,6 +799,65 @@ mod tests {
             "子进程 PATH 首目录必须是 overlay 目录(Prepend): {stdout}"
         );
     }
+
+    /// 计划 2026-11-13 §五 2.12：spawn 构造子进程 env 时补入登录 shell 探测
+    /// 回的 agent 专属环境变量——缺失才补（进程 env / 显式覆盖层已有的值
+    /// 优先，不被探测值覆盖）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_injects_shell_probe_agent_env_when_platform_lacks_it() {
+        use tokio::io::AsyncReadExt;
+
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
+        let Some(free_var) = [
+            "PI_CODING_AGENT_DIR",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+        ]
+        .into_iter()
+        .find(|name| std::env::var_os(name).is_none())
+        else {
+            panic!("宿主 env 已含全部 agent 变量,无法验证补入分支(环境不满足)");
+        };
+        crate::cross_cutting::path_overlay::set_shell_probe_for_test(
+            None,
+            vec![(free_var.to_string(), "/probe/agent-dir".to_string())],
+        );
+
+        // 补入分支:env_vars 为空、宿主缺该变量 ⇒ 子进程读到探测值。
+        let script = format!("printf '%s' \"${free_var}\"");
+        let mut process = ProcessManager::spawn(
+            "/bin/sh",
+            &["-c", &script],
+            &std::env::current_dir().expect("cwd"),
+            &BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn env printer");
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read env");
+        let _ = process.child.wait().await;
+        assert_eq!(stdout, "/probe/agent-dir", "缺失的 agent 变量必须被探测值补入");
+
+        // 平台优先分支:显式覆盖层已有该变量 ⇒ 保留显式值。
+        let mut process = ProcessManager::spawn(
+            "/bin/sh",
+            &["-c", &script],
+            &std::env::current_dir().expect("cwd"),
+            &BTreeMap::from([(free_var.to_string(), "/explicit/agent-dir".to_string())]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn explicit env printer");
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read env");
+        let _ = process.child.wait().await;
+        assert_eq!(stdout, "/explicit/agent-dir", "覆盖层已有值不得被探测值覆盖");
+    }
 }
 
 #[cfg(all(test, unix))]
