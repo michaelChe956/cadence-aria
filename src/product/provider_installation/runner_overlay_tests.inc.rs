@@ -790,3 +790,61 @@ async fn post_install_probe_runs_a_real_command() {
         "装后必须跑一个真实命令（不能只 --version）: {requests:?}"
     );
 }
+
+/// 桩 runner：裸命令失败、绝对路径命令成功（PATH 上找不到时的兜底探测）。
+#[derive(Default)]
+struct PathAwareRunner {
+    requests: Mutex<Vec<BoundedCommandRequest>>,
+}
+
+impl PathAwareRunner {
+    fn requests(&self) -> Vec<BoundedCommandRequest> {
+        self.requests.lock().expect("recorded requests").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for PathAwareRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let executable = request.executable.clone();
+        self.requests.lock().expect("recorded requests").push(request);
+        if executable.contains('/') {
+            success("1.2.3")
+        } else {
+            failure("not found")
+        }
+    }
+}
+
+/// PATH 找不到 CLI、`<bin>/<cmd> --version` 可执行 ⇒ `installed_version` 被
+/// 记录（绝对路径探测**必须经 BoundedCommandRunner**，否则 PATH 覆盖层
+/// 不生效）。
+#[tokio::test]
+async fn post_install_version_falls_back_to_absolute_path_probe() {
+    let root = tempdir().expect("root");
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+
+    let runner = Arc::new(PathAwareRunner::default());
+    let prober = health_prober(root.path(), runner.clone());
+
+    let outcome = prober
+        .refresh_after_install(InstallTarget::CodeGraph, Some(bin.as_path()))
+        .await
+        .expect("probe");
+    assert_eq!(
+        outcome.installed_version.as_deref(),
+        Some("1.2.3"),
+        "PATH 找不到时绝对路径探测必须回填版本"
+    );
+    assert!(
+        runner.requests().iter().any(|request| {
+            request.executable == bin.join("codegraph").to_string_lossy()
+        }),
+        "绝对路径探测必须经 BoundedCommandRunner: {:?}",
+        runner.requests()
+    );
+}
