@@ -551,12 +551,16 @@ pub(crate) async fn run_single_candidate_author(
             let sc_prefixes = member_checkout_prefixes::plan_member_checkout_prefixes(
                 &lifecycle,
                 &member_targets_plan,
-            );
+            )
+            .unwrap_or_else(|reason| {
+                tracing::warn!("SC 成员 checkout 前缀装载失败，退回通用不可用面：{reason}");
+                None
+            });
             sc_structure::summarize_repository_structure_sc_members(
                 &sc_launch.working_dir,
                 is_lc_issue,
                 Some(sc_members),
-                sc_prefixes.ok().flatten().as_ref(),
+                sc_prefixes.as_ref(),
             )
         }
         _ => sc_structure::summarize_repository_structure(&repository.path, is_lc_issue),
