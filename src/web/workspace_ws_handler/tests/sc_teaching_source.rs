@@ -30,7 +30,7 @@ use super::sc_failure_driver_fixture::{
     markdown_missing_five_sections, only_chain_id, sha256_hex, start_run,
     teaching_attempt_numbers, window_snapshot,
 };
-use super::single_candidate_provider_run::wait_for_single_candidate_phase;
+use super::single_candidate_provider_run::{ProviderRunFixture, wait_for_single_candidate_phase};
 use super::*;
 use crate::product::models::SingleCandidatePhase;
 use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES;
