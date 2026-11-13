@@ -274,13 +274,16 @@ fn parse_helper_output(
                 message: format!("codegraph SDK 不兼容：{message}"),
             });
         }
-        return Err(coverage_failed(format!("helper 报告失败（{code}）：{message}")));
+        return Err(coverage_failed(format!(
+            "helper 报告失败（{code}）：{message}"
+        )));
     }
     let mut member_covered = BTreeMap::new();
     for member in member_names {
-        let covered = parsed.members.get(member).copied().ok_or_else(|| {
-            coverage_failed(format!("helper 结果缺少成员 {member} 的覆盖判定"))
-        })?;
+        let covered =
+            parsed.members.get(member).copied().ok_or_else(|| {
+                coverage_failed(format!("helper 结果缺少成员 {member} 的覆盖判定"))
+            })?;
         member_covered.insert(member.clone(), covered);
     }
     Ok(CoverageOutcome {
@@ -300,7 +303,10 @@ fn write_helper_file(
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|error| coverage_failed(format!("create helper scratch dir: {error}")))?;
-    let path = dir.join(format!("codegraph-coverage-helper-{}.mjs", uuid::Uuid::new_v4()));
+    let path = dir.join(format!(
+        "codegraph-coverage-helper-{}.mjs",
+        uuid::Uuid::new_v4()
+    ));
     std::fs::write(&path, source)
         .map_err(|error| coverage_failed(format!("write helper temp file: {error}")))?;
     Ok(path)
@@ -324,9 +330,7 @@ pub fn resolve_sdk_path(paths: &CoveragePaths) -> Option<PathBuf> {
         return Some(candidate.to_path_buf());
     }
     if let Some(global_root) = paths.npm_global_root.as_deref() {
-        let candidate = global_root
-            .join(CODEGRAPH_NPM_PACKAGE)
-            .join("npm-sdk.js");
+        let candidate = global_root.join(CODEGRAPH_NPM_PACKAGE).join("npm-sdk.js");
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -377,9 +381,7 @@ fn bundled_node_candidates(sdk_path: &Path) -> Vec<PathBuf> {
     let Some(package_root) = sdk_path.parent() else {
         return Vec::new();
     };
-    let scoped = package_root
-        .join("node_modules")
-        .join("@colbymchenry");
+    let scoped = package_root.join("node_modules").join("@colbymchenry");
     let Ok(entries) = std::fs::read_dir(&scoped) else {
         return Vec::new();
     };
@@ -396,11 +398,7 @@ fn bundled_node_candidates(sdk_path: &Path) -> Vec<PathBuf> {
 }
 
 fn node_executable_name() -> &'static str {
-    if cfg!(windows) {
-        "node.exe"
-    } else {
-        "node"
-    }
+    if cfg!(windows) { "node.exe" } else { "node" }
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -476,15 +474,17 @@ fn run_bounded_sync(
     request: BoundedCommandRequest,
 ) -> Result<BoundedCommandResult, BoundedCommandError> {
     let runner = runner.clone();
-    std::thread::spawn(move || -> Result<BoundedCommandResult, BoundedCommandError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| BoundedCommandError::Io {
-                details: error.to_string(),
-            })?;
-        runtime.block_on(runner.run(request))
-    })
+    std::thread::spawn(
+        move || -> Result<BoundedCommandResult, BoundedCommandError> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| BoundedCommandError::Io {
+                    details: error.to_string(),
+                })?;
+            runtime.block_on(runner.run(request))
+        },
+    )
     .join()
     .map_err(|_| BoundedCommandError::Io {
         details: "coverage runner thread panicked".to_string(),
@@ -498,9 +498,7 @@ fn install_prefix_sdk_candidate() -> Option<PathBuf> {
         std::env::var("NPM_PREFIX").ok().as_deref(),
         std::env::var_os("HOME").map(PathBuf::from).as_deref(),
     );
-    Some(
-        npm_package_dir(&prefix, CODEGRAPH_NPM_PACKAGE).join("npm-sdk.js"),
-    )
+    Some(npm_package_dir(&prefix, CODEGRAPH_NPM_PACKAGE).join("npm-sdk.js"))
 }
 
 /// `npm root -g` 探针：全局 node_modules 根（首非空行且确为目录）。
@@ -705,10 +703,6 @@ mod tests {
         fn helper_exit_code(&self, code: i32) {
             self.runner.helper_exit_code(code);
         }
-
-        fn node_version(&self, version: &str) {
-            self.runner.node_version(version);
-        }
     }
 
     #[test]
@@ -827,7 +821,8 @@ mod tests {
             ..fixture.paths()
         };
 
-        let resolved = resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap();
+        let resolved =
+            resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap();
 
         assert_eq!(resolved, fixture.node);
         assert!(
@@ -848,7 +843,8 @@ mod tests {
 
         // 低于 22.5 ⇒ 不采用。
         fixture.runner.node_version("v18.20.0");
-        let error = resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap_err();
+        let error =
+            resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap_err();
         assert!(
             matches!(&error, AggregateIndexError::Failed { code, .. }
                 if *code == "codegraph_node_unavailable"),
@@ -857,12 +853,14 @@ mod tests {
 
         // 恰为 22.5 ⇒ 采用。
         fixture.runner.node_version("v22.5.0");
-        let resolved = resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap();
+        let resolved =
+            resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap();
         assert_eq!(resolved, path_node);
 
         // 版本不可解析 ⇒ fail-closed 不采用。
         fixture.runner.node_version("version unknown");
-        let error = resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap_err();
+        let error =
+            resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap_err();
         assert!(
             matches!(&error, AggregateIndexError::Failed { code, .. }
                 if *code == "codegraph_node_unavailable"),
@@ -879,7 +877,8 @@ mod tests {
             ..fixture.paths()
         };
 
-        let error = resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap_err();
+        let error =
+            resolve_node_executable(&paths, &fixture.sdk, &fixture.runner_handle()).unwrap_err();
         assert!(
             matches!(&error, AggregateIndexError::Failed { code, message, .. }
                 if *code == "codegraph_node_unavailable"

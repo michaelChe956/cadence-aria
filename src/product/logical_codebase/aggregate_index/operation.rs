@@ -88,10 +88,7 @@ impl AggregateIndexAcceptance {
                     }) => return Err(member_coverage_failed(member_names)),
                     Err(error) => return Err(error),
                 };
-                (
-                    verify_member_coverage(&files, member_names)?,
-                    sdk_warning,
-                )
+                (verify_member_coverage(&files, member_names)?, sdk_warning)
             }
         };
         require_member_coverage(&member_covered, member_names)?;
@@ -752,8 +749,16 @@ fn index_health_warning(outcome: &CoverageOutcome) -> Option<String> {
         }
         if let Some(Value::String(state)) = index.get("state") {
             const HEALTHY_STATES: [&str; 10] = [
-                "ready", "idle", "complete", "completed", "ok", "healthy", "clean",
-                "indexed", "active", "current",
+                "ready",
+                "idle",
+                "complete",
+                "completed",
+                "ok",
+                "healthy",
+                "clean",
+                "indexed",
+                "active",
+                "current",
             ];
             if !HEALTHY_STATES.contains(&state.trim().to_ascii_lowercase().as_str()) {
                 signals.push(format!("index state: {state}"));
