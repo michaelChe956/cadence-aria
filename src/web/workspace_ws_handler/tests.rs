@@ -40,6 +40,8 @@ mod projection_artifact_batch;
 mod provider_run_events;
 #[path = "tests/register_trust_entry.rs"]
 mod register_trust_entry;
+mod sc_failure_driver_fixture;
+mod sc_failure_package;
 mod single_candidate_ir_reredrive;
 mod single_candidate_lc_admission;
 mod single_candidate_provider_run;
