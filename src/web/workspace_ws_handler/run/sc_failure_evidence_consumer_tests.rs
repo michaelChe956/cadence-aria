@@ -353,12 +353,12 @@ mod terminal {
                     panic!("last entry must be ChainTerminal")
                 };
                 assert_eq!(terminal_class, class);
-                assert_eq!(last_failure_round_id, &last_round_id);
+                assert_eq!(last_failure_round_id.as_str(), last_round_id.as_str());
                 assert_eq!(
                     last_physical_round_id.as_deref(),
                     Some(last_round_id.as_str())
                 );
-                assert_eq!(completeness, &ScPackageCompleteness::Complete);
+                assert!(matches!(completeness, ScPackageCompleteness::Complete));
                 assert_eq!(read.evidence_through_entry_key, terminal.entry_key);
                 for round_id in &round_ids {
                     assert!(
@@ -405,12 +405,12 @@ mod terminal {
         else {
             panic!("terminal")
         };
-        assert_eq!(last_failure_round_id, &first.round.round_id);
+        assert_eq!(last_failure_round_id.as_str(), first.round.round_id.as_str());
         assert_eq!(
             last_physical_round_id.as_deref(),
             Some(interrupted.round.round_id.as_str())
         );
-        assert_eq!(completeness, &ScPackageCompleteness::Incomplete);
+        assert!(matches!(completeness, ScPackageCompleteness::Incomplete));
         let missing = missing_evidence
             .iter()
             .find(|item| item.code == "sc_failure_output_not_delivered")
@@ -479,9 +479,8 @@ mod terminal {
             last_physical_round_id.as_deref(),
             Some(first.round.round_id.as_str())
         );
-        assert_eq!(
-            completeness,
-            &ScPackageCompleteness::Complete,
+        assert!(
+            matches!(completeness, ScPackageCompleteness::Complete),
             "NotStarted 不产生缺项"
         );
     }
